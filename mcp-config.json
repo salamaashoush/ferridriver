@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "chromey-browser": {
+      "command": "/home/sashoush/Workspace/test/chromey-mcp/target/release/chromey-mcp",
+      "args": [],
+      "env": {
+        "CHROMIUM_PATH": "/usr/bin/chromium"
+      }
+    }
+  }
+}
