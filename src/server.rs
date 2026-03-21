@@ -171,56 +171,64 @@ impl ServerHandler for ChromeyMcp {
         _context: RequestContext<RoleServer>,
     ) -> impl std::future::Future<Output = Result<ListResourcesResult, ErrorData>> + Send + '_ {
         async {
-            let resources = vec![
+            let state = self.state.lock().await;
+            let sessions = state.list_sessions().await;
+            drop(state);
+
+            let mut resources = Vec::new();
+
+            let res = |uri: &str, name: &str, desc: &str, mime: &str| -> Resource {
                 Annotated::new(RawResource {
-                    uri: "browser://console".into(),
-                    name: "Console Log".into(),
-                    title: Some("Browser console messages".into()),
-                    description: Some("Console log/warn/error messages from the active page".into()),
-                    mime_type: Some("application/json".into()),
+                    uri: uri.into(), name: name.into(), title: None,
+                    description: Some(desc.into()), mime_type: Some(mime.into()),
                     size: None, icons: None, meta: None,
-                }, None),
-                Annotated::new(RawResource {
-                    uri: "browser://network".into(),
-                    name: "Network Log".into(),
-                    title: Some("Network requests".into()),
-                    description: Some("HTTP requests made by the active page".into()),
-                    mime_type: Some("application/json".into()),
-                    size: None, icons: None, meta: None,
-                }, None),
-                Annotated::new(RawResource {
-                    uri: "browser://snapshot".into(),
-                    name: "Page Snapshot".into(),
-                    title: Some("Accessibility tree snapshot".into()),
-                    description: Some("Current page a11y tree with element refs".into()),
-                    mime_type: Some("text/plain".into()),
-                    size: None, icons: None, meta: None,
-                }, None),
-                Annotated::new(RawResource {
-                    uri: "browser://screenshot".into(),
-                    name: "Screenshot".into(),
-                    title: Some("Page screenshot".into()),
-                    description: Some("PNG screenshot of the current page".into()),
-                    mime_type: Some("image/png".into()),
-                    size: None, icons: None, meta: None,
-                }, None),
-                Annotated::new(RawResource {
-                    uri: "browser://cookies".into(),
-                    name: "Cookies".into(),
-                    title: Some("Page cookies".into()),
-                    description: Some("All cookies for the current page".into()),
-                    mime_type: Some("application/json".into()),
-                    size: None, icons: None, meta: None,
-                }, None),
-                Annotated::new(RawResource {
-                    uri: "browser://page-info".into(),
-                    name: "Page Info".into(),
-                    title: Some("Current page URL and title".into()),
-                    description: Some("URL, title, and session info".into()),
-                    mime_type: Some("application/json".into()),
-                    size: None, icons: None, meta: None,
-                }, None),
-            ];
+                }, None)
+            };
+
+            // Per-session resources (dynamic — grows as sessions are created)
+            for sess in &sessions {
+                let s = &sess.name;
+                let url = sess.pages.iter().find(|p| p.active).map(|p| p.url.as_str()).unwrap_or("");
+                let title = sess.pages.iter().find(|p| p.active).map(|p| p.title.as_str()).unwrap_or("");
+
+                resources.push(res(
+                    &format!("browser://session/{s}/page-info"),
+                    &format!("[{s}] Page Info"),
+                    &format!("{url} — {title}"),
+                    "application/json",
+                ));
+                resources.push(res(
+                    &format!("browser://session/{s}/snapshot"),
+                    &format!("[{s}] Snapshot"),
+                    &format!("A11y tree for session '{s}'"),
+                    "text/plain",
+                ));
+                resources.push(res(
+                    &format!("browser://session/{s}/screenshot"),
+                    &format!("[{s}] Screenshot"),
+                    &format!("PNG screenshot of session '{s}'"),
+                    "image/png",
+                ));
+                resources.push(res(
+                    &format!("browser://session/{s}/console"),
+                    &format!("[{s}] Console"),
+                    &format!("Console messages in session '{s}'"),
+                    "application/json",
+                ));
+                resources.push(res(
+                    &format!("browser://session/{s}/network"),
+                    &format!("[{s}] Network"),
+                    &format!("Network requests in session '{s}'"),
+                    "application/json",
+                ));
+                resources.push(res(
+                    &format!("browser://session/{s}/cookies"),
+                    &format!("[{s}] Cookies"),
+                    &format!("Cookies in session '{s}'"),
+                    "application/json",
+                ));
+            }
+
             let mut result = ListResourcesResult::default();
             result.resources = resources;
             Ok(result)
@@ -234,37 +242,63 @@ impl ServerHandler for ChromeyMcp {
     ) -> impl std::future::Future<Output = Result<ReadResourceResult, ErrorData>> + Send + '_ {
         async move {
             let uri = &request.uri;
+
+            // Parse URI: browser://session/{session}/{resource}
+            // Also support legacy browser://{resource} → session=default
+            let (session, resource) = if uri.starts_with("browser://session/") {
+                let rest = &uri["browser://session/".len()..];
+                let mut parts = rest.splitn(2, '/');
+                let sess = parts.next().unwrap_or("default");
+                let res = parts.next().unwrap_or("");
+                (sess.to_string(), res.to_string())
+            } else if uri.starts_with("browser://") {
+                ("default".to_string(), uri["browser://".len()..].to_string())
+            } else {
+                return Err(Self::err(format!("Unknown resource URI: {uri}")));
+            };
+
             let mut state = self.state.lock().await;
             state.ensure_browser().await.map_err(|e| Self::err(e))?;
-            let page = state.active_page("default").map_err(|e| Self::err(e))?.clone();
+            let page = state.active_page(&session).map_err(|e| Self::err(e))?.clone();
 
-            match uri.as_str() {
-                "browser://console" => {
-                    let msgs = state.console_messages("default", None, 100).await
-                        .map_err(|e| Self::err(e))?;
+            match resource.as_str() {
+                "page-info" => {
                     drop(state);
-                    let json = serde_json::to_string_pretty(&msgs).unwrap_or_default();
+                    let url = page.url().await.ok().flatten().unwrap_or_default();
+                    let title = page.get_title().await.ok().flatten().unwrap_or_default();
+                    let json = serde_json::to_string_pretty(&serde_json::json!({
+                        "url": url, "title": title, "session": session
+                    })).unwrap_or_default();
                     Ok(ReadResourceResult::new(vec![
                         ResourceContents::text(json, uri).with_mime_type("application/json")
                     ]))
                 }
-                "browser://network" => {
-                    let reqs = state.network_requests("default", 100).await
+                "console" => {
+                    let msgs = state.console_messages(&session, None, 100).await
                         .map_err(|e| Self::err(e))?;
                     drop(state);
-                    let json = serde_json::to_string_pretty(&reqs).unwrap_or_default();
                     Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(json, uri).with_mime_type("application/json")
+                        ResourceContents::text(serde_json::to_string_pretty(&msgs).unwrap(), uri)
+                            .with_mime_type("application/json")
                     ]))
                 }
-                "browser://snapshot" => {
+                "network" => {
+                    let reqs = state.network_requests(&session, 100).await
+                        .map_err(|e| Self::err(e))?;
                     drop(state);
-                    let snap = self.snap(&page, "default").await;
+                    Ok(ReadResourceResult::new(vec![
+                        ResourceContents::text(serde_json::to_string_pretty(&reqs).unwrap(), uri)
+                            .with_mime_type("application/json")
+                    ]))
+                }
+                "snapshot" => {
+                    drop(state);
+                    let snap = self.snap(&page, &session).await;
                     Ok(ReadResourceResult::new(vec![
                         ResourceContents::text(snap, uri).with_mime_type("text/plain")
                     ]))
                 }
-                "browser://screenshot" => {
+                "screenshot" => {
                     drop(state);
                     let bytes = page.screenshot(
                         chromiumoxide::page::ScreenshotParams::builder().build()
@@ -274,26 +308,15 @@ impl ServerHandler for ChromeyMcp {
                         ResourceContents::blob(b64, uri).with_mime_type("image/png")
                     ]))
                 }
-                "browser://cookies" => {
+                "cookies" => {
                     drop(state);
                     let cookies = page.get_cookies().await.map_err(|e| Self::err(format!("{e}")))?;
                     let list: Vec<serde_json::Value> = cookies.iter().map(|c| {
                         serde_json::json!({"name": c.name, "value": c.value, "domain": c.domain})
                     }).collect();
-                    let json = serde_json::to_string_pretty(&list).unwrap_or_default();
                     Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(json, uri).with_mime_type("application/json")
-                    ]))
-                }
-                "browser://page-info" => {
-                    drop(state);
-                    let url = page.url().await.ok().flatten().unwrap_or_default();
-                    let title = page.get_title().await.ok().flatten().unwrap_or_default();
-                    let json = serde_json::to_string_pretty(&serde_json::json!({
-                        "url": url, "title": title, "session": "default"
-                    })).unwrap_or_default();
-                    Ok(ReadResourceResult::new(vec![
-                        ResourceContents::text(json, uri).with_mime_type("application/json")
+                        ResourceContents::text(serde_json::to_string_pretty(&list).unwrap(), uri)
+                            .with_mime_type("application/json")
                     ]))
                 }
                 _ => Err(Self::err(format!("Unknown resource: {uri}")))
