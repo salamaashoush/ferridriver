@@ -8,7 +8,7 @@ use base64::Engine;
 use rmcp::{
     handler::server::router::tool::ToolRouter,
     model::*,
-    service::RequestContext,
+    service::{NotificationContext, RequestContext},
     tool_handler, ErrorData, RoleServer, ServerHandler,
 };
 use std::sync::Arc;
@@ -141,6 +141,7 @@ impl ServerHandler for ChromeyMcp {
                 .enable_resources_subscribe()
                 .enable_prompts()
                 .enable_logging()
+                .enable_completions()
                 .build(),
         )
         .with_instructions(
@@ -410,5 +411,117 @@ impl ServerHandler for ChromeyMcp {
                 _ => Err(Self::err(format!("Unknown prompt: {}", request.name)))
             }
         }
+    }
+
+    // ── Resource Templates ───────────────────────────────────────────────
+
+    fn list_resource_templates(
+        &self,
+        _request: Option<PaginatedRequestParams>,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<ListResourceTemplatesResult, ErrorData>> + Send + '_ {
+        async {
+            let mut result = ListResourceTemplatesResult::default();
+            result.resource_templates = vec![
+                ResourceTemplate::new(
+                    RawResourceTemplate {
+                        uri_template: "browser://session/{session}/snapshot".into(),
+                        name: "Session Snapshot".into(),
+                        title: Some("A11y snapshot for a specific session".into()),
+                        description: Some("Accessibility tree for a named session".into()),
+                        mime_type: Some("text/plain".into()),
+                        icons: None,
+                    },
+                    None,
+                ),
+                ResourceTemplate::new(
+                    RawResourceTemplate {
+                        uri_template: "browser://session/{session}/screenshot".into(),
+                        name: "Session Screenshot".into(),
+                        title: Some("Screenshot for a specific session".into()),
+                        description: Some("PNG screenshot of a named session's active page".into()),
+                        mime_type: Some("image/png".into()),
+                        icons: None,
+                    },
+                    None,
+                ),
+                ResourceTemplate::new(
+                    RawResourceTemplate {
+                        uri_template: "browser://session/{session}/cookies".into(),
+                        name: "Session Cookies".into(),
+                        title: Some("Cookies for a specific session".into()),
+                        description: Some("All cookies in a named session".into()),
+                        mime_type: Some("application/json".into()),
+                        icons: None,
+                    },
+                    None,
+                ),
+            ];
+            Ok(result)
+        }
+    }
+
+    // ── Subscribe / Unsubscribe ──────────────────────────────────────────
+    // Accept subscriptions (resource change notifications would be sent via Peer)
+
+    fn subscribe(
+        &self,
+        _request: SubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<(), ErrorData>> + Send + '_ {
+        // Accept subscription — actual notifications would be sent via
+        // context.peer().send_notification() when page state changes.
+        // For now we accept silently; full push notifications require
+        // wiring CDP page events to MCP ResourceUpdatedNotification.
+        std::future::ready(Ok(()))
+    }
+
+    fn unsubscribe(
+        &self,
+        _request: UnsubscribeRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<(), ErrorData>> + Send + '_ {
+        std::future::ready(Ok(()))
+    }
+
+    // ── Completions ──────────────────────────────────────────────────────
+
+    fn complete(
+        &self,
+        request: CompleteRequestParams,
+        _context: RequestContext<RoleServer>,
+    ) -> impl std::future::Future<Output = Result<CompleteResult, ErrorData>> + Send + '_ {
+        async move {
+            let arg_name = request.argument.name.as_str();
+            let partial = request.argument.value.as_str();
+            let state = self.state.lock().await;
+
+            let values: Vec<String> = match arg_name {
+                // Complete session names from known sessions
+                "session" | "session_a" | "session_b" => {
+                    let sessions = state.list_sessions().await;
+                    sessions.iter()
+                        .map(|s| s.name.clone())
+                        .filter(|n| n.starts_with(partial))
+                        .collect()
+                }
+                _ => vec![],
+            };
+            drop(state);
+
+            let mut result = CompleteResult::default();
+            result.completion.values = values;
+            Ok(result)
+        }
+    }
+
+    // ── Lifecycle notifications ──────────────────────────────────────────
+
+    fn on_initialized(
+        &self,
+        _context: NotificationContext<RoleServer>,
+    ) -> impl std::future::Future<Output = ()> + Send + '_ {
+        tracing::info!("chromey-mcp: client initialized");
+        std::future::ready(())
     }
 }
