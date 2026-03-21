@@ -96,11 +96,57 @@ impl ChromeyMcp {
                 .await
                 .map_err(|e| format!("Ref '{r}' element not found: {e}"))
         } else if let Some(sel) = selector {
-            page.find_element(sel)
-                .await
-                .map_err(|e| format!("Selector '{sel}' not found: {e}"))
+            match page.find_element(sel).await {
+                Ok(el) => Ok(el),
+                Err(_) => {
+                    // Try to suggest alternatives
+                    let hint = Self::suggest_selectors(page, sel).await;
+                    Err(format!("Selector '{sel}' not found.{hint}"))
+                }
+            }
         } else {
             Err("Provide 'ref' (from snapshot) or 'selector'.".into())
+        }
+    }
+
+    /// When a selector fails, suggest what IS available on the page.
+    async fn suggest_selectors(page: &chromiumoxide::Page, failed: &str) -> String {
+        let js = r#"(function(){
+            const ids = [...document.querySelectorAll('[id]')].slice(0,10).map(e => '#'+e.id);
+            const inputs = [...document.querySelectorAll('input,button,select,textarea,a')]
+                .slice(0,10).map(e => {
+                    if (e.id) return '#'+e.id;
+                    if (e.name) return e.tagName.toLowerCase()+'[name="'+e.name+'"]';
+                    if (e.className) return e.tagName.toLowerCase()+'.'+e.className.split(' ')[0];
+                    return e.tagName.toLowerCase();
+                });
+            return JSON.stringify({ids, inputs});
+        })()"#;
+        match page.evaluate(js).await {
+            Ok(r) => {
+                if let Some(val) = r.value().and_then(|v| v.as_str()) {
+                    if let Ok(data) = serde_json::from_str::<serde_json::Value>(val) {
+                        let ids: Vec<&str> = data["ids"].as_array()
+                            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                            .unwrap_or_default();
+                        let inputs: Vec<&str> = data["inputs"].as_array()
+                            .map(|a| a.iter().filter_map(|v| v.as_str()).collect())
+                            .unwrap_or_default();
+                        let mut suggestions = Vec::new();
+                        if !ids.is_empty() {
+                            suggestions.push(format!("IDs on page: {}", ids.join(", ")));
+                        }
+                        if !inputs.is_empty() {
+                            suggestions.push(format!("Interactive: {}", inputs.join(", ")));
+                        }
+                        if !suggestions.is_empty() {
+                            return format!(" Available: {}", suggestions.join(". "));
+                        }
+                    }
+                }
+                String::new()
+            }
+            Err(_) => String::new(),
         }
     }
 
