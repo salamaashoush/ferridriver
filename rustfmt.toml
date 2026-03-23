@@ -1,0 +1,14 @@
+edition = "2024"
+max_width = 120
+hard_tabs = false
+tab_spaces = 2
+newline_style = "Unix"
+use_field_init_shorthand = true
+use_small_heuristics = "Default"
+reorder_imports = true
+reorder_modules = true
+fn_params_layout = "Tall"
+remove_nested_parens = true
+match_block_trailing_comma = true
+force_explicit_abi = true
+merge_derives = true

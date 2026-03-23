@@ -1,0 +1,6 @@
+[alias]
+ck = "check --workspace --all-features --all-targets"
+lint = "clippy --workspace --all-targets --all-features"
+lintfix = "clippy --workspace --all-targets --all-features --fix --allow-dirty"
+release = "build --release --bin ferridriver"
+release-fast = "build --profile release-fast --bin ferridriver"
