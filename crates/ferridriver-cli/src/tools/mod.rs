@@ -1,7 +1,7 @@
 //! MCP tool definitions — split by category, each with its own tool_router.
 //!
 //! Each submodule defines tools in a separate `#[tool_router]` impl block.
-//! Routers are combined via `+` in `ChromeyMcp::combined_router()`.
+//! Routers are combined via `+` in `McpServer::combined_router()`.
 
 pub mod navigation;
 pub mod input;
@@ -13,10 +13,10 @@ pub mod network;
 pub mod bdd;
 pub mod lifecycle;
 
-use crate::server::ChromeyMcp;
+use crate::server::McpServer;
 use rmcp::handler::server::router::tool::ToolRouter;
 
-impl ChromeyMcp {
+impl McpServer {
     /// Combine all category routers into one.
     pub fn combined_router() -> ToolRouter<Self> {
         Self::navigation_router()

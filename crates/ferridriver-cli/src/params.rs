@@ -279,3 +279,69 @@ pub struct RunScenarioParams {
     #[schemars(description = "Screenshot on failure. Default: false.")]
     pub screenshot_on_failure: Option<bool>,
 }
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SearchPageParams {
+    #[schemars(description = "Text or regex pattern to search for in page content.")]
+    pub pattern: String,
+    #[schemars(description = "Treat pattern as regex. Default: false.")]
+    pub regex: Option<bool>,
+    #[schemars(description = "Case-sensitive search. Default: false.")]
+    pub case_sensitive: Option<bool>,
+    #[schemars(description = "Characters of surrounding context per match. Default: 150.")]
+    pub context_chars: Option<usize>,
+    #[schemars(description = "CSS selector to limit search scope.")]
+    pub selector: Option<String>,
+    #[schemars(description = "Maximum matches to return. Default: 25.")]
+    pub max_results: Option<usize>,
+    #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct FindElementsParams {
+    #[schemars(description = "CSS selector to query elements.")]
+    pub selector: String,
+    #[schemars(description = "Specific attributes to extract (e.g. [\"href\", \"src\"]).")]
+    pub attributes: Option<Vec<String>>,
+    #[schemars(description = "Maximum elements to return. Default: 50.")]
+    pub max_results: Option<usize>,
+    #[schemars(description = "Include text content of each element. Default: true.")]
+    pub include_text: Option<bool>,
+    #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct SelectOptionParams {
+    #[schemars(description = "Element ref from snapshot.")]
+    pub r#ref: Option<String>,
+    #[schemars(description = "CSS selector.")]
+    pub selector: Option<String>,
+    #[schemars(description = "Option value to select.")]
+    pub value: Option<String>,
+    #[schemars(description = "Option text/label to select.")]
+    pub label: Option<String>,
+    #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct GetDropdownOptionsParams {
+    #[schemars(description = "Element ref from snapshot.")]
+    pub r#ref: Option<String>,
+    #[schemars(description = "CSS selector.")]
+    pub selector: Option<String>,
+    #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct UploadFileParams {
+    #[schemars(description = "CSS selector for the file input element.")]
+    pub selector: String,
+    #[schemars(description = "Absolute path to the file to upload.")]
+    pub path: String,
+    #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
