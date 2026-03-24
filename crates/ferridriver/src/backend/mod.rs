@@ -13,6 +13,12 @@ pub mod cdp_raw;
 #[cfg(target_os = "macos")]
 pub mod webkit;
 
+/// Empty JSON object `{}` — avoids `serde_json::json!({})` heap allocation per call.
+#[inline]
+pub(crate) fn empty_params() -> serde_json::Value {
+    serde_json::Value::Object(serde_json::Map::new())
+}
+
 use crate::state::{ConsoleMsg, NetRequest};
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -218,6 +224,12 @@ impl AnyPage {
         page_dispatch!(self, find_element(selector))
     }
 
+    /// Evaluate JS that returns a DOM element and wrap it as AnyElement.
+    /// The JS must return a single DOM element (not a value).
+    pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
+        page_dispatch!(self, evaluate_to_element(js))
+    }
+
     // ── Content ──
 
     pub async fn content(&self) -> Result<String, String> {
@@ -244,6 +256,23 @@ impl AnyPage {
 
     pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
         page_dispatch!(self, click_at(x, y))
+    }
+
+    /// Click at coordinates with specific button and click count.
+    /// button: "left", "right", "middle", "back", "forward"
+    /// click_count: 1 for single, 2 for double, 3 for triple
+    pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
+        page_dispatch!(self, click_at_opts(x, y, button, click_count))
+    }
+
+    /// Move mouse to coordinates without clicking.
+    pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
+        page_dispatch!(self, move_mouse(x, y))
+    }
+
+    /// Move mouse smoothly with bezier easing over N steps.
+    pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<(), String> {
+        page_dispatch!(self, move_mouse_smooth(from_x, from_y, to_x, to_y, steps))
     }
 
     pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
@@ -406,6 +435,12 @@ impl AnyElement {
     /// Call a JavaScript function on this element (e.g., "function() { this.value = ''; }").
     pub async fn call_js_fn(&self, function: &str) -> Result<(), String> {
         element_dispatch!(self, call_js_fn(function))
+    }
+
+    /// Call a JS function on this element and return the value directly.
+    /// Single CDP round-trip with returnByValue: true.
+    pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>, String> {
+        element_dispatch!(self, call_js_fn_value(function))
     }
 
     pub async fn scroll_into_view(&self) -> Result<(), String> {

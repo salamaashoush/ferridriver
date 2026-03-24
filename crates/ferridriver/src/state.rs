@@ -7,7 +7,7 @@
 //! - Single-threaded tokio runtime: Mutex is never actually contended
 
 use crate::backend::{AnyBrowser, AnyPage, BackendKind};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -59,7 +59,7 @@ impl Session {
         Self {
             pages: Vec::new(),
             active_page_idx: 0,
-            ref_map: HashMap::new(),
+            ref_map: HashMap::default(),
             console_log: Arc::new(RwLock::new(Vec::new())),
             network_log: Arc::new(RwLock::new(Vec::new())),
             dialog_log: Arc::new(RwLock::new(Vec::new())),
@@ -101,7 +101,7 @@ impl BrowserState {
             std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium());
         Self {
             browser: None,
-            sessions: HashMap::new(),
+            sessions: HashMap::default(),
             chromium_path,
             connect_mode,
             backend_kind,
@@ -151,7 +151,23 @@ impl BrowserState {
             }
             BackendKind::CdpRaw => {
                 use crate::backend::cdp_raw::CdpRawBrowser;
-                AnyBrowser::CdpRaw(CdpRawBrowser::launch(&self.chromium_path).await?)
+                match &self.connect_mode {
+                    ConnectMode::ConnectUrl(url) => {
+                        let ws_url = if url.starts_with("ws://") || url.starts_with("wss://") {
+                            url.clone()
+                        } else {
+                            discover_ws_from_http(url).await?
+                        };
+                        AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?)
+                    }
+                    ConnectMode::AutoConnect { channel, user_data_dir } => {
+                        let ws_url = discover_chrome_ws(channel, user_data_dir.as_deref())?;
+                        AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?)
+                    }
+                    ConnectMode::Launch => {
+                        AnyBrowser::CdpRaw(CdpRawBrowser::launch(&self.chromium_path).await?)
+                    }
+                }
             }
             #[cfg(target_os = "macos")]
             BackendKind::WebKit => {

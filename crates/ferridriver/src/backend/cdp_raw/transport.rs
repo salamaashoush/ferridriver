@@ -7,7 +7,7 @@
 //! - Multiple send_command calls can be in-flight simultaneously
 
 use futures::{SinkExt, StreamExt};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -22,8 +22,8 @@ type WsSink = futures::stream::SplitSink<
 pub struct WsTransport {
   writer: Mutex<WsSink>,
   next_id: AtomicU64,
-  pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
-  nav_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<Result<(), String>>>>>,
+  pending: Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
+  nav_waiters: Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>>,
   event_tx: broadcast::Sender<serde_json::Value>,
 }
 
@@ -37,10 +37,10 @@ impl WsTransport {
     let (write, read) = ws_stream.split();
     let (event_tx, _) = broadcast::channel(256);
 
-    let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>> =
-      Arc::new(Mutex::new(HashMap::new()));
-    let nav_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<Result<(), String>>>>> =
-      Arc::new(Mutex::new(HashMap::new()));
+    let pending: Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>> =
+      Arc::new(Mutex::new(FxHashMap::default()));
+    let nav_waiters: Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>> =
+      Arc::new(Mutex::new(FxHashMap::default()));
 
     let pending2 = pending.clone();
     let nav_waiters2 = nav_waiters.clone();
@@ -90,8 +90,17 @@ impl WsTransport {
             .unwrap_or("")
             .to_string();
 
-          // Navigation waiter dispatch
-          if method == "Page.loadEventFired" {
+          // Playwright approach: resolve on Page.lifecycleEvent DOMContentLoaded/load
+          if method == "Page.lifecycleEvent" {
+            if let Some(name) = json.get("params").and_then(|p| p.get("name")).and_then(|n| n.as_str()) {
+              if name == "DOMContentLoaded" || name == "load" {
+                let mut waiters = nav_waiters2.lock().await;
+                if let Some(tx) = waiters.remove(&session_id) {
+                  let _ = tx.send(Ok(()));
+                }
+              }
+            }
+          } else if method == "Page.domContentEventFired" || method == "Page.loadEventFired" {
             let mut waiters = nav_waiters2.lock().await;
             if let Some(tx) = waiters.remove(&session_id) {
               let _ = tx.send(Ok(()));
@@ -156,16 +165,15 @@ impl WsTransport {
     method: &str,
     params: serde_json::Value,
   ) -> Result<serde_json::Value, String> {
-    let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-    let mut msg = serde_json::json!({
-      "id": id,
-      "method": method,
-      "params": params,
-    });
-    if let Some(sid) = session_id {
-      msg["sessionId"] = serde_json::Value::String(sid.to_string());
-    }
+    // Build JSON directly, skip intermediate Value allocation.
+    let params_str = serde_json::to_string(&params).map_err(|e| format!("Serialize: {e}"))?;
+    let text = if let Some(sid) = session_id {
+      format!(r#"{{"id":{id},"method":"{method}","params":{params_str},"sessionId":"{sid}"}}"#)
+    } else {
+      format!(r#"{{"id":{id},"method":"{method}","params":{params_str}}}"#)
+    };
 
     let (tx, rx) = oneshot::channel();
     {
@@ -173,7 +181,6 @@ impl WsTransport {
       pending.insert(id, tx);
     }
 
-    let text = serde_json::to_string(&msg).map_err(|e| format!("Serialize: {e}"))?;
     {
       let mut writer = self.writer.lock().await;
       writer

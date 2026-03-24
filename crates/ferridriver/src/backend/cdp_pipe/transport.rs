@@ -11,7 +11,7 @@
 //! oneshot channels for command responses and navigation completion.
 //! NO polling, NO broadcast for navigation -- direct dispatch from reader.
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
@@ -26,10 +26,10 @@ pub struct PipeTransport {
     next_id: AtomicU64,
     /// Pending commands waiting for responses: id -> sender.
     /// The Result carries Ok(result_value) or Err(error_description).
-    pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
+    pending: Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
     /// Navigation waiters: sessionId -> sender that resolves when Page.loadEventFired arrives.
     /// Follows Bun's pattern: register before navigate, reader dispatches on event arrival.
-    nav_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<Result<(), String>>>>>,
+    nav_waiters: Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>>,
     /// Broadcast channel for CDP events (console, network -- fire-and-forget listeners).
     event_tx: broadcast::Sender<serde_json::Value>,
 }
@@ -119,11 +119,11 @@ impl PipeTransport {
 
         let (event_tx, _) = broadcast::channel(256);
 
-        let pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let pending: Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>> =
+            Arc::new(Mutex::new(FxHashMap::default()));
 
-        let nav_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<Result<(), String>>>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let nav_waiters: Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>> =
+            Arc::new(Mutex::new(FxHashMap::default()));
 
         let transport = Self {
             writer: Mutex::new(writer),
@@ -147,8 +147,8 @@ impl PipeTransport {
     fn spawn_reader(
         reader: tokio::io::ReadHalf<tokio::net::UnixStream>,
         event_tx: broadcast::Sender<serde_json::Value>,
-        pending: Arc<Mutex<HashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
-        nav_waiters: Arc<Mutex<HashMap<String, oneshot::Sender<Result<(), String>>>>>,
+        pending: Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
+        nav_waiters: Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>>,
     ) {
         tokio::spawn(async move {
             let mut reader = reader;
@@ -192,10 +192,10 @@ impl PipeTransport {
                             // Only full-parse the result value (needed downstream)
                             let result_field = json_scan::json_field(raw, b"result");
                             if result_field.is_empty() {
-                                Ok(serde_json::json!({}))
+                                Ok(serde_json::Value::Object(serde_json::Map::new()))
                             } else {
                                 let val: serde_json::Value = serde_json::from_slice(result_field)
-                                    .unwrap_or(serde_json::json!({}));
+                                    .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                                 Ok(val)
                             }
                         };
@@ -211,7 +211,20 @@ impl PipeTransport {
                         let sid_str = std::str::from_utf8(session_id).unwrap_or("");
 
                         match method_str {
-                            "Page.loadEventFired" => {
+                            // Playwright approach: use Page.lifecycleEvent which fires
+                            // with the specific lifecycle name. Resolve on DOMContentLoaded.
+                            "Page.lifecycleEvent" => {
+                                let params = json_scan::json_field(raw, b"params");
+                                let name = json_scan::json_string(json_scan::json_field(params, b"name"));
+                                let name_str = std::str::from_utf8(name).unwrap_or("");
+                                if name_str == "DOMContentLoaded" || name_str == "load" {
+                                    if let Some(sender) = nav_waiters.lock().await.remove(&sid_str.to_string()) {
+                                        let _ = sender.send(Ok(()));
+                                    }
+                                }
+                            }
+                            // Fallback: also handle the simple events
+                            "Page.domContentEventFired" | "Page.loadEventFired" => {
                                 if let Some(sender) = nav_waiters.lock().await.remove(&sid_str.to_string()) {
                                     let _ = sender.send(Ok(()));
                                 }
@@ -259,24 +272,22 @@ impl PipeTransport {
         method: &str,
         params: serde_json::Value,
     ) -> Result<serde_json::Value, String> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-        let mut msg = serde_json::json!({
-            "id": id,
-            "method": method,
-            "params": params,
-        });
-        if let Some(sid) = session_id {
-            msg["sessionId"] = serde_json::json!(sid);
-        }
+        // Build JSON directly as bytes, skip intermediate serde_json::Value.
+        // params is already a Value so we serialize it once.
+        let params_str = serde_json::to_string(&params).map_err(|e| format!("Serialize: {e}"))?;
+        let mut data = if let Some(sid) = session_id {
+            format!(r#"{{"id":{id},"method":"{method}","params":{params_str},"sessionId":"{sid}"}}"#)
+                .into_bytes()
+        } else {
+            format!(r#"{{"id":{id},"method":"{method}","params":{params_str}}}"#)
+                .into_bytes()
+        };
+        data.push(0); // NUL terminator
 
-        // Register the pending response
         let (tx, rx) = oneshot::channel();
         self.pending.lock().await.insert(id, tx);
-
-        // Serialize and write with NUL terminator
-        let mut data = serde_json::to_vec(&msg).map_err(|e| format!("Serialize: {e}"))?;
-        data.push(0); // NUL terminator
 
         {
             let mut writer = self.writer.lock().await;

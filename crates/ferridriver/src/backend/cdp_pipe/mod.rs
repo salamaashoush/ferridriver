@@ -12,7 +12,7 @@ mod transport;
 mod json_scan;
 
 use super::*;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::time::Duration;
 use transport::PipeTransport;
 
@@ -23,7 +23,7 @@ pub struct CdpPipeBrowser {
     child: tokio::process::Child,
     session_id: Option<String>,
     /// Track targetId -> sessionId for already-attached targets.
-    attached_targets: std::sync::Mutex<HashMap<String, Option<String>>>,
+    attached_targets: std::sync::Mutex<FxHashMap<String, Option<String>>>,
 }
 
 impl CdpPipeBrowser {
@@ -33,27 +33,41 @@ impl CdpPipeBrowser {
         session_id: Option<&str>,
     ) -> Result<(), String> {
         transport
-            .send_command(session_id, "Page.enable", serde_json::json!({}))
+            .send_command(session_id, "Page.enable", super::empty_params())
             .await?;
         transport
-            .send_command(session_id, "Runtime.enable", serde_json::json!({}))
+            .send_command(session_id, "Runtime.enable", super::empty_params())
             .await?;
         transport
-            .send_command(session_id, "DOM.enable", serde_json::json!({}))
+            .send_command(session_id, "DOM.enable", super::empty_params())
             .await?;
         transport
-            .send_command(session_id, "Network.enable", serde_json::json!({}))
+            .send_command(session_id, "Network.enable", super::empty_params())
             .await?;
         transport
-            .send_command(session_id, "Accessibility.enable", serde_json::json!({}))
+            .send_command(session_id, "Accessibility.enable", super::empty_params())
             .await?;
+
+        // Inject selector engine on every new document so it's always available
+        // without a separate evaluate call. Chrome runs this before any page JS.
+        let engine_js = crate::selectors::build_inject_js();
+        transport
+            .send_command(
+                session_id,
+                "Page.addScriptToEvaluateOnNewDocument",
+                serde_json::json!({"source": engine_js}),
+            )
+            .await?;
+
         Ok(())
     }
 
     /// Launch Chrome with `--remote-debugging-pipe` and communicate over fd 3/4.
     pub async fn launch(chromium_path: &str) -> Result<Self, String> {
+        static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+        let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let user_data_dir =
-            std::env::temp_dir().join(format!("ferridriver-pipe-{}", std::process::id()));
+            std::env::temp_dir().join(format!("ferridriver-pipe-{}-{id}", std::process::id()));
 
         let (transport, child) =
             PipeTransport::spawn(chromium_path, &user_data_dir).await?;
@@ -101,7 +115,7 @@ impl CdpPipeBrowser {
         // Enable required domains on the new session
         Self::enable_domains(&transport, session_id.as_deref()).await?;
 
-        let mut attached = HashMap::new();
+        let mut attached = FxHashMap::default();
         attached.insert(target_id, session_id.clone());
 
         Ok(Self {
@@ -115,7 +129,7 @@ impl CdpPipeBrowser {
     pub async fn pages(&self) -> Result<Vec<AnyPage>, String> {
         let result = self
             .transport
-            .send_command(None, "Target.getTargets", serde_json::json!({}))
+            .send_command(None, "Target.getTargets", super::empty_params())
             .await?;
 
         let targets = result
@@ -244,7 +258,7 @@ impl CdpPipeBrowser {
             .send_command(
                 None,
                 "Target.createBrowserContext",
-                serde_json::json!({}),
+                super::empty_params(),
             )
             .await?;
 
@@ -310,7 +324,7 @@ impl CdpPipeBrowser {
     pub async fn close(&mut self) -> Result<(), String> {
         let _ = self
             .transport
-            .send_command(None, "Browser.close", serde_json::json!({}))
+            .send_command(None, "Browser.close", super::empty_params())
             .await;
         let _ = self.child.kill().await;
         Ok(())
@@ -341,30 +355,30 @@ impl CdpPipePage {
     // ---- Navigation ----
 
     pub async fn goto(&self, url: &str) -> Result<(), String> {
-        // Register nav waiter BEFORE sending navigate (Bun's pattern:
-        // Page.loadEventFired resolves the waiter, not the command response)
+        // Playwright approach: register lifecycle waiter, send Page.navigate,
+        // wait for the matching lifecycle event (load by default).
         let rx = self
             .transport
             .register_nav_waiter(self.session_id.as_deref().unwrap_or(""))
             .await;
 
-        // Send Page.navigate and wait for the command response
         let nav_result = self
             .cmd("Page.navigate", serde_json::json!({"url": url}))
             .await?;
 
-        // Check for synchronous navigation error (bad URL, net::ERR_*)
         if let Some(error_text) = nav_result.get("errorText").and_then(|v| v.as_str()) {
             if !error_text.is_empty() {
                 return Err(format!("Navigation failed: {error_text}"));
             }
         }
 
-        // Wait for Page.loadEventFired via the registered waiter
+        // Wait for lifecycle event. Chrome fires domContentEventFired then
+        // loadEventFired. We resolve on whichever comes first (already configured
+        // in the transport reader). 30s timeout like Playwright.
         match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
             Ok(Ok(result)) => result,
-            Ok(Err(_)) => Err("Navigation waiter dropped".into()),
-            Err(_) => Ok(()), // Timeout, proceed anyway
+            Ok(Err(_)) => Ok(()),
+            Err(_) => Ok(()),
         }
     }
 
@@ -383,7 +397,7 @@ impl CdpPipePage {
     }
 
     pub async fn reload(&self) -> Result<(), String> {
-        self.cmd("Page.reload", serde_json::json!({})).await?;
+        self.cmd("Page.reload", super::empty_params()).await?;
         Ok(())
     }
 
@@ -399,7 +413,7 @@ impl CdpPipePage {
     /// Page.getNavigationHistory -> pick entries[currentIndex + delta].id
     /// -> Page.navigateToHistoryEntry -> Page.loadEventFired settles.
     async fn history_go(&self, delta: i32) -> Result<(), String> {
-        let hist = self.cmd("Page.getNavigationHistory", serde_json::json!({})).await?;
+        let hist = self.cmd("Page.getNavigationHistory", super::empty_params()).await?;
         let current = hist.get("currentIndex").and_then(|v| v.as_i64()).unwrap_or(0) as i32;
         let target = current + delta;
         let entries = hist.get("entries").and_then(|v| v.as_array());
@@ -457,8 +471,6 @@ impl CdpPipePage {
     // ---- JavaScript ----
 
     pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
-        if expression.contains("innerWidth") || expression.contains("readyState") {
-        }
         let result = self
             .cmd(
                 "Runtime.evaluate",
@@ -522,6 +534,52 @@ impl CdpPipePage {
         }))
     }
 
+    /// Evaluate JS that returns a DOM element. Uses Runtime.evaluate without
+    /// returnByValue to get an objectId, then DOM.requestNode for the nodeId.
+    /// Single evaluate + one DOM call = 2 round-trips (vs 5 for tag-and-query).
+    pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
+        // Ensure DOM agent has the document tree (required for DOM.requestNode)
+        let _ = self.cmd("DOM.getDocument", serde_json::json!({"depth": 0})).await;
+
+        let result = self
+            .cmd(
+                "Runtime.evaluate",
+                serde_json::json!({
+                    "expression": js,
+                    "returnByValue": false,
+                }),
+            )
+            .await?;
+
+        let object_id = result
+            .get("result")
+            .and_then(|r| r.get("objectId"))
+            .and_then(|v| v.as_str())
+            .ok_or("JS did not return a DOM element")?;
+
+        let node_result = self
+            .cmd(
+                "DOM.requestNode",
+                serde_json::json!({"objectId": object_id}),
+            )
+            .await?;
+
+        let node_id = node_result
+            .get("nodeId")
+            .and_then(|v| v.as_i64())
+            .ok_or("Could not resolve element nodeId")?;
+
+        if node_id == 0 {
+            return Err("Element not found".into());
+        }
+
+        Ok(AnyElement::CdpPipe(CdpPipeElement {
+            transport: self.transport.clone(),
+            session_id: self.session_id.clone(),
+            node_id,
+        }))
+    }
+
     // ---- Content ----
 
     pub async fn content(&self) -> Result<String, String> {
@@ -545,7 +603,7 @@ impl CdpPipePage {
     pub async fn set_content(&self, html: &str) -> Result<(), String> {
         // Get the frame tree to find the main frame ID
         let tree = self
-            .cmd("Page.getFrameTree", serde_json::json!({}))
+            .cmd("Page.getFrameTree", super::empty_params())
             .await?;
         let frame_id = tree
             .get("frameTree")
@@ -554,9 +612,13 @@ impl CdpPipePage {
             .and_then(|v| v.as_str())
             .ok_or("No main frame")?;
 
+        // Embed the selector engine directly in the HTML as a <script> tag.
+        // This avoids a separate evaluate round-trip after setDocumentContent.
+        let engine_js = crate::selectors::build_inject_js();
+        let augmented = format!("<script>{engine_js}</script>{html}");
         self.cmd(
             "Page.setDocumentContent",
-            serde_json::json!({"frameId": frame_id, "html": html}),
+            serde_json::json!({"frameId": frame_id, "html": augmented}),
         )
         .await?;
         Ok(())
@@ -570,7 +632,7 @@ impl CdpPipePage {
             ImageFormat::Jpeg => "jpeg",
             ImageFormat::Webp => "webp",
         };
-        let mut params = serde_json::json!({"format": format_str});
+        let mut params = serde_json::json!({"format": format_str, "optimizeForSpeed": true});
         if let Some(q) = opts.quality {
             params["quality"] = serde_json::json!(q);
         }
@@ -579,7 +641,7 @@ impl CdpPipePage {
             let metrics = self
                 .cmd(
                     "Page.getLayoutMetrics",
-                    serde_json::json!({}),
+                    super::empty_params(),
                 )
                 .await?;
             if let Some(content_size) = metrics.get("contentSize") {
@@ -685,7 +747,7 @@ impl CdpPipePage {
 
     pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<(), String> {
         // Get document root
-        let doc = self.cmd("DOM.getDocument", serde_json::json!({})).await?;
+        let doc = self.cmd("DOM.getDocument", super::empty_params()).await?;
         let root_id = doc.get("root").and_then(|r| r.get("nodeId")).and_then(|v| v.as_i64())
             .ok_or("No document root")?;
 
@@ -782,16 +844,45 @@ impl CdpPipePage {
     // ---- Input ----
 
     pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
+        self.click_at_opts(x, y, "left", 1).await
+    }
+
+    pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
         self.cmd(
             "Input.dispatchMouseEvent",
-            serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}),
+            serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "clickCount": click_count}),
         )
         .await?;
         self.cmd(
             "Input.dispatchMouseEvent",
-            serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}),
+            serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "clickCount": click_count}),
         )
         .await?;
+        Ok(())
+    }
+
+    pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
+        self.cmd(
+            "Input.dispatchMouseEvent",
+            serde_json::json!({"type": "mouseMoved", "x": x, "y": y}),
+        )
+        .await?;
+        Ok(())
+    }
+
+    pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<(), String> {
+        let steps = steps.max(1);
+        for i in 0..=steps {
+            let t = i as f64 / steps as f64;
+            let ease = t * t * (3.0 - 2.0 * t);
+            let x = from_x + (to_x - from_x) * ease;
+            let y = from_y + (to_y - from_y) * ease;
+            self.cmd(
+                "Input.dispatchMouseEvent",
+                serde_json::json!({"type": "mouseMoved", "x": x, "y": y}),
+            )
+            .await?;
+        }
         Ok(())
     }
 
@@ -805,11 +896,18 @@ impl CdpPipePage {
             serde_json::json!({"type": "mousePressed", "x": from.0, "y": from.1, "button": "left", "clickCount": 1}),
         )
         .await?;
-        self.cmd(
-            "Input.dispatchMouseEvent",
-            serde_json::json!({"type": "mouseMoved", "x": to.0, "y": to.1, "button": "left"}),
-        )
-        .await?;
+        let steps = 10u32;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let ease = t * t * (3.0 - 2.0 * t);
+            let x = from.0 + (to.0 - from.0) * ease;
+            let y = from.1 + (to.1 - from.1) * ease;
+            self.cmd(
+                "Input.dispatchMouseEvent",
+                serde_json::json!({"type": "mouseMoved", "x": x, "y": y, "button": "left"}),
+            )
+            .await?;
+        }
         self.cmd(
             "Input.dispatchMouseEvent",
             serde_json::json!({"type": "mouseReleased", "x": to.0, "y": to.1, "button": "left", "clickCount": 1}),
@@ -872,7 +970,7 @@ impl CdpPipePage {
 
     pub async fn get_cookies(&self) -> Result<Vec<CookieData>, String> {
         let result = self
-            .cmd("Network.getCookies", serde_json::json!({}))
+            .cmd("Network.getCookies", super::empty_params())
             .await?;
         let cookies = result
             .get("cookies")
@@ -928,14 +1026,14 @@ impl CdpPipePage {
     }
 
     pub async fn clear_cookies(&self) -> Result<(), String> {
-        self.cmd("Storage.clearCookies", serde_json::json!({})).await?;
+        self.cmd("Storage.clearCookies", super::empty_params()).await?;
         Ok(())
     }
 
     // ---- Emulation ----
 
     pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
-        let _ = self.cmd("Emulation.clearDeviceMetricsOverride", serde_json::json!({})).await;
+        let _ = self.cmd("Emulation.clearDeviceMetricsOverride", super::empty_params()).await;
         let is_landscape = config.is_landscape || config.width > config.height;
         let orientation = if config.is_mobile {
             if is_landscape {
@@ -1018,18 +1116,18 @@ impl CdpPipePage {
     // ---- Tracing ----
 
     pub async fn start_tracing(&self) -> Result<(), String> {
-        self.cmd("Tracing.start", serde_json::json!({})).await?;
+        self.cmd("Tracing.start", super::empty_params()).await?;
         Ok(())
     }
 
     pub async fn stop_tracing(&self) -> Result<(), String> {
-        self.cmd("Tracing.end", serde_json::json!({})).await?;
+        self.cmd("Tracing.end", super::empty_params()).await?;
         Ok(())
     }
 
     pub async fn metrics(&self) -> Result<Vec<MetricData>, String> {
         let result = self
-            .cmd("Performance.getMetrics", serde_json::json!({}))
+            .cmd("Performance.getMetrics", super::empty_params())
             .await?;
         let metrics = result
             .get("metrics")
@@ -1293,16 +1391,22 @@ impl CdpPipeElement {
         Ok(((x1 + x3) / 2.0, (y1 + y3) / 2.0))
     }
 
-    /// Call a JS function on this element and return the string result.
-    async fn call_js_fn_result(&self, function: &str) -> Result<String, String> {
+    /// Resolve this element's nodeId to a Runtime objectId.
+    async fn resolve_object_id(&self) -> Result<String, String> {
         let resolved = self
             .cmd("DOM.resolveNode", serde_json::json!({"nodeId": self.node_id}))
             .await?;
-        let object_id = resolved
+        resolved
             .get("object")
             .and_then(|o| o.get("objectId"))
             .and_then(|v| v.as_str())
-            .ok_or("Cannot resolve element")?;
+            .map(|s| s.to_string())
+            .ok_or("Cannot resolve element".into())
+    }
+
+    /// Call a JS function on this element and return the value.
+    pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>, String> {
+        let object_id = self.resolve_object_id().await?;
         let result = self
             .cmd(
                 "Runtime.callFunctionOn",
@@ -1313,36 +1417,25 @@ impl CdpPipeElement {
                 }),
             )
             .await?;
-        result
+        Ok(result
             .get("result")
             .and_then(|r| r.get("value"))
-            .and_then(|v| v.as_str())
-            .map(|s| s.to_string())
-            .ok_or("No return value".into())
+            .cloned())
     }
 
     pub async fn click(&self) -> Result<(), String> {
-        let _ = self.scroll_into_view().await;
+        // Single JS call: scroll into view + get center coordinates
+        let center = self.call_js_fn_value(
+            "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
+        ).await?;
 
-        // Try DOM.getBoxModel first, fall back to JS getBoundingClientRect, then JS click
-        let center = match self.get_center().await {
-            Ok(c) => Some(c),
-            Err(_) => {
-                // Fallback: JS getBoundingClientRect
-                match self.call_js_fn_result("function() { var r = this.getBoundingClientRect(); return JSON.stringify({x:r.x,y:r.y,w:r.width,h:r.height}); }").await {
-                    Ok(s) => {
-                        if let Ok(rect) = serde_json::from_str::<serde_json::Value>(&s) {
-                            let x = rect["x"].as_f64().unwrap_or(0.0) + rect["w"].as_f64().unwrap_or(0.0) / 2.0;
-                            let y = rect["y"].as_f64().unwrap_or(0.0) + rect["h"].as_f64().unwrap_or(0.0) / 2.0;
-                            Some((x, y))
-                        } else { None }
-                    }
-                    Err(_) => None,
-                }
+        if let Some(c) = center {
+            let x = c.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let y = c.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if x == 0.0 && y == 0.0 {
+                // Element has no layout, use JS click
+                return self.call_js_fn("function() { this.click(); }").await;
             }
-        };
-
-        if let Some((x, y)) = center {
             self.cmd(
                 "Input.dispatchMouseEvent",
                 serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": "left", "clickCount": 1}),
@@ -1355,7 +1448,6 @@ impl CdpPipeElement {
             .await?;
             Ok(())
         } else {
-            // Final fallback: JS click
             self.call_js_fn("function() { this.click(); }").await
         }
     }
@@ -1384,19 +1476,7 @@ impl CdpPipeElement {
     }
 
     pub async fn call_js_fn(&self, function: &str) -> Result<(), String> {
-        // Resolve node to object first
-        let resolved = self
-            .cmd(
-                "DOM.resolveNode",
-                serde_json::json!({"nodeId": self.node_id}),
-            )
-            .await?;
-        let object_id = resolved
-            .get("object")
-            .and_then(|o| o.get("objectId"))
-            .and_then(|v| v.as_str())
-            .ok_or("Cannot resolve element")?;
-
+        let object_id = self.resolve_object_id().await?;
         self.cmd(
             "Runtime.callFunctionOn",
             serde_json::json!({
