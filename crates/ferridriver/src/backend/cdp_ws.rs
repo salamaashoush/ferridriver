@@ -11,6 +11,7 @@ use chromiumoxide::cdp::browser_protocol::network::{
 use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotFormat;
 use chromiumoxide::cdp::js_protocol::runtime::{CallFunctionOnParams, EventConsoleApiCalled};
 use chromiumoxide::Page;
+use base64::Engine as _;
 use futures::StreamExt;
 
 // ─── CdpWsBrowser ───────────────────────────────────────────────────────────
@@ -87,6 +88,9 @@ impl CdpWsBrowser {
             .pages()
             .await
             .map_err(|e| format!("List pages: {e}"))?;
+        for p in &pages {
+            Self::inject_engine(p).await;
+        }
         Ok(pages.into_iter().map(|p| AnyPage::CdpWs(CdpWsPage(p))).collect())
     }
 
@@ -96,7 +100,16 @@ impl CdpWsBrowser {
             .new_page(url)
             .await
             .map_err(|e| format!("New page failed: {e}"))?;
+        Self::inject_engine(&page).await;
         Ok(AnyPage::CdpWs(CdpWsPage(page)))
+    }
+
+    /// Inject selector engine via addScriptToEvaluateOnNewDocument so it's
+    /// available on every navigation without a separate evaluate call.
+    async fn inject_engine(page: &Page) {
+        use chromiumoxide::cdp::browser_protocol::page::AddScriptToEvaluateOnNewDocumentParams;
+        let engine_js = crate::selectors::build_inject_js();
+        let _ = page.execute(AddScriptToEvaluateOnNewDocumentParams::new(engine_js)).await;
     }
 
     pub async fn new_page_isolated(&self, url: &str) -> Result<AnyPage, String> {
@@ -188,6 +201,43 @@ impl CdpWsPage {
         Ok(AnyElement::CdpWs(CdpWsElement { element: el, page: self.0.clone() }))
     }
 
+    pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
+        use chromiumoxide::cdp::js_protocol::runtime::EvaluateParams;
+        use chromiumoxide::cdp::browser_protocol::dom::RequestNodeParams;
+
+        // Evaluate without returnByValue to get a RemoteObject reference
+        let params = EvaluateParams::builder()
+            .expression(js)
+            .build()
+            .map_err(|e| format!("{e}"))?;
+        let result = self.0.execute(params).await.map_err(|e| format!("{e}"))?;
+        let object_id = result.result.result.object_id
+            .ok_or("JS did not return a DOM element")?;
+
+        // Get nodeId from objectId
+        let node_result = self.0.execute(RequestNodeParams::new(object_id))
+            .await
+            .map_err(|e| format!("{e}"))?;
+        let node_id = node_result.result.node_id;
+
+        // Now find the element via chromiumoxide using the nodeId
+        // We need to get a chromiumoxide Element. Use DOM.describeNode to get the backendNodeId,
+        // then resolve via find_element with a unique attribute.
+        // Simpler approach: tag the element in JS with a unique attr, then find_element by it.
+        let tag = format!("fd-eval-{}", std::process::id());
+        let tag_js = format!(
+            "(function() {{ var el = ({js}); if (el) el.setAttribute('data-{tag}', '1'); }})()"
+        );
+        let _ = self.0.evaluate(tag_js).await;
+        let el = self.0.find_element(format!("[data-{tag}]"))
+            .await
+            .map_err(|e| format!("{e}"))?;
+        let _ = self.0.evaluate(format!(
+            "document.querySelector('[data-{tag}]')?.removeAttribute('data-{tag}')"
+        )).await;
+        Ok(AnyElement::CdpWs(CdpWsElement { element: el, page: self.0.clone() }))
+    }
+
     // ── Content ──
 
     pub async fn content(&self) -> Result<String, String> {
@@ -201,37 +251,62 @@ impl CdpWsPage {
             .await
             .map_err(|e| format!("No frame: {e}"))?
             .ok_or_else(|| "No main frame".to_string())?;
+        let engine_js = crate::selectors::build_inject_js();
+        let augmented = format!("<script>{engine_js}</script>{html}");
         self.0
             .execute(
                 chromiumoxide::cdp::browser_protocol::page::SetDocumentContentParams::new(
                     frame_id,
-                    html.to_string(),
+                    augmented,
                 ),
             )
             .await
-            .map_err(|e| format!("set_content: {e}"))?;
-        Ok(())
+            .map_err(|e| format!("{e}"))
+            .map(|_| ())
     }
 
     // ── Screenshots ──
 
     pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>, String> {
+        use chromiumoxide::cdp::browser_protocol::page::CaptureScreenshotParams;
+
+        // Use raw CDP Page.captureScreenshot directly instead of chromiumoxide's
+        // screenshot wrapper which adds significant overhead (537ms vs 25ms).
         let format = match opts.format {
             ImageFormat::Png => CaptureScreenshotFormat::Png,
             ImageFormat::Jpeg => CaptureScreenshotFormat::Jpeg,
             ImageFormat::Webp => CaptureScreenshotFormat::Webp,
         };
-        let mut builder = chromiumoxide::page::ScreenshotParams::builder().format(format);
+        let mut params = CaptureScreenshotParams::builder()
+            .format(format)
+            .optimize_for_speed(true);
         if let Some(q) = opts.quality {
-            builder = builder.quality(q);
+            params = params.quality(q);
         }
+
         if opts.full_page {
-            builder = builder.full_page(true);
+            use chromiumoxide::cdp::browser_protocol::page::GetLayoutMetricsParams;
+            let metrics = self.0.execute(GetLayoutMetricsParams::default())
+                .await
+                .map_err(|e| format!("Layout metrics: {e}"))?;
+            let cs = &metrics.result.css_content_size;
+            use chromiumoxide::cdp::browser_protocol::page::Viewport;
+            params = params.clip(Viewport {
+                x: 0.0,
+                y: 0.0,
+                width: cs.width,
+                height: cs.height,
+                scale: 1.0,
+            });
         }
-        self.0
-            .screenshot(builder.build())
+
+        let result = self.0.execute(params.build())
             .await
-            .map_err(|e| format!("Screenshot: {e}"))
+            .map_err(|e| format!("Screenshot: {e}"))?;
+
+        base64::engine::general_purpose::STANDARD
+            .decode(&result.result.data)
+            .map_err(|e| format!("Decode: {e}"))
     }
 
     pub async fn screenshot_element(
@@ -312,25 +387,74 @@ impl CdpWsPage {
     // ── Input ──
 
     pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
-        self.0
-            .click(chromiumoxide::layout::Point { x, y })
-            .await
-            .map_err(|e| format!("{e}"))
-            .map(|_| ())
+        self.click_at_opts(x, y, "left", 1).await
+    }
+
+    pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::input::{DispatchMouseEventParams, DispatchMouseEventType, MouseButton};
+        let btn = match button {
+            "right" => MouseButton::Right,
+            "middle" => MouseButton::Middle,
+            "back" => MouseButton::Back,
+            "forward" => MouseButton::Forward,
+            _ => MouseButton::Left,
+        };
+        let pressed = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(x).y(y).button(btn.clone()).click_count(click_count as i64)
+            .build().map_err(|e| format!("{e}"))?;
+        self.0.execute(pressed).await.map_err(|e| format!("{e}"))?;
+        let released = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(x).y(y).button(btn).click_count(click_count as i64)
+            .build().map_err(|e| format!("{e}"))?;
+        self.0.execute(released).await.map_err(|e| format!("{e}"))?;
+        Ok(())
+    }
+
+    pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::input::{DispatchMouseEventParams, DispatchMouseEventType};
+        let moved = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseMoved)
+            .x(x).y(y)
+            .build().map_err(|e| format!("{e}"))?;
+        self.0.execute(moved).await.map_err(|e| format!("{e}"))?;
+        Ok(())
+    }
+
+    pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<(), String> {
+        let steps = steps.max(1);
+        for i in 0..=steps {
+            let t = i as f64 / steps as f64;
+            let ease = t * t * (3.0 - 2.0 * t);
+            let x = from_x + (to_x - from_x) * ease;
+            let y = from_y + (to_y - from_y) * ease;
+            self.move_mouse(x, y).await?;
+        }
+        Ok(())
     }
 
     pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
-        self.0
-            .click_and_drag(
-                chromiumoxide::layout::Point {
-                    x: from.0,
-                    y: from.1,
-                },
-                chromiumoxide::layout::Point { x: to.0, y: to.1 },
-            )
-            .await
-            .map_err(|e| format!("{e}"))
-            .map(|_| ())
+        use chromiumoxide::cdp::browser_protocol::input::{DispatchMouseEventParams, DispatchMouseEventType, MouseButton};
+        let pressed = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(from.0).y(from.1).button(MouseButton::Left).click_count(1i64)
+            .build().map_err(|e| format!("{e}"))?;
+        self.0.execute(pressed).await.map_err(|e| format!("{e}"))?;
+        let steps = 10u32;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let ease = t * t * (3.0 - 2.0 * t);
+            let x = from.0 + (to.0 - from.0) * ease;
+            let y = from.1 + (to.1 - from.1) * ease;
+            self.move_mouse(x, y).await?;
+        }
+        let released = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(to.0).y(to.1).button(MouseButton::Left).click_count(1i64)
+            .build().map_err(|e| format!("{e}"))?;
+        self.0.execute(released).await.map_err(|e| format!("{e}"))?;
+        Ok(())
     }
 
     pub async fn type_str(&self, text: &str) -> Result<(), String> {
@@ -616,39 +740,34 @@ pub struct CdpWsElement {
 
 impl CdpWsElement {
     pub async fn click(&self) -> Result<(), String> {
-        // Step 1: Scroll into view (ignore error)
-        let _ = self.element.scroll_into_view().await;
+        // Single JS call: scroll into view + get center. Same pattern as cdp-pipe/cdp-raw.
+        let center = self.call_js_fn_value(
+            "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
+        ).await?;
 
-        // Step 2: Try standard chromiumoxide click
-        if self.element.click().await.is_ok() {
-            return Ok(());
-        }
-
-        // Step 3: Get center via JS getBoundingClientRect, then coordinate click
-        // Tag the element with a unique attribute so we can query it from page context
-        let tag = format!("__fd_click_{}", std::process::id());
-        let _ = self.element.call_js_fn(
-            &format!("function() {{ this.setAttribute('data-fd-click', '{tag}'); }}"),
-            false,
-        ).await;
-        let js = format!(
-            "(function(){{ var e=document.querySelector('[data-fd-click=\"{tag}\"]'); if(!e) return null; var r=e.getBoundingClientRect(); e.removeAttribute('data-fd-click'); return JSON.stringify({{x:r.x,y:r.y,w:r.width,h:r.height}}); }})()"
-        );
-        if let Ok(val) = self.page.evaluate(js).await {
-            if let Some(s) = val.value().and_then(|v| v.as_str()) {
-                if let Ok(rect) = serde_json::from_str::<serde_json::Value>(s) {
-                    let x = rect["x"].as_f64().unwrap_or(0.0) + rect["w"].as_f64().unwrap_or(0.0) / 2.0;
-                    let y = rect["y"].as_f64().unwrap_or(0.0) + rect["h"].as_f64().unwrap_or(0.0) / 2.0;
-                    if self.page.click(chromiumoxide::layout::Point { x, y }).await.is_ok() {
-                        return Ok(());
-                    }
-                }
+        if let Some(c) = center {
+            let x = c.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            let y = c.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
+            if x == 0.0 && y == 0.0 {
+                let _ = self.element.call_js_fn("function() { this.click(); }", false).await;
+                return Ok(());
             }
+            use chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventParams;
+            let pressed = DispatchMouseEventParams::builder()
+                .r#type(chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType::MousePressed)
+                .x(x).y(y).button(chromiumoxide::cdp::browser_protocol::input::MouseButton::Left).click_count(1)
+                .build().map_err(|e| format!("{e}"))?;
+            self.page.execute(pressed).await.map_err(|e| format!("{e}"))?;
+            let released = DispatchMouseEventParams::builder()
+                .r#type(chromiumoxide::cdp::browser_protocol::input::DispatchMouseEventType::MouseReleased)
+                .x(x).y(y).button(chromiumoxide::cdp::browser_protocol::input::MouseButton::Left).click_count(1)
+                .build().map_err(|e| format!("{e}"))?;
+            self.page.execute(released).await.map_err(|e| format!("{e}"))?;
+            Ok(())
+        } else {
+            let _ = self.element.call_js_fn("function() { this.click(); }", false).await;
+            Ok(())
         }
-
-        // Step 4: Final fallback - JS click
-        let _ = self.element.call_js_fn("function() { this.click(); }", false).await;
-        Ok(())
     }
 
     pub async fn hover(&self) -> Result<(), String> {
@@ -663,6 +782,21 @@ impl CdpWsElement {
     pub async fn call_js_fn(&self, function: &str) -> Result<(), String> {
         let _ = self.element.call_js_fn(function, false).await;
         Ok(())
+    }
+
+    pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>, String> {
+        // Use raw CDP CallFunctionOn with returnByValue: true so objects
+        // (like DOMRect from getBoundingClientRect) are serialized as JSON.
+        let params = CallFunctionOnParams::builder()
+            .object_id(self.element.remote_object_id.clone())
+            .function_declaration(function)
+            .return_by_value(true)
+            .build()
+            .map_err(|e| format!("{e}"))?;
+        let result = self.page.execute(params)
+            .await
+            .map_err(|e| format!("{e}"))?;
+        Ok(result.result.result.value.clone())
     }
 
     pub async fn scroll_into_view(&self) -> Result<(), String> {
