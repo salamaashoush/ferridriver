@@ -230,6 +230,40 @@ for (const backend of BACKENDS) {
       expect(ua).toBe("FerridriverTest/1.0");
     });
 
+    it("sets locale", async () => {
+      await page.setLocale("de-DE");
+      await page.goto("https://example.com");
+      const lang = await page.evaluateStr("navigator.language");
+      expect(lang).toBe("de-DE");
+    });
+
+    it("sets timezone", async () => {
+      await page.setTimezone("America/New_York");
+      await page.goto("https://example.com");
+      const tz = await page.evaluateStr(
+        "Intl.DateTimeFormat().resolvedOptions().timeZone"
+      );
+      expect(tz).toBe("America/New_York");
+    });
+
+    it("emulates dark color scheme", async () => {
+      await page.emulateMedia(undefined, "dark");
+      await page.goto("https://example.com");
+      const isDark = await page.evaluate(
+        "window.matchMedia('(prefers-color-scheme: dark)').matches"
+      );
+      expect(isDark).toBe(true);
+    });
+
+    it("emulates reduced motion", async () => {
+      await page.emulateMedia(undefined, undefined, "reduce");
+      await page.goto("https://example.com");
+      const isReduced = await page.evaluate(
+        "window.matchMedia('(prefers-reduced-motion: reduce)').matches"
+      );
+      expect(isReduced).toBe(true);
+    });
+
     // ── Cookies ───────────────────────────────────────────────────────
 
     it("sets and gets a cookie", async () => {

@@ -378,19 +378,43 @@ impl Page {
       .map_err(napi::Error::from_reason)
   }
 
+  /// Set the browser locale (navigator.language, Intl APIs).
+  #[napi]
+  pub async fn set_locale(&self, locale: String) -> Result<()> {
+    self.inner.set_locale(&locale).await.map_err(napi::Error::from_reason)
+  }
+
+  /// Set the browser timezone (Date, Intl.DateTimeFormat).
+  #[napi]
+  pub async fn set_timezone(&self, timezone_id: String) -> Result<()> {
+    self.inner.set_timezone(&timezone_id).await.map_err(napi::Error::from_reason)
+  }
+
+  /// Emulate media features (color scheme, reduced motion, media type, etc.).
   #[napi]
   pub async fn emulate_media(
     &self,
     media_type: Option<String>,
     color_scheme: Option<String>,
     reduced_motion: Option<String>,
+    forced_colors: Option<String>,
+    contrast: Option<String>,
   ) -> Result<()> {
-    self.inner.emulate_media(
-      media_type.as_deref(),
-      color_scheme.as_deref(),
-      reduced_motion.as_deref(),
-    ).await.map_err(napi::Error::from_reason)
+    self.inner.emulate_media(&ferridriver::options::EmulateMediaOptions {
+      media: media_type,
+      color_scheme,
+      reduced_motion,
+      forced_colors,
+      contrast,
+    }).await.map_err(napi::Error::from_reason)
   }
+
+  /// Enable or disable JavaScript execution.
+  #[napi]
+  pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<()> {
+    self.inner.set_javascript_enabled(enabled).await.map_err(napi::Error::from_reason)
+  }
+
 
   // ── Cookies ─────────────────────────────────────────────────────────────
 

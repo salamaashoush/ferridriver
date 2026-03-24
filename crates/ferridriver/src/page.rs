@@ -347,6 +347,47 @@ impl Page {
     self.inner.set_network_state(offline, latency, download, upload).await
   }
 
+  /// Set the browser locale (affects navigator.language and Intl APIs).
+  pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
+    self.inner.set_locale(locale).await
+  }
+
+  /// Set the browser timezone (affects Date and Intl.DateTimeFormat).
+  pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
+    self.inner.set_timezone(timezone_id).await
+  }
+
+  /// Emulate media features (color scheme, reduced motion, media type, etc.).
+  /// Matches Playwright's page.emulateMedia().
+  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
+    self.inner.emulate_media(opts).await
+  }
+
+  /// Enable or disable JavaScript execution.
+  pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
+    self.inner.set_javascript_enabled(enabled).await
+  }
+
+  /// Set extra HTTP headers that will be sent with every request.
+  pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
+    self.inner.set_extra_http_headers(headers).await
+  }
+
+  /// Grant browser permissions (geolocation, notifications, camera, etc.).
+  pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<(), String> {
+    self.inner.grant_permissions(permissions, origin).await
+  }
+
+  /// Reset all granted permissions.
+  pub async fn reset_permissions(&self) -> Result<(), String> {
+    self.inner.reset_permissions().await
+  }
+
+  /// Emulate focus state (page always appears focused even when not).
+  pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
+    self.inner.set_focus_emulation_enabled(enabled).await
+  }
+
   // ── Tracing ─────────────────────────────────────────────────────────────
 
   pub async fn start_tracing(&self) -> Result<(), String> {
@@ -453,28 +494,6 @@ impl Page {
       }
       tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
-  }
-
-  // ── Media emulation ─────────────────────────────────────────────────────
-
-  /// Emulate media features (color scheme, reduced motion, media type).
-  pub async fn emulate_media(&self, media_type: Option<&str>, color_scheme: Option<&str>, reduced_motion: Option<&str>) -> Result<(), String> {
-    let mut features = Vec::new();
-    if let Some(cs) = color_scheme {
-      features.push(format!("{{\"name\":\"prefers-color-scheme\",\"value\":\"{cs}\"}}"));
-    }
-    if let Some(rm) = reduced_motion {
-      features.push(format!("{{\"name\":\"prefers-reduced-motion\",\"value\":\"{rm}\"}}"));
-    }
-    let media = media_type.unwrap_or("");
-    let features_json = format!("[{}]", features.join(","));
-    // Use evaluate to set via CSS media override (works cross-backend)
-    if !media.is_empty() {
-      let js = format!("(function(){{try{{document.documentElement.setAttribute('data-media','{media}')}}catch(e){{}}}})()");
-      let _ = self.inner.evaluate(&js).await;
-    }
-    // For CDP backends, could use Emulation.setEmulatedMedia but evaluate works everywhere
-    Ok(())
   }
 
   /// Bring this page to front (focus).

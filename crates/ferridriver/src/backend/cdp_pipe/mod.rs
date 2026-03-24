@@ -1091,6 +1091,76 @@ impl CdpPipePage {
         Ok(())
     }
 
+    pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
+        // Playwright approach: use Emulation.setLocaleOverride for Intl APIs,
+        // AND Network.setUserAgentOverride with acceptLanguage for navigator.language.
+        let _ = self.cmd("Emulation.setLocaleOverride", serde_json::json!({"locale": locale})).await;
+        self.cmd("Network.setUserAgentOverride", serde_json::json!({
+            "userAgent": "",
+            "acceptLanguage": locale,
+        })).await?;
+        Ok(())
+    }
+
+    pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
+        self.cmd("Emulation.setTimezoneOverride", serde_json::json!({"timezoneId": timezone_id})).await?;
+        Ok(())
+    }
+
+    pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
+        let mut features = Vec::new();
+        if let Some(cs) = &opts.color_scheme {
+            features.push(serde_json::json!({"name": "prefers-color-scheme", "value": cs}));
+        }
+        if let Some(rm) = &opts.reduced_motion {
+            features.push(serde_json::json!({"name": "prefers-reduced-motion", "value": rm}));
+        }
+        if let Some(fc) = &opts.forced_colors {
+            features.push(serde_json::json!({"name": "forced-colors", "value": fc}));
+        }
+        if let Some(c) = &opts.contrast {
+            features.push(serde_json::json!({"name": "prefers-contrast", "value": c}));
+        }
+        let mut params = serde_json::json!({"features": features});
+        if let Some(media) = &opts.media {
+            params["media"] = serde_json::json!(media);
+        }
+        self.cmd("Emulation.setEmulatedMedia", params).await?;
+        Ok(())
+    }
+
+    pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.cmd("Emulation.setScriptExecutionDisabled", serde_json::json!({"value": !enabled})).await?;
+        Ok(())
+    }
+
+    pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
+        let h: serde_json::Map<String, serde_json::Value> = headers.iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+            .collect();
+        self.cmd("Network.setExtraHTTPHeaders", serde_json::json!({"headers": h})).await?;
+        Ok(())
+    }
+
+    pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<(), String> {
+        let mut params = serde_json::json!({"permissions": permissions});
+        if let Some(o) = origin {
+            params["origin"] = serde_json::json!(o);
+        }
+        self.cmd("Browser.grantPermissions", params).await?;
+        Ok(())
+    }
+
+    pub async fn reset_permissions(&self) -> Result<(), String> {
+        self.cmd("Browser.resetPermissions", super::empty_params()).await?;
+        Ok(())
+    }
+
+    pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
+        self.cmd("Emulation.setFocusEmulationEnabled", serde_json::json!({"enabled": enabled})).await?;
+        Ok(())
+    }
+
     // ---- Network ----
 
     pub async fn set_network_state(

@@ -53,7 +53,10 @@ enum Op {
     OP_CLEAR_COOKIES = 63,
     OP_LOAD_HTML = 64,
     OP_ADD_INIT_SCRIPT = 65,
-    OP_MOUSE_EVENT = 66,  // Generic mouse: u8 type(0=move,1=down,2=up) + u8 button(0=left,1=right,2=middle) + u32 clickCount + f64 x + f64 y + u64 vid
+    OP_MOUSE_EVENT = 66,
+    OP_SET_LOCALE = 67,
+    OP_SET_TIMEZONE = 68,
+    OP_EMULATE_MEDIA = 69,
     OP_SHUTDOWN = 255,
 };
 
@@ -1241,6 +1244,123 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             } else {
                 write_frame(req_id, REP_OK, NULL, 0);
             }
+            break;
+        }
+
+        case OP_SET_LOCALE: {
+            // Inject locale override at document start via WKUserScript.
+            // This runs before any page JS, overriding navigator.language/languages
+            // across all rendering pipelines (Intl, toLocaleString, etc.)
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
+
+            NSString *locale = read_str(payload, payload_len, &off);
+            NSString *js = [NSString stringWithFormat:
+                @"Object.defineProperty(navigator,'language',{get:function(){return '%@'},configurable:true});"
+                "Object.defineProperty(navigator,'languages',{get:function(){return ['%@']},configurable:true});"
+                "if(typeof Intl!=='undefined'){var _DT=Intl.DateTimeFormat;Intl.DateTimeFormat=function(l,o){"
+                "return new _DT('%@',o)};Intl.DateTimeFormat.prototype=_DT.prototype;"
+                "var _NF=Intl.NumberFormat;Intl.NumberFormat=function(l,o){"
+                "return new _NF('%@',o)};Intl.NumberFormat.prototype=_NF.prototype}",
+                locale, locale, locale, locale];
+            WKUserScript *script = [[WKUserScript alloc]
+                initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
+            [v->webview.configuration.userContentController addUserScript:script];
+            [v->webview evaluateJavaScript:js completionHandler:nil];
+            write_frame(req_id, REP_OK, NULL, 0);
+            break;
+        }
+
+        case OP_SET_TIMEZONE: {
+            // Inject timezone override at document start via WKUserScript.
+            // Overrides Date.prototype.toLocaleString and Intl.DateTimeFormat.
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
+
+            NSString *tz = read_str(payload, payload_len, &off);
+            NSString *js = [NSString stringWithFormat:
+                @"(function(){"
+                "var _DTF=Intl.DateTimeFormat;"
+                "Intl.DateTimeFormat=function(l,o){o=Object.assign({},o);o.timeZone='%@';return new _DTF(l,o)};"
+                "Intl.DateTimeFormat.prototype=_DTF.prototype;"
+                "Intl.DateTimeFormat.supportedLocalesOf=_DTF.supportedLocalesOf;"
+                "var _tls=Date.prototype.toLocaleString;"
+                "Date.prototype.toLocaleString=function(l,o){o=Object.assign({},o);o.timeZone='%@';return _tls.call(this,l,o)};"
+                "var _tds=Date.prototype.toLocaleDateString;"
+                "Date.prototype.toLocaleDateString=function(l,o){o=Object.assign({},o);o.timeZone='%@';return _tds.call(this,l,o)};"
+                "var _tts=Date.prototype.toLocaleTimeString;"
+                "Date.prototype.toLocaleTimeString=function(l,o){o=Object.assign({},o);o.timeZone='%@';return _tts.call(this,l,o)};"
+                "})()", tz, tz, tz, tz];
+            WKUserScript *script = [[WKUserScript alloc]
+                initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
+            [v->webview.configuration.userContentController addUserScript:script];
+            [v->webview evaluateJavaScript:js completionHandler:nil];
+            write_frame(req_id, REP_OK, NULL, 0);
+            break;
+        }
+
+        case OP_EMULATE_MEDIA: {
+            // Emulate media features. Uses WKWebView's _setForcedAppearance for dark mode
+            // (native rendering pipeline), WKUserScript for other features.
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
+
+            NSString *colorScheme = read_str(payload, payload_len, &off);
+            NSString *reducedMotion = read_str(payload, payload_len, &off);
+            NSString *forcedColors = read_str(payload, payload_len, &off);
+            NSString *media = read_str(payload, payload_len, &off);
+
+            // Use private API for dark mode if available (affects CSS media queries natively)
+            if (colorScheme.length > 0) {
+                SEL appearanceSel = NSSelectorFromString(@"_setOverrideAppearance:");
+                if ([v->webview respondsToSelector:appearanceSel]) {
+                    NSAppearance *appearance = nil;
+                    if ([colorScheme isEqualToString:@"dark"]) {
+                        appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+                    } else if ([colorScheme isEqualToString:@"light"]) {
+                        appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+                    }
+                    ((void(*)(id,SEL,id))objc_msgSend)(v->webview, appearanceSel, appearance);
+                }
+            }
+
+            // Inject CSS overrides for other media features via WKUserScript
+            NSMutableString *css = [NSMutableString string];
+            if (media.length > 0) {
+                // Can't truly emulate media type (screen/print) in WKWebView
+                // but we can set a data attribute for CSS-based detection
+                [v->webview evaluateJavaScript:
+                    [NSString stringWithFormat:@"document.documentElement.setAttribute('data-media','%@')", media]
+                    completionHandler:nil];
+            }
+            if (reducedMotion.length > 0) {
+                // Intercept matchMedia to override prefers-reduced-motion.
+                // The native MediaQueryList.matches is read-only, so we wrap matchMedia.
+                NSString *val = [reducedMotion isEqualToString:@"reduce"] ? @"reduce" : @"no-preference";
+                NSString *js = [NSString stringWithFormat:
+                    @"(function(){"
+                    "var _mm=window.matchMedia;"
+                    "window.matchMedia=function(q){"
+                    "var r=_mm.call(window,q);"
+                    "if(q.indexOf('prefers-reduced-motion')!==-1){"
+                    "var m=q.indexOf('reduce')!==-1;"
+                    "var want=%@;"
+                    "return Object.create(r,{matches:{get:function(){return want}}})}"
+                    "return r}})()",
+                    [val isEqualToString:@"reduce"] ? @"true" : @"false"];
+                WKUserScript *script = [[WKUserScript alloc]
+                    initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
+                [v->webview.configuration.userContentController addUserScript:script];
+                [v->webview evaluateJavaScript:js completionHandler:nil];
+            }
+
+            write_frame(req_id, REP_OK, NULL, 0);
             break;
         }
 

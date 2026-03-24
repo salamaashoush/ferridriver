@@ -73,6 +73,21 @@ pub struct ViewportConfig {
   pub is_landscape: bool,
 }
 
+/// Media emulation options -- matches Playwright's page.emulateMedia().
+#[derive(Debug, Clone, Default)]
+pub struct EmulateMediaOptions {
+  /// "screen", "print", or null to reset
+  pub media: Option<String>,
+  /// "light", "dark", "no-preference"
+  pub color_scheme: Option<String>,
+  /// "reduce", "no-preference"
+  pub reduced_motion: Option<String>,
+  /// "active", "none"
+  pub forced_colors: Option<String>,
+  /// "more", "less", "no-preference"
+  pub contrast: Option<String>,
+}
+
 impl Default for ViewportConfig {
   fn default() -> Self {
     Self {

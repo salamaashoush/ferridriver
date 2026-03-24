@@ -321,6 +321,38 @@ impl AnyPage {
         page_dispatch!(self, set_geolocation(lat, lng, accuracy))
     }
 
+    pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
+        page_dispatch!(self, set_locale(locale))
+    }
+
+    pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
+        page_dispatch!(self, set_timezone(timezone_id))
+    }
+
+    pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
+        page_dispatch!(self, emulate_media(opts))
+    }
+
+    pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
+        page_dispatch!(self, set_javascript_enabled(enabled))
+    }
+
+    pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
+        page_dispatch!(self, set_extra_http_headers(headers))
+    }
+
+    pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<(), String> {
+        page_dispatch!(self, grant_permissions(permissions, origin))
+    }
+
+    pub async fn reset_permissions(&self) -> Result<(), String> {
+        page_dispatch!(self, reset_permissions())
+    }
+
+    pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
+        page_dispatch!(self, set_focus_emulation_enabled(enabled))
+    }
+
     // ── Network ──
 
     pub async fn set_network_state(

@@ -421,6 +421,55 @@ impl WebKitPage {
         Ok(())
     }
 
+    pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        ipc::str_encode(&mut p, locale);
+        let r = self.client.send(ipc::Op::SetLocale, &p).await?;
+        self.ok(r)
+    }
+
+    pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        ipc::str_encode(&mut p, timezone_id);
+        let r = self.client.send(ipc::Op::SetTimezone, &p).await?;
+        self.ok(r)
+    }
+
+    pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
+        let mut p = Vec::new();
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        ipc::str_encode(&mut p, opts.color_scheme.as_deref().unwrap_or(""));
+        ipc::str_encode(&mut p, opts.reduced_motion.as_deref().unwrap_or(""));
+        ipc::str_encode(&mut p, opts.forced_colors.as_deref().unwrap_or(""));
+        ipc::str_encode(&mut p, opts.media.as_deref().unwrap_or(""));
+        let r = self.client.send(ipc::Op::EmulateMedia, &p).await?;
+        self.ok(r)
+    }
+
+    pub async fn set_javascript_enabled(&self, _enabled: bool) -> Result<(), String> {
+        // WKWebView doesn't support disabling JS at runtime
+        Ok(())
+    }
+
+    pub async fn set_extra_http_headers(&self, _headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
+        // Would require native WKURLSchemeHandler -- not trivially possible
+        Ok(())
+    }
+
+    pub async fn grant_permissions(&self, _permissions: &[String], _origin: Option<&str>) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub async fn reset_permissions(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub async fn set_focus_emulation_enabled(&self, _enabled: bool) -> Result<(), String> {
+        Ok(())
+    }
+
     pub async fn start_tracing(&self) -> Result<(), String> {
         // Mark the start time for performance measurement
         self.evaluate("window.__fd_trace_start = performance.now()").await?;

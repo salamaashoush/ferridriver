@@ -31,6 +31,7 @@ pub enum Op {
     WaitNav = 40, SetFileInput = 50, SetViewport = 51,
     GetCookies = 60, SetCookie = 61, DeleteCookie = 62, ClearCookies = 63,
     LoadHtml = 64, AddInitScript = 65, MouseEvent = 66,
+    SetLocale = 67, SetTimezone = 68, EmulateMedia = 69,
     Shutdown = 255,
 }
 

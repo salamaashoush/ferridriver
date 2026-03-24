@@ -555,6 +555,73 @@ impl CdpWsPage {
             .map(|_| ())
     }
 
+    pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::emulation::SetLocaleOverrideParams;
+        let _ = self.0.execute(SetLocaleOverrideParams::builder().locale(locale).build()).await;
+        // Also set via Network.setUserAgentOverride for navigator.language
+        use chromiumoxide::cdp::browser_protocol::network::SetUserAgentOverrideParams;
+        let mut params = SetUserAgentOverrideParams::new("");
+        params.accept_language = Some(locale.to_string());
+        self.0.execute(params).await.map_err(|e| format!("{e}")).map(|_| ())
+    }
+
+    pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::emulation::SetTimezoneOverrideParams;
+        self.0.execute(SetTimezoneOverrideParams::new(timezone_id))
+            .await.map_err(|e| format!("{e}")).map(|_| ())
+    }
+
+    pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::emulation::{SetEmulatedMediaParams, MediaFeature};
+        let mut features = Vec::new();
+        if let Some(cs) = &opts.color_scheme {
+            features.push(MediaFeature { name: "prefers-color-scheme".into(), value: cs.clone() });
+        }
+        if let Some(rm) = &opts.reduced_motion {
+            features.push(MediaFeature { name: "prefers-reduced-motion".into(), value: rm.clone() });
+        }
+        if let Some(fc) = &opts.forced_colors {
+            features.push(MediaFeature { name: "forced-colors".into(), value: fc.clone() });
+        }
+        if let Some(c) = &opts.contrast {
+            features.push(MediaFeature { name: "prefers-contrast".into(), value: c.clone() });
+        }
+        let mut params = SetEmulatedMediaParams::default();
+        params.media = opts.media.clone();
+        params.features = Some(features);
+        self.0.execute(params).await.map_err(|e| format!("{e}")).map(|_| ())
+    }
+
+    pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::emulation::SetScriptExecutionDisabledParams;
+        self.0.execute(SetScriptExecutionDisabledParams::new(!enabled))
+            .await.map_err(|e| format!("{e}")).map(|_| ())
+    }
+
+    pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::network::SetExtraHttpHeadersParams;
+        use chromiumoxide::cdp::browser_protocol::network::Headers;
+        let h: serde_json::Map<String, serde_json::Value> = headers.iter()
+            .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect();
+        let params = SetExtraHttpHeadersParams::new(Headers::new(serde_json::Value::Object(h)));
+        self.0.execute(params).await.map_err(|e| format!("{e}")).map(|_| ())
+    }
+
+    pub async fn grant_permissions(&self, _permissions: &[String], _origin: Option<&str>) -> Result<(), String> {
+        // Browser-level command, not page-level. Would need browser handle.
+        Ok(())
+    }
+
+    pub async fn reset_permissions(&self) -> Result<(), String> {
+        Ok(())
+    }
+
+    pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::emulation::SetFocusEmulationEnabledParams;
+        self.0.execute(SetFocusEmulationEnabledParams::new(enabled))
+            .await.map_err(|e| format!("{e}")).map(|_| ())
+    }
+
     // ── Network ──
 
     pub async fn set_network_state(
