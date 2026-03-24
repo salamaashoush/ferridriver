@@ -3,7 +3,7 @@
 use async_trait::async_trait;
 use crate::backend::AnyPage;
 use regex::Regex;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 #[macro_use]
 mod macros;

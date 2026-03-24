@@ -1,7 +1,7 @@
 //! Accessibility tree snapshot — compact, LLM-friendly format.
 
 use crate::backend::{AnyPage, AxNodeData};
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static REF_COUNTER: AtomicUsize = AtomicUsize::new(1);
@@ -52,14 +52,14 @@ const MAX_TEXT_LEN: usize = 80;
 
 /// Build a compact snapshot. Returns (text, ref_map).
 pub fn build_snapshot(nodes: &[AxNodeData]) -> (String, HashMap<String, i64>) {
-    let mut output = String::new();
-    let mut ref_map: HashMap<String, i64> = HashMap::new();
+    let mut output = String::with_capacity(nodes.len() * 64);
+    let mut ref_map: HashMap<String, i64> = HashMap::default();
     let mut truncated = false;
 
-    let mut children_map: HashMap<String, Vec<usize>> = HashMap::new();
+    let mut children_map: HashMap<&str, Vec<usize>> = HashMap::default();
     for (i, node) in nodes.iter().enumerate() {
         if let Some(pid) = &node.parent_id {
-            children_map.entry(pid.clone()).or_default().push(i);
+            children_map.entry(pid.as_str()).or_default().push(i);
         }
     }
 
@@ -84,7 +84,7 @@ pub fn build_snapshot(nodes: &[AxNodeData]) -> (String, HashMap<String, i64>) {
 
     fn format_tree(
         nodes: &[AxNodeData],
-        children_map: &HashMap<String, Vec<usize>>,
+        children_map: &HashMap<&str, Vec<usize>>,
         idx: usize,
         depth: usize,
         output: &mut String,
@@ -141,15 +141,15 @@ pub fn build_snapshot(nodes: &[AxNodeData]) -> (String, HashMap<String, i64>) {
             String::new()
         };
 
-        output.push_str(&format!("{indent}- {role}"));
+        use std::fmt::Write;
+        let _ = write!(output, "{indent}- {role}");
 
         if !name.is_empty() {
-            let display_name = if name.len() > MAX_TEXT_LEN {
-                format!("{}...", &name[..MAX_TEXT_LEN])
+            if name.len() > MAX_TEXT_LEN {
+                let _ = write!(output, " \"{}...\"", &name[..MAX_TEXT_LEN]);
             } else {
-                name.to_string()
-            };
-            output.push_str(&format!(" \"{display_name}\""));
+                let _ = write!(output, " \"{name}\"");
+            }
         }
 
         output.push_str(&ref_str);
@@ -157,16 +157,16 @@ pub fn build_snapshot(nodes: &[AxNodeData]) -> (String, HashMap<String, i64>) {
         for prop in &node.properties {
             if let Some(val) = &prop.value {
                 match prop.name.as_str() {
-                    "level" => output.push_str(&format!(" [level={val}]")),
+                    "level" => { let _ = write!(output, " [level={val}]"); }
                     "url" if is_interactive(role) => {
                         let u = val.as_str().unwrap_or("");
                         if !u.is_empty() && u.len() <= 100 {
-                            output.push_str(&format!(" [url={u}]"));
+                            let _ = write!(output, " [url={u}]");
                         }
                     }
                     "checked" if val.as_bool() == Some(true) => output.push_str(" [checked]"),
                     "selected" if val.as_bool() == Some(true) => output.push_str(" [selected]"),
-                    "expanded" => output.push_str(&format!(" [expanded={val}]")),
+                    "expanded" => { let _ = write!(output, " [expanded={val}]"); }
                     "disabled" if val.as_bool() == Some(true) => output.push_str(" [disabled]"),
                     "required" if val.as_bool() == Some(true) => output.push_str(" [required]"),
                     "focused" if val.as_bool() == Some(true) => output.push_str(" [focused]"),
@@ -208,14 +208,14 @@ pub fn build_snapshot(nodes: &[AxNodeData]) -> (String, HashMap<String, i64>) {
 
     fn recurse_children(
         nodes: &[AxNodeData],
-        children_map: &HashMap<String, Vec<usize>>,
+        children_map: &HashMap<&str, Vec<usize>>,
         idx: usize,
         depth: usize,
         output: &mut String,
         ref_map: &mut HashMap<String, i64>,
         truncated: &mut bool,
     ) {
-        if let Some(kids) = children_map.get(&nodes[idx].node_id) {
+        if let Some(kids) = children_map.get(nodes[idx].node_id.as_str()) {
             for &kid_idx in kids {
                 format_tree(nodes, children_map, kid_idx, depth, output, ref_map, truncated);
             }

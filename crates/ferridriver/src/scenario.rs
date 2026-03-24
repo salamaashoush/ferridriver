@@ -3,7 +3,7 @@
 use crate::backend::{AnyPage, ScreenshotOpts};
 use crate::steps::StepRegistry;
 use base64::Engine;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 use std::time::Instant;
 
 #[derive(Debug, Clone, serde::Serialize)]
@@ -160,7 +160,7 @@ pub async fn run(
     let (scenario_name, steps) = parse(script)?;
     let registry = StepRegistry::global();
 
-    let mut variables: HashMap<String, String> = HashMap::new();
+    let mut variables: HashMap<String, String> = HashMap::default();
     let mut results: Vec<StepResult> = Vec::new();
     let mut failure_screenshots: Vec<ScreenshotData> = Vec::new();
     let mut passed = 0usize;

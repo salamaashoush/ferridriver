@@ -20,6 +20,8 @@ base64 = { workspace = true }
 libc = { workspace = true }
 tracing = { workspace = true }
 tokio-tungstenite = "0.24"
+rustc-hash = "2"
 
 [build-dependencies]
 cc = "1"
+

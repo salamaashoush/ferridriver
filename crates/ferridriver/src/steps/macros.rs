@@ -30,7 +30,7 @@ macro_rules! step {
                 $page: &$crate::backend::AnyPage,
                 $caps: &::regex::Captures<'_>,
                 $table: Option<&[Vec<String>]>,
-                $vars: &mut ::std::collections::HashMap<String, String>,
+                $vars: &mut ::rustc_hash::FxHashMap<String, String>,
             ) -> Result<Option<::serde_json::Value>, String> $body
         }
     };
