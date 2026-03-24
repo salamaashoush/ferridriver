@@ -194,17 +194,15 @@ impl Locator {
   }
 
   pub async fn get_attribute(&self, name: &str) -> Result<Option<String>, String> {
-    let el = self.resolve().await?;
-    let escaped = name.replace('\'', "\\'");
-    let _ = el.call_js_fn(&format!(
-      "function() {{ this.setAttribute('data-fd-attr-result', this.getAttribute('{escaped}') || ''); }}"
-    )).await;
-    let val = self.page.inner().evaluate(&format!(
-      "(function() {{ var e = document.querySelector('[data-fd-attr-result]'); \
-       if (!e) return null; var v = e.getAttribute('data-fd-attr-result'); \
-       e.removeAttribute('data-fd-attr-result'); return v; }})()"
-    )).await?.and_then(|v| v.as_str().map(|s| s.to_string()));
-    Ok(val)
+    let escaped = name.replace('\\', "\\\\").replace('\'', "\\'");
+    let val = self.eval_on_element(&format!(
+      "return el.getAttribute('{escaped}');"
+    )).await?;
+    Ok(val.and_then(|v| match v {
+      serde_json::Value::String(s) => Some(s),
+      serde_json::Value::Null => None,
+      other => Some(other.to_string()),
+    }))
   }
 
   pub async fn input_value(&self) -> Result<String, String> {
@@ -212,10 +210,13 @@ impl Locator {
   }
 
   pub async fn is_visible(&self) -> Result<bool, String> {
-    self.eval_bool("function() { \
-      var s = getComputedStyle(this); \
-      return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'; \
-    }").await
+    // Single evaluate: find element + check visibility. Returns false if not found.
+    let val = self.eval_on_element(
+      "var s = getComputedStyle(el); \
+       return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';"
+    ).await?;
+    // eval_on_element returns null if element not found -> false (Playwright behavior)
+    Ok(val.and_then(|v| v.as_bool()).unwrap_or(false))
   }
 
   pub async fn is_hidden(&self) -> Result<bool, String> {
@@ -235,34 +236,26 @@ impl Locator {
   }
 
   pub async fn count(&self) -> Result<usize, String> {
-    let matches = selectors::query_all(self.page.inner(), &self.selector).await?;
-    selectors::cleanup_tags(self.page.inner()).await;
-    Ok(matches.len())
+    let parsed = selectors::parse(&self.selector)?;
+    let parts_json = selectors::build_parts_json(&parsed);
+    let js = format!("window.__fd.selCount({parts_json})");
+    let val = self.page.inner().evaluate(&js).await?
+      .and_then(|v| v.as_u64())
+      .unwrap_or(0);
+    Ok(val as usize)
   }
 
   pub async fn bounding_box(&self) -> Result<Option<BoundingBox>, String> {
-    let el = self.resolve().await?;
-    let _ = el.call_js_fn("function() { \
-      var r = this.getBoundingClientRect(); \
-      this.setAttribute('data-fd-bbox', JSON.stringify({x:r.x,y:r.y,width:r.width,height:r.height})); \
-    }").await;
-    let json = self.page.inner().evaluate("(function() { \
-      var e = document.querySelector('[data-fd-bbox]'); \
-      if (!e) return null; \
-      var v = e.getAttribute('data-fd-bbox'); \
-      e.removeAttribute('data-fd-bbox'); \
-      return v; \
-    })()").await?.and_then(|v| v.as_str().map(|s| s.to_string()));
-    match json {
-      Some(s) => {
-        let parsed: serde_json::Value = serde_json::from_str(&s).map_err(|e| format!("{e}"))?;
-        Ok(Some(BoundingBox {
-          x: parsed["x"].as_f64().unwrap_or(0.0),
-          y: parsed["y"].as_f64().unwrap_or(0.0),
-          width: parsed["width"].as_f64().unwrap_or(0.0),
-          height: parsed["height"].as_f64().unwrap_or(0.0),
-        }))
-      }
+    let val = self.eval_on_element(
+      "var r = el.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height};"
+    ).await?;
+    match val {
+      Some(v) => Ok(Some(BoundingBox {
+        x: v["x"].as_f64().unwrap_or(0.0),
+        y: v["y"].as_f64().unwrap_or(0.0),
+        width: v["width"].as_f64().unwrap_or(0.0),
+        height: v["height"].as_f64().unwrap_or(0.0),
+      })),
       None => Ok(None),
     }
   }
@@ -398,9 +391,19 @@ impl Locator {
 
   /// Get text content of all matching elements.
   pub async fn all_text_contents(&self) -> Result<Vec<String>, String> {
-    let matches = selectors::query_all(self.page.inner(), &self.selector).await?;
-    selectors::cleanup_tags(self.page.inner()).await;
-    Ok(matches.into_iter().map(|m| m.text).collect())
+    let parsed = selectors::parse(&self.selector)?;
+    let parts_json = selectors::build_parts_json(&parsed);
+    let js = format!(
+      "(function() {{ var r = window.__fd._exec({parts_json}, document); \
+       return r.map(function(e) {{ return (e.textContent || '').trim(); }}); }})()"
+    );
+    let val = self.page.inner().evaluate(&js).await?;
+    match val {
+      Some(serde_json::Value::Array(arr)) => {
+        Ok(arr.into_iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+      }
+      _ => Ok(Vec::new()),
+    }
   }
 
   /// Get inner text of all matching elements.
@@ -431,29 +434,35 @@ impl Locator {
   }
 
   async fn eval_prop(&self, prop: &str) -> Result<Option<String>, String> {
-    let el = self.resolve().await?;
-    let _ = el.call_js_fn(&format!(
-      "function() {{ this.setAttribute('data-fd-prop', String(this.{prop} || '')); }}"
-    )).await;
-    let val = self.page.inner().evaluate(&format!(
-      "(function() {{ var e = document.querySelector('[data-fd-prop]'); \
-       if (!e) return null; var v = e.getAttribute('data-fd-prop'); \
-       e.removeAttribute('data-fd-prop'); return v; }})()"
-    )).await?.and_then(|v| v.as_str().map(|s| s.to_string()));
-    Ok(val)
+    let val = self.eval_on_element(&format!(
+      "var v = el.{prop}; return v == null ? null : String(v);"
+    )).await?;
+    Ok(val.and_then(|v| match v {
+      serde_json::Value::String(s) => Some(s),
+      serde_json::Value::Null => None,
+      other => Some(other.to_string()),
+    }))
   }
 
   async fn eval_bool(&self, func: &str) -> Result<bool, String> {
-    let el = self.resolve().await?;
-    let _ = el.call_js_fn(&format!(
-      "function() {{ this.setAttribute('data-fd-bool', ({func}).call(this) ? '1' : '0'); }}"
-    )).await;
-    let val = self.page.inner().evaluate(
-      "(function() { var e = document.querySelector('[data-fd-bool]'); \
-       if (!e) return '0'; var v = e.getAttribute('data-fd-bool'); \
-       e.removeAttribute('data-fd-bool'); return v; })()"
-    ).await?.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
-    Ok(val == "1")
+    let val = self.eval_on_element(&format!(
+      "return !!({func}).call(el);"
+    )).await?;
+    Ok(val.and_then(|v| v.as_bool()).unwrap_or(false))
+  }
+
+  /// Run JS on the first element matching this locator's selector in a single
+  /// evaluate call. The JS body has `el` in scope (the matched element).
+  /// Returns the value from `return ...;` in the body.
+  /// Engine is already injected via addScriptToEvaluateOnNewDocument.
+  /// This is exactly 1 CDP round-trip.
+  async fn eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>, String> {
+    let parsed = selectors::parse(&self.selector)?;
+    let parts_json = selectors::build_parts_json(&parsed);
+    let js = format!(
+      "(function() {{ var el = window.__fd.selOne({parts_json}); if (!el) return null; {js_body} }})()"
+    );
+    self.page.inner().evaluate(&js).await
   }
 }
 

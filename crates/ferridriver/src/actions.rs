@@ -4,11 +4,12 @@
 //! No MCP types, no server state -- pure browser automation logic.
 //!
 //! All JS operations go through the unified `window.__fd` runtime
-//! (injected lazily on first use via `selectors::ensure_engine`).
+//! (injected automatically via addScriptToEvaluateOnNewDocument on CDP,
+//! or after navigation on WebKit).
 
 use crate::backend::{AnyElement, AnyPage};
 use crate::selectors;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -122,7 +123,7 @@ pub struct ScrollInfo {
 
 /// Ensure the unified runtime is injected, then evaluate JS.
 async fn rt_eval(page: &AnyPage, js: &str) -> Result<Option<serde_json::Value>, String> {
-    selectors::ensure_engine(page).await?;
+
     page.evaluate(js).await
 }
 
@@ -212,19 +213,19 @@ pub async fn check_click_guard(
 
 /// Fill an input element: auto-wait for actionable, click to focus, clear with events, type value, dispatch events.
 pub async fn fill(element: &AnyElement, value: &str) -> Result<(), String> {
-    element.click().await.map_err(|e| format!("Click to focus: {e}"))?;
-    // Clear value and dispatch events via runtime
-    let _ = element.call_js_fn("function() { \
-        if (window.__fd) window.__fd.clearAndDispatch(this); \
-        else { this.value = ''; } \
-    }").await;
-    // Type via CDP (can't be done from JS)
-    element.type_str(value).await.map_err(|e| format!("Type: {e}"))?;
-    // Dispatch final events via runtime
-    let _ = element.call_js_fn("function() { \
-        if (window.__fd) window.__fd.dispatchInputEvents(this); \
-    }").await;
-    Ok(())
+    // Single JS call: focus + set value + dispatch events.
+    // This is how Playwright implements fill() -- set value directly via JS,
+    // not character-by-character typing. Much faster (1 CDP call vs 9+).
+    let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+    element.call_js_fn(&format!(
+        "function() {{ \
+            this.focus(); \
+            this.value = ''; \
+            this.value = '{escaped}'; \
+            this.dispatchEvent(new Event('input', {{bubbles: true}})); \
+            this.dispatchEvent(new Event('change', {{bubbles: true}})); \
+        }}"
+    )).await.map_err(|e| format!("Fill: {e}"))
 }
 
 // ─── Navigation ─────────────────────────────────────────────────────────────
@@ -336,7 +337,7 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
                 index: m.index,
                 tag: m.tag,
                 text: if opts.include_text { Some(m.text) } else { None },
-                attrs: HashMap::new(),
+                attrs: HashMap::default(),
                 children_count: 0,
             }
         }).collect();
@@ -363,7 +364,7 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
     let total = data["total"].as_u64().unwrap_or(0) as usize;
     let elements = data["elements"].as_array().map(|arr| {
         arr.iter().map(|el| {
-            let mut attrs = HashMap::new();
+            let mut attrs = HashMap::default();
             if let Some(obj) = el["attrs"].as_object() {
                 for (k, v) in obj {
                     attrs.insert(k.clone(), v.as_str().unwrap_or("").to_string());
@@ -427,7 +428,7 @@ pub async fn select_option(
     page: &AnyPage,
     target: &str,
 ) -> Result<SelectResult, String> {
-    selectors::ensure_engine(page).await?;
+
     let escaped = target.replace('\\', "\\\\").replace('\'', "\\'");
     let _ = element.call_js_fn(&format!(
         "function() {{ \
@@ -466,7 +467,7 @@ pub async fn get_dropdown_options(
     element: &AnyElement,
     page: &AnyPage,
 ) -> Result<Vec<DropdownOption>, String> {
-    selectors::ensure_engine(page).await?;
+
     let _ = element.call_js_fn("function() { \
         var r = window.__fd.getOptions(this); \
         this.setAttribute('data-fd-result', r); \

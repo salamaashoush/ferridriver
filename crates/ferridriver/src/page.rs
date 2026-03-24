@@ -9,7 +9,7 @@ use crate::locator::Locator;
 use crate::options::*;
 use crate::selectors;
 use crate::snapshot;
-use std::collections::HashMap;
+use rustc_hash::FxHashMap as HashMap;
 
 /// High-level page API, mirrors Playwright's Page interface.
 #[derive(Clone)]
@@ -37,6 +37,11 @@ impl Page {
   // ── Navigation ──────────────────────────────────────────────────────────
 
   pub async fn goto(&self, url: &str) -> Result<(), String> {
+    self.inner.goto(url).await
+  }
+
+  /// Navigate with empty-DOM health check and retry (for MCP server use).
+  pub async fn goto_with_health_check(&self, url: &str) -> Result<(), String> {
     actions::navigate_with_health_check(&self.inner, url).await
   }
 
@@ -292,6 +297,18 @@ impl Page {
     self.inner.click_at(x, y).await
   }
 
+  pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
+    self.inner.click_at_opts(x, y, button, click_count).await
+  }
+
+  pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
+    self.inner.move_mouse(x, y).await
+  }
+
+  pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<(), String> {
+    self.inner.move_mouse_smooth(from_x, from_y, to_x, to_y, steps).await
+  }
+
   pub async fn drag_and_drop(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
     self.inner.click_and_drag(from, to).await
   }
@@ -346,8 +363,22 @@ impl Page {
 
   // ── Cookie delete ───────────────────────────────────────────────────────
 
+  /// Delete cookie(s) by name and optional domain.
+  ///
+  /// Uses the Playwright approach: get all cookies, clear all, re-add
+  /// non-matching ones. This avoids CDP `Network.deleteCookies` edge cases
+  /// with exact domain matching and secure cookie handling.
   pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
-    self.inner.delete_cookie(name, domain).await
+    let cookies = self.inner.get_cookies().await?;
+    self.inner.clear_cookies().await?;
+    for cookie in cookies {
+      let name_matches = cookie.name == name;
+      let domain_matches = domain.map_or(true, |d| cookie.domain == d);
+      if !(name_matches && domain_matches) {
+        self.inner.set_cookie(cookie).await?;
+      }
+    }
+    Ok(())
   }
 
   // ── Cookies ─────────────────────────────────────────────────────────────

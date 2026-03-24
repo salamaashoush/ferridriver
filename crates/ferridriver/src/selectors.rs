@@ -105,60 +105,55 @@ pub fn parse(selector: &str) -> Result<Selector, String> {
 }
 
 fn split_by_chain(s: &str) -> Vec<String> {
+    // Fast path: no chain operator, avoid scanning
+    if !s.contains(">>") {
+        let t = s.trim();
+        return if t.is_empty() { Vec::new() } else { vec![t.to_string()] };
+    }
+
     let mut parts = Vec::new();
-    let mut current = String::new();
-    let chars: Vec<char> = s.chars().collect();
+    let bytes = s.as_bytes();
+    let mut start = 0;
     let mut i = 0;
-    let mut in_quote: Option<char> = None;
+    let mut in_quote: u8 = 0; // 0 = none, b'"' or b'\''
 
-    while i < chars.len() {
-        let c = chars[i];
+    while i < bytes.len() {
+        let c = bytes[i];
 
-        if c == '\\' && i + 1 < chars.len() {
-            current.push(c);
-            current.push(chars[i + 1]);
+        if c == b'\\' && i + 1 < bytes.len() {
             i += 2;
             continue;
         }
 
-        if let Some(q) = in_quote {
-            current.push(c);
-            if c == q {
-                in_quote = None;
-            }
+        if in_quote != 0 {
+            if c == in_quote { in_quote = 0; }
             i += 1;
             continue;
         }
 
-        if c == '"' || c == '\'' {
-            in_quote = Some(c);
-            current.push(c);
+        if c == b'"' || c == b'\'' {
+            in_quote = c;
             i += 1;
             continue;
         }
 
-        // Check for >>
-        if c == '>' && i + 1 < chars.len() && chars[i + 1] == '>' {
-            let trimmed = current.trim().to_string();
-            if !trimmed.is_empty() {
-                parts.push(trimmed);
+        if c == b'>' && i + 1 < bytes.len() && bytes[i + 1] == b'>' {
+            let part = s[start..i].trim();
+            if !part.is_empty() {
+                parts.push(part.to_string());
             }
-            current.clear();
             i += 2;
-            // Skip whitespace after >>
-            while i < chars.len() && chars[i] == ' ' {
-                i += 1;
-            }
+            while i < bytes.len() && bytes[i] == b' ' { i += 1; }
+            start = i;
             continue;
         }
 
-        current.push(c);
         i += 1;
     }
 
-    let trimmed = current.trim().to_string();
-    if !trimmed.is_empty() {
-        parts.push(trimmed);
+    let part = s[start..].trim();
+    if !part.is_empty() {
+        parts.push(part.to_string());
     }
 
     parts
@@ -204,10 +199,11 @@ fn parse_part(s: &str) -> Result<SelectorPart, String> {
 // ─── JS Query Builder ───────────────────────────────────────────────────────
 
 /// JS to inject the unified runtime once. Idempotent -- safe to call multiple times.
-fn build_inject_js() -> String {
+pub fn build_inject_js() -> String {
     format!(
         "(function() {{ if (window.__fd) return; {ENGINE_JS}\n\
         window.__fd = {{\n\
+          _exec: executeSelector,\n\
           sel: function(parts) {{\n\
             try {{\n\
               var results = executeSelector(parts, document);\n\
@@ -218,6 +214,8 @@ fn build_inject_js() -> String {
               }}));\n\
             }} catch (e) {{ return JSON.stringify({{error: e.message}}); }}\n\
           }},\n\
+          selOne: function(parts) {{ var r = executeSelector(parts, document); return r.length > 0 ? r[0] : null; }},\n\
+          selCount: function(parts) {{ return executeSelector(parts, document).length; }},\n\
           clearAndDispatch: clearAndDispatch,\n\
           dispatchInputEvents: dispatchInputEvents,\n\
           clickGuard: clickGuard,\n\
@@ -243,14 +241,9 @@ fn build_query_js(selector: &Selector) -> String {
     format!("window.__fd.sel({parts_json})")
 }
 
-/// Ensure the selector engine JS is injected into the page.
-/// Idempotent -- only injects once per page load.
-pub async fn ensure_engine(page: &AnyPage) -> Result<(), String> {
-    page.evaluate(&build_inject_js()).await?;
-    Ok(())
-}
 
-fn build_parts_json(selector: &Selector) -> String {
+
+pub fn build_parts_json(selector: &Selector) -> String {
     let parts: Vec<String> = selector.parts.iter().map(|p| {
         let engine = match p.engine {
             Engine::Css => "css",
@@ -1069,7 +1062,6 @@ pub async fn query_all(
 ) -> Result<Vec<MatchedElement>, String> {
     let parsed = parse(selector)?;
     // Ensure engine is injected (idempotent)
-    ensure_engine(page).await?;
     let js = build_query_js(&parsed);
     let result_str = page.evaluate(&js).await?
         .and_then(|v| v.as_str().map(|s| s.to_string()))
@@ -1093,30 +1085,34 @@ pub async fn query_one(
     selector: &str,
     strict: bool,
 ) -> Result<AnyElement, String> {
-    let matches = query_all(page, selector).await?;
+    let parsed = parse(selector)?;
+    let parts_json = build_parts_json(&parsed);
 
-    if matches.is_empty() {
-        return Err(format!("No element found for selector: {selector}"));
+    if strict {
+        // Strict mode: need count check, use the full query_all path
+        let matches = query_all(page, selector).await?;
+        if matches.is_empty() {
+            return Err(format!("No element found for selector: {selector}"));
+        }
+        if matches.len() > 1 {
+            cleanup_tags(page).await;
+            return Err(format!(
+                "Selector \"{selector}\" resolved to {} elements. Use a more specific selector.",
+                matches.len()
+            ));
+        }
+        let el = page.find_element("[data-fd-sel='0']").await
+            .map_err(|_| format!("Could not resolve matched element for: {selector}"))?;
+        cleanup_tags(page).await;
+        return Ok(el);
     }
-    if strict && matches.len() > 1 {
-        return Err(format!(
-            "Selector \"{selector}\" resolved to {} elements. Use a more specific selector.",
-            matches.len()
-        ));
-    }
 
-    // Resolve first matched element via its tagged attribute
-    let el = page.find_element("[data-fd-sel='0']").await
-        .map_err(|_| format!("Could not resolve matched element for: {selector}"))?;
+    // Fast path: engine already injected via addScriptToEvaluateOnNewDocument.
+    // Returns the DOM element directly (no tagging/cleanup).
+    let js = format!("window.__fd.selOne({parts_json})");
 
-    // Clean up tags
-    let _ = page.evaluate("(function() { \
-        document.querySelectorAll('[data-fd-sel]').forEach(function(e) { \
-            e.removeAttribute('data-fd-sel'); \
-        }); \
-    })()").await;
-
-    Ok(el)
+    page.evaluate_to_element(&js).await
+        .map_err(|_| format!("No element found for selector: {selector}"))
 }
 
 /// Clean up any leftover selector tags (call after operations).
