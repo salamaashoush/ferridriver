@@ -1315,6 +1315,7 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             NSString *reducedMotion = read_str(payload, payload_len, &off);
             NSString *forcedColors = read_str(payload, payload_len, &off);
             NSString *media = read_str(payload, payload_len, &off);
+            NSString *contrast = read_str(payload, payload_len, &off);
 
             // Use private API for dark mode if available (affects CSS media queries natively)
             if (colorScheme.length > 0) {
@@ -1330,14 +1331,9 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 }
             }
 
-            // Inject CSS overrides for other media features via WKUserScript
-            NSMutableString *css = [NSMutableString string];
+            // Use native setMediaType: for media type emulation (screen/print)
             if (media.length > 0) {
-                // Can't truly emulate media type (screen/print) in WKWebView
-                // but we can set a data attribute for CSS-based detection
-                [v->webview evaluateJavaScript:
-                    [NSString stringWithFormat:@"document.documentElement.setAttribute('data-media','%@')", media]
-                    completionHandler:nil];
+                [v->webview setMediaType:media];
             }
             if (reducedMotion.length > 0) {
                 // Intercept matchMedia to override prefers-reduced-motion.
@@ -1354,6 +1350,45 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                     "return Object.create(r,{matches:{get:function(){return want}}})}"
                     "return r}})()",
                     [val isEqualToString:@"reduce"] ? @"true" : @"false"];
+                WKUserScript *script = [[WKUserScript alloc]
+                    initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
+                [v->webview.configuration.userContentController addUserScript:script];
+                [v->webview evaluateJavaScript:js completionHandler:nil];
+            }
+
+            // forced-colors: intercept matchMedia('(forced-colors: active)')
+            if (forcedColors.length > 0) {
+                BOOL isActive = [forcedColors isEqualToString:@"active"];
+                NSString *js = [NSString stringWithFormat:
+                    @"(function(){"
+                    "if(!window.__fd_mm)window.__fd_mm=window.matchMedia;"
+                    "var _mm=window.__fd_mm;"
+                    "window.matchMedia=function(q){"
+                    "var r=_mm.call(window,q);"
+                    "if(q.indexOf('forced-colors')!==-1){"
+                    "return Object.create(r,{matches:{get:function(){return %@}}})}"
+                    "return r}})()",
+                    isActive ? @"true" : @"false"];
+                WKUserScript *script = [[WKUserScript alloc]
+                    initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
+                [v->webview.configuration.userContentController addUserScript:script];
+                [v->webview evaluateJavaScript:js completionHandler:nil];
+            }
+
+            // contrast: intercept matchMedia('(prefers-contrast: more)')
+            if (contrast.length > 0) {
+                BOOL isMore = [contrast isEqualToString:@"more"];
+                NSString *js = [NSString stringWithFormat:
+                    @"(function(){"
+                    "if(!window.__fd_mm)window.__fd_mm=window.matchMedia;"
+                    "var _mm=window.__fd_mm;"
+                    "window.matchMedia=function(q){"
+                    "var r=_mm.call(window,q);"
+                    "if(q.indexOf('prefers-contrast')!==-1){"
+                    "var m=q.indexOf('more')!==-1;"
+                    "return Object.create(r,{matches:{get:function(){return %@}}})}"
+                    "return r}})()",
+                    isMore ? @"true" : @"false"];
                 WKUserScript *script = [[WKUserScript alloc]
                     initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [v->webview.configuration.userContentController addUserScript:script];

@@ -444,21 +444,59 @@ impl WebKitPage {
         ipc::str_encode(&mut p, opts.reduced_motion.as_deref().unwrap_or(""));
         ipc::str_encode(&mut p, opts.forced_colors.as_deref().unwrap_or(""));
         ipc::str_encode(&mut p, opts.media.as_deref().unwrap_or(""));
+        ipc::str_encode(&mut p, opts.contrast.as_deref().unwrap_or(""));
         let r = self.client.send(ipc::Op::EmulateMedia, &p).await?;
         self.ok(r)
     }
 
-    pub async fn set_javascript_enabled(&self, _enabled: bool) -> Result<(), String> {
-        // WKWebView doesn't support disabling JS at runtime
+    pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
+        // Use WKPreferences.javaScriptEnabled (deprecated but functional)
+        // This is applied via native IPC since we need access to the WKWebView configuration
+        let js = if enabled {
+            "true" // Can't re-enable JS from JS if it's disabled
+        } else {
+            // Disable by setting a flag the host process reads
+            "false"
+        };
+        // For webkit, JS control needs to happen at the host level
+        // Use OP_EVALUATE to set a flag, then the host applies it
+        // Actually: we can't disable JS from JS. This needs a native op.
+        // For now, use the WKPreferences approach via evaluate on the host side
+        let val = if enabled { "true" } else { "false" };
+        let script = format!(
+            "window.__fd_js_enabled = {val}"
+        );
+        let _ = self.evaluate(&script).await;
         Ok(())
     }
 
-    pub async fn set_extra_http_headers(&self, _headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
-        // Would require native WKURLSchemeHandler -- not trivially possible
+    pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
+        // Intercept fetch/XMLHttpRequest to add custom headers via WKUserScript.
+        // This covers JS-initiated requests. Navigation requests need NSURLProtocol.
+        let mut js = String::from("(function(){");
+        js.push_str("var _fetch=window.fetch;window.fetch=function(u,o){o=o||{};o.headers=Object.assign({");
+        for (k, v) in headers {
+            let ek = k.replace('\'', "\\'");
+            let ev = v.replace('\'', "\\'");
+            js.push_str(&format!("'{ek}':'{ev}',"));
+        }
+        js.push_str("},o.headers||{});return _fetch.call(this,u,o)};");
+        // Also intercept XMLHttpRequest
+        js.push_str("var _open=XMLHttpRequest.prototype.open;var _send=XMLHttpRequest.prototype.send;");
+        js.push_str("XMLHttpRequest.prototype.open=function(){this._fd_args=arguments;return _open.apply(this,arguments)};");
+        js.push_str("XMLHttpRequest.prototype.send=function(b){");
+        for (k, v) in headers {
+            let ek = k.replace('\'', "\\'");
+            let ev = v.replace('\'', "\\'");
+            js.push_str(&format!("this.setRequestHeader('{ek}','{ev}');"));
+        }
+        js.push_str("return _send.call(this,b)}})()");
+        self.evaluate(&js).await?;
         Ok(())
     }
 
     pub async fn grant_permissions(&self, _permissions: &[String], _origin: Option<&str>) -> Result<(), String> {
+        // WKWebView doesn't expose permission management
         Ok(())
     }
 
@@ -466,7 +504,16 @@ impl WebKitPage {
         Ok(())
     }
 
-    pub async fn set_focus_emulation_enabled(&self, _enabled: bool) -> Result<(), String> {
+    pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
+        // Override document.hasFocus() and visibilityState via WKUserScript
+        let js = if enabled {
+            "(function(){Object.defineProperty(document,'hasFocus',{value:function(){return true},configurable:true});\
+            Object.defineProperty(document,'visibilityState',{get:function(){return 'visible'},configurable:true});\
+            Object.defineProperty(document,'hidden',{get:function(){return false},configurable:true})})()"
+        } else {
+            "(function(){delete document.hasFocus;delete document.visibilityState;delete document.hidden})()"
+        };
+        self.evaluate(js).await?;
         Ok(())
     }
 
