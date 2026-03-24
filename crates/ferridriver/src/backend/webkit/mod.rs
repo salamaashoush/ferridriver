@@ -37,9 +37,17 @@ impl WebKitBrowser {
     pub async fn new_page(&self, url: &str) -> Result<AnyPage, String> {
         let r = self.client.send_str(Op::CreateView, url).await?;
         match r {
-            IpcResponse::ViewCreated(id) => Ok(AnyPage::WebKit(WebKitPage {
-                client: self.client.clone(), view_id: id,
-            })),
+            IpcResponse::ViewCreated(id) => {
+                let page = WebKitPage { client: self.client.clone(), view_id: id };
+                // Inject selector engine via WKUserScript (runs at document start
+                // on every navigation, equivalent to addScriptToEvaluateOnNewDocument)
+                let engine_js = crate::selectors::build_inject_js();
+                let mut p = Vec::new();
+                p.extend_from_slice(&page.vid().to_le_bytes());
+                ipc::str_encode(&mut p, &engine_js);
+                let _ = page.client.send(Op::AddInitScript, &p).await;
+                Ok(AnyPage::WebKit(page))
+            }
             IpcResponse::Error(e) => Err(e),
             _ => Err("unexpected".into()),
         }
@@ -50,8 +58,10 @@ impl WebKitBrowser {
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
-        let _ = self.client.send_empty(Op::Shutdown).await;
+        // OP_SHUTDOWN calls _exit(0) immediately -- no response comes back.
+        // Just kill the child process directly.
         let _ = self.child.kill();
+        let _ = self.child.wait();
         Ok(())
     }
 }
@@ -74,7 +84,6 @@ impl WebKitPage {
     pub async fn goto(&self, url: &str) -> Result<(), String> {
         let r = self.client.send_str_vid(Op::Navigate, url, self.vid()).await?;
         self.ok(r)?;
-        // Wait for load like Bun
         let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
         self.ok(r2)
     }
@@ -141,15 +150,28 @@ impl WebKitPage {
         Ok(AnyElement::WebKit(WebKitElement { client: self.client.clone(), view_id: self.view_id, ref_id }))
     }
 
+    pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
+        let escaped = js.replace('\\', "\\\\").replace('\'', "\\'");
+        let wrap = format!(
+            r#"(function(){{var e=({escaped});if(!e)return null;if(!window.__wr)window.__wr={{}};var id=Object.keys(window.__wr).length+1;window.__wr[id]=e;return id}})()"#
+        );
+        let r = self.evaluate(&wrap).await?;
+        let ref_id = r.and_then(|v| v.as_u64()).ok_or("JS did not return a DOM element")?;
+        Ok(AnyElement::WebKit(WebKitElement { client: self.client.clone(), view_id: self.view_id, ref_id }))
+    }
+
     pub async fn content(&self) -> Result<String, String> {
         let r = self.evaluate("document.documentElement.outerHTML").await?;
         Ok(r.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default())
     }
 
     pub async fn set_content(&self, html: &str) -> Result<(), String> {
-        let esc = html.replace('\\', "\\\\").replace('`', "\\`");
-        self.evaluate(&format!("document.documentElement.innerHTML=`{esc}`")).await?;
-        Ok(())
+        let mut p = Vec::new();
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        ipc::str_encode(&mut p, html);
+        ipc::str_encode(&mut p, "about:blank");
+        let r = self.client.send(ipc::Op::LoadHtml, &p).await?;
+        self.ok(r)
     }
 
     pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>, String> {
@@ -224,21 +246,78 @@ impl WebKitPage {
     }
 
     pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
-        let mut p = Vec::new();
-        p.extend_from_slice(&x.to_le_bytes());
-        p.extend_from_slice(&y.to_le_bytes());
-        p.extend_from_slice(&self.vid().to_le_bytes());
-        let r = self.client.send(Op::Click, &p).await?;
-        self.ok(r)
+        self.click_at_opts(x, y, "left", 1).await
+    }
+
+    pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
+        let btn: u8 = match button { "right" => 1, "middle" => 2, _ => 0 };
+        // NSEvent clickCount must increment per click for dblclick to fire.
+        // e.g. click_count=2: first pair has clickCount=1, second has clickCount=2.
+        for i in 1..=click_count {
+            self.send_mouse_event(1, btn, i, x, y).await?; // down
+            self.send_mouse_event(2, btn, i, x, y).await?; // up
+        }
+        Ok(())
+    }
+
+    pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
+        // WKWebView's mouseMoved: doesn't propagate to DOM in offscreen windows.
+        // Use WKWebView.evaluateJavaScript to dispatch the event directly in the
+        // web content process, same approach as Playwright's webkit backend.
+        let js = format!(
+            "(function(){{var e=document.elementFromPoint({x},{y});\
+            if(e)e.dispatchEvent(new MouseEvent('mousemove',{{clientX:{x},clientY:{y},bubbles:true,view:window}}))}})()");
+        self.evaluate(&js).await?;
+        Ok(())
+    }
+
+    pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<(), String> {
+        let steps = steps.max(1);
+        // Batch all moves into one JS evaluate for performance
+        let mut js = String::with_capacity(steps as usize * 120 + 20);
+        js.push_str("(function(){");
+        for i in 0..=steps {
+            let t = i as f64 / steps as f64;
+            let ease = t * t * (3.0 - 2.0 * t);
+            let x = from_x + (to_x - from_x) * ease;
+            let y = from_y + (to_y - from_y) * ease;
+            use std::fmt::Write;
+            let _ = write!(js,
+                "var e=document.elementFromPoint({x},{y});\
+                if(e)e.dispatchEvent(new MouseEvent('mousemove',{{clientX:{x},clientY:{y},bubbles:true,view:window}}));"
+            );
+        }
+        js.push_str("})()");
+        self.evaluate(&js).await?;
+        Ok(())
     }
 
     pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
-        let js = format!(
-            "(function(){{var f=document.elementFromPoint({},{});if(f){{f.dispatchEvent(new MouseEvent('mousedown',{{clientX:{},clientY:{},bubbles:true}}));f.dispatchEvent(new MouseEvent('mousemove',{{clientX:{},clientY:{},bubbles:true}}));f.dispatchEvent(new MouseEvent('mouseup',{{clientX:{},clientY:{},bubbles:true}}))}}}})()",
-            from.0, from.1, from.0, from.1, to.0, to.1, to.0, to.1
-        );
-        self.evaluate(&js).await?;
-        Ok(())
+        self.send_mouse_event(1, 0, 1, from.0, from.1).await?; // down
+        let steps = 10u32;
+        for i in 1..=steps {
+            let t = i as f64 / steps as f64;
+            let ease = t * t * (3.0 - 2.0 * t);
+            let x = from.0 + (to.0 - from.0) * ease;
+            let y = from.1 + (to.1 - from.1) * ease;
+            self.send_mouse_event(0, 0, 0, x, y).await?; // move
+        }
+        self.send_mouse_event(2, 0, 1, to.0, to.1).await // up
+    }
+
+    /// Send a native mouse event via IPC.
+    /// mouse_type: 0=move, 1=down, 2=up
+    /// button: 0=left, 1=right, 2=middle
+    async fn send_mouse_event(&self, mouse_type: u8, button: u8, click_count: u32, x: f64, y: f64) -> Result<(), String> {
+        let mut p = Vec::with_capacity(27);
+        p.push(mouse_type);
+        p.push(button);
+        p.extend_from_slice(&click_count.to_le_bytes());
+        p.extend_from_slice(&x.to_le_bytes());
+        p.extend_from_slice(&y.to_le_bytes());
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        let r = self.client.send(ipc::Op::MouseEvent, &p).await?;
+        self.ok(r)
     }
 
     pub async fn type_str(&self, text: &str) -> Result<(), String> {
@@ -258,33 +337,49 @@ impl WebKitPage {
     }
 
     pub async fn get_cookies(&self) -> Result<Vec<CookieData>, String> {
-        let js = r#"JSON.stringify(document.cookie.split(';').map(function(c){var p=c.trim().split('=');return{name:p[0],value:p.slice(1).join('='),domain:location.hostname,path:'/',secure:false,http_only:false}}))"#;
-        let r = self.evaluate(js).await?;
-        let s = r.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or("[]".into());
-        Ok(serde_json::from_str(&s).unwrap_or_default())
+        let mut p = Vec::new();
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        let r = self.client.send(ipc::Op::GetCookies, &p).await?;
+        match r {
+            ipc::IpcResponse::Value(v) => {
+                // The IPC reader already parses the JSON string into a Value.
+                // Deserialize directly from the parsed Value.
+                Ok(serde_json::from_value(v).unwrap_or_default())
+            }
+            ipc::IpcResponse::Error(e) => Err(e),
+            _ => Err("unexpected response".into()),
+        }
     }
 
     pub async fn set_cookie(&self, c: CookieData) -> Result<(), String> {
-        let mut parts = vec![format!("{}={}", c.name, c.value)];
-        if !c.domain.is_empty() { parts.push(format!("domain={}", c.domain)); }
-        if !c.path.is_empty() { parts.push(format!("path={}", c.path)); }
-        if c.secure { parts.push("secure".into()); }
-        self.evaluate(&format!("document.cookie='{}'", parts.join("; ").replace('\'', "\\'"))).await?;
-        Ok(())
+        let mut p = Vec::new();
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        ipc::str_encode(&mut p, &c.name);
+        ipc::str_encode(&mut p, &c.value);
+        ipc::str_encode(&mut p, &c.domain);
+        ipc::str_encode(&mut p, &c.path);
+        p.push(u8::from(c.secure));
+        p.push(u8::from(c.http_only));
+        let expires = c.expires.unwrap_or(-1.0);
+        p.extend_from_slice(&expires.to_le_bytes());
+        let r = self.client.send(ipc::Op::SetCookie, &p).await?;
+        self.ok(r)
     }
 
     pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
-        let mut cookie = format!("{}=;expires=Thu,01 Jan 1970 00:00:00 UTC;path=/", name);
-        if let Some(d) = domain {
-            cookie.push_str(&format!(";domain={d}"));
-        }
-        self.evaluate(&format!("document.cookie='{}'", cookie.replace('\'', "\\'"))).await?;
-        Ok(())
+        let mut p = Vec::new();
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        ipc::str_encode(&mut p, name);
+        ipc::str_encode(&mut p, domain.unwrap_or(""));
+        let r = self.client.send(ipc::Op::DeleteCookie, &p).await?;
+        self.ok(r)
     }
 
     pub async fn clear_cookies(&self) -> Result<(), String> {
-        self.evaluate("document.cookie.split(';').forEach(function(c){document.cookie=c.trim().split('=')[0]+'=;expires=Thu,01 Jan 1970 00:00:00 UTC;path=/'})").await?;
-        Ok(())
+        let mut p = Vec::new();
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        let r = self.client.send(ipc::Op::ClearCookies, &p).await?;
+        self.ok(r)
     }
 
     pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
@@ -469,12 +564,36 @@ impl WebKitElement {
         self.eval(&format!("({}).call({})", func, self.el())).await
     }
 
+    pub async fn call_js_fn_value(&self, func: &str) -> Result<Option<serde_json::Value>, String> {
+        let js = format!("JSON.stringify(({}).call({}))", func, self.el());
+        let mut p = Vec::new();
+        ipc::str_encode(&mut p, &js);
+        p.extend_from_slice(&self.view_id.to_le_bytes());
+        let r = self.client.send(ipc::Op::Evaluate, &p).await?;
+        match r {
+            ipc::IpcResponse::Value(serde_json::Value::String(s)) => {
+                Ok(serde_json::from_str(&s).ok())
+            }
+            ipc::IpcResponse::Value(v) => Ok(Some(v)),
+            ipc::IpcResponse::Error(e) => Err(e),
+            _ => Ok(None),
+        }
+    }
+
     pub async fn scroll_into_view(&self) -> Result<(), String> {
         self.eval(&format!("{}.scrollIntoView({{behavior:'instant',block:'center'}})", self.el())).await
     }
 
-    pub async fn screenshot(&self, _fmt: ImageFormat) -> Result<Vec<u8>, String> {
+    pub async fn screenshot(&self, fmt: ImageFormat) -> Result<Vec<u8>, String> {
+        // Must match page screenshot payload: u8 format + u8 quality + u64 vid
         let mut p = Vec::new();
+        let fmt_byte: u8 = match fmt {
+            ImageFormat::Jpeg => 1,
+            ImageFormat::Webp => 2,
+            _ => 0,
+        };
+        p.push(fmt_byte);
+        p.push(80); // default quality
         p.extend_from_slice(&self.view_id.to_le_bytes());
         let r = self.client.send(Op::Screenshot, &p).await?;
         match r { IpcResponse::Binary(d) => Ok(d), IpcResponse::Error(e) => Err(e), _ => Err("no data".into()) }

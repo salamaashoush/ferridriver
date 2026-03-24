@@ -11,7 +11,7 @@
 //! Parent: std blocking sockets, background reader thread, oneshot channels.
 //!         std::process::Command spawn (NOT tokio).
 
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
@@ -28,7 +28,10 @@ pub enum Op {
     Close = 5, GoBack = 7, GoForward = 8, Reload = 9,
     Click = 10, Type = 11, PressKey = 12,
     GetUrl = 20, GetTitle = 21, ListViews = 22, SetUserAgent = 30,
-    WaitNav = 40, SetFileInput = 50, SetViewport = 51, Shutdown = 255,
+    WaitNav = 40, SetFileInput = 50, SetViewport = 51,
+    GetCookies = 60, SetCookie = 61, DeleteCookie = 62, ClearCookies = 63,
+    LoadHtml = 64, AddInitScript = 65, MouseEvent = 66,
+    Shutdown = 255,
 }
 
 #[repr(u8)]
@@ -87,7 +90,7 @@ pub enum IpcResponse {
 
 pub struct IpcClient {
     writer: StdMutex<std::os::unix::net::UnixStream>,
-    pending: Arc<StdMutex<HashMap<u64, oneshot::Sender<IpcResponse>>>>,
+    pending: Arc<StdMutex<FxHashMap<u64, oneshot::Sender<IpcResponse>>>>,
     next_id: AtomicU64,
     /// Console messages pushed by the host via REP_CONSOLE_EVENT (no polling).
     pub console_log: Arc<StdMutex<Vec<(String, String)>>>,
@@ -97,20 +100,49 @@ pub struct IpcClient {
     pub network_log: Arc<StdMutex<Vec<(String, String, String, String)>>>,
 }
 
+/// Path to the host binary baked in at compile time by build.rs.
+#[cfg(target_os = "macos")]
+static HOST_BINARY_PATH: &str = concat!(env!("OUT_DIR"), "/fd_webkit_host");
+
 impl IpcClient {
+    /// Resolve the path to the WebKit host binary.
+    ///
+    /// Priority:
+    /// 1. `FERRIDRIVER_WEBKIT_HOST` env var (explicit override)
+    /// 2. Compile-time path from build.rs (baked into the binary)
+    #[cfg(target_os = "macos")]
+    fn resolve_host_binary() -> Result<std::path::PathBuf, String> {
+        if let Ok(path) = std::env::var("FERRIDRIVER_WEBKIT_HOST") {
+            let p = std::path::PathBuf::from(&path);
+            if p.exists() {
+                return Ok(p);
+            }
+            return Err(format!("FERRIDRIVER_WEBKIT_HOST={path} does not exist"));
+        }
+
+        let p = std::path::PathBuf::from(HOST_BINARY_PATH);
+        if p.exists() {
+            return Ok(p);
+        }
+
+        Err(format!(
+            "WebKit host binary not found at {HOST_BINARY_PATH}. \
+             Set FERRIDRIVER_WEBKIT_HOST to the path of fd_webkit_host."
+        ))
+    }
+
     pub async fn spawn() -> Result<(Self, std::process::Child), String> {
         use std::os::unix::io::IntoRawFd;
 
         let (parent_sock, child_sock) =
             std::os::unix::net::UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
         let child_fd = child_sock.into_raw_fd();
-        let exe = std::env::current_exe().map_err(|e| format!("exe: {e}"))?;
+        let exe = Self::resolve_host_binary()?;
 
         let child = unsafe {
             use std::os::unix::process::CommandExt;
-            let mut cmd = std::process::Command::new(exe);
-            cmd.env("FD_WEBKIT_HOST", "1")
-               .stdin(std::process::Stdio::null())
+            let mut cmd = std::process::Command::new(&exe);
+            cmd.stdin(std::process::Stdio::null())
                .stdout(std::process::Stdio::null())
                .stderr(std::process::Stdio::inherit());
             cmd.pre_exec(move || {
@@ -122,14 +154,14 @@ impl IpcClient {
                 }
                 Ok(())
             });
-            cmd.spawn().map_err(|e| format!("spawn: {e}"))?
+            cmd.spawn().map_err(|e| format!("spawn webkit host ({exe:?}): {e}"))?
         };
 
         let read_sock = parent_sock.try_clone().map_err(|e| format!("clone: {e}"))?;
         let write_sock = parent_sock;
 
-        let pending: Arc<StdMutex<HashMap<u64, oneshot::Sender<IpcResponse>>>> =
-            Arc::new(StdMutex::new(HashMap::new()));
+        let pending: Arc<StdMutex<FxHashMap<u64, oneshot::Sender<IpcResponse>>>> =
+            Arc::new(StdMutex::new(FxHashMap::default()));
         let pending2 = pending.clone();
         let console_log: Arc<StdMutex<Vec<(String, String)>>> =
             Arc::new(StdMutex::new(Vec::new()));
@@ -276,7 +308,7 @@ impl IpcClient {
     }
 
     pub async fn send(&self, op: Op, payload: &[u8]) -> Result<IpcResponse, String> {
-        let rid = self.next_id.fetch_add(1, Ordering::SeqCst) as u32;
+        let rid = self.next_id.fetch_add(1, Ordering::Relaxed) as u32;
         let (tx, rx) = oneshot::channel();
         self.pending.lock().unwrap().insert(rid as u64, tx);
         { let mut w = self.writer.lock().unwrap(); frame_write(&mut *w, rid, op as u8, payload); }
@@ -307,31 +339,3 @@ impl IpcClient {
     }
 }
 
-// ─── Host subprocess entry ──────────────────────────────────────────────────
-
-pub fn is_webkit_host() -> bool {
-    std::env::var("FD_WEBKIT_HOST").is_ok()
-}
-
-#[cfg(target_os = "macos")]
-unsafe extern "C" {
-    fn fd_webkit_host_main(fd: i32) -> !;
-}
-
-#[cfg(target_os = "macos")]
-pub fn run_webkit_host() -> ! {
-    // Call the Objective-C host implementation (host.m) via FFI.
-    // This uses CFRunLoop + CFFileDescriptor exactly like Bun's host_main.cpp.
-    // The fd is always 3, set up by pre_exec dup2 in the parent.
-    unsafe { fd_webkit_host_main(3) }
-}
-
-#[cfg(not(target_os = "macos"))]
-pub fn run_webkit_host() -> ! {
-    eprintln!("WebKit only on macOS");
-    std::process::exit(1);
-}
-
-// The macOS host subprocess implementation is in host.m (Objective-C),
-// compiled via build.rs and linked as a static library. The entry point
-// fd_webkit_host_main(fd) is called from run_webkit_host() above.

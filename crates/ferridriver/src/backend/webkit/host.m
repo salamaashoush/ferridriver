@@ -47,6 +47,13 @@ enum Op {
     OP_WAIT_NAV = 40,
     OP_SET_FILE_INPUT = 50,
     OP_SET_VIEWPORT = 51,
+    OP_GET_COOKIES = 60,
+    OP_SET_COOKIE = 61,
+    OP_DELETE_COOKIE = 62,
+    OP_CLEAR_COOKIES = 63,
+    OP_LOAD_HTML = 64,
+    OP_ADD_INIT_SCRIPT = 65,
+    OP_MOUSE_EVENT = 66,  // Generic mouse: u8 type(0=move,1=down,2=up) + u8 button(0=left,1=right,2=middle) + u32 clickCount + f64 x + f64 y + u64 vid
     OP_SHUTDOWN = 255,
 };
 
@@ -256,6 +263,7 @@ static uint64_t read_u64(const uint8_t *data, uint32_t data_len, uint32_t *offse
 - (instancetype)initWithContentRect:(NSRect)rect styleMask:(NSWindowStyleMask)style backing:(NSBackingStoreType)buf defer:(BOOL)flag {
     self = [super initWithContentRect:rect styleMask:style backing:buf defer:flag];
     _emulatedScaleFactor = 1.0;
+    [self setAcceptsMouseMovedEvents:YES];
     return self;
 }
 - (BOOL)isVisible { return YES; }
@@ -404,6 +412,14 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 initWithFrame:NSMakeRect(0, 0, 1280, 720)
                 configuration:config];
             [wv setNavigationDelegate:g_nav_delegate];
+
+            // Add tracking area so mouseMoved events propagate to the web content
+            NSTrackingArea *trackingArea = [[NSTrackingArea alloc]
+                initWithRect:wv.bounds
+                options:(NSTrackingMouseMoved | NSTrackingActiveAlways | NSTrackingInVisibleRect)
+                owner:wv
+                userInfo:nil];
+            [wv addTrackingArea:trackingArea];
 
             // Disable occlusion detection (private API)
             SEL occSel = NSSelectorFromString(@"_setWindowOcclusionDetectionEnabled:");
@@ -986,6 +1002,245 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 [v->webview evaluateJavaScript:screenJS completionHandler:nil];
             }
             write_frame(req_id, REP_OK, NULL, 0);
+            break;
+        }
+
+        case OP_GET_COOKIES: {
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
+
+            uint32_t captured_rid = req_id;
+            WKHTTPCookieStore *store = v->webview.configuration.websiteDataStore.httpCookieStore;
+            [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+                NSMutableArray *arr = [NSMutableArray new];
+                for (NSHTTPCookie *c in cookies) {
+                    [arr addObject:@{
+                        @"name": c.name ?: @"",
+                        @"value": c.value ?: @"",
+                        @"domain": c.domain ?: @"",
+                        @"path": c.path ?: @"/",
+                        @"secure": @(c.isSecure),
+                        @"http_only": @(c.isHTTPOnly),
+                        @"expires": c.expiresDate ? @([c.expiresDate timeIntervalSince1970]) : [NSNull null],
+                    }];
+                }
+                NSData *json = [NSJSONSerialization dataWithJSONObject:arr options:0 error:nil];
+                NSString *s = [[NSString alloc] initWithData:json encoding:NSUTF8StringEncoding];
+                write_frame_str(captured_rid, REP_VALUE, s ?: @"[]");
+            }];
+            break;
+        }
+
+        case OP_SET_COOKIE: {
+            // Payload: u64 vid + str name + str value + str domain + str path + u8 secure + u8 httpOnly + f64 expires (-1 = session)
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
+
+            NSString *name = read_str(payload, payload_len, &off);
+            NSString *value = read_str(payload, payload_len, &off);
+            NSString *domain = read_str(payload, payload_len, &off);
+            NSString *path = read_str(payload, payload_len, &off);
+            uint8_t secure = (off < payload_len) ? payload[off++] : 0;
+            uint8_t httpOnly = (off < payload_len) ? payload[off++] : 0;
+            double expires = -1;
+            if (off + 8 <= payload_len) {
+                memcpy(&expires, payload + off, 8); off += 8;
+            }
+
+            NSMutableDictionary *props = [NSMutableDictionary dictionaryWithDictionary:@{
+                NSHTTPCookieName: name,
+                NSHTTPCookieValue: value,
+                NSHTTPCookieDomain: domain,
+                NSHTTPCookiePath: path.length > 0 ? path : @"/",
+            }];
+            if (secure) props[NSHTTPCookieSecure] = @"TRUE";
+            if (expires > 0) {
+                props[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSince1970:expires];
+            }
+            // Note: NSHTTPCookie doesn't expose httpOnly setter via properties,
+            // but cookies created via WKHTTPCookieStore respect the httpOnly
+            // from the original Set-Cookie header if present.
+
+            NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
+            if (!cookie) { write_frame_str(req_id, REP_ERROR, @"invalid cookie"); break; }
+
+            uint32_t captured_rid = req_id;
+            WKHTTPCookieStore *store = v->webview.configuration.websiteDataStore.httpCookieStore;
+            [store setCookie:cookie completionHandler:^{
+                write_frame(captured_rid, REP_OK, NULL, 0);
+            }];
+            break;
+        }
+
+        case OP_DELETE_COOKIE: {
+            // Payload: u64 vid + str name + str domain
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
+
+            NSString *name = read_str(payload, payload_len, &off);
+            NSString *domain = read_str(payload, payload_len, &off);
+
+            uint32_t captured_rid = req_id;
+            WKHTTPCookieStore *store = v->webview.configuration.websiteDataStore.httpCookieStore;
+            [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
+                __block int pending = 0;
+                __block BOOL any = NO;
+                for (NSHTTPCookie *c in cookies) {
+                    if (![c.name isEqualToString:name]) continue;
+                    if (domain.length > 0 && ![c.domain isEqualToString:domain]) continue;
+                    any = YES;
+                    pending++;
+                    [store deleteCookie:c completionHandler:^{
+                        if (--pending == 0) {
+                            write_frame(captured_rid, REP_OK, NULL, 0);
+                        }
+                    }];
+                }
+                if (!any) write_frame(captured_rid, REP_OK, NULL, 0);
+            }];
+            break;
+        }
+
+        case OP_CLEAR_COOKIES: {
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
+
+            uint32_t captured_rid = req_id;
+            WKWebsiteDataStore *store = v->webview.configuration.websiteDataStore;
+            NSSet *types = [NSSet setWithObject:WKWebsiteDataTypeCookies];
+            [store removeDataOfTypes:types
+                   modifiedSince:[NSDate distantPast]
+                   completionHandler:^{
+                write_frame(captured_rid, REP_OK, NULL, 0);
+            }];
+            break;
+        }
+
+        case OP_LOAD_HTML: {
+            // Payload: u64 vid + str html + str baseURL
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
+
+            NSString *html = read_str(payload, payload_len, &off);
+            NSString *base = read_str(payload, payload_len, &off);
+            NSURL *baseURL = base.length > 0 ? [NSURL URLWithString:base] : nil;
+
+            // Register nav waiter so caller can wait for load completion
+            uint32_t captured_rid = req_id;
+            g_nav_delegate.waiters[@((uintptr_t)v->webview)] = ^(NSError *err) {
+                if (err) {
+                    write_frame_str(captured_rid, REP_ERROR,
+                        err.localizedDescription ?: @"load failed");
+                } else {
+                    write_frame(captured_rid, REP_OK, NULL, 0);
+                }
+            };
+
+            [v->webview loadHTMLString:html baseURL:baseURL];
+            break;
+        }
+
+        case OP_ADD_INIT_SCRIPT: {
+            // Payload: u64 vid + str source
+            // Adds a WKUserScript that runs at document start on every navigation.
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
+
+            NSString *source = read_str(payload, payload_len, &off);
+            WKUserScript *script = [[WKUserScript alloc]
+                initWithSource:source
+                injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+                forMainFrameOnly:YES];
+            [v->webview.configuration.userContentController addUserScript:script];
+
+            // Also run immediately on the current page
+            [v->webview evaluateJavaScript:source completionHandler:nil];
+            write_frame(req_id, REP_OK, NULL, 0);
+            break;
+        }
+
+        case OP_MOUSE_EVENT: {
+            // Generic native mouse event dispatch.
+            // Payload: u8 type(0=move,1=down,2=up) + u8 button(0=left,1=right,2=middle) + u32 clickCount + f64 x + f64 y + u64 vid
+            uint32_t off = 0;
+            uint8_t mouse_type = (off < payload_len) ? payload[off++] : 0;
+            uint8_t mouse_button = (off < payload_len) ? payload[off++] : 0;
+            uint32_t click_count = 1;
+            if (off + 4 <= payload_len) { memcpy(&click_count, payload + off, 4); off += 4; }
+            double x = 0, y = 0;
+            if (off + 8 <= payload_len) { memcpy(&x, payload + off, 8); off += 8; }
+            if (off + 8 <= payload_len) { memcpy(&y, payload + off, 8); off += 8; }
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame(req_id, REP_OK, NULL, 0); break; }
+
+            double wy = CGRectGetHeight(v->webview.bounds) - y;
+            NSTimeInterval ts = [NSProcessInfo processInfo].systemUptime;
+            NSInteger winNum = [v->window windowNumber];
+
+            // Map button + type to NSEventType
+            NSEventType evType;
+            if (mouse_type == 0) {
+                // Move
+                evType = (mouse_button == 0) ? NSEventTypeMouseMoved : NSEventTypeMouseMoved;
+            } else if (mouse_type == 1) {
+                // Down
+                switch (mouse_button) {
+                    case 1: evType = NSEventTypeRightMouseDown; break;
+                    case 2: evType = NSEventTypeOtherMouseDown; break;
+                    default: evType = NSEventTypeLeftMouseDown; break;
+                }
+            } else {
+                // Up
+                switch (mouse_button) {
+                    case 1: evType = NSEventTypeRightMouseUp; break;
+                    case 2: evType = NSEventTypeOtherMouseUp; break;
+                    default: evType = NSEventTypeLeftMouseUp; break;
+                }
+            }
+
+            NSEvent *ev = [NSEvent mouseEventWithType:evType
+                location:NSMakePoint(x, wy)
+                modifierFlags:0 timestamp:ts
+                windowNumber:winNum context:nil
+                eventNumber:0 clickCount:(NSInteger)click_count pressure:(mouse_type == 1 ? 1.0 : 0.0)];
+
+            // Temporarily allow mouse events so sendEvent: works
+            BOOL wasIgnoring = [v->window ignoresMouseEvents];
+            if (wasIgnoring) [v->window setIgnoresMouseEvents:NO];
+
+            // Use sendEvent: for proper event pipeline propagation to web content
+            [v->window sendEvent:ev];
+
+            if (wasIgnoring) [v->window setIgnoresMouseEvents:YES];
+
+            // Completion barrier for mouse up events
+            if (mouse_type == 2) {
+                SEL barrierSel = NSSelectorFromString(@"_doAfterProcessingAllPendingMouseEvents:");
+                if ([v->webview respondsToSelector:barrierSel]) {
+                    uint32_t captured_rid = req_id;
+                    void (^block)(void) = ^{
+                        write_frame(captured_rid, REP_OK, NULL, 0);
+                    };
+                    ((void(*)(id,SEL,id))objc_msgSend)(v->webview, barrierSel, block);
+                } else {
+                    write_frame(req_id, REP_OK, NULL, 0);
+                }
+            } else {
+                write_frame(req_id, REP_OK, NULL, 0);
+            }
             break;
         }
 
