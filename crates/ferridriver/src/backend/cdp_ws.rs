@@ -457,6 +457,38 @@ impl CdpWsPage {
         Ok(())
     }
 
+    pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::input::{DispatchMouseEventParams, DispatchMouseEventType};
+        let params = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseWheel)
+            .x(0.0).y(0.0).delta_x(delta_x).delta_y(delta_y)
+            .build().map_err(|e| format!("{e}"))?;
+        self.0.execute(params).await.map_err(|e| format!("{e}"))?;
+        Ok(())
+    }
+
+    pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::input::{DispatchMouseEventParams, DispatchMouseEventType, MouseButton};
+        let btn = match button { "right" => MouseButton::Right, "middle" => MouseButton::Middle, _ => MouseButton::Left };
+        let params = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MousePressed)
+            .x(x).y(y).button(btn).click_count(1i64)
+            .build().map_err(|e| format!("{e}"))?;
+        self.0.execute(params).await.map_err(|e| format!("{e}"))?;
+        Ok(())
+    }
+
+    pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+        use chromiumoxide::cdp::browser_protocol::input::{DispatchMouseEventParams, DispatchMouseEventType, MouseButton};
+        let btn = match button { "right" => MouseButton::Right, "middle" => MouseButton::Middle, _ => MouseButton::Left };
+        let params = DispatchMouseEventParams::builder()
+            .r#type(DispatchMouseEventType::MouseReleased)
+            .x(x).y(y).button(btn).click_count(1i64)
+            .build().map_err(|e| format!("{e}"))?;
+        self.0.execute(params).await.map_err(|e| format!("{e}"))?;
+        Ok(())
+    }
+
     pub async fn type_str(&self, text: &str) -> Result<(), String> {
         self.0.type_str(text).await.map_err(|e| format!("{e}")).map(|_| ())
     }

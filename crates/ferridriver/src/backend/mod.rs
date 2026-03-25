@@ -275,6 +275,21 @@ impl AnyPage {
         page_dispatch!(self, move_mouse_smooth(from_x, from_y, to_x, to_y, steps))
     }
 
+    /// Mouse wheel scroll at current position.
+    pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
+        page_dispatch!(self, mouse_wheel(delta_x, delta_y))
+    }
+
+    /// Mouse button down (without up). For custom drag sequences.
+    pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+        page_dispatch!(self, mouse_down(x, y, button))
+    }
+
+    /// Mouse button up.
+    pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+        page_dispatch!(self, mouse_up(x, y, button))
+    }
+
     pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
         page_dispatch!(self, click_and_drag(from, to))
     }

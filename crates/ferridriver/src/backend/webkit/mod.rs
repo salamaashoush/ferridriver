@@ -292,6 +292,23 @@ impl WebKitPage {
         Ok(())
     }
 
+    pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
+        self.evaluate(&format!(
+            "window.scrollBy({delta_x},{delta_y})"
+        )).await?;
+        Ok(())
+    }
+
+    pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+        let btn: u8 = match button { "right" => 1, "middle" => 2, _ => 0 };
+        self.send_mouse_event(1, btn, 1, x, y).await
+    }
+
+    pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+        let btn: u8 = match button { "right" => 1, "middle" => 2, _ => 0 };
+        self.send_mouse_event(2, btn, 1, x, y).await
+    }
+
     pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
         self.send_mouse_event(1, 0, 1, from.0, from.1).await?; // down
         let steps = 10u32;

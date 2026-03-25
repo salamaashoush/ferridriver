@@ -961,6 +961,27 @@ impl CdpRawPage {
         Ok(())
     }
 
+    pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
+        self.cmd("Input.dispatchMouseEvent",
+            serde_json::json!({"type": "mouseWheel", "x": 0, "y": 0, "deltaX": delta_x, "deltaY": delta_y}),
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+        self.cmd("Input.dispatchMouseEvent",
+            serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "clickCount": 1}),
+        ).await?;
+        Ok(())
+    }
+
+    pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+        self.cmd("Input.dispatchMouseEvent",
+            serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "clickCount": 1}),
+        ).await?;
+        Ok(())
+    }
+
     pub async fn type_str(&self, text: &str) -> Result<(), String> {
         for ch in text.chars() {
             self.cmd(

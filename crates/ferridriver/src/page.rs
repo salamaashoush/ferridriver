@@ -496,6 +496,23 @@ impl Page {
     }
   }
 
+  // ── Mouse (low-level) ──────────────────────────────────────────────────
+
+  /// Scroll via mouse wheel event.
+  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
+    self.inner.mouse_wheel(delta_x, delta_y).await
+  }
+
+  /// Mouse button down (without up). For custom drag sequences.
+  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+    self.inner.mouse_down(x, y, button).await
+  }
+
+  /// Mouse button up.
+  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+    self.inner.mouse_up(x, y, button).await
+  }
+
   /// Bring this page to front (focus).
   pub async fn bring_to_front(&self) -> Result<(), String> {
     let _ = self.inner.evaluate("window.focus()").await;
