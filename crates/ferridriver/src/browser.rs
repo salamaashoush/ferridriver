@@ -72,9 +72,17 @@ impl Browser {
   }
 
   /// Get the active page for the default session.
+  /// Creates a page if none exists yet.
   pub async fn page(&self) -> Result<Page, String> {
     let mut state = self.state.lock().await;
     state.ensure_browser().await?;
+    // Auto-create a page if the default session is empty
+    if state.session("default").is_err() || state.session("default").unwrap().pages.is_empty() {
+      let idx = state.open_page("default", "about:blank").await?;
+      let sess = state.session("default")?;
+      let page = sess.pages.get(idx).ok_or("Page not found")?.clone();
+      return Ok(Page::new(page));
+    }
     let page = state.active_page("default")?.clone();
     Ok(Page::new(page))
   }

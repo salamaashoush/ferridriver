@@ -208,20 +208,19 @@ impl BrowserState {
 
         self.browser = Some(browser);
 
-        // Discover existing pages or create one
+        // Adopt any existing pages (e.g., from connect mode) into the "default" session.
+        // For launch mode, Chrome starts with no pages (--no-startup-window),
+        // so this loop typically does nothing. Pages are created lazily on first
+        // open_page() call, avoiding a wasted default session.
         let existing_pages = self.browser().pages().await.unwrap_or_default();
-        let pages = if existing_pages.is_empty() {
-            let page = self.browser().new_page("about:blank").await?;
-            vec![page]
-        } else {
-            existing_pages
-        };
-        let sess = self.session_mut("default");
-        for page in pages {
-            // Set standard viewport (1280x720) on every backend for consistent behavior
-            let _ = page.emulate_viewport(&crate::options::ViewportConfig::default()).await;
-            page.attach_listeners(sess.console_log.clone(), sess.network_log.clone(), sess.dialog_log.clone());
-            sess.pages.push(page);
+        if !existing_pages.is_empty() {
+            let vp = self.default_viewport.clone().unwrap_or_default();
+            let sess = self.session_mut("default");
+            for page in existing_pages {
+                let _ = page.emulate_viewport(&vp).await;
+                page.attach_listeners(sess.console_log.clone(), sess.network_log.clone(), sess.dialog_log.clone());
+                sess.pages.push(page);
+            }
         }
 
         Ok(())
