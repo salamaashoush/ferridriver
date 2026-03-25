@@ -76,10 +76,16 @@ pub struct BrowserState {
     browser: Option<AnyBrowser>,
     sessions: HashMap<String, Session>,
     chromium_path: String,
-    /// Connection mode
     connect_mode: ConnectMode,
-    /// Backend kind
     backend_kind: BackendKind,
+    /// Extra Chrome flags from LaunchOptions.
+    pub extra_args: Vec<String>,
+    /// Whether to run headless.
+    pub headless: bool,
+    /// Custom user data directory.
+    pub user_data_dir: Option<String>,
+    /// Default viewport for new pages.
+    pub default_viewport: Option<crate::options::ViewportConfig>,
 }
 
 #[derive(Clone)]
@@ -105,6 +111,28 @@ impl BrowserState {
             chromium_path,
             connect_mode,
             backend_kind,
+            extra_args: Vec::new(),
+            headless: true,
+            user_data_dir: None,
+            default_viewport: Some(crate::options::ViewportConfig::default()),
+        }
+    }
+
+    /// Create state from LaunchOptions.
+    pub fn with_options(connect_mode: ConnectMode, opts: crate::options::LaunchOptions) -> Self {
+        let chromium_path = opts.executable_path.unwrap_or_else(||
+            std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium())
+        );
+        Self {
+            browser: None,
+            sessions: HashMap::default(),
+            chromium_path,
+            connect_mode,
+            backend_kind: opts.backend,
+            extra_args: opts.args,
+            headless: opts.headless,
+            user_data_dir: opts.user_data_dir,
+            default_viewport: opts.viewport,
         }
     }
 
@@ -147,7 +175,8 @@ impl BrowserState {
             }
             BackendKind::CdpPipe => {
                 use crate::backend::cdp_pipe::CdpPipeBrowser;
-                AnyBrowser::CdpPipe(CdpPipeBrowser::launch(&self.chromium_path).await?)
+                let flags = chrome_flags(self.headless, &self.extra_args);
+                AnyBrowser::CdpPipe(CdpPipeBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
             }
             BackendKind::CdpRaw => {
                 use crate::backend::cdp_raw::CdpRawBrowser;
@@ -165,7 +194,8 @@ impl BrowserState {
                         AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?)
                     }
                     ConnectMode::Launch => {
-                        AnyBrowser::CdpRaw(CdpRawBrowser::launch(&self.chromium_path).await?)
+                        let flags = chrome_flags(self.headless, &self.extra_args);
+                        AnyBrowser::CdpRaw(CdpRawBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
                     }
                 }
             }
@@ -575,8 +605,22 @@ fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf, Str
 
 /// Common Chrome/Chromium launch flags used by both cdp-ws and cdp-pipe backends.
 /// Matches the flags Bun uses in ChromeProcess.zig for maximum compatibility.
-pub const CHROME_FLAGS: &[&str] = &[
-    "--headless",
+/// Build Chrome flags based on options.
+pub fn chrome_flags(headless: bool, extra_args: &[String]) -> Vec<String> {
+    let mut flags: Vec<String> = Vec::with_capacity(20 + extra_args.len());
+    if headless {
+        flags.push("--headless".into());
+    }
+    for f in BASE_CHROME_FLAGS {
+        flags.push((*f).into());
+    }
+    for arg in extra_args {
+        flags.push(arg.clone());
+    }
+    flags
+}
+
+const BASE_CHROME_FLAGS: &[&str] = &[
     "--no-sandbox",
     "--disable-gpu",
     "--disable-dev-shm-usage",

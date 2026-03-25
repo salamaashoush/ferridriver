@@ -131,12 +131,13 @@ impl WsTransport {
   pub async fn spawn(
     chromium_path: &str,
     user_data_dir: &Path,
+    extra_flags: &[String],
   ) -> Result<(Self, tokio::process::Child), String> {
     let mut command = tokio::process::Command::new(chromium_path);
     command.arg(format!("--user-data-dir={}", user_data_dir.display()));
-    command.arg("--remote-debugging-port=0"); // auto-assign port
+    command.arg("--remote-debugging-port=0");
 
-    for flag in crate::state::CHROME_FLAGS {
+    for flag in extra_flags {
       command.arg(flag);
     }
 

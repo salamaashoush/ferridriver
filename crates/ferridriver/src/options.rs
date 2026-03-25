@@ -88,6 +88,54 @@ pub struct EmulateMediaOptions {
   pub contrast: Option<String>,
 }
 
+/// Launch options for the browser -- matches Playwright's browserType.launch().
+#[derive(Debug, Clone)]
+pub struct LaunchOptions {
+  /// Backend to use: CdpWs, CdpPipe, CdpRaw, WebKit.
+  pub backend: crate::backend::BackendKind,
+  /// Run in headful mode (show browser window). Default: false (headless).
+  pub headless: bool,
+  /// Path to Chrome/Chromium binary. Default: auto-detect.
+  pub executable_path: Option<String>,
+  /// Extra command-line arguments to pass to Chrome.
+  pub args: Vec<String>,
+  /// User data directory. Default: temp dir per launch.
+  pub user_data_dir: Option<String>,
+  /// WebSocket URL to connect to instead of launching.
+  pub ws_endpoint: Option<String>,
+  /// Auto-connect to running Chrome instance.
+  pub auto_connect: Option<AutoConnectOptions>,
+  /// Default viewport for new pages. None = use Chrome defaults.
+  pub viewport: Option<ViewportConfig>,
+  /// Slow down operations by this many ms (for debugging).
+  pub slow_mo: Option<u64>,
+  /// Default navigation timeout in ms.
+  pub timeout: Option<u64>,
+}
+
+#[derive(Debug, Clone)]
+pub struct AutoConnectOptions {
+  pub channel: String,
+  pub user_data_dir: Option<String>,
+}
+
+impl Default for LaunchOptions {
+  fn default() -> Self {
+    Self {
+      backend: crate::backend::BackendKind::CdpPipe,
+      headless: true,
+      executable_path: None,
+      args: Vec::new(),
+      user_data_dir: None,
+      ws_endpoint: None,
+      auto_connect: None,
+      viewport: Some(ViewportConfig::default()),
+      slow_mo: None,
+      timeout: None,
+    }
+  }
+}
+
 impl Default for ViewportConfig {
   fn default() -> Self {
     Self {

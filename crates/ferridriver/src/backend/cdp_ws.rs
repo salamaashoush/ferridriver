@@ -31,11 +31,11 @@ impl CdpWsBrowser {
             .user_data_dir(user_data_dir)
             .viewport(None);
 
-        // Apply shared Chrome flags (skipping --headless and --no-sandbox
+        // Apply Chrome flags (skipping --headless and --no-sandbox
         // which BrowserConfig handles via its own methods)
-        for flag in crate::state::CHROME_FLAGS {
-            match *flag {
-                "--headless" => {} // BrowserConfig handles this
+        for flag in crate::state::chrome_flags(true, &[]) {
+            match flag.as_str() {
+                "--headless" => {}
                 "--no-sandbox" => { builder = builder.no_sandbox(); }
                 f => { builder = builder.arg(f); }
             }

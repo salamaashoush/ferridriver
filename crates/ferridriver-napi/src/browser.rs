@@ -3,7 +3,6 @@
 use crate::page::Page;
 use crate::types::LaunchOptions;
 use ferridriver::backend::BackendKind;
-use ferridriver::state::ConnectMode;
 use napi::Result;
 use napi_derive::napi;
 
@@ -32,16 +31,15 @@ impl Browser {
   pub async fn launch(options: Option<LaunchOptions>) -> Result<Self> {
     let opts = options.unwrap_or_default();
 
-    let inner = if let Some(url) = &opts.ws_endpoint {
-      ferridriver::Browser::connect(url)
-        .await
-        .map_err(napi::Error::from_reason)?
-    } else {
-      let backend = parse_backend(opts.backend.as_deref())?;
-      ferridriver::Browser::launch_with(ConnectMode::Launch, backend)
-        .await
-        .map_err(napi::Error::from_reason)?
+    let backend = parse_backend(opts.backend.as_deref())?;
+    let launch_opts = ferridriver::options::LaunchOptions {
+      backend,
+      ws_endpoint: opts.ws_endpoint.clone(),
+      ..Default::default()
     };
+    let inner = ferridriver::Browser::launch(launch_opts)
+      .await
+      .map_err(napi::Error::from_reason)?;
 
     Ok(Self { inner })
   }

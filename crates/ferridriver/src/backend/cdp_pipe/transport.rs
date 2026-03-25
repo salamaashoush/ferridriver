@@ -39,6 +39,7 @@ impl PipeTransport {
     pub async fn spawn(
         chromium_path: &str,
         user_data_dir: &Path,
+        extra_flags: &[String],
     ) -> Result<(Self, tokio::process::Child), String> {
         use std::os::unix::io::IntoRawFd;
 
@@ -56,8 +57,8 @@ impl PipeTransport {
         command.arg(format!("--user-data-dir={}", user_data_dir.display()));
         command.arg("--remote-debugging-pipe");
 
-        // Apply shared Chrome flags
-        for flag in crate::state::CHROME_FLAGS {
+        // Apply Chrome flags (from LaunchOptions)
+        for flag in extra_flags {
             command.arg(flag);
         }
 

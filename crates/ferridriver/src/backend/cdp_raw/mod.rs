@@ -57,13 +57,17 @@ impl CdpRawBrowser {
 
     /// Launch Chrome with `--remote-debugging-pipe` and communicate over fd 3/4.
     pub async fn launch(chromium_path: &str) -> Result<Self, String> {
+        Self::launch_with_flags(chromium_path, &crate::state::chrome_flags(true, &[])).await
+    }
+
+    pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self, String> {
         static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
         let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
         let user_data_dir =
             std::env::temp_dir().join(format!("ferridriver-raw-{}-{id}", std::process::id()));
 
         let (transport, child) =
-            WsTransport::spawn(chromium_path, &user_data_dir).await?;
+            WsTransport::spawn(chromium_path, &user_data_dir, flags).await?;
         let transport = Arc::new(transport);
 
         // Enable target discovery so we get notified about new targets
