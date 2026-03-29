@@ -483,10 +483,19 @@ pub async fn build_snapshot_for_ai(
 
   let depth = opts.depth.unwrap_or(-1);
 
-  // Page context header
-  let url = page.url().await.ok().flatten().unwrap_or_default();
-  let title = page.title().await.ok().flatten().unwrap_or_default();
-  let console_errors = crate::actions::console_error_count(page).await;
+  // Fetch all metadata + a11y tree in parallel (saves 3-4 sequential round-trips).
+  let (url_res, title_res, errors_res, scroll_res, tree_res) = tokio::join!(
+    page.url(),
+    page.title(),
+    crate::actions::console_error_count(page),
+    crate::actions::scroll_info(page),
+    page.accessibility_tree_with_depth(depth),
+  );
+
+  let url = url_res.ok().flatten().unwrap_or_default();
+  let title = title_res.ok().flatten().unwrap_or_default();
+  let console_errors = errors_res;
+  let tree = tree_res?;
 
   let mut header = String::new();
   header.push_str("### Page\n");
@@ -495,7 +504,7 @@ pub async fn build_snapshot_for_ai(
   if console_errors > 0 {
     let _ = writeln!(header, "- Console: {console_errors} errors");
   }
-  if let Ok(si) = crate::actions::scroll_info(page).await {
+  if let Ok(si) = scroll_res {
     if si.scroll_height > 0 {
       let _ = writeln!(
         header,
@@ -506,9 +515,7 @@ pub async fn build_snapshot_for_ai(
   }
   header.push_str("\n### Snapshot\n");
 
-  // Fetch accessibility tree with native depth limiting
   reset_refs();
-  let tree = page.accessibility_tree_with_depth(depth).await?;
 
   // Build full snapshot
   let (snapshot_text, ref_map) = build_snapshot(&tree);

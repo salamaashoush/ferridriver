@@ -33,33 +33,17 @@ pub struct CdpPipeBrowser {
 impl CdpPipeBrowser {
   /// Enable required CDP domains on a session so events and queries work.
   async fn enable_domains(transport: &PipeTransport, session_id: Option<&str>) -> Result<(), String> {
-    transport
-      .send_command(session_id, "Page.enable", super::empty_params())
-      .await?;
-    transport
-      .send_command(session_id, "Runtime.enable", super::empty_params())
-      .await?;
-    transport
-      .send_command(session_id, "DOM.enable", super::empty_params())
-      .await?;
-    transport
-      .send_command(session_id, "Network.enable", super::empty_params())
-      .await?;
-    transport
-      .send_command(session_id, "Accessibility.enable", super::empty_params())
-      .await?;
-
-    // Inject selector engine on every new document so it's always available
-    // without a separate evaluate call. Chrome runs this before any page JS.
+    let ep = super::empty_params();
     let engine_js = crate::selectors::build_inject_js();
-    transport
-      .send_command(
-        session_id,
-        "Page.addScriptToEvaluateOnNewDocument",
-        serde_json::json!({"source": engine_js}),
-      )
-      .await?;
-
+    let (r1, r2, r3, r4, r5, r6) = tokio::join!(
+      transport.send_command(session_id, "Page.enable", ep.clone()),
+      transport.send_command(session_id, "Runtime.enable", ep.clone()),
+      transport.send_command(session_id, "DOM.enable", ep.clone()),
+      transport.send_command(session_id, "Network.enable", ep.clone()),
+      transport.send_command(session_id, "Accessibility.enable", ep),
+      transport.send_command(session_id, "Page.addScriptToEvaluateOnNewDocument", serde_json::json!({"source": engine_js})),
+    );
+    r1?; r2?; r3?; r4?; r5?; r6?;
     Ok(())
   }
 
@@ -1249,16 +1233,9 @@ impl CdpPipePage {
   ///
   /// # Errors
   ///
-  /// Returns an error if any `Input.dispatchKeyEvent` CDP command fails.
+  /// Returns an error if the `Input.insertText` CDP command fails.
   pub async fn type_str(&self, text: &str) -> Result<(), String> {
-    for ch in text.chars() {
-      self
-        .cmd(
-          "Input.dispatchKeyEvent",
-          serde_json::json!({"type": "char", "text": ch.to_string()}),
-        )
-        .await?;
-    }
+    self.cmd("Input.insertText", serde_json::json!({"text": text})).await?;
     Ok(())
   }
 
@@ -2720,21 +2697,14 @@ impl CdpPipeElement {
     Ok(())
   }
 
-  /// Click this element and type text character by character.
+  /// Click this element and insert text in a single CDP call.
   ///
   /// # Errors
   ///
-  /// Returns an error if clicking the element or dispatching any key event fails.
+  /// Returns an error if clicking the element or the `Input.insertText` CDP command fails.
   pub async fn type_str(&self, text: &str) -> Result<(), String> {
     self.click().await?;
-    for ch in text.chars() {
-      self
-        .cmd(
-          "Input.dispatchKeyEvent",
-          serde_json::json!({"type": "char", "text": ch.to_string()}),
-        )
-        .await?;
-    }
+    self.cmd("Input.insertText", serde_json::json!({"text": text})).await?;
     Ok(())
   }
 
