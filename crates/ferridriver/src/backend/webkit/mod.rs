@@ -153,7 +153,12 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the navigation IPC call fails or the page fails to load.
-  pub async fn goto(&self, url: &str) -> Result<(), String> {
+  pub async fn goto(
+    &self, url: &str, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64,
+  ) -> Result<(), String> {
+    // WebKit backend: WKWebView navigation delegate fires on load complete.
+    // Lifecycle granularity (commit vs domcontentloaded vs load) is not
+    // distinguishable via the native API — all waits resolve on load.
     let r = self.client.send_str_vid(Op::Navigate, url, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
@@ -161,44 +166,32 @@ impl WebKitPage {
   }
 
   /// Wait for the current navigation to complete.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the wait IPC call times out or fails.
   pub async fn wait_for_navigation(&self) -> Result<(), String> {
     let r = self.client.send_vid(Op::WaitNav, self.vid()).await?;
     Self::ok(r)
   }
 
-  /// Reload the current page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the reload IPC call fails.
-  pub async fn reload(&self) -> Result<(), String> {
+  pub async fn reload(
+    &self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64,
+  ) -> Result<(), String> {
     let r = self.client.send_vid(Op::Reload, self.vid()).await?;
-    Self::ok(r)
-  }
-
-  /// Navigate back in the session history and wait for navigation to complete.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the go-back IPC call fails or the navigation wait times out.
-  pub async fn go_back(&self) -> Result<(), String> {
-    let r = self.client.send_vid(Op::GoBack, self.vid()).await?;
     Self::ok(r)?;
-    // Wait for navigation to complete via nav delegate
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
     Self::ok(r2)
   }
 
-  /// Navigate forward in the session history and wait for navigation to complete.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the go-forward IPC call fails or the navigation wait times out.
-  pub async fn go_forward(&self) -> Result<(), String> {
+  pub async fn go_back(
+    &self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64,
+  ) -> Result<(), String> {
+    let r = self.client.send_vid(Op::GoBack, self.vid()).await?;
+    Self::ok(r)?;
+    let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
+    Self::ok(r2)
+  }
+
+  pub async fn go_forward(
+    &self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64,
+  ) -> Result<(), String> {
     let r = self.client.send_vid(Op::GoForward, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
