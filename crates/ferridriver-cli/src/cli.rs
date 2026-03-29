@@ -32,7 +32,8 @@ pub enum Command {
 #[derive(Args)]
 pub struct BrowserArgs {
     /// Browser backend to use
-    #[arg(long, value_enum, default_value_t = Backend::CdpPipe)]
+    #[cfg_attr(unix, arg(long, value_enum, default_value_t = Backend::CdpPipe))]
+    #[cfg_attr(not(unix), arg(long, value_enum, default_value_t = Backend::CdpRaw))]
     backend: Backend,
 
     /// Connect to a running Chrome instance via WebSocket or HTTP URL
@@ -66,10 +67,11 @@ pub struct TransportArgs {
 
 #[derive(Clone, ValueEnum)]
 enum Backend {
-    /// Chrome `DevTools` Protocol over pipes (fd 3/4)
+    /// Chrome `DevTools` Protocol over pipes (fd 3/4). Unix only.
+    #[cfg(unix)]
     #[value(name = "cdp-pipe")]
     CdpPipe,
-    /// Raw CDP over WebSocket (our own, fully parallel)
+    /// Raw CDP over WebSocket (our own, fully parallel). All platforms.
     #[value(name = "cdp-raw")]
     CdpRaw,
     /// Native `WKWebView` (macOS only)
@@ -89,6 +91,7 @@ pub enum Transport {
 impl BrowserArgs {
     pub fn backend_kind(&self) -> BackendKind {
         match self.backend {
+            #[cfg(unix)]
             Backend::CdpPipe => BackendKind::CdpPipe,
             Backend::CdpRaw => BackendKind::CdpRaw,
             #[cfg(target_os = "macos")]

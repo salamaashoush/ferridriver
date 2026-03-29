@@ -192,6 +192,7 @@ impl BrowserState {
         }
 
         let browser = match self.backend_kind {
+            #[cfg(unix)]
             BackendKind::CdpPipe => {
                 use crate::backend::cdp_pipe::CdpPipeBrowser;
                 let flags = chrome_flags(self.headless, &all_extra);
@@ -779,7 +780,14 @@ pub fn detect_chromium() -> String {
     }
 
     if let Ok(path_var) = std::env::var("PATH") {
-        let names = [
+        #[cfg(windows)]
+        let names: &[&str] = &[
+            "chrome.exe",
+            "msedge.exe",
+            "chromium.exe",
+        ];
+        #[cfg(not(windows))]
+        let names: &[&str] = &[
             "google-chrome-stable",
             "google-chrome",
             "chromium-browser",
@@ -787,8 +795,9 @@ pub fn detect_chromium() -> String {
             "microsoft-edge",
             "chrome",
         ];
-        for name in &names {
-            for dir in path_var.split(':') {
+        let separator = if cfg!(windows) { ';' } else { ':' };
+        for name in names {
+            for dir in path_var.split(separator) {
                 let candidate = std::path::PathBuf::from(dir).join(name);
                 if candidate.exists() {
                     return candidate.to_string_lossy().to_string();
@@ -836,22 +845,54 @@ pub fn detect_chromium() -> String {
         }
     }
 
+    #[cfg(target_os = "windows")]
+    {
+        // Windows: check standard install locations for Chrome and Edge
+        let program_files = std::env::var("PROGRAMFILES")
+            .unwrap_or_else(|_| r"C:\Program Files".to_string());
+        let program_files_x86 = std::env::var("PROGRAMFILES(X86)")
+            .unwrap_or_else(|_| r"C:\Program Files (x86)".to_string());
+        let local_app_data = std::env::var("LOCALAPPDATA")
+            .unwrap_or_default();
+
+        let win_paths = [
+            format!(r"{program_files}\Google\Chrome\Application\chrome.exe"),
+            format!(r"{program_files_x86}\Google\Chrome\Application\chrome.exe"),
+            format!(r"{local_app_data}\Google\Chrome\Application\chrome.exe"),
+            format!(r"{program_files}\Microsoft\Edge\Application\msedge.exe"),
+            format!(r"{program_files_x86}\Microsoft\Edge\Application\msedge.exe"),
+            format!(r"{program_files}\Chromium\Application\chrome.exe"),
+        ];
+        for path in &win_paths {
+            if std::path::Path::new(path).exists() {
+                return path.clone();
+            }
+        }
+    }
+
     if let Some(p) = find_playwright_chrome() {
         return p;
     }
 
-    "chromium".to_string()
+    if cfg!(windows) { "msedge.exe".to_string() } else { "chromium".to_string() }
 }
 
 /// Search Playwright's cache dir for a chromium headless shell binary.
 fn find_playwright_chrome() -> Option<String> {
-    let home = std::env::var("HOME").ok()?;
+    let home = std::env::var("HOME")
+        .or_else(|_| std::env::var("USERPROFILE"))
+        .ok()?;
 
     #[cfg(target_os = "macos")]
     let cache_dir = std::path::PathBuf::from(&home).join("Library/Caches/ms-playwright");
     #[cfg(target_os = "linux")]
     let cache_dir = std::path::PathBuf::from(&home).join(".cache/ms-playwright");
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+    #[cfg(target_os = "windows")]
+    let cache_dir = {
+        let local = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| format!(r"{home}\AppData\Local"));
+        std::path::PathBuf::from(local).join("ms-playwright")
+    };
+    #[cfg(not(any(target_os = "macos", target_os = "linux", target_os = "windows")))]
     return None;
 
     if !cache_dir.exists() {

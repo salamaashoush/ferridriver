@@ -7,6 +7,7 @@
 //!
 //! Uses enum dispatch (not trait objects) for zero-cost abstraction and Clone support.
 
+#[cfg(unix)]
 pub mod cdp_pipe;
 pub mod cdp_raw;
 #[cfg(target_os = "macos")]
@@ -101,9 +102,10 @@ pub struct MetricData {
 /// Which backend to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
-    /// Chrome `DevTools` Protocol over pipes (--remote-debugging-pipe)
+    /// Chrome `DevTools` Protocol over pipes (--remote-debugging-pipe). Unix only.
+    #[cfg(unix)]
     CdpPipe,
-    /// Chrome `DevTools` Protocol over WebSocket (our own, fully parallel)
+    /// Chrome `DevTools` Protocol over WebSocket (our own, fully parallel). All platforms.
     CdpRaw,
     /// Native WebKit/WKWebView (macOS only)
     #[cfg(target_os = "macos")]
@@ -114,6 +116,7 @@ pub enum BackendKind {
 
 /// Browser instance — enum dispatch across backends.
 pub enum AnyBrowser {
+    #[cfg(unix)]
     CdpPipe(cdp_pipe::CdpPipeBrowser),
     CdpRaw(cdp_raw::CdpRawBrowser),
     #[cfg(target_os = "macos")]
@@ -129,6 +132,7 @@ impl AnyBrowser {
     pub async fn pages(&self) -> Result<Vec<AnyPage>, String> {
         match self {
 
+            #[cfg(unix)]
             Self::CdpPipe(b) => b.pages().await,
             Self::CdpRaw(b) => b.pages().await,
             #[cfg(target_os = "macos")]
@@ -144,6 +148,7 @@ impl AnyBrowser {
     pub async fn new_page(&self, url: &str) -> Result<AnyPage, String> {
         match self {
 
+            #[cfg(unix)]
             Self::CdpPipe(b) => b.new_page(url).await,
             Self::CdpRaw(b) => b.new_page(url).await,
             #[cfg(target_os = "macos")]
@@ -159,6 +164,7 @@ impl AnyBrowser {
     pub async fn new_page_isolated(&self, url: &str) -> Result<AnyPage, String> {
         match self {
 
+            #[cfg(unix)]
             Self::CdpPipe(b) => b.new_page_isolated(url).await,
             Self::CdpRaw(b) => b.new_page_isolated(url).await,
             #[cfg(target_os = "macos")]
@@ -174,6 +180,7 @@ impl AnyBrowser {
     pub async fn close(&mut self) -> Result<(), String> {
         match self {
 
+            #[cfg(unix)]
             Self::CdpPipe(b) => b.close().await,
             Self::CdpRaw(b) => b.close().await,
             #[cfg(target_os = "macos")]
@@ -187,6 +194,7 @@ impl AnyBrowser {
 /// Page handle — enum dispatch across backends. Cheaply cloneable (Arc-based).
 #[derive(Clone)]
 pub enum AnyPage {
+    #[cfg(unix)]
     CdpPipe(cdp_pipe::CdpPipePage),
     CdpRaw(cdp_raw::CdpRawPage),
     #[cfg(target_os = "macos")]
@@ -197,6 +205,7 @@ pub enum AnyPage {
 macro_rules! page_dispatch {
     ($self:expr, $method:ident ( $($arg:expr),* $(,)? )) => {
         match $self {
+            #[cfg(unix)]
             AnyPage::CdpPipe(p) => p.$method($($arg),*).await,
             AnyPage::CdpRaw(p) => p.$method($($arg),*).await,
             #[cfg(target_os = "macos")]
@@ -212,6 +221,7 @@ impl AnyPage {
     #[must_use]
     pub fn events(&self) -> &EventEmitter {
         match self {
+            #[cfg(unix)]
             AnyPage::CdpPipe(p) => &p.events,
             AnyPage::CdpRaw(p) => &p.events,
             #[cfg(target_os = "macos")]
@@ -691,6 +701,7 @@ impl AnyPage {
         dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
     ) {
         match self {
+            #[cfg(unix)]
             Self::CdpPipe(p) => p.attach_listeners(console_log, network_log, dialog_log),
             Self::CdpRaw(p) => p.attach_listeners(console_log, network_log, dialog_log),
             #[cfg(target_os = "macos")]
@@ -744,6 +755,7 @@ impl AnyPage {
     /// Default: auto-accept alerts/confirms, accept prompts with default value.
     pub async fn set_dialog_handler(&self, handler: crate::events::DialogHandler) {
         match self {
+            #[cfg(unix)]
             Self::CdpPipe(p) => *p.dialog_handler.write().await = handler,
             Self::CdpRaw(p) => *p.dialog_handler.write().await = handler,
             #[cfg(target_os = "macos")]
@@ -789,6 +801,7 @@ impl AnyPage {
     #[must_use]
     pub fn is_closed(&self) -> bool {
         match self {
+            #[cfg(unix)]
             Self::CdpPipe(p) => p.is_closed(),
             Self::CdpRaw(p) => p.is_closed(),
             #[cfg(target_os = "macos")]
@@ -844,6 +857,7 @@ impl AnyPage {
 
 /// Element handle — enum dispatch across backends.
 pub enum AnyElement {
+    #[cfg(unix)]
     CdpPipe(cdp_pipe::CdpPipeElement),
     CdpRaw(cdp_raw::CdpRawElement),
     #[cfg(target_os = "macos")]
@@ -853,6 +867,7 @@ pub enum AnyElement {
 macro_rules! element_dispatch {
     ($self:expr, $method:ident ( $($arg:expr),* $(,)? )) => {
         match $self {
+            #[cfg(unix)]
             AnyElement::CdpPipe(e) => e.$method($($arg),*).await,
             AnyElement::CdpRaw(e) => e.$method($($arg),*).await,
             #[cfg(target_os = "macos")]
