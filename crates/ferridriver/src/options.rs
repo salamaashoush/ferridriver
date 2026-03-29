@@ -73,7 +73,7 @@ pub struct ViewportConfig {
   pub is_landscape: bool,
 }
 
-/// Media emulation options -- matches Playwright's page.emulateMedia().
+/// Media emulation options -- matches Playwright's `page.emulateMedia()`.
 #[derive(Debug, Clone, Default)]
 pub struct EmulateMediaOptions {
   /// "screen", "print", or null to reset
@@ -88,10 +88,20 @@ pub struct EmulateMediaOptions {
   pub contrast: Option<String>,
 }
 
-/// Launch options for the browser -- matches Playwright's browserType.launch().
+/// Navigation options for goto/reload/goBack/goForward.
+#[derive(Debug, Clone, Default)]
+pub struct GotoOptions {
+  /// When to consider navigation complete:
+  /// "load" (default), "domcontentloaded", "networkidle", "commit"
+  pub wait_until: Option<String>,
+  /// Maximum navigation timeout in milliseconds.
+  pub timeout: Option<u64>,
+}
+
+/// Launch options for the browser -- matches Playwright's `browserType.launch()`.
 #[derive(Debug, Clone)]
 pub struct LaunchOptions {
-  /// Backend to use: CdpWs, CdpPipe, CdpRaw, WebKit.
+  /// Backend to use: `CdpPipe`, `CdpRaw`, `WebKit`.
   pub backend: crate::backend::BackendKind,
   /// Run in headful mode (show browser window). Default: false (headless).
   pub headless: bool,

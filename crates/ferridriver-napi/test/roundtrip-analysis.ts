@@ -23,7 +23,7 @@ async function bench(backend: string) {
   // goto breakdown - this is the biggest gap vs Playwright
   const goto = await med(() => p.goto("https://example.com"));
   
-  // click breakdown - cdp-ws is 98ms, others 3ms
+  // click breakdown
   await p.setContent('<button id="b">x</button>');
   const click = await med(() => p.click("#b"));
   
@@ -41,6 +41,6 @@ async function bench(backend: string) {
   await b.close();
 }
 
-for (const backend of ["cdp-ws", "cdp-pipe", "cdp-raw", "webkit"]) {
+for (const backend of ["cdp-pipe", "cdp-raw", "webkit"]) {
   await bench(backend);
 }

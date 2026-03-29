@@ -1,6 +1,6 @@
-//! Locator class -- NAPI binding for ferridriver::Locator.
+//! Locator class -- NAPI binding for `ferridriver::Locator`.
 
-use crate::types::*;
+use crate::types::{RoleOptions, TextOptions, FilterOptions, BoundingBox, WaitOptions};
 use napi::bindgen_prelude::Buffer;
 use napi::Result;
 use napi_derive::napi;
@@ -34,38 +34,38 @@ impl Locator {
 
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
-    let opts = options.as_ref().map_or_else(Default::default, Into::into);
-    Self::wrap(self.inner.get_by_role(&role, opts))
+    let opts: ferridriver::options::RoleOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    Self::wrap(self.inner.get_by_role(&role, &opts))
   }
 
   #[napi]
   pub fn get_by_text(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts = options.as_ref().map_or_else(Default::default, Into::into);
-    Self::wrap(self.inner.get_by_text(&text, opts))
+    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    Self::wrap(self.inner.get_by_text(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_label(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts = options.as_ref().map_or_else(Default::default, Into::into);
-    Self::wrap(self.inner.get_by_label(&text, opts))
+    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    Self::wrap(self.inner.get_by_label(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_placeholder(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts = options.as_ref().map_or_else(Default::default, Into::into);
-    Self::wrap(self.inner.get_by_placeholder(&text, opts))
+    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    Self::wrap(self.inner.get_by_placeholder(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_alt_text(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts = options.as_ref().map_or_else(Default::default, Into::into);
-    Self::wrap(self.inner.get_by_alt_text(&text, opts))
+    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    Self::wrap(self.inner.get_by_alt_text(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_title(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts = options.as_ref().map_or_else(Default::default, Into::into);
-    Self::wrap(self.inner.get_by_title(&text, opts))
+    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    Self::wrap(self.inner.get_by_title(&text, &opts))
   }
 
   #[napi]
@@ -90,7 +90,7 @@ impl Locator {
 
   #[napi]
   pub fn filter(&self, options: FilterOptions) -> Locator {
-    Self::wrap(self.inner.filter(ferridriver::options::FilterOptions::from(&options)))
+    Self::wrap(self.inner.filter(&ferridriver::options::FilterOptions::from(&options)))
   }
 
   // ── Actions ─────────────────────────────────────────────────────────────
@@ -167,7 +167,7 @@ impl Locator {
 
   #[napi]
   pub async fn press_sequentially(&self, text: String, delay_ms: Option<f64>) -> Result<()> {
-    self.inner.press_sequentially(&text, delay_ms.map(|v| v as u64))
+    self.inner.press_sequentially(&text, delay_ms.map(crate::types::f64_to_u64))
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -232,7 +232,7 @@ impl Locator {
   #[napi]
   pub async fn count(&self) -> Result<i32> {
     let n = self.inner.count().await.map_err(napi::Error::from_reason)?;
-    Ok(n as i32)
+    i32::try_from(n).map_err(|_| napi::Error::from_reason(format!("element count {n} exceeds i32::MAX")))
   }
 
   #[napi]
@@ -245,7 +245,7 @@ impl Locator {
 
   #[napi]
   pub async fn wait_for(&self, options: Option<WaitOptions>) -> Result<()> {
-    let opts = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::WaitOptions = options.as_ref().map_or_else(Default::default, Into::into);
     self.inner.wait_for(opts).await.map_err(napi::Error::from_reason)
   }
 
@@ -268,4 +268,63 @@ impl Locator {
   pub async fn all_inner_texts(&self) -> Result<Vec<String>> {
     self.inner.all_inner_texts().await.map_err(napi::Error::from_reason)
   }
+
+  // ── Missing methods ─────────────────────────────────────────────────────
+
+  #[napi]
+  pub async fn right_click(&self) -> Result<()> {
+    self.inner.right_click().await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn tap(&self) -> Result<()> {
+    self.inner.tap().await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn select_text(&self) -> Result<()> {
+    self.inner.select_text().await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn set_checked(&self, checked: bool) -> Result<()> {
+    self.inner.set_checked(checked).await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn set_input_files(&self, paths: Vec<String>) -> Result<()> {
+    self.inner.set_input_files(&paths).await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn is_attached(&self) -> Result<bool> {
+    self.inner.is_attached().await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn evaluate(&self, expression: String) -> Result<Option<serde_json::Value>> {
+    self.inner.evaluate(&expression).await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn evaluate_all(&self, expression: String) -> Result<Option<serde_json::Value>> {
+    self.inner.evaluate_all(&expression).await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub fn or_locator(&self, other: &Locator) -> Locator {
+    Locator { inner: self.inner.or(&other.inner) }
+  }
+
+  #[napi]
+  pub fn and_locator(&self, other: &Locator) -> Locator {
+    Locator { inner: self.inner.and(&other.inner) }
+  }
+
+  #[napi]
+  pub async fn all(&self) -> Result<Vec<Locator>> {
+    let locators = self.inner.all().await.map_err(napi::Error::from_reason)?;
+    Ok(locators.into_iter().map(|l| Locator { inner: l }).collect())
+  }
+
 }

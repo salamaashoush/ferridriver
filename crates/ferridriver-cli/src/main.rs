@@ -1,10 +1,6 @@
-//! ferridriver -- High-performance browser automation.
+//! ferridriver -- High-performance browser automation CLI.
 
 mod cli;
-mod mcp;
-mod params;
-mod server;
-mod tools;
 
 use clap::Parser;
 use tracing_subscriber::{self, EnvFilter};
@@ -20,6 +16,14 @@ async fn main() -> anyhow::Result<()> {
     let cli = cli::Cli::parse();
 
     match cli.command {
-        cli::Command::Mcp { browser, transport } => mcp::run(browser, transport).await,
+        cli::Command::Mcp { browser, transport } => {
+            let backend = browser.backend_kind();
+            let mode = browser.connect_mode();
+
+            match transport.transport {
+                cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio(mode, backend).await,
+                cli::Transport::Http => ferridriver_mcp::mcp::serve_http(mode, backend, transport.port).await,
+            }
+        }
     }
 }

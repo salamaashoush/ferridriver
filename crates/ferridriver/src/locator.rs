@@ -6,12 +6,14 @@
 //!
 //! Locators can be chained to narrow scope:
 //! ```ignore
-//! page.locator("css=.form").get_by_role("textbox", Default::default()).fill("hello").await?;
+//! page.locator("css=.form").get_by_role("textbox", &Default::default()).fill("hello").await?;
 //! ```
+
+use std::fmt::Write as _;
 
 use crate::actions;
 use crate::backend::AnyElement;
-use crate::options::*;
+use crate::options::{RoleOptions, TextOptions, FilterOptions, BoundingBox, WaitOptions};
 use crate::selectors;
 
 /// A lazy element locator. Does not query the DOM until an action is called.
@@ -19,57 +21,78 @@ use crate::selectors;
 pub struct Locator {
   pub(crate) page: crate::page::Page,
   pub(crate) selector: String,
+  /// If set, evaluate in this frame instead of the main frame.
+  pub(crate) frame_id: Option<String>,
 }
 
 impl Locator {
   // ── Sub-locators (chain with >>) ──────────────────────────────────────────
 
   /// Narrow this locator's scope with an additional selector.
+  #[must_use]
   pub fn locator(&self, selector: &str) -> Locator {
     self.chain(selector)
   }
 
-  pub fn get_by_role(&self, role: &str, opts: RoleOptions) -> Locator {
-    self.chain(&build_role_selector(role, &opts))
+  /// Locate elements by ARIA role, optionally filtered by role options.
+  #[must_use]
+  pub fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Locator {
+    self.chain(&build_role_selector(role, opts))
   }
 
-  pub fn get_by_text(&self, text: &str, opts: TextOptions) -> Locator {
-    self.chain(&build_text_selector("text", text, &opts))
+  /// Locate elements by visible text content.
+  #[must_use]
+  pub fn get_by_text(&self, text: &str, opts: &TextOptions) -> Locator {
+    self.chain(&build_text_selector("text", text, opts))
   }
 
-  pub fn get_by_label(&self, text: &str, opts: TextOptions) -> Locator {
-    self.chain(&build_text_selector("label", text, &opts))
+  /// Locate form elements by their associated label text.
+  #[must_use]
+  pub fn get_by_label(&self, text: &str, opts: &TextOptions) -> Locator {
+    self.chain(&build_text_selector("label", text, opts))
   }
 
-  pub fn get_by_placeholder(&self, text: &str, opts: TextOptions) -> Locator {
-    self.chain(&build_text_selector("placeholder", text, &opts))
+  /// Locate input elements by their placeholder text.
+  #[must_use]
+  pub fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Locator {
+    self.chain(&build_text_selector("placeholder", text, opts))
   }
 
-  pub fn get_by_alt_text(&self, text: &str, opts: TextOptions) -> Locator {
-    self.chain(&build_text_selector("alt", text, &opts))
+  /// Locate elements by their `alt` attribute text.
+  #[must_use]
+  pub fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Locator {
+    self.chain(&build_text_selector("alt", text, opts))
   }
 
-  pub fn get_by_title(&self, text: &str, opts: TextOptions) -> Locator {
-    self.chain(&build_text_selector("title", text, &opts))
+  /// Locate elements by their `title` attribute text.
+  #[must_use]
+  pub fn get_by_title(&self, text: &str, opts: &TextOptions) -> Locator {
+    self.chain(&build_text_selector("title", text, opts))
   }
 
+  #[must_use]
   pub fn get_by_test_id(&self, test_id: &str) -> Locator {
     self.chain(&format!("testid={test_id}"))
   }
 
+  #[must_use]
   pub fn first(&self) -> Locator {
     self.chain("nth=0")
   }
 
+  #[must_use]
   pub fn last(&self) -> Locator {
     self.chain("nth=-1")
   }
 
+  #[must_use]
   pub fn nth(&self, index: i32) -> Locator {
     self.chain(&format!("nth={index}"))
   }
 
-  pub fn filter(&self, opts: FilterOptions) -> Locator {
+  /// Filter this locator by text content, sub-selector presence, or absence.
+  #[must_use]
+  pub fn filter(&self, opts: &FilterOptions) -> Locator {
     let mut loc = self.clone();
     if let Some(text) = &opts.has_text {
       loc = loc.chain(&format!("has-text={text}"));
@@ -88,6 +111,12 @@ impl Locator {
 
   // ── Actions ───────────────────────────────────────────────────────────────
 
+  /// Click the element matched by this locator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found, is not actionable
+  /// (e.g. a `<select>` or file input), or the click fails.
   pub async fn click(&self) -> Result<(), String> {
     let el = self.resolve().await?;
     // Click guard: prevent clicking <select> or file inputs
@@ -98,18 +127,53 @@ impl Locator {
     el.click().await
   }
 
+  /// Double-click the element matched by this locator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or the double-click fails.
   pub async fn dblclick(&self) -> Result<(), String> {
     let el = self.resolve().await?;
     actions::wait_for_actionable(&el, self.page.inner()).await.ok();
-    el.click().await?;
-    el.click().await
+    el.dblclick().await
   }
 
+  /// Right-click (context menu click) on the element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found, its bounding box
+  /// cannot be computed, or the right-click dispatch fails.
+  pub async fn right_click(&self) -> Result<(), String> {
+    let el = self.resolve().await?;
+    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
+    // Get center coords and dispatch right-click via page
+    let center = el.call_js_fn_value(
+      "function() { this.scrollIntoViewIfNeeded && this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
+    ).await?;
+    if let Some(c) = center {
+      let x = c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+      let y = c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+      self.page.click_at_opts(x, y, "right", 1).await?;
+    }
+    Ok(())
+  }
+
+  /// Fill an input or textarea element with the given value.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or is not a fillable element.
   pub async fn fill(&self, value: &str) -> Result<(), String> {
     let el = self.resolve().await?;
     actions::fill(&el, value).await
   }
 
+  /// Clear the value of an input or textarea element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found.
   pub async fn clear(&self) -> Result<(), String> {
     let el = self.resolve().await?;
     let _ = el.call_js_fn("function() { \
@@ -119,29 +183,54 @@ impl Locator {
     Ok(())
   }
 
+  /// Type text into the element character by character using keyboard events.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or key dispatch fails.
   pub async fn type_text(&self, text: &str) -> Result<(), String> {
     let el = self.resolve().await?;
     actions::wait_for_actionable(&el, self.page.inner()).await.ok();
     el.type_str(text).await
   }
 
+  /// Press a key or key combination (e.g. "Enter", "Control+a").
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or the key press fails.
   pub async fn press(&self, key: &str) -> Result<(), String> {
     self.resolve().await?;
     self.page.inner().press_key(key).await
   }
 
+  /// Hover over the element matched by this locator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or the hover action fails.
   pub async fn hover(&self) -> Result<(), String> {
     let el = self.resolve().await?;
     actions::wait_for_actionable(&el, self.page.inner()).await.ok();
     el.hover().await
   }
 
+  /// Focus the element matched by this locator.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found.
   pub async fn focus(&self) -> Result<(), String> {
     let el = self.resolve().await?;
     let _ = el.call_js_fn("function() { this.focus(); }").await;
     Ok(())
   }
 
+  /// Check a checkbox or radio button if it is not already checked.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or is not actionable.
   pub async fn check(&self) -> Result<(), String> {
     let el = self.resolve().await?;
     actions::wait_for_actionable(&el, self.page.inner()).await.ok();
@@ -149,6 +238,11 @@ impl Locator {
     Ok(())
   }
 
+  /// Uncheck a checkbox if it is currently checked.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or is not actionable.
   pub async fn uncheck(&self) -> Result<(), String> {
     let el = self.resolve().await?;
     actions::wait_for_actionable(&el, self.page.inner()).await.ok();
@@ -156,21 +250,91 @@ impl Locator {
     Ok(())
   }
 
+  /// Set the checked state of a checkbox or radio button.
+  /// If `checked` is true, checks it. If false, unchecks it.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or is not actionable.
+  pub async fn set_checked(&self, checked: bool) -> Result<(), String> {
+    if checked { self.check().await } else { self.uncheck().await }
+  }
+
+  /// Tap the element (touch event). Dispatches touchstart + touchend on platforms
+  /// that support Touch/TouchEvent APIs, falls back to pointerdown + pointerup + click
+  /// on desktop browsers (e.g. macOS `WKWebView`) where Touch constructors are unavailable.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or the tap event dispatch fails.
+  pub async fn tap(&self) -> Result<(), String> {
+    let el = self.resolve().await?;
+    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
+    el.call_js_fn("function() { \
+      this.scrollIntoViewIfNeeded && this.scrollIntoViewIfNeeded(); \
+      var r = this.getBoundingClientRect(); \
+      var cx = r.left + r.width/2, cy = r.top + r.height/2; \
+      if (typeof Touch !== 'undefined' && typeof TouchEvent !== 'undefined') { \
+        var t = new Touch({identifier:1,target:this,clientX:cx,clientY:cy}); \
+        this.dispatchEvent(new TouchEvent('touchstart',{touches:[t],changedTouches:[t],bubbles:true})); \
+        this.dispatchEvent(new TouchEvent('touchend',{touches:[],changedTouches:[t],bubbles:true})); \
+      } else { \
+        this.dispatchEvent(new PointerEvent('pointerdown',{clientX:cx,clientY:cy,bubbles:true,isPrimary:true,pointerType:'touch'})); \
+        this.dispatchEvent(new PointerEvent('pointerup',{clientX:cx,clientY:cy,bubbles:true,isPrimary:true,pointerType:'touch'})); \
+        this.click(); \
+      } \
+    }").await
+  }
+
+  /// Select all text in an input or textarea element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or the selection fails.
+  pub async fn select_text(&self) -> Result<(), String> {
+    let el = self.resolve().await?;
+    el.call_js_fn("function() { \
+      this.focus(); \
+      if (this.select) { this.select(); } \
+      else if (this.setSelectionRange) { this.setSelectionRange(0, this.value ? this.value.length : 0); } \
+    }").await
+  }
+
+  /// Select an `<option>` by value within a `<select>` element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or is not a `<select>`.
   pub async fn select_option(&self, value: &str) -> Result<Vec<String>, String> {
     let el = self.resolve().await?;
     let result = actions::select_option(&el, self.page.inner(), value).await?;
     Ok(vec![result.selected_value])
   }
 
+  /// Set file paths on a file input element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not a file input or the upload fails.
   pub async fn set_input_files(&self, paths: &[String]) -> Result<(), String> {
     actions::upload_file(self.page.inner(), &self.selector, paths).await
   }
 
+  /// Scroll the element into the visible area of the viewport.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or scroll fails.
   pub async fn scroll_into_view(&self) -> Result<(), String> {
     let el = self.resolve().await?;
     el.scroll_into_view().await
   }
 
+  /// Dispatch a DOM event of the given type on the element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found.
   pub async fn dispatch_event(&self, event_type: &str) -> Result<(), String> {
     let el = self.resolve().await?;
     let _ = el.call_js_fn(&format!(
@@ -181,18 +345,38 @@ impl Locator {
 
   // ── Content & state ───────────────────────────────────────────────────────
 
+  /// Return the `textContent` of the element, or `None` if not found.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn text_content(&self) -> Result<Option<String>, String> {
     self.eval_prop("textContent").await
   }
 
+  /// Return the `innerText` of the element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn inner_text(&self) -> Result<String, String> {
-    self.eval_prop("innerText").await.map(|v| v.unwrap_or_default())
+    self.eval_prop("innerText").await.map(std::option::Option::unwrap_or_default)
   }
 
+  /// Return the `innerHTML` of the element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn inner_html(&self) -> Result<String, String> {
-    self.eval_prop("innerHTML").await.map(|v| v.unwrap_or_default())
+    self.eval_prop("innerHTML").await.map(std::option::Option::unwrap_or_default)
   }
 
+  /// Get the value of an attribute on the element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn get_attribute(&self, name: &str) -> Result<Option<String>, String> {
     let escaped = name.replace('\\', "\\\\").replace('\'', "\\'");
     let val = self.eval_on_element(&format!(
@@ -205,10 +389,21 @@ impl Locator {
     }))
   }
 
+  /// Return the `value` property of an input or textarea element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn input_value(&self) -> Result<String, String> {
-    self.eval_prop("value").await.map(|v| v.unwrap_or_default())
+    self.eval_prop("value").await.map(std::option::Option::unwrap_or_default)
   }
 
+  /// Check whether the element is visible (not `display:none`, `visibility:hidden`,
+  /// or `opacity:0`). Returns `false` if the element does not exist.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn is_visible(&self) -> Result<bool, String> {
     // Single evaluate: find element + check visibility. Returns false if not found.
     let val = self.eval_on_element(
@@ -219,22 +414,56 @@ impl Locator {
     Ok(val.and_then(|v| v.as_bool()).unwrap_or(false))
   }
 
+  /// Check whether the element is hidden (inverse of `is_visible`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn is_hidden(&self) -> Result<bool, String> {
     self.is_visible().await.map(|v| !v)
   }
 
+  /// Check whether the element is enabled (i.e. not `disabled`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn is_enabled(&self) -> Result<bool, String> {
     self.eval_bool("function() { return !this.disabled; }").await
   }
 
+  /// Check whether the element is disabled.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn is_disabled(&self) -> Result<bool, String> {
     self.eval_bool("function() { return !!this.disabled; }").await
   }
 
+  /// Check whether a checkbox or radio button is checked.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn is_checked(&self) -> Result<bool, String> {
     self.eval_bool("function() { return !!this.checked; }").await
   }
 
+  /// Check if the element is attached to the DOM (exists in the document).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing fails.
+  pub async fn is_attached(&self) -> Result<bool, String> {
+    Ok(self.resolve().await.is_ok())
+  }
+
+  /// Count the number of elements matching this locator's selector.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn count(&self) -> Result<usize, String> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
@@ -242,9 +471,14 @@ impl Locator {
     let val = self.page.inner().evaluate(&js).await?
       .and_then(|v| v.as_u64())
       .unwrap_or(0);
-    Ok(val as usize)
+    Ok(usize::try_from(val).unwrap_or(usize::MAX))
   }
 
+  /// Return the bounding box of the element, or `None` if the element is not found.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn bounding_box(&self) -> Result<Option<BoundingBox>, String> {
     let val = self.eval_on_element(
       "var r = el.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height};"
@@ -262,6 +496,13 @@ impl Locator {
 
   // ── Waiting ───────────────────────────────────────────────────────────────
 
+  /// Wait for the element to reach the specified state ("visible", "hidden",
+  /// "attached", or "detached").
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the timeout expires before the element reaches
+  /// the desired state, or if an unknown state is specified.
   pub async fn wait_for(&self, opts: WaitOptions) -> Result<(), String> {
     let timeout = opts.timeout.unwrap_or(30000);
     let state = opts.state.as_deref().unwrap_or("visible");
@@ -292,6 +533,11 @@ impl Locator {
 
   // ── Screenshot ────────────────────────────────────────────────────────────
 
+  /// Take a PNG screenshot of the element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or screenshot capture fails.
   pub async fn screenshot(&self) -> Result<Vec<u8>, String> {
     let el = self.resolve().await?;
     el.screenshot(crate::backend::ImageFormat::Png).await
@@ -299,12 +545,22 @@ impl Locator {
 
   // ── Editable check ───────────────────────────────────────────────────────
 
+  /// Check whether the element is editable (not disabled and not read-only).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn is_editable(&self) -> Result<bool, String> {
     self.eval_bool("function() { return !this.disabled && !this.readOnly; }").await
   }
 
   // ── Blur ────────────────────────────────────────────────────────────────
 
+  /// Remove focus from the element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found.
   pub async fn blur(&self) -> Result<(), String> {
     let el = self.resolve().await?;
     let _ = el.call_js_fn("function() { this.blur(); }").await;
@@ -314,6 +570,10 @@ impl Locator {
   // ── Press sequentially ──────────────────────────────────────────────────
 
   /// Type text character by character with a delay between each.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be found or any key press fails.
   pub async fn press_sequentially(&self, text: &str, delay_ms: Option<u64>) -> Result<(), String> {
     let el = self.resolve().await?;
     actions::wait_for_actionable(&el, self.page.inner()).await.ok();
@@ -329,6 +589,12 @@ impl Locator {
 
   // ── Drag to another locator ─────────────────────────────────────────────
 
+  /// Drag this element to the target locator's element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if either element cannot be found, bounding box
+  /// coordinates cannot be read, or the drag operation fails.
   pub async fn drag_to(&self, target: &Locator) -> Result<(), String> {
     let source_el = self.resolve().await?;
     let _ = source_el.call_js_fn("function() { \
@@ -345,13 +611,13 @@ impl Locator {
       var e = document.querySelector('[data-fd-drag-src]'); \
       if (!e) return null; var v = e.getAttribute('data-fd-drag-src'); \
       e.removeAttribute('data-fd-drag-src'); return v; \
-    })()").await?.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+    })()").await?.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
 
     let tgt_json = self.page.inner().evaluate("(function() { \
       var e = document.querySelector('[data-fd-drag-tgt]'); \
       if (!e) return null; var v = e.getAttribute('data-fd-drag-tgt'); \
       e.removeAttribute('data-fd-drag-tgt'); return v; \
-    })()").await?.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+    })()").await?.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
 
     let src: serde_json::Value = serde_json::from_str(&src_json).map_err(|e| format!("{e}"))?;
     let tgt: serde_json::Value = serde_json::from_str(&tgt_json).map_err(|e| format!("{e}"))?;
@@ -364,14 +630,28 @@ impl Locator {
   // ── Combinators ─────────────────────────────────────────────────────────
 
   /// Union: matches elements from either this or the other locator.
+  /// Creates a new locator that matches elements found by either selector.
+  /// For CSS selectors, uses `:is(a, b)`. For rich selectors, falls back to
+  /// trying both selectors in order.
+  #[must_use]
   pub fn or(&self, other: &Locator) -> Locator {
-    // Use CSS :is() for combining if both are CSS, otherwise not easily composable
-    // For now, just return self (limitation noted)
-    // A proper implementation would need selector engine support for OR
-    self.clone()
+    let is_css_a = !selectors::is_rich_selector(&self.selector);
+    let is_css_b = !selectors::is_rich_selector(&other.selector);
+
+    let combined = if is_css_a && is_css_b {
+      // Both are CSS -- use :is() for a proper CSS OR
+      format!("css=:is({}, {})", self.selector.strip_prefix("css=").unwrap_or(&self.selector),
+              other.selector.strip_prefix("css=").unwrap_or(&other.selector))
+    } else {
+      // At least one is a rich selector -- combine with | operator
+      // This is handled by the selector engine's _exec
+      format!("{} | {}", self.selector, other.selector)
+    };
+    Locator { page: self.page.clone(), selector: combined, frame_id: self.frame_id.clone() }
   }
 
   /// Intersection: matches elements that match both locators.
+  #[must_use]
   pub fn and(&self, other: &Locator) -> Locator {
     // Chain with >> which narrows scope
     self.chain(&other.selector)
@@ -380,16 +660,25 @@ impl Locator {
   // ── All matches ─────────────────────────────────────────────────────────
 
   /// Return all matching locators as individual Locator instances.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the count query fails due to selector parsing
+  /// or JS evaluation errors.
   pub async fn all(&self) -> Result<Vec<Locator>, String> {
     let count = self.count().await?;
     let mut locators = Vec::with_capacity(count);
     for i in 0..count {
-      locators.push(self.nth(i as i32));
+      locators.push(self.nth(i32::try_from(i).unwrap_or(i32::MAX)));
     }
     Ok(locators)
   }
 
   /// Get text content of all matching elements.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn all_text_contents(&self) -> Result<Vec<String>, String> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
@@ -400,20 +689,65 @@ impl Locator {
     let val = self.page.inner().evaluate(&js).await?;
     match val {
       Some(serde_json::Value::Array(arr)) => {
-        Ok(arr.into_iter().filter_map(|v| v.as_str().map(|s| s.to_string())).collect())
+        Ok(arr.into_iter().filter_map(|v| v.as_str().map(std::string::ToString::to_string)).collect())
       }
       _ => Ok(Vec::new()),
     }
   }
 
   /// Get inner text of all matching elements.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn all_inner_texts(&self) -> Result<Vec<String>, String> {
     // Same as all_text_contents for our implementation
     self.all_text_contents().await
   }
 
+  // ── Evaluate ────────────────────────────────────────────────────────────
+
+  /// Evaluate a JS expression with the first matching element as `el`.
+  /// The expression should return a value.
+  ///
+  /// ```ignore
+  /// let tag = locator.evaluate("el.tagName").await?;
+  /// ```
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
+  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
+    self.eval_on_element(&format!("return ({expression});")).await
+  }
+
+  /// Evaluate a JS expression with ALL matching elements as `elements` array.
+  /// The expression should return a value.
+  ///
+  /// ```ignore
+  /// let count = locator.evaluate_all("elements.length").await?;
+  /// let texts = locator.evaluate_all("elements.map(e => e.textContent)").await?;
+  /// ```
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
+  pub async fn evaluate_all(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
+    let parsed = selectors::parse(&self.selector)?;
+    let parts_json = selectors::build_parts_json(&parsed);
+    let js = format!(
+      "(function() {{ var elements = window.__fd.selAll({parts_json}); return ({expression}); }})()"
+    );
+    if let Some(fid) = &self.frame_id {
+      self.page.inner().evaluate_in_frame(&js, fid).await
+    } else {
+      self.page.inner().evaluate(&js).await
+    }
+  }
+
   // ── Selector access ───────────────────────────────────────────────────────
 
+  #[must_use]
   pub fn selector(&self) -> &str {
     &self.selector
   }
@@ -430,7 +764,7 @@ impl Locator {
     } else {
       format!("{} >> {sub}", self.selector)
     };
-    Locator { page: self.page.clone(), selector }
+    Locator { page: self.page.clone(), selector, frame_id: self.frame_id.clone() }
   }
 
   async fn eval_prop(&self, prop: &str) -> Result<Option<String>, String> {
@@ -462,13 +796,20 @@ impl Locator {
     let js = format!(
       "(function() {{ var el = window.__fd.selOne({parts_json}); if (!el) return null; {js_body} }})()"
     );
-    self.page.inner().evaluate(&js).await
+    if let Some(fid) = &self.frame_id {
+      self.page.inner().evaluate_in_frame(&js, fid).await
+    } else {
+      self.page.inner().evaluate(&js).await
+    }
   }
 }
 
 impl std::fmt::Debug for Locator {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-    f.debug_struct("Locator").field("selector", &self.selector).finish()
+    f.debug_struct("Locator")
+      .field("selector", &self.selector)
+      .field("frame_id", &self.frame_id)
+      .finish_non_exhaustive()
   }
 }
 
@@ -477,7 +818,7 @@ impl std::fmt::Debug for Locator {
 pub(crate) fn build_role_selector(role: &str, opts: &RoleOptions) -> String {
   let mut sel = format!("role={role}");
   if let Some(name) = &opts.name {
-    sel.push_str(&format!("[name=\"{}\"]", name.replace('"', "\\\"")));
+    let _ = write!(sel, "[name=\"{}\"]", name.replace('"', "\\\""));
   }
   if opts.exact == Some(true) {
     // exact name matching handled at the engine level
@@ -501,7 +842,7 @@ pub(crate) fn build_role_selector(role: &str, opts: &RoleOptions) -> String {
     sel.push_str("[expanded=false]");
   }
   if let Some(level) = opts.level {
-    sel.push_str(&format!("[level={level}]"));
+    let _ = write!(sel, "[level={level}]");
   }
   if let Some(true) = opts.pressed {
     sel.push_str("[pressed=true]");

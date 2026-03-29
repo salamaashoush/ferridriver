@@ -11,7 +11,7 @@ import { chromium } from "playwright";
 const WARMUP = 3;
 const RUNS = 15;
 
-const FD_BACKENDS = ["cdp-ws", "cdp-pipe", "cdp-raw"] as const;
+const FD_BACKENDS = ["cdp-pipe", "cdp-raw"] as const;
 if (process.platform === "darwin") {
   (FD_BACKENDS as unknown as string[]).push("webkit");
 }

@@ -57,6 +57,8 @@ enum Op {
     OP_SET_LOCALE = 67,
     OP_SET_TIMEZONE = 68,
     OP_EMULATE_MEDIA = 69,
+    OP_ACCESSIBILITY_TREE = 70,
+    OP_ROUTE_REQUEST = 71,
     OP_SHUTDOWN = 255,
 };
 
@@ -170,7 +172,7 @@ static uint64_t read_u64(const uint8_t *data, uint32_t data_len, uint32_t *offse
 
 // ─── Navigation delegate ────────────────────────────────────────────────────
 
-@interface FDNavDelegate : NSObject <WKNavigationDelegate, WKScriptMessageHandler>
+@interface FDNavDelegate : NSObject <WKNavigationDelegate, WKScriptMessageHandler, WKScriptMessageHandlerWithReply>
 @property (nonatomic, strong) NSMutableDictionary<NSNumber*, void(^)(NSError*)> *waiters;
 @end
 
@@ -236,6 +238,56 @@ static uint64_t read_u64(const uint8_t *data, uint32_t data_len, uint32_t *offse
         free(buf);
     }
 }
+// Global dictionary for pending route reply handlers, keyed by req_id.
+// Populated by WKScriptMessageHandlerWithReply, resolved by dispatch_frame.
+static NSMutableDictionary<NSNumber*, void(^)(id, NSString*)> *g_pending_routes = nil;
+
+// WKScriptMessageHandlerWithReply -- used for route interception.
+// JS calls postMessage() and awaits the reply. We send an IPC frame to Rust,
+// Rust runs the route handler, sends back a response frame. dispatch_frame
+// picks it up and calls the stored replyHandler, which resolves the JS Promise.
+- (void)userContentController:(WKUserContentController *)ctrl
+      didReceiveScriptMessage:(WKScriptMessage *)message
+                 replyHandler:(void (^)(id _Nullable, NSString * _Nullable))replyHandler {
+    if (![message.name isEqualToString:@"fdRoute"]) {
+        replyHandler(nil, @"Unknown handler");
+        return;
+    }
+    NSDictionary *body = message.body;
+    if (![body isKindOfClass:[NSDictionary class]]) {
+        replyHandler(@{@"action": @"continue"}, nil);
+        return;
+    }
+
+    NSString *url = body[@"url"] ?: @"";
+    NSString *method = body[@"method"] ?: @"GET";
+    NSString *headersJson = body[@"headers"] ?: @"{}";
+    NSString *postData = body[@"postData"] ?: @"";
+
+    const char *u = [url UTF8String], *m = [method UTF8String], *h = [headersJson UTF8String], *p = [postData UTF8String];
+    uint32_t ul = (uint32_t)strlen(u), ml = (uint32_t)strlen(m), hl = (uint32_t)strlen(h), pl = (uint32_t)strlen(p);
+    uint32_t total = 16 + ul + ml + hl + pl;
+    uint8_t *buf = malloc(total);
+    uint32_t off = 0;
+    memcpy(buf+off, &ul, 4); off+=4; memcpy(buf+off, u, ul); off+=ul;
+    memcpy(buf+off, &ml, 4); off+=4; memcpy(buf+off, m, ml); off+=ml;
+    memcpy(buf+off, &hl, 4); off+=4; memcpy(buf+off, h, hl); off+=hl;
+    memcpy(buf+off, &pl, 4); off+=4; memcpy(buf+off, p, pl); off+=pl;
+
+    static uint32_t route_seq = 50000;
+    uint32_t rid = route_seq++;
+
+    // Store the reply handler. It will be called from dispatch_frame when
+    // the Rust parent sends back REP_VALUE with this req_id.
+    if (!g_pending_routes) g_pending_routes = [NSMutableDictionary new];
+    g_pending_routes[@(rid)] = [replyHandler copy];
+
+    // Send as rep=11 (REP_ROUTE_REQUEST) so the Rust reader recognizes it
+    write_frame(rid, 11, buf, total);
+    free(buf);
+    // replyHandler will be called later from dispatch_frame
+}
+
 - (void)webView:(WKWebView *)wv didFinishNavigation:(WKNavigation *)nav {
     NSNumber *key = @((uintptr_t)wv);
     void(^block)(NSError*) = _waiters[key];
@@ -365,6 +417,10 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             [config.userContentController addScriptMessageHandler:g_nav_delegate name:@"fdConsole"];
             [config.userContentController addScriptMessageHandler:g_nav_delegate name:@"fdDialog"];
             [config.userContentController addScriptMessageHandler:g_nav_delegate name:@"fdNetwork"];
+            // Route handler with reply support (macOS 11+)
+            if (@available(macOS 11.0, *)) {
+                [config.userContentController addScriptMessageHandler:g_nav_delegate contentWorld:WKContentWorld.pageWorld name:@"fdRoute"];
+            }
 
             // Console capture
             NSString *consoleJS = @"(function(){if(window.__fd_con)return;window.__fd_con=1;"
@@ -392,19 +448,78 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 injectionTime:WKUserScriptInjectionTimeAtDocumentStart
                 forMainFrameOnly:NO]];
 
-            // Network request interception (fetch + XMLHttpRequest)
+            // Network observation + route interception (fetch + XMLHttpRequest)
+            // Routes are patterns stored in __fd_routes array. When a fetch/XHR URL
+            // matches a pattern, we call fdRoute.postMessage() which round-trips to Rust
+            // for the route action (fulfill/continue/abort).
             NSString *networkJS = @"(function(){if(window.__fd_net)return;window.__fd_net=1;"
-                "var h=webkit.messageHandlers.fdNetwork;var seq=0;"
+                "var hNet=webkit.messageHandlers.fdNetwork;var seq=0;"
+                "window.__fd_routes=window.__fd_routes||[];"
+                "function matchRoute(url){"
+                  "for(var i=0;i<window.__fd_routes.length;i++){"
+                    "if(window.__fd_routes[i].test(url))return true;"
+                  "}"
+                  "return false;"
+                "}"
+                // fetch interceptor
                 "var origFetch=window.fetch;"
-                "window.fetch=function(url,opts){"
-                "var method=(opts&&opts.method)||'GET';"
-                "var u=typeof url==='string'?url:(url&&url.url||'');"
-                "try{h.postMessage({id:'f'+(seq++),method:method,url:u,resourceType:'Fetch'})}catch(e){}"
-                "return origFetch.apply(this,arguments)};"
+                "window.fetch=function(input,opts){"
+                  "var method=(opts&&opts.method)||'GET';"
+                  "var u=typeof input==='string'?input:(input&&input.url||'');"
+                  "try{hNet.postMessage({id:'f'+(seq++),method:method,url:u,resourceType:'Fetch'})}catch(e){}"
+                  "if(!matchRoute(u))return origFetch.apply(this,arguments);"
+                  // Route matches -- ask Rust for the action
+                  "var hdrs='{}';"
+                  "try{if(opts&&opts.headers){hdrs=JSON.stringify(Object.fromEntries("
+                    "opts.headers instanceof Headers?opts.headers.entries():Object.entries(opts.headers)))}}catch(e){}"
+                  "var body=(opts&&opts.body)||'';"
+                  "return webkit.messageHandlers.fdRoute.postMessage("
+                    "{url:u,method:method,headers:hdrs,postData:typeof body==='string'?body:''}"
+                  ").then(function(action){"
+                    "if(!action||action.action==='continue')return origFetch.apply(null,[input,opts]);"
+                    "if(action.action==='abort')throw new TypeError('Request blocked by route');"
+                    "if(action.action==='fulfill'){"
+                      "var h=new Headers();"
+                      "if(action.headers){for(var k in action.headers)h.set(k,action.headers[k])}"
+                      "if(action.contentType)h.set('content-type',action.contentType);"
+                      "return new Response(action.body||'',{status:action.status||200,headers:h})"
+                    "}"
+                    "return origFetch.apply(null,[input,opts]);"
+                  "});"
+                "};"
+                // XHR interceptor
                 "var origOpen=XMLHttpRequest.prototype.open;"
+                "var origSend=XMLHttpRequest.prototype.send;"
                 "XMLHttpRequest.prototype.open=function(method,url){"
-                "try{h.postMessage({id:'x'+(seq++),method:method,url:url,resourceType:'XHR'})}catch(e){}"
-                "return origOpen.apply(this,arguments)};"
+                  "this.__fd_method=method;this.__fd_url=url;"
+                  "try{hNet.postMessage({id:'x'+(seq++),method:method,url:url,resourceType:'XHR'})}catch(e){}"
+                  "return origOpen.apply(this,arguments);"
+                "};"
+                "XMLHttpRequest.prototype.send=function(body){"
+                  "var self=this,url=this.__fd_url||'',method=this.__fd_method||'GET';"
+                  "if(!matchRoute(url))return origSend.apply(this,arguments);"
+                  "webkit.messageHandlers.fdRoute.postMessage("
+                    "{url:url,method:method,headers:'{}',postData:typeof body==='string'?body:''}"
+                  ").then(function(action){"
+                    "if(!action||action.action==='continue')return origSend.apply(self,[body]);"
+                    "if(action.action==='abort'){"
+                      "Object.defineProperty(self,'status',{get:function(){return 0}});"
+                      "Object.defineProperty(self,'readyState',{get:function(){return 4}});"
+                      "self.dispatchEvent(new Event('error'));"
+                      "return;"
+                    "}"
+                    "if(action.action==='fulfill'){"
+                      "Object.defineProperty(self,'status',{get:function(){return action.status||200}});"
+                      "Object.defineProperty(self,'responseText',{get:function(){return action.body||''}});"
+                      "Object.defineProperty(self,'response',{get:function(){return action.body||''}});"
+                      "Object.defineProperty(self,'readyState',{get:function(){return 4}});"
+                      "self.dispatchEvent(new Event('readystatechange'));"
+                      "self.dispatchEvent(new Event('load'));"
+                      "return;"
+                    "}"
+                    "origSend.apply(self,[body]);"
+                  "});"
+                "};"
                 "})()";
             [config.userContentController addUserScript:[[WKUserScript alloc]
                 initWithSource:networkJS
@@ -461,6 +576,13 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             if (url.length > 0 && ![url isEqualToString:@"about:blank"]) {
                 NSURL *nsurl = [NSURL URLWithString:url];
                 if (nsurl) [wv loadRequest:[NSURLRequest requestWithURL:nsurl]];
+            } else {
+                // about:blank skips navigation so WKUserScripts don't fire.
+                // Evaluate them manually so overrides (console, dialog, network)
+                // are active from the start.
+                for (WKUserScript *s in config.userContentController.userScripts) {
+                    [wv evaluateJavaScript:s.source completionHandler:nil];
+                }
             }
 
             uint64_t vid = g_next_vid++;
@@ -588,10 +710,13 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
 
             uint32_t captured_rid = req_id;
 
-            // Use callAsyncJavaScript (same as Bun) — wraps body in async function,
-            // awaits the return value, handles promises natively. JSON.stringify
-            // page-side so the result is always a string (or nil for undefined).
-            NSString *body = [NSString stringWithFormat:@"return JSON.stringify(await (%@))", expr];
+            // callAsyncJavaScript wraps the body in an async function, so we can use
+            // `return`. We use eval() to handle both expressions and multi-statement code.
+            // eval() returns the last expression value for expressions, and runs
+            // multi-statement code correctly. JSON.stringify captures the result.
+            NSString *escaped = [expr stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+            escaped = [escaped stringByReplacingOccurrencesOfString:@"`" withString:@"\\`"];
+            NSString *body = [NSString stringWithFormat:@"return JSON.stringify(await eval(`%@`))", escaped];
             [v->webview callAsyncJavaScript:body
                                  arguments:nil
                                    inFrame:nil
@@ -1396,6 +1521,251 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             }
 
             write_frame(req_id, REP_OK, NULL, 0);
+            break;
+        }
+
+        case OP_ACCESSIBILITY_TREE: {
+            // Payload: u64 view_id + i32 depth
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            int32_t maxDepth = -1;
+            if (off + 4 <= payload_len) {
+                memcpy(&maxDepth, payload + off, 4);
+            }
+            ViewEntry *v = get_view(vid);
+            if (!v) {
+                write_frame_str(req_id, REP_ERROR, @"no such view");
+                break;
+            }
+
+            // Walk native NSAccessibility tree from the WKWebView.
+            // In-process calls -- no accessibility permissions required.
+            NSMutableArray *nodes = [NSMutableArray array];
+            // Counter for unique node IDs
+            __block int nodeCounter = 0;
+
+            // Map from accessibility element pointer to nodeId string
+            NSMapTable *elemToId = [NSMapTable strongToStrongObjectsMapTable];
+
+            // Recursive block to walk the tree
+            void (^__block walkTree)(id, NSString*, int);
+            __weak __block void (^weakWalkTree)(id, NSString*, int);
+            walkTree = ^(id elem, NSString *parentId, int depth) {
+                if (maxDepth >= 0 && depth > maxDepth) return;
+                if (![elem respondsToSelector:@selector(accessibilityRole)]) return;
+
+                NSString *role = [elem accessibilityRole];
+                if (!role) role = @"generic";
+
+                // Map NSAccessibility roles to ARIA roles
+                NSString *ariaRole = role;
+                if ([role isEqualToString:NSAccessibilityButtonRole]) ariaRole = @"button";
+                else if ([role isEqualToString:NSAccessibilityLinkRole]) ariaRole = @"link";
+                else if ([role isEqualToString:NSAccessibilityTextFieldRole]) ariaRole = @"textbox";
+                else if ([role isEqualToString:NSAccessibilityTextAreaRole]) ariaRole = @"textbox";
+                else if ([role isEqualToString:NSAccessibilityCheckBoxRole]) ariaRole = @"checkbox";
+                else if ([role isEqualToString:NSAccessibilityRadioButtonRole]) ariaRole = @"radio";
+                else if ([role isEqualToString:NSAccessibilityPopUpButtonRole]) ariaRole = @"combobox";
+                else if ([role isEqualToString:NSAccessibilityMenuItemRole]) ariaRole = @"menuitem";
+                else if ([role isEqualToString:NSAccessibilityTabGroupRole]) ariaRole = @"tablist";
+                else if ([role isEqualToString:@"AXTab"]) ariaRole = @"tab";
+                else if ([role isEqualToString:NSAccessibilitySliderRole]) ariaRole = @"slider";
+                else if ([role isEqualToString:NSAccessibilityImageRole]) ariaRole = @"img";
+                else if ([role isEqualToString:NSAccessibilityHeadingRole] ||
+                         [role isEqualToString:@"AXHeading"]) ariaRole = @"heading";
+                else if ([role isEqualToString:NSAccessibilityListRole]) ariaRole = @"list";
+                else if ([role isEqualToString:NSAccessibilityTableRole]) ariaRole = @"table";
+                else if ([role isEqualToString:NSAccessibilityRowRole]) ariaRole = @"row";
+                else if ([role isEqualToString:NSAccessibilityCellRole]) ariaRole = @"cell";
+                else if ([role isEqualToString:NSAccessibilityGroupRole]) ariaRole = @"group";
+                else if ([role isEqualToString:NSAccessibilityToolbarRole]) ariaRole = @"toolbar";
+                else if ([role isEqualToString:NSAccessibilityMenuRole]) ariaRole = @"menu";
+                else if ([role isEqualToString:NSAccessibilityMenuBarRole]) ariaRole = @"menubar";
+                else if ([role isEqualToString:NSAccessibilityStaticTextRole]) ariaRole = @"StaticText";
+                else if ([role isEqualToString:NSAccessibilityWebAreaRole] ||
+                         [role isEqualToString:@"AXWebArea"]) ariaRole = @"RootWebArea";
+                else if ([role isEqualToString:@"AXLandmarkNavigation"]) ariaRole = @"navigation";
+                else if ([role isEqualToString:@"AXLandmarkMain"]) ariaRole = @"main";
+                else if ([role isEqualToString:@"AXLandmarkBanner"]) ariaRole = @"banner";
+                else if ([role isEqualToString:@"AXLandmarkContentInfo"]) ariaRole = @"contentinfo";
+                else if ([role isEqualToString:@"AXLandmarkComplementary"]) ariaRole = @"complementary";
+                else if ([role isEqualToString:@"AXLandmarkSearch"]) ariaRole = @"search";
+                else if ([role isEqualToString:NSAccessibilityComboBoxRole]) ariaRole = @"combobox";
+                else if ([role isEqualToString:@"AXSearchField"]) ariaRole = @"searchbox";
+                else if ([role isEqualToString:NSAccessibilityProgressIndicatorRole]) ariaRole = @"progressbar";
+                else if ([role isEqualToString:NSAccessibilityDisclosureTriangleRole]) ariaRole = @"button";
+                else if ([role isEqualToString:@"AXSwitch"]) ariaRole = @"switch";
+
+                NSString *nodeId = [NSString stringWithFormat:@"n%d", nodeCounter++];
+                [elemToId setObject:nodeId forKey:elem];
+
+                // Accessible name: try label, title, description in order
+                NSString *name = @"";
+                if ([elem respondsToSelector:@selector(accessibilityLabel)]) {
+                    NSString *lbl = [elem accessibilityLabel];
+                    if (lbl.length > 0) name = lbl;
+                }
+                if (name.length == 0 && [elem respondsToSelector:@selector(accessibilityTitle)]) {
+                    NSString *t = [elem accessibilityTitle];
+                    if (t.length > 0) name = t;
+                }
+
+                NSString *desc = @"";
+                if ([elem respondsToSelector:@selector(accessibilityHelp)]) {
+                    NSString *h = [elem accessibilityHelp];
+                    if (h.length > 0) desc = h;
+                }
+
+                // Properties
+                NSMutableArray *props = [NSMutableArray array];
+
+                // Level (for headings)
+                if ([elem respondsToSelector:@selector(accessibilityDisclosureLevel)]) {
+                    // Only include for headings - use undocumented attribute
+                    if ([ariaRole isEqualToString:@"heading"]) {
+                        id levelVal = nil;
+                        @try {
+                            levelVal = [elem accessibilityAttributeValue:@"AXHeadingLevel"];
+                        } @catch (NSException *e) {}
+                        if (levelVal && [levelVal respondsToSelector:@selector(integerValue)]) {
+                            [props addObject:@{@"name": @"level",
+                                               @"value": [NSNumber numberWithInteger:[levelVal integerValue]]}];
+                        }
+                    }
+                }
+
+                // Checked state
+                if ([elem respondsToSelector:@selector(accessibilityValue)] &&
+                    ([ariaRole isEqualToString:@"checkbox"] || [ariaRole isEqualToString:@"radio"] ||
+                     [ariaRole isEqualToString:@"switch"])) {
+                    id val = [elem accessibilityValue];
+                    if ([val isKindOfClass:[NSNumber class]]) {
+                        [props addObject:@{@"name": @"checked",
+                                           @"value": @([val boolValue])}];
+                    }
+                }
+
+                // URL for links
+                if ([ariaRole isEqualToString:@"link"]) {
+                    @try {
+                        id urlVal = [elem accessibilityAttributeValue:NSAccessibilityURLAttribute];
+                        if ([urlVal isKindOfClass:[NSURL class]]) {
+                            [props addObject:@{@"name": @"url",
+                                               @"value": [urlVal absoluteString]}];
+                        }
+                    } @catch (NSException *e) {}
+                }
+
+                // Disabled state
+                if ([elem respondsToSelector:@selector(isAccessibilityEnabled)]) {
+                    if (![elem isAccessibilityEnabled]) {
+                        [props addObject:@{@"name": @"disabled", @"value": @YES}];
+                    }
+                }
+
+                // Expanded state
+                if ([elem respondsToSelector:@selector(isAccessibilityExpanded)]) {
+                    @try {
+                        id expVal = [elem accessibilityAttributeValue:NSAccessibilityExpandedAttribute];
+                        if (expVal) {
+                            [props addObject:@{@"name": @"expanded",
+                                               @"value": @([expVal boolValue])}];
+                        }
+                    } @catch (NSException *e) {}
+                }
+
+                // Selected state
+                if ([elem respondsToSelector:@selector(isAccessibilitySelected)]) {
+                    if ([elem isAccessibilitySelected]) {
+                        [props addObject:@{@"name": @"selected", @"value": @YES}];
+                    }
+                }
+
+                // Required state (custom attribute)
+                @try {
+                    id reqVal = [elem accessibilityAttributeValue:@"AXRequired"];
+                    if (reqVal && [reqVal boolValue]) {
+                        [props addObject:@{@"name": @"required", @"value": @YES}];
+                    }
+                } @catch (NSException *e) {}
+
+                // Focused state
+                if ([elem respondsToSelector:@selector(isAccessibilityFocused)]) {
+                    if ([elem isAccessibilityFocused]) {
+                        [props addObject:@{@"name": @"focused", @"value": @YES}];
+                    }
+                }
+
+                // Value for input-like elements
+                if ([elem respondsToSelector:@selector(accessibilityValue)] &&
+                    ([ariaRole isEqualToString:@"textbox"] || [ariaRole isEqualToString:@"combobox"] ||
+                     [ariaRole isEqualToString:@"searchbox"] || [ariaRole isEqualToString:@"slider"] ||
+                     [ariaRole isEqualToString:@"spinbutton"])) {
+                    id val = [elem accessibilityValue];
+                    if ([val isKindOfClass:[NSString class]] && [val length] > 0) {
+                        [props addObject:@{@"name": @"value", @"value": val}];
+                    } else if ([val isKindOfClass:[NSNumber class]]) {
+                        [props addObject:@{@"name": @"value",
+                                           @"value": [val stringValue]}];
+                    }
+                }
+
+                // Build node dict
+                NSMutableDictionary *node = [NSMutableDictionary dictionary];
+                node[@"nodeId"] = nodeId;
+                if (parentId) node[@"parentId"] = parentId;
+                node[@"role"] = ariaRole;
+                if (name.length > 0) node[@"name"] = name;
+                if (desc.length > 0) node[@"description"] = desc;
+                node[@"properties"] = props;
+                node[@"ignored"] = @NO;
+                [nodes addObject:node];
+
+                // Recurse into children
+                if ([elem respondsToSelector:@selector(accessibilityChildren)]) {
+                    NSArray *children = [elem accessibilityChildren];
+                    for (id child in children) {
+                        void (^strongWalk)(id, NSString*, int) = weakWalkTree;
+                        if (strongWalk) strongWalk(child, nodeId, depth + 1);
+                    }
+                }
+            };
+            weakWalkTree = walkTree;
+
+            // Start walking from the WKWebView
+            walkTree(v->webview, nil, 0);
+
+            // Serialize to JSON
+            NSError *jsonErr = nil;
+            NSData *jsonData = [NSJSONSerialization dataWithJSONObject:nodes
+                                                              options:0
+                                                                error:&jsonErr];
+            if (jsonErr) {
+                write_frame_str(req_id, REP_ERROR, [jsonErr localizedDescription]);
+                break;
+            }
+
+            NSString *jsonStr = [[NSString alloc] initWithData:jsonData
+                                                      encoding:NSUTF8StringEncoding];
+            write_frame_str(req_id, REP_VALUE, jsonStr);
+            break;
+        }
+
+        case OP_ROUTE_REQUEST: {
+            // Response from Rust parent for a route request.
+            // Payload: u32 strLen + str actionJson
+            // Resolve the pending JS replyHandler for this req_id.
+            uint32_t off = 0;
+            NSString *actionJson = read_str(payload, payload_len, &off);
+            NSNumber *key = @(req_id);
+            void (^handler)(id, NSString*) = g_pending_routes[key];
+            if (handler) {
+                [g_pending_routes removeObjectForKey:key];
+                // Parse the action JSON and reply to JS
+                NSData *jsonData = [actionJson dataUsingEncoding:NSUTF8StringEncoding];
+                NSDictionary *action = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:nil];
+                handler(action ?: @{@"action": @"continue"}, nil);
+            }
             break;
         }
 

@@ -5,11 +5,11 @@
 //!
 //! All JS operations go through the unified `window.__fd` runtime
 //! (injected automatically via addScriptToEvaluateOnNewDocument on CDP,
-//! or after navigation on WebKit).
+//! or after navigation on `WebKit`).
 
 use crate::backend::{AnyElement, AnyPage};
 use crate::selectors;
-use rustc_hash::FxHashMap as HashMap;
+use rustc_hash::FxHashMap;
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -73,7 +73,7 @@ pub struct FoundElement {
     pub index: usize,
     pub tag: String,
     pub text: Option<String>,
-    pub attrs: HashMap<String, String>,
+    pub attrs: FxHashMap<String, String>,
     pub children_count: usize,
 }
 
@@ -130,7 +130,7 @@ async fn rt_eval(page: &AnyPage, js: &str) -> Result<Option<serde_json::Value>, 
 /// Ensure runtime + evaluate, return string result.
 async fn rt_eval_str(page: &AnyPage, js: &str) -> Result<String, String> {
     let val = rt_eval(page, js).await?;
-    Ok(val.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default())
+    Ok(val.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default())
 }
 
 // ─── Element Resolution ─────────────────────────────────────────────────────
@@ -140,9 +140,13 @@ async fn rt_eval_str(page: &AnyPage, js: &str) -> Result<String, String> {
 /// ALL selectors go through the unified selector engine -- no dual path.
 /// Plain CSS like `#id` or `.class` works (default engine is CSS).
 /// Rich selectors like `role=button[name="Save"]` also work.
-pub async fn resolve_element(
+///
+/// # Errors
+///
+/// Returns an error if the ref is unknown, the selector is missing, or no element is found.
+pub async fn resolve_element<S: std::hash::BuildHasher>(
     page: &AnyPage,
-    ref_map: &HashMap<String, i64>,
+    ref_map: &std::collections::HashMap<String, i64, S>,
     r#ref: Option<&str>,
     selector: Option<&str>,
 ) -> Result<AnyElement, String> {
@@ -183,9 +187,14 @@ pub async fn suggest_selectors(page: &AnyPage) -> Vec<String> {
 // ─── Click Guard ────────────────────────────────────────────────────────────
 
 /// Check element tag/type before clicking.
+///
+/// # Errors
+///
+/// Returns `ClickGuardError::IsSelect` or `ClickGuardError::IsFileInput` if the element
+/// should not be clicked directly.
 pub async fn check_click_guard(
     element: &AnyElement,
-    _page: &AnyPage,
+    page: &AnyPage,
 ) -> Result<(), ClickGuardError> {
     // call_js_fn runs in the element's context -- window.__fd is available
     let _ = element.call_js_fn("function() { \
@@ -194,13 +203,13 @@ pub async fn check_click_guard(
     }").await;
 
     // Read result via a lightweight evaluate
-    let guard = _page.evaluate("(function() { \
+    let guard = page.evaluate("(function() { \
         var e = document.querySelector('[data-fd-guard]'); \
         if (!e) return ''; \
         var v = e.getAttribute('data-fd-guard'); \
         e.removeAttribute('data-fd-guard'); \
         return v || ''; \
-    })()").await.ok().flatten().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+    })()").await.ok().flatten().and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
 
     match guard.as_str() {
         "select" => Err(ClickGuardError::IsSelect),
@@ -212,6 +221,10 @@ pub async fn check_click_guard(
 // ─── Fill ───────────────────────────────────────────────────────────────────
 
 /// Fill an input element: auto-wait for actionable, click to focus, clear with events, type value, dispatch events.
+///
+/// # Errors
+///
+/// Returns an error if the element cannot be focused or the value cannot be set.
 pub async fn fill(element: &AnyElement, value: &str) -> Result<(), String> {
     // Single JS call: focus + set value + dispatch events.
     // This is how Playwright implements fill() -- set value directly via JS,
@@ -231,6 +244,10 @@ pub async fn fill(element: &AnyElement, value: &str) -> Result<(), String> {
 // ─── Navigation ─────────────────────────────────────────────────────────────
 
 /// Navigate to URL with empty DOM health check for HTTP/HTTPS pages.
+///
+/// # Errors
+///
+/// Returns an error if navigation fails or the page DOM remains empty after retries.
 pub async fn navigate_with_health_check(page: &AnyPage, url: &str) -> Result<(), String> {
     page.goto(url).await?;
 
@@ -265,12 +282,17 @@ pub async fn navigate_with_health_check(page: &AnyPage, url: &str) -> Result<(),
 // ─── Search Page ────────────────────────────────────────────────────────────
 
 /// Search page text for a pattern (like grep). Uses injected runtime.
+///
+/// # Errors
+///
+/// Returns an error if JS evaluation fails or the search pattern is invalid.
+///
 pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchResult, String> {
-    let pattern = serde_json::to_string(&opts.pattern).unwrap();
+    let pattern = serde_json::to_string(&opts.pattern).map_err(|e| e.to_string())?;
     let is_regex = if opts.regex { "true" } else { "false" };
     let case_sensitive = if opts.case_sensitive { "true" } else { "false" };
     let context_chars = opts.context_chars;
-    let css_scope = serde_json::to_string(&opts.css_scope).unwrap();
+    let css_scope = serde_json::to_string(&opts.css_scope).map_err(|e| e.to_string())?;
     let max_results = opts.max_results;
 
     let js = format!(
@@ -284,14 +306,14 @@ pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchR
         return Err(err.to_string());
     }
 
-    let total = data["total"].as_u64().unwrap_or(0) as usize;
+    let total = usize::try_from(data["total"].as_u64().unwrap_or(0)).unwrap_or(0);
     let has_more = data["has_more"].as_bool().unwrap_or(false);
     let matches = data["matches"].as_array().map(|arr| {
         arr.iter().map(|m| SearchMatch {
             match_text: m["match_text"].as_str().unwrap_or("").to_string(),
             context: m["context"].as_str().unwrap_or("").to_string(),
             element_path: m["element_path"].as_str().unwrap_or("").to_string(),
-            char_position: m["char_position"].as_u64().unwrap_or(0) as usize,
+            char_position: usize::try_from(m["char_position"].as_u64().unwrap_or(0)).unwrap_or(0),
         }).collect()
     }).unwrap_or_default();
 
@@ -299,6 +321,7 @@ pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchR
 }
 
 /// Format search results into human-readable text.
+#[must_use]
 pub fn format_search_results(result: &SearchResult, pattern: &str) -> String {
     if result.total == 0 {
         return format!("No matches found for \"{pattern}\" on page.");
@@ -307,7 +330,7 @@ pub fn format_search_results(result: &SearchResult, pattern: &str) -> String {
     let mut lines = vec![format!(
         "Found {} match{} for \"{pattern}\" on page:\n",
         result.total,
-        if result.total != 1 { "es" } else { "" }
+        if result.total == 1 { "" } else { "es" }
     )];
     for (i, m) in result.matches.iter().enumerate() {
         let loc = if m.element_path.is_empty() { String::new() } else { format!(" (in {})", m.element_path) };
@@ -326,6 +349,11 @@ pub fn format_search_results(result: &SearchResult, pattern: &str) -> String {
 // ─── Find Elements ──────────────────────────────────────────────────────────
 
 /// Query DOM elements by selector. Uses injected runtime.
+///
+/// # Errors
+///
+/// Returns an error if JS evaluation fails or the selector is invalid.
+///
 pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result<FindResult, String> {
     // Rich selectors go through the selector engine
     if selectors::is_rich_selector(&opts.selector) {
@@ -337,7 +365,7 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
                 index: m.index,
                 tag: m.tag,
                 text: if opts.include_text { Some(m.text) } else { None },
-                attrs: HashMap::default(),
+                attrs: FxHashMap::default(),
                 children_count: 0,
             }
         }).collect();
@@ -345,8 +373,8 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
     }
 
     // Plain CSS: use runtime's findElementsCSS
-    let selector = serde_json::to_string(&opts.selector).unwrap();
-    let attributes = serde_json::to_string(&opts.attributes).unwrap();
+    let selector = serde_json::to_string(&opts.selector).map_err(|e| e.to_string())?;
+    let attributes = serde_json::to_string(&opts.attributes).map_err(|e| e.to_string())?;
     let max_results = opts.max_results;
     let include_text = if opts.include_text { "true" } else { "false" };
 
@@ -361,21 +389,21 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
         return Err(err.to_string());
     }
 
-    let total = data["total"].as_u64().unwrap_or(0) as usize;
+    let total = usize::try_from(data["total"].as_u64().unwrap_or(0)).unwrap_or(0);
     let elements = data["elements"].as_array().map(|arr| {
         arr.iter().map(|el| {
-            let mut attrs = HashMap::default();
+            let mut attrs = FxHashMap::default();
             if let Some(obj) = el["attrs"].as_object() {
                 for (k, v) in obj {
                     attrs.insert(k.clone(), v.as_str().unwrap_or("").to_string());
                 }
             }
             FoundElement {
-                index: el["index"].as_u64().unwrap_or(0) as usize,
+                index: usize::try_from(el["index"].as_u64().unwrap_or(0)).unwrap_or(0),
                 tag: el["tag"].as_str().unwrap_or("?").to_string(),
-                text: el["text"].as_str().map(|s| s.to_string()),
+                text: el["text"].as_str().map(std::string::ToString::to_string),
                 attrs,
-                children_count: el["children_count"].as_u64().unwrap_or(0) as usize,
+                children_count: usize::try_from(el["children_count"].as_u64().unwrap_or(0)).unwrap_or(0),
             }
         }).collect()
     }).unwrap_or_default();
@@ -383,7 +411,8 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
     Ok(FindResult { elements, total })
 }
 
-/// Format find_elements results into human-readable text.
+/// Format `find_elements` results into human-readable text.
+#[must_use]
 pub fn format_find_results(result: &FindResult, selector: &str) -> String {
     if result.total == 0 {
         return format!("No elements found matching \"{selector}\".");
@@ -392,7 +421,7 @@ pub fn format_find_results(result: &FindResult, selector: &str) -> String {
     let mut lines = vec![format!(
         "Found {} element{} matching \"{selector}\":\n",
         result.total,
-        if result.total != 1 { "s" } else { "" }
+        if result.total == 1 { "" } else { "s" }
     )];
     for el in &result.elements {
         let mut parts = vec![format!("[{}] <{}>", el.index, el.tag)];
@@ -423,6 +452,10 @@ pub fn format_find_results(result: &FindResult, selector: &str) -> String {
 // ─── Select Option ──────────────────────────────────────────────────────────
 
 /// Select a dropdown option by value or label text.
+///
+/// # Errors
+///
+/// Returns an error if the element is not a select or the target option is not found.
 pub async fn select_option(
     element: &AnyElement,
     page: &AnyPage,
@@ -443,7 +476,7 @@ pub async fn select_option(
         var v = e.getAttribute('data-fd-result'); \
         e.removeAttribute('data-fd-result'); \
         return v || '{}'; \
-    })()").await.ok().flatten().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_else(|| "{}".into());
+    })()").await.ok().flatten().and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_else(|| "{}".into());
 
     let result: serde_json::Value = serde_json::from_str(&result_json).unwrap_or(serde_json::json!({}));
 
@@ -451,7 +484,7 @@ pub async fn select_option(
         let mut msg = format!("{err}.");
         if let Some(avail) = result["available"].as_array() {
             let opts: Vec<&str> = avail.iter().filter_map(|v| v.as_str()).collect();
-            msg.push_str(&format!(" Available options: {}", opts.join(", ")));
+            let _ = std::fmt::Write::write_fmt(&mut msg, format_args!(" Available options: {}", opts.join(", ")));
         }
         return Err(msg);
     }
@@ -462,7 +495,11 @@ pub async fn select_option(
     })
 }
 
-/// Get all options from a <select> dropdown.
+/// Get all options from a `<select>` dropdown.
+///
+/// # Errors
+///
+/// Returns an error if the element is not a select or options cannot be retrieved.
 pub async fn get_dropdown_options(
     element: &AnyElement,
     page: &AnyPage,
@@ -479,7 +516,7 @@ pub async fn get_dropdown_options(
         var v = e.getAttribute('data-fd-result'); \
         e.removeAttribute('data-fd-result'); \
         return v || '{}'; \
-    })()").await.ok().flatten().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_else(|| "{}".into());
+    })()").await.ok().flatten().and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_else(|| "{}".into());
 
     let result: serde_json::Value = serde_json::from_str(&result_json).unwrap_or(serde_json::json!({}));
 
@@ -489,7 +526,7 @@ pub async fn get_dropdown_options(
 
     let opts = result["options"].as_array().map(|arr| {
         arr.iter().map(|o| DropdownOption {
-            index: o["index"].as_u64().unwrap_or(0) as usize,
+            index: usize::try_from(o["index"].as_u64().unwrap_or(0)).unwrap_or(0),
             text: o["text"].as_str().unwrap_or("").to_string(),
             value: o["value"].as_str().unwrap_or("").to_string(),
             selected: o["selected"].as_bool().unwrap_or(false),
@@ -502,6 +539,10 @@ pub async fn get_dropdown_options(
 // ─── Scroll Info ────────────────────────────────────────────────────────────
 
 /// Get current scroll position, page height, and viewport height.
+///
+/// # Errors
+///
+/// Returns an error if JS evaluation fails.
 pub async fn scroll_info(page: &AnyPage) -> Result<ScrollInfo, String> {
     let result = rt_eval_str(page, "window.__fd.scrollInfo()").await?;
     let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or(serde_json::json!({}));
@@ -528,6 +569,10 @@ pub async fn console_error_count(page: &AnyPage) -> i64 {
 // ─── Markdown Extraction ────────────────────────────────────────────────────
 
 /// Extract page content as clean markdown. Uses the injected runtime.
+///
+/// # Errors
+///
+/// Returns an error if JS evaluation fails.
 pub async fn extract_markdown(page: &AnyPage) -> Result<String, String> {
     rt_eval_str(page, "window.__fd.extractMarkdown()").await
 }
@@ -535,7 +580,11 @@ pub async fn extract_markdown(page: &AnyPage) -> Result<String, String> {
 // ─── File Upload ────────────────────────────────────────────────────────────
 
 /// Upload file(s) to a file input element.
-/// Uses CDP DOM.setFileInputFiles with the element's backendNodeId.
+/// Uses CDP `DOM.setFileInputFiles` with the element's `backendNodeId`.
+///
+/// # Errors
+///
+/// Returns an error if the file input element is not found or the files cannot be set.
 pub async fn upload_file(page: &AnyPage, selector: &str, paths: &[String]) -> Result<(), String> {
     page.set_file_input(selector, paths).await
 }
@@ -545,6 +594,10 @@ pub async fn upload_file(page: &AnyPage, selector: &str, paths: &[String]) -> Re
 /// Wait for an element to be actionable (visible, enabled).
 /// Polls from Rust side with short sleeps -- no blocking JS promises.
 /// This allows parallel pages to make progress concurrently.
+///
+/// # Errors
+///
+/// Returns an error if the element is not actionable within the timeout.
 pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
 
@@ -567,7 +620,7 @@ pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result
             var v = e.getAttribute('data-fd-actionable'); \
             e.removeAttribute('data-fd-actionable'); \
             return v; \
-        })()").await.ok().flatten().and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        })()").await.ok().flatten().and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
 
         if val == "1" {
             return Ok(());

@@ -17,6 +17,7 @@ napi-derive = "3"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+rustc-hash = "2"
 
 [build-dependencies]
 napi-build = "2"

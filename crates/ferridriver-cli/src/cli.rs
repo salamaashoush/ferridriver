@@ -32,14 +32,14 @@ pub enum Command {
 #[derive(Args)]
 pub struct BrowserArgs {
     /// Browser backend to use
-    #[arg(long, value_enum, default_value_t = Backend::CdpWs)]
+    #[arg(long, value_enum, default_value_t = Backend::CdpPipe)]
     backend: Backend,
 
     /// Connect to a running Chrome instance via WebSocket or HTTP URL
     #[arg(long, conflicts_with = "auto_connect")]
     connect: Option<String>,
 
-    /// Auto-detect and connect to a running Chrome (reads DevToolsActivePort)
+    /// Auto-detect and connect to a running Chrome (reads `DevToolsActivePort`)
     #[arg(long, conflicts_with = "connect")]
     auto_connect: bool,
 
@@ -66,16 +66,13 @@ pub struct TransportArgs {
 
 #[derive(Clone, ValueEnum)]
 enum Backend {
-    /// Chrome DevTools Protocol over WebSocket (via chromiumoxide)
-    #[value(name = "cdp-ws")]
-    CdpWs,
-    /// Chrome DevTools Protocol over pipes (fd 3/4)
+    /// Chrome `DevTools` Protocol over pipes (fd 3/4)
     #[value(name = "cdp-pipe")]
     CdpPipe,
     /// Raw CDP over WebSocket (our own, fully parallel)
     #[value(name = "cdp-raw")]
     CdpRaw,
-    /// Native WKWebView (macOS only)
+    /// Native `WKWebView` (macOS only)
     #[cfg(target_os = "macos")]
     #[value(name = "webkit")]
     WebKit,
@@ -92,7 +89,6 @@ pub enum Transport {
 impl BrowserArgs {
     pub fn backend_kind(&self) -> BackendKind {
         match self.backend {
-            Backend::CdpWs => BackendKind::CdpWs,
             Backend::CdpPipe => BackendKind::CdpPipe,
             Backend::CdpRaw => BackendKind::CdpRaw,
             #[cfg(target_os = "macos")]

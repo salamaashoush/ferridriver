@@ -6,6 +6,8 @@
 #![allow(clippy::needless_pass_by_value)]
 
 mod browser;
+mod context;
+mod frame;
 mod locator;
 mod page;
 mod types;

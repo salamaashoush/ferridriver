@@ -2,6 +2,20 @@
 
 use napi_derive::napi;
 
+/// Convert a JS `number` (f64) to u64 for millisecond timeouts and similar values.
+/// Negative values are clamped to 0; fractional parts are truncated.
+/// This is the correct semantic for the NAPI boundary where JS has only f64 numbers.
+pub(crate) fn f64_to_u64(v: f64) -> u64 {
+    if v < 0.0 {
+        0
+    } else {
+        // After the negative check above, v is guaranteed non-negative.
+        // Truncation of the fractional part is intentional for ms timeouts.
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        { v as u64 }
+    }
+}
+
 /// Options for role-based locators (getByRole).
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
@@ -96,11 +110,53 @@ pub struct BoundingBox {
   pub height: f64,
 }
 
+/// Navigation options (waitUntil, timeout).
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct GotoOptions {
+  /// When to consider navigation complete: "load", "domcontentloaded", "networkidle", "commit"
+  pub wait_until: Option<String>,
+  /// Maximum navigation timeout in milliseconds.
+  pub timeout: Option<f64>,
+}
+
+impl From<&GotoOptions> for ferridriver::options::GotoOptions {
+  fn from(o: &GotoOptions) -> Self {
+    Self {
+      wait_until: o.wait_until.clone(),
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
+/// Emulate media options.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct EmulateMediaOptions {
+  pub media: Option<String>,
+  pub color_scheme: Option<String>,
+  pub reduced_motion: Option<String>,
+  pub forced_colors: Option<String>,
+  pub contrast: Option<String>,
+}
+
+impl From<&EmulateMediaOptions> for ferridriver::options::EmulateMediaOptions {
+  fn from(o: &EmulateMediaOptions) -> Self {
+    Self {
+      media: o.media.clone(),
+      color_scheme: o.color_scheme.clone(),
+      reduced_motion: o.reduced_motion.clone(),
+      forced_colors: o.forced_colors.clone(),
+      contrast: o.contrast.clone(),
+    }
+  }
+}
+
 /// Launch options for the browser.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct LaunchOptions {
-  /// Backend to use: "cdp-ws" (default), "cdp-pipe", "cdp-raw", "webkit"
+  /// Backend to use: "cdp-pipe" (default), "cdp-raw", "webkit"
   pub backend: Option<String>,
   /// WebSocket URL to connect to (instead of launching)
   pub ws_endpoint: Option<String>,
@@ -145,7 +201,7 @@ impl From<&WaitOptions> for ferridriver::options::WaitOptions {
   fn from(o: &WaitOptions) -> Self {
     Self {
       state: o.state.clone(),
-      timeout: o.timeout.map(|v| v as u64),
+      timeout: o.timeout.map(f64_to_u64),
     }
   }
 }
@@ -208,4 +264,15 @@ impl From<&ferridriver::backend::MetricData> for MetricData {
       value: o.value,
     }
   }
+}
+
+// ── Event data types (Playwright-compatible) ─────────────────────────────
+
+/// Network response data. Matches Playwright's Response interface (subset).
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct ResponseData {
+  pub url: String,
+  pub status: i32,
+  pub status_text: String,
 }

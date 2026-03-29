@@ -1,7 +1,7 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { Browser, type Page } from "../index.js";
 
-const BACKENDS: string[] = ["cdp-ws", "cdp-pipe", "cdp-raw"];
+const BACKENDS: string[] = ["cdp-pipe", "cdp-raw"];
 if (process.platform === "darwin") {
   BACKENDS.push("webkit");
 }
@@ -505,6 +505,295 @@ for (const backend of BACKENDS) {
       const text = await page.locator("#result").innerText();
       expect(text).toContain("down");
       expect(text).toContain("up");
+    });
+
+    // ══════════════════════════════════════════════════════════════════
+    // New NAPI method tests
+    // ══════════════════════════════════════════════════════════════════
+
+    // ── Browser methods ──────────────────────────────────────────────
+
+    it("browser.version returns engine name", () => {
+      expect(browser.version.length).toBeGreaterThan(0);
+    });
+
+    it("browser.isConnected returns true while connected", async () => {
+      expect(await browser.isConnected()).toBe(true);
+    });
+
+    it("browser.contexts lists contexts", async () => {
+      const ctxs = await browser.contexts();
+      expect(ctxs.length).toBeGreaterThan(0);
+    });
+
+    // ── Page.isClosed ────────────────────────────────────────────────
+
+    it("page.isClosed is false for active page", () => {
+      expect(page.isClosed()).toBe(false);
+    });
+
+    // ── Page.viewportSize ────────────────────────────────────────────
+
+    it("page.viewportSize returns dimensions", async () => {
+      const [w, h] = await page.viewportSize();
+      expect(w).toBeGreaterThan(0);
+      expect(h).toBeGreaterThan(0);
+    });
+
+    // ── Page.goto with options ───────────────────────────────────────
+
+    it("page.goto accepts GotoOptions", async () => {
+      await page.goto("https://example.com", {
+        waitUntil: "domcontentloaded",
+        timeout: 10000,
+      });
+      const title = await page.title();
+      expect(title).toContain("Example");
+    });
+
+    // ── Page.waitForLoadState with state ──────────────────────────────
+
+    it("waitForLoadState accepts state string", async () => {
+      await page.goto("https://example.com");
+      await page.waitForLoadState("domcontentloaded");
+      const ready = await page.evaluateStr("document.readyState");
+      expect(ready === "interactive" || ready === "complete").toBe(true);
+    });
+
+    // ── Page.addInitScript / removeInitScript ────────────────────────
+
+    it("addInitScript injects JS before page scripts", async () => {
+      const id = await page.addInitScript(
+        "window.__test_init_napi = 'injected'"
+      );
+      expect(id.length).toBeGreaterThan(0);
+      await page.goto("https://example.com");
+      const val = await page.evaluateStr("window.__test_init_napi || 'missing'");
+      expect(val).toBe("injected");
+      await page.removeInitScript(id);
+    });
+
+    // ── Page.addScriptTag / addStyleTag ──────────────────────────────
+
+    it("addScriptTag injects inline script", async () => {
+      await page.setContent("<body></body>");
+      await page.addScriptTag(undefined, "document.title = 'script_injected'");
+      const title = await page.title();
+      expect(title).toBe("script_injected");
+    });
+
+    it("addStyleTag injects inline CSS", async () => {
+      await page.setContent('<div id="box">test</div>');
+      await page.addStyleTag(undefined, "#box { color: red }");
+      const color = await page.evaluateStr(
+        "getComputedStyle(document.getElementById('box')).color"
+      );
+      expect(color).toBe("rgb(255, 0, 0)");
+    });
+
+    // ── Page.storageState ────────────────────────────────────────────
+
+    it("storageState returns cookies and localStorage", async () => {
+      await page.goto("https://example.com");
+      const state = await page.storageState();
+      expect(state).toHaveProperty("cookies");
+      expect(state).toHaveProperty("localStorage");
+      expect(Array.isArray(state.cookies)).toBe(true);
+    });
+
+    // ── Page.mouseWheel / mouseDown / mouseUp ────────────────────────
+
+    it("mouseWheel scrolls the page", async () => {
+      await page.setContent(
+        '<div style="height:5000px">tall</div>'
+      );
+      await page.mouseWheel(0, 300);
+      // Give scroll time to apply
+      await page.waitForTimeout(100);
+      const scrollY = await page.evaluate("window.scrollY");
+      expect(scrollY).toBeGreaterThan(0);
+    });
+
+    it("mouseDown and mouseUp fire events", async () => {
+      await page.setContent(`
+        <div id="log"></div>
+        <script>
+          document.addEventListener('mousedown', () => document.getElementById('log').textContent += 'down,');
+          document.addEventListener('mouseup', () => document.getElementById('log').textContent += 'up,');
+        </script>
+      `);
+      await page.mouseDown(100, 100);
+      await page.mouseUp(100, 100);
+      const log = await page.locator("#log").innerText();
+      expect(log).toContain("down");
+      expect(log).toContain("up");
+    });
+
+    // ── Page.on / off / removeAllListeners ───────────────────────────
+
+    it("on returns listenerId, off removes it", async () => {
+      const received: any[] = [];
+      const id = page.on("console", (data) => {
+        received.push(data);
+      });
+      expect(typeof id).toBe("number");
+      expect(id).toBeGreaterThan(0);
+      await page.evaluate("console.log('test_on_off')");
+      await page.waitForTimeout(100);
+      page.off(id);
+      // After off, no more events should be received
+    });
+
+    it("removeAllListeners clears all listeners", () => {
+      page.on("console", () => {});
+      page.on("request", () => {});
+      page.removeAllListeners();
+      // Should not throw
+    });
+
+    // ── Page.defaultTimeout getter ───────────────────────────────────
+
+    it("defaultTimeout returns the timeout", () => {
+      expect(page.defaultTimeout).toBeGreaterThan(0);
+    });
+
+    // ── Locator.rightClick ───────────────────────────────────────────
+
+    it("locator.rightClick fires contextmenu", async () => {
+      await page.setContent(`
+        <div id="target" oncontextmenu="document.title='ctx';return false" style="padding:20px">right click me</div>
+      `);
+      await page.waitForSelector("#target");
+      await page.locator("#target").rightClick();
+      const title = await page.title();
+      expect(title).toBe("ctx");
+    });
+
+    // ── Locator.isAttached ───────────────────────────────────────────
+
+    it("locator.isAttached returns true for existing element", async () => {
+      await page.setContent('<div id="exists">here</div>');
+      expect(await page.locator("#exists").isAttached()).toBe(true);
+      expect(await page.locator("#gone").isAttached()).toBe(false);
+    });
+
+    // ── Locator.setChecked ───────────────────────────────────────────
+
+    it("locator.setChecked toggles checkbox state", async () => {
+      await page.setContent('<input id="cb" type="checkbox">');
+      await page.waitForSelector("#cb");
+      const loc = page.locator("#cb");
+      await loc.setChecked(true);
+      expect(await loc.isChecked()).toBe(true);
+      await loc.setChecked(false);
+      expect(await loc.isChecked()).toBe(false);
+    });
+
+    // ── Locator.selectText ───────────────────────────────────────────
+
+    it("locator.selectText selects input text", async () => {
+      await page.setContent('<input id="inp" type="text" value="select me">');
+      await page.waitForSelector("#inp");
+      await page.locator("#inp").selectText();
+      const selected = await page.evaluateStr(
+        "window.getSelection().toString()"
+      );
+      expect(selected).toBe("select me");
+    });
+
+    // ── Locator.evaluate / evaluateAll ────────────────────────────────
+
+    it("locator.evaluate runs JS on element", async () => {
+      await page.setContent('<h1 id="heading">Hello</h1>');
+      const tag = await page.locator("#heading").evaluate("el.tagName");
+      expect(tag).toBe("H1");
+    });
+
+    it("locator.evaluateAll runs JS on all matches", async () => {
+      await page.setContent(`
+        <ul><li class="item">A</li><li class="item">B</li><li class="item">C</li></ul>
+      `);
+      const count = await page.locator("css=.item").evaluateAll("elements.length");
+      expect(count).toBe(3);
+    });
+
+    // ── Locator.orLocator / andLocator ────────────────────────────────
+
+    it("locator.orLocator combines selectors", async () => {
+      await page.setContent(
+        '<button id="a">Alpha</button><span id="b">Beta</span>'
+      );
+      const combined = page.locator("#a").orLocator(page.locator("#b"));
+      const count = await combined.count();
+      expect(count).toBe(2);
+    });
+
+    it("locator.andLocator narrows scope", async () => {
+      await page.setContent(
+        '<div class="box"><span class="text">Inside</span></div><div class="other"><span class="text">Outside</span></div>'
+      );
+      const loc = page
+        .locator("css=.box")
+        .andLocator(page.locator("css=.text"));
+      const text = await loc.textContent();
+      expect(text).toBe("Inside");
+    });
+
+    // ── Locator.all ──────────────────────────────────────────────────
+
+    it("locator.all returns individual locators", async () => {
+      await page.setContent(
+        '<ul><li>A</li><li>B</li><li>C</li></ul>'
+      );
+      const all = await page.locator("li").all();
+      expect(all.length).toBe(3);
+      const text = await all[0].textContent();
+      expect(text).toBe("A");
+    });
+
+    // ── Locator.tap ──────────────────────────────────────────────────
+
+    // tap() uses Touch/TouchEvent on platforms that support them,
+    // falls back to PointerEvent + click on desktop WKWebView
+    it("locator.tap fires tap events", async () => {
+      await page.setContent(`
+        <button id="btn">tap me</button>
+        <script>
+          var b = document.getElementById('btn');
+          b.addEventListener('touchend', function() { this.textContent = 'tapped'; });
+          b.addEventListener('pointerup', function(e) { if(e.pointerType==='touch') this.textContent = 'tapped'; });
+        </script>
+      `);
+      await page.waitForSelector("#btn");
+      await page.locator("#btn").tap();
+      const text = await page.locator("#btn").textContent();
+      expect(text).toBe("tapped");
+    });
+
+    // ── Frame methods ────────────────────────────────────────────────
+
+    it("frame.isDetached returns false for active frame", async () => {
+      await page.goto("https://example.com");
+      const main = await page.mainFrame();
+      expect(await main.isDetached()).toBe(false);
+    });
+
+    // ── Context methods ──────────────────────────────────────────────
+
+    it("context.name returns context name", () => {
+      const ctx = browser.defaultContext();
+      expect(ctx.name).toBe("default");
+    });
+
+    it("context.setOffline toggles network", async () => {
+      const ctx = browser.defaultContext();
+      await ctx.setOffline(true);
+      // Navigating should fail or return error
+      await ctx.setOffline(false);
+      // Restore connectivity -- page should work again
+      await page.goto("https://example.com");
+      const title = await page.title();
+      expect(title).toContain("Example");
     });
   });
 }

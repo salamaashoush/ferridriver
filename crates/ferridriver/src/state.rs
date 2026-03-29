@@ -1,85 +1,114 @@
-//! Browser state management with session-scoped isolation.
+//! Browser state management with instance→context→page hierarchy.
 //!
 //! Design principles:
-//! - No global "active page" — every tool call specifies its session
-//! - Sessions map to isolated browser contexts (isolated cookies, storage, websockets)
+//! - Instance = Chrome process (owns chrome flags)
+//! - Context = isolated browser context within an instance (isolated cookies, storage)
+//! - Page = tab within a context
+//! - Composite session key: "<instance>:<context>" (backwards compat: bare name = default instance)
+//! - No global "active page" -- every tool call specifies its session key
 //! - No races possible: there is no shared mutable selection state
-//! - Single-threaded tokio runtime: Mutex is never actually contended
 
 use crate::backend::{AnyBrowser, AnyPage, BackendKind};
+use crate::context::BrowserContext;
 use rustc_hash::FxHashMap as HashMap;
-use std::sync::Arc;
-use tokio::sync::RwLock;
 
 /// Default viewport dimensions -- consistent across all backends.
 pub const DEFAULT_VIEWPORT_WIDTH: i64 = 1280;
 pub const DEFAULT_VIEWPORT_HEIGHT: i64 = 720;
 
-/// A collected console message.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ConsoleMsg {
-    pub level: String,
-    pub text: String,
+// Re-export log types from context (they live there now).
+pub use crate::context::{ConsoleMsg, DialogEvent, NetRequest};
+
+// ── SessionKey ──────────────────────────────────────────────────────────────
+
+/// Parsed composite session key: `"<instance>:<context>"`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SessionKey {
+    pub instance: String,
+    pub context: String,
 }
 
-/// A collected network request.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct NetRequest {
-    pub id: String,
-    pub method: String,
-    pub url: String,
-    pub resource_type: String,
-    pub status: Option<i64>,
-    pub mime_type: Option<String>,
-}
-
-/// A dismissed dialog event (alert, confirm, prompt).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DialogEvent {
-    pub dialog_type: String,
-    pub message: String,
-    pub action: String,
-}
-
-/// A single isolated session backed by a browser context.
-pub struct Session {
-    pub pages: Vec<AnyPage>,
-    pub active_page_idx: usize,
-    pub ref_map: HashMap<String, i64>,
-    /// Console messages collected from events.
-    pub console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
-    /// Network requests collected from events.
-    pub network_log: Arc<RwLock<Vec<NetRequest>>>,
-    /// Dialog events (auto-dismissed alerts, confirms, prompts).
-    pub dialog_log: Arc<RwLock<Vec<DialogEvent>>>,
-}
-
-impl Session {
-    fn new() -> Self {
-        Self {
-            pages: Vec::new(),
-            active_page_idx: 0,
-            ref_map: HashMap::default(),
-            console_log: Arc::new(RwLock::new(Vec::new())),
-            network_log: Arc::new(RwLock::new(Vec::new())),
-            dialog_log: Arc::new(RwLock::new(Vec::new())),
+impl SessionKey {
+    /// Parse a composite key string.
+    ///
+    /// - `"default"` → instance="default", context="default"
+    /// - `"myctx"` → instance="default", context="myctx"
+    /// - `"staging:admin"` → instance="staging", context="admin"
+    #[must_use]
+    pub fn parse(raw: &str) -> Self {
+        if let Some((inst, ctx)) = raw.split_once(':') {
+            SessionKey {
+                instance: inst.to_string(),
+                context: ctx.to_string(),
+            }
+        } else if raw == "default" {
+            SessionKey {
+                instance: "default".to_string(),
+                context: "default".to_string(),
+            }
+        } else {
+            // Backwards compat: bare name → default instance, name as context
+            SessionKey {
+                instance: "default".to_string(),
+                context: raw.to_string(),
+            }
         }
     }
 
-    pub fn active_page(&self) -> Option<&AnyPage> {
-        self.pages.get(self.active_page_idx)
+    /// Reconstruct the composite key string.
+    #[must_use]
+    pub fn to_composite(&self) -> String {
+        format!("{}:{}", self.instance, self.context)
     }
 }
 
-/// All browser state.
+// ── BrowserInstance ─────────────────────────────────────────────────────────
+
+/// A single Chrome process and its isolated contexts.
+struct BrowserInstance {
+    browser: AnyBrowser,
+    contexts: HashMap<String, BrowserContext>,
+}
+
+impl BrowserInstance {
+    fn context(&self, name: &str) -> Result<&BrowserContext, String> {
+        self.contexts.get(name).ok_or_else(|| {
+            format!("Context '{name}' not found in this instance.")
+        })
+    }
+
+    fn context_mut(&mut self, name: &str) -> &mut BrowserContext {
+        self.contexts
+            .entry(name.to_string())
+            .or_insert_with(|| BrowserContext::new(name.to_string()))
+    }
+
+    fn context_mut_checked(&mut self, name: &str) -> Result<&mut BrowserContext, String> {
+        self.contexts
+            .get_mut(name)
+            .ok_or_else(|| format!("Context '{name}' not found."))
+    }
+
+    fn remove_context(&mut self, name: &str) {
+        self.contexts.remove(name);
+    }
+}
+
+// ── BrowserState ────────────────────────────────────────────────────────────
+
+/// Callback type for per-instance chrome args.
+pub type InstanceArgsFn = Box<dyn Fn(&str) -> Vec<String> + Send + Sync>;
+
+/// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
-    browser: Option<AnyBrowser>,
-    sessions: HashMap<String, Session>,
+    instances: HashMap<String, BrowserInstance>,
     chromium_path: String,
     connect_mode: ConnectMode,
     backend_kind: BackendKind,
-    /// Extra Chrome flags from LaunchOptions.
+    /// Base Chrome flags applied to ALL instances.
     pub extra_args: Vec<String>,
+    /// Per-instance additional chrome args. Called with instance name when launching.
+    instance_args_fn: Option<InstanceArgsFn>,
     /// Whether to run headless.
     pub headless: bool,
     /// Custom user data directory.
@@ -94,7 +123,7 @@ pub enum ConnectMode {
     Launch,
     /// Connect to browser at explicit ws:// or http:// URL
     ConnectUrl(String),
-    /// Auto-connect to running Chrome by reading DevToolsActivePort file
+    /// Auto-connect to running Chrome by reading `DevToolsActivePort` file
     AutoConnect {
         channel: String,
         user_data_dir: Option<String>,
@@ -102,80 +131,70 @@ pub enum ConnectMode {
 }
 
 impl BrowserState {
+    #[must_use]
     pub fn new(connect_mode: ConnectMode, backend_kind: BackendKind) -> Self {
         let chromium_path =
             std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium());
         Self {
-            browser: None,
-            sessions: HashMap::default(),
+            instances: HashMap::default(),
             chromium_path,
             connect_mode,
             backend_kind,
             extra_args: Vec::new(),
+            instance_args_fn: None,
             headless: true,
             user_data_dir: None,
             default_viewport: Some(crate::options::ViewportConfig::default()),
         }
     }
 
-    /// Create state from LaunchOptions.
+    /// Create state from `LaunchOptions`.
+    #[must_use]
     pub fn with_options(connect_mode: ConnectMode, opts: crate::options::LaunchOptions) -> Self {
         let chromium_path = opts.executable_path.unwrap_or_else(||
             std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium())
         );
         Self {
-            browser: None,
-            sessions: HashMap::default(),
+            instances: HashMap::default(),
             chromium_path,
             connect_mode,
             backend_kind: opts.backend,
             extra_args: opts.args,
+            instance_args_fn: None,
             headless: opts.headless,
             user_data_dir: opts.user_data_dir,
             default_viewport: opts.viewport,
         }
     }
 
-    /// Ensure browser is launched or connected.
-    pub async fn ensure_browser(&mut self) -> Result<(), String> {
-        if self.browser.is_some() {
+    /// Set a callback for per-instance additional chrome args.
+    /// Called with the instance name when launching a new Chrome process.
+    pub fn set_instance_args_fn(&mut self, f: InstanceArgsFn) {
+        self.instance_args_fn = Some(f);
+    }
+
+    // ── Instance management ─────────────────────────────────────────────────
+
+    /// Ensure a Chrome instance is launched. If it already exists, no-op.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the browser process fails to start or connection fails.
+    pub async fn ensure_instance(&mut self, instance_name: &str) -> Result<(), String> {
+        if self.instances.contains_key(instance_name) {
             return Ok(());
         }
 
+        // Build flags: base + per-instance
+        let mut all_extra = self.extra_args.clone();
+        if let Some(ref f) = self.instance_args_fn {
+            all_extra.extend(f(instance_name));
+        }
+
         let browser = match self.backend_kind {
-            BackendKind::CdpWs => {
-                use crate::backend::cdp_ws::CdpWsBrowser;
-                match &self.connect_mode {
-                    ConnectMode::ConnectUrl(url) => {
-                        let ws_url = if url.starts_with("ws://") || url.starts_with("wss://") {
-                            url.clone()
-                        } else {
-                            discover_ws_from_http(url).await?
-                        };
-                        AnyBrowser::CdpWs(CdpWsBrowser::connect(&ws_url).await?)
-                    }
-                    ConnectMode::AutoConnect {
-                        channel,
-                        user_data_dir,
-                    } => {
-                        let ws_url =
-                            discover_chrome_ws(channel, user_data_dir.as_deref())?;
-                        eprintln!("Auto-connecting to Chrome at {ws_url}");
-                        AnyBrowser::CdpWs(CdpWsBrowser::connect(&ws_url).await.map_err(|e| {
-                            format!(
-                                "Auto-connect failed: {e}. Ensure Chrome is running and remote \
-                                 debugging is enabled at chrome://inspect/#remote-debugging"
-                            )
-                        })?)
-                    }
-                    ConnectMode::Launch => {
-                        AnyBrowser::CdpWs(CdpWsBrowser::launch(&self.chromium_path).await?)
-                    }
-                }
-            }
             BackendKind::CdpPipe => {
                 use crate::backend::cdp_pipe::CdpPipeBrowser;
-                let flags = chrome_flags(self.headless, &self.extra_args);
+                let flags = chrome_flags(self.headless, &all_extra);
                 AnyBrowser::CdpPipe(CdpPipeBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
             }
             BackendKind::CdpRaw => {
@@ -194,7 +213,7 @@ impl BrowserState {
                         AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?)
                     }
                     ConnectMode::Launch => {
-                        let flags = chrome_flags(self.headless, &self.extra_args);
+                        let flags = chrome_flags(self.headless, &all_extra);
                         AnyBrowser::CdpRaw(CdpRawBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
                     }
                 }
@@ -206,232 +225,347 @@ impl BrowserState {
             }
         };
 
-        self.browser = Some(browser);
+        let mut inst = BrowserInstance {
+            browser,
+            contexts: HashMap::default(),
+        };
 
-        // Adopt any existing pages (e.g., from connect mode) into the "default" session.
-        // For launch mode, Chrome starts with no pages (--no-startup-window),
-        // so this loop typically does nothing. Pages are created lazily on first
-        // open_page() call, avoiding a wasted default session.
-        let existing_pages = self.browser().pages().await.unwrap_or_default();
+        // Adopt existing pages into the "default" context of this instance.
+        let existing_pages = inst.browser.pages().await.unwrap_or_default();
+        let vp = self.default_viewport.clone().unwrap_or_default();
+        let ctx = inst.context_mut("default");
         if !existing_pages.is_empty() {
-            let vp = self.default_viewport.clone().unwrap_or_default();
-            let sess = self.session_mut("default");
             for page in existing_pages {
                 let _ = page.emulate_viewport(&vp).await;
-                page.attach_listeners(sess.console_log.clone(), sess.network_log.clone(), sess.dialog_log.clone());
-                sess.pages.push(page);
+                page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+                ctx.pages.push(page);
             }
         }
+        if ctx.pages.is_empty() {
+            let page = inst.browser.new_page("about:blank").await?;
+            let _ = page.emulate_viewport(&vp).await;
+            let ctx = inst.context_mut("default");
+            page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+            ctx.pages.push(page);
+        }
 
+        self.instances.insert(instance_name.to_string(), inst);
         Ok(())
     }
 
-    fn browser(&self) -> &AnyBrowser {
-        self.browser.as_ref().expect("Browser not launched")
+    /// Backwards-compat: ensure the "default" instance.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the browser process fails to start.
+    pub async fn ensure_browser(&mut self) -> Result<(), String> {
+        Box::pin(self.ensure_instance("default")).await
     }
 
-    fn session_mut(&mut self, name: &str) -> &mut Session {
-        self.sessions
-            .entry(name.to_string())
-            .or_insert_with(Session::new)
+    /// Connect to a running browser at the given WebSocket or HTTP URL.
+    /// Creates a new instance with the given name using `CdpRaw` backend.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the WebSocket connection or page discovery fails.
+    pub async fn connect_to_url(&mut self, instance_name: &str, url: &str) -> Result<usize, String> {
+        use crate::backend::cdp_raw::CdpRawBrowser;
+
+        // Drop existing instance if any
+        self.instances.remove(instance_name);
+
+        let ws_url = if url.starts_with("ws://") || url.starts_with("wss://") {
+            url.to_string()
+        } else {
+            discover_ws_from_http(url).await?
+        };
+
+        let browser = AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?);
+        let mut inst = BrowserInstance {
+            browser,
+            contexts: HashMap::default(),
+        };
+
+        let vp = self.default_viewport.clone().unwrap_or_default();
+        let existing_pages = inst.browser.pages().await.unwrap_or_default();
+        let ctx = inst.context_mut("default");
+        let page_count = existing_pages.len();
+        for page in existing_pages {
+            let _ = page.emulate_viewport(&vp).await;
+            page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+            ctx.pages.push(page);
+        }
+
+        self.instances.insert(instance_name.to_string(), inst);
+        Ok(page_count)
     }
 
-    pub fn session(&self, name: &str) -> Result<&Session, String> {
-        self.sessions.get(name).ok_or_else(|| {
-            format!(
-                "Session '{name}' not found. Use new_page with session='{name}' to create it."
-            )
+    /// Auto-discover and connect to a running Chrome instance.
+    /// Reads Chrome's `DevToolsActivePort` file to find the WebSocket URL.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if Chrome discovery or connection fails.
+    pub async fn connect_auto(&mut self, instance_name: &str, channel: &str, user_data_dir: Option<&str>) -> Result<usize, String> {
+        let ws_url = discover_chrome_ws(channel, user_data_dir)?;
+        Box::pin(self.connect_to_url(instance_name, &ws_url)).await
+    }
+
+    // ── Routing helpers ─────────────────────────────────────────────────────
+
+    fn instance(&self, name: &str) -> Result<&BrowserInstance, String> {
+        self.instances.get(name).ok_or_else(|| {
+            format!("Browser instance '{name}' not found. It will be created on first use.")
         })
     }
 
-    pub fn session_mut_checked(&mut self, name: &str) -> Result<&mut Session, String> {
-        self.sessions
-            .get_mut(name)
-            .ok_or_else(|| format!("Session '{name}' not found."))
+    fn instance_mut(&mut self, name: &str) -> Result<&mut BrowserInstance, String> {
+        self.instances.get_mut(name).ok_or_else(|| {
+            format!("Browser instance '{name}' not found.")
+        })
     }
 
-    /// Open a new page in a session.
-    pub async fn open_page(&mut self, session: &str, url: &str) -> Result<usize, String> {
-        self.ensure_browser().await?;
+    // ── Public methods (all parse composite keys) ───────────────────────────
 
-        let page = if session == "default" {
-            self.browser().new_page(url).await?
+    /// Open a new page in a context. `context` is a composite key like `"staging:admin"`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the instance or page creation fails.
+    pub async fn open_page(&mut self, context: &str, url: &str) -> Result<usize, String> {
+        let key = SessionKey::parse(context);
+        Box::pin(self.ensure_instance(&key.instance)).await?;
+
+        let vp = self.default_viewport.clone().unwrap_or_default();
+        let inst = self.instance_mut(&key.instance)?;
+
+        let page = if key.context == "default" {
+            inst.browser.new_page(url).await?
         } else {
-            self.browser().new_page_isolated(url).await?
+            inst.browser.new_page_isolated(url).await?
         };
 
-        // Don't call wait_for_navigation here — the backend's new_page/goto
-        // already waits for the page to load (Page.loadEventFired for CDP,
-        // navigation delegate for WebKit). Double-waiting would hang because
-        // the loadEventFired event is already consumed.
+        let _ = page.emulate_viewport(&vp).await;
 
-        // Set standard viewport on new pages
-        let _ = page.emulate_viewport(&crate::options::ViewportConfig::default()).await;
-
-        let sess = self.session_mut(session);
-        page.attach_listeners(sess.console_log.clone(), sess.network_log.clone(), sess.dialog_log.clone());
-        let idx = sess.pages.len();
-        sess.pages.push(page);
-        sess.active_page_idx = idx;
+        let ctx = inst.context_mut(&key.context);
+        page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+        let idx = ctx.pages.len();
+        ctx.pages.push(page);
+        ctx.active_page_idx = idx;
 
         Ok(idx)
     }
 
-    pub fn active_page(&self, session: &str) -> Result<&AnyPage, String> {
-        let sess = self.session(session)?;
-        sess.active_page()
-            .ok_or_else(|| format!("No pages in session '{session}'"))
+    /// # Errors
+    ///
+    /// Returns an error if the instance, context, or page does not exist.
+    pub fn active_page(&self, context: &str) -> Result<&AnyPage, String> {
+        let key = SessionKey::parse(context);
+        let inst = self.instance(&key.instance)?;
+        let ctx = inst.context(&key.context)?;
+        ctx.active_page()
+            .ok_or_else(|| format!("No pages in context '{context}'"))
     }
 
-    pub fn select_page(&mut self, session: &str, page_idx: usize) -> Result<(), String> {
-        let sess = self.session_mut_checked(session)?;
-        if page_idx >= sess.pages.len() {
+    /// # Errors
+    ///
+    /// Returns an error if the instance or context does not exist.
+    pub fn context(&self, context: &str) -> Result<&BrowserContext, String> {
+        let key = SessionKey::parse(context);
+        let inst = self.instance(&key.instance)?;
+        inst.context(&key.context)
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the instance or context does not exist.
+    pub fn context_mut_checked(&mut self, context: &str) -> Result<&mut BrowserContext, String> {
+        let key = SessionKey::parse(context);
+        let inst = self.instance_mut(&key.instance)?;
+        inst.context_mut_checked(&key.context)
+    }
+
+    pub fn remove_context(&mut self, context: &str) {
+        let key = SessionKey::parse(context);
+        if let Some(inst) = self.instances.get_mut(&key.instance) {
+            inst.remove_context(&key.context);
+        }
+    }
+
+    /// # Errors
+    ///
+    /// Returns an error if the context does not exist or the page index is out of range.
+    pub fn select_page(&mut self, context: &str, page_idx: usize) -> Result<(), String> {
+        let key = SessionKey::parse(context);
+        let inst = self.instance_mut(&key.instance)?;
+        let ctx = inst.context_mut_checked(&key.context)?;
+        if page_idx >= ctx.pages.len() {
             return Err(format!(
-                "Page index {page_idx} out of range (session '{session}' has {} pages)",
-                sess.pages.len()
+                "Page index {page_idx} out of range (context '{context}' has {} pages)",
+                ctx.pages.len()
             ));
         }
-        sess.active_page_idx = page_idx;
+        ctx.active_page_idx = page_idx;
         Ok(())
     }
 
-    pub fn close_page(&mut self, session: &str, page_idx: usize) -> Result<(), String> {
-        let sess = self.session_mut_checked(session)?;
-        if sess.pages.len() <= 1 {
-            return Err("Cannot close the last page in a session".into());
+    /// # Errors
+    ///
+    /// Returns an error if this is the last page, context does not exist, or index is out of range.
+    pub fn close_page(&mut self, context: &str, page_idx: usize) -> Result<(), String> {
+        let key = SessionKey::parse(context);
+        let inst = self.instance_mut(&key.instance)?;
+        let ctx = inst.context_mut_checked(&key.context)?;
+        if ctx.pages.len() <= 1 {
+            return Err("Cannot close the last page in a context".into());
         }
-        if page_idx >= sess.pages.len() {
+        if page_idx >= ctx.pages.len() {
             return Err(format!("Page index {page_idx} out of range"));
         }
-        sess.pages.remove(page_idx);
-        if sess.active_page_idx >= sess.pages.len() {
-            sess.active_page_idx = sess.pages.len() - 1;
+        ctx.pages.remove(page_idx);
+        if ctx.active_page_idx >= ctx.pages.len() {
+            ctx.active_page_idx = ctx.pages.len() - 1;
         }
         Ok(())
     }
 
-    pub async fn list_sessions(&self) -> Vec<SessionInfo> {
+    pub async fn list_contexts(&self) -> Vec<ContextInfo> {
         let mut result = Vec::new();
-        for (name, sess) in &self.sessions {
-            let mut pages = Vec::new();
-            for (i, page) in sess.pages.iter().enumerate() {
-                let url = page.url().await.ok().flatten().unwrap_or_default();
-                let title = page.title().await.ok().flatten().unwrap_or_default();
-                pages.push(PageInfo {
-                    index: i,
-                    url,
-                    title,
-                    active: i == sess.active_page_idx,
+        for (inst_name, inst) in &self.instances {
+            for (ctx_name, ctx) in &inst.contexts {
+                let mut pages = Vec::new();
+                for (i, page) in ctx.pages.iter().enumerate() {
+                    let url = page.url().await.ok().flatten().unwrap_or_default();
+                    let title = page.title().await.ok().flatten().unwrap_or_default();
+                    pages.push(PageInfo {
+                        index: i,
+                        url,
+                        title,
+                        active: i == ctx.active_page_idx,
+                    });
+                }
+                // Use composite name for non-default instances, bare name for default
+                let name = if inst_name == "default" {
+                    ctx_name.clone()
+                } else {
+                    format!("{inst_name}:{ctx_name}")
+                };
+                result.push(ContextInfo {
+                    name,
+                    instance: inst_name.clone(),
+                    context: ctx_name.clone(),
+                    pages,
                 });
             }
-            result.push(SessionInfo {
-                name: name.clone(),
-                pages,
-            });
         }
         result.sort_by(|a, b| a.name.cmp(&b.name));
         result
     }
 
-    pub fn set_ref_map(&mut self, session: &str, ref_map: HashMap<String, i64>) {
-        if let Some(sess) = self.sessions.get_mut(session) {
-            sess.ref_map = ref_map;
+    pub fn set_ref_map(&mut self, context: &str, ref_map: HashMap<String, i64>) {
+        let key = SessionKey::parse(context);
+        if let Some(inst) = self.instances.get_mut(&key.instance) {
+            if let Some(ctx) = inst.contexts.get_mut(&key.context) {
+                ctx.ref_map = ref_map;
+            }
         }
     }
 
-    pub fn ref_map(&self, session: &str) -> HashMap<String, i64> {
-        self.sessions
-            .get(session)
-            .map(|s| s.ref_map.clone())
+    #[must_use]
+    pub fn ref_map(&self, context: &str) -> HashMap<String, i64> {
+        let key = SessionKey::parse(context);
+        self.instances
+            .get(&key.instance)
+            .and_then(|inst| inst.contexts.get(&key.context))
+            .map(|c| c.ref_map.clone())
             .unwrap_or_default()
     }
 
-    /// Get console messages for a session.
+    /// # Errors
+    ///
+    /// Returns an error if the instance or context does not exist.
     pub async fn console_messages(
         &self,
-        session: &str,
+        context: &str,
         level: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ConsoleMsg>, String> {
-        let sess = self.session(session)?;
-        let msgs = sess.console_log.read().await;
-        let filtered: Vec<ConsoleMsg> = msgs
-            .iter()
-            .filter(|m| level.map_or(true, |l| l == "all" || m.level == l))
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        Ok(filtered)
+        let key = SessionKey::parse(context);
+        let inst = self.instance(&key.instance)?;
+        let ctx = inst.context(&key.context)?;
+        Ok(ctx.console_messages(level, limit).await)
     }
 
-    /// Get network requests for a session.
+    /// # Errors
+    ///
+    /// Returns an error if the instance or context does not exist.
     pub async fn network_requests(
         &self,
-        session: &str,
+        context: &str,
         limit: usize,
     ) -> Result<Vec<NetRequest>, String> {
-        let sess = self.session(session)?;
-        let reqs = sess.network_log.read().await;
-        let result: Vec<NetRequest> = reqs
-            .iter()
-            .rev()
-            .take(limit)
-            .cloned()
-            .collect::<Vec<_>>()
-            .into_iter()
-            .rev()
-            .collect();
-        Ok(result)
+        let key = SessionKey::parse(context);
+        let inst = self.instance(&key.instance)?;
+        let ctx = inst.context(&key.context)?;
+        Ok(ctx.network_requests(limit).await)
     }
 
-    /// Refresh the page list for a session by querying the browser for current targets.
-    /// Adds any new pages that weren't previously tracked.
-    pub async fn refresh_pages(&mut self, session: &str) -> Result<usize, String> {
-        let browser = self.browser.as_ref().ok_or("No browser")?;
-        let current_pages = browser.pages().await?;
-        let sess = self.sessions.get_mut(session).ok_or_else(|| format!("Session '{session}' not found"))?;
+    /// # Errors
+    ///
+    /// Returns an error if the instance or context does not exist, or page discovery fails.
+    pub async fn refresh_pages(&mut self, context: &str) -> Result<usize, String> {
+        let key = SessionKey::parse(context);
+        let inst = self.instance_mut(&key.instance)?;
+        let current_pages = inst.browser.pages().await?;
+        let ctx = inst.context_mut_checked(&key.context)?;
 
-        let existing_count = sess.pages.len();
-        // Find pages that exist in browser but not in our session
-        // Simple heuristic: if browser has more pages than we track, add the extras
+        let existing_count = ctx.pages.len();
         if current_pages.len() > existing_count {
             for page in current_pages.into_iter().skip(existing_count) {
-                page.attach_listeners(sess.console_log.clone(), sess.network_log.clone(), sess.dialog_log.clone());
-                sess.pages.push(page);
+                page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+                ctx.pages.push(page);
             }
         }
-        Ok(sess.pages.len())
+        Ok(ctx.pages.len())
     }
 
-    /// Get dialog messages for a session.
+    /// # Errors
+    ///
+    /// Returns an error if the instance or context does not exist.
     pub async fn dialog_messages(
         &self,
-        session: &str,
+        context: &str,
         limit: usize,
     ) -> Result<Vec<DialogEvent>, String> {
-        let sess = self.session(session)?;
-        let msgs = sess.dialog_log.read().await;
-        let start = msgs.len().saturating_sub(limit);
-        Ok(msgs[start..].to_vec())
+        let key = SessionKey::parse(context);
+        let inst = self.instance(&key.instance)?;
+        let ctx = inst.context(&key.context)?;
+        Ok(ctx.dialog_messages(limit).await)
     }
 
     pub async fn shutdown(&mut self) {
-        self.sessions.clear();
-        if let Some(mut browser) = self.browser.take() {
-            let _ = browser.close().await;
+        for (_, mut inst) in self.instances.drain() {
+            inst.contexts.clear();
+            let _ = inst.browser.close().await;
         }
+    }
+
+    #[must_use]
+    pub fn is_connected(&self) -> bool {
+        !self.instances.is_empty()
     }
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub struct SessionInfo {
+pub struct ContextInfo {
     pub name: String,
+    pub instance: String,
+    pub context: String,
     pub pages: Vec<PageInfo>,
 }
+
+// Backward-compat alias for code that still references SessionInfo.
+pub type SessionInfo = ContextInfo;
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct PageInfo {
@@ -443,6 +577,8 @@ pub struct PageInfo {
 
 /// Discover the WebSocket URL from an HTTP debug endpoint.
 async fn discover_ws_from_http(http_url: &str) -> Result<String, String> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
+
     let url = http_url.trim_end_matches('/');
     let host_port = url
         .strip_prefix("http://")
@@ -451,8 +587,6 @@ async fn discover_ws_from_http(http_url: &str) -> Result<String, String> {
     let stream = tokio::net::TcpStream::connect(host_port)
         .await
         .map_err(|e| format!("Cannot connect to {host_port}: {e}"))?;
-
-    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
     let (reader, mut writer) = stream.into_split();
     let req = format!(
         "GET /json/version HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n"
@@ -482,7 +616,6 @@ async fn discover_ws_from_http(http_url: &str) -> Result<String, String> {
         }
     }
 
-    use tokio::io::AsyncReadExt;
     let mut body = vec![0u8; content_length.max(4096)];
     let n = buf_reader
         .read(&mut body)
@@ -495,11 +628,11 @@ async fn discover_ws_from_http(http_url: &str) -> Result<String, String> {
 
     json.get("webSocketDebuggerUrl")
         .and_then(|v| v.as_str())
-        .map(|s| s.to_string())
+        .map(std::string::ToString::to_string)
         .ok_or_else(|| "No webSocketDebuggerUrl in /json/version".to_string())
 }
 
-/// Discover a running Chrome instance by reading its DevToolsActivePort file.
+/// Discover a running Chrome instance by reading its `DevToolsActivePort` file.
 fn discover_chrome_ws(
     channel: &str,
     explicit_user_data_dir: Option<&str>,
@@ -521,7 +654,7 @@ fn discover_chrome_ws(
 
     let lines: Vec<&str> = content
         .lines()
-        .map(|l| l.trim())
+        .map(str::trim)
         .filter(|l| !l.is_empty())
         .collect();
     if lines.len() < 2 {
@@ -602,9 +735,8 @@ fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf, Str
     Ok(path)
 }
 
-/// Common Chrome/Chromium launch flags used by both cdp-ws and cdp-pipe backends.
-/// Matches the flags Bun uses in ChromeProcess.zig for maximum compatibility.
-/// Build Chrome flags based on options.
+/// Common Chrome/Chromium launch flags used by cdp-pipe and cdp-raw backends.
+#[must_use]
 pub fn chrome_flags(headless: bool, extra_args: &[String]) -> Vec<String> {
     let mut flags: Vec<String> = Vec::with_capacity(20 + extra_args.len());
     if headless {
@@ -638,21 +770,14 @@ const BASE_CHROME_FLAGS: &[&str] = &[
 ];
 
 /// Detect Chrome/Chromium binary on the system.
-/// Follows the same priority as Bun's findChrome():
-///   1. CHROMIUM_PATH env var
-///   2. $PATH search (google-chrome-stable, google-chrome, chromium-browser, chromium, microsoft-edge, chrome)
-///   3. Hardcoded app bundle paths (macOS /Applications, ~/Applications)
-///   4. Hardcoded Linux paths (/usr/bin, /snap/bin)
-///   5. Playwright cache (chromium_headless_shell)
+#[must_use]
 pub fn detect_chromium() -> String {
-    // 1. Env var (already handled by caller, but check here too for completeness)
     if let Ok(p) = std::env::var("CHROMIUM_PATH") {
         if std::path::Path::new(&p).exists() {
             return p;
         }
     }
 
-    // 2. $PATH search — same names and order as Bun
     if let Ok(path_var) = std::env::var("PATH") {
         let names = [
             "google-chrome-stable",
@@ -672,7 +797,6 @@ pub fn detect_chromium() -> String {
         }
     }
 
-    // 3. Hardcoded paths
     #[cfg(target_os = "macos")]
     {
         let bundles = [
@@ -682,12 +806,10 @@ pub fn detect_chromium() -> String {
             "Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
         ];
         for bundle in &bundles {
-            // /Applications
             let sys = std::path::PathBuf::from("/Applications").join(bundle);
             if sys.exists() {
                 return sys.to_string_lossy().to_string();
             }
-            // ~/Applications
             if let Ok(home) = std::env::var("HOME") {
                 let user = std::path::PathBuf::from(&home).join("Applications").join(bundle);
                 if user.exists() {
@@ -714,7 +836,6 @@ pub fn detect_chromium() -> String {
         }
     }
 
-    // 4. Playwright cache — look for chromium_headless_shell-<rev>
     if let Some(p) = find_playwright_chrome() {
         return p;
     }
@@ -737,7 +858,6 @@ fn find_playwright_chrome() -> Option<String> {
         return None;
     }
 
-    // Find the newest chromium_headless_shell-<rev> directory
     let mut best_rev: u32 = 0;
     let mut best_name = String::new();
     let prefix = "chromium_headless_shell-";
@@ -760,7 +880,6 @@ fn find_playwright_chrome() -> Option<String> {
         return None;
     }
 
-    // Build binary path — two possible layouts
     #[cfg(target_os = "macos")]
     let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
     #[cfg(target_os = "linux")]
@@ -780,7 +899,6 @@ fn find_playwright_chrome() -> Option<String> {
         return Some(cft_binary.to_string_lossy().to_string());
     }
 
-    // Non-cft layout (Linux arm64)
     #[cfg(target_os = "linux")]
     {
         let alt_binary = cache_dir

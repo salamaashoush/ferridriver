@@ -91,7 +91,7 @@ impl CdpWsBrowser {
         for p in &pages {
             Self::inject_engine(p).await;
         }
-        Ok(pages.into_iter().map(|p| AnyPage::CdpWs(CdpWsPage(p))).collect())
+        Ok(pages.into_iter().map(|p| AnyPage::CdpWs(CdpWsPage { page: p, events: crate::events::EventEmitter::new() })).collect())
     }
 
     pub async fn new_page(&self, url: &str) -> Result<AnyPage, String> {
@@ -101,7 +101,7 @@ impl CdpWsBrowser {
             .await
             .map_err(|e| format!("New page failed: {e}"))?;
         Self::inject_engine(&page).await;
-        Ok(AnyPage::CdpWs(CdpWsPage(page)))
+        Ok(AnyPage::CdpWs(CdpWsPage { page, events: crate::events::EventEmitter::new() }))
     }
 
     /// Inject selector engine via addScriptToEvaluateOnNewDocument so it's
@@ -132,7 +132,7 @@ impl CdpWsBrowser {
             .new_page(create_params)
             .await
             .map_err(|e| format!("New page in context failed: {e}"))?;
-        Ok(AnyPage::CdpWs(CdpWsPage(page)))
+        Ok(AnyPage::CdpWs(CdpWsPage { page, events: crate::events::EventEmitter::new() }))
     }
 
     pub async fn close(&mut self) -> Result<(), String> {
@@ -143,50 +143,53 @@ impl CdpWsBrowser {
 // ─── CdpWsPage ──────────────────────────────────────────────────────────────
 
 #[derive(Clone)]
-pub struct CdpWsPage(pub(crate) Page);
+pub struct CdpWsPage {
+    pub(crate) page: Page,
+    pub events: crate::events::EventEmitter,
+}
 
 impl CdpWsPage {
     // ── Navigation ──
 
     pub async fn goto(&self, url: &str) -> Result<(), String> {
-        self.0.goto(url).await.map_err(|e| format!("Navigate: {e}"))?;
+        self.page.goto(url).await.map_err(|e| format!("Navigate: {e}"))?;
         Ok(())
     }
 
     pub async fn wait_for_navigation(&self) -> Result<(), String> {
-        let _ = self.0.wait_for_navigation().await;
+        let _ = self.page.wait_for_navigation().await;
         Ok(())
     }
 
     pub async fn reload(&self) -> Result<(), String> {
-        self.0.reload().await.map_err(|e| format!("Reload: {e}"))?;
+        self.page.reload().await.map_err(|e| format!("Reload: {e}"))?;
         Ok(())
     }
 
     pub async fn go_back(&self) -> Result<(), String> {
-        self.0.evaluate("window.history.back()").await.map_err(|e| format!("{e}"))?;
-        let _ = self.0.wait_for_navigation().await;
+        self.page.evaluate("window.history.back()").await.map_err(|e| format!("{e}"))?;
+        let _ = self.page.wait_for_navigation().await;
         Ok(())
     }
 
     pub async fn go_forward(&self) -> Result<(), String> {
-        self.0.evaluate("window.history.forward()").await.map_err(|e| format!("{e}"))?;
-        let _ = self.0.wait_for_navigation().await;
+        self.page.evaluate("window.history.forward()").await.map_err(|e| format!("{e}"))?;
+        let _ = self.page.wait_for_navigation().await;
         Ok(())
     }
 
     pub async fn url(&self) -> Result<Option<String>, String> {
-        self.0.url().await.map_err(|e| format!("URL: {e}"))
+        self.page.url().await.map_err(|e| format!("URL: {e}"))
     }
 
     pub async fn title(&self) -> Result<Option<String>, String> {
-        self.0.get_title().await.map_err(|e| format!("Title: {e}"))
+        self.page.get_title().await.map_err(|e| format!("Title: {e}"))
     }
 
     // ── JavaScript ──
 
     pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
-        let result = self.0.evaluate(expression).await.map_err(|e| format!("{e}"))?;
+        let result = self.page.evaluate(expression).await.map_err(|e| format!("{e}"))?;
         Ok(result.value().cloned())
     }
 
@@ -194,11 +197,11 @@ impl CdpWsPage {
 
     pub async fn find_element(&self, selector: &str) -> Result<AnyElement, String> {
         let el = self
-            .0
+            .page
             .find_element(selector)
             .await
             .map_err(|e| format!("'{selector}': {e}"))?;
-        Ok(AnyElement::CdpWs(CdpWsElement { element: el, page: self.0.clone() }))
+        Ok(AnyElement::CdpWs(CdpWsElement { element: el, page: self.page.clone() }))
     }
 
     pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
@@ -210,12 +213,12 @@ impl CdpWsPage {
             .expression(js)
             .build()
             .map_err(|e| format!("{e}"))?;
-        let result = self.0.execute(params).await.map_err(|e| format!("{e}"))?;
+        let result = self.page.execute(params).await.map_err(|e| format!("{e}"))?;
         let object_id = result.result.result.object_id
             .ok_or("JS did not return a DOM element")?;
 
         // Get nodeId from objectId
-        let node_result = self.0.execute(RequestNodeParams::new(object_id))
+        let node_result = self.page.execute(RequestNodeParams::new(object_id))
             .await
             .map_err(|e| format!("{e}"))?;
         let node_id = node_result.result.node_id;
@@ -228,32 +231,32 @@ impl CdpWsPage {
         let tag_js = format!(
             "(function() {{ var el = ({js}); if (el) el.setAttribute('data-{tag}', '1'); }})()"
         );
-        let _ = self.0.evaluate(tag_js).await;
-        let el = self.0.find_element(format!("[data-{tag}]"))
+        let _ = self.page.evaluate(tag_js).await;
+        let el = self.page.find_element(format!("[data-{tag}]"))
             .await
             .map_err(|e| format!("{e}"))?;
-        let _ = self.0.evaluate(format!(
+        let _ = self.page.evaluate(format!(
             "document.querySelector('[data-{tag}]')?.removeAttribute('data-{tag}')"
         )).await;
-        Ok(AnyElement::CdpWs(CdpWsElement { element: el, page: self.0.clone() }))
+        Ok(AnyElement::CdpWs(CdpWsElement { element: el, page: self.page.clone() }))
     }
 
     // ── Content ──
 
     pub async fn content(&self) -> Result<String, String> {
-        self.0.content().await.map_err(|e| format!("{e}"))
+        self.page.content().await.map_err(|e| format!("{e}"))
     }
 
     pub async fn set_content(&self, html: &str) -> Result<(), String> {
         let frame_id = self
-            .0
+            .page
             .mainframe()
             .await
             .map_err(|e| format!("No frame: {e}"))?
             .ok_or_else(|| "No main frame".to_string())?;
         let engine_js = crate::selectors::build_inject_js();
         let augmented = format!("<script>{engine_js}</script>{html}");
-        self.0
+        self.page
             .execute(
                 chromiumoxide::cdp::browser_protocol::page::SetDocumentContentParams::new(
                     frame_id,
@@ -286,7 +289,7 @@ impl CdpWsPage {
 
         if opts.full_page {
             use chromiumoxide::cdp::browser_protocol::page::GetLayoutMetricsParams;
-            let metrics = self.0.execute(GetLayoutMetricsParams::default())
+            let metrics = self.page.execute(GetLayoutMetricsParams::default())
                 .await
                 .map_err(|e| format!("Layout metrics: {e}"))?;
             let cs = &metrics.result.css_content_size;
@@ -300,7 +303,7 @@ impl CdpWsPage {
             });
         }
 
-        let result = self.0.execute(params.build())
+        let result = self.page.execute(params.build())
             .await
             .map_err(|e| format!("Screenshot: {e}"))?;
 
@@ -315,7 +318,7 @@ impl CdpWsPage {
         format: ImageFormat,
     ) -> Result<Vec<u8>, String> {
         let el = self
-            .0
+            .page
             .find_element(selector)
             .await
             .map_err(|e| format!("{e}"))?;
@@ -335,7 +338,7 @@ impl CdpWsPage {
         params.landscape = Some(landscape);
         params.print_background = Some(print_background);
         params.prefer_css_page_size = Some(true);
-        let result = self.0.execute(params).await.map_err(|e| format!("PDF: {e}"))?;
+        let result = self.page.execute(params).await.map_err(|e| format!("PDF: {e}"))?;
         let data = result.result.data;
         base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &data)
             .map_err(|e| format!("Decode PDF: {e}"))
@@ -349,26 +352,26 @@ impl CdpWsPage {
             BackendNodeId,
         };
         // Get document root
-        let doc = self.0.execute(GetDocumentParams::default()).await
+        let doc = self.page.execute(GetDocumentParams::default()).await
             .map_err(|e| format!("Get document: {e}"))?;
         let root_node_id = doc.result.root.node_id;
 
         // Query for the element
         let query = QuerySelectorParams::new(root_node_id, selector.to_string());
-        let query_result = self.0.execute(query).await
+        let query_result = self.page.execute(query).await
             .map_err(|e| format!("querySelector '{selector}': {e}"))?;
         let node_id = query_result.result.node_id;
 
         // Get backendNodeId via describeNode
         let describe = DescribeNodeParams::builder().node_id(node_id).build();
-        let desc_result = self.0.execute(describe).await
+        let desc_result = self.page.execute(describe).await
             .map_err(|e| format!("describeNode: {e}"))?;
         let backend_node_id = desc_result.result.node.backend_node_id;
 
         // Set files
         let mut params = SetFileInputFilesParams::new(paths.to_vec());
         params.backend_node_id = Some(BackendNodeId::new(backend_node_id.inner().clone()));
-        self.0.execute(params).await
+        self.page.execute(params).await
             .map_err(|e| format!("setFileInputFiles: {e}"))?;
         Ok(())
     }
@@ -376,9 +379,13 @@ impl CdpWsPage {
     // ── Accessibility ──
 
     pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>, String> {
+        self.accessibility_tree_with_depth(-1).await
+    }
+
+    pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>, String> {
         let tree = self
-            .0
-            .get_full_ax_tree(Some(-1), None)
+            .page
+            .get_full_ax_tree(Some(depth as i64), None)
             .await
             .map_err(|e| format!("A11y tree: {e}"))?;
         Ok(convert_ax_nodes(&tree.nodes))
@@ -403,12 +410,12 @@ impl CdpWsPage {
             .r#type(DispatchMouseEventType::MousePressed)
             .x(x).y(y).button(btn.clone()).click_count(click_count as i64)
             .build().map_err(|e| format!("{e}"))?;
-        self.0.execute(pressed).await.map_err(|e| format!("{e}"))?;
+        self.page.execute(pressed).await.map_err(|e| format!("{e}"))?;
         let released = DispatchMouseEventParams::builder()
             .r#type(DispatchMouseEventType::MouseReleased)
             .x(x).y(y).button(btn).click_count(click_count as i64)
             .build().map_err(|e| format!("{e}"))?;
-        self.0.execute(released).await.map_err(|e| format!("{e}"))?;
+        self.page.execute(released).await.map_err(|e| format!("{e}"))?;
         Ok(())
     }
 
@@ -418,7 +425,7 @@ impl CdpWsPage {
             .r#type(DispatchMouseEventType::MouseMoved)
             .x(x).y(y)
             .build().map_err(|e| format!("{e}"))?;
-        self.0.execute(moved).await.map_err(|e| format!("{e}"))?;
+        self.page.execute(moved).await.map_err(|e| format!("{e}"))?;
         Ok(())
     }
 
@@ -440,7 +447,7 @@ impl CdpWsPage {
             .r#type(DispatchMouseEventType::MousePressed)
             .x(from.0).y(from.1).button(MouseButton::Left).click_count(1i64)
             .build().map_err(|e| format!("{e}"))?;
-        self.0.execute(pressed).await.map_err(|e| format!("{e}"))?;
+        self.page.execute(pressed).await.map_err(|e| format!("{e}"))?;
         let steps = 10u32;
         for i in 1..=steps {
             let t = i as f64 / steps as f64;
@@ -453,7 +460,7 @@ impl CdpWsPage {
             .r#type(DispatchMouseEventType::MouseReleased)
             .x(to.0).y(to.1).button(MouseButton::Left).click_count(1i64)
             .build().map_err(|e| format!("{e}"))?;
-        self.0.execute(released).await.map_err(|e| format!("{e}"))?;
+        self.page.execute(released).await.map_err(|e| format!("{e}"))?;
         Ok(())
     }
 
@@ -463,7 +470,7 @@ impl CdpWsPage {
             .r#type(DispatchMouseEventType::MouseWheel)
             .x(0.0).y(0.0).delta_x(delta_x).delta_y(delta_y)
             .build().map_err(|e| format!("{e}"))?;
-        self.0.execute(params).await.map_err(|e| format!("{e}"))?;
+        self.page.execute(params).await.map_err(|e| format!("{e}"))?;
         Ok(())
     }
 
@@ -474,7 +481,7 @@ impl CdpWsPage {
             .r#type(DispatchMouseEventType::MousePressed)
             .x(x).y(y).button(btn).click_count(1i64)
             .build().map_err(|e| format!("{e}"))?;
-        self.0.execute(params).await.map_err(|e| format!("{e}"))?;
+        self.page.execute(params).await.map_err(|e| format!("{e}"))?;
         Ok(())
     }
 
@@ -485,22 +492,22 @@ impl CdpWsPage {
             .r#type(DispatchMouseEventType::MouseReleased)
             .x(x).y(y).button(btn).click_count(1i64)
             .build().map_err(|e| format!("{e}"))?;
-        self.0.execute(params).await.map_err(|e| format!("{e}"))?;
+        self.page.execute(params).await.map_err(|e| format!("{e}"))?;
         Ok(())
     }
 
     pub async fn type_str(&self, text: &str) -> Result<(), String> {
-        self.0.type_str(text).await.map_err(|e| format!("{e}")).map(|_| ())
+        self.page.type_str(text).await.map_err(|e| format!("{e}")).map(|_| ())
     }
 
     pub async fn press_key(&self, key: &str) -> Result<(), String> {
-        self.0.press_key(key).await.map_err(|e| format!("{e}")).map(|_| ())
+        self.page.press_key(key).await.map_err(|e| format!("{e}")).map(|_| ())
     }
 
     // ── Cookies ──
 
     pub async fn get_cookies(&self) -> Result<Vec<CookieData>, String> {
-        let cookies = self.0.get_cookies().await.map_err(|e| format!("{e}"))?;
+        let cookies = self.page.get_cookies().await.map_err(|e| format!("{e}"))?;
         Ok(cookies
             .iter()
             .map(|c| CookieData {
@@ -529,18 +536,18 @@ impl CdpWsPage {
         if let Some(e) = cookie.expires {
             cp.expires = Some(TimeSinceEpoch::new(e));
         }
-        self.0.set_cookie(cp).await.map_err(|e| format!("{e}")).map(|_| ())
+        self.page.set_cookie(cp).await.map_err(|e| format!("{e}")).map(|_| ())
     }
 
     pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
         use chromiumoxide::cdp::browser_protocol::network::DeleteCookiesParams;
         let mut params = DeleteCookiesParams::new(name.to_string());
         params.domain = domain.map(|d| d.to_string());
-        self.0.delete_cookie(params).await.map_err(|e| format!("{e}")).map(|_| ())
+        self.page.delete_cookie(params).await.map_err(|e| format!("{e}")).map(|_| ())
     }
 
     pub async fn clear_cookies(&self) -> Result<(), String> {
-        self.0.clear_cookies().await.map_err(|e| format!("{e}")).map(|_| ())
+        self.page.clear_cookies().await.map_err(|e| format!("{e}")).map(|_| ())
     }
 
     // ── Emulation ──
@@ -552,7 +559,7 @@ impl CdpWsPage {
         );
         // SetDeviceMetricsOverrideParams doesn't expose screenWidth/screenHeight/touch directly
         // via the builder, but the struct fields are public
-        self.0
+        self.page
             .emulate_viewport(params)
             .await
             .map_err(|e| format!("{e}"))
@@ -561,7 +568,7 @@ impl CdpWsPage {
 
     pub async fn set_user_agent(&self, ua: &str) -> Result<(), String> {
         use chromiumoxide::cdp::browser_protocol::network::SetUserAgentOverrideParams;
-        self.0
+        self.page
             .set_user_agent(SetUserAgentOverrideParams::new(ua.to_string()))
             .await
             .map_err(|e| format!("{e}"))
@@ -580,7 +587,7 @@ impl CdpWsPage {
             .longitude(lng)
             .accuracy(accuracy)
             .build();
-        self.0
+        self.page
             .emulate_geolocation(params)
             .await
             .map_err(|e| format!("{e}"))
@@ -589,17 +596,17 @@ impl CdpWsPage {
 
     pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
         use chromiumoxide::cdp::browser_protocol::emulation::SetLocaleOverrideParams;
-        let _ = self.0.execute(SetLocaleOverrideParams::builder().locale(locale).build()).await;
+        let _ = self.page.execute(SetLocaleOverrideParams::builder().locale(locale).build()).await;
         // Also set via Network.setUserAgentOverride for navigator.language
         use chromiumoxide::cdp::browser_protocol::network::SetUserAgentOverrideParams;
         let mut params = SetUserAgentOverrideParams::new("");
         params.accept_language = Some(locale.to_string());
-        self.0.execute(params).await.map_err(|e| format!("{e}")).map(|_| ())
+        self.page.execute(params).await.map_err(|e| format!("{e}")).map(|_| ())
     }
 
     pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
         use chromiumoxide::cdp::browser_protocol::emulation::SetTimezoneOverrideParams;
-        self.0.execute(SetTimezoneOverrideParams::new(timezone_id))
+        self.page.execute(SetTimezoneOverrideParams::new(timezone_id))
             .await.map_err(|e| format!("{e}")).map(|_| ())
     }
 
@@ -621,12 +628,12 @@ impl CdpWsPage {
         let mut params = SetEmulatedMediaParams::default();
         params.media = opts.media.clone();
         params.features = Some(features);
-        self.0.execute(params).await.map_err(|e| format!("{e}")).map(|_| ())
+        self.page.execute(params).await.map_err(|e| format!("{e}")).map(|_| ())
     }
 
     pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
         use chromiumoxide::cdp::browser_protocol::emulation::SetScriptExecutionDisabledParams;
-        self.0.execute(SetScriptExecutionDisabledParams::new(!enabled))
+        self.page.execute(SetScriptExecutionDisabledParams::new(!enabled))
             .await.map_err(|e| format!("{e}")).map(|_| ())
     }
 
@@ -636,7 +643,7 @@ impl CdpWsPage {
         let h: serde_json::Map<String, serde_json::Value> = headers.iter()
             .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone()))).collect();
         let params = SetExtraHttpHeadersParams::new(Headers::new(serde_json::Value::Object(h)));
-        self.0.execute(params).await.map_err(|e| format!("{e}")).map(|_| ())
+        self.page.execute(params).await.map_err(|e| format!("{e}")).map(|_| ())
     }
 
     pub async fn grant_permissions(&self, _permissions: &[String], _origin: Option<&str>) -> Result<(), String> {
@@ -650,8 +657,43 @@ impl CdpWsPage {
 
     pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
         use chromiumoxide::cdp::browser_protocol::emulation::SetFocusEmulationEnabledParams;
-        self.0.execute(SetFocusEmulationEnabledParams::new(enabled))
+        self.page.execute(SetFocusEmulationEnabledParams::new(enabled))
             .await.map_err(|e| format!("{e}")).map(|_| ())
+    }
+
+    // ── Frames ──
+
+    pub async fn get_frame_tree(&self) -> Result<Vec<super::FrameInfo>, String> {
+        use chromiumoxide::cdp::browser_protocol::page::GetFrameTreeParams;
+        let result = self.page.execute(GetFrameTreeParams::default())
+            .await.map_err(|e| format!("{e}"))?;
+
+        fn collect(tree: &chromiumoxide::cdp::browser_protocol::page::FrameTree, out: &mut Vec<super::FrameInfo>) {
+            let f = &tree.frame;
+            out.push(super::FrameInfo {
+                frame_id: f.id.inner().to_string(),
+                parent_frame_id: f.parent_id.as_ref().map(|id| id.inner().to_string()),
+                name: f.name.clone().unwrap_or_default(),
+                url: f.url.clone(),
+            });
+            if let Some(children) = &tree.child_frames {
+                for child in children {
+                    collect(child, out);
+                }
+            }
+        }
+
+        let mut frames = Vec::new();
+        collect(&result.result.frame_tree, &mut frames);
+        Ok(frames)
+    }
+
+    pub async fn evaluate_in_frame(&self, expression: &str, _frame_id: &str) -> Result<Option<serde_json::Value>, String> {
+        // chromiumoxide doesn't expose frame-scoped evaluation easily.
+        // Fallback: evaluate in main frame context (will be improved when cdp-ws is deprecated).
+        self.page.evaluate(expression).await
+            .map(|v| v.value().cloned())
+            .map_err(|e| format!("{e}"))
     }
 
     // ── Network ──
@@ -665,7 +707,7 @@ impl CdpWsPage {
     ) -> Result<(), String> {
         use chromiumoxide::cdp::browser_protocol::network::OverrideNetworkStateParams;
         let params = OverrideNetworkStateParams::new(offline, latency, download, upload);
-        self.0.execute(params).await.map_err(|e| format!("{e}"))?;
+        self.page.execute(params).await.map_err(|e| format!("{e}"))?;
         Ok(())
     }
 
@@ -673,12 +715,12 @@ impl CdpWsPage {
 
     pub async fn start_tracing(&self) -> Result<(), String> {
         let params = chromiumoxide::cdp::browser_protocol::tracing::StartParams::builder().build();
-        self.0.execute(params).await.map_err(|e| format!("{e}"))?;
+        self.page.execute(params).await.map_err(|e| format!("{e}"))?;
         Ok(())
     }
 
     pub async fn stop_tracing(&self) -> Result<(), String> {
-        self.0
+        self.page
             .execute(chromiumoxide::cdp::browser_protocol::tracing::EndParams {})
             .await
             .map_err(|e| format!("{e}"))?;
@@ -686,7 +728,7 @@ impl CdpWsPage {
     }
 
     pub async fn metrics(&self) -> Result<Vec<MetricData>, String> {
-        let metrics = self.0.metrics().await.map_err(|e| format!("{e}"))?;
+        let metrics = self.page.metrics().await.map_err(|e| format!("{e}"))?;
         Ok(metrics
             .iter()
             .map(|m| MetricData {
@@ -707,7 +749,7 @@ impl CdpWsPage {
             .backend_node_id(BackendNodeId::new(backend_node_id))
             .build();
         let resolved = self
-            .0
+            .page
             .execute(resolve)
             .await
             .map_err(|e| format!("Ref '{ref_id}' stale: {e}"))?;
@@ -724,18 +766,18 @@ impl CdpWsPage {
             ))
             .build()
             .map_err(|e| format!("Tag build error: {e}"))?;
-        self.0
+        self.page
             .execute(tag)
             .await
             .map_err(|e| format!("Tag failed: {e}"))?;
 
         let el = self
-            .0
+            .page
             .find_element(&format!("[data-cref='{ref_id}']"))
             .await
             .map_err(|e| format!("Ref '{ref_id}' element not found: {e}"))?;
 
-        Ok(AnyElement::CdpWs(CdpWsElement { element: el, page: self.0.clone() }))
+        Ok(AnyElement::CdpWs(CdpWsElement { element: el, page: self.page.clone() }))
     }
 
     // ── Event listeners ──
@@ -748,7 +790,7 @@ impl CdpWsPage {
     ) {
         // Console listener
         let cl = console_log;
-        let page_clone = self.0.clone();
+        let page_clone = self.page.clone();
         tokio::spawn(async move {
             if let Ok(mut stream) = page_clone.event_listener::<EventConsoleApiCalled>().await {
                 while let Some(ev) = stream.next().await {
@@ -772,7 +814,7 @@ impl CdpWsPage {
 
         // Network request listener
         let nl = network_log.clone();
-        let page_clone = self.0.clone();
+        let page_clone = self.page.clone();
         tokio::spawn(async move {
             if let Ok(mut stream) = page_clone.event_listener::<EventRequestWillBeSent>().await {
                 while let Some(ev) = stream.next().await {
@@ -787,6 +829,8 @@ impl CdpWsPage {
                             .unwrap_or_default(),
                         status: None,
                         mime_type: None,
+                        headers: None,
+                        post_data: None,
                     });
                 }
             }
@@ -794,7 +838,7 @@ impl CdpWsPage {
 
         // Network response listener (updates status)
         let nl2 = network_log;
-        let page_clone = self.0.clone();
+        let page_clone = self.page.clone();
         tokio::spawn(async move {
             if let Ok(mut stream) = page_clone.event_listener::<EventResponseReceived>().await {
                 while let Some(ev) = stream.next().await {
@@ -813,7 +857,7 @@ impl CdpWsPage {
             EventJavascriptDialogOpening, HandleJavaScriptDialogParams, DialogType,
         };
         let dl = dialog_log;
-        let page_clone = self.0.clone();
+        let page_clone = self.page.clone();
         tokio::spawn(async move {
             if let Ok(mut stream) = page_clone.event_listener::<EventJavascriptDialogOpening>().await {
                 while let Some(ev) = stream.next().await {

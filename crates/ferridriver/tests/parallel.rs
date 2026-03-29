@@ -7,7 +7,6 @@
 
 use ferridriver::backend::BackendKind;
 use ferridriver::options::*;
-use ferridriver::state::ConnectMode;
 use ferridriver::Browser;
 use std::time::Instant;
 
@@ -30,9 +29,10 @@ fn data_url(html: &str) -> String {
 async fn multi_page_automation() {
   let t0 = Instant::now();
 
-  let browser = Browser::launch_with(ConnectMode::Launch, BackendKind::CdpWs)
-    .await
-    .expect("launch");
+  let browser = Browser::launch(LaunchOptions {
+    backend: BackendKind::CdpPipe,
+    ..Default::default()
+  }).await.expect("launch");
 
   // Create 3 pages with different content
   let page1 = browser.new_page().await.unwrap();
@@ -43,9 +43,9 @@ async fn multi_page_automation() {
   let url2 = data_url("<h1>Page Two</h1><button id='b' onclick=\"this.textContent='clicked'\">Go</button>");
   let url3 = data_url("<h1>Page Three</h1><ul><li>A</li><li>B</li><li>C</li></ul>");
 
-  page1.goto(&url1).await.unwrap();
-  page2.goto(&url2).await.unwrap();
-  page3.goto(&url3).await.unwrap();
+  page1.goto(&url1, None).await.unwrap();
+  page2.goto(&url2, None).await.unwrap();
+  page3.goto(&url3, None).await.unwrap();
 
   // Act on each page -- each has independent state
   page1.locator("#i").fill("multi-page").await.unwrap();

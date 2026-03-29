@@ -1,10 +1,10 @@
 //! WebSocket transport for CDP -- high-performance, fully parallel.
 //!
-//! Same architecture as cdp_pipe/transport.rs but over WebSocket:
+//! Same architecture as `cdp_pipe/transport.rs` but over WebSocket:
 //! - Oneshot channels for response correlation (no handler bottleneck)
 //! - Broadcast channel for events (console, network, dialog)
 //! - Navigation waiters (register before navigate, resolve on loadEventFired)
-//! - Multiple send_command calls can be in-flight simultaneously
+//! - Multiple `send_command` calls can be in-flight simultaneously
 
 use futures::{SinkExt, StreamExt};
 use rustc_hash::FxHashMap;
@@ -19,16 +19,21 @@ type WsSink = futures::stream::SplitSink<
   Message,
 >;
 
+/// Shared map of pending CDP command responses keyed by command ID.
+type PendingMap = Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>;
+/// Shared map of navigation waiters keyed by session ID.
+type NavWaiterMap = Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>>;
+
 pub struct WsTransport {
   writer: Mutex<WsSink>,
   next_id: AtomicU64,
-  pending: Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
-  nav_waiters: Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>>,
+  pending: PendingMap,
+  nav_waiters: NavWaiterMap,
   event_tx: broadcast::Sender<serde_json::Value>,
 }
 
 impl WsTransport {
-  /// Connect to an existing Chrome DevTools WebSocket endpoint.
+  /// Connect to an existing Chrome `DevTools` WebSocket endpoint.
   pub async fn connect(ws_url: &str) -> Result<Self, String> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
       .await
@@ -37,10 +42,8 @@ impl WsTransport {
     let (write, read) = ws_stream.split();
     let (event_tx, _) = broadcast::channel(256);
 
-    let pending: Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>> =
-      Arc::new(Mutex::new(FxHashMap::default()));
-    let nav_waiters: Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>> =
-      Arc::new(Mutex::new(FxHashMap::default()));
+    let pending: PendingMap = Arc::new(Mutex::new(FxHashMap::default()));
+    let nav_waiters: NavWaiterMap = Arc::new(Mutex::new(FxHashMap::default()));
 
     let pending2 = pending.clone();
     let nav_waiters2 = nav_waiters.clone();
@@ -50,17 +53,14 @@ impl WsTransport {
     tokio::spawn(async move {
       let mut read = read;
       while let Some(Ok(msg)) = read.next().await {
-        let text = match msg {
-          Message::Text(t) => t,
-          _ => continue,
-        };
+        let Message::Text(text) = msg else { continue };
 
         let json: serde_json::Value = match serde_json::from_str(&text) {
           Ok(v) => v,
           Err(_) => continue,
         };
 
-        let id = json.get("id").and_then(|v| v.as_u64()).unwrap_or(0);
+        let id = json.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
 
         if id > 0 {
           // Response to a command
@@ -218,7 +218,7 @@ impl WsTransport {
   }
 }
 
-/// Discover Chrome's DevTools WebSocket URL by reading the DevToolsActivePort file.
+/// Discover Chrome's `DevTools` WebSocket URL by reading the `DevToolsActivePort` file.
 async fn discover_ws_url(
   port_file: &Path,
   child: &mut tokio::process::Child,

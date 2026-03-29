@@ -1,7 +1,7 @@
 //! ferridriver -- High-performance browser automation library.
 //!
 //! Provides a Playwright-compatible API for browser automation across
-//! multiple backends (CDP WebSocket, CDP Pipes, native WebKit).
+//! multiple backends (CDP WebSocket, CDP Pipes, native `WebKit`).
 //!
 //! # Quick Start
 //!
@@ -23,16 +23,23 @@
 
 // ── Public API (Playwright-compatible) ──
 pub mod browser;
+pub mod context;
+pub mod events;
+pub mod frame;
 pub mod locator;
 pub mod options;
 pub mod page;
 
 pub use browser::Browser;
+pub use context::{BrowserContext, ContextRef};
+pub use events::{EventEmitter, PageEvent};
+pub use frame::Frame;
 pub use locator::Locator;
 pub use page::Page;
 
 // ── Public lower-level modules (needed by MCP server and consumers) ──
 pub mod backend;
+pub mod route;
 pub mod state;
 pub mod snapshot;
 pub mod scenario;

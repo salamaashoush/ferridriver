@@ -61,8 +61,8 @@ fn parse(script: &str) -> Result<(Option<String>, Vec<ParsedStep>), String> {
         if line.is_empty() || line.starts_with('#') || line.starts_with("Feature:") {
             continue;
         }
-        if line.starts_with("Scenario:") {
-            scenario_name = Some(line.strip_prefix("Scenario:").unwrap().trim().to_string());
+        if let Some(name) = line.strip_prefix("Scenario:") {
+            scenario_name = Some(name.trim().to_string());
             continue;
         }
 
@@ -152,6 +152,9 @@ fn interpolate(s: &str, vars: &HashMap<String, String>) -> String {
     result
 }
 
+/// # Errors
+///
+/// Returns an error if the script cannot be parsed or a step execution fails fatally.
 pub async fn run(
     page: &AnyPage,
     script: &str,
@@ -201,7 +204,7 @@ pub async fn run(
         let result = registry
             .execute(page, &body, table.as_deref(), &mut variables)
             .await;
-        let duration_ms = t0.elapsed().as_millis() as u64;
+        let duration_ms = u64::try_from(t0.elapsed().as_millis()).unwrap_or(u64::MAX);
 
         match result {
             Ok(data) => {
@@ -245,7 +248,7 @@ pub async fn run(
         }
     }
 
-    let total_duration_ms = total_start.elapsed().as_millis() as u64;
+    let total_duration_ms = u64::try_from(total_start.elapsed().as_millis()).unwrap_or(u64::MAX);
     let status = if failed == 0 { "passed" } else { "failed" }.to_string();
     let summary = format!(
         "{passed} passed, {failed} failed, {skipped} skipped in {total_duration_ms}ms"

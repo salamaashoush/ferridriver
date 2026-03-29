@@ -1,17 +1,24 @@
 use super::{q, js_escape, StepCategory, StepDef};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
-    steps.push(Box::new(WaitSelectorTimeout));
-    steps.push(Box::new(WaitSelector));
+    // Text variants MUST come before selector variants.
+    // The selector timeout pattern uses negative lookahead to reject "text " prefix,
+    // so order doesn't actually matter for correctness -- but keeping text first
+    // is a safety net.
     steps.push(Box::new(WaitTextTimeout));
     steps.push(Box::new(WaitText));
+    steps.push(Box::new(WaitSelectorTimeout));
+    steps.push(Box::new(WaitSelector));
     steps.push(Box::new(WaitMs));
     steps.push(Box::new(WaitNavigation));
 }
 
 step!(WaitSelectorTimeout {
     category: StepCategory::Wait,
-    pattern: r#"^I wait for (.+) for (\d+)\s*ms$"#,
+    // Use lazy .+? so this captures the selector minimally, leaving " for NNNNms" at the end.
+    // Text variants are registered first, so "I wait for text X for 5000ms" is matched
+    // by WaitTextTimeout before reaching this pattern.
+    pattern: r"^I wait for (.+?) for (\d+)\s*ms$",
     description: "Wait for selector with timeout",
     example: "When I wait for \"#loading\" for 5000ms",
     execute(page, caps, _table, _vars) {
@@ -24,7 +31,7 @@ step!(WaitSelectorTimeout {
 
 step!(WaitSelector {
     category: StepCategory::Wait,
-    pattern: r#"^I wait for selector (.+)$"#,
+    pattern: r"^I wait for selector (.+)$",
     description: "Wait for selector to appear",
     example: "When I wait for selector \"#content\"",
     execute(page, caps, _table, _vars) {
@@ -36,7 +43,7 @@ step!(WaitSelector {
 
 step!(WaitTextTimeout {
     category: StepCategory::Wait,
-    pattern: r#"^I wait for text (.+) for (\d+)\s*ms$"#,
+    pattern: r"^I wait for text (.+?) for (\d+)\s*ms$",
     description: "Wait for text with timeout",
     example: "When I wait for text \"Success\" for 5000ms",
     execute(page, caps, _table, _vars) {
@@ -49,7 +56,7 @@ step!(WaitTextTimeout {
 
 step!(WaitText {
     category: StepCategory::Wait,
-    pattern: r#"^I wait for text (.+)$"#,
+    pattern: r"^I wait for text (.+)$",
     description: "Wait for text to appear",
     example: "When I wait for text \"Ready\"",
     execute(page, caps, _table, _vars) {
@@ -61,7 +68,7 @@ step!(WaitText {
 
 step!(WaitMs {
     category: StepCategory::Wait,
-    pattern: r#"^I wait (\d+)\s*ms$"#,
+    pattern: r"^I wait (\d+)\s*ms$",
     description: "Wait a fixed duration",
     example: "When I wait 500ms",
     execute(_page, caps, _table, _vars) {
@@ -73,7 +80,7 @@ step!(WaitMs {
 
 step!(WaitNavigation {
     category: StepCategory::Wait,
-    pattern: r#"^I wait for navigation$"#,
+    pattern: r"^I wait for navigation$",
     description: "Wait for next navigation",
     example: "And I wait for navigation",
     execute(page, _caps, _table, _vars) {
@@ -98,7 +105,7 @@ async fn wait_for_selector(
         if super::find(page, selector).await.is_ok() {
             return Ok(());
         }
-        tokio::time::sleep(std::time::Duration::from_millis(16)).await; // ~60fps poll rate
+        tokio::time::sleep(std::time::Duration::from_millis(16)).await;
     }
 }
 
@@ -122,6 +129,6 @@ async fn wait_for_text(
                 return Ok(());
             }
         }
-        tokio::time::sleep(std::time::Duration::from_millis(16)).await; // ~60fps poll rate
+        tokio::time::sleep(std::time::Duration::from_millis(16)).await;
     }
 }

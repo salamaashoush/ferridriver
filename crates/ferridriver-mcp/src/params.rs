@@ -140,6 +140,10 @@ pub struct EvaluateParams {
 pub struct SnapshotParams {
     #[schemars(description = "Session name. Defaults to 'default'.")]
     pub session: Option<String>,
+    #[schemars(description = "Accessibility tree depth limit. -1 or omit for unlimited. 0 = root only.")]
+    pub depth: Option<i32>,
+    #[schemars(description = "Track key for incremental snapshots. When set, subsequent calls with the same key return only changed/new nodes.")]
+    pub track: Option<String>,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -343,5 +347,97 @@ pub struct UploadFileParams {
     #[schemars(description = "Absolute path to the file to upload.")]
     pub path: String,
     #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
+
+// ── Consolidated param types (used by refactored tool modules) ─────────────
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct PageParams {
+    #[schemars(description = "Action: back, forward, reload, new, close, select, list, close_browser.")]
+    pub action: String,
+    #[schemars(description = "URL for 'new' action.")]
+    pub url: Option<String>,
+    #[schemars(description = "Page index for close/select actions.")]
+    pub page_index: Option<usize>,
+    #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct CookiesParams {
+    #[schemars(description = "Action: get, set, delete, clear.")]
+    pub action: String,
+    #[schemars(description = "Cookie name (required for set/delete).")]
+    pub name: Option<String>,
+    #[schemars(description = "Cookie value (required for set).")]
+    pub value: Option<String>,
+    pub domain: Option<String>,
+    pub path: Option<String>,
+    pub secure: Option<bool>,
+    pub http_only: Option<bool>,
+    pub expires: Option<f64>,
+    #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct StorageParams {
+    #[schemars(description = "Action: get, set, list, clear.")]
+    pub action: String,
+    #[schemars(description = "Storage key (required for get/set).")]
+    pub key: Option<String>,
+    #[schemars(description = "Storage value (required for set).")]
+    pub value: Option<String>,
+    #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct EmulateParams {
+    #[schemars(description = "Viewport width.")]
+    pub width: Option<i64>,
+    #[schemars(description = "Viewport height.")]
+    pub height: Option<i64>,
+    pub device_scale_factor: Option<f64>,
+    pub mobile: Option<bool>,
+    pub user_agent: Option<String>,
+    #[schemars(description = "Latitude for geolocation override.")]
+    pub latitude: Option<f64>,
+    #[schemars(description = "Longitude for geolocation override.")]
+    pub longitude: Option<f64>,
+    pub accuracy: Option<f64>,
+    #[schemars(description = "Network state: 'offline' or 'online'.")]
+    pub network: Option<String>,
+    pub latency: Option<f64>,
+    pub download_throughput: Option<f64>,
+    pub upload_throughput: Option<f64>,
+    #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct DiagnosticsParams {
+    #[schemars(description = "Type: console, network, trace_start, trace_stop.")]
+    pub r#type: String,
+    #[schemars(description = "Filter level for console: log, warn, error, info, debug, all.")]
+    pub level: Option<String>,
+    #[schemars(description = "Max entries to return.")]
+    pub limit: Option<usize>,
+    #[schemars(description = "Session name. Defaults to 'default'.")]
+    pub session: Option<String>,
+}
+
+#[derive(Debug, Deserialize, schemars::JsonSchema)]
+pub struct ConnectParams {
+    #[schemars(description = "WebSocket URL (ws://...) or HTTP debugger URL (http://...) to connect to a running Chrome instance. Omit for auto-discovery.")]
+    pub url: Option<String>,
+    #[schemars(description = "Auto-discover a running Chrome instance by reading DevToolsActivePort file. Ignored if url is provided.")]
+    pub auto_discover: Option<bool>,
+    #[schemars(description = "Chrome channel for auto-discovery: 'stable' (default), 'beta', 'canary'.")]
+    pub channel: Option<String>,
+    #[schemars(description = "Custom Chrome user data directory for auto-discovery.")]
+    pub user_data_dir: Option<String>,
+    #[schemars(description = "Session name for the connected browser. Defaults to 'default'.")]
     pub session: Option<String>,
 }

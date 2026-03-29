@@ -18,6 +18,11 @@ use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::sync::{broadcast, oneshot, Mutex};
 
+/// Shared map of pending CDP command responses keyed by command ID.
+type PendingMap = Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>;
+/// Shared map of navigation waiters keyed by session ID.
+type NavWaiterMap = Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>>;
+
 /// CDP transport over pipes -- manages command IDs, response correlation, and event dispatch.
 pub struct PipeTransport {
     /// Write half of the parent socket.
@@ -25,18 +30,18 @@ pub struct PipeTransport {
     /// Next command ID.
     next_id: AtomicU64,
     /// Pending commands waiting for responses: id -> sender.
-    /// The Result carries Ok(result_value) or Err(error_description).
-    pending: Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
+    /// The Result carries `Ok(result_value)` or `Err(error_description)`.
+    pending: PendingMap,
     /// Navigation waiters: sessionId -> sender that resolves when Page.loadEventFired arrives.
     /// Follows Bun's pattern: register before navigate, reader dispatches on event arrival.
-    nav_waiters: Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>>,
+    nav_waiters: NavWaiterMap,
     /// Broadcast channel for CDP events (console, network -- fire-and-forget listeners).
     event_tx: broadcast::Sender<serde_json::Value>,
 }
 
 impl PipeTransport {
     /// Spawn Chrome with `--remote-debugging-pipe` and set up the pipe transport.
-    pub async fn spawn(
+    pub fn spawn(
         chromium_path: &str,
         user_data_dir: &Path,
         extra_flags: &[String],
@@ -72,6 +77,12 @@ impl PipeTransport {
 
         // In pre_exec, dup the child socket fd to fd 3 and fd 4 for Chrome.
         // Check return values of dup2 for safety.
+        // SAFETY: pre_exec runs between fork and exec in the child process.
+        // We dup2 the socketpair fd to fd 3 and 4 which Chrome expects for
+        // --remote-debugging-pipe. The fd comes from UnixStream::pair() and
+        // is valid. dup2 return values are checked. The closure only uses
+        // async-signal-safe syscalls (dup2, close, fcntl).
+        #[allow(unsafe_code)]
         unsafe {
             command.pre_exec(move || {
                 // Chrome reads commands from fd 3 and writes responses to fd 4.
@@ -90,16 +101,14 @@ impl PipeTransport {
                     libc::fcntl(child_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
                 }
 
-                if child_fd != 3 {
-                    if libc::dup2(child_fd, 3) == -1 {
+                if child_fd != 3
+                    && libc::dup2(child_fd, 3) == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
-                }
-                if child_fd != 4 {
-                    if libc::dup2(child_fd, 4) == -1 {
+                if child_fd != 4
+                    && libc::dup2(child_fd, 4) == -1 {
                         return Err(std::io::Error::last_os_error());
                     }
-                }
                 if child_fd != 3 && child_fd != 4 {
                     libc::close(child_fd);
                 }
@@ -120,11 +129,9 @@ impl PipeTransport {
 
         let (event_tx, _) = broadcast::channel(256);
 
-        let pending: Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>> =
-            Arc::new(Mutex::new(FxHashMap::default()));
+        let pending: PendingMap = Arc::new(Mutex::new(FxHashMap::default()));
 
-        let nav_waiters: Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>> =
-            Arc::new(Mutex::new(FxHashMap::default()));
+        let nav_waiters: NavWaiterMap = Arc::new(Mutex::new(FxHashMap::default()));
 
         let transport = Self {
             writer: Mutex::new(writer),
@@ -148,36 +155,33 @@ impl PipeTransport {
     fn spawn_reader(
         reader: tokio::io::ReadHalf<tokio::net::UnixStream>,
         event_tx: broadcast::Sender<serde_json::Value>,
-        pending: Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
-        nav_waiters: Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>>,
+        pending: PendingMap,
+        nav_waiters: NavWaiterMap,
     ) {
         tokio::spawn(async move {
+            use super::json_scan;
+
             let mut reader = reader;
             // Chunk-based reader matching Bun's onData pattern:
             // read() what's available into rx buffer, memchr for NUL delimiters,
             // dispatch each complete message. No byte-at-a-time reads.
             let mut rx = Vec::with_capacity(64 * 1024);
+            #[allow(clippy::large_stack_arrays)] // intentional 32KB read buffer for performance
             let mut tmp = [0u8; 32768];
 
             loop {
                 // Read a chunk from the socket
                 let n = match reader.read(&mut tmp).await {
-                    Ok(0) => return,  // EOF
+                    Ok(0) | Err(_) => return, // EOF or error
                     Ok(n) => n,
-                    Err(_) => return,
                 };
                 rx.extend_from_slice(&tmp[..n]);
 
                 // Process all complete NUL-delimited messages
-                loop {
-                    let nul_pos = match rx.iter().position(|&b| b == 0) {
-                        Some(p) => p,
-                        None => break, // no complete message yet
-                    };
+                while let Some(nul_pos) = rx.iter().position(|&b| b == 0) {
                     if nul_pos == 0 { rx.drain(..1); continue; }
 
                     let raw = &rx[..nul_pos];
-                    use super::json_scan;
 
                     // Fast path: use zero-alloc scanner for dispatch fields
                     let id = json_scan::json_id(raw);
@@ -185,11 +189,7 @@ impl PipeTransport {
                     if id > 0 {
                         // Response — check error field without full parse
                         let error_field = json_scan::json_field(raw, b"error");
-                        let payload = if !error_field.is_empty() {
-                            let msg_bytes = json_scan::error_message(error_field);
-                            let msg_str = std::str::from_utf8(msg_bytes).unwrap_or("CDP error");
-                            Err(msg_str.to_string())
-                        } else {
+                        let payload = if error_field.is_empty() {
                             // Only full-parse the result value (needed downstream)
                             let result_field = json_scan::json_field(raw, b"result");
                             if result_field.is_empty() {
@@ -199,8 +199,12 @@ impl PipeTransport {
                                     .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
                                 Ok(val)
                             }
+                        } else {
+                            let msg_bytes = json_scan::error_message(error_field);
+                            let msg_str = std::str::from_utf8(msg_bytes).unwrap_or("CDP error");
+                            Err(msg_str.to_string())
                         };
-                        rx.drain(..nul_pos + 1);
+                        rx.drain(..=nul_pos);
                         if let Some(sender) = pending.lock().await.remove(&id) {
                             let _ = sender.send(payload);
                         }
@@ -242,7 +246,7 @@ impl PipeTransport {
                         if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(raw) {
                             let _ = event_tx.send(msg);
                         }
-                        rx.drain(..nul_pos + 1);
+                        rx.drain(..=nul_pos);
                     }
                 }
             }

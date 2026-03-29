@@ -1,7 +1,9 @@
 fn main() {
     #[cfg(target_os = "macos")]
     {
-        let out_dir = std::env::var("OUT_DIR").unwrap();
+        let Ok(out_dir) = std::env::var("OUT_DIR") else {
+            panic!("OUT_DIR environment variable not set -- this build script must be run by Cargo");
+        };
 
         // Compile host.m and host_main.c into object files via the cc crate.
         // We use cc for correct compiler detection, flag handling, and
@@ -29,15 +31,16 @@ fn main() {
         let host_bin = format!("{out_dir}/fd_webkit_host");
 
         let tool = cc::Build::new().get_compiler();
-        let status = tool.to_command()
+        let Ok(status) = tool.to_command()
             .args([&host_obj, &main_obj])
             .arg("-o")
             .arg(&host_bin)
             .args(["-framework", "Cocoa"])
             .args(["-framework", "WebKit"])
             .args(["-framework", "CoreFoundation"])
-            .status()
-            .expect("Failed to link webkit host binary");
+            .status() else {
+            panic!("Failed to run linker for webkit host binary");
+        };
 
         assert!(status.success(), "Failed to link webkit host binary");
 

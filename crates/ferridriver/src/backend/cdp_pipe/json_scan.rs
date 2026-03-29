@@ -4,7 +4,7 @@
 //! slices, returns sub-slices. No allocations, no serde.
 //!
 //! Only used for hot-path fields (id, result, error, method, sessionId) where
-//! avoiding a full serde_json parse saves allocations per CDP message.
+//! avoiding a full `serde_json` parse saves allocations per CDP message.
 
 /// Scan a JSON value starting at `vstart`. Depth-counts braces/brackets,
 /// tracks quoted strings. Returns the slice up to the end of the value
@@ -70,8 +70,8 @@ pub fn json_id(data: &[u8]) -> u64 {
     if slice.is_empty() { return 0; }
     let mut n: u64 = 0;
     for &c in slice {
-        if c < b'0' || c > b'9' { break; }
-        n = n * 10 + (c - b'0') as u64;
+        if !c.is_ascii_digit() { break; }
+        n = n * 10 + u64::from(c - b'0');
     }
     n
 }
@@ -80,9 +80,9 @@ pub fn json_id(data: &[u8]) -> u64 {
 /// a quoted string.
 pub fn json_string(field: &[u8]) -> &[u8] {
     let f = field.iter().position(|&b| b != b' ' && b != b'\t')
-        .map(|s| &field[s..]).unwrap_or(field);
+        .map_or(field, |s| &field[s..]);
     let f = f.iter().rposition(|&b| b != b' ' && b != b'\t')
-        .map(|e| &f[..=e]).unwrap_or(f);
+        .map_or(f, |e| &f[..=e]);
     if f.len() >= 2 && f[0] == b'"' && f[f.len() - 1] == b'"' {
         &f[1..f.len() - 1]
     } else {
@@ -90,10 +90,6 @@ pub fn json_string(field: &[u8]) -> &[u8] {
     }
 }
 
-/// Check if a field value indicates an error (non-empty "error" field).
-pub fn has_error(data: &[u8]) -> bool {
-    !json_field(data, b"error").is_empty()
-}
 
 /// Extract the "message" string from an error object.
 pub fn error_message(error_field: &[u8]) -> &[u8] {

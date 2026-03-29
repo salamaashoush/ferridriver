@@ -52,6 +52,7 @@ pub enum StepCategory {
 }
 
 /// Extract a quoted or bare string from a regex capture.
+#[must_use]
 pub fn q(s: &str) -> String {
     let s = s.trim();
     if (s.starts_with('"') && s.ends_with('"')) || (s.starts_with('\'') && s.ends_with('\'')) {
@@ -61,13 +62,37 @@ pub fn q(s: &str) -> String {
     }
 }
 
-/// Escape a string for use in JS string literals.
+/// Escape a string for safe embedding in JS single-quoted string literals.
+/// Handles all characters that could break or inject into JS strings.
+#[must_use]
 pub fn js_escape(s: &str) -> String {
-    s.replace('\\', "\\\\").replace('\'', "\\'")
+    let mut out = String::with_capacity(s.len() + 8);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '\'' => out.push_str("\\'"),
+            '"' => out.push_str("\\\""),
+            '`' => out.push_str("\\`"),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            '\0' => out.push_str("\\0"),
+            // Unicode line/paragraph separators (would terminate JS string in some engines)
+            '\u{2028}' => out.push_str("\\u2028"),
+            '\u{2029}' => out.push_str("\\u2029"),
+            _ => out.push(c),
+        }
+    }
+    out
 }
 
 /// Find element using the selector engine (supports role=, text=, etc.)
 /// or falls back to plain CSS for simple selectors.
+///
+/// # Errors
+///
+/// Returns an error if the element cannot be found using the given selector,
+/// or if the underlying browser query fails.
 pub async fn find(page: &AnyPage, selector: &str) -> Result<crate::backend::AnyElement, String> {
     if crate::selectors::is_rich_selector(selector) {
         crate::selectors::query_one(page, selector, false).await

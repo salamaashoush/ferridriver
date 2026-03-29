@@ -22,6 +22,40 @@ impl StepRegistry {
         super::screenshot::register(&mut steps);
         super::javascript::register(&mut steps);
 
+        // Validate: check that each step's example matches its own pattern
+        // and warn about examples that match an earlier step (would be shadowed).
+        #[cfg(debug_assertions)]
+        {
+            for (i, step) in steps.iter().enumerate() {
+                // Only use the first line of the example (data tables are on subsequent lines)
+                let first_line = step.example().lines().next().unwrap_or("");
+                let example_body = first_line
+                    .trim_start_matches("Given ")
+                    .trim_start_matches("When ")
+                    .trim_start_matches("Then ")
+                    .trim_start_matches("And ");
+                assert!(
+                    step.pattern().is_match(example_body),
+                    "Step '{}' example '{}' does not match its own pattern '{}'",
+                    step.description(),
+                    first_line,
+                    step.pattern().as_str()
+                );
+                // Check if an earlier step would shadow this one
+                for earlier in &steps[..i] {
+                    if earlier.pattern().is_match(example_body) {
+                        eprintln!(
+                            "WARNING: step '{}' example '{}' is shadowed by earlier step '{}' (pattern '{}')",
+                            step.description(),
+                            step.example(),
+                            earlier.description(),
+                            earlier.pattern().as_str()
+                        );
+                    }
+                }
+            }
+        }
+
         Self { steps }
     }
 
@@ -30,6 +64,12 @@ impl StepRegistry {
         INSTANCE.get_or_init(Self::build)
     }
 
+    /// Execute the step matching `body` against the registered patterns.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if no step matches the given body text, or if the
+    /// matched step's execution fails (e.g. element not found, assertion failed).
     pub async fn execute(
         &self,
         page: &AnyPage,
@@ -64,7 +104,9 @@ impl StepRegistry {
         Err(format!("Unknown step: '{body}'{hint}"))
     }
 
+    #[must_use]
     pub fn reference(&self) -> String {
+        use std::fmt::Write;
         let mut out = String::new();
         let mut current_cat: Option<StepCategory> = None;
 
@@ -72,17 +114,19 @@ impl StepRegistry {
             let cat = step.category();
             if current_cat != Some(cat) {
                 current_cat = Some(cat);
-                out.push_str(&format!("\n## {:?}\n", cat));
+                let _ = write!(out, "\n## {cat:?}\n");
             }
-            out.push_str(&format!(
-                "- {} — `{}`\n",
+            let _ = writeln!(
+                out,
+                "- {} — `{}`",
                 step.description(),
                 step.example()
-            ));
+            );
         }
         out
     }
 
+    #[must_use]
     pub fn list(&self) -> Vec<StepInfo> {
         self.steps
             .iter()

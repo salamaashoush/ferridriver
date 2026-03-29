@@ -62,6 +62,7 @@ pub struct MatchedElement {
 // ─── Detector ───────────────────────────────────────────────────────────────
 
 /// Check if a selector string uses the rich engine format (not plain CSS).
+#[must_use]
 pub fn is_rich_selector(s: &str) -> bool {
     let prefixes = [
         "role=", "text=", "testid=", "label=", "placeholder=",
@@ -83,6 +84,10 @@ pub fn is_rich_selector(s: &str) -> bool {
 // ─── Parser ─────────────────────────────────────────────────────────────────
 
 /// Parse a selector string into a Selector AST.
+///
+/// # Errors
+///
+/// Returns an error if the selector string is empty or has an invalid chain.
 pub fn parse(selector: &str) -> Result<Selector, String> {
     let selector = selector.trim();
     if selector.is_empty() {
@@ -98,7 +103,7 @@ pub fn parse(selector: &str) -> Result<Selector, String> {
         if raw.is_empty() {
             return Err("Empty selector part in chain".into());
         }
-        parts.push(parse_part(raw)?);
+        parts.push(parse_part(raw));
     }
 
     Ok(Selector { parts })
@@ -159,7 +164,7 @@ fn split_by_chain(s: &str) -> Vec<String> {
     parts
 }
 
-fn parse_part(s: &str) -> Result<SelectorPart, String> {
+fn parse_part(s: &str) -> SelectorPart {
     // Try each engine prefix
     let engines = [
         ("role=", Engine::Role),
@@ -181,24 +186,25 @@ fn parse_part(s: &str) -> Result<SelectorPart, String> {
     ];
 
     for (prefix, engine) in &engines {
-        if s.starts_with(prefix) {
-            return Ok(SelectorPart {
+        if let Some(body) = s.strip_prefix(prefix) {
+            return SelectorPart {
                 engine: engine.clone(),
-                body: s[prefix.len()..].to_string(),
-            });
+                body: body.to_string(),
+            };
         }
     }
 
     // Default: treat as CSS selector
-    Ok(SelectorPart {
+    SelectorPart {
         engine: Engine::Css,
         body: s.to_string(),
-    })
+    }
 }
 
 // ─── JS Query Builder ───────────────────────────────────────────────────────
 
 /// JS to inject the unified runtime once. Idempotent -- safe to call multiple times.
+#[must_use]
 pub fn build_inject_js() -> String {
     format!(
         "(function() {{ if (window.__fd) return; {ENGINE_JS}\n\
@@ -215,6 +221,7 @@ pub fn build_inject_js() -> String {
             }} catch (e) {{ return JSON.stringify({{error: e.message}}); }}\n\
           }},\n\
           selOne: function(parts) {{ var r = executeSelector(parts, document); return r.length > 0 ? r[0] : null; }},\n\
+          selAll: function(parts) {{ return executeSelector(parts, document); }},\n\
           selCount: function(parts) {{ return executeSelector(parts, document).length; }},\n\
           clearAndDispatch: clearAndDispatch,\n\
           dispatchInputEvents: dispatchInputEvents,\n\
@@ -243,6 +250,8 @@ fn build_query_js(selector: &Selector) -> String {
 
 
 
+/// Builds a JSON array of selector parts for the injected engine.
+#[must_use]
 pub fn build_parts_json(selector: &Selector) -> String {
     let parts: Vec<String> = selector.parts.iter().map(|p| {
         let engine = match p.engine {
@@ -263,13 +272,13 @@ pub fn build_parts_json(selector: &Selector) -> String {
             Engine::HasNot => "has-not",
             Engine::HasNotText => "has-not-text",
         };
-        let body_escaped = serde_json::to_string(&p.body).unwrap();
+        let body_escaped = serde_json::to_string(&p.body).unwrap_or_else(|_| format!("\"{}\"", p.body));
         format!(r#"{{"engine":"{engine}","body":{body_escaped}}}"#)
     }).collect();
     format!("[{}]", parts.join(","))
 }
 
-/// The injected JS engine -- all selector logic runs in one evaluate() call.
+/// The injected JS engine -- all selector logic runs in one `evaluate()` call.
 const ENGINE_JS: &str = r#"
 // ── Whitespace normalization ──
 function normalizeWS(s) {
@@ -333,8 +342,8 @@ function getAccessibleName(el) {
     var labelledBy = el.getAttribute('aria-labelledby');
     if (labelledBy) {
         var names = labelledBy.split(/\s+/).map(function(id) {
-            var ref = document.getElementById(id);
-            return ref ? getElementText(ref).normalized : '';
+            var refEl = document.getElementById(id);
+            return refEl ? getElementText(refEl).normalized : '';
         }).filter(Boolean);
         if (names.length) return names.join(' ');
     }
@@ -1056,6 +1065,10 @@ function dismissDialogs() {
 
 /// Query all elements matching a rich selector. Returns lightweight info.
 /// Injects the engine JS on first use, then subsequent calls are lightweight.
+///
+/// # Errors
+///
+/// Returns an error if selector parsing or JS evaluation fails.
 pub async fn query_all(
     page: &AnyPage,
     selector: &str,
@@ -1064,7 +1077,7 @@ pub async fn query_all(
     // Ensure engine is injected (idempotent)
     let js = build_query_js(&parsed);
     let result_str = page.evaluate(&js).await?
-        .and_then(|v| v.as_str().map(|s| s.to_string()))
+        .and_then(|v| v.as_str().map(std::string::ToString::to_string))
         .unwrap_or_else(|| "[]".into());
 
     // Check for error
@@ -1080,6 +1093,11 @@ pub async fn query_all(
 }
 
 /// Query a single element. If strict=true, errors when 0 or >1 matches.
+///
+/// # Errors
+///
+/// Returns an error if selector parsing fails, no element is found, or (in strict mode)
+/// multiple elements match.
 pub async fn query_one(
     page: &AnyPage,
     selector: &str,

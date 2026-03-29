@@ -25,7 +25,7 @@ dbg_macro = "warn"
 
 [workspace.dependencies]
 ferridriver = { path = "crates/ferridriver" }
-chromey = { version = "2", default-features = false }
+ferridriver-mcp = { path = "crates/ferridriver-mcp" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

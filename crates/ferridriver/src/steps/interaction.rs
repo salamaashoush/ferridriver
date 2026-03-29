@@ -19,60 +19,59 @@ pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
 
 step!(Click {
     category: StepCategory::Interaction,
-    pattern: r#"^I click (.+)$"#,
+    pattern: r"^I click (.+)$",
     description: "Click an element",
     example: "When I click \"#submit\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
-        el.click().await.map_err(|e| format!("{e}"))?;
+        el.click().await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
 
 step!(DoubleClick {
     category: StepCategory::Interaction,
-    pattern: r#"^I double[- ]click (.+)$"#,
-    description: "Double-click an element",
+    pattern: r"^I double[- ]click (.+)$",
+    description: "Double-click an element (fires dblclick event)",
     example: "When I double-click \"#item\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
-        el.click().await.map_err(|e| format!("{e}"))?;
-        el.click().await.map_err(|e| format!("{e}"))?;
+        el.dblclick().await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
 
 step!(ClickAt {
     category: StepCategory::Interaction,
-    pattern: r#"^I click at (?:coordinates )?(\d+)\s*,\s*(\d+)$"#,
+    pattern: r"^I click at (?:coordinates )?(\d+)\s*,\s*(\d+)$",
     description: "Click at X,Y coordinates",
     example: "When I click at 100, 200",
     execute(page, caps, _table, _vars) {
         let x: f64 = caps[1].parse().map_err(|_| "Invalid x")?;
         let y: f64 = caps[2].parse().map_err(|_| "Invalid y")?;
-        page.click_at(x, y).await.map_err(|e| format!("{e}"))?;
+        page.click_at(x, y).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
 
 step!(Hover {
     category: StepCategory::Interaction,
-    pattern: r#"^I hover (?:over )?(.+)$"#,
+    pattern: r"^I hover (?:over )?(.+)$",
     description: "Hover over an element",
     example: "When I hover over \"#menu\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
-        el.hover().await.map_err(|e| format!("{e}"))?;
+        el.hover().await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
 
 step!(Fill {
     category: StepCategory::Interaction,
-    pattern: r#"^I fill (.+) with (.+)$"#,
+    pattern: r"^I fill (.+) with (.+)$",
     description: "Clear and type into an input",
     example: "When I fill \"#email\" with \"test@example.com\"",
     execute(page, caps, _table, _vars) {
@@ -86,7 +85,7 @@ step!(Fill {
 
 step!(FillForm {
     category: StepCategory::Interaction,
-    pattern: r#"^I fill the form:?$"#,
+    pattern: r"^I fill the form:?$",
     description: "Fill multiple form fields via data table",
     example: "When I fill the form:\n  | #name | Alice |\n  | #email | alice@test.com |",
     execute(page, _caps, table, _vars) {
@@ -105,20 +104,25 @@ step!(FillForm {
 
 step!(Clear {
     category: StepCategory::Interaction,
-    pattern: r#"^I clear (.+)$"#,
-    description: "Clear an input field",
+    pattern: r"^I clear (.+)$",
+    description: "Clear an input field (dispatches input and change events)",
     example: "When I clear \"#search\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        page.evaluate(&format!("document.querySelector('{}').value = ''", js_escape(&sel)))
-            .await.map_err(|e| format!("{e}"))?;
+        let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
+        el.call_js_fn("function() { \
+            this.focus(); \
+            this.value = ''; \
+            this.dispatchEvent(new Event('input', {bubbles: true})); \
+            this.dispatchEvent(new Event('change', {bubbles: true})); \
+        }").await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
 
 step!(SelectOption {
     category: StepCategory::Interaction,
-    pattern: r#"^I select (.+) from (.+)$"#,
+    pattern: r"^I select (.+) from (.+)$",
     description: "Select dropdown option",
     example: "When I select \"admin\" from \"#role\"",
     execute(page, caps, _table, _vars) {
@@ -132,74 +136,74 @@ step!(SelectOption {
 
 step!(TypeText {
     category: StepCategory::Interaction,
-    pattern: r#"^I type (.+)$"#,
+    pattern: r"^I type (.+)$",
     description: "Type text into focused element",
     example: "When I type \"hello world\"",
     execute(page, caps, _table, _vars) {
         let text = q(&caps[1]);
-        page.type_str(&text).await.map_err(|e| format!("{e}"))?;
+        page.type_str(&text).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
 
 step!(PressKey {
     category: StepCategory::Interaction,
-    pattern: r#"^I press (?:key )?(.+)$"#,
+    pattern: r"^I press (?:key )?(.+)$",
     description: "Press a key or combo",
     example: "When I press \"Enter\"",
     execute(page, caps, _table, _vars) {
         let key = q(&caps[1]);
-        page.press_key(&key).await.map_err(|e| format!("{e}"))?;
+        page.press_key(&key).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
 
 step!(Focus {
     category: StepCategory::Interaction,
-    pattern: r#"^I focus (.+)$"#,
+    pattern: r"^I focus (.+)$",
     description: "Focus an element",
     example: "When I focus \"#input\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         page.evaluate(&format!("document.querySelector('{}')?.focus()", js_escape(&sel)))
-            .await.map_err(|e| format!("{e}"))?;
+            .await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
 
 step!(ScrollTo {
     category: StepCategory::Interaction,
-    pattern: r#"^I scroll to (.+)$"#,
+    pattern: r"^I scroll to (.+)$",
     description: "Scroll element into view",
     example: "When I scroll to \"#footer\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let el = super::find(page, &sel).await.map_err(|e| format!("{e}"))?;
-        el.scroll_into_view().await.map_err(|e| format!("{e}"))?;
+        let el = super::find(page, &sel).await.map_err(|e| e.clone())?;
+        el.scroll_into_view().await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
 
 step!(ScrollDown {
     category: StepCategory::Interaction,
-    pattern: r#"^I scroll down(?: by (\d+))?$"#,
+    pattern: r"^I scroll down(?: by (\d+))?$",
     description: "Scroll down",
     example: "When I scroll down by 300",
     execute(page, caps, _table, _vars) {
         let px = caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(300.0);
-        page.evaluate(&format!("window.scrollBy(0, {px})")).await.map_err(|e| format!("{e}"))?;
+        page.evaluate(&format!("window.scrollBy(0, {px})")).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
 
 step!(ScrollUp {
     category: StepCategory::Interaction,
-    pattern: r#"^I scroll up(?: by (\d+))?$"#,
+    pattern: r"^I scroll up(?: by (\d+))?$",
     description: "Scroll up",
     example: "When I scroll up by 300",
     execute(page, caps, _table, _vars) {
         let px = caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(300.0);
-        page.evaluate(&format!("window.scrollBy(0, -{px})")).await.map_err(|e| format!("{e}"))?;
+        page.evaluate(&format!("window.scrollBy(0, -{px})")).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });

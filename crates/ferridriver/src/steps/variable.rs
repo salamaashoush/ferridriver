@@ -12,7 +12,7 @@ pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
 
 step!(StoreText {
     category: StepCategory::Variable,
-    pattern: r#"^I store the text of (.+) as \$(\w+)$"#,
+    pattern: r"^I store the text of (.+) as \$(\w+)$",
     description: "Store element text in variable",
     example: "When I store the text of \"h1\" as $title",
     execute(page, caps, _table, vars) {
@@ -20,7 +20,7 @@ step!(StoreText {
         let var = caps[2].to_string();
         let r = page.evaluate(&format!("document.querySelector('{}')?.innerText || ''", js_escape(&sel)))
             .await?;
-        let val = r.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let val = r.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
         vars.insert(var, val);
         Ok(None)
     }
@@ -28,7 +28,7 @@ step!(StoreText {
 
 step!(StoreValue {
     category: StepCategory::Variable,
-    pattern: r#"^I store the value of (.+) as \$(\w+)$"#,
+    pattern: r"^I store the value of (.+) as \$(\w+)$",
     description: "Store input value in variable",
     example: "When I store the value of \"#email\" as $email",
     execute(page, caps, _table, vars) {
@@ -36,7 +36,7 @@ step!(StoreValue {
         let var = caps[2].to_string();
         let r = page.evaluate(&format!("document.querySelector('{}')?.value || ''", js_escape(&sel)))
             .await?;
-        let val = r.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let val = r.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
         vars.insert(var, val);
         Ok(None)
     }
@@ -44,7 +44,7 @@ step!(StoreValue {
 
 step!(StoreAttr {
     category: StepCategory::Variable,
-    pattern: r#"^I store the attribute (.+) of (.+) as \$(\w+)$"#,
+    pattern: r"^I store the attribute (.+) of (.+) as \$(\w+)$",
     description: "Store element attribute in variable",
     example: "When I store the attribute \"href\" of \"a\" as $link",
     execute(page, caps, _table, vars) {
@@ -55,7 +55,7 @@ step!(StoreAttr {
             "document.querySelector('{}')?.getAttribute('{}') || ''",
             js_escape(&sel), js_escape(&attr)
         )).await?;
-        let val = r.and_then(|v| v.as_str().map(|s| s.to_string())).unwrap_or_default();
+        let val = r.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
         vars.insert(var, val);
         Ok(None)
     }
@@ -63,7 +63,7 @@ step!(StoreAttr {
 
 step!(StoreUrl {
     category: StepCategory::Variable,
-    pattern: r#"^I store the URL as \$(\w+)$"#,
+    pattern: r"^I store the URL as \$(\w+)$",
     description: "Store current URL in variable",
     example: "When I store the URL as $url",
     execute(page, caps, _table, vars) {
@@ -76,7 +76,7 @@ step!(StoreUrl {
 
 step!(StoreTitle {
     category: StepCategory::Variable,
-    pattern: r#"^I store the title as \$(\w+)$"#,
+    pattern: r"^I store the title as \$(\w+)$",
     description: "Store page title in variable",
     example: "When I store the title as $title",
     execute(page, caps, _table, vars) {
@@ -89,7 +89,7 @@ step!(StoreTitle {
 
 step!(EvalAndStore {
     category: StepCategory::Variable,
-    pattern: r#"^I evaluate (.+) and store as \$(\w+)$"#,
+    pattern: r"^I evaluate (.+) and store as \$(\w+)$",
     description: "Evaluate JS and store result",
     example: "When I evaluate \"document.title\" and store as $t",
     execute(page, caps, _table, vars) {
@@ -106,7 +106,7 @@ step!(EvalAndStore {
 
 step!(SetVar {
     category: StepCategory::Variable,
-    pattern: r#"^I set \$(\w+) to (.+)$"#,
+    pattern: r"^I set \$(\w+) to (.+)$",
     description: "Set a variable to a value",
     example: "Given I set $name to \"Alice\"",
     execute(_page, caps, _table, vars) {

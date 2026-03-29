@@ -6,12 +6,12 @@ pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
 
 step!(Evaluate {
     category: StepCategory::JavaScript,
-    pattern: r#"^I evaluate (.+)$"#,
-    description: "Execute JavaScript",
+    pattern: r"^I evaluate (.+)$",
+    description: "Execute JavaScript and return the result",
     example: "When I evaluate \"document.title\"",
     execute(page, caps, _table, _vars) {
         let expr = q(&caps[1]);
-        page.evaluate(expr.as_str()).await?;
-        Ok(None)
+        let result = page.evaluate(expr.as_str()).await?;
+        Ok(result)
     }
 });

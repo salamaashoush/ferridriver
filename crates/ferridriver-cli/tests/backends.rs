@@ -829,11 +829,6 @@ fn run_all_tests(backend: &str) {
 // ─── One #[test] per backend ────────────────────────────────────────────────
 
 #[test]
-fn all_tests_cdp_ws() {
-    run_all_tests("cdp-ws");
-}
-
-#[test]
 fn all_tests_cdp_pipe() {
     run_all_tests("cdp-pipe");
 }

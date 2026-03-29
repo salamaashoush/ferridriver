@@ -10,7 +10,7 @@ pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
 
 step!(SetCookieDomain {
     category: StepCategory::Cookie,
-    pattern: r#"^I set cookie (.+) to (.+) on (.+)$"#,
+    pattern: r"^I set cookie (.+) to (.+) on (.+)$",
     description: "Set cookie with domain",
     example: "When I set cookie \"token\" to \"abc\" on \"example.com\"",
     execute(page, caps, _table, _vars) {
@@ -32,7 +32,7 @@ step!(SetCookieDomain {
 
 step!(SetCookie {
     category: StepCategory::Cookie,
-    pattern: r#"^I set cookie (.+) to (.+)$"#,
+    pattern: r"^I set cookie (.+) to (.+)$",
     description: "Set cookie",
     example: "When I set cookie \"session\" to \"xyz\"",
     execute(page, caps, _table, _vars) {
@@ -53,7 +53,7 @@ step!(SetCookie {
 
 step!(DeleteCookie {
     category: StepCategory::Cookie,
-    pattern: r#"^I delete cookie (.+)$"#,
+    pattern: r"^I delete cookie (.+)$",
     description: "Delete a cookie",
     example: "When I delete cookie \"session\"",
     execute(page, caps, _table, _vars) {
@@ -65,7 +65,7 @@ step!(DeleteCookie {
 
 step!(ClearCookies {
     category: StepCategory::Cookie,
-    pattern: r#"^I clear all cookies$"#,
+    pattern: r"^I clear all cookies$",
     description: "Clear all cookies",
     example: "When I clear all cookies",
     execute(page, _caps, _table, _vars) {

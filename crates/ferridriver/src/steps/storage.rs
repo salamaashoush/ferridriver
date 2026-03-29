@@ -8,7 +8,7 @@ pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
 
 step!(SetLocalStorage {
     category: StepCategory::Storage,
-    pattern: r#"^I set localStorage (.+) to (.+)$"#,
+    pattern: r"^I set localStorage (.+) to (.+)$",
     description: "Set localStorage item",
     example: "When I set localStorage \"key\" to \"value\"",
     execute(page, caps, _table, _vars) {
@@ -22,7 +22,7 @@ step!(SetLocalStorage {
 
 step!(RemoveLocalStorage {
     category: StepCategory::Storage,
-    pattern: r#"^I remove localStorage (.+)$"#,
+    pattern: r"^I remove localStorage (.+)$",
     description: "Remove localStorage item",
     example: "When I remove localStorage \"key\"",
     execute(page, caps, _table, _vars) {
@@ -35,7 +35,7 @@ step!(RemoveLocalStorage {
 
 step!(ClearLocalStorage {
     category: StepCategory::Storage,
-    pattern: r#"^I clear localStorage$"#,
+    pattern: r"^I clear localStorage$",
     description: "Clear all localStorage",
     example: "When I clear localStorage",
     execute(page, _caps, _table, _vars) {
