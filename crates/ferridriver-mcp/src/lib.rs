@@ -15,4 +15,4 @@ pub mod server;
 pub mod tools;
 
 // Re-export key types at crate root for ergonomic imports.
-pub use server::{McpServer, McpServerConfig, DefaultConfig, State};
+pub use server::{DefaultConfig, McpServer, McpServerConfig, State};

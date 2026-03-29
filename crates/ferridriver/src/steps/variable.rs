@@ -1,13 +1,13 @@
-use super::{q, js_escape, StepCategory, StepDef};
+use super::{StepCategory, StepDef, js_escape, q};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
-    steps.push(Box::new(StoreText));
-    steps.push(Box::new(StoreValue));
-    steps.push(Box::new(StoreAttr));
-    steps.push(Box::new(StoreUrl));
-    steps.push(Box::new(StoreTitle));
-    steps.push(Box::new(EvalAndStore));
-    steps.push(Box::new(SetVar));
+  steps.push(Box::new(StoreText));
+  steps.push(Box::new(StoreValue));
+  steps.push(Box::new(StoreAttr));
+  steps.push(Box::new(StoreUrl));
+  steps.push(Box::new(StoreTitle));
+  steps.push(Box::new(EvalAndStore));
+  steps.push(Box::new(SetVar));
 }
 
 step!(StoreText {

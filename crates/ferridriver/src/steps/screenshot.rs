@@ -1,11 +1,11 @@
-use super::{q, StepCategory, StepDef};
+use super::{StepCategory, StepDef, q};
+use crate::backend::{ImageFormat, ScreenshotOpts};
 use base64::Engine;
-use crate::backend::{ScreenshotOpts, ImageFormat};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
-    steps.push(Box::new(ScreenshotOf));
-    steps.push(Box::new(Screenshot));
-    steps.push(Box::new(Snapshot));
+  steps.push(Box::new(ScreenshotOf));
+  steps.push(Box::new(Screenshot));
+  steps.push(Box::new(Snapshot));
 }
 
 step!(Screenshot {

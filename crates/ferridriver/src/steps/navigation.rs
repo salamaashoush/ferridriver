@@ -1,11 +1,11 @@
-use super::{q, StepCategory, StepDef};
+use super::{StepCategory, StepDef, q};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
-    steps.push(Box::new(NavigateNoWait));
-    steps.push(Box::new(Navigate));
-    steps.push(Box::new(GoBack));
-    steps.push(Box::new(GoForward));
-    steps.push(Box::new(Reload));
+  steps.push(Box::new(NavigateNoWait));
+  steps.push(Box::new(Navigate));
+  steps.push(Box::new(GoBack));
+  steps.push(Box::new(GoForward));
+  steps.push(Box::new(Reload));
 }
 
 step!(NavigateNoWait {

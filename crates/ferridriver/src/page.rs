@@ -8,7 +8,7 @@ use crate::backend::{AnyPage, CookieData, ImageFormat, ScreenshotOpts};
 use crate::events::{EventEmitter, PageEvent};
 use crate::frame::Frame;
 use crate::locator::Locator;
-use crate::options::{GotoOptions, RoleOptions, TextOptions, WaitOptions, ScreenshotOptions};
+use crate::options::{GotoOptions, RoleOptions, ScreenshotOptions, TextOptions, WaitOptions};
 use crate::snapshot;
 use std::sync::Arc;
 use tokio::sync::Mutex;
@@ -56,8 +56,13 @@ impl Page {
   ///
   /// Returns an error if the JavaScript evaluation fails.
   pub async fn viewport_size(&self) -> Result<(i64, i64), String> {
-    let r = self.inner.evaluate("JSON.stringify({w:window.innerWidth,h:window.innerHeight})").await?;
-    let s = r.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
+    let r = self
+      .inner
+      .evaluate("JSON.stringify({w:window.innerWidth,h:window.innerHeight})")
+      .await?;
+    let s = r
+      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .unwrap_or_default();
     let parsed: serde_json::Value = serde_json::from_str(&s).unwrap_or_default();
     let w = parsed.get("w").and_then(serde_json::Value::as_i64).unwrap_or(0);
     let h = parsed.get("h").and_then(serde_json::Value::as_i64).unwrap_or(0);
@@ -87,16 +92,18 @@ impl Page {
             while tokio::time::Instant::now() < deadline {
               if let Ok(Some(v)) = self.inner.evaluate("document.readyState").await {
                 let s = v.as_str().unwrap_or("loading");
-                if s == "interactive" || s == "complete" { return Ok(()); }
+                if s == "interactive" || s == "complete" {
+                  return Ok(());
+                }
               }
               tokio::time::sleep(std::time::Duration::from_millis(16)).await;
             }
             return Err("Timeout waiting for domcontentloaded".into());
-          }
+          },
           "networkidle" => {
             self.wait_for_load_state(Some("networkidle")).await?;
-          }
-          _ => {} // "load" / "commit" -- already handled by the navigation call
+          },
+          _ => {}, // "load" / "commit" -- already handled by the navigation call
         }
       }
     }
@@ -155,47 +162,99 @@ impl Page {
 
   #[must_use]
   pub fn locator(&self, selector: &str) -> Locator {
-    Locator { page: self.clone(), frame_id: None, selector: selector.to_string() }
+    Locator {
+      page: self.clone(),
+      frame_id: None,
+      selector: selector.to_string(),
+    }
   }
 
   #[must_use]
   pub fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Locator {
-    Locator { page: self.clone(), frame_id: None, selector: crate::locator::build_role_selector(role, opts) }
+    Locator {
+      page: self.clone(),
+      frame_id: None,
+      selector: crate::locator::build_role_selector(role, opts),
+    }
   }
 
   #[must_use]
   pub fn get_by_text(&self, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) { format!("text=\"{text}\"") } else { format!("text={text}") };
-    Locator { page: self.clone(), frame_id: None, selector: sel }
+    let sel = if opts.exact == Some(true) {
+      format!("text=\"{text}\"")
+    } else {
+      format!("text={text}")
+    };
+    Locator {
+      page: self.clone(),
+      frame_id: None,
+      selector: sel,
+    }
   }
 
   #[must_use]
   pub fn get_by_label(&self, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) { format!("label=\"{text}\"") } else { format!("label={text}") };
-    Locator { page: self.clone(), frame_id: None, selector: sel }
+    let sel = if opts.exact == Some(true) {
+      format!("label=\"{text}\"")
+    } else {
+      format!("label={text}")
+    };
+    Locator {
+      page: self.clone(),
+      frame_id: None,
+      selector: sel,
+    }
   }
 
   #[must_use]
   pub fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) { format!("placeholder=\"{text}\"") } else { format!("placeholder={text}") };
-    Locator { page: self.clone(), frame_id: None, selector: sel }
+    let sel = if opts.exact == Some(true) {
+      format!("placeholder=\"{text}\"")
+    } else {
+      format!("placeholder={text}")
+    };
+    Locator {
+      page: self.clone(),
+      frame_id: None,
+      selector: sel,
+    }
   }
 
   #[must_use]
   pub fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) { format!("alt=\"{text}\"") } else { format!("alt={text}") };
-    Locator { page: self.clone(), frame_id: None, selector: sel }
+    let sel = if opts.exact == Some(true) {
+      format!("alt=\"{text}\"")
+    } else {
+      format!("alt={text}")
+    };
+    Locator {
+      page: self.clone(),
+      frame_id: None,
+      selector: sel,
+    }
   }
 
   #[must_use]
   pub fn get_by_title(&self, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) { format!("title=\"{text}\"") } else { format!("title={text}") };
-    Locator { page: self.clone(), frame_id: None, selector: sel }
+    let sel = if opts.exact == Some(true) {
+      format!("title=\"{text}\"")
+    } else {
+      format!("title={text}")
+    };
+    Locator {
+      page: self.clone(),
+      frame_id: None,
+      selector: sel,
+    }
   }
 
   #[must_use]
   pub fn get_by_test_id(&self, test_id: &str) -> Locator {
-    Locator { page: self.clone(), frame_id: None, selector: format!("testid={test_id}") }
+    Locator {
+      page: self.clone(),
+      frame_id: None,
+      selector: format!("testid={test_id}"),
+    }
   }
 
   // ── Page-level actions (convenience, delegate to locator) ───────────────
@@ -421,8 +480,13 @@ impl Page {
   pub async fn evaluate_str(&self, expression: &str) -> Result<String, String> {
     self.inner.evaluate(expression).await.map(|v| {
       v.map(|val| {
-        if let Some(s) = val.as_str() { s.to_string() } else { val.to_string() }
-      }).unwrap_or_default()
+        if let Some(s) = val.as_str() {
+          s.to_string()
+        } else {
+          val.to_string()
+        }
+      })
+      .unwrap_or_default()
     })
   }
 
@@ -473,20 +537,18 @@ impl Page {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(self.default_timeout);
 
     match state {
-      "domcontentloaded" => {
-        loop {
-          if tokio::time::Instant::now() >= deadline {
-            return Err("Timeout waiting for domcontentloaded".into());
-          }
-          if let Ok(Some(v)) = self.inner.evaluate("document.readyState").await {
-            let s = v.as_str().unwrap_or("loading");
-            if s == "interactive" || s == "complete" {
-              return Ok(());
-            }
-          }
-          tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+      "domcontentloaded" => loop {
+        if tokio::time::Instant::now() >= deadline {
+          return Err("Timeout waiting for domcontentloaded".into());
         }
-      }
+        if let Ok(Some(v)) = self.inner.evaluate("document.readyState").await {
+          let s = v.as_str().unwrap_or("loading");
+          if s == "interactive" || s == "complete" {
+            return Ok(());
+          }
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(16)).await;
+      },
       "networkidle" => {
         // Wait for no pending network requests for 500ms.
         // Uses Performance API to detect network activity.
@@ -497,11 +559,16 @@ impl Page {
             return Err("Timeout waiting for networkidle".into());
           }
           // Check if there are pending resource loads
-          let has_pending = self.inner.evaluate(
-            "(function(){var p=performance.getEntriesByType('resource');\
+          let has_pending = self
+            .inner
+            .evaluate(
+              "(function(){var p=performance.getEntriesByType('resource');\
              var now=performance.now();\
-             return p.some(function(e){return e.responseEnd===0 || (now - e.responseEnd) < 100})})()"
-          ).await.ok().flatten();
+             return p.some(function(e){return e.responseEnd===0 || (now - e.responseEnd) < 100})})()",
+            )
+            .await
+            .ok()
+            .flatten();
           if has_pending == Some(serde_json::Value::Bool(true)) {
             idle_since = tokio::time::Instant::now();
           } else if tokio::time::Instant::now() - idle_since >= idle_threshold {
@@ -509,7 +576,7 @@ impl Page {
           }
           tokio::time::sleep(std::time::Duration::from_millis(100)).await;
         }
-      }
+      },
       _ => {
         // "load" -- wait for document.readyState === "complete"
         loop {
@@ -523,7 +590,7 @@ impl Page {
           }
           tokio::time::sleep(std::time::Duration::from_millis(50)).await;
         }
-      }
+      },
     }
   }
 
@@ -540,11 +607,14 @@ impl Page {
       Some("webp") => ImageFormat::Webp,
       _ => ImageFormat::Png,
     };
-    self.inner.screenshot(ScreenshotOpts {
-      format,
-      quality: opts.quality,
-      full_page: opts.full_page.unwrap_or(false),
-    }).await
+    self
+      .inner
+      .screenshot(ScreenshotOpts {
+        format,
+        quality: opts.quality,
+        full_page: opts.full_page.unwrap_or(false),
+      })
+      .await
   }
 
   /// Take a screenshot of a specific element matching the selector.
@@ -598,9 +668,14 @@ impl Page {
   ///
   /// Returns an error if the viewport emulation fails.
   pub async fn set_viewport_size(&self, width: i64, height: i64) -> Result<(), String> {
-    self.inner.emulate_viewport(&crate::options::ViewportConfig {
-      width, height, ..Default::default()
-    }).await
+    self
+      .inner
+      .emulate_viewport(&crate::options::ViewportConfig {
+        width,
+        height,
+        ..Default::default()
+      })
+      .await
   }
 
   // ── Input devices ───────────────────────────────────────────────────────
@@ -637,7 +712,14 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the mouse move dispatch fails.
-  pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<(), String> {
+  pub async fn move_mouse_smooth(
+    &self,
+    from_x: f64,
+    from_y: f64,
+    to_x: f64,
+    to_y: f64,
+    steps: u32,
+  ) -> Result<(), String> {
     self.inner.move_mouse_smooth(from_x, from_y, to_x, to_y, steps).await
   }
 
@@ -880,16 +962,22 @@ impl Page {
   /// Returns an error if cookies or localStorage cannot be retrieved.
   pub async fn storage_state(&self) -> Result<serde_json::Value, String> {
     let cookies = self.cookies().await?;
-    let cookies_json: Vec<serde_json::Value> = cookies.iter().map(|c| {
-      serde_json::json!({
-        "name": c.name, "value": c.value, "domain": c.domain, "path": c.path,
-        "secure": c.secure, "httpOnly": c.http_only, "expires": c.expires
+    let cookies_json: Vec<serde_json::Value> = cookies
+      .iter()
+      .map(|c| {
+        serde_json::json!({
+          "name": c.name, "value": c.value, "domain": c.domain, "path": c.path,
+          "secure": c.secure, "httpOnly": c.http_only, "expires": c.expires
+        })
       })
-    }).collect();
+      .collect();
 
-    let storage_r = self.inner.evaluate(
-      "JSON.stringify(Object.fromEntries(Object.entries(localStorage)))"
-    ).await.ok().flatten();
+    let storage_r = self
+      .inner
+      .evaluate("JSON.stringify(Object.fromEntries(Object.entries(localStorage)))")
+      .await
+      .ok()
+      .flatten();
     let local_storage: serde_json::Value = storage_r
       .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
       .unwrap_or(serde_json::json!({}));
@@ -926,11 +1014,14 @@ impl Page {
     if let Some(storage) = state.get("localStorage").and_then(|v| v.as_object()) {
       for (key, value) in storage {
         let val_str = value.as_str().unwrap_or("");
-        self.inner.evaluate(&format!(
-          "localStorage.setItem('{}', '{}')",
-          crate::steps::js_escape(key),
-          crate::steps::js_escape(val_str)
-        )).await?;
+        self
+          .inner
+          .evaluate(&format!(
+            "localStorage.setItem('{}', '{}')",
+            crate::steps::js_escape(key),
+            crate::steps::js_escape(val_str)
+          ))
+          .await?;
       }
     }
 
@@ -973,7 +1064,11 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out.
-  pub async fn wait_for_function(&self, expression: &str, timeout_ms: Option<u64>) -> Result<serde_json::Value, String> {
+  pub async fn wait_for_function(
+    &self,
+    expression: &str,
+    timeout_ms: Option<u64>,
+  ) -> Result<serde_json::Value, String> {
     let timeout = timeout_ms.unwrap_or(self.default_timeout);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
     loop {
@@ -1065,7 +1160,9 @@ impl Page {
   /// Returns an error if the frame tree cannot be retrieved or no main frame exists.
   pub async fn main_frame(&self) -> Result<Frame, String> {
     let frames = self.inner.get_frame_tree().await?;
-    let main = frames.into_iter().find(|f| f.parent_frame_id.is_none())
+    let main = frames
+      .into_iter()
+      .find(|f| f.parent_frame_id.is_none())
       .ok_or("No main frame found")?;
     Ok(Frame::from_info(self.clone(), main))
   }
@@ -1077,7 +1174,12 @@ impl Page {
   /// Returns an error if the frame tree cannot be retrieved.
   pub async fn frames(&self) -> Result<Vec<Frame>, String> {
     let infos = self.inner.get_frame_tree().await?;
-    Ok(infos.into_iter().map(|info| Frame::from_info(self.clone(), info)).collect())
+    Ok(
+      infos
+        .into_iter()
+        .map(|info| Frame::from_info(self.clone(), info))
+        .collect(),
+    )
   }
 
   /// Find a frame by name or URL.
@@ -1087,7 +1189,11 @@ impl Page {
   /// Returns an error if the frame tree cannot be retrieved.
   pub async fn frame(&self, name_or_url: &str) -> Result<Option<Frame>, String> {
     let frames = self.frames().await?;
-    Ok(frames.into_iter().find(|f| f.name() == name_or_url || f.url() == name_or_url))
+    Ok(
+      frames
+        .into_iter()
+        .find(|f| f.name() == name_or_url || f.url() == name_or_url),
+    )
   }
 
   // ── Events ────────────────────────────────────────────────────────────
@@ -1139,14 +1245,16 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation event does not occur within the timeout.
-  pub fn expect_navigation(&self, timeout_ms: Option<u64>) -> impl std::future::Future<Output = Result<(), String>> + '_ {
+  pub fn expect_navigation(
+    &self,
+    timeout_ms: Option<u64>,
+  ) -> impl std::future::Future<Output = Result<(), String>> + '_ {
     let timeout = timeout_ms.unwrap_or(self.default_timeout);
     let events = self.inner.events().clone();
     async move {
-      events.wait_for(
-        |e| matches!(e, PageEvent::Load | PageEvent::DomContentLoaded),
-        timeout,
-      ).await?;
+      events
+        .wait_for(|e| matches!(e, PageEvent::Load | PageEvent::DomContentLoaded), timeout)
+        .await?;
       Ok(())
     }
   }
@@ -1156,15 +1264,21 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if no matching response is received within the timeout.
-  pub fn expect_response(&self, url_pattern: &str, timeout_ms: Option<u64>) -> impl std::future::Future<Output = Result<crate::events::NetResponse, String>> + '_ {
+  pub fn expect_response(
+    &self,
+    url_pattern: &str,
+    timeout_ms: Option<u64>,
+  ) -> impl std::future::Future<Output = Result<crate::events::NetResponse, String>> + '_ {
     let timeout = timeout_ms.unwrap_or(self.default_timeout);
     let events = self.inner.events().clone();
     let pattern = url_pattern.to_string();
     async move {
-      let event = events.wait_for(
-        move |e| matches!(e, PageEvent::Response(r) if r.url.contains(&pattern)),
-        timeout,
-      ).await?;
+      let event = events
+        .wait_for(
+          move |e| matches!(e, PageEvent::Response(r) if r.url.contains(&pattern)),
+          timeout,
+        )
+        .await?;
       match event {
         PageEvent::Response(r) => Ok(r),
         _ => Err("Unexpected event type".into()),
@@ -1177,15 +1291,21 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if no matching request is received within the timeout.
-  pub fn expect_request(&self, url_pattern: &str, timeout_ms: Option<u64>) -> impl std::future::Future<Output = Result<crate::context::NetRequest, String>> + '_ {
+  pub fn expect_request(
+    &self,
+    url_pattern: &str,
+    timeout_ms: Option<u64>,
+  ) -> impl std::future::Future<Output = Result<crate::context::NetRequest, String>> + '_ {
     let timeout = timeout_ms.unwrap_or(self.default_timeout);
     let events = self.inner.events().clone();
     let pattern = url_pattern.to_string();
     async move {
-      let event = events.wait_for(
-        move |e| matches!(e, PageEvent::Request(r) if r.url.contains(&pattern)),
-        timeout,
-      ).await?;
+      let event = events
+        .wait_for(
+          move |e| matches!(e, PageEvent::Request(r) if r.url.contains(&pattern)),
+          timeout,
+        )
+        .await?;
       match event {
         PageEvent::Request(r) => Ok(r),
         _ => Err("Unexpected event type".into()),
@@ -1198,14 +1318,16 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if no download event occurs within the timeout.
-  pub fn expect_download(&self, timeout_ms: Option<u64>) -> impl std::future::Future<Output = Result<crate::events::DownloadInfo, String>> + '_ {
+  pub fn expect_download(
+    &self,
+    timeout_ms: Option<u64>,
+  ) -> impl std::future::Future<Output = Result<crate::events::DownloadInfo, String>> + '_ {
     let timeout = timeout_ms.unwrap_or(self.default_timeout);
     let events = self.inner.events().clone();
     async move {
-      let event = events.wait_for(
-        |e| matches!(e, PageEvent::Download(_)),
-        timeout,
-      ).await?;
+      let event = events
+        .wait_for(|e| matches!(e, PageEvent::Download(_)), timeout)
+        .await?;
       match event {
         PageEvent::Download(d) => Ok(d),
         _ => Err("Unexpected event type".into()),
@@ -1219,7 +1341,11 @@ impl Page {
   ///
   /// Returns an error if the event does not occur within the timeout.
   pub async fn wait_for_event(&self, event_name: &str, timeout_ms: Option<u64>) -> Result<PageEvent, String> {
-    self.inner.events().wait_for_event(event_name, timeout_ms.unwrap_or(self.default_timeout)).await
+    self
+      .inner
+      .events()
+      .wait_for_event(event_name, timeout_ms.unwrap_or(self.default_timeout))
+      .await
   }
 
   /// Wait for a download to start, matching an optional URL pattern.
@@ -1227,12 +1353,20 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if no matching download occurs within the timeout.
-  pub async fn wait_for_download(&self, url_pattern: Option<&str>, timeout_ms: Option<u64>) -> Result<crate::events::DownloadInfo, String> {
+  pub async fn wait_for_download(
+    &self,
+    url_pattern: Option<&str>,
+    timeout_ms: Option<u64>,
+  ) -> Result<crate::events::DownloadInfo, String> {
     let pattern = url_pattern.map(std::string::ToString::to_string);
-    let event = self.inner.events().wait_for(
-      move |e| matches!(e, PageEvent::Download(d) if pattern.as_ref().is_none_or(|p| d.url.contains(p))),
-      timeout_ms.unwrap_or(self.default_timeout),
-    ).await?;
+    let event = self
+      .inner
+      .events()
+      .wait_for(
+        move |e| matches!(e, PageEvent::Download(d) if pattern.as_ref().is_none_or(|p| d.url.contains(p))),
+        timeout_ms.unwrap_or(self.default_timeout),
+      )
+      .await?;
     match event {
       PageEvent::Download(d) => Ok(d),
       _ => Err("Unexpected event type".into()),
@@ -1244,12 +1378,20 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if no matching request occurs within the timeout.
-  pub async fn wait_for_request(&self, url_pattern: &str, timeout_ms: Option<u64>) -> Result<crate::context::NetRequest, String> {
+  pub async fn wait_for_request(
+    &self,
+    url_pattern: &str,
+    timeout_ms: Option<u64>,
+  ) -> Result<crate::context::NetRequest, String> {
     let pattern = url_pattern.to_string();
-    let event = self.inner.events().wait_for(
-      move |e| matches!(e, PageEvent::Request(r) if r.url.contains(&pattern)),
-      timeout_ms.unwrap_or(self.default_timeout),
-    ).await?;
+    let event = self
+      .inner
+      .events()
+      .wait_for(
+        move |e| matches!(e, PageEvent::Request(r) if r.url.contains(&pattern)),
+        timeout_ms.unwrap_or(self.default_timeout),
+      )
+      .await?;
     match event {
       PageEvent::Request(r) => Ok(r),
       _ => Err("Unexpected event type".into()),
@@ -1261,12 +1403,20 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if no matching response occurs within the timeout.
-  pub async fn wait_for_response(&self, url_pattern: &str, timeout_ms: Option<u64>) -> Result<crate::events::NetResponse, String> {
+  pub async fn wait_for_response(
+    &self,
+    url_pattern: &str,
+    timeout_ms: Option<u64>,
+  ) -> Result<crate::events::NetResponse, String> {
     let pattern = url_pattern.to_string();
-    let event = self.inner.events().wait_for(
-      move |e| matches!(e, PageEvent::Response(r) if r.url.contains(&pattern)),
-      timeout_ms.unwrap_or(self.default_timeout),
-    ).await?;
+    let event = self
+      .inner
+      .events()
+      .wait_for(
+        move |e| matches!(e, PageEvent::Response(r) if r.url.contains(&pattern)),
+        timeout_ms.unwrap_or(self.default_timeout),
+      )
+      .await?;
     match event {
       PageEvent::Response(r) => Ok(r),
       _ => Err("Unexpected event type".into()),
@@ -1357,7 +1507,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if neither `url` nor `content` is provided, or if injection fails.
-  pub async fn add_script_tag(&self, url: Option<&str>, content: Option<&str>, script_type: Option<&str>) -> Result<(), String> {
+  pub async fn add_script_tag(
+    &self,
+    url: Option<&str>,
+    content: Option<&str>,
+    script_type: Option<&str>,
+  ) -> Result<(), String> {
     let t = script_type.unwrap_or("text/javascript");
     if let Some(url) = url {
       self.inner.evaluate(&format!(
@@ -1391,10 +1546,13 @@ impl Page {
         crate::steps::js_escape(url)
       )).await?;
     } else if let Some(content) = content {
-      self.inner.evaluate(&format!(
-        "(function(){{var s=document.createElement('style');s.textContent='{}';document.head.appendChild(s)}})()",
-        crate::steps::js_escape(content)
-      )).await?;
+      self
+        .inner
+        .evaluate(&format!(
+          "(function(){{var s=document.createElement('style');s.textContent='{}';document.head.appendChild(s)}})()",
+          crate::steps::js_escape(content)
+        ))
+        .await?;
     } else {
       return Err("Provide either 'url' or 'content'".into());
     }
@@ -1526,10 +1684,14 @@ impl Keyboard<'_> {
   ///
   /// Returns an error if the text insertion fails.
   pub async fn insert_text(&self, text: &str) -> Result<(), String> {
-    self.page.inner.evaluate(&format!(
-      "document.execCommand('insertText', false, '{}')",
-      crate::steps::js_escape(text)
-    )).await?;
+    self
+      .page
+      .inner
+      .evaluate(&format!(
+        "document.execCommand('insertText', false, '{}')",
+        crate::steps::js_escape(text)
+      ))
+      .await?;
     Ok(())
   }
 }

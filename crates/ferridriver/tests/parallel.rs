@@ -5,9 +5,9 @@
 //! are serialized through the single handler. For independent parallelism,
 //! use separate Browser instances or the cdp-pipe backend.
 
+use ferridriver::Browser;
 use ferridriver::backend::BackendKind;
 use ferridriver::options::*;
-use ferridriver::Browser;
 use std::time::Instant;
 
 fn data_url(html: &str) -> String {
@@ -18,7 +18,7 @@ fn data_url(html: &str) -> String {
       .map(|b| match b {
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
           (b as char).to_string()
-        }
+        },
         _ => format!("%{:02X}", b),
       })
       .collect::<String>()
@@ -32,7 +32,9 @@ async fn multi_page_automation() {
   let browser = Browser::launch(LaunchOptions {
     backend: BackendKind::CdpPipe,
     ..Default::default()
-  }).await.expect("launch");
+  })
+  .await
+  .expect("launch");
 
   // Create 3 pages with different content
   let page1 = browser.new_page().await.unwrap();
@@ -54,7 +56,10 @@ async fn multi_page_automation() {
 
   // Verify each page has independent state
   let v1 = page1.locator("#i").input_value().await.unwrap();
-  let v2 = page2.evaluate_str("document.getElementById('b').textContent").await.unwrap();
+  let v2 = page2
+    .evaluate_str("document.getElementById('b').textContent")
+    .await
+    .unwrap();
 
   assert!(v1.contains("multi-page"), "page1: {v1}");
   assert!(v2.contains("clicked"), "page2: {v2}");

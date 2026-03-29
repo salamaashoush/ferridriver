@@ -1,11 +1,11 @@
-use super::{q, StepCategory, StepDef};
+use super::{StepCategory, StepDef, q};
 use crate::backend::CookieData;
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
-    steps.push(Box::new(SetCookieDomain));
-    steps.push(Box::new(SetCookie));
-    steps.push(Box::new(DeleteCookie));
-    steps.push(Box::new(ClearCookies));
+  steps.push(Box::new(SetCookieDomain));
+  steps.push(Box::new(SetCookie));
+  steps.push(Box::new(DeleteCookie));
+  steps.push(Box::new(ClearCookies));
 }
 
 step!(SetCookieDomain {

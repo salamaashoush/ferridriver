@@ -1,9 +1,9 @@
-use super::{q, js_escape, StepCategory, StepDef};
+use super::{StepCategory, StepDef, js_escape, q};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
-    steps.push(Box::new(SetLocalStorage));
-    steps.push(Box::new(RemoveLocalStorage));
-    steps.push(Box::new(ClearLocalStorage));
+  steps.push(Box::new(SetLocalStorage));
+  steps.push(Box::new(RemoveLocalStorage));
+  steps.push(Box::new(ClearLocalStorage));
 }
 
 step!(SetLocalStorage {

@@ -1,7 +1,7 @@
-use super::{q, StepCategory, StepDef};
+use super::{StepCategory, StepDef, q};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
-    steps.push(Box::new(Evaluate));
+  steps.push(Box::new(Evaluate));
 }
 
 step!(Evaluate {

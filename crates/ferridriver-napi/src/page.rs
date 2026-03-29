@@ -1,9 +1,12 @@
 //! Page class -- NAPI binding for `ferridriver::Page`.
 
 use crate::locator::Locator;
-use crate::types::{GotoOptions, RoleOptions, TextOptions, ResponseData, WaitOptions, ScreenshotOptions, ViewportConfig, CookieData, MetricData};
-use napi::bindgen_prelude::Buffer;
+use crate::types::{
+  CookieData, GotoOptions, MetricData, ResponseData, RoleOptions, ScreenshotOptions, TextOptions, ViewportConfig,
+  WaitOptions,
+};
 use napi::Result;
+use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 /// High-level page API, mirrors Playwright's Page interface.
@@ -115,7 +118,10 @@ impl Page {
   /// Get the main frame of this page.
   #[napi]
   pub async fn main_frame(&self) -> Result<crate::frame::Frame> {
-    self.inner.main_frame().await
+    self
+      .inner
+      .main_frame()
+      .await
       .map(crate::frame::Frame::wrap)
       .map_err(napi::Error::from_reason)
   }
@@ -123,7 +129,10 @@ impl Page {
   /// Get all frames in the page (main frame + all iframes).
   #[napi]
   pub async fn frames(&self) -> Result<Vec<crate::frame::Frame>> {
-    self.inner.frames().await
+    self
+      .inner
+      .frames()
+      .await
       .map(|f| f.into_iter().map(crate::frame::Frame::wrap).collect())
       .map_err(napi::Error::from_reason)
   }
@@ -131,7 +140,10 @@ impl Page {
   /// Find a frame by name or URL.
   #[napi]
   pub async fn frame(&self, name_or_url: String) -> Result<Option<crate::frame::Frame>> {
-    self.inner.frame(&name_or_url).await
+    self
+      .inner
+      .frame(&name_or_url)
+      .await
       .map(|opt| opt.map(crate::frame::Frame::wrap))
       .map_err(napi::Error::from_reason)
   }
@@ -143,12 +155,10 @@ impl Page {
   /// Supported events: 'console', 'response', 'request', 'dialog', 'download',
   /// 'frameattached', 'framedetached', 'framenavigated',
   /// 'load', 'domcontentloaded', 'close', 'pageerror'
-  #[napi(ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | Record<string, any>) => void")]
-  pub fn on(
-    &self,
-    event: String,
-    listener: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>,
-  ) -> Result<f64> {
+  #[napi(
+    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | Record<string, any>) => void"
+  )]
+  pub fn on(&self, event: String, listener: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>) -> Result<f64> {
     let tsfn = listener
       .build_threadsafe_function()
       .callee_handled::<false>()
@@ -167,7 +177,9 @@ impl Page {
   }
 
   /// Register a one-time event listener. Auto-removed after first match.
-  #[napi(ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | Record<string, any>) => void")]
+  #[napi(
+    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | Record<string, any>) => void"
+  )]
   pub fn once(
     &self,
     event: String,
@@ -195,7 +207,9 @@ impl Page {
   pub fn off(&self, listener_id: f64) {
     // listener_id originates from on()/once() which returns a u64 counter
     // round-tripped through f64; the value is always non-negative and integral.
-    self.inner.off(ferridriver::events::ListenerId(crate::types::f64_to_u64(listener_id)));
+    self
+      .inner
+      .off(ferridriver::events::ListenerId(crate::types::f64_to_u64(listener_id)));
   }
 
   /// Remove all event listeners from this page.
@@ -205,11 +219,18 @@ impl Page {
   }
 
   /// Wait for a specific event. Playwright API: `page.waitForEvent(event)`.
-  #[napi(ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number", ts_return_type = "Promise<{ type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | Record<string, any>>")]
+  #[napi(
+    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
+    ts_return_type = "Promise<{ type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | Record<string, any>>"
+  )]
   pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
-    let ev = self.inner.events().wait_for_event(&event, timeout)
-      .await.map_err(napi::Error::from_reason)?;
+    let ev = self
+      .inner
+      .events()
+      .wait_for_event(&event, timeout)
+      .await
+      .map_err(napi::Error::from_reason)?;
     Ok(page_event_to_value(&ev))
   }
 
@@ -217,8 +238,11 @@ impl Page {
   /// Playwright API: `page.waitForResponse(urlOrPredicate)`.
   #[napi]
   pub async fn wait_for_response(&self, url_pattern: String, timeout_ms: Option<f64>) -> Result<ResponseData> {
-    let r = self.inner.wait_for_response(&url_pattern, timeout_ms.map(crate::types::f64_to_u64))
-      .await.map_err(napi::Error::from_reason)?;
+    let r = self
+      .inner
+      .wait_for_response(&url_pattern, timeout_ms.map(crate::types::f64_to_u64))
+      .await
+      .map_err(napi::Error::from_reason)?;
     Ok(ResponseData {
       url: r.url,
       status: i32::try_from(r.status).unwrap_or(i32::MAX),
@@ -235,17 +259,29 @@ impl Page {
 
   #[napi]
   pub async fn fill(&self, selector: String, value: String) -> Result<()> {
-    self.inner.fill(&selector, &value).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .fill(&selector, &value)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn type_text(&self, selector: String, text: String) -> Result<()> {
-    self.inner.type_text(&selector, &text).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .type_text(&selector, &text)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn press(&self, selector: String, key: String) -> Result<()> {
-    self.inner.press(&selector, &key).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .press(&selector, &key)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
@@ -255,7 +291,11 @@ impl Page {
 
   #[napi]
   pub async fn select_option(&self, selector: String, value: String) -> Result<Vec<String>> {
-    self.inner.select_option(&selector, &value).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .select_option(&selector, &value)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
@@ -287,7 +327,11 @@ impl Page {
 
   #[napi]
   pub async fn text_content(&self, selector: String) -> Result<Option<String>> {
-    self.inner.text_content(&selector).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .text_content(&selector)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
@@ -302,12 +346,20 @@ impl Page {
 
   #[napi]
   pub async fn get_attribute(&self, selector: String, name: String) -> Result<Option<String>> {
-    self.inner.get_attribute(&selector, &name).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .get_attribute(&selector, &name)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn input_value(&self, selector: String) -> Result<String> {
-    self.inner.input_value(&selector).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .input_value(&selector)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   // ── State checks ────────────────────────────────────────────────────────
@@ -329,7 +381,11 @@ impl Page {
 
   #[napi]
   pub async fn is_disabled(&self, selector: String) -> Result<bool> {
-    self.inner.is_disabled(&selector).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .is_disabled(&selector)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
@@ -339,7 +395,11 @@ impl Page {
 
   #[napi]
   pub async fn is_editable(&self, selector: String) -> Result<bool> {
-    self.inner.is_editable(&selector).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .is_editable(&selector)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   // ── Evaluation ──────────────────────────────────────────────────────────
@@ -351,7 +411,11 @@ impl Page {
 
   #[napi]
   pub async fn evaluate_str(&self, expression: String) -> Result<String> {
-    self.inner.evaluate_str(&expression).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .evaluate_str(&expression)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   // ── Waiting ─────────────────────────────────────────────────────────────
@@ -359,12 +423,20 @@ impl Page {
   #[napi]
   pub async fn wait_for_selector(&self, selector: String, options: Option<WaitOptions>) -> Result<()> {
     let opts: ferridriver::options::WaitOptions = options.as_ref().map_or_else(Default::default, Into::into);
-    self.inner.wait_for_selector(&selector, opts).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .wait_for_selector(&selector, opts)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn wait_for_url(&self, url_pattern: String) -> Result<()> {
-    self.inner.wait_for_url(&url_pattern).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .wait_for_url(&url_pattern)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
@@ -374,19 +446,27 @@ impl Page {
 
   #[napi]
   pub async fn wait_for_load_state(&self, state: Option<String>) -> Result<()> {
-    self.inner.wait_for_load_state(state.as_deref()).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .wait_for_load_state(state.as_deref())
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn wait_for_function(&self, expression: String, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
-    self.inner.wait_for_function(&expression, timeout_ms.map(crate::types::f64_to_u64))
+    self
+      .inner
+      .wait_for_function(&expression, timeout_ms.map(crate::types::f64_to_u64))
       .await
       .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn wait_for_navigation(&self, timeout_ms: Option<f64>) -> Result<()> {
-    self.inner.wait_for_navigation(timeout_ms.map(crate::types::f64_to_u64))
+    self
+      .inner
+      .wait_for_navigation(timeout_ms.map(crate::types::f64_to_u64))
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -402,17 +482,22 @@ impl Page {
 
   #[napi]
   pub async fn screenshot_element(&self, selector: String) -> Result<Buffer> {
-    let bytes = self.inner.screenshot_element(&selector).await.map_err(napi::Error::from_reason)?;
+    let bytes = self
+      .inner
+      .screenshot_element(&selector)
+      .await
+      .map_err(napi::Error::from_reason)?;
     Ok(bytes.into())
   }
 
   /// Generate PDF from the page (headless Chrome only).
   #[napi]
   pub async fn pdf(&self, landscape: Option<bool>, print_background: Option<bool>) -> Result<Buffer> {
-    let bytes = self.inner.pdf(
-      landscape.unwrap_or(false),
-      print_background.unwrap_or(false),
-    ).await.map_err(napi::Error::from_reason)?;
+    let bytes = self
+      .inner
+      .pdf(landscape.unwrap_or(false), print_background.unwrap_or(false))
+      .await
+      .map_err(napi::Error::from_reason)?;
     Ok(bytes.into())
   }
 
@@ -420,14 +505,18 @@ impl Page {
 
   #[napi]
   pub async fn set_viewport_size(&self, width: i32, height: i32) -> Result<()> {
-    self.inner.set_viewport_size(i64::from(width), i64::from(height))
+    self
+      .inner
+      .set_viewport_size(i64::from(width), i64::from(height))
       .await
       .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn set_viewport(&self, config: ViewportConfig) -> Result<()> {
-    self.inner.set_viewport(&ferridriver::options::ViewportConfig::from(&config))
+    self
+      .inner
+      .set_viewport(&ferridriver::options::ViewportConfig::from(&config))
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -445,8 +534,11 @@ impl Page {
   pub async fn click_at_opts(&self, x: f64, y: f64, button: String, click_count: Option<i32>) -> Result<()> {
     let count = u32::try_from(click_count.unwrap_or(1))
       .map_err(|_| napi::Error::from_reason("click_count must be non-negative"))?;
-    self.inner.click_at_opts(x, y, &button, count)
-      .await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .click_at_opts(x, y, &button, count)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   /// Move mouse to coordinates without clicking.
@@ -457,16 +549,28 @@ impl Page {
 
   /// Move mouse smoothly with bezier easing.
   #[napi]
-  pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: Option<i32>) -> Result<()> {
-    let step_count = u32::try_from(steps.unwrap_or(10))
-      .map_err(|_| napi::Error::from_reason("steps must be non-negative"))?;
-    self.inner.move_mouse_smooth(from_x, from_y, to_x, to_y, step_count)
-      .await.map_err(napi::Error::from_reason)
+  pub async fn move_mouse_smooth(
+    &self,
+    from_x: f64,
+    from_y: f64,
+    to_x: f64,
+    to_y: f64,
+    steps: Option<i32>,
+  ) -> Result<()> {
+    let step_count =
+      u32::try_from(steps.unwrap_or(10)).map_err(|_| napi::Error::from_reason("steps must be non-negative"))?;
+    self
+      .inner
+      .move_mouse_smooth(from_x, from_y, to_x, to_y, step_count)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn drag_and_drop(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> Result<()> {
-    self.inner.drag_and_drop((from_x, from_y), (to_x, to_y))
+    self
+      .inner
+      .drag_and_drop((from_x, from_y), (to_x, to_y))
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -490,14 +594,18 @@ impl Page {
 
   #[napi]
   pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: Option<f64>) -> Result<()> {
-    self.inner.set_geolocation(lat, lng, accuracy.unwrap_or(1.0))
+    self
+      .inner
+      .set_geolocation(lat, lng, accuracy.unwrap_or(1.0))
       .await
       .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn set_network_state(&self, offline: bool, latency: f64, download: f64, upload: f64) -> Result<()> {
-    self.inner.set_network_state(offline, latency, download, upload)
+    self
+      .inner
+      .set_network_state(offline, latency, download, upload)
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -511,7 +619,11 @@ impl Page {
   /// Set the browser timezone (Date, Intl.DateTimeFormat).
   #[napi]
   pub async fn set_timezone(&self, timezone_id: String) -> Result<()> {
-    self.inner.set_timezone(&timezone_id).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .set_timezone(&timezone_id)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   /// Emulate media features (color scheme, reduced motion, media type, etc.).
@@ -524,21 +636,28 @@ impl Page {
     forced_colors: Option<String>,
     contrast: Option<String>,
   ) -> Result<()> {
-    self.inner.emulate_media(&ferridriver::options::EmulateMediaOptions {
-      media: media_type,
-      color_scheme,
-      reduced_motion,
-      forced_colors,
-      contrast,
-    }).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .emulate_media(&ferridriver::options::EmulateMediaOptions {
+        media: media_type,
+        color_scheme,
+        reduced_motion,
+        forced_colors,
+        contrast,
+      })
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   /// Enable or disable JavaScript execution.
   #[napi]
   pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<()> {
-    self.inner.set_javascript_enabled(enabled).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .set_javascript_enabled(enabled)
+      .await
+      .map_err(napi::Error::from_reason)
   }
-
 
   // ── Cookies ─────────────────────────────────────────────────────────────
 
@@ -550,14 +669,18 @@ impl Page {
 
   #[napi]
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
-    self.inner.set_cookie(ferridriver::backend::CookieData::from(&cookie))
+    self
+      .inner
+      .set_cookie(ferridriver::backend::CookieData::from(&cookie))
       .await
       .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn delete_cookie(&self, name: String, domain: Option<String>) -> Result<()> {
-    self.inner.delete_cookie(&name, domain.as_deref())
+    self
+      .inner
+      .delete_cookie(&name, domain.as_deref())
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -576,7 +699,11 @@ impl Page {
 
   #[napi]
   pub async fn dispatch_event(&self, selector: String, event_type: String) -> Result<()> {
-    self.inner.dispatch_event(&selector, &event_type).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .dispatch_event(&selector, &event_type)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   // ── Tracing ─────────────────────────────────────────────────────────────
@@ -620,7 +747,8 @@ impl Page {
   pub async fn viewport_size(&self) -> Result<Vec<i32>> {
     let (w, h) = self.inner.viewport_size().await.map_err(napi::Error::from_reason)?;
     let w32 = i32::try_from(w).map_err(|_| napi::Error::from_reason(format!("viewport width {w} exceeds i32::MAX")))?;
-    let h32 = i32::try_from(h).map_err(|_| napi::Error::from_reason(format!("viewport height {h} exceeds i32::MAX")))?;
+    let h32 =
+      i32::try_from(h).map_err(|_| napi::Error::from_reason(format!("viewport height {h} exceeds i32::MAX")))?;
     Ok(vec![w32, h32])
   }
 
@@ -631,41 +759,74 @@ impl Page {
 
   #[napi]
   pub async fn set_storage_state(&self, state: serde_json::Value) -> Result<()> {
-    self.inner.set_storage_state(&state).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .set_storage_state(&state)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn add_init_script(&self, source: String) -> Result<String> {
-    self.inner.add_init_script(&source).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .add_init_script(&source)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn remove_init_script(&self, identifier: String) -> Result<()> {
-    self.inner.remove_init_script(&identifier).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .remove_init_script(&identifier)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
-  pub async fn add_script_tag(&self, url: Option<String>, content: Option<String>, script_type: Option<String>) -> Result<()> {
-    self.inner.add_script_tag(url.as_deref(), content.as_deref(), script_type.as_deref())
-      .await.map_err(napi::Error::from_reason)
+  pub async fn add_script_tag(
+    &self,
+    url: Option<String>,
+    content: Option<String>,
+    script_type: Option<String>,
+  ) -> Result<()> {
+    self
+      .inner
+      .add_script_tag(url.as_deref(), content.as_deref(), script_type.as_deref())
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn add_style_tag(&self, url: Option<String>, content: Option<String>) -> Result<()> {
-    self.inner.add_style_tag(url.as_deref(), content.as_deref())
-      .await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .add_style_tag(url.as_deref(), content.as_deref())
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn set_extra_http_headers(&self, headers: std::collections::HashMap<String, String>) -> Result<()> {
     let mut fx = rustc_hash::FxHashMap::default();
-    for (k, v) in headers { fx.insert(k, v); }
-    self.inner.set_extra_http_headers(&fx).await.map_err(napi::Error::from_reason)
+    for (k, v) in headers {
+      fx.insert(k, v);
+    }
+    self
+      .inner
+      .set_extra_http_headers(&fx)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn grant_permissions(&self, permissions: Vec<String>, origin: Option<String>) -> Result<()> {
-    self.inner.grant_permissions(&permissions, origin.as_deref()).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .grant_permissions(&permissions, origin.as_deref())
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
@@ -675,40 +836,70 @@ impl Page {
 
   #[napi]
   pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<()> {
-    self.inner.set_focus_emulation_enabled(enabled).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .set_focus_emulation_enabled(enabled)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
-    self.inner.mouse_wheel(delta_x, delta_y).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .mouse_wheel(delta_x, delta_y)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn mouse_down(&self, x: f64, y: f64, button: Option<String>) -> Result<()> {
-    self.inner.mouse_down(x, y, button.as_deref().unwrap_or("left")).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .mouse_down(x, y, button.as_deref().unwrap_or("left"))
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn mouse_up(&self, x: f64, y: f64, button: Option<String>) -> Result<()> {
-    self.inner.mouse_up(x, y, button.as_deref().unwrap_or("left")).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .mouse_up(x, y, button.as_deref().unwrap_or("left"))
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn set_input_files(&self, selector: String, paths: Vec<String>) -> Result<()> {
-    self.inner.set_input_files(&selector, &paths).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .set_input_files(&selector, &paths)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn wait_for_request(&self, url_pattern: String, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
-    let req = self.inner.wait_for_request(&url_pattern, timeout_ms.map(crate::types::f64_to_u64))
-      .await.map_err(napi::Error::from_reason)?;
+    let req = self
+      .inner
+      .wait_for_request(&url_pattern, timeout_ms.map(crate::types::f64_to_u64))
+      .await
+      .map_err(napi::Error::from_reason)?;
     Ok(serde_json::json!({"url": req.url, "method": req.method, "resourceType": req.resource_type}))
   }
 
   #[napi]
-  pub async fn wait_for_download(&self, url_pattern: Option<String>, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
-    let dl = self.inner.wait_for_download(url_pattern.as_deref(), timeout_ms.map(crate::types::f64_to_u64))
-      .await.map_err(napi::Error::from_reason)?;
+  pub async fn wait_for_download(
+    &self,
+    url_pattern: Option<String>,
+    timeout_ms: Option<f64>,
+  ) -> Result<serde_json::Value> {
+    let dl = self
+      .inner
+      .wait_for_download(url_pattern.as_deref(), timeout_ms.map(crate::types::f64_to_u64))
+      .await
+      .map_err(napi::Error::from_reason)?;
     Ok(serde_json::json!({"guid": dl.guid, "url": dl.url, "suggestedFilename": dl.suggested_filename}))
   }
 
@@ -716,7 +907,9 @@ impl Page {
   pub fn default_timeout(&self) -> f64 {
     // Default timeout is a millisecond value; practical values never exceed 2^53 (f64 mantissa).
     #[allow(clippy::cast_precision_loss)]
-    { self.inner.default_timeout() as f64 }
+    {
+      self.inner.default_timeout() as f64
+    }
   }
 }
 
@@ -728,71 +921,81 @@ use ferridriver::events::PageEvent;
 /// Returns None if the event doesn't match the requested name.
 #[allow(clippy::match_same_arms)] // arms differ by event name filter, bodies intentionally identical
 fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value> {
-    match (event_name, event) {
-        ("console", PageEvent::Console(msg)) => Some(serde_json::json!({
-            "type": msg.level,
-            "text": msg.text,
-        })),
-        ("response", PageEvent::Response(r)) => Some(serde_json::json!({
-            "url": r.url,
-            "status": r.status,
-            "statusText": r.status_text,
-            "mimeType": r.mime_type,
-            "headers": r.headers,
-        })),
-        ("request", PageEvent::Request(r)) => Some(serde_json::json!({
-            "url": r.url,
-            "method": r.method,
-            "resourceType": r.resource_type,
-            "headers": r.headers,
-            "postData": r.post_data,
-        })),
-        ("dialog", PageEvent::Dialog(d)) => Some(serde_json::json!({
-            "type": d.dialog_type,
-            "message": d.message,
-            "defaultValue": d.default_value,
-        })),
-        ("frameattached", PageEvent::FrameAttached(f)) => Some(serde_json::json!({
-            "frameId": f.frame_id,
-            "name": f.name,
-            "url": f.url,
-        })),
-        ("framedetached", PageEvent::FrameDetached { frame_id }) => Some(serde_json::json!({
-            "frameId": frame_id,
-        })),
-        ("framenavigated", PageEvent::FrameNavigated(f)) => Some(serde_json::json!({
-            "frameId": f.frame_id,
-            "name": f.name,
-            "url": f.url,
-        })),
-        ("load", PageEvent::Load) => Some(serde_json::json!({})),
-        ("domcontentloaded", PageEvent::DomContentLoaded) => Some(serde_json::json!({})),
-        ("close", PageEvent::Close) => Some(serde_json::json!({})),
-        ("pageerror", PageEvent::PageError(msg)) => Some(serde_json::json!({
-            "message": msg,
-        })),
-        ("download", PageEvent::Download(d)) => Some(serde_json::json!({
-            "guid": d.guid,
-            "url": d.url,
-            "suggestedFilename": d.suggested_filename,
-        })),
-        _ => None,
-    }
+  match (event_name, event) {
+    ("console", PageEvent::Console(msg)) => Some(serde_json::json!({
+        "type": msg.level,
+        "text": msg.text,
+    })),
+    ("response", PageEvent::Response(r)) => Some(serde_json::json!({
+        "url": r.url,
+        "status": r.status,
+        "statusText": r.status_text,
+        "mimeType": r.mime_type,
+        "headers": r.headers,
+    })),
+    ("request", PageEvent::Request(r)) => Some(serde_json::json!({
+        "url": r.url,
+        "method": r.method,
+        "resourceType": r.resource_type,
+        "headers": r.headers,
+        "postData": r.post_data,
+    })),
+    ("dialog", PageEvent::Dialog(d)) => Some(serde_json::json!({
+        "type": d.dialog_type,
+        "message": d.message,
+        "defaultValue": d.default_value,
+    })),
+    ("frameattached", PageEvent::FrameAttached(f)) => Some(serde_json::json!({
+        "frameId": f.frame_id,
+        "name": f.name,
+        "url": f.url,
+    })),
+    ("framedetached", PageEvent::FrameDetached { frame_id }) => Some(serde_json::json!({
+        "frameId": frame_id,
+    })),
+    ("framenavigated", PageEvent::FrameNavigated(f)) => Some(serde_json::json!({
+        "frameId": f.frame_id,
+        "name": f.name,
+        "url": f.url,
+    })),
+    ("load", PageEvent::Load) => Some(serde_json::json!({})),
+    ("domcontentloaded", PageEvent::DomContentLoaded) => Some(serde_json::json!({})),
+    ("close", PageEvent::Close) => Some(serde_json::json!({})),
+    ("pageerror", PageEvent::PageError(msg)) => Some(serde_json::json!({
+        "message": msg,
+    })),
+    ("download", PageEvent::Download(d)) => Some(serde_json::json!({
+        "guid": d.guid,
+        "url": d.url,
+        "suggestedFilename": d.suggested_filename,
+    })),
+    _ => None,
+  }
 }
 
 /// Convert any `PageEvent` to a JS value (for waitForEvent).
 fn page_event_to_value(event: &PageEvent) -> serde_json::Value {
-    match event {
-        PageEvent::Console(msg) => serde_json::json!({"type": msg.level, "text": msg.text}),
-        PageEvent::Response(r) => serde_json::json!({"url": r.url, "status": r.status, "statusText": r.status_text, "mimeType": r.mime_type, "headers": r.headers}),
-        PageEvent::Request(r) => serde_json::json!({"url": r.url, "method": r.method, "resourceType": r.resource_type, "headers": r.headers, "postData": r.post_data}),
-        PageEvent::Dialog(d) => serde_json::json!({"type": d.dialog_type, "message": d.message, "defaultValue": d.default_value}),
-        PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::json!({"frameId": f.frame_id, "name": f.name, "url": f.url}),
-        PageEvent::FrameDetached { frame_id } => serde_json::json!({"frameId": frame_id}),
-        PageEvent::Load => serde_json::json!({"type": "load"}),
-        PageEvent::DomContentLoaded => serde_json::json!({"type": "domcontentloaded"}),
-        PageEvent::Close => serde_json::json!({"type": "close"}),
-        PageEvent::PageError(msg) => serde_json::json!({"message": msg}),
-        PageEvent::Download(d) => serde_json::json!({"guid": d.guid, "url": d.url, "suggestedFilename": d.suggested_filename}),
-    }
+  match event {
+    PageEvent::Console(msg) => serde_json::json!({"type": msg.level, "text": msg.text}),
+    PageEvent::Response(r) => {
+      serde_json::json!({"url": r.url, "status": r.status, "statusText": r.status_text, "mimeType": r.mime_type, "headers": r.headers})
+    },
+    PageEvent::Request(r) => {
+      serde_json::json!({"url": r.url, "method": r.method, "resourceType": r.resource_type, "headers": r.headers, "postData": r.post_data})
+    },
+    PageEvent::Dialog(d) => {
+      serde_json::json!({"type": d.dialog_type, "message": d.message, "defaultValue": d.default_value})
+    },
+    PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => {
+      serde_json::json!({"frameId": f.frame_id, "name": f.name, "url": f.url})
+    },
+    PageEvent::FrameDetached { frame_id } => serde_json::json!({"frameId": frame_id}),
+    PageEvent::Load => serde_json::json!({"type": "load"}),
+    PageEvent::DomContentLoaded => serde_json::json!({"type": "domcontentloaded"}),
+    PageEvent::Close => serde_json::json!({"type": "close"}),
+    PageEvent::PageError(msg) => serde_json::json!({"message": msg}),
+    PageEvent::Download(d) => {
+      serde_json::json!({"guid": d.guid, "url": d.url, "suggestedFilename": d.suggested_filename})
+    },
+  }
 }

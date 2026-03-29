@@ -1,20 +1,20 @@
-use super::{q, js_escape, StepCategory, StepDef};
+use super::{StepCategory, StepDef, js_escape, q};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
-    steps.push(Box::new(DoubleClick));
-    steps.push(Box::new(ClickAt));
-    steps.push(Box::new(Click));
-    steps.push(Box::new(Hover));
-    steps.push(Box::new(FillForm));
-    steps.push(Box::new(Fill));
-    steps.push(Box::new(Clear));
-    steps.push(Box::new(SelectOption));
-    steps.push(Box::new(TypeText));
-    steps.push(Box::new(PressKey));
-    steps.push(Box::new(Focus));
-    steps.push(Box::new(ScrollTo));
-    steps.push(Box::new(ScrollDown));
-    steps.push(Box::new(ScrollUp));
+  steps.push(Box::new(DoubleClick));
+  steps.push(Box::new(ClickAt));
+  steps.push(Box::new(Click));
+  steps.push(Box::new(Hover));
+  steps.push(Box::new(FillForm));
+  steps.push(Box::new(Fill));
+  steps.push(Box::new(Clear));
+  steps.push(Box::new(SelectOption));
+  steps.push(Box::new(TypeText));
+  steps.push(Box::new(PressKey));
+  steps.push(Box::new(Focus));
+  steps.push(Box::new(ScrollTo));
+  steps.push(Box::new(ScrollDown));
+  steps.push(Box::new(ScrollUp));
 }
 
 step!(Click {

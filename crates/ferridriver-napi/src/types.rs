@@ -6,14 +6,16 @@ use napi_derive::napi;
 /// Negative values are clamped to 0; fractional parts are truncated.
 /// This is the correct semantic for the NAPI boundary where JS has only f64 numbers.
 pub(crate) fn f64_to_u64(v: f64) -> u64 {
-    if v < 0.0 {
-        0
-    } else {
-        // After the negative check above, v is guaranteed non-negative.
-        // Truncation of the fractional part is intentional for ms timeouts.
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        { v as u64 }
+  if v < 0.0 {
+    0
+  } else {
+    // After the negative check above, v is guaranteed non-negative.
+    // Truncation of the fractional part is intentional for ms timeouts.
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    {
+      v as u64
     }
+  }
 }
 
 /// Options for role-based locators (getByRole).

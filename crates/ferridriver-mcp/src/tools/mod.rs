@@ -3,29 +3,29 @@
 //! Each submodule defines tools in a separate `#[tool_router]` impl block.
 //! Routers are combined via `+` in `McpServer::combined_router()`.
 
-pub mod navigation;
-pub mod input;
+pub mod bdd;
 pub mod content;
 pub mod cookies;
-pub mod storage;
 pub mod emulation;
+pub mod input;
+pub mod navigation;
 pub mod network;
-pub mod bdd;
+pub mod storage;
 
 use crate::server::McpServer;
 use rmcp::handler::server::router::tool::ToolRouter;
 
 impl McpServer {
-    /// Combine all category routers into one.
-    #[must_use]
-    pub fn combined_router() -> ToolRouter<Self> {
-        Self::navigation_router()
-            + Self::input_router()
-            + Self::content_router()
-            + Self::cookies_router()
-            + Self::storage_router()
-            + Self::emulation_router()
-            + Self::network_router()
-            + Self::bdd_router()
-    }
+  /// Combine all category routers into one.
+  #[must_use]
+  pub fn combined_router() -> ToolRouter<Self> {
+    Self::navigation_router()
+      + Self::input_router()
+      + Self::content_router()
+      + Self::cookies_router()
+      + Self::storage_router()
+      + Self::emulation_router()
+      + Self::network_router()
+      + Self::bdd_router()
+  }
 }

@@ -1,8 +1,8 @@
 //! Locator class -- NAPI binding for `ferridriver::Locator`.
 
-use crate::types::{RoleOptions, TextOptions, FilterOptions, BoundingBox, WaitOptions};
-use napi::bindgen_prelude::Buffer;
+use crate::types::{BoundingBox, FilterOptions, RoleOptions, TextOptions, WaitOptions};
 use napi::Result;
+use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 
 /// A lazy element locator. Does not query the DOM until an action is called.
@@ -162,12 +162,18 @@ impl Locator {
 
   #[napi]
   pub async fn dispatch_event(&self, event_type: String) -> Result<()> {
-    self.inner.dispatch_event(&event_type).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .dispatch_event(&event_type)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn press_sequentially(&self, text: String, delay_ms: Option<f64>) -> Result<()> {
-    self.inner.press_sequentially(&text, delay_ms.map(crate::types::f64_to_u64))
+    self
+      .inner
+      .press_sequentially(&text, delay_ms.map(crate::types::f64_to_u64))
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -238,7 +244,12 @@ impl Locator {
   #[napi]
   pub async fn bounding_box(&self) -> Result<Option<BoundingBox>> {
     let bb = self.inner.bounding_box().await.map_err(napi::Error::from_reason)?;
-    Ok(bb.map(|b| BoundingBox { x: b.x, y: b.y, width: b.width, height: b.height }))
+    Ok(bb.map(|b| BoundingBox {
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+    }))
   }
 
   // ── Waiting ─────────────────────────────────────────────────────────────
@@ -293,7 +304,11 @@ impl Locator {
 
   #[napi]
   pub async fn set_input_files(&self, paths: Vec<String>) -> Result<()> {
-    self.inner.set_input_files(&paths).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .set_input_files(&paths)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
@@ -308,17 +323,25 @@ impl Locator {
 
   #[napi]
   pub async fn evaluate_all(&self, expression: String) -> Result<Option<serde_json::Value>> {
-    self.inner.evaluate_all(&expression).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .evaluate_all(&expression)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub fn or_locator(&self, other: &Locator) -> Locator {
-    Locator { inner: self.inner.or(&other.inner) }
+    Locator {
+      inner: self.inner.or(&other.inner),
+    }
   }
 
   #[napi]
   pub fn and_locator(&self, other: &Locator) -> Locator {
-    Locator { inner: self.inner.and(&other.inner) }
+    Locator {
+      inner: self.inner.and(&other.inner),
+    }
   }
 
   #[napi]
@@ -326,5 +349,4 @@ impl Locator {
     let locators = self.inner.all().await.map_err(napi::Error::from_reason)?;
     Ok(locators.into_iter().map(|l| Locator { inner: l }).collect())
   }
-
 }

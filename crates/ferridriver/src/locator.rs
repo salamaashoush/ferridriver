@@ -13,7 +13,7 @@ use std::fmt::Write as _;
 
 use crate::actions;
 use crate::backend::AnyElement;
-use crate::options::{RoleOptions, TextOptions, FilterOptions, BoundingBox, WaitOptions};
+use crate::options::{BoundingBox, FilterOptions, RoleOptions, TextOptions, WaitOptions};
 use crate::selectors;
 
 /// A lazy element locator. Does not query the DOM until an action is called.
@@ -176,10 +176,14 @@ impl Locator {
   /// Returns an error if the element cannot be found.
   pub async fn clear(&self) -> Result<(), String> {
     let el = self.resolve().await?;
-    let _ = el.call_js_fn("function() { \
+    let _ = el
+      .call_js_fn(
+        "function() { \
       if (window.__fd) window.__fd.clearAndDispatch(this); \
       else { this.value = ''; } \
-    }").await;
+    }",
+      )
+      .await;
     Ok(())
   }
 
@@ -257,7 +261,11 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or is not actionable.
   pub async fn set_checked(&self, checked: bool) -> Result<(), String> {
-    if checked { self.check().await } else { self.uncheck().await }
+    if checked {
+      self.check().await
+    } else {
+      self.uncheck().await
+    }
   }
 
   /// Tap the element (touch event). Dispatches touchstart + touchend on platforms
@@ -293,11 +301,14 @@ impl Locator {
   /// Returns an error if the element cannot be found or the selection fails.
   pub async fn select_text(&self) -> Result<(), String> {
     let el = self.resolve().await?;
-    el.call_js_fn("function() { \
+    el.call_js_fn(
+      "function() { \
       this.focus(); \
       if (this.select) { this.select(); } \
       else if (this.setSelectionRange) { this.setSelectionRange(0, this.value ? this.value.length : 0); } \
-    }").await
+    }",
+    )
+    .await
   }
 
   /// Select an `<option>` by value within a `<select>` element.
@@ -337,9 +348,11 @@ impl Locator {
   /// Returns an error if the element cannot be found.
   pub async fn dispatch_event(&self, event_type: &str) -> Result<(), String> {
     let el = self.resolve().await?;
-    let _ = el.call_js_fn(&format!(
-      "function() {{ this.dispatchEvent(new Event('{event_type}', {{bubbles: true}})); }}"
-    )).await;
+    let _ = el
+      .call_js_fn(&format!(
+        "function() {{ this.dispatchEvent(new Event('{event_type}', {{bubbles: true}})); }}"
+      ))
+      .await;
     Ok(())
   }
 
@@ -360,7 +373,10 @@ impl Locator {
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn inner_text(&self) -> Result<String, String> {
-    self.eval_prop("innerText").await.map(std::option::Option::unwrap_or_default)
+    self
+      .eval_prop("innerText")
+      .await
+      .map(std::option::Option::unwrap_or_default)
   }
 
   /// Return the `innerHTML` of the element.
@@ -369,7 +385,10 @@ impl Locator {
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn inner_html(&self) -> Result<String, String> {
-    self.eval_prop("innerHTML").await.map(std::option::Option::unwrap_or_default)
+    self
+      .eval_prop("innerHTML")
+      .await
+      .map(std::option::Option::unwrap_or_default)
   }
 
   /// Get the value of an attribute on the element.
@@ -379,9 +398,9 @@ impl Locator {
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn get_attribute(&self, name: &str) -> Result<Option<String>, String> {
     let escaped = name.replace('\\', "\\\\").replace('\'', "\\'");
-    let val = self.eval_on_element(&format!(
-      "return el.getAttribute('{escaped}');"
-    )).await?;
+    let val = self
+      .eval_on_element(&format!("return el.getAttribute('{escaped}');"))
+      .await?;
     Ok(val.and_then(|v| match v {
       serde_json::Value::String(s) => Some(s),
       serde_json::Value::Null => None,
@@ -395,7 +414,10 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn input_value(&self) -> Result<String, String> {
-    self.eval_prop("value").await.map(std::option::Option::unwrap_or_default)
+    self
+      .eval_prop("value")
+      .await
+      .map(std::option::Option::unwrap_or_default)
   }
 
   /// Check whether the element is visible (not `display:none`, `visibility:hidden`,
@@ -406,10 +428,12 @@ impl Locator {
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn is_visible(&self) -> Result<bool, String> {
     // Single evaluate: find element + check visibility. Returns false if not found.
-    let val = self.eval_on_element(
-      "var s = getComputedStyle(el); \
-       return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';"
-    ).await?;
+    let val = self
+      .eval_on_element(
+        "var s = getComputedStyle(el); \
+       return s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0';",
+      )
+      .await?;
     // eval_on_element returns null if element not found -> false (Playwright behavior)
     Ok(val.and_then(|v| v.as_bool()).unwrap_or(false))
   }
@@ -468,7 +492,11 @@ impl Locator {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
     let js = format!("window.__fd.selCount({parts_json})");
-    let val = self.page.inner().evaluate(&js).await?
+    let val = self
+      .page
+      .inner()
+      .evaluate(&js)
+      .await?
       .and_then(|v| v.as_u64())
       .unwrap_or(0);
     Ok(usize::try_from(val).unwrap_or(usize::MAX))
@@ -480,9 +508,9 @@ impl Locator {
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn bounding_box(&self) -> Result<Option<BoundingBox>, String> {
-    let val = self.eval_on_element(
-      "var r = el.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height};"
-    ).await?;
+    let val = self
+      .eval_on_element("var r = el.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height};")
+      .await?;
     match val {
       Some(v) => Ok(Some(BoundingBox {
         x: v["x"].as_f64().unwrap_or(0.0),
@@ -514,17 +542,23 @@ impl Locator {
       }
       match state {
         "attached" | "visible" => {
-          if selectors::query_one(self.page.inner(), &self.selector, false).await.is_ok() {
+          if selectors::query_one(self.page.inner(), &self.selector, false)
+            .await
+            .is_ok()
+          {
             selectors::cleanup_tags(self.page.inner()).await;
             return Ok(());
           }
-        }
+        },
         "hidden" | "detached" => {
-          if selectors::query_one(self.page.inner(), &self.selector, false).await.is_err() {
+          if selectors::query_one(self.page.inner(), &self.selector, false)
+            .await
+            .is_err()
+          {
             return Ok(());
           }
           selectors::cleanup_tags(self.page.inner()).await;
-        }
+        },
         _ => return Err(format!("Unknown wait state: {state}")),
       }
       tokio::time::sleep(std::time::Duration::from_millis(50)).await;
@@ -551,7 +585,9 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or JS evaluation fails.
   pub async fn is_editable(&self) -> Result<bool, String> {
-    self.eval_bool("function() { return !this.disabled && !this.readOnly; }").await
+    self
+      .eval_bool("function() { return !this.disabled && !this.readOnly; }")
+      .await
   }
 
   // ── Blur ────────────────────────────────────────────────────────────────
@@ -597,27 +633,51 @@ impl Locator {
   /// coordinates cannot be read, or the drag operation fails.
   pub async fn drag_to(&self, target: &Locator) -> Result<(), String> {
     let source_el = self.resolve().await?;
-    let _ = source_el.call_js_fn("function() { \
+    let _ = source_el
+      .call_js_fn(
+        "function() { \
       var r = this.getBoundingClientRect(); \
       this.setAttribute('data-fd-drag-src', JSON.stringify({x:r.x+r.width/2, y:r.y+r.height/2})); \
-    }").await;
+    }",
+      )
+      .await;
     let target_el = target.resolve().await?;
-    let _ = target_el.call_js_fn("function() { \
+    let _ = target_el
+      .call_js_fn(
+        "function() { \
       var r = this.getBoundingClientRect(); \
       this.setAttribute('data-fd-drag-tgt', JSON.stringify({x:r.x+r.width/2, y:r.y+r.height/2})); \
-    }").await;
+    }",
+      )
+      .await;
 
-    let src_json = self.page.inner().evaluate("(function() { \
+    let src_json = self
+      .page
+      .inner()
+      .evaluate(
+        "(function() { \
       var e = document.querySelector('[data-fd-drag-src]'); \
       if (!e) return null; var v = e.getAttribute('data-fd-drag-src'); \
       e.removeAttribute('data-fd-drag-src'); return v; \
-    })()").await?.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
+    })()",
+      )
+      .await?
+      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .unwrap_or_default();
 
-    let tgt_json = self.page.inner().evaluate("(function() { \
+    let tgt_json = self
+      .page
+      .inner()
+      .evaluate(
+        "(function() { \
       var e = document.querySelector('[data-fd-drag-tgt]'); \
       if (!e) return null; var v = e.getAttribute('data-fd-drag-tgt'); \
       e.removeAttribute('data-fd-drag-tgt'); return v; \
-    })()").await?.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
+    })()",
+      )
+      .await?
+      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .unwrap_or_default();
 
     let src: serde_json::Value = serde_json::from_str(&src_json).map_err(|e| format!("{e}"))?;
     let tgt: serde_json::Value = serde_json::from_str(&tgt_json).map_err(|e| format!("{e}"))?;
@@ -640,14 +700,21 @@ impl Locator {
 
     let combined = if is_css_a && is_css_b {
       // Both are CSS -- use :is() for a proper CSS OR
-      format!("css=:is({}, {})", self.selector.strip_prefix("css=").unwrap_or(&self.selector),
-              other.selector.strip_prefix("css=").unwrap_or(&other.selector))
+      format!(
+        "css=:is({}, {})",
+        self.selector.strip_prefix("css=").unwrap_or(&self.selector),
+        other.selector.strip_prefix("css=").unwrap_or(&other.selector)
+      )
     } else {
       // At least one is a rich selector -- combine with | operator
       // This is handled by the selector engine's _exec
       format!("{} | {}", self.selector, other.selector)
     };
-    Locator { page: self.page.clone(), selector: combined, frame_id: self.frame_id.clone() }
+    Locator {
+      page: self.page.clone(),
+      selector: combined,
+      frame_id: self.frame_id.clone(),
+    }
   }
 
   /// Intersection: matches elements that match both locators.
@@ -688,9 +755,12 @@ impl Locator {
     );
     let val = self.page.inner().evaluate(&js).await?;
     match val {
-      Some(serde_json::Value::Array(arr)) => {
-        Ok(arr.into_iter().filter_map(|v| v.as_str().map(std::string::ToString::to_string)).collect())
-      }
+      Some(serde_json::Value::Array(arr)) => Ok(
+        arr
+          .into_iter()
+          .filter_map(|v| v.as_str().map(std::string::ToString::to_string))
+          .collect(),
+      ),
       _ => Ok(Vec::new()),
     }
   }
@@ -735,9 +805,7 @@ impl Locator {
   pub async fn evaluate_all(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    let js = format!(
-      "(function() {{ var elements = window.__fd.selAll({parts_json}); return ({expression}); }})()"
-    );
+    let js = format!("(function() {{ var elements = window.__fd.selAll({parts_json}); return ({expression}); }})()");
     if let Some(fid) = &self.frame_id {
       self.page.inner().evaluate_in_frame(&js, fid).await
     } else {
@@ -764,13 +832,17 @@ impl Locator {
     } else {
       format!("{} >> {sub}", self.selector)
     };
-    Locator { page: self.page.clone(), selector, frame_id: self.frame_id.clone() }
+    Locator {
+      page: self.page.clone(),
+      selector,
+      frame_id: self.frame_id.clone(),
+    }
   }
 
   async fn eval_prop(&self, prop: &str) -> Result<Option<String>, String> {
-    let val = self.eval_on_element(&format!(
-      "var v = el.{prop}; return v == null ? null : String(v);"
-    )).await?;
+    let val = self
+      .eval_on_element(&format!("var v = el.{prop}; return v == null ? null : String(v);"))
+      .await?;
     Ok(val.and_then(|v| match v {
       serde_json::Value::String(s) => Some(s),
       serde_json::Value::Null => None,
@@ -779,9 +851,7 @@ impl Locator {
   }
 
   async fn eval_bool(&self, func: &str) -> Result<bool, String> {
-    let val = self.eval_on_element(&format!(
-      "return !!({func}).call(el);"
-    )).await?;
+    let val = self.eval_on_element(&format!("return !!({func}).call(el);")).await?;
     Ok(val.and_then(|v| v.as_bool()).unwrap_or(false))
   }
 
@@ -793,9 +863,7 @@ impl Locator {
   async fn eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>, String> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    let js = format!(
-      "(function() {{ var el = window.__fd.selOne({parts_json}); if (!el) return null; {js_body} }})()"
-    );
+    let js = format!("(function() {{ var el = window.__fd.selOne({parts_json}); if (!el) return null; {js_body} }})()");
     if let Some(fid) = &self.frame_id {
       self.page.inner().evaluate_in_frame(&js, fid).await
     } else {

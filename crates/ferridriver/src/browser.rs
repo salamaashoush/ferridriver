@@ -52,7 +52,10 @@ impl Browser {
     let backend_kind = options.backend;
     let mut state = BrowserState::with_options(mode, options);
     Box::pin(state.ensure_browser()).await?;
-    Ok(Self { state: Arc::new(Mutex::new(state)), backend_kind })
+    Ok(Self {
+      state: Arc::new(Mutex::new(state)),
+      backend_kind,
+    })
   }
 
   /// Connect to a running browser via WebSocket URL.
@@ -64,7 +67,8 @@ impl Browser {
     Box::pin(Self::launch(LaunchOptions {
       ws_endpoint: Some(url.to_string()),
       ..Default::default()
-    })).await
+    }))
+    .await
   }
 
   /// Create a new isolated browser context.
@@ -140,7 +144,9 @@ impl Browser {
   /// List all browser contexts.
   pub async fn contexts(&self) -> Vec<ContextRef> {
     let state = self.state.lock().await;
-    state.list_contexts().await
+    state
+      .list_contexts()
+      .await
       .iter()
       .map(|c| ContextRef::new(self.state.clone(), c.name.clone()))
       .collect()

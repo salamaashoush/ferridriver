@@ -1,37 +1,37 @@
-use super::{q, js_escape, StepCategory, StepDef};
+use super::{StepCategory, StepDef, js_escape, q};
 use crate::backend::AnyElement;
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
-    // Page-level assertions FIRST (more specific, avoids regex overlap with element-level)
-    steps.push(Box::new(PageNotHasText));
-    steps.push(Box::new(PageHasText));
-    // URL / title
-    steps.push(Box::new(UrlContains));
-    steps.push(Box::new(UrlExact));
-    steps.push(Box::new(TitleContains));
-    steps.push(Box::new(TitleExact));
-    // Visibility
-    steps.push(Box::new(NotVisible));
-    steps.push(Box::new(Visible));
-    // Element text (negated first)
-    steps.push(Box::new(NotContainsText));
-    steps.push(Box::new(ContainsText));
-    steps.push(Box::new(TextExact));
-    // Value
-    steps.push(Box::new(ValueExact));
-    // Attributes / classes
-    steps.push(Box::new(HasAttrValue));
-    steps.push(Box::new(NotHasAttr));
-    steps.push(Box::new(HasAttr));
-    steps.push(Box::new(NotHasClass));
-    steps.push(Box::new(HasClass));
-    // State
-    steps.push(Box::new(Disabled));
-    steps.push(Box::new(Enabled));
-    steps.push(Box::new(NotChecked));
-    steps.push(Box::new(Checked));
-    // Count
-    steps.push(Box::new(ElementCount));
+  // Page-level assertions FIRST (more specific, avoids regex overlap with element-level)
+  steps.push(Box::new(PageNotHasText));
+  steps.push(Box::new(PageHasText));
+  // URL / title
+  steps.push(Box::new(UrlContains));
+  steps.push(Box::new(UrlExact));
+  steps.push(Box::new(TitleContains));
+  steps.push(Box::new(TitleExact));
+  // Visibility
+  steps.push(Box::new(NotVisible));
+  steps.push(Box::new(Visible));
+  // Element text (negated first)
+  steps.push(Box::new(NotContainsText));
+  steps.push(Box::new(ContainsText));
+  steps.push(Box::new(TextExact));
+  // Value
+  steps.push(Box::new(ValueExact));
+  // Attributes / classes
+  steps.push(Box::new(HasAttrValue));
+  steps.push(Box::new(NotHasAttr));
+  steps.push(Box::new(HasAttr));
+  steps.push(Box::new(NotHasClass));
+  steps.push(Box::new(HasClass));
+  // State
+  steps.push(Box::new(Disabled));
+  steps.push(Box::new(Enabled));
+  steps.push(Box::new(NotChecked));
+  steps.push(Box::new(Checked));
+  // Count
+  steps.push(Box::new(ElementCount));
 }
 
 // ── Helpers ──
@@ -40,27 +40,38 @@ pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
 
 /// Get innerText from an element resolved via the selector engine.
 async fn el_inner_text(page: &crate::backend::AnyPage, sel: &str) -> Result<String, String> {
-    let el = super::find(page, sel).await.map_err(|_| format!("'{sel}' not found"))?;
-    let r = el.call_js_fn_value("function() { return this.innerText || '' }").await?;
-    Ok(r.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default())
+  let el = super::find(page, sel).await.map_err(|_| format!("'{sel}' not found"))?;
+  let r = el
+    .call_js_fn_value("function() { return this.innerText || '' }")
+    .await?;
+  Ok(
+    r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .unwrap_or_default(),
+  )
 }
 
 /// Call a JS function on a resolved element and return bool.
 async fn el_js_bool(el: &AnyElement, func: &str) -> Result<bool, String> {
-    let r = el.call_js_fn_value(func).await?;
-    Ok(r == Some(serde_json::Value::Bool(true)))
+  let r = el.call_js_fn_value(func).await?;
+  Ok(r == Some(serde_json::Value::Bool(true)))
 }
 
 /// Check visibility using the selector engine. Returns false if element not found
 /// or hidden by CSS (display:none, visibility:hidden, opacity:0, zero size).
 async fn is_element_visible(page: &crate::backend::AnyPage, sel: &str) -> Result<bool, String> {
-    let Ok(el) = super::find(page, sel).await else { return Ok(false) };
-    el_js_bool(&el, "function() { \
+  let Ok(el) = super::find(page, sel).await else {
+    return Ok(false);
+  };
+  el_js_bool(
+    &el,
+    "function() { \
         var s = getComputedStyle(this); \
         if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false; \
         var r = this.getBoundingClientRect(); \
         return r.width > 0 && r.height > 0; \
-    }").await
+    }",
+  )
+  .await
 }
 
 // ── Page-level text ──

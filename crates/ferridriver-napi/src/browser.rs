@@ -73,9 +73,7 @@ impl Browser {
   /// Get the active page for the default context.
   #[napi]
   pub async fn page(&self) -> Result<Page> {
-    let page = Box::pin(self.inner.page())
-      .await
-      .map_err(napi::Error::from_reason)?;
+    let page = Box::pin(self.inner.page()).await.map_err(napi::Error::from_reason)?;
     Ok(Page::wrap(page))
   }
 
@@ -95,9 +93,7 @@ impl Browser {
   /// Close the browser.
   #[napi]
   pub async fn close(&self) -> Result<()> {
-    self.inner.close()
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.close().await.map_err(napi::Error::from_reason)
   }
 
   /// List all browser contexts.

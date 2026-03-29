@@ -9,9 +9,9 @@
 use futures::{SinkExt, StreamExt};
 use rustc_hash::FxHashMap;
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use tokio::sync::{broadcast, oneshot, Mutex};
+use std::sync::atomic::{AtomicU64, Ordering};
+use tokio::sync::{Mutex, broadcast, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
 type WsSink = futures::stream::SplitSink<
@@ -65,10 +65,7 @@ impl WsTransport {
         if id > 0 {
           // Response to a command
           let result = if let Some(err) = json.get("error") {
-            let msg = err
-              .get("message")
-              .and_then(|m| m.as_str())
-              .unwrap_or("CDP error");
+            let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("CDP error");
             Err(msg.to_string())
           } else {
             Ok(json.get("result").cloned().unwrap_or(serde_json::json!({})))
@@ -80,15 +77,8 @@ impl WsTransport {
           }
         } else {
           // Event (no id)
-          let method = json
-            .get("method")
-            .and_then(|m| m.as_str())
-            .unwrap_or("");
-          let session_id = json
-            .get("sessionId")
-            .and_then(|s| s.as_str())
-            .unwrap_or("")
-            .to_string();
+          let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
+          let session_id = json.get("sessionId").and_then(|s| s.as_str()).unwrap_or("").to_string();
 
           // Playwright approach: resolve on Page.lifecycleEvent DOMContentLoaded/load
           if method == "Page.lifecycleEvent" {
@@ -147,9 +137,7 @@ impl WsTransport {
       .stdout(std::process::Stdio::null())
       .stderr(std::process::Stdio::piped());
 
-    let mut child = command
-      .spawn()
-      .map_err(|e| format!("Chrome launch: {e}"))?;
+    let mut child = command.spawn().map_err(|e| format!("Chrome launch: {e}"))?;
 
     // Discover WebSocket URL from DevToolsActivePort file
     let port_file = user_data_dir.join("DevToolsActivePort");
@@ -198,15 +186,12 @@ impl WsTransport {
         // Clean up pending on timeout
         self.pending.lock().await.remove(&id);
         Err("Timeout (30s)".into())
-      }
+      },
     }
   }
 
   /// Register a navigation waiter for a session. Returns a receiver.
-  pub async fn register_nav_waiter(
-    &self,
-    session_id: &str,
-  ) -> oneshot::Receiver<Result<(), String>> {
+  pub async fn register_nav_waiter(&self, session_id: &str) -> oneshot::Receiver<Result<(), String>> {
     let (tx, rx) = oneshot::channel();
     self.nav_waiters.lock().await.insert(session_id.to_string(), tx);
     rx
@@ -219,10 +204,7 @@ impl WsTransport {
 }
 
 /// Discover Chrome's `DevTools` WebSocket URL by reading the `DevToolsActivePort` file.
-async fn discover_ws_url(
-  port_file: &Path,
-  child: &mut tokio::process::Child,
-) -> Result<String, String> {
+async fn discover_ws_url(port_file: &Path, child: &mut tokio::process::Child) -> Result<String, String> {
   // Poll for DevToolsActivePort file (Chrome writes it after binding the port)
   for _ in 0..200 {
     if let Ok(content) = tokio::fs::read_to_string(port_file).await {

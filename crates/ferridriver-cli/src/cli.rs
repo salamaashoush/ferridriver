@@ -6,109 +6,106 @@ use ferridriver::state::ConnectMode;
 
 #[derive(Parser)]
 #[command(
-    name = "ferridriver",
-    about = "High-performance browser automation",
-    version,
-    propagate_version = true,
+  name = "ferridriver",
+  about = "High-performance browser automation",
+  version,
+  propagate_version = true
 )]
 pub struct Cli {
-    #[command(subcommand)]
-    pub command: Command,
+  #[command(subcommand)]
+  pub command: Command,
 }
 
 #[derive(Subcommand)]
 pub enum Command {
-    /// Run as an MCP server
-    Mcp {
-        #[command(flatten)]
-        browser: BrowserArgs,
+  /// Run as an MCP server
+  Mcp {
+    #[command(flatten)]
+    browser: BrowserArgs,
 
-        #[command(flatten)]
-        transport: TransportArgs,
-    },
+    #[command(flatten)]
+    transport: TransportArgs,
+  },
 }
 
 /// Browser backend and connection options.
 #[derive(Args)]
 pub struct BrowserArgs {
-    /// Browser backend to use
-    #[cfg_attr(unix, arg(long, value_enum, default_value_t = Backend::CdpPipe))]
-    #[cfg_attr(not(unix), arg(long, value_enum, default_value_t = Backend::CdpRaw))]
-    backend: Backend,
+  /// Browser backend to use
+  #[arg(long, value_enum, default_value_t = Backend::CdpPipe)]
+  backend: Backend,
 
-    /// Connect to a running Chrome instance via WebSocket or HTTP URL
-    #[arg(long, conflicts_with = "auto_connect")]
-    connect: Option<String>,
+  /// Connect to a running Chrome instance via WebSocket or HTTP URL
+  #[arg(long, conflicts_with = "auto_connect")]
+  connect: Option<String>,
 
-    /// Auto-detect and connect to a running Chrome (reads `DevToolsActivePort`)
-    #[arg(long, conflicts_with = "connect")]
-    auto_connect: bool,
+  /// Auto-detect and connect to a running Chrome (reads `DevToolsActivePort`)
+  #[arg(long, conflicts_with = "connect")]
+  auto_connect: bool,
 
-    /// Chrome release channel
-    #[arg(long, default_value = "stable", requires = "auto_connect")]
-    channel: String,
+  /// Chrome release channel
+  #[arg(long, default_value = "stable", requires = "auto_connect")]
+  channel: String,
 
-    /// Chrome user data directory
-    #[arg(long)]
-    user_data_dir: Option<String>,
+  /// Chrome user data directory
+  #[arg(long)]
+  user_data_dir: Option<String>,
 }
 
 /// MCP transport options.
 #[derive(Args)]
 pub struct TransportArgs {
-    /// MCP transport protocol
-    #[arg(long, value_enum, default_value_t = Transport::Stdio)]
-    pub transport: Transport,
+  /// MCP transport protocol
+  #[arg(long, value_enum, default_value_t = Transport::Stdio)]
+  pub transport: Transport,
 
-    /// HTTP listen port (requires --transport http)
-    #[arg(long, default_value_t = 8080, requires_if("http", "transport"))]
-    pub port: u16,
+  /// HTTP listen port (requires --transport http)
+  #[arg(long, default_value_t = 8080, requires_if("http", "transport"))]
+  pub port: u16,
 }
 
 #[derive(Clone, ValueEnum)]
 enum Backend {
-    /// Chrome `DevTools` Protocol over pipes (fd 3/4). Unix only.
-    #[cfg(unix)]
-    #[value(name = "cdp-pipe")]
-    CdpPipe,
-    /// Raw CDP over WebSocket (our own, fully parallel). All platforms.
-    #[value(name = "cdp-raw")]
-    CdpRaw,
-    /// Native `WKWebView` (macOS only)
-    #[cfg(target_os = "macos")]
-    #[value(name = "webkit")]
-    WebKit,
+  /// Chrome `DevTools` Protocol over pipes (fd 3/4)
+  #[value(name = "cdp-pipe")]
+  CdpPipe,
+  /// Raw CDP over WebSocket (our own, fully parallel)
+  #[value(name = "cdp-raw")]
+  CdpRaw,
+  /// Native `WKWebView` (macOS only)
+  #[cfg(target_os = "macos")]
+  #[value(name = "webkit")]
+  WebKit,
 }
 
 #[derive(Clone, ValueEnum)]
 pub enum Transport {
-    /// Standard IO (for Claude Code, CLI clients)
-    Stdio,
-    /// Streamable HTTP + SSE (for remote clients, web UIs)
-    Http,
+  /// Standard IO (for Claude Code, CLI clients)
+  Stdio,
+  /// Streamable HTTP + SSE (for remote clients, web UIs)
+  Http,
 }
 
 impl BrowserArgs {
-    pub fn backend_kind(&self) -> BackendKind {
-        match self.backend {
-            #[cfg(unix)]
-            Backend::CdpPipe => BackendKind::CdpPipe,
-            Backend::CdpRaw => BackendKind::CdpRaw,
-            #[cfg(target_os = "macos")]
-            Backend::WebKit => BackendKind::WebKit,
-        }
+  pub fn backend_kind(&self) -> BackendKind {
+    match self.backend {
+      Backend::CdpPipe => BackendKind::CdpPipe,
+      Backend::CdpRaw => BackendKind::CdpRaw,
+      #[cfg(target_os = "macos")]
+      Backend::WebKit => BackendKind::WebKit,
     }
+  }
 
-    pub fn connect_mode(&self) -> ConnectMode {
-        if self.auto_connect {
-            ConnectMode::AutoConnect {
-                channel: self.channel.clone(),
-                user_data_dir: self.user_data_dir.clone(),
-            }
-        } else if let Some(url) = &self.connect {
-            ConnectMode::ConnectUrl(url.clone())
-        } else {
-            ConnectMode::Launch
-        }
+  pub fn connect_mode(&self) -> ConnectMode {
+    if self.auto_connect {
+      ConnectMode::AutoConnect {
+        channel: self.channel.clone(),
+        user_data_dir: self.user_data_dir.clone(),
+      }
+    } else if let Some(url) = &self.connect {
+      ConnectMode::ConnectUrl(url.clone())
+    } else {
+      ConnectMode::Launch
     }
+  }
 }
