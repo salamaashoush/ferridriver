@@ -49,7 +49,11 @@ impl McpServer {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
-    page.goto(&p.url, None).await.map_err(Self::err)?;
+    let opts = ferridriver::options::GotoOptions {
+      wait_until: Some(p.wait_until.unwrap_or_else(|| "commit".into())),
+      timeout: None,
+    };
+    page.goto(&p.url, Some(opts)).await.map_err(Self::err)?;
     self.action_ok(&page, s, "Navigation complete.").await
   }
 

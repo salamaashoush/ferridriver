@@ -31,7 +31,7 @@ step!(Navigate {
     execute(page, caps, _table, _vars) {
         let url = q(&caps[1]);
         // goto() already waits for page load internally
-        page.goto(&url).await.map_err(|e| format!("Navigate: {e}"))?;
+        page.goto(&url, crate::backend::NavLifecycle::Load, 30_000).await.map_err(|e| format!("Navigate: {e}"))?;
         Ok(None)
     }
 });
@@ -42,7 +42,7 @@ step!(GoBack {
     description: "Go back in history",
     example: "When I go back",
     execute(page, _caps, _table, _vars) {
-        page.go_back().await.map_err(|e| e.clone())?;
+        page.go_back(crate::backend::NavLifecycle::Load, 30_000).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
@@ -53,7 +53,7 @@ step!(GoForward {
     description: "Go forward in history",
     example: "When I go forward",
     execute(page, _caps, _table, _vars) {
-        page.go_forward().await.map_err(|e| e.clone())?;
+        page.go_forward(crate::backend::NavLifecycle::Load, 30_000).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
@@ -64,7 +64,7 @@ step!(Reload {
     description: "Reload the page",
     example: "When I reload the page",
     execute(page, _caps, _table, _vars) {
-        page.reload().await.map_err(|e| e.clone())?;
+        page.reload(crate::backend::NavLifecycle::Load, 30_000).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });

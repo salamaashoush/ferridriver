@@ -20,8 +20,11 @@ use tokio::sync::{Mutex, broadcast, oneshot};
 
 /// Shared map of pending CDP command responses keyed by command ID.
 type PendingMap = Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>;
-/// Shared map of navigation waiters keyed by session ID.
-type NavWaiterMap = Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>>;
+struct NavWaiter {
+  target: crate::backend::NavLifecycle,
+  tx: oneshot::Sender<Result<(), String>>,
+}
+type NavWaiterMap = Arc<Mutex<FxHashMap<String, NavWaiter>>>;
 
 /// CDP transport over pipes -- manages command IDs, response correlation, and event dispatch.
 pub struct PipeTransport {
@@ -216,31 +219,50 @@ impl PipeTransport {
             let method_str = std::str::from_utf8(method).unwrap_or("");
             let sid_str = std::str::from_utf8(session_id).unwrap_or("");
 
-            match method_str {
-              // Playwright approach: use Page.lifecycleEvent which fires
-              // with the specific lifecycle name. Resolve on DOMContentLoaded.
-              "Page.lifecycleEvent" => {
-                let params = json_scan::json_field(raw, b"params");
-                let name = json_scan::json_string(json_scan::json_field(params, b"name"));
-                let name_str = std::str::from_utf8(name).unwrap_or("");
-                if name_str == "DOMContentLoaded" || name_str == "load" {
-                  if let Some(sender) = nav_waiters.lock().await.remove(&sid_str.to_string()) {
-                    let _ = sender.send(Ok(()));
+            {
+              use crate::backend::NavLifecycle;
+              let key = sid_str.to_string();
+              match method_str {
+                "Page.frameNavigated" => {
+                  let mut waiters = nav_waiters.lock().await;
+                  if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::Commit)) {
+                    if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
                   }
-                }
-              },
-              // Fallback: also handle the simple events
-              "Page.domContentEventFired" | "Page.loadEventFired" => {
-                if let Some(sender) = nav_waiters.lock().await.remove(&sid_str.to_string()) {
-                  let _ = sender.send(Ok(()));
-                }
-              },
-              "Inspector.targetCrashed" => {
-                if let Some(sender) = nav_waiters.lock().await.remove(&sid_str.to_string()) {
-                  let _ = sender.send(Err("Target crashed".into()));
-                }
-              },
-              _ => {},
+                },
+                "Page.lifecycleEvent" => {
+                  let params = json_scan::json_field(raw, b"params");
+                  let name = json_scan::json_string(json_scan::json_field(params, b"name"));
+                  let name_str = std::str::from_utf8(name).unwrap_or("");
+                  let mut waiters = nav_waiters.lock().await;
+                  let resolve = matches!(
+                    (name_str, waiters.get(&key).map(|w| w.target)),
+                    ("DOMContentLoaded", Some(NavLifecycle::DomContentLoaded))
+                    | ("load", Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded))
+                  );
+                  if resolve {
+                    if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
+                  }
+                },
+                "Page.loadEventFired" => {
+                  let mut waiters = nav_waiters.lock().await;
+                  if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded)) {
+                    if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
+                  }
+                },
+                "Page.domContentEventFired" => {
+                  let mut waiters = nav_waiters.lock().await;
+                  if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::DomContentLoaded)) {
+                    if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
+                  }
+                },
+                "Inspector.targetCrashed" => {
+                  let mut waiters = nav_waiters.lock().await;
+                  if let Some(w) = waiters.remove(&key) {
+                    let _ = w.tx.send(Err("Target crashed".into()));
+                  }
+                },
+                _ => {},
+              }
             }
 
             // Full parse only for broadcast (console/network listeners need it)
@@ -259,9 +281,13 @@ impl PipeTransport {
   ///
   /// Follows Bun's ChromeBackend.cpp pattern: caller registers BEFORE sending
   /// Page.navigate, then awaits the receiver after the navigate response returns.
-  pub async fn register_nav_waiter(&self, session_id: &str) -> oneshot::Receiver<Result<(), String>> {
+  pub async fn register_nav_waiter(
+    &self,
+    session_id: &str,
+    target: crate::backend::NavLifecycle,
+  ) -> oneshot::Receiver<Result<(), String>> {
     let (tx, rx) = oneshot::channel();
-    self.nav_waiters.lock().await.insert(session_id.to_string(), tx);
+    self.nav_waiters.lock().await.insert(session_id.to_string(), NavWaiter { target, tx });
     rx
   }
 

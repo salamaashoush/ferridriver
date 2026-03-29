@@ -98,6 +98,31 @@ pub struct MetricData {
   pub value: f64,
 }
 
+/// Navigation lifecycle target — which CDP event to wait for after Page.navigate.
+/// Matches Playwright's `waitUntil` semantics exactly.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NavLifecycle {
+  /// `Page.frameNavigated` — response committed, new document started.
+  Commit,
+  /// `Page.lifecycleEvent` name="`DOMContentLoaded`" — HTML parsed, DOM ready.
+  DomContentLoaded,
+  /// `Page.lifecycleEvent` name="load" — all resources loaded.
+  Load,
+}
+
+impl NavLifecycle {
+  /// Parse from a `waitUntil` string (Playwright / MCP convention).
+  #[must_use]
+  pub fn from_str(s: &str) -> Self {
+    match s {
+      "commit" => Self::Commit,
+      "domcontentloaded" => Self::DomContentLoaded,
+      "load" => Self::Load,
+      _ => Self::Load,
+    }
+  }
+}
+
 /// Which backend to use.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BackendKind {
@@ -242,8 +267,10 @@ impl AnyPage {
   /// # Errors
   ///
   /// Returns an error if navigation fails (e.g., invalid URL, network error, or timeout).
-  pub async fn goto(&self, url: &str) -> Result<(), String> {
-    page_dispatch!(self, goto(url))
+  pub async fn goto(
+    &self, url: &str, lifecycle: NavLifecycle, timeout_ms: u64,
+  ) -> Result<(), String> {
+    page_dispatch!(self, goto(url, lifecycle, timeout_ms))
   }
 
   /// Wait until the current navigation completes.
@@ -260,26 +287,22 @@ impl AnyPage {
   /// # Errors
   ///
   /// Returns an error if the reload fails or the backend connection is lost.
-  pub async fn reload(&self) -> Result<(), String> {
-    page_dispatch!(self, reload())
+  pub async fn reload(
+    &self, lifecycle: NavLifecycle, timeout_ms: u64,
+  ) -> Result<(), String> {
+    page_dispatch!(self, reload(lifecycle, timeout_ms))
   }
 
-  /// Navigate back in browser history.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if there is no previous history entry or the backend fails.
-  pub async fn go_back(&self) -> Result<(), String> {
-    page_dispatch!(self, go_back())
+  pub async fn go_back(
+    &self, lifecycle: NavLifecycle, timeout_ms: u64,
+  ) -> Result<(), String> {
+    page_dispatch!(self, go_back(lifecycle, timeout_ms))
   }
 
-  /// Navigate forward in browser history.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if there is no next history entry or the backend fails.
-  pub async fn go_forward(&self) -> Result<(), String> {
-    page_dispatch!(self, go_forward())
+  pub async fn go_forward(
+    &self, lifecycle: NavLifecycle, timeout_ms: u64,
+  ) -> Result<(), String> {
+    page_dispatch!(self, go_forward(lifecycle, timeout_ms))
   }
 
   /// Get the current page URL.

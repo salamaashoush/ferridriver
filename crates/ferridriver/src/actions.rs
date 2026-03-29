@@ -272,7 +272,7 @@ pub async fn fill(element: &AnyElement, value: &str) -> Result<(), String> {
 ///
 /// Returns an error if navigation fails or the page DOM remains empty after retries.
 pub async fn navigate_with_health_check(page: &AnyPage, url: &str) -> Result<(), String> {
-  page.goto(url).await?;
+  page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await?;
 
   let url_lower = url.to_lowercase();
   if url_lower.starts_with("http://") || url_lower.starts_with("https://") {
@@ -290,7 +290,7 @@ pub async fn navigate_with_health_check(page: &AnyPage, url: &str) -> Result<(),
     if is_empty().await {
       tokio::time::sleep(std::time::Duration::from_secs(2)).await;
       if is_empty().await {
-        let _ = page.reload().await;
+        let _ = page.reload(crate::backend::NavLifecycle::Load, 30_000).await;
         tokio::time::sleep(std::time::Duration::from_secs(3)).await;
         if is_empty().await {
           return Err(

@@ -152,7 +152,7 @@ impl CdpWsPage {
     // ── Navigation ──
 
     pub async fn goto(&self, url: &str) -> Result<(), String> {
-        self.page.goto(url).await.map_err(|e| format!("Navigate: {e}"))?;
+        self.page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await.map_err(|e| format!("Navigate: {e}"))?;
         Ok(())
     }
 
@@ -162,7 +162,7 @@ impl CdpWsPage {
     }
 
     pub async fn reload(&self) -> Result<(), String> {
-        self.page.reload().await.map_err(|e| format!("Reload: {e}"))?;
+        self.page.reload(crate::backend::NavLifecycle::Load, 30_000).await.map_err(|e| format!("Reload: {e}"))?;
         Ok(())
     }
 

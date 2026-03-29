@@ -35,15 +35,16 @@ impl CdpPipeBrowser {
   async fn enable_domains(transport: &PipeTransport, session_id: Option<&str>) -> Result<(), String> {
     let ep = super::empty_params();
     let engine_js = crate::selectors::build_inject_js();
-    let (r1, r2, r3, r4, r5, r6) = tokio::join!(
+    let (r1, r2, r3, r4, r5, r6, r7) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep.clone()),
       transport.send_command(session_id, "Runtime.enable", ep.clone()),
       transport.send_command(session_id, "DOM.enable", ep.clone()),
       transport.send_command(session_id, "Network.enable", ep.clone()),
-      transport.send_command(session_id, "Accessibility.enable", ep),
+      transport.send_command(session_id, "Accessibility.enable", ep.clone()),
+      transport.send_command(session_id, "Page.setLifecycleEventsEnabled", serde_json::json!({"enabled": true})),
       transport.send_command(session_id, "Page.addScriptToEvaluateOnNewDocument", serde_json::json!({"source": engine_js})),
     );
-    r1?; r2?; r3?; r4?; r5?; r6?;
+    r1?; r2?; r3?; r4?; r5?; r6?; r7?;
     Ok(())
   }
 
@@ -262,7 +263,7 @@ impl CdpPipeBrowser {
 
     // Navigate if a real URL was requested (not about:blank)
     if url != "about:blank" && !url.is_empty() {
-      page.goto(url).await?;
+      page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await?;
     }
 
     Ok(AnyPage::CdpPipe(page))
@@ -343,7 +344,7 @@ impl CdpPipeBrowser {
 
     // Navigate if a real URL was requested
     if url != "about:blank" && !url.is_empty() {
-      page.goto(url).await?;
+      page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await?;
     }
 
     Ok(AnyPage::CdpPipe(page))
@@ -427,12 +428,12 @@ impl CdpPipePage {
   ///
   /// Returns an error if the `Page.navigate` CDP command fails or if Chrome
   /// reports a navigation error (e.g. DNS resolution failure).
-  pub async fn goto(&self, url: &str) -> Result<(), String> {
-    // Playwright approach: register lifecycle waiter, send Page.navigate,
-    // wait for the matching lifecycle event (load by default).
+  pub async fn goto(
+    &self, url: &str, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
+  ) -> Result<(), String> {
     let rx = self
       .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""))
+      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle)
       .await;
 
     let nav_result = self.cmd("Page.navigate", serde_json::json!({"url": url})).await?;
@@ -443,10 +444,7 @@ impl CdpPipePage {
       }
     }
 
-    // Wait for lifecycle event. Chrome fires domContentEventFired then
-    // loadEventFired. We resolve on whichever comes first (already configured
-    // in the transport reader). 30s timeout like Playwright.
-    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) | Err(_) => Ok(()),
     }
@@ -462,7 +460,7 @@ impl CdpPipePage {
     // Register nav waiter and await Page.loadEventFired (Bun's pattern)
     let rx = self
       .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""))
+      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), crate::backend::NavLifecycle::Load)
       .await;
 
     match tokio::time::timeout(Duration::from_secs(30), rx).await {
@@ -477,35 +475,35 @@ impl CdpPipePage {
   /// # Errors
   ///
   /// Returns an error if the `Page.reload` CDP command fails.
-  pub async fn reload(&self) -> Result<(), String> {
+  pub async fn reload(
+    &self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
+  ) -> Result<(), String> {
+    let rx = self
+      .transport
+      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle)
+      .await;
     self.cmd("Page.reload", super::empty_params()).await?;
-    Ok(())
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
+      Ok(Ok(r)) => r,
+      _ => Ok(()),
+    }
   }
 
-  /// Navigate back in the browser history.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if fetching the navigation history or navigating to
-  /// the previous history entry fails.
-  pub async fn go_back(&self) -> Result<(), String> {
-    self.history_go(-1).await
+  pub async fn go_back(
+    &self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
+  ) -> Result<(), String> {
+    self.history_go(-1, lifecycle, timeout_ms).await
   }
 
-  /// Navigate forward in the browser history.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if fetching the navigation history or navigating to
-  /// the next history entry fails.
-  pub async fn go_forward(&self) -> Result<(), String> {
-    self.history_go(1).await
+  pub async fn go_forward(
+    &self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
+  ) -> Result<(), String> {
+    self.history_go(1, lifecycle, timeout_ms).await
   }
 
-  /// Navigate history by delta. Same as Bun's historyGo:
-  /// Page.getNavigationHistory -> pick entries[currentIndex + delta].id
-  /// -> Page.navigateToHistoryEntry -> Page.loadEventFired settles.
-  async fn history_go(&self, delta: i32) -> Result<(), String> {
+  async fn history_go(
+    &self, delta: i32, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
+  ) -> Result<(), String> {
     let hist = self.cmd("Page.getNavigationHistory", super::empty_params()).await?;
     let current_i64 = hist
       .get("currentIndex")
@@ -517,7 +515,6 @@ impl CdpPipePage {
     let Some(entries) = entries else {
       return Ok(());
     };
-    // At history boundary -- nothing to do (same as Bun's canGoBack check)
     let Ok(target_usize) = usize::try_from(target) else {
       return Ok(());
     };
@@ -529,16 +526,14 @@ impl CdpPipePage {
       .and_then(serde_json::Value::as_i64)
       .unwrap_or(0);
 
-    // Register nav waiter before navigating
     let rx = self
       .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""))
+      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle)
       .await;
     self
       .cmd("Page.navigateToHistoryEntry", serde_json::json!({"entryId": entry_id}))
       .await?;
-    // Wait for Page.loadEventFired -- the navigation IS happening so this will fire
-    match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
+    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
       Ok(Ok(r)) => r,
       _ => Ok(()),
     }

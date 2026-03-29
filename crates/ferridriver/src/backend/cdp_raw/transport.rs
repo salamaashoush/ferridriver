@@ -21,8 +21,12 @@ type WsSink = futures::stream::SplitSink<
 
 /// Shared map of pending CDP command responses keyed by command ID.
 type PendingMap = Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>;
-/// Shared map of navigation waiters keyed by session ID.
-type NavWaiterMap = Arc<Mutex<FxHashMap<String, oneshot::Sender<Result<(), String>>>>>;
+/// Navigation waiter — target lifecycle + oneshot sender.
+struct NavWaiter {
+  target: crate::backend::NavLifecycle,
+  tx: oneshot::Sender<Result<(), String>>,
+}
+type NavWaiterMap = Arc<Mutex<FxHashMap<String, NavWaiter>>>;
 
 pub struct WsTransport {
   writer: Mutex<WsSink>,
@@ -80,25 +84,42 @@ impl WsTransport {
           let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
           let session_id = json.get("sessionId").and_then(|s| s.as_str()).unwrap_or("").to_string();
 
-          // Playwright approach: resolve on Page.lifecycleEvent DOMContentLoaded/load
-          if method == "Page.lifecycleEvent" {
+          // Lifecycle-aware navigation resolution (Playwright approach).
+          // Each waiter stores its target lifecycle; we only resolve when
+          // the matching CDP event arrives.
+          use crate::backend::NavLifecycle;
+          if method == "Page.frameNavigated" {
+            let mut waiters = nav_waiters2.lock().await;
+            if matches!(waiters.get(&session_id).map(|w| w.target), Some(NavLifecycle::Commit)) {
+              if let Some(w) = waiters.remove(&session_id) { let _ = w.tx.send(Ok(())); }
+            }
+          } else if method == "Page.lifecycleEvent" {
             if let Some(name) = json.get("params").and_then(|p| p.get("name")).and_then(|n| n.as_str()) {
-              if name == "DOMContentLoaded" || name == "load" {
-                let mut waiters = nav_waiters2.lock().await;
-                if let Some(tx) = waiters.remove(&session_id) {
-                  let _ = tx.send(Ok(()));
-                }
+              let mut waiters = nav_waiters2.lock().await;
+              let resolve = match (name, waiters.get(&session_id).map(|w| w.target)) {
+                ("DOMContentLoaded", Some(NavLifecycle::DomContentLoaded)) => true,
+                ("load", Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded)) => true,
+                _ => false,
+              };
+              if resolve {
+                if let Some(w) = waiters.remove(&session_id) { let _ = w.tx.send(Ok(())); }
               }
             }
-          } else if method == "Page.domContentEventFired" || method == "Page.loadEventFired" {
+          } else if method == "Page.loadEventFired" {
+            // Fallback for session-less frames (empty session_id)
             let mut waiters = nav_waiters2.lock().await;
-            if let Some(tx) = waiters.remove(&session_id) {
-              let _ = tx.send(Ok(()));
+            if matches!(waiters.get(&session_id).map(|w| w.target), Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded)) {
+              if let Some(w) = waiters.remove(&session_id) { let _ = w.tx.send(Ok(())); }
+            }
+          } else if method == "Page.domContentEventFired" {
+            let mut waiters = nav_waiters2.lock().await;
+            if matches!(waiters.get(&session_id).map(|w| w.target), Some(NavLifecycle::DomContentLoaded)) {
+              if let Some(w) = waiters.remove(&session_id) { let _ = w.tx.send(Ok(())); }
             }
           } else if method == "Inspector.targetCrashed" {
             let mut waiters = nav_waiters2.lock().await;
-            if let Some(tx) = waiters.remove(&session_id) {
-              let _ = tx.send(Err("Target crashed".into()));
+            if let Some(w) = waiters.remove(&session_id) {
+              let _ = w.tx.send(Err("Target crashed".into()));
             }
           }
 
@@ -190,10 +211,14 @@ impl WsTransport {
     }
   }
 
-  /// Register a navigation waiter for a session. Returns a receiver.
-  pub async fn register_nav_waiter(&self, session_id: &str) -> oneshot::Receiver<Result<(), String>> {
+  /// Register a navigation waiter for a session with a lifecycle target. Returns a receiver.
+  pub async fn register_nav_waiter(
+    &self,
+    session_id: &str,
+    target: crate::backend::NavLifecycle,
+  ) -> oneshot::Receiver<Result<(), String>> {
     let (tx, rx) = oneshot::channel();
-    self.nav_waiters.lock().await.insert(session_id.to_string(), tx);
+    self.nav_waiters.lock().await.insert(session_id.to_string(), NavWaiter { target, tx });
     rx
   }
 

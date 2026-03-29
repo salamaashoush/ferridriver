@@ -77,37 +77,8 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<(), String> {
-    self.inner.goto(url).await?;
-    self.apply_wait_until(opts).await
-  }
-
-  /// Apply waitUntil from `GotoOptions` after a navigation action.
-  async fn apply_wait_until(&self, opts: Option<GotoOptions>) -> Result<(), String> {
-    if let Some(opts) = opts {
-      if let Some(wait_until) = &opts.wait_until {
-        let timeout = opts.timeout.unwrap_or(self.default_timeout);
-        let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
-        match wait_until.as_str() {
-          "domcontentloaded" => {
-            while tokio::time::Instant::now() < deadline {
-              if let Ok(Some(v)) = self.inner.evaluate("document.readyState").await {
-                let s = v.as_str().unwrap_or("loading");
-                if s == "interactive" || s == "complete" {
-                  return Ok(());
-                }
-              }
-              tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-            }
-            return Err("Timeout waiting for domcontentloaded".into());
-          },
-          "networkidle" => {
-            self.wait_for_load_state(Some("networkidle")).await?;
-          },
-          _ => {}, // "load" / "commit" -- already handled by the navigation call
-        }
-      }
-    }
-    Ok(())
+    let (lifecycle, timeout) = Self::resolve_nav_opts(&opts, self.default_timeout);
+    self.inner.goto(url, lifecycle, timeout).await
   }
 
   /// Navigate back in history.
@@ -116,8 +87,8 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn go_back(&self, opts: Option<GotoOptions>) -> Result<(), String> {
-    self.inner.go_back().await?;
-    self.apply_wait_until(opts).await
+    let (lifecycle, timeout) = Self::resolve_nav_opts(&opts, self.default_timeout);
+    self.inner.go_back(lifecycle, timeout).await
   }
 
   /// Navigate forward in history.
@@ -126,8 +97,8 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn go_forward(&self, opts: Option<GotoOptions>) -> Result<(), String> {
-    self.inner.go_forward().await?;
-    self.apply_wait_until(opts).await
+    let (lifecycle, timeout) = Self::resolve_nav_opts(&opts, self.default_timeout);
+    self.inner.go_forward(lifecycle, timeout).await
   }
 
   /// Reload the current page.
@@ -136,8 +107,15 @@ impl Page {
   ///
   /// Returns an error if the reload fails or the wait condition times out.
   pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<(), String> {
-    self.inner.reload().await?;
-    self.apply_wait_until(opts).await
+    let (lifecycle, timeout) = Self::resolve_nav_opts(&opts, self.default_timeout);
+    self.inner.reload(lifecycle, timeout).await
+  }
+
+  /// Parse `GotoOptions` into backend `NavLifecycle` + timeout.
+  fn resolve_nav_opts(opts: &Option<GotoOptions>, default_timeout: u64) -> (crate::backend::NavLifecycle, u64) {
+    let wait_until = opts.as_ref().and_then(|o| o.wait_until.as_deref()).unwrap_or("load");
+    let timeout = opts.as_ref().and_then(|o| o.timeout).unwrap_or(default_timeout);
+    (crate::backend::NavLifecycle::from_str(wait_until), timeout)
   }
 
   /// Get the current page URL.
