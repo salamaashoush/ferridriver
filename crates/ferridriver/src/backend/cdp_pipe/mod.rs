@@ -8,7 +8,7 @@
 //! waiter before sending Page.navigate, then await the waiter which resolves
 //! when the reader task sees Page.loadEventFired for that session.
 
-mod json_scan;
+use super::json_scan;
 mod transport;
 
 use base64::Engine as _;
@@ -32,10 +32,51 @@ pub struct CdpPipeBrowser {
 
 impl CdpPipeBrowser {
   /// Enable required CDP domains on a session so events and queries work.
-  async fn enable_domains(transport: &PipeTransport, session_id: Option<&str>) -> Result<(), String> {
+  /// If `viewport` is provided, sets viewport in the same parallel batch
+  /// (saves a sequential round-trip vs calling emulate_viewport afterwards).
+  async fn enable_domains(
+    transport: &PipeTransport,
+    session_id: Option<&str>,
+    viewport: Option<&crate::options::ViewportConfig>,
+  ) -> Result<(), String> {
     let ep = super::empty_params();
     let engine_js = crate::selectors::build_inject_js();
-    let (r1, r2, r3, r4, r5, r6, r7) = tokio::join!(
+
+    let vp_params = viewport.map(|vp| {
+      let is_landscape = vp.is_landscape || vp.width > vp.height;
+      let orientation = if vp.is_mobile {
+        if is_landscape {
+          serde_json::json!({"angle": 90, "type": "landscapePrimary"})
+        } else {
+          serde_json::json!({"angle": 0, "type": "portraitPrimary"})
+        }
+      } else {
+        serde_json::json!({"angle": 0, "type": "landscapePrimary"})
+      };
+      serde_json::json!({
+        "width": vp.width,
+        "height": vp.height,
+        "deviceScaleFactor": vp.device_scale_factor,
+        "mobile": vp.is_mobile,
+        "screenWidth": vp.width,
+        "screenHeight": vp.height,
+        "screenOrientation": orientation,
+      })
+    });
+
+    // Fire all CDP commands in parallel — domain enables + optional viewport.
+    let vp_fut = async {
+      if let Some(params) = vp_params {
+        transport
+          .send_command(session_id, "Emulation.setDeviceMetricsOverride", params)
+          .await
+          .map(|_| ())
+      } else {
+        Ok(())
+      }
+    };
+
+    let (r1, r2, r3, r4, r5, r6, r7, r8) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep.clone()),
       transport.send_command(session_id, "Runtime.enable", ep.clone()),
       transport.send_command(session_id, "DOM.enable", ep.clone()),
@@ -43,8 +84,9 @@ impl CdpPipeBrowser {
       transport.send_command(session_id, "Accessibility.enable", ep.clone()),
       transport.send_command(session_id, "Page.setLifecycleEventsEnabled", serde_json::json!({"enabled": true})),
       transport.send_command(session_id, "Page.addScriptToEvaluateOnNewDocument", serde_json::json!({"source": engine_js})),
+      vp_fut,
     );
-    r1?; r2?; r3?; r4?; r5?; r6?; r7?;
+    r1?; r2?; r3?; r4?; r5?; r6?; r7?; r8?;
     Ok(())
   }
 
@@ -72,13 +114,14 @@ impl CdpPipeBrowser {
     let (transport, child) = PipeTransport::spawn(chromium_path, &user_data_dir, flags)?;
     let transport = Arc::new(transport);
 
-    // Enable target discovery so we get notified about new targets
+    // Enable target discovery.
     transport
       .send_command(None, "Target.setDiscoverTargets", serde_json::json!({"discover": true}))
       .await?;
 
-    // With --no-startup-window, Chrome won't create a default page target.
-    // Create our own initial page target.
+    // Create initial page — with setAutoAttach, Chrome sends Target.attachedToTarget event.
+    // We use explicit attachToTarget here for the initial page (simpler setup), and
+    // use auto-attach for subsequent new_page_isolated calls (where it saves a round-trip).
     let create_result = transport
       .send_command(None, "Target.createTarget", serde_json::json!({"url": "about:blank"}))
       .await?;
@@ -89,22 +132,17 @@ impl CdpPipeBrowser {
       .ok_or("No targetId from Target.createTarget")?
       .to_string();
 
-    // Attach to the target to get a session ID
     let attach_result = transport
-      .send_command(
-        None,
-        "Target.attachToTarget",
-        serde_json::json!({"targetId": target_id, "flatten": true}),
-      )
+      .send_command(None, "Target.attachToTarget", serde_json::json!({"targetId": target_id, "flatten": true}))
       .await?;
 
     let session_id = attach_result
       .get("sessionId")
       .and_then(|v| v.as_str())
-      .map(std::string::ToString::to_string);
+      .map(String::from);
 
     // Enable required domains on the new session
-    Self::enable_domains(&transport, session_id.as_deref()).await?;
+    Self::enable_domains(&transport, session_id.as_deref(), None).await?;
 
     let mut attached = FxHashMap::default();
     attached.insert(target_id, session_id.clone());
@@ -181,7 +219,7 @@ impl CdpPipeBrowser {
           .insert(target_id.clone(), sid.clone());
 
         // Enable domains on the new session
-        Self::enable_domains(&self.transport, sid.as_deref()).await?;
+        Self::enable_domains(&self.transport, sid.as_deref(), None).await?;
 
         sid
       };
@@ -245,7 +283,7 @@ impl CdpPipeBrowser {
       .insert(target_id.clone(), sid.clone());
 
     // Enable domains BEFORE any navigation
-    Self::enable_domains(&self.transport, sid.as_deref()).await?;
+    Self::enable_domains(&self.transport, sid.as_deref(), None).await?;
 
     let page = CdpPipePage {
       transport: self.transport.clone(),
@@ -275,7 +313,7 @@ impl CdpPipeBrowser {
   ///
   /// Returns an error if creating the browser context, target, or session fails,
   /// if enabling domains on the session fails, or if navigation fails.
-  pub async fn new_page_isolated(&self, url: &str) -> Result<AnyPage, String> {
+  pub async fn new_page_isolated(&self, url: &str, viewport: Option<&crate::options::ViewportConfig>) -> Result<AnyPage, String> {
     // Create isolated browser context
     let ctx = self
       .transport
@@ -288,7 +326,6 @@ impl CdpPipeBrowser {
       .ok_or("No browserContextId")?
       .to_string();
 
-    // Create target in the isolated context, starting with about:blank
     let result = self
       .transport
       .send_command(
@@ -326,7 +363,7 @@ impl CdpPipeBrowser {
       .insert(target_id.clone(), sid.clone());
 
     // Enable domains BEFORE any navigation
-    Self::enable_domains(&self.transport, sid.as_deref()).await?;
+    Self::enable_domains(&self.transport, sid.as_deref(), viewport).await?;
 
     let page = CdpPipePage {
       transport: self.transport.clone(),
@@ -1376,9 +1413,8 @@ impl CdpPipePage {
   ///
   /// Returns an error if the `Emulation.setDeviceMetricsOverride` CDP command fails.
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
-    let _ = self
-      .cmd("Emulation.clearDeviceMetricsOverride", super::empty_params())
-      .await;
+    // Skip clearDeviceMetricsOverride — unnecessary on fresh pages and costs a CDP round-trip.
+    // On reconfiguration, setDeviceMetricsOverride alone is sufficient.
     let is_landscape = config.is_landscape || config.width > config.height;
     let orientation = if config.is_mobile {
       if is_landscape {

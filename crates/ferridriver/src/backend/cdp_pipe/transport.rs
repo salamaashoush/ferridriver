@@ -16,27 +16,27 @@ use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot};
 
-/// Shared map of pending CDP command responses keyed by command ID.
-type PendingMap = Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>;
+/// Pending commands: std::sync::Mutex for zero-futex overhead (never held across await).
+type PendingMap = Arc<std::sync::Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>;
 struct NavWaiter {
   target: crate::backend::NavLifecycle,
   tx: oneshot::Sender<Result<(), String>>,
 }
-type NavWaiterMap = Arc<Mutex<FxHashMap<String, NavWaiter>>>;
+/// Nav waiters: std::sync::Mutex (never held across await).
+type NavWaiterMap = Arc<std::sync::Mutex<FxHashMap<String, NavWaiter>>>;
+
 
 /// CDP transport over pipes -- manages command IDs, response correlation, and event dispatch.
 pub struct PipeTransport {
-  /// Write half of the parent socket.
-  writer: Mutex<tokio::io::WriteHalf<tokio::net::UnixStream>>,
+  /// Channel sender for the dedicated writer task.
+  write_tx: tokio::sync::mpsc::Sender<Vec<u8>>,
   /// Next command ID.
   next_id: AtomicU64,
-  /// Pending commands waiting for responses: id -> sender.
-  /// The Result carries `Ok(result_value)` or `Err(error_description)`.
+  /// Pending commands waiting for responses.
   pending: PendingMap,
-  /// Navigation waiters: sessionId -> sender that resolves when Page.loadEventFired arrives.
-  /// Follows Bun's pattern: register before navigate, reader dispatches on event arrival.
+  /// Navigation waiters.
   nav_waiters: NavWaiterMap,
   /// Broadcast channel for CDP events (console, network -- fire-and-forget listeners).
   event_tx: broadcast::Sender<serde_json::Value>,
@@ -130,12 +130,31 @@ impl PipeTransport {
 
     let (event_tx, _) = broadcast::channel(256);
 
-    let pending: PendingMap = Arc::new(Mutex::new(FxHashMap::default()));
+    let pending: PendingMap = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
 
-    let nav_waiters: NavWaiterMap = Arc::new(Mutex::new(FxHashMap::default()));
+    let nav_waiters: NavWaiterMap = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+
+    // Spawn dedicated writer task: drains channel, batches messages, single write_all.
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
+    tokio::spawn(async move {
+      let mut writer = writer;
+      let mut buf = Vec::with_capacity(8192);
+      while let Some(first) = write_rx.recv().await {
+        buf.clear();
+        buf.extend_from_slice(&first);
+        // Drain all queued messages (non-blocking) — batches parallel sends.
+        while let Ok(more) = write_rx.try_recv() {
+          buf.extend_from_slice(&more);
+        }
+        if writer.write_all(&buf).await.is_err() {
+          break; // pipe closed
+        }
+        // Flush not needed for Unix pipes (unbuffered by default).
+      }
+    });
 
     let transport = Self {
-      writer: Mutex::new(writer),
+      write_tx,
       next_id: AtomicU64::new(1),
       pending: pending.clone(),
       nav_waiters: nav_waiters.clone(),
@@ -209,7 +228,7 @@ impl PipeTransport {
               Err(msg_str.to_string())
             };
             rx.drain(..=nul_pos);
-            if let Some(sender) = pending.lock().await.remove(&id) {
+            if let Some(sender) = pending.lock().unwrap().remove(&id) {
               let _ = sender.send(payload);
             }
           } else {
@@ -219,12 +238,13 @@ impl PipeTransport {
             let method_str = std::str::from_utf8(method).unwrap_or("");
             let sid_str = std::str::from_utf8(session_id).unwrap_or("");
 
+            // Single lock for all navigation event dispatch.
             {
               use crate::backend::NavLifecycle;
               let key = sid_str.to_string();
+              let mut waiters = nav_waiters.lock().unwrap();
               match method_str {
                 "Page.frameNavigated" => {
-                  let mut waiters = nav_waiters.lock().await;
                   if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::Commit)) {
                     if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
                   }
@@ -233,7 +253,6 @@ impl PipeTransport {
                   let params = json_scan::json_field(raw, b"params");
                   let name = json_scan::json_string(json_scan::json_field(params, b"name"));
                   let name_str = std::str::from_utf8(name).unwrap_or("");
-                  let mut waiters = nav_waiters.lock().await;
                   let resolve = matches!(
                     (name_str, waiters.get(&key).map(|w| w.target)),
                     ("DOMContentLoaded", Some(NavLifecycle::DomContentLoaded))
@@ -244,19 +263,16 @@ impl PipeTransport {
                   }
                 },
                 "Page.loadEventFired" => {
-                  let mut waiters = nav_waiters.lock().await;
                   if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded)) {
                     if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
                   }
                 },
                 "Page.domContentEventFired" => {
-                  let mut waiters = nav_waiters.lock().await;
                   if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::DomContentLoaded)) {
                     if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
                   }
                 },
                 "Inspector.targetCrashed" => {
-                  let mut waiters = nav_waiters.lock().await;
                   if let Some(w) = waiters.remove(&key) {
                     let _ = w.tx.send(Err("Target crashed".into()));
                   }
@@ -287,9 +303,10 @@ impl PipeTransport {
     target: crate::backend::NavLifecycle,
   ) -> oneshot::Receiver<Result<(), String>> {
     let (tx, rx) = oneshot::channel();
-    self.nav_waiters.lock().await.insert(session_id.to_string(), NavWaiter { target, tx });
+    self.nav_waiters.lock().unwrap().insert(session_id.to_string(), NavWaiter { target, tx });
     rx
   }
+
 
   /// Send a CDP command and wait for the response.
   pub async fn send_command(
@@ -311,23 +328,18 @@ impl PipeTransport {
     data.push(0); // NUL terminator
 
     let (tx, rx) = oneshot::channel();
-    self.pending.lock().await.insert(id, tx);
+    self.pending.lock().unwrap().insert(id, tx);
 
-    {
-      let mut writer = self.writer.lock().await;
-      writer
-        .write_all(&data)
-        .await
-        .map_err(|e| format!("Write to pipe: {e}"))?;
-      writer.flush().await.map_err(|e| format!("Flush pipe: {e}"))?;
-    }
+    // Push to writer task channel (~20-50ns, non-blocking).
+    // Writer task batches queued messages and does one write_all syscall.
+    self.write_tx.send(data).await.map_err(|_| "Pipe writer closed".to_string())?;
 
     // Wait for response with timeout
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result, // result is already Result<Value, String>
       Ok(Err(_)) => Err(format!("Response channel dropped for {method}")),
       Err(_) => {
-        self.pending.lock().await.remove(&id);
+        self.pending.lock().unwrap().remove(&id);
         Err(format!("Timeout waiting for {method} response"))
       },
     }

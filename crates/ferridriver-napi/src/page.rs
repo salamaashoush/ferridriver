@@ -163,6 +163,7 @@ impl Page {
       .build_threadsafe_function()
       .callee_handled::<false>()
       .weak::<true>()
+      .max_queue_size::<0>()
       .build()?;
     let event_name = event.clone();
     let callback: ferridriver::events::EventCallback = std::sync::Arc::new(move |ev| {
@@ -171,7 +172,6 @@ impl Page {
       }
     });
     let id = self.inner.on(&event, callback);
-    // ListenerId is a sequential counter; it will never exceed 2^53 (f64 mantissa precision).
     #[allow(clippy::cast_precision_loss)]
     Ok(id.0 as f64)
   }
@@ -189,6 +189,7 @@ impl Page {
       .build_threadsafe_function()
       .callee_handled::<false>()
       .weak::<true>()
+      .max_queue_size::<0>()
       .build()?;
     let event_name = event.clone();
     let callback: ferridriver::events::EventCallback = std::sync::Arc::new(move |ev| {

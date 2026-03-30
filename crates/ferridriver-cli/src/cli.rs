@@ -26,6 +26,64 @@ pub enum Command {
     #[command(flatten)]
     transport: TransportArgs,
   },
+
+  /// Run E2E tests
+  Test {
+    /// Test file patterns or specific files
+    #[arg(trailing_var_arg = true)]
+    files: Vec<String>,
+
+    #[command(flatten)]
+    test_args: TestArgs,
+  },
+}
+
+/// Test runner options.
+#[derive(Args)]
+pub struct TestArgs {
+  /// Number of parallel workers (0 = auto)
+  #[arg(long, short = 'j')]
+  pub workers: Option<u32>,
+
+  /// Number of retries for failed tests
+  #[arg(long)]
+  pub retries: Option<u32>,
+
+  /// Reporter: terminal, junit, json
+  #[arg(long)]
+  pub reporter: Vec<String>,
+
+  /// Grep pattern to filter tests by name
+  #[arg(long, short)]
+  pub grep: Option<String>,
+
+  /// Invert grep pattern (exclude matching tests)
+  #[arg(long)]
+  pub grep_invert: Option<String>,
+
+  /// Shard: current/total (e.g., "1/3")
+  #[arg(long)]
+  pub shard: Option<String>,
+
+  /// Config file path
+  #[arg(long, short)]
+  pub config: Option<String>,
+
+  /// Run in headed mode (show browser window)
+  #[arg(long)]
+  pub headed: bool,
+
+  /// List tests without running them
+  #[arg(long)]
+  pub list: bool,
+
+  /// Tag filter
+  #[arg(long)]
+  pub tag: Option<String>,
+
+  /// Output directory for reports
+  #[arg(long)]
+  pub output: Option<String>,
 }
 
 /// Browser backend and connection options.

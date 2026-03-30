@@ -1,0 +1,37 @@
+[package]
+name = "ferridriver-test"
+description = "High-performance E2E test runner for ferridriver (Playwright-compatible)"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferridriver = { workspace = true }
+ferridriver-test-macros = { path = "../ferridriver-test-macros" }
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+regex = { workspace = true }
+
+async-channel = "2"
+inventory = "0.3"
+rustc-hash = "2"
+toml = "0.8"
+glob = "0.3"
+console = "0.15"
+quick-xml = "0.37"
+
+[[bin]]
+name = "bench-profile"
+path = "src/bin/bench_profile_bin.rs"
+
+[[bin]]
+name = "bench-single"
+path = "src/bin/bench_single.rs"

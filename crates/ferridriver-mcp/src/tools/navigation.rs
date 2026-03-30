@@ -89,13 +89,12 @@ impl McpServer {
         let _guard = self.session_guard(s).await;
         let url = p.url.as_deref().unwrap_or("about:blank");
         let mut state = self.state.lock().await;
-        let idx = Box::pin(state.open_page(s, url)).await.map_err(Self::err)?;
-        let any_page = state.active_page(s).map_err(Self::err)?.clone();
+        let any_page = Box::pin(state.open_page(s, url)).await.map_err(Self::err)?;
         drop(state);
         let page = ferridriver::Page::new(any_page);
         let snap = self.snap(&page, s).await;
         Ok(CallToolResult::success(vec![Content::text(format!(
-          "Opened page {idx} in session '{s}'.\n\n{snap}"
+          "Opened new page in session '{s}'.\n\n{snap}"
         ))]))
       },
       "close" => {

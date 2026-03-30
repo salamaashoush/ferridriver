@@ -26,11 +26,41 @@ pub struct CdpRawBrowser {
 
 impl CdpRawBrowser {
   /// Enable required CDP domains on a session so events and queries work.
-  async fn enable_domains(transport: &WsTransport, session_id: Option<&str>) -> Result<(), String> {
+  /// If `viewport` is provided, sets it in the same parallel batch.
+  async fn enable_domains(
+    transport: &WsTransport,
+    session_id: Option<&str>,
+    viewport: Option<&crate::options::ViewportConfig>,
+  ) -> Result<(), String> {
     let ep = super::empty_params();
     let engine_js = crate::selectors::build_inject_js();
-    // All domain enables + init script have no dependencies — fire in parallel.
-    let (r1, r2, r3, r4, r5, r6, r7) = tokio::join!(
+
+    let vp_params = viewport.map(|vp| {
+      let is_landscape = vp.is_landscape || vp.width > vp.height;
+      let orientation = if vp.is_mobile {
+        if is_landscape { serde_json::json!({"angle": 90, "type": "landscapePrimary"}) }
+        else { serde_json::json!({"angle": 0, "type": "portraitPrimary"}) }
+      } else {
+        serde_json::json!({"angle": 0, "type": "landscapePrimary"})
+      };
+      serde_json::json!({
+        "width": vp.width, "height": vp.height,
+        "deviceScaleFactor": vp.device_scale_factor,
+        "mobile": vp.is_mobile,
+        "screenWidth": vp.width, "screenHeight": vp.height,
+        "screenOrientation": orientation,
+      })
+    });
+
+    let vp_fut = async {
+      if let Some(params) = vp_params {
+        transport.send_command(session_id, "Emulation.setDeviceMetricsOverride", params).await.map(|_| ())
+      } else {
+        Ok(())
+      }
+    };
+
+    let (r1, r2, r3, r4, r5, r6, r7, r8) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep.clone()),
       transport.send_command(session_id, "Runtime.enable", ep.clone()),
       transport.send_command(session_id, "DOM.enable", ep.clone()),
@@ -38,8 +68,9 @@ impl CdpRawBrowser {
       transport.send_command(session_id, "Accessibility.enable", ep.clone()),
       transport.send_command(session_id, "Page.setLifecycleEventsEnabled", serde_json::json!({"enabled": true})),
       transport.send_command(session_id, "Page.addScriptToEvaluateOnNewDocument", serde_json::json!({"source": engine_js})),
+      vp_fut,
     );
-    r1?; r2?; r3?; r4?; r5?; r6?; r7?;
+    r1?; r2?; r3?; r4?; r5?; r6?; r7?; r8?;
     Ok(())
   }
 
@@ -105,7 +136,7 @@ impl CdpRawBrowser {
       .map(std::string::ToString::to_string);
 
     // Enable required domains on the new session
-    Self::enable_domains(&transport, session_id.as_deref()).await?;
+    Self::enable_domains(&transport, session_id.as_deref(), None).await?;
 
     let mut attached = FxHashMap::default();
     attached.insert(target_id, session_id.clone());
@@ -157,7 +188,7 @@ impl CdpRawBrowser {
             .get("sessionId")
             .and_then(|v| v.as_str())
             .map(std::string::ToString::to_string);
-          Self::enable_domains(&transport, sid.as_deref()).await?;
+          Self::enable_domains(&transport, sid.as_deref(), None).await?;
           attached.insert(target_id, sid);
           found_page = true;
           break; // take first page
@@ -186,7 +217,7 @@ impl CdpRawBrowser {
         .get("sessionId")
         .and_then(|v| v.as_str())
         .map(std::string::ToString::to_string);
-      Self::enable_domains(&transport, sid.as_deref()).await?;
+      Self::enable_domains(&transport, sid.as_deref(), None).await?;
       attached.insert(target_id, sid);
     }
 
@@ -209,11 +240,11 @@ impl CdpRawBrowser {
       .send_command(None, "Target.getTargets", super::empty_params())
       .await?;
 
+    let empty_vec = Vec::new();
     let targets = result
       .get("targetInfos")
       .and_then(|t| t.as_array())
-      .cloned()
-      .unwrap_or_default();
+      .unwrap_or(&empty_vec);
 
     let mut pages = Vec::new();
     for target in targets {
@@ -262,7 +293,7 @@ impl CdpRawBrowser {
           .insert(target_id.clone(), sid.clone());
 
         // Enable domains on the new session
-        Self::enable_domains(&self.transport, sid.as_deref()).await?;
+        Self::enable_domains(&self.transport, sid.as_deref(), None).await?;
 
         sid
       };
@@ -325,7 +356,7 @@ impl CdpRawBrowser {
       .insert(target_id.clone(), sid.clone());
 
     // Enable domains BEFORE any navigation
-    Self::enable_domains(&self.transport, sid.as_deref()).await?;
+    Self::enable_domains(&self.transport, sid.as_deref(), None).await?;
 
     let page = CdpRawPage {
       transport: self.transport.clone(),
@@ -355,7 +386,7 @@ impl CdpRawBrowser {
   ///
   /// Returns an error if browser context creation, target creation,
   /// attachment, domain enablement, or navigation fails.
-  pub async fn new_page_isolated(&self, url: &str) -> Result<AnyPage, String> {
+  pub async fn new_page_isolated(&self, url: &str, viewport: Option<&crate::options::ViewportConfig>) -> Result<AnyPage, String> {
     // Create isolated browser context
     let ctx = self
       .transport
@@ -406,7 +437,7 @@ impl CdpRawBrowser {
       .insert(target_id.clone(), sid.clone());
 
     // Enable domains BEFORE any navigation
-    Self::enable_domains(&self.transport, sid.as_deref()).await?;
+    Self::enable_domains(&self.transport, sid.as_deref(), viewport).await?;
 
     let page = CdpRawPage {
       transport: self.transport.clone(),
@@ -487,8 +518,7 @@ impl CdpRawPage {
   ) -> Result<(), String> {
     let rx = self
       .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle)
-      .await;
+      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
 
     let nav_result = self.cmd("Page.navigate", serde_json::json!({"url": url})).await?;
 
@@ -513,8 +543,7 @@ impl CdpRawPage {
   pub async fn wait_for_navigation(&self) -> Result<(), String> {
     let rx = self
       .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), crate::backend::NavLifecycle::Load)
-      .await;
+      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), crate::backend::NavLifecycle::Load);
 
     match tokio::time::timeout(Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
@@ -533,8 +562,7 @@ impl CdpRawPage {
   ) -> Result<(), String> {
     let rx = self
       .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle)
-      .await;
+      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
     self.cmd("Page.reload", super::empty_params()).await?;
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
       Ok(Ok(r)) => r,
@@ -577,8 +605,7 @@ impl CdpRawPage {
 
     let rx = self
       .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle)
-      .await;
+      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
     self
       .cmd("Page.navigateToHistoryEntry", serde_json::json!({"entryId": entry_id}))
       .await?;
@@ -1435,9 +1462,7 @@ impl CdpRawPage {
   ///
   /// Returns an error if `Emulation.setDeviceMetricsOverride` fails.
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
-    let _ = self
-      .cmd("Emulation.clearDeviceMetricsOverride", super::empty_params())
-      .await;
+    // Skip clearDeviceMetricsOverride — setDeviceMetricsOverride alone is sufficient.
     let is_landscape = config.is_landscape || config.width > config.height;
     let orientation = if config.is_mobile {
       if is_landscape {

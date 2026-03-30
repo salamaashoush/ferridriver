@@ -9,6 +9,7 @@
 
 pub mod cdp_pipe;
 pub mod cdp_raw;
+pub(crate) mod json_scan;
 #[cfg(target_os = "macos")]
 pub mod webkit;
 
@@ -179,10 +180,14 @@ impl AnyBrowser {
   /// # Errors
   ///
   /// Returns an error if the backend fails to create an isolated context or navigate.
-  pub async fn new_page_isolated(&self, url: &str) -> Result<AnyPage, String> {
+  pub async fn new_page_isolated(
+    &self,
+    url: &str,
+    viewport: Option<&crate::options::ViewportConfig>,
+  ) -> Result<AnyPage, String> {
     match self {
-      Self::CdpPipe(b) => b.new_page_isolated(url).await,
-      Self::CdpRaw(b) => b.new_page_isolated(url).await,
+      Self::CdpPipe(b) => b.new_page_isolated(url, viewport).await,
+      Self::CdpRaw(b) => b.new_page_isolated(url, viewport).await,
       #[cfg(target_os = "macos")]
       Self::WebKit(b) => b.new_page_isolated(url).await,
     }

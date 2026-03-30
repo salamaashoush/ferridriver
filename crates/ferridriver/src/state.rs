@@ -341,28 +341,38 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the instance or page creation fails.
-  pub async fn open_page(&mut self, context: &str, url: &str) -> Result<usize, String> {
+  /// Create a new page in the given context. Returns the `AnyPage` directly
+  /// (no second lookup needed).
+  pub async fn open_page(&mut self, context: &str, url: &str) -> Result<AnyPage, String> {
     let key = SessionKey::parse(context);
-    Box::pin(self.ensure_instance(&key.instance)).await?;
+    self.open_page_keyed(&key, url).await
+  }
 
-    let vp = self.default_viewport.clone().unwrap_or_default();
+  /// Same as `open_page` but accepts a pre-parsed `SessionKey` (avoids re-parsing).
+  pub async fn open_page_keyed(&mut self, key: &SessionKey, url: &str) -> Result<AnyPage, String> {
+    if !self.instances.contains_key(&key.instance) {
+      self.ensure_instance(&key.instance).await?;
+    }
+
+    let vp = self.default_viewport.clone();
     let inst = self.instance_mut(&key.instance)?;
 
     let page = if key.context == "default" {
-      inst.browser.new_page(url).await?
+      let p = inst.browser.new_page(url).await?;
+      if let Some(ref vp) = vp {
+        let _ = p.emulate_viewport(vp).await;
+      }
+      p
     } else {
-      inst.browser.new_page_isolated(url).await?
+      inst.browser.new_page_isolated(url, vp.as_ref()).await?
     };
-
-    let _ = page.emulate_viewport(&vp).await;
 
     let ctx = inst.context_mut(&key.context);
     page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
-    let idx = ctx.pages.len();
-    ctx.pages.push(page);
-    ctx.active_page_idx = idx;
+    ctx.pages.push(page.clone());
+    ctx.active_page_idx = ctx.pages.len() - 1;
 
-    Ok(idx)
+    Ok(page)
   }
 
   /// # Errors

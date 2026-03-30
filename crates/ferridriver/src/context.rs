@@ -9,6 +9,7 @@
 
 use crate::backend::{AnyPage, CookieData};
 use crate::page::Page;
+use crate::state::SessionKey;
 use rustc_hash::FxHashMap as HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -197,9 +198,12 @@ use tokio::sync::Mutex;
 
 /// Handle to a browser context. Created by `Browser::new_context()` / `default_context()`.
 /// Provides the Playwright-compatible context API by delegating to `BrowserState`.
+#[derive(Clone)]
 pub struct ContextRef {
   pub(crate) state: Arc<Mutex<BrowserState>>,
   pub(crate) name: String,
+  /// Pre-parsed session key (avoids re-parsing on every operation).
+  pub(crate) key: SessionKey,
   /// Default timeout for actions in this context (ms). 0 = no override.
   default_timeout_ms: u64,
   /// Default navigation timeout in this context (ms). 0 = no override.
@@ -208,9 +212,11 @@ pub struct ContextRef {
 
 impl ContextRef {
   pub(crate) fn new(state: Arc<Mutex<BrowserState>>, name: String) -> Self {
+    let key = SessionKey::parse(&name);
     Self {
       state,
       name,
+      key,
       default_timeout_ms: 0,
       default_navigation_timeout_ms: 0,
     }
@@ -229,8 +235,7 @@ impl ContextRef {
   /// Returns an error if page creation fails.
   pub async fn new_page(&self) -> Result<Page, String> {
     let mut state = self.state.lock().await;
-    Box::pin(state.open_page(&self.name, "about:blank")).await?;
-    let any_page = state.active_page(&self.name)?.clone();
+    let any_page = state.open_page_keyed(&self.key, "about:blank").await?;
     Ok(Page::new(any_page))
   }
 

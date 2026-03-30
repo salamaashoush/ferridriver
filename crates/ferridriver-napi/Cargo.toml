@@ -10,6 +10,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 ferridriver = { workspace = true }
+ferridriver-test = { workspace = true }
 
 napi = { version = "3", features = ["async", "napi9", "serde-json"] }
 napi-derive = "3"
@@ -18,6 +19,7 @@ tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 rustc-hash = "2"
+async-channel = "2"
 
 [build-dependencies]
 napi-build = "2"

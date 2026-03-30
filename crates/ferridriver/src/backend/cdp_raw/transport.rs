@@ -4,32 +4,28 @@
 //! - Oneshot channels for response correlation (no handler bottleneck)
 //! - Broadcast channel for events (console, network, dialog)
 //! - Navigation waiters (register before navigate, resolve on loadEventFired)
-//! - Multiple `send_command` calls can be in-flight simultaneously
+//! - Channel-based writer (decouples sender from I/O, enables batching)
+//! - std::sync::Mutex for maps (never held across await, zero futex overhead)
 
 use futures::{SinkExt, StreamExt};
 use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::{Mutex, broadcast, oneshot};
+use tokio::sync::{broadcast, oneshot};
 use tokio_tungstenite::tungstenite::Message;
 
-type WsSink = futures::stream::SplitSink<
-  tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
-  Message,
->;
-
-/// Shared map of pending CDP command responses keyed by command ID.
-type PendingMap = Arc<Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>;
-/// Navigation waiter — target lifecycle + oneshot sender.
+/// std::sync::Mutex — never held across await, zero futex overhead on uncontended path.
+type PendingMap = Arc<std::sync::Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>;
 struct NavWaiter {
   target: crate::backend::NavLifecycle,
   tx: oneshot::Sender<Result<(), String>>,
 }
-type NavWaiterMap = Arc<Mutex<FxHashMap<String, NavWaiter>>>;
+type NavWaiterMap = Arc<std::sync::Mutex<FxHashMap<String, NavWaiter>>>;
 
 pub struct WsTransport {
-  writer: Mutex<WsSink>,
+  /// Channel sender for dedicated writer task (same pattern as cdp_pipe).
+  write_tx: tokio::sync::mpsc::Sender<Message>,
   next_id: AtomicU64,
   pending: PendingMap,
   nav_waiters: NavWaiterMap,
@@ -46,91 +42,109 @@ impl WsTransport {
     let (write, read) = ws_stream.split();
     let (event_tx, _) = broadcast::channel(256);
 
-    let pending: PendingMap = Arc::new(Mutex::new(FxHashMap::default()));
-    let nav_waiters: NavWaiterMap = Arc::new(Mutex::new(FxHashMap::default()));
+    let pending: PendingMap = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+    let nav_waiters: NavWaiterMap = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+
+    // Spawn dedicated writer task.
+    let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Message>(64);
+    tokio::spawn(async move {
+      let mut writer = write;
+      while let Some(msg) = write_rx.recv().await {
+        if writer.send(msg).await.is_err() {
+          break;
+        }
+      }
+    });
 
     let pending2 = pending.clone();
     let nav_waiters2 = nav_waiters.clone();
     let event_tx2 = event_tx.clone();
 
-    // Reader task: process WebSocket messages
+    // Reader task: uses json_scan for zero-alloc dispatch (same as cdp_pipe).
+    // Full serde parse only for broadcast to event subscribers.
     tokio::spawn(async move {
+      use crate::backend::json_scan;
+
       let mut read = read;
       while let Some(Ok(msg)) = read.next().await {
         let Message::Text(text) = msg else { continue };
+        let raw = text.as_bytes();
 
-        let json: serde_json::Value = match serde_json::from_str(&text) {
-          Ok(v) => v,
-          Err(_) => continue,
-        };
-
-        let id = json.get("id").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let id = json_scan::json_id(raw);
 
         if id > 0 {
-          // Response to a command
-          let result = if let Some(err) = json.get("error") {
-            let msg = err.get("message").and_then(|m| m.as_str()).unwrap_or("CDP error");
-            Err(msg.to_string())
+          // Response — parse only the result or error field, not the whole message.
+          let error_field = json_scan::json_field(raw, b"error");
+          let payload = if error_field.is_empty() {
+            let result_field = json_scan::json_field(raw, b"result");
+            if result_field.is_empty() {
+              Ok(serde_json::Value::Object(serde_json::Map::new()))
+            } else {
+              serde_json::from_slice::<serde_json::Value>(result_field)
+                .map_err(|e| format!("parse result: {e}"))
+            }
           } else {
-            Ok(json.get("result").cloned().unwrap_or(serde_json::json!({})))
+            let msg_bytes = json_scan::error_message(error_field);
+            let msg_str = std::str::from_utf8(msg_bytes).unwrap_or("CDP error");
+            Err(msg_str.to_string())
           };
 
-          let mut pending = pending2.lock().await;
-          if let Some(tx) = pending.remove(&id) {
-            let _ = tx.send(result);
+          if let Some(tx) = pending2.lock().unwrap().remove(&id) {
+            let _ = tx.send(payload);
           }
         } else {
-          // Event (no id)
-          let method = json.get("method").and_then(|m| m.as_str()).unwrap_or("");
-          let session_id = json.get("sessionId").and_then(|s| s.as_str()).unwrap_or("").to_string();
+          // Event — scan method and sessionId without full parse.
+          let method = json_scan::json_string(json_scan::json_field(raw, b"method"));
+          let session_id = json_scan::json_string(json_scan::json_field(raw, b"sessionId"));
+          let method_str = std::str::from_utf8(method).unwrap_or("");
+          let sid_str = std::str::from_utf8(session_id).unwrap_or("");
 
-          // Lifecycle-aware navigation resolution (Playwright approach).
-          // Each waiter stores its target lifecycle; we only resolve when
-          // the matching CDP event arrives.
-          use crate::backend::NavLifecycle;
-          if method == "Page.frameNavigated" {
-            let mut waiters = nav_waiters2.lock().await;
-            if matches!(waiters.get(&session_id).map(|w| w.target), Some(NavLifecycle::Commit)) {
-              if let Some(w) = waiters.remove(&session_id) { let _ = w.tx.send(Ok(())); }
-            }
-          } else if method == "Page.lifecycleEvent" {
-            if let Some(name) = json.get("params").and_then(|p| p.get("name")).and_then(|n| n.as_str()) {
-              let mut waiters = nav_waiters2.lock().await;
-              let resolve = match (name, waiters.get(&session_id).map(|w| w.target)) {
-                ("DOMContentLoaded", Some(NavLifecycle::DomContentLoaded)) => true,
-                ("load", Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded)) => true,
-                _ => false,
-              };
-              if resolve {
-                if let Some(w) = waiters.remove(&session_id) { let _ = w.tx.send(Ok(())); }
+          // Single lock for all navigation event dispatch.
+          {
+            use crate::backend::NavLifecycle;
+            let key = sid_str.to_string();
+            let mut waiters = nav_waiters2.lock().unwrap();
+            if method_str == "Page.frameNavigated" {
+              if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::Commit)) {
+                if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
               }
-            }
-          } else if method == "Page.loadEventFired" {
-            // Fallback for session-less frames (empty session_id)
-            let mut waiters = nav_waiters2.lock().await;
-            if matches!(waiters.get(&session_id).map(|w| w.target), Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded)) {
-              if let Some(w) = waiters.remove(&session_id) { let _ = w.tx.send(Ok(())); }
-            }
-          } else if method == "Page.domContentEventFired" {
-            let mut waiters = nav_waiters2.lock().await;
-            if matches!(waiters.get(&session_id).map(|w| w.target), Some(NavLifecycle::DomContentLoaded)) {
-              if let Some(w) = waiters.remove(&session_id) { let _ = w.tx.send(Ok(())); }
-            }
-          } else if method == "Inspector.targetCrashed" {
-            let mut waiters = nav_waiters2.lock().await;
-            if let Some(w) = waiters.remove(&session_id) {
-              let _ = w.tx.send(Err("Target crashed".into()));
+            } else if method_str == "Page.lifecycleEvent" {
+              let params = json_scan::json_field(raw, b"params");
+              let name = json_scan::json_string(json_scan::json_field(params, b"name"));
+              let name_str = std::str::from_utf8(name).unwrap_or("");
+              let resolve = matches!(
+                (name_str, waiters.get(&key).map(|w| w.target)),
+                ("DOMContentLoaded", Some(NavLifecycle::DomContentLoaded))
+                | ("load", Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded))
+              );
+              if resolve {
+                if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
+              }
+            } else if method_str == "Page.loadEventFired" {
+              if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded)) {
+                if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
+              }
+            } else if method_str == "Page.domContentEventFired" {
+              if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::DomContentLoaded)) {
+                if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
+              }
+            } else if method_str == "Inspector.targetCrashed" {
+              if let Some(w) = waiters.remove(&key) {
+                let _ = w.tx.send(Err("Target crashed".into()));
+              }
             }
           }
 
-          // Broadcast to all event subscribers
-          let _ = event_tx2.send(json);
+          // Full parse only for broadcast to event subscribers.
+          if let Ok(json) = serde_json::from_str::<serde_json::Value>(&text) {
+            let _ = event_tx2.send(json);
+          }
         }
       }
     });
 
     Ok(Self {
-      writer: Mutex::new(write),
+      write_tx,
       next_id: AtomicU64::new(1),
       pending,
       nav_waiters,
@@ -160,7 +174,6 @@ impl WsTransport {
 
     let mut child = command.spawn().map_err(|e| format!("Chrome launch: {e}"))?;
 
-    // Discover WebSocket URL from DevToolsActivePort file
     let port_file = user_data_dir.join("DevToolsActivePort");
     let ws_url = discover_ws_url(&port_file, &mut child).await?;
 
@@ -177,7 +190,6 @@ impl WsTransport {
   ) -> Result<serde_json::Value, String> {
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
 
-    // Build JSON directly, skip intermediate Value allocation.
     let params_str = serde_json::to_string(&params).map_err(|e| format!("Serialize: {e}"))?;
     let text = if let Some(sid) = session_id {
       format!(r#"{{"id":{id},"method":"{method}","params":{params_str},"sessionId":"{sid}"}}"#)
@@ -186,39 +198,33 @@ impl WsTransport {
     };
 
     let (tx, rx) = oneshot::channel();
-    {
-      let mut pending = self.pending.lock().await;
-      pending.insert(id, tx);
-    }
+    self.pending.lock().unwrap().insert(id, tx);
 
-    {
-      let mut writer = self.writer.lock().await;
-      writer
-        .send(Message::Text(text))
-        .await
-        .map_err(|e| format!("WS send: {e}"))?;
-    }
+    // Push to writer task (~20-50ns, non-blocking).
+    self
+      .write_tx
+      .send(Message::Text(text))
+      .await
+      .map_err(|_| "WS writer closed".to_string())?;
 
-    // Await response with timeout
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => Err("Channel closed".into()),
       Err(_) => {
-        // Clean up pending on timeout
-        self.pending.lock().await.remove(&id);
+        self.pending.lock().unwrap().remove(&id);
         Err("Timeout (30s)".into())
-      },
+      }
     }
   }
 
-  /// Register a navigation waiter for a session with a lifecycle target. Returns a receiver.
-  pub async fn register_nav_waiter(
+  /// Register a navigation waiter for a session with a lifecycle target.
+  pub fn register_nav_waiter(
     &self,
     session_id: &str,
     target: crate::backend::NavLifecycle,
   ) -> oneshot::Receiver<Result<(), String>> {
     let (tx, rx) = oneshot::channel();
-    self.nav_waiters.lock().await.insert(session_id.to_string(), NavWaiter { target, tx });
+    self.nav_waiters.lock().unwrap().insert(session_id.to_string(), NavWaiter { target, tx });
     rx
   }
 
@@ -232,22 +238,19 @@ impl WsTransport {
 async fn discover_ws_url(port_file: &Path, child: &mut tokio::process::Child) -> Result<String, String> {
   // Poll for DevToolsActivePort file (Chrome writes it after binding the port)
   for _ in 0..200 {
-    if let Ok(content) = tokio::fs::read_to_string(port_file).await {
-      let lines: Vec<&str> = content.trim().lines().collect();
+    if let Ok(contents) = tokio::fs::read_to_string(port_file).await {
+      let lines: Vec<&str> = contents.lines().collect();
       if lines.len() >= 2 {
         let port = lines[0].trim();
         let path = lines[1].trim();
         return Ok(format!("ws://127.0.0.1:{port}{path}"));
       }
     }
-
-    // Check if Chrome died
-    if let Some(status) = child.try_wait().map_err(|e| format!("{e}"))? {
-      return Err(format!("Chrome exited early with {status}"));
+    // Check if Chrome crashed
+    if let Some(status) = child.try_wait().map_err(|e| format!("wait: {e}"))? {
+      return Err(format!("Chrome exited with status {status} before DevToolsActivePort was written"));
     }
-
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
   }
-
-  Err("Timeout waiting for Chrome DevToolsActivePort (10s)".into())
+  Err("Timed out waiting for DevToolsActivePort".into())
 }

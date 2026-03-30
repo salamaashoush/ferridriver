@@ -1,0 +1,15 @@
+{
+  "name": "@ferridriver/test",
+  "version": "0.2.0",
+  "description": "High-performance E2E test runner (Playwright-compatible API, Rust engine)",
+  "type": "module",
+  "main": "src/index.ts",
+  "types": "src/index.ts",
+  "bin": {
+    "ferridriver-test": "src/cli.ts"
+  },
+  "dependencies": {
+    "ferridriver": "file:../../crates/ferridriver-napi"
+  },
+  "license": "MIT OR Apache-2.0"
+}

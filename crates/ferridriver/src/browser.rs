@@ -93,7 +93,7 @@ impl Browser {
   ///
   /// Returns an error if page creation fails.
   pub async fn new_page(&self) -> Result<Page, String> {
-    Box::pin(self.default_context().new_page()).await
+    self.default_context().new_page().await
   }
 
   /// Shorthand: create a new page and navigate to URL.

@@ -10,4 +10,5 @@ mod context;
 mod frame;
 mod locator;
 mod page;
+mod test_runner;
 mod types;

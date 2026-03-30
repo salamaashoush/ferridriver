@@ -14,9 +14,14 @@ workspace = true
 
 [dependencies]
 ferridriver-mcp = { path = "../ferridriver-mcp" }
+ferridriver-test = { workspace = true }
 ferridriver = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+base64 = { workspace = true }
