@@ -834,6 +834,7 @@ pub fn detect_chromium() -> String {
 }
 
 /// Search Playwright's cache dir for a chromium headless shell binary.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
 fn find_playwright_chrome() -> Option<String> {
   let home = std::env::var("HOME").ok()?;
 
@@ -841,8 +842,6 @@ fn find_playwright_chrome() -> Option<String> {
   let cache_dir = std::path::PathBuf::from(&home).join("Library/Caches/ms-playwright");
   #[cfg(target_os = "linux")]
   let cache_dir = std::path::PathBuf::from(&home).join(".cache/ms-playwright");
-  #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-  return None;
 
   if !cache_dir.exists() {
     return None;
@@ -897,5 +896,10 @@ fn find_playwright_chrome() -> Option<String> {
     }
   }
 
+  None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn find_playwright_chrome() -> Option<String> {
   None
 }

@@ -15,7 +15,7 @@ use rustc_hash::FxHashMap;
 use std::path::Path;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio::sync::{broadcast, oneshot};
 
 /// Pending commands: std::sync::Mutex for zero-futex overhead (never held across await).
@@ -26,6 +26,10 @@ struct NavWaiter {
 }
 /// Nav waiters: std::sync::Mutex (never held across await).
 type NavWaiterMap = Arc<std::sync::Mutex<FxHashMap<String, NavWaiter>>>;
+
+/// Platform-agnostic async reader/writer types.
+type BoxReader = Box<dyn AsyncRead + Send + Unpin>;
+type BoxWriter = Box<dyn AsyncWrite + Send + Unpin>;
 
 
 /// CDP transport over pipes -- manages command IDs, response correlation, and event dispatch.
@@ -77,7 +81,7 @@ impl PipeTransport {
     // Spawn dedicated writer task: drains channel, batches messages, single write_all.
     let (write_tx, mut write_rx) = tokio::sync::mpsc::channel::<Vec<u8>>(64);
     tokio::spawn(async move {
-      let mut writer = writer;
+      let mut writer: BoxWriter = writer;
       let mut buf = Vec::with_capacity(8192);
       while let Some(first) = write_rx.recv().await {
         buf.clear();
@@ -113,7 +117,7 @@ impl PipeTransport {
   }
 
   fn spawn_reader(
-    reader: tokio::io::ReadHalf<tokio::net::UnixStream>,
+    reader: BoxReader,
     event_tx: broadcast::Sender<serde_json::Value>,
     pending: PendingMap,
     nav_waiters: NavWaiterMap,
@@ -298,11 +302,7 @@ impl PipeTransport {
 fn spawn_with_pipes(
   command: &mut tokio::process::Command,
   _chromium_path: &str,
-) -> Result<(
-  tokio::process::Child,
-  tokio::io::ReadHalf<tokio::net::UnixStream>,
-  tokio::io::WriteHalf<tokio::net::UnixStream>,
-), String> {
+) -> Result<(tokio::process::Child, BoxReader, BoxWriter), String> {
   use std::os::unix::io::IntoRawFd;
 
   let (parent_sock, child_sock) =
@@ -339,24 +339,118 @@ fn spawn_with_pipes(
   let stream =
     tokio::net::UnixStream::from_std(parent_sock).map_err(|e| format!("tokio stream: {e}"))?;
   let (reader, writer) = tokio::io::split(stream);
-  Ok((child, reader, writer))
+  Ok((child, Box::new(reader) as BoxReader, Box::new(writer) as BoxWriter))
 }
 
-/// Windows: anonymous pipes via `os_pipe`, passed as inheritable handles.
-/// Chrome reads from handle 3, writes to handle 4 (mapped via `--remote-debugging-io`
-/// or inherited stdio extras).
+/// Windows: named pipes with IOCP support, passed via `--remote-debugging-io-pipes`.
+/// Chrome reads from one pipe handle and writes to another. Named pipes are used
+/// instead of anonymous pipes because anonymous pipes don't support overlapped I/O
+/// (required for tokio's IOCP integration on Windows).
 #[cfg(windows)]
 fn spawn_with_pipes(
   command: &mut tokio::process::Command,
   _chromium_path: &str,
-) -> Result<(
-  tokio::process::Child,
-  tokio::io::ReadHalf<tokio::io::DuplexStream>,
-  tokio::io::WriteHalf<tokio::io::DuplexStream>,
-), String> {
-  // On Windows, Chrome's --remote-debugging-pipe uses handle 3 and 4.
-  // We create anonymous pipes and pass them via STARTUPINFO additional handles.
-  // For now, fall back to cdp_raw (WebSocket) on Windows. Pipe transport
-  // requires platform-specific handle inheritance that is complex to implement.
-  Err("CDP pipe transport is not yet supported on Windows. Use --backend cdp-raw instead.".into())
+) -> Result<(tokio::process::Child, BoxReader, BoxWriter), String> {
+  use std::os::windows::io::RawHandle;
+  use std::ptr;
+
+  // Generate unique pipe names for this process.
+  let id = std::process::id();
+  let ts = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap_or_default()
+    .as_nanos();
+  let pipe_in_name = format!(r"\\.\pipe\ferridriver-in-{id}-{ts}");
+  let pipe_out_name = format!(r"\\.\pipe\ferridriver-out-{id}-{ts}");
+
+  fn to_wide(s: &str) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+    std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+  }
+
+  unsafe {
+    use windows_sys::Win32::Foundation::*;
+    use windows_sys::Win32::Security::SECURITY_ATTRIBUTES;
+    use windows_sys::Win32::Storage::FileSystem::*;
+    use windows_sys::Win32::System::Pipes::*;
+
+    let mut sa = SECURITY_ATTRIBUTES {
+      nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
+      lpSecurityDescriptor: ptr::null_mut(),
+      bInheritHandle: TRUE,
+    };
+
+    // Server ends (parent side) — overlapped for IOCP/tokio.
+    // Parent writes to pipe_in, Chrome reads from it.
+    let server_in = CreateNamedPipeW(
+      to_wide(&pipe_in_name).as_ptr(),
+      PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+      PIPE_TYPE_BYTE | PIPE_WAIT,
+      1, 65536, 65536, 0, ptr::null_mut(),
+    );
+    if server_in == INVALID_HANDLE_VALUE {
+      return Err("CreateNamedPipe failed for input pipe".into());
+    }
+
+    // Parent reads from pipe_out, Chrome writes to it.
+    let server_out = CreateNamedPipeW(
+      to_wide(&pipe_out_name).as_ptr(),
+      PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
+      PIPE_TYPE_BYTE | PIPE_WAIT,
+      1, 65536, 65536, 0, ptr::null_mut(),
+    );
+    if server_out == INVALID_HANDLE_VALUE {
+      CloseHandle(server_in);
+      return Err("CreateNamedPipe failed for output pipe".into());
+    }
+
+    // Client ends (Chrome side) — inheritable, synchronous.
+    // Chrome reads from client_in.
+    let client_in = CreateFileW(
+      to_wide(&pipe_in_name).as_ptr(),
+      GENERIC_READ, 0, &sa as *const SECURITY_ATTRIBUTES, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0 as HANDLE,
+    );
+    if client_in == INVALID_HANDLE_VALUE {
+      CloseHandle(server_in);
+      CloseHandle(server_out);
+      return Err("CreateFile failed for Chrome input pipe".into());
+    }
+
+    // Chrome writes to client_out.
+    let client_out = CreateFileW(
+      to_wide(&pipe_out_name).as_ptr(),
+      GENERIC_WRITE, 0, &sa as *const SECURITY_ATTRIBUTES, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0 as HANDLE,
+    );
+    if client_out == INVALID_HANDLE_VALUE {
+      CloseHandle(server_in);
+      CloseHandle(server_out);
+      CloseHandle(client_in);
+      return Err("CreateFile failed for Chrome output pipe".into());
+    }
+
+    // Tell Chrome which handles to use via --remote-debugging-io-pipes.
+    command.arg(format!(
+      "--remote-debugging-io-pipes={},{}",
+      client_in as u32, client_out as u32,
+    ));
+
+    let child = command
+      .spawn()
+      .map_err(|e| format!("Failed to launch Chrome: {e}"))?;
+
+    // Close client ends in parent (Chrome has its own copies via inheritance).
+    CloseHandle(client_in);
+    CloseHandle(client_out);
+
+    // Wrap server ends in tokio named pipe types (IOCP-backed, async-native).
+    let reader = tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
+      server_out as RawHandle,
+    ).map_err(|e| format!("tokio NamedPipeServer (read): {e}"))?;
+
+    let writer = tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
+      server_in as RawHandle,
+    ).map_err(|e| format!("tokio NamedPipeServer (write): {e}"))?;
+
+    Ok((child, Box::new(reader) as BoxReader, Box::new(writer) as BoxWriter))
+  }
 }
