@@ -994,16 +994,16 @@ mod tests {
 
   #[tokio::test]
   async fn test_ensure_instance_uses_resolver_for_connect() {
-    // Start a TCP listener to simulate a Chrome debug port
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = listener.local_addr().unwrap().port();
+    // Bind then drop to get a port that's definitely not listening.
+    let port = {
+      let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+      l.local_addr().unwrap().port()
+      // listener drops here, port is free
+    };
 
     let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpRaw);
     state.set_instance_resolver_fn(Box::new(move |instance| {
       if instance == "test-resolved" {
-        // Return a ConnectUrl to a port that's listening but not actually Chrome.
-        // ensure_instance will try to connect and fail at the WebSocket handshake,
-        // but the resolver itself is correctly invoked.
         Some(ConnectMode::ConnectUrl(format!(
           "ws://127.0.0.1:{port}/devtools/browser/test"
         )))
@@ -1012,15 +1012,14 @@ mod tests {
       }
     }));
 
-    // Should attempt WebSocket connection (will fail because it's not real Chrome,
-    // but proves the resolver was used instead of launching)
+    // Should attempt WebSocket connection to the dead port (fails fast with
+    // "connection refused"), proving the resolver was invoked instead of launching.
     let result = state.ensure_instance("test-resolved").await;
     assert!(
       result.is_err(),
-      "Should fail at WS handshake (not a real Chrome), proving resolver was invoked"
+      "Should fail with connection refused, proving resolver was invoked"
     );
     let err = result.unwrap_err();
-    // The error should be about WebSocket/connection, NOT about Chrome binary not found
     assert!(
       !err.contains("not found") && !err.contains("No such file"),
       "Error should be connection-related, not binary-not-found: {err}"
