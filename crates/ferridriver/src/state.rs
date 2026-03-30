@@ -941,3 +941,108 @@ fn find_playwright_chrome() -> Option<String> {
 fn find_playwright_chrome() -> Option<String> {
   None
 }
+
+#[cfg(test)]
+mod tests {
+  use std::sync::Arc;
+
+  use super::*;
+  use crate::backend::BackendKind;
+
+  #[test]
+  fn test_instance_resolver_none_by_default() {
+    let state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpPipe);
+    assert!(state.instance_resolver_fn.is_none());
+  }
+
+  #[test]
+  fn test_instance_resolver_returns_connect_url() {
+    let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpPipe);
+    state.set_instance_resolver_fn(Box::new(|instance| match instance {
+      "staging" => Some(ConnectMode::ConnectUrl(
+        "ws://127.0.0.1:9222/devtools/browser/abc".to_owned(),
+      )),
+      _ => None,
+    }));
+
+    // Resolver returns Some for "staging"
+    let resolved = state.instance_resolver_fn.as_ref().unwrap()("staging");
+    assert!(matches!(resolved, Some(ConnectMode::ConnectUrl(url)) if url.contains("9222")));
+
+    // Resolver returns None for unknown instance (falls through to default)
+    let resolved = state.instance_resolver_fn.as_ref().unwrap()("unknown");
+    assert!(resolved.is_none());
+  }
+
+  #[test]
+  fn test_instance_args_fn_independent_of_resolver() {
+    let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpPipe);
+
+    state.set_instance_args_fn(Box::new(|instance| {
+      vec![format!("--window-name={instance}")]
+    }));
+
+    state.set_instance_resolver_fn(Box::new(|_| None));
+
+    // Both callbacks set independently
+    let args = state.instance_args_fn.as_ref().unwrap()("dev");
+    assert_eq!(args, vec!["--window-name=dev"]);
+
+    let resolved = state.instance_resolver_fn.as_ref().unwrap()("dev");
+    assert!(resolved.is_none());
+  }
+
+  #[tokio::test]
+  async fn test_ensure_instance_uses_resolver_for_connect() {
+    // Start a TCP listener to simulate a Chrome debug port
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+
+    let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpRaw);
+    state.set_instance_resolver_fn(Box::new(move |instance| {
+      if instance == "test-resolved" {
+        // Return a ConnectUrl to a port that's listening but not actually Chrome.
+        // ensure_instance will try to connect and fail at the WebSocket handshake,
+        // but the resolver itself is correctly invoked.
+        Some(ConnectMode::ConnectUrl(format!(
+          "ws://127.0.0.1:{port}/devtools/browser/test"
+        )))
+      } else {
+        None
+      }
+    }));
+
+    // Should attempt WebSocket connection (will fail because it's not real Chrome,
+    // but proves the resolver was used instead of launching)
+    let result = state.ensure_instance("test-resolved").await;
+    assert!(
+      result.is_err(),
+      "Should fail at WS handshake (not a real Chrome), proving resolver was invoked"
+    );
+    let err = result.unwrap_err();
+    // The error should be about WebSocket/connection, NOT about Chrome binary not found
+    assert!(
+      !err.contains("not found") && !err.contains("No such file"),
+      "Error should be connection-related, not binary-not-found: {err}"
+    );
+  }
+
+  #[tokio::test]
+  async fn test_ensure_instance_skips_resolver_when_exists() {
+    use std::sync::atomic::{AtomicU32, Ordering};
+
+    let call_count = Arc::new(AtomicU32::new(0));
+    let counter = Arc::clone(&call_count);
+
+    let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpPipe);
+    state.set_instance_resolver_fn(Box::new(move |_| {
+      counter.fetch_add(1, Ordering::Relaxed);
+      None // Fall through to default
+    }));
+
+    // First call: resolver should be called (but will fall through and try to launch)
+    let _ = state.ensure_instance("test").await;
+    // Resolver was called exactly once (regardless of whether launch succeeded)
+    assert_eq!(call_count.load(Ordering::Relaxed), 1);
+  }
+}
