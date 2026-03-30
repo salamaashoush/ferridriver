@@ -1,2 +1,12 @@
 /target
 Cargo.lock
+node_modules/
+*.node
+perf.data
+perf.data.old
+test-results/
+bench/pw-bench/node_modules/
+bench/pw-bench/package-lock.json
+bench/pw-bench/test-results/
+packages/*/node_modules/
+packages/*/bun.lock

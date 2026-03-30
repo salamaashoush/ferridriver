@@ -49,84 +49,24 @@ impl PipeTransport {
     user_data_dir: &Path,
     extra_flags: &[String],
   ) -> Result<(Self, tokio::process::Child), String> {
-    use std::os::unix::io::IntoRawFd;
-
-    // Create a Unix socketpair instead of two pipes.
-    // Chrome will read AND write on the child end (dup'd to fd 3 and fd 4).
-    let (parent_sock, child_sock) = std::os::unix::net::UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
-
-    let child_fd = child_sock.into_raw_fd();
-
     let mut command = tokio::process::Command::new(chromium_path);
 
-    // user-data-dir MUST come before --remote-debugging-pipe (Chrome quirk,
-    // see Bun's ChromeProcess.zig comment about CommandLine::Init)
+    // user-data-dir MUST come before --remote-debugging-pipe (Chrome quirk).
     command.arg(format!("--user-data-dir={}", user_data_dir.display()));
     command.arg("--remote-debugging-pipe");
 
-    // Apply Chrome flags (from LaunchOptions)
     for flag in extra_flags {
       command.arg(flag);
     }
-
-    // Pipe-specific flags
-    command.arg("--no-startup-window"); // we create targets explicitly via CDP
+    command.arg("--no-startup-window");
 
     command
       .stdin(std::process::Stdio::null())
       .stdout(std::process::Stdio::null())
       .stderr(std::process::Stdio::piped());
 
-    // In pre_exec, dup the child socket fd to fd 3 and fd 4 for Chrome.
-    // Check return values of dup2 for safety.
-    // SAFETY: pre_exec runs between fork and exec in the child process.
-    // We dup2 the socketpair fd to fd 3 and 4 which Chrome expects for
-    // --remote-debugging-pipe. The fd comes from UnixStream::pair() and
-    // is valid. dup2 return values are checked. The closure only uses
-    // async-signal-safe syscalls (dup2, close, fcntl).
-    #[allow(unsafe_code)]
-    unsafe {
-      command.pre_exec(move || {
-        // Chrome reads commands from fd 3 and writes responses to fd 4.
-        // Both point to the same socketpair end.
-        //
-        // Critical: child_fd comes from UnixStream::pair() which sets
-        // SOCK_CLOEXEC. If child_fd happens to be 3 or 4, dup2 is a
-        // no-op but CLOEXEC stays set, so exec closes the fd and Chrome
-        // sees "pipe file descriptors are not open". Fix: always clear
-        // CLOEXEC on child_fd first, then dup2 to both 3 and 4.
-        // dup2 target fds never inherit CLOEXEC.
-
-        // Clear CLOEXEC on the source fd
-        let flags = libc::fcntl(child_fd, libc::F_GETFD);
-        if flags != -1 {
-          libc::fcntl(child_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
-        }
-
-        if child_fd != 3 && libc::dup2(child_fd, 3) == -1 {
-          return Err(std::io::Error::last_os_error());
-        }
-        if child_fd != 4 && libc::dup2(child_fd, 4) == -1 {
-          return Err(std::io::Error::last_os_error());
-        }
-        if child_fd != 3 && child_fd != 4 {
-          libc::close(child_fd);
-        }
-        Ok(())
-      });
-    }
-
-    let child = command
-      .spawn()
-      .map_err(|e| format!("Failed to launch Chrome with --remote-debugging-pipe: {e}"))?;
-
-    // Convert the parent socket to a tokio UnixStream
-    parent_sock
-      .set_nonblocking(true)
-      .map_err(|e| format!("set_nonblocking: {e}"))?;
-    let parent_stream = tokio::net::UnixStream::from_std(parent_sock).map_err(|e| format!("tokio stream: {e}"))?;
-
-    let (reader, writer) = tokio::io::split(parent_stream);
+    // Platform-specific pipe setup and process spawning.
+    let (child, reader, writer) = spawn_with_pipes(&mut command, chromium_path)?;
 
     let (event_tx, _) = broadcast::channel(256);
 
@@ -349,4 +289,74 @@ impl PipeTransport {
   pub fn subscribe_events(&self) -> broadcast::Receiver<serde_json::Value> {
     self.event_tx.subscribe()
   }
+}
+
+// ── Platform-specific pipe spawning ──
+
+/// Unix: socketpair + dup2 to fd 3/4.
+#[cfg(unix)]
+fn spawn_with_pipes(
+  command: &mut tokio::process::Command,
+  _chromium_path: &str,
+) -> Result<(
+  tokio::process::Child,
+  tokio::io::ReadHalf<tokio::net::UnixStream>,
+  tokio::io::WriteHalf<tokio::net::UnixStream>,
+), String> {
+  use std::os::unix::io::IntoRawFd;
+
+  let (parent_sock, child_sock) =
+    std::os::unix::net::UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+  let child_fd = child_sock.into_raw_fd();
+
+  #[allow(unsafe_code)]
+  unsafe {
+    command.pre_exec(move || {
+      let flags = libc::fcntl(child_fd, libc::F_GETFD);
+      if flags != -1 {
+        libc::fcntl(child_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);
+      }
+      if child_fd != 3 && libc::dup2(child_fd, 3) == -1 {
+        return Err(std::io::Error::last_os_error());
+      }
+      if child_fd != 4 && libc::dup2(child_fd, 4) == -1 {
+        return Err(std::io::Error::last_os_error());
+      }
+      if child_fd != 3 && child_fd != 4 {
+        libc::close(child_fd);
+      }
+      Ok(())
+    });
+  }
+
+  let child = command
+    .spawn()
+    .map_err(|e| format!("Failed to launch Chrome with --remote-debugging-pipe: {e}"))?;
+
+  parent_sock
+    .set_nonblocking(true)
+    .map_err(|e| format!("set_nonblocking: {e}"))?;
+  let stream =
+    tokio::net::UnixStream::from_std(parent_sock).map_err(|e| format!("tokio stream: {e}"))?;
+  let (reader, writer) = tokio::io::split(stream);
+  Ok((child, reader, writer))
+}
+
+/// Windows: anonymous pipes via `os_pipe`, passed as inheritable handles.
+/// Chrome reads from handle 3, writes to handle 4 (mapped via `--remote-debugging-io`
+/// or inherited stdio extras).
+#[cfg(windows)]
+fn spawn_with_pipes(
+  command: &mut tokio::process::Command,
+  _chromium_path: &str,
+) -> Result<(
+  tokio::process::Child,
+  tokio::io::ReadHalf<tokio::io::DuplexStream>,
+  tokio::io::WriteHalf<tokio::io::DuplexStream>,
+), String> {
+  // On Windows, Chrome's --remote-debugging-pipe uses handle 3 and 4.
+  // We create anonymous pipes and pass them via STARTUPINFO additional handles.
+  // For now, fall back to cdp_raw (WebSocket) on Windows. Pipe transport
+  // requires platform-specific handle inheritance that is complex to implement.
+  Err("CDP pipe transport is not yet supported on Windows. Use --backend cdp-raw instead.".into())
 }
