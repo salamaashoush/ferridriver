@@ -38,10 +38,10 @@ pub use self::ctx as sess;
 
 /// Trait for customizing the MCP server behavior.
 ///
-/// Implement this to control chrome launch args, server metadata,
-/// and pre-dispatch validation. The library stays generic -- any
-/// domain-specific concepts (environments, auth, etc.) belong in
-/// the consumer's own `ServerHandler` wrapper.
+/// Implement this to control chrome launch args, browser instance resolution,
+/// server metadata, and pre-dispatch validation. The library stays generic --
+/// any domain-specific concepts (environments, auth, etc.) belong in the
+/// consumer's own `ServerHandler` wrapper.
 pub trait McpServerConfig: Send + Sync + 'static {
   /// Base Chrome arguments applied to ALL browser instances.
   ///
@@ -60,6 +60,22 @@ pub trait McpServerConfig: Send + Sync + 'static {
   /// Default: no additional args (all instances get the same base flags).
   fn chrome_args_for_instance(&self, _instance: &str) -> Vec<String> {
     Vec::new()
+  }
+
+  /// Resolve how to connect to a browser instance by name.
+  ///
+  /// Called before launching a new browser. If this returns `Some(ConnectMode)`,
+  /// ferridriver connects to an existing browser instead of launching a new one.
+  ///
+  /// Use this to integrate with external browser managers:
+  /// - Read a `DevToolsActivePort` file from a known profile directory
+  /// - Query a service registry for running browser endpoints
+  /// - Connect to a browser launched by another tool with debugging enabled
+  ///
+  /// The instance name comes from the session key (e.g. `"staging"` from `"staging:admin"`).
+  /// Return `None` to fall through to the default behavior (launch a new browser).
+  fn resolve_instance(&self, _instance: &str) -> Option<ConnectMode> {
+    None
   }
 
   /// Server name for MCP `get_info`.
@@ -131,6 +147,11 @@ impl McpServer {
     let config_clone = Arc::clone(&config);
     browser_state.set_instance_args_fn(Box::new(move |instance| {
       config_clone.chrome_args_for_instance(instance)
+    }));
+    // Wire per-instance connection resolver from config trait.
+    let config_clone = Arc::clone(&config);
+    browser_state.set_instance_resolver_fn(Box::new(move |instance| {
+      config_clone.resolve_instance(instance)
     }));
     let state = Arc::new(Mutex::new(browser_state));
     Self {

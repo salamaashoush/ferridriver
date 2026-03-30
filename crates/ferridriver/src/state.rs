@@ -102,6 +102,17 @@ impl BrowserInstance {
 /// Callback type for per-instance chrome args.
 pub type InstanceArgsFn = Box<dyn Fn(&str) -> Vec<String> + Send + Sync>;
 
+/// Callback type for resolving how to connect to a browser instance.
+///
+/// When an instance is requested, this resolver is called first. If it returns
+/// `Some(ConnectMode)`, that mode is used instead of the default `connect_mode`.
+/// This allows consumers to route certain instances to existing browsers
+/// (e.g. "staging" -> connect to a browser already running with debugging enabled)
+/// while launching fresh browsers for others.
+///
+/// Return `None` to fall through to the default `connect_mode`.
+pub type InstanceResolverFn = Box<dyn Fn(&str) -> Option<ConnectMode> + Send + Sync>;
+
 /// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
   instances: HashMap<String, BrowserInstance>,
@@ -112,6 +123,9 @@ pub struct BrowserState {
   pub extra_args: Vec<String>,
   /// Per-instance additional chrome args. Called with instance name when launching.
   instance_args_fn: Option<InstanceArgsFn>,
+  /// Per-instance connect mode resolver. Called before launching to check if
+  /// an existing browser should be connected to instead.
+  instance_resolver_fn: Option<InstanceResolverFn>,
   /// Whether to run headless.
   pub headless: bool,
   /// Custom user data directory.
@@ -144,6 +158,7 @@ impl BrowserState {
       backend_kind,
       extra_args: Vec::new(),
       instance_args_fn: None,
+      instance_resolver_fn: None,
       headless: true,
       user_data_dir: None,
       default_viewport: Some(crate::options::ViewportConfig::default()),
@@ -163,6 +178,7 @@ impl BrowserState {
       backend_kind: opts.backend,
       extra_args: opts.args,
       instance_args_fn: None,
+      instance_resolver_fn: None,
       headless: opts.headless,
       user_data_dir: opts.user_data_dir,
       default_viewport: opts.viewport,
@@ -173,6 +189,16 @@ impl BrowserState {
   /// Called with the instance name when launching a new Chrome process.
   pub fn set_instance_args_fn(&mut self, f: InstanceArgsFn) {
     self.instance_args_fn = Some(f);
+  }
+
+  /// Set a callback to resolve how to connect to a specific instance.
+  ///
+  /// When `ensure_instance("name")` is called, the resolver runs first.
+  /// If it returns `Some(ConnectMode)`, that mode is used instead of launching.
+  /// This decouples browser discovery from ferridriver -- the consumer provides
+  /// the discovery logic (reading DevToolsActivePort files, querying a registry, etc.).
+  pub fn set_instance_resolver_fn(&mut self, f: InstanceResolverFn) {
+    self.instance_resolver_fn = Some(f);
   }
 
   // ── Instance management ─────────────────────────────────────────────────
@@ -187,43 +213,55 @@ impl BrowserState {
       return Ok(());
     }
 
+    // Check if the instance resolver can provide a connection mode.
+    // This lets consumers route specific instances to existing browsers
+    // (e.g. "staging" -> connect to browser managed by another tool).
+    let resolved_mode = self
+      .instance_resolver_fn
+      .as_ref()
+      .and_then(|f| f(instance_name));
+
     // Build flags: base + per-instance
     let mut all_extra = self.extra_args.clone();
     if let Some(ref f) = self.instance_args_fn {
       all_extra.extend(f(instance_name));
     }
 
-    let browser = match self.backend_kind {
-      BackendKind::CdpPipe => {
-        use crate::backend::cdp_pipe::CdpPipeBrowser;
-        let flags = chrome_flags(self.headless, &all_extra);
-        AnyBrowser::CdpPipe(CdpPipeBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
-      },
-      BackendKind::CdpRaw => {
+    // Use resolved mode if available, otherwise fall back to default connect_mode.
+    let effective_mode = resolved_mode.as_ref().unwrap_or(&self.connect_mode);
+
+    let browser = match effective_mode {
+      // ConnectUrl and AutoConnect always use CdpRaw (WebSocket)
+      ConnectMode::ConnectUrl(url) => {
         use crate::backend::cdp_raw::CdpRawBrowser;
-        match &self.connect_mode {
-          ConnectMode::ConnectUrl(url) => {
-            let ws_url = if url.starts_with("ws://") || url.starts_with("wss://") {
-              url.clone()
-            } else {
-              discover_ws_from_http(url).await?
-            };
-            AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?)
-          },
-          ConnectMode::AutoConnect { channel, user_data_dir } => {
-            let ws_url = discover_chrome_ws(channel, user_data_dir.as_deref())?;
-            AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?)
-          },
-          ConnectMode::Launch => {
-            let flags = chrome_flags(self.headless, &all_extra);
-            AnyBrowser::CdpRaw(CdpRawBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
-          },
-        }
+        let ws_url = if url.starts_with("ws://") || url.starts_with("wss://") {
+          url.clone()
+        } else {
+          discover_ws_from_http(url).await?
+        };
+        AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?)
       },
-      #[cfg(target_os = "macos")]
-      BackendKind::WebKit => {
-        use crate::backend::webkit::WebKitBrowser;
-        AnyBrowser::WebKit(WebKitBrowser::launch().await?)
+      ConnectMode::AutoConnect { channel, user_data_dir } => {
+        use crate::backend::cdp_raw::CdpRawBrowser;
+        let ws_url = discover_chrome_ws(channel, user_data_dir.as_deref())?;
+        AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?)
+      },
+      ConnectMode::Launch => match self.backend_kind {
+        BackendKind::CdpPipe => {
+          use crate::backend::cdp_pipe::CdpPipeBrowser;
+          let flags = chrome_flags(self.headless, &all_extra);
+          AnyBrowser::CdpPipe(CdpPipeBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
+        },
+        BackendKind::CdpRaw => {
+          use crate::backend::cdp_raw::CdpRawBrowser;
+          let flags = chrome_flags(self.headless, &all_extra);
+          AnyBrowser::CdpRaw(CdpRawBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
+        },
+        #[cfg(target_os = "macos")]
+        BackendKind::WebKit => {
+          use crate::backend::webkit::WebKitBrowser;
+          AnyBrowser::WebKit(WebKitBrowser::launch().await?)
+        },
       },
     };
 
