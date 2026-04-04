@@ -1,0 +1,12 @@
+{
+  "name": "ferridriver",
+  "private": true,
+  "workspaces": [
+    "packages/*",
+    "crates/ferridriver-napi",
+    "examples/ct-react",
+    "examples/ct-vue",
+    "examples/ct-svelte",
+    "examples/ct-solid"
+  ]
+}

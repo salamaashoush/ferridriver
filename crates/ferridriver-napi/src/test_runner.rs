@@ -156,6 +156,7 @@ impl TestRunner {
         name: name.clone(), options: Default::default(),
       }).collect();
     }
+    if let Some(ref url) = cfg.base_url { tc.base_url = Some(url.clone()); }
     if let Some(ref dir) = cfg.output_dir { tc.output_dir = dir.into(); }
     if let Some(ref patterns) = cfg.test_match { tc.test_match.clone_from(patterns); }
     if let Some(w) = cfg.viewport_width {
@@ -286,6 +287,7 @@ impl TestRunner {
       let tx = done_tx.clone();
       let timeout_ms = self.config.timeout;
       let max_retries = self.config.retries;
+      let base_url = self.config.base_url.clone();
 
       // Collect references to test callbacks and metadata.
       // ThreadsafeFunction is Clone (Arc-based).
@@ -311,9 +313,40 @@ impl TestRunner {
             continue;
           }
 
-          // Create isolated page.
+          // Create isolated page. Navigate to base_url if set (CT mode).
+          // Wait for the page to be interactive (framework rendered).
           let ctx = browser.new_context();
-          let page_result = ctx.new_page().await;
+          let page_result = match &base_url {
+            Some(url) => {
+              let page = ctx.new_page().await;
+              match page {
+                Ok(p) => {
+                  if let Err(e) = p.goto(url, None).await {
+                    Err(format!("navigate to {url}: {e}"))
+                  } else {
+                    // Wait for the app to render (any element with an id).
+                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+                    loop {
+                      let ready = p
+                        .evaluate("(document.querySelectorAll('[id]').length > 2)")
+                        .await
+                        .unwrap_or(None)
+                        .and_then(|v| v.as_bool())
+                        .unwrap_or(false);
+                      if ready { break; }
+                      if std::time::Instant::now() >= deadline {
+                        break; // Timeout — proceed anyway, test will fail with a clear error.
+                      }
+                      tokio::time::sleep(Duration::from_millis(50)).await;
+                    }
+                    Ok(p)
+                  }
+                }
+                Err(e) => Err(e),
+              }
+            }
+            None => ctx.new_page().await,
+          };
 
           let test_start = Instant::now();
           let test_timeout = meta.timeout

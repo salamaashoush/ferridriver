@@ -80,9 +80,22 @@ async function resolveCtAdapter(): Promise<{
   const fw = ctFramework || 'react';
   const pkg = `@ferridriver/ct-${fw}`;
 
-  for (const path of [pkg, resolve(`packages/ct-${fw}/src/index.mjs`)]) {
+  // Resolve from the user's project directory (cwd), not from the CLI's location.
+  // This ensures bun workspace links in the project's node_modules are found.
+  const { createRequire } = await import('module');
+  const projectRequire = createRequire(resolve('package.json'));
+
+  // Try: 1) resolve from project, 2) bare import, 3) monorepo fallback.
+  const candidates = [
+    () => projectRequire.resolve(pkg),
+    () => pkg,
+    () => resolve(`packages/ct-${fw}/src/index.mjs`),
+  ];
+
+  for (const getPath of candidates) {
     try {
-      const adapter = await import(path);
+      const resolvedPath = getPath();
+      const adapter = await import(resolvedPath);
       return {
         registerSourcePath: adapter.registerSourcePath,
         frameworkPlugin: adapter.vitePlugin || null,
@@ -134,28 +147,55 @@ async function main() {
     process.exit(0);
   }
 
-  // ── CT mode: build + serve before loading tests ──
-  let ctRunner: any = null;
+  // ── CT mode: start Vite dev server for the project ──
+  let viteProcess: any = null;
   if (ctMode) {
-    const adapter = await resolveCtAdapter();
+    // Start the project's own Vite dev server.
+    // This serves the full app (index.html + all sources).
+    // Tests can interact with the app directly OR use mount() for isolated components.
+    const { spawn } = await import('child_process');
+    const port = 3100 + Math.floor(Math.random() * 1000);
 
-    let createCtRunner: any;
-    for (const path of ['@ferridriver/ct-core/runner', resolve('packages/ct-core/src/runner.mjs')]) {
-      try { createCtRunner = (await import(path)).createCtRunner; break; } catch {}
-    }
-    if (!createCtRunner) throw new Error('Cannot find @ferridriver/ct-core.');
+    const viteCmd = (await import('fs')).existsSync(resolve('node_modules/.bin/vite'))
+      ? resolve('node_modules/.bin/vite')
+      : 'bunx';
+    const viteArgs = viteCmd.endsWith('vite')
+      ? ['--port', String(port), '--host', '127.0.0.1']
+      : ['--bun', 'vite', '--port', String(port), '--host', '127.0.0.1'];
 
-    ctRunner = await createCtRunner({
-      projectDir: resolve('.'),
-      testFiles,
-      registerSourcePath: adapter.registerSourcePath,
-      frameworkPlugin: adapter.frameworkPlugin,
+    viteProcess = spawn(viteCmd, viteArgs, {
+      cwd: resolve('.'),
+      stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    config.base_url = ctRunner.baseUrl;
-    setupCtMount();
+    // Wait for Vite to print URL.
+    const viteUrl = await new Promise<string>((resolveUrl, reject) => {
+      const timeout = setTimeout(() => reject(new Error('Vite startup timeout (30s)')), 30000);
+      const onData = (chunk: Buffer) => {
+        const line = chunk.toString();
+        const match = line.match(/http:\/\/127\.0\.0\.1:\d+/);
+        if (match) {
+          clearTimeout(timeout);
+          resolveUrl(match[0]);
+        }
+      };
+      viteProcess.stdout?.on('data', onData);
+      viteProcess.stderr?.on('data', onData);
+      viteProcess.on('error', (e: Error) => { clearTimeout(timeout); reject(e); });
+    });
 
-    console.log(`[ct] ${ctRunner.registry.size} component(s), serving at ${ctRunner.baseUrl}`);
+    // Wait for Vite to actually serve content (first request triggers compilation).
+    for (let i = 0; i < 30; i++) {
+      try {
+        const resp = await fetch(viteUrl);
+        if (resp.ok) break;
+      } catch {}
+      await new Promise(r => setTimeout(r, 500));
+    }
+
+    config.baseUrl = viteUrl;
+    setupCtMount();
+    console.log(`[ct] Vite dev server at ${viteUrl}`);
   }
 
   // ── Create Rust runner ──
@@ -171,7 +211,7 @@ async function main() {
   const tests = _drainTests();
   if (tests.length === 0) {
     console.log('  No tests found.');
-    if (ctRunner) await ctRunner.stop();
+    if (viteProcess) viteProcess.kill();
     process.exit(0);
   }
 
@@ -204,7 +244,7 @@ async function main() {
   if (summary.skipped > 0) parts.push(`\x1b[33m${summary.skipped} skipped\x1b[0m`);
   console.log(`\n  ${summary.total} test(s): ${parts.join(', ')} (${Math.round(summary.durationMs)}ms)\n`);
 
-  if (ctRunner) await ctRunner.stop();
+  if (viteProcess) viteProcess.kill();
   process.exit(summary.failed > 0 ? 1 : 0);
 }
 

@@ -81,11 +81,10 @@ export async function createCtRunner(config) {
   const { createRequire } = await import("module");
   const projectRequire = createRequire(join(projectDir, "package.json"));
   const vite = await import(projectRequire.resolve("vite"));
+  // Only add our CT plugin. The framework plugin (react, vue, etc.) comes from
+  // the project's vite.config.ts which we load via configFile.
   const ctPlugin = ferridriverCtPlugin(registry, registerSourcePath, templateDir);
-  const fwPlugin = frameworkPlugin ? await frameworkPlugin() : null;
-
   const plugins = [ctPlugin];
-  if (fwPlugin) plugins.push(fwPlugin);
 
   const viteConfig = {
     // Root = project dir so Vite resolves node_modules (react, etc.) correctly.

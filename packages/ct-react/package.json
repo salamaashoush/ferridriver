@@ -9,7 +9,7 @@
     "./register": "./src/registerSource.mjs"
   },
   "dependencies": {
-    "@ferridriver/ct-core": "file:../ct-core"
+    "@ferridriver/ct-core": "workspace:*"
   },
   "peerDependencies": {
     "react": ">=18.0.0",

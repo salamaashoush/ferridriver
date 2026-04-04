@@ -4,13 +4,16 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "test": "bun test"
+    "test:ct": "ferridriver-test --ct --framework react src/todomvc.ct.ts"
   },
   "dependencies": {
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
   "devDependencies": {
+    "@ferridriver/test": "workspace:*",
+    "@ferridriver/ct-react": "workspace:*",
+    "@ferridriver/ct-core": "workspace:*",
     "@vitejs/plugin-react": "^4.0.0",
     "vite": "^6.0.0"
   }
