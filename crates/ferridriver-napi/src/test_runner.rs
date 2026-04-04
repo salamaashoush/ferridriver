@@ -252,22 +252,8 @@ impl TestRunner {
 
     let start = Instant::now();
 
-    // Launch all browsers in parallel.
-    let launch_opts = build_launch_options(&self.config.browser);
-    let mut browser_handles = Vec::with_capacity(num_workers);
-    for _ in 0..num_workers {
-      let opts = launch_opts.clone();
-      browser_handles.push(tokio::spawn(async move {
-        ferridriver::Browser::launch(opts).await
-      }));
-    }
-    let mut browsers: Vec<Arc<ferridriver::Browser>> = Vec::with_capacity(num_workers);
-    for handle in browser_handles {
-      let browser = handle.await
-        .map_err(|e| napi::Error::from_reason(format!("browser launch panicked: {e}")))?
-        .map_err(napi::Error::from_reason)?;
-      browsers.push(Arc::new(browser));
-    }
+    // Only spawn as many workers as there are tests.
+    let actual_workers = num_workers.min(total_tests);
 
     // Build work queue: (test_index, attempt).
     let (work_tx, work_rx) = async_channel::unbounded::<(usize, u32)>();
@@ -276,18 +262,19 @@ impl TestRunner {
     }
 
     // Collect results.
-    let results: Arc<Mutex<Vec<TestResultItem>>> = Arc::new(Mutex::new(Vec::new()));
+    let _results: Arc<Mutex<Vec<TestResultItem>>> = Arc::new(Mutex::new(Vec::new()));
     let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<(usize, TestResultItem, bool)>(256);
 
-    // Spawn N workers.
+    // Spawn workers — each launches its own browser on-demand.
+    let launch_opts = build_launch_options(&self.config.browser);
     let mut worker_handles = Vec::new();
-    for worker_id in 0..num_workers {
-      let browser = Arc::clone(&browsers[worker_id]);
+    for worker_id in 0..actual_workers {
       let rx = work_rx.clone();
       let tx = done_tx.clone();
       let timeout_ms = self.config.timeout;
       let max_retries = self.config.retries;
       let base_url = self.config.base_url.clone();
+      let opts = launch_opts.clone();
 
       // Collect references to test callbacks and metadata.
       // ThreadsafeFunction is Clone (Arc-based).
@@ -295,6 +282,9 @@ impl TestRunner {
       let test_metas: Vec<_> = tests.iter().map(|t| t.meta.clone()).collect();
 
       let handle = tokio::spawn(async move {
+        // Lazy browser launch — only when this worker picks up its first test.
+        let mut browser: Option<Arc<ferridriver::Browser>> = None;
+
         while let Ok((test_idx, attempt)) = rx.recv().await {
           let meta = &test_metas[test_idx];
           let cb = &test_callbacks[test_idx];
@@ -313,9 +303,26 @@ impl TestRunner {
             continue;
           }
 
+          // Lazy browser launch on first real test.
+          if browser.is_none() {
+            match ferridriver::Browser::launch(opts.clone()).await {
+              Ok(b) => { browser = Some(Arc::new(b)); }
+              Err(e) => {
+                let result = TestResultItem {
+                  id: meta.id.clone(), title: meta.title.clone(),
+                  status: "failed".into(), duration_ms: 0.0,
+                  attempt: attempt as i32,
+                  error_message: Some(format!("browser launch failed: {e}")),
+                };
+                let _ = tx.send((test_idx, result, false)).await;
+                continue;
+              }
+            }
+          }
+          let browser_ref = browser.as_ref().unwrap();
+
           // Create isolated page. Navigate to base_url if set (CT mode).
-          // Vite is pre-warmed by the CLI, so goto → load should be fast.
-          let ctx = browser.new_context();
+          let ctx = browser_ref.new_context();
           let page_result = match &base_url {
             Some(url) => {
               match ctx.new_page().await {
@@ -421,10 +428,7 @@ impl TestRunner {
 
     let duration = start.elapsed();
 
-    // Close browsers.
-    for browser in &browsers {
-      let _ = browser.close().await;
-    }
+    // Browsers are closed when worker tasks drop (lazy-owned by each worker).
 
     // Compute summary.
     // For flaky detection: group by test ID, if last attempt passed but earlier failed → flaky.
