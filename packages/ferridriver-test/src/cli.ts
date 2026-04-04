@@ -184,18 +184,33 @@ async function main() {
       viteProcess.on('error', (e: Error) => { clearTimeout(timeout); reject(e); });
     });
 
-    // Wait for Vite to actually serve content (first request triggers compilation).
-    for (let i = 0; i < 30; i++) {
+    // Pre-warm: fetch the page to trigger Vite's on-demand compilation.
+    // This compiles React/Vue/Svelte/Solid BEFORE any browser connects,
+    // so browsers get pre-compiled JS instantly.
+    const warmStart = Date.now();
+    for (let i = 0; i < 60; i++) {
       try {
         const resp = await fetch(viteUrl);
-        if (resp.ok) break;
+        if (resp.ok) {
+          // Fetch the JS entry too to trigger full compilation.
+          const html = await resp.text();
+          const scriptMatch = html.match(/src="([^"]+\.(?:tsx?|jsx?|mts|mjs))"/);
+          if (scriptMatch) {
+            await fetch(`${viteUrl}${scriptMatch[1]}`);
+          }
+          break;
+        }
       } catch {}
-      await new Promise(r => setTimeout(r, 500));
+      await new Promise(r => setTimeout(r, 200));
     }
+    console.log(`[ct] Vite warmed in ${Date.now() - warmStart}ms`);
 
     config.baseUrl = viteUrl;
+    // Cap workers for CT — Chrome launch + navigate dominates.
+    // 4 workers is the sweet spot (benchmarked).
+    if (!config.workers) config.workers = 4;
     setupCtMount();
-    console.log(`[ct] Vite dev server at ${viteUrl}`);
+    console.log(`[ct] Serving at ${viteUrl}`);
   }
 
   // ── Create Rust runner ──

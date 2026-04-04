@@ -314,34 +314,12 @@ impl TestRunner {
           }
 
           // Create isolated page. Navigate to base_url if set (CT mode).
-          // Wait for the page to be interactive (framework rendered).
+          // Vite is pre-warmed by the CLI, so goto → load should be fast.
           let ctx = browser.new_context();
           let page_result = match &base_url {
             Some(url) => {
-              let page = ctx.new_page().await;
-              match page {
-                Ok(p) => {
-                  if let Err(e) = p.goto(url, None).await {
-                    Err(format!("navigate to {url}: {e}"))
-                  } else {
-                    // Wait for the app to render (any element with an id).
-                    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-                    loop {
-                      let ready = p
-                        .evaluate("(document.querySelectorAll('[id]').length > 2)")
-                        .await
-                        .unwrap_or(None)
-                        .and_then(|v| v.as_bool())
-                        .unwrap_or(false);
-                      if ready { break; }
-                      if std::time::Instant::now() >= deadline {
-                        break; // Timeout — proceed anyway, test will fail with a clear error.
-                      }
-                      tokio::time::sleep(Duration::from_millis(50)).await;
-                    }
-                    Ok(p)
-                  }
-                }
+              match ctx.new_page().await {
+                Ok(p) => p.goto(url, None).await.map(|()| p),
                 Err(e) => Err(e),
               }
             }
