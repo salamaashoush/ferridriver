@@ -30,6 +30,10 @@ quick-xml = "0.37"
 similar = "2"
 base64 = "0.22"
 zip = { version = "2", default-features = false, features = ["deflate"] }
+axum = { workspace = true }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["fs", "cors"] }
+http = "1"
 
 [[bin]]
 name = "bench-profile"

@@ -26,6 +26,7 @@
 
 // ── Core modules ──
 pub mod config;
+pub mod ct;
 pub mod discovery;
 pub mod dispatcher;
 pub mod expect;
