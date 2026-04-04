@@ -1,5 +1,4 @@
-import React from "react";
 import { createRoot } from "react-dom/client";
-import Counter from "./Counter";
+import TodoApp from "./TodoApp";
 
-createRoot(document.getElementById("app")!).render(<Counter initial={0} />);
+createRoot(document.getElementById("app")!).render(<TodoApp />);

@@ -1,12 +1,12 @@
 /**
- * @ferridriver/ct-vue — registerSource
+ * @ferridriver/ct-solid — registerSource
  *
- * Implements window.__ferriMount/Update/Unmount using Vue 3's createApp.
+ * Implements window.__ferriMount/Update/Unmount using Solid's render API.
  */
 
-import { createApp, h } from "vue";
+import { render } from "solid-js/web";
 
-const __apps = new Map();
+const __disposers = new Map();
 
 window.__ferriMount = async function (componentRef, rootElement, options = {}) {
   const props = options.props || componentRef.props || {};
@@ -24,21 +24,8 @@ window.__ferriMount = async function (componentRef, rootElement, options = {}) {
     }
   }
 
-  const app = createApp({
-    render() {
-      return h(Component, props);
-    },
-  });
-
-  // Allow plugins via beforeMount hooks (e.g. Pinia, Vue Router).
-  if (options.hooksConfig && options.hooksConfig.plugins) {
-    for (const plugin of options.hooksConfig.plugins) {
-      app.use(plugin);
-    }
-  }
-
-  app.mount(rootElement);
-  __apps.set(rootElement, { app, Component });
+  const dispose = render(() => Component(props), rootElement);
+  __disposers.set(rootElement, dispose);
 
   if (window.__ferriAfterMount) {
     for (const hook of window.__ferriAfterMount) {
@@ -47,21 +34,12 @@ window.__ferriMount = async function (componentRef, rootElement, options = {}) {
   }
 };
 
-window.__ferriUpdate = function (rootElement, newProps) {
-  const entry = __apps.get(rootElement);
-  if (!entry) throw new Error("No component mounted on this element");
-  entry.app.unmount();
-  const app = createApp({ render: () => h(entry.Component, newProps) });
-  app.mount(rootElement);
-  entry.app = app;
-};
-
 window.__ferriUnmount = function (rootElement) {
   const el = rootElement || document.getElementById("root") || document.getElementById("app");
-  const entry = __apps.get(el);
-  if (entry) {
-    entry.app.unmount();
-    __apps.delete(el);
+  const dispose = __disposers.get(el);
+  if (dispose) {
+    dispose();
+    __disposers.delete(el);
   }
 };
 

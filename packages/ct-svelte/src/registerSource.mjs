@@ -11,10 +11,10 @@ window.__ferriMount = async function (componentRef, rootElement, options = {}) {
   const props = options.props || componentRef.props || {};
 
   let Component;
-  if (window.__ferriRegistry && window.__ferriRegistry[componentRef.id]) {
-    Component = await window.__ferriRegistry[componentRef.id]();
+  if (window.__ferriRegistry && window.__ferriRegistry.resolveImportRef) {
+    Component = await window.__ferriRegistry.resolveImportRef(componentRef);
   } else {
-    throw new Error(`Component "${componentRef.id}" not found in registry.`);
+    throw new Error("Component registry not initialized");
   }
 
   if (window.__ferriBeforeMount) {

@@ -1,0 +1,8 @@
+{
+  "name": "ct-svelte-example",
+  "private": true,
+  "type": "module",
+  "scripts": { "dev": "vite", "test:ct": "ferridriver-test --ct --framework svelte" },
+  "dependencies": { "svelte": "^5.0.0" },
+  "devDependencies": { "@sveltejs/vite-plugin-svelte": "^5.0.0", "vite": "^6.0.0" }
+}

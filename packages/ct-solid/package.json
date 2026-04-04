@@ -1,0 +1,15 @@
+{
+  "name": "@ferridriver/ct-solid",
+  "version": "0.1.0",
+  "description": "Ferridriver component testing adapter for Solid",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./register": "./src/registerSource.mjs"
+  },
+  "peerDependencies": {
+    "solid-js": ">=1.0.0"
+  },
+  "keywords": ["ferridriver", "component-testing", "solid"]
+}
