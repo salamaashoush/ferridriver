@@ -254,13 +254,13 @@ impl CdpWsPage {
             .await
             .map_err(|e| format!("No frame: {e}"))?
             .ok_or_else(|| "No main frame".to_string())?;
-        let engine_js = crate::selectors::build_inject_js();
-        let augmented = format!("<script>{engine_js}</script>{html}");
+        // Selector engine is already injected via addScriptToEvaluateOnNewDocument
+        // during page setup, so setDocumentContent triggers it automatically.
         self.page
             .execute(
                 chromiumoxide::cdp::browser_protocol::page::SetDocumentContentParams::new(
                     frame_id,
-                    augmented,
+                    html,
                 ),
             )
             .await
@@ -288,19 +288,7 @@ impl CdpWsPage {
         }
 
         if opts.full_page {
-            use chromiumoxide::cdp::browser_protocol::page::GetLayoutMetricsParams;
-            let metrics = self.page.execute(GetLayoutMetricsParams::default())
-                .await
-                .map_err(|e| format!("Layout metrics: {e}"))?;
-            let cs = &metrics.result.css_content_size;
-            use chromiumoxide::cdp::browser_protocol::page::Viewport;
-            params = params.clip(Viewport {
-                x: 0.0,
-                y: 0.0,
-                width: cs.width,
-                height: cs.height,
-                scale: 1.0,
-            });
+            params = params.capture_beyond_viewport(true);
         }
 
         let result = self.page.execute(params.build())

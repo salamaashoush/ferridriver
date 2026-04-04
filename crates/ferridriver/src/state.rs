@@ -19,6 +19,14 @@ pub const DEFAULT_VIEWPORT_HEIGHT: i64 = 720;
 // Re-export log types from context (they live there now).
 pub use crate::context::{ConsoleMsg, DialogEvent, NetRequest};
 
+/// Arc handles to a context's log collections, usable without holding the `BrowserState` lock.
+#[derive(Clone)]
+pub struct ContextLogHandles {
+  pub console: std::sync::Arc<tokio::sync::RwLock<Vec<ConsoleMsg>>>,
+  pub network: std::sync::Arc<tokio::sync::RwLock<Vec<NetRequest>>>,
+  pub dialog: std::sync::Arc<tokio::sync::RwLock<Vec<DialogEvent>>>,
+}
+
 // ── SessionKey ──────────────────────────────────────────────────────────────
 
 /// Parsed composite session key: `"<instance>:<context>"`.
@@ -233,29 +241,29 @@ impl BrowserState {
     let browser = match effective_mode {
       // ConnectUrl and AutoConnect always use CdpRaw (WebSocket)
       ConnectMode::ConnectUrl(url) => {
-        use crate::backend::cdp_raw::CdpRawBrowser;
+        use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
         let ws_url = if url.starts_with("ws://") || url.starts_with("wss://") {
           url.clone()
         } else {
           discover_ws_from_http(url).await?
         };
-        AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?)
+        AnyBrowser::CdpRaw(CdpBrowser::<WsTransport>::connect(&ws_url).await?)
       },
       ConnectMode::AutoConnect { channel, user_data_dir } => {
-        use crate::backend::cdp_raw::CdpRawBrowser;
+        use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
         let ws_url = discover_chrome_ws(channel, user_data_dir.as_deref())?;
-        AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?)
+        AnyBrowser::CdpRaw(CdpBrowser::<WsTransport>::connect(&ws_url).await?)
       },
       ConnectMode::Launch => match self.backend_kind {
         BackendKind::CdpPipe => {
-          use crate::backend::cdp_pipe::CdpPipeBrowser;
+          use crate::backend::cdp::{CdpBrowser, pipe::PipeTransport};
           let flags = chrome_flags(self.headless, &all_extra);
-          AnyBrowser::CdpPipe(CdpPipeBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
+          AnyBrowser::CdpPipe(CdpBrowser::<PipeTransport>::launch_with_flags(&self.chromium_path, &flags).await?)
         },
         BackendKind::CdpRaw => {
-          use crate::backend::cdp_raw::CdpRawBrowser;
+          use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
           let flags = chrome_flags(self.headless, &all_extra);
-          AnyBrowser::CdpRaw(CdpRawBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
+          AnyBrowser::CdpRaw(CdpBrowser::<WsTransport>::launch_with_flags(&self.chromium_path, &flags).await?)
         },
         #[cfg(target_os = "macos")]
         BackendKind::WebKit => {
@@ -271,12 +279,17 @@ impl BrowserState {
     };
 
     // Adopt existing pages into the "default" context of this instance.
+    // When connecting to an existing browser, skip viewport override to preserve
+    // the user's current window size. Only apply viewport for freshly launched browsers.
+    let is_connect = matches!(effective_mode, ConnectMode::ConnectUrl(_) | ConnectMode::AutoConnect { .. });
     let existing_pages = inst.browser.pages().await.unwrap_or_default();
     let vp = self.default_viewport.clone().unwrap_or_default();
     let ctx = inst.context_mut("default");
     if !existing_pages.is_empty() {
       for page in existing_pages {
-        let _ = page.emulate_viewport(&vp).await;
+        if !is_connect {
+          let _ = page.emulate_viewport(&vp).await;
+        }
         page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
         ctx.pages.push(page);
       }
@@ -309,7 +322,7 @@ impl BrowserState {
   ///
   /// Returns an error if the WebSocket connection or page discovery fails.
   pub async fn connect_to_url(&mut self, instance_name: &str, url: &str) -> Result<usize, String> {
-    use crate::backend::cdp_raw::CdpRawBrowser;
+    use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
 
     // Drop existing instance if any
     self.instances.remove(instance_name);
@@ -320,18 +333,18 @@ impl BrowserState {
       discover_ws_from_http(url).await?
     };
 
-    let browser = AnyBrowser::CdpRaw(CdpRawBrowser::connect(&ws_url).await?);
+    let browser = AnyBrowser::CdpRaw(CdpBrowser::<WsTransport>::connect(&ws_url).await?);
     let mut inst = BrowserInstance {
       browser,
       contexts: HashMap::default(),
     };
 
-    let vp = self.default_viewport.clone().unwrap_or_default();
+    // Skip viewport override for existing pages — connect_to_url attaches to a
+    // user-managed browser whose window size should not be touched.
     let existing_pages = inst.browser.pages().await.unwrap_or_default();
     let ctx = inst.context_mut("default");
     let page_count = existing_pages.len();
     for page in existing_pages {
-      let _ = page.emulate_viewport(&vp).await;
       page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
       ctx.pages.push(page);
     }
@@ -520,11 +533,12 @@ impl BrowserState {
     result
   }
 
-  pub fn set_ref_map(&mut self, context: &str, ref_map: HashMap<String, i64>) {
+  /// Store a new ref map for the given context (atomic, no `&mut self` needed).
+  pub fn set_ref_map(&self, context: &str, ref_map: HashMap<String, i64>) {
     let key = SessionKey::parse(context);
-    if let Some(inst) = self.instances.get_mut(&key.instance) {
-      if let Some(ctx) = inst.contexts.get_mut(&key.context) {
-        ctx.ref_map = ref_map;
+    if let Some(inst) = self.instances.get(&key.instance) {
+      if let Some(ctx) = inst.contexts.get(&key.context) {
+        ctx.ref_map.store(std::sync::Arc::new(ref_map));
       }
     }
   }
@@ -536,8 +550,34 @@ impl BrowserState {
       .instances
       .get(&key.instance)
       .and_then(|inst| inst.contexts.get(&key.context))
-      .map(|c| c.ref_map.clone())
+      .map(|c| (**c.ref_map.load()).clone())
       .unwrap_or_default()
+  }
+
+  /// Get an `Arc` handle to a context's ref map `ArcSwap` for lock-free access.
+  #[must_use]
+  pub fn ref_map_handle(&self, context: &str) -> Option<std::sync::Arc<arc_swap::ArcSwap<HashMap<String, i64>>>> {
+    let key = SessionKey::parse(context);
+    self
+      .instances
+      .get(&key.instance)
+      .and_then(|inst| inst.contexts.get(&key.context))
+      .map(|c| std::sync::Arc::clone(&c.ref_map))
+  }
+
+  /// Get `Arc` handles to a context's log collections for lock-free access.
+  #[must_use]
+  pub fn log_handles(&self, context: &str) -> Option<ContextLogHandles> {
+    let key = SessionKey::parse(context);
+    self
+      .instances
+      .get(&key.instance)
+      .and_then(|inst| inst.contexts.get(&key.context))
+      .map(|ctx| ContextLogHandles {
+        console: std::sync::Arc::clone(&ctx.console_log),
+        network: std::sync::Arc::clone(&ctx.network_log),
+        dialog: std::sync::Arc::clone(&ctx.dialog_log),
+      })
   }
 
   /// # Errors
@@ -765,36 +805,76 @@ fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf, Str
 
 /// Common Chrome/Chromium launch flags used by cdp-pipe and cdp-raw backends.
 #[must_use]
+/// Build Chrome flags matching Playwright's launch sequence exactly.
+/// Order: chromiumSwitches → headless flags → sandbox → user args.
 pub fn chrome_flags(headless: bool, extra_args: &[String]) -> Vec<String> {
-  let mut flags: Vec<String> = Vec::with_capacity(20 + extra_args.len());
-  if headless {
-    flags.push("--headless".into());
-  }
-  for f in BASE_CHROME_FLAGS {
+  let mut flags: Vec<String> = Vec::with_capacity(40 + extra_args.len());
+
+  // 1. Base chromiumSwitches (from Playwright's chromiumSwitches.ts)
+  for f in CHROMIUM_SWITCHES {
     flags.push((*f).into());
   }
+
+  // 2. Always added after base switches
+  flags.push("--enable-unsafe-swiftshader".into());
+
+  // 3. Headless flags (Playwright adds these when headless=true)
+  if headless {
+    flags.push("--headless".into());
+    flags.push("--hide-scrollbars".into());
+    flags.push("--mute-audio".into());
+    flags.push("--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4".into());
+  }
+
+  // 4. Sandbox control (Playwright disables by default unless chromiumSandbox=true)
+  flags.push("--no-sandbox".into());
+
+  // 5. User-provided args
   for arg in extra_args {
     flags.push(arg.clone());
   }
+
   flags
 }
 
-const BASE_CHROME_FLAGS: &[&str] = &[
-  "--no-sandbox",
-  "--disable-gpu",
-  "--disable-dev-shm-usage",
-  "--disable-extensions",
+/// Chrome switches matching Playwright's chromiumSwitches() exactly.
+/// See: playwright/packages/playwright-core/src/server/chromium/chromiumSwitches.ts
+const CHROMIUM_SWITCHES: &[&str] = &[
+  "--disable-field-trial-config",
   "--disable-background-networking",
   "--disable-background-timer-throttling",
   "--disable-backgrounding-occluded-windows",
-  "--disable-renderer-backgrounding",
-  "--disable-ipc-flooding-protection",
-  "--disable-sync",
-  "--disable-translate",
-  "--disable-default-apps",
+  "--disable-back-forward-cache",
+  "--disable-breakpad",
+  "--disable-client-side-phishing-detection",
+  "--disable-component-extensions-with-background-pages",
   "--disable-component-update",
-  "--no-first-run",
   "--no-default-browser-check",
+  "--disable-default-apps",
+  "--disable-dev-shm-usage",
+  "--disable-edgeupdater",
+  "--disable-extensions",
+  "--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion",
+  "--enable-features=CDPScreenshotNewSurface",
+  "--allow-pre-commit-input",
+  "--disable-hang-monitor",
+  "--disable-ipc-flooding-protection",
+  "--disable-popup-blocking",
+  "--disable-prompt-on-repost",
+  "--disable-renderer-backgrounding",
+  "--force-color-profile=srgb",
+  "--metrics-recording-only",
+  "--no-first-run",
+  "--password-store=basic",
+  "--use-mock-keychain",
+  "--no-service-autorun",
+  "--export-tagged-pdf",
+  "--disable-search-engine-choice-screen",
+  "--unsafely-disable-devtools-self-xss-warnings",
+  "--edge-skip-compat-layer-relaunch",
+  "--enable-automation",
+  "--disable-infobars",
+  "--disable-sync",
 ];
 
 /// Detect Chrome/Chromium binary on the system.
@@ -803,6 +883,39 @@ pub fn detect_chromium() -> String {
   if let Ok(p) = std::env::var("CHROMIUM_PATH") {
     if std::path::Path::new(&p).exists() {
       return p;
+    }
+  }
+
+  // Check for Playwright's bundled Chrome first (most up-to-date, best tested).
+  // Follows Playwright's registry logic: PLAYWRIGHT_BROWSERS_PATH, then XDG_CACHE_HOME, then ~/.cache.
+  let pw_cache = if let Ok(p) = std::env::var("PLAYWRIGHT_BROWSERS_PATH") {
+    Some(std::path::PathBuf::from(p))
+  } else {
+    std::env::var("XDG_CACHE_HOME")
+      .ok()
+      .or_else(|| std::env::var("HOME").ok().map(|h| format!("{h}/.cache")))
+      .map(|c| std::path::PathBuf::from(c).join("ms-playwright"))
+  };
+  if let Some(pw_cache) = pw_cache {
+    if pw_cache.is_dir() {
+      // Find the latest chromium-* directory
+      if let Ok(entries) = std::fs::read_dir(&pw_cache) {
+        let mut candidates: Vec<_> = entries
+          .filter_map(|e| e.ok())
+          .filter(|e| e.file_name().to_string_lossy().starts_with("chromium-"))
+          .collect();
+        candidates.sort_by(|a, b| b.file_name().cmp(&a.file_name())); // newest first
+        for entry in candidates {
+          let chrome = entry.path().join("chrome-linux64/chrome");
+          if chrome.exists() {
+            return chrome.to_string_lossy().to_string();
+          }
+          let chrome_mac = entry.path().join("chrome-mac/Chromium.app/Contents/MacOS/Chromium");
+          if chrome_mac.exists() {
+            return chrome_mac.to_string_lossy().to_string();
+          }
+        }
+      }
     }
   }
 

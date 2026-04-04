@@ -1,34 +1,59 @@
-//! CDP Raw backend -- our own high-performance CDP over WebSocket.
+//! Unified CDP backend -- Chrome DevTools Protocol over pipes or WebSocket.
 //!
-//! Same architecture as `cdp_pipe` (oneshot channels, broadcast events, no handler
-//! bottleneck) but over WebSocket instead of Unix pipes. Supports true parallel
-//! multi-page automation -- multiple CDP commands can be in-flight simultaneously.
+//! Generic over transport: `CdpBrowser<PipeTransport>` for pipe-based,
+//! `CdpBrowser<WsTransport>` for WebSocket-based. Both share identical page,
+//! element, and event handling logic.
+//!
+//! Navigation follows Bun's ChromeBackend.cpp architecture: register a oneshot
+//! waiter before sending Page.navigate, then await the waiter which resolves
+//! when the reader task sees Page.loadEventFired for that session.
 
-pub(crate) mod transport;
+pub mod pipe;
+pub mod transport;
+pub mod ws;
+
+use base64::Engine as _;
 
 use super::{
   AnyElement, AnyPage, Arc, AxNodeData, AxProperty, ConsoleMsg, CookieData, ImageFormat, MetricData, NetRequest,
   RwLock, ScreenshotOpts,
 };
-use base64::Engine as _;
 use rustc_hash::FxHashMap;
 use std::time::Duration;
-use transport::WsTransport;
+use transport::CdpTransport;
 
-// ---- CdpRawBrowser --------------------------------------------------------
+/// Sealed trait mapping transport types to their `AnyPage`/`AnyElement` enum constructors.
+/// This avoids having "abstract" methods or duplicated impls on the generic types.
+pub trait CdpWrap: CdpTransport + Sized {
+  fn wrap_page(page: CdpPage<Self>) -> AnyPage;
+  fn wrap_element(elem: CdpElement<Self>) -> AnyElement;
+}
 
-pub struct CdpRawBrowser {
-  transport: Arc<WsTransport>,
+impl CdpWrap for pipe::PipeTransport {
+  fn wrap_page(page: CdpPage<Self>) -> AnyPage { AnyPage::CdpPipe(page) }
+  fn wrap_element(elem: CdpElement<Self>) -> AnyElement { AnyElement::CdpPipe(elem) }
+}
+
+impl CdpWrap for ws::WsTransport {
+  fn wrap_page(page: CdpPage<Self>) -> AnyPage { AnyPage::CdpRaw(page) }
+  fn wrap_element(elem: CdpElement<Self>) -> AnyElement { AnyElement::CdpRaw(elem) }
+}
+
+// ---- CdpBrowser<T> --------------------------------------------------------
+
+pub struct CdpBrowser<T: CdpTransport> {
+  transport: Arc<T>,
   child: Option<tokio::process::Child>,
   /// Track targetId -> sessionId for already-attached targets.
   attached_targets: std::sync::Mutex<FxHashMap<String, Option<String>>>,
 }
 
-impl CdpRawBrowser {
+impl<T: CdpWrap> CdpBrowser<T> {
   /// Enable required CDP domains on a session so events and queries work.
-  /// If `viewport` is provided, sets it in the same parallel batch.
+  /// If `viewport` is provided, sets viewport in the same parallel batch
+  /// (saves a sequential round-trip vs calling emulate_viewport afterwards).
   async fn enable_domains(
-    transport: &WsTransport,
+    transport: &T,
     session_id: Option<&str>,
     viewport: Option<&crate::options::ViewportConfig>,
   ) -> Result<(), String> {
@@ -38,23 +63,32 @@ impl CdpRawBrowser {
     let vp_params = viewport.map(|vp| {
       let is_landscape = vp.is_landscape || vp.width > vp.height;
       let orientation = if vp.is_mobile {
-        if is_landscape { serde_json::json!({"angle": 90, "type": "landscapePrimary"}) }
-        else { serde_json::json!({"angle": 0, "type": "portraitPrimary"}) }
+        if is_landscape {
+          serde_json::json!({"angle": 90, "type": "landscapePrimary"})
+        } else {
+          serde_json::json!({"angle": 0, "type": "portraitPrimary"})
+        }
       } else {
         serde_json::json!({"angle": 0, "type": "landscapePrimary"})
       };
       serde_json::json!({
-        "width": vp.width, "height": vp.height,
+        "width": vp.width,
+        "height": vp.height,
         "deviceScaleFactor": vp.device_scale_factor,
         "mobile": vp.is_mobile,
-        "screenWidth": vp.width, "screenHeight": vp.height,
+        "screenWidth": vp.width,
+        "screenHeight": vp.height,
         "screenOrientation": orientation,
       })
     });
 
+    // Fire all CDP commands in parallel — domain enables + optional viewport.
     let vp_fut = async {
       if let Some(params) = vp_params {
-        transport.send_command(session_id, "Emulation.setDeviceMetricsOverride", params).await.map(|_| ())
+        transport
+          .send_command(session_id, "Emulation.setDeviceMetricsOverride", params)
+          .await
+          .map(|_| ())
       } else {
         Ok(())
       }
@@ -74,43 +108,14 @@ impl CdpRawBrowser {
     Ok(())
   }
 
-  /// Launch Chrome with `--remote-debugging-pipe` and communicate over fd 3/4.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the Chrome process fails to spawn, the WebSocket
-  /// connection cannot be established, or the required CDP domains cannot be
-  /// enabled on the initial session.
-  pub async fn launch(chromium_path: &str) -> Result<Self, String> {
-    Box::pin(Self::launch_with_flags(
-      chromium_path,
-      &crate::state::chrome_flags(true, &[]),
-    ))
-    .await
-  }
-
-  /// Launch Chrome with custom command-line flags and communicate over WebSocket.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the Chrome process fails to spawn, the WebSocket
-  /// transport cannot connect, target creation or attachment fails, or
-  /// domain enablement fails.
-  pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self, String> {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let user_data_dir = std::env::temp_dir().join(format!("ferridriver-raw-{}-{id}", std::process::id()));
-
-    let (transport, child) = Box::pin(WsTransport::spawn(chromium_path, &user_data_dir, flags)).await?;
-    let transport = Arc::new(transport);
-
-    // Enable target discovery so we get notified about new targets
+  /// Internal constructor for after transport + child process setup.
+  async fn init(transport: Arc<T>, child: Option<tokio::process::Child>) -> Result<Self, String> {
+    // Enable target discovery.
     transport
       .send_command(None, "Target.setDiscoverTargets", serde_json::json!({"discover": true}))
       .await?;
 
-    // With --no-startup-window, Chrome won't create a default page target.
-    // Create our own initial page target.
+    // Create initial page target.
     let create_result = transport
       .send_command(None, "Target.createTarget", serde_json::json!({"url": "about:blank"}))
       .await?;
@@ -121,8 +126,127 @@ impl CdpRawBrowser {
       .ok_or("No targetId from Target.createTarget")?
       .to_string();
 
-    // Attach to the target to get a session ID
     let attach_result = transport
+      .send_command(None, "Target.attachToTarget", serde_json::json!({"targetId": target_id, "flatten": true}))
+      .await?;
+
+    let session_id = attach_result
+      .get("sessionId")
+      .and_then(|v| v.as_str())
+      .map(String::from);
+
+    // Enable required domains on the new session
+    Self::enable_domains(&transport, session_id.as_deref(), None).await?;
+
+    let mut attached = FxHashMap::default();
+    attached.insert(target_id, session_id);
+
+    Ok(Self {
+      transport,
+      child,
+      attached_targets: std::sync::Mutex::new(attached),
+    })
+  }
+
+  /// Retrieve all open page targets, attaching to any not yet tracked.
+  pub async fn pages(&self) -> Result<Vec<AnyPage>, String> {
+    let result = self
+      .transport
+      .send_command(None, "Target.getTargets", super::empty_params())
+      .await?;
+
+    let targets = result
+      .get("targetInfos")
+      .and_then(|t| t.as_array())
+      .cloned()
+      .unwrap_or_default();
+
+    let mut pages = Vec::new();
+    for target in targets {
+      if target.get("type").and_then(|v| v.as_str()) != Some("page") {
+        continue;
+      }
+      let target_id = target
+        .get("targetId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+
+      // Check if we already have a session for this target
+      let existing_sid = {
+        self
+          .attached_targets
+          .lock()
+          .map_err(|e| format!("Lock poisoned: {e}"))?
+          .get(&target_id)
+          .cloned()
+      };
+
+      let sid = if let Some(sid) = existing_sid {
+        sid
+      } else {
+        let attach = self
+          .transport
+          .send_command(
+            None,
+            "Target.attachToTarget",
+            serde_json::json!({"targetId": target_id, "flatten": true}),
+          )
+          .await?;
+
+        let sid = attach
+          .get("sessionId")
+          .and_then(|v| v.as_str())
+          .map(std::string::ToString::to_string);
+
+        self
+          .attached_targets
+          .lock()
+          .map_err(|e| format!("Lock poisoned: {e}"))?
+          .insert(target_id.clone(), sid.clone());
+
+        Self::enable_domains(&self.transport, sid.as_deref(), None).await?;
+
+        sid
+      };
+
+      let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
+      let lc_notify = Arc::new(tokio::sync::Notify::new());
+      pages.push(T::wrap_page(CdpPage {
+        transport: self.transport.clone(),
+        session_id: sid,
+        target_id,
+        events: crate::events::EventEmitter::new(),
+        frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+        dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
+        exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+        binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+        fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
+        lifecycle: lc_state.clone(),
+        lifecycle_notify: lc_notify.clone(),
+      }));
+    }
+    Ok(pages)
+  }
+
+  /// Create a new page target, attach to it, and optionally navigate to a URL.
+  pub async fn new_page(&self, url: &str) -> Result<AnyPage, String> {
+    let result = self
+      .transport
+      .send_command(None, "Target.createTarget", serde_json::json!({"url": "about:blank"}))
+      .await?;
+
+    let target_id = result
+      .get("targetId")
+      .and_then(|v| v.as_str())
+      .ok_or("No targetId")?
+      .to_string();
+
+    let attach = self
+      .transport
       .send_command(
         None,
         "Target.attachToTarget",
@@ -130,32 +254,192 @@ impl CdpRawBrowser {
       )
       .await?;
 
-    let session_id = attach_result
+    let sid = attach
       .get("sessionId")
       .and_then(|v| v.as_str())
       .map(std::string::ToString::to_string);
 
-    // Enable required domains on the new session
-    Self::enable_domains(&transport, session_id.as_deref(), None).await?;
+    self
+      .attached_targets
+      .lock()
+      .map_err(|e| format!("Lock poisoned: {e}"))?
+      .insert(target_id.clone(), sid.clone());
 
-    let mut attached = FxHashMap::default();
-    attached.insert(target_id, session_id.clone());
+    Self::enable_domains(&self.transport, sid.as_deref(), None).await?;
 
-    Ok(Self {
-      transport,
-      child: Some(child),
-      attached_targets: std::sync::Mutex::new(attached),
-    })
+    let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
+    let lc_notify = Arc::new(tokio::sync::Notify::new());
+    let page = CdpPage {
+      transport: self.transport.clone(),
+      session_id: sid,
+      target_id,
+      events: crate::events::EventEmitter::new(),
+      frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+      dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
+      exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+      binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+      fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
+      lifecycle: lc_state.clone(),
+      lifecycle_notify: lc_notify.clone(),
+    };
+
+    // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
+    page.transport.register_lifecycle_tracker(
+      page.session_id.as_deref().unwrap_or(""),
+      page.lifecycle.clone(),
+      page.lifecycle_notify.clone(),
+    );
+
+    if url != "about:blank" && !url.is_empty() {
+      page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await?;
+    }
+
+    Ok(T::wrap_page(page))
+  }
+
+  /// Create a new page in an isolated browser context (separate cookies/storage).
+  pub async fn new_page_isolated(&self, url: &str, viewport: Option<&crate::options::ViewportConfig>) -> Result<AnyPage, String> {
+    let ctx = self
+      .transport
+      .send_command(None, "Target.createBrowserContext", super::empty_params())
+      .await?;
+
+    let ctx_id = ctx
+      .get("browserContextId")
+      .and_then(|v| v.as_str())
+      .ok_or("No browserContextId")?
+      .to_string();
+
+    let result = self
+      .transport
+      .send_command(
+        None,
+        "Target.createTarget",
+        serde_json::json!({"url": "about:blank", "browserContextId": ctx_id}),
+      )
+      .await?;
+
+    let target_id = result
+      .get("targetId")
+      .and_then(|v| v.as_str())
+      .ok_or("No targetId")?
+      .to_string();
+
+    let attach = self
+      .transport
+      .send_command(
+        None,
+        "Target.attachToTarget",
+        serde_json::json!({"targetId": target_id, "flatten": true}),
+      )
+      .await?;
+
+    let sid = attach
+      .get("sessionId")
+      .and_then(|v| v.as_str())
+      .map(std::string::ToString::to_string);
+
+    self
+      .attached_targets
+      .lock()
+      .map_err(|e| format!("Lock poisoned: {e}"))?
+      .insert(target_id.clone(), sid.clone());
+
+    Self::enable_domains(&self.transport, sid.as_deref(), viewport).await?;
+
+    let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
+    let lc_notify = Arc::new(tokio::sync::Notify::new());
+    let page = CdpPage {
+      transport: self.transport.clone(),
+      session_id: sid,
+      target_id,
+      events: crate::events::EventEmitter::new(),
+      frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+      dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
+      exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
+      binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+      fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
+      lifecycle: lc_state.clone(),
+      lifecycle_notify: lc_notify.clone(),
+    };
+
+    // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
+    page.transport.register_lifecycle_tracker(
+      page.session_id.as_deref().unwrap_or(""),
+      page.lifecycle.clone(),
+      page.lifecycle_notify.clone(),
+    );
+
+    if url != "about:blank" && !url.is_empty() {
+      page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await?;
+    }
+
+    Ok(T::wrap_page(page))
+  }
+
+  /// Close the browser process and release resources.
+  pub async fn close(&mut self) -> Result<(), String> {
+    let _ = self
+      .transport
+      .send_command(None, "Browser.close", super::empty_params())
+      .await;
+    if let Some(ref mut child) = self.child {
+      let _ = child.kill().await;
+    }
+    Ok(())
+  }
+}
+
+// ── Pipe-specific launch ───────────────���─────────────────────────────────────
+
+impl CdpBrowser<pipe::PipeTransport> {
+  /// Launch Chrome with `--remote-debugging-pipe` and communicate over fd 3/4.
+  pub async fn launch(chromium_path: &str) -> Result<Self, String> {
+    Self::launch_with_flags(chromium_path, &crate::state::chrome_flags(true, &[])).await
+  }
+
+  /// Launch Chrome with custom flags and communicate over fd 3/4.
+  pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self, String> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let user_data_dir = std::env::temp_dir().join(format!("ferridriver-pipe-{}-{id}", std::process::id()));
+
+    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, &user_data_dir, flags)?;
+    Self::init(Arc::new(transport), Some(child)).await
+  }
+}
+
+// ── WS-specific launch + connect ─────────────────────────────────────────────
+
+impl CdpBrowser<ws::WsTransport> {
+  /// Launch Chrome with `--remote-debugging-port` and communicate over WebSocket.
+  pub async fn launch(chromium_path: &str) -> Result<Self, String> {
+    Box::pin(Self::launch_with_flags(
+      chromium_path,
+      &crate::state::chrome_flags(true, &[]),
+    ))
+    .await
+  }
+
+  /// Launch Chrome with custom flags and communicate over WebSocket.
+  pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self, String> {
+    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let user_data_dir = std::env::temp_dir().join(format!("ferridriver-raw-{}-{id}", std::process::id()));
+
+    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, &user_data_dir, flags)).await?;
+    Self::init(Arc::new(transport), Some(child)).await
   }
 
   /// Connect to a running Chrome instance via WebSocket URL.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the WebSocket connection fails, target discovery
-  /// or attachment fails, or the required CDP domains cannot be enabled.
   pub async fn connect(ws_url: &str) -> Result<Self, String> {
-    let transport = Arc::new(WsTransport::connect(ws_url).await?);
+    let transport = Arc::new(ws::WsTransport::connect(ws_url).await?);
 
     transport
       .send_command(None, "Target.setDiscoverTargets", serde_json::json!({"discover": true}))
@@ -228,275 +512,100 @@ impl CdpRawBrowser {
     })
   }
 
-  /// List all open page targets, attaching to any that are not yet tracked.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if listing targets fails, attaching to a target fails,
-  /// or enabling CDP domains on a new session fails.
-  pub async fn pages(&self) -> Result<Vec<AnyPage>, String> {
-    let result = self
-      .transport
-      .send_command(None, "Target.getTargets", super::empty_params())
-      .await?;
+}
 
-    let empty_vec = Vec::new();
-    let targets = result
-      .get("targetInfos")
-      .and_then(|t| t.as_array())
-      .unwrap_or(&empty_vec);
+// ---- CdpPage<T> ------------------------------------------------------------
 
-    let mut pages = Vec::new();
-    for target in targets {
-      if target.get("type").and_then(|v| v.as_str()) != Some("page") {
-        continue;
-      }
-      let target_id = target
-        .get("targetId")
+/// Recursively collect frame info from a CDP frame tree node.
+fn collect_frames(node: &serde_json::Value, out: &mut Vec<super::FrameInfo>) {
+  if let Some(frame) = node.get("frame") {
+    out.push(super::FrameInfo {
+      frame_id: frame.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+      parent_frame_id: frame
+        .get("parentId")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-
-      // Check if we already have a session for this target
-      let existing_sid = {
-        self
-          .attached_targets
-          .lock()
-          .map_err(|e| format!("Lock poisoned: {e}"))?
-          .get(&target_id)
-          .cloned()
-      };
-
-      let sid = if let Some(sid) = existing_sid {
-        // Already attached, reuse the session
-        sid
-      } else {
-        let attach = self
-          .transport
-          .send_command(
-            None,
-            "Target.attachToTarget",
-            serde_json::json!({"targetId": target_id, "flatten": true}),
-          )
-          .await?;
-
-        let sid = attach
-          .get("sessionId")
-          .and_then(|v| v.as_str())
-          .map(std::string::ToString::to_string);
-
-        // Track it as attached with its session
-        self
-          .attached_targets
-          .lock()
-          .map_err(|e| format!("Lock poisoned: {e}"))?
-          .insert(target_id.clone(), sid.clone());
-
-        // Enable domains on the new session
-        Self::enable_domains(&self.transport, sid.as_deref(), None).await?;
-
-        sid
-      };
-
-      pages.push(AnyPage::CdpRaw(CdpRawPage {
-        transport: self.transport.clone(),
-        session_id: sid,
-        target_id,
-        events: crate::events::EventEmitter::new(),
-        frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
-        dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
-        exposed_fns: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
-        binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-        routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-        fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      }));
-    }
-    Ok(pages)
+        .map(std::string::ToString::to_string),
+      name: frame.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+      url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    });
   }
-
-  /// Create a new page target and optionally navigate to the given URL.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if target creation, attachment, domain enablement, or
-  /// navigation (when `url` is not `about:blank`) fails.
-  pub async fn new_page(&self, url: &str) -> Result<AnyPage, String> {
-    // Create target with about:blank initially so we can set up domains before navigation
-    let result = self
-      .transport
-      .send_command(None, "Target.createTarget", serde_json::json!({"url": "about:blank"}))
-      .await?;
-
-    let target_id = result
-      .get("targetId")
-      .and_then(|v| v.as_str())
-      .ok_or("No targetId")?
-      .to_string();
-
-    let attach = self
-      .transport
-      .send_command(
-        None,
-        "Target.attachToTarget",
-        serde_json::json!({"targetId": target_id, "flatten": true}),
-      )
-      .await?;
-
-    let sid = attach
-      .get("sessionId")
-      .and_then(|v| v.as_str())
-      .map(std::string::ToString::to_string);
-
-    // Track as attached
-    self
-      .attached_targets
-      .lock()
-      .map_err(|e| format!("Lock poisoned: {e}"))?
-      .insert(target_id.clone(), sid.clone());
-
-    // Enable domains BEFORE any navigation
-    Self::enable_domains(&self.transport, sid.as_deref(), None).await?;
-
-    let page = CdpRawPage {
-      transport: self.transport.clone(),
-      session_id: sid,
-      target_id,
-      events: crate::events::EventEmitter::new(),
-      frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
-      dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
-      exposed_fns: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
-      binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-      fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-
-    // Navigate if a real URL was requested (not about:blank)
-    if url != "about:blank" && !url.is_empty() {
-      page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await?;
+  if let Some(children) = node.get("childFrames").and_then(|v| v.as_array()) {
+    for child in children {
+      collect_frames(child, out);
     }
-
-    Ok(AnyPage::CdpRaw(page))
-  }
-
-  /// Create a new page in an isolated browser context and optionally navigate.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if browser context creation, target creation,
-  /// attachment, domain enablement, or navigation fails.
-  pub async fn new_page_isolated(&self, url: &str, viewport: Option<&crate::options::ViewportConfig>) -> Result<AnyPage, String> {
-    // Create isolated browser context
-    let ctx = self
-      .transport
-      .send_command(None, "Target.createBrowserContext", super::empty_params())
-      .await?;
-
-    let ctx_id = ctx
-      .get("browserContextId")
-      .and_then(|v| v.as_str())
-      .ok_or("No browserContextId")?
-      .to_string();
-
-    // Create target in the isolated context, starting with about:blank
-    let result = self
-      .transport
-      .send_command(
-        None,
-        "Target.createTarget",
-        serde_json::json!({"url": "about:blank", "browserContextId": ctx_id}),
-      )
-      .await?;
-
-    let target_id = result
-      .get("targetId")
-      .and_then(|v| v.as_str())
-      .ok_or("No targetId")?
-      .to_string();
-
-    let attach = self
-      .transport
-      .send_command(
-        None,
-        "Target.attachToTarget",
-        serde_json::json!({"targetId": target_id, "flatten": true}),
-      )
-      .await?;
-
-    let sid = attach
-      .get("sessionId")
-      .and_then(|v| v.as_str())
-      .map(std::string::ToString::to_string);
-
-    // Track as attached
-    self
-      .attached_targets
-      .lock()
-      .map_err(|e| format!("Lock poisoned: {e}"))?
-      .insert(target_id.clone(), sid.clone());
-
-    // Enable domains BEFORE any navigation
-    Self::enable_domains(&self.transport, sid.as_deref(), viewport).await?;
-
-    let page = CdpRawPage {
-      transport: self.transport.clone(),
-      session_id: sid,
-      target_id,
-      events: crate::events::EventEmitter::new(),
-      frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
-      dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
-      exposed_fns: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
-      binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-      fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-    };
-
-    // Navigate if a real URL was requested
-    if url != "about:blank" && !url.is_empty() {
-      page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await?;
-    }
-
-    Ok(AnyPage::CdpRaw(page))
-  }
-
-  /// Close the browser and kill the child process if one was launched.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Browser.close` CDP command fails (though the
-  /// error is silently ignored since we also kill the child process).
-  pub async fn close(&mut self) -> Result<(), String> {
-    let _ = self
-      .transport
-      .send_command(None, "Browser.close", super::empty_params())
-      .await;
-    if let Some(ref mut child) = self.child {
-      let _ = child.kill().await;
-    }
-    Ok(())
   }
 }
 
-// ---- CdpRawPage ------------------------------------------------------------
+/// Lifecycle state for a page's current document.
+/// Tracks which lifecycle events have fired and which document they belong to.
+/// Updated synchronously by the transport reader. Checked synchronously by goto().
+pub struct LifecycleState {
+  /// loaderId of the current committed document (from Page.frameNavigated).
+  pub current_loader_id: String,
+  /// Lifecycle events fired for the current document.
+  pub fired: std::collections::HashSet<String>,
+}
 
-#[derive(Clone)]
-pub struct CdpRawPage {
-  transport: Arc<WsTransport>,
+impl LifecycleState {
+  fn new() -> Self {
+    Self {
+      current_loader_id: String::new(),
+      fired: std::collections::HashSet::new(),
+    }
+  }
+}
+
+pub struct CdpPage<T: CdpTransport> {
+  transport: Arc<T>,
   session_id: Option<String>,
   target_id: String,
+  /// Event emitter for page events (console, dialog, network, frame lifecycle).
   pub events: crate::events::EventEmitter,
-  frame_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>>,
+  /// Frame ID -> execution context ID mapping for frame-scoped evaluation.
+  frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
+  /// Configurable dialog handler. Called when a JS dialog appears.
   pub dialog_handler: Arc<tokio::sync::RwLock<crate::events::DialogHandler>>,
-  pub exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
+  /// Registered exposed function callbacks.
+  pub exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedFn>>>,
+  /// Whether the binding channel has been initialized.
   binding_initialized: Arc<std::sync::atomic::AtomicBool>,
+  /// Whether this page has been closed.
   closed: Arc<std::sync::atomic::AtomicBool>,
+  /// Registered route handlers for network interception.
   routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
+  /// Whether Fetch domain is enabled for interception.
   fetch_enabled: Arc<std::sync::atomic::AtomicBool>,
+  /// Cached main frame ID to avoid repeated `Page.getFrameTree` calls.
+  main_frame_id: Arc<tokio::sync::OnceCell<String>>,
+  /// Lifecycle state for current document — tracks loaderId + fired events.
+  /// Updated synchronously by the transport reader task. Checked synchronously by goto().
+  lifecycle: Arc<std::sync::Mutex<LifecycleState>>,
+  /// Notification sent when lifecycle state is updated.
+  lifecycle_notify: Arc<tokio::sync::Notify>,
 }
 
-impl CdpRawPage {
+impl<T: CdpTransport> Clone for CdpPage<T> {
+  fn clone(&self) -> Self {
+    Self {
+      transport: self.transport.clone(),
+      session_id: self.session_id.clone(),
+      target_id: self.target_id.clone(),
+      events: self.events.clone(),
+      frame_contexts: self.frame_contexts.clone(),
+      dialog_handler: self.dialog_handler.clone(),
+      exposed_fns: self.exposed_fns.clone(),
+      binding_initialized: self.binding_initialized.clone(),
+      closed: self.closed.clone(),
+      routes: self.routes.clone(),
+      fetch_enabled: self.fetch_enabled.clone(),
+      main_frame_id: self.main_frame_id.clone(),
+      lifecycle: self.lifecycle.clone(),
+      lifecycle_notify: self.lifecycle_notify.clone(),
+    }
+  }
+}
+
+impl<T: CdpWrap> CdpPage<T> {
   /// Send a CDP command to this page's session.
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
     self
@@ -507,19 +616,21 @@ impl CdpRawPage {
 
   // ---- Navigation ----
 
-  /// Navigate to the given URL, waiting for `Page.loadEventFired`.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Page.navigate` CDP command fails or the
-  /// navigation reports an error (e.g. DNS resolution failure).
   pub async fn goto(
     &self, url: &str, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
   ) -> Result<(), String> {
+    let target_event = match lifecycle {
+      crate::backend::NavLifecycle::Commit => "commit",
+      crate::backend::NavLifecycle::DomContentLoaded => "domcontentloaded",
+      crate::backend::NavLifecycle::Load => "load",
+    };
+
+    // Register nav waiter BEFORE navigate.
     let rx = self
       .transport
       .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
 
+    // Send navigation command. Response includes loaderId for this navigation.
     let nav_result = self.cmd("Page.navigate", serde_json::json!({"url": url})).await?;
 
     if let Some(error_text) = nav_result.get("errorText").and_then(|v| v.as_str()) {
@@ -528,18 +639,29 @@ impl CdpRawPage {
       }
     }
 
+    let nav_loader_id = nav_result
+      .get("loaderId")
+      .and_then(|v| v.as_str())
+      .unwrap_or("");
+
+    // Sync check: if the lifecycle event for THIS navigation's document already
+    // fired (reader processed frameNavigated + lifecycle events during the navigate
+    // command), return immediately. The loaderId match ensures we don't return
+    // early with stale data from a previous navigation.
+    {
+      let state = self.lifecycle.lock().unwrap();
+      if state.current_loader_id == nav_loader_id && state.fired.contains(target_event) {
+        return Ok(());
+      }
+    }
+
+    // Async wait for the lifecycle event via oneshot.
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) | Err(_) => Ok(()),
     }
   }
 
-  /// Wait for an in-progress navigation to complete (`Page.loadEventFired`).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the navigation waiter is dropped before the event
-  /// fires.
   pub async fn wait_for_navigation(&self) -> Result<(), String> {
     let rx = self
       .transport
@@ -548,15 +670,10 @@ impl CdpRawPage {
     match tokio::time::timeout(Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => Err("Navigation waiter dropped".into()),
-      Err(_) => Ok(()), // Timeout, proceed anyway
+      Err(_) => Ok(()),
     }
   }
 
-  /// Reload the current page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Page.reload` CDP command fails.
   pub async fn reload(
     &self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
   ) -> Result<(), String> {
@@ -586,19 +703,23 @@ impl CdpRawPage {
     &self, delta: i32, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
   ) -> Result<(), String> {
     let hist = self.cmd("Page.getNavigationHistory", super::empty_params()).await?;
-    let current = hist
+    let current_i64 = hist
       .get("currentIndex")
       .and_then(serde_json::Value::as_i64)
       .unwrap_or(0);
-    let target = current + i64::from(delta);
+    let current = i32::try_from(current_i64).unwrap_or(i32::MAX);
+    let target = current + delta;
     let entries = hist.get("entries").and_then(|v| v.as_array());
     let Some(entries) = entries else {
       return Ok(());
     };
-    let Some(target_idx) = usize::try_from(target).ok().filter(|&t| t < entries.len()) else {
+    let Ok(target_usize) = usize::try_from(target) else {
       return Ok(());
     };
-    let entry_id = entries[target_idx]
+    if target_usize >= entries.len() {
+      return Ok(());
+    }
+    let entry_id = entries[target_usize]
       .get("id")
       .and_then(serde_json::Value::as_i64)
       .unwrap_or(0);
@@ -615,11 +736,6 @@ impl CdpRawPage {
     }
   }
 
-  /// Return the current page URL via `location.href`.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Runtime.evaluate` CDP command fails.
   pub async fn url(&self) -> Result<Option<String>, String> {
     let result = self
       .cmd(
@@ -639,11 +755,6 @@ impl CdpRawPage {
     )
   }
 
-  /// Return the current document title.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Runtime.evaluate` CDP command fails.
   pub async fn title(&self) -> Result<Option<String>, String> {
     let result = self
       .cmd(
@@ -665,12 +776,6 @@ impl CdpRawPage {
 
   // ---- JavaScript ----
 
-  /// Evaluate a JavaScript expression in the page and return its value.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the CDP `Runtime.evaluate` command fails or the
-  /// evaluated expression throws an exception.
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
     let result = self
       .cmd(
@@ -696,31 +801,7 @@ impl CdpRawPage {
 
   // ---- Frames ----
 
-  /// Retrieve the frame tree for the current page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Page.getFrameTree` CDP command fails.
   pub async fn get_frame_tree(&self) -> Result<Vec<super::FrameInfo>, String> {
-    fn collect_frames(node: &serde_json::Value, out: &mut Vec<super::FrameInfo>) {
-      if let Some(frame) = node.get("frame") {
-        out.push(super::FrameInfo {
-          frame_id: frame.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-          parent_frame_id: frame
-            .get("parentId")
-            .and_then(|v| v.as_str())
-            .map(std::string::ToString::to_string),
-          name: frame.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-          url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-        });
-      }
-      if let Some(children) = node.get("childFrames").and_then(|v| v.as_array()) {
-        for child in children {
-          collect_frames(child, out);
-        }
-      }
-    }
-
     let result = self.cmd("Page.getFrameTree", super::empty_params()).await?;
 
     let mut frames = Vec::new();
@@ -730,12 +811,6 @@ impl CdpRawPage {
     Ok(frames)
   }
 
-  /// Evaluate a JavaScript expression in a specific frame's execution context.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if no execution context is found for the given frame,
-  /// the CDP `Runtime.evaluate` command fails, or the expression throws.
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>, String> {
     let context_id = {
       let contexts = self.frame_contexts.read().await;
@@ -764,21 +839,15 @@ impl CdpRawPage {
       }
       Ok(result.get("result").and_then(|r| r.get("value")).cloned())
     } else {
-      Err(format!("No execution context found for frame '{frame_id}'."))
+      Err(format!(
+        "No execution context found for frame '{frame_id}'. Frame may not be loaded yet."
+      ))
     }
   }
 
   // ---- Elements ----
 
-  /// Find a single DOM element matching the given CSS selector.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the document root cannot be obtained, the selector
-  /// is invalid, or no element matches.
   pub async fn find_element(&self, selector: &str) -> Result<AnyElement, String> {
-    // Get a fresh document root each time, since nodeIds get invalidated
-    // after navigation or DOM changes.
     let doc = self.cmd("DOM.getDocument", serde_json::json!({"depth": 0})).await?;
     let root_id = doc
       .get("root")
@@ -786,7 +855,6 @@ impl CdpRawPage {
       .and_then(serde_json::Value::as_i64)
       .ok_or_else(|| "No document root".to_string())?;
 
-    // Query selector
     let result = self
       .cmd(
         "DOM.querySelector",
@@ -803,19 +871,13 @@ impl CdpRawPage {
       return Err(format!("'{selector}' not found"));
     }
 
-    Ok(AnyElement::CdpRaw(CdpRawElement {
+    Ok(T::wrap_element(CdpElement {
       transport: self.transport.clone(),
       session_id: self.session_id.clone(),
       node_id,
     }))
   }
 
-  /// Evaluate JavaScript that returns a DOM element and wrap it as `AnyElement`.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the JS does not return a DOM element, or the
-  /// node cannot be resolved to a `nodeId`.
   pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
     let _ = self.cmd("DOM.getDocument", serde_json::json!({"depth": 0})).await;
 
@@ -848,7 +910,7 @@ impl CdpRawPage {
       return Err("Element not found".into());
     }
 
-    Ok(AnyElement::CdpRaw(CdpRawElement {
+    Ok(T::wrap_element(CdpElement {
       transport: self.transport.clone(),
       session_id: self.session_id.clone(),
       node_id,
@@ -857,11 +919,6 @@ impl CdpRawPage {
 
   // ---- Content ----
 
-  /// Return the full outer HTML of the document element.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Runtime.evaluate` CDP command fails.
   pub async fn content(&self) -> Result<String, String> {
     let result = self
       .cmd(
@@ -882,28 +939,27 @@ impl CdpRawPage {
     )
   }
 
-  /// Replace the page content with the given HTML string.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the frame tree cannot be read or
-  /// `Page.setDocumentContent` fails.
   pub async fn set_content(&self, html: &str) -> Result<(), String> {
-    // Get the frame tree to find the main frame ID
-    let tree = self.cmd("Page.getFrameTree", super::empty_params()).await?;
-    let frame_id = tree
-      .get("frameTree")
-      .and_then(|f| f.get("frame"))
-      .and_then(|f| f.get("id"))
-      .and_then(|v| v.as_str())
-      .ok_or("No main frame")?;
+    let frame_id = self
+      .main_frame_id
+      .get_or_try_init(|| async {
+        let tree = self.cmd("Page.getFrameTree", super::empty_params()).await?;
+        tree
+          .get("frameTree")
+          .and_then(|f| f.get("frame"))
+          .and_then(|f| f.get("id"))
+          .and_then(|v| v.as_str())
+          .map(std::string::ToString::to_string)
+          .ok_or_else(|| "No main frame".to_string())
+      })
+      .await?;
 
-    let engine_js = crate::selectors::build_inject_js();
-    let augmented = format!("<script>{engine_js}</script>{html}");
+    // Selector engine is already injected via Page.addScriptToEvaluateOnNewDocument
+    // during page setup, so setDocumentContent triggers it automatically.
     self
       .cmd(
         "Page.setDocumentContent",
-        serde_json::json!({"frameId": frame_id, "html": augmented}),
+        serde_json::json!({"frameId": frame_id, "html": html}),
       )
       .await?;
     Ok(())
@@ -911,38 +967,39 @@ impl CdpRawPage {
 
   // ---- Screenshots ----
 
-  /// Capture a screenshot of the full page or viewport.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Page.captureScreenshot` or layout metrics
-  /// retrieval fails, or the base64 data cannot be decoded.
   pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>, String> {
     let format_str = match opts.format {
       ImageFormat::Png => "png",
       ImageFormat::Jpeg => "jpeg",
       ImageFormat::Webp => "webp",
     };
-    let mut params = serde_json::json!({"format": format_str, "optimizeForSpeed": true});
+    let mut params = serde_json::json!({"format": format_str});
     if let Some(q) = opts.quality {
       params["quality"] = serde_json::json!(q);
     }
     if opts.full_page {
-      // Get full page dimensions
+      // Playwright approach: get full page dimensions via JS + getLayoutMetrics in parallel,
+      // then use clip with captureBeyondViewport to render everything in one pass.
       let metrics = self.cmd("Page.getLayoutMetrics", super::empty_params()).await?;
-      if let Some(content_size) = metrics.get("contentSize") {
-        let w = content_size
-          .get("width")
-          .and_then(serde_json::Value::as_f64)
-          .unwrap_or(800.0);
-        let h = content_size
-          .get("height")
-          .and_then(serde_json::Value::as_f64)
-          .unwrap_or(600.0);
-        params["clip"] = serde_json::json!({
-            "x": 0, "y": 0, "width": w, "height": h, "scale": 1
-        });
-      }
+      let content_size = metrics.get("contentSize");
+      let w = content_size
+        .and_then(|c| c.get("width"))
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(800.0);
+      let h = content_size
+        .and_then(|c| c.get("height"))
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(600.0);
+      // Use visualViewport.scale like Playwright (not hardcoded 1)
+      let scale = metrics
+        .get("visualViewport")
+        .and_then(|v| v.get("scale"))
+        .and_then(serde_json::Value::as_f64)
+        .unwrap_or(1.0);
+      params["clip"] = serde_json::json!({
+          "x": 0, "y": 0, "width": w, "height": h, "scale": scale
+      });
+      params["captureBeyondViewport"] = serde_json::json!(true);
     }
 
     let result = self.cmd("Page.captureScreenshot", params).await?;
@@ -954,14 +1011,7 @@ impl CdpRawPage {
       .map_err(|e| format!("Decode screenshot: {e}"))
   }
 
-  /// Capture a screenshot of a specific element identified by CSS selector.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the element is not found, the bounding rect
-  /// cannot be computed, the screenshot fails, or base64 decoding fails.
   pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>, String> {
-    // Get element bounding box via JS
     let js = format!(
       r"(function(){{
                 const el = document.querySelector('{}');
@@ -1003,14 +1053,8 @@ impl CdpRawPage {
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).map_err(|e| format!("Decode: {e}"))
   }
 
-  // ---- PDF generation ----
+  // ---- PDF ----
 
-  /// Generate a PDF of the current page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Page.printToPDF` fails or the base64 PDF data
-  /// cannot be decoded.
   pub async fn pdf(&self, landscape: bool, print_background: bool) -> Result<Vec<u8>, String> {
     let result = self
       .cmd(
@@ -1028,14 +1072,7 @@ impl CdpRawPage {
 
   // ---- File upload ----
 
-  /// Set the file paths on a `<input type="file">` element.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the document root cannot be obtained, the
-  /// selector does not match, or `DOM.setFileInputFiles` fails.
   pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<(), String> {
-    // Get document root
     let doc = self.cmd("DOM.getDocument", super::empty_params()).await?;
     let root_id = doc
       .get("root")
@@ -1043,7 +1080,6 @@ impl CdpRawPage {
       .and_then(serde_json::Value::as_i64)
       .ok_or("No document root")?;
 
-    // Query for element
     let query = self
       .cmd(
         "DOM.querySelector",
@@ -1058,7 +1094,6 @@ impl CdpRawPage {
       .and_then(serde_json::Value::as_i64)
       .ok_or("Element not found")?;
 
-    // Get backendNodeId
     let desc = self
       .cmd("DOM.describeNode", serde_json::json!({"nodeId": node_id}))
       .await?;
@@ -1068,7 +1103,6 @@ impl CdpRawPage {
       .and_then(serde_json::Value::as_i64)
       .ok_or("No backendNodeId")?;
 
-    // Set files
     self
       .cmd(
         "DOM.setFileInputFiles",
@@ -1083,22 +1117,10 @@ impl CdpRawPage {
 
   // ---- Accessibility ----
 
-  /// Retrieve the full accessibility tree for the page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Accessibility.getFullAXTree` fails or the
-  /// response is missing `nodes`.
   pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>, String> {
     self.accessibility_tree_with_depth(-1).await
   }
 
-  /// Retrieve the accessibility tree up to the given depth.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Accessibility.getFullAXTree` fails or the
-  /// response is missing `nodes`.
   pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>, String> {
     let result = self
       .cmd("Accessibility.getFullAXTree", serde_json::json!({"depth": depth}))
@@ -1155,20 +1177,10 @@ impl CdpRawPage {
 
   // ---- Input ----
 
-  /// Click at the given viewport coordinates with the left mouse button.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Input.dispatchMouseEvent` CDP command fails.
   pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
     self.click_at_opts(x, y, "left", 1).await
   }
 
-  /// Click at the given coordinates with configurable button and click count.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Input.dispatchMouseEvent` CDP command fails.
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
     self
       .cmd(
@@ -1185,11 +1197,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Move the mouse to the given viewport coordinates.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Input.dispatchMouseEvent` CDP command fails.
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
     self
       .cmd(
@@ -1200,23 +1207,12 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Move the mouse smoothly from one point to another using eased steps.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if any intermediate `Input.dispatchMouseEvent` fails.
   pub async fn move_mouse_smooth(
-    &self,
-    from_x: f64,
-    from_y: f64,
-    to_x: f64,
-    to_y: f64,
-    steps: u32,
+    &self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32,
   ) -> Result<(), String> {
     let steps = steps.max(1);
     for i in 0..=steps {
       let t = f64::from(i) / f64::from(steps);
-      // Cubic bezier easing for natural movement
       let ease = t * t * (3.0 - 2.0 * t);
       let x = from_x + (to_x - from_x) * ease;
       let y = from_y + (to_y - from_y) * ease;
@@ -1230,11 +1226,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Perform a click-and-drag from one point to another with smooth steps.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if any `Input.dispatchMouseEvent` call fails.
   pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
     self
       .cmd(
@@ -1242,7 +1233,6 @@ impl CdpRawPage {
         serde_json::json!({"type": "mousePressed", "x": from.0, "y": from.1, "button": "left", "clickCount": 1}),
       )
       .await?;
-    // Smooth drag with intermediate steps
     let steps = 10u32;
     for i in 1..=steps {
       let t = f64::from(i) / f64::from(steps);
@@ -1265,11 +1255,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Dispatch a mouse wheel event with the given deltas.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Input.dispatchMouseEvent` CDP command fails.
   pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
     self
       .cmd(
@@ -1280,11 +1265,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Press a mouse button at the given coordinates without releasing.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Input.dispatchMouseEvent` CDP command fails.
   pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
     self
       .cmd(
@@ -1295,11 +1275,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Release a mouse button at the given coordinates.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Input.dispatchMouseEvent` CDP command fails.
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
     self
       .cmd(
@@ -1310,26 +1285,12 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Type a string of text character-by-character via key events.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if any `Input.dispatchKeyEvent` call fails.
   pub async fn type_str(&self, text: &str) -> Result<(), String> {
-    // Single CDP round-trip for bulk text insertion instead of one per character.
     self.cmd("Input.insertText", serde_json::json!({"text": text})).await?;
     Ok(())
   }
 
-  /// Press and release a named key (e.g. "Enter", "Tab", "`ArrowLeft`").
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Input.dispatchKeyEvent` CDP command fails.
   pub async fn press_key(&self, key: &str) -> Result<(), String> {
-    // Port of Bun's cdpKeyInfo table: map key names to DOM key string,
-    // Windows VK code, and text character. Text-producing keys use "keyDown",
-    // control keys use "rawKeyDown".
     let (dom_key, vk, text) = match key {
       "Enter" => ("Enter", 13, Some("\r")),
       "Tab" => ("Tab", 9, Some("\t")),
@@ -1372,11 +1333,6 @@ impl CdpRawPage {
 
   // ---- Cookies ----
 
-  /// Retrieve all cookies visible to the current page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Network.getCookies` CDP command fails.
   pub async fn get_cookies(&self) -> Result<Vec<CookieData>, String> {
     let result = self.cmd("Network.getCookies", super::empty_params()).await?;
     let cookies = result
@@ -1400,11 +1356,6 @@ impl CdpRawPage {
     )
   }
 
-  /// Set a cookie with the given data.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Network.setCookie` CDP command fails.
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<(), String> {
     let mut params = serde_json::json!({
         "name": cookie.name,
@@ -1425,17 +1376,11 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Delete a cookie by name, optionally scoped to a domain.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Network.deleteCookies` CDP command fails.
   pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
     let mut params = serde_json::json!({"name": name});
     if let Some(d) = domain {
       params["domain"] = serde_json::json!(d);
     } else {
-      // Chrome requires at least url or domain for Network.deleteCookies
       if let Ok(Some(url)) = self.url().await {
         params["url"] = serde_json::json!(url);
       }
@@ -1444,11 +1389,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Clear all cookies in the browser storage.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the `Storage.clearCookies` CDP command fails.
   pub async fn clear_cookies(&self) -> Result<(), String> {
     self.cmd("Storage.clearCookies", super::empty_params()).await?;
     Ok(())
@@ -1456,13 +1396,7 @@ impl CdpRawPage {
 
   // ---- Emulation ----
 
-  /// Set device viewport emulation (size, scale, mobile, touch).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Emulation.setDeviceMetricsOverride` fails.
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
-    // Skip clearDeviceMetricsOverride — setDeviceMetricsOverride alone is sufficient.
     let is_landscape = config.is_landscape || config.width > config.height;
     let orientation = if config.is_mobile {
       if is_landscape {
@@ -1498,11 +1432,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Override the browser's User-Agent string.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Network.setUserAgentOverride` fails.
   pub async fn set_user_agent(&self, ua: &str) -> Result<(), String> {
     self
       .cmd("Network.setUserAgentOverride", serde_json::json!({"userAgent": ua}))
@@ -1510,28 +1439,16 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Override the browser's geolocation.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Emulation.setGeolocationOverride` fails.
   pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<(), String> {
     self
       .cmd(
         "Emulation.setGeolocationOverride",
-        serde_json::json!({
-            "latitude": lat, "longitude": lng, "accuracy": accuracy,
-        }),
+        serde_json::json!({"latitude": lat, "longitude": lng, "accuracy": accuracy}),
       )
       .await?;
     Ok(())
   }
 
-  /// Override the browser locale and accept-language header.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Network.setUserAgentOverride` fails.
   pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
     let _ = self
       .cmd("Emulation.setLocaleOverride", serde_json::json!({"locale": locale}))
@@ -1539,20 +1456,12 @@ impl CdpRawPage {
     self
       .cmd(
         "Network.setUserAgentOverride",
-        serde_json::json!({
-            "userAgent": "",
-            "acceptLanguage": locale,
-        }),
+        serde_json::json!({"userAgent": "", "acceptLanguage": locale}),
       )
       .await?;
     Ok(())
   }
 
-  /// Override the browser's timezone.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Emulation.setTimezoneOverride` fails.
   pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
     self
       .cmd(
@@ -1563,11 +1472,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Emulate CSS media features (color scheme, reduced motion, etc.).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Emulation.setEmulatedMedia` fails.
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
     let mut features = Vec::new();
     if let Some(cs) = &opts.color_scheme {
@@ -1590,11 +1494,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Enable or disable JavaScript execution on the page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Emulation.setScriptExecutionDisabled` fails.
   pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
     self
       .cmd(
@@ -1605,12 +1504,7 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Set extra HTTP headers to be sent with every request.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Network.setExtraHTTPHeaders` fails.
-  pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
+  pub async fn set_extra_http_headers(&self, headers: &FxHashMap<String, String>) -> Result<(), String> {
     let h: serde_json::Map<String, serde_json::Value> = headers
       .iter()
       .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
@@ -1621,11 +1515,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Grant browser permissions (e.g. geolocation, notifications).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Browser.grantPermissions` fails.
   pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<(), String> {
     let mut params = serde_json::json!({"permissions": permissions});
     if let Some(o) = origin {
@@ -1635,21 +1524,11 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Reset all previously granted permissions.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Browser.resetPermissions` fails.
   pub async fn reset_permissions(&self) -> Result<(), String> {
     self.cmd("Browser.resetPermissions", super::empty_params()).await?;
     Ok(())
   }
 
-  /// Enable or disable focus emulation for the page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Emulation.setFocusEmulationEnabled` fails.
   pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
     self
       .cmd(
@@ -1662,11 +1541,6 @@ impl CdpRawPage {
 
   // ---- Network ----
 
-  /// Emulate network conditions (offline, latency, throughput).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Network.emulateNetworkConditions` fails.
   pub async fn set_network_state(&self, offline: bool, latency: f64, download: f64, upload: f64) -> Result<(), String> {
     self
       .cmd(
@@ -1684,31 +1558,16 @@ impl CdpRawPage {
 
   // ---- Tracing ----
 
-  /// Start a tracing session.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Tracing.start` fails.
   pub async fn start_tracing(&self) -> Result<(), String> {
     self.cmd("Tracing.start", super::empty_params()).await?;
     Ok(())
   }
 
-  /// Stop the current tracing session.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Tracing.end` fails.
   pub async fn stop_tracing(&self) -> Result<(), String> {
     self.cmd("Tracing.end", super::empty_params()).await?;
     Ok(())
   }
 
-  /// Retrieve performance metrics for the current page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Performance.getMetrics` fails.
   pub async fn metrics(&self) -> Result<Vec<MetricData>, String> {
     let result = self.cmd("Performance.getMetrics", super::empty_params()).await?;
     let metrics = result
@@ -1729,12 +1588,6 @@ impl CdpRawPage {
 
   // ---- Ref resolution ----
 
-  /// Resolve a backend DOM node ID to an element, tagging it for lookup.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the node can no longer be resolved, the tagging
-  /// script fails, or the element cannot be found by selector.
   pub async fn resolve_backend_node(&self, backend_node_id: i64, ref_id: &str) -> Result<AnyElement, String> {
     let resolve_result = self
       .cmd("DOM.resolveNode", serde_json::json!({"backendNodeId": backend_node_id}))
@@ -1746,7 +1599,6 @@ impl CdpRawPage {
       .and_then(|v| v.as_str())
       .ok_or_else(|| format!("Ref '{ref_id}' no longer valid."))?;
 
-    // Tag element with data-cref attribute
     self
       .cmd(
         "Runtime.callFunctionOn",
@@ -1757,7 +1609,6 @@ impl CdpRawPage {
       )
       .await?;
 
-    // Find by the tag
     self.find_element(&format!("[data-cref='{ref_id}']")).await
   }
 
@@ -1769,22 +1620,14 @@ impl CdpRawPage {
     network_log: Arc<RwLock<Vec<NetRequest>>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
   ) {
-    // Domains are already enabled via enable_domains() at session creation time.
-    // No need to re-enable here.
-
     let transport = self.transport.clone();
     let session_id = self.session_id.clone();
     let emitter1 = self.events.clone();
     let emitter2 = self.events.clone();
     let emitter3 = self.events.clone();
 
-    // Console listener
     Self::spawn_console_listener(transport.clone(), session_id.clone(), console_log, emitter1);
-
-    // Network listener
-    Self::spawn_network_listener(transport, session_id, network_log, emitter2);
-
-    // Dialog handler listener -- uses configurable dialog_handler
+    Self::spawn_network_listener(transport.clone(), session_id.clone(), network_log, emitter2);
     Self::spawn_dialog_listener(
       self.transport.clone(),
       self.session_id.clone(),
@@ -1792,8 +1635,6 @@ impl CdpRawPage {
       dialog_log,
       emitter3,
     );
-
-    // Frame context tracker
     Self::spawn_frame_context_tracker(
       self.transport.clone(),
       self.session_id.clone(),
@@ -1802,10 +1643,8 @@ impl CdpRawPage {
     );
   }
 
-  /// Spawn a task that listens for `Runtime.consoleAPICalled` events and
-  /// forwards them to the console log buffer and event emitter.
   fn spawn_console_listener(
-    transport: Arc<WsTransport>,
+    transport: Arc<T>,
     session_id: Option<String>,
     console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
     emitter: crate::events::EventEmitter,
@@ -1819,6 +1658,7 @@ impl CdpRawPage {
             continue;
           }
         }
+
         if event.get("method").and_then(|m| m.as_str()) == Some("Runtime.consoleAPICalled") {
           if let Some(params) = event.get("params") {
             let level = params.get("type").and_then(|v| v.as_str()).unwrap_or("log").to_string();
@@ -1842,10 +1682,8 @@ impl CdpRawPage {
     });
   }
 
-  /// Spawn a task that listens for network events (`requestWillBeSent`,
-  /// `responseReceived`, `downloadWillBegin`) and forwards them.
   fn spawn_network_listener(
-    transport: Arc<WsTransport>,
+    transport: Arc<T>,
     session_id: Option<String>,
     network_log: Arc<RwLock<Vec<NetRequest>>>,
     emitter: crate::events::EventEmitter,
@@ -1859,6 +1697,7 @@ impl CdpRawPage {
             continue;
           }
         }
+
         let method = event.get("method").and_then(|m| m.as_str()).unwrap_or("");
         match method {
           "Network.requestWillBeSent" => {
@@ -1913,13 +1752,13 @@ impl CdpRawPage {
                 .to_string();
               let resp = params.get("response");
               let status = resp.and_then(|r| r.get("status")).and_then(serde_json::Value::as_i64);
-              let url = resp
-                .and_then(|r| r.get("url"))
+              let status_text = resp
+                .and_then(|r| r.get("statusText"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
-              let status_text = resp
-                .and_then(|r| r.get("statusText"))
+              let url = resp
+                .and_then(|r| r.get("url"))
                 .and_then(|v| v.as_str())
                 .unwrap_or("")
                 .to_string();
@@ -1973,12 +1812,10 @@ impl CdpRawPage {
     });
   }
 
-  /// Spawn a task that listens for `Page.javascriptDialogOpening` events,
-  /// calls the configurable dialog handler, and logs the result.
   fn spawn_dialog_listener(
-    transport: Arc<WsTransport>,
+    transport: Arc<T>,
     session_id: Option<String>,
-    dialog_handler: Arc<tokio::sync::RwLock<crate::events::DialogHandler>>,
+    handler: Arc<tokio::sync::RwLock<crate::events::DialogHandler>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
     emitter: crate::events::EventEmitter,
   ) {
@@ -2006,11 +1843,13 @@ impl CdpRawPage {
               message: message.clone(),
               default_value: default_value.clone(),
             };
-            let action = dialog_handler.read().await(&pending);
+
+            let action = handler.read().await(&pending);
             let (accept, prompt_text) = match &action {
               crate::events::DialogAction::Accept(text) => (true, text.clone()),
               crate::events::DialogAction::Dismiss => (false, None),
             };
+
             let mut cmd_params = serde_json::json!({"accept": accept});
             if let Some(text) = &prompt_text {
               cmd_params["promptText"] = serde_json::Value::String(text.clone());
@@ -2018,6 +1857,7 @@ impl CdpRawPage {
             let _ = transport
               .send_command(session_id.as_deref(), "Page.handleJavaScriptDialog", cmd_params)
               .await;
+
             let action_str = match &action {
               crate::events::DialogAction::Accept(_) => "accepted",
               crate::events::DialogAction::Dismiss => "dismissed",
@@ -2027,6 +1867,7 @@ impl CdpRawPage {
               message: message.clone(),
               action: action_str.to_string(),
             });
+
             emitter.emit(crate::events::PageEvent::Dialog(pending));
           }
         }
@@ -2034,11 +1875,10 @@ impl CdpRawPage {
     });
   }
 
-  /// Spawn a task that tracks frame execution contexts and emits frame events.
   fn spawn_frame_context_tracker(
-    transport: Arc<WsTransport>,
+    transport: Arc<T>,
     session_id: Option<String>,
-    frame_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>>,
+    frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
     emitter: crate::events::EventEmitter,
   ) {
     tokio::spawn(async move {
@@ -2050,6 +1890,7 @@ impl CdpRawPage {
             continue;
           }
         }
+
         let method = event.get("method").and_then(|m| m.as_str()).unwrap_or("");
         match method {
           "Runtime.executionContextCreated" => {
@@ -2073,7 +1914,8 @@ impl CdpRawPage {
               .and_then(|p| p.get("executionContextId"))
               .and_then(serde_json::Value::as_i64)
             {
-              frame_contexts.write().await.retain(|_, &mut v| v != ctx_id);
+              let mut contexts = frame_contexts.write().await;
+              contexts.retain(|_, &mut v| v != ctx_id);
             }
           },
           "Runtime.executionContextsCleared" => {
@@ -2125,11 +1967,6 @@ impl CdpRawPage {
 
   // ---- Init Scripts ----
 
-  /// Add a script to be evaluated on every new document before page scripts run.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Page.addScriptToEvaluateOnNewDocument` fails.
   pub async fn add_init_script(&self, source: &str) -> Result<String, String> {
     let result = self
       .cmd(
@@ -2145,11 +1982,6 @@ impl CdpRawPage {
     Ok(id)
   }
 
-  /// Remove a previously added init script by its identifier.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Page.removeScriptToEvaluateOnNewDocument` fails.
   pub async fn remove_init_script(&self, identifier: &str) -> Result<(), String> {
     self
       .cmd(
@@ -2162,6 +1994,26 @@ impl CdpRawPage {
 
   // ---- Exposed Functions ----
 
+  /// The JS source for the binding controller injected as an init script.
+  pub const BINDING_CONTROLLER_JS: &'static str = r"(function(){
+if(globalThis.__fd_bc)return;
+var bc={seq:0,cbs:{},fns:{}};
+globalThis.__fd_bc=bc;
+bc.add=function(name){
+  bc.fns[name]=true;
+  globalThis[name]=function(){
+    var s=++bc.seq;
+    var args=[];for(var i=0;i<arguments.length;i++)args.push(arguments[i]);
+    var p=new Promise(function(r,j){bc.cbs[s]={r:r,j:j}});
+    globalThis.__fd_binding__(JSON.stringify({name:name,seq:s,args:args}));
+    return p;
+  };
+};
+bc.del=function(name){delete bc.fns[name];delete globalThis[name]};
+bc.resolve=function(seq,val){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.r(val)}};
+bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new Error(err))}};
+})()";
+
   async fn ensure_binding_channel(&self) -> Result<(), String> {
     if self.binding_initialized.swap(true, std::sync::atomic::Ordering::SeqCst) {
       return Ok(());
@@ -2169,10 +2021,8 @@ impl CdpRawPage {
     self
       .cmd("Runtime.addBinding", serde_json::json!({"name": "__fd_binding__"}))
       .await?;
-    // Same controller JS as CdpPipe
-    let controller_js = crate::backend::cdp_pipe::CdpPipePage::BINDING_CONTROLLER_JS;
-    self.add_init_script(controller_js).await?;
-    self.evaluate(controller_js).await?;
+    self.add_init_script(Self::BINDING_CONTROLLER_JS).await?;
+    self.evaluate(Self::BINDING_CONTROLLER_JS).await?;
 
     let t = self.transport.clone();
     let sid = self.session_id.clone();
@@ -2190,9 +2040,11 @@ impl CdpRawPage {
           continue;
         }
         if let Some(params) = event.get("params") {
-          if params.get("name").and_then(|v| v.as_str()) != Some("__fd_binding__") {
+          let binding_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+          if binding_name != "__fd_binding__" {
             continue;
           }
+
           let payload_str = params.get("payload").and_then(|v| v.as_str()).unwrap_or("{}");
           let payload: serde_json::Value = serde_json::from_str(payload_str).unwrap_or_default();
           let fn_name = payload.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
@@ -2206,25 +2058,25 @@ impl CdpRawPage {
           let maybe_fn = fns.read().await.get(&fn_name).cloned();
           if let Some(callback) = maybe_fn {
             let result = callback(args);
-            let js = format!(
-              "globalThis.__fd_bc.resolve({},{})",
+            let deliver_js = format!(
+              "globalThis.__fd_bc.resolve({}, {})",
               seq,
-              serde_json::to_string(&result).unwrap_or("null".into())
+              serde_json::to_string(&result).unwrap_or_else(|_| "null".into())
             );
             let _ = t
               .send_command(
                 sid.as_deref(),
                 "Runtime.evaluate",
-                serde_json::json!({"expression": js}),
+                serde_json::json!({"expression": deliver_js}),
               )
               .await;
           } else {
-            let js = format!("globalThis.__fd_bc.reject({seq},'Function not found: {fn_name}')");
+            let deliver_js = format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')");
             let _ = t
               .send_command(
                 sid.as_deref(),
                 "Runtime.evaluate",
-                serde_json::json!({"expression": js}),
+                serde_json::json!({"expression": deliver_js}),
               )
               .await;
           }
@@ -2234,12 +2086,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Expose a Rust function to page JavaScript under the given name.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the binding channel setup, init script
-  /// registration, or the registration JS evaluation fails.
   pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<(), String> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), func);
@@ -2249,11 +2095,6 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Remove a previously exposed function by name.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the cleanup JS evaluation fails.
   pub async fn remove_exposed_function(&self, name: &str) -> Result<(), String> {
     self.exposed_fns.write().await.remove(name);
     let js = format!(
@@ -2264,12 +2105,8 @@ impl CdpRawPage {
     Ok(())
   }
 
-  /// Close this page target. Subsequent calls are no-ops.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `Target.closeTarget` fails (though the error is
-  /// silently ignored).
+  // ---- Lifecycle ----
+
   pub async fn close_page(&self) -> Result<(), String> {
     if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
       return Ok(());
@@ -2311,155 +2148,184 @@ impl CdpRawPage {
     let sid = self.session_id.clone();
     let routes = self.routes.clone();
     tokio::spawn(async move {
-      let mut rx = t.subscribe_events();
-      while let Ok(event) = rx.recv().await {
-        if let Some(ref expected_sid) = sid {
-          let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-          if event_sid != Some(expected_sid.as_str()) {
-            continue;
-          }
-        }
-        if event.get("method").and_then(|m| m.as_str()) != Some("Fetch.requestPaused") {
-          continue;
-        }
-        let Some(params) = event.get("params") else { continue };
-        let request_id = params
-          .get("requestId")
-          .and_then(|v| v.as_str())
-          .unwrap_or("")
-          .to_string();
-        let req_obj = params.get("request");
-        let url = req_obj
-          .and_then(|r| r.get("url"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("")
-          .to_string();
-        let method = req_obj
-          .and_then(|r| r.get("method"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("GET")
-          .to_string();
-        let resource_type = params
-          .get("resourceType")
-          .and_then(|v| v.as_str())
-          .unwrap_or("")
-          .to_string();
-        let post_data = req_obj
-          .and_then(|r| r.get("postData"))
-          .and_then(|v| v.as_str())
-          .map(std::string::ToString::to_string);
-        let headers: rustc_hash::FxHashMap<String, String> = req_obj
-          .and_then(|r| r.get("headers"))
-          .and_then(|h| h.as_object())
-          .map(|obj| {
-            obj
-              .iter()
-              .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-              .collect()
-          })
-          .unwrap_or_default();
-
-        let intercepted = crate::route::InterceptedRequest {
-          request_id: request_id.clone(),
-          url: url.clone(),
-          method,
-          headers,
-          post_data,
-          resource_type,
-        };
-
-        let action = {
-          let routes_guard = routes.read().await;
-          routes_guard
-            .iter()
-            .find(|r| r.pattern.is_match(&url))
-            .map(|r| (r.handler)(&intercepted))
-        };
-
-        match action {
-          Some(crate::route::RouteAction::Fulfill(resp)) => {
-            let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp.body);
-            let mut hdrs: Vec<serde_json::Value> = resp
-              .headers
-              .iter()
-              .map(|(k, v)| serde_json::json!({"name": k, "value": v}))
-              .collect();
-            if let Some(ct) = &resp.content_type {
-              if !hdrs
-                .iter()
-                .any(|h| h.get("name").and_then(|n| n.as_str()) == Some("content-type"))
-              {
-                hdrs.push(serde_json::json!({"name": "content-type", "value": ct}));
-              }
-            }
-            let _ = t
-              .send_command(
-                sid.as_deref(),
-                "Fetch.fulfillRequest",
-                serde_json::json!({
-                    "requestId": request_id, "responseCode": resp.status,
-                    "responsePhrase": crate::route::status_text(resp.status),
-                    "responseHeaders": hdrs, "body": body_b64,
-                }),
-              )
-              .await;
-          },
-          Some(crate::route::RouteAction::Continue(overrides)) => {
-            let mut p = serde_json::json!({"requestId": request_id});
-            if let Some(u) = &overrides.url {
-              p["url"] = serde_json::Value::String(u.clone());
-            }
-            if let Some(m) = &overrides.method {
-              p["method"] = serde_json::Value::String(m.clone());
-            }
-            if let Some(h) = &overrides.headers {
-              p["headers"] =
-                serde_json::Value::Array(h.iter().map(|(k, v)| serde_json::json!({"name":k,"value":v})).collect());
-            }
-            if let Some(pd) = &overrides.post_data {
-              p["postData"] = serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(pd));
-            }
-            let _ = t.send_command(sid.as_deref(), "Fetch.continueRequest", p).await;
-          },
-          Some(crate::route::RouteAction::Abort(reason)) => {
-            let er = match reason.to_lowercase().as_str() {
-              "aborted" => "Aborted",
-              "blockedbyclient" => "BlockedByClient",
-              "connectionfailed" => "ConnectionFailed",
-              "connectionrefused" => "ConnectionRefused",
-              "internetdisconnected" => "InternetDisconnected",
-              "timedout" => "TimedOut",
-              _ => "Failed",
-            };
-            let _ = t
-              .send_command(
-                sid.as_deref(),
-                "Fetch.failRequest",
-                serde_json::json!({"requestId": request_id, "errorReason": er}),
-              )
-              .await;
-          },
-          None => {
-            let _ = t
-              .send_command(
-                sid.as_deref(),
-                "Fetch.continueRequest",
-                serde_json::json!({"requestId": request_id}),
-              )
-              .await;
-          },
-        }
-      }
+      Self::handle_fetch_events(t, sid, routes).await;
     });
     Ok(())
   }
 
-  /// Register a route handler for requests matching the given glob pattern.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the glob pattern is invalid or enabling the
-  /// `Fetch` domain fails.
+  async fn handle_fetch_events(
+    transport: Arc<T>,
+    session_id: Option<String>,
+    routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
+  ) {
+    let mut rx = transport.subscribe_events();
+    while let Ok(event) = rx.recv().await {
+      if let Some(ref expected_sid) = session_id {
+        let event_sid = event.get("sessionId").and_then(|v| v.as_str());
+        if event_sid != Some(expected_sid.as_str()) {
+          continue;
+        }
+      }
+      if event.get("method").and_then(|m| m.as_str()) != Some("Fetch.requestPaused") {
+        continue;
+      }
+      let Some(params) = event.get("params") else { continue };
+      let request_id = params
+        .get("requestId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+      let req_obj = params.get("request");
+      let url = req_obj
+        .and_then(|r| r.get("url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+      let method = req_obj
+        .and_then(|r| r.get("method"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("GET")
+        .to_string();
+      let resource_type = params
+        .get("resourceType")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+      let post_data = req_obj
+        .and_then(|r| r.get("postData"))
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string);
+      let headers: FxHashMap<String, String> = req_obj
+        .and_then(|r| r.get("headers"))
+        .and_then(|h| h.as_object())
+        .map(|obj| {
+          obj
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect()
+        })
+        .unwrap_or_default();
+
+      let intercepted = crate::route::InterceptedRequest {
+        request_id: request_id.clone(),
+        url: url.clone(),
+        method,
+        headers,
+        post_data,
+        resource_type,
+      };
+
+      let action = {
+        let routes_guard = routes.read().await;
+        let mut matched_action = None;
+        for route in routes_guard.iter() {
+          if route.pattern.is_match(&url) {
+            matched_action = Some((route.handler)(&intercepted));
+            break;
+          }
+        }
+        matched_action
+      };
+
+      Self::execute_route_action(&transport, session_id.as_deref(), &request_id, action).await;
+    }
+  }
+
+  async fn execute_route_action(
+    transport: &T,
+    session_id: Option<&str>,
+    request_id: &str,
+    action: Option<crate::route::RouteAction>,
+  ) {
+    match action {
+      Some(crate::route::RouteAction::Fulfill(resp)) => {
+        let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp.body);
+        let mut hdrs: Vec<serde_json::Value> = resp
+          .headers
+          .iter()
+          .map(|(k, v)| serde_json::json!({"name": k, "value": v}))
+          .collect();
+        if let Some(ct) = &resp.content_type {
+          if !hdrs
+            .iter()
+            .any(|h| h.get("name").and_then(|n| n.as_str()) == Some("content-type"))
+          {
+            hdrs.push(serde_json::json!({"name": "content-type", "value": ct}));
+          }
+        }
+        let _ = transport
+          .send_command(
+            session_id,
+            "Fetch.fulfillRequest",
+            serde_json::json!({
+                "requestId": request_id,
+                "responseCode": resp.status,
+                "responsePhrase": crate::route::status_text(resp.status),
+                "responseHeaders": hdrs,
+                "body": body_b64,
+            }),
+          )
+          .await;
+      },
+      Some(crate::route::RouteAction::Continue(overrides)) => {
+        let mut params = serde_json::json!({"requestId": request_id});
+        if let Some(url) = &overrides.url {
+          params["url"] = serde_json::Value::String(url.clone());
+        }
+        if let Some(method) = &overrides.method {
+          params["method"] = serde_json::Value::String(method.clone());
+        }
+        if let Some(headers) = &overrides.headers {
+          let hdrs: Vec<serde_json::Value> = headers
+            .iter()
+            .map(|(k, v)| serde_json::json!({"name": k, "value": v}))
+            .collect();
+          params["headers"] = serde_json::Value::Array(hdrs);
+        }
+        if let Some(post_data) = &overrides.post_data {
+          params["postData"] = serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(post_data));
+        }
+        let _ = transport
+          .send_command(session_id, "Fetch.continueRequest", params)
+          .await;
+      },
+      Some(crate::route::RouteAction::Abort(reason)) => {
+        let error_reason = match reason.to_lowercase().as_str() {
+          "aborted" => "Aborted",
+          "accessdenied" => "AccessDenied",
+          "addressunreachable" => "AddressUnreachable",
+          "blockedbyclient" => "BlockedByClient",
+          "connectionfailed" => "ConnectionFailed",
+          "connectionrefused" => "ConnectionRefused",
+          "connectionreset" => "ConnectionReset",
+          "internetdisconnected" => "InternetDisconnected",
+          "namenotresolved" => "NameNotResolved",
+          "timedout" => "TimedOut",
+          _ => "Failed",
+        };
+        let _ = transport
+          .send_command(
+            session_id,
+            "Fetch.failRequest",
+            serde_json::json!({
+                "requestId": request_id,
+                "errorReason": error_reason,
+            }),
+          )
+          .await;
+      },
+      None => {
+        let _ = transport
+          .send_command(
+            session_id,
+            "Fetch.continueRequest",
+            serde_json::json!({"requestId": request_id}),
+          )
+          .await;
+      },
+    }
+  }
+
   pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<(), String> {
     let regex = crate::route::glob_to_regex(pattern)?;
     self.routes.write().await.push(crate::route::RegisteredRoute {
@@ -2470,12 +2336,6 @@ impl CdpRawPage {
     self.ensure_fetch_enabled().await
   }
 
-  /// Remove a previously registered route handler by pattern.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if disabling the `Fetch` domain fails when no
-  /// routes remain.
   pub async fn unroute(&self, pattern: &str) -> Result<(), String> {
     let mut routes = self.routes.write().await;
     routes.retain(|r| r.pattern_str != pattern);
@@ -2487,16 +2347,25 @@ impl CdpRawPage {
   }
 }
 
-// ---- CdpRawElement ---------------------------------------------------------
+// ---- CdpElement<T> ---------------------------------------------------------
 
-#[derive(Clone)]
-pub struct CdpRawElement {
-  transport: Arc<WsTransport>,
+pub struct CdpElement<T: CdpTransport> {
+  transport: Arc<T>,
   session_id: Option<String>,
   node_id: i64,
 }
 
-impl CdpRawElement {
+impl<T: CdpTransport> Clone for CdpElement<T> {
+  fn clone(&self) -> Self {
+    Self {
+      transport: self.transport.clone(),
+      session_id: self.session_id.clone(),
+      node_id: self.node_id,
+    }
+  }
+}
+
+impl<T: CdpTransport> CdpElement<T> {
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
     self
       .transport
@@ -2515,7 +2384,6 @@ impl CdpRawElement {
       .and_then(|c| c.as_array())
       .ok_or("No box model")?;
 
-    // content quad: [x1,y1, x2,y2, x3,y3, x4,y4]
     if content.len() < 8 {
       return Err("Invalid box model".into());
     }
@@ -2540,12 +2408,6 @@ impl CdpRawElement {
       .ok_or("Cannot resolve element".into())
   }
 
-  /// Call a JS function on this element and return the value.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the element cannot be resolved or the
-  /// `Runtime.callFunctionOn` CDP command fails.
   pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>, String> {
     let object_id = self.resolve_object_id().await?;
     let result = self
@@ -2561,12 +2423,6 @@ impl CdpRawElement {
     Ok(result.get("result").and_then(|r| r.get("value")).cloned())
   }
 
-  /// Click this element by scrolling it into view and dispatching mouse events.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the element cannot be scrolled into view, the
-  /// bounding rect cannot be computed, or the mouse event dispatch fails.
   pub async fn click(&self) -> Result<(), String> {
     let center = self.call_js_fn_value(
             "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
@@ -2596,12 +2452,6 @@ impl CdpRawElement {
     }
   }
 
-  /// Double-click this element.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if scrolling, bounding rect computation, or mouse
-  /// event dispatch fails.
   pub async fn dblclick(&self) -> Result<(), String> {
     let center = self.call_js_fn_value(
             "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
@@ -2615,6 +2465,7 @@ impl CdpRawElement {
           .call_js_fn("function() { this.dispatchEvent(new MouseEvent('dblclick', {bubbles:true})); }")
           .await;
       }
+      // First click (clickCount=1) fires 'click'
       self
         .cmd(
           "Input.dispatchMouseEvent",
@@ -2627,6 +2478,7 @@ impl CdpRawElement {
           serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": "left", "clickCount": 1}),
         )
         .await?;
+      // Second click (clickCount=2) fires 'dblclick'
       self
         .cmd(
           "Input.dispatchMouseEvent",
@@ -2647,12 +2499,6 @@ impl CdpRawElement {
     }
   }
 
-  /// Hover over this element by moving the mouse to its center.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if scrolling into view, getting the center
-  /// coordinates, or the mouse move event fails.
   pub async fn hover(&self) -> Result<(), String> {
     self.scroll_into_view().await?;
     let (x, y) = self.get_center().await?;
@@ -2665,23 +2511,12 @@ impl CdpRawElement {
     Ok(())
   }
 
-  /// Click this element and type a string into it character-by-character.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the click or any key event dispatch fails.
   pub async fn type_str(&self, text: &str) -> Result<(), String> {
     self.click().await?;
     self.cmd("Input.insertText", serde_json::json!({"text": text})).await?;
     Ok(())
   }
 
-  /// Call a JS function on this element (result is discarded).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the element cannot be resolved or the
-  /// `Runtime.callFunctionOn` CDP command fails.
   pub async fn call_js_fn(&self, function: &str) -> Result<(), String> {
     let object_id = self.resolve_object_id().await?;
     self
@@ -2696,11 +2531,6 @@ impl CdpRawElement {
     Ok(())
   }
 
-  /// Scroll this element into the visible viewport if needed.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if `DOM.scrollIntoViewIfNeeded` fails.
   pub async fn scroll_into_view(&self) -> Result<(), String> {
     self
       .cmd(
@@ -2711,14 +2541,7 @@ impl CdpRawElement {
     Ok(())
   }
 
-  /// Capture a screenshot of this element's bounding box.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the box model cannot be obtained, the screenshot
-  /// capture fails, or base64 decoding fails.
   pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>, String> {
-    // Get bounding box
     let result = self
       .cmd("DOM.getBoxModel", serde_json::json!({"nodeId": self.node_id}))
       .await?;

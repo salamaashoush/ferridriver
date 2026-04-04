@@ -371,7 +371,7 @@ fn format_tree(ctx: &mut SnapshotCtx<'_>, idx: usize, depth: usize) {
     // Ancestor context line -- abbreviated, just role + name for structure
     let _ = write!(ctx.output, "{indent}- {role}");
     if !name.is_empty() {
-      let truncated_name = if name.len() > 30 { &name[..30] } else { name };
+      let truncated_name = if name.len() > 30 { truncate_str(name, 30) } else { name };
       let _ = write!(ctx.output, " \"{truncated_name}\"");
     }
     ctx.output.push_str(&ref_str);
@@ -382,11 +382,23 @@ fn format_tree(ctx: &mut SnapshotCtx<'_>, idx: usize, depth: usize) {
 }
 
 /// Write the node name, truncating if necessary.
+fn truncate_str(s: &str, max_bytes: usize) -> &str {
+  if s.len() <= max_bytes {
+    return s;
+  }
+  // Find the last char boundary at or before max_bytes.
+  let mut end = max_bytes;
+  while end > 0 && !s.is_char_boundary(end) {
+    end -= 1;
+  }
+  &s[..end]
+}
+
 fn write_node_name(output: &mut String, name: &str) {
   use std::fmt::Write;
   if !name.is_empty() {
     if name.len() > MAX_TEXT_LEN {
-      let _ = write!(output, " \"{}...\"", &name[..MAX_TEXT_LEN]);
+      let _ = write!(output, " \"{}...\"", truncate_str(name, MAX_TEXT_LEN));
     } else {
       let _ = write!(output, " \"{name}\"");
     }
@@ -432,7 +444,7 @@ fn write_node_value(output: &mut String, node: &AxNodeData, role: &str) {
         if let Some(val) = &prop.value {
           if let Some(s) = val.as_str() {
             if !s.is_empty() {
-              let display_val = if s.len() > 50 { &s[..50] } else { s };
+              let display_val = if s.len() > 50 { truncate_str(s, 50) } else { s };
               let _ = write!(output, " [value=\"{display_val}\"]");
             }
           }
@@ -448,7 +460,7 @@ fn write_node_description(output: &mut String, desc: &str, name: &str) {
   use std::fmt::Write;
   if !desc.is_empty() && desc != name {
     let d = if desc.len() > MAX_TEXT_LEN {
-      &desc[..MAX_TEXT_LEN]
+      truncate_str(desc, MAX_TEXT_LEN)
     } else {
       desc
     };
@@ -456,11 +468,54 @@ fn write_node_description(output: &mut String, desc: &str, name: &str) {
   }
 }
 
+/// Max siblings of the same role to render before collapsing.
+const MAX_SAME_ROLE_SIBLINGS: usize = 5;
+
 fn recurse_children(ctx: &mut SnapshotCtx<'_>, idx: usize, depth: usize) {
+  use std::fmt::Write;
   if let Some(kids) = ctx.children_map.get(ctx.nodes[idx].node_id.as_str()) {
     let kids = kids.clone();
-    for kid_idx in kids {
-      format_tree(ctx, kid_idx, depth);
+    let total = kids.len();
+
+    // Fast path: few children, no collapsing needed.
+    if total <= MAX_SAME_ROLE_SIBLINGS * 2 {
+      for kid_idx in kids {
+        format_tree(ctx, kid_idx, depth);
+      }
+      return;
+    }
+
+    // Detect runs of same-role siblings and collapse the middle.
+    let mut i = 0;
+    while i < total {
+      if ctx.truncated {
+        return;
+      }
+      let role_i = get_role(&ctx.nodes[kids[i]]);
+      // Count consecutive siblings with the same role.
+      let mut run_end = i + 1;
+      while run_end < total && get_role(&ctx.nodes[kids[run_end]]) == role_i {
+        run_end += 1;
+      }
+      let run_len = run_end - i;
+
+      if run_len > MAX_SAME_ROLE_SIBLINGS * 2 {
+        // Show first MAX_SAME_ROLE_SIBLINGS, collapse middle, show last MAX_SAME_ROLE_SIBLINGS.
+        for j in i..i + MAX_SAME_ROLE_SIBLINGS {
+          format_tree(ctx, kids[j], depth);
+        }
+        let collapsed = run_len - MAX_SAME_ROLE_SIBLINGS * 2;
+        let indent = "  ".repeat(depth);
+        let _ = write!(ctx.output, "{indent}- ... ({collapsed} more {role_i} items)\n");
+        for j in run_end - MAX_SAME_ROLE_SIBLINGS..run_end {
+          format_tree(ctx, kids[j], depth);
+        }
+      } else {
+        for j in i..run_end {
+          format_tree(ctx, kids[j], depth);
+        }
+      }
+      i = run_end;
     }
   }
 }

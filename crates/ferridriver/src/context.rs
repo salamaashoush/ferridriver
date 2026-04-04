@@ -7,6 +7,7 @@
 //! - Created by `Browser.new_context()`
 //! - Pages are created by `context.new_page()`
 
+use arc_swap::ArcSwap;
 use crate::backend::{AnyPage, CookieData};
 use crate::page::Page;
 use crate::state::SessionKey;
@@ -54,8 +55,8 @@ pub struct BrowserContext {
   pub pages: Vec<AnyPage>,
   /// Active page index.
   pub active_page_idx: usize,
-  /// Element ref map for accessibility snapshots.
-  pub ref_map: HashMap<String, i64>,
+  /// Element ref map for accessibility snapshots (wait-free reads via `ArcSwap`).
+  pub ref_map: Arc<ArcSwap<HashMap<String, i64>>>,
   /// Console messages collected from page events.
   pub console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
   /// Network requests collected from page events.
@@ -72,7 +73,7 @@ impl BrowserContext {
     Self {
       pages: Vec::new(),
       active_page_idx: 0,
-      ref_map: HashMap::default(),
+      ref_map: Arc::new(ArcSwap::from_pointee(HashMap::default())),
       console_log: Arc::new(RwLock::new(Vec::new())),
       network_log: Arc::new(RwLock::new(Vec::new())),
       dialog_log: Arc::new(RwLock::new(Vec::new())),
