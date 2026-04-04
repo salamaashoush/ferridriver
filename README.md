@@ -215,10 +215,102 @@ Feature: Login
 
 Step categories: Navigation (5), Interaction (14), Wait (6), Assertion (24), Variable (7), Cookie (4), Storage (3), Screenshot (3), JavaScript (1).
 
+## Test Runner (ferridriver-test)
+
+Playwright-compatible test runner with parallel execution, auto-retrying assertions, and rich reporting.
+
+```rust
+use ferridriver_test::prelude::*;
+
+#[ferritest]
+async fn login_flow(page: Page) {
+    page.goto("https://app.example.com/login", None).await.unwrap();
+    page.locator("#email").fill("user@example.com").await.unwrap();
+    page.locator("button[type=submit]").click().await.unwrap();
+    expect(&page).to_have_url("dashboard").await.unwrap();
+}
+```
+
+- **Parallel execution**: N workers × N browsers, MPMC work-stealing dispatch
+- **Hooks**: beforeAll/afterAll, beforeEach/afterEach
+- **Serial mode**: `SuiteMode::Serial` — run in order, skip on failure
+- **32 expect matchers**: visibility, text, value, attributes, count, accessibility, snapshots
+- **Visual screenshot diffing**: pixel-level PNG comparison with threshold and diff image
+- **Reporters**: Terminal, JUnit XML, JSON, HTML (self-contained)
+- **95+ tests/sec** (3.7x faster than Playwright Test)
+
+See [crates/ferridriver-test/README.md](crates/ferridriver-test/README.md) for full API.
+
+## Component Testing
+
+Test UI components in real browsers with `cargo test` or `bun test`. Supports both Rust WASM frameworks and JS frameworks.
+
+### Rust Frameworks (Leptos, Dioxus)
+
+```rust
+use ferridriver_ct_leptos::prelude::*;
+
+#[component_test]
+async fn counter_increments(page: Page) -> Result<(), TestFailure> {
+    page.locator("#inc").click().await?;
+    expect(&page.locator("#count")).to_have_text("1").await?;
+    Ok(())
+}
+
+ferridriver_ct_leptos::main!();
+```
+
+- `trunk build` / `dx build` (cached) → static serve → parallel test runner
+- Custom harness: one browser, fresh page per test, inventory-based discovery
+- **15 TodoMVC tests in 531ms** (Leptos), **622ms** (Dioxus)
+- **500 tests in 10.1s** (49.5 tests/sec)
+
+### JS Frameworks (React, Vue, Svelte)
+
+```typescript
+import { test, expect } from '@ferridriver/ct-react';
+import Counter from './Counter';
+
+test('increments', async ({ mount, page }) => {
+  await mount(Counter, { props: { initial: 0 } });
+  await page.locator('#inc').click();
+  await expect(page.locator('#count')).toHaveText('1');
+});
+```
+
+- Import transform → Vite build → component registry → mount via `page.evaluate()`
+- Framework adapters: `@ferridriver/ct-react`, `@ferridriver/ct-vue`, `@ferridriver/ct-svelte`
+- Same expect API as Playwright CT
+
+### Workspace Layout
+
+```
+crates/
+  ferridriver              Core library: Browser, Page, Locator, backends
+  ferridriver-cli          MCP server binary
+  ferridriver-mcp          MCP server library (25 tools)
+  ferridriver-napi         Node.js/Bun bindings (NAPI-RS)
+  ferridriver-test         Test runner: parallel, hooks, expect, reporters
+  ferridriver-test-macros  #[ferritest] proc macro
+  ferridriver-ct-leptos    Leptos component testing adapter
+  ferridriver-ct-dioxus    Dioxus component testing adapter
+packages/
+  ct-core                  JS CT core: import transform, Vite plugin, browser runtime
+  ct-react                 React adapter: registerSource + test API
+  ct-vue                   Vue adapter
+  ct-svelte                Svelte adapter
+examples/
+  ct-leptos-todomvc        Leptos TodoMVC with 15 component tests
+  ct-dioxus-todomvc        Dioxus TodoMVC with 15 component tests
+  ct-react                 React counter with CT tests
+```
+
 ## Performance
 
 - CdpPipe: 1.1x faster than Playwright on equivalent operations
 - WebKit: 1.3x faster than Playwright's patched WebKit
+- Test runner: 95+ tests/sec (3.7x faster than Playwright Test)
+- Component testing: 49.5 tests/sec on real WASM apps
 - Single CDP call per element interaction (scroll + getBoundingClientRect + dispatch in one evaluate)
 - FxHashMap for all internal maps (faster than std HashMap)
 - Zero-copy screenshot transfer via shared memory on WebKit
@@ -227,7 +319,11 @@ Step categories: Navigation (5), Interaction (14), Wait (6), Assertion (24), Var
 
 - 67 Rust integration tests (53 BDD + 14 Page API)
 - 250 NAPI tests (Bun, across all 3 backends)
-- 317 total tests
+- 14 test runner feature tests (hooks, serial, expected failures, soft assertions, snapshots)
+- 3 visual screenshot diff tests
+- 30 component tests (15 Leptos TodoMVC + 15 Dioxus TodoMVC)
+- 3 CT infrastructure tests
+- **367+ total tests**
 
 ## Building
 
@@ -242,14 +338,25 @@ cargo build --package ferridriver-cli
 cd crates/ferridriver-napi
 bun run build
 bun test
+
+# Run test runner benchmarks
+cargo test --package ferridriver-test --test bench_runner -- --nocapture
+
+# Run component tests (requires trunk)
+cargo test -p ct-leptos-todomvc --test todomvc
+
+# Run component tests (requires dx)
+cargo test -p ct-dioxus-todomvc --test todomvc
 ```
 
 ## Requirements
 
-- Rust 1.75+
+- Rust nightly (edition 2024)
 - Chrome/Chromium (auto-detected, or set `CHROMIUM_PATH`)
 - macOS 11+ for WebKit backend
 - Node.js 18+ or Bun 1.0+ for NAPI bindings
+- `trunk` for Leptos component testing (`cargo install trunk`)
+- `dx` for Dioxus component testing (`cargo install dioxus-cli`)
 
 ## License
 
