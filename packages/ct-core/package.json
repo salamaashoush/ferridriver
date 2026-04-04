@@ -1,0 +1,19 @@
+{
+  "name": "@ferridriver/ct-core",
+  "version": "0.1.0",
+  "description": "Ferridriver component testing core — Vite build, mount fixture, import transform, browser runtime",
+  "type": "module",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./mount": "./src/mount.mjs",
+    "./runner": "./src/runner.mjs",
+    "./vitePlugin": "./src/vitePlugin.mjs",
+    "./importTransform": "./src/importTransform.mjs",
+    "./jsx-runtime": "./jsx-runtime.js",
+    "./injected": "./src/injected/index.js"
+  },
+  "peerDependencies": {
+    "vite": ">=5.0.0"
+  },
+  "keywords": ["ferridriver", "component-testing", "vite"]
+}

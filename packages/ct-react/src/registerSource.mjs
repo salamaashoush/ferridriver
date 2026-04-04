@@ -21,13 +21,10 @@ window.__ferriMount = async function (componentRef, rootElement, options = {}) {
 
   // Resolve the component — either from registry or direct reference.
   let Component;
-  if (window.__ferriRegistry && window.__ferriRegistry[componentRef.id]) {
-    Component = await window.__ferriRegistry[componentRef.id]();
+  if (window.__ferriRegistry && window.__ferriRegistry.resolveImportRef) {
+    Component = await window.__ferriRegistry.resolveImportRef(componentRef);
   } else {
-    throw new Error(
-      `Component "${componentRef.id}" not found in registry. ` +
-        `Available: ${Object.keys(window.__ferriRegistry || {}).join(", ")}`
-    );
+    throw new Error(`Component registry not initialized`);
   }
 
   // Run beforeMount hooks if any.

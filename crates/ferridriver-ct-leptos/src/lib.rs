@@ -1,118 +1,205 @@
 //! Ferridriver component testing adapter for Leptos.
 //!
-//! Integrates with Leptos's real toolchain:
-//! - **CSR mode**: Uses `trunk serve` (the standard Leptos/Yew dev server)
-//! - **SSR mode**: Uses `cargo leptos watch`
-//!
-//! # Usage
+//! Architecture:
+//! - `trunk build` (cached) → serve dist/ via ComponentServer
+//! - Feed tests into ferridriver-test's parallel runner
+//! - N workers × N browsers, MPMC dispatch, retry, reporters
 //!
 //! ```ignore
-//! use ferridriver_ct_leptos::LeptosComponentTest;
+//! use ferridriver_ct_leptos::prelude::*;
 //!
-//! #[tokio::test]
-//! async fn test_counter() {
-//!     let ct = LeptosComponentTest::new("./examples/ct-leptos")
-//!         .csr()      // or .ssr()
-//!         .start()
-//!         .await
-//!         .unwrap();
-//!
-//!     let page = ct.new_page().await.unwrap();
+//! #[component_test]
+//! async fn counter_increments(page: Page) {
 //!     page.locator("#inc").click().await.unwrap();
-//!     let count = page.locator("#count").text_content().await.unwrap();
-//!     assert_eq!(count.unwrap(), "1");
-//!
-//!     ct.stop().await;
+//!     expect(&page.locator("#count")).to_have_text("1").await.unwrap();
 //! }
+//!
+//! ferridriver_ct_leptos::main!();
 //! ```
 
-use std::path::{Path, PathBuf};
+use std::future::Future;
+use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
+use std::time::Duration;
 
-use ferridriver_test::ct::devserver::{DevServer, DevServerConfig};
+use ferridriver_test::ct::server::ComponentServer;
+use ferridriver_test::model::*;
+use ferridriver_test::config::TestConfig;
+use ferridriver_test::reporter;
+use ferridriver_test::runner::TestRunner;
 
-/// Leptos rendering mode.
-#[derive(Debug, Clone, Copy, Default)]
-pub enum LeptosMode {
-  /// Client-side rendering via `trunk serve`.
-  #[default]
-  Csr,
-  /// Server-side rendering via `cargo leptos watch`.
-  Ssr,
+pub use ferridriver_ct_leptos_macros::component_test;
+pub use ferridriver_test;
+pub use inventory;
+
+pub mod prelude {
+  pub use ferridriver::{Locator, Page};
+  pub use ferridriver_test::expect::expect;
+  pub use ferridriver_test::model::TestFailure;
+  pub use crate::component_test;
 }
 
-/// Builder for Leptos component tests.
-pub struct LeptosComponentTest {
-  project_dir: PathBuf,
-  mode: LeptosMode,
+/// A registered component test (populated by `#[component_test]` via inventory).
+pub struct ComponentTestRegistration {
+  pub name: &'static str,
+  pub test_fn: fn(ferridriver::Page) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>,
 }
 
-/// A running Leptos component test environment.
-pub struct LeptosTestEnv {
-  dev_server: DevServer,
-  browser: ferridriver::Browser,
-}
+inventory::collect!(ComponentTestRegistration);
 
-impl LeptosComponentTest {
-  /// Create a new Leptos CT builder for the given project directory.
-  /// The directory must contain a `Cargo.toml` with Leptos dependencies.
-  pub fn new(project_dir: impl Into<PathBuf>) -> Self {
-    Self {
-      project_dir: project_dir.into(),
-      mode: LeptosMode::default(),
+#[macro_export]
+macro_rules! main {
+  () => {
+    fn main() {
+      $crate::run_harness();
     }
-  }
-
-  /// Use CSR mode (trunk serve). This is the default.
-  #[must_use]
-  pub fn csr(mut self) -> Self {
-    self.mode = LeptosMode::Csr;
-    self
-  }
-
-  /// Use SSR mode (cargo leptos watch).
-  #[must_use]
-  pub fn ssr(mut self) -> Self {
-    self.mode = LeptosMode::Ssr;
-    self
-  }
-
-  /// Start the dev server and launch a browser.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if trunk/cargo-leptos is not installed,
-  /// the project fails to build, or the browser fails to launch.
-  pub async fn start(self) -> Result<LeptosTestEnv, String> {
-    let config = match self.mode {
-      LeptosMode::Csr => DevServerConfig::trunk(&self.project_dir),
-      LeptosMode::Ssr => DevServerConfig::cargo_leptos(&self.project_dir),
-    };
-
-    let dev_server = ferridriver_test::ct::devserver::start(&config).await?;
-
-    let browser = ferridriver::Browser::launch(ferridriver::options::LaunchOptions::default())
-      .await
-      .map_err(|e| format!("browser launch: {e}"))?;
-
-    Ok(LeptosTestEnv { dev_server, browser })
-  }
+  };
 }
 
-impl LeptosTestEnv {
-  /// The dev server URL.
-  #[must_use]
-  pub fn url(&self) -> &str {
-    self.dev_server.url()
+/// Run all registered component tests through the parallel test runner.
+pub fn run_harness() {
+  let rt = tokio::runtime::Builder::new_multi_thread()
+    .worker_threads(4)
+    .enable_all()
+    .build()
+    .expect("failed to build tokio runtime");
+
+  let exit_code = rt.block_on(async { run_inner().await });
+  std::process::exit(exit_code);
+}
+
+async fn run_inner() -> i32 {
+  let registrations: Vec<&ComponentTestRegistration> =
+    inventory::iter::<ComponentTestRegistration>.into_iter().collect();
+
+  if registrations.is_empty() {
+    println!("\n  0 tests found.\n");
+    return 0;
   }
 
-  /// Create a new page already navigated to the component.
-  pub async fn new_page(&self) -> Result<ferridriver::Page, String> {
-    self.browser.new_page_with_url(self.dev_server.url()).await
+  // Step 1: trunk build (cached).
+  let project_dir = find_project_dir();
+  trunk_build(&project_dir).await;
+
+  // Step 2: Serve dist/.
+  let dist_dir = project_dir.join("dist");
+  let server = ComponentServer::start(&dist_dir)
+    .await
+    .expect("failed to start server");
+  let url = server.url();
+  eprintln!("[ferridriver-ct] Serving {} test(s) at {url}", registrations.len());
+
+  // Step 3: Convert registrations into TestCases for the runner.
+  let test_cases: Vec<TestCase> = registrations
+    .iter()
+    .map(|reg| {
+      let test_fn_ptr = reg.test_fn;
+      let nav_url = url.clone();
+
+      TestCase {
+        id: TestId {
+          file: "component_test".into(),
+          suite: None,
+          name: reg.name.to_string(),
+        },
+        test_fn: Arc::new(move |pool| {
+          let nav_url = nav_url.clone();
+          Box::pin(async move {
+            // Get the page from the fixture pool (worker creates it).
+            let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
+              message: e,
+              stack: None,
+              diff: None,
+              screenshot: None,
+            })?;
+
+            // Navigate to the CT server.
+            page.goto(&nav_url, None).await.map_err(|e| TestFailure {
+              message: format!("navigate failed: {e}"),
+              stack: None,
+              diff: None,
+              screenshot: None,
+            })?;
+
+            // Run the user's test body.
+            // Clone the inner Page (Arc<AnyPage> clone is cheap).
+            let page_owned = ferridriver::Page::new(page.inner().clone());
+            test_fn_ptr(page_owned).await
+          })
+        }),
+        fixture_requests: vec!["page".into()],
+        annotations: Vec::new(),
+        timeout: Some(Duration::from_secs(30)),
+        retries: None,
+        expected_status: ExpectedStatus::Pass,
+      }
+    })
+    .collect();
+
+  let total = test_cases.len();
+
+  // Step 4: Build test plan.
+  let plan = TestPlan {
+    suites: vec![TestSuite {
+      name: "component_tests".into(),
+      file: "component_test".into(),
+      tests: test_cases,
+      hooks: Hooks::default(),
+      annotations: Vec::new(),
+      mode: SuiteMode::Parallel,
+    }],
+    total_tests: total,
+    shard: None,
+  };
+
+  // Step 5: Run through the parallel test runner.
+  let config = TestConfig {
+    workers: {
+      let cpus = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4);
+      (cpus / 2).max(1)
+    },
+    timeout: 30_000,
+    ..Default::default()
+  };
+
+  let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
+  let mut runner = TestRunner::new(config, reporters, ferridriver_test::CliOverrides::default());
+  let exit_code = runner.run(plan).await;
+
+  // Cleanup.
+  server.stop().await;
+
+  exit_code
+}
+
+async fn trunk_build(project_dir: &PathBuf) {
+  eprintln!("[ferridriver-ct] trunk build...");
+  let start = std::time::Instant::now();
+
+  let output = tokio::process::Command::new("trunk")
+    .arg("build")
+    .current_dir(project_dir)
+    .stdout(std::process::Stdio::piped())
+    .stderr(std::process::Stdio::piped())
+    .output()
+    .await
+    .expect("failed to run `trunk build` — cargo install trunk");
+
+  if !output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    panic!("[ferridriver-ct] trunk build failed:\n{stderr}");
   }
 
-  /// Stop everything.
-  pub async fn stop(self) {
-    let _ = self.browser.close().await;
-    self.dev_server.stop().await;
+  eprintln!("[ferridriver-ct] built in {:.0?}", start.elapsed());
+}
+
+fn find_project_dir() -> PathBuf {
+  let mut dir = std::env::current_dir().expect("cannot get cwd");
+  loop {
+    if dir.join("Cargo.toml").exists() { return dir; }
+    if !dir.pop() { panic!("cannot find Cargo.toml"); }
   }
 }

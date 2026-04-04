@@ -1,11 +1,12 @@
 [package]
-name = "ct-leptos-example"
+name = "ct-leptos-todomvc"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
 leptos = { version = "0.7", features = ["csr"] }
 console_error_panic_hook = "0.1"
+web-sys = { version = "0.3", features = ["Storage", "Window"] }
 
 [dev-dependencies]
 ferridriver-ct-leptos = { path = "../../crates/ferridriver-ct-leptos" }
@@ -14,5 +15,9 @@ ferridriver-test = { path = "../../crates/ferridriver-test" }
 tokio = { version = "1", features = ["full"] }
 
 [[test]]
-name = "counter"
+name = "todomvc"
+harness = false
+
+[[test]]
+name = "stress500"
 harness = false

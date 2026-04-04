@@ -450,6 +450,358 @@ impl Expect<'_, Locator> {
     .await
   }
 
+  // ── Array text matchers ──
+
+  /// Assert multiple elements' text content matches an array of expected values.
+  /// Each element matched by the locator is compared positionally.
+  /// Supports String and Regex per item.
+  pub async fn to_have_texts(&self, expected: &[impl Into<StringOrRegex> + Clone]) -> Result<(), TestFailure> {
+    let expected: Vec<StringOrRegex> = expected.iter().map(|e| e.clone().into()).collect();
+    let locator = self.subject;
+    let is_not = self.is_not;
+    poll_until(self.timeout, || {
+      let expected = expected.clone();
+      async move {
+        let count = locator.count().await.unwrap_or(0);
+        let mut actuals = Vec::with_capacity(count);
+        for i in 0..count {
+          let selector = format!("{}:nth-child({})", locator.selector(), i + 1);
+          // Use the parent page's evaluate to get text for each child.
+          let text = locator
+            .evaluate(&format!(
+              "document.querySelectorAll('{}')[{i}]?.textContent?.trim() || ''",
+              locator.selector().replace('\'', "\\'")
+            ))
+            .await
+            .unwrap_or(None)
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+          actuals.push(text);
+        }
+
+        if actuals.len() != expected.len() {
+          let matches = false;
+          if matches == is_not { return Ok(()); }
+          return Err(MatchError::new(format!(
+            "expected {} texts, got {}\nexpected: {:?}\nreceived: {:?}",
+            expected.len(), actuals.len(),
+            expected.iter().map(|e| e.description()).collect::<Vec<_>>(),
+            actuals,
+          )));
+        }
+
+        for (i, (exp, act)) in expected.iter().zip(actuals.iter()).enumerate() {
+          let matches = exp.matches(act);
+          if matches == is_not {
+            return Err(MatchError::new(format!(
+              "text mismatch at index {i}\n{}expected: {}\nreceived: \"{act}\"",
+              if is_not { "not " } else { "" },
+              exp.description(),
+            )));
+          }
+        }
+        Ok(())
+      }
+    })
+    .await
+  }
+
+  /// Assert multiple elements contain expected substrings (positional).
+  pub async fn to_contain_texts(&self, expected: &[impl AsRef<str>]) -> Result<(), TestFailure> {
+    let expected: Vec<String> = expected.iter().map(|s| s.as_ref().to_string()).collect();
+    let locator = self.subject;
+    let is_not = self.is_not;
+    poll_until(self.timeout, || {
+      let expected = expected.clone();
+      async move {
+        let count = locator.count().await.unwrap_or(0);
+        let mut actuals = Vec::with_capacity(count);
+        for i in 0..count {
+          let text = locator
+            .evaluate(&format!(
+              "document.querySelectorAll('{}')[{i}]?.textContent?.trim() || ''",
+              locator.selector().replace('\'', "\\'")
+            ))
+            .await
+            .unwrap_or(None)
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+          actuals.push(text);
+        }
+
+        if actuals.len() != expected.len() {
+          if is_not { return Ok(()); }
+          return Err(MatchError::new(format!(
+            "expected {} texts, got {}",
+            expected.len(), actuals.len(),
+          )));
+        }
+
+        for (i, (exp, act)) in expected.iter().zip(actuals.iter()).enumerate() {
+          let contains = act.contains(exp.as_str());
+          if contains == is_not {
+            return Err(MatchError::new(format!(
+              "text at index {i} {}to contain \"{exp}\"\nreceived: \"{act}\"",
+              if is_not { "not expected " } else { "expected " },
+            )));
+          }
+        }
+        Ok(())
+      }
+    })
+    .await
+  }
+
+  // ── Snapshot matchers ──
+
+  /// Assert the element's text content matches a stored snapshot.
+  /// First run creates the snapshot file. Subsequent runs diff against it.
+  /// Pass `update = true` (or `--update-snapshots` CLI) to overwrite.
+  pub async fn to_match_snapshot(&self, name: &str) -> Result<(), TestFailure> {
+    let locator = self.subject;
+    let actual = locator
+      .text_content()
+      .await
+      .unwrap_or(None)
+      .unwrap_or_default();
+    // Snapshot dir defaults to __snapshots__ relative to cwd.
+    let snap_dir = std::path::PathBuf::from("__snapshots__");
+    let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
+    let info = crate::model::TestInfo {
+      test_id: crate::model::TestId {
+        file: String::new(),
+        suite: None,
+        name: name.to_string(),
+      },
+      title_path: vec![name.to_string()],
+      retry: 0,
+      worker_index: 0,
+      parallel_index: 0,
+      repeat_each_index: 0,
+      output_dir: std::path::PathBuf::from("test-results"),
+      snapshot_dir: snap_dir,
+      attachments: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      steps: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      soft_errors: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      timeout: self.timeout,
+      tags: Vec::new(),
+      start_time: std::time::Instant::now(),
+    };
+    crate::snapshot::assert_snapshot(&info, &actual, name, update)
+  }
+
+  /// Assert the element's screenshot matches a stored PNG snapshot.
+  ///
+  /// Performs pixel-level comparison:
+  /// - Decodes both PNGs to RGBA pixels
+  /// - Compares per-pixel with a configurable threshold (default: 0.1 per channel)
+  /// - Reports mismatch count and percentage
+  /// - Generates a diff image (red = changed pixels) saved alongside
+  /// - Attaches the actual screenshot to the failure for reporters
+  ///
+  /// First run creates the baseline. Set `UPDATE_SNAPSHOTS=1` to overwrite.
+  pub async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure> {
+    let locator = self.subject;
+    let actual_png = locator
+      .screenshot()
+      .await
+      .map_err(|e| TestFailure {
+        message: format!("screenshot failed: {e}"),
+        stack: None, diff: None, screenshot: None,
+      })?;
+
+    let snap_dir = std::path::PathBuf::from("__snapshots__");
+    let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
+    let snap_path = snap_dir.join(format!("{name}.png"));
+    let diff_path = snap_dir.join(format!("{name}-diff.png"));
+    let actual_path = snap_dir.join(format!("{name}-actual.png"));
+
+    if update || !snap_path.exists() {
+      if let Some(parent) = snap_path.parent() {
+        std::fs::create_dir_all(parent).map_err(|e| TestFailure {
+          message: format!("create snapshot dir: {e}"),
+          stack: None, diff: None, screenshot: None,
+        })?;
+      }
+      std::fs::write(&snap_path, &actual_png).map_err(|e| TestFailure {
+        message: format!("write screenshot: {e}"),
+        stack: None, diff: None, screenshot: None,
+      })?;
+      return Ok(());
+    }
+
+    let expected_png = std::fs::read(&snap_path).map_err(|e| TestFailure {
+      message: format!("read snapshot: {e}"),
+      stack: None, diff: None, screenshot: None,
+    })?;
+
+    // Fast path: identical bytes.
+    if expected_png == actual_png {
+      return Ok(());
+    }
+
+    // Decode both PNGs.
+    let expected_img = image::load_from_memory_with_format(&expected_png, image::ImageFormat::Png)
+      .map_err(|e| TestFailure {
+        message: format!("decode expected PNG: {e}"),
+        stack: None, diff: None, screenshot: None,
+      })?
+      .to_rgba8();
+
+    let actual_img = image::load_from_memory_with_format(&actual_png, image::ImageFormat::Png)
+      .map_err(|e| TestFailure {
+        message: format!("decode actual PNG: {e}"),
+        stack: None, diff: None, screenshot: None,
+      })?
+      .to_rgba8();
+
+    let (ew, eh) = expected_img.dimensions();
+    let (aw, ah) = actual_img.dimensions();
+
+    if ew != aw || eh != ah {
+      // Save actual for inspection.
+      let _ = std::fs::write(&actual_path, &actual_png);
+      return Err(TestFailure {
+        message: format!(
+          "screenshot '{name}' size mismatch: expected {ew}x{eh}, got {aw}x{ah}\n\
+           actual saved to: {}",
+          actual_path.display()
+        ),
+        stack: None, diff: None, screenshot: Some(actual_png),
+      });
+    }
+
+    // Pixel-level diff with threshold.
+    // Threshold: max allowed difference per channel (0-255). Default 2 (~0.8%).
+    let threshold: u8 = std::env::var("SCREENSHOT_THRESHOLD")
+      .ok()
+      .and_then(|v| v.parse().ok())
+      .unwrap_or(2);
+
+    let mut diff_img = image::RgbaImage::new(ew, eh);
+    let mut mismatch_count: u64 = 0;
+    let total_pixels = (ew as u64) * (eh as u64);
+
+    let expected_pixels = expected_img.as_raw();
+    let actual_pixels = actual_img.as_raw();
+
+    for i in (0..expected_pixels.len()).step_by(4) {
+      let dr = expected_pixels[i].abs_diff(actual_pixels[i]);
+      let dg = expected_pixels[i + 1].abs_diff(actual_pixels[i + 1]);
+      let db = expected_pixels[i + 2].abs_diff(actual_pixels[i + 2]);
+
+      let pixel_idx = i / 4;
+      let x = (pixel_idx % ew as usize) as u32;
+      let y = (pixel_idx / ew as usize) as u32;
+
+      if dr > threshold || dg > threshold || db > threshold {
+        mismatch_count += 1;
+        // Red pixel in diff image for mismatch.
+        diff_img.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
+      } else {
+        // Dimmed original pixel for matching areas.
+        diff_img.put_pixel(
+          x, y,
+          image::Rgba([
+            actual_pixels[i] / 3,
+            actual_pixels[i + 1] / 3,
+            actual_pixels[i + 2] / 3,
+            255,
+          ]),
+        );
+      }
+    }
+
+    if mismatch_count == 0 {
+      return Ok(());
+    }
+
+    let mismatch_pct = (mismatch_count as f64 / total_pixels as f64) * 100.0;
+
+    // Save diff and actual images.
+    let _ = std::fs::create_dir_all(&snap_dir);
+    let _ = diff_img.save(&diff_path);
+    let _ = std::fs::write(&actual_path, &actual_png);
+
+    // Encode diff as PNG bytes for the failure attachment.
+    let mut diff_png = Vec::new();
+    diff_img
+      .write_to(&mut std::io::Cursor::new(&mut diff_png), image::ImageFormat::Png)
+      .ok();
+
+    Err(TestFailure {
+      message: format!(
+        "screenshot '{name}' mismatch: {mismatch_count}/{total_pixels} pixels differ ({mismatch_pct:.2}%)\n\
+         threshold: {threshold}/255 per channel\n\
+         expected: {}\n\
+         actual:   {}\n\
+         diff:     {}\n\
+         Run with UPDATE_SNAPSHOTS=1 to update baseline.",
+        snap_path.display(),
+        actual_path.display(),
+        diff_path.display(),
+      ),
+      stack: None,
+      diff: None,
+      screenshot: Some(actual_png),
+    })
+  }
+
+  // ── Accessibility ──
+
+  /// Assert the element's accessibility tree matches a YAML-like snapshot.
+  /// Matches Playwright's `toMatchAriaSnapshot` (simplified).
+  pub async fn to_match_aria_snapshot(&self, expected_yaml: &str) -> Result<(), TestFailure> {
+    let locator = self.subject;
+    let is_not = self.is_not;
+    poll_until(self.timeout, || {
+      let expected_yaml = expected_yaml.to_string();
+      async move {
+        // Get the accessible name and role of matched elements.
+        let aria_tree = locator
+          .evaluate(
+            "(() => { \
+              const el = document.querySelector(selector); \
+              if (!el) return 'EMPTY'; \
+              function walk(node, indent) { \
+                let role = node.getAttribute('role') || node.tagName.toLowerCase(); \
+                let name = node.getAttribute('aria-label') || node.textContent?.trim()?.substring(0, 50) || ''; \
+                let line = indent + role; \
+                if (name) line += ' \"' + name + '\"'; \
+                let lines = [line]; \
+                for (const child of node.children) { \
+                  lines.push(...walk(child, indent + '  ')); \
+                } \
+                return lines; \
+              } \
+              return walk(el, '').join('\\n'); \
+            })()"
+          )
+          .await
+          .unwrap_or(None)
+          .and_then(|v| v.as_str().map(String::from))
+          .unwrap_or_else(|| "EMPTY".into());
+
+        // Simple substring matching against the expected YAML.
+        let lines_match = expected_yaml.lines().all(|expected_line| {
+          let trimmed = expected_line.trim();
+          if trimmed.is_empty() { return true; }
+          aria_tree.contains(trimmed)
+        });
+
+        if lines_match == is_not {
+          Err(MatchError::new(format!(
+            "aria snapshot {}match\nexpected:\n{expected_yaml}\nreceived:\n{aria_tree}",
+            if is_not { "unexpected " } else { "did not " },
+          )))
+        } else {
+          Ok(())
+        }
+      }
+    })
+    .await
+  }
+
   // ── Count ──
 
   /// Assert the number of elements matching the locator.

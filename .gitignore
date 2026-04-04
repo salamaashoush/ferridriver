@@ -10,3 +10,17 @@ bench/pw-bench/package-lock.json
 bench/pw-bench/test-results/
 packages/*/node_modules/
 packages/*/bun.lock
+
+# Component testing build artifacts
+examples/*/dist/
+examples/*/node_modules/
+examples/*/bun.lock
+__snapshots__/
+*.ferridriver-ct/
+__ferri_ct_*
+
+# Dioxus build output (in workspace target)
+target/dx/
+
+# Claude Code worktrees
+.claude/worktrees/

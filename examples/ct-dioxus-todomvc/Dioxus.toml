@@ -1,0 +1,6 @@
+[application]
+name = "ct-dioxus-todomvc"
+default_platform = "web"
+
+[web.app]
+title = "Dioxus TodoMVC"

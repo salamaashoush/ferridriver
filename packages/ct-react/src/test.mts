@@ -1,54 +1,45 @@
 /**
  * @ferridriver/ct-react — test API
  *
- * Provides Playwright-compatible component testing API:
+ * Full Playwright-style component testing for React:
  *
  * ```typescript
  * import { test, expect } from '@ferridriver/ct-react';
  * import Counter from './Counter';
  *
  * test('increments', async ({ mount, page }) => {
- *   const component = await mount(Counter, { props: { initial: 5 } });
+ *   const component = await mount(<Counter initial={5} />);
  *   await expect(component.locator('#count')).toHaveText('5');
  *   await component.locator('#inc').click();
  *   await expect(component.locator('#count')).toHaveText('6');
  * });
  * ```
  *
- * Under the hood:
- * 1. Starts Vite dev server (or uses existing one)
- * 2. Navigates browser to the dev server
- * 3. mount() calls page.evaluate() which invokes window.__ferriMount()
- *    (defined by registerSource.mjs)
- * 4. Returns a Locator pointing at the mounted component root
+ * Pipeline:
+ * 1. Before tests: ct-core scans test files, builds Vite bundle with registry
+ * 2. Starts preview server at FERRIDRIVER_CT_URL
+ * 3. Each test: navigates to preview, mount() → page.evaluate() → __ferriMount()
+ * 4. After tests: shuts down server + browser
  */
 
 import { Browser, type Page } from "../../../crates/ferridriver-napi/index.js";
+import { mount as ctMount } from "../../ct-core/src/mount.mjs";
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 
-// Re-export expect for convenience.
 export { expect };
 
-// Global state managed by the test harness.
 let _browser: Browser | null = null;
-let _page: Page | null = null;
-let _baseUrl: string = process.env.CT_URL || "http://localhost:5173";
+let _baseUrl: string = "";
+let _boundCallbacks: Function[] = [];
 
-/**
- * Mount function — injects a component into the page via evaluate.
- *
- * The registerSource.mjs (loaded by the dev server page) defines
- * window.__ferriMount which uses React's createRoot to render.
- *
- * For the component registry to work, the dev server must serve a page
- * that includes the registerSource AND registers the component.
- * In the simple case (no registry), we pass component as a string ID
- * and the registerSource looks it up.
- */
+interface MountResult {
+  locator: (selector: string) => ReturnType<Page["locator"]>;
+}
+
 type MountFunction = (
-  componentOrId: any,
-  options?: { props?: Record<string, any> }
-) => Promise<{ locator: (selector: string) => any }>;
+  component: any,
+  options?: { props?: Record<string, any>; hooksConfig?: Record<string, any> }
+) => Promise<MountResult>;
 
 interface TestFixtures {
   page: Page;
@@ -58,68 +49,53 @@ interface TestFixtures {
 type TestFn = (fixtures: TestFixtures) => Promise<void>;
 
 /**
+ * The base URL comes from:
+ * 1. FERRIDRIVER_CT_URL env var (set by ct-core runner after Vite build+preview)
+ * 2. CT_URL env var (manual dev server)
+ * 3. Default http://localhost:3100
+ */
+function getBaseUrl(): string {
+  return (
+    process.env.FERRIDRIVER_CT_URL ||
+    process.env.CT_URL ||
+    "http://localhost:3100"
+  );
+}
+
+/**
  * Define a component test.
- *
- * Usage:
- * ```typescript
- * test('my test', async ({ mount, page }) => {
- *   const component = await mount(MyComponent, { props: { count: 0 } });
- *   await page.locator('button').click();
- * });
- * ```
  */
 export function test(name: string, fn: TestFn) {
   it(name, async () => {
     if (!_browser) {
       _browser = await Browser.launch({ backend: "cdp-pipe" });
     }
+    _baseUrl = getBaseUrl();
+    _boundCallbacks = [];
 
-    // Create fresh page per test.
+    // Fresh page per test, navigated to the CT preview server.
     const page = await _browser.newPageWithUrl(_baseUrl);
 
-    // Wait for the page to be ready.
-    await new Promise((r) => setTimeout(r, 200));
+    // Expose the callback bridge for function refs (event handlers etc).
+    await page.evaluate(`(() => {
+      window.__ferriDispatchFunction = window.__ferriDispatchFunction || function() {};
+    })()`);
 
-    // Create mount function.
-    const mount: MountFunction = async (componentOrId, options = {}) => {
-      const props = options.props || {};
-      const componentId =
-        typeof componentOrId === "string"
-          ? componentOrId
-          : componentOrId?.name || componentOrId?.displayName || "default";
-
-      // Call __ferriMount if available, otherwise just render via registry.
-      const js = `(() => {
-        const root = document.getElementById('root') || document.getElementById('app');
-        if (!root) throw new Error('No #root or #app element');
-        if (window.__ferriMount) {
-          window.__ferriMount(
-            { id: '${componentId}', props: ${JSON.stringify(props)} },
-            root,
-            { props: ${JSON.stringify(props)} }
-          );
-        }
-        return root.outerHTML;
-      })()`;
-
-      await page.evaluate(js);
-
-      // Return a locator-like object pointing at the component root.
+    // Create the mount function that uses ct-core's mount().
+    const mount: MountFunction = async (component, options = {}) => {
+      await ctMount(page, component, options, _boundCallbacks);
+      const rootLocator = page.locator("#root");
       return {
-        locator: (selector: string) => page.locator(selector),
+        locator: (selector: string) => page.locator(`#root ${selector}`),
       };
     };
 
-    try {
-      await fn({ page, mount });
-    } finally {
-      // Page cleanup — context is isolated per test in ferridriver.
-    }
+    await fn({ page, mount });
   });
 }
 
 /**
- * Describe block for grouping component tests.
+ * Describe block.
  */
 test.describe = (name: string, fn: () => void) => {
   describe(name, () => {
@@ -141,16 +117,8 @@ test.describe = (name: string, fn: () => void) => {
 };
 
 /**
- * Set the base URL for the dev server.
- * Call before any tests if not using CT_URL env var.
+ * Configure the CT runner programmatically.
  */
-export function setBaseUrl(url: string) {
-  _baseUrl = url;
+export function configure(opts: { baseUrl?: string }) {
+  if (opts.baseUrl) _baseUrl = opts.baseUrl;
 }
-
-/**
- * Clean up browser on process exit.
- */
-process.on("exit", () => {
-  // Can't await here, but browser should auto-close.
-});

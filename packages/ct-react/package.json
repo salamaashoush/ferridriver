@@ -9,6 +9,9 @@
     "./test": "./src/test.mts",
     "./register": "./src/registerSource.mjs"
   },
+  "dependencies": {
+    "@ferridriver/ct-core": "file:../ct-core"
+  },
   "peerDependencies": {
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0"

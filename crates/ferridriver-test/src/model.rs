@@ -328,6 +328,25 @@ impl fmt::Display for TestFailure {
 
 impl std::error::Error for TestFailure {}
 
+/// Enables `?` on any `Result<T, String>` inside test functions.
+/// Locator methods (click, fill, press, etc.) return `Result<T, String>`.
+impl From<String> for TestFailure {
+  fn from(message: String) -> Self {
+    Self {
+      message,
+      stack: None,
+      diff: None,
+      screenshot: None,
+    }
+  }
+}
+
+impl From<&str> for TestFailure {
+  fn from(message: &str) -> Self {
+    Self::from(message.to_string())
+  }
+}
+
 /// An artifact attached to a test result.
 #[derive(Debug, Clone)]
 pub struct Attachment {

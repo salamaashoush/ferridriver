@@ -1,18 +1,17 @@
 [package]
-name = "ct-leptos-example"
+name = "ct-dioxus-todomvc"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-leptos = { version = "0.7", features = ["csr"] }
-console_error_panic_hook = "0.1"
+dioxus = { version = "0.7", features = ["web"] }
 
 [dev-dependencies]
-ferridriver-ct-leptos = { path = "../../crates/ferridriver-ct-leptos" }
+ferridriver-ct-dioxus = { path = "../../crates/ferridriver-ct-dioxus" }
 ferridriver = { path = "../../crates/ferridriver" }
 ferridriver-test = { path = "../../crates/ferridriver-test" }
 tokio = { version = "1", features = ["full"] }
 
 [[test]]
-name = "counter"
+name = "todomvc"
 harness = false

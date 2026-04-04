@@ -29,6 +29,7 @@ console = "0.15"
 quick-xml = "0.37"
 similar = "2"
 base64 = "0.22"
+image = { version = "0.25", default-features = false, features = ["png"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 axum = { workspace = true }
 tower = "0.5"
