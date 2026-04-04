@@ -16,11 +16,15 @@ impl McpServer {
   )]
   async fn connect(&self, Parameters(p): Parameters<ConnectParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
-    let mut state = self.state.lock().await;
 
     if let Some(url) = &p.url {
-      let page_count = Box::pin(state.connect_to_url(s, url)).await.map_err(Self::err)?;
-      drop(state);
+      let page_count = {
+        let mut state = self.state.write().await;
+        let count = Box::pin(state.connect_to_url(s, url)).await.map_err(Self::err)?;
+        drop(state);
+        self.state.invalidate_context(s);
+        count
+      };
       let page = Box::pin(self.page(s)).await?;
       let snap = self.snap(&page, s).await;
       Ok(CallToolResult::success(vec![Content::text(format!(
@@ -28,10 +32,15 @@ impl McpServer {
       ))]))
     } else if p.auto_discover.unwrap_or(false) {
       let channel = p.channel.as_deref().unwrap_or("stable");
-      let page_count = Box::pin(state.connect_auto(s, channel, p.user_data_dir.as_deref()))
-        .await
-        .map_err(Self::err)?;
-      drop(state);
+      let page_count = {
+        let mut state = self.state.write().await;
+        let count = Box::pin(state.connect_auto(s, channel, p.user_data_dir.as_deref()))
+          .await
+          .map_err(Self::err)?;
+        drop(state);
+        self.state.invalidate_context(s);
+        count
+      };
       let page = Box::pin(self.page(s)).await?;
       let snap = self.snap(&page, s).await;
       Ok(CallToolResult::success(vec![Content::text(format!(
@@ -59,7 +68,7 @@ impl McpServer {
 
   #[tool(
     name = "page",
-    description = "Manage pages and sessions. Actions: back, forward, reload, new (open page), close (by index), select (by index), list (all sessions/pages), close_browser."
+    description = "Manage pages (tabs) and sessions. Actions: list (show all tabs with URLs), select (switch to tab by index -- invalidates old refs), new (open tab), close (close tab by index), back, forward, reload, close_browser. Use 'list' to find tabs, then 'select' to switch."
   )]
   async fn page_manage(&self, Parameters(p): Parameters<PageParams>) -> Result<CallToolResult, ErrorData> {
     match p.action.as_str() {
@@ -88,9 +97,10 @@ impl McpServer {
         let s = sess(p.session.as_ref());
         let _guard = self.session_guard(s).await;
         let url = p.url.as_deref().unwrap_or("about:blank");
-        let mut state = self.state.lock().await;
+        let mut state = self.state.write().await;
         let any_page = Box::pin(state.open_page(s, url)).await.map_err(Self::err)?;
         drop(state);
+        self.state.invalidate_context(s);
         let page = ferridriver::Page::new(any_page);
         let snap = self.snap(&page, s).await;
         Ok(CallToolResult::success(vec![Content::text(format!(
@@ -103,8 +113,10 @@ impl McpServer {
         let idx = p
           .page_index
           .ok_or_else(|| Self::err("'page_index' required for close"))?;
-        let mut state = self.state.lock().await;
+        let mut state = self.state.write().await;
         state.close_page(s, idx).map_err(Self::err)?;
+        drop(state);
+        self.state.invalidate_context(s);
         Ok(CallToolResult::success(vec![Content::text(format!(
           "Closed page {idx} in session '{s}'."
         ))]))
@@ -115,7 +127,7 @@ impl McpServer {
         let idx = p
           .page_index
           .ok_or_else(|| Self::err("'page_index' required for select"))?;
-        let mut state = self.state.lock().await;
+        let mut state = self.state.write().await;
         state.select_page(s, idx).map_err(Self::err)?;
         let any_page = state.active_page(s).map_err(Self::err)?.clone();
         drop(state);
@@ -123,7 +135,7 @@ impl McpServer {
         self.action_ok(&page, s, &format!("Switched to page {idx}.")).await
       },
       "list" => {
-        let state = self.state.lock().await;
+        let state = self.state.read().await;
         let contexts = state.list_contexts().await;
         drop(state);
         let mut out = String::from("### Sessions\n");
@@ -137,7 +149,8 @@ impl McpServer {
         Ok(CallToolResult::success(vec![Content::text(out)]))
       },
       "close_browser" => {
-        self.state.lock().await.shutdown().await;
+        self.state.write().await.shutdown().await;
+        self.state.invalidate_all();
         Ok(CallToolResult::success(vec![Content::text("Browser closed.")]))
       },
       other => Err(Self::err(format!(

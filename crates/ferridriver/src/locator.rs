@@ -118,13 +118,17 @@ impl Locator {
   /// Returns an error if the element cannot be found, is not actionable
   /// (e.g. a `<select>` or file input), or the click fails.
   pub async fn click(&self) -> Result<(), String> {
-    let el = self.resolve().await?;
-    // Click guard: prevent clicking <select> or file inputs
-    if let Err(guard_err) = actions::check_click_guard(&el, self.page.inner()).await {
-      return Err(guard_err.to_string());
-    }
-    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
-    el.click().await
+    let page = self.page.inner().clone();
+    self.retry_with_element(|el| {
+      let page = page.clone();
+      async move {
+        if let Err(e) = actions::check_click_guard(&el, &page).await {
+          return Err(e.to_string());
+        }
+        actions::wait_for_actionable(&el, &page).await.ok();
+        el.click().await
+      }
+    }).await
   }
 
   /// Double-click the element matched by this locator.
@@ -133,9 +137,14 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or the double-click fails.
   pub async fn dblclick(&self) -> Result<(), String> {
-    let el = self.resolve().await?;
-    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
-    el.dblclick().await
+    let page = self.page.inner().clone();
+    self.retry_with_element(|el| {
+      let page = page.clone();
+      async move {
+        actions::wait_for_actionable(&el, &page).await.ok();
+        el.dblclick().await
+      }
+    }).await
   }
 
   /// Right-click (context menu click) on the element.
@@ -145,18 +154,21 @@ impl Locator {
   /// Returns an error if the element cannot be found, its bounding box
   /// cannot be computed, or the right-click dispatch fails.
   pub async fn right_click(&self) -> Result<(), String> {
-    let el = self.resolve().await?;
-    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
-    // Get center coords and dispatch right-click via page
-    let center = el.call_js_fn_value(
-      "function() { this.scrollIntoViewIfNeeded && this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
-    ).await?;
-    if let Some(c) = center {
-      let x = c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-      let y = c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-      self.page.click_at_opts(x, y, "right", 1).await?;
-    }
-    Ok(())
+    let page_ref = self.page.clone();
+    self.retry_with_element(|el| {
+      let page_ref = page_ref.clone();
+      async move {
+        let center = el.call_js_fn_value(
+          "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
+        ).await?;
+        if let Some(c) = center {
+          let x = c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+          let y = c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+          page_ref.click_at_opts(x, y, "right", 1).await?;
+        }
+        Ok(())
+      }
+    }).await
   }
 
   /// Fill an input or textarea element with the given value.
@@ -165,8 +177,11 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or is not a fillable element.
   pub async fn fill(&self, value: &str) -> Result<(), String> {
-    let el = self.resolve().await?;
-    actions::fill(&el, value).await
+    let value = value.to_string();
+    self.retry_with_element(|el| {
+      let value = value.clone();
+      async move { actions::fill(&el, &value).await }
+    }).await
   }
 
   /// Clear the value of an input or textarea element.
@@ -175,16 +190,15 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found.
   pub async fn clear(&self) -> Result<(), String> {
-    let el = self.resolve().await?;
-    let _ = el
-      .call_js_fn(
+    self.retry_with_element(|el| async move {
+      el.call_js_fn(
         "function() { \
-      if (window.__fd) window.__fd.clearAndDispatch(this); \
-      else { this.value = ''; } \
-    }",
-      )
-      .await;
-    Ok(())
+          if (window.__fd) window.__fd.clearAndDispatch(this); \
+          else { this.value = ''; } \
+        }",
+      ).await?;
+      Ok(())
+    }).await
   }
 
   /// Type text into the element character by character using keyboard events.
@@ -193,9 +207,16 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or key dispatch fails.
   pub async fn type_text(&self, text: &str) -> Result<(), String> {
-    let el = self.resolve().await?;
-    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
-    el.type_str(text).await
+    let text = text.to_string();
+    let page = self.page.inner().clone();
+    self.retry_with_element(|el| {
+      let text = text.clone();
+      let page = page.clone();
+      async move {
+        actions::wait_for_actionable(&el, &page).await.ok();
+        el.type_str(&text).await
+      }
+    }).await
   }
 
   /// Press a key or key combination (e.g. "Enter", "Control+a").
@@ -204,8 +225,13 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or the key press fails.
   pub async fn press(&self, key: &str) -> Result<(), String> {
-    self.resolve().await?;
-    self.page.inner().press_key(key).await
+    let key = key.to_string();
+    let page = self.page.inner().clone();
+    self.retry_with_element(|_el| {
+      let key = key.clone();
+      let page = page.clone();
+      async move { page.press_key(&key).await }
+    }).await
   }
 
   /// Hover over the element matched by this locator.
@@ -214,9 +240,14 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or the hover action fails.
   pub async fn hover(&self) -> Result<(), String> {
-    let el = self.resolve().await?;
-    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
-    el.hover().await
+    let page = self.page.inner().clone();
+    self.retry_with_element(|el| {
+      let page = page.clone();
+      async move {
+        actions::wait_for_actionable(&el, &page).await.ok();
+        el.hover().await
+      }
+    }).await
   }
 
   /// Focus the element matched by this locator.
@@ -225,9 +256,10 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found.
   pub async fn focus(&self) -> Result<(), String> {
-    let el = self.resolve().await?;
-    let _ = el.call_js_fn("function() { this.focus(); }").await;
-    Ok(())
+    self.retry_with_element(|el| async move {
+      el.call_js_fn("function() { this.focus(); }").await?;
+      Ok(())
+    }).await
   }
 
   /// Check a checkbox or radio button if it is not already checked.
@@ -236,10 +268,15 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or is not actionable.
   pub async fn check(&self) -> Result<(), String> {
-    let el = self.resolve().await?;
-    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
-    let _ = el.call_js_fn("function() { if (!this.checked) this.click(); }").await;
-    Ok(())
+    let page = self.page.inner().clone();
+    self.retry_with_element(|el| {
+      let page = page.clone();
+      async move {
+        actions::wait_for_actionable(&el, &page).await.ok();
+        el.call_js_fn("function() { if (!this.checked) this.click(); }").await?;
+        Ok(())
+      }
+    }).await
   }
 
   /// Uncheck a checkbox if it is currently checked.
@@ -248,10 +285,15 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or is not actionable.
   pub async fn uncheck(&self) -> Result<(), String> {
-    let el = self.resolve().await?;
-    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
-    let _ = el.call_js_fn("function() { if (this.checked) this.click(); }").await;
-    Ok(())
+    let page = self.page.inner().clone();
+    self.retry_with_element(|el| {
+      let page = page.clone();
+      async move {
+        actions::wait_for_actionable(&el, &page).await.ok();
+        el.call_js_fn("function() { if (this.checked) this.click(); }").await?;
+        Ok(())
+      }
+    }).await
   }
 
   /// Set the checked state of a checkbox or radio button.
@@ -632,58 +674,31 @@ impl Locator {
   /// Returns an error if either element cannot be found, bounding box
   /// coordinates cannot be read, or the drag operation fails.
   pub async fn drag_to(&self, target: &Locator) -> Result<(), String> {
+    // Get both source and target center coordinates via call_js_fn_value (1 CDP each)
     let source_el = self.resolve().await?;
-    let _ = source_el
-      .call_js_fn(
-        "function() { \
-      var r = this.getBoundingClientRect(); \
-      this.setAttribute('data-fd-drag-src', JSON.stringify({x:r.x+r.width/2, y:r.y+r.height/2})); \
-    }",
-      )
-      .await;
     let target_el = target.resolve().await?;
-    let _ = target_el
-      .call_js_fn(
-        "function() { \
-      var r = this.getBoundingClientRect(); \
-      this.setAttribute('data-fd-drag-tgt', JSON.stringify({x:r.x+r.width/2, y:r.y+r.height/2})); \
-    }",
-      )
-      .await;
 
-    let src_json = self
-      .page
-      .inner()
-      .evaluate(
-        "(function() { \
-      var e = document.querySelector('[data-fd-drag-src]'); \
-      if (!e) return null; var v = e.getAttribute('data-fd-drag-src'); \
-      e.removeAttribute('data-fd-drag-src'); return v; \
-    })()",
-      )
-      .await?
-      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .unwrap_or_default();
+    // Parallel: get both centers simultaneously
+    let (src_result, tgt_result) = tokio::join!(
+      source_el.call_js_fn_value(
+        "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
+      ),
+      target_el.call_js_fn_value(
+        "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
+      ),
+    );
 
-    let tgt_json = self
-      .page
-      .inner()
-      .evaluate(
-        "(function() { \
-      var e = document.querySelector('[data-fd-drag-tgt]'); \
-      if (!e) return null; var v = e.getAttribute('data-fd-drag-tgt'); \
-      e.removeAttribute('data-fd-drag-tgt'); return v; \
-    })()",
-      )
-      .await?
-      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .unwrap_or_default();
+    let src = src_result?.ok_or("No source bounding box")?;
+    let tgt = tgt_result?.ok_or("No target bounding box")?;
 
-    let src: serde_json::Value = serde_json::from_str(&src_json).map_err(|e| format!("{e}"))?;
-    let tgt: serde_json::Value = serde_json::from_str(&tgt_json).map_err(|e| format!("{e}"))?;
-
-    let from = (src["x"].as_f64().unwrap_or(0.0), src["y"].as_f64().unwrap_or(0.0));
-    let to = (tgt["x"].as_f64().unwrap_or(0.0), tgt["y"].as_f64().unwrap_or(0.0));
+    let from = (
+      src.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+      src.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+    );
+    let to = (
+      tgt.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+      tgt.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
+    );
     self.page.inner().click_and_drag(from, to).await
   }
 
@@ -820,7 +835,75 @@ impl Locator {
     &self.selector
   }
 
-  // ── Internal ──────────────────────────────────────────────────────────────
+  // ── Core retry system ─────────────────────────────────────────────────────
+  //
+  // Matches Playwright's retryWithProgressAndTimeouts + _retryWithProgressIfNotConnected
+  // + _callOnElementOnceMatches. ALL element operations go through one of these two
+  // methods. Retry backoff: [0, 20, 50, 100, 100, 500]ms (same as Playwright).
+
+  /// Backoff schedule matching Playwright's retryWithProgressAndTimeouts.
+  const RETRY_BACKOFFS_MS: &'static [u64] = &[0, 0, 20, 50, 100, 100, 500];
+
+  /// Resolve element with retry, then run an action on it.
+  /// Used by: click, fill, hover, check, uncheck, tap, dblclick, type, press, etc.
+  /// Matches Playwright's `_retryWithProgressIfNotConnected`.
+  async fn retry_with_element<F, Fut, R>(&self, action: F) -> Result<R, String>
+  where
+    F: Fn(AnyElement) -> Fut,
+    Fut: std::future::Future<Output = Result<R, String>>,
+  {
+    for (i, &delay_ms) in Self::RETRY_BACKOFFS_MS.iter().enumerate() {
+      if delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+      }
+      match self.resolve().await {
+        Ok(el) => match action(el).await {
+          Ok(result) => return Ok(result),
+          Err(e) if e.contains("not connected") || e.contains("not found") || e.contains("detached") => {
+            if i >= Self::RETRY_BACKOFFS_MS.len() - 1 { return Err(e); }
+            continue;
+          }
+          Err(e) => return Err(e),
+        },
+        Err(_) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => continue,
+        Err(e) => return Err(e),
+      }
+    }
+    Err(format!("No element found for selector: {}", self.selector))
+  }
+
+  /// Resolve element + run JS callback in ONE CDP call, with retry.
+  /// Used by: innerText, textContent, innerHTML, getAttribute, inputValue, isVisible, etc.
+  /// Matches Playwright's `_callOnElementOnceMatches`.
+  async fn retry_eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>, String> {
+    let parsed = selectors::parse(&self.selector)?;
+    let parts_json = selectors::build_parts_json(&parsed);
+    let js = format!(
+      "(function() {{ var el = window.__fd.selOne({parts_json}); if (!el) return null; {js_body} }})()"
+    );
+
+    for (i, &delay_ms) in Self::RETRY_BACKOFFS_MS.iter().enumerate() {
+      if delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+      }
+      let result = if let Some(fid) = &self.frame_id {
+        self.page.inner().evaluate_in_frame(&js, fid).await
+      } else {
+        self.page.inner().evaluate(&js).await
+      };
+      match result {
+        Ok(Some(serde_json::Value::Null)) | Ok(None) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => {
+          continue; // element not found, retry
+        }
+        Ok(val) => return Ok(val),
+        Err(_) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => continue,
+        Err(e) => return Err(e),
+      }
+    }
+    Ok(None)
+  }
+
+  // ── Internal helpers ────────────────────────────────────────────────────────
 
   async fn resolve(&self) -> Result<AnyElement, String> {
     selectors::query_one(self.page.inner(), &self.selector, false).await
@@ -841,7 +924,7 @@ impl Locator {
 
   async fn eval_prop(&self, prop: &str) -> Result<Option<String>, String> {
     let val = self
-      .eval_on_element(&format!("var v = el.{prop}; return v == null ? null : String(v);"))
+      .retry_eval_on_element(&format!("var v = el.{prop}; return v == null ? null : String(v);"))
       .await?;
     Ok(val.and_then(|v| match v {
       serde_json::Value::String(s) => Some(s),
@@ -851,15 +934,11 @@ impl Locator {
   }
 
   async fn eval_bool(&self, func: &str) -> Result<bool, String> {
-    let val = self.eval_on_element(&format!("return !!({func}).call(el);")).await?;
+    let val = self.retry_eval_on_element(&format!("return !!({func}).call(el);")).await?;
     Ok(val.and_then(|v| v.as_bool()).unwrap_or(false))
   }
 
-  /// Run JS on the first element matching this locator's selector in a single
-  /// evaluate call. The JS body has `el` in scope (the matched element).
-  /// Returns the value from `return ...;` in the body.
-  /// Engine is already injected via addScriptToEvaluateOnNewDocument.
-  /// This is exactly 1 CDP round-trip.
+  /// Legacy: non-retrying eval for callers that handle retry themselves.
   async fn eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>, String> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);

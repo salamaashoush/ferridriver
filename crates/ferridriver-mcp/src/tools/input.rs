@@ -7,7 +7,7 @@ use rmcp::{ErrorData, handler::server::wrapper::Parameters, model::CallToolResul
 
 #[tool_router(router = input_router, vis = "pub")]
 impl McpServer {
-  #[tool(name = "click", description = "Click an element by ref or selector.")]
+  #[tool(name = "click", description = "Click an element. Prefer 'ref' from snapshot (e.g. ref='e5') over CSS selector. Refs work across frames; CSS selectors only match the main frame.")]
   async fn click(&self, Parameters(p): Parameters<ClickParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -15,7 +15,7 @@ impl McpServer {
 
     if let Some(r) = &p.r#ref {
       // Ref-based: resolve via snapshot refs, then click
-      let ref_map = self.state.lock().await.ref_map(s);
+      let ref_map = self.state.ref_map_for(s).await;
       let el = Self::resolve(&page, &ref_map, p.r#ref.as_ref(), p.selector.as_ref())
         .await
         .map_err(Self::err)?;
@@ -50,14 +50,14 @@ impl McpServer {
       .await
   }
 
-  #[tool(name = "hover", description = "Hover over an element.")]
+  #[tool(name = "hover", description = "Hover over an element. Prefer 'ref' from snapshot over CSS selector.")]
   async fn hover(&self, Parameters(p): Parameters<HoverParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let target = p.r#ref.as_deref().or(p.selector.as_deref()).unwrap_or("?");
     if p.r#ref.is_some() {
-      let ref_map = self.state.lock().await.ref_map(s);
+      let ref_map = self.state.ref_map_for(s).await;
       let resolved = Self::resolve(&page, &ref_map, p.r#ref.as_ref(), p.selector.as_ref())
         .await
         .map_err(Self::err)?;
@@ -70,14 +70,14 @@ impl McpServer {
     self.action_ok(&page, s, &format!("Hovered '{target}'.")).await
   }
 
-  #[tool(name = "fill", description = "Fill an input element.")]
+  #[tool(name = "fill", description = "Fill an input or contenteditable element. Prefer 'ref' from snapshot over CSS selector. For contenteditable elements (e.g. WhatsApp message box), use type_text after clicking the element instead.")]
   async fn fill(&self, Parameters(p): Parameters<FillParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let target = p.r#ref.as_deref().or(p.selector.as_deref()).unwrap_or("?");
     if p.r#ref.is_some() {
-      let ref_map = self.state.lock().await.ref_map(s);
+      let ref_map = self.state.ref_map_for(s).await;
       let _resolved = Self::resolve(&page, &ref_map, p.r#ref.as_ref(), p.selector.as_ref())
         .await
         .map_err(Self::err)?;
@@ -101,13 +101,13 @@ impl McpServer {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
+    let ref_map = self.state.ref_map_for(s).await;
     let mut filled = Vec::new();
     for field in &p.fields {
       let target = field.r#ref.as_deref().or(field.selector.as_deref()).unwrap_or("?");
       if let Some(sel) = &field.selector {
         page.fill(sel, &field.value).await.map_err(Self::err)?;
       } else if field.r#ref.is_some() {
-        let ref_map = self.state.lock().await.ref_map(s);
         let _resolved = Self::resolve(&page, &ref_map, field.r#ref.as_ref(), field.selector.as_ref())
           .await
           .map_err(Self::err)?;

@@ -21,3 +21,5 @@ anyhow = { workspace = true }
 axum = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }
+dashmap = { workspace = true }
+arc-swap = { workspace = true }

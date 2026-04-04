@@ -27,7 +27,10 @@ impl McpServer {
     };
     match page.snapshot_for_ai(opts).await {
       Ok(result) => {
-        if let Ok(mut state) = self.state.try_lock() {
+        if let Some(handle) = self.state.ref_map_handle(s).await {
+          handle.store(std::sync::Arc::new(result.ref_map));
+        } else {
+          let state = self.state.read().await;
           state.set_ref_map(s, result.ref_map);
         }
         let mut text = result.full;

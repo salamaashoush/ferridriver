@@ -1,0 +1,17 @@
+{
+  "mcpServers": {
+    "ferridriver": {
+      "type": "stdio",
+      "command": "cargo",
+      "args": [
+        "run",
+        "--bin",
+        "ferridriver",
+        "--",
+        "mcp"
+      ],
+      "cwd": "/home/sashoush/Workspace/test/chromey-mcp",
+      "env": {}
+    }
+  }
+}

@@ -203,27 +203,11 @@ pub async fn suggest_selectors(page: &AnyPage) -> Vec<String> {
 ///
 /// Returns `ClickGuardError::IsSelect` or `ClickGuardError::IsFileInput` if the element
 /// should not be clicked directly.
-pub async fn check_click_guard(element: &AnyElement, page: &AnyPage) -> Result<(), ClickGuardError> {
-  // call_js_fn runs in the element's context -- window.__fd is available
-  let _ = element
-    .call_js_fn(
-      "function() { \
-        var g = window.__fd ? window.__fd.clickGuard(this) : ''; \
-        if (g) this.setAttribute('data-fd-guard', g); \
-    }",
-    )
-    .await;
-
-  // Read result via a lightweight evaluate
-  let guard = page
-    .evaluate(
-      "(function() { \
-        var e = document.querySelector('[data-fd-guard]'); \
-        if (!e) return ''; \
-        var v = e.getAttribute('data-fd-guard'); \
-        e.removeAttribute('data-fd-guard'); \
-        return v || ''; \
-    })()",
+pub async fn check_click_guard(element: &AnyElement, _page: &AnyPage) -> Result<(), ClickGuardError> {
+  // Single CDP roundtrip: call_js_fn_value returns the guard value directly
+  let guard = element
+    .call_js_fn_value(
+      "function() { return window.__fd ? window.__fd.clickGuard(this) : ''; }",
     )
     .await
     .ok()
@@ -247,17 +231,22 @@ pub async fn check_click_guard(element: &AnyElement, page: &AnyPage) -> Result<(
 /// Returns an error if the element cannot be focused or the value cannot be set.
 pub async fn fill(element: &AnyElement, value: &str) -> Result<(), String> {
   // Single JS call: focus + set value + dispatch events.
-  // This is how Playwright implements fill() -- set value directly via JS,
-  // not character-by-character typing. Much faster (1 CDP call vs 9+).
+  // Handles both regular inputs (.value) and contenteditable elements (.textContent).
   let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
   element
     .call_js_fn(&format!(
       "function() {{ \
             this.focus(); \
-            this.value = ''; \
-            this.value = '{escaped}'; \
-            this.dispatchEvent(new Event('input', {{bubbles: true}})); \
-            this.dispatchEvent(new Event('change', {{bubbles: true}})); \
+            if (this.isContentEditable) {{ \
+              this.textContent = ''; \
+              this.textContent = '{escaped}'; \
+              this.dispatchEvent(new InputEvent('input', {{bubbles: true}})); \
+            }} else {{ \
+              this.value = ''; \
+              this.value = '{escaped}'; \
+              this.dispatchEvent(new Event('input', {{bubbles: true}})); \
+              this.dispatchEvent(new Event('change', {{bubbles: true}})); \
+            }} \
         }}"
     ))
     .await
@@ -507,27 +496,13 @@ pub fn format_find_results(result: &FindResult, selector: &str) -> String {
 /// # Errors
 ///
 /// Returns an error if the element is not a select or the target option is not found.
-pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -> Result<SelectResult, String> {
+pub async fn select_option(element: &AnyElement, _page: &AnyPage, target: &str) -> Result<SelectResult, String> {
   let escaped = target.replace('\\', "\\\\").replace('\'', "\\'");
-  let _ = element
-    .call_js_fn(&format!(
-      "function() {{ \
-            var r = window.__fd.selectOption(this, '{escaped}'); \
-            this.setAttribute('data-fd-result', r); \
-        }}"
+  // Single CDP roundtrip: call_js_fn_value returns JSON result directly
+  let result_json = element
+    .call_js_fn_value(&format!(
+      "function() {{ return JSON.stringify(window.__fd.selectOption(this, '{escaped}')); }}"
     ))
-    .await;
-
-  let result_json = page
-    .evaluate(
-      "(function() { \
-        var e = document.querySelector('[data-fd-result]'); \
-        if (!e) return '{}'; \
-        var v = e.getAttribute('data-fd-result'); \
-        e.removeAttribute('data-fd-result'); \
-        return v || '{}'; \
-    })()",
-    )
     .await
     .ok()
     .flatten()
@@ -556,25 +531,11 @@ pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -
 /// # Errors
 ///
 /// Returns an error if the element is not a select or options cannot be retrieved.
-pub async fn get_dropdown_options(element: &AnyElement, page: &AnyPage) -> Result<Vec<DropdownOption>, String> {
-  let _ = element
-    .call_js_fn(
-      "function() { \
-        var r = window.__fd.getOptions(this); \
-        this.setAttribute('data-fd-result', r); \
-    }",
-    )
-    .await;
-
-  let result_json = page
-    .evaluate(
-      "(function() { \
-        var e = document.querySelector('[data-fd-result]'); \
-        if (!e) return '{}'; \
-        var v = e.getAttribute('data-fd-result'); \
-        e.removeAttribute('data-fd-result'); \
-        return v || '{}'; \
-    })()",
+pub async fn get_dropdown_options(element: &AnyElement, _page: &AnyPage) -> Result<Vec<DropdownOption>, String> {
+  // Single CDP roundtrip: call_js_fn_value returns JSON result directly
+  let result_json = element
+    .call_js_fn_value(
+      "function() { return JSON.stringify(window.__fd.getOptions(this)); }",
     )
     .await
     .ok()
@@ -668,7 +629,7 @@ pub async fn upload_file(page: &AnyPage, selector: &str, paths: &[String]) -> Re
 /// # Errors
 ///
 /// Returns an error if the element is not actionable within the timeout.
-pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result<(), String> {
+pub async fn wait_for_actionable(element: &AnyElement, _page: &AnyPage) -> Result<(), String> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
 
   loop {
@@ -676,27 +637,12 @@ pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result
       return Err("Timeout: element not actionable".into());
     }
 
-    // Check visible + enabled via a synchronous JS call (no promises, no RAF)
-    let _ = element
-      .call_js_fn(
+    // Single CDP roundtrip: uses Playwright's isVisible + getAriaDisabled via window.__fd
+    let val = element
+      .call_js_fn_value(
         "function() { \
-            var s = getComputedStyle(this); \
-            var visible = s.display !== 'none' && s.visibility !== 'hidden' && s.opacity !== '0'; \
-            var enabled = !this.disabled; \
-            this.setAttribute('data-fd-actionable', (visible && enabled) ? '1' : '0'); \
+            return JSON.stringify(window.__fd.isActionable(this)); \
         }",
-      )
-      .await;
-
-    let val = page
-      .evaluate(
-        "(function() { \
-            var e = document.querySelector('[data-fd-actionable]'); \
-            if (!e) return '0'; \
-            var v = e.getAttribute('data-fd-actionable'); \
-            e.removeAttribute('data-fd-actionable'); \
-            return v; \
-        })()",
       )
       .await
       .ok()
@@ -704,8 +650,10 @@ pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result
       .and_then(|v| v.as_str().map(std::string::ToString::to_string))
       .unwrap_or_default();
 
-    if val == "1" {
-      return Ok(());
+    if let Ok(result) = serde_json::from_str::<serde_json::Value>(&val) {
+      if result["actionable"].as_bool() == Some(true) {
+        return Ok(());
+      }
     }
 
     // Yield to other tasks (allows parallel pages to make progress)

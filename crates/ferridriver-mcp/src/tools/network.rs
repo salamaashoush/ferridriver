@@ -19,24 +19,40 @@ impl McpServer {
     match p.r#type.as_str() {
       "console" => {
         let _guard = self.session_guard(s).await;
-        let state = self.state.lock().await;
-        let msgs = state
-          .console_messages(s, p.level.as_deref(), p.limit.unwrap_or(50))
+        let handles = self
+          .state
+          .log_handles_for(s)
           .await
-          .map_err(Self::err)?;
-        drop(state);
+          .ok_or_else(|| Self::err(format!("Context '{s}' not found")))?;
+        let limit = p.limit.unwrap_or(50);
+        let level = p.level.as_deref();
+        let log = handles.console.read().await;
+        let msgs: Vec<_> = log
+          .iter()
+          .filter(|m| level.is_none_or(|l| l == "all" || m.level == l))
+          .rev()
+          .take(limit)
+          .cloned()
+          .collect::<Vec<_>>()
+          .into_iter()
+          .rev()
+          .collect();
+        drop(log);
         Ok(CallToolResult::success(vec![Content::text(
           serde_json::to_string_pretty(&msgs).unwrap_or_default(),
         )]))
       },
       "network" => {
         let _guard = self.session_guard(s).await;
-        let state = self.state.lock().await;
-        let reqs = state
-          .network_requests(s, p.limit.unwrap_or(50))
+        let handles = self
+          .state
+          .log_handles_for(s)
           .await
-          .map_err(Self::err)?;
-        drop(state);
+          .ok_or_else(|| Self::err(format!("Context '{s}' not found")))?;
+        let limit = p.limit.unwrap_or(50);
+        let log = handles.network.read().await;
+        let reqs: Vec<_> = log.iter().rev().take(limit).cloned().collect::<Vec<_>>().into_iter().rev().collect();
+        drop(log);
         Ok(CallToolResult::success(vec![Content::text(
           serde_json::to_string_pretty(&reqs).unwrap_or_default(),
         )]))

@@ -1,12 +1,14 @@
 //! `McpServer` server struct and shared helpers used by all tools.
 
+use arc_swap::ArcSwap;
 use base64::Engine;
+use dashmap::DashMap;
 use ferridriver::Page;
 use ferridriver::actions;
 use ferridriver::backend::BackendKind;
 use ferridriver::backend::{AnyElement, AnyPage};
 use ferridriver::snapshot;
-use ferridriver::state::{BrowserState, ConnectMode};
+use ferridriver::state::{BrowserState, ConnectMode, ContextLogHandles};
 use rmcp::{
   ErrorData, RoleServer, ServerHandler,
   handler::server::router::tool::ToolRouter,
@@ -19,11 +21,111 @@ use rmcp::{
   service::RequestContext,
   tool_handler,
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
-pub type State = Arc<Mutex<BrowserState>>;
+// ── SharedState ──────────────────────────────────────────────────────────────
+
+/// Shared state for the MCP server.
+///
+/// Hot paths (`ref_map` reads, log reads) use extracted `Arc` handles cached in
+/// `DashMap`s and bypass the `RwLock` entirely. Cold paths (instance init, page
+/// management) use the `RwLock<BrowserState>`.
+#[derive(Clone)]
+pub struct SharedState {
+  /// The underlying browser state. Write-locked only for mutations
+  /// (`ensure_instance`, `open_page`, `close_page`, `shutdown`, `connect`).
+  /// Read-locked for lookups that extract `Arc` handles.
+  inner: Arc<RwLock<BrowserState>>,
+  /// Cached `ref_map` handles per context — wait-free reads via `ArcSwap`.
+  ref_maps: Arc<DashMap<String, RefMapHandle>>,
+  /// Cached log handles per context.
+  log_handles: Arc<DashMap<String, ContextLogHandles>>,
+  /// Per-context serialization locks (replaces nested `Mutex<HashMap<..>>`).
+  context_locks: Arc<DashMap<String, Arc<Mutex<()>>>>,
+}
+
+/// Type alias for the `ArcSwap`-wrapped ref map used for wait-free reads.
+type RefMapHandle = Arc<ArcSwap<FxHashMap<String, i64>>>;
+
+impl SharedState {
+  fn new(browser_state: BrowserState) -> Self {
+    Self {
+      inner: Arc::new(RwLock::new(browser_state)),
+      ref_maps: Arc::new(DashMap::new()),
+      log_handles: Arc::new(DashMap::new()),
+      context_locks: Arc::new(DashMap::new()),
+    }
+  }
+
+  /// Write-lock the inner state (for mutations).
+  pub(crate) async fn write(&self) -> tokio::sync::RwLockWriteGuard<'_, BrowserState> {
+    self.inner.write().await
+  }
+
+  /// Read-lock the inner state (for lookups).
+  pub(crate) async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, BrowserState> {
+    self.inner.read().await
+  }
+
+  /// Get the `ref_map` for a context as a cloned `FxHashMap` (wait-free via cached `ArcSwap`).
+  pub(crate) async fn ref_map_for(&self, context: &str) -> FxHashMap<String, i64> {
+    // Fast path: cached handle exists
+    if let Some(entry) = self.ref_maps.get(context) {
+      return (**entry.value().load()).clone();
+    }
+    // Slow path: read-lock state, extract handle, cache it
+    let state = self.inner.read().await;
+    if let Some(handle) = state.ref_map_handle(context) {
+      let cloned = (**handle.load()).clone();
+      drop(state);
+      self.ref_maps.insert(context.to_string(), handle);
+      cloned
+    } else {
+      FxHashMap::default()
+    }
+  }
+
+  /// Get a cached `ArcSwap` handle for storing `ref_map`s (wait-free store).
+  pub(crate) async fn ref_map_handle(&self, context: &str) -> Option<RefMapHandle> {
+    if let Some(entry) = self.ref_maps.get(context) {
+      return Some(Arc::clone(entry.value()));
+    }
+    let state = self.inner.read().await;
+    let handle = state.ref_map_handle(context)?;
+    drop(state);
+    self.ref_maps.insert(context.to_string(), Arc::clone(&handle));
+    Some(handle)
+  }
+
+  /// Get cached log handles for a context (no `BrowserState` lock after first call).
+  pub(crate) async fn log_handles_for(&self, context: &str) -> Option<ContextLogHandles> {
+    if let Some(entry) = self.log_handles.get(context) {
+      return Some(entry.value().clone());
+    }
+    let state = self.inner.read().await;
+    let handles = state.log_handles(context)?;
+    drop(state);
+    self.log_handles.insert(context.to_string(), handles.clone());
+    Some(handles)
+  }
+
+  /// Invalidate caches for a context (after `close_page`, new page, etc.).
+  pub(crate) fn invalidate_context(&self, context: &str) {
+    self.ref_maps.remove(context);
+    self.log_handles.remove(context);
+  }
+
+  /// Invalidate all caches (after shutdown).
+  pub(crate) fn invalidate_all(&self) {
+    self.ref_maps.clear();
+    self.log_handles.clear();
+  }
+}
+
+/// Backward-compat type alias.
+pub type State = SharedState;
 
 /// Backward-compat free function: derive context from session only.
 #[must_use]
@@ -103,7 +205,12 @@ pub trait McpServerConfig: Send + Sync + 'static {
 pub const DEFAULT_INSTRUCTIONS: &str = "Browser automation. All tools accept optional 'session' param (default: 'default'). \
      Different sessions have isolated cookies/storage -- use for multi-user testing.\n\
      Actions return an accessibility snapshot with [ref=eN] identifiers. \
-     Use these refs with click/hover/fill. Prefer snapshot over screenshot.";
+     Use these refs with click/hover/fill. Prefer snapshot over screenshot.\n\
+     IMPORTANT: Refs are tied to the current page snapshot. After page(select) or navigate, \
+     old refs are invalid -- use the new snapshot's refs. Always prefer 'ref' over CSS selectors \
+     in click/fill/hover since refs are resolved from the snapshot and work reliably across frames.\n\
+     To switch between browser tabs, use page(action='list') then page(action='select', page_index=N). \
+     Do NOT use evaluate to list or switch tabs.";
 
 /// Default config for standalone ferridriver (no customization).
 pub struct DefaultConfig;
@@ -113,10 +220,9 @@ impl McpServerConfig for DefaultConfig {}
 
 #[derive(Clone)]
 pub struct McpServer {
-  pub(crate) state: State,
+  pub(crate) state: SharedState,
   /// The composed tool router. Public so consumers can list tools or dispatch directly.
   pub tool_router: ToolRouter<Self>,
-  pub(crate) context_locks: Arc<Mutex<HashMap<String, Arc<Mutex<()>>>>>,
   /// Configuration trait object for customizing server behavior.
   pub config: Arc<dyn McpServerConfig>,
   /// Typed extension slot for consumer-specific state (e.g. Jira clients).
@@ -153,11 +259,10 @@ impl McpServer {
     browser_state.set_instance_resolver_fn(Box::new(move |instance| {
       config_clone.resolve_instance(instance)
     }));
-    let state = Arc::new(Mutex::new(browser_state));
+    let state = SharedState::new(browser_state);
     Self {
       state,
       tool_router: Self::combined_router(),
-      context_locks: Arc::new(Mutex::new(HashMap::new())),
       config,
       extensions: Arc::new(NoExtensions),
     }
@@ -188,13 +293,12 @@ impl McpServer {
   }
 
   pub async fn context_guard(&self, context: &str) -> tokio::sync::OwnedMutexGuard<()> {
-    let lock = {
-      let mut locks = self.context_locks.lock().await;
-      locks
-        .entry(context.to_string())
-        .or_insert_with(|| Arc::new(Mutex::new(())))
-        .clone()
-    };
+    let lock = self
+      .state
+      .context_locks
+      .entry(context.to_string())
+      .or_insert_with(|| Arc::new(Mutex::new(())))
+      .clone();
     lock.lock_owned().await
   }
 
@@ -206,14 +310,24 @@ impl McpServer {
   /// Get a Page for a context, ensuring the required browser instance exists.
   /// Parses the composite session key to ensure the correct instance is launched.
   ///
+  /// Fast path (instance exists): shared read lock — concurrent reads allowed.
+  /// Slow path (cold start): exclusive write lock — only when launching a new browser.
+  ///
   /// # Errors
   ///
   /// Returns an error if the browser instance cannot be launched or the active page
   /// for the given context cannot be retrieved.
   pub async fn page(&self, context: &str) -> Result<Page, ErrorData> {
-    let mut state = self.state.lock().await;
-    // Parse the composite key to find which instance is needed
+    // Fast path: instance already exists, read lock only
+    {
+      let state = self.state.read().await;
+      if let Ok(any_page) = state.active_page(context) {
+        return Ok(Page::new(any_page.clone()));
+      }
+    }
+    // Slow path: need to create instance (write lock)
     let key = ferridriver::state::SessionKey::parse(context);
+    let mut state = self.state.write().await;
     Box::pin(state.ensure_instance(&key.instance))
       .await
       .map_err(Self::err)?;
@@ -228,8 +342,16 @@ impl McpServer {
   /// Returns an error if the browser instance cannot be launched or the active page
   /// for the given context cannot be retrieved.
   pub async fn raw_page(&self, context: &str) -> Result<AnyPage, ErrorData> {
-    let mut state = self.state.lock().await;
+    // Fast path: read lock
+    {
+      let state = self.state.read().await;
+      if let Ok(any_page) = state.active_page(context) {
+        return Ok(any_page.clone());
+      }
+    }
+    // Slow path: write lock
     let key = ferridriver::state::SessionKey::parse(context);
+    let mut state = self.state.write().await;
     Box::pin(state.ensure_instance(&key.instance))
       .await
       .map_err(Self::err)?;
@@ -259,15 +381,24 @@ impl McpServer {
   }
 
   /// Build snapshot text and store `ref_map` for the context.
+  /// Uses a 5-second timeout to avoid hanging on unresponsive pages.
+  /// Stores the `ref_map` via wait-free `ArcSwap` — never drops updates.
   pub async fn snap(&self, page: &Page, context: &str) -> String {
-    match page.snapshot_for_ai(snapshot::SnapshotOptions::default()).await {
-      Ok(result) => {
-        if let Ok(mut state) = self.state.try_lock() {
+    let snap_fut = page.snapshot_for_ai(snapshot::SnapshotOptions::default());
+    match tokio::time::timeout(std::time::Duration::from_secs(5), snap_fut).await {
+      Ok(Ok(result)) => {
+        // Wait-free store via cached ArcSwap handle
+        if let Some(handle) = self.state.ref_map_handle(context).await {
+          handle.store(Arc::new(result.ref_map));
+        } else {
+          // Fallback: read-lock state to store (context may not be cached yet)
+          let state = self.state.read().await;
           state.set_ref_map(context, result.ref_map);
         }
         result.full
       },
-      Err(e) => format!("\n[snapshot error: {e}]"),
+      Ok(Err(e)) => format!("\n[snapshot error: {e}]"),
+      Err(_) => "\n[snapshot timed out — page may be unresponsive or have a very large DOM]".to_string(),
     }
   }
 
@@ -310,7 +441,7 @@ impl ServerHandler for McpServer {
     _request: Option<PaginatedRequestParams>,
     _context: RequestContext<RoleServer>,
   ) -> Result<ListResourcesResult, ErrorData> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let contexts = state.list_contexts().await;
     drop(state);
 
@@ -412,22 +543,29 @@ impl ServerHandler for McpServer {
         ]))
       },
       "console" => {
-        let state = self.state.lock().await;
-        let msgs = state
-          .console_messages(&context_name, None, 100)
+        let handles = self
+          .state
+          .log_handles_for(&context_name)
           .await
-          .map_err(Self::err)?;
-        drop(state);
-        let text = serde_json::to_string_pretty(&msgs).unwrap_or_default();
+          .ok_or_else(|| Self::err(format!("Context '{context_name}' not found")))?;
+        let msgs = handles.console.read().await;
+        let last: Vec<_> = msgs.iter().rev().take(100).cloned().collect::<Vec<_>>().into_iter().rev().collect();
+        drop(msgs);
+        let text = serde_json::to_string_pretty(&last).unwrap_or_default();
         Ok(ReadResourceResult::new(vec![
           ResourceContents::text(text, uri).with_mime_type("application/json"),
         ]))
       },
       "network" => {
-        let state = self.state.lock().await;
-        let reqs = state.network_requests(&context_name, 100).await.map_err(Self::err)?;
-        drop(state);
-        let text = serde_json::to_string_pretty(&reqs).unwrap_or_default();
+        let handles = self
+          .state
+          .log_handles_for(&context_name)
+          .await
+          .ok_or_else(|| Self::err(format!("Context '{context_name}' not found")))?;
+        let reqs = handles.network.read().await;
+        let last: Vec<_> = reqs.iter().rev().take(100).cloned().collect::<Vec<_>>().into_iter().rev().collect();
+        drop(reqs);
+        let text = serde_json::to_string_pretty(&last).unwrap_or_default();
         Ok(ReadResourceResult::new(vec![
           ResourceContents::text(text, uri).with_mime_type("application/json"),
         ]))

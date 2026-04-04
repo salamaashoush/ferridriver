@@ -1,20 +1,20 @@
-operation,playwright_ms,cdp-ws_ms,cdp-pipe_ms,cdp-raw_ms,webkit_ms
-goto (network),4.19,26.93,21.81,18.07,42.81
-setContent,1.18,1.71,1.58,2.02,1.23
-title(),0.21,0.23,0.1,0.21,0.05
-content(),0.19,0.91,0.84,1,0.13
-innerText('h1'),0.48,0.19,0.11,0.29,0.19
-innerHTML('ul'),0.56,0.32,0.15,0.24,0.16
-evaluate('1+1'),0.21,0.21,0.12,0.2,0.17
-evaluate (50 elems),0.36,0.27,0.11,0.17,0.11
-loc('h1').textContent(),0.3,0.18,0.11,0.23,0.13
-loc('li').count(),0.25,0.24,0.12,0.21,0.13
-loc('h1').isVisible(),0.23,0.23,0.13,0.24,0.12
-loc('h1').boundingBox(),1.08,0.3,0.11,0.26,0.13
-loc('li').allTextContents(),0.55,0.26,0.15,0.27,0.16
-fill('#name', text),1.27,3.03,1.06,1.51,0.53
-click('#btn'),14.64,4.48,2.15,4.05,2.51
-check('#agree'),1.51,3.35,0.96,2.36,1.25
-screenshot(),16.75,24.72,17.46,18.03,6.82
-screenshot(fullPage),41.54,25.8,26.83,31.79,6.94
-setViewportSize(),0.03,0.03,0.68,0.83,0.2
+operation,playwright_ms,cdp-pipe_ms,cdp-raw_ms
+goto (network),2.07,2.78,2.57
+setContent,0.86,0.73,0.75
+title(),0.09,0.05,0.05
+content(),0.11,0.06,0.06
+innerText('h1'),0.39,0.08,0.08
+innerHTML('ul'),0.31,0.07,0.08
+evaluate('1+1'),0.1,0.05,0.06
+evaluate (50 elems),0.26,0.07,0.08
+loc('h1').textContent(),0.18,0.06,0.07
+loc('li').count(),0.15,0.07,0.09
+loc('h1').isVisible(),0.16,0.07,0.08
+loc('h1').boundingBox(),0.57,0.07,0.08
+loc('li').allTextContents(),0.35,0.09,0.11
+fill('#name', text),0.82,0.43,0.47
+click('#btn'),14.71,1.02,1.21
+check('#agree'),1.15,0.47,0.55
+screenshot(),33.39,33.32,16.63
+screenshot(fullPage),34.23,33.1,33.36
+setViewportSize(),0.02,0.03,0.04
