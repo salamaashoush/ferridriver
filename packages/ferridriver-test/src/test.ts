@@ -3,13 +3,23 @@
  *
  * Tests are registered as callbacks. The Rust runner calls them with
  * a Page fixture and handles parallelism, retries, timeouts.
+ *
+ * In component testing mode (--ct), a `mount` fixture is also provided.
  */
 
 import type { Page, TestMeta } from 'ferridriver';
 
+/** Mount function for component testing. */
+export type MountFunction = (
+  component: any,
+  options?: { props?: Record<string, any>; hooksConfig?: Record<string, any> },
+) => Promise<void>;
+
 /** Fixtures available in test callbacks. */
 export interface TestFixtures {
   page: Page;
+  /** Available in component testing mode (--ct). Mounts a component into the page. */
+  mount: MountFunction;
 }
 
 /** Test function signature. */
@@ -31,6 +41,27 @@ interface RegisteredTest {
 const registry: RegisteredTest[] = [];
 const describeStack: string[] = [];
 let hasOnly = false;
+
+// ── Component testing mount function (set by CLI in --ct mode) ──
+
+let _ctMountFactory: ((page: Page) => MountFunction) | null = null;
+
+/** Called by the CLI to inject the mount factory for CT mode. */
+export function _setCtMountFactory(factory: (page: Page) => MountFunction): void {
+  _ctMountFactory = factory;
+}
+
+function createMount(page: Page): MountFunction {
+  if (_ctMountFactory) {
+    return _ctMountFactory(page);
+  }
+  // E2E mode — mount not available.
+  return async () => {
+    throw new Error('mount() is only available in component testing mode (--ct)');
+  };
+}
+
+// ── Helpers ──
 
 function fullTitle(name: string): string {
   return [...describeStack, name].join(' > ');
@@ -59,7 +90,7 @@ function testFn(name: string, optionsOrBody: TestOptions | TestBody, maybeBody?:
       retries: options.retries,
       tags: options.tag ? (Array.isArray(options.tag) ? options.tag : [options.tag]) : undefined,
     },
-    body: (page) => body({ page }),
+    body: (page) => body({ page, mount: createMount(page) }),
   });
 }
 
@@ -67,7 +98,7 @@ testFn.skip = (name: string, body: TestBody) => {
   const title = fullTitle(name);
   registry.push({
     meta: { id: makeId(currentFile, title), title, file: currentFile, modifier: 'skip' },
-    body: (page) => body({ page }),
+    body: (page) => body({ page, mount: createMount(page) }),
   });
 };
 
@@ -76,7 +107,7 @@ testFn.only = (name: string, body: TestBody) => {
   const title = fullTitle(name);
   registry.push({
     meta: { id: makeId(currentFile, title), title, file: currentFile, modifier: 'only' },
-    body: (page) => body({ page }),
+    body: (page) => body({ page, mount: createMount(page) }),
   });
 };
 
@@ -84,7 +115,7 @@ testFn.fixme = (name: string, body: TestBody) => {
   const title = fullTitle(name);
   registry.push({
     meta: { id: makeId(currentFile, title), title, file: currentFile, modifier: 'fixme' },
-    body: (page) => body({ page }),
+    body: (page) => body({ page, mount: createMount(page) }),
   });
 };
 
@@ -97,7 +128,6 @@ export function describe(name: string, fn: () => void): void {
 }
 
 describe.skip = (name: string, fn: () => void) => {
-  // All tests inside get skip modifier
   describeStack.push(name);
   const startIdx = registry.length;
   fn();
@@ -111,12 +141,10 @@ describe.skip = (name: string, fn: () => void) => {
 
 let currentFile = '';
 
-/** Set the current file being loaded (called by the runner before importing each test file). */
 export function _setCurrentFile(file: string): void {
   currentFile = file;
 }
 
-/** Get all registered tests and reset the registry. */
 export function _drainTests(): RegisteredTest[] {
   const tests = [...registry];
   registry.length = 0;
@@ -124,7 +152,6 @@ export function _drainTests(): RegisteredTest[] {
   return tests;
 }
 
-/** Check if any test.only() was used. */
 export function _hasOnly(): boolean {
   return hasOnly;
 }
