@@ -1,32 +1,44 @@
-//! Test dispatcher: MPMC work queue with longest-first scheduling.
+//! Test dispatcher: MPMC work queue supporting parallel and serial suites.
+//!
+//! Parallel tests go to a shared channel (natural load balancing).
+//! Serial suites go as batches — one worker picks up the entire suite.
 
 use std::sync::Arc;
 
-use crate::model::{TestCase, TestFn, TestId};
+use crate::model::{Hooks, SuiteMode, TestCase, TestFn, TestId};
 
-/// A test assigned to a worker with its attempt number.
+/// A single test assigned to a worker.
 pub struct TestAssignment {
-  /// The test to run.
   pub test: TestCase,
-  /// Current attempt number (1-indexed).
   pub attempt: u32,
+  /// Suite key for hook tracking (e.g. "file.rs::suite_name").
+  pub suite_key: String,
+  /// Shared hooks for this test's suite.
+  pub hooks: Arc<Hooks>,
+  /// Suite execution mode.
+  pub suite_mode: SuiteMode,
 }
 
-/// Retry info: enough data to re-create a `TestAssignment` without cloning TestCase.
-pub struct RetryAssignment {
-  pub id: TestId,
-  pub test_fn: TestFn,
-  pub fixture_requests: Vec<String>,
-  pub attempt: u32,
-  pub timeout: Option<std::time::Duration>,
-  pub retries: Option<u32>,
+/// A batch of serial tests — all run on one worker, in order.
+pub struct SerialBatch {
+  pub suite_key: String,
+  pub assignments: Vec<TestAssignment>,
+  pub hooks: Arc<Hooks>,
 }
 
-/// Dispatch strategy: tests are fed into a shared MPMC channel.
-/// Workers pull from this channel, achieving natural load balancing.
+/// Work item pulled by a worker.
+pub enum WorkItem {
+  /// Single parallel test.
+  Single(TestAssignment),
+  /// Batch of serial tests (one worker runs all, in order).
+  Serial(SerialBatch),
+}
+
+/// Dispatch strategy: parallel tests via shared MPMC channel,
+/// serial suites as batches on the same channel.
 pub struct Dispatcher {
-  tx: async_channel::Sender<TestAssignment>,
-  rx: async_channel::Receiver<TestAssignment>,
+  tx: async_channel::Sender<WorkItem>,
+  rx: async_channel::Receiver<WorkItem>,
 }
 
 impl Dispatcher {
@@ -35,40 +47,25 @@ impl Dispatcher {
     Self { tx, rx }
   }
 
-  /// Enqueue all tests (takes ownership).
-  pub async fn enqueue_all(&self, tests: Vec<TestCase>) {
-    for test in tests {
-      let _ = self.tx.send(TestAssignment { test, attempt: 1 }).await;
-    }
+  /// Enqueue a single parallel test.
+  pub async fn enqueue_single(&self, assignment: TestAssignment) {
+    let _ = self.tx.send(WorkItem::Single(assignment)).await;
   }
 
-  /// Enqueue tests by reference (Arc-based TestFn allows sharing).
-  /// Used for repeatEach where the same tests are enqueued multiple times.
-  pub async fn enqueue_all_shared(&self, tests: &[TestCase]) {
-    for test in tests {
-      let assignment = TestAssignment {
-        test: TestCase {
-          id: test.id.clone(),
-          test_fn: Arc::clone(&test.test_fn),
-          fixture_requests: test.fixture_requests.clone(),
-          annotations: test.annotations.clone(),
-          timeout: test.timeout,
-          retries: test.retries,
-          expected_status: test.expected_status.clone(),
-        },
-        attempt: 1,
-      };
-      let _ = self.tx.send(assignment).await;
-    }
+  /// Enqueue an entire serial suite as a batch.
+  pub async fn enqueue_serial(&self, batch: SerialBatch) {
+    let _ = self.tx.send(WorkItem::Serial(batch)).await;
   }
 
-  /// Re-enqueue a test for retry using saved test info from the worker result.
+  /// Re-enqueue a test for retry (always as single item).
   pub async fn retry_shared(
     &self,
     test_fn: &TestFn,
     id: &TestId,
     fixture_requests: Vec<String>,
     attempt: u32,
+    suite_key: String,
+    hooks: Arc<Hooks>,
   ) {
     let assignment = TestAssignment {
       test: TestCase {
@@ -81,16 +78,19 @@ impl Dispatcher {
         expected_status: crate::model::ExpectedStatus::Pass,
       },
       attempt,
+      suite_key,
+      hooks,
+      suite_mode: SuiteMode::Parallel,
     };
-    let _ = self.tx.send(assignment).await;
+    let _ = self.tx.send(WorkItem::Single(assignment)).await;
   }
 
   /// Get a receiver clone for a worker.
-  pub fn receiver(&self) -> async_channel::Receiver<TestAssignment> {
+  pub fn receiver(&self) -> async_channel::Receiver<WorkItem> {
     self.rx.clone()
   }
 
-  /// Signal no more tests will be enqueued.
+  /// Signal no more work will be enqueued.
   pub fn close(&self) {
     self.tx.close();
   }

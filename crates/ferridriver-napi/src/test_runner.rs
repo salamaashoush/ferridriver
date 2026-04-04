@@ -55,6 +55,30 @@ pub struct TestMeta {
   pub timeout: Option<f64>,
   pub retries: Option<i32>,
   pub tags: Option<Vec<String>>,
+  /// Suite ID this test belongs to (from register_suite).
+  pub suite_id: Option<String>,
+}
+
+/// Metadata for a test suite (describe block).
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct SuiteMeta {
+  /// Unique suite name.
+  pub name: String,
+  /// Source file.
+  pub file: String,
+  /// "parallel" (default) or "serial".
+  pub mode: Option<String>,
+}
+
+/// Hook registration metadata.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct HookMeta {
+  /// Suite ID this hook belongs to.
+  pub suite_id: String,
+  /// "beforeAll", "afterAll", "beforeEach", "afterEach".
+  pub kind: String,
 }
 
 /// Result of a single test.
@@ -90,12 +114,26 @@ struct RegisteredTest {
   callback: Arc<TestCallbackFn>,
 }
 
+/// A registered suite.
+struct RegisteredSuite {
+  meta: SuiteMeta,
+  id: String,
+}
+
+/// A registered hook.
+struct RegisteredHook {
+  meta: HookMeta,
+  callback: Arc<TestCallbackFn>,
+}
+
 /// The test runner. Manages browser pool, dispatches tests to workers,
 /// calls JS callbacks with fixtures, collects results.
 #[napi]
 pub struct TestRunner {
   config: ferridriver_test::TestConfig,
   tests: Mutex<Vec<RegisteredTest>>,
+  suites: Mutex<Vec<RegisteredSuite>>,
+  hooks: Mutex<Vec<RegisteredHook>>,
 }
 
 #[napi]
@@ -134,6 +172,8 @@ impl TestRunner {
     Ok(Self {
       config: tc,
       tests: Mutex::new(Vec::new()),
+      suites: Mutex::new(Vec::new()),
+      hooks: Mutex::new(Vec::new()),
     })
   }
 
@@ -159,6 +199,36 @@ impl TestRunner {
     let mut tests = self.tests.try_lock()
       .map_err(|_| napi::Error::from_reason("tests lock contended during registration"))?;
     tests.push(RegisteredTest { meta, callback: Arc::new(tsfn) });
+    Ok(())
+  }
+
+  /// Register a test suite (describe block). Returns a suite ID for test/hook registration.
+  #[napi]
+  pub fn register_suite(&self, meta: SuiteMeta) -> Result<String> {
+    let id = format!("{}::{}", meta.file, meta.name);
+    let mut suites = self.suites.try_lock()
+      .map_err(|_| napi::Error::from_reason("suites lock contended"))?;
+    suites.push(RegisteredSuite { meta, id: id.clone() });
+    Ok(id)
+  }
+
+  /// Register a lifecycle hook for a suite.
+  #[napi(ts_args_type = "meta: HookMeta, callback: (page: Page) => Promise<void>")]
+  pub fn register_hook(
+    &self,
+    meta: HookMeta,
+    callback: napi::bindgen_prelude::Function<'_, crate::page::Page, napi::bindgen_prelude::Promise<()>>,
+  ) -> Result<()> {
+    let tsfn = callback
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+
+    let mut hooks = self.hooks.try_lock()
+      .map_err(|_| napi::Error::from_reason("hooks lock contended"))?;
+    hooks.push(RegisteredHook { meta, callback: Arc::new(tsfn) });
     Ok(())
   }
 

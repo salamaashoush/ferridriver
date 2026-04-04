@@ -27,6 +27,9 @@ toml = "0.8"
 glob = "0.3"
 console = "0.15"
 quick-xml = "0.37"
+similar = "2"
+base64 = "0.22"
+zip = { version = "2", default-features = false, features = ["deflate"] }
 
 [[bin]]
 name = "bench-profile"

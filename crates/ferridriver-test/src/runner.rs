@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::config::{CliOverrides, TestConfig};
 use crate::dispatcher::Dispatcher;
 use crate::fixture::{builtin_fixtures, validate_dag, FixturePool, FixtureScope};
-use crate::model::{TestPlan, TestStatus};
+use crate::model::{Hooks, TestPlan, TestStatus};
 use crate::reporter::{EventBus, ReporterEvent, ReporterSet};
 use crate::shard;
 use crate::worker::{Worker, WorkerTestResult};
@@ -107,15 +107,98 @@ impl TestRunner {
 
     let start = Instant::now();
 
+    // ── Global setup ──
+    if !self.config.global_setup_fns.is_empty() {
+      let global_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Global);
+      for setup_fn in &self.config.global_setup_fns {
+        if let Err(e) = setup_fn(global_pool.clone()).await {
+          tracing::error!("global setup failed: {e}");
+          event_bus
+            .emit(ReporterEvent::RunFinished {
+              total: total_tests,
+              passed: 0,
+              failed: total_tests,
+              skipped: 0,
+              flaky: 0,
+              duration: start.elapsed(),
+            })
+            .await;
+          drop(event_bus);
+          if let Ok(reporters) = reporter_handle.await {
+            self.reporters = reporters;
+          }
+          return 1;
+        }
+      }
+    }
+
     // ── Collect tests, apply repeatEach ──
     let repeat_each = self.config.repeat_each.max(1);
-    let all_tests: Vec<_> = plan.suites.into_iter().flat_map(|s| s.tests).collect();
-    let total_executions = all_tests.len() * repeat_each as usize;
+    let total_executions = total_tests * repeat_each as usize;
 
-    // ── Dispatcher ──
+    // ── Dispatcher — enqueue suites with hooks + mode context ──
     let dispatcher = Arc::new(Dispatcher::new());
     for _rep in 0..repeat_each {
-      dispatcher.enqueue_all_shared(&all_tests).await;
+      for suite in &plan.suites {
+        let suite_key = format!("{}::{}", suite.file, suite.name);
+        let hooks = Arc::new(Hooks {
+          before_all: suite.hooks.before_all.clone(),
+          after_all: suite.hooks.after_all.clone(),
+          before_each: suite.hooks.before_each.clone(),
+          after_each: suite.hooks.after_each.clone(),
+        });
+
+        match suite.mode {
+          crate::model::SuiteMode::Parallel => {
+            for test in &suite.tests {
+              let assignment = crate::dispatcher::TestAssignment {
+                test: crate::model::TestCase {
+                  id: test.id.clone(),
+                  test_fn: Arc::clone(&test.test_fn),
+                  fixture_requests: test.fixture_requests.clone(),
+                  annotations: test.annotations.clone(),
+                  timeout: test.timeout,
+                  retries: test.retries,
+                  expected_status: test.expected_status.clone(),
+                },
+                attempt: 1,
+                suite_key: suite_key.clone(),
+                hooks: Arc::clone(&hooks),
+                suite_mode: crate::model::SuiteMode::Parallel,
+              };
+              dispatcher.enqueue_single(assignment).await;
+            }
+          }
+          crate::model::SuiteMode::Serial => {
+            let assignments: Vec<_> = suite
+              .tests
+              .iter()
+              .map(|test| crate::dispatcher::TestAssignment {
+                test: crate::model::TestCase {
+                  id: test.id.clone(),
+                  test_fn: Arc::clone(&test.test_fn),
+                  fixture_requests: test.fixture_requests.clone(),
+                  annotations: test.annotations.clone(),
+                  timeout: test.timeout,
+                  retries: test.retries,
+                  expected_status: test.expected_status.clone(),
+                },
+                attempt: 1,
+                suite_key: suite_key.clone(),
+                hooks: Arc::clone(&hooks),
+                suite_mode: crate::model::SuiteMode::Serial,
+              })
+              .collect();
+            dispatcher
+              .enqueue_serial(crate::dispatcher::SerialBatch {
+                suite_key: suite_key.clone(),
+                assignments,
+                hooks: Arc::clone(&hooks),
+              })
+              .await;
+          }
+        }
+      }
     }
 
     // ── Spawn workers with overlapped browser launch ──
@@ -168,6 +251,8 @@ impl TestRunner {
             &result.test_id,
             result.fixture_requests.clone(),
             result.outcome.attempt + 1,
+            result.suite_key.clone(),
+            Arc::clone(&result.hooks),
           )
           .await;
       } else {
@@ -181,6 +266,16 @@ impl TestRunner {
 
     for handle in worker_handles {
       let _ = handle.await;
+    }
+
+    // ── Global teardown (always runs, even if tests failed) ──
+    if !self.config.global_teardown_fns.is_empty() {
+      let global_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Global);
+      for teardown_fn in &self.config.global_teardown_fns {
+        if let Err(e) = teardown_fn(global_pool.clone()).await {
+          tracing::error!("global teardown error: {e}");
+        }
+      }
     }
 
     let duration = start.elapsed();

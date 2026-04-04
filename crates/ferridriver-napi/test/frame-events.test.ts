@@ -5,7 +5,10 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { Browser, type Page } from "../index.js";
 
-const CDP_BACKENDS = ["cdp-pipe", "cdp-raw"] as const;
+// When FERRIDRIVER_BACKEND is set, run only that backend for parallel execution.
+const CDP_BACKENDS = process.env.FERRIDRIVER_BACKEND
+  ? [process.env.FERRIDRIVER_BACKEND] as const
+  : ["cdp-pipe", "cdp-raw"] as const;
 
 for (const backend of CDP_BACKENDS) {
   describe(`[${backend}] Frames`, () => {

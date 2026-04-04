@@ -1,5 +1,6 @@
 //! Reporter system: event-driven, multiplexed, trait-based.
 
+pub mod html;
 pub mod json;
 pub mod junit;
 pub mod terminal;
@@ -124,6 +125,10 @@ pub fn create_reporters(names: &[crate::config::ReporterConfig], output_dir: &st
       "junit" => {
         let path = output_dir.join("junit.xml");
         reporters.push(Box::new(junit::JUnitReporter::new(path)));
+      }
+      "html" => {
+        let path = output_dir.join("report.html");
+        reporters.push(Box::new(html::HtmlReporter::new(path)));
       }
       other => {
         tracing::warn!("unknown reporter: {other}, skipping");

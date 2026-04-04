@@ -5,7 +5,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 /// Configuration file schema. Loaded from `ferridriver.config.toml` (or `.json`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TestConfig {
   /// Test file glob patterns.
@@ -58,6 +58,15 @@ pub struct TestConfig {
 
   /// Run all tests in parallel (ignore file-level serial grouping).
   pub fully_parallel: bool,
+
+  /// Programmatic global setup hooks (run before any tests).
+  /// Not serializable — set by code, not config files.
+  #[serde(skip)]
+  pub global_setup_fns: Vec<crate::model::HookFn>,
+
+  /// Programmatic global teardown hooks (run after all tests).
+  #[serde(skip)]
+  pub global_teardown_fns: Vec<crate::model::HookFn>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -184,7 +193,22 @@ impl Default for TestConfig {
       repeat_each: 1,
       forbid_only: false,
       fully_parallel: false,
+      global_setup_fns: Vec::new(),
+      global_teardown_fns: Vec::new(),
     }
+  }
+}
+
+impl std::fmt::Debug for TestConfig {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("TestConfig")
+      .field("workers", &self.workers)
+      .field("timeout", &self.timeout)
+      .field("retries", &self.retries)
+      .field("browser", &self.browser)
+      .field("global_setup_fns", &format!("[{} fn(s)]", self.global_setup_fns.len()))
+      .field("global_teardown_fns", &format!("[{} fn(s)]", self.global_teardown_fns.len()))
+      .finish_non_exhaustive()
   }
 }
 

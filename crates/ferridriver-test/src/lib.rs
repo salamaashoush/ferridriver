@@ -35,6 +35,8 @@ pub mod reporter;
 pub mod retry;
 pub mod runner;
 pub mod shard;
+pub mod snapshot;
+pub mod tracing;
 pub mod worker;
 
 // ── Re-exports ──

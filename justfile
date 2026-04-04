@@ -9,6 +9,8 @@ ready: fmt lint test
 alias r := ready
 alias f := fix
 alias c := check
+alias t := test
+alias tf := test-fast
 
 # Check compilation
 check:
@@ -20,10 +22,32 @@ test:
   cargo test --workspace
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends
 
+# Run all tests with maximum parallelism
+# - Builds binary first
+# - Runs workspace unit tests and backend integration tests concurrently
+# - Backend tests for each backend run as parallel processes
+test-fast:
+  cargo build --bin ferridriver
+  cargo test --workspace & \
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_pipe" & \
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_raw" & \
+  wait
+
 # Run specific backend test (use underscores: cdp_ws, cdp_pipe, webkit)
 test-backend backend:
   cargo build --bin ferridriver
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_{{backend}}" --nocapture
+
+# Run NAPI/TypeScript tests with parallel backends
+test-ts:
+  cd crates/ferridriver-napi && bun test
+
+# Run all NAPI tests per backend in parallel processes
+test-ts-fast:
+  cd crates/ferridriver-napi && \
+  FERRIDRIVER_BACKEND=cdp-pipe bun test & \
+  FERRIDRIVER_BACKEND=cdp-raw bun test & \
+  wait
 
 # Lint
 lint:

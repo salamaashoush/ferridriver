@@ -1,10 +1,15 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { Browser, type Page } from "../index.js";
 
-const BACKENDS: string[] = ["cdp-pipe", "cdp-raw"];
-if (process.platform === "darwin") {
-  BACKENDS.push("webkit");
-}
+// When FERRIDRIVER_BACKEND is set, run only that backend (enables parallel
+// execution: `FERRIDRIVER_BACKEND=cdp-pipe bun test & FERRIDRIVER_BACKEND=cdp-raw bun test`).
+const BACKENDS: string[] = process.env.FERRIDRIVER_BACKEND
+  ? [process.env.FERRIDRIVER_BACKEND]
+  : (() => {
+      const b = ["cdp-pipe", "cdp-raw"];
+      if (process.platform === "darwin") b.push("webkit");
+      return b;
+    })();
 
 describe("Browser (general)", () => {
   it("rejects unknown backend", async () => {
