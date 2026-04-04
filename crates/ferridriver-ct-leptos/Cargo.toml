@@ -1,0 +1,11 @@
+[package]
+name = "ferridriver-ct-leptos"
+description = "Ferridriver component testing adapter for Leptos"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+ferridriver-test = { path = "../ferridriver-test" }
+ferridriver = { path = "../ferridriver" }
+tokio = { version = "1", features = ["full"] }

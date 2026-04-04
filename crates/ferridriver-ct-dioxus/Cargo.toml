@@ -1,0 +1,11 @@
+[package]
+name = "ferridriver-ct-dioxus"
+description = "Ferridriver component testing adapter for Dioxus"
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[dependencies]
+ferridriver-test = { path = "../ferridriver-test" }
+ferridriver = { path = "../ferridriver" }
+tokio = { version = "1", features = ["full"] }

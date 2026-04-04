@@ -1,0 +1,16 @@
+{
+  "name": "@ferridriver/ct-react",
+  "version": "0.1.0",
+  "description": "Ferridriver component testing adapter for React",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./register": "./src/registerSource.mjs"
+  },
+  "peerDependencies": {
+    "react": ">=18.0.0",
+    "react-dom": ">=18.0.0"
+  },
+  "keywords": ["ferridriver", "component-testing", "react"]
+}

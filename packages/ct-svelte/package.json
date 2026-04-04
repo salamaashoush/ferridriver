@@ -1,0 +1,15 @@
+{
+  "name": "@ferridriver/ct-svelte",
+  "version": "0.1.0",
+  "description": "Ferridriver component testing adapter for Svelte 5",
+  "type": "module",
+  "main": "src/index.mjs",
+  "exports": {
+    ".": "./src/index.mjs",
+    "./register": "./src/registerSource.mjs"
+  },
+  "peerDependencies": {
+    "svelte": ">=4.0.0"
+  },
+  "keywords": ["ferridriver", "component-testing", "svelte"]
+}
