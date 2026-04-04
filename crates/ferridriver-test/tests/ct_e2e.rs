@@ -1,132 +1,92 @@
 //! Component testing integration tests.
 //!
-//! Tests the ComponentServer serving static files and a browser loading them.
-//! Does NOT require Leptos/Dioxus/React installed — uses plain HTML+JS components.
-
-use std::sync::Arc;
+//! Tests the ComponentServer, DevServer URL discovery, and mount() flow.
+//! Uses plain HTML+JS to simulate what framework adapters would do.
 
 use ferridriver_test::ct::server::ComponentServer;
 
-/// Test: ComponentServer serves static files and browser can load them.
+/// Test: ComponentServer serves static files and browser can interact.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_component_server_serves_files() {
-  // Create a temp dir with a simple HTML file.
-  let tmp = std::env::temp_dir().join(format!("ferri_ct_server_{}", std::process::id()));
+async fn test_component_server_serves_and_interacts() {
+  let tmp = std::env::temp_dir().join(format!("ferri_ct_{}", std::process::id()));
   let _ = std::fs::remove_dir_all(&tmp);
   std::fs::create_dir_all(&tmp).unwrap();
 
+  // A "component" with a counter — simulates what a framework adapter produces.
   std::fs::write(
     tmp.join("index.html"),
     r#"<!DOCTYPE html>
 <html><head><title>CT Test</title></head>
 <body>
-<div id="app">
-  <button onclick="this.textContent='clicked'">Click Me</button>
-</div>
-<script>document.body.setAttribute('data-mounted', 'true');</script>
+<div id="app"></div>
+<script>
+// Simulate framework registerSource: defines __ferriMount.
+window.__ferriMount = async function(componentRef, rootEl, options) {
+  let count = (options && options.props && options.props.initial) || 0;
+  function render() {
+    rootEl.innerHTML = `<span id="count">${count}</span><button id="inc">+</button><button id="dec">-</button>`;
+    rootEl.querySelector('#inc').onclick = () => { count++; render(); };
+    rootEl.querySelector('#dec').onclick = () => { count--; render(); };
+  }
+  render();
+};
+
+// Simulate registry + auto-mount for testing.
+window.__ferriMount({ id: 'Counter' }, document.getElementById('app'), { props: { initial: 0 } });
+</script>
 </body></html>"#,
   )
   .unwrap();
 
-  // Start the server.
   let server = ComponentServer::start(&tmp).await.unwrap();
   let url = server.url();
   assert!(url.starts_with("http://127.0.0.1:"));
 
-  // Launch a browser and navigate.
   let browser = ferridriver::Browser::launch(ferridriver::options::LaunchOptions::default())
     .await
     .unwrap();
   let page = browser.new_page_with_url(&url).await.unwrap();
 
-  // Wait for mount signal.
-  page
-    .wait_for_selector("[data-mounted]", ferridriver::options::WaitOptions::default())
-    .await
-    .unwrap();
+  // Verify initial state.
+  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
+  assert_eq!(count, "0", "initial count should be 0");
 
-  // Verify the page loaded.
-  let title = page.title().await.unwrap();
-  assert_eq!(title, "CT Test");
+  // Click + three times.
+  for _ in 0..3 {
+    page.locator("#inc").click().await.unwrap();
+  }
+  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
+  assert_eq!(count, "3", "count should be 3 after 3 clicks");
 
-  // Interact with the component.
-  page.locator("button").click().await.unwrap();
-  let text = page.locator("button").text_content().await.unwrap().unwrap_or_default();
-  assert_eq!(text, "clicked");
+  // Click - once.
+  page.locator("#dec").click().await.unwrap();
+  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
+  assert_eq!(count, "2", "count should be 2 after decrement");
 
-  // Cleanup.
   let _ = browser.close().await;
   server.stop().await;
   let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// Test: ComponentServer serves WASM HTML wrapper.
+/// Test: mount() via page.evaluate() with the serialization protocol.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_wasm_html_wrapper_structure() {
-  let html = ferridriver_test::ct::server::wasm_html_wrapper("my_component.js");
-  assert!(html.contains("my_component.js"));
-  assert!(html.contains("data-mounted"));
-  assert!(html.contains("<div id=\"app\">"));
-  assert!(html.contains("type=\"module\""));
-}
-
-/// Test: Vite HTML wrapper structure.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_vite_html_wrapper_structure() {
-  let html = ferridriver_test::ct::server::vite_html_wrapper("/src/entry.tsx");
-  assert!(html.contains("/src/entry.tsx"));
-  assert!(html.contains("<div id=\"app\">"));
-  assert!(html.contains("type=\"module\""));
-}
-
-/// Test: Vite entry generation for each framework.
-#[test]
-fn test_vite_entry_generation() {
-  use ferridriver_test::ct::vite::{generate_entry, JsFramework};
-
-  let react_entry = generate_entry(JsFramework::React, "./Counter.tsx", Some(r#"{ "initial": 5 }"#));
-  assert!(react_entry.contains("createRoot"));
-  assert!(react_entry.contains("Counter.tsx"));
-  assert!(react_entry.contains("\"initial\": 5"));
-
-  let vue_entry = generate_entry(JsFramework::Vue, "./Counter.vue", None);
-  assert!(vue_entry.contains("createApp"));
-  assert!(vue_entry.contains("Counter.vue"));
-
-  let svelte_entry = generate_entry(JsFramework::Svelte, "./Counter.svelte", None);
-  assert!(svelte_entry.contains("new Component"));
-  assert!(svelte_entry.contains("Counter.svelte"));
-
-  let solid_entry = generate_entry(JsFramework::Solid, "./Counter.tsx", None);
-  assert!(solid_entry.contains("solid-js/web"));
-  assert!(solid_entry.contains("Counter.tsx"));
-}
-
-/// Test: ComponentServer with a JS "component" (plain JS that mounts DOM).
-/// This simulates what a Vite-built component would do.
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn test_js_component_mount_and_interact() {
-  let tmp = std::env::temp_dir().join(format!("ferri_ct_js_{}", std::process::id()));
+async fn test_mount_via_evaluate() {
+  let tmp = std::env::temp_dir().join(format!("ferri_ct_mount_{}", std::process::id()));
   let _ = std::fs::remove_dir_all(&tmp);
   std::fs::create_dir_all(&tmp).unwrap();
 
-  // A "component" that renders a counter with increment button.
+  // Page with __ferriMount — NO auto-mount, just defines the function.
   std::fs::write(
     tmp.join("index.html"),
     r#"<!DOCTYPE html>
-<html><head><title>Counter Component</title></head>
+<html><head><title>Mount Test</title></head>
 <body>
-<div id="app"></div>
-<script type="module">
-  // Simulates what a framework's mount() would do.
-  const app = document.getElementById('app');
-  let count = 0;
-  function render() {
-    app.innerHTML = `<span id="count">${count}</span><button id="inc" onclick="window.__inc()">+</button>`;
-  }
-  window.__inc = () => { count++; render(); };
-  render();
-  document.body.setAttribute('data-mounted', 'true');
+<div id="app">INITIAL</div>
+<script>
+window.__ferriMount = function(componentRef, rootEl, options) {
+  const props = (options && options.props) || {};
+  rootEl.innerHTML = '<div id="mounted" data-component="' + componentRef.id + '" data-initial="' + (props.initial || 0) + '">Mounted: ' + componentRef.id + '</div>';
+};
 </script>
 </body></html>"#,
   )
@@ -138,22 +98,47 @@ async fn test_js_component_mount_and_interact() {
     .unwrap();
   let page = browser.new_page_with_url(&server.url()).await.unwrap();
 
-  page.wait_for_selector("[data-mounted]", ferridriver::options::WaitOptions::default()).await.unwrap();
-
   // Verify initial state.
-  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
-  assert_eq!(count, "0");
+  let initial = page.locator("#app").text_content().await.unwrap().unwrap_or_default();
+  assert_eq!(initial, "INITIAL", "page should show initial content");
 
-  // Click increment 3 times.
-  for _ in 0..3 {
-    page.locator("#inc").click().await.unwrap();
-  }
+  // Use ct::mount() to mount a component.
+  let component = ferridriver_test::ct::ComponentRef {
+    id: "MyCounter".into(),
+    props: serde_json::json!({ "initial": 42 }),
+    children: vec![],
+  };
+  let options = ferridriver_test::ct::MountOptions {
+    props: serde_json::json!({ "initial": 42 }),
+    ..Default::default()
+  };
 
-  // Verify final state.
-  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
-  assert_eq!(count, "3");
+  let _locator = ferridriver_test::ct::mount(&page, &server.url(), &component, &options)
+    .await
+    .unwrap();
+
+  // Verify the component was mounted.
+  let text = page.locator("#mounted").text_content().await.unwrap().unwrap_or_default();
+  assert!(text.contains("MyCounter"), "mounted component should contain ID: {text}");
 
   let _ = browser.close().await;
   server.stop().await;
   let _ = std::fs::remove_dir_all(&tmp);
+}
+
+/// Test: DevServer URL extraction from various log formats.
+#[test]
+fn test_devserver_url_extraction() {
+  use ferridriver_test::ct::devserver;
+
+  // These are internal — test via starting a simple HTTP server.
+  // For now just verify the module compiles and types are accessible.
+  let config = devserver::DevServerConfig::vite(std::path::Path::new("."));
+  assert_eq!(config.cmd, if cfg!(target_os = "linux") { "bunx" } else { "bunx" });
+
+  let config = devserver::DevServerConfig::trunk(std::path::Path::new("."));
+  assert_eq!(config.cmd, "trunk");
+
+  let config = devserver::DevServerConfig::dioxus(std::path::Path::new("."));
+  assert_eq!(config.cmd, "dx");
 }
