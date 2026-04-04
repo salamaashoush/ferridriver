@@ -6,6 +6,7 @@
   "main": "src/index.mjs",
   "exports": {
     ".": "./src/index.mjs",
+    "./test": "./src/test.mts",
     "./register": "./src/registerSource.mjs"
   },
   "peerDependencies": {
