@@ -1,63 +1,48 @@
 # ferridriver
 
-High-performance browser automation library in Rust. Playwright-compatible API across multiple backends, optimized for speed.
+High-performance browser automation library in Rust with a Playwright-compatible API. Multiple CDP backends, native WebKit, MCP server for AI agents, Node.js/Bun bindings, and a full test runner with component testing for 6 frameworks.
 
 ## Architecture
 
 ```
-ferridriver (Rust library)
-  |-- CdpPipe backend    (Chrome via fd 3/4 pipes -- fastest)
-  |-- CdpRaw backend     (Chrome via WebSocket -- fully parallel)
-  |-- WebKit backend      (macOS WKWebView -- native NSAccessibility)
-  |
-  |-- ferridriver-cli     (MCP server for AI agent automation)
-  |-- ferridriver-napi    (Node.js/Bun bindings via NAPI-RS)
+ferridriver (core library)
+  ├── CdpPipe backend       Chrome via fd 3/4 pipes — fastest, default
+  ├── CdpRaw backend        Chrome via WebSocket — connect to running browser
+  ├── WebKit backend         macOS WKWebView — native accessibility
+  │
+  ├── ferridriver-cli        CLI: MCP server + test runner (Rust)
+  ├── ferridriver-napi       Node.js/Bun bindings (NAPI-RS)
+  ├── @ferridriver/test      CLI: test runner + component testing (TypeScript)
+  │
+  ├── ferridriver-test       Test runner core: parallel, hooks, expect, reporters
+  ├── ferridriver-ct-leptos  Component testing for Leptos (trunk)
+  ├── ferridriver-ct-dioxus  Component testing for Dioxus (dx)
+  │
+  ├── @ferridriver/ct-core   JS CT core: Vite plugin, import transform, browser runtime
+  ├── @ferridriver/ct-react  React adapter (createRoot/render)
+  ├── @ferridriver/ct-vue    Vue adapter (createApp/mount)
+  ├── @ferridriver/ct-svelte Svelte adapter (mount, Svelte 4+5)
+  └── @ferridriver/ct-solid  Solid adapter (render/dispose)
 ```
-
-### Backends
-
-| Backend | Transport | Use case |
-|---------|-----------|----------|
-| **CdpPipe** | Unix pipes (fd 3/4) | Default. Lowest latency, no port discovery. |
-| **CdpRaw** | WebSocket | Connect to running Chrome, full parallel multi-page. |
-| **WebKit** | Binary IPC to WKWebView subprocess | macOS only. Native accessibility, native mouse events. |
 
 ## Quick Start (Rust)
 
 ```rust
 use ferridriver::{Browser, Page};
-use ferridriver::options::{LaunchOptions, RoleOptions, GotoOptions};
+use ferridriver::options::LaunchOptions;
 
 #[tokio::main]
 async fn main() -> Result<(), String> {
     let browser = Browser::launch(LaunchOptions::default()).await?;
     let page = browser.page().await?;
 
-    // Navigate
     page.goto("https://example.com", None).await?;
-
-    // Locators (Playwright-style)
-    page.get_by_role("link", RoleOptions { name: Some("More".into()), ..Default::default() })
-        .click().await?;
-
-    // Fill forms
     page.locator("#email").fill("test@example.com").await?;
-    page.locator("#password").fill("secret").await?;
     page.locator("button[type=submit]").click().await?;
-
-    // Wait for navigation
     page.wait_for_url("/dashboard").await?;
 
-    // Extract content
     let title = page.title().await?;
-    let md = page.markdown().await?;
-
-    // Screenshot
     let png = page.screenshot(Default::default()).await?;
-
-    // Accessibility snapshot (LLM-optimized)
-    let snap = page.snapshot_for_ai(Default::default()).await?;
-    println!("{}", snap.full);
 
     browser.close().await?;
     Ok(())
@@ -67,185 +52,83 @@ async fn main() -> Result<(), String> {
 ## Quick Start (Node.js/Bun)
 
 ```typescript
-import { Browser } from 'ferridriver-napi';
+import { Browser } from 'ferridriver';
 
 const browser = await Browser.launch();
-const page = await browser.page();
-
-await page.goto('https://example.com');
+const page = await browser.newPageWithUrl('https://example.com');
 await page.locator('h1').click();
-const text = await page.locator('h1').textContent();
-console.log(text);
-
-// Event listeners
-const id = page.on('response', (data) => {
-  console.log(`${data.status} ${data.url}`);
-});
-page.off(id); // remove listener
-
+console.log(await page.locator('h1').textContent());
 await browser.close();
 ```
 
-## API Reference
+## Test Runner
 
-### Page
+Parallel test execution with auto-retrying assertions. 99 tests/sec, 4x faster than Playwright Test.
 
-#### Navigation
-- `goto(url, opts?)` -- navigate with optional `{ waitUntil, timeout }`
-- `go_back(opts?)` / `go_forward(opts?)` / `reload(opts?)`
-- `url()` / `title()` / `content()`
-- `wait_for_url(pattern)` / `wait_for_load_state(state?)`
-- `wait_for_navigation(timeout?)`
-
-#### Locators
-- `locator(selector)` -- CSS, XPath, or rich selectors (`role=`, `text=`, `testid=`)
-- `get_by_role(role, opts?)` / `get_by_text(text, opts?)` / `get_by_label(text, opts?)`
-- `get_by_placeholder(text, opts?)` / `get_by_alt_text(text, opts?)` / `get_by_title(text, opts?)`
-- `get_by_test_id(id)`
-
-#### Locator Actions
-- `click()` / `dblclick()` / `right_click()` / `tap()`
-- `fill(value)` / `clear()` / `type_text(text)` / `press(key)` / `press_sequentially(text)`
-- `hover()` / `focus()` / `blur()` / `scroll_into_view()`
-- `check()` / `uncheck()` / `set_checked(bool)`
-- `select_option(value)` / `set_input_files(paths)` / `select_text()`
-- `drag_to(target_locator)` / `dispatch_event(event_type)`
-
-#### Locator Queries
-- `text_content()` / `inner_text()` / `inner_html()` / `input_value()`
-- `get_attribute(name)` / `bounding_box()`
-- `is_visible()` / `is_hidden()` / `is_enabled()` / `is_disabled()` / `is_checked()` / `is_editable()` / `is_attached()`
-- `count()` / `all()` / `first()` / `last()` / `nth(index)`
-- `all_text_contents()` / `all_inner_texts()`
-- `evaluate(expression)` / `evaluate_all(expression)`
-- `or(other)` / `and(other)` / `filter(opts)`
-
-#### Screenshots & Content
-- `screenshot(opts?)` / `screenshot_element(selector)` / `pdf(landscape, print_bg)`
-- `markdown()` / `set_content(html)`
-- `add_script_tag(url?, content?, type?)` / `add_style_tag(url?, content?)`
-
-#### Accessibility Snapshot
-- `snapshot_for_ai(opts?)` -- LLM-optimized accessibility tree with optional depth limiting and incremental change tracking
-
-#### Network Interception
-- `route(pattern, handler)` -- intercept requests matching a glob pattern
-- `unroute(pattern)` -- remove route handlers
-- Supports `fulfill` (mock response), `continue` (modify request), `abort` (block request)
-- CDP: native Fetch domain. WebKit: JS fetch/XHR monkey-patching via WKScriptMessageHandlerWithReply.
-
-#### Events
-- `on(event, callback)` / `once(event, callback)` / `off(listener_id)` / `remove_all_listeners()`
-- `wait_for_event(name, timeout?)` / `wait_for_response(url_pattern, timeout?)`
-- `wait_for_request(url_pattern, timeout?)` / `wait_for_download(url_pattern?, timeout?)`
-- `expect_navigation(timeout?)` / `expect_response(url_pattern, timeout?)` / `expect_request(url_pattern, timeout?)`
-- Events: `console`, `request`, `response`, `dialog`, `download`, `load`, `domcontentloaded`, `close`, `pageerror`, `frameattached`, `framedetached`, `framenavigated`
-
-#### Dialog Handling
-- `set_dialog_handler(handler)` -- configure how JS dialogs (alert/confirm/prompt) are handled
-- Default: auto-accept alerts/confirms, accept prompts with default value
-
-#### JavaScript Bridge
-- `evaluate(expression)` / `evaluate_str(expression)`
-- `add_init_script(source)` / `remove_init_script(id)` -- inject JS before page scripts on every navigation
-- `expose_function(name, callback)` / `remove_exposed_function(name)` -- bridge Rust functions to page JS
-
-#### Emulation
-- `set_viewport_size(w, h)` / `set_viewport(config)` / `viewport_size()`
-- `set_user_agent(ua)` / `set_locale(locale)` / `set_timezone(tz)`
-- `set_geolocation(lat, lng, accuracy)` / `set_network_state(offline, latency, dl, ul)`
-- `emulate_media(opts)` / `set_javascript_enabled(bool)`
-- `set_extra_http_headers(headers)` / `grant_permissions(perms, origin?)`
-
-#### Cookies & Storage
-- `cookies()` / `set_cookie(cookie)` / `delete_cookie(name, domain?)` / `clear_cookies()`
-- `storage_state()` / `set_storage_state(json)` -- save/restore full session state
-
-#### Input Devices
-- `page.keyboard().press(key)` / `page.keyboard().type(text)`
-- `page.mouse().click(x, y, opts?)` / `page.mouse().move(x, y)` / `page.mouse().wheel(dx, dy)`
-- `page.mouse().down(x, y, button?)` / `page.mouse().up(x, y, button?)`
-- `page.touchscreen().tap(x, y)`
-
-#### Frames
-- `main_frame()` / `frames()` / `frame(name_or_url)`
-- Frame has its own `evaluate()`, `locator()`, `get_by_*()`, `content()`, `set_content()`, `add_script_tag()`, `add_style_tag()`
-
-#### Lifecycle
-- `close()` / `is_closed()` / `bring_to_front()`
-
-### Browser
-- `Browser::launch(opts)` / `Browser::connect(ws_url)`
-- `new_page()` / `new_page_with_url(url)` / `page()`
-- `new_context()` / `default_context()` / `contexts()`
-- `close()` / `is_connected()` / `version()`
-
-### BrowserContext
-- `new_page()` / `pages()` / `close()`
-- `cookies()` / `add_cookies(cookies)` / `clear_cookies()` / `delete_cookie(name, domain?)`
-- `grant_permissions(perms, origin?)` / `clear_permissions()`
-- `set_geolocation(lat, lng, accuracy)` / `set_extra_http_headers(headers)` / `set_offline(bool)`
-- `add_init_script(source)` / `route(pattern, handler)` / `unroute(pattern)`
-
-## MCP Server (ferridriver-cli)
-
-25 tools for AI agent browser automation. Install as an MCP server for Claude, Cursor, or any MCP-compatible client.
-
-```bash
-cargo install ferridriver-cli
-```
-
-Tools: `navigate`, `page`, `click`, `click_at`, `hover`, `fill`, `fill_form`, `type_text`, `press_key`, `drag`, `scroll`, `select_option`, `upload_file`, `snapshot`, `screenshot`, `evaluate`, `wait_for`, `search_page`, `get_markdown`, `cookies`, `storage`, `emulate`, `diagnostics`, `list_steps`, `run_scenario`
-
-## BDD Framework
-
-58 Gherkin step definitions for browser automation testing.
-
-```gherkin
-Feature: Login
-  Scenario: Successful login
-    Given I navigate to "https://app.example.com/login"
-    When I fill "#email" with "user@example.com"
-    And I fill "#password" with "secret"
-    And I click "#submit"
-    Then the URL should contain "/dashboard"
-    And the title should contain "Dashboard"
-    And "#welcome" should contain text "Welcome"
-```
-
-Step categories: Navigation (5), Interaction (14), Wait (6), Assertion (24), Variable (7), Cookie (4), Storage (3), Screenshot (3), JavaScript (1).
-
-## Test Runner (ferridriver-test)
-
-Playwright-compatible test runner with parallel execution, auto-retrying assertions, and rich reporting.
+### Rust
 
 ```rust
 use ferridriver_test::prelude::*;
 
 #[ferritest]
-async fn login_flow(page: Page) {
-    page.goto("https://app.example.com/login", None).await.unwrap();
-    page.locator("#email").fill("user@example.com").await.unwrap();
-    page.locator("button[type=submit]").click().await.unwrap();
-    expect(&page).to_have_url("dashboard").await.unwrap();
+async fn login_flow(page: Page) -> Result<(), TestFailure> {
+    page.goto("https://app.example.com/login", None).await?;
+    page.locator("#email").fill("user@example.com").await?;
+    page.locator("button[type=submit]").click().await?;
+    expect(&page).to_have_url("dashboard").await?;
+    Ok(())
 }
 ```
 
-- **Parallel execution**: N workers × N browsers, MPMC work-stealing dispatch
-- **Hooks**: beforeAll/afterAll, beforeEach/afterEach
-- **Serial mode**: `SuiteMode::Serial` — run in order, skip on failure
-- **32 expect matchers**: visibility, text, value, attributes, count, accessibility, snapshots
-- **Visual screenshot diffing**: pixel-level PNG comparison with threshold and diff image
-- **Reporters**: Terminal, JUnit XML, JSON, HTML (self-contained)
-- **95+ tests/sec** (3.7x faster than Playwright Test)
+### TypeScript
 
-See [crates/ferridriver-test/README.md](crates/ferridriver-test/README.md) for full API.
+```typescript
+import { test, expect } from '@ferridriver/test';
+
+test('login flow', async ({ page }) => {
+  await page.goto('https://app.example.com/login');
+  await page.locator('#email').fill('user@example.com');
+  await page.locator('button[type=submit]').click();
+  await expect(page).toHaveURL(/dashboard/);
+});
+```
+
+```bash
+ferridriver-test tests/login.spec.ts --workers 4
+```
+
+### Features
+
+- **Parallel**: N workers × N browsers, MPMC work-stealing dispatch
+- **Hooks**: beforeAll/afterAll, beforeEach/afterEach
+- **Serial mode**: tests run in order, skip remaining on failure
+- **Expected failures**: `test.fail()` pass/fail inversion
+- **Global setup/teardown**
+- **Retry + flaky detection**
+- **Reporters**: Terminal, JUnit XML, JSON, HTML
+- **Text snapshots**: `.snap` files with unified diff
+- **Visual snapshots**: pixel-level PNG diff with threshold and diff image
+- **CDP tracing**: Playwright-compatible format
+
+### 32 Expect Matchers
+
+Visibility: `toBeVisible`, `toBeHidden`, `toBeAttached`, `toBeInViewport`
+State: `toBeEnabled`, `toBeDisabled`, `toBeChecked`, `toBeEditable`, `toBeFocused`, `toBeEmpty`
+Text: `toHaveText`, `toContainText`, `toHaveTexts`, `toContainTexts`
+Value: `toHaveValue`, `toHaveValues`
+Attributes: `toHaveAttribute`, `toHaveClass`, `toContainClass`, `toHaveCSS`, `toHaveId`, `toHaveRole`
+A11y: `toHaveAccessibleName`, `toHaveAccessibleDescription`, `toMatchAriaSnapshot`
+Snapshots: `toMatchSnapshot`, `toHaveScreenshot`
+Other: `toHaveJSProperty`, `toHaveCount`
+Page: `toHaveTitle`, `toHaveURL`
+Modifiers: `.not()`, `.withTimeout()`, `.soft()`, `.withMessage()`
+Utilities: `expect.poll()`, `toPass()`
 
 ## Component Testing
 
-Test UI components in real browsers with `cargo test` or `bun test`. Supports both Rust WASM frameworks and JS frameworks.
+Test UI components in real browsers. Supports Rust WASM and JS frameworks with framework-native toolchains.
 
-### Rust Frameworks (Leptos, Dioxus)
+### Leptos
 
 ```rust
 use ferridriver_ct_leptos::prelude::*;
@@ -260,93 +143,210 @@ async fn counter_increments(page: Page) -> Result<(), TestFailure> {
 ferridriver_ct_leptos::main!();
 ```
 
-- `trunk build` / `dx build` (cached) → static serve → parallel test runner
-- Custom harness: one browser, fresh page per test, inventory-based discovery
-- **15 TodoMVC tests in 531ms** (Leptos), **622ms** (Dioxus)
-- **500 tests in 10.1s** (49.5 tests/sec)
+```bash
+cargo install trunk
+cargo test -p my-leptos-app --test components
+```
 
-### JS Frameworks (React, Vue, Svelte)
+### Dioxus
+
+```rust
+use ferridriver_ct_dioxus::prelude::*;
+
+#[component_test]
+async fn counter_increments(page: Page) -> Result<(), TestFailure> {
+    page.locator("#inc").click().await?;
+    expect(&page.locator("#count")).to_have_text("1").await?;
+    Ok(())
+}
+
+ferridriver_ct_dioxus::main!();
+```
+
+```bash
+cargo install dioxus-cli
+cargo test -p my-dioxus-app --test components
+```
+
+### React / Vue / Svelte / Solid
 
 ```typescript
-import { test, expect } from '@ferridriver/ct-react';
-import Counter from './Counter';
+import { test, expect } from '@ferridriver/test';
 
-test('increments', async ({ mount, page }) => {
-  await mount(Counter, { props: { initial: 0 } });
+test('counter increments', async ({ page }) => {
   await page.locator('#inc').click();
   await expect(page.locator('#count')).toHaveText('1');
 });
 ```
 
-- Import transform → Vite build → component registry → mount via `page.evaluate()`
-- Framework adapters: `@ferridriver/ct-react`, `@ferridriver/ct-vue`, `@ferridriver/ct-svelte`
-- Same expect API as Playwright CT
+```bash
+ferridriver-test --ct --framework react src/todomvc.ct.ts
+ferridriver-test --ct --framework vue src/todomvc.ct.ts
+ferridriver-test --ct --framework svelte src/todomvc.ct.ts
+ferridriver-test --ct --framework solid src/todomvc.ct.ts
+```
 
-### Workspace Layout
+The `--ct` flag starts the Vite dev server, pre-warms it, navigates each test page to the app, and provides a `mount()` fixture.
+
+### How It Works
+
+**Rust frameworks**: `trunk build` / `dx build` (cached) → `ComponentServer` serves static output → ferridriver-test parallel runner creates pages against it. Custom harness with `inventory` for test discovery.
+
+**JS frameworks**: CLI starts Vite dev server → pre-warms compilation → NAPI test runner creates pages navigated to `baseUrl` → tests interact via Playwright-style Page/Locator API.
+
+### Performance
+
+| Framework | 15 TodoMVC tests | Per test |
+|-----------|-----------------|---------|
+| Solid | 392ms | 26ms |
+| Vue | 409ms | 27ms |
+| Svelte | 447ms | 30ms |
+| Leptos | 483ms | 32ms |
+| React | 534ms | 36ms |
+| Dioxus | 599ms | 40ms |
+
+500 Leptos tests: 10.1s (49.5 tests/sec)
+
+## MCP Server
+
+25 tools for AI agent browser automation. Works with Claude, Cursor, or any MCP client.
+
+```bash
+# stdio (for Claude Code)
+ferridriver mcp
+
+# HTTP (for remote clients)
+ferridriver mcp --transport http --port 8080
+```
+
+Tools: `navigate`, `page`, `click`, `click_at`, `hover`, `fill`, `fill_form`, `type_text`, `press_key`, `drag`, `scroll`, `select_option`, `upload_file`, `snapshot`, `screenshot`, `evaluate`, `wait_for`, `search_page`, `get_markdown`, `cookies`, `storage`, `emulate`, `diagnostics`, `list_steps`, `run_scenario`
+
+## BDD Framework
+
+58 Gherkin step definitions for browser automation testing.
+
+```gherkin
+Feature: Login
+  Scenario: Successful login
+    Given I navigate to "https://app.example.com/login"
+    When I fill "#email" with "user@example.com"
+    And I click "#submit"
+    Then the URL should contain "/dashboard"
+```
+
+## Page API
+
+### Navigation
+`goto`, `goBack`, `goForward`, `reload`, `url`, `title`, `content`, `waitForUrl`, `waitForLoadState`, `waitForNavigation`
+
+### Locators
+`locator(css)`, `getByRole`, `getByText`, `getByLabel`, `getByPlaceholder`, `getByAltText`, `getByTitle`, `getByTestId`
+
+### Actions
+`click`, `dblclick`, `rightClick`, `tap`, `fill`, `clear`, `typeText`, `press`, `pressSequentially`, `hover`, `focus`, `blur`, `scrollIntoView`, `check`, `uncheck`, `setChecked`, `selectOption`, `setInputFiles`, `selectText`, `dragTo`, `dispatchEvent`
+
+### Queries
+`textContent`, `innerText`, `innerHTML`, `inputValue`, `getAttribute`, `boundingBox`, `isVisible`, `isHidden`, `isEnabled`, `isDisabled`, `isChecked`, `isEditable`, `isAttached`, `count`, `all`, `first`, `last`, `nth`, `allTextContents`, `allInnerTexts`, `evaluate`, `evaluateAll`, `or`, `and`, `filter`
+
+### Screenshots & Content
+`screenshot`, `screenshotElement`, `pdf`, `markdown`, `setContent`, `addScriptTag`, `addStyleTag`, `snapshotForAi`
+
+### Network
+`route(pattern, handler)`, `unroute` — fulfill, continue, or abort requests
+
+### Events
+`on`, `once`, `off`, `removeAllListeners`, `waitForEvent`, `waitForResponse`, `waitForRequest`, `waitForDownload`, `expectNavigation`, `expectResponse`, `expectRequest`
+
+### Emulation
+`setViewportSize`, `setUserAgent`, `setLocale`, `setTimezone`, `setGeolocation`, `setNetworkState`, `emulateMedia`, `setJavascriptEnabled`, `setExtraHttpHeaders`, `grantPermissions`
+
+### Cookies & Storage
+`cookies`, `setCookie`, `deleteCookie`, `clearCookies`, `storageState`, `setStorageState`
+
+### Input Devices
+`keyboard.press`, `keyboard.type`, `mouse.click`, `mouse.move`, `mouse.wheel`, `mouse.down`, `mouse.up`, `touchscreen.tap`
+
+### Browser & Context
+`Browser.launch`, `Browser.connect`, `newPage`, `newContext`, `close`, `isConnected`
+`BrowserContext.newPage`, `pages`, `close`, `cookies`, `addCookies`, `clearCookies`, `grantPermissions`, `addInitScript`, `route`
+
+## Workspace
 
 ```
 crates/
-  ferridriver              Core library: Browser, Page, Locator, backends
-  ferridriver-cli          MCP server binary
-  ferridriver-mcp          MCP server library (25 tools)
-  ferridriver-napi         Node.js/Bun bindings (NAPI-RS)
-  ferridriver-test         Test runner: parallel, hooks, expect, reporters
-  ferridriver-test-macros  #[ferritest] proc macro
-  ferridriver-ct-leptos    Leptos component testing adapter
-  ferridriver-ct-dioxus    Dioxus component testing adapter
+  ferridriver               Core: Browser, Page, Locator, 3 backends
+  ferridriver-cli            CLI binary (MCP server + Rust test runner)
+  ferridriver-mcp            MCP server library (25 tools, rmcp)
+  ferridriver-napi           Node.js/Bun bindings (NAPI-RS)
+  ferridriver-test           Test runner: parallel, hooks, expect, reporters
+  ferridriver-test-macros    #[ferritest] proc macro
+  ferridriver-ct-leptos      Leptos CT adapter (#[component_test] + trunk)
+  ferridriver-ct-leptos-macros
+  ferridriver-ct-dioxus      Dioxus CT adapter (#[component_test] + dx)
+  ferridriver-ct-dioxus-macros
 packages/
-  ct-core                  JS CT core: import transform, Vite plugin, browser runtime
-  ct-react                 React adapter: registerSource + test API
-  ct-vue                   Vue adapter
-  ct-svelte                Svelte adapter
+  ferridriver-test           @ferridriver/test — TS CLI + test API
+  ct-core                    @ferridriver/ct-core — Vite plugin, import transform, browser runtime
+  ct-react                   @ferridriver/ct-react — React registerSource
+  ct-vue                     @ferridriver/ct-vue — Vue registerSource
+  ct-svelte                  @ferridriver/ct-svelte — Svelte registerSource
+  ct-solid                   @ferridriver/ct-solid — Solid registerSource
 examples/
-  ct-leptos-todomvc        Leptos TodoMVC with 15 component tests
-  ct-dioxus-todomvc        Dioxus TodoMVC with 15 component tests
-  ct-react                 React counter with CT tests
+  ct-leptos                  Leptos counter (4 tests)
+  ct-leptos-todomvc          Leptos TodoMVC (15 tests)
+  ct-dioxus-todomvc          Dioxus TodoMVC (15 tests)
+  ct-react                   React TodoMVC (15 tests)
+  ct-vue                     Vue TodoMVC (15 tests)
+  ct-svelte                  Svelte TodoMVC (15 tests)
+  ct-solid                   Solid TodoMVC (15 tests)
 ```
 
 ## Performance
 
-- CdpPipe: 1.1x faster than Playwright on equivalent operations
-- WebKit: 1.3x faster than Playwright's patched WebKit
-- Test runner: 95+ tests/sec (3.7x faster than Playwright Test)
-- Component testing: 49.5 tests/sec on real WASM apps
-- Single CDP call per element interaction (scroll + getBoundingClientRect + dispatch in one evaluate)
-- FxHashMap for all internal maps (faster than std HashMap)
-- Zero-copy screenshot transfer via shared memory on WebKit
+| Metric | Value |
+|--------|-------|
+| Test runner throughput | **99 tests/sec** (100 tests, 6 workers) |
+| vs Playwright Test | **4x faster** (50 tests) |
+| CT per test (JS) | 26-36ms |
+| CT per test (WASM) | 32-40ms |
+| CdpPipe vs Playwright | 1.1x faster per operation |
+| WebKit vs Playwright WebKit | 1.3x faster |
 
 ## Test Coverage
 
 - 67 Rust integration tests (53 BDD + 14 Page API)
-- 250 NAPI tests (Bun, across all 3 backends)
-- 14 test runner feature tests (hooks, serial, expected failures, soft assertions, snapshots)
+- 250 NAPI tests (Bun, across 3 backends)
+- 14 test runner feature tests
 - 3 visual screenshot diff tests
-- 30 component tests (15 Leptos TodoMVC + 15 Dioxus TodoMVC)
+- 30 Rust component tests (15 Leptos + 15 Dioxus TodoMVC)
+- 60 JS component tests (15 each: React, Vue, Svelte, Solid TodoMVC)
 - 3 CT infrastructure tests
-- **367+ total tests**
+- **427+ total tests**
 
 ## Building
 
 ```bash
-# Rust library
-cargo build --package ferridriver
+# Core library
+cargo build -p ferridriver
 
 # MCP server
-cargo build --package ferridriver-cli
+cargo build -p ferridriver-cli
 
-# NAPI addon (requires Node.js or Bun)
-cd crates/ferridriver-napi
-bun run build
-bun test
+# NAPI addon
+cd crates/ferridriver-napi && bun run build && bun test
 
-# Run test runner benchmarks
-cargo test --package ferridriver-test --test bench_runner -- --nocapture
+# Rust component tests
+cargo test -p ct-leptos-todomvc --test todomvc     # requires: cargo install trunk
+cargo test -p ct-dioxus-todomvc --test todomvc     # requires: cargo install dioxus-cli
 
-# Run component tests (requires trunk)
-cargo test -p ct-leptos-todomvc --test todomvc
+# JS component tests
+cd examples/ct-react && bun install && bun run test:ct
+cd examples/ct-vue && bun install && bun run test:ct
+cd examples/ct-svelte && bun install && bun run test:ct
+cd examples/ct-solid && bun install && bun run test:ct
 
-# Run component tests (requires dx)
-cargo test -p ct-dioxus-todomvc --test todomvc
+# Or from workspace root
+bun install && cd examples/ct-react && bun run test:ct
 ```
 
 ## Requirements
@@ -354,9 +354,9 @@ cargo test -p ct-dioxus-todomvc --test todomvc
 - Rust nightly (edition 2024)
 - Chrome/Chromium (auto-detected, or set `CHROMIUM_PATH`)
 - macOS 11+ for WebKit backend
-- Node.js 18+ or Bun 1.0+ for NAPI bindings
-- `trunk` for Leptos component testing (`cargo install trunk`)
-- `dx` for Dioxus component testing (`cargo install dioxus-cli`)
+- Bun 1.0+ or Node.js 18+ for NAPI and TS test runner
+- `trunk` for Leptos CT (`cargo install trunk`)
+- `dx` for Dioxus CT (`cargo install dioxus-cli`)
 
 ## License
 
