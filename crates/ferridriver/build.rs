@@ -52,6 +52,44 @@ fn main() {
 
   assert!(status.success(), "Failed to link webkit host binary");
 
+  // ── Copy fd_webkit_host to discoverable locations ─────────────────────
+  //
+  // 1. target/{profile}/fd_webkit_host  (sibling to CLI binary)
+  // 2. ~/.cache/ferridriver/fd_webkit_host  (survives cargo clean)
+  //
+  // Both copies are best-effort: warnings on failure, not panics.
+
+  // Derive target/{profile}/ from OUT_DIR.
+  // OUT_DIR layout: <target>/<profile>/build/<crate>-<hash>/out
+  // Walking up 3 parents from OUT_DIR gives <target>/<profile>/
+  let out_path = std::path::Path::new(&out_dir);
+  if let Some(profile_dir) = out_path
+    .parent()
+    .and_then(|p| p.parent())
+    .and_then(|p| p.parent())
+  {
+    let dest = profile_dir.join("fd_webkit_host");
+    if let Err(e) = std::fs::copy(&host_bin, &dest) {
+      println!("cargo:warning=Could not copy fd_webkit_host to {}: {e}", dest.display());
+    }
+  }
+
+  // Copy to ~/.cache/ferridriver/ (survives cargo clean, works for cargo install)
+  if let Some(home) = std::env::var_os("HOME") {
+    let cache_dir = std::path::Path::new(&home).join(".cache").join("ferridriver");
+    match std::fs::create_dir_all(&cache_dir) {
+      Ok(()) => {
+        let dest = cache_dir.join("fd_webkit_host");
+        if let Err(e) = std::fs::copy(&host_bin, &dest) {
+          println!("cargo:warning=Could not copy fd_webkit_host to {}: {e}", dest.display());
+        }
+      },
+      Err(e) => {
+        println!("cargo:warning=Could not create cache dir {}: {e}", cache_dir.display());
+      },
+    }
+  }
+
   // Don't link the static libs into the Rust library -- they're only
   // used to produce the standalone binary above. Clear the link flags
   // that cc::Build emits by default.
