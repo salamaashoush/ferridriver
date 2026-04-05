@@ -10,6 +10,7 @@
 import { InjectedScript } from './injectedScript';
 import { isElementVisible, parentElementOrShadowHost, enclosingShadowRootOrDocument } from './domUtils';
 import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessibleName, getReadonly } from './roleUtils';
+import { escapeForTextSelector, escapeForAttributeSelector } from '@isomorphic/stringUtils';
 
 // ── Types ──
 
@@ -31,22 +32,46 @@ const injected = new InjectedScript(window, {
 function executeSelector(parts: SelectorPart[], root: Node): Element[] {
   // Convert ferridriver's {engine, body} parts to Playwright's parsed selector format
   // Map ferridriver engine names to Playwright engine names
-  const engineMap: Record<string, string> = {
-    'testid': 'data-testid',
-    'has': 'internal:has',
-    'has-not': 'internal:has-not',
-    'has-text': 'internal:has-text',
-    'has-not-text': 'internal:has-not-text',
-  };
+  // Build the selector string using Playwright's own escaping conventions.
+  // body format from Rust: raw text for text/label, attribute value for placeholder/alt/title,
+  // role spec for role, CSS for css, etc.
+  // exact flag: body enclosed in double quotes = exact match, otherwise substring/case-insensitive.
   const selectorStr = parts.map(p => {
-    const engine = engineMap[p.engine] || p.engine;
-    // For internal:has, body is a sub-selector (CSS)
-    if (engine === 'internal:has' || engine === 'internal:has-not')
-      return `${engine}="${p.body.replace(/"/g, '\\"')}"`;
-    // For internal:has-text/has-not-text, body is a text pattern
-    if (engine === 'internal:has-text' || engine === 'internal:has-not-text')
-      return `${engine}=${p.body}`;
-    return `${engine}=${p.body}`;
+    const engine = p.engine;
+    const body = p.body;
+    // Detect exact match: Playwright convention is body wrapped in double quotes
+    const isExact = body.startsWith('"') && body.endsWith('"');
+    const rawBody = isExact ? body.slice(1, -1) : body;
+
+    switch (engine) {
+      case 'text':
+        return `internal:text=${escapeForTextSelector(rawBody, isExact)}`;
+      case 'label':
+        return `internal:label=${escapeForTextSelector(rawBody, isExact)}`;
+      case 'placeholder':
+        return `internal:attr=[placeholder=${escapeForAttributeSelector(rawBody, isExact)}]`;
+      case 'alt':
+        return `internal:attr=[alt=${escapeForAttributeSelector(rawBody, isExact)}]`;
+      case 'title':
+        return `internal:attr=[title=${escapeForAttributeSelector(rawBody, isExact)}]`;
+      case 'testid':
+        // testid is always exact match
+        return `internal:testid=[data-testid=${escapeForAttributeSelector(rawBody, true)}]`;
+      case 'role':
+        // role body is already in Playwright format: button[name="Save"][checked=true]...
+        return `internal:role=${body}`;
+      case 'has':
+        return `internal:has="${body.replace(/"/g, '\\"')}"`;
+      case 'has-not':
+        return `internal:has-not="${body.replace(/"/g, '\\"')}"`;
+      case 'has-text':
+        return `internal:has-text=${escapeForTextSelector(rawBody, isExact)}`;
+      case 'has-not-text':
+        return `internal:has-not-text=${escapeForTextSelector(rawBody, isExact)}`;
+      default:
+        // css, xpath, id, nth, visible - pass through
+        return `${engine}=${body}`;
+    }
   }).join(' >> ');
   try {
     const parsed = injected.parseSelector(selectorStr);
@@ -219,14 +244,14 @@ function searchPage(pattern: string, isRegex: boolean, caseSensitive: boolean, c
   } catch { return JSON.stringify({ error: 'Invalid pattern' }); }
   const scope = cssScope ? document.querySelector(cssScope) || document.body : document.body;
   const text = scope.innerText || '';
-  const matches: { match: string; context: string; index: number }[] = [];
+  const matches: { match_text: string; context: string; element_path: string; char_position: number }[] = [];
   let m;
   while ((m = regex.exec(text)) && matches.length < maxResults) {
     const start = Math.max(0, m.index - contextChars);
     const end = Math.min(text.length, m.index + m[0].length + contextChars);
-    matches.push({ match: m[0], context: text.slice(start, end), index: m.index });
+    matches.push({ match_text: m[0], context: text.slice(start, end), element_path: '', char_position: m.index });
   }
-  return JSON.stringify({ count: matches.length, matches });
+  return JSON.stringify({ total: matches.length, has_more: false, matches });
 }
 
 function findElementsCSS(selector: string, attributes: string[], maxResults: number, includeText: boolean) {
@@ -245,7 +270,7 @@ function findElementsCSS(selector: string, attributes: string[], maxResults: num
 }
 
 function scrollInfo() {
-  return { scrollY: window.scrollY, scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight };
+  return JSON.stringify({ scrollY: window.scrollY, scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight });
 }
 
 function suggestSelectors() {
