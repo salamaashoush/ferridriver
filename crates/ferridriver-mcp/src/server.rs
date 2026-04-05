@@ -242,12 +242,23 @@ impl McpServer {
   /// Create a server with default config (standalone mode).
   #[must_use]
   pub fn new(mode: ConnectMode, backend: BackendKind) -> Self {
-    Self::with_config(mode, backend, Arc::new(DefaultConfig))
+    Self::with_options(mode, backend, false, Arc::new(DefaultConfig))
+  }
+
+  /// Create a server with headless option.
+  pub fn new_headless(mode: ConnectMode, backend: BackendKind, headless: bool) -> Self {
+    Self::with_options(mode, backend, headless, Arc::new(DefaultConfig))
   }
 
   /// Create a server with a custom config.
   pub fn with_config(mode: ConnectMode, backend: BackendKind, config: Arc<dyn McpServerConfig>) -> Self {
+    Self::with_options(mode, backend, false, config)
+  }
+
+  /// Create a server with all options.
+  pub fn with_options(mode: ConnectMode, backend: BackendKind, headless: bool, config: Arc<dyn McpServerConfig>) -> Self {
     let mut browser_state = BrowserState::new(mode, backend);
+    browser_state.headless = headless;
     browser_state.extra_args = config.chrome_args();
     // Wire per-instance args callback from config trait.
     let config_clone = Arc::clone(&config);

@@ -108,6 +108,10 @@ pub struct BrowserArgs {
   /// Chrome user data directory
   #[arg(long)]
   user_data_dir: Option<String>,
+
+  /// Run in headless mode (hide browser window). Default: headed.
+  #[arg(long)]
+  pub headless: bool,
 }
 
 /// MCP transport options.

@@ -14,8 +14,8 @@ use std::sync::Arc;
 ///
 /// Returns an error if the MCP transport fails to initialize or the server
 /// encounters a fatal communication error.
-pub async fn serve_stdio(mode: ConnectMode, backend: BackendKind) -> anyhow::Result<()> {
-  let svc = Box::pin(McpServer::new(mode, backend).serve(rmcp::transport::io::stdio())).await?;
+pub async fn serve_stdio(mode: ConnectMode, backend: BackendKind, headless: bool) -> anyhow::Result<()> {
+  let svc = Box::pin(McpServer::new_headless(mode, backend, headless).serve(rmcp::transport::io::stdio())).await?;
   svc.waiting().await?;
   Ok(())
 }
@@ -26,7 +26,7 @@ pub async fn serve_stdio(mode: ConnectMode, backend: BackendKind) -> anyhow::Res
 ///
 /// Returns an error if the TCP listener cannot bind to the requested port,
 /// or if the HTTP server encounters a fatal error.
-pub async fn serve_http(mode: ConnectMode, backend: BackendKind, port: u16) -> anyhow::Result<()> {
+pub async fn serve_http(mode: ConnectMode, backend: BackendKind, port: u16, headless: bool) -> anyhow::Result<()> {
   use rmcp::transport::streamable_http_server::{
     StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
   };
@@ -37,7 +37,7 @@ pub async fn serve_http(mode: ConnectMode, backend: BackendKind, port: u16) -> a
   config.cancellation_token = ct.child_token();
 
   let svc = StreamableHttpService::new(
-    move || Ok(McpServer::new(mode.clone(), backend)),
+    move || Ok(McpServer::new_headless(mode.clone(), backend, headless)),
     Arc::new(LocalSessionManager::default()),
     config,
   );

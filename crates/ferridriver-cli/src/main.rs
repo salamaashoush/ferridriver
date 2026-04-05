@@ -19,10 +19,11 @@ async fn main() -> anyhow::Result<()> {
     cli::Command::Mcp { browser, transport } => {
       let backend = browser.backend_kind();
       let mode = browser.connect_mode();
+      let headless = browser.headless;
 
       match transport.transport {
-        cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio(mode, backend).await,
-        cli::Transport::Http => ferridriver_mcp::mcp::serve_http(mode, backend, transport.port).await,
+        cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio(mode, backend, headless).await,
+        cli::Transport::Http => ferridriver_mcp::mcp::serve_http(mode, backend, transport.port, headless).await,
       }
     }
     cli::Command::Test { files, test_args } => {
