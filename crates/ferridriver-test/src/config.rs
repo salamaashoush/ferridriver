@@ -240,6 +240,9 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
       config.timeout = v;
     }
   }
+  if let Ok(b) = std::env::var("FERRIDRIVER_BACKEND") {
+    config.browser.backend = b;
+  }
 
   // Apply CLI overrides (highest priority).
   if let Some(w) = overrides.workers {
