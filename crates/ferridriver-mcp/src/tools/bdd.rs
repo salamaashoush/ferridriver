@@ -31,7 +31,7 @@ impl McpServer {
       stop_on_failure: p.stop_on_failure.unwrap_or(true),
       screenshot_on_failure: p.screenshot_on_failure.unwrap_or(false),
     };
-    let result = ferridriver::scenario::run(page.inner(), &p.script, options)
+    let result = ferridriver::scenario::run(&page, &p.script, options)
       .await
       .map_err(Self::err)?;
     let mut contents = vec![Content::text(serde_json::to_string_pretty(&result).unwrap_or_default())];

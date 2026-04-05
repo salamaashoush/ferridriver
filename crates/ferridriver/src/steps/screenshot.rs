@@ -1,5 +1,6 @@
 use super::{StepCategory, StepDef, q};
-use crate::backend::{ImageFormat, ScreenshotOpts};
+use crate::backend::ImageFormat;
+use crate::options::ScreenshotOptions;
 use base64::Engine;
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
@@ -14,7 +15,7 @@ step!(Screenshot {
     description: "Take a full page screenshot",
     example: "Then I take a screenshot",
     execute(page, _caps, _table, _vars) {
-        let bytes = page.screenshot(ScreenshotOpts::default())
+        let bytes = page.screenshot(ScreenshotOptions { full_page: None, format: None, quality: None })
             .await?;
         let b64 = base64::engine::general_purpose::STANDARD.encode(&bytes);
         Ok(Some(serde_json::json!({"screenshot": b64, "format": "png"})))
@@ -41,7 +42,7 @@ step!(Snapshot {
     description: "Take accessibility tree snapshot",
     example: "Then I take a snapshot",
     execute(page, _caps, _table, _vars) {
-        let nodes = page.accessibility_tree().await?;
+        let nodes = page.inner().accessibility_tree().await?;
         let (text, _) = crate::snapshot::build_snapshot(&nodes);
         Ok(Some(serde_json::Value::String(text)))
     }

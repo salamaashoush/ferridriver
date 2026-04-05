@@ -15,10 +15,8 @@ step!(NavigateNoWait {
     example: "When I navigate to \"https://example.com\" without waiting",
     execute(page, caps, _table, _vars) {
         let url = q(&caps[1]);
-        // Use window.location to start navigation without waiting for load.
-        // page.goto() waits for loadEventFired -- this returns immediately.
-        page.evaluate(&format!("window.location.href = '{}'", super::js_escape(&url)))
-            .await.map_err(|e| format!("Navigate: {e}"))?;
+        let opts = crate::options::GotoOptions { wait_until: Some("commit".into()), timeout: None };
+        page.goto(&url, Some(opts)).await.map_err(|e| format!("Navigate: {e}"))?;
         Ok(None)
     }
 });
@@ -30,8 +28,7 @@ step!(Navigate {
     example: "Given I navigate to \"https://example.com\"",
     execute(page, caps, _table, _vars) {
         let url = q(&caps[1]);
-        // goto() already waits for page load internally
-        page.goto(&url, crate::backend::NavLifecycle::Load, 30_000).await.map_err(|e| format!("Navigate: {e}"))?;
+        page.goto(&url, None).await.map_err(|e| format!("Navigate: {e}"))?;
         Ok(None)
     }
 });
@@ -42,7 +39,7 @@ step!(GoBack {
     description: "Go back in history",
     example: "When I go back",
     execute(page, _caps, _table, _vars) {
-        page.go_back(crate::backend::NavLifecycle::Load, 30_000).await.map_err(|e| e.clone())?;
+        page.go_back(None).await?;
         Ok(None)
     }
 });
@@ -53,7 +50,7 @@ step!(GoForward {
     description: "Go forward in history",
     example: "When I go forward",
     execute(page, _caps, _table, _vars) {
-        page.go_forward(crate::backend::NavLifecycle::Load, 30_000).await.map_err(|e| e.clone())?;
+        page.go_forward(None).await?;
         Ok(None)
     }
 });
@@ -64,7 +61,7 @@ step!(Reload {
     description: "Reload the page",
     example: "When I reload the page",
     execute(page, _caps, _table, _vars) {
-        page.reload(crate::backend::NavLifecycle::Load, 30_000).await.map_err(|e| e.clone())?;
+        page.reload(None).await?;
         Ok(None)
     }
 });

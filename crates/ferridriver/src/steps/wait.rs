@@ -1,10 +1,7 @@
-use super::{StepCategory, StepDef, js_escape, q};
+use super::{StepCategory, StepDef, q};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
   // Text variants MUST come before selector variants.
-  // The selector timeout pattern uses negative lookahead to reject "text " prefix,
-  // so order doesn't actually matter for correctness -- but keeping text first
-  // is a safety net.
   steps.push(Box::new(WaitTextTimeout));
   steps.push(Box::new(WaitText));
   steps.push(Box::new(WaitSelectorTimeout));
@@ -15,9 +12,6 @@ pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
 
 step!(WaitSelectorTimeout {
     category: StepCategory::Wait,
-    // Use lazy .+? so this captures the selector minimally, leaving " for NNNNms" at the end.
-    // Text variants are registered first, so "I wait for text X for 5000ms" is matched
-    // by WaitTextTimeout before reaching this pattern.
     pattern: r"^I wait for (.+?) for (\d+)\s*ms$",
     description: "Wait for selector with timeout",
     example: "When I wait for \"#loading\" for 5000ms",
@@ -84,14 +78,14 @@ step!(WaitNavigation {
     description: "Wait for next navigation",
     example: "And I wait for navigation",
     execute(page, _caps, _table, _vars) {
-        let _ = page.wait_for_navigation().await;
+        let _ = page.inner().wait_for_navigation().await;
         Ok(None)
     }
 });
 
 // ── Helpers ──
 
-async fn wait_for_selector(page: &crate::backend::AnyPage, selector: &str, timeout_ms: u64) -> Result<(), String> {
+async fn wait_for_selector(page: &crate::page::Page, selector: &str, timeout_ms: u64) -> Result<(), String> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
   loop {
     if tokio::time::Instant::now() >= deadline {
@@ -104,15 +98,15 @@ async fn wait_for_selector(page: &crate::backend::AnyPage, selector: &str, timeo
   }
 }
 
-async fn wait_for_text(page: &crate::backend::AnyPage, text: &str, timeout_ms: u64) -> Result<(), String> {
+async fn wait_for_text(page: &crate::page::Page, text: &str, timeout_ms: u64) -> Result<(), String> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-  let js = format!("document.body?.innerText?.includes('{}') || false", js_escape(text));
+  let loc = page.locator("body");
   loop {
     if tokio::time::Instant::now() >= deadline {
       return Err(format!("Timeout ({timeout_ms}ms) waiting for text '{text}'"));
     }
-    if let Ok(r) = page.evaluate(js.as_str()).await {
-      if r == Some(serde_json::Value::Bool(true)) {
+    if let Ok(Some(content)) = loc.text_content().await {
+      if content.contains(text) {
         return Ok(());
       }
     }

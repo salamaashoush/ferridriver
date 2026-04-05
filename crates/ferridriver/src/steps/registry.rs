@@ -1,7 +1,7 @@
 //! Central step registry — compiled once, dispatches step execution.
 
 use super::{StepCategory, StepDef};
-use crate::backend::AnyPage;
+use crate::page::Page;
 use std::sync::OnceLock;
 
 pub struct StepRegistry {
@@ -72,7 +72,7 @@ impl StepRegistry {
   /// matched step's execution fails (e.g. element not found, assertion failed).
   pub async fn execute(
     &self,
-    page: &AnyPage,
+    page: &Page,
     body: &str,
     data_table: Option<&[Vec<String>]>,
     vars: &mut rustc_hash::FxHashMap<String, String>,

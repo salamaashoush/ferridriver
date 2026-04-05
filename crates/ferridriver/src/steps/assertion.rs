@@ -1,5 +1,4 @@
-use super::{StepCategory, StepDef, js_escape, q};
-use crate::backend::AnyElement;
+use super::{StepCategory, StepDef, q};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
   // Page-level assertions FIRST (more specific, avoids regex overlap with element-level)
@@ -34,46 +33,6 @@ pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
   steps.push(Box::new(ElementCount));
 }
 
-// ── Helpers ──
-// All element-level helpers resolve via the selector engine (super::find)
-// so rich selectors (role=, text=, etc.) work in assertions the same as interactions.
-
-/// Get innerText from an element resolved via the selector engine.
-async fn el_inner_text(page: &crate::backend::AnyPage, sel: &str) -> Result<String, String> {
-  let el = super::find(page, sel).await.map_err(|_| format!("'{sel}' not found"))?;
-  let r = el
-    .call_js_fn_value("function() { return this.innerText || '' }")
-    .await?;
-  Ok(
-    r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .unwrap_or_default(),
-  )
-}
-
-/// Call a JS function on a resolved element and return bool.
-async fn el_js_bool(el: &AnyElement, func: &str) -> Result<bool, String> {
-  let r = el.call_js_fn_value(func).await?;
-  Ok(r == Some(serde_json::Value::Bool(true)))
-}
-
-/// Check visibility using the selector engine. Returns false if element not found
-/// or hidden by CSS (display:none, visibility:hidden, opacity:0, zero size).
-async fn is_element_visible(page: &crate::backend::AnyPage, sel: &str) -> Result<bool, String> {
-  let Ok(el) = super::find(page, sel).await else {
-    return Ok(false);
-  };
-  el_js_bool(
-    &el,
-    "function() { \
-        var s = getComputedStyle(this); \
-        if (s.display === 'none' || s.visibility === 'hidden' || s.opacity === '0') return false; \
-        var r = this.getBoundingClientRect(); \
-        return r.width > 0 && r.height > 0; \
-    }",
-  )
-  .await
-}
-
 // ── Page-level text ──
 
 step!(PageHasText {
@@ -83,8 +42,9 @@ step!(PageHasText {
     example: "Then the page should contain text \"Welcome\"",
     execute(page, caps, _table, _vars) {
         let text = q(&caps[1]);
-        let r = page.evaluate(&format!("document.body?.innerText?.includes('{}') || false", js_escape(&text))).await?;
-        if r != Some(serde_json::Value::Bool(true)) {
+        let loc = page.locator("body");
+        let content = loc.text_content().await?.unwrap_or_default();
+        if !content.contains(&text) {
             return Err(format!("Page does not contain text '{text}'"));
         }
         Ok(None)
@@ -98,8 +58,9 @@ step!(PageNotHasText {
     example: "Then the page should not contain text \"Error\"",
     execute(page, caps, _table, _vars) {
         let text = q(&caps[1]);
-        let r = page.evaluate(&format!("document.body?.innerText?.includes('{}') || false", js_escape(&text))).await?;
-        if r == Some(serde_json::Value::Bool(true)) {
+        let loc = page.locator("body");
+        let content = loc.text_content().await?.unwrap_or_default();
+        if content.contains(&text) {
             return Err(format!("Page contains text '{text}' but should not"));
         }
         Ok(None)
@@ -115,7 +76,7 @@ step!(UrlContains {
     example: "Then the URL should contain \"/dashboard\"",
     execute(page, caps, _table, _vars) {
         let expected = q(&caps[1]);
-        let url = page.url().await.ok().flatten().unwrap_or_default();
+        let url = page.url().await.unwrap_or_default();
         if !url.contains(&expected) {
             return Err(format!("URL '{url}' does not contain '{expected}'"));
         }
@@ -130,7 +91,7 @@ step!(UrlExact {
     example: "Then the URL should be \"https://example.com/\"",
     execute(page, caps, _table, _vars) {
         let expected = q(&caps[1]);
-        let url = page.url().await.ok().flatten().unwrap_or_default();
+        let url = page.url().await.unwrap_or_default();
         if url != expected {
             return Err(format!("URL is '{url}', expected '{expected}'"));
         }
@@ -145,7 +106,7 @@ step!(TitleContains {
     example: "Then the title should contain \"Dashboard\"",
     execute(page, caps, _table, _vars) {
         let expected = q(&caps[1]);
-        let title = page.title().await.ok().flatten().unwrap_or_default();
+        let title = page.title().await.unwrap_or_default();
         if !title.contains(&expected) {
             return Err(format!("Title '{title}' does not contain '{expected}'"));
         }
@@ -160,7 +121,7 @@ step!(TitleExact {
     example: "Then the title should be \"My App\"",
     execute(page, caps, _table, _vars) {
         let expected = q(&caps[1]);
-        let title = page.title().await.ok().flatten().unwrap_or_default();
+        let title = page.title().await.unwrap_or_default();
         if title != expected {
             return Err(format!("Title is '{title}', expected '{expected}'"));
         }
@@ -173,11 +134,12 @@ step!(TitleExact {
 step!(Visible {
     category: StepCategory::Assertion,
     pattern: r"^(.+) should be visible$",
-    description: "Assert element exists and is visible (not hidden by CSS)",
+    description: "Assert element exists and is visible",
     example: "Then \"#dialog\" should be visible",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let visible = is_element_visible(page, &sel).await?;
+        let loc = page.locator(&sel);
+        let visible = loc.is_visible().await.unwrap_or(false);
         if !visible {
             return Err(format!("'{sel}' is not visible"));
         }
@@ -188,12 +150,13 @@ step!(Visible {
 step!(NotVisible {
     category: StepCategory::Assertion,
     pattern: r"^(.+) should not be visible$",
-    description: "Assert element does not exist or is hidden by CSS",
+    description: "Assert element does not exist or is hidden",
     example: "Then \"#spinner\" should not be visible",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let visible = is_element_visible(page, &sel).await?;
-        if visible {
+        let loc = page.locator(&sel);
+        let hidden = loc.is_hidden().await.unwrap_or(true);
+        if !hidden {
             return Err(format!("'{sel}' is visible but should not be"));
         }
         Ok(None)
@@ -210,7 +173,8 @@ step!(ContainsText {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let expected = q(&caps[2]);
-        let text = el_inner_text(page, &sel).await?;
+        let loc = page.locator(&sel);
+        let text = loc.inner_text().await.map_err(|_| format!("'{sel}' not found"))?;
         if !text.contains(&expected) {
             return Err(format!("'{sel}' text is '{text}', does not contain '{expected}'"));
         }
@@ -226,7 +190,8 @@ step!(NotContainsText {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let expected = q(&caps[2]);
-        let text = el_inner_text(page, &sel).await?;
+        let loc = page.locator(&sel);
+        let text = loc.inner_text().await.map_err(|_| format!("'{sel}' not found"))?;
         if text.contains(&expected) {
             return Err(format!("'{sel}' text '{text}' contains '{expected}' but should not"));
         }
@@ -242,7 +207,8 @@ step!(TextExact {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let expected = q(&caps[2]);
-        let text = el_inner_text(page, &sel).await?;
+        let loc = page.locator(&sel);
+        let text = loc.inner_text().await.map_err(|_| format!("'{sel}' not found"))?;
         if text.trim() != expected.trim() {
             return Err(format!("'{sel}' text is '{text}', expected '{expected}'"));
         }
@@ -258,9 +224,8 @@ step!(ValueExact {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let expected = q(&caps[2]);
-        let el = super::find(page, &sel).await.map_err(|_| format!("'{sel}' not found"))?;
-        let r = el.call_js_fn_value("function() { return this.value || '' }").await?;
-        let val = r.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
+        let loc = page.locator(&sel);
+        let val = loc.input_value().await.map_err(|_| format!("'{sel}' not found"))?;
         if val != expected {
             return Err(format!("'{sel}' value is '{val}', expected '{expected}'"));
         }
@@ -279,9 +244,10 @@ step!(HasAttrValue {
         let sel = q(&caps[1]);
         let attr = q(&caps[2]);
         let expected = q(&caps[3]);
-        let el = super::find(page, &sel).await.map_err(|_| format!("'{sel}' not found"))?;
-        let r = el.call_js_fn_value(&format!("function() {{ return this.getAttribute('{}') || '' }}", js_escape(&attr))).await?;
-        let val = r.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
+        let loc = page.locator(&sel);
+        let val = loc.get_attribute(&attr).await
+            .map_err(|_| format!("'{sel}' not found"))?
+            .unwrap_or_default();
         if val != expected {
             return Err(format!("'{sel}' attribute '{attr}' is '{val}', expected '{expected}'"));
         }
@@ -297,8 +263,10 @@ step!(HasAttr {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let attr = q(&caps[2]);
-        let el = super::find(page, &sel).await.map_err(|_| format!("'{sel}' not found"))?;
-        if !el_js_bool(&el, &format!("function() {{ return this.hasAttribute('{}') }}", js_escape(&attr))).await? {
+        let loc = page.locator(&sel);
+        let val = loc.get_attribute(&attr).await
+            .map_err(|_| format!("'{sel}' not found"))?;
+        if val.is_none() {
             return Err(format!("'{sel}' does not have attribute '{attr}'"));
         }
         Ok(None)
@@ -313,8 +281,10 @@ step!(NotHasAttr {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let attr = q(&caps[2]);
-        let el = super::find(page, &sel).await.map_err(|_| format!("'{sel}' not found"))?;
-        if el_js_bool(&el, &format!("function() {{ return this.hasAttribute('{}') }}", js_escape(&attr))).await? {
+        let loc = page.locator(&sel);
+        let val = loc.get_attribute(&attr).await
+            .map_err(|_| format!("'{sel}' not found"))?;
+        if val.is_some() {
             return Err(format!("'{sel}' has attribute '{attr}' but should not"));
         }
         Ok(None)
@@ -329,8 +299,11 @@ step!(HasClass {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let cls = q(&caps[2]);
-        let el = super::find(page, &sel).await.map_err(|_| format!("'{sel}' not found"))?;
-        if !el_js_bool(&el, &format!("function() {{ return this.classList.contains('{}') }}", js_escape(&cls))).await? {
+        let loc = page.locator(&sel);
+        let classes = loc.get_attribute("class").await
+            .map_err(|_| format!("'{sel}' not found"))?
+            .unwrap_or_default();
+        if !classes.split_whitespace().any(|c| c == cls) {
             return Err(format!("'{sel}' does not have class '{cls}'"));
         }
         Ok(None)
@@ -345,8 +318,11 @@ step!(NotHasClass {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let cls = q(&caps[2]);
-        let el = super::find(page, &sel).await.map_err(|_| format!("'{sel}' not found"))?;
-        if el_js_bool(&el, &format!("function() {{ return this.classList.contains('{}') }}", js_escape(&cls))).await? {
+        let loc = page.locator(&sel);
+        let classes = loc.get_attribute("class").await
+            .map_err(|_| format!("'{sel}' not found"))?
+            .unwrap_or_default();
+        if classes.split_whitespace().any(|c| c == cls) {
             return Err(format!("'{sel}' has class '{cls}' but should not"));
         }
         Ok(None)
@@ -362,8 +338,9 @@ step!(Enabled {
     example: "Then \"#submit\" should be enabled",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let el = super::find(page, &sel).await.map_err(|_| format!("'{sel}' not found"))?;
-        if !el_js_bool(&el, "function() { return !this.disabled }").await? {
+        let loc = page.locator(&sel);
+        let enabled = loc.is_enabled().await.map_err(|_| format!("'{sel}' not found"))?;
+        if !enabled {
             return Err(format!("'{sel}' is disabled"));
         }
         Ok(None)
@@ -377,8 +354,9 @@ step!(Disabled {
     example: "Then \"#submit\" should be disabled",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let el = super::find(page, &sel).await.map_err(|_| format!("'{sel}' not found"))?;
-        if !el_js_bool(&el, "function() { return this.disabled === true }").await? {
+        let loc = page.locator(&sel);
+        let disabled = loc.is_disabled().await.map_err(|_| format!("'{sel}' not found"))?;
+        if !disabled {
             return Err(format!("'{sel}' is not disabled"));
         }
         Ok(None)
@@ -392,8 +370,9 @@ step!(Checked {
     example: "Then \"#agree\" should be checked",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let el = super::find(page, &sel).await.map_err(|_| format!("'{sel}' not found"))?;
-        if !el_js_bool(&el, "function() { return this.checked === true }").await? {
+        let loc = page.locator(&sel);
+        let checked = loc.is_checked().await.map_err(|_| format!("'{sel}' not found"))?;
+        if !checked {
             return Err(format!("'{sel}' is not checked"));
         }
         Ok(None)
@@ -407,8 +386,9 @@ step!(NotChecked {
     example: "Then \"#agree\" should not be checked",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let el = super::find(page, &sel).await.map_err(|_| format!("'{sel}' not found"))?;
-        if el_js_bool(&el, "function() { return this.checked === true }").await? {
+        let loc = page.locator(&sel);
+        let checked = loc.is_checked().await.map_err(|_| format!("'{sel}' not found"))?;
+        if checked {
             return Err(format!("'{sel}' is checked but should not be"));
         }
         Ok(None)
@@ -423,12 +403,8 @@ step!(ElementCount {
     execute(page, caps, _table, _vars) {
         let expected: usize = caps[1].parse().map_err(|_| "Invalid count")?;
         let sel = q(&caps[2]);
-        // ElementCount must use querySelectorAll for counting - rich selectors
-        // don't have a count concept. CSS selectors are the right tool here.
-        let r = page.evaluate(&format!("document.querySelectorAll('{}').length", js_escape(&sel)))
-            .await?;
-        #[allow(clippy::cast_possible_truncation)] // element count will never exceed usize
-        let actual = r.and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+        let loc = page.locator(&sel);
+        let actual = loc.count().await?;
         if actual != expected {
             return Err(format!("Found {actual} '{sel}', expected {expected}"));
         }

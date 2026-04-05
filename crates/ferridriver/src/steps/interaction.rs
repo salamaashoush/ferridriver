@@ -1,4 +1,4 @@
-use super::{StepCategory, StepDef, js_escape, q};
+use super::{StepCategory, StepDef, q};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
   steps.push(Box::new(DoubleClick));
@@ -12,9 +12,12 @@ pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
   steps.push(Box::new(TypeText));
   steps.push(Box::new(PressKey));
   steps.push(Box::new(Focus));
+  steps.push(Box::new(Blur));
   steps.push(Box::new(ScrollTo));
   steps.push(Box::new(ScrollDown));
   steps.push(Box::new(ScrollUp));
+  steps.push(Box::new(Check));
+  steps.push(Box::new(Uncheck));
 }
 
 step!(Click {
@@ -24,8 +27,8 @@ step!(Click {
     example: "When I click \"#submit\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
-        el.click().await.map_err(|e| e.clone())?;
+        let loc = page.locator(&sel);
+        loc.click().await?;
         Ok(None)
     }
 });
@@ -37,8 +40,8 @@ step!(DoubleClick {
     example: "When I double-click \"#item\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
-        el.dblclick().await.map_err(|e| e.clone())?;
+        let loc = page.locator(&sel);
+        loc.dblclick().await?;
         Ok(None)
     }
 });
@@ -63,8 +66,8 @@ step!(Hover {
     example: "When I hover over \"#menu\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
-        el.hover().await.map_err(|e| e.clone())?;
+        let loc = page.locator(&sel);
+        loc.hover().await?;
         Ok(None)
     }
 });
@@ -77,8 +80,8 @@ step!(Fill {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let val = q(&caps[2]);
-        let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
-        crate::actions::fill(&el, &val).await?;
+        let loc = page.locator(&sel);
+        loc.fill(&val).await?;
         Ok(None)
     }
 });
@@ -94,8 +97,8 @@ step!(FillForm {
             if row.len() >= 2 {
                 let sel = &row[0];
                 let val = &row[1];
-                let el = super::find(page, sel).await.map_err(|e| format!("'{sel}': {e}"))?;
-                crate::actions::fill(&el, val).await?;
+                let loc = page.locator(sel);
+                loc.fill(val).await?;
             }
         }
         Ok(None)
@@ -105,17 +108,12 @@ step!(FillForm {
 step!(Clear {
     category: StepCategory::Interaction,
     pattern: r"^I clear (.+)$",
-    description: "Clear an input field (dispatches input and change events)",
+    description: "Clear an input field",
     example: "When I clear \"#search\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
-        el.call_js_fn("function() { \
-            this.focus(); \
-            this.value = ''; \
-            this.dispatchEvent(new Event('input', {bubbles: true})); \
-            this.dispatchEvent(new Event('change', {bubbles: true})); \
-        }").await.map_err(|e| e.clone())?;
+        let loc = page.locator(&sel);
+        loc.fill("").await?;
         Ok(None)
     }
 });
@@ -129,7 +127,7 @@ step!(SelectOption {
         let val = q(&caps[1]);
         let sel = q(&caps[2]);
         let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
-        crate::actions::select_option(&el, page, &val).await?;
+        crate::actions::select_option(&el, page.inner(), &val).await?;
         Ok(None)
     }
 });
@@ -165,8 +163,47 @@ step!(Focus {
     example: "When I focus \"#input\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        page.evaluate(&format!("document.querySelector('{}')?.focus()", js_escape(&sel)))
-            .await.map_err(|e| e.clone())?;
+        let loc = page.locator(&sel);
+        loc.focus().await?;
+        Ok(None)
+    }
+});
+
+step!(Blur {
+    category: StepCategory::Interaction,
+    pattern: r"^I blur (.+)$",
+    description: "Blur (unfocus) an element",
+    example: "When I blur \"#input\"",
+    execute(page, caps, _table, _vars) {
+        let sel = q(&caps[1]);
+        let loc = page.locator(&sel);
+        loc.blur().await?;
+        Ok(None)
+    }
+});
+
+step!(Check {
+    category: StepCategory::Interaction,
+    pattern: r"^I check (.+)$",
+    description: "Check a checkbox",
+    example: "When I check \"#agree\"",
+    execute(page, caps, _table, _vars) {
+        let sel = q(&caps[1]);
+        let loc = page.locator(&sel);
+        loc.check().await?;
+        Ok(None)
+    }
+});
+
+step!(Uncheck {
+    category: StepCategory::Interaction,
+    pattern: r"^I uncheck (.+)$",
+    description: "Uncheck a checkbox",
+    example: "When I uncheck \"#agree\"",
+    execute(page, caps, _table, _vars) {
+        let sel = q(&caps[1]);
+        let loc = page.locator(&sel);
+        loc.uncheck().await?;
         Ok(None)
     }
 });
@@ -191,7 +228,7 @@ step!(ScrollDown {
     example: "When I scroll down by 300",
     execute(page, caps, _table, _vars) {
         let px = caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(300.0);
-        page.evaluate(&format!("window.scrollBy(0, {px})")).await.map_err(|e| e.clone())?;
+        page.mouse_wheel(0.0, px).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
@@ -203,7 +240,7 @@ step!(ScrollUp {
     example: "When I scroll up by 300",
     execute(page, caps, _table, _vars) {
         let px = caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(300.0);
-        page.evaluate(&format!("window.scrollBy(0, -{px})")).await.map_err(|e| e.clone())?;
+        page.mouse_wheel(0.0, -px).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });

@@ -1,4 +1,4 @@
-use super::{StepCategory, StepDef, js_escape, q};
+use super::{StepCategory, StepDef, q};
 
 pub fn register(steps: &mut Vec<Box<dyn StepDef>>) {
   steps.push(Box::new(StoreText));
@@ -18,9 +18,8 @@ step!(StoreText {
     execute(page, caps, _table, vars) {
         let sel = q(&caps[1]);
         let var = caps[2].to_string();
-        let r = page.evaluate(&format!("document.querySelector('{}')?.innerText || ''", js_escape(&sel)))
-            .await?;
-        let val = r.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
+        let loc = page.locator(&sel);
+        let val = loc.inner_text().await.unwrap_or_default();
         vars.insert(var, val);
         Ok(None)
     }
@@ -34,9 +33,8 @@ step!(StoreValue {
     execute(page, caps, _table, vars) {
         let sel = q(&caps[1]);
         let var = caps[2].to_string();
-        let r = page.evaluate(&format!("document.querySelector('{}')?.value || ''", js_escape(&sel)))
-            .await?;
-        let val = r.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
+        let loc = page.locator(&sel);
+        let val = loc.input_value().await.unwrap_or_default();
         vars.insert(var, val);
         Ok(None)
     }
@@ -51,11 +49,8 @@ step!(StoreAttr {
         let attr = q(&caps[1]);
         let sel = q(&caps[2]);
         let var = caps[3].to_string();
-        let r = page.evaluate(&format!(
-            "document.querySelector('{}')?.getAttribute('{}') || ''",
-            js_escape(&sel), js_escape(&attr)
-        )).await?;
-        let val = r.and_then(|v| v.as_str().map(std::string::ToString::to_string)).unwrap_or_default();
+        let loc = page.locator(&sel);
+        let val = loc.get_attribute(&attr).await?.unwrap_or_default();
         vars.insert(var, val);
         Ok(None)
     }
@@ -68,7 +63,7 @@ step!(StoreUrl {
     example: "When I store the URL as $url",
     execute(page, caps, _table, vars) {
         let var = caps[1].to_string();
-        let url = page.url().await.ok().flatten().unwrap_or_default();
+        let url = page.url().await.unwrap_or_default();
         vars.insert(var, url);
         Ok(None)
     }
@@ -81,7 +76,7 @@ step!(StoreTitle {
     example: "When I store the title as $title",
     execute(page, caps, _table, vars) {
         let var = caps[1].to_string();
-        let title = page.title().await.ok().flatten().unwrap_or_default();
+        let title = page.title().await.unwrap_or_default();
         vars.insert(var, title);
         Ok(None)
     }

@@ -1,6 +1,7 @@
 //! BDD scenario runner — parse Gherkin scripts and execute via the step registry.
 
-use crate::backend::{AnyPage, ScreenshotOpts};
+use crate::page::Page;
+use crate::options::ScreenshotOptions;
 use crate::steps::StepRegistry;
 use base64::Engine;
 use rustc_hash::FxHashMap as HashMap;
@@ -153,7 +154,7 @@ fn interpolate(s: &str, vars: &HashMap<String, String>) -> String {
 /// # Errors
 ///
 /// Returns an error if the script cannot be parsed or a step execution fails fatally.
-pub async fn run(page: &AnyPage, script: &str, options: ScenarioOptions) -> Result<ScenarioResult, String> {
+pub async fn run(page: &Page, script: &str, options: ScenarioOptions) -> Result<ScenarioResult, String> {
   let (scenario_name, steps) = parse(script)?;
   let registry = StepRegistry::global();
 
@@ -212,7 +213,7 @@ pub async fn run(page: &AnyPage, script: &str, options: ScenarioOptions) -> Resu
         failed += 1;
 
         if options.screenshot_on_failure {
-          if let Ok(bytes) = page.screenshot(ScreenshotOpts::default()).await {
+          if let Ok(bytes) = page.screenshot(ScreenshotOptions { full_page: None, format: None, quality: None }).await {
             failure_screenshots.push(ScreenshotData {
               step: step_num,
               base64: base64::engine::general_purpose::STANDARD.encode(&bytes),
