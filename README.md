@@ -97,9 +97,118 @@ test('login flow', async ({ page }) => {
 ferridriver-test tests/login.spec.ts --workers 4
 ```
 
+### E2E Project Setup (Rust)
+
+```
+my-project/
+  ferridriver.config.toml       # config (optional, auto-discovered)
+  tests/
+    harness.rs                  # main!() -- one per project
+    homepage.rs                 # test modules
+    login.rs
+    checkout.rs
+  Cargo.toml
+```
+
+**`tests/harness.rs`** -- entry point, includes all test modules:
+```rust
+mod homepage;
+mod login;
+mod checkout;
+
+ferridriver_test::main!();
+```
+
+**`tests/homepage.rs`** -- just tests, no boilerplate:
+```rust
+use ferridriver_test::prelude::*;
+
+#[ferritest]
+async fn loads_homepage(page: Page) -> Result<(), TestFailure> {
+    page.goto("https://example.com", None).await?;
+    expect(&page).to_have_title("Example Domain").await?;
+    Ok(())
+}
+```
+
+**`Cargo.toml`:**
+```toml
+[[test]]
+name = "e2e"
+path = "tests/harness.rs"
+harness = false
+
+[dev-dependencies]
+ferridriver-test = { version = "0.2" }
+```
+
+**Run:**
+```bash
+cargo test --test e2e
+cargo test --test e2e -- --headed --backend webkit --workers 1
+```
+
+### Configuration
+
+All test runners (E2E, CT Rust, CT TypeScript) share the same configuration system.
+
+**`ferridriver.config.toml`** (auto-discovered by walking up from CWD):
+```toml
+workers = 4
+timeout = 30000
+retries = 1
+
+[browser]
+backend = "cdp-pipe"    # "cdp-pipe", "cdp-raw", "webkit"
+headless = true
+
+[browser.viewport]
+width = 1280
+height = 720
+```
+
+**Priority** (lowest to highest):
+1. Config file defaults
+2. `main!()` / `HarnessConfig` macro arguments
+3. Environment variables (`FERRIDRIVER_BACKEND`, `FERRIDRIVER_WORKERS`, `FERRIDRIVER_TIMEOUT`, `FERRIDRIVER_RETRIES`)
+4. CLI flags (`--headed`, `--backend`, `--workers`, `--timeout`)
+
+**CLI flags** (after `--` for `cargo test`, direct for `ferridriver-test`):
+| Flag | Description |
+|---|---|
+| `--headed` | Show browser window |
+| `--backend <name>` | `cdp-pipe`, `cdp-raw`, `webkit` |
+| `--workers <n>` / `-j <n>` | Parallel workers |
+| `--retries <n>` | Retry failed tests |
+| `--timeout <ms>` | Per-test timeout |
+| `--grep <pattern>` / `-g` | Filter tests by name |
+| `--tag <name>` | Filter by tag |
+| `--list` | List tests without running |
+| `--update-snapshots` / `-u` | Update snapshot files |
+
+**Per-test options** (via `#[ferritest]` / `#[component_test]`):
+```rust
+#[ferritest(retries = 2, timeout = "30s", tag = "smoke")]
+async fn flaky_test(page: Page) -> Result<(), TestFailure> { ... }
+
+#[ferritest(skip)]       // skip this test
+#[ferritest(slow)]       // mark as slow
+#[ferritest(fixme)]      // known broken
+```
+
+### Backends
+
+| Backend | Flag | Description |
+|---|---|---|
+| CDP Pipe | `cdp-pipe` | Chrome via fd 3/4 pipes. Fastest. Default. |
+| CDP Raw | `cdp-raw` | Chrome via WebSocket. Connect to running browser. |
+| WebKit | `webkit` | Native WKWebView (macOS only). No Chrome needed. |
+
+WebKit uses the system WKWebView -- no browser download, instant startup, native accessibility tree. Headless only (headful mode pending).
+
 ### Features
 
-- **Parallel**: N workers × N browsers, MPMC work-stealing dispatch
+- **Parallel**: N workers x N browsers, MPMC work-stealing dispatch
 - **Hooks**: beforeAll/afterAll, beforeEach/afterEach
 - **Serial mode**: tests run in order, skip remaining on failure
 - **Expected failures**: `test.fail()` pass/fail inversion
@@ -140,12 +249,22 @@ async fn counter_increments(page: Page) -> Result<(), TestFailure> {
     Ok(())
 }
 
+// Default config
 ferridriver_ct_leptos::main!();
+
+// Or with custom launch options
+ferridriver_ct_leptos::main! {
+    backend: "webkit",
+    headless: false,
+    workers: 2,
+    timeout: 60000,
+}
 ```
 
 ```bash
 cargo install trunk
 cargo test -p my-leptos-app --test components
+cargo test -p my-leptos-app --test components -- --headed --backend webkit
 ```
 
 ### Dioxus
@@ -160,12 +279,21 @@ async fn counter_increments(page: Page) -> Result<(), TestFailure> {
     Ok(())
 }
 
+// Default config
 ferridriver_ct_dioxus::main!();
+
+// Or with custom launch options
+ferridriver_ct_dioxus::main! {
+    backend: "cdp-pipe",
+    headless: false,
+    workers: 1,
+}
 ```
 
 ```bash
 cargo install dioxus-cli
 cargo test -p my-dioxus-app --test components
+cargo test -p my-dioxus-app --test components -- --headed --workers 1
 ```
 
 ### React / Vue / Svelte / Solid
@@ -184,6 +312,9 @@ ferridriver-test --ct --framework react src/todomvc.ct.ts
 ferridriver-test --ct --framework vue src/todomvc.ct.ts
 ferridriver-test --ct --framework svelte src/todomvc.ct.ts
 ferridriver-test --ct --framework solid src/todomvc.ct.ts
+
+# With options
+ferridriver-test --ct --framework react --headed --backend webkit --workers 1 src/app.ct.ts
 ```
 
 The `--ct` flag starts the Vite dev server, pre-warms it, navigates each test page to the app, and provides a `mount()` fixture.
@@ -212,32 +343,66 @@ The `--ct` flag starts the Vite dev server, pre-warms it, navigates each test pa
 25 tools for AI agent browser automation. Works with Claude, Cursor, or any MCP client.
 
 ```bash
-# stdio (for Claude Code)
+# stdio (for Claude Code) -- headed by default
 ferridriver mcp
+
+# headless mode
+ferridriver mcp --headless
 
 # HTTP (for remote clients)
 ferridriver mcp --transport http --port 8080
+
+# WebKit backend (macOS, no Chrome needed)
+ferridriver mcp --backend webkit
+
+# Connect to running Chrome
+ferridriver mcp --auto-connect
+ferridriver mcp --connect ws://localhost:9222/devtools/browser/...
 ```
 
 Tools: `navigate`, `page`, `click`, `click_at`, `hover`, `fill`, `fill_form`, `type_text`, `press_key`, `drag`, `scroll`, `select_option`, `upload_file`, `snapshot`, `screenshot`, `evaluate`, `wait_for`, `search_page`, `get_markdown`, `cookies`, `storage`, `emulate`, `diagnostics`, `list_steps`, `run_scenario`
 
 ## BDD Framework
 
-58 Gherkin step definitions for browser automation testing.
+58 Gherkin step definitions backed by the Page/Locator API (not raw JS evaluate). All selectors support Playwright engine syntax (`role=`, `text=`, `label=`, etc).
 
 ```gherkin
 Feature: Login
   Scenario: Successful login
     Given I navigate to "https://app.example.com/login"
-    When I fill "#email" with "user@example.com"
-    And I click "#submit"
+    When I fill "label=Email" with "user@example.com"
+    And I fill "label=Password" with "secret"
+    And I click "role=button[name=Sign in]"
     Then the URL should contain "/dashboard"
+    And "role=heading" should have text "Welcome"
 ```
+
+Available step categories: Navigation, Interaction (click, fill, type, hover, check, focus, blur, scroll), Wait (selector, text, timeout), Assertion (text, visibility, value, attribute, class, state, count), Variable, Cookie, Storage, Screenshot.
 
 ## Page API
 
 ### Navigation
 `goto`, `goBack`, `goForward`, `reload`, `url`, `title`, `content`, `waitForUrl`, `waitForLoadState`, `waitForNavigation`
+
+### Selectors (Playwright-compatible)
+
+All Playwright selector engines are supported:
+
+| Selector | Example |
+|---|---|
+| CSS | `locator("#submit")`, `locator(".btn.primary")` |
+| Role | `getByRole("button", name="Save")` |
+| Text | `getByText("Hello")`, `getByText("Hello", exact=true)` |
+| Label | `getByLabel("Email")` |
+| Placeholder | `getByPlaceholder("Enter name")` |
+| Alt text | `getByAltText("Logo")` |
+| Title | `getByTitle("Settings")` |
+| Test ID | `getByTestId("login-form")` |
+| XPath | `locator("xpath=//button")` |
+| ID | `locator("id=submit")` |
+| Chaining | `locator("css=.form >> role=button")` |
+| Filtering | `locator("css=div >> has-text=Keep")` |
+| Nth | `locator("css=li >> nth=1")` |
 
 ### Locators
 `locator(css)`, `getByRole`, `getByText`, `getByLabel`, `getByPlaceholder`, `getByAltText`, `getByTitle`, `getByTestId`

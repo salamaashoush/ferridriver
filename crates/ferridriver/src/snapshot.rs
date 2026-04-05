@@ -506,7 +506,7 @@ fn recurse_children(ctx: &mut SnapshotCtx<'_>, idx: usize, depth: usize) {
         }
         let collapsed = run_len - MAX_SAME_ROLE_SIBLINGS * 2;
         let indent = "  ".repeat(depth);
-        let _ = write!(ctx.output, "{indent}- ... ({collapsed} more {role_i} items)\n");
+        let _ = writeln!(ctx.output, "{indent}- ... ({collapsed} more {role_i} items)");
         for j in run_end - MAX_SAME_ROLE_SIBLINGS..run_end {
           format_tree(ctx, kids[j], depth);
         }

@@ -2,7 +2,7 @@
 //!
 //! Chrome's `--remote-debugging-pipe` uses fd 3/4 for CDP communication.
 //! We create a Unix socketpair, dup to fd 3/4, and communicate over the parent end.
-//! All dispatch logic (responses, nav waiters, lifecycle, broadcast) is in CdpDispatcher.
+//! All dispatch logic (responses, nav waiters, lifecycle, broadcast) is in `CdpDispatcher`.
 
 use std::path::Path;
 use std::sync::Arc;

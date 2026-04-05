@@ -1,7 +1,7 @@
 //! WebSocket transport for CDP — same dispatch logic as pipe, different I/O.
 //!
 //! All message dispatch (responses, nav waiters, lifecycle tracking, broadcast)
-//! is handled by the shared CdpDispatcher. This file only implements WebSocket I/O.
+//! is handled by the shared `CdpDispatcher`. This file only implements WebSocket I/O.
 
 use futures::{SinkExt, StreamExt};
 use std::path::Path;

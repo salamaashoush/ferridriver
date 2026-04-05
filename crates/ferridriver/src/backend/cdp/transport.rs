@@ -5,7 +5,6 @@
 //! here as `CdpDispatcher` — both transports embed it and call `dispatch_message`.
 
 use rustc_hash::FxHashMap;
-use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, oneshot};
@@ -49,7 +48,7 @@ pub(crate) struct LifecycleTracker {
   pub notify: Arc<tokio::sync::Notify>,
 }
 
-/// Shared CDP message dispatch state. Embedded by both PipeTransport and WsTransport.
+/// Shared CDP message dispatch state. Embedded by both `PipeTransport` and `WsTransport`.
 pub(crate) struct CdpDispatcher {
   pub next_id: AtomicU64,
   pub pending: Arc<std::sync::Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
