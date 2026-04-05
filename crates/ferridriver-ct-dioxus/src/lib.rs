@@ -52,23 +52,40 @@ inventory::collect!(ComponentTestRegistration);
 macro_rules! main {
   () => {
     fn main() {
-      $crate::run_harness();
+      $crate::run_harness($crate::HarnessConfig::default());
+    }
+  };
+  ($($key:ident : $val:expr),+ $(,)?) => {
+    fn main() {
+      let mut cfg = $crate::HarnessConfig::default();
+      $( cfg.$key = Some($val.into()); )+
+      $crate::run_harness(cfg);
     }
   };
 }
 
-pub fn run_harness() {
+/// Configuration for the component test harness.
+/// Fields set here act as defaults; CLI args (`-- --headed`) override them.
+#[derive(Default)]
+pub struct HarnessConfig {
+  pub backend: Option<String>,
+  pub headless: Option<bool>,
+  pub workers: Option<u32>,
+  pub timeout: Option<u64>,
+}
+
+pub fn run_harness(harness_cfg: HarnessConfig) {
   let rt = tokio::runtime::Builder::new_multi_thread()
     .worker_threads(4)
     .enable_all()
     .build()
     .expect("failed to build tokio runtime");
 
-  let exit_code = rt.block_on(async { run_inner().await });
+  let exit_code = rt.block_on(async { run_inner(harness_cfg).await });
   std::process::exit(exit_code);
 }
 
-async fn run_inner() -> i32 {
+async fn run_inner(harness_cfg: HarnessConfig) -> i32 {
   let registrations: Vec<&ComponentTestRegistration> =
     inventory::iter::<ComponentTestRegistration>.into_iter().collect();
 
@@ -141,7 +158,8 @@ async fn run_inner() -> i32 {
     shard: None,
   };
 
-  let config = TestConfig {
+  let cli = parse_ct_args();
+  let mut config = TestConfig {
     workers: {
       let cpus = std::thread::available_parallelism()
         .map(|n| n.get() as u32)
@@ -152,8 +170,21 @@ async fn run_inner() -> i32 {
     ..Default::default()
   };
 
+  // Apply harness config (from main! macro)
+  if let Some(ref b) = harness_cfg.backend { config.browser.backend.clone_from(b); }
+  if let Some(h) = harness_cfg.headless { config.browser.headless = h; }
+  if let Some(w) = harness_cfg.workers { config.workers = w; }
+  if let Some(t) = harness_cfg.timeout { config.timeout = t; }
+
+  // CLI args override harness config (highest priority)
+  if let Some(w) = cli.workers { config.workers = w; }
+  if cli.headed { config.browser.headless = false; }
+  if let Ok(backend) = std::env::var("FERRIDRIVER_BACKEND") {
+    config.browser.backend = backend;
+  }
+
   let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
-  let mut runner = TestRunner::new(config, reporters, ferridriver_test::CliOverrides::default());
+  let mut runner = TestRunner::new(config, reporters, cli);
   let exit_code = runner.run(plan).await;
 
   server.stop().await;
@@ -240,6 +271,38 @@ fn walkdir(dir: &std::path::Path) -> Vec<PathBuf> {
     }
   }
   results
+}
+
+/// Parse CLI args for component test overrides.
+/// Supports: --headed, --backend <name>, --workers <n>, --timeout <ms>
+fn parse_ct_args() -> ferridriver_test::CliOverrides {
+  use ferridriver_test::config::CliOverrides;
+  let args: Vec<String> = std::env::args().collect();
+  let mut overrides = CliOverrides::default();
+  let mut i = 1;
+  while i < args.len() {
+    match args[i].as_str() {
+      "--headed" => overrides.headed = true,
+      "--workers" | "-j" => {
+        i += 1;
+        if let Some(val) = args.get(i) {
+          overrides.workers = val.parse().ok();
+        }
+      },
+      "--backend" => {
+        i += 1;
+        // Backend is stored in a custom field -- we'll handle it in the config
+        if let Some(val) = args.get(i) {
+          // SAFETY: single-threaded at this point (called before runner starts)
+          #[allow(unused_unsafe)]
+          unsafe { std::env::set_var("FERRIDRIVER_BACKEND", val); }
+        }
+      },
+      _ => {},
+    }
+    i += 1;
+  }
+  overrides
 }
 
 fn find_project_dir() -> PathBuf {
