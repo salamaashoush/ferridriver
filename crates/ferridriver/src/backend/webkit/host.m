@@ -82,6 +82,8 @@ enum Rep {
 #include <sys/uio.h>
 
 static int g_fd = -1;
+// TODO: headful mode needs proper NSApp event loop integration
+// static BOOL g_headful = NO;
 static CFFileDescriptorRef g_cffd = NULL;
 static NSMutableData *g_write_queue = nil;
 
@@ -556,8 +558,6 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             if ([wv respondsToSelector:replaceSel])
                 ((void(*)(id,SEL,BOOL))objc_msgSend)(wv, replaceSel, NO);
 
-            // Custom window with isVisible/isKeyWindow/screen overrides
-            // Window at (0,0) alpha=0 ignoresMouseEvents=YES
             FDHostWindow *win = [[FDHostWindow alloc]
                 initWithContentRect:NSMakeRect(0, 0, 1280, 720)
                 styleMask:NSWindowStyleMaskBorderless
@@ -567,10 +567,6 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             [win setAlphaValue:0.0];
             [win setIgnoresMouseEvents:YES];
             [win setContentView:wv];
-            // orderFront makes the window actually visible to the compositor.
-            // orderBack may not trigger the initial compositing pass needed
-            // for takeSnapshot to work. The window is at (0,0) alpha=0 with
-            // ignoresMouseEvents=YES so it's invisible to the user.
             [win makeKeyAndOrderFront:nil];
 
             if (url.length > 0 && ![url isEqualToString:@"about:blank"]) {
@@ -928,67 +924,53 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
         }
 
         case OP_PRESS_KEY: {
-            // Port of Bun's pressIPC: use _executeEditCommand for named keys
-            // (Tab, Enter, Backspace, etc.) which properly handles focus changes
-            // and editing. Fall back to keyDown for other keys.
+            // Dispatch native NSEvent keyDown/keyUp for ALL keys.
+            // This fires isTrusted:true DOM keyboard events (keydown, keypress, keyup)
+            // that React and other frameworks listen to for form submission, navigation, etc.
+            // Unlike _executeEditCommand which only performs the editing action without DOM events.
             uint32_t off = 0;
             NSString *key = read_str(payload, payload_len, &off);
             uint64_t vid = read_u64(payload, payload_len, &off);
             ViewEntry *v = get_view(vid);
             if (v) {
-                // Map key name to editing command (same as Bun's vkeyInfo table)
-                NSString *editCmd = nil;
-                NSString *editArg = @"";
-                if ([key isEqualToString:@"Tab"]) editCmd = @"InsertTab";
-                else if ([key isEqualToString:@"Enter"]) editCmd = @"InsertNewline";
-                else if ([key isEqualToString:@"Backspace"]) editCmd = @"DeleteBackward";
-                else if ([key isEqualToString:@"Delete"]) editCmd = @"DeleteForward";
-                else if ([key isEqualToString:@"ArrowLeft"]) editCmd = @"MoveLeft";
-                else if ([key isEqualToString:@"ArrowRight"]) editCmd = @"MoveRight";
-                else if ([key isEqualToString:@"ArrowUp"]) editCmd = @"MoveUp";
-                else if ([key isEqualToString:@"ArrowDown"]) editCmd = @"MoveDown";
-                else if ([key isEqualToString:@"Home"]) editCmd = @"MoveToBeginningOfLine";
-                else if ([key isEqualToString:@"End"]) editCmd = @"MoveToEndOfLine";
-                else if ([key isEqualToString:@"PageUp"]) editCmd = @"ScrollPageBackward";
-                else if ([key isEqualToString:@"PageDown"]) editCmd = @"ScrollPageForward";
+                NSTimeInterval ts = [NSProcessInfo processInfo].systemUptime;
+                NSInteger winNum = [v->window windowNumber];
 
-                SEL execSel = NSSelectorFromString(@"_executeEditCommand:argument:completion:");
-                if (editCmd && [v->webview respondsToSelector:execSel]) {
-                    // Editing command with completion — fires after WebContent processes it
-                    uint32_t captured_rid = req_id;
-                    void (^block)(BOOL) = ^(BOOL success) {
-                        write_frame(captured_rid, REP_OK, NULL, 0);
-                    };
-                    ((void(*)(id,SEL,id,id,id))objc_msgSend)(
-                        v->webview, execSel, editCmd, editArg, block);
-                } else {
-                    // Fallback: keyDown/keyUp with proper character codes
-                    NSTimeInterval ts = [NSProcessInfo processInfo].systemUptime;
-                    NSInteger winNum = [v->window windowNumber];
-                    // Map key name to actual character for NSEvent
-                    NSString *chars = key;
-                    uint16_t keyCode = 0;
-                    if ([key isEqualToString:@"Escape"]) { chars = [NSString stringWithFormat:@"%C", (unichar)0x1b]; keyCode = 0x35; }
-                    else if ([key isEqualToString:@"Space"]) { chars = @" "; keyCode = 0x31; }
-                    else if (key.length == 1) { chars = key; } // single character
+                // Map key name to character + keyCode for NSEvent
+                NSString *chars = key;
+                uint16_t keyCode = 0;
+                if ([key isEqualToString:@"Enter"])       { chars = @"\r"; keyCode = 0x24; }
+                else if ([key isEqualToString:@"Tab"])     { chars = @"\t"; keyCode = 0x30; }
+                else if ([key isEqualToString:@"Backspace"]) { chars = [NSString stringWithFormat:@"%C", (unichar)0x08]; keyCode = 0x33; }
+                else if ([key isEqualToString:@"Delete"])  { chars = [NSString stringWithFormat:@"%C", (unichar)0x7F]; keyCode = 0x75; }
+                else if ([key isEqualToString:@"Escape"])  { chars = [NSString stringWithFormat:@"%C", (unichar)0x1B]; keyCode = 0x35; }
+                else if ([key isEqualToString:@"Space"])   { chars = @" "; keyCode = 0x31; }
+                else if ([key isEqualToString:@"ArrowLeft"])  { chars = [NSString stringWithFormat:@"%C", (unichar)0xF702]; keyCode = 0x7B; }
+                else if ([key isEqualToString:@"ArrowRight"]) { chars = [NSString stringWithFormat:@"%C", (unichar)0xF703]; keyCode = 0x7C; }
+                else if ([key isEqualToString:@"ArrowDown"])  { chars = [NSString stringWithFormat:@"%C", (unichar)0xF701]; keyCode = 0x7D; }
+                else if ([key isEqualToString:@"ArrowUp"])    { chars = [NSString stringWithFormat:@"%C", (unichar)0xF700]; keyCode = 0x7E; }
+                else if ([key isEqualToString:@"Home"])    { chars = [NSString stringWithFormat:@"%C", (unichar)0xF729]; keyCode = 0x73; }
+                else if ([key isEqualToString:@"End"])     { chars = [NSString stringWithFormat:@"%C", (unichar)0xF72B]; keyCode = 0x77; }
+                else if ([key isEqualToString:@"PageUp"])  { chars = [NSString stringWithFormat:@"%C", (unichar)0xF72C]; keyCode = 0x74; }
+                else if ([key isEqualToString:@"PageDown"])  { chars = [NSString stringWithFormat:@"%C", (unichar)0xF72D]; keyCode = 0x79; }
+                else if (key.length == 1) { chars = key; }
 
-                    NSEvent *down = [NSEvent keyEventWithType:NSEventTypeKeyDown
-                        location:NSZeroPoint modifierFlags:0
-                        timestamp:ts windowNumber:winNum
-                        context:nil characters:chars
-                        charactersIgnoringModifiers:chars
-                        isARepeat:NO keyCode:keyCode];
-                    NSEvent *up = [NSEvent keyEventWithType:NSEventTypeKeyUp
-                        location:NSZeroPoint modifierFlags:0
-                        timestamp:ts windowNumber:winNum
-                        context:nil characters:chars
-                        charactersIgnoringModifiers:chars
-                        isARepeat:NO keyCode:keyCode];
+                NSEvent *down = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                    location:NSZeroPoint modifierFlags:0
+                    timestamp:ts windowNumber:winNum
+                    context:nil characters:chars
+                    charactersIgnoringModifiers:chars
+                    isARepeat:NO keyCode:keyCode];
+                NSEvent *up = [NSEvent keyEventWithType:NSEventTypeKeyUp
+                    location:NSZeroPoint modifierFlags:0
+                    timestamp:ts windowNumber:winNum
+                    context:nil characters:chars
+                    charactersIgnoringModifiers:chars
+                    isARepeat:NO keyCode:keyCode];
 
-                    [v->webview keyDown:down];
-                    [v->webview keyUp:up];
-                    write_frame(req_id, REP_OK, NULL, 0);
-                }
+                [v->webview keyDown:down];
+                [v->webview keyUp:up];
+                write_frame(req_id, REP_OK, NULL, 0);
             } else {
                 write_frame(req_id, REP_OK, NULL, 0);
             }

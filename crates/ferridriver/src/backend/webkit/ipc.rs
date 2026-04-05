@@ -291,14 +291,21 @@ pub struct IpcClient {
 #[cfg(target_os = "macos")]
 static HOST_BINARY_PATH: &str = concat!(env!("OUT_DIR"), "/fd_webkit_host");
 
+/// File name of the `WebKit` host binary.
+#[cfg(target_os = "macos")]
+const HOST_BINARY_NAME: &str = "fd_webkit_host";
+
 impl IpcClient {
   /// Resolve the path to the `WebKit` host binary.
   ///
   /// Priority:
   /// 1. `FERRIDRIVER_WEBKIT_HOST` env var (explicit override)
-  /// 2. Compile-time path from build.rs (baked into the binary)
+  /// 2. Sibling to the running executable (e.g. next to `ferridriver` CLI)
+  /// 3. `~/.cache/ferridriver/fd_webkit_host` (survives cargo clean)
+  /// 4. Compile-time baked path from build.rs (dev builds)
   #[cfg(target_os = "macos")]
   fn resolve_host_binary() -> Result<std::path::PathBuf, String> {
+    // Priority 1: Environment variable override
     if let Ok(path) = std::env::var("FERRIDRIVER_WEBKIT_HOST") {
       let p = std::path::PathBuf::from(&path);
       if p.exists() {
@@ -307,14 +314,40 @@ impl IpcClient {
       return Err(format!("FERRIDRIVER_WEBKIT_HOST={path} does not exist"));
     }
 
-    let p = std::path::PathBuf::from(HOST_BINARY_PATH);
-    if p.exists() {
-      return Ok(p);
+    // Priority 2: Sibling to the running executable
+    if let Ok(exe) = std::env::current_exe() {
+      if let Some(dir) = exe.parent() {
+        let sibling = dir.join(HOST_BINARY_NAME);
+        if sibling.exists() {
+          return Ok(sibling);
+        }
+      }
+    }
+
+    // Priority 3: Cache directory
+    if let Some(home) = std::env::var_os("HOME") {
+      let cached = std::path::Path::new(&home)
+        .join(".cache")
+        .join("ferridriver")
+        .join(HOST_BINARY_NAME);
+      if cached.exists() {
+        return Ok(cached);
+      }
+    }
+
+    // Priority 4: Compile-time baked path (dev builds)
+    let baked = std::path::PathBuf::from(HOST_BINARY_PATH);
+    if baked.exists() {
+      return Ok(baked);
     }
 
     Err(format!(
-      "WebKit host binary not found at {HOST_BINARY_PATH}. \
-             Set FERRIDRIVER_WEBKIT_HOST to the path of fd_webkit_host."
+      "WebKit host binary not found. Checked:\n  \
+       1. $FERRIDRIVER_WEBKIT_HOST (not set)\n  \
+       2. sibling to current executable\n  \
+       3. ~/.cache/ferridriver/{HOST_BINARY_NAME}\n  \
+       4. {HOST_BINARY_PATH}\n\
+       Set FERRIDRIVER_WEBKIT_HOST or rebuild with `cargo build`."
     ))
   }
 
@@ -325,14 +358,14 @@ impl IpcClient {
   /// Returns an error if the Unix socketpair cannot be created, the host binary
   /// cannot be found or spawned, or the subprocess fails to become ready within
   /// the probe timeout.
-  pub async fn spawn() -> Result<(Self, std::process::Child), String> {
+  pub async fn spawn(headless: bool) -> Result<(Self, std::process::Child), String> {
     use std::os::unix::io::IntoRawFd;
 
     let (parent_sock, child_sock) = std::os::unix::net::UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
     let child_fd = child_sock.into_raw_fd();
     let exe = Self::resolve_host_binary()?;
 
-    let child = Self::spawn_host_process(&exe, child_fd)?;
+    let child = Self::spawn_host_process(&exe, child_fd, headless)?;
 
     let read_sock = parent_sock.try_clone().map_err(|e| format!("clone: {e}"))?;
     let write_sock = parent_sock;
@@ -387,6 +420,7 @@ impl IpcClient {
   fn spawn_host_process(
     exe: &std::path::Path,
     child_fd: std::os::unix::io::RawFd,
+    headless: bool,
   ) -> Result<std::process::Child, String> {
     // SAFETY: pre_exec runs in the forked child before exec. We manipulate
     // file descriptors to pass the IPC socket as fd 3 to the host subprocess.

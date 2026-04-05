@@ -1,4 +1,4 @@
-//! Unified CDP backend -- Chrome DevTools Protocol over pipes or WebSocket.
+//! Unified CDP backend -- Chrome `DevTools` Protocol over pipes or WebSocket.
 //!
 //! Generic over transport: `CdpBrowser<PipeTransport>` for pipe-based,
 //! `CdpBrowser<WsTransport>` for WebSocket-based. Both share identical page,
@@ -51,7 +51,7 @@ pub struct CdpBrowser<T: CdpTransport> {
 impl<T: CdpWrap> CdpBrowser<T> {
   /// Enable required CDP domains on a session so events and queries work.
   /// If `viewport` is provided, sets viewport in the same parallel batch
-  /// (saves a sequential round-trip vs calling emulate_viewport afterwards).
+  /// (saves a sequential round-trip vs calling `emulate_viewport` afterwards).
   async fn enable_domains(
     transport: &T,
     session_id: Option<&str>,
@@ -538,7 +538,7 @@ fn collect_frames(node: &serde_json::Value, out: &mut Vec<super::FrameInfo>) {
 
 /// Lifecycle state for a page's current document.
 /// Tracks which lifecycle events have fired and which document they belong to.
-/// Updated synchronously by the transport reader. Checked synchronously by goto().
+/// Updated synchronously by the transport reader. Checked synchronously by `goto()`.
 pub struct LifecycleState {
   /// loaderId of the current committed document (from Page.frameNavigated).
   pub current_loader_id: String,
@@ -578,7 +578,7 @@ pub struct CdpPage<T: CdpTransport> {
   /// Cached main frame ID to avoid repeated `Page.getFrameTree` calls.
   main_frame_id: Arc<tokio::sync::OnceCell<String>>,
   /// Lifecycle state for current document — tracks loaderId + fired events.
-  /// Updated synchronously by the transport reader task. Checked synchronously by goto().
+  /// Updated synchronously by the transport reader task. Checked synchronously by `goto()`.
   lifecycle: Arc<std::sync::Mutex<LifecycleState>>,
   /// Notification sent when lifecycle state is updated.
   lifecycle_notify: Arc<tokio::sync::Notify>,
@@ -1380,10 +1380,8 @@ impl<T: CdpWrap> CdpPage<T> {
     let mut params = serde_json::json!({"name": name});
     if let Some(d) = domain {
       params["domain"] = serde_json::json!(d);
-    } else {
-      if let Ok(Some(url)) = self.url().await {
-        params["url"] = serde_json::json!(url);
-      }
+    } else if let Ok(Some(url)) = self.url().await {
+      params["url"] = serde_json::json!(url);
     }
     self.cmd("Network.deleteCookies", params).await?;
     Ok(())

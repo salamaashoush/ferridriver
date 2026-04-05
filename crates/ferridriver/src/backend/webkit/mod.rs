@@ -28,7 +28,17 @@ impl WebKitBrowser {
   /// Returns an error if the host binary cannot be found or the subprocess
   /// fails to start or become ready.
   pub async fn launch() -> Result<Self, String> {
-    let (client, child) = IpcClient::spawn().await?;
+    Self::launch_with_options(true).await
+  }
+
+  /// Launch with explicit headless/headful control.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the host binary cannot be found or the subprocess
+  /// fails to start or become ready.
+  pub async fn launch_with_options(headless: bool) -> Result<Self, String> {
+    let (client, child) = IpcClient::spawn(headless).await?;
     Ok(Self {
       client: Arc::new(client),
       child,
@@ -93,13 +103,22 @@ impl WebKitBrowser {
     }
   }
 
-  /// Create a new page in an isolated context (delegates to `new_page` on `WebKit`).
+  /// Create a new page in an isolated context. If a viewport config is provided,
+  /// it is applied immediately after page creation (saves a sequential round-trip).
   ///
   /// # Errors
   ///
-  /// Returns an error if page creation fails.
-  pub async fn new_page_isolated(&self, url: &str) -> Result<AnyPage, String> {
-    self.new_page(url).await
+  /// Returns an error if page creation or viewport setup fails.
+  pub async fn new_page_isolated(
+    &self,
+    url: &str,
+    viewport: Option<&crate::options::ViewportConfig>,
+  ) -> Result<AnyPage, String> {
+    let page = self.new_page(url).await?;
+    if let Some(vp) = viewport {
+      page.emulate_viewport(vp).await?;
+    }
+    Ok(page)
   }
 
   /// Close the browser by killing the host subprocess.
@@ -370,21 +389,59 @@ impl WebKitPage {
     }
   }
 
-  /// Take a screenshot of a specific element by scrolling it into view first.
+  /// Take a screenshot of a specific element by scrolling it into view,
+  /// capturing a full screenshot, then cropping to the element's bounding box via JS.
   ///
   /// # Errors
   ///
-  /// Returns an error if the screenshot IPC call fails.
-  pub async fn screenshot_element(&self, sel: &str, _fmt: ImageFormat) -> Result<Vec<u8>, String> {
-    // Scroll element into view, then take full screenshot
-    // WKWebView doesn't support clipped screenshots natively
-    let esc = sel.replace('\'', "\\'");
-    let _ = self
-      .evaluate(&format!(
-        "document.querySelector('{esc}')?.scrollIntoView({{block:'center'}})"
-      ))
-      .await;
-    self.screenshot(ScreenshotOpts::default()).await
+  /// Returns an error if the element is not found, screenshot fails, or cropping fails.
+  pub async fn screenshot_element(&self, sel: &str, fmt: ImageFormat) -> Result<Vec<u8>, String> {
+    let esc = sel.replace('\\', "\\\\").replace('\'', "\\'");
+    // Get bounding box after scrolling into view (single evaluate)
+    let js = format!(
+      "(function(){{var e=document.querySelector('{esc}');if(!e)return null;\
+       e.scrollIntoView({{block:'center',behavior:'instant'}});\
+       var r=e.getBoundingClientRect();\
+       return JSON.stringify({{x:Math.round(r.x),y:Math.round(r.y),w:Math.round(r.width),h:Math.round(r.height)}})}})()"
+    );
+    let bbox = self.evaluate(&js).await?;
+    let bbox_str = bbox
+      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .ok_or_else(|| format!("Element '{sel}' not found"))?;
+    let bbox_val: serde_json::Value = serde_json::from_str(&bbox_str).map_err(|e| format!("bbox parse: {e}"))?;
+    let bx = bbox_val.get("x").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let by = bbox_val.get("y").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let bw = bbox_val.get("w").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let bh = bbox_val.get("h").and_then(serde_json::Value::as_i64).unwrap_or(0);
+
+    if bw <= 0 || bh <= 0 {
+      return Err(format!("Element '{sel}' has zero dimensions"));
+    }
+
+    // Take full page screenshot
+    let full_png = self.screenshot(ScreenshotOpts { format: fmt, quality: None, full_page: false }).await?;
+
+    // Crop to element bounds using JS Canvas API (avoids needing image crate dependency)
+    // Encode full screenshot as base64, crop in JS, return cropped base64
+    let b64_full = base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &full_png);
+    let crop_fmt = match fmt {
+      ImageFormat::Jpeg => "image/jpeg",
+      ImageFormat::Webp => "image/webp",
+      ImageFormat::Png => "image/png",
+    };
+    let crop_js = format!(
+      "(async function(){{var img=new Image();var b='data:image/png;base64,{b64_full}';\
+       await new Promise(function(r){{img.onload=r;img.src=b}});\
+       var c=document.createElement('canvas');c.width={bw};c.height={bh};\
+       var ctx=c.getContext('2d');ctx.drawImage(img,{bx},{by},{bw},{bh},0,0,{bw},{bh});\
+       return c.toDataURL('{crop_fmt}').split(',')[1]}})()"
+    );
+    let cropped = self.evaluate(&crop_js).await?;
+    let cropped_b64 = cropped
+      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .ok_or("crop failed")?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cropped_b64)
+      .map_err(|e| format!("decode cropped: {e}"))
   }
 
   /// Generate a PDF of the page. Not supported on `WebKit` backend.
@@ -406,21 +463,24 @@ impl WebKitPage {
   }
 
   /// Set file input on an `<input type="file">` element.
+  /// Supports multiple files by sending each file via IPC sequentially.
   ///
   /// # Errors
   ///
-  /// Returns an error if no paths are provided or the IPC call fails.
+  /// Returns an error if no paths are provided or any IPC call fails.
   pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<(), String> {
     if paths.is_empty() {
       return Err("No file paths provided".into());
     }
-    // WebKit uses a custom IPC op that reads the file in ObjC and injects via DataTransfer API
-    let mut p = Vec::new();
-    ipc::str_encode(&mut p, selector);
-    ipc::str_encode(&mut p, &paths[0]); // First file only (multi-file needs multiple calls)
-    p.extend_from_slice(&self.view_id.to_le_bytes());
-    let r = self.client.send(ipc::Op::SetFileInput, &p).await?;
-    Self::ok(r)
+    for path in paths {
+      let mut p = Vec::new();
+      ipc::str_encode(&mut p, selector);
+      ipc::str_encode(&mut p, path);
+      p.extend_from_slice(&self.view_id.to_le_bytes());
+      let r = self.client.send(ipc::Op::SetFileInput, &p).await?;
+      Self::ok(r)?;
+    }
+    Ok(())
   }
 
   /// Get the full accessibility tree via native `NSAccessibility`.
@@ -527,28 +587,21 @@ impl WebKitPage {
     Ok(())
   }
 
-  /// Move the mouse to the given coordinates using JS event dispatch.
+  /// Move the mouse to the given coordinates using native `NSEvent` mouse moved.
   ///
   /// # Errors
   ///
-  /// Returns an error if the JavaScript evaluation fails.
+  /// Returns an error if the native mouse event IPC call fails.
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
-    // WKWebView's mouseMoved: doesn't propagate to DOM in offscreen windows.
-    // Use WKWebView.evaluateJavaScript to dispatch the event directly in the
-    // web content process, same approach as Playwright's webkit backend.
-    let js = format!(
-      "(function(){{var e=document.elementFromPoint({x},{y});\
-            if(e)e.dispatchEvent(new MouseEvent('mousemove',{{clientX:{x},clientY:{y},bubbles:true,view:window}}))}})()"
-    );
-    self.evaluate(&js).await?;
-    Ok(())
+    self.send_mouse_event(0, 0, 0, x, y).await
   }
 
-  /// Move the mouse smoothly from one point to another with easing.
+  /// Move the mouse smoothly from one point to another with bezier easing.
+  /// Uses native `NSEvent` mouse moved events via IPC (matches CDP optimization).
   ///
   /// # Errors
   ///
-  /// Returns an error if the batched JavaScript evaluation fails.
+  /// Returns an error if any native mouse event IPC call fails.
   pub async fn move_mouse_smooth(
     &self,
     from_x: f64,
@@ -557,24 +610,14 @@ impl WebKitPage {
     to_y: f64,
     steps: u32,
   ) -> Result<(), String> {
-    use std::fmt::Write;
     let steps = steps.max(1);
-    // Batch all moves into one JS evaluate for performance
-    let mut js = String::with_capacity(steps as usize * 120 + 20);
-    js.push_str("(function(){");
     for i in 0..=steps {
       let t = f64::from(i) / f64::from(steps);
-      let ease = t * t * (3.0 - 2.0 * t);
+      let ease = t * t * (3.0 - 2.0 * t); // bezier easing (matches CDP)
       let x = from_x + (to_x - from_x) * ease;
       let y = from_y + (to_y - from_y) * ease;
-      let _ = write!(
-        js,
-        "var e=document.elementFromPoint({x},{y});\
-                if(e)e.dispatchEvent(new MouseEvent('mousemove',{{clientX:{x},clientY:{y},bubbles:true,view:window}}));"
-      );
+      self.send_mouse_event(0, 0, 0, x, y).await?;
     }
-    js.push_str("})()");
-    self.evaluate(&js).await?;
     Ok(())
   }
 
@@ -1327,88 +1370,130 @@ impl WebKitElement {
     Ok(())
   }
 
+  /// Get the center coordinates of this element after scrolling it into view.
+  /// Returns (x, y) or falls back to (0, 0).
+  #[allow(clippy::many_single_char_names)]
+  async fn get_center(&self) -> Result<(f64, f64), String> {
+    let js = format!(
+      "(function(){{var e={el};e.scrollIntoViewIfNeeded?e.scrollIntoViewIfNeeded():e.scrollIntoView({{block:'center'}});var r=e.getBoundingClientRect();return JSON.stringify({{x:r.x+r.width/2,y:r.y+r.height/2}})}})()",
+      el = self.el()
+    );
+    let mut payload = Vec::new();
+    ipc::str_encode(&mut payload, &js);
+    payload.extend_from_slice(&self.view_id.to_le_bytes());
+    let result = self.client.send(ipc::Op::Evaluate, &payload).await?;
+    match result {
+      IpcResponse::Value(val) => {
+        let obj: serde_json::Value = if let Some(s) = val.as_str() {
+          serde_json::from_str(s).unwrap_or_default()
+        } else {
+          val
+        };
+        let cx = obj.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let cy = obj.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        Ok((cx, cy))
+      },
+      IpcResponse::Error(err) => Err(err),
+      _ => Ok((0.0, 0.0)),
+    }
+  }
+
+  /// Send a native mouse event for this element's view.
+  async fn send_mouse(&self, mouse_type: u8, button: u8, click_count: u32, pos_x: f64, pos_y: f64) -> Result<(), String> {
+    let mut payload = Vec::with_capacity(27);
+    payload.push(mouse_type);
+    payload.push(button);
+    payload.extend_from_slice(&click_count.to_le_bytes());
+    payload.extend_from_slice(&pos_x.to_le_bytes());
+    payload.extend_from_slice(&pos_y.to_le_bytes());
+    payload.extend_from_slice(&self.view_id.to_le_bytes());
+    let result = self.client.send(ipc::Op::MouseEvent, &payload).await?;
+    match result {
+      IpcResponse::Error(err) => Err(err),
+      _ => Ok(()),
+    }
+  }
+
   /// Click the element using native `NSEvent` after scrolling it into view.
+  /// Single JS evaluate for scroll+bbox (matches CDP optimization), then native mouse events.
   ///
   /// # Errors
   ///
   /// Returns an error if coordinate extraction or the native click IPC call fails.
   pub async fn click(&self) -> Result<(), String> {
-    // Scroll into view first
-    let _ = self.scroll_into_view().await;
-    // Get element center coordinates, then use native NSEvent click (OP_CLICK)
-    // instead of JS .click() which doesn't trigger native focus behavior.
-    let js = format!(
-      "(function(){{var e={};var r=e.getBoundingClientRect();return r.left+r.width/2+','+( r.top+r.height/2)}})()",
-      self.el()
-    );
-    let mut payload = Vec::new();
-    ipc::str_encode(&mut payload, &js);
-    payload.extend_from_slice(&self.view_id.to_le_bytes());
-    let eval_result = self.client.send(ipc::Op::Evaluate, &payload).await?;
-    match eval_result {
-      IpcResponse::Value(val) => {
-        let coords = val.as_str().unwrap_or("0,0");
-        let parts: Vec<&str> = coords.split(',').collect();
-        let x: f64 = parts.first().and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        let y: f64 = parts.get(1).and_then(|s| s.parse().ok()).unwrap_or(0.0);
-        // Native click via NSEvent
-        let mut click_p = Vec::new();
-        click_p.extend_from_slice(&x.to_le_bytes());
-        click_p.extend_from_slice(&y.to_le_bytes());
-        click_p.extend_from_slice(&self.view_id.to_le_bytes());
-        let r2 = self.client.send(ipc::Op::Click, &click_p).await?;
-        match r2 {
-          IpcResponse::Error(e) => Err(e),
-          _ => Ok(()),
-        }
-      },
-      IpcResponse::Error(e) => Err(e),
-      // Fallback to JS click if coordinate extraction fails
-      _ => self.eval(&format!("{}.click()", self.el())).await,
+    let (x, y) = self.get_center().await?;
+    if x == 0.0 && y == 0.0 {
+      return self.eval(&format!("{}.click()", self.el())).await;
     }
+    self.send_mouse(1, 0, 1, x, y).await?; // down
+    self.send_mouse(2, 0, 1, x, y).await // up
   }
 
-  /// Double-click the element by dispatching click and dblclick DOM events.
+  /// Double-click the element using native `NSEvent` with proper clickCount.
+  /// First click pair (clickCount=1) fires 'click', second pair (clickCount=2) fires 'dblclick'.
   ///
   /// # Errors
   ///
-  /// Returns an error if the JavaScript evaluation fails.
+  /// Returns an error if coordinate extraction or native mouse IPC calls fail.
   pub async fn dblclick(&self) -> Result<(), String> {
-    let _ = self.scroll_into_view().await;
-    // Fire dblclick via JS - WebKit's NSEvent approach for dblclick would need
-    // OP_CLICK with clickCount=2, but the simpler approach dispatches DOM events
-    // which is reliable for web app event handlers.
-    self.eval(&format!("(function(){{var e={el};e.dispatchEvent(new MouseEvent('click',{{bubbles:true,detail:1}}));e.dispatchEvent(new MouseEvent('click',{{bubbles:true,detail:2}}));e.dispatchEvent(new MouseEvent('dblclick',{{bubbles:true,detail:2}}))}})()
-", el=self.el())).await
+    let (x, y) = self.get_center().await?;
+    if x == 0.0 && y == 0.0 {
+      return self
+        .eval(&format!(
+          "{}.dispatchEvent(new MouseEvent('dblclick',{{bubbles:true}}))",
+          self.el()
+        ))
+        .await;
+    }
+    // First click (clickCount=1) fires 'click'
+    self.send_mouse(1, 0, 1, x, y).await?;
+    self.send_mouse(2, 0, 1, x, y).await?;
+    // Second click (clickCount=2) fires 'dblclick'
+    self.send_mouse(1, 0, 2, x, y).await?;
+    self.send_mouse(2, 0, 2, x, y).await
   }
 
-  /// Hover over the element by dispatching a mouseenter DOM event.
+  /// Hover over the element using native `NSEvent` mouseMoved + JS mouseenter.
+  /// Native mouseMoved doesn't propagate mouseenter to DOM in offscreen WKWebView
+  /// windows, so we also fire the JS event to ensure hover handlers trigger.
   ///
   /// # Errors
   ///
-  /// Returns an error if the JavaScript evaluation fails.
+  /// Returns an error if coordinate extraction, native mouse IPC, or JS eval fails.
   pub async fn hover(&self) -> Result<(), String> {
+    let (x, y) = self.get_center().await?;
+    // Native mouse move for CSS :hover state
+    let _ = self.send_mouse(0, 0, 0, x, y).await;
+    // JS mouseenter for DOM event handlers (needed for offscreen WKWebView windows)
     self
       .eval(&format!(
-        "{}.dispatchEvent(new MouseEvent('mouseenter',{{bubbles:true}}))",
-        self.el()
+        "(function(){{var e={el};e.dispatchEvent(new MouseEvent('mouseenter',{{clientX:{x},clientY:{y},bubbles:true,view:window}}));\
+         e.dispatchEvent(new MouseEvent('mouseover',{{clientX:{x},clientY:{y},bubbles:true,view:window}}))}})()
+",
+        el = self.el()
       ))
       .await
   }
 
-  /// Type text into the element by setting its value and dispatching an input event.
+  /// Type text into the element using native `InsertText` editing command.
+  /// Focuses the element first, then uses the native IPC type op which fires
+  /// `beforeinput`/`input` events with `isTrusted: true` (matches CDP `Input.insertText`).
   ///
   /// # Errors
   ///
-  /// Returns an error if the JavaScript evaluation fails.
+  /// Returns an error if focusing or the native type IPC call fails.
   pub async fn type_str(&self, text: &str) -> Result<(), String> {
-    let esc = text.replace('\\', "\\\\").replace('\'', "\\'");
-    self
-      .eval(&format!(
-        "(function(){{var e={};e.focus();e.value+='{esc}';e.dispatchEvent(new Event('input',{{bubbles:true}}))}})()",
-        self.el()
-      ))
-      .await
+    // Focus the element first via click (matches CDP element type_str behavior)
+    self.click().await?;
+    // Use native OP_TYPE for trusted input events
+    let mut p = Vec::new();
+    ipc::str_encode(&mut p, text);
+    p.extend_from_slice(&self.view_id.to_le_bytes());
+    let r = self.client.send(Op::Type, &p).await?;
+    match r {
+      IpcResponse::Error(e) => Err(e),
+      _ => Ok(()),
+    }
   }
 
   /// Call a JavaScript function with this element as `this`.

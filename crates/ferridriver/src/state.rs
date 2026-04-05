@@ -167,7 +167,7 @@ impl BrowserState {
       extra_args: Vec::new(),
       instance_args_fn: None,
       instance_resolver_fn: None,
-      headless: true,
+      headless: false,
       user_data_dir: None,
       default_viewport: Some(crate::options::ViewportConfig::default()),
     }
@@ -204,7 +204,7 @@ impl BrowserState {
   /// When `ensure_instance("name")` is called, the resolver runs first.
   /// If it returns `Some(ConnectMode)`, that mode is used instead of launching.
   /// This decouples browser discovery from ferridriver -- the consumer provides
-  /// the discovery logic (reading DevToolsActivePort files, querying a registry, etc.).
+  /// the discovery logic (reading `DevToolsActivePort` files, querying a registry, etc.).
   pub fn set_instance_resolver_fn(&mut self, f: InstanceResolverFn) {
     self.instance_resolver_fn = Some(f);
   }
@@ -268,7 +268,7 @@ impl BrowserState {
         #[cfg(target_os = "macos")]
         BackendKind::WebKit => {
           use crate::backend::webkit::WebKitBrowser;
-          AnyBrowser::WebKit(WebKitBrowser::launch().await?)
+          AnyBrowser::WebKit(WebKitBrowser::launch_with_options(self.headless).await?)
         },
       },
     };
@@ -837,7 +837,7 @@ pub fn chrome_flags(headless: bool, extra_args: &[String]) -> Vec<String> {
   flags
 }
 
-/// Chrome switches matching Playwright's chromiumSwitches() exactly.
+/// Chrome switches matching Playwright's `chromiumSwitches()` exactly.
 /// See: playwright/packages/playwright-core/src/server/chromium/chromiumSwitches.ts
 const CHROMIUM_SWITCHES: &[&str] = &[
   "--disable-field-trial-config",
@@ -901,7 +901,7 @@ pub fn detect_chromium() -> String {
       // Find the latest chromium-* directory
       if let Ok(entries) = std::fs::read_dir(&pw_cache) {
         let mut candidates: Vec<_> = entries
-          .filter_map(|e| e.ok())
+          .filter_map(std::result::Result::ok)
           .filter(|e| e.file_name().to_string_lossy().starts_with("chromium-"))
           .collect();
         candidates.sort_by(|a, b| b.file_name().cmp(&a.file_name())); // newest first

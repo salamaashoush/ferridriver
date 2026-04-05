@@ -188,7 +188,7 @@ impl AnyBrowser {
       Self::CdpPipe(b) => b.new_page_isolated(url, viewport).await,
       Self::CdpRaw(b) => b.new_page_isolated(url, viewport).await,
       #[cfg(target_os = "macos")]
-      Self::WebKit(b) => b.new_page_isolated(url).await,
+      Self::WebKit(b) => b.new_page_isolated(url, viewport).await,
     }
   }
 
