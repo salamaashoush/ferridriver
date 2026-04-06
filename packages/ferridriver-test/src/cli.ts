@@ -1,28 +1,19 @@
 #!/usr/bin/env bun
 /**
- * ferridriver-test CLI — runs E2E, component, and BDD tests using the Rust engine.
+ * ferridriver-test CLI -- runs E2E, component, and BDD tests using the Rust engine.
  *
  * E2E mode (default):
  *   ferridriver-test [files...] [--workers N] [--retries N] [--headed]
  *
  * Component testing mode:
- *   ferridriver-test --ct [files...] [--framework react]
+ *   ferridriver-test ct [files...] [--framework react]
  *
  * BDD mode:
- *   ferridriver-test --bdd [features...] [--steps steps/] [--tags "@smoke"]
- *
- * The --bdd flag activates the BDD pipeline:
- *   1. Discovers step definition files (--steps glob)
- *   2. Imports them to register Given/When/Then via NAPI
- *   3. Discovers .feature files
- *   4. Rust parses Gherkin, matches steps, executes via core TestRunner
- *
- * The --ct flag activates the CT pipeline:
- *   1. Scans test files for component imports (import transform)
- *   2. Starts Vite dev server with component registry
- *   3. Runs tests with mount() fixture provided to each test
- *   4. Shuts down Vite on completion
+ *   ferridriver-test bdd [features...] [--steps steps/] [--tags "@smoke"]
  */
+
+import { defineCommand, defineArgs, runMain, withCompletions } from 'clap-ts';
+import type { CommandDef } from 'clap-ts';
 
 import { TestRunner, BddRunner } from 'ferridriver';
 import type { Page, BddRunnerConfig } from 'ferridriver';
@@ -31,51 +22,55 @@ import type { MountFunction } from './test.js';
 import { resolve, relative } from 'path';
 import { Glob } from 'bun';
 
-// ── Parse CLI args ──
+// ---- Shared arg groups (matches Rust TestArgs/BddArgs patterns) ----
 
-const args = process.argv.slice(2);
-let files: string[] = [];
-const config: Record<string, any> = {};
-let ctMode = false;
-let bddMode = false;
-let ctFramework: string | null = null;
-let ctRegisterSource: string | null = null;
-let bddStepsGlobs: string[] = [];
-let bddTags: string | null = null;
-let bddFeatureGlobs: string[] = [];
-let bddDryRun = false;
-let bddList = false;
+const runnerArgs = defineArgs({
+  workers: {
+    type: 'number',
+    short: 'j',
+    description: 'Number of parallel workers',
+  },
+  retries: {
+    type: 'number',
+    description: 'Retry failed tests N times',
+  },
+  timeout: {
+    type: 'number',
+    description: 'Test timeout in milliseconds',
+  },
+  headed: {
+    type: 'boolean',
+    description: 'Run browser in headed mode (visible window)',
+  },
+  grep: {
+    type: 'string',
+    short: 'g',
+    description: 'Only run tests matching regex pattern',
+  },
+  backend: {
+    type: 'string',
+    description: 'Browser backend',
+    valueParser: ['cdp-pipe', 'cdp-raw', 'webkit'],
+  },
+  reporter: {
+    type: 'string',
+    description: 'Test reporter',
+    valueParser: ['terminal', 'junit', 'json'],
+  },
+  'update-snapshots': {
+    type: 'boolean',
+    description: 'Update snapshot files',
+  },
+  list: {
+    type: 'boolean',
+    description: 'List discovered tests without running them',
+  },
+});
 
-for (let i = 0; i < args.length; i++) {
-  const arg = args[i];
-  if (arg === '--workers' || arg === '-j') config.workers = parseInt(args[++i]);
-  else if (arg === '--retries') config.retries = parseInt(args[++i]);
-  else if (arg === '--timeout') config.timeout = parseInt(args[++i]);
-  else if (arg === '--headed') config.headed = true;
-  else if (arg === '--grep' || arg === '-g') config.grep = args[++i];
-  else if (arg === '--backend') config.backend = args[++i];
-  else if (arg === '--reporter') config.reporter = [args[++i]];
-  else if (arg === '--ct') ctMode = true;
-  else if (arg === '--bdd') bddMode = true;
-  else if (arg === '--steps') bddStepsGlobs.push(args[++i]);
-  else if (arg === '--tags' || arg === '-t') bddTags = args[++i];
-  else if (arg === '--features') bddFeatureGlobs.push(args[++i]);
-  else if (arg === '--dry-run') bddDryRun = true;
-  else if (arg === '--list') bddList = true;
-  else if (arg === '--framework') ctFramework = args[++i];
-  else if (arg === '--register-source') ctRegisterSource = args[++i];
-  else if (arg === '--update-snapshots') config.updateSnapshots = true;
-  else if (!arg.startsWith('-')) files.push(arg);
-}
+// ---- File discovery ----
 
-// ── Discover test files ──
-
-async function discoverFiles(): Promise<string[]> {
+async function discoverFiles(files: string[], patterns: string[]): Promise<string[]> {
   if (files.length > 0) return files.map((f) => resolve(f));
-
-  const patterns = ctMode
-    ? ['**/*.ct.ts', '**/*.ct.tsx', '**/*.ct.spec.ts', '**/*.ct.spec.tsx']
-    : ['**/*.spec.ts', '**/*.test.ts'];
 
   const found: string[] = [];
   for (const pattern of patterns) {
@@ -88,9 +83,12 @@ async function discoverFiles(): Promise<string[]> {
   return found;
 }
 
-// ── CT: resolve framework adapter ──
+// ---- CT: resolve framework adapter ----
 
-async function resolveCtAdapter(): Promise<{
+async function resolveCtAdapter(
+  ctFramework: string | undefined,
+  ctRegisterSource: string | undefined,
+): Promise<{
   registerSourcePath: string;
   frameworkPlugin: (() => Promise<any>) | null;
 }> {
@@ -101,12 +99,9 @@ async function resolveCtAdapter(): Promise<{
   const fw = ctFramework || 'react';
   const pkg = `@ferridriver/ct-${fw}`;
 
-  // Resolve from the user's project directory (cwd), not from the CLI's location.
-  // This ensures bun workspace links in the project's node_modules are found.
   const { createRequire } = await import('module');
   const projectRequire = createRequire(resolve('package.json'));
 
-  // Try: 1) resolve from project, 2) bare import, 3) monorepo fallback.
   const candidates = [
     () => projectRequire.resolve(pkg),
     () => pkg,
@@ -126,11 +121,11 @@ async function resolveCtAdapter(): Promise<{
 
   throw new Error(
     `Cannot find CT adapter for "${fw}". Install: npm i ${pkg}\n` +
-    `Or specify: --register-source path/to/registerSource.mjs`
+    `Or specify: --register-source path/to/registerSource.mjs`,
   );
 }
 
-// ── CT: wire mount() into test fixtures ──
+// ---- CT: wire mount() into test fixtures ----
 
 function setupCtMount() {
   _setCtMountFactory((page: Page): MountFunction => {
@@ -158,11 +153,11 @@ function setupCtMount() {
   });
 }
 
-// ── BDD mode ──
+// ---- BDD runner ----
 
-async function discoverStepFiles(): Promise<string[]> {
-  const patterns = bddStepsGlobs.length > 0
-    ? bddStepsGlobs
+async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
+  const patterns = stepsGlobs.length > 0
+    ? stepsGlobs
     : ['steps/**/*.ts', 'steps/**/*.js', 'step_definitions/**/*.ts', 'step_definitions/**/*.js'];
 
   const found: string[] = [];
@@ -176,78 +171,12 @@ async function discoverStepFiles(): Promise<string[]> {
   return found;
 }
 
-async function runBdd() {
-  // Determine feature patterns.
-  const featurePatterns = bddFeatureGlobs.length > 0
-    ? bddFeatureGlobs
-    : files.length > 0
-      ? files
-      : ['features/**/*.feature'];
+// ---- E2E test runner (shared by default and ct modes) ----
 
-  // Discover and import step definition files.
-  const stepFiles = await discoverStepFiles();
-
-  // Create BDD runner with config.
-  const bddConfig: BddRunnerConfig = {
-    features: featurePatterns,
-    tags: bddTags || undefined,
-    workers: config.workers,
-    timeout: config.timeout,
-    retries: config.retries,
-    headed: config.headed,
-    backend: config.backend,
-    reporter: config.reporter,
-    outputDir: config.outputDir,
-  };
-
-  const runner = BddRunner.create(bddConfig);
-
-  // Set the runner so Given/When/Then in step files register into it.
-  const { _setRunner } = await import('./bdd.js');
-  _setRunner(runner);
-
-  if (stepFiles.length > 0) {
-    console.log(`  Loading ${stepFiles.length} step file(s)...`);
-    for (const file of stepFiles) {
-      await import(file);
-    }
-  } else {
-    console.log('  No step definition files found. Using built-in steps only.');
-  }
-
-  // Run features.
-  console.log(`  Running features: ${featurePatterns.join(', ')}`);
-  if (bddTags) console.log(`  Tags: ${bddTags}`);
-  console.log();
-
-  const summary = await runner.run();
-
-  // Exit.
-  process.exit(summary.failed > 0 ? 1 : 0);
-}
-
-// ── Main ──
-
-async function main() {
-  // ── BDD mode ──
-  if (bddMode) {
-    await runBdd();
-    return;
-  }
-
-  const testFiles = await discoverFiles();
-
-  if (testFiles.length === 0) {
-    console.log('  No test files found.');
-    process.exit(0);
-  }
-
-  // ── CT mode: start Vite dev server for the project ──
+async function runTests(config: Record<string, any>, testFiles: string[], ctMode: boolean) {
   let viteProcess: any = null;
+
   if (ctMode) {
-    // Start the project's own Vite dev server.
-    // This serves the full app (index.html + all sources).
-    // Tests can interact with the app directly OR use mount() for isolated components.
     const { spawn } = await import('child_process');
     const port = 3100 + Math.floor(Math.random() * 1000);
 
@@ -263,7 +192,6 @@ async function main() {
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    // Wait for Vite to print URL.
     const viteUrl = await new Promise<string>((resolveUrl, reject) => {
       const timeout = setTimeout(() => reject(new Error('Vite startup timeout (30s)')), 30000);
       const onData = (chunk: Buffer) => {
@@ -279,15 +207,11 @@ async function main() {
       viteProcess.on('error', (e: Error) => { clearTimeout(timeout); reject(e); });
     });
 
-    // Pre-warm: fetch the page to trigger Vite's on-demand compilation.
-    // This compiles React/Vue/Svelte/Solid BEFORE any browser connects,
-    // so browsers get pre-compiled JS instantly.
     const warmStart = Date.now();
     for (let i = 0; i < 60; i++) {
       try {
         const resp = await fetch(viteUrl);
         if (resp.ok) {
-          // Fetch the JS entry too to trigger full compilation.
           const html = await resp.text();
           const scriptMatch = html.match(/src="([^"]+\.(?:tsx?|jsx?|mts|mjs))"/);
           if (scriptMatch) {
@@ -301,18 +225,14 @@ async function main() {
     console.log(`[ct] Vite warmed in ${Date.now() - warmStart}ms`);
 
     config.baseUrl = viteUrl;
-    // Cap workers for CT — Chrome launch + navigate dominates.
-    // 4 workers is the sweet spot (benchmarked).
     if (!config.workers) config.workers = 4;
     setupCtMount();
     console.log(`[ct] Serving at ${viteUrl}`);
   }
 
-  // ── Create Rust runner ──
   const runner = await TestRunner.create(config);
   const workerCount = runner.workerCount();
 
-  // ── Load test files ──
   for (const file of testFiles) {
     _setCurrentFile(relative(process.cwd(), file));
     await import(file);
@@ -338,8 +258,8 @@ async function main() {
   const summary = await runner.run();
 
   for (const r of summary.results) {
-    const icon = r.status === 'passed' ? '✓' : r.status === 'failed' || r.status === 'timed out' ? '✗' :
-                 r.status === 'skipped' ? '−' : r.status === 'flaky' ? '⚠' : '?';
+    const icon = r.status === 'passed' ? '\u2713' : r.status === 'failed' || r.status === 'timed out' ? '\u2717' :
+                 r.status === 'skipped' ? '\u2212' : r.status === 'flaky' ? '\u26a0' : '?';
     const color = r.status === 'passed' ? '\x1b[32m' : r.status === 'failed' || r.status === 'timed out' ? '\x1b[31m' :
                   '\x1b[33m';
     const dur = r.status !== 'skipped' ? ` (${Math.round(r.durationMs)}ms)` : '';
@@ -358,4 +278,181 @@ async function main() {
   process.exit(summary.failed > 0 ? 1 : 0);
 }
 
-main().catch((e) => { console.error(e); process.exit(1); });
+// ---- Commands ----
+
+const testCommand = defineCommand({
+  meta: {
+    name: 'test',
+    description: 'Run E2E tests (default when no subcommand)',
+    aliases: ['e2e'],
+  },
+  args: {
+    ...runnerArgs,
+    files: { type: 'positional', valueName: 'FILES', trailingVarArg: true },
+  },
+  async run({ args }) {
+    const fileList = (args.files as string[] | undefined) ?? [];
+    const testFiles = await discoverFiles(fileList, ['**/*.spec.ts', '**/*.test.ts']);
+    if (testFiles.length === 0) {
+      console.log('  No test files found.');
+      process.exit(0);
+    }
+    const config: Record<string, any> = {};
+    if (args.workers !== undefined) config.workers = args.workers;
+    if (args.retries !== undefined) config.retries = args.retries;
+    if (args.timeout !== undefined) config.timeout = args.timeout;
+    if (args.headed) config.headed = true;
+    if (args.grep) config.grep = args.grep;
+    if (args.backend) config.backend = args.backend;
+    if (args.reporter) config.reporter = [args.reporter];
+    if (args['update-snapshots']) config.updateSnapshots = true;
+    await runTests(config, testFiles, false);
+  },
+});
+
+const ctCommand = defineCommand({
+  meta: {
+    name: 'ct',
+    description: 'Run component tests with Vite dev server',
+    aliases: ['component'],
+  },
+  args: {
+    ...runnerArgs,
+    framework: {
+      type: 'string',
+      description: 'UI framework for component testing',
+      valueParser: ['react', 'vue', 'svelte', 'solid'],
+      default: 'react',
+    },
+    'register-source': {
+      type: 'string',
+      valueName: 'PATH',
+      description: 'Custom component adapter source path',
+      valueHint: 'filePath',
+    },
+    files: { type: 'positional', valueName: 'FILES', trailingVarArg: true },
+  },
+  async run({ args }) {
+    const fileList = (args.files as string[] | undefined) ?? [];
+    const testFiles = await discoverFiles(fileList, [
+      '**/*.ct.ts', '**/*.ct.tsx', '**/*.ct.spec.ts', '**/*.ct.spec.tsx',
+    ]);
+    if (testFiles.length === 0) {
+      console.log('  No component test files found.');
+      process.exit(0);
+    }
+    const config: Record<string, any> = {};
+    if (args.workers !== undefined) config.workers = args.workers;
+    if (args.retries !== undefined) config.retries = args.retries;
+    if (args.timeout !== undefined) config.timeout = args.timeout;
+    if (args.headed) config.headed = true;
+    if (args.grep) config.grep = args.grep;
+    if (args.backend) config.backend = args.backend;
+    if (args.reporter) config.reporter = [args.reporter];
+    if (args['update-snapshots']) config.updateSnapshots = true;
+    await runTests(config, testFiles, true);
+  },
+});
+
+const bddCommand = defineCommand({
+  meta: {
+    name: 'bdd',
+    description: 'Run BDD/Gherkin feature tests',
+    aliases: ['features'],
+  },
+  args: {
+    ...runnerArgs,
+    steps: {
+      type: 'string',
+      action: 'append',
+      valueName: 'GLOB',
+      description: 'Step definition file glob patterns',
+      valueHint: 'filePath',
+    },
+    tags: {
+      type: 'string',
+      short: 't',
+      description: 'Tag expression filter (e.g., "@smoke and not @wip")',
+    },
+    'dry-run': {
+      type: 'boolean',
+      description: 'Parse features and match steps without executing',
+    },
+    'fail-fast': {
+      type: 'boolean',
+      description: 'Stop on first failure',
+    },
+    'step-timeout': {
+      type: 'number',
+      valueName: 'MS',
+      description: 'Timeout per step in milliseconds',
+    },
+    features: { type: 'positional', valueName: 'FEATURES', trailingVarArg: true },
+  },
+  async run({ args }) {
+    const featureFiles = (args.features as string[] | undefined) ?? [];
+    const featurePatterns = featureFiles.length > 0
+      ? featureFiles
+      : ['features/**/*.feature'];
+
+    const stepsGlobs = (args.steps as string[] | undefined) ?? [];
+    const stepFiles = await discoverStepFiles(stepsGlobs);
+
+    const bddConfig: BddRunnerConfig = {
+      features: featurePatterns,
+      tags: args.tags || undefined,
+      workers: args.workers,
+      timeout: args.timeout ?? args['step-timeout'],
+      retries: args.retries,
+      headed: args.headed,
+      backend: args.backend,
+      reporter: args.reporter ? [args.reporter] : undefined,
+    };
+
+    const runner = BddRunner.create(bddConfig);
+
+    const { _setRunner } = await import('./bdd.js');
+    _setRunner(runner);
+
+    if (stepFiles.length > 0) {
+      console.log(`  Loading ${stepFiles.length} step file(s)...`);
+      for (const file of stepFiles) {
+        await import(file);
+      }
+    } else {
+      console.log('  No step definition files found. Using built-in steps only.');
+    }
+
+    console.log(`  Running features: ${featurePatterns.join(', ')}`);
+    if (args.tags) console.log(`  Tags: ${args.tags}`);
+    console.log();
+
+    const summary = await runner.run();
+    process.exit(summary.failed > 0 ? 1 : 0);
+  },
+});
+
+// ---- Root command ----
+
+const root = defineCommand({
+  meta: {
+    name: 'ferridriver-test',
+    version: '0.2.0',
+    description: 'High-performance E2E, component, and BDD test runner',
+    about: 'Runs tests using the ferridriver Rust engine with Playwright-compatible API',
+    afterHelp:
+      'Examples:\n' +
+      '  ferridriver-test test                         # Run all E2E tests\n' +
+      '  ferridriver-test test --headed -j 4           # 4 workers, headed browser\n' +
+      '  ferridriver-test ct --framework react         # Component tests with React\n' +
+      '  ferridriver-test bdd --tags "@smoke"           # BDD tests filtered by tag\n' +
+      '  ferridriver-test bdd features/ --steps steps/  # Custom feature/step paths',
+  },
+  subCommands: {
+    test: testCommand,
+    ct: ctCommand,
+    bdd: bddCommand,
+  },
+});
+
+void runMain(withCompletions(root));

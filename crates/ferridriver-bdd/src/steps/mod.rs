@@ -13,6 +13,7 @@ pub mod javascript;
 pub mod keyboard;
 pub mod mouse;
 pub mod navigation;
+pub mod network;
 pub mod screenshot;
 pub mod storage;
 pub mod variable;

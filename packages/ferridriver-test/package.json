@@ -13,6 +13,7 @@
     "ferridriver-test": "src/cli.ts"
   },
   "dependencies": {
+    "clap-ts": "^0.2.1",
     "ferridriver": "workspace:*",
     "@ferridriver/ct-core": "workspace:*"
   },
