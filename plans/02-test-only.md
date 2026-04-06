@@ -1,4 +1,4 @@
-# Feature: test.only()
+# [DONE] Feature: test.only()
 
 ## Context
 During development, you need to focus on a single test without commenting out others. `test.only()` runs only marked tests and skips the rest. The counterpart `--forbid-only` prevents `.only()` from leaking into CI, which is a common source of silent test suite gaps.

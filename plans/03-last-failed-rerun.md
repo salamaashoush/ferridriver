@@ -1,4 +1,4 @@
-# Feature: --last-failed Rerun
+# [DONE] Feature: --last-failed Rerun
 
 ## Context
 After a test run with failures, developers want to re-run only the failed tests to iterate quickly on fixes. The `RerunReporter` already writes `@rerun.txt` with failed test locations. This feature reads that file and filters the test plan accordingly, closing the loop.

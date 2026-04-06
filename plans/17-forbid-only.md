@@ -1,4 +1,4 @@
-# Feature: --forbid-only
+# [DONE] Feature: --forbid-only
 
 ## Context
 `test.only()` is essential during development but catastrophic in CI: it silently reduces test coverage to a single test while reporting "all tests passed." `--forbid-only` makes the test run fail immediately if any `.only()` marker is found, ensuring full suite coverage in CI. This is a simple but critical CI safety net.
