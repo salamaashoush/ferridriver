@@ -1,4 +1,4 @@
-# Feature: test.info() Annotations + test.fixme(condition)
+# [DONE] Feature: test.info() Annotations + test.fixme(condition)
 
 ## Context
 Tests need metadata beyond pass/fail: links to issue trackers, environment-specific known failures, severity levels. `test.info().annotations` lets tests attach structured metadata that reporters can display. `test.fixme(condition, reason)` is a conditional skip that marks the test as a known issue, unlike `.skip()` which is silent.
