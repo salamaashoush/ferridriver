@@ -8,12 +8,22 @@ use ferridriver_bdd_macros::{step, when};
 
 #[when("I set cookie {string} to {string}")]
 async fn set_cookie(world: &mut BrowserWorld, name: String, value: String) {
+  // Extract domain from current page URL so CDP accepts the cookie.
+  let url = world.page().url().await.unwrap_or_default();
+  let domain = url
+    .split("://")
+    .nth(1)
+    .and_then(|s| s.split('/').next())
+    .and_then(|s| s.split(':').next())
+    .unwrap_or("")
+    .to_string();
+
   world
     .context()
     .add_cookies(vec![CookieData {
       name,
       value,
-      domain: String::new(),
+      domain,
       path: "/".to_string(),
       secure: false,
       http_only: false,
