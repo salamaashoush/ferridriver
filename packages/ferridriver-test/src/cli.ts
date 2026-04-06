@@ -156,9 +156,25 @@ function setupCtMount() {
 // ---- BDD runner ----
 
 async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
-  const patterns = stepsGlobs.length > 0
-    ? stepsGlobs
-    : ['steps/**/*.ts', 'steps/**/*.js', 'step_definitions/**/*.ts', 'step_definitions/**/*.js'];
+  const defaults = ['steps/**/*.ts', 'steps/**/*.js', 'step_definitions/**/*.ts', 'step_definitions/**/*.js'];
+  const raw = stepsGlobs.length > 0 ? stepsGlobs : defaults;
+
+  // Normalize: if a path is a directory, append **/*.{ts,js} glob
+  const { statSync } = await import('fs');
+  const patterns: string[] = [];
+  for (const p of raw) {
+    try {
+      if (statSync(resolve(p)).isDirectory()) {
+        patterns.push(`${p.replace(/\/+$/, '')}/**/*.ts`);
+        patterns.push(`${p.replace(/\/+$/, '')}/**/*.js`);
+      } else {
+        patterns.push(p);
+      }
+    } catch {
+      // Not a real path, treat as glob pattern
+      patterns.push(p);
+    }
+  }
 
   const found: string[] = [];
   for (const pattern of patterns) {
