@@ -78,6 +78,10 @@ const runnerArgs = defineArgs({
     type: 'boolean',
     description: 'List discovered tests without running them',
   },
+  'forbid-only': {
+    type: 'boolean',
+    description: 'Fail if test.only() is found (CI safety net)',
+  },
 });
 
 // ---- Path normalization: directories become globs ----
@@ -327,6 +331,7 @@ const testCommand = defineCommand({
     if (args.backend) config.backend = args.backend;
     if (args.reporter) config.reporter = [args.reporter];
     if (args['update-snapshots']) config.updateSnapshots = true;
+    if (args['forbid-only']) config.forbidOnly = true;
     await runTests(config, testFiles, false);
   },
 });
@@ -371,6 +376,7 @@ const ctCommand = defineCommand({
     if (args.backend) config.backend = args.backend;
     if (args.reporter) config.reporter = [args.reporter];
     if (args['update-snapshots']) config.updateSnapshots = true;
+    if (args['forbid-only']) config.forbidOnly = true;
     await runTests(config, testFiles, true);
   },
 });

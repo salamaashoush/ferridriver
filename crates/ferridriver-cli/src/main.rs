@@ -77,6 +77,7 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
     update_snapshots: false,
     profile: args.profile.clone(),
     forbid_only: args.forbid_only,
+    last_failed: false,
   };
 
   let mut config = ferridriver_test::config::resolve_config(&overrides)
@@ -128,6 +129,12 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
     .iter()
     .flat_map(scenario::expand_feature)
     .collect();
+
+  // @only filtering: if any scenario has @only, keep only those.
+  let has_only = all_scenarios.iter().any(|s| s.tags.iter().any(|t| t == "@only"));
+  if has_only {
+    all_scenarios.retain(|s| s.tags.iter().any(|t| t == "@only"));
+  }
 
   // Tag filtering.
   if let Some(tag_expr) = &config.tags {
@@ -288,6 +295,7 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
     update_snapshots: false,
     profile: args.profile,
     forbid_only: args.forbid_only,
+    last_failed: false,
   };
 
   let config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;

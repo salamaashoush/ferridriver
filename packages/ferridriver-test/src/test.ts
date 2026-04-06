@@ -137,6 +137,17 @@ describe.skip = (name: string, fn: () => void) => {
   describeStack.pop();
 };
 
+describe.only = (name: string, fn: () => void) => {
+  hasOnly = true;
+  describeStack.push(name);
+  const startIdx = registry.length;
+  fn();
+  for (let i = startIdx; i < registry.length; i++) {
+    registry[i].meta.modifier = 'only';
+  }
+  describeStack.pop();
+};
+
 // ── Internal state ──
 
 let currentFile = '';

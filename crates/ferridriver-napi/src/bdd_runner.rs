@@ -144,6 +144,8 @@ pub struct BddRunnerConfig {
   pub order: Option<String>,
   /// i18n language code for Gherkin keywords (e.g., "fr", "de", "ja").
   pub language: Option<String>,
+  /// Fail if @only tag is found (CI safety net).
+  pub forbid_only: Option<bool>,
 }
 
 /// A registered TS step definition.
@@ -239,6 +241,9 @@ impl BddRunner {
     }
     if let Some(ref lang) = cfg.language {
       tc.language = Some(lang.clone());
+    }
+    if let Some(fo) = cfg.forbid_only {
+      tc.forbid_only = fo;
     }
     if tc.features.is_empty() {
       tc.features = vec!["features/**/*.feature".to_string()];
