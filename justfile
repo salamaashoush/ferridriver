@@ -81,6 +81,15 @@ run *args:
 run-http port="8080":
   cargo run --bin ferridriver -- mcp --transport http --port {{port}}
 
+# Run BDD feature tests
+bdd *args:
+  cargo run --bin ferridriver -- bdd {{args}} -- tests/features/
+
+# Build + run BDD feature tests
+test-bdd *args:
+  cargo build --bin ferridriver
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo run --bin ferridriver -- bdd {{args}} -- tests/features/
+
 # Generate docs
 doc:
   cargo doc --workspace --no-deps --open

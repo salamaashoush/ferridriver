@@ -3,7 +3,6 @@
 //! Each submodule defines tools in a separate `#[tool_router]` impl block.
 //! Routers are combined via `+` in `McpServer::combined_router()`.
 
-pub mod bdd;
 pub mod content;
 pub mod cookies;
 pub mod emulation;
@@ -26,6 +25,5 @@ impl McpServer {
       + Self::storage_router()
       + Self::emulation_router()
       + Self::network_router()
-      + Self::bdd_router()
   }
 }

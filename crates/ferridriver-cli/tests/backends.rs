@@ -1,10 +1,22 @@
+#![allow(
+  clippy::too_many_lines,
+  clippy::doc_markdown,
+  clippy::uninlined_format_args,
+  clippy::single_char_pattern,
+  clippy::cast_precision_loss,
+  clippy::unwrap_used,
+  clippy::expect_used,
+  clippy::needless_pass_by_value,
+  clippy::redundant_closure_for_method_calls,
+  clippy::format_push_string,
+  clippy::semicolon_if_nothing_returned,
+)]
 //! Integration tests for ferridriver across all backends.
 //!
 //! Architecture: ONE browser per backend, ALL tests run sequentially on it.
 //! This avoids spawning 200+ browser processes (was ~3min, now ~10s).
 //! Each test navigates to a fresh page so state doesn't leak.
 
-use base64::Engine;
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, Command, Stdio};
@@ -418,19 +430,6 @@ fn test_drag(c: &mut McpClient) {
   assert!(t.contains("1"), "drag should trigger mousedown: {t}");
 }
 
-fn test_list_steps(c: &mut McpClient) {
-  let t = c.tool_text("list_steps", json!({}));
-  assert!(t.contains("navigate"), "list_steps: {t}");
-}
-
-fn test_run_scenario(c: &mut McpClient) {
-  c.nav("<h1>BDD</h1>");
-  let r = c.call_tool("run_scenario", json!({
-        "script": format!("Given I navigate to \"{}\"\nThen the page should contain text \"BDD\"", data_url("<h1>BDD</h1>"))
-    }));
-  ok(&r, "run_scenario");
-}
-
 fn test_scroll_to_element(c: &mut McpClient) {
   c.nav("<div style='height:3000px'></div><div id='bottom'>bottom</div>");
   c.call_tool("scroll", json!({"selector": "#bottom"}));
@@ -803,8 +802,6 @@ fn run_all_tests(backend: &str) {
   run!(test_network_requests);
   run!(test_hover);
   run!(test_drag);
-  run!(test_list_steps);
-  run!(test_run_scenario);
   run!(test_scroll_to_element);
   run!(test_double_click);
   run!(test_fill_form);

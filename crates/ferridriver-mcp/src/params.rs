@@ -275,18 +275,6 @@ pub struct FillFormParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct RunScenarioParams {
-  #[schemars(description = "Gherkin scenario script (Given/When/Then steps).")]
-  pub script: String,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
-  #[schemars(description = "Stop on first failure. Default: true.")]
-  pub stop_on_failure: Option<bool>,
-  #[schemars(description = "Screenshot on failure. Default: false.")]
-  pub screenshot_on_failure: Option<bool>,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SearchPageParams {
   #[schemars(description = "Text or regex pattern to search for in page content.")]
   pub pattern: String,
