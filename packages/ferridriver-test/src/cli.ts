@@ -82,18 +82,19 @@ const runnerArgs = defineArgs({
 
 // ---- File discovery ----
 
+async function collectGlob(pattern: string, cwd: string): Promise<string[]> {
+  const results: string[] = [];
+  for await (const file of scanGlob(pattern, cwd)) {
+    const abs = resolve(file);
+    if (!abs.includes('node_modules')) results.push(abs);
+  }
+  return results;
+}
+
 async function discoverFiles(files: string[], patterns: string[]): Promise<string[]> {
   if (files.length > 0) return files.map((f) => resolve(f));
-
-  const found: string[] = [];
-  for (const pattern of patterns) {
-    for await (const file of scanGlob(pattern, process.cwd())) {
-      const abs = resolve(file);
-      if (!abs.includes('node_modules')) found.push(abs);
-    }
-  }
-  found.sort();
-  return found;
+  const results = await Promise.all(patterns.map((p) => collectGlob(p, process.cwd())));
+  return results.flat().sort();
 }
 
 // ---- CT: resolve framework adapter ----
@@ -173,30 +174,18 @@ async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
   const raw = stepsGlobs.length > 0 ? stepsGlobs : defaults;
 
   // Normalize: if a path is a directory, append **/*.{ts,js} glob
-  const patterns: string[] = [];
-  for (const p of raw) {
+  const patterns = (await Promise.all(raw.map(async (p) => {
     try {
       if ((await stat(resolve(p))).isDirectory()) {
-        patterns.push(`${p.replace(/\/+$/, '')}/**/*.ts`);
-        patterns.push(`${p.replace(/\/+$/, '')}/**/*.js`);
-      } else {
-        patterns.push(p);
+        const base = p.replace(/\/+$/, '');
+        return [`${base}/**/*.ts`, `${base}/**/*.js`];
       }
-    } catch {
-      // Not a real path, treat as glob pattern
-      patterns.push(p);
-    }
-  }
+    } catch { /* not a real path, treat as glob */ }
+    return [p];
+  }))).flat();
 
-  const found: string[] = [];
-  for (const pattern of patterns) {
-    for await (const file of scanGlob(pattern, process.cwd())) {
-      const abs = resolve(file);
-      if (!abs.includes('node_modules')) found.push(abs);
-    }
-  }
-  found.sort();
-  return found;
+  const results = await Promise.all(patterns.map((p) => collectGlob(p, process.cwd())));
+  return results.flat().sort();
 }
 
 // ---- E2E test runner (shared by default and ct modes) ----
