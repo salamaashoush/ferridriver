@@ -274,6 +274,10 @@ fn translate_scenario(
     annotations.push(TestAnnotation::Slow);
   }
 
+  if scenario.tags.iter().any(|t| t == "@only") {
+    annotations.push(TestAnnotation::Only);
+  }
+
   TestCase {
     id: TestId {
       file: scenario.feature_path.display().to_string(),

@@ -57,6 +57,14 @@ impl TestRunner {
       crate::discovery::filter_by_tag(&mut plan, tag);
     }
 
+    // ── Forbid-only check ──
+    if self.config.forbid_only || self.overrides.forbid_only {
+      if let Err(e) = crate::discovery::check_forbid_only(&plan) {
+        eprint!("{e}");
+        return 1;
+      }
+    }
+
     let total_tests = plan.total_tests;
     if total_tests == 0 {
       tracing::info!("no tests found");

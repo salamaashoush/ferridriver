@@ -42,6 +42,7 @@ pub struct TestRunnerConfig {
   pub test_match: Option<Vec<String>>,
   pub viewport_width: Option<i32>,
   pub viewport_height: Option<i32>,
+  pub forbid_only: Option<bool>,
 }
 
 /// Metadata for a registered test.
@@ -167,6 +168,7 @@ impl TestRunner {
     if let Some(h) = cfg.viewport_height {
       if let Some(ref mut vp) = tc.browser.viewport { vp.height = h as i64; }
     }
+    if let Some(fo) = cfg.forbid_only { tc.forbid_only = fo; }
     if tc.workers == 0 {
       let cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
       tc.workers = (cpus / 2).max(1);
@@ -251,6 +253,23 @@ impl TestRunner {
         total: 0, passed: 0, failed: 0, skipped: 0, flaky: 0,
         duration_ms: 0.0, results: Vec::new(),
       });
+    }
+
+    // Forbid-only check: fail if any test has modifier "only" and forbid_only is set.
+    if self.config.forbid_only {
+      let only_tests: Vec<&str> = tests
+        .iter()
+        .filter(|t| t.meta.modifier == "only")
+        .map(|t| t.meta.title.as_str())
+        .collect();
+      if !only_tests.is_empty() {
+        let msg = format!(
+          "Error: test.only() found in {} test(s):\n{}",
+          only_tests.len(),
+          only_tests.iter().map(|t| format!("  {t}")).collect::<Vec<_>>().join("\n")
+        );
+        return Err(napi::Error::from_reason(msg));
+      }
     }
 
     let start = Instant::now();

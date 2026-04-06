@@ -32,6 +32,7 @@ struct FerritestArgs {
   skip: bool,
   slow: bool,
   fixme: bool,
+  only: bool,
 }
 
 impl Parse for FerritestArgs {
@@ -43,6 +44,7 @@ impl Parse for FerritestArgs {
       skip: false,
       slow: false,
       fixme: false,
+      only: false,
     };
 
     let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -81,6 +83,7 @@ impl Parse for FerritestArgs {
             "skip" => args.skip = true,
             "slow" => args.slow = true,
             "fixme" => args.fixme = true,
+            "only" => args.only = true,
             _ => return Err(syn::Error::new_spanned(p, format!("unknown ferritest flag: {ident}"))),
           }
         }
@@ -178,6 +181,9 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   }
   if args.fixme {
     annotations.push(quote! { ferridriver_test::model::TestAnnotation::Fixme { reason: None } });
+  }
+  if args.only {
+    annotations.push(quote! { ferridriver_test::model::TestAnnotation::Only });
   }
   for tag in &args.tags {
     annotations.push(quote! { ferridriver_test::model::TestAnnotation::Tag(#tag.to_string()) });

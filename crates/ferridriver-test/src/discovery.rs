@@ -6,6 +6,8 @@ use std::sync::Arc;
 
 use crate::config::TestConfig;
 use crate::fixture::FixturePool;
+use std::fmt;
+
 use crate::model::{
   ExpectedStatus, Hooks, TestAnnotation, TestCase, TestFailure, TestId, TestPlan, TestSuite,
 };
@@ -144,6 +146,43 @@ pub fn filter_by_grep(plan: &mut TestPlan, pattern: &str, invert: bool) {
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
 }
 
+/// Error returned when `--forbid-only` is set and `.only()` markers are found.
+pub struct ForbidOnlyError {
+  pub tests: Vec<String>,
+}
+
+impl fmt::Display for ForbidOnlyError {
+  fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+    writeln!(f, "Error: test.only() found in {} test(s):", self.tests.len())?;
+    for name in &self.tests {
+      writeln!(f, "  {name}")?;
+    }
+    Ok(())
+  }
+}
+
+/// Check that no tests or suites have `Only` annotations.
+/// Returns `Err` listing all offending tests if any are found.
+pub fn check_forbid_only(plan: &TestPlan) -> Result<(), ForbidOnlyError> {
+  let mut only_tests: Vec<String> = Vec::new();
+
+  for suite in &plan.suites {
+    let suite_is_only = suite.annotations.iter().any(|a| matches!(a, TestAnnotation::Only));
+    for test in &suite.tests {
+      let test_is_only = test.annotations.iter().any(|a| matches!(a, TestAnnotation::Only));
+      if suite_is_only || test_is_only {
+        only_tests.push(test.id.full_name());
+      }
+    }
+  }
+
+  if only_tests.is_empty() {
+    Ok(())
+  } else {
+    Err(ForbidOnlyError { tests: only_tests })
+  }
+}
+
 /// Filter a test plan by tag.
 pub fn filter_by_tag(plan: &mut TestPlan, tag: &str) {
   for suite in &mut plan.suites {
@@ -156,4 +195,88 @@ pub fn filter_by_tag(plan: &mut TestPlan, tag: &str) {
   }
   plan.suites.retain(|s| !s.tests.is_empty());
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::model::{ExpectedStatus, Hooks, TestCase, TestPlan, TestSuite};
+
+  fn dummy_test(name: &str, annotations: Vec<TestAnnotation>) -> TestCase {
+    TestCase {
+      id: TestId {
+        file: "test.rs".into(),
+        suite: Some("suite".into()),
+        name: name.into(),
+        line: None,
+      },
+      test_fn: Arc::new(|_| Box::pin(async { Ok(()) })),
+      fixture_requests: vec![],
+      annotations,
+      timeout: None,
+      retries: None,
+      expected_status: ExpectedStatus::Pass,
+    }
+  }
+
+  fn make_plan(tests: Vec<TestCase>, suite_annotations: Vec<TestAnnotation>) -> TestPlan {
+    let total = tests.len();
+    TestPlan {
+      suites: vec![TestSuite {
+        name: "suite".into(),
+        file: "test.rs".into(),
+        tests,
+        hooks: Hooks::default(),
+        annotations: suite_annotations,
+        mode: crate::model::SuiteMode::default(),
+      }],
+      total_tests: total,
+      shard: None,
+    }
+  }
+
+  #[test]
+  fn forbid_only_no_only_markers() {
+    let plan = make_plan(
+      vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])],
+      vec![],
+    );
+    assert!(check_forbid_only(&plan).is_ok());
+  }
+
+  #[test]
+  fn forbid_only_detects_test_level_only() {
+    let plan = make_plan(
+      vec![
+        dummy_test("normal", vec![]),
+        dummy_test("focused", vec![TestAnnotation::Only]),
+      ],
+      vec![],
+    );
+    let err = check_forbid_only(&plan).unwrap_err();
+    assert_eq!(err.tests.len(), 1);
+    assert!(err.tests[0].contains("focused"));
+  }
+
+  #[test]
+  fn forbid_only_detects_suite_level_only() {
+    let plan = make_plan(
+      vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])],
+      vec![TestAnnotation::Only],
+    );
+    let err = check_forbid_only(&plan).unwrap_err();
+    assert_eq!(err.tests.len(), 2);
+  }
+
+  #[test]
+  fn forbid_only_error_message_format() {
+    let plan = make_plan(
+      vec![dummy_test("focused", vec![TestAnnotation::Only])],
+      vec![],
+    );
+    let err = check_forbid_only(&plan).unwrap_err();
+    let msg = err.to_string();
+    assert!(msg.contains("test.only() found in 1 test(s)"));
+    assert!(msg.contains("focused"));
+  }
 }

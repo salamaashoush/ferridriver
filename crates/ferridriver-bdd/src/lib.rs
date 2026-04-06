@@ -261,6 +261,7 @@ fn parse_bdd_cli_args() -> ferridriver_test::config::CliOverrides {
         overrides.tag = args.get(i).cloned();
       }
       "--list" => overrides.list_only = true,
+      "--forbid-only" => overrides.forbid_only = true,
       "--profile" => {
         i += 1;
         overrides.profile = args.get(i).cloned();

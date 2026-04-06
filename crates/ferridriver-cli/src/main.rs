@@ -76,6 +76,7 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
     list_only: args.list,
     update_snapshots: false,
     profile: args.profile.clone(),
+    forbid_only: args.forbid_only,
   };
 
   let mut config = ferridriver_test::config::resolve_config(&overrides)
@@ -286,6 +287,7 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
     list_only: args.list,
     update_snapshots: false,
     profile: args.profile,
+    forbid_only: args.forbid_only,
   };
 
   let config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;

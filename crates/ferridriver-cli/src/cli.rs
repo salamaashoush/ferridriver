@@ -98,6 +98,10 @@ pub struct TestArgs {
   /// Configuration profile to apply
   #[arg(long)]
   pub profile: Option<String>,
+
+  /// Fail if test.only() is found (CI safety net)
+  #[arg(long)]
+  pub forbid_only: bool,
 }
 
 /// BDD runner options.
@@ -174,6 +178,10 @@ pub struct BddArgs {
   /// Configuration profile to apply
   #[arg(long)]
   pub profile: Option<String>,
+
+  /// Fail if @only tag is found (CI safety net)
+  #[arg(long)]
+  pub forbid_only: bool,
 }
 
 /// Browser backend and connection options.

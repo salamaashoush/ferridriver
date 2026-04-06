@@ -485,6 +485,7 @@ pub enum TestAnnotation {
   Slow,
   Fixme { reason: Option<String> },
   Fail,
+  Only,
   Tag(String),
 }
 

@@ -175,6 +175,7 @@ pub struct CliOverrides {
   pub list_only: bool,
   pub update_snapshots: bool,
   pub profile: Option<String>,
+  pub forbid_only: bool,
 }
 
 #[derive(Debug, Clone)]
