@@ -48,6 +48,8 @@ pub struct TestRunnerConfig {
   pub verbose: Option<i32>,
   /// Debug categories (e.g. "cdp", "steps", "cdp,action"). Same as FERRIDRIVER_DEBUG env var.
   pub debug: Option<String>,
+  /// Grep pattern to filter tests by name.
+  pub grep: Option<String>,
 }
 
 /// Metadata for a registered test.
@@ -140,6 +142,7 @@ struct RegisteredHook {
 pub struct TestRunner {
   config: ferridriver_test::TestConfig,
   last_failed: bool,
+  grep: Option<String>,
   tests: Mutex<Vec<RegisteredTest>>,
   suites: Mutex<Vec<RegisteredSuite>>,
   hooks: Mutex<Vec<RegisteredHook>>,
@@ -195,6 +198,7 @@ impl TestRunner {
     Ok(Self {
       config: tc,
       last_failed: cfg.last_failed.unwrap_or(false),
+      grep: cfg.grep.clone(),
       tests: Mutex::new(Vec::new()),
       suites: Mutex::new(Vec::new()),
       hooks: Mutex::new(Vec::new()),
@@ -341,6 +345,7 @@ impl TestRunner {
     // Build CLI overrides.
     let overrides = ferridriver_test::config::CliOverrides {
       last_failed: self.last_failed,
+      grep: self.grep.clone(),
       ..Default::default()
     };
 

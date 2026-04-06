@@ -283,16 +283,12 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
     process.exit(0);
   }
 
-  // Register all tests — the core Rust runner handles only/skip/fixme filtering.
-  const filtered = tests;
-  const grepped = config.grep
-    ? filtered.filter((t) => new RegExp(config.grep).test(t.meta.title))
-    : filtered;
-
-  for (const t of grepped) runner.registerTest(t.meta, t.body);
+  // Register all tests — core Rust runner handles all filtering
+  // (only, skip, fixme, grep, tag, shard, last-failed).
+  for (const t of tests) runner.registerTest(t.meta, t.body);
 
   const mode = ctMode ? 'component' : 'E2E';
-  console.log(`\n  Running ${grepped.length} ${mode} test(s) with ${workerCount} worker(s)\n`);
+  console.log(`\n  Running ${tests.length} ${mode} test(s) with ${workerCount} worker(s)\n`);
 
   const summary = await runner.run();
 
