@@ -90,6 +90,7 @@
 pub mod config;
 pub mod ct;
 pub mod discovery;
+pub mod logging;
 pub mod dispatcher;
 pub mod expect;
 pub mod fixture;
@@ -148,6 +149,8 @@ macro_rules! main {
 /// Entry point called by `main!()`. Parses CLI args, loads config,
 /// discovers tests, and runs them.
 pub fn run_harness() {
+  logging::init_from_env();
+
   let rt = tokio::runtime::Builder::new_multi_thread()
     .enable_all()
     .build()

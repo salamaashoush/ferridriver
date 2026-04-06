@@ -146,6 +146,7 @@ impl TestRunner {
   /// Create a new test runner.
   #[napi(factory)]
   pub async fn create(config: Option<TestRunnerConfig>) -> Result<Self> {
+    ferridriver_test::logging::init_from_env();
     let cfg = config.unwrap_or_default();
     let mut tc = ferridriver_test::TestConfig::default();
 

@@ -96,7 +96,7 @@ impl Worker {
       if state.before_all_ran {
         for hook in &state.hooks.after_all {
           if let Err(e) = hook(custom_fixture_pool.clone()).await {
-            tracing::warn!("afterAll error: {e}");
+            tracing::warn!(target: "ferridriver::worker", "afterAll error: {e}");
           }
         }
       }
@@ -191,6 +191,15 @@ impl Worker {
     let max_retries = test.retries.unwrap_or(self.config.retries);
     let max_attempts = max_retries + 1;
     let suite_key = assignment.suite_key.clone();
+
+    tracing::debug!(
+      target: "ferridriver::worker",
+      worker = self.id,
+      test = test_id.full_name(),
+      attempt,
+      max_attempts,
+      "dispatching test",
+    );
     let hooks = Arc::clone(&assignment.hooks);
 
     // ── beforeAll (once per suite on this worker) ──
@@ -205,7 +214,7 @@ impl Worker {
     if !suite_state.before_all_ran && !hooks.before_all.is_empty() {
       for hook in &hooks.before_all {
         if let Err(e) = hook(custom_pool.clone()).await {
-          tracing::error!("beforeAll failed for {suite_key}: {e}");
+          tracing::error!(target: "ferridriver::worker", "beforeAll failed for {suite_key}: {e}");
           suite_state.before_all_failed = true;
           break;
         }
@@ -366,7 +375,7 @@ impl Worker {
         // ── afterEach hooks (ALWAYS run, even on failure) ──
         for hook in &hooks.after_each {
           if let Err(e) = hook(test_pool.clone(), Arc::clone(&test_info)).await {
-            tracing::warn!("afterEach error: {e}");
+            tracing::warn!(target: "ferridriver::worker", "afterEach error: {e}");
           }
         }
 

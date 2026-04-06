@@ -97,6 +97,7 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<(), String> {
+    tracing::debug!(target: "ferridriver::action", action = "goto", url, "page.goto");
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout);
     self.inner.goto(url, lifecycle, timeout).await
   }
@@ -263,6 +264,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or the click fails.
   pub async fn click(&self, selector: &str) -> Result<(), String> {
+    tracing::debug!(target: "ferridriver::action", action = "click", selector, "page.click");
     self.locator(selector).click().await
   }
 
@@ -272,6 +274,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or is not fillable.
   pub async fn fill(&self, selector: &str, value: &str) -> Result<(), String> {
+    tracing::debug!(target: "ferridriver::action", action = "fill", selector, "page.fill");
     self.locator(selector).fill(value).await
   }
 

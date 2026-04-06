@@ -11,6 +11,15 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::backend::json_scan;
 
+/// Truncate a string for logging, appending "..." if truncated.
+fn truncate_for_log(s: &str, max: usize) -> String {
+  if s.len() <= max {
+    s.to_string()
+  } else {
+    format!("{}...", &s[..max])
+  }
+}
+
 /// Result of a single CDP command: either the response value or an error string.
 type CdpResult = Result<serde_json::Value, String>;
 
@@ -125,6 +134,14 @@ impl CdpDispatcher {
     };
     data.push(0);
 
+    tracing::debug!(
+      target: "ferridriver::cdp::send",
+      id,
+      method,
+      params = truncate_for_log(&params_str, 200),
+      "CDP >>",
+    );
+
     let (tx, rx) = oneshot::channel();
     lock_or_recover(&self.pending).insert(id, tx);
     Ok((data, rx))
@@ -151,6 +168,13 @@ impl CdpDispatcher {
         let msg_str = std::str::from_utf8(msg_bytes).unwrap_or("CDP error");
         Err(msg_str.to_string())
       };
+      tracing::debug!(
+        target: "ferridriver::cdp::recv",
+        id,
+        ok = payload.is_ok(),
+        payload = truncate_for_log(&format!("{payload:?}"), 200),
+        "CDP << response",
+      );
       if let Some(sender) = lock_or_recover(&self.pending).remove(&id) {
         let _ = sender.send(payload);
       }
@@ -205,6 +229,12 @@ impl CdpDispatcher {
       }
 
       self.dispatch_lifecycle(raw, method_str, &key);
+
+      tracing::trace!(
+        target: "ferridriver::cdp::recv",
+        method = method_str,
+        "CDP << event",
+      );
 
       // Broadcast (full parse for console/network listeners)
       if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(raw) {

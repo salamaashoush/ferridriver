@@ -12,17 +12,13 @@
 mod cli;
 
 use clap::Parser;
-use tracing_subscriber::{self, EnvFilter};
 
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
-  tracing_subscriber::fmt()
-    .with_env_filter(EnvFilter::from_default_env().add_directive(tracing::Level::WARN.into()))
-    .with_writer(std::io::stderr)
-    .with_ansi(false)
-    .init();
-
   let cli = cli::Cli::parse();
+
+  // Centralized tracing setup — respects RUST_LOG, FERRIDRIVER_DEBUG, and --verbose.
+  ferridriver_test::logging::init(cli.verbose);
 
   match cli.command {
     cli::Command::Mcp { browser, transport } => {
@@ -314,3 +310,4 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
 
   std::process::exit(exit_code);
 }
+

@@ -161,6 +161,8 @@ macro_rules! bdd_main {
 pub fn run_bdd_harness() {
   use std::sync::Arc;
 
+  ferridriver_test::logging::init_from_env();
+
   let rt = tokio::runtime::Builder::new_multi_thread()
     .enable_all()
     .build()

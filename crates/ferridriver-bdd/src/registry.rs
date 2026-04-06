@@ -216,19 +216,26 @@ impl StepRegistry {
     }
 
     match matches.len() {
-      0 => Err(MatchError::Undefined {
-        text: text.to_string(),
-        suggestions: self.suggest(text),
-      }),
+      0 => {
+        tracing::debug!(target: "ferridriver::bdd::step", text, "step UNDEFINED — no match");
+        Err(MatchError::Undefined {
+          text: text.to_string(),
+          suggestions: self.suggest(text),
+        })
+      }
       1 => {
         let (def, params) = matches.into_iter().next().expect("checked len == 1");
+        tracing::debug!(target: "ferridriver::bdd::step", text, expression = def.expression, "step matched");
         Ok(StepMatch { def, params })
       }
-      _ => Err(MatchError::Ambiguous {
-        text: text.to_string(),
-        matches: matches.iter().map(|(def, _)| def.location.clone()).collect(),
-        expressions: matches.iter().map(|(def, _)| def.expression.clone()).collect(),
-      }),
+      _ => {
+        tracing::warn!(target: "ferridriver::bdd::step", text, count = matches.len(), "step AMBIGUOUS");
+        Err(MatchError::Ambiguous {
+          text: text.to_string(),
+          matches: matches.iter().map(|(def, _)| def.location.clone()).collect(),
+          expressions: matches.iter().map(|(def, _)| def.expression.clone()).collect(),
+        })
+      }
     }
   }
 

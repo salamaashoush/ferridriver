@@ -86,6 +86,11 @@ const runnerArgs = defineArgs({
     type: 'boolean',
     description: 'Re-run only previously failed tests (from @rerun.txt)',
   },
+  verbose: {
+    type: 'boolean',
+    short: 'v',
+    description: 'Verbose output (debug-level logging)',
+  },
 });
 
 // ---- Path normalization: directories become globs ----
@@ -337,6 +342,7 @@ const testCommand = defineCommand({
     if (args['update-snapshots']) config.updateSnapshots = true;
     if (args['forbid-only']) config.forbidOnly = true;
     if (args['last-failed']) config.lastFailed = true;
+    if (args.verbose && !process.env.FERRIDRIVER_DEBUG) process.env.FERRIDRIVER_DEBUG = '*';
     await runTests(config, testFiles, false);
   },
 });
@@ -383,6 +389,7 @@ const ctCommand = defineCommand({
     if (args['update-snapshots']) config.updateSnapshots = true;
     if (args['forbid-only']) config.forbidOnly = true;
     if (args['last-failed']) config.lastFailed = true;
+    if (args.verbose && !process.env.FERRIDRIVER_DEBUG) process.env.FERRIDRIVER_DEBUG = '*';
     await runTests(config, testFiles, true);
   },
 });

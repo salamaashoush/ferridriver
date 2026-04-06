@@ -75,8 +75,14 @@ impl TestRunner {
     }
 
     let total_tests = plan.total_tests;
+    tracing::debug!(
+      target: "ferridriver::runner",
+      total_tests,
+      suites = plan.suites.len(),
+      "test plan after filtering",
+    );
     if total_tests == 0 {
-      tracing::info!("no tests found");
+      tracing::info!(target: "ferridriver::runner", "no tests found");
       return 0;
     }
 
@@ -96,7 +102,7 @@ impl TestRunner {
     {
       let fixture_defs = builtin_fixtures(&self.config.browser);
       if let Err(e) = validate_dag(&fixture_defs) {
-        tracing::error!("fixture DAG error: {e}");
+        tracing::error!(target: "ferridriver::fixture", "fixture DAG error: {e}");
         return 1;
       }
     }
@@ -129,7 +135,7 @@ impl TestRunner {
       let global_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Global);
       for setup_fn in &self.config.global_setup_fns {
         if let Err(e) = setup_fn(global_pool.clone()).await {
-          tracing::error!("global setup failed: {e}");
+          tracing::error!(target: "ferridriver::runner", "global setup failed: {e}");
           event_bus
             .emit(ReporterEvent::RunFinished {
               total: total_tests,
@@ -242,7 +248,7 @@ impl TestRunner {
             worker.run(Arc::new(browser), custom_pool, rx, tx).await;
           }
           Err(e) => {
-            tracing::error!("worker {worker_id}: browser launch failed: {e}");
+            tracing::error!(target: "ferridriver::worker", "worker {worker_id}: browser launch failed: {e}");
           }
         }
       });
@@ -262,6 +268,12 @@ impl TestRunner {
         .push(result.outcome.status.clone());
 
       if result.should_retry {
+        tracing::debug!(
+          target: "ferridriver::runner",
+          test = result.test_id.full_name(),
+          attempt = result.outcome.attempt,
+          "retrying failed test",
+        );
         dispatcher
           .retry_shared(
             &result.test_fn,
@@ -290,7 +302,7 @@ impl TestRunner {
       let global_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Global);
       for teardown_fn in &self.config.global_teardown_fns {
         if let Err(e) = teardown_fn(global_pool.clone()).await {
-          tracing::error!("global teardown error: {e}");
+          tracing::error!(target: "ferridriver::runner", "global teardown error: {e}");
         }
       }
     }

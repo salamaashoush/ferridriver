@@ -160,6 +160,7 @@ impl FixturePool {
       let teardown = def.teardown.as_ref().map(Arc::clone);
       let timeout = def.timeout;
 
+      tracing::debug!(target: "ferridriver::fixture", fixture = name, "setting up fixture");
       let arc_val = tokio::time::timeout(timeout, setup(pool.clone()))
         .await
         .map_err(|_| format!("fixture '{name}' setup timed out after {timeout:?}"))?
@@ -203,7 +204,7 @@ impl FixturePool {
         values.remove(&name)
       };
       if let Some(val) = value {
-        tracing::debug!("tearing down fixture: {name}");
+        tracing::debug!(target: "ferridriver::fixture", "tearing down fixture: {name}");
         teardown_fn(val).await;
       }
     }

@@ -12,6 +12,10 @@ use ferridriver::state::ConnectMode;
   propagate_version = true
 )]
 pub struct Cli {
+  /// Verbose output (-v = debug, -vv = trace including CDP protocol)
+  #[arg(short, long, action = clap::ArgAction::Count, global = true)]
+  pub verbose: u8,
+
   #[command(subcommand)]
   pub command: Command,
 }

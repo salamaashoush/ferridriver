@@ -197,6 +197,7 @@ impl BddRunner {
   /// Create a new BDD runner.
   #[napi(factory)]
   pub fn create(config: Option<BddRunnerConfig>) -> Result<Self> {
+    ferridriver_test::logging::init_from_env();
     let cfg = config.unwrap_or_default();
     let mut tc = ferridriver_test::TestConfig::default();
 
