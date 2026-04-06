@@ -20,7 +20,7 @@ impl McpServer {
     let page = Box::pin(self.page(s)).await?;
     match p.action.as_str() {
       "get" => {
-        let cookies = page.cookies().await.map_err(Self::err)?;
+        let cookies = page.inner().get_cookies().await.map_err(Self::err)?;
         let list: Vec<serde_json::Value> = cookies.iter().map(|c| {
                     serde_json::json!({"name": c.name, "value": c.value, "domain": c.domain, "path": c.path, "secure": c.secure, "httpOnly": c.http_only})
                 }).collect();
@@ -44,7 +44,7 @@ impl McpServer {
           expires: p.expires,
           same_site: None,
         };
-        page.set_cookie(cookie).await.map_err(Self::err)?;
+        page.inner().set_cookie(cookie).await.map_err(Self::err)?;
         Ok(CallToolResult::success(vec![Content::text(format!(
           "Cookie '{name}' set."
         ))]))
@@ -54,13 +54,22 @@ impl McpServer {
           .name
           .as_deref()
           .ok_or_else(|| Self::err("'name' required for delete"))?;
-        page.delete_cookie(name, p.domain.as_deref()).await.map_err(Self::err)?;
+        // Delete by getting all cookies, clearing, and re-setting non-matching ones
+        let cookies = page.inner().get_cookies().await.map_err(Self::err)?;
+        page.inner().clear_cookies().await.map_err(Self::err)?;
+        for c in cookies {
+          let name_matches = c.name == name;
+          let domain_matches = p.domain.as_deref().is_none_or(|d| c.domain == d);
+          if !(name_matches && domain_matches) {
+            page.inner().set_cookie(c).await.map_err(Self::err)?;
+          }
+        }
         Ok(CallToolResult::success(vec![Content::text(format!(
           "Cookie '{name}' deleted."
         ))]))
       },
       "clear" => {
-        page.clear_cookies().await.map_err(Self::err)?;
+        page.inner().clear_cookies().await.map_err(Self::err)?;
         Ok(CallToolResult::success(vec![Content::text("Cookies cleared.")]))
       },
       other => Err(Self::err(format!(

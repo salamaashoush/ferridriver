@@ -599,7 +599,7 @@ impl ServerHandler for McpServer {
         ]))
       },
       "cookies" => {
-        let cookies = page.cookies().await.map_err(Self::err)?;
+        let cookies = page.inner().get_cookies().await.map_err(Self::err)?;
         let list: Vec<serde_json::Value> = cookies
           .iter()
           .map(|c| serde_json::json!({"name": c.name, "value": c.value, "domain": c.domain}))

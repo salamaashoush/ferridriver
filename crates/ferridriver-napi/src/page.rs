@@ -2,7 +2,7 @@
 
 use crate::locator::Locator;
 use crate::types::{
-  CookieData, GotoOptions, MetricData, ResponseData, RoleOptions, ScreenshotOptions, TextOptions, ViewportConfig,
+  GotoOptions, MetricData, ResponseData, RoleOptions, ScreenshotOptions, TextOptions, ViewportConfig,
   WaitOptions,
 };
 use napi::Result;
@@ -658,37 +658,6 @@ impl Page {
       .set_javascript_enabled(enabled)
       .await
       .map_err(napi::Error::from_reason)
-  }
-
-  // ── Cookies ─────────────────────────────────────────────────────────────
-
-  #[napi]
-  pub async fn cookies(&self) -> Result<Vec<CookieData>> {
-    let cookies = self.inner.cookies().await.map_err(napi::Error::from_reason)?;
-    Ok(cookies.iter().map(CookieData::from).collect())
-  }
-
-  #[napi]
-  pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
-    self
-      .inner
-      .set_cookie(ferridriver::backend::CookieData::from(&cookie))
-      .await
-      .map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn delete_cookie(&self, name: String, domain: Option<String>) -> Result<()> {
-    self
-      .inner
-      .delete_cookie(&name, domain.as_deref())
-      .await
-      .map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn clear_cookies(&self) -> Result<()> {
-    self.inner.clear_cookies().await.map_err(napi::Error::from_reason)
   }
 
   // ── Focus / dispatch ────────────────────────────────────────────────────

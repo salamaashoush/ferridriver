@@ -17,7 +17,7 @@ step!(SetCookieDomain {
         let name = q(&caps[1]);
         let value = q(&caps[2]);
         let domain = q(&caps[3]);
-        page.set_cookie(CookieData {
+        page.inner().set_cookie(CookieData {
             name,
             value,
             domain,
@@ -39,7 +39,7 @@ step!(SetCookie {
     execute(page, caps, _table, _vars) {
         let name = q(&caps[1]);
         let value = q(&caps[2]);
-        page.set_cookie(CookieData {
+        page.inner().set_cookie(CookieData {
             name,
             value,
             domain: String::new(),
@@ -60,7 +60,13 @@ step!(DeleteCookie {
     example: "When I delete cookie \"session\"",
     execute(page, caps, _table, _vars) {
         let name = q(&caps[1]);
-        page.delete_cookie(&name, None).await?;
+        let cookies = page.inner().get_cookies().await?;
+        page.inner().clear_cookies().await?;
+        for c in cookies {
+            if c.name != name {
+                page.inner().set_cookie(c).await?;
+            }
+        }
         Ok(None)
     }
 });
@@ -71,7 +77,7 @@ step!(ClearCookies {
     description: "Clear all cookies",
     example: "When I clear all cookies",
     execute(page, _caps, _table, _vars) {
-        page.clear_cookies().await?;
+        page.inner().clear_cookies().await?;
         Ok(None)
     }
 });

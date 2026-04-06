@@ -897,84 +897,6 @@ impl Page {
     self.inner.metrics().await
   }
 
-  // ── Cookie delete ───────────────────────────────────────────────────────
-
-  /// Delete cookie(s) by name and optional domain.
-  ///
-  /// Uses the Playwright approach: get all cookies, clear all, re-add
-  /// non-matching ones. This avoids CDP `Network.deleteCookies` edge cases
-  /// with exact domain matching and secure cookie handling.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if cookies cannot be read, cleared, or re-set.
-  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
-    let cookies = self.inner.get_cookies().await?;
-    self.inner.clear_cookies().await?;
-    for cookie in cookies {
-      let name_matches = cookie.name == name;
-      let domain_matches = domain.is_none_or(|d| cookie.domain == d);
-      if !(name_matches && domain_matches) {
-        self.inner.set_cookie(cookie).await?;
-      }
-    }
-    Ok(())
-  }
-
-  // ── Cookies ─────────────────────────────────────────────────────────────
-
-  /// Get all cookies for the current page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if cookies cannot be retrieved.
-  pub async fn cookies(&self) -> Result<Vec<CookieData>, String> {
-    self.inner.get_cookies().await
-  }
-
-  /// Set a cookie.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the cookie cannot be set.
-  pub async fn set_cookie(&self, cookie: CookieData) -> Result<(), String> {
-    self.inner.set_cookie(cookie).await
-  }
-
-  /// Add multiple cookies at once (matches Playwright's `context.addCookies()`).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if any cookie cannot be set.
-  pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<(), String> {
-    for cookie in cookies {
-      self.inner.set_cookie(cookie).await?;
-    }
-    Ok(())
-  }
-
-  /// Clear all cookies.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if cookies cannot be cleared.
-  pub async fn clear_cookies(&self) -> Result<(), String> {
-    self.inner.clear_cookies().await
-  }
-
-  /// Clear cookies matching the given filters (matches Playwright's `context.clearCookies(options?)`).
-  /// If no filters are specified, all cookies are cleared.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if cookies cannot be cleared.
-  pub async fn clear_cookies_filtered(
-    &self,
-    options: &crate::backend::ClearCookieOptions,
-  ) -> Result<(), String> {
-    self.inner.clear_cookies_filtered(options).await
-  }
-
   // ── Storage State ──────────────────────────────────────────────────────
 
   /// Serialize the current page's storage state (cookies + localStorage) to JSON.
@@ -984,7 +906,7 @@ impl Page {
   ///
   /// Returns an error if cookies or localStorage cannot be retrieved.
   pub async fn storage_state(&self) -> Result<serde_json::Value, String> {
-    let cookies = self.cookies().await?;
+    let cookies = self.inner.get_cookies().await?;
     let cookies_json: Vec<serde_json::Value> = cookies
       .iter()
       .map(|c| {
@@ -1030,7 +952,7 @@ impl Page {
           expires: c.get("expires").and_then(serde_json::Value::as_f64),
           same_site: c.get("sameSite").and_then(|v| v.as_str()).and_then(|v| v.parse::<crate::backend::SameSite>().ok()),
         };
-        self.set_cookie(cookie).await?;
+        self.inner.set_cookie(cookie).await?;
       }
     }
 
