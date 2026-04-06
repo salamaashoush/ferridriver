@@ -879,11 +879,28 @@ impl Page {
 
   #[napi(getter)]
   pub fn default_timeout(&self) -> f64 {
-    // Default timeout is a millisecond value; practical values never exceed 2^53 (f64 mantissa).
     #[allow(clippy::cast_precision_loss)]
     {
       self.inner.default_timeout() as f64
     }
+  }
+
+  // ── Expect assertions (delegates to Rust core, all polling in Rust) ──
+
+  #[napi]
+  pub async fn expect_title(&self, expected: String, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_have_title(expected.as_str()).await.map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  #[napi]
+  pub async fn expect_url(&self, expected: String, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_have_url(expected.as_str()).await.map_err(|e| napi::Error::from_reason(e.message))
   }
 }
 

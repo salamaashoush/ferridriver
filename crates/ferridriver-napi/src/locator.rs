@@ -349,4 +349,86 @@ impl Locator {
     let locators = self.inner.all().await.map_err(napi::Error::from_reason)?;
     Ok(locators.into_iter().map(|l| Locator { inner: l }).collect())
   }
+
+  // ── Expect assertions (delegates to Rust core, all polling in Rust) ──
+
+  #[napi]
+  pub async fn expect_visible(&self, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_be_visible().await.map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  #[napi]
+  pub async fn expect_hidden(&self, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_be_hidden().await.map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  #[napi]
+  pub async fn expect_enabled(&self, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_be_enabled().await.map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  #[napi]
+  pub async fn expect_disabled(&self, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_be_disabled().await.map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  #[napi]
+  pub async fn expect_checked(&self, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_be_checked().await.map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  #[napi]
+  pub async fn expect_text(&self, expected: String, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_have_text(expected.as_str()).await.map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  #[napi]
+  pub async fn expect_contain_text(&self, expected: String, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_contain_text(expected.as_str()).await.map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  #[napi]
+  pub async fn expect_value(&self, expected: String, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_have_value(expected.as_str()).await.map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  #[napi]
+  pub async fn expect_attribute(&self, name: String, value: String, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_have_attribute(&name, value.as_str()).await.map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  #[napi]
+  pub async fn expect_count(&self, expected: i32, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) { e = e.not(); }
+    if let Some(t) = timeout_ms { e = e.with_timeout(std::time::Duration::from_millis(t as u64)); }
+    e.to_have_count(expected as usize).await.map_err(|e| napi::Error::from_reason(e.message))
+  }
 }

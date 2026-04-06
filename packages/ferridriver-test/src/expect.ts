@@ -1,41 +1,11 @@
 /**
- * Auto-retrying assertions — mirrors Playwright's expect() API.
- * Polls locator/page state until condition is met or timeout.
+ * Auto-retrying assertions — thin wrapper over Rust core expect.
+ * All polling/retry logic runs in Rust for zero NAPI round-trips per retry.
  */
 
 import type { Page, Locator } from 'ferridriver';
 
 const DEFAULT_TIMEOUT = 5000;
-const POLL_INTERVALS = [100, 250, 500, 1000];
-
-class ExpectError extends Error {
-  constructor(message: string, public diff?: string) {
-    super(message);
-    this.name = 'ExpectError';
-  }
-}
-
-async function pollUntil(
-  timeout: number,
-  check: () => Promise<void>,
-): Promise<void> {
-  const deadline = Date.now() + timeout;
-  let lastError: Error | undefined;
-  let idx = 0;
-
-  while (true) {
-    try {
-      await check();
-      return;
-    } catch (e) {
-      lastError = e as Error;
-      const interval = POLL_INTERVALS[Math.min(idx++, POLL_INTERVALS.length - 1)];
-      if (Date.now() + interval > deadline) break;
-      await new Promise((r) => setTimeout(r, interval));
-    }
-  }
-  throw lastError ?? new ExpectError('assertion timed out');
-}
 
 // ── Page assertions ──
 
@@ -53,28 +23,12 @@ class PageAssertions {
     },
   });
 
-  async toHaveTitle(expected: string | RegExp): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const actual = await this.page.title();
-      const matches = typeof expected === 'string' ? actual === expected : expected.test(actual);
-      if (matches === this.isNot) {
-        throw new ExpectError(
-          `expected title ${this.isNot ? 'not ' : ''}${expected}\nreceived: "${actual}"`,
-        );
-      }
-    });
+  async toHaveTitle(expected: string): Promise<void> {
+    await this.page.expectTitle(expected, this.isNot, this.timeout);
   }
 
-  async toHaveURL(expected: string | RegExp): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const actual = await this.page.url();
-      const matches = typeof expected === 'string' ? actual === expected : expected.test(actual);
-      if (matches === this.isNot) {
-        throw new ExpectError(
-          `expected URL ${this.isNot ? 'not ' : ''}${expected}\nreceived: "${actual}"`,
-        );
-      }
-    });
+  async toHaveURL(expected: string): Promise<void> {
+    await this.page.expectUrl(expected, this.isNot, this.timeout);
   }
 }
 
@@ -95,98 +49,51 @@ class LocatorAssertions {
   });
 
   async toBeVisible(): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const visible = await this.locator.isVisible();
-      if (visible === this.isNot) throw new ExpectError(`expected element ${this.isNot ? 'not ' : ''}to be visible`);
-    });
+    await this.locator.expectVisible(this.isNot, this.timeout);
   }
 
   async toBeHidden(): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const hidden = await this.locator.isHidden();
-      if (hidden === this.isNot) throw new ExpectError(`expected element ${this.isNot ? 'not ' : ''}to be hidden`);
-    });
+    await this.locator.expectHidden(this.isNot, this.timeout);
   }
 
   async toBeEnabled(): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const enabled = await this.locator.isEnabled();
-      if (enabled === this.isNot) throw new ExpectError(`expected element ${this.isNot ? 'not ' : ''}to be enabled`);
-    });
+    await this.locator.expectEnabled(this.isNot, this.timeout);
   }
 
   async toBeDisabled(): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const disabled = await this.locator.isDisabled();
-      if (disabled === this.isNot) throw new ExpectError(`expected element ${this.isNot ? 'not ' : ''}to be disabled`);
-    });
+    await this.locator.expectDisabled(this.isNot, this.timeout);
   }
 
   async toBeChecked(): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const checked = await this.locator.isChecked();
-      if (checked === this.isNot) throw new ExpectError(`expected element ${this.isNot ? 'not ' : ''}to be checked`);
-    });
+    await this.locator.expectChecked(this.isNot, this.timeout);
   }
 
-  async toHaveText(expected: string | RegExp): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const actual = (await this.locator.textContent()) ?? '';
-      const matches = typeof expected === 'string' ? actual.trim() === expected : expected.test(actual);
-      if (matches === this.isNot) {
-        throw new ExpectError(`expected text ${this.isNot ? 'not ' : ''}${expected}\nreceived: "${actual}"`);
-      }
-    });
+  async toHaveText(expected: string): Promise<void> {
+    await this.locator.expectText(expected, this.isNot, this.timeout);
   }
 
-  async toContainText(expected: string | RegExp): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const actual = (await this.locator.textContent()) ?? '';
-      const matches = typeof expected === 'string' ? actual.includes(expected) : expected.test(actual);
-      if (matches === this.isNot) {
-        throw new ExpectError(`expected text ${this.isNot ? 'not ' : ''}to contain ${expected}\nreceived: "${actual}"`);
-      }
-    });
+  async toContainText(expected: string): Promise<void> {
+    await this.locator.expectContainText(expected, this.isNot, this.timeout);
   }
 
-  async toHaveValue(expected: string | RegExp): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const actual = await this.locator.inputValue();
-      const matches = typeof expected === 'string' ? actual === expected : expected.test(actual);
-      if (matches === this.isNot) {
-        throw new ExpectError(`expected value ${this.isNot ? 'not ' : ''}${expected}\nreceived: "${actual}"`);
-      }
-    });
+  async toHaveValue(expected: string): Promise<void> {
+    await this.locator.expectValue(expected, this.isNot, this.timeout);
   }
 
-  async toHaveAttribute(name: string, value: string | RegExp): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const actual = (await this.locator.getAttribute(name)) ?? '';
-      const matches = typeof value === 'string' ? actual === value : value.test(actual);
-      if (matches === this.isNot) {
-        throw new ExpectError(`expected attribute "${name}" ${this.isNot ? 'not ' : ''}${value}\nreceived: "${actual}"`);
-      }
-    });
+  async toHaveAttribute(name: string, value: string): Promise<void> {
+    await this.locator.expectAttribute(name, value, this.isNot, this.timeout);
   }
 
   async toHaveCount(expected: number): Promise<void> {
-    await pollUntil(this.timeout, async () => {
-      const actual = await this.locator.count();
-      if ((actual === expected) === this.isNot) {
-        throw new ExpectError(`expected count ${this.isNot ? 'not ' : ''}${expected}\nreceived: ${actual}`);
-      }
-    });
+    await this.locator.expectCount(expected, this.isNot, this.timeout);
   }
 }
 
 // ── toPass() wrapper ──
 
 interface ToPassOptions {
-  /** Maximum time to retry in ms (default: 5000). */
   timeout?: number;
-  /** Retry intervals in ms (default: [100, 250, 500, 1000]). */
   intervals?: number[];
-  /** Custom error message on final failure. */
   message?: string;
 }
 
@@ -195,7 +102,7 @@ class ToPassWrapper {
 
   async toPass(options: ToPassOptions = {}): Promise<void> {
     const timeout = options.timeout ?? DEFAULT_TIMEOUT;
-    const intervals = options.intervals ?? POLL_INTERVALS;
+    const intervals = options.intervals ?? [100, 250, 500, 1000];
     const deadline = Date.now() + timeout;
     let lastError: Error | undefined;
     let idx = 0;
@@ -215,8 +122,7 @@ class ToPassWrapper {
     }
 
     const prefix = options.message ?? 'toPass()';
-    const msg = `${prefix} failed after ${attempts} attempt(s) (${timeout}ms): ${lastError?.message ?? 'timed out'}`;
-    throw new ExpectError(msg);
+    throw new Error(`${prefix} failed after ${attempts} attempt(s) (${timeout}ms): ${lastError?.message ?? 'timed out'}`);
   }
 }
 
