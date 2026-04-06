@@ -259,10 +259,15 @@ impl Worker {
       };
     }
 
-    // Check for skip/fixme.
-    if test.annotations.iter().any(|a| {
-      matches!(a, TestAnnotation::Skip { .. } | TestAnnotation::Fixme { .. })
-    }) {
+    // Check for skip/fixme (with conditional fixme evaluation).
+    let browser_backend = &self.config.browser.backend;
+    let should_skip = test.annotations.iter().any(|a| match a {
+      TestAnnotation::Skip { .. } => true,
+      TestAnnotation::Fixme { condition: None, .. } => true,
+      TestAnnotation::Fixme { condition: Some(cond), .. } => evaluate_fixme_condition(cond, browser_backend),
+      _ => false,
+    });
+    if should_skip {
       let outcome = TestOutcome {
         test_id: test_id.clone(),
         status: TestStatus::Skipped,
@@ -347,6 +352,7 @@ impl Worker {
         .collect(),
       start_time: start,
       event_bus: Some(self.event_bus.clone()),
+      annotations: Arc::new(Mutex::new(Vec::new())),
     });
 
     let result = match page_result {
@@ -520,4 +526,33 @@ async fn capture_screenshot(page: &ferridriver::Page) -> Option<Vec<u8>> {
     quality: None,
   };
   page.screenshot(opts).await.ok()
+}
+
+/// Evaluate a fixme condition string against the current environment.
+///
+/// Supported conditions:
+/// - `"linux"`, `"macos"`, `"windows"` — matches current OS
+/// - `"chromium"`, `"webkit"`, `"firefox"` — matches browser backend
+/// - `"ci"` — matches when `CI` env var is set
+/// - `"headed"`, `"headless"` — matches browser mode
+/// - `"!condition"` — negation
+fn evaluate_fixme_condition(condition: &str, browser_backend: &str) -> bool {
+  let condition = condition.trim();
+  if let Some(inner) = condition.strip_prefix('!') {
+    return !evaluate_fixme_condition(inner, browser_backend);
+  }
+  match condition {
+    // OS conditions.
+    "linux" => cfg!(target_os = "linux"),
+    "macos" | "darwin" => cfg!(target_os = "macos"),
+    "windows" | "win32" => cfg!(target_os = "windows"),
+    // Browser conditions.
+    "chromium" | "chrome" => browser_backend.contains("cdp"),
+    "webkit" => browser_backend == "webkit",
+    "firefox" => browser_backend == "firefox",
+    // Environment conditions.
+    "ci" => std::env::var("CI").is_ok(),
+    // Unknown condition: don't skip.
+    _ => false,
+  }
 }

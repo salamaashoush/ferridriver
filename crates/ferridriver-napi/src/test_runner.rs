@@ -57,12 +57,12 @@ pub struct TestMeta {
   pub id: String,
   pub title: String,
   pub file: String,
-  pub modifier: String,
   pub timeout: Option<f64>,
   pub retries: Option<i32>,
-  pub tags: Option<Vec<String>>,
   /// Suite ID this test belongs to (from register_suite).
   pub suite_id: Option<String>,
+  /// Annotations — same as Rust TestAnnotation, deserialized from JSON.
+  pub annotations: Vec<serde_json::Value>,
 }
 
 /// Metadata for a test suite (describe block).
@@ -256,290 +256,137 @@ impl TestRunner {
     Ok(())
   }
 
-  /// Run all registered tests. Launches browsers, dispatches in parallel,
-  /// calls JS callbacks with Page fixtures, handles retries, returns summary.
+  /// Run all registered tests through the core TestRunner pipeline.
   ///
-  /// This is the hot path — everything runs from Rust for maximum performance.
+  /// Converts registered JS tests into a TestPlan, delegates to the core runner
+  /// for browser launch, parallel dispatch, retries, filtering, and reporting.
   #[napi]
   #[allow(clippy::too_many_lines)]
   pub async fn run(&self) -> Result<RunSummary> {
-    let tests = self.tests.lock().await;
-    let num_workers = self.config.workers as usize;
-    let total_tests = tests.len();
+    use ferridriver_test::model::*;
 
-    if total_tests == 0 {
+    let tests = self.tests.lock().await;
+
+    if tests.is_empty() {
       return Ok(RunSummary {
         total: 0, passed: 0, failed: 0, skipped: 0, flaky: 0,
         duration_ms: 0.0, results: Vec::new(),
       });
     }
 
-    // Forbid-only check: fail if any test has modifier "only" and forbid_only is set.
-    if self.config.forbid_only {
-      let only_tests: Vec<&str> = tests
-        .iter()
-        .filter(|t| t.meta.modifier == "only")
-        .map(|t| t.meta.title.as_str())
-        .collect();
-      if !only_tests.is_empty() {
-        let msg = format!(
-          "Error: test.only() found in {} test(s):\n{}",
-          only_tests.len(),
-          only_tests.iter().map(|t| format!("  {t}")).collect::<Vec<_>>().join("\n")
-        );
-        return Err(napi::Error::from_reason(msg));
-      }
-    }
+    // Convert registered JS tests into core TestCase objects.
+    let test_cases: Vec<TestCase> = tests
+      .iter()
+      .map(|t| {
+        let cb = Arc::clone(&t.callback);
+        let meta = t.meta.clone();
 
-    // Only-filtering: if any test has modifier "only", keep only those.
-    let has_only = tests.iter().any(|t| t.meta.modifier == "only");
-    let only_indices: Vec<usize> = if has_only {
-      tests.iter().enumerate()
-        .filter(|(_, t)| t.meta.modifier == "only")
-        .map(|(i, _)| i)
-        .collect()
-    } else {
-      (0..tests.len()).collect()
-    };
-    // Last-failed filtering: read @rerun.txt and keep only matching tests.
-    let run_indices: Vec<usize> = if self.last_failed {
-      let rerun_path = self.config.output_dir.join("@rerun.txt");
-      if let Ok(content) = std::fs::read_to_string(&rerun_path) {
-        let rerun_set: rustc_hash::FxHashSet<&str> = content.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-        if rerun_set.is_empty() {
-          only_indices
-        } else {
-          only_indices.into_iter().filter(|&i| {
-            rerun_set.contains(tests[i].meta.file.as_str())
-              || rerun_set.contains(tests[i].meta.title.as_str())
-          }).collect()
+        // Deserialize annotations from JSON — same type as Rust core.
+        let annotations: Vec<TestAnnotation> = meta.annotations
+          .iter()
+          .filter_map(|v| serde_json::from_value::<TestAnnotation>(v.clone()).ok())
+          .collect();
+
+        TestCase {
+          id: TestId {
+            file: meta.file.clone(),
+            suite: meta.suite_id.clone(),
+            name: meta.title.clone(),
+            line: None,
+          },
+          test_fn: Arc::new(move |pool| {
+            let cb = Arc::clone(&cb);
+            Box::pin(async move {
+              // Get Page from the fixture pool (created by the core worker).
+              let page: std::sync::Arc<ferridriver::Page> = pool.get("page").await
+                .map_err(|e| TestFailure {
+                  message: format!("fixture 'page' failed: {e}"),
+                  stack: None, diff: None, screenshot: None,
+                })?;
+
+              // Wrap as NAPI Page and call JS callback.
+              let napi_page = crate::page::Page::wrap((*page).clone());
+              call_js_test(&cb, napi_page).await.map_err(|e| TestFailure {
+                message: e,
+                stack: None, diff: None, screenshot: None,
+              })
+            })
+          }),
+          fixture_requests: vec!["page".into()],
+          annotations,
+          timeout: meta.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
+          retries: meta.retries.map(|r| r as u32),
+          expected_status: ExpectedStatus::Pass,
         }
-      } else {
-        only_indices
-      }
-    } else {
-      only_indices
-    };
-    let total_tests = run_indices.len();
+      })
+      .collect();
 
+    let total = test_cases.len();
+    drop(tests); // Release lock before running.
+
+    // Build TestPlan.
+    let plan = TestPlan {
+      suites: vec![TestSuite {
+        name: "tests".into(),
+        file: "".into(),
+        tests: test_cases,
+        hooks: Hooks::default(),
+        annotations: Vec::new(),
+        mode: SuiteMode::Parallel,
+      }],
+      total_tests: total,
+      shard: None,
+    };
+
+    // Build CLI overrides.
+    let overrides = ferridriver_test::config::CliOverrides {
+      last_failed: self.last_failed,
+      ..Default::default()
+    };
+
+    // Create reporters: no terminal reporter (TS CLI handles display).
+    // Only add rerun reporter + result collector.
+    let collector = Arc::new(tokio::sync::Mutex::new(ResultCollector::new()));
+    let mut reporter_list: Vec<Box<dyn ferridriver_test::reporter::Reporter>> = Vec::new();
+    reporter_list.push(Box::new(ferridriver_test::reporter::rerun::RerunReporter::new(
+      self.config.output_dir.join("@rerun.txt"),
+    )));
+    reporter_list.push(Box::new(ResultCollectorReporter(Arc::clone(&collector))));
+    let reporters = ferridriver_test::reporter::ReporterSet::new(reporter_list);
+
+    // Run through core pipeline — same as Rust CLI and BDD.
     let start = Instant::now();
-
-    // Only spawn as many workers as there are tests.
-    let actual_workers = num_workers.min(total_tests);
-
-    // Build work queue: (test_index, attempt).
-    let (work_tx, work_rx) = async_channel::unbounded::<(usize, u32)>();
-    for &i in &run_indices {
-      let _ = work_tx.send((i, 1)).await;
-    }
-
-    // Collect results.
-    let _results: Arc<Mutex<Vec<TestResultItem>>> = Arc::new(Mutex::new(Vec::new()));
-    let (done_tx, mut done_rx) = tokio::sync::mpsc::channel::<(usize, TestResultItem, bool)>(256);
-
-    // Spawn workers — each launches its own browser on-demand.
-    let launch_opts = build_launch_options(&self.config.browser);
-    let mut worker_handles = Vec::new();
-    for _worker_id in 0..actual_workers {
-      let rx = work_rx.clone();
-      let tx = done_tx.clone();
-      let timeout_ms = self.config.timeout;
-      let max_retries = self.config.retries;
-      let base_url = self.config.base_url.clone();
-      let opts = launch_opts.clone();
-
-      // Collect references to test callbacks and metadata.
-      // ThreadsafeFunction is Clone (Arc-based).
-      let test_callbacks: Vec<_> = tests.iter().map(|t| Arc::clone(&t.callback)).collect();
-      let test_metas: Vec<_> = tests.iter().map(|t| t.meta.clone()).collect();
-
-      let handle = tokio::spawn(async move {
-        // Lazy browser launch — only when this worker picks up its first test.
-        let mut browser: Option<Arc<ferridriver::Browser>> = None;
-
-        while let Ok((test_idx, attempt)) = rx.recv().await {
-          let meta = &test_metas[test_idx];
-          let cb = &test_callbacks[test_idx];
-
-          // Skip.
-          if meta.modifier == "skip" || meta.modifier == "fixme" {
-            let result = TestResultItem {
-              id: meta.id.clone(),
-              title: meta.title.clone(),
-              status: "skipped".into(),
-              duration_ms: 0.0,
-              attempt: attempt as i32,
-              error_message: None,
-            };
-            let _ = tx.send((test_idx, result, false)).await;
-            continue;
-          }
-
-          // Lazy browser launch on first real test.
-          if browser.is_none() {
-            match ferridriver::Browser::launch(opts.clone()).await {
-              Ok(b) => { browser = Some(Arc::new(b)); }
-              Err(e) => {
-                let result = TestResultItem {
-                  id: meta.id.clone(), title: meta.title.clone(),
-                  status: "failed".into(), duration_ms: 0.0,
-                  attempt: attempt as i32,
-                  error_message: Some(format!("browser launch failed: {e}")),
-                };
-                let _ = tx.send((test_idx, result, false)).await;
-                continue;
-              }
-            }
-          }
-          let browser_ref = browser.as_ref().unwrap();
-
-          // Create isolated page. Navigate to base_url if set (CT mode).
-          let ctx = browser_ref.new_context();
-          let page_result = match &base_url {
-            Some(url) => {
-              match ctx.new_page().await {
-                Ok(p) => p.goto(url, None).await.map(|()| p),
-                Err(e) => Err(e),
-              }
-            }
-            None => ctx.new_page().await,
-          };
-
-          let test_start = Instant::now();
-          let test_timeout = meta.timeout
-            .map(|t| Duration::from_millis(t as u64))
-            .unwrap_or(Duration::from_millis(timeout_ms));
-
-          let result = match page_result {
-            Ok(page) => {
-              let napi_page = crate::page::Page::wrap(page);
-
-              // Call the JS test body with the Page fixture.
-              let call_result = tokio::time::timeout(
-                test_timeout,
-                call_js_test(cb, napi_page),
-              ).await;
-
-              let duration = test_start.elapsed();
-              let _ = ctx.close().await;
-
-              match call_result {
-                Ok(Ok(())) => TestResultItem {
-                  id: meta.id.clone(),
-                  title: meta.title.clone(),
-                  status: "passed".into(),
-                  duration_ms: duration.as_secs_f64() * 1000.0,
-                  attempt: attempt as i32,
-                  error_message: None,
-                },
-                Ok(Err(e)) => TestResultItem {
-                  id: meta.id.clone(),
-                  title: meta.title.clone(),
-                  status: "failed".into(),
-                  duration_ms: duration.as_secs_f64() * 1000.0,
-                  attempt: attempt as i32,
-                  error_message: Some(e),
-                },
-                Err(_) => TestResultItem {
-                  id: meta.id.clone(),
-                  title: meta.title.clone(),
-                  status: "timed out".into(),
-                  duration_ms: test_timeout.as_secs_f64() * 1000.0,
-                  attempt: attempt as i32,
-                  error_message: Some(format!("test timed out after {test_timeout:?}")),
-                },
-              }
-            }
-            Err(e) => {
-              let _ = ctx.close().await;
-              TestResultItem {
-                id: meta.id.clone(),
-                title: meta.title.clone(),
-                status: "failed".into(),
-                duration_ms: test_start.elapsed().as_secs_f64() * 1000.0,
-                attempt: attempt as i32,
-                error_message: Some(format!("page creation failed: {e}")),
-              }
-            }
-          };
-
-          let retries = meta.retries.unwrap_or(max_retries as i32) as u32;
-          let should_retry = result.status != "passed"
-            && result.status != "skipped"
-            && attempt <= retries;
-
-          let _ = tx.send((test_idx, result, should_retry)).await;
-        }
-      });
-      worker_handles.push(handle);
-    }
-    drop(done_tx);
-    drop(tests); // Release tests lock.
-
-    // Collect results, handle retries.
-    let mut all_results: Vec<TestResultItem> = Vec::new();
-    let mut completed = 0usize;
-
-    while let Some((test_idx, result, should_retry)) = done_rx.recv().await {
-      if should_retry {
-        let next_attempt = result.attempt as u32 + 1;
-        let _ = work_tx.send((test_idx, next_attempt)).await;
-      } else {
-        completed += 1;
-      }
-      all_results.push(result);
-
-      if completed >= total_tests {
-        work_tx.close();
-      }
-    }
-
-    for handle in worker_handles {
-      let _ = handle.await;
-    }
-
+    let config = self.config.clone();
+    let mut runner = ferridriver_test::runner::TestRunner::new(config, reporters, overrides);
+    let _exit_code = runner.run(plan).await;
     let duration = start.elapsed();
 
-    // Browsers are closed when worker tasks drop (lazy-owned by each worker).
-
-    // Compute summary.
-    // For flaky detection: group by test ID, if last attempt passed but earlier failed → flaky.
-    let mut final_results: Vec<TestResultItem> = Vec::new();
+    // Collect results from the reporter.
+    let collected = collector.lock().await;
     let mut passed = 0i32;
     let mut failed = 0i32;
     let mut skipped = 0i32;
     let mut flaky = 0i32;
+    let mut results = Vec::new();
 
-    // Group results by test ID, take the last attempt.
-    let mut by_id: rustc_hash::FxHashMap<String, Vec<&TestResultItem>> = rustc_hash::FxHashMap::default();
-    for r in &all_results {
-      by_id.entry(r.id.clone()).or_default().push(r);
-    }
-    for attempts in by_id.values() {
-      let last = attempts.last().unwrap();
-      let mut item = (*last).clone();
-      if last.status == "passed" && attempts.len() > 1 {
-        item.status = "flaky".into();
-        flaky += 1;
-        passed += 1;
-      } else {
-        match item.status.as_str() {
-          "passed" => passed += 1,
-          "skipped" => skipped += 1,
-          _ => failed += 1,
-        }
+    for r in &collected.results {
+      match r.status.as_str() {
+        "passed" => passed += 1,
+        "skipped" => skipped += 1,
+        "flaky" => { flaky += 1; passed += 1; }
+        _ => failed += 1,
       }
-      final_results.push(item);
+      results.push(r.clone());
     }
 
     Ok(RunSummary {
-      total: total_tests as i32,
+      total: results.len() as i32,
       passed,
       failed,
       skipped,
       flaky,
       duration_ms: duration.as_secs_f64() * 1000.0,
-      results: final_results,
+      results,
     })
   }
 
@@ -578,24 +425,46 @@ async fn call_js_test(
   }
 }
 
-fn build_launch_options(
-  bc: &ferridriver_test::config::BrowserConfig,
-) -> ferridriver::options::LaunchOptions {
-  use ferridriver::backend::BackendKind;
-  let backend = match bc.backend.as_str() {
-    "cdp-raw" => BackendKind::CdpRaw,
-    #[cfg(target_os = "macos")]
-    "webkit" => BackendKind::WebKit,
-    _ => BackendKind::CdpPipe,
-  };
-  ferridriver::options::LaunchOptions {
-    backend,
-    headless: bc.headless,
-    executable_path: bc.executable_path.clone(),
-    args: bc.args.clone(),
-    viewport: bc.viewport.as_ref().map(|v| ferridriver::options::ViewportConfig {
-      width: v.width, height: v.height, ..Default::default()
-    }),
-    ..Default::default()
+/// In-memory result collector for returning test outcomes to TS.
+struct ResultCollector {
+  results: Vec<TestResultItem>,
+}
+
+impl ResultCollector {
+  fn new() -> Self {
+    Self { results: Vec::new() }
   }
 }
+
+/// Reporter that collects results into a shared ResultCollector.
+struct ResultCollectorReporter(Arc<tokio::sync::Mutex<ResultCollector>>);
+
+#[async_trait::async_trait]
+impl ferridriver_test::reporter::Reporter for ResultCollectorReporter {
+  async fn on_event(&mut self, event: &ferridriver_test::reporter::ReporterEvent) {
+    if let ferridriver_test::reporter::ReporterEvent::TestFinished { test_id, outcome } = event {
+      let status = match outcome.status {
+        ferridriver_test::model::TestStatus::Passed => "passed",
+        ferridriver_test::model::TestStatus::Failed => "failed",
+        ferridriver_test::model::TestStatus::TimedOut => "timed out",
+        ferridriver_test::model::TestStatus::Skipped => "skipped",
+        ferridriver_test::model::TestStatus::Flaky => "flaky",
+        ferridriver_test::model::TestStatus::Interrupted => "interrupted",
+      };
+      let mut collector = self.0.lock().await;
+      collector.results.push(TestResultItem {
+        id: test_id.full_name(),
+        title: test_id.name.clone(),
+        status: status.into(),
+        duration_ms: outcome.duration.as_secs_f64() * 1000.0,
+        attempt: outcome.attempt as i32,
+        error_message: outcome.error.as_ref().map(|e| e.message.clone()),
+      });
+    }
+  }
+
+  async fn finalize(&mut self) -> std::result::Result<(), String> {
+    Ok(())
+  }
+}
+

@@ -19,6 +19,7 @@ napi-derive = "3"
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
+async-trait = { workspace = true }
 rustc-hash = "2"
 async-channel = "2"
 

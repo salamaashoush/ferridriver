@@ -283,7 +283,8 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
     process.exit(0);
   }
 
-  const filtered = _hasOnly() ? tests.filter((t) => t.meta.modifier === 'only') : tests;
+  // Register all tests — the core Rust runner handles only/skip/fixme filtering.
+  const filtered = tests;
   const grepped = config.grep
     ? filtered.filter((t) => new RegExp(config.grep).test(t.meta.title))
     : filtered;

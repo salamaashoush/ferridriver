@@ -191,9 +191,25 @@ pub struct TestInfo {
   pub start_time: Instant,
   /// Event bus for real-time step event emission (set by worker).
   pub event_bus: Option<EventBus>,
+  /// Runtime annotations added via `test_info.annotate()`.
+  pub annotations: Arc<Mutex<Vec<TestAnnotation>>>,
 }
 
 impl TestInfo {
+  /// Add a structured annotation at runtime.
+  pub async fn annotate(&self, type_name: impl Into<String>, description: impl Into<String>) {
+    let mut annotations = self.annotations.lock().await;
+    annotations.push(TestAnnotation::Info {
+      type_name: type_name.into(),
+      description: description.into(),
+    });
+  }
+
+  /// Get all runtime annotations.
+  pub async fn get_annotations(&self) -> Vec<TestAnnotation> {
+    let annotations = self.annotations.lock().await;
+    annotations.clone()
+  }
   /// Add an attachment to this test.
   pub async fn attach(&self, name: String, content_type: String, body: AttachmentBody) {
     let mut attachments = self.attachments.lock().await;
@@ -479,14 +495,17 @@ impl fmt::Display for StepCategory {
 
 // ── Annotations ──
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum TestAnnotation {
   Skip { reason: Option<String> },
   Slow,
-  Fixme { reason: Option<String> },
+  Fixme { reason: Option<String>, condition: Option<String> },
   Fail,
   Only,
   Tag(String),
+  /// Structured metadata: type + description (e.g., issue/JIRA-1234, severity/critical).
+  Info { type_name: String, description: String },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

@@ -620,6 +620,7 @@ impl Expect<'_, Locator> {
       tags: Vec::new(),
       start_time: std::time::Instant::now(),
       event_bus: None,
+      annotations: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
     };
     crate::snapshot::assert_snapshot(&info, &actual, name, update)
   }

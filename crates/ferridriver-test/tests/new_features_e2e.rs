@@ -561,6 +561,7 @@ fn test_snapshot_create_and_match() {
     tags: Vec::new(),
     start_time: std::time::Instant::now(),
     event_bus: None,
+    annotations: Arc::new(tokio::sync::Mutex::new(Vec::new())),
   };
 
   // First call: creates snapshot file.

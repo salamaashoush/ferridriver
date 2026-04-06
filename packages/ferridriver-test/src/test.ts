@@ -32,6 +32,8 @@ interface TestOptions {
   tag?: string | string[];
   timeout?: number;
   retries?: number;
+  /** Mark as fixme. `true` = unconditional, string = condition (e.g. "linux", "webkit", "ci"). */
+  fixme?: boolean | string;
 }
 
 // ── Global test registry ──
@@ -120,6 +122,21 @@ function makeId(file: string, title: string): string {
 
 // ── test() ──
 
+/** Build annotations array matching Rust TestAnnotation serde format. */
+function buildAnnotations(options: TestOptions, extra?: any[]): any[] {
+  const annotations: any[] = extra ? [...extra] : [];
+  if (options.fixme === true) {
+    annotations.push({ fixme: { reason: null, condition: null } });
+  } else if (typeof options.fixme === 'string') {
+    annotations.push({ fixme: { reason: null, condition: options.fixme } });
+  }
+  if (options.tag) {
+    const tags = Array.isArray(options.tag) ? options.tag : [options.tag];
+    for (const t of tags) annotations.push({ tag: t });
+  }
+  return annotations;
+}
+
 function testFn(name: string, body: TestBody): void;
 function testFn(name: string, options: TestOptions, body: TestBody): void;
 function testFn(name: string, optionsOrBody: TestOptions | TestBody, maybeBody?: TestBody): void {
@@ -132,10 +149,9 @@ function testFn(name: string, optionsOrBody: TestOptions | TestBody, maybeBody?:
       id: makeId(currentFile, title),
       title,
       file: currentFile,
-      modifier: 'none',
       timeout: options.timeout,
       retries: options.retries,
-      tags: options.tag ? (Array.isArray(options.tag) ? options.tag : [options.tag]) : undefined,
+      annotations: buildAnnotations(options),
     },
     body: (page) => body({ page, mount: createMount(page) }),
   });
@@ -144,7 +160,7 @@ function testFn(name: string, optionsOrBody: TestOptions | TestBody, maybeBody?:
 testFn.skip = (name: string, body: TestBody) => {
   const title = fullTitle(name);
   registry.push({
-    meta: { id: makeId(currentFile, title), title, file: currentFile, modifier: 'skip' },
+    meta: { id: makeId(currentFile, title), title, file: currentFile, annotations: [{ skip: { reason: null } }] },
     body: (page) => body({ page, mount: createMount(page) }),
   });
 };
@@ -153,7 +169,7 @@ testFn.only = (name: string, body: TestBody) => {
   hasOnly = true;
   const title = fullTitle(name);
   registry.push({
-    meta: { id: makeId(currentFile, title), title, file: currentFile, modifier: 'only' },
+    meta: { id: makeId(currentFile, title), title, file: currentFile, annotations: ['only'] },
     body: (page) => body({ page, mount: createMount(page) }),
   });
 };
@@ -172,7 +188,7 @@ testFn.each = <T>(dataOrStrings: T[] | TemplateStringsArray, ...templateValues: 
           id: makeId(currentFile, title),
           title,
           file: currentFile,
-          modifier: 'none',
+          annotations: [],
         },
         body: (page) => body({ page, mount: createMount(page) }, row as T),
       });
@@ -183,9 +199,25 @@ testFn.each = <T>(dataOrStrings: T[] | TemplateStringsArray, ...templateValues: 
 testFn.fixme = (name: string, body: TestBody) => {
   const title = fullTitle(name);
   registry.push({
-    meta: { id: makeId(currentFile, title), title, file: currentFile, modifier: 'fixme' },
+    meta: { id: makeId(currentFile, title), title, file: currentFile, annotations: [{ fixme: { reason: null, condition: null } }] },
     body: (page) => body({ page, mount: createMount(page) }),
   });
+};
+
+/** Runtime test info — accessible inside test bodies. */
+class TestInfoRuntime {
+  annotations: Array<{ type: string; description: string }> = [];
+}
+
+/** Current test info instance (set per-test). */
+let currentTestInfo: TestInfoRuntime | null = null;
+
+/** Get the current test's info for annotations. */
+testFn.info = (): TestInfoRuntime => {
+  if (!currentTestInfo) {
+    currentTestInfo = new TestInfoRuntime();
+  }
+  return currentTestInfo;
 };
 
 // ── describe() ──
@@ -201,7 +233,7 @@ describe.skip = (name: string, fn: () => void) => {
   const startIdx = registry.length;
   fn();
   for (let i = startIdx; i < registry.length; i++) {
-    registry[i].meta.modifier = 'skip';
+    registry[i].meta.annotations.push({ skip: { reason: null } });
   }
   describeStack.pop();
 };
@@ -223,7 +255,7 @@ describe.only = (name: string, fn: () => void) => {
   const startIdx = registry.length;
   fn();
   for (let i = startIdx; i < registry.length; i++) {
-    registry[i].meta.modifier = 'only';
+    registry[i].meta.annotations.push('only');
   }
   describeStack.pop();
 };

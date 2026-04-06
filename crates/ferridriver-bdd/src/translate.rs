@@ -278,6 +278,37 @@ fn translate_scenario(
     annotations.push(TestAnnotation::Only);
   }
 
+  // @fixme or @fixme(condition)
+  for tag in &scenario.tags {
+    if tag == "@fixme" {
+      annotations.push(TestAnnotation::Fixme { reason: Some("tagged @fixme".to_string()), condition: None });
+    } else if let Some(cond) = tag.strip_prefix("@fixme(").and_then(|s| s.strip_suffix(')')) {
+      annotations.push(TestAnnotation::Fixme {
+        reason: Some(format!("tagged @fixme({cond})")),
+        condition: Some(cond.to_string()),
+      });
+    }
+  }
+
+  // @key(value) → Info annotations (e.g., @issue(JIRA-1234), @severity(critical), @owner(team-auth))
+  for tag in &scenario.tags {
+    if let Some(rest) = tag.strip_prefix('@') {
+      if let Some(paren_pos) = rest.find('(') {
+        if rest.ends_with(')') {
+          let key = &rest[..paren_pos];
+          let value = &rest[paren_pos + 1..rest.len() - 1];
+          // Skip fixme — handled above. Skip known tags.
+          if key != "fixme" && key != "only" && key != "skip" && key != "slow" {
+            annotations.push(TestAnnotation::Info {
+              type_name: key.to_string(),
+              description: value.to_string(),
+            });
+          }
+        }
+      }
+    }
+  }
+
   // Extract line number from location "file:line".
   let line = scenario
     .location

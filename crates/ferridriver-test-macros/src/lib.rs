@@ -31,7 +31,8 @@ struct FerritestArgs {
   tags: Vec<String>,
   skip: bool,
   slow: bool,
-  fixme: bool,
+  /// None = not set, Some(None) = unconditional, Some(Some("linux")) = conditional
+  fixme: Option<Option<String>>,
   only: bool,
 }
 
@@ -43,7 +44,7 @@ impl Parse for FerritestArgs {
       tags: Vec::new(),
       skip: false,
       slow: false,
-      fixme: false,
+      fixme: None,
       only: false,
     };
 
@@ -74,6 +75,13 @@ impl Parse for FerritestArgs {
                 }
               }
             }
+            "fixme" => {
+              if let syn::Expr::Lit(lit) = &nv.value {
+                if let Lit::Str(s) = &lit.lit {
+                  args.fixme = Some(Some(s.value()));
+                }
+              }
+            }
             _ => return Err(syn::Error::new_spanned(&nv.path, format!("unknown ferritest attribute: {ident}"))),
           }
         }
@@ -82,7 +90,7 @@ impl Parse for FerritestArgs {
           match ident.as_str() {
             "skip" => args.skip = true,
             "slow" => args.slow = true,
-            "fixme" => args.fixme = true,
+            "fixme" => args.fixme = Some(None),
             "only" => args.only = true,
             _ => return Err(syn::Error::new_spanned(p, format!("unknown ferritest flag: {ident}"))),
           }
@@ -179,8 +187,14 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   if args.slow {
     annotations.push(quote! { ferridriver_test::model::TestAnnotation::Slow });
   }
-  if args.fixme {
-    annotations.push(quote! { ferridriver_test::model::TestAnnotation::Fixme { reason: None } });
+  match &args.fixme {
+    Some(None) => {
+      annotations.push(quote! { ferridriver_test::model::TestAnnotation::Fixme { reason: None, condition: None } });
+    }
+    Some(Some(cond)) => {
+      annotations.push(quote! { ferridriver_test::model::TestAnnotation::Fixme { reason: None, condition: Some(#cond.to_string()) } });
+    }
+    None => {}
   }
   if args.only {
     annotations.push(quote! { ferridriver_test::model::TestAnnotation::Only });
