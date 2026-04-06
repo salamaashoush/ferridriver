@@ -342,7 +342,7 @@ const testCommand = defineCommand({
     if (args['update-snapshots']) config.updateSnapshots = true;
     if (args['forbid-only']) config.forbidOnly = true;
     if (args['last-failed']) config.lastFailed = true;
-    if (args.verbose && !process.env.FERRIDRIVER_DEBUG) process.env.FERRIDRIVER_DEBUG = '*';
+    if (args.verbose) config.verbose = 1;
     await runTests(config, testFiles, false);
   },
 });

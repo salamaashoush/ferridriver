@@ -44,6 +44,8 @@ pub struct TestRunnerConfig {
   pub viewport_height: Option<i32>,
   pub forbid_only: Option<bool>,
   pub last_failed: Option<bool>,
+  /// Verbose logging level: 0=off, 1=debug, 2=trace
+  pub verbose: Option<i32>,
 }
 
 /// Metadata for a registered test.
@@ -146,8 +148,13 @@ impl TestRunner {
   /// Create a new test runner.
   #[napi(factory)]
   pub async fn create(config: Option<TestRunnerConfig>) -> Result<Self> {
-    ferridriver_test::logging::init_from_env();
     let cfg = config.unwrap_or_default();
+    let verbose = cfg.verbose.unwrap_or(0) as u8;
+    if verbose > 0 {
+      ferridriver_test::logging::init(verbose);
+    } else {
+      ferridriver_test::logging::init_from_env();
+    }
     let mut tc = ferridriver_test::TestConfig::default();
 
     if let Some(t) = cfg.timeout { tc.timeout = crate::types::f64_to_u64(t); }

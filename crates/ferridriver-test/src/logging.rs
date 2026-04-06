@@ -35,11 +35,12 @@ pub fn init(verbose: u8) {
   INIT.call_once(|| {
     let filter = build_filter(verbose);
     let use_ansi = std::io::IsTerminal::is_terminal(&std::io::stderr());
-    tracing_subscriber::fmt()
+    // try_init: no-op if a subscriber is already set (e.g., by NAPI host).
+    let _ = tracing_subscriber::fmt()
       .with_env_filter(filter)
       .with_writer(std::io::stderr)
       .with_ansi(use_ansi)
-      .init();
+      .try_init();
   });
 }
 
