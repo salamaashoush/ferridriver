@@ -122,3 +122,131 @@ Benchmarked against Playwright Test on the same 50-test workload (navigate + cli
 | `expect_poll().to_equal` | Poll async value until it equals expected |
 
 All matchers support `.not()`, `.with_timeout()`, `.with_message()`, and `.soft()`.
+
+## Architecture
+
+### Execution Pipeline
+
+```
+TestPlan (suites + tests)
+    |
+TestRunner.run()
+    |
+    +-- filter (shard, grep, tag)
+    +-- validate fixture DAG
+    +-- run global setup
+    +-- Dispatcher (MPMC unbounded channel)
+    |       |
+    |   +---+---+---+
+    |   |   |   |   |
+    |  W0  W1  W2  W3   (workers, each with own Browser)
+    |   |   |   |   |
+    |   +---+---+---+
+    |       |
+    +-- collect results (retry failed tests)
+    +-- run global teardown
+    +-- return exit code
+```
+
+Workers launch browsers concurrently (overlapped, not sequential) for ~80-100ms savings.
+
+### Worker Per-Test Lifecycle
+
+```
+beforeAll (SuiteHookFn, once per suite per worker)
+  |
+  create BrowserContext + Page (isolated per test)
+  |
+  inject fixtures: browser, context, page, test_info
+  |
+  beforeEach (HookFn, receives FixturePool + Arc<TestInfo>)
+  |
+  test body (with timeout; x3 for @slow)
+  |
+  afterEach (always runs, even on failure)
+  |
+  screenshot on failure (if configured)
+  |
+  close context + teardown fixtures (LIFO)
+  |
+  determine status (check @fail inversion, soft errors)
+  |
+afterAll (SuiteHookFn, on worker shutdown)
+```
+
+### Fixture System
+
+Dependency-injected fixtures with three scopes and automatic LIFO teardown.
+
+```
+Global pool (shared across all workers)
+  |
+  Worker pool (one per worker, inherits global)
+    |
+    Test pool (one per test, inherits worker)
+```
+
+**Resolution:** `pool.get::<T>("name")` walks the scope chain, resolves dependencies recursively, caches values, registers teardown. DAG validated at startup.
+
+**Built-in fixtures:**
+
+| Name | Scope | Type |
+|------|-------|------|
+| `browser` | Worker | `Arc<Browser>` |
+| `context` | Test | `Arc<ContextRef>` |
+| `page` | Test | `Arc<Page>` |
+| `test_info` | Test | `Arc<TestInfo>` |
+
+### Hook Types
+
+```rust
+// Suite-scoped: once per suite per worker, no test context
+type SuiteHookFn = Arc<dyn Fn(FixturePool) -> BoxFuture<Result<()>>>;
+
+// Test-scoped: per test, has test metadata and step API
+type HookFn = Arc<dyn Fn(FixturePool, Arc<TestInfo>) -> BoxFuture<Result<()>>>;
+```
+
+### Reporter Event Pipeline
+
+Workers emit events via `EventBus` (async broadcast). A spawned task fans events to all reporters.
+
+```
+RunStarted -> WorkerStarted -> TestStarted -> StepStarted* -> StepFinished*
+-> TestFinished -> WorkerFinished -> RunFinished
+```
+
+Step events (`StepStarted`/`StepFinished`) are boxed to keep the enum small. They carry optional metadata (e.g., BDD keyword info) for domain-specific rendering.
+
+### Step Tracking API
+
+Tests can emit structured steps for live reporter rendering:
+
+```rust
+let handle = test_info.begin_step("Click login", StepCategory::TestStep).await;
+// ... do work ...
+handle.end(None).await;  // None = success, Some(msg) = failure
+
+// Nested steps
+let parent = test_info.begin_step("Fill form", StepCategory::TestStep).await;
+let child = test_info.begin_child_step("Email", StepCategory::TestStep, &parent.step_id).await;
+child.end(None).await;
+parent.end(None).await;
+```
+
+Categories: `TestStep`, `Expect`, `Fixture`, `Hook`, `PwApi`
+
+### Retry and Flaky Detection
+
+Failed tests are re-dispatched to the shared queue (any worker can pick them up). `RetryPolicy::final_status()` determines the outcome:
+
+- All attempts passed: `Passed`
+- Last attempt passed, prior failed: `Flaky`
+- Last attempt failed: `Failed`
+- All skipped: `Skipped`
+
+### Dispatcher
+
+- **Parallel suites:** Each test enqueued as `WorkItem::Single` to shared MPMC channel. Natural load balancing -- fast workers pull more.
+- **Serial suites:** All tests batched as `WorkItem::Serial`. One worker gets the batch, runs tests in order, skips rest on first failure.
+- **Retry:** Re-enqueued as `WorkItem::Single` (any worker can pick it up).
