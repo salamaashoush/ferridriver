@@ -19,10 +19,10 @@
 //! ```
 
 use proc_macro::TokenStream;
-use quote::quote;
+use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, FnArg, ItemFn, Lit, Meta, Pat, Token, Type};
+use syn::{parse_macro_input, Expr, FnArg, ItemFn, Lit, Meta, Pat, Token, Type};
 
 /// Attribute arguments: `#[ferritest(retries = 2, timeout = "30s", tag = "smoke")]`
 struct FerritestArgs {
@@ -221,6 +221,159 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
         test_fn: |pool| Box::pin(#fn_name(pool)),
       }
     }
+  };
+
+  expanded.into()
+}
+
+/// Arguments for `#[ferritest_each]`: `data = [(...), (...)]`.
+struct FerritestEachArgs {
+  data: Vec<Vec<Expr>>,
+}
+
+impl Parse for FerritestEachArgs {
+  fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+    // Parse: data = [(...), (...)]
+    let ident: syn::Ident = input.parse()?;
+    if ident != "data" {
+      return Err(syn::Error::new_spanned(&ident, "expected `data = [...]`"));
+    }
+    let _: Token![=] = input.parse()?;
+
+    let content;
+    syn::bracketed!(content in input);
+
+    let mut data = Vec::new();
+    while !content.is_empty() {
+      let inner;
+      syn::parenthesized!(inner in content);
+      let exprs: Punctuated<Expr, Token![,]> = Punctuated::parse_terminated(&inner)?;
+      data.push(exprs.into_iter().collect());
+
+      if content.peek(Token![,]) {
+        let _: Token![,] = content.parse()?;
+      }
+    }
+
+    Ok(Self { data })
+  }
+}
+
+/// `#[ferritest_each(data = [("a", 1), ("b", 2)])]` — parameterized test macro.
+///
+/// Expands a single async test function into N registered tests, one per data row.
+/// Parameters after fixture types (Page, Browser, etc.) receive the data values.
+///
+/// ```ignore
+/// #[ferritest_each(data = [("admin", "admin@example.com"), ("guest", "guest@example.com")])]
+/// async fn login(page: Page, role: &str, email: &str) {
+///     page.goto(&format!("/login?role={role}"), None).await.unwrap();
+/// }
+/// ```
+/// Registers: `login (admin, admin@example.com)` and `login (guest, guest@example.com)`.
+#[proc_macro_attribute]
+pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
+  let args = parse_macro_input!(attr as FerritestEachArgs);
+  let input = parse_macro_input!(item as ItemFn);
+
+  let fn_name = &input.sig.ident;
+  let fn_name_str = fn_name.to_string();
+  let block = &input.block;
+  let attrs = &input.attrs;
+
+  // Split parameters into fixture params and data params.
+  let all_params: Vec<_> = input.sig.inputs.iter().collect();
+  let mut fixture_names: Vec<String> = Vec::new();
+  let mut fixture_bindings = Vec::new();
+  let mut data_params: Vec<(&syn::Ident, &Type)> = Vec::new();
+
+  for arg in &all_params {
+    if let FnArg::Typed(pat_type) = arg {
+      if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
+        let param_name = &pat_ident.ident;
+        let param_type = &*pat_type.ty;
+        let fixture = fixture_name_from_type(param_type);
+        if let Some(fixture) = fixture {
+          fixture_names.push(fixture.clone());
+          fixture_bindings.push(quote! {
+            let #param_name: #param_type = __pool.get::<#param_type>(#fixture).await
+              .map_err(|e| ferridriver_test::model::TestFailure {
+                message: format!("fixture '{}' failed: {}", #fixture, e),
+                stack: None,
+                diff: None,
+                screenshot: None,
+              })?;
+          });
+        } else {
+          data_params.push((param_name, param_type));
+        }
+      }
+    }
+  }
+
+  let fixture_array = fixture_names.iter().map(|f| quote! { #f });
+
+  // Generate one inventory::submit! per data row.
+  let mut submissions = Vec::new();
+  for (row_idx, row) in args.data.iter().enumerate() {
+    if row.len() != data_params.len() {
+      return syn::Error::new_spanned(
+        &input.sig.ident,
+        format!(
+          "data row {} has {} values but function expects {} data parameters",
+          row_idx,
+          row.len(),
+          data_params.len()
+        ),
+      )
+      .to_compile_error()
+      .into();
+    }
+
+    // Build name suffix: "(val1, val2)"
+    let row_values_str: Vec<String> = row.iter().map(|e| quote!(#e).to_string().replace('"', "")).collect();
+    let suffix = row_values_str.join(", ");
+    let test_name = format!("{fn_name_str} ({suffix})");
+
+    // Build let bindings for data params.
+    let data_bindings: Vec<_> = data_params
+      .iter()
+      .zip(row.iter())
+      .map(|((param_name, param_type), value)| {
+        quote! { let #param_name: #param_type = #value; }
+      })
+      .collect();
+
+    let inner_fn_name = format_ident!("__ferritest_each_{}_{}", fn_name, row_idx);
+    let fixture_array2 = fixture_names.iter().map(|f| quote! { #f });
+
+    submissions.push(quote! {
+      async fn #inner_fn_name(__pool: ferridriver_test::fixture::FixturePool) -> Result<(), ferridriver_test::model::TestFailure> {
+        #(#fixture_bindings)*
+        #(#data_bindings)*
+        #block
+        Ok(())
+      }
+
+      inventory::submit! {
+        ferridriver_test::discovery::TestRegistration {
+          file: file!(),
+          line: line!(),
+          name: #test_name,
+          suite: None,
+          fixture_requests: &[#(#fixture_array2),*],
+          annotations: &[],
+          timeout_ms: None,
+          retries: None,
+          test_fn: |pool| Box::pin(#inner_fn_name(pool)),
+        }
+      }
+    });
+  }
+
+  let expanded = quote! {
+    #(#attrs)*
+    #(#submissions)*
   };
 
   expanded.into()

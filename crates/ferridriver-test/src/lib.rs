@@ -115,7 +115,7 @@ pub use reporter::{Reporter, ReporterEvent, ReporterSet};
 pub use runner::TestRunner;
 
 // Re-export proc macros.
-pub use ferridriver_test_macros::ferritest;
+pub use ferridriver_test_macros::{ferritest, ferritest_each};
 
 // Re-export inventory for the proc macro expansion.
 pub use inventory;
@@ -231,5 +231,5 @@ pub mod prelude {
   pub use crate::expect::{expect, expect_configured, expect_poll, to_pass};
   pub use crate::fixture::FixturePool;
   pub use crate::model::{TestFailure, TestInfo};
-  pub use ferridriver_test_macros::ferritest;
+  pub use ferridriver_test_macros::{ferritest, ferritest_each};
 }

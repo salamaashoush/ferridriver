@@ -25,6 +25,9 @@ export interface TestFixtures {
 /** Test function signature. */
 type TestBody = (fixtures: TestFixtures) => Promise<void>;
 
+/** Parameterized test body — receives fixtures + data row. */
+type EachTestBody<T> = (fixtures: TestFixtures, data: T) => Promise<void>;
+
 interface TestOptions {
   tag?: string | string[];
   timeout?: number;
@@ -62,6 +65,50 @@ function createMount(page: Page): MountFunction {
 }
 
 // ── Helpers ──
+
+/**
+ * Parse a tagged template literal table into an array of objects.
+ * Format:
+ *   test.each`
+ *     role       | email
+ *     ${'admin'} | ${'admin@example.com'}
+ *     ${'guest'} | ${'guest@example.com'}
+ *   `
+ * First row is headers, subsequent rows are values interpolated from ${} expressions.
+ */
+function parseTemplateTable(strings: TemplateStringsArray, values: any[]): Record<string, any>[] {
+  const raw = strings.join('\x00').split('\n').map(l => l.trim()).filter(l => l.length > 0);
+  if (raw.length < 2) return [];
+
+  const headers = raw[0].split('|').map(h => h.replace(/\x00/g, '').trim()).filter(Boolean);
+  const rows: Record<string, any>[] = [];
+  let valIdx = 0;
+
+  for (let i = 1; i < raw.length; i++) {
+    const cells = raw[i].split('|').map(c => c.trim()).filter(Boolean);
+    const row: Record<string, any> = {};
+    for (let j = 0; j < headers.length; j++) {
+      const cell = cells[j] ?? '';
+      if (cell.includes('\x00')) {
+        row[headers[j]] = values[valIdx++];
+      } else {
+        row[headers[j]] = cell;
+      }
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+/** Interpolate `$variable` placeholders in test names with values from a data row. */
+function interpolateTemplate(template: string, data: any): string {
+  if (typeof data !== 'object' || data === null) {
+    return template.replace(/\$\{?\w+\}?/g, String(data));
+  }
+  return template.replace(/\$(\w+)/g, (_, key) => {
+    return key in data ? String(data[key]) : `$${key}`;
+  });
+}
 
 function fullTitle(name: string): string {
   return [...describeStack, name].join(' > ');
@@ -111,6 +158,28 @@ testFn.only = (name: string, body: TestBody) => {
   });
 };
 
+testFn.each = <T>(dataOrStrings: T[] | TemplateStringsArray, ...templateValues: any[]) => {
+  const rows = Array.isArray(dataOrStrings) && !('raw' in dataOrStrings)
+    ? dataOrStrings as T[]
+    : parseTemplateTable(dataOrStrings as TemplateStringsArray, templateValues);
+
+  return (nameTemplate: string, body: EachTestBody<T>) => {
+    for (const row of rows) {
+      const name = interpolateTemplate(nameTemplate, row);
+      const title = fullTitle(name);
+      registry.push({
+        meta: {
+          id: makeId(currentFile, title),
+          title,
+          file: currentFile,
+          modifier: 'none',
+        },
+        body: (page) => body({ page, mount: createMount(page) }, row as T),
+      });
+    }
+  };
+};
+
 testFn.fixme = (name: string, body: TestBody) => {
   const title = fullTitle(name);
   registry.push({
@@ -135,6 +204,17 @@ describe.skip = (name: string, fn: () => void) => {
     registry[i].meta.modifier = 'skip';
   }
   describeStack.pop();
+};
+
+describe.each = <T>(data: T[]) => {
+  return (nameTemplate: string, fn: (data: T) => void) => {
+    for (const row of data) {
+      const name = interpolateTemplate(nameTemplate, row);
+      describeStack.push(name);
+      fn(row);
+      describeStack.pop();
+    }
+  };
 };
 
 describe.only = (name: string, fn: () => void) => {
