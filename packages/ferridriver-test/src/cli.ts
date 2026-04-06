@@ -91,6 +91,10 @@ const runnerArgs = defineArgs({
     short: 'v',
     description: 'Verbose output (debug-level logging)',
   },
+  debug: {
+    type: 'string',
+    description: 'Debug categories: cdp, steps, action, worker, fixture (comma-separated)',
+  },
 });
 
 // ---- Path normalization: directories become globs ----
@@ -343,6 +347,8 @@ const testCommand = defineCommand({
     if (args['forbid-only']) config.forbidOnly = true;
     if (args['last-failed']) config.lastFailed = true;
     if (args.verbose) config.verbose = 1;
+    if (args.debug) config.debug = args.debug;
+    else if (args.verbose) config.debug = '*';
     await runTests(config, testFiles, false);
   },
 });

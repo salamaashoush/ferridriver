@@ -46,6 +46,8 @@ pub struct TestRunnerConfig {
   pub last_failed: Option<bool>,
   /// Verbose logging level: 0=off, 1=debug, 2=trace
   pub verbose: Option<i32>,
+  /// Debug categories (e.g. "cdp", "steps", "cdp,action"). Same as FERRIDRIVER_DEBUG env var.
+  pub debug: Option<String>,
 }
 
 /// Metadata for a registered test.
@@ -149,6 +151,12 @@ impl TestRunner {
   #[napi(factory)]
   pub async fn create(config: Option<TestRunnerConfig>) -> Result<Self> {
     let cfg = config.unwrap_or_default();
+    // Inject debug config as env var so the centralized logging picks it up.
+    // This works around Bun not propagating process.env to std::env::var.
+    if let Some(ref debug) = cfg.debug {
+      #[allow(unused_unsafe)]
+      unsafe { std::env::set_var("FERRIDRIVER_DEBUG", debug); }
+    }
     let verbose = cfg.verbose.unwrap_or(0) as u8;
     if verbose > 0 {
       ferridriver_test::logging::init(verbose);
