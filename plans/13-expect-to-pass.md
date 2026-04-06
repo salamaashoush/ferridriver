@@ -1,4 +1,4 @@
-# Feature: expect.toPass() Auto-Retry
+# [DONE] Feature: expect.toPass() Auto-Retry
 
 ## Context
 Some assertions depend on asynchronous state changes that don't have a clear locator-based wait. `expect.toPass()` wraps an assertion block and retries it until it passes or times out. This is safer than `sleep()` and more flexible than locator auto-wait. Playwright added this as a generic retry wrapper for any assertion logic.
