@@ -65,6 +65,9 @@ impl TestRunner {
       }
     }
 
+    // ── Only filtering: if any test/suite has Only, keep only those ──
+    crate::discovery::filter_by_only(&mut plan);
+
     let total_tests = plan.total_tests;
     if total_tests == 0 {
       tracing::info!("no tests found");

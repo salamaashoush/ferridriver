@@ -183,6 +183,28 @@ pub fn check_forbid_only(plan: &TestPlan) -> Result<(), ForbidOnlyError> {
   }
 }
 
+/// Filter a test plan to only `Only`-marked tests/suites.
+/// If no `Only` annotations exist, the plan is unchanged.
+pub fn filter_by_only(plan: &mut TestPlan) {
+  let has_only = plan.suites.iter().any(|suite| {
+    suite.annotations.iter().any(|a| matches!(a, TestAnnotation::Only))
+      || suite.tests.iter().any(|t| t.annotations.iter().any(|a| matches!(a, TestAnnotation::Only)))
+  });
+
+  if !has_only {
+    return;
+  }
+
+  for suite in &mut plan.suites {
+    let suite_is_only = suite.annotations.iter().any(|a| matches!(a, TestAnnotation::Only));
+    if !suite_is_only {
+      suite.tests.retain(|t| t.annotations.iter().any(|a| matches!(a, TestAnnotation::Only)));
+    }
+  }
+  plan.suites.retain(|s| !s.tests.is_empty());
+  plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+}
+
 /// Filter a test plan by tag.
 pub fn filter_by_tag(plan: &mut TestPlan, tag: &str) {
   for suite in &mut plan.suites {
@@ -266,6 +288,41 @@ mod tests {
     );
     let err = check_forbid_only(&plan).unwrap_err();
     assert_eq!(err.tests.len(), 2);
+  }
+
+  #[test]
+  fn filter_by_only_keeps_only_marked_tests() {
+    let mut plan = make_plan(
+      vec![
+        dummy_test("normal1", vec![]),
+        dummy_test("focused", vec![TestAnnotation::Only]),
+        dummy_test("normal2", vec![]),
+      ],
+      vec![],
+    );
+    filter_by_only(&mut plan);
+    assert_eq!(plan.total_tests, 1);
+    assert_eq!(plan.suites[0].tests[0].id.name, "focused");
+  }
+
+  #[test]
+  fn filter_by_only_no_only_keeps_all() {
+    let mut plan = make_plan(
+      vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])],
+      vec![],
+    );
+    filter_by_only(&mut plan);
+    assert_eq!(plan.total_tests, 2);
+  }
+
+  #[test]
+  fn filter_by_only_suite_level_keeps_all_in_suite() {
+    let mut plan = make_plan(
+      vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])],
+      vec![TestAnnotation::Only],
+    );
+    filter_by_only(&mut plan);
+    assert_eq!(plan.total_tests, 2);
   }
 
   #[test]

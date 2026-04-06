@@ -272,6 +272,18 @@ impl TestRunner {
       }
     }
 
+    // Only-filtering: if any test has modifier "only", keep only those.
+    let has_only = tests.iter().any(|t| t.meta.modifier == "only");
+    let only_indices: Vec<usize> = if has_only {
+      tests.iter().enumerate()
+        .filter(|(_, t)| t.meta.modifier == "only")
+        .map(|(i, _)| i)
+        .collect()
+    } else {
+      (0..tests.len()).collect()
+    };
+    let total_tests = only_indices.len();
+
     let start = Instant::now();
 
     // Only spawn as many workers as there are tests.
@@ -279,7 +291,7 @@ impl TestRunner {
 
     // Build work queue: (test_index, attempt).
     let (work_tx, work_rx) = async_channel::unbounded::<(usize, u32)>();
-    for i in 0..total_tests {
+    for &i in &only_indices {
       let _ = work_tx.send((i, 1)).await;
     }
 
