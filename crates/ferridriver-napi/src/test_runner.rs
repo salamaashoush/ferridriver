@@ -43,6 +43,7 @@ pub struct TestRunnerConfig {
   pub viewport_width: Option<i32>,
   pub viewport_height: Option<i32>,
   pub forbid_only: Option<bool>,
+  pub last_failed: Option<bool>,
 }
 
 /// Metadata for a registered test.
@@ -134,6 +135,7 @@ struct RegisteredHook {
 #[napi]
 pub struct TestRunner {
   config: ferridriver_test::TestConfig,
+  last_failed: bool,
   tests: Mutex<Vec<RegisteredTest>>,
   suites: Mutex<Vec<RegisteredSuite>>,
   hooks: Mutex<Vec<RegisteredHook>>,
@@ -176,6 +178,7 @@ impl TestRunner {
 
     Ok(Self {
       config: tc,
+      last_failed: cfg.last_failed.unwrap_or(false),
       tests: Mutex::new(Vec::new()),
       suites: Mutex::new(Vec::new()),
       hooks: Mutex::new(Vec::new()),
@@ -282,7 +285,26 @@ impl TestRunner {
     } else {
       (0..tests.len()).collect()
     };
-    let total_tests = only_indices.len();
+    // Last-failed filtering: read @rerun.txt and keep only matching tests.
+    let run_indices: Vec<usize> = if self.last_failed {
+      let rerun_path = self.config.output_dir.join("@rerun.txt");
+      if let Ok(content) = std::fs::read_to_string(&rerun_path) {
+        let rerun_set: rustc_hash::FxHashSet<&str> = content.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+        if rerun_set.is_empty() {
+          only_indices
+        } else {
+          only_indices.into_iter().filter(|&i| {
+            rerun_set.contains(tests[i].meta.file.as_str())
+              || rerun_set.contains(tests[i].meta.title.as_str())
+          }).collect()
+        }
+      } else {
+        only_indices
+      }
+    } else {
+      only_indices
+    };
+    let total_tests = run_indices.len();
 
     let start = Instant::now();
 
@@ -291,7 +313,7 @@ impl TestRunner {
 
     // Build work queue: (test_index, attempt).
     let (work_tx, work_rx) = async_channel::unbounded::<(usize, u32)>();
-    for &i in &only_indices {
+    for &i in &run_indices {
       let _ = work_tx.send((i, 1)).await;
     }
 

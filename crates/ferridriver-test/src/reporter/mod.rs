@@ -174,5 +174,11 @@ pub fn create_reporters(names: &[crate::config::ReporterConfig], output_dir: &st
     reporters.push(Box::new(terminal::TerminalReporter::new()));
   }
 
+  // Always add the rerun reporter so @rerun.txt is available for --last-failed.
+  let has_rerun = names.iter().any(|c| c.name == "rerun");
+  if !has_rerun {
+    reporters.push(Box::new(rerun::RerunReporter::new(output_dir.join("@rerun.txt"))));
+  }
+
   ReporterSet::new(reporters)
 }

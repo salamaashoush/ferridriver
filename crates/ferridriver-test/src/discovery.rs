@@ -7,6 +7,7 @@ use std::sync::Arc;
 use crate::config::TestConfig;
 use crate::fixture::FixturePool;
 use std::fmt;
+use std::path::Path;
 
 use crate::model::{
   ExpectedStatus, Hooks, TestAnnotation, TestCase, TestFailure, TestId, TestPlan, TestSuite,
@@ -205,6 +206,38 @@ pub fn filter_by_only(plan: &mut TestPlan) {
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
 }
 
+/// Filter a test plan to only tests listed in a rerun file.
+/// The rerun file contains one `file:line` or `file > suite > name` entry per line.
+/// If the file doesn't exist or is empty, logs a warning and runs all tests.
+pub fn filter_by_rerun(plan: &mut TestPlan, rerun_path: &Path) {
+  let content = match std::fs::read_to_string(rerun_path) {
+    Ok(c) if !c.trim().is_empty() => c,
+    Ok(_) => {
+      tracing::warn!("rerun file {} is empty, running all tests", rerun_path.display());
+      return;
+    }
+    Err(_) => {
+      tracing::warn!("rerun file {} not found, running all tests", rerun_path.display());
+      return;
+    }
+  };
+
+  let rerun_set: rustc_hash::FxHashSet<String> = content
+    .lines()
+    .map(|l| l.trim().to_string())
+    .filter(|l| !l.is_empty())
+    .collect();
+
+  for suite in &mut plan.suites {
+    suite.tests.retain(|test| {
+      rerun_set.contains(&test.id.file_location())
+        || rerun_set.contains(&test.id.full_name())
+    });
+  }
+  plan.suites.retain(|s| !s.tests.is_empty());
+  plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+}
+
 /// Filter a test plan by tag.
 pub fn filter_by_tag(plan: &mut TestPlan, tag: &str) {
   for suite in &mut plan.suites {
@@ -335,5 +368,78 @@ mod tests {
     let msg = err.to_string();
     assert!(msg.contains("test.only() found in 1 test(s)"));
     assert!(msg.contains("focused"));
+  }
+
+  #[test]
+  fn filter_by_rerun_keeps_matching_tests() {
+    let dir = std::env::temp_dir().join("ferritest_rerun_test");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rerun_path = dir.join("@rerun.txt");
+    std::fs::write(&rerun_path, "test.rs:10\n").unwrap();
+
+    let mut plan = make_plan(
+      vec![
+        {
+          let mut t = dummy_test("match", vec![]);
+          t.id.line = Some(10);
+          t
+        },
+        dummy_test("nomatch", vec![]),
+      ],
+      vec![],
+    );
+    filter_by_rerun(&mut plan, &rerun_path);
+    assert_eq!(plan.total_tests, 1);
+    assert_eq!(plan.suites[0].tests[0].id.name, "match");
+
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn filter_by_rerun_missing_file_keeps_all() {
+    let mut plan = make_plan(
+      vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])],
+      vec![],
+    );
+    filter_by_rerun(&mut plan, Path::new("/nonexistent/@rerun.txt"));
+    assert_eq!(plan.total_tests, 2);
+  }
+
+  #[test]
+  fn filter_by_rerun_empty_file_keeps_all() {
+    let dir = std::env::temp_dir().join("ferritest_rerun_empty");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rerun_path = dir.join("@rerun.txt");
+    std::fs::write(&rerun_path, "  \n").unwrap();
+
+    let mut plan = make_plan(
+      vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])],
+      vec![],
+    );
+    filter_by_rerun(&mut plan, &rerun_path);
+    assert_eq!(plan.total_tests, 2);
+
+    std::fs::remove_dir_all(&dir).ok();
+  }
+
+  #[test]
+  fn filter_by_rerun_matches_full_name() {
+    let dir = std::env::temp_dir().join("ferritest_rerun_fullname");
+    std::fs::create_dir_all(&dir).unwrap();
+    let rerun_path = dir.join("@rerun.txt");
+    std::fs::write(&rerun_path, "test.rs > suite > focused\n").unwrap();
+
+    let mut plan = make_plan(
+      vec![
+        dummy_test("focused", vec![]),
+        dummy_test("other", vec![]),
+      ],
+      vec![],
+    );
+    filter_by_rerun(&mut plan, &rerun_path);
+    assert_eq!(plan.total_tests, 1);
+    assert_eq!(plan.suites[0].tests[0].id.name, "focused");
+
+    std::fs::remove_dir_all(&dir).ok();
   }
 }

@@ -278,12 +278,18 @@ fn translate_scenario(
     annotations.push(TestAnnotation::Only);
   }
 
+  // Extract line number from location "file:line".
+  let line = scenario
+    .location
+    .rsplit_once(':')
+    .and_then(|(_, l)| l.parse::<usize>().ok());
+
   TestCase {
     id: TestId {
       file: scenario.feature_path.display().to_string(),
       suite: Some(scenario.feature_name.clone()),
       name: scenario.name.clone(),
-      line: None,
+      line,
     },
     test_fn,
     fixture_requests: vec![

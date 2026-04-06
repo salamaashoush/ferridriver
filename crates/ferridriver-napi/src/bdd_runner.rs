@@ -146,6 +146,8 @@ pub struct BddRunnerConfig {
   pub language: Option<String>,
   /// Fail if @only tag is found (CI safety net).
   pub forbid_only: Option<bool>,
+  /// Re-run only previously failed scenarios (from @rerun.txt).
+  pub last_failed: Option<bool>,
 }
 
 /// A registered TS step definition.
@@ -184,6 +186,7 @@ pub struct BddRunSummary {
 #[napi]
 pub struct BddRunner {
   config: ferridriver_test::TestConfig,
+  last_failed: bool,
   steps: Mutex<Vec<TsStepDef>>,
   hooks: Mutex<Vec<TsHook>>,
   param_types: StdMutex<Vec<(String, String)>>,
@@ -257,6 +260,7 @@ impl BddRunner {
 
     Ok(Self {
       config: tc,
+      last_failed: cfg.last_failed.unwrap_or(false),
       steps: Mutex::new(Vec::new()),
       hooks: Mutex::new(Vec::new()),
       param_types: StdMutex::new(Vec::new()),
@@ -567,11 +571,19 @@ impl BddRunner {
       if reps.is_empty() {
         reps.push(Box::new(ferridriver_bdd::reporter::terminal::BddTerminalReporter::new()));
       }
+      // Always add the rerun reporter so @rerun.txt is available for --last-failed.
+      let has_rerun = self.config.reporter.iter().any(|r| r.name == "rerun");
+      if !has_rerun {
+        reps.push(Box::new(ferridriver_bdd::reporter::rerun::BddRerunReporter::new(
+          self.config.output_dir.join("@rerun.txt"),
+        )));
+      }
       ferridriver_test::reporter::ReporterSet::new(reps)
     };
 
     // Run via core TestRunner.
-    let overrides = ferridriver_test::config::CliOverrides::default();
+    let mut overrides = ferridriver_test::config::CliOverrides::default();
+    overrides.last_failed = self.last_failed;
     let config = self.config.clone();
     let total = plan.total_tests;
 

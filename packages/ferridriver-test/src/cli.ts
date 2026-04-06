@@ -82,6 +82,10 @@ const runnerArgs = defineArgs({
     type: 'boolean',
     description: 'Fail if test.only() is found (CI safety net)',
   },
+  'last-failed': {
+    type: 'boolean',
+    description: 'Re-run only previously failed tests (from @rerun.txt)',
+  },
 });
 
 // ---- Path normalization: directories become globs ----
@@ -332,6 +336,7 @@ const testCommand = defineCommand({
     if (args.reporter) config.reporter = [args.reporter];
     if (args['update-snapshots']) config.updateSnapshots = true;
     if (args['forbid-only']) config.forbidOnly = true;
+    if (args['last-failed']) config.lastFailed = true;
     await runTests(config, testFiles, false);
   },
 });
@@ -377,6 +382,7 @@ const ctCommand = defineCommand({
     if (args.reporter) config.reporter = [args.reporter];
     if (args['update-snapshots']) config.updateSnapshots = true;
     if (args['forbid-only']) config.forbidOnly = true;
+    if (args['last-failed']) config.lastFailed = true;
     await runTests(config, testFiles, true);
   },
 });

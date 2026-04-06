@@ -225,6 +225,9 @@ pub fn run_bdd_harness() {
     let reporters = {
       let mut reps: Vec<Box<dyn ferridriver_test::reporter::Reporter>> = Vec::new();
       reps.push(Box::new(reporter::terminal::BddTerminalReporter::new()));
+      reps.push(Box::new(reporter::rerun::BddRerunReporter::new(
+        config.output_dir.join("@rerun.txt"),
+      )));
       ferridriver_test::reporter::ReporterSet::new(reps)
     };
 
@@ -262,6 +265,7 @@ fn parse_bdd_cli_args() -> ferridriver_test::config::CliOverrides {
       }
       "--list" => overrides.list_only = true,
       "--forbid-only" => overrides.forbid_only = true,
+      "--last-failed" => overrides.last_failed = true,
       "--profile" => {
         i += 1;
         overrides.profile = args.get(i).cloned();

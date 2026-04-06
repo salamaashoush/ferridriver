@@ -68,6 +68,12 @@ impl TestRunner {
     // ── Only filtering: if any test/suite has Only, keep only those ──
     crate::discovery::filter_by_only(&mut plan);
 
+    // ── Last-failed rerun filter ──
+    if self.overrides.last_failed {
+      let rerun_path = self.config.output_dir.join("@rerun.txt");
+      crate::discovery::filter_by_rerun(&mut plan, &rerun_path);
+    }
+
     let total_tests = plan.total_tests;
     if total_tests == 0 {
       tracing::info!("no tests found");

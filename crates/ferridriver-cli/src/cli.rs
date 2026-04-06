@@ -102,6 +102,10 @@ pub struct TestArgs {
   /// Fail if test.only() is found (CI safety net)
   #[arg(long)]
   pub forbid_only: bool,
+
+  /// Re-run only previously failed tests (from @rerun.txt)
+  #[arg(long)]
+  pub last_failed: bool,
 }
 
 /// BDD runner options.
@@ -182,6 +186,10 @@ pub struct BddArgs {
   /// Fail if @only tag is found (CI safety net)
   #[arg(long)]
   pub forbid_only: bool,
+
+  /// Re-run only previously failed scenarios (from @rerun.txt)
+  #[arg(long)]
+  pub last_failed: bool,
 }
 
 /// Browser backend and connection options.

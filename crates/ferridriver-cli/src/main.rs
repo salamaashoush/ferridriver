@@ -77,7 +77,7 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
     update_snapshots: false,
     profile: args.profile.clone(),
     forbid_only: args.forbid_only,
-    last_failed: false,
+    last_failed: args.last_failed,
   };
 
   let mut config = ferridriver_test::config::resolve_config(&overrides)
@@ -256,6 +256,13 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
     if reps.is_empty() {
       reps.push(Box::new(ferridriver_bdd::reporter::terminal::BddTerminalReporter::new()));
     }
+    // Always add the rerun reporter so @rerun.txt is available for --last-failed.
+    let has_rerun = config.reporter.iter().any(|r| r.name == "rerun");
+    if !has_rerun {
+      reps.push(Box::new(ferridriver_bdd::reporter::rerun::BddRerunReporter::new(
+        config.output_dir.join("@rerun.txt"),
+      )));
+    }
     ferridriver_test::reporter::ReporterSet::new(reps)
   };
 
@@ -295,7 +302,7 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
     update_snapshots: false,
     profile: args.profile,
     forbid_only: args.forbid_only,
-    last_failed: false,
+    last_failed: args.last_failed,
   };
 
   let config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;

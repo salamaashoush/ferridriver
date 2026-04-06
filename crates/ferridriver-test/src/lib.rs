@@ -212,6 +212,7 @@ fn parse_cli_args() -> CliOverrides {
       "--list" => overrides.list_only = true,
       "--update-snapshots" | "-u" => overrides.update_snapshots = true,
       "--forbid-only" => overrides.forbid_only = true,
+      "--last-failed" => overrides.last_failed = true,
       "--profile" => {
         i += 1;
         overrides.profile = args.get(i).cloned();
