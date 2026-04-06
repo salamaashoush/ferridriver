@@ -1,4 +1,4 @@
-# Feature: Verbose Protocol Logging
+# [DONE] Feature: Verbose Protocol Logging
 
 ## Context
 When tests fail in unexpected ways, developers need to see what's happening under the hood: CDP protocol messages, step matching decisions, hook execution, fixture lifecycle. The codebase already uses `tracing` — this feature is about exposing it properly through env vars and CLI flags with useful category-based filtering.
