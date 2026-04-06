@@ -177,7 +177,7 @@ async fn deep_profile() {
   // ── 8. Runner overhead measurement ──
   println!("  [8] Runner framework overhead (1 no-op test, 1 worker)");
   let noop_test = TestCase {
-    id: TestId { file: "bench".into(), suite: None, name: "noop".into() },
+    id: TestId { file: "bench".into(), suite: None, name: "noop".into(), line: None },
     test_fn: Arc::new(|_pool| Box::pin(async { Ok(()) })),
     fixture_requests: vec![],
     annotations: Vec::new(),

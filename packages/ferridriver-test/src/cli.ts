@@ -408,6 +408,18 @@ const bddCommand = defineCommand({
       valueName: 'MS',
       description: 'Timeout per step in milliseconds',
     },
+    strict: {
+      type: 'boolean',
+      description: 'Treat undefined/pending steps as errors',
+    },
+    order: {
+      type: 'string',
+      description: 'Scenario order: "defined" (default) or "random" / "random:SEED"',
+    },
+    language: {
+      type: 'string',
+      description: 'Gherkin keyword language (e.g., "fr", "de")',
+    },
     features: { type: 'positional', valueName: 'FEATURES', trailingVarArg: true },
   },
   async run({ args }) {
@@ -428,6 +440,9 @@ const bddCommand = defineCommand({
       headed: args.headed,
       backend: args.backend,
       reporter: args.reporter ? [args.reporter] : undefined,
+      strict: args.strict || undefined,
+      order: args.order || undefined,
+      language: args.language || undefined,
     };
 
     const runner = BddRunner.create(bddConfig);

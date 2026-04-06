@@ -3,6 +3,8 @@
 pub mod html;
 pub mod json;
 pub mod junit;
+pub mod progress;
+pub mod rerun;
 pub mod terminal;
 
 use std::time::Duration;
@@ -30,6 +32,8 @@ pub struct StepFinishedEvent {
   pub category: StepCategory,
   pub duration: Duration,
   pub error: Option<String>,
+  /// Arbitrary metadata attached to this step (e.g. BDD keyword/text).
+  pub metadata: Option<serde_json::Value>,
 }
 
 /// Events emitted during a test run.
@@ -152,6 +156,13 @@ pub fn create_reporters(names: &[crate::config::ReporterConfig], output_dir: &st
       "html" => {
         let path = output_dir.join("report.html");
         reporters.push(Box::new(html::HtmlReporter::new(path)));
+      }
+      "progress" => {
+        reporters.push(Box::new(progress::ProgressReporter::new()));
+      }
+      "rerun" => {
+        let path = output_dir.join("@rerun.txt");
+        reporters.push(Box::new(rerun::RerunReporter::new(path)));
       }
       other => {
         tracing::warn!("unknown reporter: {other}, skipping");

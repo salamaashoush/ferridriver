@@ -101,7 +101,7 @@ fn format_steps(steps: &[&TestStep], out: &mut String, indent: usize) {
   use std::fmt::Write;
   let pad = "  ".repeat(indent);
   for step in steps {
-    let icon = match step.status { StepStatus::Passed => "v", StepStatus::Failed => "x", StepStatus::Skipped => "-" };
+    let icon = match step.status { StepStatus::Passed => "v", StepStatus::Failed => "x", StepStatus::Skipped => "-", StepStatus::Pending => "P" };
     let _ = writeln!(out, "{pad}{icon} {} ({}ms)", step.title, step.duration.as_millis());
     if let Some(err) = &step.error { let _ = writeln!(out, "{pad}  Error: {err}"); }
     let nested: Vec<&TestStep> = step.steps.iter().filter(|s| s.category == StepCategory::TestStep).collect();

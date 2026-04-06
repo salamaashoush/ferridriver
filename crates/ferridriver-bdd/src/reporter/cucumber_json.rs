@@ -104,6 +104,7 @@ impl Reporter for CucumberJsonReporter {
             StepStatus::Passed => "passed",
             StepStatus::Failed => "failed",
             StepStatus::Skipped => "skipped",
+            StepStatus::Pending => "pending",
           };
           steps.push(CucumberStep {
             keyword: extract_keyword(step),

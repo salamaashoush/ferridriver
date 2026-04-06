@@ -140,6 +140,7 @@ async fn assert_request_count(world: &mut BrowserWorld, expected: i64, pattern: 
         "expected {expected_usize} request(s) matching \"{pattern}\", but found {actual}"
       ),
       diff: Some((expected_usize.to_string(), actual.to_string())),
+      pending: false,
     });
   }
 }

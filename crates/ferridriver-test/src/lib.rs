@@ -211,6 +211,10 @@ fn parse_cli_args() -> CliOverrides {
       },
       "--list" => overrides.list_only = true,
       "--update-snapshots" | "-u" => overrides.update_snapshots = true,
+      "--profile" => {
+        i += 1;
+        overrides.profile = args.get(i).cloned();
+      },
       _ => {},
     }
     i += 1;

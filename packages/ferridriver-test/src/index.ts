@@ -26,6 +26,17 @@ export { expect } from './expect.js';
 export { defineConfig } from './config.js';
 export type { TestRunnerConfig } from 'ferridriver';
 
-// BDD exports
-export { Given, When, Then, Step, Before, After, BeforeAll, AfterAll, configureBdd, runFeatures } from './bdd.js';
-export type { StepCallback, HookCallback, HookOptions } from './bdd.js';
+// BDD exports — matches @cucumber/cucumber API surface
+export {
+  // Step definitions
+  Given, When, Then, Step, defineStep,
+  // Hooks
+  Before, After, BeforeAll, AfterAll, BeforeStep, AfterStep,
+  // Configuration
+  defineParameterType, setDefaultTimeout, setWorldConstructor,
+  // Utilities
+  Pending, Status, DataTable, version,
+  // Runner
+  configureBdd, runFeatures,
+} from './bdd.js';
+export type { StepContext, StepCallback, HookCallback, HookOptions, StepOptions, ParameterTypeOptions } from './bdd.js';

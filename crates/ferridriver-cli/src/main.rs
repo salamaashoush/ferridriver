@@ -75,6 +75,7 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
     test_files: Vec::new(),
     list_only: args.list,
     update_snapshots: false,
+    profile: args.profile.clone(),
   };
 
   let mut config = ferridriver_test::config::resolve_config(&overrides)
@@ -99,9 +100,20 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
   if let Some(t) = args.step_timeout {
     config.timeout = t;
   }
+  if args.strict {
+    config.strict = true;
+  }
+  if let Some(order) = &args.order {
+    config.order = order.clone();
+  }
+  if args.language.is_some() {
+    config.language = args.language.clone();
+  }
 
-  // Discover and parse .feature files.
-  let feature_set = FeatureSet::discover_and_parse(&config.features, &config.test_ignore)
+  // Discover and parse .feature files (with optional i18n language).
+  let files = FeatureSet::discover(&config.features, &config.test_ignore)
+    .map_err(|e| anyhow::anyhow!(e))?;
+  let feature_set = FeatureSet::parse_with_language(files, config.language.as_deref())
     .map_err(|e| anyhow::anyhow!(e))?;
 
   if feature_set.features.is_empty() {
@@ -209,6 +221,27 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
             ),
           ));
         }
+        "usage" => {
+          reps.push(Box::new(ferridriver_bdd::reporter::usage::UsageReporter::new()));
+        }
+        "rerun" => {
+          reps.push(Box::new(ferridriver_bdd::reporter::rerun::BddRerunReporter::new(
+            config.output_dir.join("@rerun.txt"),
+          )));
+        }
+        "messages" | "ndjson" => {
+          reps.push(Box::new(ferridriver_bdd::reporter::messages::CucumberMessagesReporter::new(
+            config.output_dir.join("cucumber-messages.ndjson"),
+          )));
+        }
+        "progress" => {
+          reps.push(Box::new(ferridriver_test::reporter::progress::ProgressReporter::new()));
+        }
+        "html" => {
+          reps.push(Box::new(ferridriver_test::reporter::html::HtmlReporter::new(
+            config.output_dir.join("report.html"),
+          )));
+        }
         other => tracing::warn!("unknown reporter: {other}"),
       }
     }
@@ -252,6 +285,7 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
     test_files: files,
     list_only: args.list,
     update_snapshots: false,
+    profile: args.profile,
   };
 
   let config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;

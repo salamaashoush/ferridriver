@@ -176,6 +176,7 @@ fn format_step_lines(steps: &[&TestStep], out: &mut String, indent: usize) {
       StepStatus::Passed => "v",
       StepStatus::Failed => "x",
       StepStatus::Skipped => "-",
+      StepStatus::Pending => "P",
     };
     let dur = step.duration.as_millis();
     let _ = writeln!(out, "{pad}{icon} {} ({dur}ms)", step.title);

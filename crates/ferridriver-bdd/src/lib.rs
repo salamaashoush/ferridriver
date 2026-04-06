@@ -74,18 +74,21 @@
 extern crate self as ferridriver_bdd;
 
 // Re-export proc macros.
-pub use ferridriver_bdd_macros::{after, before, given, step, then, when};
+pub use ferridriver_bdd_macros::{after, before, given, param_type, step, then, when};
 
 // Re-export inventory so proc macro expansions can find it in downstream crates.
 pub use inventory;
 
+pub mod data_table;
 pub mod expression;
 pub mod feature;
 pub mod filter;
 pub mod hook;
+pub mod param_type;
 pub mod registry;
 pub mod reporter;
 pub mod scenario;
+pub mod snippet;
 pub mod step;
 pub mod steps;
 pub mod translate;
@@ -98,7 +101,7 @@ pub mod prelude {
   pub use crate::world::BrowserWorld;
 
   // Re-export proc macros.
-  pub use ferridriver_bdd_macros::{after, before, given, step, then, when};
+  pub use ferridriver_bdd_macros::{after, before, given, param_type, step, then, when};
 
   // Re-export ferridriver types commonly used in steps.
   pub use ferridriver::Page;
@@ -258,6 +261,10 @@ fn parse_bdd_cli_args() -> ferridriver_test::config::CliOverrides {
         overrides.tag = args.get(i).cloned();
       }
       "--list" => overrides.list_only = true,
+      "--profile" => {
+        i += 1;
+        overrides.profile = args.get(i).cloned();
+      }
       _ => {}
     }
     i += 1;

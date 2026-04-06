@@ -74,6 +74,19 @@ pub struct TestConfig {
   /// Take screenshot on failure. Default: true.
   pub screenshot_on_failure: bool,
 
+  /// Strict mode: treat undefined/pending steps as errors. Default: false.
+  pub strict: bool,
+
+  /// Scenario execution order: `"defined"` (default) or `"random"` / `"random:SEED"`.
+  pub order: String,
+
+  /// Default language for Gherkin keyword i18n (e.g., `"fr"`, `"de"`).
+  /// When `None`, features use `# language:` comments or default to English.
+  pub language: Option<String>,
+
+  /// Named configuration presets, merged onto the base config via `--profile NAME`.
+  pub profiles: BTreeMap<String, serde_json::Value>,
+
   /// Programmatic global setup hooks (run before any tests).
   /// Not serializable — set by code, not config files.
   #[serde(skip)]
@@ -161,6 +174,7 @@ pub struct CliOverrides {
   pub test_files: Vec<String>,
   pub list_only: bool,
   pub update_snapshots: bool,
+  pub profile: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -213,6 +227,10 @@ impl Default for TestConfig {
       dry_run: false,
       fail_fast: false,
       screenshot_on_failure: true,
+      strict: false,
+      order: "defined".into(),
+      language: None,
+      profiles: BTreeMap::new(),
       global_setup_fns: Vec::new(),
       global_teardown_fns: Vec::new(),
     }
@@ -243,6 +261,18 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
   } else {
     find_and_load_config()?
   };
+
+  // Apply profile overrides.
+  if let Some(profile_name) = &overrides.profile {
+    if let Some(profile_value) = config.profiles.get(profile_name) {
+      // Deep merge profile into config by re-serializing.
+      let mut base = serde_json::to_value(&config).map_err(|e| format!("serialize config: {e}"))?;
+      json_merge(&mut base, profile_value);
+      config = serde_json::from_value(base).map_err(|e| format!("apply profile '{profile_name}': {e}"))?;
+    } else {
+      return Err(format!("profile '{profile_name}' not found in config"));
+    }
+  }
 
   // Apply environment variable overrides.
   if let Ok(w) = std::env::var("FERRIDRIVER_WORKERS") {
@@ -326,5 +356,22 @@ fn load_config_file(path: &Path) -> Result<TestConfig, String> {
     "toml" => toml::from_str(&content).map_err(|e| format!("invalid TOML config: {e}")),
     "json" => serde_json::from_str(&content).map_err(|e| format!("invalid JSON config: {e}")),
     _ => Err(format!("unsupported config format: {ext}")),
+  }
+}
+
+fn json_merge(base: &mut serde_json::Value, overlay: &serde_json::Value) {
+  match (base, overlay) {
+    (serde_json::Value::Object(base_map), serde_json::Value::Object(overlay_map)) => {
+      for (key, value) in overlay_map {
+        if let Some(existing) = base_map.get_mut(key) {
+          json_merge(existing, value);
+        } else {
+          base_map.insert(key.clone(), value.clone());
+        }
+      }
+    }
+    (base, _) => {
+      *base = overlay.clone();
+    }
   }
 }

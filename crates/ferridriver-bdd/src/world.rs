@@ -1,6 +1,7 @@
 //! BrowserWorld: shared scenario state with Page, variables, and typed extensions.
 
 use std::any::{Any, TypeId};
+use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
@@ -16,6 +17,8 @@ pub struct BrowserWorld {
   context: ContextRef,
   vars: FxHashMap<String, String>,
   state: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
+  test_info: Option<Arc<ferridriver_test::model::TestInfo>>,
+  registry: Option<Arc<crate::registry::StepRegistry>>,
 }
 
 impl BrowserWorld {
@@ -26,6 +29,8 @@ impl BrowserWorld {
       context,
       vars: FxHashMap::default(),
       state: FxHashMap::default(),
+      test_info: None,
+      registry: None,
     }
   }
 
@@ -82,6 +87,41 @@ impl BrowserWorld {
   /// Remove and return typed state.
   pub fn take_state<T: Send + Sync + 'static>(&mut self) -> Option<T> {
     self.state.remove(&TypeId::of::<T>()).and_then(|b| b.downcast().ok()).map(|b| *b)
+  }
+
+  /// Set the test info for attachments.
+  pub fn set_test_info(&mut self, info: Arc<ferridriver_test::model::TestInfo>) {
+    self.test_info = Some(info);
+  }
+
+  /// Set the step registry for step composition.
+  pub fn set_registry(&mut self, registry: Arc<crate::registry::StepRegistry>) {
+    self.registry = Some(registry);
+  }
+
+  /// Attach binary data to the current test (appears in reports).
+  pub async fn attach(&self, name: &str, content_type: &str, data: Vec<u8>) {
+    if let Some(info) = &self.test_info {
+      info.attach(
+        name.to_string(),
+        content_type.to_string(),
+        ferridriver_test::model::AttachmentBody::Bytes(data),
+      ).await;
+    }
+  }
+
+  /// Log a text message as an attachment.
+  pub async fn log(&self, text: &str) {
+    self.attach("log", "text/plain", text.as_bytes().to_vec()).await;
+  }
+
+  /// Execute another step from within a step handler (step composition).
+  pub async fn run_step(&mut self, text: &str) -> Result<(), crate::step::StepError> {
+    let registry = self.registry.clone().ok_or_else(|| {
+      crate::step::StepError::from("step composition requires registry (internal error)")
+    })?;
+    let step_match = registry.find_match(text).map_err(|e| crate::step::StepError::from(e.to_string()))?;
+    (step_match.def.handler)(self, step_match.params, None, None).await
   }
 
   /// Interpolate variables in a string.

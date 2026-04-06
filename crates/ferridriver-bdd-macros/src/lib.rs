@@ -33,13 +33,28 @@ use syn::{parse_macro_input, FnArg, ItemFn, Lit, Meta, Pat, Token};
 
 struct StepArgs {
   expression: String,
+  is_regex: bool,
 }
 
 impl Parse for StepArgs {
   fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+    // Try to parse `regex = "pattern"` first.
+    if input.peek(syn::Ident) {
+      let ident: syn::Ident = input.fork().parse()?;
+      if ident == "regex" {
+        let _: syn::Ident = input.parse()?;
+        let _: Token![=] = input.parse()?;
+        let lit: Lit = input.parse()?;
+        return match lit {
+          Lit::Str(s) => Ok(Self { expression: s.value(), is_regex: true }),
+          _ => Err(syn::Error::new_spanned(lit, "expected a string literal regex pattern")),
+        };
+      }
+    }
+    // Otherwise parse as a cucumber expression string.
     let lit: Lit = input.parse()?;
     match lit {
-      Lit::Str(s) => Ok(Self { expression: s.value() }),
+      Lit::Str(s) => Ok(Self { expression: s.value(), is_regex: false }),
       _ => Err(syn::Error::new_spanned(lit, "expected a string literal cucumber expression")),
     }
   }
@@ -116,6 +131,7 @@ fn generate_step(kind: &str, attr: TokenStream, item: TokenStream) -> TokenStrea
   let block = &input.block;
   let attrs = &input.attrs;
   let expression = &args.expression;
+  let is_regex = args.is_regex;
 
   let kind_ident = syn::Ident::new(kind, proc_macro2::Span::call_site());
 
@@ -218,6 +234,7 @@ fn generate_step(kind: &str, attr: TokenStream, item: TokenStream) -> TokenStrea
       ferridriver_bdd::step::StepKind::#kind_ident,
       #expression,
       #handler_name,
+      regex = #is_regex,
     }
   };
 
@@ -390,6 +407,46 @@ fn generate_hook(prefix: &str, attr: TokenStream, item: TokenStream) -> TokenStr
   expanded.into()
 }
 
+// ── Custom parameter type macro ──
+
+struct ParamTypeArgs {
+  name: String,
+  regex: String,
+}
+
+impl Parse for ParamTypeArgs {
+  fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+    let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
+    let mut name = None;
+    let mut regex = None;
+
+    for meta in metas {
+      if let Meta::NameValue(nv) = &meta {
+        let ident = nv.path.get_ident().map(ToString::to_string).unwrap_or_default();
+        if let syn::Expr::Lit(lit) = &nv.value {
+          if let Lit::Str(s) = &lit.lit {
+            match ident.as_str() {
+              "name" => name = Some(s.value()),
+              "regex" => regex = Some(s.value()),
+              _ => {
+                return Err(syn::Error::new_spanned(
+                  &nv.path,
+                  format!("unknown param_type attribute: {ident} (expected name, regex)"),
+                ));
+              }
+            }
+          }
+        }
+      }
+    }
+
+    Ok(Self {
+      name: name.ok_or_else(|| syn::Error::new(input.span(), "missing `name` attribute"))?,
+      regex: regex.ok_or_else(|| syn::Error::new(input.span(), "missing `regex` attribute"))?,
+    })
+  }
+}
+
 // ── Public proc macro attributes ──
 
 /// Register a Given step definition.
@@ -477,4 +534,53 @@ pub fn before(attr: TokenStream, item: TokenStream) -> TokenStream {
 #[proc_macro_attribute]
 pub fn after(attr: TokenStream, item: TokenStream) -> TokenStream {
   generate_hook("After", attr, item)
+}
+
+/// Register a custom parameter type for Cucumber expressions.
+///
+/// Defines a new `{name}` placeholder that matches the given regex.
+/// Use it on a dummy function whose body is discarded — only the
+/// attribute arguments matter.
+///
+/// ```ignore
+/// // Simple: defines {color} matching red|green|blue
+/// #[param_type(name = "color", regex = "red|green|blue")]
+/// fn color_type() {}
+///
+/// // Then use in step definitions:
+/// #[given("I pick a {color} item")]
+/// async fn pick(world: &mut BrowserWorld, color: String) {
+///     // color = "red", "green", or "blue"
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn param_type(attr: TokenStream, item: TokenStream) -> TokenStream {
+  let args = parse_macro_input!(attr as ParamTypeArgs);
+  let input = parse_macro_input!(item as ItemFn);
+
+  let fn_name = &input.sig.ident;
+  let fn_name_str = fn_name.to_string();
+  let name = &args.name;
+  let regex = &args.regex;
+
+  let _reg_name = syn::Ident::new(
+    &format!("__bdd_param_type_reg_{fn_name_str}"),
+    proc_macro2::Span::call_site(),
+  );
+
+  let expanded = quote! {
+    ferridriver_bdd::inventory::submit! {
+      ferridriver_bdd::param_type::ParameterTypeRegistration {
+        name: #name,
+        regex: #regex,
+        transformer_factory: None,
+      }
+    }
+
+    // Keep the function (but it's a no-op marker).
+    #[allow(dead_code)]
+    fn #fn_name() {}
+  };
+
+  expanded.into()
 }

@@ -34,7 +34,7 @@ pub struct ScenarioStep {
   /// Step text body (after keyword).
   pub text: String,
   /// Optional data table.
-  pub table: Option<Vec<Vec<String>>>,
+  pub table: Option<crate::data_table::DataTable>,
   /// Optional doc string.
   pub docstring: Option<String>,
   /// Line number in the feature file.
@@ -124,7 +124,11 @@ pub fn expand_feature(feature: &ParsedFeature) -> Vec<ScenarioExecution> {
             scenarios.push(ScenarioExecution {
               feature_name: feature.feature.name.clone(),
               feature_path: feature.path.clone(),
-              name: format!("{} (Example #{})", scenario.name, row_idx + 1),
+              name: if let Some(ref ex_name) = example.name {
+                format!("{} ({} #{})", scenario.name, ex_name, row_idx + 1)
+              } else {
+                format!("{} (Example #{})", scenario.name, row_idx + 1)
+              },
               tags: example_tags.clone(),
               steps,
               location: format!(

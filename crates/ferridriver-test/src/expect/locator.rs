@@ -604,6 +604,7 @@ impl Expect<'_, Locator> {
         file: String::new(),
         suite: None,
         name: name.to_string(),
+        line: None,
       },
       title_path: vec![name.to_string()],
       retry: 0,

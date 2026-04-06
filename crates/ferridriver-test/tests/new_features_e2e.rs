@@ -45,7 +45,7 @@ fn fail(msg: impl Into<String>) -> TestFailure {
 fn noop_test(name: &str) -> TestCase {
   let name = name.to_string();
   TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name },
+    id: TestId { file: "new_features.rs".into(), suite: None, name, line: None },
     test_fn: Arc::new(|_| Box::pin(async { Ok(()) })),
     fixture_requests: vec![],
     annotations: Vec::new(),
@@ -157,7 +157,7 @@ async fn test_after_each_runs_even_on_failure() {
   };
 
   let failing_test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "failing".into() },
+    id: TestId { file: "new_features.rs".into(), suite: None, name: "failing".into(), line: None },
     test_fn: Arc::new(|_| Box::pin(async { Err(fail("intentional failure")) })),
     fixture_requests: vec![],
     annotations: Vec::new(),
@@ -226,7 +226,7 @@ async fn test_serial_mode_runs_in_order() {
   fn ordered_test(name: &str, expected_order: u32) -> TestCase {
     let name = name.to_string();
     TestCase {
-      id: TestId { file: "new_features.rs".into(), suite: Some("serial".into()), name },
+      id: TestId { file: "new_features.rs".into(), suite: Some("serial".into()), name, line: None },
       test_fn: Arc::new(move |_| {
         Box::pin(async move {
           let actual = ORDER.fetch_add(1, Ordering::SeqCst);
@@ -268,7 +268,7 @@ async fn test_serial_mode_skips_after_failure() {
   RUN_COUNT.store(0, Ordering::SeqCst);
 
   let failing = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: Some("serial_fail".into()), name: "fails".into() },
+    id: TestId { file: "new_features.rs".into(), suite: Some("serial_fail".into()), name: "fails".into(), line: None },
     test_fn: Arc::new(|_| {
       Box::pin(async {
         RUN_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -283,7 +283,7 @@ async fn test_serial_mode_skips_after_failure() {
   };
 
   let should_skip = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: Some("serial_fail".into()), name: "skipped".into() },
+    id: TestId { file: "new_features.rs".into(), suite: Some("serial_fail".into()), name: "skipped".into(), line: None },
     test_fn: Arc::new(|_| {
       Box::pin(async {
         RUN_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -322,7 +322,7 @@ async fn test_serial_mode_skips_after_failure() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_expected_failure_passes_when_test_fails() {
   let test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "expected_fail".into() },
+    id: TestId { file: "new_features.rs".into(), suite: None, name: "expected_fail".into(), line: None },
     test_fn: Arc::new(|_| Box::pin(async { Err(fail("this failure is expected")) })),
     fixture_requests: vec![],
     annotations: Vec::new(),
@@ -351,7 +351,7 @@ async fn test_expected_failure_passes_when_test_fails() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_expected_failure_fails_when_test_passes() {
   let test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "unexpected_pass".into() },
+    id: TestId { file: "new_features.rs".into(), suite: None, name: "unexpected_pass".into(), line: None },
     test_fn: Arc::new(|_| Box::pin(async { Ok(()) })),
     fixture_requests: vec![],
     annotations: Vec::new(),
@@ -389,7 +389,7 @@ async fn test_global_setup_runs_before_tests() {
   TEST_SAW_SETUP.store(0, Ordering::SeqCst);
 
   let test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "checks_setup".into() },
+    id: TestId { file: "new_features.rs".into(), suite: None, name: "checks_setup".into(), line: None },
     test_fn: Arc::new(|_| {
       Box::pin(async {
         if SETUP_RAN.load(Ordering::SeqCst) > 0 {
@@ -465,7 +465,7 @@ async fn test_global_setup_failure_aborts_run() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_testinfo_injected_into_pool() {
   let test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "info_check".into() },
+    id: TestId { file: "new_features.rs".into(), suite: None, name: "info_check".into(), line: None },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
         let info: Arc<TestInfo> = pool.get("test_info").await.map_err(fail)?;
@@ -502,7 +502,7 @@ async fn test_testinfo_injected_into_pool() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_soft_assertions_collected() {
   let test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "soft_test".into() },
+    id: TestId { file: "new_features.rs".into(), suite: None, name: "soft_test".into(), line: None },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
         let info: Arc<TestInfo> = pool.get("test_info").await.map_err(fail)?;
@@ -546,7 +546,7 @@ fn test_snapshot_create_and_match() {
   let _ = std::fs::remove_dir_all(&tmp);
 
   let info = TestInfo {
-    test_id: TestId { file: "snap.rs".into(), suite: None, name: "my_test".into() },
+    test_id: TestId { file: "snap.rs".into(), suite: None, name: "my_test".into(), line: None },
     title_path: vec!["snap.rs".into(), "my_test".into()],
     retry: 0,
     worker_index: 0,

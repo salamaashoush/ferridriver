@@ -1,8 +1,11 @@
 //! Step registry: collects step definitions from inventory + runtime registration.
 
+use std::sync::Arc;
+
 use crate::expression;
 use crate::filter::TagExpression;
 use crate::hook::{Hook, HookHandler, HookRegistration, HookRegistry};
+use crate::param_type::{CustomParamType, ParameterTypeRegistration, ParameterTypeRegistry};
 use crate::step::{
   MatchError, StepDef, StepHandler, StepLocation, StepMatch, StepParam, StepRegistration,
 };
@@ -11,6 +14,7 @@ use crate::step::{
 pub struct StepRegistry {
   steps: Vec<StepDef>,
   hooks: HookRegistry,
+  param_types: ParameterTypeRegistry,
 }
 
 impl StepRegistry {
@@ -19,33 +23,77 @@ impl StepRegistry {
     let mut registry = Self {
       steps: Vec::new(),
       hooks: HookRegistry::new(),
+      param_types: ParameterTypeRegistry::new(),
     };
+
+    // Collect custom parameter type registrations from inventory.
+    for reg in inventory::iter::<ParameterTypeRegistration> {
+      let transformer = reg.transformer_factory.map(|f| f());
+      registry.param_types.register(CustomParamType {
+        name: reg.name.to_string(),
+        regex: reg.regex.to_string(),
+        transformer,
+      });
+    }
 
     // Collect step registrations from #[given], #[when], #[then], #[step] macros.
     for reg in inventory::iter::<StepRegistration> {
-      match expression::compile(reg.expression) {
-        Ok(compiled) => {
-          registry.steps.push(StepDef {
-            kind: reg.kind,
-            expression: reg.expression.to_string(),
-            regex: compiled.regex,
-            param_types: compiled.param_types,
-            param_infos: compiled.param_infos,
-            handler: (reg.handler_factory)(),
-            location: StepLocation {
-              file: reg.file,
-              line: reg.line,
-            },
-          });
+      if reg.is_regex {
+        // Raw regex step: compile directly, all params are String.
+        match regex::Regex::new(reg.expression) {
+          Ok(regex) => {
+            let num_groups = regex.captures_len().saturating_sub(1);
+            registry.steps.push(StepDef {
+              kind: reg.kind,
+              expression: reg.expression.to_string(),
+              regex,
+              param_types: vec![expression::ParamType::Word; num_groups],
+              param_infos: (0..num_groups)
+                .map(|i| expression::ParamInfo { ty: expression::ParamType::Word, id: i })
+                .collect(),
+              handler: (reg.handler_factory)(),
+              location: StepLocation {
+                file: reg.file,
+                line: reg.line,
+              },
+            });
+          }
+          Err(e) => {
+            tracing::error!(
+              "failed to compile regex step \"{}\" at {}:{}: {}",
+              reg.expression,
+              reg.file,
+              reg.line,
+              e
+            );
+          }
         }
-        Err(e) => {
-          tracing::error!(
-            "failed to compile step expression \"{}\" at {}:{}: {}",
-            reg.expression,
-            reg.file,
-            reg.line,
-            e
-          );
+      } else {
+        // Cucumber expression: compile via expression engine.
+        match expression::compile_with_custom(reg.expression, &registry.param_types) {
+          Ok(compiled) => {
+            registry.steps.push(StepDef {
+              kind: reg.kind,
+              expression: reg.expression.to_string(),
+              regex: compiled.regex,
+              param_types: compiled.param_types,
+              param_infos: compiled.param_infos,
+              handler: (reg.handler_factory)(),
+              location: StepLocation {
+                file: reg.file,
+                line: reg.line,
+              },
+            });
+          }
+          Err(e) => {
+            tracing::error!(
+              "failed to compile step expression \"{}\" at {}:{}: {}",
+              reg.expression,
+              reg.file,
+              reg.line,
+              e
+            );
+          }
         }
       }
     }
@@ -94,7 +142,7 @@ impl StepRegistry {
     handler: StepHandler,
     location: StepLocation,
   ) -> Result<(), String> {
-    let compiled = expression::compile(expr)?;
+    let compiled = expression::compile_with_custom(expr, &self.param_types)?;
     self.steps.push(StepDef {
       kind,
       expression: expr.to_string(),
@@ -105,6 +153,37 @@ impl StepRegistry {
       location,
     });
     Ok(())
+  }
+
+  /// Register a step from a raw regex pattern (not a Cucumber expression).
+  /// All capture groups are extracted as string params.
+  pub fn register_regex(
+    &mut self,
+    kind: crate::step::StepKind,
+    pattern: &str,
+    handler: StepHandler,
+    location: StepLocation,
+  ) -> Result<(), String> {
+    let regex = regex::Regex::new(pattern)
+      .map_err(|e| format!("invalid regex \"{pattern}\": {e}"))?;
+    let num_groups = regex.captures_len().saturating_sub(1);
+    self.steps.push(StepDef {
+      kind,
+      expression: pattern.to_string(),
+      regex,
+      param_types: vec![expression::ParamType::Word; num_groups],
+      param_infos: (0..num_groups)
+        .map(|i| expression::ParamInfo { ty: expression::ParamType::Word, id: i })
+        .collect(),
+      handler,
+      location,
+    });
+    Ok(())
+  }
+
+  /// Register a custom parameter type for Cucumber expressions.
+  pub fn register_param_type(&mut self, param_type: CustomParamType) {
+    self.param_types.register(param_type);
   }
 
   /// Access the hook registry.
@@ -129,7 +208,7 @@ impl StepRegistry {
 
     for def in &self.steps {
       if let Some(captures) = def.regex.captures(text) {
-        match expression::extract_params(&captures, &def.param_types, &def.param_infos) {
+        match expression::extract_params_with_custom(&captures, &def.param_types, &def.param_infos, Some(&self.param_types)) {
           Ok(params) => matches.push((def, params)),
           Err(_) => continue,
         }
@@ -148,6 +227,7 @@ impl StepRegistry {
       _ => Err(MatchError::Ambiguous {
         text: text.to_string(),
         matches: matches.iter().map(|(def, _)| def.location.clone()).collect(),
+        expressions: matches.iter().map(|(def, _)| def.expression.clone()).collect(),
       }),
     }
   }

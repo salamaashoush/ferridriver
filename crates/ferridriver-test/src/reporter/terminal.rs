@@ -57,6 +57,7 @@ impl TerminalReporter {
       StepStatus::Passed => "·",
       StepStatus::Failed => "✗",
       StepStatus::Skipped => "−",
+      StepStatus::Pending => "?",
     }
   }
 
@@ -83,6 +84,13 @@ impl TerminalReporter {
           )
         }
         StepStatus::Skipped => {
+          format!(
+            "{pad}  {} {}",
+            self.skip_style.apply_to(icon),
+            self.skip_style.apply_to(&step.title)
+          )
+        }
+        StepStatus::Pending => {
           format!(
             "{pad}  {} {}",
             self.skip_style.apply_to(icon),

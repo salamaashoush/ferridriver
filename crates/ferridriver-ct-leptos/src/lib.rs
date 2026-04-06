@@ -120,6 +120,7 @@ async fn run_inner(harness_cfg: HarnessConfig) -> i32 {
           file: "component_test".into(),
           suite: None,
           name: reg.name.to_string(),
+          line: None,
         },
         test_fn: Arc::new(move |pool| {
           let nav_url = nav_url.clone();

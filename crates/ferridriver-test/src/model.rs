@@ -22,6 +22,8 @@ pub struct TestId {
   pub file: String,
   pub suite: Option<String>,
   pub name: String,
+  /// Source line number (used by rerun reporter for `file:line` output).
+  pub line: Option<usize>,
 }
 
 impl TestId {
@@ -31,6 +33,15 @@ impl TestId {
     match &self.suite {
       Some(s) => format!("{} > {} > {}", self.file, s, self.name),
       None => format!("{} > {}", self.file, self.name),
+    }
+  }
+
+  /// File path with optional line number (e.g., `features/login.feature:15`).
+  #[must_use]
+  pub fn file_location(&self) -> String {
+    match self.line {
+      Some(line) => format!("{}:{}", self.file, line),
+      None => self.file.clone(),
     }
   }
 }
@@ -342,6 +353,7 @@ impl StepHandle {
           category: self.category.clone(),
           duration,
           error: error.clone(),
+          metadata: self.metadata.clone(),
         })))
         .await;
     }
@@ -364,6 +376,15 @@ impl StepHandle {
 
   /// Complete this step as skipped.
   pub async fn skip(self, reason: Option<String>) {
+    self.finish_with_status(StepStatus::Skipped, reason).await;
+  }
+
+  /// Complete this step as pending (not yet implemented).
+  pub async fn pending(self, reason: Option<String>) {
+    self.finish_with_status(StepStatus::Pending, reason).await;
+  }
+
+  async fn finish_with_status(self, status: StepStatus, error: Option<String>) {
     let duration = self.start.elapsed();
 
     if let Some(bus) = &self.event_bus {
@@ -374,7 +395,8 @@ impl StepHandle {
           title: self.title.clone(),
           category: self.category.clone(),
           duration,
-          error: reason.clone(),
+          error: error.clone(),
+          metadata: self.metadata.clone(),
         })))
         .await;
     }
@@ -384,8 +406,8 @@ impl StepHandle {
       title: self.title,
       category: self.category,
       duration,
-      status: StepStatus::Skipped,
-      error: reason,
+      status,
+      error,
       location: None,
       parent_step_id: self.parent_step_id,
       metadata: self.metadata,
@@ -424,6 +446,8 @@ pub enum StepStatus {
   Passed,
   Failed,
   Skipped,
+  /// Step exists but is not yet implemented.
+  Pending,
 }
 
 /// Category of a test step.

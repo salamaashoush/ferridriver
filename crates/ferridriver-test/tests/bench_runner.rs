@@ -36,6 +36,7 @@ fn make_nav_test(i: usize) -> TestCase {
       file: "bench.rs".into(),
       suite: Some("nav".into()),
       name: format!("nav_{i:03}"),
+      line: None,
     },
     test_fn: Arc::new(move |pool| {
       Box::pin(async move {
@@ -67,6 +68,7 @@ fn make_interaction_test(i: usize) -> TestCase {
       file: "bench.rs".into(),
       suite: Some("click".into()),
       name: format!("interact_{i:03}"),
+      line: None,
     },
     test_fn: Arc::new(move |pool| {
       Box::pin(async move {

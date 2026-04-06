@@ -94,6 +94,10 @@ pub struct TestArgs {
   /// Output directory for reports
   #[arg(long)]
   pub output: Option<String>,
+
+  /// Configuration profile to apply
+  #[arg(long)]
+  pub profile: Option<String>,
 }
 
 /// BDD runner options.
@@ -154,6 +158,22 @@ pub struct BddArgs {
   /// Output directory for reports
   #[arg(long)]
   pub output: Option<String>,
+
+  /// Strict mode: treat undefined/pending steps as errors
+  #[arg(long)]
+  pub strict: bool,
+
+  /// Scenario execution order: "defined" (default) or "random" / "random:SEED"
+  #[arg(long)]
+  pub order: Option<String>,
+
+  /// Default language for Gherkin keyword i18n (e.g., "fr", "de")
+  #[arg(long)]
+  pub language: Option<String>,
+
+  /// Configuration profile to apply
+  #[arg(long)]
+  pub profile: Option<String>,
 }
 
 /// Browser backend and connection options.

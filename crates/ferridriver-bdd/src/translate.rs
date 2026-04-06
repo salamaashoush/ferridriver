@@ -62,6 +62,31 @@ pub fn translate_features(
     });
   }
 
+  // Apply scenario ordering.
+  if config.order.starts_with("random") {
+    let seed: u64 = if let Some(seed_str) = config.order.strip_prefix("random:") {
+      seed_str.parse().unwrap_or_else(|_| {
+        // Hash the seed string if it's not a number.
+        use std::hash::{Hash, Hasher};
+        let mut hasher = std::collections::hash_map::DefaultHasher::new();
+        seed_str.hash(&mut hasher);
+        hasher.finish()
+      })
+    } else {
+      // Use current time as seed when no explicit seed given.
+      std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos() as u64)
+        .unwrap_or(42)
+    };
+
+    tracing::info!("shuffling scenarios with seed {seed}");
+
+    for suite in &mut suites {
+      fisher_yates_shuffle(&mut suite.tests, seed);
+    }
+  }
+
   let total_tests = suites.iter().map(|s| s.tests.len()).sum();
   TestPlan {
     suites,
@@ -79,6 +104,7 @@ fn translate_scenario(
   let scenario_clone = scenario.clone();
   let step_timeout = Duration::from_millis(config.timeout);
   let screenshot_on_failure = config.screenshot_on_failure;
+  let strict = config.strict;
 
   let test_fn: TestFn = Arc::new(move |pool: FixturePool| {
     let scenario = scenario_clone.clone();
@@ -103,6 +129,10 @@ fn translate_scenario(
 
       // Construct BrowserWorld from the fixtures.
       let mut world = BrowserWorld::new((*page).clone(), (*context).clone());
+
+      // Wire test_info and registry for attachments and step composition.
+      world.set_test_info(Arc::clone(&test_info));
+      world.set_registry(Arc::clone(&registry));
 
       // Inject Scenario Outline example values as variables.
       if let Some(values) = &scenario.example_values {
@@ -152,18 +182,40 @@ fn translate_scenario(
           "bdd_line": step.line,
         }));
 
+        // Run BeforeStep hooks.
+        if let Err(e) = registry
+          .hooks()
+          .run_step(HookPoint::BeforeStep, &mut world, &text, &scenario.tags)
+          .await
+        {
+          tracing::warn!("BeforeStep hook failed: {e}");
+        }
+
         // Match and execute.
         let result =
-          execute_bdd_step(&registry, &mut world, &text, step, step_timeout).await;
+          execute_bdd_step(&registry, &mut world, &text, step, step_timeout, strict).await;
 
         match result {
           Ok(()) => handle.end(None).await,
+          Err(e) if e.pending && !strict => {
+            // Pending step in non-strict mode: mark as pending, don't fail.
+            handle.pending(Some(e.to_string())).await;
+          }
           Err(e) => {
             let msg = e.to_string();
             had_failure = true;
             failure_message = Some(msg.clone());
             handle.end(Some(msg)).await;
           }
+        }
+
+        // Run AfterStep hooks (always, even on failure).
+        if let Err(e) = registry
+          .hooks()
+          .run_step(HookPoint::AfterStep, &mut world, &text, &scenario.tags)
+          .await
+        {
+          tracing::warn!("AfterStep hook failed: {e}");
         }
       }
 
@@ -227,6 +279,7 @@ fn translate_scenario(
       file: scenario.feature_path.display().to_string(),
       suite: Some(scenario.feature_name.clone()),
       name: scenario.name.clone(),
+      line: None,
     },
     test_fn,
     fixture_requests: vec![
@@ -249,11 +302,19 @@ async fn execute_bdd_step(
   text: &str,
   step: &ScenarioStep,
   timeout: Duration,
+  strict: bool,
 ) -> Result<(), crate::step::StepError> {
   // Match step text against registry.
   let step_match = match registry.find_match(text) {
     Ok(m) => m,
     Err(MatchError::Undefined { text: t, suggestions }) => {
+      let keyword = step.keyword.trim();
+      let snippet = crate::snippet::generate_snippet(
+        keyword,
+        &t,
+        step.table.is_some(),
+        step.docstring.is_some(),
+      );
       let mut msg = format!("undefined step: \"{t}\"");
       if !suggestions.is_empty() {
         msg.push_str("\n  did you mean:");
@@ -261,20 +322,24 @@ async fn execute_bdd_step(
           msg.push_str(&format!("\n    - {s}"));
         }
       }
-      return Err(crate::step::StepError::from(msg));
+      msg.push_str(&format!("\n\n  You can implement this step with:\n\n{snippet}"));
+
+      if strict {
+        return Err(crate::step::StepError::from(msg));
+      }
+      return Err(crate::step::StepError::pending(msg));
     }
-    Err(MatchError::Ambiguous { text: t, matches }) => {
-      let locs: Vec<String> = matches.iter().map(|m| m.to_string()).collect();
-      return Err(crate::step::StepError::from(format!(
-        "ambiguous step: \"{t}\" matched {} definitions: {}",
-        locs.len(),
-        locs.join(", ")
-      )));
+    Err(MatchError::Ambiguous { text: t, matches, expressions }) => {
+      let mut msg = format!("ambiguous step: \"{t}\" matched {} definitions:", matches.len());
+      for (i, (loc, expr)) in matches.iter().zip(expressions.iter()).enumerate() {
+        msg.push_str(&format!("\n  {}. {} ({})", i + 1, expr, loc));
+      }
+      return Err(crate::step::StepError::from(msg));
     }
   };
 
   // Prepare data table and docstring.
-  let table_data = step.table.as_deref();
+  let table_data = step.table.as_ref();
   let docstring = step.docstring.as_deref();
 
   // Execute with timeout.
@@ -291,5 +356,26 @@ async fn execute_bdd_step(
       "step timed out after {}ms",
       timeout.as_millis()
     ))),
+  }
+}
+
+/// Deterministic Fisher-Yates shuffle using a simple splitmix64 PRNG.
+fn fisher_yates_shuffle<T>(items: &mut [T], seed: u64) {
+  let len = items.len();
+  if len <= 1 {
+    return;
+  }
+
+  let mut state = seed;
+  for i in (1..len).rev() {
+    // splitmix64 step
+    state = state.wrapping_add(0x9e37_79b9_7f4a_7c15);
+    let mut z = state;
+    z = (z ^ (z >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    z = (z ^ (z >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    z ^= z >> 31;
+
+    let j = (z as usize) % (i + 1);
+    items.swap(i, j);
   }
 }

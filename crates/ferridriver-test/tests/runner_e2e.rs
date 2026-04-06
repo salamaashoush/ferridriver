@@ -35,6 +35,7 @@ fn make_navigation_test() -> TestCase {
       file: "runner_e2e.rs".into(),
       suite: Some("navigation".into()),
       name: "basic_navigation".into(),
+      line: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -83,6 +84,7 @@ fn make_click_test() -> TestCase {
       file: "runner_e2e.rs".into(),
       suite: Some("interaction".into()),
       name: "click_button".into(),
+      line: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -142,6 +144,7 @@ fn make_fill_test() -> TestCase {
       file: "runner_e2e.rs".into(),
       suite: Some("interaction".into()),
       name: "fill_input".into(),
+      line: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -200,6 +203,7 @@ fn make_expect_test() -> TestCase {
       file: "runner_e2e.rs".into(),
       suite: Some("expect".into()),
       name: "auto_retry_assertions".into(),
+      line: None,
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
@@ -263,6 +267,7 @@ fn make_skip_test() -> TestCase {
       file: "runner_e2e.rs".into(),
       suite: None,
       name: "skipped_test".into(),
+      line: None,
     },
     test_fn: Arc::new(|_pool| {
       Box::pin(async move {

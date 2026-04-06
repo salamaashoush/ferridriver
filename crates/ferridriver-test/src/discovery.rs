@@ -44,6 +44,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
         file: file.clone(),
         suite: suite_name.clone(),
         name: reg.name.to_string(),
+        line: None,
       },
       test_fn: Arc::new(move |pool| test_fn_ptr(pool)),
       fixture_requests: reg.fixture_requests.iter().map(|s| (*s).to_string()).collect(),

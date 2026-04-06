@@ -51,11 +51,25 @@ impl FeatureSet {
   }
 
   /// Parse a list of feature files into a `FeatureSet`.
+  ///
+  /// When `language` is `Some("fr")`, all features default to that language's keywords.
+  /// Individual features can still override via `# language: xx` comments.
   pub fn parse(files: Vec<PathBuf>) -> Result<Self, String> {
+    Self::parse_with_language(files, None)
+  }
+
+  /// Parse feature files with an optional default language for i18n keyword support.
+  pub fn parse_with_language(files: Vec<PathBuf>, language: Option<&str>) -> Result<Self, String> {
     let mut features = Vec::with_capacity(files.len());
 
     for path in files {
-      let mut feature = gherkin::Feature::parse_path(&path, gherkin::GherkinEnv::default())
+      let env = if let Some(lang) = language {
+        gherkin::GherkinEnv::new(lang)
+          .map_err(|e| format!("unsupported language \"{lang}\": {e}"))?
+      } else {
+        gherkin::GherkinEnv::default()
+      };
+      let mut feature = gherkin::Feature::parse_path(&path, env)
         .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
 
       // parse_path may not set the path field, ensure it is set.
@@ -96,7 +110,7 @@ pub fn extract_tags(tags: &[String]) -> Vec<String> {
     .collect()
 }
 
-/// Convert a `gherkin::Table` into a `Vec<Vec<String>>` data table.
-pub fn table_to_vec(table: &gherkin::Table) -> Vec<Vec<String>> {
-  table.rows.clone()
+/// Convert a `gherkin::Table` into a `DataTable`.
+pub fn table_to_vec(table: &gherkin::Table) -> crate::data_table::DataTable {
+  crate::data_table::DataTable::new(table.rows.clone())
 }

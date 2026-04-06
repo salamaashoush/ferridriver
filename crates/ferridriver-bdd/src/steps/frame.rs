@@ -14,6 +14,7 @@ fn to_step_err(e: TestFailure) -> StepError {
   StepError {
     message: e.message,
     diff: e.diff.map(|d| (d, String::new())),
+    pending: false,
   }
 }
 

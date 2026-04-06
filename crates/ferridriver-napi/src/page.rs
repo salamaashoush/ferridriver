@@ -19,6 +19,10 @@ impl Page {
   pub(crate) fn wrap(inner: ferridriver::Page) -> Self {
     Self { inner }
   }
+
+  pub(crate) fn inner_ref(&self) -> &ferridriver::Page {
+    &self.inner
+  }
 }
 
 #[napi]

@@ -41,6 +41,7 @@ pub enum StepParam {
   Int(i64),
   Float(f64),
   Word(String),
+  Custom { type_name: String, value: String },
 }
 
 impl StepParam {
@@ -49,6 +50,7 @@ impl StepParam {
       Self::String(s) | Self::Word(s) => Some(s.clone()),
       Self::Int(i) => Some(i.to_string()),
       Self::Float(f) => Some(f.to_string()),
+      Self::Custom { value, .. } => Some(value.clone()),
     }
   }
 
@@ -57,6 +59,7 @@ impl StepParam {
       Self::Int(i) => Some(*i),
       Self::String(s) | Self::Word(s) => s.parse().ok(),
       Self::Float(f) => Some(*f as i64),
+      Self::Custom { value, .. } => value.parse().ok(),
     }
   }
 
@@ -65,14 +68,14 @@ impl StepParam {
       Self::Float(f) => Some(*f),
       Self::Int(i) => Some(*i as f64),
       Self::String(s) | Self::Word(s) => s.parse().ok(),
+      Self::Custom { value, .. } => value.parse().ok(),
     }
   }
 }
 
 // ── Data table ──
 
-/// A Gherkin data table (rows of string cells).
-pub type DataTable = [Vec<String>];
+pub use crate::data_table::DataTable;
 
 // ── Step error ──
 
@@ -81,6 +84,19 @@ pub type DataTable = [Vec<String>];
 pub struct StepError {
   pub message: String,
   pub diff: Option<(String, String)>,
+  /// When true, the step is not yet implemented (pending) rather than broken.
+  pub pending: bool,
+}
+
+impl StepError {
+  /// Create a pending step error (step not yet implemented).
+  pub fn pending(message: impl Into<String>) -> Self {
+    Self {
+      message: message.into(),
+      diff: None,
+      pending: true,
+    }
+  }
 }
 
 impl fmt::Display for StepError {
@@ -97,7 +113,7 @@ impl std::error::Error for StepError {}
 
 impl From<String> for StepError {
   fn from(message: String) -> Self {
-    Self { message, diff: None }
+    Self { message, diff: None, pending: false }
   }
 }
 
@@ -106,6 +122,7 @@ impl From<&str> for StepError {
     Self {
       message: message.to_string(),
       diff: None,
+      pending: false,
     }
   }
 }
@@ -181,6 +198,7 @@ pub enum MatchError {
   Ambiguous {
     text: String,
     matches: Vec<StepLocation>,
+    expressions: Vec<String>,
   },
 }
 
@@ -197,10 +215,10 @@ impl fmt::Display for MatchError {
         }
         Ok(())
       }
-      Self::Ambiguous { text, matches } => {
+      Self::Ambiguous { text, matches, expressions } => {
         write!(f, "ambiguous step: \"{text}\" matched {} definitions:", matches.len())?;
-        for m in matches {
-          write!(f, "\n    - {m}")?;
+        for (i, (loc, expr)) in matches.iter().zip(expressions.iter()).enumerate() {
+          write!(f, "\n  {}. {} ({})", i + 1, expr, loc)?;
         }
         Ok(())
       }
@@ -219,6 +237,8 @@ pub struct StepRegistration {
   pub handler_factory: fn() -> StepHandler,
   pub file: &'static str,
   pub line: u32,
+  /// When true, `expression` is a raw regex pattern instead of a cucumber expression.
+  pub is_regex: bool,
 }
 
 inventory::collect!(StepRegistration);
@@ -234,6 +254,19 @@ macro_rules! submit_step {
         handler_factory: $handler,
         file: file!(),
         line: line!(),
+        is_regex: false,
+      }
+    }
+  };
+  ($name:ident, $kind:expr, $expr:expr, $handler:ident, regex = $is_regex:expr,) => {
+    ferridriver_bdd::inventory::submit! {
+      ferridriver_bdd::step::StepRegistration {
+        kind: $kind,
+        expression: $expr,
+        handler_factory: $handler,
+        file: file!(),
+        line: line!(),
+        is_regex: $is_regex,
       }
     }
   };
