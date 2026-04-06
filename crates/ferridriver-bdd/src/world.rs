@@ -99,6 +99,11 @@ impl BrowserWorld {
     self.registry = Some(registry);
   }
 
+  /// Get the step registry Arc (for retry step composition).
+  pub fn registry_arc(&self) -> Option<Arc<crate::registry::StepRegistry>> {
+    self.registry.clone()
+  }
+
   /// Attach binary data to the current test (appears in reports).
   pub async fn attach(&self, name: &str, content_type: &str, data: Vec<u8>) {
     if let Some(info) = &self.test_info {

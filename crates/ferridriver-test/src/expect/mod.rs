@@ -251,25 +251,62 @@ where
 
 // ── toPass() ──
 
+/// Options for `to_pass` / `expect(fn).toPass()`.
+pub struct ToPassOptions {
+  /// Maximum time to retry (default: 5s).
+  pub timeout: Duration,
+  /// Retry intervals in ms (cycles last value). Default: [100, 250, 500, 1000].
+  pub intervals: Vec<u64>,
+  /// Custom error message prefix on final failure.
+  pub message: Option<String>,
+}
+
+impl Default for ToPassOptions {
+  fn default() -> Self {
+    Self {
+      timeout: DEFAULT_EXPECT_TIMEOUT,
+      intervals: POLL_INTERVALS.to_vec(),
+      message: None,
+    }
+  }
+}
+
 /// Retry an async block until it passes or timeout (Playwright's `expect(fn).toPass()`).
+///
+/// Simple form with just timeout:
+/// ```ignore
+/// to_pass(Duration::from_secs(10), || async { ... }).await?;
+/// ```
 pub async fn to_pass<F, Fut>(timeout: Duration, body: F) -> Result<(), TestFailure>
 where
   F: Fn() -> Fut,
   Fut: Future<Output = Result<(), TestFailure>>,
 {
-  let deadline = tokio::time::Instant::now() + timeout;
+  to_pass_with_options(body, ToPassOptions { timeout, ..Default::default() }).await
+}
+
+/// Retry an async block with full options.
+pub async fn to_pass_with_options<F, Fut>(body: F, options: ToPassOptions) -> Result<(), TestFailure>
+where
+  F: Fn() -> Fut,
+  Fut: Future<Output = Result<(), TestFailure>>,
+{
+  let deadline = tokio::time::Instant::now() + options.timeout;
   let mut interval_idx = 0;
   let mut last_error: Option<TestFailure>;
+  let mut attempts = 0u32;
 
   loop {
+    attempts += 1;
     match body().await {
       Ok(()) => return Ok(()),
       Err(e) => {
         last_error = Some(e);
-        let interval_ms = POLL_INTERVALS
+        let interval_ms = options
+          .intervals
           .get(interval_idx)
           .copied()
-          .unwrap_or(*POLL_INTERVALS.last().unwrap_or(&1000));
+          .unwrap_or(*options.intervals.last().unwrap_or(&1000));
         interval_idx += 1;
 
         let sleep_dur = Duration::from_millis(interval_ms);
@@ -281,14 +318,17 @@ where
     }
   }
 
-  Err(
-    last_error.unwrap_or_else(|| TestFailure {
-      message: "toPass() timed out".into(),
-      stack: None,
-      diff: None,
-      screenshot: None,
-    }),
-  )
+  let mut err = last_error.unwrap_or_else(|| TestFailure {
+    message: "toPass() timed out".into(),
+    stack: None,
+    diff: None,
+    screenshot: None,
+  });
+
+  // Wrap with context.
+  let prefix = options.message.as_deref().unwrap_or("toPass()");
+  err.message = format!("{prefix} failed after {attempts} attempt(s) ({:?}): {}", options.timeout, err.message);
+  Err(err)
 }
 
 // ── Internal polling ──

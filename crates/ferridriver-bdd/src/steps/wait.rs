@@ -2,10 +2,10 @@
 
 use std::time::Duration;
 
-use crate::step::StepError;
+use crate::step::{StepError, StepParam};
 use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::step;
-use ferridriver_test::expect::expect;
+use ferridriver_test::expect::{self, expect};
 use ferridriver_test::model::TestFailure;
 
 fn to_step_err(e: TestFailure) -> StepError {
@@ -51,4 +51,52 @@ async fn wait_for_visible(world: &mut BrowserWorld, selector: String) {
 async fn wait_for_hidden(world: &mut BrowserWorld, selector: String) {
   let locator = world.page().locator(&selector);
   expect(&locator).to_be_hidden().await.map_err(to_step_err)?;
+}
+
+/// Retry an assertion step until it passes or the timeout is reached.
+/// Example: `Then within 5 seconds, "h1" should have text "Hello"`
+///
+/// Matches the inner step text against the registry and retries with
+/// configurable intervals until success or timeout.
+#[step(regex = r#"^within (\d+) seconds?, (.+)$"#)]
+async fn within_seconds(world: &mut BrowserWorld, timeout_secs: String, inner_step: String) {
+  let timeout_secs: u64 = timeout_secs.parse().map_err(|e| StepError {
+    message: format!("invalid timeout: {e}"),
+    diff: None,
+    pending: false,
+  })?;
+
+  let timeout = Duration::from_secs(timeout_secs);
+  let page = world.page().clone();
+  let context = world.context().clone();
+  let registry = world.registry_arc();
+
+  // Pre-match the inner step once to validate it exists.
+  let registry = registry.ok_or_else(|| StepError {
+    message: "step registry not available for retry step".into(),
+    diff: None,
+    pending: false,
+  })?;
+  let step_match = registry.find_match(&inner_step).map_err(|e| StepError {
+    message: format!("inner step not found: {e}"),
+    diff: None,
+    pending: false,
+  })?;
+  let handler = step_match.def.handler.clone();
+  let params = step_match.params;
+
+  expect::to_pass(timeout, || {
+    let handler = handler.clone();
+    let params = params.clone();
+    let page = page.clone();
+    let context = context.clone();
+    let registry = registry.clone();
+    async move {
+      let mut temp_world = BrowserWorld::new(page, context);
+      temp_world.set_registry(registry);
+      handler(&mut temp_world, params, None, None)
+        .await
+        .map_err(|e| TestFailure::from(e.message))
+    }
+  }).await.map_err(to_step_err)?;
 }

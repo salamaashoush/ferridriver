@@ -106,7 +106,7 @@ pub mod worker;
 // -- Re-exports --
 pub use config::{CliOverrides, TestConfig};
 pub use discovery::TestRegistration;
-pub use expect::{expect, expect_configured, expect_poll, to_pass};
+pub use expect::{expect, expect_configured, expect_poll, to_pass, to_pass_with_options, ToPassOptions};
 pub use fixture::FixturePool;
 pub use model::{
   SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId, TestInfo, TestOutcome, TestPlan,

@@ -179,6 +179,47 @@ class LocatorAssertions {
   }
 }
 
+// ── toPass() wrapper ──
+
+interface ToPassOptions {
+  /** Maximum time to retry in ms (default: 5000). */
+  timeout?: number;
+  /** Retry intervals in ms (default: [100, 250, 500, 1000]). */
+  intervals?: number[];
+  /** Custom error message on final failure. */
+  message?: string;
+}
+
+class ToPassWrapper {
+  constructor(private block: () => Promise<void>) {}
+
+  async toPass(options: ToPassOptions = {}): Promise<void> {
+    const timeout = options.timeout ?? DEFAULT_TIMEOUT;
+    const intervals = options.intervals ?? POLL_INTERVALS;
+    const deadline = Date.now() + timeout;
+    let lastError: Error | undefined;
+    let idx = 0;
+    let attempts = 0;
+
+    while (true) {
+      attempts++;
+      try {
+        await this.block();
+        return;
+      } catch (e) {
+        lastError = e as Error;
+        const interval = intervals[Math.min(idx++, intervals.length - 1)];
+        if (Date.now() + interval > deadline) break;
+        await new Promise((r) => setTimeout(r, interval));
+      }
+    }
+
+    const prefix = options.message ?? 'toPass()';
+    const msg = `${prefix} failed after ${attempts} attempt(s) (${timeout}ms): ${lastError?.message ?? 'timed out'}`;
+    throw new ExpectError(msg);
+  }
+}
+
 // ── expect() entry point ──
 
 type Assertable = Page | Locator;
@@ -187,9 +228,13 @@ function isPage(v: Assertable): v is Page {
   return typeof (v as any).title === 'function' && typeof (v as any).goto === 'function';
 }
 
+export function expect(subject: () => Promise<void>): ToPassWrapper;
 export function expect(subject: Page, timeout?: number): PageAssertions;
 export function expect(subject: Locator, timeout?: number): LocatorAssertions;
-export function expect(subject: Assertable, timeout = DEFAULT_TIMEOUT): PageAssertions | LocatorAssertions {
+export function expect(subject: Assertable | (() => Promise<void>), timeout = DEFAULT_TIMEOUT): PageAssertions | LocatorAssertions | ToPassWrapper {
+  if (typeof subject === 'function') {
+    return new ToPassWrapper(subject);
+  }
   if (isPage(subject)) {
     return new PageAssertions(subject, false, timeout);
   }
