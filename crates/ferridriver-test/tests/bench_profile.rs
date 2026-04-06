@@ -1,3 +1,11 @@
+#![allow(
+  clippy::too_many_lines,
+  clippy::cast_precision_loss,
+  clippy::cast_lossless,
+  clippy::cast_sign_loss,
+  clippy::uninlined_format_args,
+  clippy::unwrap_used,
+)]
 //! Deep profiling: measure every microsecond in the test runner critical path.
 //! Identifies exactly where time is spent: browser launch, context creation,
 //! page creation, navigation, CDP operations, fixture pool overhead, dispatch, etc.

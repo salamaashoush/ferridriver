@@ -92,7 +92,7 @@ impl Worker {
     }
 
     // Run afterAll for every suite that had beforeAll on this worker.
-    for (_key, state) in &active_suites {
+    for state in active_suites.values() {
       if state.before_all_ran {
         for hook in &state.hooks.after_all {
           if let Err(e) = hook(custom_fixture_pool.clone()).await {
@@ -337,19 +337,21 @@ impl Worker {
         })
         .collect(),
       start_time: start,
+      event_bus: Some(self.event_bus.clone()),
     });
 
     let result = match page_result {
       Ok(page) => {
         let test_pool = custom_pool.child(FixtureScope::Test);
         test_pool.inject("browser", Arc::clone(browser)).await;
+        test_pool.inject("context", Arc::new(ctx.clone())).await;
         test_pool.inject("page", Arc::new(page.clone())).await;
         test_pool.inject("test_info", Arc::clone(&test_info)).await;
 
         // ── beforeEach hooks ──
         let mut before_each_err = None;
         for hook in &hooks.before_each {
-          if let Err(e) = hook(test_pool.clone()).await {
+          if let Err(e) = hook(test_pool.clone(), Arc::clone(&test_info)).await {
             before_each_err = Some(e);
             break;
           }
@@ -363,7 +365,7 @@ impl Worker {
 
         // ── afterEach hooks (ALWAYS run, even on failure) ──
         for hook in &hooks.after_each {
-          if let Err(e) = hook(test_pool.clone()).await {
+          if let Err(e) = hook(test_pool.clone(), Arc::clone(&test_info)).await {
             tracing::warn!("afterEach error: {e}");
           }
         }

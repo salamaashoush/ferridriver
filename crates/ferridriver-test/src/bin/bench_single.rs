@@ -1,3 +1,4 @@
+#![allow(clippy::cast_lossless, clippy::unwrap_used)]
 //! Measure futex calls per operation.
 
 use ferridriver::Browser;

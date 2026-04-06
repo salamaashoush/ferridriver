@@ -29,7 +29,7 @@ pub struct DevServerConfig {
 impl DevServerConfig {
   /// Vite dev server (uses bun if available, falls back to npx).
   pub fn vite(project_dir: &Path) -> Self {
-    let (cmd, mut args) = if which("bunx") {
+    let (cmd, args) = if which("bunx") {
       ("bunx".into(), vec!["--bun".into(), "vite".into()])
     } else {
       ("npx".into(), vec!["vite".into()])
@@ -167,7 +167,7 @@ async fn discover_url(
         Some(l) => l,
         None => return Err("dev server exited without providing a URL".into()),
       },
-      _ = tokio::time::sleep_until(deadline) => {
+      () = tokio::time::sleep_until(deadline) => {
         return Err(format!("timeout ({timeout_secs}s) waiting for dev server URL"));
       }
     };

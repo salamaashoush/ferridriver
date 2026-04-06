@@ -1,6 +1,11 @@
+#![allow(
+  clippy::cast_precision_loss,
+  clippy::cast_lossless,
+  clippy::uninlined_format_args,
+  clippy::unnecessary_to_owned,
+)]
 //! Micro-benchmark: measure individual operation costs.
 
-use std::sync::Arc;
 use std::time::Instant;
 
 use ferridriver::Browser;

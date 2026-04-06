@@ -40,7 +40,7 @@ use std::time::Duration;
 use crate::model::TestFailure;
 
 /// Default expect timeout (5 seconds, matching Playwright).
-pub const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_millis(5000);
+pub const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Retry intervals matching Playwright: [0, 100, 250, 500, 1000, 1000, ...]
 pub const POLL_INTERVALS: &[u64] = &[100, 250, 500, 1000];
@@ -119,7 +119,7 @@ pub struct Expect<'a, T> {
   pub(crate) message: Option<String>,
 }
 
-impl<'a, T> Expect<'a, T> {
+impl<T> Expect<'_, T> {
   /// Invert the assertion (Playwright's `.not`).
   #[must_use]
   pub fn not(mut self) -> Self {

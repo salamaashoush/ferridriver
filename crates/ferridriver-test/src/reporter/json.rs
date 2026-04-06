@@ -1,10 +1,14 @@
 //! JSON reporter: writes machine-readable results to a file.
+//!
+//! Includes step hierarchy in output (filtered to user-defined steps only,
+//! matching Playwright's JSON reporter behavior).
 
 use std::path::PathBuf;
 use std::time::Duration;
 
 use serde::Serialize;
 
+use crate::model::{StepCategory, TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct JsonReporter {
@@ -34,6 +38,20 @@ struct JsonTestResult {
   duration_ms: u128,
   attempt: u32,
   error: Option<String>,
+  /// Step hierarchy (only user-defined steps, matching Playwright's JSON reporter).
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  steps: Vec<JsonStep>,
+}
+
+#[derive(Serialize, Clone)]
+struct JsonStep {
+  title: String,
+  duration_ms: u128,
+  status: String,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  error: Option<String>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  steps: Vec<JsonStep>,
 }
 
 impl JsonReporter {
@@ -45,6 +63,20 @@ impl JsonReporter {
       duration: Duration::ZERO,
     }
   }
+}
+
+fn serialize_steps(steps: &[TestStep]) -> Vec<JsonStep> {
+  steps
+    .iter()
+    .filter(|s| s.category == StepCategory::TestStep)
+    .map(|s| JsonStep {
+      title: s.title.clone(),
+      duration_ms: s.duration.as_millis(),
+      status: format!("{:?}", s.status),
+      error: s.error.clone(),
+      steps: serialize_steps(&s.steps),
+    })
+    .collect()
 }
 
 #[async_trait::async_trait]
@@ -60,6 +92,7 @@ impl Reporter for JsonReporter {
           duration_ms: outcome.duration.as_millis(),
           attempt: outcome.attempt,
           error: outcome.error.as_ref().map(|e| e.message.clone()),
+          steps: serialize_steps(&outcome.steps),
         });
       }
       ReporterEvent::RunFinished {

@@ -1,3 +1,4 @@
+#![allow(clippy::unwrap_used, clippy::doc_markdown)]
 //! E2E tests for all Playwright-compatible features:
 //! - Retry with flaky detection
 //! - All expect matchers (visibility, text, value, attributes, CSS, count, focused, etc.)

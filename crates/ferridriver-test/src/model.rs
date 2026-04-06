@@ -6,11 +6,13 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
 
 use crate::fixture::FixturePool;
+use crate::reporter::EventBus;
 
 // ── Test Identity ──
 
@@ -91,9 +93,13 @@ pub struct TestSuite {
 
 /// Lifecycle hooks attached to a suite.
 pub struct Hooks {
-  pub before_all: Vec<HookFn>,
-  pub after_all: Vec<HookFn>,
+  /// Runs once per suite per worker (no test context).
+  pub before_all: Vec<SuiteHookFn>,
+  /// Runs once per suite per worker on teardown (no test context).
+  pub after_all: Vec<SuiteHookFn>,
+  /// Runs before each test (receives test info with tags, name, step API).
   pub before_each: Vec<HookFn>,
+  /// Runs after each test, even on failure (receives test info).
   pub after_each: Vec<HookFn>,
 }
 
@@ -108,9 +114,18 @@ impl Default for Hooks {
   }
 }
 
-/// An async hook function. Uses `Arc` for shareability across retries.
-pub type HookFn =
+/// Suite-scoped hook (before_all / after_all). Receives only the fixture pool.
+/// Runs once per suite per worker, no test context available.
+pub type SuiteHookFn =
   Arc<dyn Fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>> + Send + Sync>;
+
+/// Test-scoped hook (before_each / after_each). Receives fixture pool + `TestInfo`.
+/// `TestInfo` provides access to test tags, name, step API, and event bus.
+pub type HookFn = Arc<
+  dyn Fn(FixturePool, Arc<TestInfo>) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>
+    + Send
+    + Sync,
+>;
 
 // ── Test Plan ──
 
@@ -163,6 +178,8 @@ pub struct TestInfo {
   pub tags: Vec<String>,
   /// Test start time.
   pub start_time: Instant,
+  /// Event bus for real-time step event emission (set by worker).
+  pub event_bus: Option<EventBus>,
 }
 
 impl TestInfo {
@@ -204,6 +221,178 @@ impl TestInfo {
   pub fn elapsed(&self) -> Duration {
     self.start_time.elapsed()
   }
+
+  /// Begin a new step with real-time event emission.
+  ///
+  /// Returns a `StepHandle` that must be completed via `handle.end()`.
+  /// Emits `ReporterEvent::StepStarted` immediately if an event bus is available.
+  pub async fn begin_step(
+    &self,
+    title: impl Into<String>,
+    category: StepCategory,
+  ) -> StepHandle {
+    let title = title.into();
+    let step_id = format!(
+      "{}@{}",
+      category,
+      STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+
+    if let Some(bus) = &self.event_bus {
+      bus.emit(crate::reporter::ReporterEvent::StepStarted(Box::new(crate::reporter::StepStartedEvent {
+        test_id: self.test_id.clone(),
+        step_id: step_id.clone(),
+        parent_step_id: None,
+        title: title.clone(),
+        category: category.clone(),
+      })))
+      .await;
+    }
+
+    StepHandle {
+      step_id,
+      test_id: self.test_id.clone(),
+      title,
+      category,
+      parent_step_id: None,
+      start: Instant::now(),
+      metadata: None,
+      event_bus: self.event_bus.clone(),
+      steps: Arc::clone(&self.steps),
+    }
+  }
+
+  /// Begin a nested step (child of a parent step).
+  pub async fn begin_child_step(
+    &self,
+    title: impl Into<String>,
+    category: StepCategory,
+    parent_step_id: &str,
+  ) -> StepHandle {
+    let title = title.into();
+    let step_id = format!(
+      "{}@{}",
+      category,
+      STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
+    );
+
+    if let Some(bus) = &self.event_bus {
+      bus.emit(crate::reporter::ReporterEvent::StepStarted(Box::new(crate::reporter::StepStartedEvent {
+        test_id: self.test_id.clone(),
+        step_id: step_id.clone(),
+        parent_step_id: Some(parent_step_id.to_string()),
+        title: title.clone(),
+        category: category.clone(),
+      })))
+      .await;
+    }
+
+    StepHandle {
+      step_id,
+      test_id: self.test_id.clone(),
+      title,
+      category,
+      parent_step_id: Some(parent_step_id.to_string()),
+      start: Instant::now(),
+      metadata: None,
+      event_bus: self.event_bus.clone(),
+      steps: Arc::clone(&self.steps),
+    }
+  }
+}
+
+/// Global step ID counter for unique step identification.
+static STEP_ID_COUNTER: AtomicU64 = AtomicU64::new(0);
+
+/// Handle to an in-progress step. Must be completed via `end()`.
+///
+/// On `end()`:
+/// - Emits `ReporterEvent::StepFinished` for real-time reporting
+/// - Pushes a `TestStep` to the test's step list for batch reporting
+pub struct StepHandle {
+  pub step_id: String,
+  pub test_id: TestId,
+  pub title: String,
+  pub category: StepCategory,
+  pub parent_step_id: Option<String>,
+  pub start: Instant,
+  /// Arbitrary metadata attached to this step (set before calling `end()`).
+  pub metadata: Option<serde_json::Value>,
+  event_bus: Option<EventBus>,
+  steps: Arc<Mutex<Vec<TestStep>>>,
+}
+
+impl StepHandle {
+  /// Complete this step. Pass `None` for success, `Some(msg)` for failure.
+  pub async fn end(self, error: Option<String>) {
+    let duration = self.start.elapsed();
+    let status = if error.is_some() {
+      StepStatus::Failed
+    } else {
+      StepStatus::Passed
+    };
+
+    // Emit real-time event.
+    if let Some(bus) = &self.event_bus {
+      bus
+        .emit(crate::reporter::ReporterEvent::StepFinished(Box::new(crate::reporter::StepFinishedEvent {
+          test_id: self.test_id.clone(),
+          step_id: self.step_id.clone(),
+          title: self.title.clone(),
+          category: self.category.clone(),
+          duration,
+          error: error.clone(),
+        })))
+        .await;
+    }
+
+    // Push to batch step list (for TestOutcome.steps).
+    let step = TestStep {
+      step_id: self.step_id,
+      title: self.title,
+      category: self.category,
+      duration,
+      status,
+      error,
+      location: None,
+      parent_step_id: self.parent_step_id,
+      metadata: self.metadata.clone(),
+      steps: Vec::new(),
+    };
+    self.steps.lock().await.push(step);
+  }
+
+  /// Complete this step as skipped.
+  pub async fn skip(self, reason: Option<String>) {
+    let duration = self.start.elapsed();
+
+    if let Some(bus) = &self.event_bus {
+      bus
+        .emit(crate::reporter::ReporterEvent::StepFinished(Box::new(crate::reporter::StepFinishedEvent {
+          test_id: self.test_id.clone(),
+          step_id: self.step_id.clone(),
+          title: self.title.clone(),
+          category: self.category.clone(),
+          duration,
+          error: reason.clone(),
+        })))
+        .await;
+    }
+
+    let step = TestStep {
+      step_id: self.step_id,
+      title: self.title,
+      category: self.category,
+      duration,
+      status: StepStatus::Skipped,
+      error: reason,
+      location: None,
+      parent_step_id: self.parent_step_id,
+      metadata: self.metadata,
+      steps: Vec::new(),
+    };
+    self.steps.lock().await.push(step);
+  }
 }
 
 // ── Test Step ──
@@ -211,11 +400,30 @@ impl TestInfo {
 /// A structured test step (maps to Playwright's `test.step()`).
 #[derive(Debug, Clone)]
 pub struct TestStep {
+  /// Unique step identifier (for parent/child tracking and reporter correlation).
+  pub step_id: String,
   pub title: String,
   pub category: StepCategory,
   pub duration: Duration,
+  /// Step completion status.
+  pub status: StepStatus,
   pub error: Option<String>,
+  /// Source location (e.g., "file.rs:42" or "feature.feature:10").
+  pub location: Option<String>,
+  /// Parent step ID for nesting.
+  pub parent_step_id: Option<String>,
+  /// Arbitrary metadata for domain-specific extensions (e.g., BDD keyword, tags).
+  /// Reporters can use this for custom rendering without the core needing domain knowledge.
+  pub metadata: Option<serde_json::Value>,
   pub steps: Vec<TestStep>,
+}
+
+/// Status of a completed test step.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StepStatus {
+  Passed,
+  Failed,
+  Skipped,
 }
 
 /// Category of a test step.

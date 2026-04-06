@@ -1,9 +1,15 @@
+#![allow(
+  clippy::cast_precision_loss,
+  clippy::cast_lossless,
+  clippy::too_many_lines,
+  clippy::uninlined_format_args,
+)]
 //! Diagnose why worker scaling is sub-linear.
 //! Measure: browser launch overlap, per-worker test time, idle time.
 
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use ferridriver::Browser;
 use ferridriver::options::LaunchOptions;

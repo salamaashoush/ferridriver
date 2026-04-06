@@ -1,3 +1,10 @@
+#![allow(
+  clippy::cast_precision_loss,
+  clippy::cast_lossless,
+  clippy::uninlined_format_args,
+  clippy::doc_markdown,
+  clippy::if_same_then_else,
+)]
 //! Component testing integration tests.
 //!
 //! Tests the ComponentServer, DevServer URL discovery, and mount() flow.

@@ -4,7 +4,7 @@ use std::time::Duration;
 
 use console::Style;
 
-use crate::model::TestStatus;
+use crate::model::{StepCategory, StepStatus, TestStatus, TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct TerminalReporter {
@@ -49,6 +49,58 @@ impl TerminalReporter {
       format!("{ms}ms")
     } else {
       format!("{:.1}s", d.as_secs_f64())
+    }
+  }
+
+  fn step_icon(status: StepStatus) -> &'static str {
+    match status {
+      StepStatus::Passed => "·",
+      StepStatus::Failed => "✗",
+      StepStatus::Skipped => "−",
+    }
+  }
+
+  /// Print step hierarchy with indentation.
+  fn print_steps(&self, steps: &[&TestStep], indent: usize) {
+    let pad = " ".repeat(indent * 2);
+    for step in steps {
+      let icon = Self::step_icon(step.status);
+      let dur = Self::format_duration(step.duration);
+      let line = match step.status {
+        StepStatus::Passed => {
+          format!(
+            "{pad}  {icon} {} {}",
+            step.title,
+            self.dim_style.apply_to(format!("({dur})"))
+          )
+        }
+        StepStatus::Failed => {
+          format!(
+            "{pad}  {} {} {}",
+            self.fail_style.apply_to(icon),
+            self.fail_style.apply_to(&step.title),
+            self.dim_style.apply_to(format!("({dur})"))
+          )
+        }
+        StepStatus::Skipped => {
+          format!(
+            "{pad}  {} {}",
+            self.skip_style.apply_to(icon),
+            self.skip_style.apply_to(&step.title)
+          )
+        }
+      };
+      println!("{line}");
+
+      // Print nested steps (filtered by TestStep category).
+      let nested: Vec<&TestStep> = step
+        .steps
+        .iter()
+        .filter(|s| s.category == StepCategory::TestStep)
+        .collect();
+      if !nested.is_empty() {
+        self.print_steps(&nested, indent + 1);
+      }
     }
   }
 }
@@ -120,6 +172,16 @@ impl Reporter for TerminalReporter {
           }
         };
         println!("{line}");
+
+        // Print step details for tests that have user-defined steps.
+        let user_steps: Vec<&TestStep> = outcome
+          .steps
+          .iter()
+          .filter(|s| s.category == StepCategory::TestStep)
+          .collect();
+        if !user_steps.is_empty() {
+          self.print_steps(&user_steps, 2);
+        }
 
         // Print error details for failures.
         if let Some(error) = &outcome.error {

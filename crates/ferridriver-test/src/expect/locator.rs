@@ -413,6 +413,38 @@ impl Expect<'_, Locator> {
     .await
   }
 
+  /// Assert the locator has the expected accessible error message.
+  pub async fn to_have_accessible_error_message(
+    &self,
+    expected: impl Into<StringOrRegex>,
+  ) -> Result<(), TestFailure> {
+    let expected = expected.into();
+    let locator = self.subject;
+    let is_not = self.is_not;
+    poll_until(self.timeout, || {
+      let expected = expected.clone();
+      async move {
+        let actual = locator
+          .evaluate(
+            "(function() { \
+              var errId = el.getAttribute('aria-errormessage'); \
+              if (errId) { \
+                var errEl = document.getElementById(errId); \
+                return errEl ? errEl.textContent.trim() : ''; \
+              } \
+              return el.validationMessage || ''; \
+            })()",
+          )
+          .await
+          .unwrap_or(None)
+          .and_then(|v| v.as_str().map(String::from))
+          .unwrap_or_default();
+        check_text_match(&expected, &actual, is_not, "accessible error message")
+      }
+    })
+    .await
+  }
+
   /// Assert the locator has a JS property with the expected value.
   pub async fn to_have_js_property(
     &self,
@@ -465,7 +497,7 @@ impl Expect<'_, Locator> {
         let count = locator.count().await.unwrap_or(0);
         let mut actuals = Vec::with_capacity(count);
         for i in 0..count {
-          let selector = format!("{}:nth-child({})", locator.selector(), i + 1);
+          let _selector = format!("{}:nth-child({})", locator.selector(), i + 1);
           // Use the parent page's evaluate to get text for each child.
           let text = locator
             .evaluate(&format!(
@@ -586,6 +618,7 @@ impl Expect<'_, Locator> {
       timeout: self.timeout,
       tags: Vec::new(),
       start_time: std::time::Instant::now(),
+      event_bus: None,
     };
     crate::snapshot::assert_snapshot(&info, &actual, name, update)
   }
@@ -610,141 +643,7 @@ impl Expect<'_, Locator> {
         stack: None, diff: None, screenshot: None,
       })?;
 
-    let snap_dir = std::path::PathBuf::from("__snapshots__");
-    let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
-    let snap_path = snap_dir.join(format!("{name}.png"));
-    let diff_path = snap_dir.join(format!("{name}-diff.png"));
-    let actual_path = snap_dir.join(format!("{name}-actual.png"));
-
-    if update || !snap_path.exists() {
-      if let Some(parent) = snap_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| TestFailure {
-          message: format!("create snapshot dir: {e}"),
-          stack: None, diff: None, screenshot: None,
-        })?;
-      }
-      std::fs::write(&snap_path, &actual_png).map_err(|e| TestFailure {
-        message: format!("write screenshot: {e}"),
-        stack: None, diff: None, screenshot: None,
-      })?;
-      return Ok(());
-    }
-
-    let expected_png = std::fs::read(&snap_path).map_err(|e| TestFailure {
-      message: format!("read snapshot: {e}"),
-      stack: None, diff: None, screenshot: None,
-    })?;
-
-    // Fast path: identical bytes.
-    if expected_png == actual_png {
-      return Ok(());
-    }
-
-    // Decode both PNGs.
-    let expected_img = image::load_from_memory_with_format(&expected_png, image::ImageFormat::Png)
-      .map_err(|e| TestFailure {
-        message: format!("decode expected PNG: {e}"),
-        stack: None, diff: None, screenshot: None,
-      })?
-      .to_rgba8();
-
-    let actual_img = image::load_from_memory_with_format(&actual_png, image::ImageFormat::Png)
-      .map_err(|e| TestFailure {
-        message: format!("decode actual PNG: {e}"),
-        stack: None, diff: None, screenshot: None,
-      })?
-      .to_rgba8();
-
-    let (ew, eh) = expected_img.dimensions();
-    let (aw, ah) = actual_img.dimensions();
-
-    if ew != aw || eh != ah {
-      // Save actual for inspection.
-      let _ = std::fs::write(&actual_path, &actual_png);
-      return Err(TestFailure {
-        message: format!(
-          "screenshot '{name}' size mismatch: expected {ew}x{eh}, got {aw}x{ah}\n\
-           actual saved to: {}",
-          actual_path.display()
-        ),
-        stack: None, diff: None, screenshot: Some(actual_png),
-      });
-    }
-
-    // Pixel-level diff with threshold.
-    // Threshold: max allowed difference per channel (0-255). Default 2 (~0.8%).
-    let threshold: u8 = std::env::var("SCREENSHOT_THRESHOLD")
-      .ok()
-      .and_then(|v| v.parse().ok())
-      .unwrap_or(2);
-
-    let mut diff_img = image::RgbaImage::new(ew, eh);
-    let mut mismatch_count: u64 = 0;
-    let total_pixels = (ew as u64) * (eh as u64);
-
-    let expected_pixels = expected_img.as_raw();
-    let actual_pixels = actual_img.as_raw();
-
-    for i in (0..expected_pixels.len()).step_by(4) {
-      let dr = expected_pixels[i].abs_diff(actual_pixels[i]);
-      let dg = expected_pixels[i + 1].abs_diff(actual_pixels[i + 1]);
-      let db = expected_pixels[i + 2].abs_diff(actual_pixels[i + 2]);
-
-      let pixel_idx = i / 4;
-      let x = (pixel_idx % ew as usize) as u32;
-      let y = (pixel_idx / ew as usize) as u32;
-
-      if dr > threshold || dg > threshold || db > threshold {
-        mismatch_count += 1;
-        // Red pixel in diff image for mismatch.
-        diff_img.put_pixel(x, y, image::Rgba([255, 0, 0, 255]));
-      } else {
-        // Dimmed original pixel for matching areas.
-        diff_img.put_pixel(
-          x, y,
-          image::Rgba([
-            actual_pixels[i] / 3,
-            actual_pixels[i + 1] / 3,
-            actual_pixels[i + 2] / 3,
-            255,
-          ]),
-        );
-      }
-    }
-
-    if mismatch_count == 0 {
-      return Ok(());
-    }
-
-    let mismatch_pct = (mismatch_count as f64 / total_pixels as f64) * 100.0;
-
-    // Save diff and actual images.
-    let _ = std::fs::create_dir_all(&snap_dir);
-    let _ = diff_img.save(&diff_path);
-    let _ = std::fs::write(&actual_path, &actual_png);
-
-    // Encode diff as PNG bytes for the failure attachment.
-    let mut diff_png = Vec::new();
-    diff_img
-      .write_to(&mut std::io::Cursor::new(&mut diff_png), image::ImageFormat::Png)
-      .ok();
-
-    Err(TestFailure {
-      message: format!(
-        "screenshot '{name}' mismatch: {mismatch_count}/{total_pixels} pixels differ ({mismatch_pct:.2}%)\n\
-         threshold: {threshold}/255 per channel\n\
-         expected: {}\n\
-         actual:   {}\n\
-         diff:     {}\n\
-         Run with UPDATE_SNAPSHOTS=1 to update baseline.",
-        snap_path.display(),
-        actual_path.display(),
-        diff_path.display(),
-      ),
-      stack: None,
-      diff: None,
-      screenshot: Some(actual_png),
-    })
+    crate::snapshot::compare_screenshot_png(&actual_png, name)
   }
 
   // ── Accessibility ──

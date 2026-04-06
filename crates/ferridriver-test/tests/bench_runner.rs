@@ -1,3 +1,9 @@
+#![allow(
+  clippy::cast_precision_loss,
+  clippy::cast_lossless,
+  clippy::uninlined_format_args,
+  clippy::implicit_clone,
+)]
 //! Performance benchmark: measures ferridriver-test runner overhead and parallelism.
 //! Compare against Playwright Test for the same 50-test workload.
 

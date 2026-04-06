@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::model::TestOutcome;
+use crate::model::{StepCategory, StepStatus, TestOutcome, TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct JUnitReporter {
@@ -105,12 +105,27 @@ impl Reporter for JUnitReporter {
               .as_ref()
               .map(|e| xml_escape(&e.message))
               .unwrap_or_default();
-            writeln!(xml, r#"      <failure message="{msg}" />"#).ok();
+            // Include step path in failure message (like Playwright's JUnit reporter).
+            let step_path = find_failing_step_path(&test.steps);
+            let detail = if step_path.is_empty() {
+              msg.clone()
+            } else {
+              format!("{} [{}]", msg, step_path)
+            };
+            writeln!(xml, r#"      <failure message="{}">{}</failure>"#, xml_escape(&detail), xml_escape(&detail)).ok();
           }
           crate::model::TestStatus::Skipped => {
             writeln!(xml, r#"      <skipped />"#).ok();
           }
           _ => {}
+        }
+
+        // Include step summary as system-out for tests with user-defined steps.
+        let user_steps: Vec<&TestStep> = test.steps.iter().filter(|s| s.category == StepCategory::TestStep).collect();
+        if !user_steps.is_empty() {
+          let mut step_lines = String::new();
+          format_step_lines(&user_steps, &mut step_lines, 0);
+          writeln!(xml, r#"      <system-out><![CDATA[{step_lines}]]></system-out>"#).ok();
         }
 
         writeln!(xml, r#"    </testcase>"#).ok();
@@ -129,6 +144,48 @@ impl Reporter for JUnitReporter {
 
     tracing::info!("JUnit report written to {}", self.output_path.display());
     Ok(())
+  }
+}
+
+/// Find the path to the deepest failing user-defined step (like Playwright's formatTestHeader).
+fn find_failing_step_path(steps: &[TestStep]) -> String {
+  let mut path = Vec::new();
+  find_failing_step_recursive(steps, &mut path);
+  path.join(" > ")
+}
+
+fn find_failing_step_recursive(steps: &[TestStep], path: &mut Vec<String>) {
+  for step in steps {
+    if step.category != StepCategory::TestStep {
+      continue;
+    }
+    if step.status == StepStatus::Failed {
+      path.push(step.title.clone());
+      find_failing_step_recursive(&step.steps, path);
+      return;
+    }
+  }
+}
+
+/// Format steps as indented text lines for system-out.
+fn format_step_lines(steps: &[&TestStep], out: &mut String, indent: usize) {
+  use std::fmt::Write;
+  let pad = "  ".repeat(indent);
+  for step in steps {
+    let icon = match step.status {
+      StepStatus::Passed => "v",
+      StepStatus::Failed => "x",
+      StepStatus::Skipped => "-",
+    };
+    let dur = step.duration.as_millis();
+    let _ = writeln!(out, "{pad}{icon} {} ({dur}ms)", step.title);
+    if let Some(err) = &step.error {
+      let _ = writeln!(out, "{pad}  Error: {err}");
+    }
+    let nested: Vec<&TestStep> = step.steps.iter().filter(|s| s.category == StepCategory::TestStep).collect();
+    if !nested.is_empty() {
+      format_step_lines(&nested, out, indent + 1);
+    }
   }
 }
 

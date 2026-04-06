@@ -9,9 +9,28 @@ use std::time::Duration;
 
 use tokio::sync::mpsc;
 
-use crate::model::{TestId, TestOutcome};
+use crate::model::{StepCategory, TestId, TestOutcome};
 
 // ── Events ──
+
+#[derive(Debug, Clone)]
+pub struct StepStartedEvent {
+  pub test_id: TestId,
+  pub step_id: String,
+  pub parent_step_id: Option<String>,
+  pub title: String,
+  pub category: StepCategory,
+}
+
+#[derive(Debug, Clone)]
+pub struct StepFinishedEvent {
+  pub test_id: TestId,
+  pub step_id: String,
+  pub title: String,
+  pub category: StepCategory,
+  pub duration: Duration,
+  pub error: Option<String>,
+}
 
 /// Events emitted during a test run.
 #[derive(Debug, Clone)]
@@ -22,6 +41,10 @@ pub enum ReporterEvent {
   WorkerStarted { worker_id: u32 },
   /// A test is about to execute.
   TestStarted { test_id: TestId, attempt: u32 },
+  /// A step within a test has started (real-time, emitted during execution).
+  StepStarted(Box<StepStartedEvent>),
+  /// A step within a test has finished (real-time, emitted during execution).
+  StepFinished(Box<StepFinishedEvent>),
   /// A test finished (pass, fail, skip, etc.).
   TestFinished { test_id: TestId, outcome: TestOutcome },
   /// A worker has shut down.

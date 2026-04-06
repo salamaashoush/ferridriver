@@ -1,3 +1,9 @@
+#![allow(
+  clippy::items_after_statements,
+  clippy::redundant_closure_for_method_calls,
+  clippy::default_trait_access,
+  clippy::doc_markdown,
+)]
 //! E2E tests for newly implemented features:
 //! - Hooks (beforeAll/afterAll/beforeEach/afterEach)
 //! - Serial mode (run in order, skip on failure)
@@ -16,6 +22,7 @@ use ferridriver_test::model::*;
 use ferridriver_test::reporter;
 use ferridriver_test::runner::TestRunner;
 
+#[allow(dead_code)]
 fn data_url(html: &str) -> String {
   format!(
     "data:text/html,{}",
@@ -107,7 +114,7 @@ async fn test_before_each_runs_per_test() {
   BEFORE_EACH_COUNT.store(0, Ordering::SeqCst);
 
   let hooks = Hooks {
-    before_each: vec![Arc::new(|_pool| {
+    before_each: vec![Arc::new(|_pool, _info| {
       Box::pin(async {
         BEFORE_EACH_COUNT.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -140,7 +147,7 @@ async fn test_after_each_runs_even_on_failure() {
   AFTER_EACH_COUNT.store(0, Ordering::SeqCst);
 
   let hooks = Hooks {
-    after_each: vec![Arc::new(|_pool| {
+    after_each: vec![Arc::new(|_pool, _info| {
       Box::pin(async {
         AFTER_EACH_COUNT.fetch_add(1, Ordering::SeqCst);
         Ok(())
@@ -461,7 +468,7 @@ async fn test_testinfo_injected_into_pool() {
     id: TestId { file: "new_features.rs".into(), suite: None, name: "info_check".into() },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
-        let info: Arc<TestInfo> = pool.get("test_info").await.map_err(|e| fail(e))?;
+        let info: Arc<TestInfo> = pool.get("test_info").await.map_err(fail)?;
         if info.test_id.name != "info_check" {
           return Err(fail(format!("wrong test name in TestInfo: {}", info.test_id.name)));
         }
@@ -498,7 +505,7 @@ async fn test_soft_assertions_collected() {
     id: TestId { file: "new_features.rs".into(), suite: None, name: "soft_test".into() },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
-        let info: Arc<TestInfo> = pool.get("test_info").await.map_err(|e| fail(e))?;
+        let info: Arc<TestInfo> = pool.get("test_info").await.map_err(fail)?;
         // Add soft errors but don't return Err — test body "passes".
         info.add_soft_error(fail("soft error 1")).await;
         info.add_soft_error(fail("soft error 2")).await;
@@ -553,6 +560,7 @@ fn test_snapshot_create_and_match() {
     timeout: Duration::from_secs(5),
     tags: Vec::new(),
     start_time: std::time::Instant::now(),
+    event_bus: None,
   };
 
   // First call: creates snapshot file.

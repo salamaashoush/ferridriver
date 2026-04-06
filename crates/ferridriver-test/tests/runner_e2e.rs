@@ -9,7 +9,6 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver_test::config::{CliOverrides, TestConfig};
-use ferridriver_test::fixture::FixturePool;
 use ferridriver_test::model::*;
 use ferridriver_test::reporter;
 use ferridriver_test::runner::TestRunner;

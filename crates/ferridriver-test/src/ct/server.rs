@@ -5,7 +5,7 @@
 //! the Vite path uses this as a fallback or the Vite dev server directly.
 
 use std::net::SocketAddr;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use axum::Router;
 use tower_http::services::ServeDir;

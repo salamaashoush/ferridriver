@@ -1,4 +1,10 @@
-//! Standalone profiling binary — run with samply or strace.
+#![allow(
+  clippy::cast_precision_loss,
+  clippy::cast_lossless,
+  clippy::uninlined_format_args,
+  clippy::unwrap_used,
+)]
+//! Standalone profiling binary -- run with samply or strace.
 //! Does 20 test cycles: ctx+page+navigate+click+text+close.
 
 use std::sync::Arc;

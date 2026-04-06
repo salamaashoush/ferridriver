@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::model::TestStatus;
+use crate::model::{StepCategory, TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 /// Serializable test result for the HTML report.
@@ -23,6 +23,20 @@ struct HtmlTestResult {
   diff: Option<String>,
   #[serde(skip_serializing_if = "Option::is_none")]
   screenshot_base64: Option<String>,
+  /// Step hierarchy (user-defined steps only).
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  steps: Vec<HtmlStep>,
+}
+
+#[derive(serde::Serialize)]
+struct HtmlStep {
+  title: String,
+  status: String,
+  duration_ms: u64,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  error: Option<String>,
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  steps: Vec<HtmlStep>,
 }
 
 #[derive(serde::Serialize)]
@@ -88,6 +102,7 @@ impl Reporter for HtmlReporter {
           error: outcome.error.as_ref().map(|e| e.message.clone()),
           diff: outcome.error.as_ref().and_then(|e| e.diff.clone()),
           screenshot_base64,
+          steps: serialize_html_steps(&outcome.steps),
         });
       }
       ReporterEvent::RunFinished {
@@ -132,6 +147,20 @@ impl Reporter for HtmlReporter {
     tracing::info!("HTML report: {}", self.output_path.display());
     Ok(())
   }
+}
+
+fn serialize_html_steps(steps: &[TestStep]) -> Vec<HtmlStep> {
+  steps
+    .iter()
+    .filter(|s| s.category == StepCategory::TestStep)
+    .map(|s| HtmlStep {
+      title: s.title.clone(),
+      status: format!("{:?}", s.status),
+      duration_ms: s.duration.as_millis() as u64,
+      error: s.error.clone(),
+      steps: serialize_html_steps(&s.steps),
+    })
+    .collect()
 }
 
 const HTML_TEMPLATE: &str = r##"<!DOCTYPE html>
@@ -205,6 +234,7 @@ function render(tests){
     if(t.error)details+=`<div class="error">${esc(t.error)}</div>`;
     if(t.diff)details+=`<div class="diff">${diffHtml(t.diff)}</div>`;
     if(t.screenshot_base64)details+=`<img class="screenshot" src="data:image/png;base64,${t.screenshot_base64}">`;
+    if(t.steps&&t.steps.length)details+=renderSteps(t.steps);
     return `<div class="test" id="t${i}">
       <div class="test-header" onclick="toggle(${i})">
         <span class="badge ${badge}">${t.status}</span>
@@ -223,6 +253,18 @@ function filter(f){
   event.target.classList.add('active');
   const tests=f==='all'?R.tests:R.tests.filter(t=>t.status===f);
   render(tests);
+}
+function renderSteps(steps,depth=0){
+  const pad='  '.repeat(depth);
+  return '<div class="steps" style="margin-top:8px;font-family:monospace;font-size:12px">'+
+    steps.map(s=>{
+      const ic=s.status==='Passed'?'<span style="color:#3fb950">v</span>':s.status==='Failed'?'<span style="color:#f85149">x</span>':'<span style="color:#d29922">-</span>';
+      const d=s.duration_ms<1000?s.duration_ms+'ms':(s.duration_ms/1000).toFixed(1)+'s';
+      let line=pad+ic+' '+esc(s.title)+' <span style="color:#8b949e">('+d+')</span>';
+      if(s.error)line+='<div style="color:#f85149;margin-left:16px">'+esc(s.error)+'</div>';
+      if(s.steps&&s.steps.length)line+=renderSteps(s.steps,depth+1);
+      return '<div>'+line+'</div>';
+    }).join('')+'</div>';
 }
 function esc(s){return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')}
 function diffHtml(d){return d.split('\n').map(l=>{

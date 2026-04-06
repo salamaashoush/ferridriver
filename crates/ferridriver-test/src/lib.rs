@@ -1,3 +1,65 @@
+#![allow(
+  clippy::missing_errors_doc,
+  clippy::missing_panics_doc,
+  clippy::must_use_candidate,
+  clippy::must_use_unit,
+  clippy::return_self_not_must_use,
+  clippy::doc_markdown,
+  clippy::doc_link_with_quotes,
+  clippy::module_name_repetitions,
+  clippy::cast_possible_truncation,
+  clippy::cast_precision_loss,
+  clippy::redundant_closure_for_method_calls,
+  clippy::implicit_clone,
+  clippy::struct_excessive_bools,
+  clippy::large_enum_variant,
+  clippy::needless_raw_string_hashes,
+  clippy::should_implement_trait,
+  clippy::match_same_arms,
+  clippy::uninlined_format_args,
+  clippy::single_char_pattern,
+  clippy::unused_self,
+  clippy::unused_async,
+  clippy::bool_to_int_with_if,
+  clippy::manual_let_else,
+  clippy::too_many_lines,
+  clippy::impl_trait_in_params,
+  clippy::needless_pass_by_value,
+  clippy::match_wildcard_for_single_variants,
+  clippy::manual_string_new,
+  clippy::format_push_string,
+  clippy::trivially_copy_pass_by_ref,
+  clippy::unnecessary_wraps,
+  clippy::default_trait_access,
+  clippy::wildcard_imports,
+  clippy::items_after_statements,
+  clippy::field_reassign_with_default,
+  clippy::map_unwrap_or,
+  clippy::iter_on_single_items,
+  clippy::similar_names,
+  clippy::semicolon_if_nothing_returned,
+  clippy::inconsistent_struct_constructor,
+  clippy::derivable_impls,
+  clippy::used_underscore_items,
+  clippy::explicit_iter_loop,
+  clippy::iter_on_empty_collections,
+  clippy::wrong_self_convention,
+  clippy::unnecessary_sort_by,
+  clippy::iter_over_hash_type,
+  clippy::manual_assert,
+  clippy::explicit_deref_methods,
+  clippy::option_if_let_else,
+  clippy::match_bool,
+  clippy::ref_option,
+  clippy::needless_lifetimes,
+  clippy::type_complexity,
+  clippy::expect_used,
+  clippy::duration_subsec,
+  clippy::verbose_file_reads,
+  clippy::if_not_else,
+  clippy::implicit_hasher,
+  clippy::stable_sort_primitive,
+)]
 //! ferridriver-test -- High-performance E2E test runner for browser automation.
 //!
 //! Provides a Playwright Test-compatible API for writing and running browser tests
@@ -24,7 +86,7 @@
 //! }
 //! ```
 
-// ── Core modules ──
+// -- Core modules --
 pub mod config;
 pub mod ct;
 pub mod discovery;
@@ -40,7 +102,7 @@ pub mod snapshot;
 pub mod tracing;
 pub mod worker;
 
-// ── Re-exports ──
+// -- Re-exports --
 pub use config::{CliOverrides, TestConfig};
 pub use discovery::TestRegistration;
 pub use expect::{expect, expect_configured, expect_poll, to_pass};
@@ -106,6 +168,7 @@ pub fn run_harness() {
   std::process::exit(exit_code);
 }
 
+#[allow(unsafe_code)]
 fn parse_cli_args() -> CliOverrides {
   let args: Vec<String> = std::env::args().collect();
   let mut overrides = CliOverrides::default();

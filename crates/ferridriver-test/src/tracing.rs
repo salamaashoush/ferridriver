@@ -18,7 +18,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Serialize;
 
-use crate::model::{TestId, TestStep};
+use crate::model::TestStep;
 
 /// Trace recording mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -44,7 +44,7 @@ impl TraceMode {
 
   /// Should we record for this test attempt?
   #[must_use]
-  pub fn should_record(self, attempt: u32, failed: bool) -> bool {
+  pub fn should_record(self, attempt: u32, _failed: bool) -> bool {
     match self {
       Self::Off => false,
       Self::On => true,

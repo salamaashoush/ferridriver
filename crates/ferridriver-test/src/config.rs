@@ -59,14 +59,29 @@ pub struct TestConfig {
   /// Run all tests in parallel (ignore file-level serial grouping).
   pub fully_parallel: bool,
 
+  /// Feature file glob patterns for BDD mode (e.g., `["features/**/*.feature"]`).
+  pub features: Vec<String>,
+
+  /// Tag filter expression (e.g., `"@smoke and not @wip"`).
+  pub tags: Option<String>,
+
+  /// Dry run mode: validate without executing.
+  pub dry_run: bool,
+
+  /// Stop on first test/scenario failure.
+  pub fail_fast: bool,
+
+  /// Take screenshot on failure. Default: true.
+  pub screenshot_on_failure: bool,
+
   /// Programmatic global setup hooks (run before any tests).
   /// Not serializable — set by code, not config files.
   #[serde(skip)]
-  pub global_setup_fns: Vec<crate::model::HookFn>,
+  pub global_setup_fns: Vec<crate::model::SuiteHookFn>,
 
   /// Programmatic global teardown hooks (run after all tests).
   #[serde(skip)]
-  pub global_teardown_fns: Vec<crate::model::HookFn>,
+  pub global_teardown_fns: Vec<crate::model::SuiteHookFn>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -193,6 +208,11 @@ impl Default for TestConfig {
       repeat_each: 1,
       forbid_only: false,
       fully_parallel: false,
+      features: Vec::new(),
+      tags: None,
+      dry_run: false,
+      fail_fast: false,
+      screenshot_on_failure: true,
       global_setup_fns: Vec::new(),
       global_teardown_fns: Vec::new(),
     }

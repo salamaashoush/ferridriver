@@ -1,3 +1,4 @@
+#![allow(clippy::single_match_else, clippy::manual_let_else, clippy::doc_markdown)]
 //! Live test against a running Vite+React dev server.
 //!
 //! Prerequisites: cd examples/ct-react && bun install && bun run dev
