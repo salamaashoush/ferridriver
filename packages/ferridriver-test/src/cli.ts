@@ -20,7 +20,20 @@ import type { Page, BddRunnerConfig } from 'ferridriver';
 import { _setCurrentFile, _drainTests, _hasOnly, _setCtMountFactory } from './test.js';
 import type { MountFunction } from './test.js';
 import { resolve, relative } from 'path';
-import { Glob } from 'bun';
+import { stat } from 'fs/promises';
+
+// ---- Glob abstraction: use Bun.Glob if available, fall back to node:fs glob ----
+
+async function* scanGlob(pattern: string, cwd: string): AsyncIterable<string> {
+  if (typeof globalThis.Bun !== 'undefined') {
+    const { Glob } = await import('bun');
+    const g = new Glob(pattern);
+    yield* g.scan({ cwd, absolute: true });
+  } else {
+    const { glob } = await import('fs/promises');
+    yield* glob(pattern, { cwd });
+  }
+}
 
 // ---- Shared arg groups (matches Rust TestArgs/BddArgs patterns) ----
 
@@ -74,9 +87,9 @@ async function discoverFiles(files: string[], patterns: string[]): Promise<strin
 
   const found: string[] = [];
   for (const pattern of patterns) {
-    const glob = new Glob(pattern);
-    for await (const file of glob.scan({ cwd: process.cwd(), absolute: true })) {
-      if (!file.includes('node_modules')) found.push(file);
+    for await (const file of scanGlob(pattern, process.cwd())) {
+      const abs = resolve(file);
+      if (!abs.includes('node_modules')) found.push(abs);
     }
   }
   found.sort();
@@ -160,11 +173,10 @@ async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
   const raw = stepsGlobs.length > 0 ? stepsGlobs : defaults;
 
   // Normalize: if a path is a directory, append **/*.{ts,js} glob
-  const { statSync } = await import('fs');
   const patterns: string[] = [];
   for (const p of raw) {
     try {
-      if (statSync(resolve(p)).isDirectory()) {
+      if ((await stat(resolve(p))).isDirectory()) {
         patterns.push(`${p.replace(/\/+$/, '')}/**/*.ts`);
         patterns.push(`${p.replace(/\/+$/, '')}/**/*.js`);
       } else {
@@ -178,9 +190,9 @@ async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
 
   const found: string[] = [];
   for (const pattern of patterns) {
-    const glob = new Glob(pattern);
-    for await (const file of glob.scan({ cwd: process.cwd(), absolute: true })) {
-      if (!file.includes('node_modules')) found.push(file);
+    for await (const file of scanGlob(pattern, process.cwd())) {
+      const abs = resolve(file);
+      if (!abs.includes('node_modules')) found.push(abs);
     }
   }
   found.sort();
