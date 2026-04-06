@@ -20,7 +20,7 @@ import type { Page, BddRunnerConfig } from 'ferridriver';
 import { _setCurrentFile, _drainTests, _hasOnly, _setCtMountFactory } from './test.js';
 import type { MountFunction } from './test.js';
 import { resolve, relative } from 'path';
-import { stat } from 'fs/promises';
+import { statSync } from 'fs';
 
 // ---- Glob abstraction: use Bun.Glob if available, fall back to node:fs glob ----
 
@@ -79,6 +79,19 @@ const runnerArgs = defineArgs({
     description: 'List discovered tests without running them',
   },
 });
+
+// ---- Path normalization: directories become globs ----
+
+function normalizePaths(paths: string[], suffix: string): string[] {
+  return paths.map((p) => {
+    try {
+      if (statSync(resolve(p)).isDirectory()) {
+        return `${p.replace(/\/+$/, '')}/${suffix}`;
+      }
+    } catch { /* not a path, use as-is */ }
+    return p;
+  });
+}
 
 // ---- File discovery ----
 
@@ -171,20 +184,11 @@ function setupCtMount() {
 
 async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
   const defaults = ['steps/**/*.ts', 'steps/**/*.js', 'step_definitions/**/*.ts', 'step_definitions/**/*.js'];
-  const raw = stepsGlobs.length > 0 ? stepsGlobs : defaults;
+  const raw = stepsGlobs.length > 0
+    ? [...normalizePaths(stepsGlobs, '**/*.ts'), ...normalizePaths(stepsGlobs, '**/*.js')]
+    : defaults;
 
-  // Normalize: if a path is a directory, append **/*.{ts,js} glob
-  const patterns = (await Promise.all(raw.map(async (p) => {
-    try {
-      if ((await stat(resolve(p))).isDirectory()) {
-        const base = p.replace(/\/+$/, '');
-        return [`${base}/**/*.ts`, `${base}/**/*.js`];
-      }
-    } catch { /* not a real path, treat as glob */ }
-    return [p];
-  }))).flat();
-
-  const results = await Promise.all(patterns.map((p) => collectGlob(p, process.cwd())));
+  const results = await Promise.all(raw.map((p) => collectGlob(p, process.cwd())));
   return results.flat().sort();
 }
 
@@ -409,7 +413,7 @@ const bddCommand = defineCommand({
   async run({ args }) {
     const featureFiles = (args.features as string[] | undefined) ?? [];
     const featurePatterns = featureFiles.length > 0
-      ? featureFiles
+      ? normalizePaths(featureFiles, '**/*.feature')
       : ['features/**/*.feature'];
 
     const stepsGlobs = (args.steps as string[] | undefined) ?? [];
