@@ -336,26 +336,37 @@ where
 /// Internal match error used during polling.
 #[derive(Debug)]
 pub(crate) struct MatchError {
-  pub message: String,
-  pub diff: Option<String>,
+  pub expected: String,
+  pub received: String,
 }
 
 impl MatchError {
-  pub fn new(message: impl Into<String>) -> Self {
+  pub fn new(expected: impl Into<String>, received: impl Into<String>) -> Self {
     Self {
-      message: message.into(),
-      diff: None,
+      expected: expected.into(),
+      received: received.into(),
     }
   }
 
-  pub fn with_diff(mut self, diff: impl Into<String>) -> Self {
-    self.diff = Some(diff.into());
-    self
-  }
+}
+
+/// Context for an expect assertion — used to build Playwright-style error messages.
+pub(crate) struct ExpectContext {
+  /// e.g. "toHaveText", "toBeVisible"
+  pub method: &'static str,
+  /// e.g. "locator('h1')", "page"
+  pub subject: String,
+  /// Whether this is a negated assertion (.not)
+  pub is_not: bool,
 }
 
 /// Poll a condition until it passes or timeout, using Playwright's interval pattern.
-pub(crate) async fn poll_until<F, Fut>(timeout: Duration, mut check: F) -> Result<(), TestFailure>
+/// Produces Playwright-style error messages with method name, locator, expected/received, and call log.
+pub(crate) async fn poll_until<F, Fut>(
+  timeout: Duration,
+  ctx: ExpectContext,
+  mut check: F,
+) -> Result<(), TestFailure>
 where
   F: FnMut() -> Fut,
   Fut: Future<Output = Result<(), MatchError>>,
@@ -363,11 +374,22 @@ where
   let deadline = tokio::time::Instant::now() + timeout;
   let mut last_error: Option<MatchError>;
   let mut interval_idx = 0;
+  let mut call_log: Vec<String> = Vec::new();
+  let mut retries = 0u32;
+
+  call_log.push(format!(
+    "expect.{} with timeout {}ms",
+    ctx.method,
+    timeout.as_millis()
+  ));
+  call_log.push(format!("waiting for {}", ctx.subject));
 
   loop {
     match check().await {
       Ok(()) => return Ok(()),
       Err(e) => {
+        retries += 1;
+        call_log.push(format!("  unexpected value {}", e.received));
         last_error = Some(e);
         let interval_ms = POLL_INTERVALS
           .get(interval_idx)
@@ -384,11 +406,55 @@ where
     }
   }
 
-  let err = last_error.unwrap_or_else(|| MatchError::new("assertion timed out"));
+  let err = last_error.unwrap_or_else(|| MatchError::new("(unknown)", "(unknown)"));
+
+  // Playwright-style error format:
+  //   expect(locator).toHaveText(expected) failed
+  //
+  //   Locator:  locator('h1')
+  //   Expected: "Wrong Text"
+  //   Received: "Example Domain"
+  //   Timeout:  5000ms
+  //
+  //   Call log:
+  //     ...
+  let not_str = if ctx.is_not { ".not" } else { "" };
+  let timeout_ms = timeout.as_millis();
+
+  let call_log_str = if call_log.is_empty() {
+    String::new()
+  } else {
+    format!(
+      "\n\nCall log:\n{}",
+      call_log.iter().map(|l| format!("  - {l}")).collect::<Vec<_>>().join("\n")
+    )
+  };
+
+  let message = format!(
+    "\
+expect({subject}){not_str}.{method}() failed\n\
+\n\
+Locator:  {locator}\n\
+Expected: {expected}\n\
+Received: {received}\n\
+Timeout:  {timeout_ms}ms\
+{call_log_str}",
+    subject = ctx.subject,
+    method = ctx.method,
+    locator = ctx.subject,
+    expected = err.expected,
+    received = err.received,
+  );
+
+  let diff = format!(
+    "Expected: {}\nReceived: {}",
+    err.expected, err.received,
+  );
+
   Err(TestFailure {
-    message: err.message,
+    message,
     stack: None,
-    diff: err.diff,
+    diff: Some(diff),
     screenshot: None,
   })
 }

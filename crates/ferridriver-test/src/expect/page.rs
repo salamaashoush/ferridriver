@@ -2,8 +2,16 @@
 
 use ferridriver::Page;
 
-use super::{poll_until, Expect, MatchError, StringOrRegex};
+use super::{poll_until, Expect, ExpectContext, MatchError, StringOrRegex};
 use crate::model::TestFailure;
+
+fn page_ctx(method: &'static str, is_not: bool) -> ExpectContext {
+  ExpectContext {
+    method,
+    subject: "page".into(),
+    is_not,
+  }
+}
 
 impl Expect<'_, Page> {
   /// Assert the page title matches the expected value.
@@ -12,23 +20,16 @@ impl Expect<'_, Page> {
     let page = self.subject;
     let is_not = self.is_not;
 
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, page_ctx("toHaveTitle", is_not), || {
       let expected = expected.clone();
       async move {
-        let actual = page.title().await.map_err(|e| MatchError::new(e.to_string()))?;
+        let actual = page.title().await.map_err(|e| MatchError::new("(title)", e.to_string()))?;
         let matches = expected.matches(&actual);
         if matches == is_not {
-          Err(
-            MatchError::new(format!(
-              "expected title {}{}\nreceived: \"{actual}\"",
-              if is_not { "not " } else { "" },
-              expected.description()
-            ))
-            .with_diff(format!(
-              "- expected: {}\n+ received: \"{actual}\"",
-              expected.description()
-            )),
-          )
+          Err(MatchError::new(
+            format!("{}{}", if is_not { "not " } else { "" }, expected.description()),
+            format!("\"{actual}\""),
+          ))
         } else {
           Ok(())
         }
@@ -43,21 +44,40 @@ impl Expect<'_, Page> {
     let page = self.subject;
     let is_not = self.is_not;
 
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, page_ctx("toContainTitle", is_not), || {
       let expected = expected.clone();
       async move {
-        let actual = page.title().await.map_err(|e| MatchError::new(e.to_string()))?;
+        let actual = page.title().await.map_err(|e| MatchError::new("(title)", e.to_string()))?;
         let contains = actual.contains(&expected);
         if contains == is_not {
-          Err(
-            MatchError::new(format!(
-              "expected title {}to contain \"{expected}\"\nreceived: \"{actual}\"",
-              if is_not { "not " } else { "" },
-            ))
-            .with_diff(format!(
-              "- expected to contain: \"{expected}\"\n+ received: \"{actual}\""
-            )),
-          )
+          Err(MatchError::new(
+            format!("{}containing \"{expected}\"", if is_not { "not " } else { "" }),
+            format!("\"{actual}\""),
+          ))
+        } else {
+          Ok(())
+        }
+      }
+    })
+    .await
+  }
+
+  /// Assert the page URL matches the expected value.
+  pub async fn to_have_url(&self, expected: impl Into<StringOrRegex>) -> Result<(), TestFailure> {
+    let expected = expected.into();
+    let page = self.subject;
+    let is_not = self.is_not;
+
+    poll_until(self.timeout, page_ctx("toHaveURL", is_not), || {
+      let expected = expected.clone();
+      async move {
+        let actual = page.url().await.map_err(|e| MatchError::new("(url)", e.to_string()))?;
+        let matches = expected.matches(&actual);
+        if matches == is_not {
+          Err(MatchError::new(
+            format!("{}{}", if is_not { "not " } else { "" }, expected.description()),
+            format!("\"{actual}\""),
+          ))
         } else {
           Ok(())
         }
@@ -72,21 +92,16 @@ impl Expect<'_, Page> {
     let page = self.subject;
     let is_not = self.is_not;
 
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, page_ctx("toContainURL", is_not), || {
       let expected = expected.clone();
       async move {
-        let actual = page.url().await.map_err(|e| MatchError::new(e.to_string()))?;
+        let actual = page.url().await.map_err(|e| MatchError::new("(url)", e.to_string()))?;
         let contains = actual.contains(&expected);
         if contains == is_not {
-          Err(
-            MatchError::new(format!(
-              "expected URL {}to contain \"{expected}\"\nreceived: \"{actual}\"",
-              if is_not { "not " } else { "" },
-            ))
-            .with_diff(format!(
-              "- expected to contain: \"{expected}\"\n+ received: \"{actual}\""
-            )),
-          )
+          Err(MatchError::new(
+            format!("{}containing \"{expected}\"", if is_not { "not " } else { "" }),
+            format!("\"{actual}\""),
+          ))
         } else {
           Ok(())
         }
@@ -96,11 +111,7 @@ impl Expect<'_, Page> {
   }
 
   /// Assert the page screenshot matches a stored PNG snapshot.
-  ///
-  /// Uses the same pixel-level comparison as `Locator::to_have_screenshot()`.
-  /// Pass `UPDATE_SNAPSHOTS=1` env var to update baseline images.
   pub async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure> {
-    // Take page screenshot, then delegate to the shared snapshot comparison.
     let page = self.subject;
     let actual_png = page
       .screenshot(ferridriver::options::ScreenshotOptions::default())
@@ -121,7 +132,7 @@ impl Expect<'_, Page> {
     let is_not = self.is_not;
     let expected = expected.to_string();
 
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, page_ctx("toMatchAriaSnapshot", is_not), || {
       let expected = expected.clone();
       async move {
         let snapshot = page
@@ -130,51 +141,14 @@ impl Expect<'_, Page> {
             track: None,
           })
           .await
-          .map_err(|e| MatchError::new(format!("aria snapshot failed: {e}")))?;
+          .map_err(|e| MatchError::new("(aria snapshot)", format!("error: {e}")))?;
 
         let contains = snapshot.full.contains(&expected);
         if contains == is_not {
-          Err(
-            MatchError::new(format!(
-              "expected ARIA snapshot {}to contain \"{expected}\"",
-              if is_not { "not " } else { "" },
-            ))
-            .with_diff(format!(
-              "- expected to contain: \"{expected}\"\n+ received:\n{}",
-              &snapshot.full[..snapshot.full.len().min(500)]
-            )),
-          )
-        } else {
-          Ok(())
-        }
-      }
-    })
-    .await
-  }
-
-  /// Assert the page URL matches the expected value.
-  pub async fn to_have_url(&self, expected: impl Into<StringOrRegex>) -> Result<(), TestFailure> {
-    let expected = expected.into();
-    let page = self.subject;
-    let is_not = self.is_not;
-
-    poll_until(self.timeout, || {
-      let expected = expected.clone();
-      async move {
-        let actual = page.url().await.map_err(|e| MatchError::new(e.to_string()))?;
-        let matches = expected.matches(&actual);
-        if matches == is_not {
-          Err(
-            MatchError::new(format!(
-              "expected URL {}{}\nreceived: \"{actual}\"",
-              if is_not { "not " } else { "" },
-              expected.description()
-            ))
-            .with_diff(format!(
-              "- expected: {}\n+ received: \"{actual}\"",
-              expected.description()
-            )),
-          )
+          Err(MatchError::new(
+            format!("{}\n{expected}", if is_not { "not matching" } else { "matching" }),
+            snapshot.full[..snapshot.full.len().min(500)].to_string(),
+          ))
         } else {
           Ok(())
         }

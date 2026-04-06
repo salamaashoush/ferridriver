@@ -299,7 +299,12 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
                   '\x1b[33m';
     const dur = r.status !== 'skipped' ? ` (${Math.round(r.durationMs)}ms)` : '';
     console.log(`  ${color}${icon}\x1b[0m ${r.title}${dur}`);
-    if (r.errorMessage) console.log(`    \x1b[31m${r.errorMessage}\x1b[0m\n`);
+    if (r.errorMessage) {
+      // Strip NAPI error wrapper prefix (e.g. "GenericFailure, Error: ")
+      const msg = r.errorMessage.replace(/^GenericFailure,\s*Error:\s*/, '');
+      const indented = msg.split('\n').map((l: string) => `      ${l}`).join('\n');
+      console.log(`\x1b[31m${indented}\x1b[0m\n`);
+    }
   }
 
   const parts: string[] = [];

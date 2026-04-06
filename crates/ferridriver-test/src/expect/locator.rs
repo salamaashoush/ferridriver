@@ -2,8 +2,17 @@
 
 use ferridriver::Locator;
 
-use super::{poll_until, Expect, MatchError, StringOrRegex};
+use super::{poll_until, Expect, ExpectContext, MatchError, StringOrRegex};
 use crate::model::TestFailure;
+
+/// Build ExpectContext for a locator assertion.
+fn locator_ctx(locator: &Locator, method: &'static str, is_not: bool) -> ExpectContext {
+  ExpectContext {
+    method,
+    subject: format!("locator('{}')", locator.selector()),
+    is_not,
+  }
+}
 
 impl Expect<'_, Locator> {
   // ── Visibility / State ──
@@ -12,9 +21,9 @@ impl Expect<'_, Locator> {
   pub async fn to_be_visible(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toBeVisible", is_not), || async move {
       let visible = locator.is_visible().await.unwrap_or(false);
-      check_bool(visible, is_not, "to be visible")
+      check_bool(visible, is_not, "visible")
     })
     .await
   }
@@ -23,7 +32,7 @@ impl Expect<'_, Locator> {
   pub async fn to_be_hidden(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toBeHidden", is_not), || async move {
       let hidden = locator.is_hidden().await.unwrap_or(true);
       check_bool(hidden, is_not, "to be hidden")
     })
@@ -34,7 +43,7 @@ impl Expect<'_, Locator> {
   pub async fn to_be_enabled(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toBeEnabled", is_not), || async move {
       let enabled = locator.is_enabled().await.unwrap_or(false);
       check_bool(enabled, is_not, "to be enabled")
     })
@@ -45,7 +54,7 @@ impl Expect<'_, Locator> {
   pub async fn to_be_disabled(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toBeDisabled", is_not), || async move {
       let disabled = locator.is_disabled().await.unwrap_or(false);
       check_bool(disabled, is_not, "to be disabled")
     })
@@ -56,7 +65,7 @@ impl Expect<'_, Locator> {
   pub async fn to_be_checked(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toBeChecked", is_not), || async move {
       let checked = locator.is_checked().await.unwrap_or(false);
       check_bool(checked, is_not, "to be checked")
     })
@@ -67,7 +76,7 @@ impl Expect<'_, Locator> {
   pub async fn to_be_editable(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toBeEditable", is_not), || async move {
       let editable = locator.is_editable().await.unwrap_or(false);
       check_bool(editable, is_not, "to be editable")
     })
@@ -78,7 +87,7 @@ impl Expect<'_, Locator> {
   pub async fn to_be_attached(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toBeAttached", is_not), || async move {
       let attached = locator.is_attached().await.unwrap_or(false);
       check_bool(attached, is_not, "to be attached")
     })
@@ -89,14 +98,14 @@ impl Expect<'_, Locator> {
   pub async fn to_be_empty(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toBeEmpty", is_not), || async move {
       let text = locator.text_content().await.unwrap_or(None).unwrap_or_default();
       let empty = text.trim().is_empty();
       if empty == is_not {
-        Err(MatchError::new(format!(
-          "expected element {}to be empty, got \"{text}\"",
-          if is_not { "not " } else { "" }
-        )))
+        Err(MatchError::new(
+          format!("{}empty", if is_not { "not " } else { "" }),
+          format!("\"{}\"", text.trim()),
+        ))
       } else {
         Ok(())
       }
@@ -108,7 +117,7 @@ impl Expect<'_, Locator> {
   pub async fn to_be_focused(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toBeFocused", is_not), || async move {
       let focused = locator
         .evaluate("document.activeElement === el")
         .await
@@ -124,7 +133,7 @@ impl Expect<'_, Locator> {
   pub async fn to_be_in_viewport(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toBeInViewport", is_not), || async move {
       let in_viewport = locator
         .evaluate(
           "(function() { var r = el.getBoundingClientRect(); \
@@ -147,7 +156,7 @@ impl Expect<'_, Locator> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveText", is_not), || {
       let expected = expected.clone();
       async move {
         let actual = locator.text_content().await.unwrap_or(None).unwrap_or_default();
@@ -162,7 +171,7 @@ impl Expect<'_, Locator> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toContainText", is_not), || {
       let expected = expected.clone();
       async move {
         let actual = locator.text_content().await.unwrap_or(None).unwrap_or_default();
@@ -171,11 +180,10 @@ impl Expect<'_, Locator> {
           StringOrRegex::Regex(re) => re.is_match(&actual),
         };
         if matches == is_not {
-          Err(MatchError::new(format!(
-            "expected text {}to contain {}\nreceived: \"{actual}\"",
-            if is_not { "not " } else { "" },
-            expected.description()
-          )))
+          Err(MatchError::new(
+            format!("{}containing {}", if is_not { "not " } else { "" }, expected.description()),
+            format!("\"{actual}\""),
+          ))
         } else {
           Ok(())
         }
@@ -189,7 +197,7 @@ impl Expect<'_, Locator> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveValue", is_not), || {
       let expected = expected.clone();
       async move {
         let actual = locator.input_value().await.unwrap_or_default();
@@ -204,7 +212,7 @@ impl Expect<'_, Locator> {
     let expected: Vec<String> = expected.iter().map(|s| s.as_ref().to_string()).collect();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveValues", is_not), || {
       let expected = expected.clone();
       async move {
         let actual = locator
@@ -222,10 +230,10 @@ impl Expect<'_, Locator> {
           .unwrap_or_default();
         let matches = actual == expected;
         if matches == is_not {
-          Err(MatchError::new(format!(
-            "expected values {}{expected:?}\nreceived: {actual:?}",
-            if is_not { "not " } else { "" },
-          )))
+          Err(MatchError::new(
+            format!("{}{expected:?}", if is_not { "not " } else { "" }),
+            format!("{actual:?}"),
+          ))
         } else {
           Ok(())
         }
@@ -246,7 +254,7 @@ impl Expect<'_, Locator> {
     let locator = self.subject;
     let is_not = self.is_not;
     let attr_name = name.to_string();
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveAttribute", is_not), || {
       let expected = expected.clone();
       let attr_name = attr_name.clone();
       async move {
@@ -266,7 +274,7 @@ impl Expect<'_, Locator> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveClass", is_not), || {
       let expected = expected.clone();
       async move {
         let actual = locator.get_attribute("class").await.unwrap_or(None).unwrap_or_default();
@@ -281,17 +289,17 @@ impl Expect<'_, Locator> {
     let expected = expected.to_string();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toContainClass", is_not), || {
       let expected = expected.clone();
       async move {
         let class_attr = locator.get_attribute("class").await.unwrap_or(None).unwrap_or_default();
         let classes: Vec<&str> = class_attr.split_whitespace().collect();
         let contains = classes.iter().any(|c| *c == expected);
         if contains == is_not {
-          Err(MatchError::new(format!(
-            "expected class list {}to contain \"{expected}\"\nreceived: \"{class_attr}\"",
-            if is_not { "not " } else { "" },
-          )))
+          Err(MatchError::new(
+            format!("{}containing class \"{expected}\"", if is_not { "not " } else { "" }),
+            format!("\"{class_attr}\""),
+          ))
         } else {
           Ok(())
         }
@@ -310,7 +318,7 @@ impl Expect<'_, Locator> {
     let locator = self.subject;
     let is_not = self.is_not;
     let prop = property.to_string();
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveCSS", is_not), || {
       let expected = expected.clone();
       let prop = prop.clone();
       async move {
@@ -340,7 +348,7 @@ impl Expect<'_, Locator> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveRole", is_not), || {
       let expected = expected.clone();
       async move {
         let actual = locator
@@ -360,7 +368,7 @@ impl Expect<'_, Locator> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveAccessibleName", is_not), || {
       let expected = expected.clone();
       async move {
         let actual = locator
@@ -391,7 +399,7 @@ impl Expect<'_, Locator> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveAccessibleDescription", is_not), || {
       let expected = expected.clone();
       async move {
         let actual = locator
@@ -421,7 +429,7 @@ impl Expect<'_, Locator> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveAccessibleErrorMessage", is_not), || {
       let expected = expected.clone();
       async move {
         let actual = locator
@@ -454,7 +462,7 @@ impl Expect<'_, Locator> {
     let locator = self.subject;
     let is_not = self.is_not;
     let prop_name = name.to_string();
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveJSProperty", is_not), || {
       let prop_name = prop_name.clone();
       let expected = value.clone();
       async move {
@@ -470,10 +478,10 @@ impl Expect<'_, Locator> {
           .unwrap_or(serde_json::Value::Null);
         let matches = actual == expected;
         if matches == is_not {
-          Err(MatchError::new(format!(
-            "expected JS property \"{prop_name}\" {}{expected}\nreceived: {actual}",
-            if is_not { "not " } else { "" },
-          )))
+          Err(MatchError::new(
+            format!("{}{expected}", if is_not { "not " } else { "" }),
+            format!("{actual}"),
+          ))
         } else {
           Ok(())
         }
@@ -491,7 +499,7 @@ impl Expect<'_, Locator> {
     let expected: Vec<StringOrRegex> = expected.iter().map(|e| e.clone().into()).collect();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveTexts", is_not), || {
       let expected = expected.clone();
       async move {
         let count = locator.count().await.unwrap_or(0);
@@ -514,22 +522,19 @@ impl Expect<'_, Locator> {
         if actuals.len() != expected.len() {
           let matches = false;
           if matches == is_not { return Ok(()); }
-          return Err(MatchError::new(format!(
-            "expected {} texts, got {}\nexpected: {:?}\nreceived: {:?}",
-            expected.len(), actuals.len(),
-            expected.iter().map(|e| e.description()).collect::<Vec<_>>(),
-            actuals,
-          )));
+          return Err(MatchError::new(
+            format!("{} texts: {:?}", expected.len(), expected.iter().map(|e| e.description()).collect::<Vec<_>>()),
+            format!("{} texts: {actuals:?}", actuals.len()),
+          ));
         }
 
         for (i, (exp, act)) in expected.iter().zip(actuals.iter()).enumerate() {
           let matches = exp.matches(act);
           if matches == is_not {
-            return Err(MatchError::new(format!(
-              "text mismatch at index {i}\n{}expected: {}\nreceived: \"{act}\"",
-              if is_not { "not " } else { "" },
-              exp.description(),
-            )));
+            return Err(MatchError::new(
+              format!("{}[{i}] = {}", if is_not { "not " } else { "" }, exp.description()),
+              format!("[{i}] = \"{act}\""),
+            ));
           }
         }
         Ok(())
@@ -543,7 +548,7 @@ impl Expect<'_, Locator> {
     let expected: Vec<String> = expected.iter().map(|s| s.as_ref().to_string()).collect();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toContainTexts", is_not), || {
       let expected = expected.clone();
       async move {
         let count = locator.count().await.unwrap_or(0);
@@ -563,19 +568,19 @@ impl Expect<'_, Locator> {
 
         if actuals.len() != expected.len() {
           if is_not { return Ok(()); }
-          return Err(MatchError::new(format!(
-            "expected {} texts, got {}",
-            expected.len(), actuals.len(),
-          )));
+          return Err(MatchError::new(
+            format!("{} texts", expected.len()),
+            format!("{} texts", actuals.len()),
+          ));
         }
 
         for (i, (exp, act)) in expected.iter().zip(actuals.iter()).enumerate() {
           let contains = act.contains(exp.as_str());
           if contains == is_not {
-            return Err(MatchError::new(format!(
-              "text at index {i} {}to contain \"{exp}\"\nreceived: \"{act}\"",
-              if is_not { "not expected " } else { "expected " },
-            )));
+            return Err(MatchError::new(
+              format!("{}[{i}] containing \"{exp}\"", if is_not { "not " } else { "" }),
+              format!("[{i}] = \"{act}\""),
+            ));
           }
         }
         Ok(())
@@ -655,7 +660,7 @@ impl Expect<'_, Locator> {
   pub async fn to_match_aria_snapshot(&self, expected_yaml: &str) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || {
+    poll_until(self.timeout, locator_ctx(locator, "toMatchAriaSnapshot", is_not), || {
       let expected_yaml = expected_yaml.to_string();
       async move {
         // Get the accessible name and role of matched elements.
@@ -691,10 +696,10 @@ impl Expect<'_, Locator> {
         });
 
         if lines_match == is_not {
-          Err(MatchError::new(format!(
-            "aria snapshot {}match\nexpected:\n{expected_yaml}\nreceived:\n{aria_tree}",
-            if is_not { "unexpected " } else { "did not " },
-          )))
+          Err(MatchError::new(
+            format!("{}\n{expected_yaml}", if is_not { "not matching" } else { "matching" }),
+            aria_tree,
+          ))
         } else {
           Ok(())
         }
@@ -709,14 +714,14 @@ impl Expect<'_, Locator> {
   pub async fn to_have_count(&self, expected: usize) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, || async move {
+    poll_until(self.timeout, locator_ctx(locator, "toHaveCount", is_not), || async move {
       let actual = locator.count().await.unwrap_or(0);
       let matches = actual == expected;
       if matches == is_not {
-        Err(MatchError::new(format!(
-          "expected count {}{expected}\nreceived: {actual}",
-          if is_not { "not " } else { "" },
-        )))
+        Err(MatchError::new(
+          format!("{}{expected}", if is_not { "not " } else { "" }),
+          format!("{actual}"),
+        ))
       } else {
         Ok(())
       }
@@ -727,12 +732,11 @@ impl Expect<'_, Locator> {
 
 // ── Helpers ──
 
-fn check_bool(actual: bool, is_not: bool, description: &str) -> Result<(), MatchError> {
+fn check_bool(actual: bool, is_not: bool, expected_state: &str) -> Result<(), MatchError> {
   if actual == is_not {
-    Err(MatchError::new(format!(
-      "expected element {}{description}",
-      if is_not { "not " } else { "" }
-    )))
+    let expected = format!("{}{expected_state}", if is_not { "not " } else { "" });
+    let received = format!("{}{expected_state}", if actual { "" } else { "not " });
+    Err(MatchError::new(expected, received))
   } else {
     Ok(())
   }
@@ -742,21 +746,16 @@ fn check_text_match(
   expected: &StringOrRegex,
   actual: &str,
   is_not: bool,
-  label: &str,
+  _label: &str,
 ) -> Result<(), MatchError> {
   let matches = expected.matches(actual);
   if matches == is_not {
-    Err(
-      MatchError::new(format!(
-        "expected {label} {}{}\nreceived: \"{actual}\"",
-        if is_not { "not " } else { "" },
-        expected.description()
-      ))
-      .with_diff(format!(
-        "- expected: {}\n+ received: \"{actual}\"",
-        expected.description()
-      )),
-    )
+    let exp = format!(
+      "{}{}",
+      if is_not { "not " } else { "" },
+      expected.description()
+    );
+    Err(MatchError::new(exp, format!("\"{actual}\"")))
   } else {
     Ok(())
   }
