@@ -506,12 +506,15 @@ impl CdpWsPage {
                 secure: c.secure,
                 http_only: c.http_only,
                 expires: Some(c.expires),
+                same_site: c.same_site.as_ref().and_then(|ss| {
+                    format!("{ss:?}").parse::<super::SameSite>().ok()
+                }),
             })
             .collect())
     }
 
     pub async fn set_cookie(&self, cookie: CookieData) -> Result<(), String> {
-        use chromiumoxide::cdp::browser_protocol::network::{CookieParam, TimeSinceEpoch};
+        use chromiumoxide::cdp::browser_protocol::network::{CookieParam, CookieSameSite, TimeSinceEpoch};
         let mut cp = CookieParam::new(cookie.name, cookie.value);
         if !cookie.domain.is_empty() {
             cp.domain = Some(cookie.domain);
@@ -523,6 +526,13 @@ impl CdpWsPage {
         cp.http_only = Some(cookie.http_only);
         if let Some(e) = cookie.expires {
             cp.expires = Some(TimeSinceEpoch::new(e));
+        }
+        if let Some(ss) = cookie.same_site {
+            cp.same_site = Some(match ss {
+                super::SameSite::Strict => CookieSameSite::Strict,
+                super::SameSite::Lax => CookieSameSite::Lax,
+                super::SameSite::None => CookieSameSite::None,
+            });
         }
         self.page.set_cookie(cp).await.map_err(|e| format!("{e}")).map(|_| ())
     }

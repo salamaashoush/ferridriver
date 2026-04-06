@@ -501,18 +501,18 @@ fn recurse_children(ctx: &mut SnapshotCtx<'_>, idx: usize, depth: usize) {
 
       if run_len > MAX_SAME_ROLE_SIBLINGS * 2 {
         // Show first MAX_SAME_ROLE_SIBLINGS, collapse middle, show last MAX_SAME_ROLE_SIBLINGS.
-        for j in i..i + MAX_SAME_ROLE_SIBLINGS {
-          format_tree(ctx, kids[j], depth);
+        for &kid in &kids[i..i + MAX_SAME_ROLE_SIBLINGS] {
+          format_tree(ctx, kid, depth);
         }
         let collapsed = run_len - MAX_SAME_ROLE_SIBLINGS * 2;
         let indent = "  ".repeat(depth);
         let _ = writeln!(ctx.output, "{indent}- ... ({collapsed} more {role_i} items)");
-        for j in run_end - MAX_SAME_ROLE_SIBLINGS..run_end {
-          format_tree(ctx, kids[j], depth);
+        for &kid in &kids[run_end - MAX_SAME_ROLE_SIBLINGS..run_end] {
+          format_tree(ctx, kid, depth);
         }
       } else {
-        for j in i..run_end {
-          format_tree(ctx, kids[j], depth);
+        for &kid in &kids[i..run_end] {
+          format_tree(ctx, kid, depth);
         }
       }
       i = run_end;

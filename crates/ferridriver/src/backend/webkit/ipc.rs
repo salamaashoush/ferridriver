@@ -420,7 +420,7 @@ impl IpcClient {
   fn spawn_host_process(
     exe: &std::path::Path,
     child_fd: std::os::unix::io::RawFd,
-    headless: bool,
+    _headless: bool,
   ) -> Result<std::process::Child, String> {
     // SAFETY: pre_exec runs in the forked child before exec. We manipulate
     // file descriptors to pass the IPC socket as fd 3 to the host subprocess.

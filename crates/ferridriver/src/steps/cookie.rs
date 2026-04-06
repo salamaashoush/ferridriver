@@ -25,6 +25,7 @@ step!(SetCookieDomain {
             secure: false,
             http_only: false,
             expires: None,
+            same_site: None,
         }).await?;
         Ok(None)
     }
@@ -46,6 +47,7 @@ step!(SetCookie {
             secure: false,
             http_only: false,
             expires: None,
+            same_site: None,
         }).await?;
         Ok(None)
     }

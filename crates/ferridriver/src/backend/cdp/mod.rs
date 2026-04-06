@@ -1,3 +1,4 @@
+#![allow(clippy::missing_errors_doc, clippy::missing_panics_doc)]
 //! Unified CDP backend -- Chrome `DevTools` Protocol over pipes or WebSocket.
 //!
 //! Generic over transport: `CdpBrowser<PipeTransport>` for pipe-based,
@@ -649,7 +650,7 @@ impl<T: CdpWrap> CdpPage<T> {
     // command), return immediately. The loaderId match ensures we don't return
     // early with stale data from a previous navigation.
     {
-      let state = self.lifecycle.lock().unwrap();
+      let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
       if state.current_loader_id == nav_loader_id && state.fired.contains(target_event) {
         return Ok(());
       }
@@ -1351,6 +1352,7 @@ impl<T: CdpWrap> CdpPage<T> {
           secure: c.get("secure").and_then(serde_json::Value::as_bool).unwrap_or(false),
           http_only: c.get("httpOnly").and_then(serde_json::Value::as_bool).unwrap_or(false),
           expires: c.get("expires").and_then(serde_json::Value::as_f64),
+          same_site: c.get("sameSite").and_then(|v| v.as_str()).and_then(|v| v.parse::<super::SameSite>().ok()),
         })
         .collect(),
     )
@@ -1371,6 +1373,9 @@ impl<T: CdpWrap> CdpPage<T> {
     params["httpOnly"] = serde_json::json!(cookie.http_only);
     if let Some(e) = cookie.expires {
       params["expires"] = serde_json::json!(e);
+    }
+    if let Some(ss) = cookie.same_site {
+      params["sameSite"] = serde_json::json!(ss.as_str());
     }
     self.cmd("Network.setCookie", params).await?;
     Ok(())
@@ -1700,93 +1705,13 @@ impl<T: CdpWrap> CdpPage<T> {
         match method {
           "Network.requestWillBeSent" => {
             if let Some(params) = event.get("params") {
-              let id = params
-                .get("requestId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-              let req = params.get("request");
-              let headers = req
-                .and_then(|r| r.get("headers"))
-                .and_then(|h| h.as_object())
-                .map(|obj| {
-                  obj
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                    .collect()
-                });
-              let post_data = req
-                .and_then(|r| r.get("postData"))
-                .and_then(|v| v.as_str())
-                .map(std::string::ToString::to_string);
-              let net_req = NetRequest {
-                id: id.clone(),
-                method: req
-                  .and_then(|r| r.get("method"))
-                  .and_then(|v| v.as_str())
-                  .unwrap_or("")
-                  .to_string(),
-                url: req
-                  .and_then(|r| r.get("url"))
-                  .and_then(|v| v.as_str())
-                  .unwrap_or("")
-                  .to_string(),
-                resource_type: params.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-                status: None,
-                mime_type: None,
-                headers,
-                post_data,
-              };
+              let net_req = Self::parse_net_request(params);
               emitter.emit(crate::events::PageEvent::Request(net_req.clone()));
               network_log.write().await.push(net_req);
             }
           },
           "Network.responseReceived" => {
-            if let Some(params) = event.get("params") {
-              let rid = params
-                .get("requestId")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-              let resp = params.get("response");
-              let status = resp.and_then(|r| r.get("status")).and_then(serde_json::Value::as_i64);
-              let status_text = resp
-                .and_then(|r| r.get("statusText"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-              let url = resp
-                .and_then(|r| r.get("url"))
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-              let mime = resp
-                .and_then(|r| r.get("mimeType"))
-                .and_then(|v| v.as_str())
-                .map(std::string::ToString::to_string);
-              let resp_headers = resp
-                .and_then(|r| r.get("headers"))
-                .and_then(|h| h.as_object())
-                .map(|obj| {
-                  obj
-                    .iter()
-                    .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-                    .collect()
-                });
-              let mut reqs = network_log.write().await;
-              if let Some(r) = reqs.iter_mut().rev().find(|r| r.id == rid) {
-                r.status = status;
-                r.mime_type.clone_from(&mime);
-              }
-              emitter.emit(crate::events::PageEvent::Response(crate::events::NetResponse {
-                request_id: rid,
-                url,
-                status: status.unwrap_or(0),
-                status_text,
-                mime_type: mime.unwrap_or_default(),
-                headers: resp_headers,
-              }));
-            }
+            Self::handle_response_received(&event, &network_log, &emitter).await;
           },
           "Page.downloadWillBegin" => {
             if let Some(params) = event.get("params") {
@@ -1808,6 +1733,98 @@ impl<T: CdpWrap> CdpPage<T> {
         }
       }
     });
+  }
+
+  fn parse_net_request(params: &serde_json::Value) -> NetRequest {
+    let id = params
+      .get("requestId")
+      .and_then(|v| v.as_str())
+      .unwrap_or("")
+      .to_string();
+    let req = params.get("request");
+    let headers = req
+      .and_then(|r| r.get("headers"))
+      .and_then(|h| h.as_object())
+      .map(|obj| {
+        obj
+          .iter()
+          .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+          .collect()
+      });
+    let post_data = req
+      .and_then(|r| r.get("postData"))
+      .and_then(|v| v.as_str())
+      .map(std::string::ToString::to_string);
+    NetRequest {
+      id,
+      method: req
+        .and_then(|r| r.get("method"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string(),
+      url: req
+        .and_then(|r| r.get("url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string(),
+      resource_type: params.get("type").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+      status: None,
+      mime_type: None,
+      headers,
+      post_data,
+    }
+  }
+
+  async fn handle_response_received(
+    event: &serde_json::Value,
+    network_log: &Arc<RwLock<Vec<NetRequest>>>,
+    emitter: &crate::events::EventEmitter,
+  ) {
+    if let Some(params) = event.get("params") {
+      let rid = params
+        .get("requestId")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+      let resp = params.get("response");
+      let status = resp.and_then(|r| r.get("status")).and_then(serde_json::Value::as_i64);
+      let status_text = resp
+        .and_then(|r| r.get("statusText"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+      let url = resp
+        .and_then(|r| r.get("url"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+      let mime = resp
+        .and_then(|r| r.get("mimeType"))
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string);
+      let resp_headers = resp
+        .and_then(|r| r.get("headers"))
+        .and_then(|h| h.as_object())
+        .map(|obj| {
+          obj
+            .iter()
+            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+            .collect()
+        });
+      let mut reqs = network_log.write().await;
+      if let Some(r) = reqs.iter_mut().rev().find(|r| r.id == rid) {
+        r.status = status;
+        r.mime_type.clone_from(&mime);
+      }
+      emitter.emit(crate::events::PageEvent::Response(crate::events::NetResponse {
+        request_id: rid,
+        url,
+        status: status.unwrap_or(0),
+        status_text,
+        mime_type: mime.unwrap_or_default(),
+        headers: resp_headers,
+      }));
+    }
   }
 
   fn spawn_dialog_listener(

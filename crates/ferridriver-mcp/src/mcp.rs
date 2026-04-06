@@ -32,9 +32,11 @@ pub async fn serve_http(mode: ConnectMode, backend: BackendKind, port: u16, head
   };
 
   let ct = tokio_util::sync::CancellationToken::new();
-  let mut config = StreamableHttpServerConfig::default();
-  config.stateful_mode = true;
-  config.cancellation_token = ct.child_token();
+  let config = StreamableHttpServerConfig {
+    stateful_mode: true,
+    cancellation_token: ct.child_token(),
+    ..StreamableHttpServerConfig::default()
+  };
 
   let svc = StreamableHttpService::new(
     move || Ok(McpServer::new_headless(mode.clone(), backend, headless)),

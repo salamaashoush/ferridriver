@@ -1,3 +1,10 @@
+#![allow(
+  clippy::too_many_lines,
+  clippy::uninlined_format_args,
+  clippy::single_char_pattern,
+  clippy::redundant_closure_for_method_calls,
+  clippy::get_first,
+)]
 //! Integration tests for the ferridriver Page + Locator API.
 //!
 //! Tests the library API directly -- one browser, sequential tests.
@@ -990,7 +997,7 @@ async fn locator_or_and_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn network_interception_tests() {
-  use ferridriver::route::{ContinueOverrides, FulfillResponse, RouteAction};
+  use ferridriver::route::{FulfillResponse, RouteAction};
   use std::sync::Arc;
 
   let browser = Browser::launch(LaunchOptions {

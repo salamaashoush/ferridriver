@@ -19,6 +19,11 @@ pub struct PipeTransport {
 }
 
 impl PipeTransport {
+  /// Spawn a Chrome process with `--remote-debugging-pipe` and wire up transport.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the Chrome process fails to launch or pipe setup fails.
   pub fn spawn(
     chromium_path: &str,
     user_data_dir: &Path,

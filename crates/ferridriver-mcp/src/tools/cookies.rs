@@ -42,6 +42,7 @@ impl McpServer {
           secure: p.secure.unwrap_or(false),
           http_only: p.http_only.unwrap_or(false),
           expires: p.expires,
+          same_site: None,
         };
         page.set_cookie(cookie).await.map_err(Self::err)?;
         Ok(CallToolResult::success(vec![Content::text(format!(

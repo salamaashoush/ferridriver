@@ -1,3 +1,4 @@
+#![allow(clippy::missing_errors_doc)]
 //! `WebKit` backend — native `WKWebView` on macOS.
 //!
 //! Architecture ported from Bun's webview implementation:
@@ -755,6 +756,9 @@ impl WebKitPage {
     p.push(u8::from(c.http_only));
     let expires = c.expires.unwrap_or(-1.0);
     p.extend_from_slice(&expires.to_le_bytes());
+    // Encode sameSite as a string (empty if not set).
+    let same_site_str = c.same_site.map_or("", |ss| ss.as_str());
+    ipc::str_encode(&mut p, same_site_str);
     let r = self.client.send(ipc::Op::SetCookie, &p).await?;
     Self::ok(r)
   }
@@ -1454,7 +1458,7 @@ impl WebKitElement {
   }
 
   /// Hover over the element using native `NSEvent` mouseMoved + JS mouseenter.
-  /// Native mouseMoved doesn't propagate mouseenter to DOM in offscreen WKWebView
+  /// Native mouseMoved doesn't propagate mouseenter to DOM in offscreen `WKWebView`
   /// windows, so we also fire the JS event to ensure hover handlers trigger.
   ///
   /// # Errors

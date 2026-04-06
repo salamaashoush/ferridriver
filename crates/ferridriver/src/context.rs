@@ -236,8 +236,8 @@ impl ContextRef {
   /// Returns an error if page creation fails.
   pub async fn new_page(&self) -> Result<Page, String> {
     let mut state = self.state.lock().await;
-    let any_page = state.open_page_keyed(&self.key, "about:blank").await?;
-    Ok(Page::new(any_page))
+    let any_page = Box::pin(state.open_page_keyed(&self.key, "about:blank")).await?;
+    Ok(Page::with_context(any_page, self.clone()))
   }
 
   /// Get all pages in this context as Page handles.
@@ -248,7 +248,7 @@ impl ContextRef {
   pub async fn pages(&self) -> Result<Vec<Page>, String> {
     let state = self.state.lock().await;
     let ctx = state.context(&self.name)?;
-    Ok(ctx.pages.iter().map(|p| Page::new(p.clone())).collect())
+    Ok(ctx.pages.iter().map(|p| Page::with_context(p.clone(), self.clone())).collect())
   }
 
   /// Get all cookies in this context.
@@ -282,6 +282,48 @@ impl ContextRef {
     let state = self.state.lock().await;
     let ctx = state.context(&self.name)?;
     ctx.clear_cookies().await
+  }
+
+  /// Clear cookies matching the given filters (matches Playwright's `context.clearCookies(options?)`).
+  /// If no filters are specified, all cookies are cleared.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context does not exist or clearing cookies fails.
+  pub async fn clear_cookies_filtered(
+    &self,
+    options: &crate::backend::ClearCookieOptions,
+  ) -> Result<(), String> {
+    if options.name.is_none() && options.domain.is_none() && options.path.is_none() {
+      return self.clear_cookies().await;
+    }
+    let state = self.state.lock().await;
+    let ctx = state.context(&self.name)?;
+    let cookies = ctx.cookies().await?;
+    if let Some(page) = ctx.active_page() {
+      page.clear_cookies().await?;
+      for c in cookies {
+        let name_match = options.name.as_ref().is_none_or(|n| &c.name == n);
+        let domain_match = options.domain.as_ref().is_none_or(|d| &c.domain == d);
+        let path_match = options.path.as_ref().is_none_or(|p| &c.path == p);
+        if !(name_match && domain_match && path_match) {
+          page.set_cookie(c).await?;
+        }
+      }
+    }
+    Ok(())
+  }
+
+  /// Delete a specific cookie by name and optional domain
+  /// (matches Playwright's `context.clearCookies({ name })`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context does not exist or deleting fails.
+  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
+    let state = self.state.lock().await;
+    let ctx = state.context(&self.name)?;
+    ctx.delete_cookie(name, domain).await
   }
 
   /// Set the default timeout for actions in this context (ms).

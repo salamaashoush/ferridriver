@@ -396,13 +396,17 @@ impl BrowserState {
   /// (no second lookup needed).
   pub async fn open_page(&mut self, context: &str, url: &str) -> Result<AnyPage, String> {
     let key = SessionKey::parse(context);
-    self.open_page_keyed(&key, url).await
+    Box::pin(self.open_page_keyed(&key, url)).await
   }
 
   /// Same as `open_page` but accepts a pre-parsed `SessionKey` (avoids re-parsing).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser instance or page creation fails.
   pub async fn open_page_keyed(&mut self, key: &SessionKey, url: &str) -> Result<AnyPage, String> {
     if !self.instances.contains_key(&key.instance) {
-      self.ensure_instance(&key.instance).await?;
+      Box::pin(self.ensure_instance(&key.instance)).await?;
     }
 
     let vp = self.default_viewport.clone();
@@ -904,7 +908,7 @@ pub fn detect_chromium() -> String {
           .filter_map(std::result::Result::ok)
           .filter(|e| e.file_name().to_string_lossy().starts_with("chromium-"))
           .collect();
-        candidates.sort_by(|a, b| b.file_name().cmp(&a.file_name())); // newest first
+        candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name())); // newest first
         for entry in candidates {
           let chrome = entry.path().join("chrome-linux64/chrome");
           if chrome.exists() {
@@ -1127,7 +1131,7 @@ mod tests {
 
     // Should attempt WebSocket connection to the dead port (fails fast with
     // "connection refused"), proving the resolver was invoked instead of launching.
-    let result = state.ensure_instance("test-resolved").await;
+    let result = Box::pin(state.ensure_instance("test-resolved")).await;
     assert!(
       result.is_err(),
       "Should fail with connection refused, proving resolver was invoked"
@@ -1153,7 +1157,7 @@ mod tests {
     }));
 
     // First call: resolver should be called (but will fall through and try to launch)
-    let _ = state.ensure_instance("test").await;
+    let _ = Box::pin(state.ensure_instance("test")).await;
     // Resolver was called exactly once (regardless of whether launch succeeded)
     assert_eq!(call_count.load(Ordering::Relaxed), 1);
   }

@@ -40,7 +40,6 @@ pub use page::Page;
 // ── Public lower-level modules (needed by MCP server and consumers) ──
 pub mod backend;
 pub mod route;
-pub mod scenario;
 pub mod snapshot;
 pub mod state;
 

@@ -861,11 +861,10 @@ impl Locator {
           Ok(result) => return Ok(result),
           Err(e) if e.contains("not connected") || e.contains("not found") || e.contains("detached") => {
             if i >= Self::RETRY_BACKOFFS_MS.len() - 1 { return Err(e); }
-            continue;
           }
           Err(e) => return Err(e),
         },
-        Err(_) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => continue,
+        Err(_) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => {},
         Err(e) => return Err(e),
       }
     }
@@ -892,11 +891,10 @@ impl Locator {
         self.page.inner().evaluate(&js).await
       };
       match result {
-        Ok(Some(serde_json::Value::Null)) | Ok(None) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => {
-          continue; // element not found, retry
-        }
+        // Element not found or evaluation failed -- retry if attempts remain.
+        Ok(Some(serde_json::Value::Null) | None) | Err(_)
+          if i < Self::RETRY_BACKOFFS_MS.len() - 1 => {}
         Ok(val) => return Ok(val),
-        Err(_) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => continue,
         Err(e) => return Err(e),
       }
     }

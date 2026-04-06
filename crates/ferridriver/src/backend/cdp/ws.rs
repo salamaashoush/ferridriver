@@ -16,6 +16,11 @@ pub struct WsTransport {
 }
 
 impl WsTransport {
+  /// Connect to a running Chrome instance via WebSocket.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the WebSocket connection fails.
   pub async fn connect(ws_url: &str) -> Result<Self, String> {
     let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
       .await
@@ -46,6 +51,11 @@ impl WsTransport {
     Ok(Self { write_tx, dispatcher })
   }
 
+  /// Spawn Chrome with `--remote-debugging-port` and connect via WebSocket.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Chrome fails to launch or the WebSocket connection fails.
   pub async fn spawn(
     chromium_path: &str,
     user_data_dir: &Path,

@@ -1,3 +1,4 @@
+#![allow(clippy::missing_errors_doc)]
 //! Backend abstraction layer for browser automation.
 //!
 //! Provides a unified API across multiple browser backends:
@@ -53,7 +54,40 @@ pub struct AxProperty {
   pub value: Option<serde_json::Value>,
 }
 
-/// Cookie data (backend-agnostic).
+/// Cookie `SameSite` attribute (matches Playwright's `Strict | Lax | None`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub enum SameSite {
+  Strict,
+  Lax,
+  None,
+}
+
+impl SameSite {
+  /// Convert to a CDP/WebKit string.
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Strict => "Strict",
+      Self::Lax => "Lax",
+      Self::None => "None",
+    }
+  }
+}
+
+impl std::str::FromStr for SameSite {
+  type Err = ();
+
+  fn from_str(s: &str) -> Result<Self, Self::Err> {
+    match s {
+      "Strict" => Ok(Self::Strict),
+      "Lax" => Ok(Self::Lax),
+      "None" => Ok(Self::None),
+      _ => Err(()),
+    }
+  }
+}
+
+/// Cookie data (backend-agnostic, matches Playwright's `NetworkCookie`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CookieData {
   pub name: String,
@@ -63,6 +97,60 @@ pub struct CookieData {
   pub secure: bool,
   pub http_only: bool,
   pub expires: Option<f64>,
+  /// `SameSite` attribute (`Strict`, `Lax`, or `None`).
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub same_site: Option<SameSite>,
+}
+
+/// Options for setting a cookie (matches Playwright's `SetNetworkCookieParam`).
+/// Use `url` to derive domain/path automatically, or set `domain`/`path` directly.
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct SetCookieParams {
+  pub name: String,
+  pub value: String,
+  /// URL to derive domain/path from. Mutually exclusive with domain/path.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
+  #[serde(default)]
+  pub domain: String,
+  #[serde(default)]
+  pub path: String,
+  #[serde(default)]
+  pub secure: bool,
+  #[serde(default)]
+  pub http_only: bool,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub expires: Option<f64>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub same_site: Option<SameSite>,
+}
+
+impl From<SetCookieParams> for CookieData {
+  fn from(p: SetCookieParams) -> Self {
+    Self {
+      name: p.name,
+      value: p.value,
+      domain: p.domain,
+      path: if p.path.is_empty() { "/".to_string() } else { p.path },
+      secure: p.secure,
+      http_only: p.http_only,
+      expires: p.expires,
+      same_site: p.same_site,
+    }
+  }
+}
+
+/// Options for clearing cookies (matches Playwright's `ClearNetworkCookieOptions`).
+/// All fields are optional filters -- only cookies matching ALL specified filters are cleared.
+/// If no filters are specified, all cookies are cleared.
+#[derive(Debug, Clone, Default)]
+pub struct ClearCookieOptions {
+  /// Filter by cookie name (exact match).
+  pub name: Option<String>,
+  /// Filter by domain (exact match).
+  pub domain: Option<String>,
+  /// Filter by path (exact match).
+  pub path: Option<String>,
 }
 
 /// Screenshot options.
@@ -112,12 +200,12 @@ pub enum NavLifecycle {
 
 impl NavLifecycle {
   /// Parse from a `waitUntil` string (Playwright / MCP convention).
+  /// Unknown values default to `Load`.
   #[must_use]
-  pub fn from_str(s: &str) -> Self {
+  pub fn parse_lifecycle(s: &str) -> Self {
     match s {
       "commit" => Self::Commit,
       "domcontentloaded" => Self::DomContentLoaded,
-      "load" => Self::Load,
       _ => Self::Load,
     }
   }
@@ -399,6 +487,24 @@ impl AnyPage {
 
   pub async fn clear_cookies(&self) -> Result<(), String> {
     page_dispatch!(self, clear_cookies())
+  }
+
+  /// Clear cookies matching the given filters. If no filters, clears all.
+  pub async fn clear_cookies_filtered(&self, options: &ClearCookieOptions) -> Result<(), String> {
+    if options.name.is_none() && options.domain.is_none() && options.path.is_none() {
+      return self.clear_cookies().await;
+    }
+    // Get all cookies, delete the ones that match the filters.
+    let cookies = self.get_cookies().await?;
+    for c in &cookies {
+      let name_match = options.name.as_ref().is_none_or(|n| &c.name == n);
+      let domain_match = options.domain.as_ref().is_none_or(|d| &c.domain == d);
+      let path_match = options.path.as_ref().is_none_or(|p| &c.path == p);
+      if name_match && domain_match && path_match {
+        self.delete_cookie(&c.name, Some(&c.domain)).await?;
+      }
+    }
+    Ok(())
   }
 
   // ── Emulation ──

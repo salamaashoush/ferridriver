@@ -20,6 +20,8 @@ pub struct Page {
   default_timeout: u64,
   /// Incremental snapshot tracker for `snapshot_for_ai()`.
   snapshot_tracker: Arc<Mutex<snapshot::SnapshotTracker>>,
+  /// The context this page belongs to (matches Playwright's `page.context()`).
+  context_ref: Option<crate::context::ContextRef>,
 }
 
 impl Page {
@@ -30,7 +32,25 @@ impl Page {
       inner,
       default_timeout: 30000,
       snapshot_tracker: Arc::new(Mutex::new(snapshot::SnapshotTracker::new())),
+      context_ref: None,
     }
+  }
+
+  /// Wrap a backend page with a context reference (matches Playwright's `page.context()`).
+  #[must_use]
+  pub fn with_context(inner: AnyPage, context: crate::context::ContextRef) -> Self {
+    Self {
+      inner,
+      default_timeout: 30000,
+      snapshot_tracker: Arc::new(Mutex::new(snapshot::SnapshotTracker::new())),
+      context_ref: Some(context),
+    }
+  }
+
+  /// Get the `BrowserContext` this page belongs to (matches Playwright's `page.context()`).
+  #[must_use]
+  pub fn context(&self) -> Option<&crate::context::ContextRef> {
+    self.context_ref.as_ref()
   }
 
   /// Access the underlying backend page (escape hatch).
@@ -77,7 +97,7 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<(), String> {
-    let (lifecycle, timeout) = Self::resolve_nav_opts(&opts, self.default_timeout);
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout);
     self.inner.goto(url, lifecycle, timeout).await
   }
 
@@ -87,7 +107,7 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn go_back(&self, opts: Option<GotoOptions>) -> Result<(), String> {
-    let (lifecycle, timeout) = Self::resolve_nav_opts(&opts, self.default_timeout);
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout);
     self.inner.go_back(lifecycle, timeout).await
   }
 
@@ -97,7 +117,7 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn go_forward(&self, opts: Option<GotoOptions>) -> Result<(), String> {
-    let (lifecycle, timeout) = Self::resolve_nav_opts(&opts, self.default_timeout);
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout);
     self.inner.go_forward(lifecycle, timeout).await
   }
 
@@ -107,15 +127,15 @@ impl Page {
   ///
   /// Returns an error if the reload fails or the wait condition times out.
   pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<(), String> {
-    let (lifecycle, timeout) = Self::resolve_nav_opts(&opts, self.default_timeout);
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout);
     self.inner.reload(lifecycle, timeout).await
   }
 
   /// Parse `GotoOptions` into backend `NavLifecycle` + timeout.
-  fn resolve_nav_opts(opts: &Option<GotoOptions>, default_timeout: u64) -> (crate::backend::NavLifecycle, u64) {
-    let wait_until = opts.as_ref().and_then(|o| o.wait_until.as_deref()).unwrap_or("load");
-    let timeout = opts.as_ref().and_then(|o| o.timeout).unwrap_or(default_timeout);
-    (crate::backend::NavLifecycle::from_str(wait_until), timeout)
+  fn resolve_nav_opts(opts: Option<&GotoOptions>, default_timeout: u64) -> (crate::backend::NavLifecycle, u64) {
+    let wait_until = opts.and_then(|o| o.wait_until.as_deref()).unwrap_or("load");
+    let timeout = opts.and_then(|o| o.timeout).unwrap_or(default_timeout);
+    (crate::backend::NavLifecycle::parse_lifecycle(wait_until), timeout)
   }
 
   /// Get the current page URL.
@@ -921,6 +941,18 @@ impl Page {
     self.inner.set_cookie(cookie).await
   }
 
+  /// Add multiple cookies at once (matches Playwright's `context.addCookies()`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if any cookie cannot be set.
+  pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<(), String> {
+    for cookie in cookies {
+      self.inner.set_cookie(cookie).await?;
+    }
+    Ok(())
+  }
+
   /// Clear all cookies.
   ///
   /// # Errors
@@ -928,6 +960,19 @@ impl Page {
   /// Returns an error if cookies cannot be cleared.
   pub async fn clear_cookies(&self) -> Result<(), String> {
     self.inner.clear_cookies().await
+  }
+
+  /// Clear cookies matching the given filters (matches Playwright's `context.clearCookies(options?)`).
+  /// If no filters are specified, all cookies are cleared.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if cookies cannot be cleared.
+  pub async fn clear_cookies_filtered(
+    &self,
+    options: &crate::backend::ClearCookieOptions,
+  ) -> Result<(), String> {
+    self.inner.clear_cookies_filtered(options).await
   }
 
   // ── Storage State ──────────────────────────────────────────────────────
@@ -983,6 +1028,7 @@ impl Page {
           secure: c.get("secure").and_then(serde_json::Value::as_bool).unwrap_or(false),
           http_only: c.get("httpOnly").and_then(serde_json::Value::as_bool).unwrap_or(false),
           expires: c.get("expires").and_then(serde_json::Value::as_f64),
+          same_site: c.get("sameSite").and_then(|v| v.as_str()).and_then(|v| v.parse::<crate::backend::SameSite>().ok()),
         };
         self.set_cookie(cookie).await?;
       }

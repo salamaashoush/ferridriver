@@ -92,6 +92,8 @@ pub struct CookieData {
   pub secure: bool,
   pub http_only: bool,
   pub expires: Option<f64>,
+  /// SameSite attribute: "Strict", "Lax", or "None".
+  pub same_site: Option<String>,
 }
 
 /// Performance metric.
@@ -241,6 +243,7 @@ impl From<&CookieData> for ferridriver::backend::CookieData {
       secure: o.secure,
       http_only: o.http_only,
       expires: o.expires,
+      same_site: o.same_site.as_deref().and_then(|v| v.parse::<ferridriver::backend::SameSite>().ok()),
     }
   }
 }
@@ -255,6 +258,7 @@ impl From<&ferridriver::backend::CookieData> for CookieData {
       secure: o.secure,
       http_only: o.http_only,
       expires: o.expires,
+      same_site: o.same_site.map(|ss| ss.as_str().to_string()),
     }
   }
 }

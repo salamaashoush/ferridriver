@@ -11,6 +11,12 @@ use tokio::sync::{broadcast, oneshot};
 
 use crate::backend::json_scan;
 
+/// Result of a single CDP command: either the response value or an error string.
+type CdpResult = Result<serde_json::Value, String>;
+
+/// Pending-command map: command ID -> oneshot sender for the CDP response.
+type PendingMap = FxHashMap<u64, oneshot::Sender<CdpResult>>;
+
 /// Trait abstracting CDP transport medium (pipes vs WebSocket).
 pub trait CdpTransport: Send + Sync + 'static {
   fn send_command(
@@ -51,10 +57,18 @@ pub(crate) struct LifecycleTracker {
 /// Shared CDP message dispatch state. Embedded by both `PipeTransport` and `WsTransport`.
 pub(crate) struct CdpDispatcher {
   pub next_id: AtomicU64,
-  pub pending: Arc<std::sync::Mutex<FxHashMap<u64, oneshot::Sender<Result<serde_json::Value, String>>>>>,
+  pub pending: Arc<std::sync::Mutex<PendingMap>>,
   nav_waiters: Arc<std::sync::Mutex<FxHashMap<String, NavWaiter>>>,
   lifecycle_trackers: Arc<std::sync::Mutex<FxHashMap<String, LifecycleTracker>>>,
   pub event_tx: broadcast::Sender<serde_json::Value>,
+}
+
+/// Lock a `std::sync::Mutex`, recovering from poisoning.
+///
+/// `std::sync::Mutex` only fails when a thread panicked while holding the lock.
+/// In the CDP dispatcher this is non-fatal -- we recover the inner data and continue.
+fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
+  m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl CdpDispatcher {
@@ -75,7 +89,7 @@ impl CdpDispatcher {
     target: crate::backend::NavLifecycle,
   ) -> oneshot::Receiver<Result<(), String>> {
     let (tx, rx) = oneshot::channel();
-    self.nav_waiters.lock().unwrap().insert(session_id.to_string(), NavWaiter { target, tx });
+    lock_or_recover(&self.nav_waiters).insert(session_id.to_string(), NavWaiter { target, tx });
     rx
   }
 
@@ -85,7 +99,7 @@ impl CdpDispatcher {
     state: Arc<std::sync::Mutex<super::LifecycleState>>,
     notify: Arc<tokio::sync::Notify>,
   ) {
-    self.lifecycle_trackers.lock().unwrap().insert(
+    lock_or_recover(&self.lifecycle_trackers).insert(
       session_id.to_string(),
       LifecycleTracker { state, notify },
     );
@@ -101,7 +115,7 @@ impl CdpDispatcher {
     session_id: Option<&str>,
     method: &str,
     params: &serde_json::Value,
-  ) -> Result<(Vec<u8>, oneshot::Receiver<Result<serde_json::Value, String>>), String> {
+  ) -> Result<(Vec<u8>, oneshot::Receiver<CdpResult>), String> {
     let id = self.next_id.fetch_add(1, Ordering::Relaxed);
     let params_str = serde_json::to_string(params).map_err(|e| format!("Serialize: {e}"))?;
     let mut data = if let Some(sid) = session_id {
@@ -112,7 +126,7 @@ impl CdpDispatcher {
     data.push(0);
 
     let (tx, rx) = oneshot::channel();
-    self.pending.lock().unwrap().insert(id, tx);
+    lock_or_recover(&self.pending).insert(id, tx);
     Ok((data, rx))
   }
 
@@ -137,7 +151,7 @@ impl CdpDispatcher {
         let msg_str = std::str::from_utf8(msg_bytes).unwrap_or("CDP error");
         Err(msg_str.to_string())
       };
-      if let Some(sender) = self.pending.lock().unwrap().remove(&id) {
+      if let Some(sender) = lock_or_recover(&self.pending).remove(&id) {
         let _ = sender.send(payload);
       }
     } else {
@@ -151,7 +165,7 @@ impl CdpDispatcher {
       // Nav waiter dispatch
       {
         use crate::backend::NavLifecycle;
-        let mut waiters = self.nav_waiters.lock().unwrap();
+        let mut waiters = lock_or_recover(&self.nav_waiters);
         match method_str {
           "Page.frameNavigated" => {
             if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::Commit)) {
@@ -190,53 +204,53 @@ impl CdpDispatcher {
         }
       }
 
-      // Lifecycle tracker dispatch — tracks loaderId for document-accurate lifecycle.
-      {
-        let trackers = self.lifecycle_trackers.lock().unwrap();
-        if let Some(tracker) = trackers.get(&key) {
-          match method_str {
-            "Page.frameNavigated" => {
-              // Extract loaderId from the frame payload
-              let params = json_scan::json_field(raw, b"params");
-              let frame = json_scan::json_field(params, b"frame");
-              let loader_id = json_scan::json_string(json_scan::json_field(frame, b"loaderId"));
-              let loader_id_str = std::str::from_utf8(loader_id).unwrap_or("");
-              let mut state = tracker.state.lock().unwrap();
-              state.current_loader_id = loader_id_str.to_string();
-              state.fired.clear();
-              state.fired.insert("commit".to_string());
-              drop(state);
-              tracker.notify.notify_waiters();
-            }
-            "Page.lifecycleEvent" => {
-              let params = json_scan::json_field(raw, b"params");
-              let loader_id = json_scan::json_string(json_scan::json_field(params, b"loaderId"));
-              let loader_id_str = std::str::from_utf8(loader_id).unwrap_or("");
-              let name = json_scan::json_string(json_scan::json_field(params, b"name"));
-              let name_str = std::str::from_utf8(name).unwrap_or("");
-              let event_name = match name_str {
-                "DOMContentLoaded" => Some("domcontentloaded"),
-                "load" => Some("load"),
-                _ => None,
-              };
-              if let Some(event_name) = event_name {
-                let mut state = tracker.state.lock().unwrap();
-                // Only track events for the current document
-                if state.current_loader_id == loader_id_str || state.current_loader_id.is_empty() {
-                  state.fired.insert(event_name.to_string());
-                  drop(state);
-                  tracker.notify.notify_waiters();
-                }
-              }
-            }
-            _ => {}
-          }
-        }
-      }
+      self.dispatch_lifecycle(raw, method_str, &key);
 
       // Broadcast (full parse for console/network listeners)
       if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(raw) {
         let _ = self.event_tx.send(msg);
+      }
+    }
+  }
+
+  /// Lifecycle tracker dispatch -- tracks `loaderId` for document-accurate lifecycle.
+  fn dispatch_lifecycle(&self, raw: &[u8], method_str: &str, key: &str) {
+    let trackers = lock_or_recover(&self.lifecycle_trackers);
+    if let Some(tracker) = trackers.get(key) {
+      match method_str {
+        "Page.frameNavigated" => {
+          let params = json_scan::json_field(raw, b"params");
+          let frame = json_scan::json_field(params, b"frame");
+          let loader_id = json_scan::json_string(json_scan::json_field(frame, b"loaderId"));
+          let loader_id_str = std::str::from_utf8(loader_id).unwrap_or("");
+          let mut state = lock_or_recover(&tracker.state);
+          state.current_loader_id = loader_id_str.to_string();
+          state.fired.clear();
+          state.fired.insert("commit".to_string());
+          drop(state);
+          tracker.notify.notify_waiters();
+        }
+        "Page.lifecycleEvent" => {
+          let params = json_scan::json_field(raw, b"params");
+          let loader_id = json_scan::json_string(json_scan::json_field(params, b"loaderId"));
+          let loader_id_str = std::str::from_utf8(loader_id).unwrap_or("");
+          let name = json_scan::json_string(json_scan::json_field(params, b"name"));
+          let name_str = std::str::from_utf8(name).unwrap_or("");
+          let event_name = match name_str {
+            "DOMContentLoaded" => Some("domcontentloaded"),
+            "load" => Some("load"),
+            _ => None,
+          };
+          if let Some(event_name) = event_name {
+            let mut state = lock_or_recover(&tracker.state);
+            if state.current_loader_id == loader_id_str || state.current_loader_id.is_empty() {
+              state.fired.insert(event_name.to_string());
+              drop(state);
+              tracker.notify.notify_waiters();
+            }
+          }
+        }
+        _ => {}
       }
     }
   }

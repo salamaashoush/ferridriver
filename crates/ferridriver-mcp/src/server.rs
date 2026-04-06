@@ -246,6 +246,7 @@ impl McpServer {
   }
 
   /// Create a server with headless option.
+  #[must_use]
   pub fn new_headless(mode: ConnectMode, backend: BackendKind, headless: bool) -> Self {
     Self::with_options(mode, backend, headless, Arc::new(DefaultConfig))
   }

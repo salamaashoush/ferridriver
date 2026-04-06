@@ -1,5 +1,6 @@
+#![allow(clippy::too_many_lines)]
 //! Test that connect + page select doesn't hang.
-//! Launches its own headless Chrome, connects via CdpRaw, and tests page ops.
+//! Launches its own headless Chrome, connects via `CdpRaw`, and tests page ops.
 
 use ferridriver::backend::cdp::{CdpBrowser, ws::WsTransport};
 use std::io::BufRead;
@@ -142,7 +143,7 @@ async fn connect_and_select_pages() {
 }
 
 /// Connect to the user's running Chrome (not headless) and test page ops.
-/// Run: cargo test --test connect_select connect_real_chrome -- --nocapture
+/// Run: `cargo test --test connect_select connect_real_chrome -- --nocapture`
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn connect_real_chrome() {
   use ferridriver::backend::BackendKind;
