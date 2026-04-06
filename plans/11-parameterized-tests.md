@@ -1,4 +1,4 @@
-# Feature: Parameterized Tests (test.each)
+# [DONE] Feature: Parameterized Tests (test.each)
 
 ## Context
 Data-driven testing is one of the most common patterns: run the same test logic with different inputs. Without `test.each()`, users duplicate test bodies or write manual loops that lose individual test identity. Playwright, Jest, and Vitest all support `test.each()` with template literal table syntax.
