@@ -1,0 +1,27 @@
+[package]
+name = "ferridriver-bdd"
+description = "High-performance BDD/Cucumber test framework for ferridriver"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+ferridriver = { workspace = true }
+ferridriver-test = { workspace = true }
+ferridriver-bdd-macros = { path = "../ferridriver-bdd-macros" }
+
+tokio = { workspace = true }
+futures = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+async-trait = { workspace = true }
+tracing = { workspace = true }
+anyhow = { workspace = true }
+regex = { workspace = true }
+
+gherkin = "0.15"
+cucumber-expressions = { version = "0.5", features = ["into-regex"] }
+inventory = "0.3"
+rustc-hash = "2"
+glob = "0.3"
+console = "0.15"

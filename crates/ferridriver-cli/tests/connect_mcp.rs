@@ -1,7 +1,15 @@
+#![allow(
+  clippy::too_many_lines,
+  clippy::unwrap_used,
+  clippy::expect_used,
+  clippy::needless_pass_by_value,
+  clippy::redundant_closure_for_method_calls,
+  clippy::uninlined_format_args,
+)]
 //! MCP-level test: connect to running Chrome + page select.
 //! Reproduces the exact flow Claude Code uses via MCP stdio.
 //!
-//! Run: cargo test -p ferridriver-cli --test connect_mcp -- --nocapture
+//! Run: `cargo test -p ferridriver-cli --test connect_mcp -- --nocapture`
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -172,7 +180,7 @@ fn mcp_connect_and_select() {
     eprintln!("\n[test] {:?} === click first chat (e22) ===", t.elapsed());
     let t4 = Instant::now();
     let resp = client.call_tool("click", json!({"ref": "e22"}));
-    let click_text = extract_text(&resp);
+    let _click_text = extract_text(&resp);
     eprintln!("[test] {:?} click returned ({:?})", t.elapsed(), t4.elapsed());
 
     // Wait for chat to open

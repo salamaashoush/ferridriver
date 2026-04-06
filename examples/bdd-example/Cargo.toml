@@ -1,0 +1,16 @@
+[package]
+name = "bdd-example"
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+# The BDD test binary -- uses ferridriver's TestRunner, not libtest.
+[[test]]
+name = "bdd"
+harness = false
+
+[dependencies]
+ferridriver = { path = "../../crates/ferridriver" }
+ferridriver-bdd = { path = "../../crates/ferridriver-bdd" }
+ferridriver-test = { path = "../../crates/ferridriver-test" }
+tokio = { workspace = true }

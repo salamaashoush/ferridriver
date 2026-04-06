@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity)]
 //! Ferridriver component testing adapter for Leptos.
 //!
 //! Architecture:

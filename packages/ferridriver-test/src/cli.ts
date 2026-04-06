@@ -1,12 +1,21 @@
 #!/usr/bin/env bun
 /**
- * ferridriver-test CLI — runs E2E and component tests using the Rust engine.
+ * ferridriver-test CLI — runs E2E, component, and BDD tests using the Rust engine.
  *
  * E2E mode (default):
  *   ferridriver-test [files...] [--workers N] [--retries N] [--headed]
  *
  * Component testing mode:
  *   ferridriver-test --ct [files...] [--framework react]
+ *
+ * BDD mode:
+ *   ferridriver-test --bdd [features...] [--steps steps/] [--tags "@smoke"]
+ *
+ * The --bdd flag activates the BDD pipeline:
+ *   1. Discovers step definition files (--steps glob)
+ *   2. Imports them to register Given/When/Then via NAPI
+ *   3. Discovers .feature files
+ *   4. Rust parses Gherkin, matches steps, executes via core TestRunner
  *
  * The --ct flag activates the CT pipeline:
  *   1. Scans test files for component imports (import transform)
@@ -15,8 +24,8 @@
  *   4. Shuts down Vite on completion
  */
 
-import { TestRunner } from 'ferridriver';
-import type { Page } from 'ferridriver';
+import { TestRunner, BddRunner } from 'ferridriver';
+import type { Page, BddRunnerConfig } from 'ferridriver';
 import { _setCurrentFile, _drainTests, _hasOnly, _setCtMountFactory } from './test.js';
 import type { MountFunction } from './test.js';
 import { resolve, relative } from 'path';
@@ -28,8 +37,14 @@ const args = process.argv.slice(2);
 let files: string[] = [];
 const config: Record<string, any> = {};
 let ctMode = false;
+let bddMode = false;
 let ctFramework: string | null = null;
 let ctRegisterSource: string | null = null;
+let bddStepsGlobs: string[] = [];
+let bddTags: string | null = null;
+let bddFeatureGlobs: string[] = [];
+let bddDryRun = false;
+let bddList = false;
 
 for (let i = 0; i < args.length; i++) {
   const arg = args[i];
@@ -41,6 +56,12 @@ for (let i = 0; i < args.length; i++) {
   else if (arg === '--backend') config.backend = args[++i];
   else if (arg === '--reporter') config.reporter = [args[++i]];
   else if (arg === '--ct') ctMode = true;
+  else if (arg === '--bdd') bddMode = true;
+  else if (arg === '--steps') bddStepsGlobs.push(args[++i]);
+  else if (arg === '--tags' || arg === '-t') bddTags = args[++i];
+  else if (arg === '--features') bddFeatureGlobs.push(args[++i]);
+  else if (arg === '--dry-run') bddDryRun = true;
+  else if (arg === '--list') bddList = true;
   else if (arg === '--framework') ctFramework = args[++i];
   else if (arg === '--register-source') ctRegisterSource = args[++i];
   else if (arg === '--update-snapshots') config.updateSnapshots = true;
@@ -137,9 +158,83 @@ function setupCtMount() {
   });
 }
 
+// ── BDD mode ──
+
+async function discoverStepFiles(): Promise<string[]> {
+  const patterns = bddStepsGlobs.length > 0
+    ? bddStepsGlobs
+    : ['steps/**/*.ts', 'steps/**/*.js', 'step_definitions/**/*.ts', 'step_definitions/**/*.js'];
+
+  const found: string[] = [];
+  for (const pattern of patterns) {
+    const glob = new Glob(pattern);
+    for await (const file of glob.scan({ cwd: process.cwd(), absolute: true })) {
+      if (!file.includes('node_modules')) found.push(file);
+    }
+  }
+  found.sort();
+  return found;
+}
+
+async function runBdd() {
+  // Determine feature patterns.
+  const featurePatterns = bddFeatureGlobs.length > 0
+    ? bddFeatureGlobs
+    : files.length > 0
+      ? files
+      : ['features/**/*.feature'];
+
+  // Discover and import step definition files.
+  const stepFiles = await discoverStepFiles();
+
+  // Create BDD runner with config.
+  const bddConfig: BddRunnerConfig = {
+    features: featurePatterns,
+    tags: bddTags || undefined,
+    workers: config.workers,
+    timeout: config.timeout,
+    retries: config.retries,
+    headed: config.headed,
+    backend: config.backend,
+    reporter: config.reporter,
+    outputDir: config.outputDir,
+  };
+
+  const runner = BddRunner.create(bddConfig);
+
+  // Set the runner so Given/When/Then in step files register into it.
+  const { _setRunner } = await import('./bdd.js');
+  _setRunner(runner);
+
+  if (stepFiles.length > 0) {
+    console.log(`  Loading ${stepFiles.length} step file(s)...`);
+    for (const file of stepFiles) {
+      await import(file);
+    }
+  } else {
+    console.log('  No step definition files found. Using built-in steps only.');
+  }
+
+  // Run features.
+  console.log(`  Running features: ${featurePatterns.join(', ')}`);
+  if (bddTags) console.log(`  Tags: ${bddTags}`);
+  console.log();
+
+  const summary = await runner.run();
+
+  // Exit.
+  process.exit(summary.failed > 0 ? 1 : 0);
+}
+
 // ── Main ──
 
 async function main() {
+  // ── BDD mode ──
+  if (bddMode) {
+    await runBdd();
+    return;
+  }
+
   const testFiles = await discoverFiles();
 
   if (testFiles.length === 0) {

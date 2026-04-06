@@ -115,12 +115,14 @@ struct RegisteredTest {
 }
 
 /// A registered suite.
+#[allow(dead_code)]
 struct RegisteredSuite {
   meta: SuiteMeta,
   id: String,
 }
 
 /// A registered hook.
+#[allow(dead_code)]
 struct RegisteredHook {
   meta: HookMeta,
   callback: Arc<TestCallbackFn>,
@@ -238,6 +240,7 @@ impl TestRunner {
   ///
   /// This is the hot path — everything runs from Rust for maximum performance.
   #[napi]
+  #[allow(clippy::too_many_lines)]
   pub async fn run(&self) -> Result<RunSummary> {
     let tests = self.tests.lock().await;
     let num_workers = self.config.workers as usize;
@@ -268,7 +271,7 @@ impl TestRunner {
     // Spawn workers — each launches its own browser on-demand.
     let launch_opts = build_launch_options(&self.config.browser);
     let mut worker_handles = Vec::new();
-    for worker_id in 0..actual_workers {
+    for _worker_id in 0..actual_workers {
       let rx = work_rx.clone();
       let tx = done_tx.clone();
       let timeout_ms = self.config.timeout;
@@ -443,7 +446,7 @@ impl TestRunner {
     for r in &all_results {
       by_id.entry(r.id.clone()).or_default().push(r);
     }
-    for (_, attempts) in &by_id {
+    for attempts in by_id.values() {
       let last = attempts.last().unwrap();
       let mut item = (*last).clone();
       if last.status == "passed" && attempts.len() > 1 {

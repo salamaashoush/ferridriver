@@ -36,6 +36,16 @@ pub enum Command {
     #[command(flatten)]
     test_args: TestArgs,
   },
+
+  /// Run BDD/Gherkin feature tests
+  Bdd {
+    #[command(flatten)]
+    bdd_args: BddArgs,
+
+    /// Feature file patterns or specific .feature files
+    #[arg(last = true)]
+    features: Vec<String>,
+  },
 }
 
 /// Test runner options.
@@ -80,6 +90,66 @@ pub struct TestArgs {
   /// Tag filter
   #[arg(long)]
   pub tag: Option<String>,
+
+  /// Output directory for reports
+  #[arg(long)]
+  pub output: Option<String>,
+}
+
+/// BDD runner options.
+#[derive(Args)]
+pub struct BddArgs {
+  /// Tag filter expression (e.g., "@smoke and not @wip")
+  #[arg(long, short = 't')]
+  pub tags: Option<String>,
+
+  /// Number of parallel workers (0 = auto)
+  #[arg(long, short = 'j')]
+  pub workers: Option<u32>,
+
+  /// Number of retries for failed scenarios
+  #[arg(long)]
+  pub retries: Option<u32>,
+
+  /// Reporter: terminal, junit, json, cucumber-json
+  #[arg(long)]
+  pub reporter: Vec<String>,
+
+  /// Grep pattern to filter scenarios by name
+  #[arg(long, short)]
+  pub grep: Option<String>,
+
+  /// Invert grep pattern (exclude matching scenarios)
+  #[arg(long)]
+  pub grep_invert: Option<String>,
+
+  /// Shard: current/total (e.g., "1/3")
+  #[arg(long)]
+  pub shard: Option<String>,
+
+  /// Config file path
+  #[arg(long, short)]
+  pub config: Option<String>,
+
+  /// Run in headed mode (show browser window)
+  #[arg(long)]
+  pub headed: bool,
+
+  /// List scenarios without running them
+  #[arg(long)]
+  pub list: bool,
+
+  /// Dry run: validate step definitions without executing
+  #[arg(long)]
+  pub dry_run: bool,
+
+  /// Stop on first scenario failure
+  #[arg(long)]
+  pub fail_fast: bool,
+
+  /// Per-step timeout in milliseconds
+  #[arg(long)]
+  pub step_timeout: Option<u64>,
 
   /// Output directory for reports
   #[arg(long)]

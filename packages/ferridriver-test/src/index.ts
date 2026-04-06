@@ -25,3 +25,7 @@ export type { TestFixtures, MountFunction } from './test.js';
 export { expect } from './expect.js';
 export { defineConfig } from './config.js';
 export type { TestRunnerConfig } from 'ferridriver';
+
+// BDD exports
+export { Given, When, Then, Step, Before, After, BeforeAll, AfterAll, configureBdd, runFeatures } from './bdd.js';
+export type { StepCallback, HookCallback, HookOptions } from './bdd.js';

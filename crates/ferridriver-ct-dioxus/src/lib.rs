@@ -1,3 +1,4 @@
+#![allow(clippy::type_complexity, clippy::ptr_arg)]
 //! Ferridriver component testing adapter for Dioxus.
 //!
 //! Same architecture as the Leptos adapter:

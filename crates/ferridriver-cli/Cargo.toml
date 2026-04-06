@@ -15,6 +15,7 @@ workspace = true
 [dependencies]
 ferridriver-mcp = { path = "../ferridriver-mcp" }
 ferridriver-test = { workspace = true }
+ferridriver-bdd = { workspace = true }
 ferridriver = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

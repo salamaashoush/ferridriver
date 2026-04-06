@@ -2,9 +2,45 @@
 //!
 //! Exposes the Playwright-compatible Browser/Page/Locator API to Node.js.
 
-#![allow(unsafe_code)]
-#![allow(clippy::needless_pass_by_value)]
+#![allow(
+  unsafe_code,
+  clippy::needless_pass_by_value,
+  clippy::missing_errors_doc,
+  clippy::missing_panics_doc,
+  clippy::must_use_candidate,
+  clippy::doc_markdown,
+  clippy::module_name_repetitions,
+  clippy::cast_possible_truncation,
+  clippy::cast_possible_wrap,
+  clippy::cast_sign_loss,
+  clippy::cast_precision_loss,
+  clippy::cast_lossless,
+  clippy::redundant_closure_for_method_calls,
+  clippy::implicit_clone,
+  clippy::too_many_lines,
+  clippy::uninlined_format_args,
+  clippy::single_char_pattern,
+  clippy::unwrap_used,
+  clippy::expect_used,
+  clippy::map_unwrap_or,
+  clippy::struct_excessive_bools,
+  clippy::unnecessary_wraps,
+  clippy::default_trait_access,
+  clippy::bool_to_int_with_if,
+  clippy::format_push_string,
+  clippy::unused_async,
+  clippy::unused_self,
+  clippy::match_same_arms,
+  clippy::items_after_statements,
+  clippy::vec_init_then_push,
+  clippy::iter_over_hash_type,
+  clippy::semicolon_if_nothing_returned,
+  clippy::option_map_or_none,
+  clippy::single_match_else,
+  clippy::manual_let_else,
+)]
 
+mod bdd_runner;
 mod browser;
 mod context;
 mod frame;
