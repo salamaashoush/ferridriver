@@ -1562,7 +1562,20 @@ impl Page {
   ///
   /// Returns an error if the page cannot be closed.
   pub async fn close(&self) -> Result<(), String> {
-    self.inner.close_page().await
+    self.inner.close_page().await?;
+
+    // Remove closed page from context's page list so context.pages() stays accurate.
+    if let Some(ctx) = &self.context_ref {
+      let mut state = ctx.state.lock().await;
+      if let Ok(browser_ctx) = state.context_mut_checked(&ctx.name) {
+        browser_ctx.pages.retain(|p| !p.is_closed());
+        if browser_ctx.active_page_idx >= browser_ctx.pages.len() && !browser_ctx.pages.is_empty() {
+          browser_ctx.active_page_idx = browser_ctx.pages.len() - 1;
+        }
+      }
+    }
+
+    Ok(())
   }
 
   /// Check if this page has been closed.

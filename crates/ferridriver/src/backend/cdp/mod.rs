@@ -1393,7 +1393,22 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn clear_cookies(&self) -> Result<(), String> {
-    self.cmd("Storage.clearCookies", super::empty_params()).await?;
+    // Use Network.getCookies + Network.deleteCookies (session-scoped)
+    // instead of Storage.clearCookies (browser-scoped) to correctly
+    // clear cookies for this page's context.
+    let cookies = self.get_cookies().await?;
+    for c in &cookies {
+      self
+        .cmd(
+          "Network.deleteCookies",
+          serde_json::json!({
+            "name": c.name,
+            "domain": c.domain,
+            "path": c.path,
+          }),
+        )
+        .await?;
+    }
     Ok(())
   }
 
