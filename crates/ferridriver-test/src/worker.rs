@@ -551,6 +551,45 @@ impl Worker {
     let info_attachments = test_info.attachments.lock().await.clone();
     attachments.extend(info_attachments);
 
+    // ── Trace recording ──
+    // Uses should_write() to skip entirely for RetainOnFailure + passed tests
+    // (no wasted ZIP write + delete). Serialization happens in-memory (borrows
+    // steps, zero-copy for titles/errors), file I/O on spawn_blocking.
+    let trace_mode = self.config.trace;
+    let test_failed = status == TestStatus::Failed || status == TestStatus::TimedOut;
+    if trace_mode.should_write(attempt, test_failed) {
+      let mut recorder = crate::tracing::TraceRecorder::for_steps(&steps);
+      recorder.record_steps(&steps);
+      // Serialize to in-memory ZIP bytes (fast, no file I/O).
+      match recorder.into_zip_bytes() {
+        Ok(zip_bytes) => {
+          let trace_path = test_info.output_dir.join(format!(
+            "{}-attempt{}.trace.zip",
+            sanitize_filename(&test_id.name),
+            attempt
+          ));
+          // Offload file write to blocking thread so the async worker isn't stalled.
+          let write_path = trace_path.clone();
+          let write_result = tokio::task::spawn_blocking(move || {
+            crate::tracing::write_trace_file(&write_path, &zip_bytes)
+          })
+          .await;
+          match write_result {
+            Ok(Ok(())) => {
+              attachments.push(Attachment {
+                name: "trace".into(),
+                content_type: "application/zip".into(),
+                body: AttachmentBody::Path(trace_path),
+              });
+            }
+            Ok(Err(e)) => tracing::warn!(target: "ferridriver::worker", "trace write failed: {e}"),
+            Err(e) => tracing::warn!(target: "ferridriver::worker", "trace task panicked: {e}"),
+          }
+        }
+        Err(e) => tracing::warn!(target: "ferridriver::worker", "trace serialize failed: {e}"),
+      }
+    }
+
     // Attach or clean up video recording.
     // For buffered mode, video_path is only Some when the test failed (already filtered).
     // For eager mode, we keep or delete based on the mode.

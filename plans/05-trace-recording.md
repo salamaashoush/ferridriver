@@ -1,4 +1,4 @@
-# Feature: Trace Recording + Viewer
+# [DONE] Feature: Trace Recording + Viewer
 
 ## Context
 Playwright's trace viewer is its killer debugging feature. It records DOM snapshots, network requests, console logs, and screenshots at each action, packaged into a ZIP file. Developers can step through the trace like a debugger, seeing exactly what the page looked like at each point. This is the single most requested debugging tool for browser test frameworks.

@@ -150,6 +150,8 @@ pub struct BddRunnerConfig {
   pub last_failed: Option<bool>,
   /// Video recording mode: "off", "on", "retain-on-failure".
   pub video: Option<String>,
+  /// Trace recording mode: "off", "on", "retain-on-failure", "on-first-retry".
+  pub trace: Option<String>,
 }
 
 /// A registered TS step definition.
@@ -257,6 +259,9 @@ impl BddRunner {
         "retain-on-failure" => ferridriver_test::config::VideoMode::RetainOnFailure,
         _ => ferridriver_test::config::VideoMode::Off,
       };
+    }
+    if let Some(ref t) = cfg.trace {
+      tc.trace = ferridriver_test::tracing::TraceMode::from_str(t);
     }
     if tc.features.is_empty() {
       tc.features = vec!["features/**/*.feature".to_string()];

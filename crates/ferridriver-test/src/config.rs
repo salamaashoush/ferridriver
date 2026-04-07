@@ -114,6 +114,10 @@ pub struct TestConfig {
   #[serde(default)]
   pub video: VideoConfig,
 
+  /// Trace recording mode.
+  #[serde(default)]
+  pub trace: crate::tracing::TraceMode,
+
   /// Strict mode: treat undefined/pending steps as errors. Default: false.
   pub strict: bool,
 
@@ -222,6 +226,7 @@ pub struct CliOverrides {
   pub forbid_only: bool,
   pub last_failed: bool,
   pub video: Option<String>,
+  pub trace: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -275,6 +280,7 @@ impl Default for TestConfig {
       fail_fast: false,
       screenshot_on_failure: true,
       video: VideoConfig::default(),
+      trace: crate::tracing::TraceMode::Off,
       strict: false,
       order: "defined".into(),
       language: None,
@@ -373,6 +379,9 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
       _ => VideoMode::Off,
     };
   }
+  if let Some(trace) = &overrides.trace {
+    config.trace = crate::tracing::TraceMode::from_str(trace);
+  }
   // Environment variable: FERRIDRIVER_VIDEO=on|off|retain-on-failure
   if let Ok(v) = std::env::var("FERRIDRIVER_VIDEO") {
     config.video.mode = match v.as_str() {
@@ -380,6 +389,10 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
       "retain-on-failure" => VideoMode::RetainOnFailure,
       _ => VideoMode::Off,
     };
+  }
+  // Environment variable: FERRIDRIVER_TRACE=off|on|retain-on-failure|on-first-retry
+  if let Ok(t) = std::env::var("FERRIDRIVER_TRACE") {
+    config.trace = crate::tracing::TraceMode::from_str(&t);
   }
 
   // Auto-detect worker count.

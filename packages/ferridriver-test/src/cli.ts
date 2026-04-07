@@ -90,6 +90,10 @@ const runnerArgs = defineArgs({
     type: 'string',
     description: 'Record video: off, on, retain-on-failure',
   },
+  trace: {
+    type: 'string',
+    description: 'Record trace: off, on, retain-on-failure, on-first-retry',
+  },
   verbose: {
     type: 'boolean',
     short: 'v',
@@ -353,6 +357,7 @@ const testCommand = defineCommand({
     if (args['forbid-only']) config.forbidOnly = true;
     if (args['last-failed']) config.lastFailed = true;
     if (args.video) config.video = args.video;
+    if (args.trace) config.trace = args.trace;
     if (args.verbose) config.verbose = 1;
     if (args.debug) config.debug = args.debug;
     else if (args.verbose) config.debug = '*';
@@ -403,6 +408,7 @@ const ctCommand = defineCommand({
     if (args['forbid-only']) config.forbidOnly = true;
     if (args['last-failed']) config.lastFailed = true;
     if (args.video) config.video = args.video;
+    if (args.trace) config.trace = args.trace;
     if (args.verbose && !process.env.FERRIDRIVER_DEBUG) process.env.FERRIDRIVER_DEBUG = '*';
     await runTests(config, testFiles, true);
   },
@@ -477,6 +483,7 @@ const bddCommand = defineCommand({
       order: args.order || undefined,
       language: args.language || undefined,
       video: args.video || undefined,
+      trace: args.trace || undefined,
     };
 
     const runner = BddRunner.create(bddConfig);

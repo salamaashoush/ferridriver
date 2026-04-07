@@ -114,6 +114,10 @@ pub struct TestArgs {
   /// Record video: off, on, retain-on-failure
   #[arg(long)]
   pub video: Option<String>,
+
+  /// Record trace: off, on, retain-on-failure, on-first-retry
+  #[arg(long)]
+  pub trace: Option<String>,
 }
 
 /// BDD runner options.
@@ -202,6 +206,10 @@ pub struct BddArgs {
   /// Record video: off, on, retain-on-failure
   #[arg(long)]
   pub video: Option<String>,
+
+  /// Record trace: off, on, retain-on-failure, on-first-retry
+  #[arg(long)]
+  pub trace: Option<String>,
 }
 
 /// Browser backend and connection options.

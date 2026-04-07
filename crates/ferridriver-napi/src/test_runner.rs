@@ -52,6 +52,8 @@ pub struct TestRunnerConfig {
   pub grep: Option<String>,
   /// Video recording mode: "off", "on", "retain-on-failure".
   pub video: Option<String>,
+  /// Trace recording mode: "off", "on", "retain-on-failure", "on-first-retry".
+  pub trace: Option<String>,
 }
 
 /// Metadata for a registered test.
@@ -198,6 +200,9 @@ impl TestRunner {
         "retain-on-failure" => ferridriver_test::config::VideoMode::RetainOnFailure,
         _ => ferridriver_test::config::VideoMode::Off,
       };
+    }
+    if let Some(ref t) = cfg.trace {
+      tc.trace = ferridriver_test::tracing::TraceMode::from_str(t);
     }
     if tc.workers == 0 {
       let cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
