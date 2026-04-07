@@ -100,6 +100,11 @@ const runnerArgs = defineArgs({
     description: 'Path to storage state JSON (pre-authenticated session)',
     valueHint: 'filePath',
   },
+  watch: {
+    type: 'boolean',
+    short: 'w',
+    description: 'Watch mode: re-run tests on file changes',
+  },
   verbose: {
     type: 'boolean',
     short: 'v',
@@ -365,6 +370,7 @@ const testCommand = defineCommand({
     if (args.video) config.video = args.video;
     if (args.trace) config.trace = args.trace;
     if (args['storage-state']) config.storageState = args['storage-state'];
+    if (args.watch) config.watch = true;
     if (args.verbose) config.verbose = 1;
     if (args.debug) config.debug = args.debug;
     else if (args.verbose) config.debug = '*';
@@ -417,6 +423,7 @@ const ctCommand = defineCommand({
     if (args.video) config.video = args.video;
     if (args.trace) config.trace = args.trace;
     if (args['storage-state']) config.storageState = args['storage-state'];
+    if (args.watch) config.watch = true;
     if (args.verbose && !process.env.FERRIDRIVER_DEBUG) process.env.FERRIDRIVER_DEBUG = '*';
     await runTests(config, testFiles, true);
   },
@@ -493,6 +500,7 @@ const bddCommand = defineCommand({
       video: args.video || undefined,
       trace: args.trace || undefined,
       storageState: args['storage-state'] || undefined,
+      watch: args.watch || undefined,
     };
 
     const runner = BddRunner.create(bddConfig);

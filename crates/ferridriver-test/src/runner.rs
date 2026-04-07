@@ -24,6 +24,8 @@ pub struct TestRunner {
   config: Arc<TestConfig>,
   reporters: ReporterSet,
   overrides: CliOverrides,
+  /// Shared browser for watch mode (persists across runs).
+  shared_browser: Option<Arc<Browser>>,
 }
 
 impl TestRunner {
@@ -33,6 +35,7 @@ impl TestRunner {
       config: Arc::new(config),
       reporters,
       overrides,
+      shared_browser: None,
     }
   }
 
@@ -245,18 +248,23 @@ impl TestRunner {
       let rx = dispatcher.receiver();
       let tx = result_tx.clone();
       let custom_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Worker);
+      let shared = self.shared_browser.clone();
       let opts = launch_opts.clone();
 
       let handle = tokio::spawn(async move {
-        // Launch browser inside the worker task — overlaps with other workers.
-        match Browser::launch(opts).await {
-          Ok(browser) => {
-            worker.run(Arc::new(browser), custom_pool, rx, tx).await;
+        // Use shared browser (watch mode) or launch a new one per worker.
+        let browser = if let Some(b) = shared {
+          b
+        } else {
+          match Browser::launch(opts).await {
+            Ok(b) => Arc::new(b),
+            Err(e) => {
+              tracing::error!(target: "ferridriver::worker", "worker {worker_id}: browser launch failed: {e}");
+              return;
+            }
           }
-          Err(e) => {
-            tracing::error!(target: "ferridriver::worker", "worker {worker_id}: browser launch failed: {e}");
-          }
-        }
+        };
+        worker.run(browser, custom_pool, rx, tx).await;
       });
       worker_handles.push(handle);
     }
@@ -350,6 +358,189 @@ impl TestRunner {
     }
 
     if failed > 0 { 1 } else { 0 }
+  }
+
+  /// Run in watch mode: re-run tests on file changes with interactive keyboard controls.
+  ///
+  /// Launches a browser once and reuses it across all runs. Watches the project
+  /// directory for file changes and dispatches re-runs based on change type.
+  ///
+  /// # Arguments
+  ///
+  /// * `plan_factory` — Closure that generates a `TestPlan`. Receives an optional slice
+  ///   of changed file paths — when `Some`, the factory should only re-process those files
+  ///   (e.g., re-parse only changed `.feature` files). When `None`, generate the full plan.
+  /// * `watch_root` — Root directory to watch for file changes.
+  pub async fn run_watch<F>(&mut self, plan_factory: F, watch_root: std::path::PathBuf) -> i32
+  where
+    F: Fn(Option<&[std::path::PathBuf]>) -> TestPlan,
+  {
+    use crate::interactive::{self, WatchCommand};
+    use crate::watch::{ChangeKind, FileWatcher};
+
+    // Launch browser once — reuse across all watch cycles.
+    let launch_opts = build_launch_options(&self.config.browser);
+    let browser = match Browser::launch(launch_opts).await {
+      Ok(b) => Arc::new(b),
+      Err(e) => {
+        eprintln!("Failed to launch browser: {e}");
+        return 1;
+      }
+    };
+    self.shared_browser = Some(Arc::clone(&browser));
+
+    // Start file watcher — uses test_match globs for classification, test_ignore for filtering.
+    let watcher = match FileWatcher::new(&watch_root, &self.config.test_match, &self.config.test_ignore) {
+      Ok(w) => w,
+      Err(e) => {
+        eprintln!("Failed to start file watcher: {e}");
+        return 1;
+      }
+    };
+
+    // Start key handler (optional — fails gracefully in non-TTY environments).
+    let keys = match interactive::KeyHandler::start() {
+      Ok(k) => Some(k),
+      Err(e) => {
+        tracing::debug!(target: "ferridriver::watch", "key handler unavailable (non-TTY?): {e}");
+        None
+      }
+    };
+
+    // Track state across watch cycles.
+    let mut grep_filter: Option<String> = None;
+
+    // Initial run (full plan, no changed files).
+    let plan = plan_factory(None);
+    let _exit = self.run(plan).await;
+    interactive::print_watch_hint();
+
+    // Watch loop.
+    loop {
+      let key_recv = async {
+        if let Some(ref k) = keys {
+          k.recv().await
+        } else {
+          std::future::pending::<Option<WatchCommand>>().await
+        }
+      };
+
+      tokio::select! {
+        change = watcher.recv() => {
+          let Some(change) = change else { break };
+          // Drain + deduplicate additional changes from the debounce window.
+          let mut all_changes = vec![change];
+          all_changes.extend(watcher.drain_deduped());
+
+          // Classify: do we need to re-run all, or just specific files?
+          let mut run_all = false;
+          let mut changed_paths: Vec<std::path::PathBuf> = Vec::new();
+
+          for change in &all_changes {
+            match change {
+              ChangeKind::SourceFile(_) | ChangeKind::StepFile(_) | ChangeKind::Config => {
+                run_all = true;
+              }
+              ChangeKind::TestFile(p) | ChangeKind::FeatureFile(p) => {
+                changed_paths.push(p.clone());
+              }
+            }
+          }
+
+          if !run_all && changed_paths.is_empty() {
+            continue;
+          }
+
+          eprintln!("\n\x1b[2mChange detected, re-running...\x1b[0m\n");
+
+          // Pass changed files to the factory so it can re-process only those.
+          // For BDD: re-parse only changed .feature files instead of all.
+          // For E2E: the factory ignores changed_files (inventory-based, can't re-discover).
+          let changed = if run_all { None } else { Some(changed_paths.as_slice()) };
+          let mut plan = plan_factory(changed);
+
+          // If the factory returned the full plan but we only want changed files,
+          // filter the plan down to tests from those files.
+          if !run_all && !changed_paths.is_empty() {
+            let changed_names: rustc_hash::FxHashSet<&str> = changed_paths
+              .iter()
+              .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
+              .collect();
+            for suite in &mut plan.suites {
+              suite.tests.retain(|t| {
+                changed_names.iter().any(|name| t.id.file.contains(name))
+              });
+            }
+            plan.suites.retain(|s| !s.tests.is_empty());
+            plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
+          }
+
+          if plan.total_tests == 0 {
+            eprintln!("No tests matched changed files.");
+            interactive::print_watch_hint();
+            continue;
+          }
+
+          let _ = self.run(plan).await;
+          interactive::print_watch_hint();
+        }
+
+        cmd = key_recv => {
+          let Some(cmd) = cmd else { break };
+          match cmd {
+            WatchCommand::Quit => {
+              eprintln!("\n\x1b[2mExiting watch mode.\x1b[0m");
+              break;
+            }
+            WatchCommand::RunAll => {
+              eprintln!("\n\x1b[2mRunning all tests...\x1b[0m\n");
+              grep_filter = None;
+              let _ = self.run(plan_factory(None)).await;
+              interactive::print_watch_hint();
+            }
+            WatchCommand::RunFailed => {
+              // Re-run with --last-failed filter.
+              eprintln!("\n\x1b[2mRunning failed tests...\x1b[0m\n");
+              let mut plan = plan_factory(None);
+              // Use the existing last-failed infrastructure (reads @rerun.txt).
+              let rerun_path = self.config.output_dir.join("@rerun.txt");
+              if rerun_path.exists() {
+                crate::discovery::filter_by_rerun(&mut plan, &rerun_path);
+              }
+              if plan.total_tests == 0 {
+                eprintln!("No failed tests to re-run.");
+              } else {
+                let _ = self.run(plan).await;
+              }
+              interactive::print_watch_hint();
+            }
+            WatchCommand::Rerun => {
+              eprintln!("\n\x1b[2mRe-running...\x1b[0m\n");
+              let mut plan = plan_factory(None);
+              if let Some(ref pattern) = grep_filter {
+                crate::discovery::filter_by_grep(&mut plan, pattern, false);
+              }
+              let _ = self.run(plan).await;
+              interactive::print_watch_hint();
+            }
+            WatchCommand::FilterByName(pattern) => {
+              eprintln!("\n\x1b[2mFiltering by \"{pattern}\"...\x1b[0m\n");
+              grep_filter = Some(pattern.clone());
+              let mut plan = plan_factory(None);
+              crate::discovery::filter_by_grep(&mut plan, &pattern, false);
+              let _ = self.run(plan).await;
+              interactive::print_watch_hint();
+            }
+          }
+        }
+      }
+    }
+
+    // Cleanup.
+    self.shared_browser = None;
+    let _ = browser.close().await;
+
+    0
   }
 }
 

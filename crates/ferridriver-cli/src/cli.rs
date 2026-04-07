@@ -140,6 +140,10 @@ pub struct TestArgs {
   /// Path to storage state JSON (pre-authenticated session)
   #[arg(long)]
   pub storage_state: Option<String>,
+
+  /// Watch mode: re-run tests on file changes
+  #[arg(long, short = 'w')]
+  pub watch: bool,
 }
 
 /// BDD runner options.
@@ -236,6 +240,10 @@ pub struct BddArgs {
   /// Path to storage state JSON (pre-authenticated session)
   #[arg(long)]
   pub storage_state: Option<String>,
+
+  /// Watch mode: re-run scenarios on file changes
+  #[arg(long, short = 'w')]
+  pub watch: bool,
 }
 
 /// Browser backend and connection options.

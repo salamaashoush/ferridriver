@@ -56,6 +56,8 @@ pub struct TestRunnerConfig {
   pub trace: Option<String>,
   /// Path to storage state JSON file (pre-authenticated session).
   pub storage_state: Option<String>,
+  /// Watch mode: re-run tests on file changes.
+  pub watch: Option<bool>,
 }
 
 /// Metadata for a registered test.
@@ -148,6 +150,7 @@ struct RegisteredHook {
 pub struct TestRunner {
   config: ferridriver_test::TestConfig,
   last_failed: bool,
+  watch: bool,
   grep: Option<String>,
   tests: Mutex<Vec<RegisteredTest>>,
   suites: Mutex<Vec<RegisteredSuite>>,
@@ -217,6 +220,7 @@ impl TestRunner {
     Ok(Self {
       config: tc,
       last_failed: cfg.last_failed.unwrap_or(false),
+      watch: cfg.watch.unwrap_or(false),
       grep: cfg.grep.clone(),
       tests: Mutex::new(Vec::new()),
       suites: Mutex::new(Vec::new()),
@@ -373,9 +377,18 @@ impl TestRunner {
     let collector = Arc::new(tokio::sync::Mutex::new(ResultCollector::new()));
     let start = Instant::now();
     let config = self.config.clone();
+    let watch = self.watch;
     let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
     runner.add_reporter(Box::new(ResultCollectorReporter(Arc::clone(&collector))));
-    let _exit_code = runner.run(plan).await;
+
+    if watch {
+      // Watch mode: core Rust watch loop handles file watching + keyboard.
+      // TestPlan::clone() is cheap — TestFn is Arc (refcount bump).
+      let cwd = std::env::current_dir().unwrap_or_default();
+      let _exit_code = runner.run_watch(move |_changed| plan.clone(), cwd).await;
+    } else {
+      let _exit_code = runner.run(plan).await;
+    }
     let duration = start.elapsed();
 
     // Collect results from the reporter.

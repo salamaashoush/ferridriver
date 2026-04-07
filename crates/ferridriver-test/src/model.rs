@@ -62,6 +62,7 @@ pub type TestFn =
 // ── Test Case ──
 
 /// A single test case with metadata and body.
+#[derive(Clone)]
 pub struct TestCase {
   pub id: TestId,
   pub test_fn: TestFn,
@@ -91,6 +92,7 @@ pub enum SuiteMode {
 }
 
 /// A group of tests (maps to `test.describe` / `#[cfg(test)] mod`).
+#[derive(Clone)]
 pub struct TestSuite {
   pub name: String,
   pub file: String,
@@ -103,6 +105,7 @@ pub struct TestSuite {
 }
 
 /// Lifecycle hooks attached to a suite.
+#[derive(Clone)]
 pub struct Hooks {
   /// Runs once per suite per worker (no test context).
   pub before_all: Vec<SuiteHookFn>,
@@ -141,6 +144,7 @@ pub type HookFn = Arc<
 // ── Test Plan ──
 
 /// The full test plan after discovery + filtering + sharding.
+#[derive(Clone)]
 pub struct TestPlan {
   pub suites: Vec<TestSuite>,
   /// Total test count (after filtering, before retry expansion).

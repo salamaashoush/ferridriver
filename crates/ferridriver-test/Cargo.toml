@@ -32,6 +32,9 @@ similar = "2"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
+notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
+notify-debouncer-mini = "0.5"
+crossterm = "0.28"
 axum = { workspace = true }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "cors"] }

@@ -217,10 +217,59 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
 
   // Build step registry and translate to TestPlan.
   let registry = Arc::new(StepRegistry::build());
-  let plan = translate::translate_features(&feature_set, registry, &config);
 
   // Run via core TestRunner.
   config.mode = ferridriver_test::config::RunMode::Bdd;
+
+  if args.watch {
+    let features_patterns = config.features.clone();
+    let test_ignore = config.test_ignore.clone();
+    let language = config.language.clone();
+    let config_for_translate = config.clone();
+    let registry_clone = Arc::clone(&registry);
+    let mut runner = TestRunner::new(config, overrides);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let exit_code = runner
+      .run_watch(
+        move |changed_files: Option<&[std::path::PathBuf]>| {
+          // When specific files changed, only discover/parse those.
+          // Otherwise (None = full run), discover all features.
+          let files = if let Some(changed) = changed_files {
+            // Filter to only .feature files from the changed set.
+            let feature_files: Vec<std::path::PathBuf> = changed
+              .iter()
+              .filter(|p| p.extension().and_then(|e| e.to_str()) == Some("feature"))
+              .cloned()
+              .collect();
+            if feature_files.is_empty() {
+              // Changed files were not features (e.g., step files) — re-discover all.
+              match FeatureSet::discover(&features_patterns, &test_ignore) {
+                Ok(f) => f,
+                Err(e) => { eprintln!("Feature discovery error: {e}"); return empty_plan(); }
+              }
+            } else {
+              feature_files
+            }
+          } else {
+            match FeatureSet::discover(&features_patterns, &test_ignore) {
+              Ok(f) => f,
+              Err(e) => { eprintln!("Feature discovery error: {e}"); return empty_plan(); }
+            }
+          };
+
+          let fset = match FeatureSet::parse_with_language(files, language.as_deref()) {
+            Ok(f) => f,
+            Err(e) => { eprintln!("Feature parse error: {e}"); return empty_plan(); }
+          };
+          translate::translate_features(&fset, Arc::clone(&registry_clone), &config_for_translate)
+        },
+        cwd,
+      )
+      .await;
+    std::process::exit(exit_code);
+  }
+
+  let plan = translate::translate_features(&feature_set, registry, &config);
   let mut runner = TestRunner::new(config, overrides);
   let exit_code = runner.run(plan).await;
 
@@ -261,12 +310,32 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
     storage_state: args.storage_state,
   };
 
+  let watch = args.watch;
   let config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;
-  let plan = collect_rust_tests(&config);
 
+  if watch {
+    let config_clone = config.clone();
+    let mut runner = TestRunner::new(config, overrides);
+    let cwd = std::env::current_dir().unwrap_or_default();
+    // Rust tests are inventory-based (compile-time), can't re-discover individual files.
+    // Changed files parameter is ignored — always returns the full plan.
+    let exit_code = runner
+      .run_watch(move |_changed| collect_rust_tests(&config_clone), cwd)
+      .await;
+    std::process::exit(exit_code);
+  }
+
+  let plan = collect_rust_tests(&config);
   let mut runner = TestRunner::new(config, overrides);
   let exit_code = runner.run(plan).await;
 
   std::process::exit(exit_code);
 }
 
+fn empty_plan() -> ferridriver_test::model::TestPlan {
+  ferridriver_test::model::TestPlan {
+    suites: Vec::new(),
+    total_tests: 0,
+    shard: None,
+  }
+}

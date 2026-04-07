@@ -1,4 +1,4 @@
-# Feature: Watch Mode
+# [DONE] Feature: Watch Mode
 
 ## Context
 Developers expect instant feedback when editing tests or source files. Watch mode re-runs affected tests automatically on file change, dramatically reducing the edit-run-debug cycle. This is table-stakes for modern test frameworks (Vitest, Jest, Playwright) and is the single most impactful DX feature for adoption.

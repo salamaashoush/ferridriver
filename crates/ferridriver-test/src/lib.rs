@@ -101,6 +101,8 @@ pub mod runner;
 pub mod shard;
 pub mod snapshot;
 pub mod tracing;
+pub mod watch;
+pub mod interactive;
 pub mod worker;
 
 // -- Re-exports --
