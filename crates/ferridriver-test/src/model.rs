@@ -136,9 +136,7 @@ pub type SuiteHookFn =
 /// Test-scoped hook (before_each / after_each). Receives fixture pool + `TestInfo`.
 /// `TestInfo` provides access to test tags, name, step API, and event bus.
 pub type HookFn = Arc<
-  dyn Fn(FixturePool, Arc<TestInfo>) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>
-    + Send
-    + Sync,
+  dyn Fn(FixturePool, Arc<TestInfo>) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>> + Send + Sync,
 >;
 
 // ── Test Plan ──
@@ -257,27 +255,22 @@ impl TestInfo {
   ///
   /// Returns a `StepHandle` that must be completed via `handle.end()`.
   /// Emits `ReporterEvent::StepStarted` immediately if an event bus is available.
-  pub async fn begin_step(
-    &self,
-    title: impl Into<String>,
-    category: StepCategory,
-  ) -> StepHandle {
+  pub async fn begin_step(&self, title: impl Into<String>, category: StepCategory) -> StepHandle {
     let title = title.into();
-    let step_id = format!(
-      "{}@{}",
-      category,
-      STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
+    let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
     if let Some(bus) = &self.event_bus {
-      bus.emit(crate::reporter::ReporterEvent::StepStarted(Box::new(crate::reporter::StepStartedEvent {
-        test_id: self.test_id.clone(),
-        step_id: step_id.clone(),
-        parent_step_id: None,
-        title: title.clone(),
-        category: category.clone(),
-      })))
-      .await;
+      bus
+        .emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
+          crate::reporter::StepStartedEvent {
+            test_id: self.test_id.clone(),
+            step_id: step_id.clone(),
+            parent_step_id: None,
+            title: title.clone(),
+            category: category.clone(),
+          },
+        )))
+        .await;
     }
 
     StepHandle {
@@ -301,21 +294,20 @@ impl TestInfo {
     parent_step_id: &str,
   ) -> StepHandle {
     let title = title.into();
-    let step_id = format!(
-      "{}@{}",
-      category,
-      STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed)
-    );
+    let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
     if let Some(bus) = &self.event_bus {
-      bus.emit(crate::reporter::ReporterEvent::StepStarted(Box::new(crate::reporter::StepStartedEvent {
-        test_id: self.test_id.clone(),
-        step_id: step_id.clone(),
-        parent_step_id: Some(parent_step_id.to_string()),
-        title: title.clone(),
-        category: category.clone(),
-      })))
-      .await;
+      bus
+        .emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
+          crate::reporter::StepStartedEvent {
+            test_id: self.test_id.clone(),
+            step_id: step_id.clone(),
+            parent_step_id: Some(parent_step_id.to_string()),
+            title: title.clone(),
+            category: category.clone(),
+          },
+        )))
+        .await;
     }
 
     StepHandle {
@@ -366,15 +358,17 @@ impl StepHandle {
     // Emit real-time event.
     if let Some(bus) = &self.event_bus {
       bus
-        .emit(crate::reporter::ReporterEvent::StepFinished(Box::new(crate::reporter::StepFinishedEvent {
-          test_id: self.test_id.clone(),
-          step_id: self.step_id.clone(),
-          title: self.title.clone(),
-          category: self.category.clone(),
-          duration,
-          error: error.clone(),
-          metadata: self.metadata.clone(),
-        })))
+        .emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
+          crate::reporter::StepFinishedEvent {
+            test_id: self.test_id.clone(),
+            step_id: self.step_id.clone(),
+            title: self.title.clone(),
+            category: self.category.clone(),
+            duration,
+            error: error.clone(),
+            metadata: self.metadata.clone(),
+          },
+        )))
         .await;
     }
 
@@ -409,15 +403,17 @@ impl StepHandle {
 
     if let Some(bus) = &self.event_bus {
       bus
-        .emit(crate::reporter::ReporterEvent::StepFinished(Box::new(crate::reporter::StepFinishedEvent {
-          test_id: self.test_id.clone(),
-          step_id: self.step_id.clone(),
-          title: self.title.clone(),
-          category: self.category.clone(),
-          duration,
-          error: error.clone(),
-          metadata: self.metadata.clone(),
-        })))
+        .emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
+          crate::reporter::StepFinishedEvent {
+            test_id: self.test_id.clone(),
+            step_id: self.step_id.clone(),
+            title: self.title.clone(),
+            category: self.category.clone(),
+            duration,
+            error: error.clone(),
+            metadata: self.metadata.clone(),
+          },
+        )))
         .await;
     }
 
@@ -511,14 +507,22 @@ impl fmt::Display for StepCategory {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TestAnnotation {
-  Skip { reason: Option<String> },
+  Skip {
+    reason: Option<String>,
+  },
   Slow,
-  Fixme { reason: Option<String>, condition: Option<String> },
+  Fixme {
+    reason: Option<String>,
+    condition: Option<String>,
+  },
   Fail,
   Only,
   Tag(String),
   /// Structured metadata: type + description (e.g., issue/JIRA-1234, severity/critical).
-  Info { type_name: String, description: String },
+  Info {
+    type_name: String,
+    description: String,
+  },
 }
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]

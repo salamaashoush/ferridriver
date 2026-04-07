@@ -2,7 +2,7 @@
   clippy::items_after_statements,
   clippy::redundant_closure_for_method_calls,
   clippy::default_trait_access,
-  clippy::doc_markdown,
+  clippy::doc_markdown
 )]
 //! E2E tests for newly implemented features:
 //! - Hooks (beforeAll/afterAll/beforeEach/afterEach)
@@ -13,8 +13,8 @@
 //! - Snapshot testing
 //! - HTML reporter output
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use ferridriver_test::config::{CliOverrides, TestConfig};
@@ -31,7 +31,7 @@ fn data_url(html: &str) -> String {
       .map(|b| match b {
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
           (b as char).to_string()
-        }
+        },
         _ => format!("%{b:02X}"),
       })
       .collect::<String>()
@@ -39,13 +39,23 @@ fn data_url(html: &str) -> String {
 }
 
 fn fail(msg: impl Into<String>) -> TestFailure {
-  TestFailure { message: msg.into(), stack: None, diff: None, screenshot: None }
+  TestFailure {
+    message: msg.into(),
+    stack: None,
+    diff: None,
+    screenshot: None,
+  }
 }
 
 fn noop_test(name: &str) -> TestCase {
   let name = name.to_string();
   TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name, line: None },
+    id: TestId {
+      file: "new_features.rs".into(),
+      suite: None,
+      name,
+      line: None,
+    },
     test_fn: Arc::new(|_| Box::pin(async { Ok(()) })),
     fixture_requests: vec![],
     annotations: Vec::new(),
@@ -104,7 +114,11 @@ async fn test_before_all_runs_once_per_suite() {
   // 1 worker = beforeAll runs exactly once.
   let exit = run_plan(plan, default_config(1)).await;
   assert_eq!(exit, 0);
-  assert_eq!(BEFORE_ALL_COUNT.load(Ordering::SeqCst), 1, "beforeAll should run exactly once on 1 worker");
+  assert_eq!(
+    BEFORE_ALL_COUNT.load(Ordering::SeqCst),
+    1,
+    "beforeAll should run exactly once on 1 worker"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -137,7 +151,11 @@ async fn test_before_each_runs_per_test() {
 
   let exit = run_plan(plan, default_config(1)).await;
   assert_eq!(exit, 0);
-  assert_eq!(BEFORE_EACH_COUNT.load(Ordering::SeqCst), 3, "beforeEach should run once per test");
+  assert_eq!(
+    BEFORE_EACH_COUNT.load(Ordering::SeqCst),
+    3,
+    "beforeEach should run once per test"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -156,7 +174,12 @@ async fn test_after_each_runs_even_on_failure() {
   };
 
   let failing_test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "failing".into(), line: None },
+    id: TestId {
+      file: "new_features.rs".into(),
+      suite: None,
+      name: "failing".into(),
+      line: None,
+    },
     test_fn: Arc::new(|_| Box::pin(async { Err(fail("intentional failure")) })),
     fixture_requests: vec![],
     annotations: Vec::new(),
@@ -180,15 +203,17 @@ async fn test_after_each_runs_even_on_failure() {
 
   let exit = run_plan(plan, default_config(1)).await;
   assert_eq!(exit, 1, "should fail because one test fails");
-  assert_eq!(AFTER_EACH_COUNT.load(Ordering::SeqCst), 2, "afterEach should run for both passing and failing tests");
+  assert_eq!(
+    AFTER_EACH_COUNT.load(Ordering::SeqCst),
+    2,
+    "afterEach should run for both passing and failing tests"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_before_all_failure_skips_suite() {
   let hooks = Hooks {
-    before_all: vec![Arc::new(|_pool| {
-      Box::pin(async { Err(fail("beforeAll crashed")) })
-    })],
+    before_all: vec![Arc::new(|_pool| Box::pin(async { Err(fail("beforeAll crashed")) }))],
     ..Default::default()
   };
 
@@ -210,7 +235,10 @@ async fn test_before_all_failure_skips_suite() {
   // Our impl skips them which means exit 0. Let's verify the behavior.
   let exit = run_plan(plan, default_config(1)).await;
   // Skipped tests don't count as failures.
-  assert_eq!(exit, 0, "skipped tests from beforeAll failure should not be counted as failures");
+  assert_eq!(
+    exit, 0,
+    "skipped tests from beforeAll failure should not be counted as failures"
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -225,7 +253,12 @@ async fn test_serial_mode_runs_in_order() {
   fn ordered_test(name: &str, expected_order: u32) -> TestCase {
     let name = name.to_string();
     TestCase {
-      id: TestId { file: "new_features.rs".into(), suite: Some("serial".into()), name, line: None },
+      id: TestId {
+        file: "new_features.rs".into(),
+        suite: Some("serial".into()),
+        name,
+        line: None,
+      },
       test_fn: Arc::new(move |_| {
         Box::pin(async move {
           let actual = ORDER.fetch_add(1, Ordering::SeqCst);
@@ -247,7 +280,11 @@ async fn test_serial_mode_runs_in_order() {
     suites: vec![TestSuite {
       name: "serial".into(),
       file: "new_features.rs".into(),
-      tests: vec![ordered_test("first", 0), ordered_test("second", 1), ordered_test("third", 2)],
+      tests: vec![
+        ordered_test("first", 0),
+        ordered_test("second", 1),
+        ordered_test("third", 2),
+      ],
       hooks: Hooks::default(),
       annotations: Vec::new(),
       mode: SuiteMode::Serial,
@@ -267,7 +304,12 @@ async fn test_serial_mode_skips_after_failure() {
   RUN_COUNT.store(0, Ordering::SeqCst);
 
   let failing = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: Some("serial_fail".into()), name: "fails".into(), line: None },
+    id: TestId {
+      file: "new_features.rs".into(),
+      suite: Some("serial_fail".into()),
+      name: "fails".into(),
+      line: None,
+    },
     test_fn: Arc::new(|_| {
       Box::pin(async {
         RUN_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -282,7 +324,12 @@ async fn test_serial_mode_skips_after_failure() {
   };
 
   let should_skip = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: Some("serial_fail".into()), name: "skipped".into(), line: None },
+    id: TestId {
+      file: "new_features.rs".into(),
+      suite: Some("serial_fail".into()),
+      name: "skipped".into(),
+      line: None,
+    },
     test_fn: Arc::new(|_| {
       Box::pin(async {
         RUN_COUNT.fetch_add(1, Ordering::SeqCst);
@@ -311,7 +358,11 @@ async fn test_serial_mode_skips_after_failure() {
 
   let exit = run_plan(plan, default_config(1)).await;
   assert_eq!(exit, 1, "should fail");
-  assert_eq!(RUN_COUNT.load(Ordering::SeqCst), 1, "only the first test should actually run");
+  assert_eq!(
+    RUN_COUNT.load(Ordering::SeqCst),
+    1,
+    "only the first test should actually run"
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -321,7 +372,12 @@ async fn test_serial_mode_skips_after_failure() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_expected_failure_passes_when_test_fails() {
   let test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "expected_fail".into(), line: None },
+    id: TestId {
+      file: "new_features.rs".into(),
+      suite: None,
+      name: "expected_fail".into(),
+      line: None,
+    },
     test_fn: Arc::new(|_| Box::pin(async { Err(fail("this failure is expected")) })),
     fixture_requests: vec![],
     annotations: Vec::new(),
@@ -350,7 +406,12 @@ async fn test_expected_failure_passes_when_test_fails() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_expected_failure_fails_when_test_passes() {
   let test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "unexpected_pass".into(), line: None },
+    id: TestId {
+      file: "new_features.rs".into(),
+      suite: None,
+      name: "unexpected_pass".into(),
+      line: None,
+    },
     test_fn: Arc::new(|_| Box::pin(async { Ok(()) })),
     fixture_requests: vec![],
     annotations: Vec::new(),
@@ -388,7 +449,12 @@ async fn test_global_setup_runs_before_tests() {
   TEST_SAW_SETUP.store(0, Ordering::SeqCst);
 
   let test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "checks_setup".into(), line: None },
+    id: TestId {
+      file: "new_features.rs".into(),
+      suite: None,
+      name: "checks_setup".into(),
+      line: None,
+    },
     test_fn: Arc::new(|_| {
       Box::pin(async {
         if SETUP_RAN.load(Ordering::SeqCst) > 0 {
@@ -428,7 +494,11 @@ async fn test_global_setup_runs_before_tests() {
   let exit = run_plan(plan, config).await;
   assert_eq!(exit, 0);
   assert_eq!(SETUP_RAN.load(Ordering::SeqCst), 1, "global setup should run once");
-  assert_eq!(TEST_SAW_SETUP.load(Ordering::SeqCst), 1, "test should see that setup ran");
+  assert_eq!(
+    TEST_SAW_SETUP.load(Ordering::SeqCst),
+    1,
+    "test should see that setup ran"
+  );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -449,9 +519,7 @@ async fn test_global_setup_failure_aborts_run() {
   };
 
   let mut config = default_config(1);
-  config.global_setup_fns = vec![Arc::new(|_pool| {
-    Box::pin(async { Err(fail("global setup crashed")) })
-  })];
+  config.global_setup_fns = vec![Arc::new(|_pool| Box::pin(async { Err(fail("global setup crashed")) }))];
 
   let exit = run_plan(plan, config).await;
   assert_eq!(exit, 1, "global setup failure should abort with exit code 1");
@@ -464,7 +532,12 @@ async fn test_global_setup_failure_aborts_run() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_testinfo_injected_into_pool() {
   let test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "info_check".into(), line: None },
+    id: TestId {
+      file: "new_features.rs".into(),
+      suite: None,
+      name: "info_check".into(),
+      line: None,
+    },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
         let info: Arc<TestInfo> = pool.get("test_info").await.map_err(fail)?;
@@ -501,7 +574,12 @@ async fn test_testinfo_injected_into_pool() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn test_soft_assertions_collected() {
   let test = TestCase {
-    id: TestId { file: "new_features.rs".into(), suite: None, name: "soft_test".into(), line: None },
+    id: TestId {
+      file: "new_features.rs".into(),
+      suite: None,
+      name: "soft_test".into(),
+      line: None,
+    },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
         let info: Arc<TestInfo> = pool.get("test_info").await.map_err(fail)?;
@@ -545,7 +623,12 @@ fn test_snapshot_create_and_match() {
   let _ = std::fs::remove_dir_all(&tmp);
 
   let info = TestInfo {
-    test_id: TestId { file: "snap.rs".into(), suite: None, name: "my_test".into(), line: None },
+    test_id: TestId {
+      file: "snap.rs".into(),
+      suite: None,
+      name: "my_test".into(),
+      line: None,
+    },
     title_path: vec!["snap.rs".into(), "my_test".into()],
     retry: 0,
     worker_index: 0,
@@ -576,7 +659,10 @@ fn test_snapshot_create_and_match() {
   assert!(result.is_err(), "mismatched snapshot should fail");
   let err = result.unwrap_err();
   assert!(err.diff.is_some(), "should have diff");
-  assert!(err.diff.as_ref().unwrap().contains("CHANGED"), "diff should show the change");
+  assert!(
+    err.diff.as_ref().unwrap().contains("CHANGED"),
+    "diff should show the change"
+  );
 
   // Update mode: overwrites.
   let result = ferridriver_test::snapshot::assert_snapshot(&info, "updated content", "greeting", true);
@@ -628,7 +714,11 @@ async fn test_html_reporter_generates_file() {
   assert_eq!(exit, 0);
 
   let html_path = tmp.join("report.html");
-  assert!(html_path.exists(), "HTML report should be created at {}", html_path.display());
+  assert!(
+    html_path.exists(),
+    "HTML report should be created at {}",
+    html_path.display()
+  );
 
   let content = std::fs::read_to_string(&html_path).unwrap();
   assert!(content.contains("<!DOCTYPE html>"), "should be valid HTML");

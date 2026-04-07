@@ -21,10 +21,7 @@ async fn set_local_storage(world: &mut BrowserWorld, key: String, value: String)
 async fn remove_local_storage(world: &mut BrowserWorld, key: String) {
   world
     .page()
-    .evaluate(&format!(
-      "localStorage.removeItem('{}')",
-      key.replace('\'', "\\'")
-    ))
+    .evaluate(&format!("localStorage.removeItem('{}')", key.replace('\'', "\\'")))
     .await
     .map_err(|e| StepError::from(format!("remove localStorage \"{key}\": {e}")))?;
 }
@@ -55,10 +52,7 @@ async fn set_session_storage(world: &mut BrowserWorld, key: String, value: Strin
 async fn remove_session_storage(world: &mut BrowserWorld, key: String) {
   world
     .page()
-    .evaluate(&format!(
-      "sessionStorage.removeItem('{}')",
-      key.replace('\'', "\\'")
-    ))
+    .evaluate(&format!("sessionStorage.removeItem('{}')", key.replace('\'', "\\'")))
     .await
     .map_err(|e| StepError::from(format!("remove sessionStorage \"{key}\": {e}")))?;
 }
@@ -83,12 +77,11 @@ async fn save_storage_state(world: &mut BrowserWorld, file_path: String) {
     .await
     .map_err(|e| StepError::from(format!("save storage state: {e}")))?;
 
-  let json = serde_json::to_string_pretty(&state)
-    .map_err(|e| StepError::from(format!("serialize storage state: {e}")))?;
+  let json =
+    serde_json::to_string_pretty(&state).map_err(|e| StepError::from(format!("serialize storage state: {e}")))?;
 
   if let Some(parent) = path.parent() {
-    std::fs::create_dir_all(parent)
-      .map_err(|e| StepError::from(format!("create dir for {}: {e}", path.display())))?;
+    std::fs::create_dir_all(parent).map_err(|e| StepError::from(format!("create dir for {}: {e}", path.display())))?;
   }
   std::fs::write(&path, json)
     .map_err(|e| StepError::from(format!("write storage state to {}: {e}", path.display())))?;
@@ -100,8 +93,8 @@ async fn load_storage_state(world: &mut BrowserWorld, file_path: String) {
   let json = std::fs::read_to_string(&path)
     .map_err(|e| StepError::from(format!("read storage state from {}: {e}", path.display())))?;
 
-  let state: serde_json::Value = serde_json::from_str(&json)
-    .map_err(|e| StepError::from(format!("parse storage state: {e}")))?;
+  let state: serde_json::Value =
+    serde_json::from_str(&json).map_err(|e| StepError::from(format!("parse storage state: {e}")))?;
 
   world
     .page()

@@ -180,39 +180,87 @@ impl APIRequestContext {
         } else {
           format!("{base}/{url}")
         }
-      }
+      },
       None => url.to_string(),
     }
   }
 
   /// Send a GET request.
   pub async fn get(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
-    self.fetch(url, Some(RequestOptions { method: Some("GET".into()), ..options.unwrap_or_default() })).await
+    self
+      .fetch(
+        url,
+        Some(RequestOptions {
+          method: Some("GET".into()),
+          ..options.unwrap_or_default()
+        }),
+      )
+      .await
   }
 
   /// Send a POST request.
   pub async fn post(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
-    self.fetch(url, Some(RequestOptions { method: Some("POST".into()), ..options.unwrap_or_default() })).await
+    self
+      .fetch(
+        url,
+        Some(RequestOptions {
+          method: Some("POST".into()),
+          ..options.unwrap_or_default()
+        }),
+      )
+      .await
   }
 
   /// Send a PUT request.
   pub async fn put(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
-    self.fetch(url, Some(RequestOptions { method: Some("PUT".into()), ..options.unwrap_or_default() })).await
+    self
+      .fetch(
+        url,
+        Some(RequestOptions {
+          method: Some("PUT".into()),
+          ..options.unwrap_or_default()
+        }),
+      )
+      .await
   }
 
   /// Send a DELETE request.
   pub async fn delete(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
-    self.fetch(url, Some(RequestOptions { method: Some("DELETE".into()), ..options.unwrap_or_default() })).await
+    self
+      .fetch(
+        url,
+        Some(RequestOptions {
+          method: Some("DELETE".into()),
+          ..options.unwrap_or_default()
+        }),
+      )
+      .await
   }
 
   /// Send a PATCH request.
   pub async fn patch(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
-    self.fetch(url, Some(RequestOptions { method: Some("PATCH".into()), ..options.unwrap_or_default() })).await
+    self
+      .fetch(
+        url,
+        Some(RequestOptions {
+          method: Some("PATCH".into()),
+          ..options.unwrap_or_default()
+        }),
+      )
+      .await
   }
 
   /// Send a HEAD request.
   pub async fn head(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
-    self.fetch(url, Some(RequestOptions { method: Some("HEAD".into()), ..options.unwrap_or_default() })).await
+    self
+      .fetch(
+        url,
+        Some(RequestOptions {
+          method: Some("HEAD".into()),
+          ..options.unwrap_or_default()
+        }),
+      )
+      .await
   }
 
   /// Send an HTTP request (generic method — all verbs delegate here).
@@ -268,14 +316,13 @@ impl APIRequestContext {
     }
 
     // Send.
-    let response = builder.send().await.map_err(|e| format!("request to {resolved_url} failed: {e}"))?;
+    let response = builder
+      .send()
+      .await
+      .map_err(|e| format!("request to {resolved_url} failed: {e}"))?;
 
     let status_code = response.status().as_u16();
-    let status_text = response
-      .status()
-      .canonical_reason()
-      .unwrap_or("Unknown")
-      .to_string();
+    let status_text = response.status().canonical_reason().unwrap_or("Unknown").to_string();
     let response_url = response.url().to_string();
     let response_headers: Vec<(String, String)> = response
       .headers()
@@ -283,10 +330,7 @@ impl APIRequestContext {
       .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
       .collect();
 
-    let body_bytes = response
-      .bytes()
-      .await
-      .map_err(|e| format!("read response body: {e}"))?;
+    let body_bytes = response.bytes().await.map_err(|e| format!("read response body: {e}"))?;
 
     let api_response = APIResponse {
       status_code,

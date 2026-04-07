@@ -92,9 +92,15 @@ impl super::transport::CdpTransport for WsTransport {
   ) -> Result<serde_json::Value, String> {
     let (mut data, rx) = self.dispatcher.build_command(session_id, method, &params)?;
     // Remove NUL terminator — WebSocket doesn't need it
-    if data.last() == Some(&0) { data.pop(); }
+    if data.last() == Some(&0) {
+      data.pop();
+    }
     let text = String::from_utf8(data).map_err(|e| format!("UTF-8: {e}"))?;
-    self.write_tx.send(Message::Text(text)).await.map_err(|_| "WS writer closed".to_string())?;
+    self
+      .write_tx
+      .send(Message::Text(text))
+      .await
+      .map_err(|_| "WS writer closed".to_string())?;
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => Err(format!("Response channel dropped for {method}")),
@@ -139,7 +145,9 @@ async fn discover_ws_url(port_file: &Path, child: &mut tokio::process::Child) ->
       }
     }
     if let Ok(Some(status)) = child.try_wait() {
-      return Err(format!("Chrome exited with status {status} before providing DevToolsActivePort"));
+      return Err(format!(
+        "Chrome exited with status {status} before providing DevToolsActivePort"
+      ));
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
   }

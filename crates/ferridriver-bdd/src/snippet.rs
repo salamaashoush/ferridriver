@@ -40,9 +40,7 @@ pub fn generate_snippet(keyword: &str, text: &str, has_table: bool, has_docstrin
 
   let params_str = all_params.join(", ");
 
-  format!(
-    "#[{attr}(\"{expression}\")]\nasync fn {fn_name}({params_str}) {{\n  todo!(\"implement step\")\n}}"
-  )
+  format!("#[{attr}(\"{expression}\")]\nasync fn {fn_name}({params_str}) {{\n  todo!(\"implement step\")\n}}")
 }
 
 /// Analyze step text, replacing quoted strings, floats, and integers with

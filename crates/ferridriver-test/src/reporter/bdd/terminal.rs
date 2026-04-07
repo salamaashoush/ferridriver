@@ -27,32 +27,54 @@ impl Default for BddTerminalReporter {
 
 // ── Styles ──
 
-fn s_pass() -> Style { Style::new().green() }
-fn s_fail() -> Style { Style::new().red().bold() }
-fn s_skip() -> Style { Style::new().dim() }
-fn s_dim() -> Style { Style::new().dim() }
-fn s_bold() -> Style { Style::new().bold() }
-fn s_cyan() -> Style { Style::new().cyan().bold() }
-fn s_feature() -> Style { Style::new().magenta().bold() }
+fn s_pass() -> Style {
+  Style::new().green()
+}
+fn s_fail() -> Style {
+  Style::new().red().bold()
+}
+fn s_skip() -> Style {
+  Style::new().dim()
+}
+fn s_dim() -> Style {
+  Style::new().dim()
+}
+fn s_bold() -> Style {
+  Style::new().bold()
+}
+fn s_cyan() -> Style {
+  Style::new().cyan().bold()
+}
+fn s_feature() -> Style {
+  Style::new().magenta().bold()
+}
 
 fn format_duration(d: Duration) -> String {
   let ms = d.as_millis();
-  if ms < 1000 { format!("{ms}ms") } else { format!("{:.1}s", d.as_secs_f64()) }
+  if ms < 1000 {
+    format!("{ms}ms")
+  } else {
+    format!("{:.1}s", d.as_secs_f64())
+  }
 }
 
 #[async_trait::async_trait]
 impl Reporter for BddTerminalReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
     match event {
-      ReporterEvent::RunStarted { total_tests, num_workers } => {
+      ReporterEvent::RunStarted {
+        total_tests,
+        num_workers,
+      } => {
         println!();
-        println!("  {} Running {} scenario(s) with {} worker(s)",
+        println!(
+          "  {} Running {} scenario(s) with {} worker(s)",
           s_cyan().apply_to("\u{25b6}"), // play icon
           s_bold().apply_to(total_tests),
           num_workers,
         );
         println!();
-      }
+      },
 
       ReporterEvent::TestStarted { test_id, attempt } => {
         // Feature header — print when suite changes.
@@ -61,10 +83,7 @@ impl Reporter for BddTerminalReporter {
             println!();
           }
           if let Some(suite) = &test_id.suite {
-            println!("  {} {}",
-              s_feature().apply_to("Feature:"),
-              s_bold().apply_to(suite),
-            );
+            println!("  {} {}", s_feature().apply_to("Feature:"), s_bold().apply_to(suite),);
           }
           self.current_suite = test_id.suite.clone();
         }
@@ -74,12 +93,13 @@ impl Reporter for BddTerminalReporter {
         } else {
           String::new()
         };
-        println!("    {} {}{}",
+        println!(
+          "    {} {}{}",
           s_dim().apply_to("\u{25cf}"), // filled circle (running indicator)
           &test_id.name,
           retry,
         );
-      }
+      },
 
       ReporterEvent::StepFinished(ev) => {
         if !ev.category.is_visible() {
@@ -91,7 +111,8 @@ impl Reporter for BddTerminalReporter {
         if ev.category == StepCategory::Hook {
           let icon = if ev.error.is_some() { "\u{2717}" } else { "\u{2713}" };
           let style = if ev.error.is_some() { s_fail() } else { s_dim() };
-          println!("      {} {} {}",
+          println!(
+            "      {} {} {}",
             style.apply_to(icon),
             s_dim().apply_to(format!("[{}]", ev.title)),
             s_dim().apply_to(format!("({dur})")),
@@ -105,13 +126,16 @@ impl Reporter for BddTerminalReporter {
         }
 
         // BDD step: extract keyword from metadata for coloring.
-        let keyword = ev.metadata.as_ref()
+        let keyword = ev
+          .metadata
+          .as_ref()
           .and_then(|m| m.get("bdd_keyword"))
           .and_then(|v| v.as_str())
           .map(|k| k.trim().to_string());
 
         if ev.error.is_some() {
-          println!("      {} {} {}",
+          println!(
+            "      {} {} {}",
             s_fail().apply_to("\u{2717}"),
             s_fail().apply_to(&ev.title),
             s_dim().apply_to(format!("({dur})")),
@@ -124,20 +148,22 @@ impl Reporter for BddTerminalReporter {
         } else if let Some(kw) = &keyword {
           // Color the keyword part, rest in default.
           let rest = ev.title.strip_prefix(kw.as_str()).unwrap_or(&ev.title);
-          println!("      {} {}{} {}",
+          println!(
+            "      {} {}{} {}",
             s_pass().apply_to("\u{2713}"),
             s_cyan().apply_to(kw),
             rest,
             s_dim().apply_to(format!("({dur})")),
           );
         } else {
-          println!("      {} {} {}",
+          println!(
+            "      {} {} {}",
             s_pass().apply_to("\u{2713}"),
             &ev.title,
             s_dim().apply_to(format!("({dur})")),
           );
         }
-      }
+      },
 
       ReporterEvent::TestFinished { outcome, .. } => {
         // Re-print the scenario line with final status (overwrite the running indicator).
@@ -145,14 +171,22 @@ impl Reporter for BddTerminalReporter {
         // Actually, for simplicity in a streaming terminal, we just print the skipped indicator.
         if outcome.status == TestStatus::Skipped {
           // For skipped scenarios that had no steps printed.
-          println!("      {} {}",
+          println!(
+            "      {} {}",
             s_skip().apply_to("\u{2212}"), // minus
             s_skip().apply_to("skipped"),
           );
         }
-      }
+      },
 
-      ReporterEvent::RunFinished { total, passed, failed, skipped, flaky, duration } => {
+      ReporterEvent::RunFinished {
+        total,
+        passed,
+        failed,
+        skipped,
+        flaky,
+        duration,
+      } => {
         let dur = format_duration(*duration);
         println!();
 
@@ -165,22 +199,26 @@ impl Reporter for BddTerminalReporter {
           parts.push(format!("{}", s_fail().apply_to(format!("{failed} failed"))));
         }
         if *flaky > 0 {
-          parts.push(format!("{}", Style::new().yellow().bold().apply_to(format!("{flaky} flaky"))));
+          parts.push(format!(
+            "{}",
+            Style::new().yellow().bold().apply_to(format!("{flaky} flaky"))
+          ));
         }
         if *skipped > 0 {
           parts.push(format!("{}", s_skip().apply_to(format!("{skipped} skipped"))));
         }
 
-        println!("  {} {}: {} {}",
+        println!(
+          "  {} {}: {} {}",
           s_bold().apply_to("Scenarios"),
           s_dim().apply_to(format!("{total} total")),
           parts.join(&format!("{}", s_dim().apply_to(" | "))),
           s_dim().apply_to(format!("({dur})")),
         );
         println!();
-      }
+      },
 
-      _ => {}
+      _ => {},
     }
   }
 }

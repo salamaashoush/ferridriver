@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::model::{TestStep};
+use crate::model::TestStep;
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct JsonReporter {
@@ -94,14 +94,12 @@ impl Reporter for JsonReporter {
           error: outcome.error.as_ref().map(|e| e.message.clone()),
           steps: serialize_steps(&outcome.steps),
         });
-      }
-      ReporterEvent::RunFinished {
-        total, duration, ..
-      } => {
+      },
+      ReporterEvent::RunFinished { total, duration, .. } => {
         self.total = *total;
         self.duration = *duration;
-      }
-      _ => {}
+      },
+      _ => {},
     }
   }
 
@@ -130,8 +128,7 @@ impl Reporter for JsonReporter {
     if let Some(parent) = self.output_path.parent() {
       std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&self.output_path, json)
-      .map_err(|e| format!("cannot write {}: {e}", self.output_path.display()))?;
+    std::fs::write(&self.output_path, json).map_err(|e| format!("cannot write {}: {e}", self.output_path.display()))?;
 
     tracing::info!("JSON report written to {}", self.output_path.display());
     Ok(())

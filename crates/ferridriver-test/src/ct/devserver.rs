@@ -185,9 +185,7 @@ fn extract_url(line: &str) -> Option<String> {
   for prefix in ["http://127.0.0.1:", "http://localhost:", "http://0.0.0.0:"] {
     if let Some(start) = trimmed.find(prefix) {
       let url_part = &trimmed[start..];
-      let end = url_part
-        .find(|c: char| c.is_whitespace())
-        .unwrap_or(url_part.len());
+      let end = url_part.find(|c: char| c.is_whitespace()).unwrap_or(url_part.len());
       let url = url_part[..end].trim_end_matches('/');
       return Some(url.replace("0.0.0.0", "127.0.0.1"));
     }

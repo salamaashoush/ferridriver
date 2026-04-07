@@ -63,11 +63,7 @@ fn main() {
   // OUT_DIR layout: <target>/<profile>/build/<crate>-<hash>/out
   // Walking up 3 parents from OUT_DIR gives <target>/<profile>/
   let out_path = std::path::Path::new(&out_dir);
-  if let Some(profile_dir) = out_path
-    .parent()
-    .and_then(|p| p.parent())
-    .and_then(|p| p.parent())
-  {
+  if let Some(profile_dir) = out_path.parent().and_then(|p| p.parent()).and_then(|p| p.parent()) {
     let dest = profile_dir.join("fd_webkit_host");
     if let Err(e) = std::fs::copy(&host_bin, &dest) {
       println!("cargo:warning=Could not copy fd_webkit_host to {}: {e}", dest.display());

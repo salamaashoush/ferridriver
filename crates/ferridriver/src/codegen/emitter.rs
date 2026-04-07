@@ -43,40 +43,40 @@ async fn recorded_test(page: Page) {{
     match action {
       Action::Navigate { url } => {
         format!("  page.goto(\"{}\").await?;\n", escape_rust(url))
-      }
+      },
       Action::Click { selector, .. } => {
         format!("  page.locator(\"{}\").click().await?;\n", escape_rust(selector))
-      }
+      },
       Action::Dblclick { selector, .. } => {
         format!("  page.locator(\"{}\").dblclick().await?;\n", escape_rust(selector))
-      }
+      },
       Action::Fill { selector, value, .. } => {
         format!(
           "  page.locator(\"{}\").fill(\"{}\").await?;\n",
           escape_rust(selector),
           escape_rust(value)
         )
-      }
+      },
       Action::Press { selector, key, .. } => {
         format!(
           "  page.locator(\"{}\").press(\"{}\").await?;\n",
           escape_rust(selector),
           escape_rust(key)
         )
-      }
+      },
       Action::Select { selector, value, .. } => {
         format!(
           "  page.locator(\"{}\").select_option(\"{}\").await?;\n",
           escape_rust(selector),
           escape_rust(value)
         )
-      }
+      },
       Action::Check { selector, .. } => {
         format!("  page.locator(\"{}\").check().await?;\n", escape_rust(selector))
-      }
+      },
       Action::Uncheck { selector, .. } => {
         format!("  page.locator(\"{}\").uncheck().await?;\n", escape_rust(selector))
-      }
+      },
     }
   }
 
@@ -101,28 +101,28 @@ impl CodeEmitter for TypeScriptEmitter {
     match action {
       Action::Navigate { url } => {
         format!("  await page.goto('{}');\n", escape_js(url))
-      }
+      },
       Action::Click { locator, .. } => {
         format!("  await page.{}.click();\n", locator)
-      }
+      },
       Action::Dblclick { locator, .. } => {
         format!("  await page.{}.dblclick();\n", locator)
-      }
+      },
       Action::Fill { locator, value, .. } => {
         format!("  await page.{}.fill('{}');\n", locator, escape_js(value))
-      }
+      },
       Action::Press { locator, key, .. } => {
         format!("  await page.{}.press('{}');\n", locator, escape_js(key))
-      }
+      },
       Action::Select { locator, value, .. } => {
         format!("  await page.{}.selectOption('{}');\n", locator, escape_js(value))
-      }
+      },
       Action::Check { locator, .. } => {
         format!("  await page.{}.check();\n", locator)
-      }
+      },
       Action::Uncheck { locator, .. } => {
         format!("  await page.{}.uncheck();\n", locator)
-      }
+      },
     }
   }
 
@@ -153,9 +153,7 @@ impl GherkinEmitter {
 
 impl CodeEmitter for GherkinEmitter {
   fn header(&self, url: &str) -> String {
-    format!(
-      "Feature: Recorded test\n\n  Scenario: User interaction recording\n    Given I navigate to \"{url}\"\n"
-    )
+    format!("Feature: Recorded test\n\n  Scenario: User interaction recording\n    Given I navigate to \"{url}\"\n")
   }
 
   fn action(&self, action: &Action) -> String {
@@ -163,28 +161,28 @@ impl CodeEmitter for GherkinEmitter {
     match action {
       Action::Navigate { url } => {
         format!("    {kw} I navigate to \"{url}\"\n")
-      }
+      },
       Action::Click { selector, .. } => {
         format!("    {kw} I click \"{selector}\"\n")
-      }
+      },
       Action::Dblclick { selector, .. } => {
         format!("    {kw} I double click \"{selector}\"\n")
-      }
+      },
       Action::Fill { selector, value, .. } => {
         format!("    {kw} I fill \"{selector}\" with \"{value}\"\n")
-      }
+      },
       Action::Press { selector, key, .. } => {
         format!("    {kw} I press \"{key}\" on \"{selector}\"\n")
-      }
+      },
       Action::Select { selector, value, .. } => {
         format!("    {kw} I select \"{value}\" from \"{selector}\"\n")
-      }
+      },
       Action::Check { selector, .. } => {
         format!("    {kw} I check \"{selector}\"\n")
-      }
+      },
       Action::Uncheck { selector, .. } => {
         format!("    {kw} I uncheck \"{selector}\"\n")
-      }
+      },
     }
   }
 

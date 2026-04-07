@@ -2,15 +2,15 @@
   clippy::cast_precision_loss,
   clippy::cast_lossless,
   clippy::uninlined_format_args,
-  clippy::unwrap_used,
+  clippy::unwrap_used
 )]
 //! Standalone profiling binary -- run with samply or strace.
 //! Does 20 test cycles: ctx+page+navigate+click+text+close.
 
-use std::sync::Arc;
-use std::time::Instant;
 use ferridriver::Browser;
 use ferridriver::options::LaunchOptions;
+use std::sync::Arc;
+use std::time::Instant;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {

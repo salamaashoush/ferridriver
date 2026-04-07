@@ -360,7 +360,7 @@ ferridriver mcp --auto-connect
 ferridriver mcp --connect ws://localhost:9222/devtools/browser/...
 ```
 
-Tools: `navigate`, `page`, `click`, `click_at`, `hover`, `fill`, `fill_form`, `type_text`, `press_key`, `drag`, `scroll`, `select_option`, `upload_file`, `snapshot`, `screenshot`, `evaluate`, `wait_for`, `search_page`, `get_markdown`, `cookies`, `storage`, `emulate`, `diagnostics`, `list_steps`, `run_scenario`
+Tools: `connect`, `navigate`, `page`, `click`, `click_at`, `hover`, `fill`, `fill_form`, `type_text`, `press_key`, `drag`, `scroll`, `select_option`, `upload_file`, `snapshot`, `screenshot`, `evaluate`, `wait_for`, `search_page`, `find_elements`, `get_markdown`, `cookies`, `storage`, `emulate`, `diagnostics`
 
 ## BDD Framework
 

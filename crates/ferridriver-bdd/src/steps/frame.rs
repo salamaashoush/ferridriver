@@ -7,7 +7,7 @@
 use crate::step::StepError;
 use ferridriver::frame::Frame;
 use ferridriver_bdd_macros::{step, then, when};
-use ferridriver_test::expect::{expect_poll, DEFAULT_EXPECT_TIMEOUT};
+use ferridriver_test::expect::{DEFAULT_EXPECT_TIMEOUT, expect_poll};
 use ferridriver_test::model::TestFailure;
 
 fn to_step_err(e: TestFailure) -> StepError {

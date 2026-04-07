@@ -5,7 +5,7 @@
   clippy::struct_excessive_bools,
   clippy::cast_possible_truncation,
   clippy::cast_sign_loss,
-  clippy::unused_async,
+  clippy::unused_async
 )]
 //! ferridriver -- High-performance browser automation CLI.
 
@@ -30,14 +30,15 @@ async fn main() -> anyhow::Result<()> {
         cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio(mode, backend, headless).await,
         cli::Transport::Http => ferridriver_mcp::mcp::serve_http(mode, backend, transport.port, headless).await,
       }
-    }
-    cli::Command::Test { files, test_args } => {
-      run_tests(files, test_args).await
-    }
-    cli::Command::Bdd { features, bdd_args } => {
-      run_bdd(features, bdd_args).await
-    }
-    cli::Command::Codegen { url, language, output, viewport } => {
+    },
+    cli::Command::Test { files, test_args } => run_tests(files, test_args).await,
+    cli::Command::Bdd { features, bdd_args } => run_bdd(features, bdd_args).await,
+    cli::Command::Codegen {
+      url,
+      language,
+      output,
+      viewport,
+    } => {
       let vp = viewport.and_then(|s| {
         let parts: Vec<&str> = s.split('x').collect();
         if parts.len() == 2 {
@@ -56,20 +57,20 @@ async fn main() -> anyhow::Result<()> {
         .start()
         .await
         .map_err(|e| anyhow::anyhow!(e))
-    }
+    },
   }
 }
 
 #[allow(clippy::too_many_lines)]
 async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()> {
-  use std::sync::Arc;
-  use ferridriver_test::config::{CliOverrides, ShardArg};
-  use ferridriver_test::runner::TestRunner;
   use ferridriver_bdd::feature::FeatureSet;
   use ferridriver_bdd::filter::TagExpression;
   use ferridriver_bdd::registry::StepRegistry;
   use ferridriver_bdd::scenario;
   use ferridriver_bdd::translate;
+  use ferridriver_test::config::{CliOverrides, ShardArg};
+  use ferridriver_test::runner::TestRunner;
+  use std::sync::Arc;
 
   // Resolve config (same config file, same system).
   let overrides = CliOverrides {
@@ -99,8 +100,7 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
     storage_state: args.storage_state.clone(),
   };
 
-  let mut config = ferridriver_test::config::resolve_config(&overrides)
-    .map_err(|e| anyhow::anyhow!(e))?;
+  let mut config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;
 
   // Apply BDD-specific CLI overrides.
   if !features.is_empty() {
@@ -132,10 +132,9 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
   }
 
   // Discover and parse .feature files (with optional i18n language).
-  let files = FeatureSet::discover(&config.features, &config.test_ignore)
-    .map_err(|e| anyhow::anyhow!(e))?;
-  let feature_set = FeatureSet::parse_with_language(files, config.language.as_deref())
-    .map_err(|e| anyhow::anyhow!(e))?;
+  let files = FeatureSet::discover(&config.features, &config.test_ignore).map_err(|e| anyhow::anyhow!(e))?;
+  let feature_set =
+    FeatureSet::parse_with_language(files, config.language.as_deref()).map_err(|e| anyhow::anyhow!(e))?;
 
   if feature_set.features.is_empty() {
     println!("  No feature files found matching: {:?}", config.features);
@@ -143,19 +142,15 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
   }
 
   // Expand scenarios.
-  let mut all_scenarios: Vec<scenario::ScenarioExecution> = feature_set
-    .features
-    .iter()
-    .flat_map(scenario::expand_feature)
-    .collect();
+  let mut all_scenarios: Vec<scenario::ScenarioExecution> =
+    feature_set.features.iter().flat_map(scenario::expand_feature).collect();
 
   // @only filtering is handled by the runner's execute() via filter_by_only().
   // Scenarios with @only get TestAnnotation::Only in the translate step.
 
   // Tag filtering (BDD-specific Gherkin expressions like "@smoke and not @wip").
   if let Some(tag_expr) = &config.tags {
-    let expr = TagExpression::parse(tag_expr)
-      .map_err(|e| anyhow::anyhow!("invalid tag expression: {e}"))?;
+    let expr = TagExpression::parse(tag_expr).map_err(|e| anyhow::anyhow!("invalid tag expression: {e}"))?;
     ferridriver_bdd::filter::filter_scenarios(&mut all_scenarios, &expr);
   }
 
@@ -237,7 +232,10 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
               // Changed files were not features (e.g., step files) — re-discover all.
               match FeatureSet::discover(&features_patterns, &test_ignore) {
                 Ok(f) => f,
-                Err(e) => { eprintln!("Feature discovery error: {e}"); return empty_plan(); }
+                Err(e) => {
+                  eprintln!("Feature discovery error: {e}");
+                  return empty_plan();
+                },
               }
             } else {
               feature_files
@@ -245,13 +243,19 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
           } else {
             match FeatureSet::discover(&features_patterns, &test_ignore) {
               Ok(f) => f,
-              Err(e) => { eprintln!("Feature discovery error: {e}"); return empty_plan(); }
+              Err(e) => {
+                eprintln!("Feature discovery error: {e}");
+                return empty_plan();
+              },
             }
           };
 
           let fset = match FeatureSet::parse_with_language(files, language.as_deref()) {
             Ok(f) => f,
-            Err(e) => { eprintln!("Feature parse error: {e}"); return empty_plan(); }
+            Err(e) => {
+              eprintln!("Feature parse error: {e}");
+              return empty_plan();
+            },
           };
           translate::translate_features(&fset, Arc::clone(&registry_clone), &config_for_translate)
         },

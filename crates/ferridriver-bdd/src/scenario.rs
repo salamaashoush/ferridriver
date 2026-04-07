@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 
-use crate::feature::{extract_tags, ParsedFeature};
+use crate::feature::{ParsedFeature, extract_tags};
 
 /// A concrete scenario ready for execution (after Outline expansion).
 #[derive(Debug, Clone)]
@@ -131,11 +131,7 @@ pub fn expand_feature(feature: &ParsedFeature) -> Vec<ScenarioExecution> {
               },
               tags: example_tags.clone(),
               steps,
-              location: format!(
-                "{}:{}",
-                feature.path.display(),
-                scenario.position.line
-              ),
+              location: format!("{}:{}", feature.path.display(), scenario.position.line),
               example_values: Some(values),
             });
           }
@@ -182,10 +178,7 @@ fn gherkin_step_to_scenario_step(step: &gherkin::Step) -> ScenarioStep {
   ScenarioStep {
     keyword: step.keyword.clone(),
     text: step.value.clone(),
-    table: step
-      .table
-      .as_ref()
-      .map(crate::feature::table_to_vec),
+    table: step.table.as_ref().map(crate::feature::table_to_vec),
     docstring: step.docstring.clone(),
     line: step.position.line,
   }

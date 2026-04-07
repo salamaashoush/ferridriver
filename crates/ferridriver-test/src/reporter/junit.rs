@@ -28,11 +28,11 @@ impl Reporter for JUnitReporter {
     match event {
       ReporterEvent::TestFinished { outcome, .. } => {
         self.results.push(outcome.clone());
-      }
+      },
       ReporterEvent::RunFinished { duration, .. } => {
         self.total_duration = *duration;
-      }
-      _ => {}
+      },
+      _ => {},
     }
   }
 
@@ -100,11 +100,7 @@ impl Reporter for JUnitReporter {
 
         match test.status {
           crate::model::TestStatus::Failed | crate::model::TestStatus::TimedOut => {
-            let msg = test
-              .error
-              .as_ref()
-              .map(|e| xml_escape(&e.message))
-              .unwrap_or_default();
+            let msg = test.error.as_ref().map(|e| xml_escape(&e.message)).unwrap_or_default();
             // Include step path in failure message (like Playwright's JUnit reporter).
             let step_path = find_failing_step_path(&test.steps);
             let detail = if step_path.is_empty() {
@@ -112,12 +108,18 @@ impl Reporter for JUnitReporter {
             } else {
               format!("{} [{}]", msg, step_path)
             };
-            writeln!(xml, r#"      <failure message="{}">{}</failure>"#, xml_escape(&detail), xml_escape(&detail)).ok();
-          }
+            writeln!(
+              xml,
+              r#"      <failure message="{}">{}</failure>"#,
+              xml_escape(&detail),
+              xml_escape(&detail)
+            )
+            .ok();
+          },
           crate::model::TestStatus::Skipped => {
             writeln!(xml, r#"      <skipped />"#).ok();
-          }
-          _ => {}
+          },
+          _ => {},
         }
 
         // Include step summary as system-out for tests with user-defined steps.
@@ -139,8 +141,7 @@ impl Reporter for JUnitReporter {
     if let Some(parent) = self.output_path.parent() {
       std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&self.output_path, xml)
-      .map_err(|e| format!("cannot write {}: {e}", self.output_path.display()))?;
+    std::fs::write(&self.output_path, xml).map_err(|e| format!("cannot write {}: {e}", self.output_path.display()))?;
 
     tracing::info!("JUnit report written to {}", self.output_path.display());
     Ok(())

@@ -9,9 +9,7 @@ use crate::fixture::FixturePool;
 use std::fmt;
 use std::path::Path;
 
-use crate::model::{
-  ExpectedStatus, Hooks, TestAnnotation, TestCase, TestFailure, TestId, TestPlan, TestSuite,
-};
+use crate::model::{ExpectedStatus, Hooks, TestAnnotation, TestCase, TestFailure, TestId, TestPlan, TestSuite};
 
 // ── Inventory-based registration (populated by #[ferritest] macro) ──
 
@@ -100,19 +98,16 @@ pub fn find_test_files(root: &str, patterns: &[String], ignore: &[String]) -> Re
       format!("{root}/{pattern}")
     };
 
-    let entries =
-      glob::glob(&full_pattern).map_err(|e| format!("invalid glob pattern '{full_pattern}': {e}"))?;
+    let entries = glob::glob(&full_pattern).map_err(|e| format!("invalid glob pattern '{full_pattern}': {e}"))?;
 
     for entry in entries {
       let path = entry.map_err(|e| format!("glob error: {e}"))?;
       let path_str = path.display().to_string();
 
       // Check ignore patterns.
-      let ignored = ignore.iter().any(|ig| {
-        glob::Pattern::new(ig)
-          .map(|p| p.matches(&path_str))
-          .unwrap_or(false)
-      });
+      let ignored = ignore
+        .iter()
+        .any(|ig| glob::Pattern::new(ig).map(|p| p.matches(&path_str)).unwrap_or(false));
 
       if !ignored {
         files.push(path_str);
@@ -137,10 +132,7 @@ fn apply_filters(mut plan: TestPlan, _config: &TestConfig) -> TestPlan {
 pub fn filter_by_grep(plan: &mut TestPlan, pattern: &str, invert: bool) {
   // Build a case-insensitive regex. If the pattern has invalid regex syntax,
   // fall back to case-insensitive literal substring match.
-  let re = regex::RegexBuilder::new(pattern)
-    .case_insensitive(true)
-    .build()
-    .ok();
+  let re = regex::RegexBuilder::new(pattern).case_insensitive(true).build().ok();
   let pattern_lower = pattern.to_lowercase();
 
   for suite in &mut plan.suites {
@@ -201,7 +193,10 @@ pub fn check_forbid_only(plan: &TestPlan) -> Result<(), ForbidOnlyError> {
 pub fn filter_by_only(plan: &mut TestPlan) {
   let has_only = plan.suites.iter().any(|suite| {
     suite.annotations.iter().any(|a| matches!(a, TestAnnotation::Only))
-      || suite.tests.iter().any(|t| t.annotations.iter().any(|a| matches!(a, TestAnnotation::Only)))
+      || suite
+        .tests
+        .iter()
+        .any(|t| t.annotations.iter().any(|a| matches!(a, TestAnnotation::Only)))
   });
 
   if !has_only {
@@ -211,7 +206,9 @@ pub fn filter_by_only(plan: &mut TestPlan) {
   for suite in &mut plan.suites {
     let suite_is_only = suite.annotations.iter().any(|a| matches!(a, TestAnnotation::Only));
     if !suite_is_only {
-      suite.tests.retain(|t| t.annotations.iter().any(|a| matches!(a, TestAnnotation::Only)));
+      suite
+        .tests
+        .retain(|t| t.annotations.iter().any(|a| matches!(a, TestAnnotation::Only)));
     }
   }
   plan.suites.retain(|s| !s.tests.is_empty());
@@ -227,11 +224,11 @@ pub fn filter_by_rerun(plan: &mut TestPlan, rerun_path: &Path) {
     Ok(_) => {
       tracing::warn!("rerun file {} is empty, running all tests", rerun_path.display());
       return;
-    }
+    },
     Err(_) => {
       tracing::warn!("rerun file {} not found, running all tests", rerun_path.display());
       return;
-    }
+    },
   };
 
   let rerun_set: rustc_hash::FxHashSet<String> = content
@@ -241,10 +238,9 @@ pub fn filter_by_rerun(plan: &mut TestPlan, rerun_path: &Path) {
     .collect();
 
   for suite in &mut plan.suites {
-    suite.tests.retain(|test| {
-      rerun_set.contains(&test.id.file_location())
-        || rerun_set.contains(&test.id.full_name())
-    });
+    suite
+      .tests
+      .retain(|test| rerun_set.contains(&test.id.file_location()) || rerun_set.contains(&test.id.full_name()));
   }
   plan.suites.retain(|s| !s.tests.is_empty());
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
@@ -304,10 +300,7 @@ mod tests {
 
   #[test]
   fn forbid_only_no_only_markers() {
-    let plan = make_plan(
-      vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])],
-      vec![],
-    );
+    let plan = make_plan(vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])], vec![]);
     assert!(check_forbid_only(&plan).is_ok());
   }
 
@@ -352,10 +345,7 @@ mod tests {
 
   #[test]
   fn filter_by_only_no_only_keeps_all() {
-    let mut plan = make_plan(
-      vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])],
-      vec![],
-    );
+    let mut plan = make_plan(vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])], vec![]);
     filter_by_only(&mut plan);
     assert_eq!(plan.total_tests, 2);
   }
@@ -372,10 +362,7 @@ mod tests {
 
   #[test]
   fn forbid_only_error_message_format() {
-    let plan = make_plan(
-      vec![dummy_test("focused", vec![TestAnnotation::Only])],
-      vec![],
-    );
+    let plan = make_plan(vec![dummy_test("focused", vec![TestAnnotation::Only])], vec![]);
     let err = check_forbid_only(&plan).unwrap_err();
     let msg = err.to_string();
     assert!(msg.contains("test.only() found in 1 test(s)"));
@@ -409,10 +396,7 @@ mod tests {
 
   #[test]
   fn filter_by_rerun_missing_file_keeps_all() {
-    let mut plan = make_plan(
-      vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])],
-      vec![],
-    );
+    let mut plan = make_plan(vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])], vec![]);
     filter_by_rerun(&mut plan, Path::new("/nonexistent/@rerun.txt"));
     assert_eq!(plan.total_tests, 2);
   }
@@ -424,10 +408,7 @@ mod tests {
     let rerun_path = dir.join("@rerun.txt");
     std::fs::write(&rerun_path, "  \n").unwrap();
 
-    let mut plan = make_plan(
-      vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])],
-      vec![],
-    );
+    let mut plan = make_plan(vec![dummy_test("test1", vec![]), dummy_test("test2", vec![])], vec![]);
     filter_by_rerun(&mut plan, &rerun_path);
     assert_eq!(plan.total_tests, 2);
 
@@ -441,13 +422,7 @@ mod tests {
     let rerun_path = dir.join("@rerun.txt");
     std::fs::write(&rerun_path, "test.rs > suite > focused\n").unwrap();
 
-    let mut plan = make_plan(
-      vec![
-        dummy_test("focused", vec![]),
-        dummy_test("other", vec![]),
-      ],
-      vec![],
-    );
+    let mut plan = make_plan(vec![dummy_test("focused", vec![]), dummy_test("other", vec![])], vec![]);
     filter_by_rerun(&mut plan, &rerun_path);
     assert_eq!(plan.total_tests, 1);
     assert_eq!(plan.suites[0].tests[0].id.name, "focused");

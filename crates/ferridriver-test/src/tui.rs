@@ -18,12 +18,12 @@ use crossterm::event::{Event, EventStream, KeyCode, KeyModifiers};
 use crossterm::execute;
 use crossterm::terminal::{EnterAlternateScreen, LeaveAlternateScreen};
 use futures::StreamExt;
+use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
 use ratatui::layout::{Constraint, Layout};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Paragraph, Scrollbar, ScrollbarOrientation, ScrollbarState};
-use ratatui::Terminal;
 use tokio::sync::mpsc;
 
 use crate::interactive::WatchCommand;
@@ -41,7 +41,12 @@ pub enum TuiMessage {
   /// A test began executing.
   TestStarted { name: String },
   /// A step within a running test started or finished.
-  StepUpdate { test_name: String, step_title: String, status: EntryStatus, duration_ms: Option<u64> },
+  StepUpdate {
+    test_name: String,
+    step_title: String,
+    status: EntryStatus,
+    duration_ms: Option<u64>,
+  },
   /// A test finished with a result.
   TestFinished {
     name: String,
@@ -92,8 +97,18 @@ pub enum EntryStatus {
 #[derive(Clone)]
 pub enum WatchStatus {
   Idle,
-  Running { completed: usize, total: usize, start: Instant },
-  Done { passed: usize, failed: usize, skipped: usize, flaky: usize, duration: Duration },
+  Running {
+    completed: usize,
+    total: usize,
+    start: Instant,
+  },
+  Done {
+    passed: usize,
+    failed: usize,
+    skipped: usize,
+    flaky: usize,
+    duration: Duration,
+  },
 }
 
 /// Result of `drain_while_running()`.
@@ -115,7 +130,7 @@ const CLR_CYAN: Color = Color::Cyan;
 
 const ICON_PASS: &str = "\u{2713}"; // checkmark
 const ICON_FAIL: &str = "\u{2717}"; // cross
-const ICON_RUN: &str = "\u{25cf}";  // filled circle
+const ICON_RUN: &str = "\u{25cf}"; // filled circle
 const ICON_SKIP: &str = "\u{2212}"; // minus
 const ICON_PEND: &str = "\u{25cb}"; // empty circle
 const ICON_FLAKY: &str = "\u{25ce}"; // bullseye
@@ -190,7 +205,7 @@ impl WatchTui {
           start: self.run_start,
         };
         self.render();
-      }
+      },
       TuiMessage::TestStarted { name } => {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
           entry.status = EntryStatus::Running;
@@ -207,19 +222,33 @@ impl WatchTui {
         }
         self.auto_scroll_to_running();
         self.render();
-      }
-      TuiMessage::StepUpdate { test_name, step_title, status, duration_ms } => {
+      },
+      TuiMessage::StepUpdate {
+        test_name,
+        step_title,
+        status,
+        duration_ms,
+      } => {
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == test_name) {
           if let Some(step) = entry.steps.iter_mut().find(|s| s.title == step_title) {
             step.status = status;
             step.duration_ms = duration_ms;
           } else {
-            entry.steps.push(StepEntry { title: step_title, status, duration_ms });
+            entry.steps.push(StepEntry {
+              title: step_title,
+              status,
+              duration_ms,
+            });
           }
         }
         self.render();
-      }
-      TuiMessage::TestFinished { name, status, duration, error } => {
+      },
+      TuiMessage::TestFinished {
+        name,
+        status,
+        duration,
+        error,
+      } => {
         self.completed += 1;
         if let Some(entry) = self.entries.iter_mut().find(|e| e.name == name) {
           entry.status = status;
@@ -227,7 +256,11 @@ impl WatchTui {
           entry.error = error;
         } else {
           self.entries.push(TestEntry {
-            name, status, duration: Some(duration), steps: Vec::new(), error,
+            name,
+            status,
+            duration: Some(duration),
+            steps: Vec::new(),
+            error,
           });
         }
         self.status = WatchStatus::Running {
@@ -236,12 +269,24 @@ impl WatchTui {
           start: self.run_start,
         };
         self.render();
-      }
-      TuiMessage::RunFinished { passed, failed, skipped, flaky, duration } => {
+      },
+      TuiMessage::RunFinished {
+        passed,
+        failed,
+        skipped,
+        flaky,
+        duration,
+      } => {
         self.is_running = false;
-        self.status = WatchStatus::Done { passed, failed, skipped, flaky, duration };
+        self.status = WatchStatus::Done {
+          passed,
+          failed,
+          skipped,
+          flaky,
+          duration,
+        };
         self.render();
-      }
+      },
     }
   }
 
@@ -254,7 +299,9 @@ impl WatchTui {
 
   fn auto_scroll_to_running(&mut self) {
     let visible = self.body_height();
-    if visible == 0 { return; }
+    if visible == 0 {
+      return;
+    }
 
     let mut target_line = 0usize;
     let mut found = false;
@@ -268,7 +315,9 @@ impl WatchTui {
         target_line += 1;
       }
     }
-    if !found { return; }
+    if !found {
+      return;
+    }
 
     let viewport_end = self.scroll_offset + visible;
     if target_line < self.scroll_offset {
@@ -334,10 +383,7 @@ impl WatchTui {
         ];
 
         if let Some(ms) = step.duration_ms {
-          step_spans.push(Span::styled(
-            format!(" ({ms}ms)"),
-            Style::default().fg(CLR_DIM),
-          ));
+          step_spans.push(Span::styled(format!(" ({ms}ms)"), Style::default().fg(CLR_DIM)));
         }
 
         lines.push(Line::from(step_spans));
@@ -381,11 +427,8 @@ impl WatchTui {
       let width = area.width as usize;
 
       // Layout: header(2) | body(fill) | footer(3)
-      let [header_area, body_area, footer_area] = Layout::vertical([
-        Constraint::Length(2),
-        Constraint::Min(1),
-        Constraint::Length(3),
-      ]).areas(area);
+      let [header_area, body_area, footer_area] =
+        Layout::vertical([Constraint::Length(2), Constraint::Min(1), Constraint::Length(3)]).areas(area);
 
       // ── Header ──
       let mut header_lines = render_header(&status, total_tests, num_workers);
@@ -394,7 +437,10 @@ impl WatchTui {
         header_lines[1] = Line::from(vec![
           Span::raw(" "),
           Span::styled("Filter: ", Style::default().fg(CLR_DIM)),
-          Span::styled(pattern.clone(), Style::default().fg(CLR_CYAN).add_modifier(Modifier::BOLD)),
+          Span::styled(
+            pattern.clone(),
+            Style::default().fg(CLR_CYAN).add_modifier(Modifier::BOLD),
+          ),
         ]);
       }
       frame.render_widget(Paragraph::new(header_lines), header_area);
@@ -403,8 +449,7 @@ impl WatchTui {
       let content_lines = Self::build_content_lines(&entries, width);
       let total_lines = content_lines.len();
 
-      let paragraph = Paragraph::new(content_lines)
-        .scroll((scroll_offset as u16, 0));
+      let paragraph = Paragraph::new(content_lines).scroll((scroll_offset as u16, 0));
       frame.render_widget(paragraph, body_area);
 
       // ── Scrollbar ──
@@ -416,11 +461,8 @@ impl WatchTui {
       }
 
       // ── Footer ──
-      let [sep_area, status_area, hints_area] = Layout::vertical([
-        Constraint::Length(1),
-        Constraint::Length(1),
-        Constraint::Length(1),
-      ]).areas(footer_area);
+      let [sep_area, status_area, hints_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Length(1)]).areas(footer_area);
 
       frame.render_widget(
         Paragraph::new(Line::styled("\u{2500}".repeat(width), Style::default().fg(CLR_DIM))),
@@ -432,7 +474,10 @@ impl WatchTui {
       let hints_line = if let Some(ref input) = filter_input {
         Line::from(vec![
           Span::raw(" "),
-          Span::styled("Filter pattern: ", Style::default().fg(CLR_CYAN).add_modifier(Modifier::BOLD)),
+          Span::styled(
+            "Filter pattern: ",
+            Style::default().fg(CLR_CYAN).add_modifier(Modifier::BOLD),
+          ),
           Span::styled(input.clone(), Style::default().fg(Color::White)),
           Span::styled("\u{2588}", Style::default().fg(Color::White)), // cursor block
           Span::styled("  (Enter to apply, Esc to cancel)", Style::default().fg(CLR_DIM)),
@@ -617,31 +662,69 @@ fn render_header(status: &WatchStatus, total: usize, workers: u32) -> Vec<Line<'
   match status {
     WatchStatus::Idle => vec![
       Line::from(vec![
-        Span::styled(" WATCH ", Style::default().fg(Color::Black).bg(CLR_CYAN).add_modifier(Modifier::BOLD)),
+        Span::styled(
+          " WATCH ",
+          Style::default()
+            .fg(Color::Black)
+            .bg(CLR_CYAN)
+            .add_modifier(Modifier::BOLD),
+        ),
         Span::styled("  Watching for changes...", Style::default().fg(CLR_DIM)),
       ]),
       Line::raw(""),
     ],
     WatchStatus::Running { .. } => vec![
       Line::from(vec![
-        Span::styled(" RUNS ", Style::default().fg(Color::Black).bg(CLR_RUN).add_modifier(Modifier::BOLD)),
+        Span::styled(
+          " RUNS ",
+          Style::default()
+            .fg(Color::Black)
+            .bg(CLR_RUN)
+            .add_modifier(Modifier::BOLD),
+        ),
         Span::raw(format!("  {total} test(s) with {workers} worker(s)")),
       ]),
       Line::raw(""),
     ],
-    WatchStatus::Done { passed, failed, skipped, flaky, .. } => {
+    WatchStatus::Done {
+      passed,
+      failed,
+      skipped,
+      flaky,
+      ..
+    } => {
       let badge = if *failed > 0 {
-        Span::styled(" FAIL ", Style::default().fg(Color::White).bg(CLR_FAIL).add_modifier(Modifier::BOLD))
+        Span::styled(
+          " FAIL ",
+          Style::default()
+            .fg(Color::White)
+            .bg(CLR_FAIL)
+            .add_modifier(Modifier::BOLD),
+        )
       } else {
-        Span::styled(" PASS ", Style::default().fg(Color::Black).bg(CLR_PASS).add_modifier(Modifier::BOLD))
+        Span::styled(
+          " PASS ",
+          Style::default()
+            .fg(Color::Black)
+            .bg(CLR_PASS)
+            .add_modifier(Modifier::BOLD),
+        )
       };
       let mut summary = vec![badge, Span::raw("  ")];
       if *passed > 0 {
-        summary.push(Span::styled(format!("{passed} passed"), Style::default().fg(CLR_PASS).add_modifier(Modifier::BOLD)));
+        summary.push(Span::styled(
+          format!("{passed} passed"),
+          Style::default().fg(CLR_PASS).add_modifier(Modifier::BOLD),
+        ));
       }
       if *failed > 0 {
-        if *passed > 0 { summary.push(Span::styled(", ", Style::default().fg(CLR_DIM))); }
-        summary.push(Span::styled(format!("{failed} failed"), Style::default().fg(CLR_FAIL).add_modifier(Modifier::BOLD)));
+        if *passed > 0 {
+          summary.push(Span::styled(", ", Style::default().fg(CLR_DIM)));
+        }
+        summary.push(Span::styled(
+          format!("{failed} failed"),
+          Style::default().fg(CLR_FAIL).add_modifier(Modifier::BOLD),
+        ));
       }
       if *flaky > 0 {
         summary.push(Span::styled(", ", Style::default().fg(CLR_DIM)));
@@ -654,7 +737,7 @@ fn render_header(status: &WatchStatus, total: usize, workers: u32) -> Vec<Line<'
       let total = passed + failed + skipped;
       summary.push(Span::styled(format!("  ({total} total)"), Style::default().fg(CLR_DIM)));
       vec![Line::from(summary), Line::raw("")]
-    }
+    },
   }
 }
 
@@ -669,30 +752,39 @@ fn render_status_line(status: &WatchStatus, width: usize) -> Line<'static> {
       Span::styled("q", Style::default().add_modifier(Modifier::BOLD)),
       Span::styled(" to quit", Style::default().fg(CLR_DIM)),
     ]),
-    WatchStatus::Running { completed, total, start } => {
+    WatchStatus::Running {
+      completed,
+      total,
+      start,
+    } => {
       let elapsed = start.elapsed();
-      let pct = if *total > 0 { (*completed as f64 / *total as f64) * 100.0 } else { 0.0 };
+      let pct = if *total > 0 {
+        (*completed as f64 / *total as f64) * 100.0
+      } else {
+        0.0
+      };
       let bar_w = (width / 3).max(10).min(40);
       let filled = (pct / 100.0 * bar_w as f64) as usize;
       let empty = bar_w - filled;
       Line::from(vec![
         Span::raw(" "),
         Span::styled("Tests ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{completed}"), Style::default().fg(CLR_PASS).add_modifier(Modifier::BOLD)),
+        Span::styled(
+          format!("{completed}"),
+          Style::default().fg(CLR_PASS).add_modifier(Modifier::BOLD),
+        ),
         Span::styled(format!("/{total}  "), Style::default().fg(CLR_DIM)),
         Span::styled("\u{2588}".repeat(filled), Style::default().fg(CLR_PASS)),
         Span::styled("\u{2591}".repeat(empty), Style::default().fg(CLR_DIM)),
         Span::styled(format!("  {:.0}%", pct), Style::default().fg(CLR_DIM)),
         Span::styled(format!("  {:.1}s", elapsed.as_secs_f64()), Style::default().fg(CLR_DIM)),
       ])
-    }
-    WatchStatus::Done { duration, .. } => {
-      Line::from(vec![
-        Span::raw(" "),
-        Span::styled("Time  ", Style::default().add_modifier(Modifier::BOLD)),
-        Span::styled(format!("{:.2}s", duration.as_secs_f64()), Style::default().fg(CLR_DIM)),
-      ])
-    }
+    },
+    WatchStatus::Done { duration, .. } => Line::from(vec![
+      Span::raw(" "),
+      Span::styled("Time  ", Style::default().add_modifier(Modifier::BOLD)),
+      Span::styled(format!("{:.2}s", duration.as_secs_f64()), Style::default().fg(CLR_DIM)),
+    ]),
   }
 }
 

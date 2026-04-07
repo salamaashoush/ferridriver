@@ -73,7 +73,12 @@ fn extract_keyword(step: &TestStep) -> String {
       return format!("{kw} ");
     }
   }
-  step.title.split_whitespace().next().map(|w| format!("{w} ")).unwrap_or_default()
+  step
+    .title
+    .split_whitespace()
+    .next()
+    .map(|w| format!("{w} "))
+    .unwrap_or_default()
 }
 
 fn extract_text(step: &TestStep) -> String {

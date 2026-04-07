@@ -17,7 +17,10 @@ async fn main() {
     let t = Instant::now();
     let ctx = browser.new_context();
     let page = ctx.new_page().await.unwrap();
-    page.goto("data:text/html,<title>T</title><button id='b'>Go</button>", None).await.unwrap();
+    page
+      .goto("data:text/html,<title>T</title><button id='b'>Go</button>", None)
+      .await
+      .unwrap();
     page.locator("#b").click().await.unwrap();
     let _ = page.locator("#b").text_content().await.unwrap();
     ctx.close().await.ok();

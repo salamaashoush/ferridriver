@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::model::{TestStep};
+use crate::model::TestStep;
 use crate::reporter::{Reporter, ReporterEvent};
 
 /// Serializable test result for the HTML report.
@@ -104,7 +104,7 @@ impl Reporter for HtmlReporter {
           screenshot_base64,
           steps: serialize_html_steps(&outcome.steps),
         });
-      }
+      },
       ReporterEvent::RunFinished {
         total,
         passed,
@@ -119,8 +119,8 @@ impl Reporter for HtmlReporter {
         self.skipped = *skipped;
         self.flaky = *flaky;
         self.duration = *duration;
-      }
-      _ => {}
+      },
+      _ => {},
     }
   }
 
@@ -141,8 +141,7 @@ impl Reporter for HtmlReporter {
     if let Some(parent) = self.output_path.parent() {
       std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
     }
-    std::fs::write(&self.output_path, html)
-      .map_err(|e| format!("write HTML report: {e}"))?;
+    std::fs::write(&self.output_path, html).map_err(|e| format!("write HTML report: {e}"))?;
 
     tracing::info!("HTML report: {}", self.output_path.display());
     Ok(())

@@ -24,7 +24,9 @@ async fn add_todo(page: &Page, text: &str) -> Result<(), TestFailure> {
 async fn add_single_todo(page: Page) -> Result<(), TestFailure> {
   add_todo(&page, "Buy milk").await?;
   expect(&page.locator(".todo-list li")).to_have_count(1).await?;
-  expect(&page.locator(".todo-list li label")).to_have_text("Buy milk").await?;
+  expect(&page.locator(".todo-list li label"))
+    .to_have_text("Buy milk")
+    .await?;
   Ok(())
 }
 
@@ -34,9 +36,15 @@ async fn add_multiple_todos(page: Page) -> Result<(), TestFailure> {
   add_todo(&page, "Walk the dog").await?;
   add_todo(&page, "Write tests").await?;
   expect(&page.locator(".todo-list li")).to_have_count(3).await?;
-  expect(&page.locator(".todo-list li:nth-child(1) label")).to_have_text("Buy milk").await?;
-  expect(&page.locator(".todo-list li:nth-child(2) label")).to_have_text("Walk the dog").await?;
-  expect(&page.locator(".todo-list li:nth-child(3) label")).to_have_text("Write tests").await?;
+  expect(&page.locator(".todo-list li:nth-child(1) label"))
+    .to_have_text("Buy milk")
+    .await?;
+  expect(&page.locator(".todo-list li:nth-child(2) label"))
+    .to_have_text("Walk the dog")
+    .await?;
+  expect(&page.locator(".todo-list li:nth-child(3) label"))
+    .to_have_text("Write tests")
+    .await?;
   Ok(())
 }
 
@@ -61,7 +69,9 @@ async fn shows_item_count(page: Page) -> Result<(), TestFailure> {
   add_todo(&page, "One").await?;
   expect(&page.locator("#todo-count")).to_have_text("1 item left").await?;
   add_todo(&page, "Two").await?;
-  expect(&page.locator("#todo-count")).to_have_text("2 items left").await?;
+  expect(&page.locator("#todo-count"))
+    .to_have_text("2 items left")
+    .await?;
   Ok(())
 }
 
@@ -71,8 +81,12 @@ async fn shows_item_count(page: Page) -> Result<(), TestFailure> {
 async fn toggle_todo_complete(page: Page) -> Result<(), TestFailure> {
   add_todo(&page, "Buy milk").await?;
   page.locator(".todo-list li:nth-child(1) .toggle").click().await?;
-  expect(&page.locator(".todo-list li.completed")).to_have_count(1).await?;
-  expect(&page.locator("#todo-count")).to_have_text("0 items left").await?;
+  expect(&page.locator(".todo-list li.completed"))
+    .to_have_count(1)
+    .await?;
+  expect(&page.locator("#todo-count"))
+    .to_have_text("0 items left")
+    .await?;
   Ok(())
 }
 
@@ -93,7 +107,9 @@ async fn delete_todo(page: Page) -> Result<(), TestFailure> {
   add_todo(&page, "Keep me").await?;
   page.locator(".todo-list li:nth-child(1) .destroy").click().await?;
   expect(&page.locator(".todo-list li")).to_have_count(1).await?;
-  expect(&page.locator(".todo-list li label")).to_have_text("Keep me").await?;
+  expect(&page.locator(".todo-list li label"))
+    .to_have_text("Keep me")
+    .await?;
   Ok(())
 }
 
@@ -106,7 +122,9 @@ async fn filter_active(page: Page) -> Result<(), TestFailure> {
   page.locator(".todo-list li:nth-child(2) .toggle").click().await?;
   page.locator("#filter-active").click().await?;
   expect(&page.locator(".todo-list li")).to_have_count(1).await?;
-  expect(&page.locator(".todo-list li label")).to_have_text("Active todo").await?;
+  expect(&page.locator(".todo-list li label"))
+    .to_have_text("Active todo")
+    .await?;
   Ok(())
 }
 
@@ -117,7 +135,9 @@ async fn filter_completed(page: Page) -> Result<(), TestFailure> {
   page.locator(".todo-list li:nth-child(2) .toggle").click().await?;
   page.locator("#filter-completed").click().await?;
   expect(&page.locator(".todo-list li")).to_have_count(1).await?;
-  expect(&page.locator(".todo-list li label")).to_have_text("Completed todo").await?;
+  expect(&page.locator(".todo-list li label"))
+    .to_have_text("Completed todo")
+    .await?;
   Ok(())
 }
 
@@ -144,7 +164,9 @@ async fn clear_completed(page: Page) -> Result<(), TestFailure> {
   page.locator(".todo-list li:nth-child(3) .toggle").click().await?;
   page.locator("#clear-completed").click().await?;
   expect(&page.locator(".todo-list li")).to_have_count(1).await?;
-  expect(&page.locator(".todo-list li label")).to_have_text("Keep").await?;
+  expect(&page.locator(".todo-list li label"))
+    .to_have_text("Keep")
+    .await?;
   Ok(())
 }
 
@@ -156,7 +178,9 @@ async fn toggle_all_completes_all(page: Page) -> Result<(), TestFailure> {
   add_todo(&page, "Two").await?;
   add_todo(&page, "Three").await?;
   page.locator("#toggle-all").click().await?;
-  expect(&page.locator("#todo-count")).to_have_text("0 items left").await?;
+  expect(&page.locator("#todo-count"))
+    .to_have_text("0 items left")
+    .await?;
   Ok(())
 }
 
@@ -165,9 +189,13 @@ async fn toggle_all_uncompletes_when_all_done(page: Page) -> Result<(), TestFail
   add_todo(&page, "One").await?;
   add_todo(&page, "Two").await?;
   page.locator("#toggle-all").click().await?;
-  expect(&page.locator("#todo-count")).to_have_text("0 items left").await?;
+  expect(&page.locator("#todo-count"))
+    .to_have_text("0 items left")
+    .await?;
   page.locator("#toggle-all").click().await?;
-  expect(&page.locator("#todo-count")).to_have_text("2 items left").await?;
+  expect(&page.locator("#todo-count"))
+    .to_have_text("2 items left")
+    .await?;
   Ok(())
 }
 
@@ -180,7 +208,9 @@ async fn edit_todo_on_double_click(page: Page) -> Result<(), TestFailure> {
   expect(&page.locator(".edit-input")).to_be_visible().await?;
   page.locator(".edit-input").fill("Updated text").await?;
   page.locator(".edit-input").press("Enter").await?;
-  expect(&page.locator(".todo-list li:nth-child(1) label")).to_have_text("Updated text").await?;
+  expect(&page.locator(".todo-list li:nth-child(1) label"))
+    .to_have_text("Updated text")
+    .await?;
   Ok(())
 }
 

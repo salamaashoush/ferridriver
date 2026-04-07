@@ -5,9 +5,9 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
+use crate::Browser;
 use crate::events::ExposedFn;
 use crate::options::LaunchOptions;
-use crate::Browser;
 
 use super::emitter::{CodeEmitter, GherkinEmitter, RustEmitter, TypeScriptEmitter};
 use super::{Action, OutputLanguage};
@@ -48,8 +48,7 @@ impl Recorder {
 
     // Output target: file or stdout.
     let output: Arc<Mutex<Box<dyn Write + Send>>> = if let Some(ref path) = self.options.output_file {
-      let file = std::fs::File::create(path)
-        .map_err(|e| format!("cannot create output file {path}: {e}"))?;
+      let file = std::fs::File::create(path).map_err(|e| format!("cannot create output file {path}: {e}"))?;
       Arc::new(Mutex::new(Box::new(std::io::BufWriter::new(file))))
     } else {
       Arc::new(Mutex::new(Box::new(std::io::stdout())))

@@ -20,12 +20,7 @@ use crate::model::{TestFailure, TestInfo};
 /// # Errors
 ///
 /// Returns `TestFailure` with a unified diff if the snapshot doesn't match.
-pub fn assert_snapshot(
-  test_info: &TestInfo,
-  actual: &str,
-  name: &str,
-  update: bool,
-) -> Result<(), TestFailure> {
+pub fn assert_snapshot(test_info: &TestInfo, actual: &str, name: &str, update: bool) -> Result<(), TestFailure> {
   let snap_path = snapshot_path(&test_info.snapshot_dir, &test_info.test_id.full_name(), name);
 
   if update || !snap_path.exists() {
@@ -204,10 +199,7 @@ pub fn compare_screenshot_png(actual_png: &[u8], name: &str) -> Result<(), TestF
 
   let mut diff_png = Vec::new();
   diff_img
-    .write_to(
-      &mut std::io::Cursor::new(&mut diff_png),
-      image::ImageFormat::Png,
-    )
+    .write_to(&mut std::io::Cursor::new(&mut diff_png), image::ImageFormat::Png)
     .ok();
 
   Err(TestFailure {

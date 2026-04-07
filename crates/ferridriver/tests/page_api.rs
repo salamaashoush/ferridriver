@@ -3,7 +3,7 @@
   clippy::uninlined_format_args,
   clippy::single_char_pattern,
   clippy::redundant_closure_for_method_calls,
-  clippy::get_first,
+  clippy::get_first
 )]
 //! Integration tests for the ferridriver Page + Locator API.
 //!

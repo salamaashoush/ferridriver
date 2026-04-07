@@ -2,13 +2,13 @@
   clippy::cast_precision_loss,
   clippy::cast_lossless,
   clippy::too_many_lines,
-  clippy::uninlined_format_args,
+  clippy::uninlined_format_args
 )]
 //! Diagnose why worker scaling is sub-linear.
 //! Measure: browser launch overlap, per-worker test time, idle time.
 
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use ferridriver::Browser;
@@ -35,8 +35,10 @@ async fn diagnose_scaling() {
     for b in &browsers {
       b.close().await.ok();
     }
-    println!("      {n} browser(s) parallel: {launch_ms}ms (amortized: {:.1}ms each)",
-      launch_ms as f64 / n as f64);
+    println!(
+      "      {n} browser(s) parallel: {launch_ms}ms (amortized: {:.1}ms each)",
+      launch_ms as f64 / n as f64
+    );
   }
   println!();
 
@@ -57,7 +59,8 @@ async fn diagnose_scaling() {
     for i in 0..iters {
       let ctx = browser.new_context();
       let page = ctx.new_page().await.unwrap();
-      let url = format!("data:text/html,<title>T{i}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>");
+      let url =
+        format!("data:text/html,<title>T{i}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>");
       page.goto(&url, None).await.unwrap();
       page.locator("#b").click().await.unwrap();
       let _ = page.locator("#b").text_content().await.unwrap();
@@ -96,7 +99,8 @@ async fn diagnose_scaling() {
           let t = Instant::now();
           let ctx = b.new_context();
           let page = ctx.new_page().await.unwrap();
-          let url = format!("data:text/html,<title>T{i}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>");
+          let url =
+            format!("data:text/html,<title>T{i}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>");
           page.goto(&url, None).await.unwrap();
           page.locator("#b").click().await.unwrap();
           let _ = page.locator("#b").text_content().await.unwrap();
@@ -117,7 +121,9 @@ async fn diagnose_scaling() {
     let overall_avg: f64 = worker_avgs.iter().map(|(_, a)| a).sum::<f64>() / worker_avgs.len() as f64;
     let throughput = total_tests as f64 / (wall_ms as f64 / 1000.0);
 
-    println!("      {n} workers × {per_worker} tests: wall={wall_ms}ms, avg={overall_avg:.1}ms/test, {throughput:.1} tests/sec");
+    println!(
+      "      {n} workers × {per_worker} tests: wall={wall_ms}ms, avg={overall_avg:.1}ms/test, {throughput:.1} tests/sec"
+    );
 
     for b in &browsers {
       b.close().await.ok();
@@ -136,39 +142,54 @@ async fn diagnose_scaling() {
     for i in 0..iters {
       let ctx = browser.new_context();
       let page = ctx.new_page().await.unwrap();
-      page.goto(&format!("data:text/html,<title>T{i}</title>"), None).await.unwrap();
+      page
+        .goto(&format!("data:text/html,<title>T{i}</title>"), None)
+        .await
+        .unwrap();
       ctx.close().await.ok();
     }
     let baseline = t.elapsed().as_millis() as f64 / iters as f64;
 
     // Now with CPU load on tokio threads.
-    let cpu_tasks: Vec<_> = (0..4).map(|_| {
-      tokio::spawn(async {
-        loop {
-          tokio::task::yield_now().await;
-          // Busy loop
-          let mut x = 0u64;
-          for i in 0..10000 { x = x.wrapping_add(i); }
-          std::hint::black_box(x);
-        }
+    let cpu_tasks: Vec<_> = (0..4)
+      .map(|_| {
+        tokio::spawn(async {
+          loop {
+            tokio::task::yield_now().await;
+            // Busy loop
+            let mut x = 0u64;
+            for i in 0..10000 {
+              x = x.wrapping_add(i);
+            }
+            std::hint::black_box(x);
+          }
+        })
       })
-    }).collect();
+      .collect();
 
     let t = Instant::now();
     for i in 0..iters {
       let ctx = browser.new_context();
       let page = ctx.new_page().await.unwrap();
-      page.goto(&format!("data:text/html,<title>T{i}</title>"), None).await.unwrap();
+      page
+        .goto(&format!("data:text/html,<title>T{i}</title>"), None)
+        .await
+        .unwrap();
       ctx.close().await.ok();
     }
     let with_load = t.elapsed().as_millis() as f64 / iters as f64;
 
-    for task in cpu_tasks { task.abort(); }
+    for task in cpu_tasks {
+      task.abort();
+    }
     browser.close().await.ok();
 
     println!("      Without CPU load: {baseline:.1}ms/test");
     println!("      With CPU load:    {with_load:.1}ms/test");
-    println!("      Degradation:      {:.1}%", (with_load - baseline) / baseline * 100.0);
+    println!(
+      "      Degradation:      {:.1}%",
+      (with_load - baseline) / baseline * 100.0
+    );
   }
 
   println!("\n=== end ===\n");

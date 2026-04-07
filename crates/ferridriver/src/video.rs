@@ -9,7 +9,7 @@
 //! Shutdown is natural: stop_screencast -> pump sees channel close -> encoder drains
 //! remaining frames -> finishes. No abort, no hang.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use tokio::sync::{Mutex, mpsc};
@@ -60,11 +60,13 @@ pub async fn start_recording(
 
   // Encoder runs on blocking thread, driven by channel.
   let path = output_path.clone();
-  let encoder_task = tokio::task::spawn_blocking(move || {
-    crate::ffmpeg::encode_stream(frame_rx, &path, w, h, FPS)
-  });
+  let encoder_task = tokio::task::spawn_blocking(move || crate::ffmpeg::encode_stream(frame_rx, &path, w, h, FPS));
 
-  Ok(VideoRecordingHandle { pump_task, encoder_task, output_path })
+  Ok(VideoRecordingHandle {
+    pump_task,
+    encoder_task,
+    output_path,
+  })
 }
 
 impl VideoRecordingHandle {
@@ -79,9 +81,7 @@ impl VideoRecordingHandle {
     self.pump_task.abort();
 
     // Wait for encoder to finish encoding remaining frames + trailing pad.
-    self.encoder_task
-      .await
-      .map_err(|e| format!("encoder join: {e}"))??;
+    self.encoder_task.await.map_err(|e| format!("encoder join: {e}"))??;
 
     Ok(self.output_path)
   }
@@ -117,7 +117,12 @@ pub async fn start_buffered_recording(
     }
   });
 
-  Ok(BufferedRecordingHandle { frames, pump_task, width: w, height: h })
+  Ok(BufferedRecordingHandle {
+    frames,
+    pump_task,
+    width: w,
+    height: h,
+  })
 }
 
 impl BufferedRecordingHandle {
@@ -138,11 +143,9 @@ impl BufferedRecordingHandle {
     drop(frames);
 
     let path = output_path.clone();
-    tokio::task::spawn_blocking(move || {
-      crate::ffmpeg::encode_frames(&frames_owned, &path, w, h, FPS)
-    })
-    .await
-    .map_err(|e| format!("encode join: {e}"))??;
+    tokio::task::spawn_blocking(move || crate::ffmpeg::encode_frames(&frames_owned, &path, w, h, FPS))
+      .await
+      .map_err(|e| format!("encode join: {e}"))??;
 
     Ok(output_path)
   }
@@ -154,4 +157,3 @@ impl BufferedRecordingHandle {
     let _ = self.pump_task.await;
   }
 }
-

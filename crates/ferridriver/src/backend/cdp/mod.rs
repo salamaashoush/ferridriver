@@ -31,13 +31,21 @@ pub trait CdpWrap: CdpTransport + Sized {
 }
 
 impl CdpWrap for pipe::PipeTransport {
-  fn wrap_page(page: CdpPage<Self>) -> AnyPage { AnyPage::CdpPipe(page) }
-  fn wrap_element(elem: CdpElement<Self>) -> AnyElement { AnyElement::CdpPipe(elem) }
+  fn wrap_page(page: CdpPage<Self>) -> AnyPage {
+    AnyPage::CdpPipe(page)
+  }
+  fn wrap_element(elem: CdpElement<Self>) -> AnyElement {
+    AnyElement::CdpPipe(elem)
+  }
 }
 
 impl CdpWrap for ws::WsTransport {
-  fn wrap_page(page: CdpPage<Self>) -> AnyPage { AnyPage::CdpRaw(page) }
-  fn wrap_element(elem: CdpElement<Self>) -> AnyElement { AnyElement::CdpRaw(elem) }
+  fn wrap_page(page: CdpPage<Self>) -> AnyPage {
+    AnyPage::CdpRaw(page)
+  }
+  fn wrap_element(elem: CdpElement<Self>) -> AnyElement {
+    AnyElement::CdpRaw(elem)
+  }
 }
 
 // ---- CdpBrowser<T> --------------------------------------------------------
@@ -101,11 +109,26 @@ impl<T: CdpWrap> CdpBrowser<T> {
       transport.send_command(session_id, "DOM.enable", ep.clone()),
       transport.send_command(session_id, "Network.enable", ep.clone()),
       transport.send_command(session_id, "Accessibility.enable", ep.clone()),
-      transport.send_command(session_id, "Page.setLifecycleEventsEnabled", serde_json::json!({"enabled": true})),
-      transport.send_command(session_id, "Page.addScriptToEvaluateOnNewDocument", serde_json::json!({"source": engine_js})),
+      transport.send_command(
+        session_id,
+        "Page.setLifecycleEventsEnabled",
+        serde_json::json!({"enabled": true})
+      ),
+      transport.send_command(
+        session_id,
+        "Page.addScriptToEvaluateOnNewDocument",
+        serde_json::json!({"source": engine_js})
+      ),
       vp_fut,
     );
-    r1?; r2?; r3?; r4?; r5?; r6?; r7?; r8?;
+    r1?;
+    r2?;
+    r3?;
+    r4?;
+    r5?;
+    r6?;
+    r7?;
+    r8?;
     Ok(())
   }
 
@@ -128,7 +151,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .to_string();
 
     let attach_result = transport
-      .send_command(None, "Target.attachToTarget", serde_json::json!({"targetId": target_id, "flatten": true}))
+      .send_command(
+        None,
+        "Target.attachToTarget",
+        serde_json::json!({"targetId": target_id, "flatten": true}),
+      )
       .await?;
 
     let session_id = attach_result
@@ -302,7 +329,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
   }
 
   /// Create a new page in an isolated browser context (separate cookies/storage).
-  pub async fn new_page_isolated(&self, url: &str, viewport: Option<&crate::options::ViewportConfig>) -> Result<AnyPage, String> {
+  pub async fn new_page_isolated(
+    &self,
+    url: &str,
+    viewport: Option<&crate::options::ViewportConfig>,
+  ) -> Result<AnyPage, String> {
     let ctx = self
       .transport
       .send_command(None, "Target.createBrowserContext", super::empty_params())
@@ -512,7 +543,6 @@ impl CdpBrowser<ws::WsTransport> {
       attached_targets: std::sync::Mutex::new(attached),
     })
   }
-
 }
 
 // ---- CdpPage<T> ------------------------------------------------------------
@@ -617,9 +647,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Navigation ----
 
-  pub async fn goto(
-    &self, url: &str, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn goto(&self, url: &str, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<(), String> {
     let target_event = match lifecycle {
       crate::backend::NavLifecycle::Commit => "commit",
       crate::backend::NavLifecycle::DomContentLoaded => "domcontentloaded",
@@ -640,10 +668,7 @@ impl<T: CdpWrap> CdpPage<T> {
       }
     }
 
-    let nav_loader_id = nav_result
-      .get("loaderId")
-      .and_then(|v| v.as_str())
-      .unwrap_or("");
+    let nav_loader_id = nav_result.get("loaderId").and_then(|v| v.as_str()).unwrap_or("");
 
     // Sync check: if the lifecycle event for THIS navigation's document already
     // fired (reader processed frameNavigated + lifecycle events during the navigate
@@ -664,9 +689,10 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn wait_for_navigation(&self) -> Result<(), String> {
-    let rx = self
-      .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), crate::backend::NavLifecycle::Load);
+    let rx = self.transport.register_nav_waiter(
+      self.session_id.as_deref().unwrap_or(""),
+      crate::backend::NavLifecycle::Load,
+    );
 
     match tokio::time::timeout(Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
@@ -675,9 +701,7 @@ impl<T: CdpWrap> CdpPage<T> {
     }
   }
 
-  pub async fn reload(
-    &self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn reload(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<(), String> {
     let rx = self
       .transport
       .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
@@ -688,20 +712,19 @@ impl<T: CdpWrap> CdpPage<T> {
     }
   }
 
-  pub async fn go_back(
-    &self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn go_back(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<(), String> {
     self.history_go(-1, lifecycle, timeout_ms).await
   }
 
-  pub async fn go_forward(
-    &self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn go_forward(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<(), String> {
     self.history_go(1, lifecycle, timeout_ms).await
   }
 
   async fn history_go(
-    &self, delta: i32, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64,
+    &self,
+    delta: i32,
+    lifecycle: crate::backend::NavLifecycle,
+    timeout_ms: u64,
   ) -> Result<(), String> {
     let hist = self.cmd("Page.getNavigationHistory", super::empty_params()).await?;
     let current_i64 = hist
@@ -1078,11 +1101,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
     // Spawn listener that decodes frames and acks them.
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    Self::spawn_screencast_listener(
-      self.transport.clone(),
-      self.session_id.clone(),
-      tx,
-    );
+    Self::spawn_screencast_listener(self.transport.clone(), self.session_id.clone(), tx);
     Ok(rx)
   }
 
@@ -1134,9 +1153,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
         // Decode base64 JPEG frame data and forward with timestamp.
         if let Some(data_str) = params.get("data").and_then(|v| v.as_str()) {
-          if let Ok(jpeg_bytes) =
-            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_str)
-          {
+          if let Ok(jpeg_bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_str) {
             if frame_tx.send((jpeg_bytes, timestamp)).is_err() {
               break;
             }
@@ -1149,7 +1166,11 @@ impl<T: CdpWrap> CdpPage<T> {
         let sid = session_id.clone();
         tokio::spawn(async move {
           let _ = t
-            .send_command(sid.as_deref(), "Page.screencastFrameAck", serde_json::json!({ "sessionId": ack_id }))
+            .send_command(
+              sid.as_deref(),
+              "Page.screencastFrameAck",
+              serde_json::json!({ "sessionId": ack_id }),
+            )
             .await;
         });
       }
@@ -1311,7 +1332,12 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn move_mouse_smooth(
-    &self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32,
+    &self,
+    from_x: f64,
+    from_y: f64,
+    to_x: f64,
+    to_y: f64,
+    steps: u32,
   ) -> Result<(), String> {
     let steps = steps.max(1);
     for i in 0..=steps {
@@ -1454,7 +1480,10 @@ impl<T: CdpWrap> CdpPage<T> {
           secure: c.get("secure").and_then(serde_json::Value::as_bool).unwrap_or(false),
           http_only: c.get("httpOnly").and_then(serde_json::Value::as_bool).unwrap_or(false),
           expires: c.get("expires").and_then(serde_json::Value::as_f64),
-          same_site: c.get("sameSite").and_then(|v| v.as_str()).and_then(|v| v.parse::<super::SameSite>().ok()),
+          same_site: c
+            .get("sameSite")
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.parse::<super::SameSite>().ok()),
         })
         .collect(),
     )
@@ -2302,10 +2331,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         continue;
       }
       let Some(params) = event.get("params") else { continue };
-      let request_id = params
-        .get("requestId")
-        .and_then(|v| v.as_str())
-        .unwrap_or("");
+      let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
       let req_obj = params.get("request");
       // Borrow URL directly from the JSON event — zero allocation for matching.
       let url = req_obj
@@ -2329,13 +2355,8 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           .and_then(|r| r.get("method"))
           .and_then(|v| v.as_str())
           .unwrap_or("GET");
-        let resource_type = params
-          .get("resourceType")
-          .and_then(|v| v.as_str())
-          .unwrap_or("");
-        let post_data = req_obj
-          .and_then(|r| r.get("postData"))
-          .and_then(|v| v.as_str());
+        let resource_type = params.get("resourceType").and_then(|v| v.as_str()).unwrap_or("");
+        let post_data = req_obj.and_then(|r| r.get("postData")).and_then(|v| v.as_str());
         let headers: FxHashMap<String, String> = req_obj
           .and_then(|r| r.get("headers"))
           .and_then(|h| h.as_object())
@@ -2362,8 +2383,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         let action = rx.await.unwrap_or(crate::route::RouteAction::Continue(
           crate::route::ContinueOverrides::default(),
         ));
-        Self::execute_route_action(&transport, session_id.as_deref(), request_id, Some(action))
-          .await;
+        Self::execute_route_action(&transport, session_id.as_deref(), request_id, Some(action)).await;
       } else {
         // No matching route — continue with zero allocation beyond the CDP command.
         let _ = transport

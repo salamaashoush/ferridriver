@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use notify_debouncer_mini::{new_debouncer, DebouncedEventKind};
+use notify_debouncer_mini::{DebouncedEventKind, new_debouncer};
 
 /// What kind of file changed.
 #[derive(Debug, Clone)]
@@ -22,14 +22,7 @@ pub enum ChangeKind {
 }
 
 /// Default directories to ignore (checked as path segments, no allocation).
-const DEFAULT_IGNORE_SEGMENTS: &[&str] = &[
-  "target",
-  "node_modules",
-  ".git",
-  "test-results",
-  "dist",
-  ".next",
-];
+const DEFAULT_IGNORE_SEGMENTS: &[&str] = &["target", "node_modules", ".git", "test-results", "dist", ".next"];
 
 /// Check if a path contains any ignored directory segment.
 /// Zero-allocation: iterates path components directly.
@@ -37,8 +30,7 @@ fn is_ignored(path: &Path, extra_ignore: &[String]) -> bool {
   path.components().any(|c| {
     if let std::path::Component::Normal(s) = c {
       let s = s.to_str().unwrap_or("");
-      DEFAULT_IGNORE_SEGMENTS.iter().any(|ign| *ign == s)
-        || extra_ignore.iter().any(|ign| ign == s)
+      DEFAULT_IGNORE_SEGMENTS.iter().any(|ign| *ign == s) || extra_ignore.iter().any(|ign| ign == s)
     } else {
       false
     }
@@ -66,16 +58,9 @@ impl FileWatcher {
   /// * `root` — Directory to watch recursively.
   /// * `test_globs` — Glob patterns that identify test files (from `test_match` config).
   /// * `ignore_patterns` — Extra directory names to ignore (merged with defaults).
-  pub fn new(
-    root: &Path,
-    test_globs: &[String],
-    ignore_patterns: &[String],
-  ) -> Result<Self, String> {
+  pub fn new(root: &Path, test_globs: &[String], ignore_patterns: &[String]) -> Result<Self, String> {
     let (tx, rx) = async_channel::bounded(256);
-    let compiled_globs: Vec<glob::Pattern> = test_globs
-      .iter()
-      .filter_map(|g| glob::Pattern::new(g).ok())
-      .collect();
+    let compiled_globs: Vec<glob::Pattern> = test_globs.iter().filter_map(|g| glob::Pattern::new(g).ok()).collect();
     let root_owned = root.to_path_buf();
     let extra_ignore: Vec<String> = ignore_patterns.to_vec();
 
@@ -98,7 +83,7 @@ impl FileWatcher {
           // Only watch source code, test files, features, and config files.
           let ext = path.extension().and_then(|e| e.to_str()).unwrap_or("");
           match ext {
-            "rs" | "ts" | "tsx" | "js" | "jsx" | "mts" | "mjs" | "feature" => {}
+            "rs" | "ts" | "tsx" | "js" | "jsx" | "mts" | "mjs" | "feature" => {},
             "toml" | "json" => {
               // Only config files — not arbitrary data files.
               let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
@@ -108,7 +93,7 @@ impl FileWatcher {
               {
                 continue;
               }
-            }
+            },
             _ => continue,
           }
 
@@ -141,10 +126,9 @@ impl FileWatcher {
     let mut changes = Vec::new();
     while let Ok(kind) = self.rx.try_recv() {
       let key = match &kind {
-        ChangeKind::TestFile(p)
-        | ChangeKind::SourceFile(p)
-        | ChangeKind::FeatureFile(p)
-        | ChangeKind::StepFile(p) => p.clone(),
+        ChangeKind::TestFile(p) | ChangeKind::SourceFile(p) | ChangeKind::FeatureFile(p) | ChangeKind::StepFile(p) => {
+          p.clone()
+        },
         ChangeKind::Config => std::path::PathBuf::from("__config__"),
       };
       if seen.insert(key) {
@@ -173,9 +157,11 @@ fn classify_change(path: &Path, root: &Path, test_globs: &[glob::Pattern]) -> Ch
   }
 
   // Step definition files — check path components, no string search.
-  if (ext == "rs" || ext == "ts" || ext == "js") && path.components().any(|c| {
-    matches!(c, std::path::Component::Normal(s) if s == "steps" || s == "step_definitions")
-  }) {
+  if (ext == "rs" || ext == "ts" || ext == "js")
+    && path
+      .components()
+      .any(|c| matches!(c, std::path::Component::Normal(s) if s == "steps" || s == "step_definitions"))
+  {
     return ChangeKind::StepFile(path.to_path_buf());
   }
 

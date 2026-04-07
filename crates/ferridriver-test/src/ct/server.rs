@@ -24,8 +24,7 @@ impl ComponentServer {
   ///
   /// Returns an error if the server fails to bind.
   pub async fn start(root_dir: &Path) -> Result<Self, String> {
-    let service = ServeDir::new(root_dir)
-      .append_index_html_on_directories(true);
+    let service = ServeDir::new(root_dir).append_index_html_on_directories(true);
 
     let app = Router::new().fallback_service(service);
 
@@ -33,15 +32,15 @@ impl ComponentServer {
       .await
       .map_err(|e| format!("bind failed: {e}"))?;
 
-    let addr = listener
-      .local_addr()
-      .map_err(|e| format!("local_addr: {e}"))?;
+    let addr = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?;
 
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let handle = tokio::spawn(async move {
       axum::serve(listener, app)
-        .with_graceful_shutdown(async { let _ = shutdown_rx.await; })
+        .with_graceful_shutdown(async {
+          let _ = shutdown_rx.await;
+        })
         .await
         .ok();
     });

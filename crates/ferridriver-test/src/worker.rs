@@ -13,14 +13,14 @@ use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use rustc_hash::FxHashMap;
-use tokio::sync::{mpsc, Mutex};
+use tokio::sync::{Mutex, mpsc};
 
 use crate::config::TestConfig;
 use crate::dispatcher::{SerialBatch, TestAssignment, WorkItem};
 use crate::fixture::{FixturePool, FixtureScope};
 use crate::model::{
-  Attachment, AttachmentBody, ExpectedStatus, Hooks, StepCategory, TestAnnotation, TestFailure,
-  TestInfo, TestOutcome, TestStatus,
+  Attachment, AttachmentBody, ExpectedStatus, Hooks, StepCategory, TestAnnotation, TestFailure, TestInfo, TestOutcome,
+  TestStatus,
 };
 use crate::reporter::{EventBus, ReporterEvent};
 
@@ -77,7 +77,7 @@ impl Worker {
           if result_tx.send(result).await.is_err() {
             break;
           }
-        }
+        },
         WorkItem::Serial(batch) => {
           let results = self
             .run_serial_batch(&browser, &custom_fixture_pool, &mut active_suites, batch)
@@ -87,7 +87,7 @@ impl Worker {
               break;
             }
           }
-        }
+        },
       }
     }
 
@@ -109,26 +109,36 @@ impl Worker {
             name: step_title.clone(),
             line: None,
           };
-          self.event_bus.emit(ReporterEvent::StepStarted(Box::new(crate::reporter::StepStartedEvent {
-            test_id: synthetic_id.clone(),
-            step_id: step_id.clone(),
-            parent_step_id: None,
-            title: step_title.clone(),
-            category: StepCategory::Hook,
-          }))).await;
+          self
+            .event_bus
+            .emit(ReporterEvent::StepStarted(Box::new(
+              crate::reporter::StepStartedEvent {
+                test_id: synthetic_id.clone(),
+                step_id: step_id.clone(),
+                parent_step_id: None,
+                title: step_title.clone(),
+                category: StepCategory::Hook,
+              },
+            )))
+            .await;
           let start = Instant::now();
           let result = hook(custom_fixture_pool.clone()).await;
           let duration = start.elapsed();
           let error = result.as_ref().err().map(|e| format!("{e}"));
-          self.event_bus.emit(ReporterEvent::StepFinished(Box::new(crate::reporter::StepFinishedEvent {
-            test_id: synthetic_id,
-            step_id,
-            title: step_title,
-            category: StepCategory::Hook,
-            duration,
-            error: error.clone(),
-            metadata: None,
-          }))).await;
+          self
+            .event_bus
+            .emit(ReporterEvent::StepFinished(Box::new(
+              crate::reporter::StepFinishedEvent {
+                test_id: synthetic_id,
+                step_id,
+                title: step_title,
+                category: StepCategory::Hook,
+                duration,
+                error: error.clone(),
+                metadata: None,
+              },
+            )))
+            .await;
           if let Err(e) = result {
             tracing::warn!(target: "ferridriver::worker", "afterAll error: {e}");
           }
@@ -196,12 +206,8 @@ impl Worker {
         continue;
       }
 
-      let result = self
-        .run_single(browser, custom_pool, active_suites, assignment)
-        .await;
-      if result.outcome.status == TestStatus::Failed
-        || result.outcome.status == TestStatus::TimedOut
-      {
+      let result = self.run_single(browser, custom_pool, active_suites, assignment).await;
+      if result.outcome.status == TestStatus::Failed || result.outcome.status == TestStatus::TimedOut {
         serial_failed = true;
       }
       results.push(result);
@@ -238,13 +244,11 @@ impl Worker {
     let hooks = Arc::clone(&assignment.hooks);
 
     // ── beforeAll (once per suite on this worker) ──
-    let suite_state = active_suites
-      .entry(suite_key.clone())
-      .or_insert_with(|| SuiteState {
-        before_all_ran: false,
-        before_all_failed: false,
-        hooks: Arc::clone(&hooks),
-      });
+    let suite_state = active_suites.entry(suite_key.clone()).or_insert_with(|| SuiteState {
+      before_all_ran: false,
+      before_all_failed: false,
+      hooks: Arc::clone(&hooks),
+    });
 
     if !suite_state.before_all_ran && !hooks.before_all.is_empty() {
       for (i, hook) in hooks.before_all.iter().enumerate() {
@@ -253,26 +257,36 @@ impl Worker {
         } else {
           format!("beforeAll [{i}]")
         };
-        self.event_bus.emit(ReporterEvent::StepStarted(Box::new(crate::reporter::StepStartedEvent {
-          test_id: test_id.clone(),
-          step_id: format!("hook:beforeAll:{suite_key}:{i}"),
-          parent_step_id: None,
-          title: step_title.clone(),
-          category: StepCategory::Hook,
-        }))).await;
+        self
+          .event_bus
+          .emit(ReporterEvent::StepStarted(Box::new(
+            crate::reporter::StepStartedEvent {
+              test_id: test_id.clone(),
+              step_id: format!("hook:beforeAll:{suite_key}:{i}"),
+              parent_step_id: None,
+              title: step_title.clone(),
+              category: StepCategory::Hook,
+            },
+          )))
+          .await;
         let start = Instant::now();
         let result = hook(custom_pool.clone()).await;
         let duration = start.elapsed();
         let error = result.as_ref().err().map(|e| e.message.clone());
-        self.event_bus.emit(ReporterEvent::StepFinished(Box::new(crate::reporter::StepFinishedEvent {
-          test_id: test_id.clone(),
-          step_id: format!("hook:beforeAll:{suite_key}:{i}"),
-          title: step_title,
-          category: StepCategory::Hook,
-          duration,
-          error: error.clone(),
-          metadata: None,
-        }))).await;
+        self
+          .event_bus
+          .emit(ReporterEvent::StepFinished(Box::new(
+            crate::reporter::StepFinishedEvent {
+              test_id: test_id.clone(),
+              step_id: format!("hook:beforeAll:{suite_key}:{i}"),
+              title: step_title,
+              category: StepCategory::Hook,
+              duration,
+              error: error.clone(),
+              metadata: None,
+            },
+          )))
+          .await;
         if let Err(e) = result {
           tracing::error!(target: "ferridriver::worker", "beforeAll failed for {suite_key}: {e}");
           suite_state.before_all_failed = true;
@@ -325,7 +339,9 @@ impl Worker {
     let should_skip = test.annotations.iter().any(|a| match a {
       TestAnnotation::Skip { .. } => true,
       TestAnnotation::Fixme { condition: None, .. } => true,
-      TestAnnotation::Fixme { condition: Some(cond), .. } => evaluate_fixme_condition(cond, browser_backend),
+      TestAnnotation::Fixme {
+        condition: Some(cond), ..
+      } => evaluate_fixme_condition(cond, browser_backend),
       _ => false,
     });
     if should_skip {
@@ -369,9 +385,7 @@ impl Worker {
       .await;
 
     // Timeout with slow multiplier.
-    let mut timeout_dur = test
-      .timeout
-      .unwrap_or(Duration::from_millis(self.config.timeout));
+    let mut timeout_dur = test.timeout.unwrap_or(Duration::from_millis(self.config.timeout));
     if test.annotations.iter().any(|a| matches!(a, TestAnnotation::Slow)) {
       timeout_dur *= 3;
     }
@@ -443,14 +457,14 @@ impl Worker {
                 if let Err(e) = page.set_storage_state(&state).await {
                   tracing::warn!(target: "ferridriver::worker", "set_storage_state failed: {e}");
                 }
-              }
+              },
               Err(e) => {
                 tracing::warn!(target: "ferridriver::worker", "parse storage state {}: {e}", path.display());
-              }
+              },
             },
             Err(e) => {
               tracing::warn!(target: "ferridriver::worker", "read storage state {}: {e}", path.display());
-            }
+            },
           }
         }
 
@@ -465,27 +479,43 @@ impl Worker {
           crate::config::VideoMode::Off => None,
           crate::config::VideoMode::On => {
             let ext = ferridriver::video::video_extension();
-            let video_path = test_info.output_dir.join(format!(
-              "{}-attempt{}.{ext}",
-              sanitize_filename(&test_id.name),
-              attempt
-            ));
+            let video_path =
+              test_info
+                .output_dir
+                .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
             let _ = std::fs::create_dir_all(&test_info.output_dir);
             match ferridriver::video::start_recording(
-              &page, video_path, self.config.video.width, self.config.video.height, 80,
-            ).await {
+              &page,
+              video_path,
+              self.config.video.width,
+              self.config.video.height,
+              80,
+            )
+            .await
+            {
               Ok(h) => Some(VideoHandle::Eager(h)),
-              Err(e) => { tracing::warn!(target: "ferridriver::worker", "video start failed: {e}"); None }
+              Err(e) => {
+                tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+                None
+              },
             }
-          }
+          },
           crate::config::VideoMode::RetainOnFailure => {
             match ferridriver::video::start_buffered_recording(
-              &page, self.config.video.width, self.config.video.height, 80,
-            ).await {
+              &page,
+              self.config.video.width,
+              self.config.video.height,
+              80,
+            )
+            .await
+            {
               Ok(h) => Some(VideoHandle::Buffered(h)),
-              Err(e) => { tracing::warn!(target: "ferridriver::worker", "video start failed: {e}"); None }
+              Err(e) => {
+                tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+                None
+              },
             }
-          }
+          },
         };
 
         // ── beforeEach hooks ──
@@ -538,36 +568,41 @@ impl Worker {
         // ── Stop video recording (before context close, page session must be alive) ──
         let test_failed = r.as_ref().is_err() || r.as_ref().is_ok_and(|r| r.is_err());
         let video_path = match video_handle {
-          Some(VideoHandle::Eager(handle)) => {
-            match handle.stop(&page).await {
-              Ok(path) => Some(path),
-              Err(e) => { tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}"); None }
-            }
-          }
+          Some(VideoHandle::Eager(handle)) => match handle.stop(&page).await {
+            Ok(path) => Some(path),
+            Err(e) => {
+              tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}");
+              None
+            },
+          },
           Some(VideoHandle::Buffered(handle)) => {
             if test_failed {
               // Test failed — encode the buffered frames to a video file.
               let ext = ferridriver::video::video_extension();
-              let video_path = test_info.output_dir.join(format!(
-                "{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt
-              ));
+              let video_path =
+                test_info
+                  .output_dir
+                  .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
               let _ = std::fs::create_dir_all(&test_info.output_dir);
               match handle.encode(&page, video_path).await {
                 Ok(path) => Some(path),
-                Err(e) => { tracing::warn!(target: "ferridriver::worker", "video encode failed: {e}"); None }
+                Err(e) => {
+                  tracing::warn!(target: "ferridriver::worker", "video encode failed: {e}");
+                  None
+                },
               }
             } else {
               // Test passed — discard frames, no encoding cost.
               handle.discard(&page).await;
               None
             }
-          }
+          },
           None => None,
         };
 
         let _ = ctx.close().await;
         (r, screenshot, video_path)
-      }
+      },
       Err(e) => {
         let _ = ctx.close().await;
         (
@@ -580,7 +615,7 @@ impl Worker {
           None,
           None,
         )
-      }
+      },
     };
 
     let duration = start.elapsed();
@@ -602,7 +637,7 @@ impl Worker {
           failure.screenshot = screenshot;
         }
         (TestStatus::Failed, Some(failure))
-      }
+      },
       Err(_) => (
         TestStatus::TimedOut,
         Some(TestFailure {
@@ -616,9 +651,7 @@ impl Worker {
 
     // Expected failure inversion (test.fail() annotation).
     let (status, error) = match (&raw_status, &test.expected_status) {
-      (TestStatus::Failed | TestStatus::TimedOut, ExpectedStatus::Fail) => {
-        (TestStatus::Passed, None)
-      }
+      (TestStatus::Failed | TestStatus::TimedOut, ExpectedStatus::Fail) => (TestStatus::Passed, None),
       (TestStatus::Passed, ExpectedStatus::Fail) => (
         TestStatus::Failed,
         Some(TestFailure {
@@ -676,10 +709,8 @@ impl Worker {
           ));
           // Offload file write to blocking thread so the async worker isn't stalled.
           let write_path = trace_path.clone();
-          let write_result = tokio::task::spawn_blocking(move || {
-            crate::tracing::write_trace_file(&write_path, &zip_bytes)
-          })
-          .await;
+          let write_result =
+            tokio::task::spawn_blocking(move || crate::tracing::write_trace_file(&write_path, &zip_bytes)).await;
           match write_result {
             Ok(Ok(())) => {
               attachments.push(Attachment {
@@ -687,11 +718,11 @@ impl Worker {
                 content_type: "application/zip".into(),
                 body: AttachmentBody::Path(trace_path),
               });
-            }
+            },
             Ok(Err(e)) => tracing::warn!(target: "ferridriver::worker", "trace write failed: {e}"),
             Err(e) => tracing::warn!(target: "ferridriver::worker", "trace task panicked: {e}"),
           }
-        }
+        },
         Err(e) => tracing::warn!(target: "ferridriver::worker", "trace serialize failed: {e}"),
       }
     }
@@ -759,7 +790,16 @@ impl Worker {
 
 /// Sanitize a test name for use as a filename.
 fn sanitize_filename(name: &str) -> String {
-  name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
+  name
+    .chars()
+    .map(|c| {
+      if c.is_alphanumeric() || c == '-' || c == '_' {
+        c
+      } else {
+        '_'
+      }
+    })
+    .collect()
 }
 
 async fn capture_screenshot(page: &ferridriver::Page) -> Option<Vec<u8>> {

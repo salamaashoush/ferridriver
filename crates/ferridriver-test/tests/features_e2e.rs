@@ -7,8 +7,8 @@
 //! - SuiteMode (parallel/serial)
 //! - repeatEach
 
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
 use ferridriver_test::config::{CliOverrides, TestConfig};
@@ -24,7 +24,7 @@ fn data_url(html: &str) -> String {
       .map(|b| match b {
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
           (b as char).to_string()
-        }
+        },
         _ => format!("%{b:02X}"),
       })
       .collect::<String>()
@@ -130,51 +130,90 @@ fn make_matchers_test() -> TestCase {
         page.goto(&url, None).await.map_err(make_failure)?;
 
         // Visibility
-        ferridriver_test::expect(&page.locator("#visible")).to_be_visible().await?;
-        ferridriver_test::expect(&page.locator("#hidden")).to_be_hidden().await?;
-        ferridriver_test::expect(&page.locator("#visible")).not().to_be_hidden().await?;
+        ferridriver_test::expect(&page.locator("#visible"))
+          .to_be_visible()
+          .await?;
+        ferridriver_test::expect(&page.locator("#hidden"))
+          .to_be_hidden()
+          .await?;
+        ferridriver_test::expect(&page.locator("#visible"))
+          .not()
+          .to_be_hidden()
+          .await?;
 
         // Enabled/Disabled
         ferridriver_test::expect(&page.locator("#btn")).to_be_disabled().await?;
         ferridriver_test::expect(&page.locator("#inp")).to_be_enabled().await?;
 
         // Checked
-        ferridriver_test::expect(&page.locator("#check")).to_be_checked().await?;
+        ferridriver_test::expect(&page.locator("#check"))
+          .to_be_checked()
+          .await?;
 
         // Editable
-        ferridriver_test::expect(&page.locator("#area")).to_be_editable().await?;
+        ferridriver_test::expect(&page.locator("#area"))
+          .to_be_editable()
+          .await?;
 
         // Attached
-        ferridriver_test::expect(&page.locator("#visible")).to_be_attached().await?;
+        ferridriver_test::expect(&page.locator("#visible"))
+          .to_be_attached()
+          .await?;
 
         // Empty
         ferridriver_test::expect(&page.locator("#empty")).to_be_empty().await?;
-        ferridriver_test::expect(&page.locator("#visible")).not().to_be_empty().await?;
+        ferridriver_test::expect(&page.locator("#visible"))
+          .not()
+          .to_be_empty()
+          .await?;
 
         // Text
-        ferridriver_test::expect(&page.locator("#visible")).to_have_text("Visible").await?;
-        ferridriver_test::expect(&page.locator("#btn")).to_contain_text("Submit").await?;
+        ferridriver_test::expect(&page.locator("#visible"))
+          .to_have_text("Visible")
+          .await?;
+        ferridriver_test::expect(&page.locator("#btn"))
+          .to_contain_text("Submit")
+          .await?;
 
         // Value
-        ferridriver_test::expect(&page.locator("#inp")).to_have_value("hello").await?;
+        ferridriver_test::expect(&page.locator("#inp"))
+          .to_have_value("hello")
+          .await?;
 
         // Attribute
-        ferridriver_test::expect(&page.locator("#inp")).to_have_attribute("type", "text").await?;
+        ferridriver_test::expect(&page.locator("#inp"))
+          .to_have_attribute("type", "text")
+          .await?;
 
         // Class
-        ferridriver_test::expect(&page.locator("#btn")).to_have_class("primary large").await?;
-        ferridriver_test::expect(&page.locator("#btn")).to_contain_class("primary").await?;
-        ferridriver_test::expect(&page.locator("#btn")).to_contain_class("large").await?;
-        ferridriver_test::expect(&page.locator("#btn")).not().to_contain_class("secondary").await?;
+        ferridriver_test::expect(&page.locator("#btn"))
+          .to_have_class("primary large")
+          .await?;
+        ferridriver_test::expect(&page.locator("#btn"))
+          .to_contain_class("primary")
+          .await?;
+        ferridriver_test::expect(&page.locator("#btn"))
+          .to_contain_class("large")
+          .await?;
+        ferridriver_test::expect(&page.locator("#btn"))
+          .not()
+          .to_contain_class("secondary")
+          .await?;
 
         // ID
-        ferridriver_test::expect(&page.locator("#btn")).to_have_id("btn").await?;
+        ferridriver_test::expect(&page.locator("#btn"))
+          .to_have_id("btn")
+          .await?;
 
         // Role
-        ferridriver_test::expect(&page.locator("#btn")).to_have_role("button").await?;
+        ferridriver_test::expect(&page.locator("#btn"))
+          .to_have_role("button")
+          .await?;
 
         // Accessible name
-        ferridriver_test::expect(&page.locator("#btn")).to_have_accessible_name("Submit Form").await?;
+        ferridriver_test::expect(&page.locator("#btn"))
+          .to_have_accessible_name("Submit Form")
+          .await?;
 
         // Accessible description
         ferridriver_test::expect(&page.locator("#btn"))
@@ -185,7 +224,9 @@ fn make_matchers_test() -> TestCase {
         ferridriver_test::expect(&page.locator("div")).to_have_count(4).await?;
 
         // CSS
-        ferridriver_test::expect(&page.locator("#styled")).to_have_css("color", "rgb(255, 0, 0)").await?;
+        ferridriver_test::expect(&page.locator("#styled"))
+          .to_have_css("color", "rgb(255, 0, 0)")
+          .await?;
 
         // JS property
         ferridriver_test::expect(&page.locator("#inp"))
@@ -401,8 +442,13 @@ fn make_page_assertions_test() -> TestCase {
         page.goto(&url, None).await.map_err(make_failure)?;
 
         ferridriver_test::expect(&*page).to_have_title("My Title").await?;
-        ferridriver_test::expect(&*page).not().to_have_title("Wrong Title").await?;
-        ferridriver_test::expect(&*page).to_have_url(regex::Regex::new("^data:").unwrap()).await?;
+        ferridriver_test::expect(&*page)
+          .not()
+          .to_have_title("Wrong Title")
+          .await?;
+        ferridriver_test::expect(&*page)
+          .to_have_url(regex::Regex::new("^data:").unwrap())
+          .await?;
 
         Ok(())
       })

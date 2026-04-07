@@ -98,5 +98,7 @@ async fn within_seconds(world: &mut BrowserWorld, timeout_secs: String, inner_st
         .await
         .map_err(|e| TestFailure::from(e.message))
     }
-  }).await.map_err(to_step_err)?;
+  })
+  .await
+  .map_err(to_step_err)?;
 }

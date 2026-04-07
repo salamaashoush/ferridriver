@@ -2,10 +2,7 @@ use leptos::prelude::*;
 
 /// A counter component with increment/decrement buttons.
 #[component]
-pub fn Counter(
-  #[prop(default = 0)]
-  initial: i32,
-) -> impl IntoView {
+pub fn Counter(#[prop(default = 0)] initial: i32) -> impl IntoView {
   let (count, set_count) = signal(initial);
 
   view! {

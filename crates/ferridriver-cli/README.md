@@ -1,6 +1,6 @@
 # ferridriver-cli
 
-MCP (Model Context Protocol) server for AI-powered browser automation. Provides 25 tools for navigating, interacting with, and extracting content from web pages.
+MCP (Model Context Protocol) server for AI-powered browser automation. Provides browser tools for navigating, interacting with, and extracting content from web pages.
 
 ## Installation
 
@@ -23,9 +23,10 @@ Add to your MCP client configuration (Claude Desktop, Cursor, etc.):
 }
 ```
 
-## Tools (25)
+## Tools
 
 ### Navigation
+- **connect** -- attach to a running Chrome (debugger URL or `auto_discover`)
 - **navigate** -- go to URL
 - **page** -- manage pages/sessions (back, forward, reload, new, close, select, list, close_browser)
 
@@ -38,6 +39,7 @@ Add to your MCP client configuration (Claude Desktop, Cursor, etc.):
 - **evaluate** -- run JavaScript
 - **wait_for** -- wait for selector or text
 - **search_page** -- grep-like text search with context
+- **find_elements** -- list elements matching a CSS or rich selector
 - **get_markdown** -- extract page as clean markdown
 
 ### State
@@ -45,10 +47,6 @@ Add to your MCP client configuration (Claude Desktop, Cursor, etc.):
 - **storage** -- get/set/list/clear localStorage
 - **emulate** -- viewport, user agent, geolocation, network conditions
 - **diagnostics** -- console messages, network requests, performance tracing
-
-### BDD
-- **list_steps** -- list all 58 available Gherkin step definitions
-- **run_scenario** -- execute a Gherkin scenario with Given/When/Then steps
 
 ## Sessions
 

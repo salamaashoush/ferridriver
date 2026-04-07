@@ -21,7 +21,7 @@ fn data_url(html: &str) -> String {
       .map(|b| match b {
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
           (b as char).to_string()
-        }
+        },
         _ => format!("%{b:02X}"),
       })
       .collect::<String>()
@@ -280,7 +280,9 @@ fn make_skip_test() -> TestCase {
       })
     }),
     fixture_requests: vec![],
-    annotations: vec![TestAnnotation::Skip { reason: Some("testing skip".into()) }],
+    annotations: vec![TestAnnotation::Skip {
+      reason: Some("testing skip".into()),
+    }],
     timeout: None,
     retries: None,
     expected_status: ExpectedStatus::Pass,

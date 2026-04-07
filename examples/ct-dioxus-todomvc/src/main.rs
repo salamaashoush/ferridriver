@@ -26,11 +26,16 @@ fn App() -> Element {
   let mut next_id = use_signal(|| 1u32);
   let mut new_title = use_signal(String::new);
 
-  let filtered: Vec<Todo> = todos.read().iter().filter(|t| match *filter.read() {
-    Filter::All => true,
-    Filter::Active => !t.completed,
-    Filter::Completed => t.completed,
-  }).cloned().collect();
+  let filtered: Vec<Todo> = todos
+    .read()
+    .iter()
+    .filter(|t| match *filter.read() {
+      Filter::All => true,
+      Filter::Active => !t.completed,
+      Filter::Completed => t.completed,
+    })
+    .cloned()
+    .collect();
 
   let active_count = todos.read().iter().filter(|t| !t.completed).count();
   let completed_count = todos.read().iter().filter(|t| t.completed).count();

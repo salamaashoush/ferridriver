@@ -27,11 +27,11 @@ impl Reporter for BddJunitReporter {
     match event {
       ReporterEvent::TestFinished { outcome, .. } => {
         self.results.push(outcome.clone());
-      }
+      },
       ReporterEvent::RunFinished { duration, .. } => {
         self.total_duration_ms = duration.as_millis() as u64;
-      }
-      _ => {}
+      },
+      _ => {},
     }
   }
 
@@ -40,7 +40,11 @@ impl Reporter for BddJunitReporter {
 
     let mut suites: rustc_hash::FxHashMap<String, Vec<&TestOutcome>> = rustc_hash::FxHashMap::default();
     for result in &self.results {
-      let suite = result.test_id.suite.clone().unwrap_or_else(|| result.test_id.file.clone());
+      let suite = result
+        .test_id
+        .suite
+        .clone()
+        .unwrap_or_else(|| result.test_id.file.clone());
       suites.entry(suite).or_default().push(result);
     }
 
@@ -92,11 +96,11 @@ impl Reporter for BddJunitReporter {
           TestStatus::Failed | TestStatus::TimedOut => {
             let msg = test.error.as_ref().map(|e| escape_xml(&e.message)).unwrap_or_default();
             writeln!(xml, r#"      <failure message="{msg}">{msg}</failure>"#).ok();
-          }
+          },
           TestStatus::Skipped => {
             writeln!(xml, r#"      <skipped />"#).ok();
-          }
-          _ => {}
+          },
+          _ => {},
         }
 
         let user_steps: Vec<&TestStep> = test.steps.iter().filter(|s| s.category.is_visible()).collect();

@@ -37,7 +37,7 @@
   clippy::semicolon_if_nothing_returned,
   clippy::option_map_or_none,
   clippy::single_match_else,
-  clippy::manual_let_else,
+  clippy::manual_let_else
 )]
 
 mod api_request;

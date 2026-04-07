@@ -58,7 +58,7 @@
   clippy::verbose_file_reads,
   clippy::if_not_else,
   clippy::implicit_hasher,
-  clippy::stable_sort_primitive,
+  clippy::stable_sort_primitive
 )]
 //! ferridriver-test -- High-performance E2E test runner for browser automation.
 //!
@@ -90,10 +90,11 @@
 pub mod config;
 pub mod ct;
 pub mod discovery;
-pub mod logging;
 pub mod dispatcher;
 pub mod expect;
 pub mod fixture;
+pub mod interactive;
+pub mod logging;
 pub mod model;
 pub mod reporter;
 pub mod retry;
@@ -104,17 +105,16 @@ pub mod tracing;
 pub mod tui;
 pub mod tui_reporter;
 pub mod watch;
-pub mod interactive;
 pub mod worker;
 
 // -- Re-exports --
 pub use config::{CliOverrides, RunMode, TestConfig};
 pub use discovery::TestRegistration;
-pub use expect::{expect, expect_configured, expect_poll, to_pass, to_pass_with_options, ToPassOptions};
+pub use expect::{ToPassOptions, expect, expect_configured, expect_poll, to_pass, to_pass_with_options};
 pub use fixture::FixturePool;
 pub use model::{
-  SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId, TestInfo, TestOutcome, TestPlan,
-  TestStatus, TestStep,
+  SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId, TestInfo, TestOutcome, TestPlan, TestStatus,
+  TestStep,
 };
 pub use reporter::{EventBus, EventBusBuilder, Reporter, ReporterDriver, ReporterEvent, ReporterSet, Subscription};
 pub use runner::TestRunner;
@@ -196,7 +196,9 @@ fn parse_cli_args() -> CliOverrides {
         if let Some(v) = args.get(i) {
           // SAFETY: single-threaded before runner starts
           #[allow(unused_unsafe)]
-          unsafe { std::env::set_var("FERRIDRIVER_TIMEOUT", v); }
+          unsafe {
+            std::env::set_var("FERRIDRIVER_TIMEOUT", v);
+          }
         }
       },
       "--backend" => {
@@ -204,7 +206,9 @@ fn parse_cli_args() -> CliOverrides {
         if let Some(v) = args.get(i) {
           // SAFETY: single-threaded before runner starts
           #[allow(unused_unsafe)]
-          unsafe { std::env::set_var("FERRIDRIVER_BACKEND", v); }
+          unsafe {
+            std::env::set_var("FERRIDRIVER_BACKEND", v);
+          }
         }
       },
       "--grep" | "-g" => {

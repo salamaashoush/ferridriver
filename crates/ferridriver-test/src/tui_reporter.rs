@@ -6,7 +6,7 @@
 use tokio::sync::mpsc;
 
 use crate::config::RunMode;
-use crate::model::{TestStatus};
+use crate::model::TestStatus;
 use crate::reporter::ReporterEvent;
 use crate::tui::{EntryStatus, TestEntry, TuiMessage};
 
@@ -44,7 +44,10 @@ impl TuiReporter {
 impl crate::reporter::Reporter for TuiReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
     match event {
-      ReporterEvent::RunStarted { total_tests, num_workers } => {
+      ReporterEvent::RunStarted {
+        total_tests,
+        num_workers,
+      } => {
         // We don't have the test names yet at RunStarted — they arrive via TestStarted.
         // Pre-populate with placeholders that will be updated.
         self.pending_names.clear();
@@ -53,12 +56,12 @@ impl crate::reporter::Reporter for TuiReporter {
           workers: *num_workers,
           names: Vec::new(), // Empty — tests will appear as they start.
         });
-      }
+      },
 
       ReporterEvent::TestStarted { test_id, .. } => {
         let name = self.display_name(test_id);
         self.send(TuiMessage::TestStarted { name });
-      }
+      },
 
       ReporterEvent::StepStarted(step) => {
         if step.category.is_visible() || self.mode == RunMode::Bdd {
@@ -70,12 +73,16 @@ impl crate::reporter::Reporter for TuiReporter {
             duration_ms: None,
           });
         }
-      }
+      },
 
       ReporterEvent::StepFinished(step) => {
         if step.category.is_visible() || self.mode == RunMode::Bdd {
           let test_name = self.display_name(&step.test_id);
-          let status = if step.error.is_some() { EntryStatus::Failed } else { EntryStatus::Passed };
+          let status = if step.error.is_some() {
+            EntryStatus::Failed
+          } else {
+            EntryStatus::Passed
+          };
           self.send(TuiMessage::StepUpdate {
             test_name,
             step_title: step.title.clone(),
@@ -83,7 +90,7 @@ impl crate::reporter::Reporter for TuiReporter {
             duration_ms: Some(step.duration.as_millis() as u64),
           });
         }
-      }
+      },
 
       ReporterEvent::TestFinished { test_id, outcome } => {
         let name = self.display_name(test_id);
@@ -100,9 +107,16 @@ impl crate::reporter::Reporter for TuiReporter {
           duration: outcome.duration,
           error: outcome.error.as_ref().map(|e| e.message.clone()),
         });
-      }
+      },
 
-      ReporterEvent::RunFinished { passed, failed, skipped, flaky, duration, .. } => {
+      ReporterEvent::RunFinished {
+        passed,
+        failed,
+        skipped,
+        flaky,
+        duration,
+        ..
+      } => {
         self.send(TuiMessage::RunFinished {
           passed: *passed,
           failed: *failed,
@@ -110,9 +124,9 @@ impl crate::reporter::Reporter for TuiReporter {
           flaky: *flaky,
           duration: *duration,
         });
-      }
+      },
 
-      _ => {}
+      _ => {},
     }
   }
 

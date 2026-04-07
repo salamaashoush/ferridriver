@@ -206,9 +206,7 @@ pub async fn suggest_selectors(page: &AnyPage) -> Vec<String> {
 pub async fn check_click_guard(element: &AnyElement, _page: &AnyPage) -> Result<(), ClickGuardError> {
   // Single CDP roundtrip: call_js_fn_value returns the guard value directly
   let guard = element
-    .call_js_fn_value(
-      "function() { return window.__fd ? window.__fd.clickGuard(this) : ''; }",
-    )
+    .call_js_fn_value("function() { return window.__fd ? window.__fd.clickGuard(this) : ''; }")
     .await
     .ok()
     .flatten()
@@ -534,9 +532,7 @@ pub async fn select_option(element: &AnyElement, _page: &AnyPage, target: &str) 
 pub async fn get_dropdown_options(element: &AnyElement, _page: &AnyPage) -> Result<Vec<DropdownOption>, String> {
   // Single CDP roundtrip: call_js_fn_value returns JSON result directly
   let result_json = element
-    .call_js_fn_value(
-      "function() { return JSON.stringify(window.__fd.getOptions(this)); }",
-    )
+    .call_js_fn_value("function() { return JSON.stringify(window.__fd.getOptions(this)); }")
     .await
     .ok()
     .flatten()

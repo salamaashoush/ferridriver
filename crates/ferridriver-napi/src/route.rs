@@ -51,11 +51,7 @@ impl Route {
   /// The URL of the intercepted request.
   #[napi(getter)]
   pub fn url(&self) -> String {
-    self
-      .inner
-      .as_ref()
-      .map(|r| r.request().url.clone())
-      .unwrap_or_default()
+    self.inner.as_ref().map(|r| r.request().url.clone()).unwrap_or_default()
   }
 
   /// The HTTP method of the intercepted request.

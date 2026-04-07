@@ -27,16 +27,32 @@ impl Default for ProgressReporter {
   }
 }
 
-fn s_pass() -> Style { Style::new().green() }
-fn s_fail() -> Style { Style::new().red().bold() }
-fn s_skip() -> Style { Style::new().dim() }
-fn s_flaky() -> Style { Style::new().yellow() }
-fn s_bold() -> Style { Style::new().bold() }
-fn s_dim() -> Style { Style::new().dim() }
+fn s_pass() -> Style {
+  Style::new().green()
+}
+fn s_fail() -> Style {
+  Style::new().red().bold()
+}
+fn s_skip() -> Style {
+  Style::new().dim()
+}
+fn s_flaky() -> Style {
+  Style::new().yellow()
+}
+fn s_bold() -> Style {
+  Style::new().bold()
+}
+fn s_dim() -> Style {
+  Style::new().dim()
+}
 
 fn format_duration(d: Duration) -> String {
   let ms = d.as_millis();
-  if ms < 1000 { format!("{ms}ms") } else { format!("{:.1}s", d.as_secs_f64()) }
+  if ms < 1000 {
+    format!("{ms}ms")
+  } else {
+    format!("{:.1}s", d.as_secs_f64())
+  }
 }
 
 #[async_trait::async_trait]
@@ -57,8 +73,15 @@ impl Reporter for ProgressReporter {
           println!();
         }
         let _ = std::io::stdout().flush();
-      }
-      ReporterEvent::RunFinished { total, passed, failed, skipped, flaky, duration } => {
+      },
+      ReporterEvent::RunFinished {
+        total,
+        passed,
+        failed,
+        skipped,
+        flaky,
+        duration,
+      } => {
         if self.count % 80 != 0 {
           println!();
         }
@@ -79,15 +102,16 @@ impl Reporter for ProgressReporter {
           parts.push(format!("{}", s_skip().apply_to(format!("{skipped} skipped"))));
         }
 
-        println!("{} {}: {} {}",
+        println!(
+          "{} {}: {} {}",
           s_bold().apply_to("Tests"),
           s_dim().apply_to(format!("{total} total")),
           parts.join(&format!("{}", s_dim().apply_to(" | "))),
           s_dim().apply_to(format!("({dur})")),
         );
         println!();
-      }
-      _ => {}
+      },
+      _ => {},
     }
   }
 }

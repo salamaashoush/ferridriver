@@ -102,7 +102,11 @@ impl super::transport::CdpTransport for PipeTransport {
     params: serde_json::Value,
   ) -> Result<serde_json::Value, String> {
     let (data, rx) = self.dispatcher.build_command(session_id, method, &params)?;
-    self.write_tx.send(data).await.map_err(|_| "Pipe writer closed".to_string())?;
+    self
+      .write_tx
+      .send(data)
+      .await
+      .map_err(|_| "Pipe writer closed".to_string())?;
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => Err(format!("Response channel dropped for {method}")),
@@ -141,8 +145,7 @@ fn spawn_with_pipes(
 ) -> Result<(tokio::process::Child, BoxReader, BoxWriter), String> {
   use std::os::unix::io::IntoRawFd;
 
-  let (parent_sock, child_sock) =
-    std::os::unix::net::UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+  let (parent_sock, child_sock) = std::os::unix::net::UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
   let child_fd = child_sock.into_raw_fd();
 
   #[allow(unsafe_code)]
@@ -172,8 +175,7 @@ fn spawn_with_pipes(
   parent_sock
     .set_nonblocking(true)
     .map_err(|e| format!("set_nonblocking: {e}"))?;
-  let stream =
-    tokio::net::UnixStream::from_std(parent_sock).map_err(|e| format!("tokio stream: {e}"))?;
+  let stream = tokio::net::UnixStream::from_std(parent_sock).map_err(|e| format!("tokio stream: {e}"))?;
   let (reader, writer) = tokio::io::split(stream);
   Ok((child, Box::new(reader) as BoxReader, Box::new(writer) as BoxWriter))
 }
@@ -196,7 +198,10 @@ fn spawn_with_pipes(
 
   fn to_wide(s: &str) -> Vec<u16> {
     use std::os::windows::ffi::OsStrExt;
-    std::ffi::OsStr::new(s).encode_wide().chain(std::iter::once(0)).collect()
+    std::ffi::OsStr::new(s)
+      .encode_wide()
+      .chain(std::iter::once(0))
+      .collect()
   }
 
   unsafe {
@@ -215,7 +220,11 @@ fn spawn_with_pipes(
       to_wide(&pipe_in_name).as_ptr(),
       PIPE_ACCESS_OUTBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
       PIPE_TYPE_BYTE | PIPE_WAIT,
-      1, 65536, 65536, 0, ptr::null_mut(),
+      1,
+      65536,
+      65536,
+      0,
+      ptr::null_mut(),
     );
     if server_in == INVALID_HANDLE_VALUE {
       return Err("CreateNamedPipe failed for input pipe".into());
@@ -225,7 +234,11 @@ fn spawn_with_pipes(
       to_wide(&pipe_out_name).as_ptr(),
       PIPE_ACCESS_INBOUND | FILE_FLAG_OVERLAPPED | FILE_FLAG_FIRST_PIPE_INSTANCE,
       PIPE_TYPE_BYTE | PIPE_WAIT,
-      1, 65536, 65536, 0, ptr::null_mut(),
+      1,
+      65536,
+      65536,
+      0,
+      ptr::null_mut(),
     );
     if server_out == INVALID_HANDLE_VALUE {
       CloseHandle(server_in);
@@ -234,7 +247,12 @@ fn spawn_with_pipes(
 
     let client_in = CreateFileW(
       to_wide(&pipe_in_name).as_ptr(),
-      GENERIC_READ, 0, &sa as *const SECURITY_ATTRIBUTES, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0 as HANDLE,
+      GENERIC_READ,
+      0,
+      &sa as *const SECURITY_ATTRIBUTES,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL,
+      0 as HANDLE,
     );
     if client_in == INVALID_HANDLE_VALUE {
       CloseHandle(server_in);
@@ -244,7 +262,12 @@ fn spawn_with_pipes(
 
     let client_out = CreateFileW(
       to_wide(&pipe_out_name).as_ptr(),
-      GENERIC_WRITE, 0, &sa as *const SECURITY_ATTRIBUTES, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, 0 as HANDLE,
+      GENERIC_WRITE,
+      0,
+      &sa as *const SECURITY_ATTRIBUTES,
+      OPEN_EXISTING,
+      FILE_ATTRIBUTE_NORMAL,
+      0 as HANDLE,
     );
     if client_out == INVALID_HANDLE_VALUE {
       CloseHandle(server_in);
@@ -258,20 +281,16 @@ fn spawn_with_pipes(
       client_in as u32, client_out as u32,
     ));
 
-    let child = command
-      .spawn()
-      .map_err(|e| format!("Failed to launch Chrome: {e}"))?;
+    let child = command.spawn().map_err(|e| format!("Failed to launch Chrome: {e}"))?;
 
     CloseHandle(client_in);
     CloseHandle(client_out);
 
-    let reader = tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
-      server_out as RawHandle,
-    ).map_err(|e| format!("tokio NamedPipeServer (read): {e}"))?;
+    let reader = tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(server_out as RawHandle)
+      .map_err(|e| format!("tokio NamedPipeServer (read): {e}"))?;
 
-    let writer = tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(
-      server_in as RawHandle,
-    ).map_err(|e| format!("tokio NamedPipeServer (write): {e}"))?;
+    let writer = tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(server_in as RawHandle)
+      .map_err(|e| format!("tokio NamedPipeServer (write): {e}"))?;
 
     Ok((child, Box::new(reader) as BoxReader, Box::new(writer) as BoxWriter))
   }

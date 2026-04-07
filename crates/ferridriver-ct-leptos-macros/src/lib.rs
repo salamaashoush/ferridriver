@@ -22,7 +22,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, ItemFn, ReturnType};
+use syn::{ItemFn, ReturnType, parse_macro_input};
 
 #[proc_macro_attribute]
 pub fn component_test(_attr: TokenStream, item: TokenStream) -> TokenStream {

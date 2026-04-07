@@ -174,7 +174,10 @@ impl WebKitPage {
   ///
   /// Returns an error if the navigation IPC call fails or the page fails to load.
   pub async fn goto(
-    &self, url: &str, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64,
+    &self,
+    url: &str,
+    _lifecycle: crate::backend::NavLifecycle,
+    _timeout_ms: u64,
   ) -> Result<(), String> {
     // WebKit backend: WKWebView navigation delegate fires on load complete.
     // Lifecycle granularity (commit vs domcontentloaded vs load) is not
@@ -191,27 +194,21 @@ impl WebKitPage {
     Self::ok(r)
   }
 
-  pub async fn reload(
-    &self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn reload(&self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64) -> Result<(), String> {
     let r = self.client.send_vid(Op::Reload, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
     Self::ok(r2)
   }
 
-  pub async fn go_back(
-    &self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn go_back(&self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64) -> Result<(), String> {
     let r = self.client.send_vid(Op::GoBack, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
     Self::ok(r2)
   }
 
-  pub async fn go_forward(
-    &self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn go_forward(&self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64) -> Result<(), String> {
     let r = self.client.send_vid(Op::GoForward, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
@@ -420,7 +417,13 @@ impl WebKitPage {
     }
 
     // Take full page screenshot
-    let full_png = self.screenshot(ScreenshotOpts { format: fmt, quality: None, full_page: false }).await?;
+    let full_png = self
+      .screenshot(ScreenshotOpts {
+        format: fmt,
+        quality: None,
+        full_page: false,
+      })
+      .await?;
 
     // Crop to element bounds using JS Canvas API (avoids needing image crate dependency)
     // Encode full screenshot as base64, crop in JS, return cropped base64
@@ -1273,9 +1276,9 @@ impl WebKitPage {
                 let route_obj = crate::route::Route::new(intercepted, tx);
                 (route.handler)(route_obj);
                 // Block to receive the action (WebKit handler is sync).
-                let action = rx.blocking_recv().unwrap_or(
-                  crate::route::RouteAction::Continue(crate::route::ContinueOverrides::default()),
-                );
+                let action = rx.blocking_recv().unwrap_or(crate::route::RouteAction::Continue(
+                  crate::route::ContinueOverrides::default(),
+                ));
                 return match action {
                   crate::route::RouteAction::Fulfill(resp) => {
                     let body_str = String::from_utf8_lossy(&resp.body).to_string();
@@ -1409,7 +1412,14 @@ impl WebKitElement {
   }
 
   /// Send a native mouse event for this element's view.
-  async fn send_mouse(&self, mouse_type: u8, button: u8, click_count: u32, pos_x: f64, pos_y: f64) -> Result<(), String> {
+  async fn send_mouse(
+    &self,
+    mouse_type: u8,
+    button: u8,
+    click_count: u32,
+    pos_x: f64,
+    pos_y: f64,
+  ) -> Result<(), String> {
     let mut payload = Vec::with_capacity(27);
     payload.push(mouse_type);
     payload.push(button);

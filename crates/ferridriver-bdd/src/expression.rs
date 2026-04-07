@@ -59,8 +59,8 @@ pub fn compile_with_custom(
   custom_types: &ParameterTypeRegistry,
 ) -> Result<CompiledExpression, String> {
   // Parse the expression AST to extract parameter types and IDs.
-  let parsed = Expression::parse(expression)
-    .map_err(|e| format!("invalid cucumber expression \"{expression}\": {e}"))?;
+  let parsed =
+    Expression::parse(expression).map_err(|e| format!("invalid cucumber expression \"{expression}\": {e}"))?;
 
   let mut param_infos = Vec::new();
   extract_param_types(&parsed, custom_types, &mut param_infos);
@@ -99,11 +99,14 @@ pub fn compile_with_custom(
           .map_err(|e| format!("failed to compile processed expression \"{processed}\": {e}"))
       })?
   } else {
-    Expression::regex(expression)
-      .map_err(|e| format!("failed to compile expression \"{expression}\": {e}"))?
+    Expression::regex(expression).map_err(|e| format!("failed to compile expression \"{expression}\": {e}"))?
   };
 
-  Ok(CompiledExpression { regex, param_types, param_infos })
+  Ok(CompiledExpression {
+    regex,
+    param_types,
+    param_infos,
+  })
 }
 
 fn extract_param_types(
@@ -126,7 +129,7 @@ fn extract_param_types(
           } else {
             ParamType::Anonymous
           }
-        }
+        },
       };
       params.push(ParamInfo { ty, id: p.id });
     }
@@ -185,42 +188,30 @@ pub fn extract_params_with_custom(
           .unwrap_or("");
         positional_index += 2;
         StepParam::String(cap.to_string())
-      }
+      },
       ParamType::Int => {
-        let cap = captures
-          .get(positional_index)
-          .map(|m| m.as_str())
-          .unwrap_or("");
+        let cap = captures.get(positional_index).map(|m| m.as_str()).unwrap_or("");
         positional_index += 1;
         let val = cap
           .parse::<i64>()
           .map_err(|e| format!("failed to parse int param \"{cap}\": {e}"))?;
         StepParam::Int(val)
-      }
+      },
       ParamType::Float => {
-        let cap = captures
-          .get(positional_index)
-          .map(|m| m.as_str())
-          .unwrap_or("");
+        let cap = captures.get(positional_index).map(|m| m.as_str()).unwrap_or("");
         positional_index += 1;
         let val = cap
           .parse::<f64>()
           .map_err(|e| format!("failed to parse float param \"{cap}\": {e}"))?;
         StepParam::Float(val)
-      }
+      },
       ParamType::Word | ParamType::Anonymous => {
-        let cap = captures
-          .get(positional_index)
-          .map(|m| m.as_str())
-          .unwrap_or("");
+        let cap = captures.get(positional_index).map(|m| m.as_str()).unwrap_or("");
         positional_index += 1;
         StepParam::Word(cap.to_string())
-      }
+      },
       ParamType::Custom(name) => {
-        let cap = captures
-          .get(positional_index)
-          .map(|m| m.as_str())
-          .unwrap_or("");
+        let cap = captures.get(positional_index).map(|m| m.as_str()).unwrap_or("");
         positional_index += 1;
         // If a transformer is registered, use it; otherwise return Custom variant.
         if let Some(registry) = custom_types {
@@ -228,15 +219,24 @@ pub fn extract_params_with_custom(
             if let Some(ref transformer) = custom.transformer {
               transformer(cap)
             } else {
-              StepParam::Custom { type_name: name.clone(), value: cap.to_string() }
+              StepParam::Custom {
+                type_name: name.clone(),
+                value: cap.to_string(),
+              }
             }
           } else {
-            StepParam::Custom { type_name: name.clone(), value: cap.to_string() }
+            StepParam::Custom {
+              type_name: name.clone(),
+              value: cap.to_string(),
+            }
           }
         } else {
-          StepParam::Custom { type_name: name.clone(), value: cap.to_string() }
+          StepParam::Custom {
+            type_name: name.clone(),
+            value: cap.to_string(),
+          }
         }
-      }
+      },
     };
 
     params.push(param);

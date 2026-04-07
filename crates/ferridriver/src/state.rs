@@ -224,10 +224,7 @@ impl BrowserState {
     // Check if the instance resolver can provide a connection mode.
     // This lets consumers route specific instances to existing browsers
     // (e.g. "staging" -> connect to browser managed by another tool).
-    let resolved_mode = self
-      .instance_resolver_fn
-      .as_ref()
-      .and_then(|f| f(instance_name));
+    let resolved_mode = self.instance_resolver_fn.as_ref().and_then(|f| f(instance_name));
 
     // Build flags: base + per-instance
     let mut all_extra = self.extra_args.clone();
@@ -281,7 +278,10 @@ impl BrowserState {
     // Adopt existing pages into the "default" context of this instance.
     // When connecting to an existing browser, skip viewport override to preserve
     // the user's current window size. Only apply viewport for freshly launched browsers.
-    let is_connect = matches!(effective_mode, ConnectMode::ConnectUrl(_) | ConnectMode::AutoConnect { .. });
+    let is_connect = matches!(
+      effective_mode,
+      ConnectMode::ConnectUrl(_) | ConnectMode::AutoConnect { .. }
+    );
     let existing_pages = inst.browser.pages().await.unwrap_or_default();
     let vp = self.default_viewport.clone().unwrap_or_default();
     let ctx = inst.context_mut("default");
@@ -827,7 +827,9 @@ pub fn chrome_flags(headless: bool, extra_args: &[String]) -> Vec<String> {
     flags.push("--headless".into());
     flags.push("--hide-scrollbars".into());
     flags.push("--mute-audio".into());
-    flags.push("--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4".into());
+    flags.push(
+      "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4".into(),
+    );
   }
 
   // 4. Sandbox control (Playwright disables by default unless chromiumSandbox=true)
@@ -1095,9 +1097,7 @@ mod tests {
   fn test_instance_args_fn_independent_of_resolver() {
     let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpPipe);
 
-    state.set_instance_args_fn(Box::new(|instance| {
-      vec![format!("--window-name={instance}")]
-    }));
+    state.set_instance_args_fn(Box::new(|instance| vec![format!("--window-name={instance}")]));
 
     state.set_instance_resolver_fn(Box::new(|_| None));
 

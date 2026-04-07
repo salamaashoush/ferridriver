@@ -10,8 +10,8 @@
 //! Commands flow through an async channel to the watch loop.
 
 use std::io::Write;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Watch mode command from keyboard input.
 #[derive(Debug, Clone)]
@@ -55,7 +55,11 @@ impl KeyHandler {
       .spawn(move || key_poll_loop(&tx, &active_clone))
       .map_err(|e| format!("spawn key handler: {e}"))?;
 
-    Ok(Self { rx, active, _handle: handle })
+    Ok(Self {
+      rx,
+      active,
+      _handle: handle,
+    })
   }
 
   /// Receive the next key command (async).
@@ -141,8 +145,12 @@ fn key_poll_loop(tx: &async_channel::Sender<WatchCommand>, active: &AtomicBool) 
         let _ = crossterm::terminal::disable_raw_mode();
         let pattern = read_filter_pattern();
         let _ = crossterm::terminal::enable_raw_mode();
-        if pattern.is_empty() { None } else { Some(WatchCommand::FilterByName(pattern)) }
-      }
+        if pattern.is_empty() {
+          None
+        } else {
+          Some(WatchCommand::FilterByName(pattern))
+        }
+      },
       _ => None,
     };
 

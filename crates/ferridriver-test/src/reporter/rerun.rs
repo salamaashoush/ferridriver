@@ -45,7 +45,11 @@ impl Reporter for RerunReporter {
     std::fs::write(&self.output_path, content)
       .map_err(|e| format!("cannot write {}: {e}", self.output_path.display()))?;
 
-    tracing::info!("Rerun file written to {} ({} failed)", self.output_path.display(), self.failed.len());
+    tracing::info!(
+      "Rerun file written to {} ({} failed)",
+      self.output_path.display(),
+      self.failed.len()
+    );
     Ok(())
   }
 }

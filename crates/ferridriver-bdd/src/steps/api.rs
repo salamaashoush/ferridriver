@@ -186,9 +186,7 @@ async fn api_response_header_contains(world: &mut BrowserWorld, header: String, 
   let header_val = resp.header(&header).unwrap_or("");
   if !header_val.contains(&expected) {
     return Err(StepError {
-      message: format!(
-        "API response header \"{header}\" does not contain \"{expected}\" (got \"{header_val}\")"
-      ),
+      message: format!("API response header \"{header}\" does not contain \"{expected}\" (got \"{header_val}\")"),
       diff: Some((expected, header_val.to_string())),
       pending: false,
     });

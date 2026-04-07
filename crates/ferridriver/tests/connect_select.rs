@@ -10,8 +10,7 @@ use std::time::Instant;
 async fn connect_and_select_pages() {
   let t = Instant::now();
 
-  let chrome_path =
-    std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| "google-chrome-stable".to_string());
+  let chrome_path = std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| "google-chrome-stable".to_string());
 
   // Launch Chrome with port=0 and parse the actual port from stderr
   eprintln!("[test] launching Chrome...");
@@ -48,13 +47,19 @@ async fn connect_and_select_pages() {
 
   // --- Connect ---
   eprintln!("[test] {:?} CdpBrowser::<WsTransport>::connect()...", t.elapsed());
-  let browser = CdpBrowser::<WsTransport>::connect(&ws_url).await.expect("connect failed");
+  let browser = CdpBrowser::<WsTransport>::connect(&ws_url)
+    .await
+    .expect("connect failed");
   eprintln!("[test] {:?} connected!", t.elapsed());
 
   // --- Create extra pages via CDP to simulate multiple tabs ---
   eprintln!("[test] {:?} creating extra pages...", t.elapsed());
-  let _ = browser.new_page("data:text/html,<title>Page2</title><body>Hello2</body>").await;
-  let _ = browser.new_page("data:text/html,<title>Page3</title><body>Hello3</body>").await;
+  let _ = browser
+    .new_page("data:text/html,<title>Page2</title><body>Hello2</body>")
+    .await;
+  let _ = browser
+    .new_page("data:text/html,<title>Page3</title><body>Hello3</body>")
+    .await;
   eprintln!("[test] {:?} created extra pages", t.elapsed());
 
   // --- List pages ---
@@ -103,7 +108,12 @@ async fn connect_and_select_pages() {
   eprintln!("\n[test] {:?} creating chrome:// page...", t.elapsed());
   let t6 = Instant::now();
   let chrome_page = browser.new_page("chrome://version").await;
-  eprintln!("[test] {:?} chrome:// page created: {:?} ({:?})", t.elapsed(), chrome_page.is_ok(), t6.elapsed());
+  eprintln!(
+    "[test] {:?} chrome:// page created: {:?} ({:?})",
+    t.elapsed(),
+    chrome_page.is_ok(),
+    t6.elapsed()
+  );
 
   // Now simulate what state.rs connect_to_url does:
   // Drop the browser and reconnect fresh, which will try to attach to ALL pages
@@ -111,13 +121,20 @@ async fn connect_and_select_pages() {
   drop(browser);
   eprintln!("\n[test] {:?} === RECONNECT (simulates MCP connect) ===", t.elapsed());
   let t7 = Instant::now();
-  let browser2 = CdpBrowser::<WsTransport>::connect(&ws_url).await.expect("reconnect failed");
+  let browser2 = CdpBrowser::<WsTransport>::connect(&ws_url)
+    .await
+    .expect("reconnect failed");
   eprintln!("[test] {:?} reconnected ({:?})", t.elapsed(), t7.elapsed());
 
   let t8 = Instant::now();
   eprintln!("[test] {:?} browser.pages()...", t.elapsed());
   let pages2 = browser2.pages().await.expect("pages() failed");
-  eprintln!("[test] {:?} got {} pages ({:?})", t.elapsed(), pages2.len(), t8.elapsed());
+  eprintln!(
+    "[test] {:?} got {} pages ({:?})",
+    t.elapsed(),
+    pages2.len(),
+    t8.elapsed()
+  );
 
   for (i, page) in pages2.iter().enumerate() {
     eprintln!("\n[test] {:?} === Reconnected Page {i} ===", t.elapsed());
@@ -130,7 +147,12 @@ async fn connect_and_select_pages() {
     }
 
     let t10 = Instant::now();
-    match tokio::time::timeout(std::time::Duration::from_secs(5), page.accessibility_tree_with_depth(-1)).await {
+    match tokio::time::timeout(
+      std::time::Duration::from_secs(5),
+      page.accessibility_tree_with_depth(-1),
+    )
+    .await
+    {
       Ok(Ok(tree)) => eprintln!("[test]   a11y = {} nodes ({:?})", tree.len(), t10.elapsed()),
       Ok(Err(e)) => eprintln!("[test]   a11y ERROR: {e} ({:?})", t10.elapsed()),
       Err(_) => eprintln!("[test]   a11y TIMED OUT ({:?})", t10.elapsed()),

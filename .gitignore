@@ -24,3 +24,4 @@ target/dx/
 
 # Claude Code worktrees
 .claude/worktrees/
+.DS_Store

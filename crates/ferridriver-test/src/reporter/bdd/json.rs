@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::{TestStep};
+use crate::model::TestStep;
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct BddJsonReporter {
@@ -84,17 +84,21 @@ impl Reporter for BddJsonReporter {
           steps: serialize_steps(&outcome.steps),
           error: outcome.error.as_ref().map(|e| e.message.clone()),
         });
-      }
+      },
       ReporterEvent::RunFinished { duration, .. } => {
         self.run_duration_ms = duration.as_millis() as u64;
-      }
-      _ => {}
+      },
+      _ => {},
     }
   }
 
   async fn finalize(&mut self) -> Result<(), String> {
     let passed = self.results.iter().filter(|r| r.status == "passed").count();
-    let failed = self.results.iter().filter(|r| r.status == "failed" || r.status == "timed out").count();
+    let failed = self
+      .results
+      .iter()
+      .filter(|r| r.status == "failed" || r.status == "timed out")
+      .count();
     let skipped = self.results.iter().filter(|r| r.status == "skipped").count();
 
     let output = JsonOutput {
@@ -110,8 +114,7 @@ impl Reporter for BddJsonReporter {
       let _ = std::fs::create_dir_all(parent);
     }
     let json = serde_json::to_string_pretty(&output).map_err(|e| format!("JSON serialize: {e}"))?;
-    std::fs::write(&self.output_path, json)
-      .map_err(|e| format!("write {}: {e}", self.output_path.display()))?;
+    std::fs::write(&self.output_path, json).map_err(|e| format!("write {}: {e}", self.output_path.display()))?;
     Ok(())
   }
 }

@@ -6,8 +6,8 @@
 use crate::step::StepError;
 use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::then;
-use ferridriver_test::expect::expect;
 use ferridriver_test::expect::StringOrRegex;
+use ferridriver_test::expect::expect;
 use ferridriver_test::model::TestFailure;
 
 fn to_step_err(e: TestFailure) -> StepError {
@@ -76,12 +76,7 @@ async fn should_have_value(world: &mut BrowserWorld, selector: String, expected:
 }
 
 #[then("{string} should have attribute {string} with value {string}")]
-async fn should_have_attribute(
-  world: &mut BrowserWorld,
-  selector: String,
-  attr: String,
-  expected: String,
-) {
+async fn should_have_attribute(world: &mut BrowserWorld, selector: String, attr: String, expected: String) {
   let locator = world.page().locator(&selector);
   expect(&locator)
     .to_have_attribute(&attr, expected.as_str())
@@ -128,21 +123,13 @@ async fn page_title_contains(world: &mut BrowserWorld, expected: String) {
 #[then("{string} should not be visible")]
 async fn should_not_be_visible(world: &mut BrowserWorld, selector: String) {
   let locator = world.page().locator(&selector);
-  expect(&locator)
-    .not()
-    .to_be_visible()
-    .await
-    .map_err(to_step_err)?;
+  expect(&locator).not().to_be_visible().await.map_err(to_step_err)?;
 }
 
 #[then("{string} should not be hidden")]
 async fn should_not_be_hidden(world: &mut BrowserWorld, selector: String) {
   let locator = world.page().locator(&selector);
-  expect(&locator)
-    .not()
-    .to_be_hidden()
-    .await
-    .map_err(to_step_err)?;
+  expect(&locator).not().to_be_hidden().await.map_err(to_step_err)?;
 }
 
 #[then("{string} should not contain text {string}")]
@@ -207,11 +194,7 @@ async fn should_be_focused(world: &mut BrowserWorld, selector: String) {
 #[then("{string} should not be focused")]
 async fn should_not_be_focused(world: &mut BrowserWorld, selector: String) {
   let locator = world.page().locator(&selector);
-  expect(&locator)
-    .not()
-    .to_be_focused()
-    .await
-    .map_err(to_step_err)?;
+  expect(&locator).not().to_be_focused().await.map_err(to_step_err)?;
 }
 
 #[then("{string} should be empty")]
@@ -223,11 +206,7 @@ async fn should_be_empty(world: &mut BrowserWorld, selector: String) {
 #[then("{string} should not be empty")]
 async fn should_not_be_empty(world: &mut BrowserWorld, selector: String) {
   let locator = world.page().locator(&selector);
-  expect(&locator)
-    .not()
-    .to_be_empty()
-    .await
-    .map_err(to_step_err)?;
+  expect(&locator).not().to_be_empty().await.map_err(to_step_err)?;
 }
 
 #[then("{string} should be editable")]
@@ -239,20 +218,13 @@ async fn should_be_editable(world: &mut BrowserWorld, selector: String) {
 #[then("{string} should not be editable")]
 async fn should_not_be_editable(world: &mut BrowserWorld, selector: String) {
   let locator = world.page().locator(&selector);
-  expect(&locator)
-    .not()
-    .to_be_editable()
-    .await
-    .map_err(to_step_err)?;
+  expect(&locator).not().to_be_editable().await.map_err(to_step_err)?;
 }
 
 #[then("{string} should be in viewport")]
 async fn should_be_in_viewport(world: &mut BrowserWorld, selector: String) {
   let locator = world.page().locator(&selector);
-  expect(&locator)
-    .to_be_in_viewport()
-    .await
-    .map_err(to_step_err)?;
+  expect(&locator).to_be_in_viewport().await.map_err(to_step_err)?;
 }
 
 #[then("{string} should be attached")]
@@ -264,12 +236,7 @@ async fn should_be_attached(world: &mut BrowserWorld, selector: String) {
 // --- CSS assertions ---
 
 #[then("{string} should have CSS {string} with value {string}")]
-async fn should_have_css(
-  world: &mut BrowserWorld,
-  selector: String,
-  property: String,
-  expected: String,
-) {
+async fn should_have_css(world: &mut BrowserWorld, selector: String, property: String, expected: String) {
   let locator = world.page().locator(&selector);
   expect(&locator)
     .to_have_css(&property, expected.as_str())
@@ -298,11 +265,7 @@ async fn should_have_accessible_name(world: &mut BrowserWorld, selector: String,
 }
 
 #[then("{string} should have accessible description {string}")]
-async fn should_have_accessible_description(
-  world: &mut BrowserWorld,
-  selector: String,
-  expected: String,
-) {
+async fn should_have_accessible_description(world: &mut BrowserWorld, selector: String, expected: String) {
   let locator = world.page().locator(&selector);
   expect(&locator)
     .to_have_accessible_description(expected.as_str())
