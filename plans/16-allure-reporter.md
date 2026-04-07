@@ -1,4 +1,4 @@
-# Feature: Allure Reporter
+# [DONE] Feature: Allure Reporter
 
 ## Context
 Allure is the de facto standard enterprise test reporting framework used by QA teams worldwide. It provides a rich dashboard with test history, categories, timelines, and trend analysis. Adding Allure output makes ferridriver immediately usable in enterprise CI/CD pipelines that already have Allure Report infrastructure. Teams get familiar reporting without migration cost.

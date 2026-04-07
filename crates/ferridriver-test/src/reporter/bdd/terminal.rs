@@ -1,13 +1,11 @@
 //! BDD terminal reporter: Gherkin-formatted output with Feature > Scenario > Step hierarchy.
-//!
-//! Implements `ferridriver_test::reporter::Reporter`.
 
 use std::time::Duration;
 
 use console::Style;
 
-use ferridriver_test::model::{StepCategory, TestStatus};
-use ferridriver_test::reporter::{Reporter, ReporterEvent};
+use crate::model::{StepCategory, TestStatus};
+use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct BddTerminalReporter {
   current_suite: Option<String>,

@@ -86,7 +86,7 @@ pub mod filter;
 pub mod hook;
 pub mod param_type;
 pub mod registry;
-pub mod reporter;
+// Reporters have been unified into ferridriver_test::reporter (including bdd/ submodule).
 pub mod scenario;
 pub mod snippet;
 pub mod step;
@@ -223,18 +223,9 @@ pub fn run_bdd_harness() {
       return 0;
     }
 
-    // Create BDD reporters.
-    let reporters = {
-      let mut reps: Vec<Box<dyn ferridriver_test::reporter::Reporter>> = Vec::new();
-      reps.push(Box::new(reporter::terminal::BddTerminalReporter::new()));
-      reps.push(Box::new(reporter::rerun::BddRerunReporter::new(
-        config.output_dir.join("@rerun.txt"),
-      )));
-      ferridriver_test::reporter::ReporterSet::new(reps)
-    };
-
     // Run via core TestRunner.
-    let mut runner = ferridriver_test::runner::TestRunner::new(config, reporters, overrides);
+    config.mode = ferridriver_test::config::RunMode::Bdd;
+    let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
     runner.run(plan).await
   });
 

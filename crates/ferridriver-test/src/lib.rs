@@ -104,7 +104,7 @@ pub mod tracing;
 pub mod worker;
 
 // -- Re-exports --
-pub use config::{CliOverrides, TestConfig};
+pub use config::{CliOverrides, RunMode, TestConfig};
 pub use discovery::TestRegistration;
 pub use expect::{expect, expect_configured, expect_poll, to_pass, to_pass_with_options, ToPassOptions};
 pub use fixture::FixturePool;
@@ -162,9 +162,8 @@ pub fn run_harness() {
       eprintln!("config error: {e}");
       std::process::exit(1);
     });
-    let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
     let plan = discovery::collect_rust_tests(&config);
-    let mut runner = runner::TestRunner::new(config, reporters, overrides);
+    let mut runner = runner::TestRunner::new(config, overrides);
     runner.run(plan).await
   });
 

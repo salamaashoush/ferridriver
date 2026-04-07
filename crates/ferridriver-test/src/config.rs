@@ -4,6 +4,15 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+/// Whether we're running E2E tests or BDD scenarios.
+/// Controls reporter variant selection (e.g., terminal vs BDD terminal).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum RunMode {
+  #[default]
+  E2e,
+  Bdd,
+}
+
 /// Configuration file schema. Loaded from `ferridriver.config.toml` (or `.json`).
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -86,6 +95,10 @@ pub struct TestConfig {
 
   /// Named configuration presets, merged onto the base config via `--profile NAME`.
   pub profiles: BTreeMap<String, serde_json::Value>,
+
+  /// Run mode: E2E tests or BDD scenarios. Controls reporter variants.
+  #[serde(default)]
+  pub mode: RunMode,
 
   /// Programmatic global setup hooks (run before any tests).
   /// Not serializable — set by code, not config files.
@@ -233,6 +246,7 @@ impl Default for TestConfig {
       order: "defined".into(),
       language: None,
       profiles: BTreeMap::new(),
+      mode: RunMode::E2e,
       global_setup_fns: Vec::new(),
       global_teardown_fns: Vec::new(),
     }

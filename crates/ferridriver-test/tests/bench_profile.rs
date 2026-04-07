@@ -196,7 +196,7 @@ async fn deep_profile() {
   };
   let config = TestConfig { workers: 1, timeout: 5000, reporter: vec![], ..Default::default() };
   let t = Instant::now();
-  let mut runner = TestRunner::new(config, reporter::ReporterSet::default(), CliOverrides::default());
+  let mut runner = TestRunner::new(config, CliOverrides::default());
   let _ = runner.run(plan).await;
   println!("      1 no-op test, 1 worker:  {:>7.1}ms (= browser launch + dispatch overhead)", t.elapsed().as_secs_f64() * 1000.0);
   println!();

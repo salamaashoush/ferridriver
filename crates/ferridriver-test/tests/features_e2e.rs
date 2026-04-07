@@ -89,8 +89,7 @@ async fn test_retry_with_flaky_detection() {
     timeout: 10_000,
     ..Default::default()
   };
-  let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
-  let mut runner = TestRunner::new(config, reporters, CliOverrides::default());
+  let mut runner = TestRunner::new(config, CliOverrides::default());
   let exit_code = runner.run(plan).await;
   // Flaky tests count as passed (exit code 0).
   assert_eq!(exit_code, 0, "flaky test should pass after retry");
@@ -229,8 +228,7 @@ async fn test_all_locator_matchers() {
     timeout: 30_000,
     ..Default::default()
   };
-  let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
-  let mut runner = TestRunner::new(config, reporters, CliOverrides::default());
+  let mut runner = TestRunner::new(config, CliOverrides::default());
   let exit_code = runner.run(plan).await;
   assert_eq!(exit_code, 0, "all matchers should pass");
 }
@@ -302,8 +300,7 @@ async fn test_expect_poll() {
     timeout: 15_000,
     ..Default::default()
   };
-  let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
-  let mut runner = TestRunner::new(config, reporters, CliOverrides::default());
+  let mut runner = TestRunner::new(config, CliOverrides::default());
   let exit_code = runner.run(plan).await;
   assert_eq!(exit_code, 0, "expect.poll should pass");
 }
@@ -382,8 +379,7 @@ async fn test_to_pass() {
     timeout: 15_000,
     ..Default::default()
   };
-  let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
-  let mut runner = TestRunner::new(config, reporters, CliOverrides::default());
+  let mut runner = TestRunner::new(config, CliOverrides::default());
   let exit_code = runner.run(plan).await;
   assert_eq!(exit_code, 0, "toPass should succeed");
 }
@@ -439,8 +435,7 @@ async fn test_page_assertions() {
     timeout: 15_000,
     ..Default::default()
   };
-  let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
-  let mut runner = TestRunner::new(config, reporters, CliOverrides::default());
+  let mut runner = TestRunner::new(config, CliOverrides::default());
   let exit_code = runner.run(plan).await;
   assert_eq!(exit_code, 0, "page assertions should pass");
 }

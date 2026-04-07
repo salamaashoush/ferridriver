@@ -533,62 +533,14 @@ impl BddRunner {
       });
     }
 
-    // Create reporters from config.
-    let reporters = {
-      let mut reps: Vec<Box<dyn ferridriver_test::reporter::Reporter>> = Vec::new();
-      let mut has_terminal = false;
-      for rc in &self.config.reporter {
-        match rc.name.as_str() {
-          "terminal" | "bdd" | "default" | "" => {
-            if !has_terminal {
-              reps.push(Box::new(ferridriver_bdd::reporter::terminal::BddTerminalReporter::new()));
-              has_terminal = true;
-            }
-          }
-          "json" => {
-            reps.push(Box::new(ferridriver_bdd::reporter::json::BddJsonReporter::new(self.config.output_dir.join("bdd-results.json"))));
-          }
-          "junit" => {
-            reps.push(Box::new(ferridriver_bdd::reporter::junit::BddJunitReporter::new(self.config.output_dir.join("bdd-junit.xml"))));
-          }
-          "cucumber-json" | "cucumber" => {
-            reps.push(Box::new(ferridriver_bdd::reporter::cucumber_json::CucumberJsonReporter::new(self.config.output_dir.join("cucumber.json"))));
-          }
-          "usage" => {
-            reps.push(Box::new(ferridriver_bdd::reporter::usage::UsageReporter::new()));
-          }
-          "rerun" => {
-            reps.push(Box::new(ferridriver_bdd::reporter::rerun::BddRerunReporter::new(self.config.output_dir.join("@rerun.txt"))));
-          }
-          "messages" | "ndjson" => {
-            reps.push(Box::new(ferridriver_bdd::reporter::messages::CucumberMessagesReporter::new(self.config.output_dir.join("cucumber-messages.ndjson"))));
-          }
-          "progress" => {
-            reps.push(Box::new(ferridriver_test::reporter::progress::ProgressReporter::new()));
-          }
-          _ => {}
-        }
-      }
-      if reps.is_empty() {
-        reps.push(Box::new(ferridriver_bdd::reporter::terminal::BddTerminalReporter::new()));
-      }
-      // Always add the rerun reporter so @rerun.txt is available for --last-failed.
-      let has_rerun = self.config.reporter.iter().any(|r| r.name == "rerun");
-      if !has_rerun {
-        reps.push(Box::new(ferridriver_bdd::reporter::rerun::BddRerunReporter::new(
-          self.config.output_dir.join("@rerun.txt"),
-        )));
-      }
-      ferridriver_test::reporter::ReporterSet::new(reps)
-    };
-
     // Run via core TestRunner.
     let mut overrides = ferridriver_test::config::CliOverrides::default();
     overrides.last_failed = self.last_failed;
-    let config = self.config.clone();
+    let mut config = self.config.clone();
+    config.mode = ferridriver_test::config::RunMode::Bdd;
     let total = plan.total_tests;
 
-    let mut runner = ferridriver_test::runner::TestRunner::new(config, reporters, overrides);
+    let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
     let exit_code = runner.run(plan).await;
 
     // We don't have per-test results here since TestRunner reports via events.

@@ -1,11 +1,9 @@
 //! Cucumber JSON reporter: standard format for CI dashboards.
-//!
-//! Implements `ferridriver_test::reporter::Reporter`.
 
 use std::path::PathBuf;
 
-use ferridriver_test::model::{StepCategory, StepStatus, TestStep};
-use ferridriver_test::reporter::{Reporter, ReporterEvent};
+use crate::model::{StepCategory, StepStatus, TestStep};
+use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct CucumberJsonReporter {
   output_path: PathBuf,
@@ -90,45 +88,42 @@ fn extract_text(step: &TestStep) -> String {
 #[async_trait::async_trait]
 impl Reporter for CucumberJsonReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
-    match event {
-      ReporterEvent::TestFinished { test_id, outcome } => {
-        let feature = test_id.suite.as_deref().unwrap_or("Unknown Feature");
-        self.ensure_feature(feature, &test_id.file);
+    if let ReporterEvent::TestFinished { test_id, outcome } = event {
+      let feature = test_id.suite.as_deref().unwrap_or("Unknown Feature");
+      self.ensure_feature(feature, &test_id.file);
 
-        let mut steps = Vec::new();
-        for step in &outcome.steps {
-          if step.category != StepCategory::TestStep {
-            continue;
-          }
-          let status = match step.status {
-            StepStatus::Passed => "passed",
-            StepStatus::Failed => "failed",
-            StepStatus::Skipped => "skipped",
-            StepStatus::Pending => "pending",
-          };
-          steps.push(CucumberStep {
-            keyword: extract_keyword(step),
-            name: extract_text(step),
-            result: CucumberStepResult {
-              status: status.to_string(),
-              duration: step.duration.as_nanos() as u64,
-              error_message: step.error.clone(),
-            },
-          });
+      let mut steps = Vec::new();
+      for step in &outcome.steps {
+        if step.category != StepCategory::TestStep {
+          continue;
         }
-
-        let scenario = CucumberScenario {
-          keyword: "Scenario".to_string(),
-          name: test_id.name.clone(),
-          scenario_type: "scenario".to_string(),
-          steps,
+        let status = match step.status {
+          StepStatus::Passed => "passed",
+          StepStatus::Failed => "failed",
+          StepStatus::Skipped => "skipped",
+          StepStatus::Pending => "pending",
         };
-
-        if let Some(f) = self.features.iter_mut().find(|f| f.name == feature) {
-          f.elements.push(scenario);
-        }
+        steps.push(CucumberStep {
+          keyword: extract_keyword(step),
+          name: extract_text(step),
+          result: CucumberStepResult {
+            status: status.to_string(),
+            duration: step.duration.as_nanos() as u64,
+            error_message: step.error.clone(),
+          },
+        });
       }
-      _ => {}
+
+      let scenario = CucumberScenario {
+        keyword: "Scenario".to_string(),
+        name: test_id.name.clone(),
+        scenario_type: "scenario".to_string(),
+        steps,
+      };
+
+      if let Some(f) = self.features.iter_mut().find(|f| f.name == feature) {
+        f.elements.push(scenario);
+      }
     }
   }
 

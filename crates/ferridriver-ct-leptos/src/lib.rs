@@ -197,8 +197,7 @@ async fn run_inner(harness_cfg: HarnessConfig) -> i32 {
     config.browser.backend = backend;
   }
 
-  let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
-  let mut runner = TestRunner::new(config, reporters, cli);
+  let mut runner = TestRunner::new(config, cli);
   let exit_code = runner.run(plan).await;
 
   // Cleanup.

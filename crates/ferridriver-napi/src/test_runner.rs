@@ -349,20 +349,13 @@ impl TestRunner {
       ..Default::default()
     };
 
-    // Create reporters: no terminal reporter (TS CLI handles display).
-    // Only add rerun reporter + result collector.
+    // Run through core pipeline — reporters created from config internally.
+    // Append ResultCollector so we can return per-test results to TS.
     let collector = Arc::new(tokio::sync::Mutex::new(ResultCollector::new()));
-    let mut reporter_list: Vec<Box<dyn ferridriver_test::reporter::Reporter>> = Vec::new();
-    reporter_list.push(Box::new(ferridriver_test::reporter::rerun::RerunReporter::new(
-      self.config.output_dir.join("@rerun.txt"),
-    )));
-    reporter_list.push(Box::new(ResultCollectorReporter(Arc::clone(&collector))));
-    let reporters = ferridriver_test::reporter::ReporterSet::new(reporter_list);
-
-    // Run through core pipeline — same as Rust CLI and BDD.
     let start = Instant::now();
     let config = self.config.clone();
-    let mut runner = ferridriver_test::runner::TestRunner::new(config, reporters, overrides);
+    let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
+    runner.add_reporter(Box::new(ResultCollectorReporter(Arc::clone(&collector))));
     let _exit_code = runner.run(plan).await;
     let duration = start.elapsed();
 

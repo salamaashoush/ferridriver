@@ -126,7 +126,7 @@ async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> Duration 
     ..Default::default()
   };
 
-  let mut runner = TestRunner::new(config, reporter::ReporterSet::default(), CliOverrides::default());
+  let mut runner = TestRunner::new(config, CliOverrides::default());
 
   let start = Instant::now();
   let exit_code = runner.run(plan).await;

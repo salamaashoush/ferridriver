@@ -3,8 +3,8 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use ferridriver_test::model::{StepCategory, TestStatus};
-use ferridriver_test::reporter::{Reporter, ReporterEvent};
+use crate::model::StepCategory;
+use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct CucumberMessagesReporter {
   output_path: PathBuf,
@@ -48,13 +48,6 @@ impl Reporter for CucumberMessagesReporter {
         }));
       }
       ReporterEvent::TestFinished { test_id, outcome } => {
-        let _status = match outcome.status {
-          TestStatus::Passed => "PASSED",
-          TestStatus::Failed | TestStatus::TimedOut => "FAILED",
-          TestStatus::Skipped => "SKIPPED",
-          TestStatus::Flaky => "PASSED",
-          TestStatus::Interrupted => "UNDEFINED",
-        };
         self.messages.push(serde_json::json!({
           "testCaseFinished": {
             "testCaseStartedId": test_id.full_name(),

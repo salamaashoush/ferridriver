@@ -141,6 +141,7 @@ impl Worker {
           steps: Vec::new(),
           stdout: String::new(),
           stderr: String::new(),
+          annotations: test.annotations.clone(),
         };
         self
           .event_bus
@@ -240,6 +241,7 @@ impl Worker {
         steps: Vec::new(),
         stdout: String::new(),
         stderr: String::new(),
+        annotations: test.annotations.clone(),
       };
       self
         .event_bus
@@ -279,6 +281,7 @@ impl Worker {
         steps: Vec::new(),
         stdout: String::new(),
         stderr: String::new(),
+        annotations: test.annotations.clone(),
       };
       self
         .event_bus
@@ -483,6 +486,10 @@ impl Worker {
     let info_attachments = test_info.attachments.lock().await.clone();
     attachments.extend(info_attachments);
 
+    // Merge compile-time annotations with runtime annotations.
+    let mut annotations = test.annotations.clone();
+    annotations.extend(test_info.get_annotations().await);
+
     let outcome = TestOutcome {
       test_id: test_id.clone(),
       status,
@@ -494,6 +501,7 @@ impl Worker {
       steps,
       stdout: String::new(),
       stderr: String::new(),
+      annotations,
     };
 
     self

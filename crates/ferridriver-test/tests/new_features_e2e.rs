@@ -56,8 +56,7 @@ fn noop_test(name: &str) -> TestCase {
 }
 
 async fn run_plan(plan: TestPlan, config: TestConfig) -> i32 {
-  let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
-  let mut runner = TestRunner::new(config, reporters, CliOverrides::default());
+  let mut runner = TestRunner::new(config, CliOverrides::default());
   runner.run(plan).await
 }
 

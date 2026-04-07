@@ -1,11 +1,9 @@
 //! BDD JSON reporter: machine-readable results with step hierarchy.
-//!
-//! Implements `ferridriver_test::reporter::Reporter`.
 
 use std::path::PathBuf;
 
-use ferridriver_test::model::{StepCategory, TestStep};
-use ferridriver_test::reporter::{Reporter, ReporterEvent};
+use crate::model::{StepCategory, TestStep};
+use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct BddJsonReporter {
   output_path: PathBuf,

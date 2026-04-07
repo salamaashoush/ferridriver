@@ -1,11 +1,9 @@
 //! BDD JUnit XML reporter.
-//!
-//! Implements `ferridriver_test::reporter::Reporter`.
 
 use std::path::PathBuf;
 
-use ferridriver_test::model::{StepCategory, StepStatus, TestOutcome, TestStep};
-use ferridriver_test::reporter::{Reporter, ReporterEvent};
+use crate::model::{StepCategory, StepStatus, TestOutcome, TestStatus, TestStep};
+use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct BddJunitReporter {
   output_path: PathBuf,
@@ -40,36 +38,62 @@ impl Reporter for BddJunitReporter {
   async fn finalize(&mut self) -> Result<(), String> {
     use std::fmt::Write;
 
-    let mut suites: rustc_hash::FxHashMap<String, Vec<&TestOutcome>> =
-      rustc_hash::FxHashMap::default();
+    let mut suites: rustc_hash::FxHashMap<String, Vec<&TestOutcome>> = rustc_hash::FxHashMap::default();
     for result in &self.results {
       let suite = result.test_id.suite.clone().unwrap_or_else(|| result.test_id.file.clone());
       suites.entry(suite).or_default().push(result);
     }
 
-    let failures = self.results.iter().filter(|r| matches!(r.status, ferridriver_test::model::TestStatus::Failed | ferridriver_test::model::TestStatus::TimedOut)).count();
-    let skipped = self.results.iter().filter(|r| r.status == ferridriver_test::model::TestStatus::Skipped).count();
+    let failures = self
+      .results
+      .iter()
+      .filter(|r| matches!(r.status, TestStatus::Failed | TestStatus::TimedOut))
+      .count();
+    let skipped = self.results.iter().filter(|r| r.status == TestStatus::Skipped).count();
 
     let mut xml = String::new();
     writeln!(xml, r#"<?xml version="1.0" encoding="UTF-8"?>"#).ok();
-    writeln!(xml, r#"<testsuites tests="{}" failures="{}" skipped="{}" time="{:.3}">"#, self.results.len(), failures, skipped, self.total_duration_ms as f64 / 1000.0).ok();
+    writeln!(
+      xml,
+      r#"<testsuites tests="{}" failures="{}" skipped="{}" time="{:.3}">"#,
+      self.results.len(),
+      failures,
+      skipped,
+      self.total_duration_ms as f64 / 1000.0
+    )
+    .ok();
 
     for (suite_name, tests) in &suites {
-      let sf = tests.iter().filter(|t| matches!(t.status, ferridriver_test::model::TestStatus::Failed | ferridriver_test::model::TestStatus::TimedOut)).count();
+      let sf = tests
+        .iter()
+        .filter(|t| matches!(t.status, TestStatus::Failed | TestStatus::TimedOut))
+        .count();
       let st: f64 = tests.iter().map(|t| t.duration.as_secs_f64()).sum();
 
-      writeln!(xml, r#"  <testsuite name="{}" tests="{}" failures="{sf}" time="{st:.3}">"#, escape_xml(suite_name), tests.len()).ok();
+      writeln!(
+        xml,
+        r#"  <testsuite name="{}" tests="{}" failures="{sf}" time="{st:.3}">"#,
+        escape_xml(suite_name),
+        tests.len()
+      )
+      .ok();
 
       for test in tests {
         let time = test.duration.as_secs_f64();
-        writeln!(xml, r#"    <testcase name="{}" classname="{}" time="{time:.3}">"#, escape_xml(&test.test_id.name), escape_xml(suite_name)).ok();
+        writeln!(
+          xml,
+          r#"    <testcase name="{}" classname="{}" time="{time:.3}">"#,
+          escape_xml(&test.test_id.name),
+          escape_xml(suite_name)
+        )
+        .ok();
 
         match test.status {
-          ferridriver_test::model::TestStatus::Failed | ferridriver_test::model::TestStatus::TimedOut => {
+          TestStatus::Failed | TestStatus::TimedOut => {
             let msg = test.error.as_ref().map(|e| escape_xml(&e.message)).unwrap_or_default();
             writeln!(xml, r#"      <failure message="{msg}">{msg}</failure>"#).ok();
           }
-          ferridriver_test::model::TestStatus::Skipped => {
+          TestStatus::Skipped => {
             writeln!(xml, r#"      <skipped />"#).ok();
           }
           _ => {}
@@ -101,14 +125,27 @@ fn format_steps(steps: &[&TestStep], out: &mut String, indent: usize) {
   use std::fmt::Write;
   let pad = "  ".repeat(indent);
   for step in steps {
-    let icon = match step.status { StepStatus::Passed => "v", StepStatus::Failed => "x", StepStatus::Skipped => "-", StepStatus::Pending => "P" };
+    let icon = match step.status {
+      StepStatus::Passed => "v",
+      StepStatus::Failed => "x",
+      StepStatus::Skipped => "-",
+      StepStatus::Pending => "P",
+    };
     let _ = writeln!(out, "{pad}{icon} {} ({}ms)", step.title, step.duration.as_millis());
-    if let Some(err) = &step.error { let _ = writeln!(out, "{pad}  Error: {err}"); }
+    if let Some(err) = &step.error {
+      let _ = writeln!(out, "{pad}  Error: {err}");
+    }
     let nested: Vec<&TestStep> = step.steps.iter().filter(|s| s.category == StepCategory::TestStep).collect();
-    if !nested.is_empty() { format_steps(&nested, out, indent + 1); }
+    if !nested.is_empty() {
+      format_steps(&nested, out, indent + 1);
+    }
   }
 }
 
 fn escape_xml(s: &str) -> String {
-  s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;").replace('\'', "&apos;")
+  s.replace('&', "&amp;")
+    .replace('<', "&lt;")
+    .replace('>', "&gt;")
+    .replace('"', "&quot;")
+    .replace('\'', "&apos;")
 }

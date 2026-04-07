@@ -1,5 +1,7 @@
 //! Reporter system: event-driven, multiplexed, trait-based.
 
+pub mod allure;
+pub mod bdd;
 pub mod html;
 pub mod json;
 pub mod junit;
@@ -98,6 +100,11 @@ impl ReporterSet {
     Self { reporters }
   }
 
+  /// Append an additional reporter (e.g., NAPI ResultCollector).
+  pub fn add(&mut self, reporter: Box<dyn Reporter>) {
+    self.reporters.push(reporter);
+  }
+
   pub async fn emit(&mut self, event: &ReporterEvent) {
     for reporter in &mut self.reporters {
       reporter.on_event(event).await;
@@ -136,34 +143,80 @@ impl EventBus {
 
 // ── Factory ──
 
-/// Create reporters from config names.
-pub fn create_reporters(names: &[crate::config::ReporterConfig], output_dir: &std::path::Path) -> ReporterSet {
+/// Unified reporter factory. Creates reporters from config names, routing
+/// mode-dependent reporters (terminal, json, junit) based on `mode`.
+pub(crate) fn create_reporters(
+  names: &[crate::config::ReporterConfig],
+  output_dir: &std::path::Path,
+  mode: crate::config::RunMode,
+) -> ReporterSet {
   let mut reporters: Vec<Box<dyn Reporter>> = Vec::new();
+  let mut has_terminal = false;
 
   for config in names {
     match config.name.as_str() {
-      "terminal" | "list" => {
-        reporters.push(Box::new(terminal::TerminalReporter::new()));
+      // ── Mode-dependent reporters ──
+      "terminal" | "list" | "bdd" | "default" | "" => {
+        if !has_terminal {
+          match mode {
+            crate::config::RunMode::E2e => reporters.push(Box::new(terminal::TerminalReporter::new())),
+            crate::config::RunMode::Bdd => reporters.push(Box::new(bdd::terminal::BddTerminalReporter::new())),
+          }
+          has_terminal = true;
+        }
       }
-      "json" => {
-        let path = output_dir.join("results.json");
-        reporters.push(Box::new(json::JsonReporter::new(path)));
-      }
-      "junit" => {
-        let path = output_dir.join("junit.xml");
-        reporters.push(Box::new(junit::JUnitReporter::new(path)));
-      }
+      "json" => match mode {
+        crate::config::RunMode::E2e => {
+          reporters.push(Box::new(json::JsonReporter::new(output_dir.join("results.json"))));
+        }
+        crate::config::RunMode::Bdd => {
+          reporters.push(Box::new(bdd::json::BddJsonReporter::new(output_dir.join("bdd-results.json"))));
+        }
+      },
+      "junit" => match mode {
+        crate::config::RunMode::E2e => {
+          reporters.push(Box::new(junit::JUnitReporter::new(output_dir.join("junit.xml"))));
+        }
+        crate::config::RunMode::Bdd => {
+          reporters.push(Box::new(bdd::junit::BddJunitReporter::new(output_dir.join("bdd-junit.xml"))));
+        }
+      },
+
+      // ── Shared reporters (same for both modes) ──
       "html" => {
-        let path = output_dir.join("report.html");
-        reporters.push(Box::new(html::HtmlReporter::new(path)));
+        reporters.push(Box::new(html::HtmlReporter::new(output_dir.join("report.html"))));
+      }
+      "allure" => {
+        let dir = config
+          .options
+          .get("output_dir")
+          .and_then(|v| v.as_str())
+          .map(std::path::PathBuf::from)
+          .unwrap_or_else(|| output_dir.join("allure-results"));
+        reporters.push(Box::new(allure::AllureReporter::new(dir)));
       }
       "progress" => {
         reporters.push(Box::new(progress::ProgressReporter::new()));
       }
       "rerun" => {
-        let path = output_dir.join("@rerun.txt");
-        reporters.push(Box::new(rerun::RerunReporter::new(path)));
+        reporters.push(Box::new(rerun::RerunReporter::new(output_dir.join("@rerun.txt"))));
       }
+
+      // ── BDD-specific reporters (usable in any mode) ──
+      "cucumber-json" | "cucumber" => {
+        reporters.push(Box::new(bdd::cucumber_json::CucumberJsonReporter::new(
+          output_dir.join("cucumber.json"),
+        )));
+      }
+      "messages" | "ndjson" => {
+        reporters.push(Box::new(bdd::messages::CucumberMessagesReporter::new(
+          output_dir.join("cucumber-messages.ndjson"),
+        )));
+      }
+      "usage" => {
+        reporters.push(Box::new(bdd::usage::UsageReporter::new()));
+      }
+
       other => {
         tracing::warn!("unknown reporter: {other}, skipping");
       }
@@ -171,7 +224,10 @@ pub fn create_reporters(names: &[crate::config::ReporterConfig], output_dir: &st
   }
 
   if reporters.is_empty() {
-    reporters.push(Box::new(terminal::TerminalReporter::new()));
+    match mode {
+      crate::config::RunMode::E2e => reporters.push(Box::new(terminal::TerminalReporter::new())),
+      crate::config::RunMode::Bdd => reporters.push(Box::new(bdd::terminal::BddTerminalReporter::new())),
+    }
   }
 
   // Always add the rerun reporter so @rerun.txt is available for --last-failed.

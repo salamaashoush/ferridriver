@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 
-use ferridriver_test::model::StepCategory;
-use ferridriver_test::reporter::{Reporter, ReporterEvent};
+use crate::model::StepCategory;
+use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct UsageReporter {
   /// Map from step expression -> (call_count, total_duration).
@@ -43,7 +43,6 @@ impl Reporter for UsageReporter {
         return;
       }
 
-      // Extract bdd_text from metadata if available, otherwise use title.
       let expression = ev
         .metadata
         .as_ref()
@@ -62,7 +61,6 @@ impl Reporter for UsageReporter {
       return Ok(());
     }
 
-    // Sort by total time descending.
     let mut entries: Vec<_> = self.stats.drain().collect();
     entries.sort_by(|a, b| b.1.1.cmp(&a.1.1));
 

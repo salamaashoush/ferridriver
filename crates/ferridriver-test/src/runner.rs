@@ -27,12 +27,18 @@ pub struct TestRunner {
 }
 
 impl TestRunner {
-  pub fn new(config: TestConfig, reporters: ReporterSet, overrides: CliOverrides) -> Self {
+  pub fn new(config: TestConfig, overrides: CliOverrides) -> Self {
+    let reporters = crate::reporter::create_reporters(&config.reporter, &config.output_dir, config.mode);
     Self {
       config: Arc::new(config),
       reporters,
       overrides,
     }
+  }
+
+  /// Append an additional reporter after construction (e.g., NAPI ResultCollector).
+  pub fn add_reporter(&mut self, reporter: Box<dyn crate::reporter::Reporter>) {
+    self.reporters.add(reporter);
   }
 
   /// Run the full test plan. Returns exit code (0 = all passed).

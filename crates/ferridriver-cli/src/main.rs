@@ -196,74 +196,9 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
   let registry = Arc::new(StepRegistry::build());
   let plan = translate::translate_features(&feature_set, registry, &config);
 
-  // Create reporters -- BDD terminal by default, or from config.
-  let reporters = {
-    let mut reps: Vec<Box<dyn ferridriver_test::reporter::Reporter>> = Vec::new();
-    let mut has_terminal = false;
-    for rc in &config.reporter {
-      match rc.name.as_str() {
-        "terminal" | "bdd" | "default" | "" => {
-          if !has_terminal {
-            reps.push(Box::new(ferridriver_bdd::reporter::terminal::BddTerminalReporter::new()));
-            has_terminal = true;
-          }
-        }
-        "json" => {
-          reps.push(Box::new(ferridriver_bdd::reporter::json::BddJsonReporter::new(
-            config.output_dir.join("bdd-results.json"),
-          )));
-        }
-        "junit" => {
-          reps.push(Box::new(ferridriver_bdd::reporter::junit::BddJunitReporter::new(
-            config.output_dir.join("bdd-junit.xml"),
-          )));
-        }
-        "cucumber-json" | "cucumber" => {
-          reps.push(Box::new(
-            ferridriver_bdd::reporter::cucumber_json::CucumberJsonReporter::new(
-              config.output_dir.join("cucumber.json"),
-            ),
-          ));
-        }
-        "usage" => {
-          reps.push(Box::new(ferridriver_bdd::reporter::usage::UsageReporter::new()));
-        }
-        "rerun" => {
-          reps.push(Box::new(ferridriver_bdd::reporter::rerun::BddRerunReporter::new(
-            config.output_dir.join("@rerun.txt"),
-          )));
-        }
-        "messages" | "ndjson" => {
-          reps.push(Box::new(ferridriver_bdd::reporter::messages::CucumberMessagesReporter::new(
-            config.output_dir.join("cucumber-messages.ndjson"),
-          )));
-        }
-        "progress" => {
-          reps.push(Box::new(ferridriver_test::reporter::progress::ProgressReporter::new()));
-        }
-        "html" => {
-          reps.push(Box::new(ferridriver_test::reporter::html::HtmlReporter::new(
-            config.output_dir.join("report.html"),
-          )));
-        }
-        other => tracing::warn!("unknown reporter: {other}"),
-      }
-    }
-    if reps.is_empty() {
-      reps.push(Box::new(ferridriver_bdd::reporter::terminal::BddTerminalReporter::new()));
-    }
-    // Always add the rerun reporter so @rerun.txt is available for --last-failed.
-    let has_rerun = config.reporter.iter().any(|r| r.name == "rerun");
-    if !has_rerun {
-      reps.push(Box::new(ferridriver_bdd::reporter::rerun::BddRerunReporter::new(
-        config.output_dir.join("@rerun.txt"),
-      )));
-    }
-    ferridriver_test::reporter::ReporterSet::new(reps)
-  };
-
   // Run via core TestRunner.
-  let mut runner = TestRunner::new(config, reporters, overrides);
+  config.mode = ferridriver_test::config::RunMode::Bdd;
+  let mut runner = TestRunner::new(config, overrides);
   let exit_code = runner.run(plan).await;
 
   std::process::exit(exit_code);
@@ -273,7 +208,6 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
   use ferridriver_test::{
     config::{CliOverrides, ShardArg},
     discovery::collect_rust_tests,
-    reporter::create_reporters,
     runner::TestRunner,
   };
 
@@ -302,10 +236,9 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
   };
 
   let config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;
-  let reporters = create_reporters(&config.reporter, &config.output_dir);
   let plan = collect_rust_tests(&config);
 
-  let mut runner = TestRunner::new(config, reporters, overrides);
+  let mut runner = TestRunner::new(config, overrides);
   let exit_code = runner.run(plan).await;
 
   std::process::exit(exit_code);

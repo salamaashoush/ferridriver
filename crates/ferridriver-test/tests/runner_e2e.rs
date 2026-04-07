@@ -336,9 +336,8 @@ async fn test_runner_e2e() {
     ..Default::default()
   };
 
-  let reporters = reporter::create_reporters(&config.reporter, &config.output_dir);
   let overrides = CliOverrides::default();
-  let mut runner = TestRunner::new(config, reporters, overrides);
+  let mut runner = TestRunner::new(config, overrides);
 
   let exit_code = runner.run(plan).await;
   assert_eq!(exit_code, 0, "test runner should pass all tests (exit code 0)");

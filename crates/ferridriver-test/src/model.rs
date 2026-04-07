@@ -556,6 +556,8 @@ pub struct TestOutcome {
   pub steps: Vec<TestStep>,
   pub stdout: String,
   pub stderr: String,
+  /// Annotations from the test definition + runtime (tags, severity, issues, etc.).
+  pub annotations: Vec<TestAnnotation>,
 }
 
 /// A test failure with diagnostic information.
