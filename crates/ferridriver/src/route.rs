@@ -2,6 +2,26 @@
 //!
 //! Mirrors Playwright's Route API for intercepting, mocking, and modifying
 //! network requests. Uses CDP Fetch domain on Chrome backends.
+//!
+//! The handler receives a `Route` object and must call exactly one of
+//! `fulfill()`, `continue_route()`, or `abort()`. If the handler drops
+//! the `Route` without calling any method, the request is continued
+//! with no modifications (fail-open).
+//!
+//! ```ignore
+//! page.route("**/api/*", Arc::new(|route: Route| {
+//!     if route.request().url.contains("block-me") {
+//!         route.abort("blockedbyclient");
+//!     } else {
+//!         route.fulfill(FulfillResponse {
+//!             status: 200,
+//!             body: b"mocked".to_vec(),
+//!             content_type: Some("text/plain".into()),
+//!             ..Default::default()
+//!         });
+//!     }
+//! })).await?;
+//! ```
 
 use rustc_hash::FxHashMap;
 
@@ -70,10 +90,66 @@ pub struct InterceptedRequest {
   pub resource_type: String,
 }
 
+/// A paused network request. The handler must call exactly one of
+/// `fulfill()`, `continue_route()`, or `abort()` to resume the request.
+///
+/// If dropped without calling any method, the request is continued
+/// with no modifications (fail-open).
+pub struct Route {
+  request: InterceptedRequest,
+  action_tx: Option<tokio::sync::oneshot::Sender<RouteAction>>,
+}
+
+impl Route {
+  /// Create a new Route with its response channel.
+  pub fn new(request: InterceptedRequest, action_tx: tokio::sync::oneshot::Sender<RouteAction>) -> Self {
+    Self {
+      request,
+      action_tx: Some(action_tx),
+    }
+  }
+
+  /// The intercepted request.
+  pub fn request(&self) -> &InterceptedRequest {
+    &self.request
+  }
+
+  /// Fulfill with a custom response (mock).
+  pub fn fulfill(mut self, response: FulfillResponse) {
+    if let Some(tx) = self.action_tx.take() {
+      let _ = tx.send(RouteAction::Fulfill(response));
+    }
+  }
+
+  /// Continue the request, optionally with modifications.
+  pub fn continue_route(mut self, overrides: ContinueOverrides) {
+    if let Some(tx) = self.action_tx.take() {
+      let _ = tx.send(RouteAction::Continue(overrides));
+    }
+  }
+
+  /// Abort the request with an error reason.
+  pub fn abort(mut self, reason: &str) {
+    if let Some(tx) = self.action_tx.take() {
+      let _ = tx.send(RouteAction::Abort(reason.to_string()));
+    }
+  }
+}
+
+impl Drop for Route {
+  fn drop(&mut self) {
+    // Fail-open: if the handler didn't call fulfill/continue/abort,
+    // continue the request with no modifications.
+    if let Some(tx) = self.action_tx.take() {
+      let _ = tx.send(RouteAction::Continue(ContinueOverrides::default()));
+    }
+  }
+}
+
 /// Route handler function type.
-/// Takes the intercepted request, returns what action to take.
+/// Receives a `Route` object; must call one of `fulfill()`, `continue_route()`, or `abort()`.
 /// Must be Send + Sync since it's called from async tasks.
-pub type RouteHandler = std::sync::Arc<dyn Fn(&InterceptedRequest) -> RouteAction + Send + Sync>;
+pub type RouteHandler = std::sync::Arc<dyn Fn(Route) + Send + Sync>;
 
 /// A registered route with URL pattern and handler.
 pub struct RegisteredRoute {

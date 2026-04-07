@@ -1269,7 +1269,13 @@ impl WebKitPage {
                   },
                   resource_type: String::new(),
                 };
-                let action = (route.handler)(&intercepted);
+                let (tx, rx) = tokio::sync::oneshot::channel();
+                let route_obj = crate::route::Route::new(intercepted, tx);
+                (route.handler)(route_obj);
+                // Block to receive the action (WebKit handler is sync).
+                let action = rx.blocking_recv().unwrap_or(
+                  crate::route::RouteAction::Continue(crate::route::ContinueOverrides::default()),
+                );
                 return match action {
                   crate::route::RouteAction::Fulfill(resp) => {
                     let body_str = String::from_utf8_lossy(&resp.body).to_string();

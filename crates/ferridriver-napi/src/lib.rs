@@ -42,9 +42,11 @@
 
 mod bdd_runner;
 mod browser;
+mod codegen;
 mod context;
 mod frame;
 mod locator;
 mod page;
+mod route;
 mod test_runner;
 mod types;

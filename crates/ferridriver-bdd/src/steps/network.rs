@@ -7,7 +7,7 @@ use std::sync::{Arc, Mutex};
 
 use crate::step::StepError;
 use crate::world::BrowserWorld;
-use ferridriver::route::{FulfillResponse, InterceptedRequest, RouteAction};
+use ferridriver::route::{ContinueOverrides, FulfillResponse, InterceptedRequest};
 use ferridriver_bdd_macros::{given, then, when};
 
 /// Thread-safe log of intercepted requests stored in world state.
@@ -48,12 +48,12 @@ async fn mock_with_status_and_body(world: &mut BrowserWorld, pattern: String, st
     .page()
     .route(
       &pattern,
-      Arc::new(move |_req: &InterceptedRequest| {
-        RouteAction::Fulfill(FulfillResponse {
+      Arc::new(move |route| {
+        route.fulfill(FulfillResponse {
           status,
           body: body_bytes.clone(),
           ..FulfillResponse::default()
-        })
+        });
       }),
     )
     .await
@@ -67,13 +67,13 @@ async fn mock_with_json(world: &mut BrowserWorld, pattern: String, json_body: St
     .page()
     .route(
       &pattern,
-      Arc::new(move |_req: &InterceptedRequest| {
-        RouteAction::Fulfill(FulfillResponse {
+      Arc::new(move |route| {
+        route.fulfill(FulfillResponse {
           status: 200,
           body: body_bytes.clone(),
           content_type: Some("application/json".to_string()),
           ..FulfillResponse::default()
-        })
+        });
       }),
     )
     .await
@@ -86,7 +86,9 @@ async fn block_requests(world: &mut BrowserWorld, pattern: String) {
     .page()
     .route(
       &pattern,
-      Arc::new(|_req: &InterceptedRequest| RouteAction::Abort("BlockedByClient".to_string())),
+      Arc::new(|route| {
+        route.abort("BlockedByClient");
+      }),
     )
     .await
     .map_err(|e| StepError::from(format!("block requests to \"{pattern}\": {e}")))?;
@@ -99,9 +101,9 @@ async fn intercept_requests(world: &mut BrowserWorld, pattern: String) {
     .page()
     .route(
       &pattern,
-      Arc::new(move |req: &InterceptedRequest| {
-        tracker.push(req.clone());
-        RouteAction::Continue(Default::default())
+      Arc::new(move |route| {
+        tracker.push(route.request().clone());
+        route.continue_route(ContinueOverrides::default());
       }),
     )
     .await

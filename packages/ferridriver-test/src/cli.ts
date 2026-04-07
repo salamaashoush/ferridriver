@@ -509,6 +509,47 @@ const bddCommand = defineCommand({
   },
 });
 
+const codegenCommand = defineCommand({
+  meta: {
+    name: 'codegen',
+    description: 'Record user interactions and generate test code',
+  },
+  args: {
+    url: { type: 'positional', valueName: 'URL', required: true },
+    language: {
+      type: 'string',
+      short: 'l',
+      description: 'Output language: rust, typescript (ts), gherkin (bdd)',
+      default: 'rust',
+    },
+    output: {
+      type: 'string',
+      short: 'o',
+      description: 'Write generated code to file instead of stdout',
+    },
+    viewport: {
+      type: 'string',
+      description: 'Viewport size (WxH, e.g. "1280x720")',
+    },
+  },
+  async run({ args }) {
+    const { Codegen } = await import('ferridriver');
+
+    const config: Record<string, any> = { url: args.url as string };
+    if (args.language) config.language = args.language;
+    if (args.output) config.outputFile = args.output;
+    if (args.viewport) {
+      const [w, h] = (args.viewport as string).split('x').map(Number);
+      if (w && h) {
+        config.viewportWidth = w;
+        config.viewportHeight = h;
+      }
+    }
+
+    await Codegen.run(config);
+  },
+});
+
 // ---- Root command ----
 
 const root = defineCommand({
@@ -523,12 +564,14 @@ const root = defineCommand({
       '  ferridriver-test test --headed -j 4           # 4 workers, headed browser\n' +
       '  ferridriver-test ct --framework react         # Component tests with React\n' +
       '  ferridriver-test bdd --tags "@smoke"           # BDD tests filtered by tag\n' +
-      '  ferridriver-test bdd features/ --steps steps/  # Custom feature/step paths',
+      '  ferridriver-test bdd features/ --steps steps/  # Custom feature/step paths\n' +
+      '  ferridriver-test codegen https://example.com   # Record interactions as test code',
   },
   subCommands: {
     test: testCommand,
     ct: ctCommand,
     bdd: bddCommand,
+    codegen: codegenCommand,
   },
 });
 

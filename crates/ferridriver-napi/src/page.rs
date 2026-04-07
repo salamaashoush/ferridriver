@@ -885,6 +885,64 @@ impl Page {
     }
   }
 
+  // ── Network interception ─────────────────────────────────────────────
+
+  /// Route network requests matching a glob pattern.
+  ///
+  /// The handler receives a `Route` object with request details and must call
+  /// one of `route.fulfill()`, `route.continue()`, or `route.abort()`.
+  ///
+  /// ```js
+  /// await page.route('**/api/*', (route) => {
+  ///   if (route.url.includes('block')) {
+  ///     route.abort();
+  ///   } else {
+  ///     route.fulfill({ status: 200, body: '{"ok":true}', contentType: 'application/json' });
+  ///   }
+  /// });
+  /// ```
+  /// Route network requests matching a glob pattern.
+  ///
+  /// The handler receives a `Route` object with request details and must call
+  /// one of `route.fulfill()`, `route.continue()`, or `route.abort()`.
+  ///
+  /// ```js
+  /// await page.route('**/api/*', (route) => {
+  ///   if (route.url.includes('block')) {
+  ///     route.abort();
+  ///   } else {
+  ///     route.fulfill({ status: 200, body: '{"ok":true}', contentType: 'application/json' });
+  ///   }
+  /// });
+  /// ```
+  #[napi(ts_args_type = "pattern: string, handler: (route: Route) => void")]
+  pub async fn route(
+    &self,
+    pattern: String,
+    handler: napi::threadsafe_function::ThreadsafeFunction<crate::route::Route, (), crate::route::Route, napi::Status, false, true, 0>,
+  ) -> Result<()> {
+    let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
+      let napi_route = crate::route::Route::wrap(route);
+      handler.call(
+        napi_route,
+        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+      );
+    });
+
+    self
+      .inner
+      .route(&pattern, rust_handler)
+      .await
+      .map_err(napi::Error::from_reason)
+  }
+
+  /// Remove all route handlers matching the glob pattern.
+  #[napi]
+  pub async fn unroute(&self, pattern: String) -> Result<()> {
+    self.inner.unroute(&pattern).await.map_err(napi::Error::from_reason)
+  }
+
+
   // ── Expect assertions (delegates to Rust core, all polling in Rust) ──
 
   #[napi]

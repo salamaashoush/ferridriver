@@ -2347,19 +2347,30 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         resource_type,
       };
 
-      let action = {
+      // Find matching route handler and dispatch.
+      let matched_handler = {
         let routes_guard = routes.read().await;
-        let mut matched_action = None;
-        for route in routes_guard.iter() {
-          if route.pattern.is_match(&url) {
-            matched_action = Some((route.handler)(&intercepted));
-            break;
-          }
-        }
-        matched_action
+        routes_guard
+          .iter()
+          .find(|r| r.pattern.is_match(&url))
+          .map(|r| std::sync::Arc::clone(&r.handler))
       };
 
-      Self::execute_route_action(&transport, session_id.as_deref(), &request_id, action).await;
+      let action = if let Some(handler) = matched_handler {
+        // Create a oneshot channel for the handler to send its response.
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let route = crate::route::Route::new(intercepted, tx);
+        handler(route);
+        // Await the handler's decision (or default to Continue if dropped).
+        rx.await.unwrap_or(crate::route::RouteAction::Continue(
+          crate::route::ContinueOverrides::default(),
+        ))
+      } else {
+        crate::route::RouteAction::Continue(crate::route::ContinueOverrides::default())
+      };
+
+      Self::execute_route_action(&transport, session_id.as_deref(), &request_id, Some(action))
+        .await;
     }
   }
 

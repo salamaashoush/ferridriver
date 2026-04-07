@@ -997,7 +997,7 @@ async fn locator_or_and_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn network_interception_tests() {
-  use ferridriver::route::{FulfillResponse, RouteAction};
+  use ferridriver::route::FulfillResponse;
   use std::sync::Arc;
 
   let browser = Browser::launch(LaunchOptions {
@@ -1013,13 +1013,13 @@ async fn network_interception_tests() {
   page
     .route(
       "**/mock-page",
-      Arc::new(|_req| {
-        RouteAction::Fulfill(FulfillResponse {
+      Arc::new(|route| {
+        route.fulfill(FulfillResponse {
           status: 200,
           body: b"<html><head><title>Mocked</title></head><body>This page is mocked</body></html>".to_vec(),
           content_type: Some("text/html".into()),
           ..Default::default()
-        })
+        });
       }),
     )
     .await
@@ -1039,13 +1039,13 @@ async fn network_interception_tests() {
   page
     .route(
       "**/api/data",
-      Arc::new(|_req| {
-        RouteAction::Fulfill(FulfillResponse {
+      Arc::new(|route| {
+        route.fulfill(FulfillResponse {
           status: 200,
           body: br#"{"mocked":true,"value":42}"#.to_vec(),
           content_type: Some("application/json".into()),
           ..Default::default()
-        })
+        });
       }),
     )
     .await
@@ -1064,7 +1064,9 @@ async fn network_interception_tests() {
   page
     .route(
       "**/blocked",
-      Arc::new(|_req| RouteAction::Abort("blockedbyclient".into())),
+      Arc::new(|route| {
+        route.abort("blockedbyclient");
+      }),
     )
     .await
     .unwrap();
