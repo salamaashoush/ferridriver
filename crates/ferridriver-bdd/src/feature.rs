@@ -17,12 +17,24 @@ pub struct FeatureSet {
 
 impl FeatureSet {
   /// Discover `.feature` files matching the given glob patterns.
+  ///
+  /// If a pattern is a directory path (no glob chars, exists as dir), it is
+  /// automatically expanded to `<dir>/**/*.feature` so users can pass bare
+  /// directory paths like `tests/features/` or `tests/features`.
   pub fn discover(patterns: &[String], ignore: &[String]) -> Result<Vec<PathBuf>, String> {
     let mut files = Vec::new();
 
-    for pattern in patterns {
+    for raw_pattern in patterns {
+      // If the pattern is a directory, expand to recursive glob.
+      let pattern = if std::path::Path::new(raw_pattern).is_dir() {
+        let trimmed = raw_pattern.trim_end_matches('/');
+        format!("{trimmed}/**/*.feature")
+      } else {
+        raw_pattern.clone()
+      };
+
       let entries =
-        glob::glob(pattern).map_err(|e| format!("invalid glob pattern \"{pattern}\": {e}"))?;
+        glob::glob(&pattern).map_err(|e| format!("invalid glob pattern \"{pattern}\": {e}"))?;
 
       for entry in entries {
         match entry {

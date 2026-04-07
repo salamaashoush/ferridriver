@@ -135,11 +135,23 @@ fn apply_filters(mut plan: TestPlan, _config: &TestConfig) -> TestPlan {
 
 /// Filter a test plan by grep pattern.
 pub fn filter_by_grep(plan: &mut TestPlan, pattern: &str, invert: bool) {
-  let re = regex::Regex::new(pattern).ok();
+  // Build a case-insensitive regex. If the pattern has invalid regex syntax,
+  // fall back to case-insensitive literal substring match.
+  let re = regex::RegexBuilder::new(pattern)
+    .case_insensitive(true)
+    .build()
+    .ok();
+  let pattern_lower = pattern.to_lowercase();
+
   for suite in &mut plan.suites {
     suite.tests.retain(|test| {
       let full_name = test.id.full_name();
-      let matches = re.as_ref().is_some_and(|r| r.is_match(&full_name));
+      let matches = if let Some(ref r) = re {
+        r.is_match(&full_name)
+      } else {
+        // Fallback: case-insensitive substring search.
+        full_name.to_lowercase().contains(&pattern_lower)
+      };
       if invert { !matches } else { matches }
     });
   }

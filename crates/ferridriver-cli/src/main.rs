@@ -149,26 +149,18 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
     .flat_map(scenario::expand_feature)
     .collect();
 
-  // @only filtering: if any scenario has @only, keep only those.
-  let has_only = all_scenarios.iter().any(|s| s.tags.iter().any(|t| t == "@only"));
-  if has_only {
-    all_scenarios.retain(|s| s.tags.iter().any(|t| t == "@only"));
-  }
+  // @only filtering is handled by the runner's execute() via filter_by_only().
+  // Scenarios with @only get TestAnnotation::Only in the translate step.
 
-  // Tag filtering.
+  // Tag filtering (BDD-specific Gherkin expressions like "@smoke and not @wip").
   if let Some(tag_expr) = &config.tags {
     let expr = TagExpression::parse(tag_expr)
       .map_err(|e| anyhow::anyhow!("invalid tag expression: {e}"))?;
     ferridriver_bdd::filter::filter_scenarios(&mut all_scenarios, &expr);
   }
 
-  // Grep filtering.
-  if let Some(grep) = &args.grep {
-    ferridriver_bdd::filter::filter_by_grep(&mut all_scenarios, grep, false);
-  }
-  if let Some(grep_inv) = &args.grep_invert {
-    ferridriver_bdd::filter::filter_by_grep(&mut all_scenarios, grep_inv, true);
-  }
+  // Grep filtering is handled by the runner's execute() via CliOverrides.grep.
+  // No duplicate filtering here — the runner applies it to the TestPlan.
 
   let total = all_scenarios.len();
   if total == 0 {

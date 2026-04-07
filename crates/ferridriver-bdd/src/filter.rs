@@ -182,18 +182,21 @@ pub fn filter_scenarios(scenarios: &mut Vec<ScenarioExecution>, expr: &TagExpres
 
 /// Filter scenarios by grep pattern (scenario name match).
 pub fn filter_by_grep(scenarios: &mut Vec<ScenarioExecution>, pattern: &str, invert: bool) {
-  let re = match regex::Regex::new(pattern) {
-    Ok(r) => r,
-    Err(_) => return,
-  };
+  // Case-insensitive regex. If pattern is invalid regex, fall back to
+  // case-insensitive substring match (user typed plain text, not regex).
+  let re = regex::RegexBuilder::new(pattern)
+    .case_insensitive(true)
+    .build()
+    .ok();
+  let pattern_lower = pattern.to_lowercase();
 
   scenarios.retain(|s| {
-    let matches = re.is_match(&s.name);
-    if invert {
-      !matches
+    let matches = if let Some(ref r) = re {
+      r.is_match(&s.name)
     } else {
-      matches
-    }
+      s.name.to_lowercase().contains(&pattern_lower)
+    };
+    if invert { !matches } else { matches }
   });
 }
 
