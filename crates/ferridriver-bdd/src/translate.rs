@@ -134,6 +134,11 @@ fn translate_scenario(
       world.set_test_info(Arc::clone(&test_info));
       world.set_registry(Arc::clone(&registry));
 
+      // Set feature directory for fixture path resolution.
+      if let Some(dir) = scenario.feature_path.parent() {
+        world.set_feature_dir(dir.to_path_buf());
+      }
+
       // Inject Scenario Outline example values as variables.
       if let Some(values) = &scenario.example_values {
         for (key, val) in values {

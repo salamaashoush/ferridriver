@@ -80,6 +80,82 @@ async fn mock_with_json(world: &mut BrowserWorld, pattern: String, json_body: St
     .map_err(|e| StepError::from(format!("mock JSON requests to \"{pattern}\": {e}")))?;
 }
 
+#[given("I mock requests to {string} with fixture {string}")]
+async fn mock_with_fixture(world: &mut BrowserWorld, pattern: String, fixture_path: String) {
+  let path = world.resolve_fixture_path(&fixture_path);
+  let body = std::fs::read(&path)
+    .map_err(|e| StepError::from(format!("read fixture {}: {e}", path.display())))?;
+
+  // Infer content type from extension.
+  let content_type = match path.extension().and_then(|e| e.to_str()) {
+    Some("json") => "application/json",
+    Some("html") | Some("htm") => "text/html",
+    Some("xml") => "application/xml",
+    Some("txt") => "text/plain",
+    Some("css") => "text/css",
+    Some("js") => "application/javascript",
+    _ => "application/octet-stream",
+  }
+  .to_string();
+
+  world
+    .page()
+    .route(
+      &pattern,
+      Arc::new(move |route| {
+        route.fulfill(FulfillResponse {
+          status: 200,
+          body: body.clone(),
+          content_type: Some(content_type.clone()),
+          ..FulfillResponse::default()
+        });
+      }),
+    )
+    .await
+    .map_err(|e| StepError::from(format!("mock with fixture \"{}\": {e}", fixture_path)))?;
+}
+
+#[given("I mock requests to {string} with fixture {string} and status {int}")]
+async fn mock_with_fixture_and_status(
+  world: &mut BrowserWorld,
+  pattern: String,
+  fixture_path: String,
+  status: i64,
+) {
+  let status = i32::try_from(status)
+    .map_err(|_| StepError::from(format!("invalid status code: {status}")))?;
+  let path = world.resolve_fixture_path(&fixture_path);
+  let body = std::fs::read(&path)
+    .map_err(|e| StepError::from(format!("read fixture {}: {e}", path.display())))?;
+
+  let content_type = match path.extension().and_then(|e| e.to_str()) {
+    Some("json") => "application/json",
+    Some("html") | Some("htm") => "text/html",
+    Some("xml") => "application/xml",
+    Some("txt") => "text/plain",
+    Some("css") => "text/css",
+    Some("js") => "application/javascript",
+    _ => "application/octet-stream",
+  }
+  .to_string();
+
+  world
+    .page()
+    .route(
+      &pattern,
+      Arc::new(move |route| {
+        route.fulfill(FulfillResponse {
+          status,
+          body: body.clone(),
+          content_type: Some(content_type.clone()),
+          ..FulfillResponse::default()
+        });
+      }),
+    )
+    .await
+    .map_err(|e| StepError::from(format!("mock with fixture \"{}\": {e}", fixture_path)))?;
+}
+
 #[given("I block requests to {string}")]
 async fn block_requests(world: &mut BrowserWorld, pattern: String) {
   world

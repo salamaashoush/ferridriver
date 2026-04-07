@@ -19,6 +19,8 @@ pub struct BrowserWorld {
   state: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
   test_info: Option<Arc<ferridriver_test::model::TestInfo>>,
   registry: Option<Arc<crate::registry::StepRegistry>>,
+  /// Directory of the current feature file (for resolving relative fixture paths).
+  feature_dir: Option<std::path::PathBuf>,
 }
 
 impl BrowserWorld {
@@ -31,6 +33,7 @@ impl BrowserWorld {
       state: FxHashMap::default(),
       test_info: None,
       registry: None,
+      feature_dir: None,
     }
   }
 
@@ -97,6 +100,21 @@ impl BrowserWorld {
   /// Set the step registry for step composition.
   pub fn set_registry(&mut self, registry: Arc<crate::registry::StepRegistry>) {
     self.registry = Some(registry);
+  }
+
+  /// Set the feature file directory for resolving relative fixture paths.
+  pub fn set_feature_dir(&mut self, dir: std::path::PathBuf) {
+    self.feature_dir = Some(dir);
+  }
+
+  /// Resolve a path relative to the feature file directory.
+  /// Falls back to current working directory if feature dir is not set.
+  pub fn resolve_fixture_path(&self, relative: &str) -> std::path::PathBuf {
+    if let Some(dir) = &self.feature_dir {
+      dir.join(relative)
+    } else {
+      std::path::PathBuf::from(relative)
+    }
   }
 
   /// Get the step registry Arc (for retry step composition).
