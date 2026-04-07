@@ -306,32 +306,9 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
   // (only, skip, fixme, grep, tag, shard, last-failed).
   for (const t of tests) runner.registerTest(t.meta, t.body);
 
-  const mode = ctMode ? 'component' : 'E2E';
-  console.log(`\n  Running ${tests.length} ${mode} test(s) with ${workerCount} worker(s)\n`);
-
+  // Rust reporters handle all terminal output (icons, colors, progress, summary).
+  // TS CLI only needs the exit code from the summary.
   const summary = await runner.run();
-
-  for (const r of summary.results) {
-    const icon = r.status === 'passed' ? '\u2713' : r.status === 'failed' || r.status === 'timed out' ? '\u2717' :
-                 r.status === 'skipped' ? '\u2212' : r.status === 'flaky' ? '\u26a0' : '?';
-    const color = r.status === 'passed' ? '\x1b[32m' : r.status === 'failed' || r.status === 'timed out' ? '\x1b[31m' :
-                  '\x1b[33m';
-    const dur = r.status !== 'skipped' ? ` (${Math.round(r.durationMs)}ms)` : '';
-    console.log(`  ${color}${icon}\x1b[0m ${r.title}${dur}`);
-    if (r.errorMessage) {
-      // Strip NAPI error wrapper prefix (e.g. "GenericFailure, Error: ")
-      const msg = r.errorMessage.replace(/^GenericFailure,\s*Error:\s*/, '');
-      const indented = msg.split('\n').map((l: string) => `      ${l}`).join('\n');
-      console.log(`\x1b[31m${indented}\x1b[0m\n`);
-    }
-  }
-
-  const parts: string[] = [];
-  if (summary.passed > 0) parts.push(`\x1b[32m${summary.passed} passed\x1b[0m`);
-  if (summary.failed > 0) parts.push(`\x1b[31m${summary.failed} failed\x1b[0m`);
-  if (summary.flaky > 0) parts.push(`\x1b[33m${summary.flaky} flaky\x1b[0m`);
-  if (summary.skipped > 0) parts.push(`\x1b[33m${summary.skipped} skipped\x1b[0m`);
-  console.log(`\n  ${summary.total} test(s): ${parts.join(', ')} (${Math.round(summary.durationMs)}ms)\n`);
 
   if (viteProcess) viteProcess.kill();
   process.exit(summary.failed > 0 ? 1 : 0);
