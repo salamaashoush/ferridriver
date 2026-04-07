@@ -2305,72 +2305,75 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       let request_id = params
         .get("requestId")
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
+        .unwrap_or("");
       let req_obj = params.get("request");
+      // Borrow URL directly from the JSON event — zero allocation for matching.
       let url = req_obj
         .and_then(|r| r.get("url"))
         .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-      let method = req_obj
-        .and_then(|r| r.get("method"))
-        .and_then(|v| v.as_str())
-        .unwrap_or("GET")
-        .to_string();
-      let resource_type = params
-        .get("resourceType")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-      let post_data = req_obj
-        .and_then(|r| r.get("postData"))
-        .and_then(|v| v.as_str())
-        .map(std::string::ToString::to_string);
-      let headers: FxHashMap<String, String> = req_obj
-        .and_then(|r| r.get("headers"))
-        .and_then(|h| h.as_object())
-        .map(|obj| {
-          obj
-            .iter()
-            .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
-            .collect()
-        })
-        .unwrap_or_default();
+        .unwrap_or("");
 
-      let intercepted = crate::route::InterceptedRequest {
-        request_id: request_id.clone(),
-        url: url.clone(),
-        method,
-        headers,
-        post_data,
-        resource_type,
-      };
-
-      // Find matching route handler and dispatch.
+      // Match route BEFORE allocating InterceptedRequest.
+      // For non-matching requests (the common case), this is zero-alloc.
       let matched_handler = {
         let routes_guard = routes.read().await;
         routes_guard
           .iter()
-          .find(|r| r.pattern.is_match(&url))
+          .find(|r| r.pattern.is_match(url))
           .map(|r| std::sync::Arc::clone(&r.handler))
       };
 
-      let action = if let Some(handler) = matched_handler {
-        // Create a oneshot channel for the handler to send its response.
+      if let Some(handler) = matched_handler {
+        // Only parse the full request when a route actually matched.
+        let method = req_obj
+          .and_then(|r| r.get("method"))
+          .and_then(|v| v.as_str())
+          .unwrap_or("GET");
+        let resource_type = params
+          .get("resourceType")
+          .and_then(|v| v.as_str())
+          .unwrap_or("");
+        let post_data = req_obj
+          .and_then(|r| r.get("postData"))
+          .and_then(|v| v.as_str());
+        let headers: FxHashMap<String, String> = req_obj
+          .and_then(|r| r.get("headers"))
+          .and_then(|h| h.as_object())
+          .map(|obj| {
+            obj
+              .iter()
+              .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+              .collect()
+          })
+          .unwrap_or_default();
+
+        let intercepted = crate::route::InterceptedRequest {
+          request_id: request_id.to_string(),
+          url: url.to_string(),
+          method: method.to_string(),
+          headers,
+          post_data: post_data.map(str::to_string),
+          resource_type: resource_type.to_string(),
+        };
+
         let (tx, rx) = tokio::sync::oneshot::channel();
         let route = crate::route::Route::new(intercepted, tx);
         handler(route);
-        // Await the handler's decision (or default to Continue if dropped).
-        rx.await.unwrap_or(crate::route::RouteAction::Continue(
+        let action = rx.await.unwrap_or(crate::route::RouteAction::Continue(
           crate::route::ContinueOverrides::default(),
-        ))
+        ));
+        Self::execute_route_action(&transport, session_id.as_deref(), request_id, Some(action))
+          .await;
       } else {
-        crate::route::RouteAction::Continue(crate::route::ContinueOverrides::default())
-      };
-
-      Self::execute_route_action(&transport, session_id.as_deref(), &request_id, Some(action))
-        .await;
+        // No matching route — continue with zero allocation beyond the CDP command.
+        let _ = transport
+          .send_command(
+            session_id.as_deref(),
+            "Fetch.continueRequest",
+            serde_json::json!({"requestId": request_id}),
+          )
+          .await;
+      }
     }
   }
 
