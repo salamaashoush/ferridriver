@@ -1062,7 +1062,7 @@ impl<T: CdpWrap> CdpPage<T> {
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, String> {
+  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>, String> {
     self
       .cmd(
         "Page.startScreencast",
@@ -1093,10 +1093,14 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   /// Background task: listens for `Page.screencastFrame` events, decodes JPEG, acks, forwards.
+  ///
+  /// Passes raw JPEG frames to the channel. Frame interpolation (gap-filling) is handled
+  /// by the video recorder layer, not here. ACK is sent immediately and non-blocking
+  /// (matching Playwright's approach) so Chrome sends the next frame ASAP.
   fn spawn_screencast_listener(
     transport: Arc<T>,
     session_id: Option<String>,
-    frame_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+    frame_tx: tokio::sync::mpsc::UnboundedSender<(Vec<u8>, f64)>,
   ) {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_events();
@@ -1115,19 +1119,31 @@ impl<T: CdpWrap> CdpPage<T> {
 
         let Some(params) = event.get("params") else { continue };
 
-        // Decode base64 JPEG frame data.
+        // Extract Chrome's frame timestamp (seconds since epoch).
+        // Falls back to wall clock if metadata is missing.
+        let timestamp = params
+          .get("metadata")
+          .and_then(|m| m.get("timestamp"))
+          .and_then(|t| t.as_f64())
+          .unwrap_or_else(|| {
+            std::time::SystemTime::now()
+              .duration_since(std::time::UNIX_EPOCH)
+              .unwrap_or_default()
+              .as_secs_f64()
+          });
+
+        // Decode base64 JPEG frame data and forward with timestamp.
         if let Some(data_str) = params.get("data").and_then(|v| v.as_str()) {
           if let Ok(jpeg_bytes) =
             base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_str)
           {
-            if frame_tx.send(jpeg_bytes).is_err() {
-              break; // Receiver dropped, stop listening.
+            if frame_tx.send((jpeg_bytes, timestamp)).is_err() {
+              break;
             }
           }
         }
 
-        // Acknowledge the frame so Chrome sends the next one.
-        // The sessionId inside params is a screencast-specific integer, not the CDP session string.
+        // Acknowledge immediately (non-blocking) so Chrome sends the next frame ASAP.
         let ack_id = params.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
         let t = transport.clone();
         let sid = session_id.clone();

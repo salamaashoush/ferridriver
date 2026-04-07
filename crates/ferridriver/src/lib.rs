@@ -46,6 +46,7 @@ pub mod state;
 // ── Implementation modules (used by MCP server, will be internalized) ──
 pub mod actions;
 pub mod selectors;
+pub mod ffmpeg;
 pub mod video;
 
 // ── BDD steps (use crate-internal APIs) ──

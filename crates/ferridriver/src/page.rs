@@ -1609,13 +1609,14 @@ impl Page {
 
   // ── Screencast (video recording) ──
 
-  /// Start CDP screencast. Returns a channel of decoded JPEG frames.
+  /// Start CDP screencast. Returns a channel of `(jpeg_bytes, timestamp_secs)` pairs.
+  /// Timestamp is Chrome's `metadata.timestamp` from the screencastFrame event.
   pub async fn start_screencast(
     &self,
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, String> {
+  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>, String> {
     self.inner.start_screencast(quality, max_width, max_height).await
   }
 

@@ -21,6 +21,7 @@ tracing = { workspace = true }
 tokio-tungstenite = "0.24"
 rustc-hash = "2"
 arc-swap = { workspace = true }
+ffmpeg-next = "8.1.0"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }

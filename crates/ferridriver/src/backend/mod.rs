@@ -614,7 +614,7 @@ impl AnyPage {
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, String> {
+  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>, String> {
     match self {
       AnyPage::CdpPipe(p) => p.start_screencast(quality, max_width, max_height).await,
       AnyPage::CdpRaw(p) => p.start_screencast(quality, max_width, max_height).await,

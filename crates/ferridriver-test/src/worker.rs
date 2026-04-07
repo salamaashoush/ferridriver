@@ -367,30 +367,37 @@ impl Worker {
         test_pool.inject("test_info", Arc::clone(&test_info)).await;
 
         // ── Video recording (start before any test code) ──
-        let video_handle = if self.config.video.mode != crate::config::VideoMode::Off {
-          let video_path = test_info.output_dir.join(format!(
-            "{}-attempt{}.webm",
-            sanitize_filename(&test_id.name),
-            attempt
-          ));
-          let _ = std::fs::create_dir_all(&test_info.output_dir);
-          match ferridriver::video::start_recording(
-            &page,
-            video_path,
-            self.config.video.width,
-            self.config.video.height,
-            80,
-          )
-          .await
-          {
-            Ok(h) => Some(h),
-            Err(e) => {
-              tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-              None
+        // retain-on-failure: buffer frames in memory, only encode if test fails (zero ffmpeg cost for passing tests)
+        // on: eager mode, pipe frames to ffmpeg in real-time
+        enum VideoHandle {
+          Eager(ferridriver::video::VideoRecordingHandle),
+          Buffered(ferridriver::video::BufferedRecordingHandle),
+        }
+        let video_handle: Option<VideoHandle> = match self.config.video.mode {
+          crate::config::VideoMode::Off => None,
+          crate::config::VideoMode::On => {
+            let ext = ferridriver::video::video_extension();
+            let video_path = test_info.output_dir.join(format!(
+              "{}-attempt{}.{ext}",
+              sanitize_filename(&test_id.name),
+              attempt
+            ));
+            let _ = std::fs::create_dir_all(&test_info.output_dir);
+            match ferridriver::video::start_recording(
+              &page, video_path, self.config.video.width, self.config.video.height, 80,
+            ).await {
+              Ok(h) => Some(VideoHandle::Eager(h)),
+              Err(e) => { tracing::warn!(target: "ferridriver::worker", "video start failed: {e}"); None }
             }
           }
-        } else {
-          None
+          crate::config::VideoMode::RetainOnFailure => {
+            match ferridriver::video::start_buffered_recording(
+              &page, self.config.video.width, self.config.video.height, 80,
+            ).await {
+              Ok(h) => Some(VideoHandle::Buffered(h)),
+              Err(e) => { tracing::warn!(target: "ferridriver::worker", "video start failed: {e}"); None }
+            }
+          }
         };
 
         // ── beforeEach hooks ──
@@ -423,16 +430,33 @@ impl Worker {
         };
 
         // ── Stop video recording (before context close, page session must be alive) ──
-        let video_path = if let Some(handle) = video_handle {
-          match handle.stop(&page).await {
-            Ok(path) => Some(path),
-            Err(e) => {
-              tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}");
+        let test_failed = r.as_ref().is_err() || r.as_ref().is_ok_and(|r| r.is_err());
+        let video_path = match video_handle {
+          Some(VideoHandle::Eager(handle)) => {
+            match handle.stop(&page).await {
+              Ok(path) => Some(path),
+              Err(e) => { tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}"); None }
+            }
+          }
+          Some(VideoHandle::Buffered(handle)) => {
+            if test_failed {
+              // Test failed — encode the buffered frames to a video file.
+              let ext = ferridriver::video::video_extension();
+              let video_path = test_info.output_dir.join(format!(
+                "{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt
+              ));
+              let _ = std::fs::create_dir_all(&test_info.output_dir);
+              match handle.encode(&page, video_path).await {
+                Ok(path) => Some(path),
+                Err(e) => { tracing::warn!(target: "ferridriver::worker", "video encode failed: {e}"); None }
+              }
+            } else {
+              // Test passed — discard frames, no encoding cost.
+              handle.discard(&page).await;
               None
             }
           }
-        } else {
-          None
+          None => None,
         };
 
         let _ = ctx.close().await;
@@ -528,18 +552,18 @@ impl Worker {
     attachments.extend(info_attachments);
 
     // Attach or clean up video recording.
+    // For buffered mode, video_path is only Some when the test failed (already filtered).
+    // For eager mode, we keep or delete based on the mode.
     if let Some(ref path) = video_path {
       let keep = match self.config.video.mode {
         crate::config::VideoMode::On => true,
-        crate::config::VideoMode::RetainOnFailure => {
-          matches!(status, TestStatus::Failed | TestStatus::TimedOut)
-        }
+        crate::config::VideoMode::RetainOnFailure => true, // buffered mode already filtered
         crate::config::VideoMode::Off => false,
       };
       if keep && path.exists() {
         attachments.push(Attachment {
           name: "video".into(),
-          content_type: "video/webm".into(),
+          content_type: ferridriver::video::video_content_type().into(),
           body: AttachmentBody::Path(path.clone()),
         });
       } else {
