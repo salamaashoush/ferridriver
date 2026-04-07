@@ -1054,6 +1054,92 @@ impl<T: CdpWrap> CdpPage<T> {
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).map_err(|e| format!("Decode: {e}"))
   }
 
+  // ---- Screencast (video recording) ----
+
+  /// Start CDP screencast. Chrome will emit `Page.screencastFrame` events with JPEG data.
+  pub async fn start_screencast(
+    &self,
+    quality: u8,
+    max_width: u32,
+    max_height: u32,
+  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, String> {
+    self
+      .cmd(
+        "Page.startScreencast",
+        serde_json::json!({
+          "format": "jpeg",
+          "quality": quality,
+          "maxWidth": max_width,
+          "maxHeight": max_height,
+          "everyNthFrame": 1,
+        }),
+      )
+      .await?;
+
+    // Spawn listener that decodes frames and acks them.
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    Self::spawn_screencast_listener(
+      self.transport.clone(),
+      self.session_id.clone(),
+      tx,
+    );
+    Ok(rx)
+  }
+
+  /// Stop CDP screencast.
+  pub async fn stop_screencast(&self) -> Result<(), String> {
+    self.cmd("Page.stopScreencast", serde_json::json!({})).await?;
+    Ok(())
+  }
+
+  /// Background task: listens for `Page.screencastFrame` events, decodes JPEG, acks, forwards.
+  fn spawn_screencast_listener(
+    transport: Arc<T>,
+    session_id: Option<String>,
+    frame_tx: tokio::sync::mpsc::UnboundedSender<Vec<u8>>,
+  ) {
+    tokio::spawn(async move {
+      let mut rx = transport.subscribe_events();
+      while let Ok(event) = rx.recv().await {
+        // Filter by CDP session.
+        if let Some(ref expected_sid) = session_id {
+          let event_sid = event.get("sessionId").and_then(|v| v.as_str());
+          if event_sid != Some(expected_sid.as_str()) {
+            continue;
+          }
+        }
+
+        if event.get("method").and_then(|m| m.as_str()) != Some("Page.screencastFrame") {
+          continue;
+        }
+
+        let Some(params) = event.get("params") else { continue };
+
+        // Decode base64 JPEG frame data.
+        if let Some(data_str) = params.get("data").and_then(|v| v.as_str()) {
+          if let Ok(jpeg_bytes) =
+            base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_str)
+          {
+            if frame_tx.send(jpeg_bytes).is_err() {
+              break; // Receiver dropped, stop listening.
+            }
+          }
+        }
+
+        // Acknowledge the frame so Chrome sends the next one.
+        // The sessionId inside params is a screencast-specific integer, not the CDP session string.
+        let ack_id = params.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+        let t = transport.clone();
+        let sid = session_id.clone();
+        tokio::spawn(async move {
+          let _ = t
+            .send_command(sid.as_deref(), "Page.screencastFrameAck", serde_json::json!({ "sessionId": ack_id }))
+            .await;
+        });
+      }
+    });
+  }
+
   // ---- PDF ----
 
   pub async fn pdf(&self, landscape: bool, print_background: bool) -> Result<Vec<u8>, String> {

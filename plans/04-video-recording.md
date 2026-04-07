@@ -1,4 +1,4 @@
-# Feature: Video Recording
+# [DONE] Feature: Video Recording
 
 ## Context
 Video recordings of test execution are invaluable for debugging failures, especially in CI where you cannot reproduce interactively. Playwright's video feature captures the entire test as a video file and attaches it to the report. This is a high-value feature for CI debugging and bug reports.

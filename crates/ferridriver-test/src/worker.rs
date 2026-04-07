@@ -366,6 +366,33 @@ impl Worker {
         test_pool.inject("page", Arc::new(page.clone())).await;
         test_pool.inject("test_info", Arc::clone(&test_info)).await;
 
+        // ── Video recording (start before any test code) ──
+        let video_handle = if self.config.video.mode != crate::config::VideoMode::Off {
+          let video_path = test_info.output_dir.join(format!(
+            "{}-attempt{}.webm",
+            sanitize_filename(&test_id.name),
+            attempt
+          ));
+          let _ = std::fs::create_dir_all(&test_info.output_dir);
+          match ferridriver::video::start_recording(
+            &page,
+            video_path,
+            self.config.video.width,
+            self.config.video.height,
+            80,
+          )
+          .await
+          {
+            Ok(h) => Some(h),
+            Err(e) => {
+              tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+              None
+            }
+          }
+        } else {
+          None
+        };
+
         // ── beforeEach hooks ──
         let mut before_each_err = None;
         for hook in &hooks.before_each {
@@ -395,8 +422,21 @@ impl Worker {
           None
         };
 
+        // ── Stop video recording (before context close, page session must be alive) ──
+        let video_path = if let Some(handle) = video_handle {
+          match handle.stop(&page).await {
+            Ok(path) => Some(path),
+            Err(e) => {
+              tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}");
+              None
+            }
+          }
+        } else {
+          None
+        };
+
         let _ = ctx.close().await;
-        (r, screenshot)
+        (r, screenshot, video_path)
       }
       Err(e) => {
         let _ = ctx.close().await;
@@ -408,12 +448,13 @@ impl Worker {
             screenshot: None,
           })),
           None,
+          None,
         )
       }
     };
 
     let duration = start.elapsed();
-    let (timeout_result, screenshot) = result;
+    let (timeout_result, screenshot, video_path) = result;
 
     let mut attachments = Vec::new();
     if let Some(ref png) = screenshot {
@@ -486,6 +527,26 @@ impl Worker {
     let info_attachments = test_info.attachments.lock().await.clone();
     attachments.extend(info_attachments);
 
+    // Attach or clean up video recording.
+    if let Some(ref path) = video_path {
+      let keep = match self.config.video.mode {
+        crate::config::VideoMode::On => true,
+        crate::config::VideoMode::RetainOnFailure => {
+          matches!(status, TestStatus::Failed | TestStatus::TimedOut)
+        }
+        crate::config::VideoMode::Off => false,
+      };
+      if keep && path.exists() {
+        attachments.push(Attachment {
+          name: "video".into(),
+          content_type: "video/webm".into(),
+          body: AttachmentBody::Path(path.clone()),
+        });
+      } else {
+        let _ = std::fs::remove_file(path);
+      }
+    }
+
     // Merge compile-time annotations with runtime annotations.
     let mut annotations = test.annotations.clone();
     annotations.extend(test_info.get_annotations().await);
@@ -525,6 +586,11 @@ impl Worker {
       hooks,
     }
   }
+}
+
+/// Sanitize a test name for use as a filename.
+fn sanitize_filename(name: &str) -> String {
+  name.chars().map(|c| if c.is_alphanumeric() || c == '-' || c == '_' { c } else { '_' }).collect()
 }
 
 async fn capture_screenshot(page: &ferridriver::Page) -> Option<Vec<u8>> {

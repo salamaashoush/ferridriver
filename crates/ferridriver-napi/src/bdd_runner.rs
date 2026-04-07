@@ -148,6 +148,8 @@ pub struct BddRunnerConfig {
   pub forbid_only: Option<bool>,
   /// Re-run only previously failed scenarios (from @rerun.txt).
   pub last_failed: Option<bool>,
+  /// Video recording mode: "off", "on", "retain-on-failure".
+  pub video: Option<String>,
 }
 
 /// A registered TS step definition.
@@ -248,6 +250,13 @@ impl BddRunner {
     }
     if let Some(fo) = cfg.forbid_only {
       tc.forbid_only = fo;
+    }
+    if let Some(ref v) = cfg.video {
+      tc.video.mode = match v.as_str() {
+        "on" => ferridriver_test::config::VideoMode::On,
+        "retain-on-failure" => ferridriver_test::config::VideoMode::RetainOnFailure,
+        _ => ferridriver_test::config::VideoMode::Off,
+      };
     }
     if tc.features.is_empty() {
       tc.features = vec!["features/**/*.feature".to_string()];

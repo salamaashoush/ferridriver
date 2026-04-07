@@ -607,6 +607,31 @@ impl AnyPage {
     page_dispatch!(self, pdf(landscape, print_background))
   }
 
+  // ── Screencast (video recording) ──
+
+  pub async fn start_screencast(
+    &self,
+    quality: u8,
+    max_width: u32,
+    max_height: u32,
+  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, String> {
+    match self {
+      AnyPage::CdpPipe(p) => p.start_screencast(quality, max_width, max_height).await,
+      AnyPage::CdpRaw(p) => p.start_screencast(quality, max_width, max_height).await,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(_) => Err("Video recording is not supported on WebKit backend".into()),
+    }
+  }
+
+  pub async fn stop_screencast(&self) -> Result<(), String> {
+    match self {
+      AnyPage::CdpPipe(p) => p.stop_screencast().await,
+      AnyPage::CdpRaw(p) => p.stop_screencast().await,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(_) => Ok(()), // No-op if never started.
+    }
+  }
+
   // ── File upload ──
 
   pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<(), String> {

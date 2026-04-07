@@ -74,6 +74,7 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
     profile: args.profile.clone(),
     forbid_only: args.forbid_only,
     last_failed: args.last_failed,
+    video: args.video.clone(),
   };
 
   let mut config = ferridriver_test::config::resolve_config(&overrides)
@@ -233,6 +234,7 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
     profile: args.profile,
     forbid_only: args.forbid_only,
     last_failed: args.last_failed,
+    video: args.video,
   };
 
   let config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;

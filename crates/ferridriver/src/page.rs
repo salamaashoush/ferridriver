@@ -1606,6 +1606,23 @@ impl Page {
   pub fn touchscreen(&self) -> Touchscreen<'_> {
     Touchscreen { page: self }
   }
+
+  // ── Screencast (video recording) ──
+
+  /// Start CDP screencast. Returns a channel of decoded JPEG frames.
+  pub async fn start_screencast(
+    &self,
+    quality: u8,
+    max_width: u32,
+    max_height: u32,
+  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<Vec<u8>>, String> {
+    self.inner.start_screencast(quality, max_width, max_height).await
+  }
+
+  /// Stop CDP screencast.
+  pub async fn stop_screencast(&self) -> Result<(), String> {
+    self.inner.stop_screencast().await
+  }
 }
 
 impl std::fmt::Debug for Page {

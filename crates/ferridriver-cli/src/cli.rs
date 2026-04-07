@@ -110,6 +110,10 @@ pub struct TestArgs {
   /// Re-run only previously failed tests (from @rerun.txt)
   #[arg(long)]
   pub last_failed: bool,
+
+  /// Record video: off, on, retain-on-failure
+  #[arg(long)]
+  pub video: Option<String>,
 }
 
 /// BDD runner options.
@@ -194,6 +198,10 @@ pub struct BddArgs {
   /// Re-run only previously failed scenarios (from @rerun.txt)
   #[arg(long)]
   pub last_failed: bool,
+
+  /// Record video: off, on, retain-on-failure
+  #[arg(long)]
+  pub video: Option<String>,
 }
 
 /// Browser backend and connection options.

@@ -50,6 +50,8 @@ pub struct TestRunnerConfig {
   pub debug: Option<String>,
   /// Grep pattern to filter tests by name.
   pub grep: Option<String>,
+  /// Video recording mode: "off", "on", "retain-on-failure".
+  pub video: Option<String>,
 }
 
 /// Metadata for a registered test.
@@ -190,6 +192,13 @@ impl TestRunner {
       if let Some(ref mut vp) = tc.browser.viewport { vp.height = h as i64; }
     }
     if let Some(fo) = cfg.forbid_only { tc.forbid_only = fo; }
+    if let Some(ref v) = cfg.video {
+      tc.video.mode = match v.as_str() {
+        "on" => ferridriver_test::config::VideoMode::On,
+        "retain-on-failure" => ferridriver_test::config::VideoMode::RetainOnFailure,
+        _ => ferridriver_test::config::VideoMode::Off,
+      };
+    }
     if tc.workers == 0 {
       let cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
       tc.workers = (cpus / 2).max(1);

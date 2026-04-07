@@ -13,6 +13,33 @@ pub enum RunMode {
   Bdd,
 }
 
+/// Video recording mode.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum VideoMode {
+  #[default]
+  Off,
+  On,
+  RetainOnFailure,
+}
+
+/// Video recording configuration.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VideoConfig {
+  pub mode: VideoMode,
+  /// Video width (default 1280). Must be even for VP8.
+  pub width: u32,
+  /// Video height (default 720). Must be even for VP8.
+  pub height: u32,
+}
+
+impl Default for VideoConfig {
+  fn default() -> Self {
+    Self { mode: VideoMode::Off, width: 1280, height: 720 }
+  }
+}
+
 /// Configuration file schema. Loaded from `ferridriver.config.toml` (or `.json`).
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -82,6 +109,10 @@ pub struct TestConfig {
 
   /// Take screenshot on failure. Default: true.
   pub screenshot_on_failure: bool,
+
+  /// Video recording configuration.
+  #[serde(default)]
+  pub video: VideoConfig,
 
   /// Strict mode: treat undefined/pending steps as errors. Default: false.
   pub strict: bool,
@@ -190,6 +221,7 @@ pub struct CliOverrides {
   pub profile: Option<String>,
   pub forbid_only: bool,
   pub last_failed: bool,
+  pub video: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -242,6 +274,7 @@ impl Default for TestConfig {
       dry_run: false,
       fail_fast: false,
       screenshot_on_failure: true,
+      video: VideoConfig::default(),
       strict: false,
       order: "defined".into(),
       language: None,
@@ -332,6 +365,21 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
   }
   if let Some(dir) = &overrides.output_dir {
     config.output_dir = PathBuf::from(dir);
+  }
+  if let Some(video) = &overrides.video {
+    config.video.mode = match video.as_str() {
+      "on" => VideoMode::On,
+      "retain-on-failure" => VideoMode::RetainOnFailure,
+      _ => VideoMode::Off,
+    };
+  }
+  // Environment variable: FERRIDRIVER_VIDEO=on|off|retain-on-failure
+  if let Ok(v) = std::env::var("FERRIDRIVER_VIDEO") {
+    config.video.mode = match v.as_str() {
+      "on" => VideoMode::On,
+      "retain-on-failure" => VideoMode::RetainOnFailure,
+      _ => VideoMode::Off,
+    };
   }
 
   // Auto-detect worker count.
