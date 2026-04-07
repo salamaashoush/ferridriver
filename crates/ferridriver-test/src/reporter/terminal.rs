@@ -1,115 +1,20 @@
-//! Rich terminal reporter with colors and live progress.
+//! Rich terminal reporter: Playwright/Vitest-style output with colors and icons.
 
 use std::time::Duration;
 
 use console::Style;
 
-use crate::model::{StepCategory, StepStatus, TestStatus, TestStep};
+use crate::model::{StepStatus, TestStatus, TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct TerminalReporter {
   completed: usize,
   total: usize,
-  pass_style: Style,
-  fail_style: Style,
-  skip_style: Style,
-  flaky_style: Style,
-  dim_style: Style,
-  bold_style: Style,
 }
 
 impl TerminalReporter {
   pub fn new() -> Self {
-    Self {
-      completed: 0,
-      total: 0,
-      pass_style: Style::new().green(),
-      fail_style: Style::new().red().bold(),
-      skip_style: Style::new().yellow(),
-      flaky_style: Style::new().yellow().bold(),
-      dim_style: Style::new().dim(),
-      bold_style: Style::new().bold(),
-    }
-  }
-
-  fn status_icon(&self, status: &TestStatus) -> &'static str {
-    match status {
-      TestStatus::Passed => "✓",
-      TestStatus::Failed => "✗",
-      TestStatus::TimedOut => "⏱",
-      TestStatus::Skipped => "−",
-      TestStatus::Flaky => "⚠",
-      TestStatus::Interrupted => "!",
-    }
-  }
-
-  fn format_duration(d: Duration) -> String {
-    let ms = d.as_millis();
-    if ms < 1000 {
-      format!("{ms}ms")
-    } else {
-      format!("{:.1}s", d.as_secs_f64())
-    }
-  }
-
-  fn step_icon(status: StepStatus) -> &'static str {
-    match status {
-      StepStatus::Passed => "·",
-      StepStatus::Failed => "✗",
-      StepStatus::Skipped => "−",
-      StepStatus::Pending => "?",
-    }
-  }
-
-  /// Print step hierarchy with indentation.
-  fn print_steps(&self, steps: &[&TestStep], indent: usize) {
-    let pad = " ".repeat(indent * 2);
-    for step in steps {
-      let icon = Self::step_icon(step.status);
-      let dur = Self::format_duration(step.duration);
-      let line = match step.status {
-        StepStatus::Passed => {
-          format!(
-            "{pad}  {icon} {} {}",
-            step.title,
-            self.dim_style.apply_to(format!("({dur})"))
-          )
-        }
-        StepStatus::Failed => {
-          format!(
-            "{pad}  {} {} {}",
-            self.fail_style.apply_to(icon),
-            self.fail_style.apply_to(&step.title),
-            self.dim_style.apply_to(format!("({dur})"))
-          )
-        }
-        StepStatus::Skipped => {
-          format!(
-            "{pad}  {} {}",
-            self.skip_style.apply_to(icon),
-            self.skip_style.apply_to(&step.title)
-          )
-        }
-        StepStatus::Pending => {
-          format!(
-            "{pad}  {} {}",
-            self.skip_style.apply_to(icon),
-            self.skip_style.apply_to(&step.title)
-          )
-        }
-      };
-      println!("{line}");
-
-      // Print nested steps (filtered by TestStep category).
-      let nested: Vec<&TestStep> = step
-        .steps
-        .iter()
-        .filter(|s| s.category == StepCategory::TestStep)
-        .collect();
-      if !nested.is_empty() {
-        self.print_steps(&nested, indent + 1);
-      }
-    }
+    Self { completed: 0, total: 0 }
   }
 }
 
@@ -119,82 +24,138 @@ impl Default for TerminalReporter {
   }
 }
 
+// ── Styles ──
+
+fn s_pass() -> Style { Style::new().green() }
+fn s_fail() -> Style { Style::new().red().bold() }
+fn s_skip() -> Style { Style::new().dim() }
+fn s_flaky() -> Style { Style::new().yellow().bold() }
+fn s_dim() -> Style { Style::new().dim() }
+fn s_bold() -> Style { Style::new().bold() }
+fn s_cyan() -> Style { Style::new().cyan().bold() }
+
+fn status_icon(status: &TestStatus) -> (&'static str, Style) {
+  match status {
+    TestStatus::Passed => ("\u{2713}", s_pass()),   // checkmark
+    TestStatus::Failed => ("\u{2717}", s_fail()),    // cross
+    TestStatus::TimedOut => ("\u{2717}", s_fail()),   // cross (same as failed)
+    TestStatus::Skipped => ("\u{2212}", s_skip()),   // minus
+    TestStatus::Flaky => ("\u{25ce}", s_flaky()),    // bullseye
+    TestStatus::Interrupted => ("!", s_fail()),
+  }
+}
+
+fn step_icon(status: StepStatus) -> (&'static str, Style) {
+  match status {
+    StepStatus::Passed => ("\u{2713}", s_pass()),   // checkmark
+    StepStatus::Failed => ("\u{2717}", s_fail()),    // cross
+    StepStatus::Skipped => ("\u{2212}", s_skip()),   // minus
+    StepStatus::Pending => ("\u{25cb}", s_skip()),   // empty circle
+  }
+}
+
+fn format_duration(d: Duration) -> String {
+  let ms = d.as_millis();
+  if ms < 1000 { format!("{ms}ms") } else { format!("{:.1}s", d.as_secs_f64()) }
+}
+
+fn print_steps(steps: &[&TestStep], indent: usize) {
+  let pad = " ".repeat(indent);
+  for step in steps {
+    let (icon, icon_style) = step_icon(step.status);
+    let dur = format_duration(step.duration);
+    match step.status {
+      StepStatus::Passed => {
+        println!("{pad}{} {} {}", icon_style.apply_to(icon), step.title, s_dim().apply_to(format!("({dur})")));
+      }
+      StepStatus::Failed => {
+        println!("{pad}{} {} {}", icon_style.apply_to(icon), s_fail().apply_to(&step.title), s_dim().apply_to(format!("({dur})")));
+      }
+      StepStatus::Skipped | StepStatus::Pending => {
+        println!("{pad}{} {}", icon_style.apply_to(icon), s_skip().apply_to(&step.title));
+      }
+    }
+
+    if let Some(ref err) = step.error {
+      for line in err.lines() {
+        println!("{pad}  {}", s_fail().apply_to(line));
+      }
+    }
+
+    let nested: Vec<&TestStep> = step.steps.iter().filter(|s| s.category.is_visible()).collect();
+    if !nested.is_empty() {
+      print_steps(&nested, indent + 2);
+    }
+  }
+}
+
 #[async_trait::async_trait]
 impl Reporter for TerminalReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
     match event {
-      ReporterEvent::RunStarted {
-        total_tests,
-        num_workers,
-      } => {
+      ReporterEvent::RunStarted { total_tests, num_workers } => {
         self.total = *total_tests;
-        println!(
-          "\n{}",
-          self
-            .bold_style
-            .apply_to(format!("Running {total_tests} test(s) with {num_workers} worker(s)"))
+        println!();
+        println!("  {} Running {} test(s) with {} worker(s)",
+          s_cyan().apply_to("\u{25b6}"), // play icon
+          s_bold().apply_to(total_tests),
+          num_workers,
         );
         println!();
       }
-      ReporterEvent::TestStarted { .. } => {}
+
       ReporterEvent::TestFinished { test_id, outcome } => {
         self.completed += 1;
-        let icon = self.status_icon(&outcome.status);
-        let duration = Self::format_duration(outcome.duration);
-        let name = &test_id.name;
+        let (icon, icon_style) = status_icon(&outcome.status);
+        let duration = format_duration(outcome.duration);
 
-        let line = match outcome.status {
+        match outcome.status {
           TestStatus::Passed => {
-            format!(
-              "  {} {} {}",
-              self.pass_style.apply_to(icon),
-              name,
-              self.dim_style.apply_to(format!("({duration})"))
-            )
+            println!("  {} {} {}",
+              icon_style.apply_to(icon),
+              test_id.full_name(),
+              s_dim().apply_to(format!("({duration})")),
+            );
           }
           TestStatus::Failed | TestStatus::TimedOut => {
-            format!(
-              "  {} {} {}",
-              self.fail_style.apply_to(icon),
-              self.fail_style.apply_to(name),
-              self.dim_style.apply_to(format!("({duration})"))
-            )
+            println!("  {} {} {}",
+              icon_style.apply_to(icon),
+              s_fail().apply_to(test_id.full_name()),
+              s_dim().apply_to(format!("({duration})")),
+            );
           }
           TestStatus::Skipped => {
-            format!(
-              "  {} {}",
-              self.skip_style.apply_to(icon),
-              self.skip_style.apply_to(name)
-            )
+            println!("  {} {}",
+              icon_style.apply_to(icon),
+              s_skip().apply_to(test_id.full_name()),
+            );
           }
           TestStatus::Flaky => {
-            format!(
-              "  {} {} {}",
-              self.flaky_style.apply_to(icon),
-              self.flaky_style.apply_to(name),
-              self.dim_style.apply_to(format!("({duration}) [flaky]"))
-            )
+            println!("  {} {} {}",
+              icon_style.apply_to(icon),
+              s_flaky().apply_to(test_id.full_name()),
+              s_dim().apply_to(format!("({duration}) [flaky]")),
+            );
           }
           TestStatus::Interrupted => {
-            format!("  {} {}", self.fail_style.apply_to(icon), name)
+            println!("  {} {}", icon_style.apply_to(icon), test_id.full_name());
           }
-        };
-        println!("{line}");
-
-        // Print step details for tests that have user-defined steps.
-        let user_steps: Vec<&TestStep> = outcome
-          .steps
-          .iter()
-          .filter(|s| s.category == StepCategory::TestStep)
-          .collect();
-        if !user_steps.is_empty() {
-          self.print_steps(&user_steps, 2);
         }
 
-        // Print error details for failures.
+        // Steps.
+        let user_steps: Vec<&TestStep> = outcome.steps.iter()
+          .filter(|s| s.category.is_visible())
+          .collect();
+        if !user_steps.is_empty() {
+          print_steps(&user_steps, 4);
+        }
+
+        // Error.
         if let Some(error) = &outcome.error {
           println!();
-          println!("    {}", self.fail_style.apply_to(&error.message));
+          for line in error.message.lines() {
+            println!("    {}", s_fail().apply_to(line));
+          }
           if let Some(diff) = &error.diff {
             for line in diff.lines() {
               println!("    {line}");
@@ -203,37 +164,35 @@ impl Reporter for TerminalReporter {
           println!();
         }
       }
-      ReporterEvent::RunFinished {
-        total,
-        passed,
-        failed,
-        skipped,
-        flaky,
-        duration,
-      } => {
+
+      ReporterEvent::RunFinished { total, passed, failed, skipped, flaky, duration } => {
+        let dur = format_duration(*duration);
         println!();
-        let duration_str = Self::format_duration(*duration);
+
+        // Summary with colored counts.
         let mut parts = Vec::new();
         if *passed > 0 {
-          parts.push(format!("{}", self.pass_style.apply_to(format!("{passed} passed"))));
+          parts.push(format!("{}", s_pass().apply_to(format!("{passed} passed"))));
         }
         if *failed > 0 {
-          parts.push(format!("{}", self.fail_style.apply_to(format!("{failed} failed"))));
+          parts.push(format!("{}", s_fail().apply_to(format!("{failed} failed"))));
         }
         if *flaky > 0 {
-          parts.push(format!("{}", self.flaky_style.apply_to(format!("{flaky} flaky"))));
+          parts.push(format!("{}", s_flaky().apply_to(format!("{flaky} flaky"))));
         }
         if *skipped > 0 {
-          parts.push(format!("{}", self.skip_style.apply_to(format!("{skipped} skipped"))));
+          parts.push(format!("{}", s_skip().apply_to(format!("{skipped} skipped"))));
         }
-        println!(
-          "  {} {} {}",
-          self.bold_style.apply_to(format!("{total} test(s):")),
-          parts.join(", "),
-          self.dim_style.apply_to(format!("({duration_str})"))
+
+        println!("  {} {}: {} {}",
+          s_bold().apply_to("Tests"),
+          s_dim().apply_to(format!("{total} total")),
+          parts.join(&format!("{}", s_dim().apply_to(" | "))),
+          s_dim().apply_to(format!("({dur})")),
         );
         println!();
       }
+
       _ => {}
     }
   }
