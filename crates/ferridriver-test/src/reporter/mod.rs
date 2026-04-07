@@ -193,7 +193,11 @@ pub(crate) fn create_reporters(
           .and_then(|v| v.as_str())
           .map(std::path::PathBuf::from)
           .unwrap_or_else(|| output_dir.join("allure-results"));
-        reporters.push(Box::new(allure::AllureReporter::new(dir)));
+        let mut reporter = allure::AllureReporter::new(dir);
+        if let Some(title) = config.options.get("suite_title").and_then(|v| v.as_str()) {
+          reporter = reporter.with_suite_title(title.to_string());
+        }
+        reporters.push(Box::new(reporter));
       }
       "progress" => {
         reporters.push(Box::new(progress::ProgressReporter::new()));

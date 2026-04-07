@@ -10,6 +10,7 @@ use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use rustc_hash::FxHashMap;
 use serde::Serialize;
 
 use crate::model::{AttachmentBody, TestAnnotation, TestOutcome, TestStatus, TestStep};
@@ -106,10 +107,14 @@ struct AllureCategory {
 
 pub struct AllureReporter {
   output_dir: PathBuf,
+  /// Optional suite title override from config.
+  suite_title: Option<String>,
   /// Collected results to write in finalize.
   results: Vec<PendingResult>,
   /// Run-level environment info.
   env: BTreeMap<String, String>,
+  /// Per-test start timestamps (recorded on TestStarted events).
+  test_starts: FxHashMap<String, u64>,
   /// Run start timestamp (epoch ms).
   run_start: u64,
 }
@@ -128,10 +133,17 @@ impl AllureReporter {
   pub fn new(output_dir: PathBuf) -> Self {
     Self {
       output_dir,
+      suite_title: None,
       results: Vec::new(),
       env: BTreeMap::new(),
+      test_starts: FxHashMap::default(),
       run_start: epoch_ms(),
     }
+  }
+
+  pub fn with_suite_title(mut self, title: String) -> Self {
+    self.suite_title = Some(title);
+    self
   }
 }
 
@@ -143,6 +155,12 @@ impl Reporter for AllureReporter {
         self.run_start = epoch_ms();
         self.env.insert("Total Tests".into(), total_tests.to_string());
         self.env.insert("Workers".into(), num_workers.to_string());
+        self.env.insert("OS".into(), std::env::consts::OS.into());
+        self.env.insert("Arch".into(), std::env::consts::ARCH.into());
+        self.env.insert("ferridriver".into(), env!("CARGO_PKG_VERSION").into());
+      }
+      ReporterEvent::TestStarted { test_id, .. } => {
+        self.test_starts.insert(test_id.full_name(), epoch_ms());
       }
       ReporterEvent::TestFinished { outcome, .. } => {
         self.collect_result(outcome);
@@ -227,7 +245,10 @@ impl Reporter for AllureReporter {
 impl AllureReporter {
   fn collect_result(&mut self, outcome: &TestOutcome) {
     let uuid = make_uuid();
-    let start_ms = self.run_start;
+    let start_ms = self
+      .test_starts
+      .remove(&outcome.test_id.full_name())
+      .unwrap_or(self.run_start);
     let stop_ms = start_ms + outcome.duration.as_millis() as u64;
 
     let status = map_status(&outcome.status);
@@ -275,8 +296,13 @@ impl AllureReporter {
     }
 
     // Build labels from annotations.
+    let suite_value = self
+      .suite_title
+      .clone()
+      .or_else(|| outcome.test_id.suite.clone())
+      .unwrap_or_default();
     let mut labels = vec![
-      AllureLabel { name: "suite".into(), value: outcome.test_id.suite.clone().unwrap_or_default() },
+      AllureLabel { name: "suite".into(), value: suite_value },
       AllureLabel { name: "parentSuite".into(), value: outcome.test_id.file.clone() },
     ];
     let mut links = Vec::new();
