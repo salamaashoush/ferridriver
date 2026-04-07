@@ -105,6 +105,11 @@ impl ReporterSet {
     self.reporters.push(reporter);
   }
 
+  /// Replace all reporters with a new set.
+  pub fn replace(&mut self, reporters: Vec<Box<dyn Reporter>>) {
+    self.reporters = reporters;
+  }
+
   pub async fn emit(&mut self, event: &ReporterEvent) {
     for reporter in &mut self.reporters {
       reporter.on_event(event).await;

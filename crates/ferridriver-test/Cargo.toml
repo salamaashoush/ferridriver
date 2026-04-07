@@ -34,7 +34,8 @@ image = { version = "0.25", default-features = false, features = ["png"] }
 zip = { version = "2", default-features = false, features = ["deflate"] }
 notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
 notify-debouncer-mini = "0.5"
-crossterm = "0.28"
+crossterm = { version = "0.28", features = ["event-stream"] }
+ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28"] }
 axum = { workspace = true }
 tower = "0.5"
 tower-http = { version = "0.6", features = ["fs", "cors"] }
