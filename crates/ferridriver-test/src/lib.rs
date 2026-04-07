@@ -116,7 +116,7 @@ pub use model::{
   SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId, TestInfo, TestOutcome, TestPlan,
   TestStatus, TestStep,
 };
-pub use reporter::{Reporter, ReporterEvent, ReporterSet};
+pub use reporter::{EventBus, EventBusBuilder, Reporter, ReporterDriver, ReporterEvent, ReporterSet, Subscription};
 pub use runner::TestRunner;
 
 // Re-export proc macros.

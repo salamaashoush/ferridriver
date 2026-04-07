@@ -9,6 +9,7 @@ pub mod progress;
 pub mod rerun;
 pub mod terminal;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::mpsc;
@@ -116,33 +117,108 @@ impl ReporterSet {
     }
   }
 
-  pub async fn finalize(&mut self) -> ReporterSet {
+  pub async fn finalize(&mut self) {
     for reporter in &mut self.reporters {
       if let Err(e) = reporter.finalize().await {
         tracing::error!("reporter finalize error: {e}");
       }
     }
-    // Return empty set after finalization.
-    Self::default()
   }
 }
 
 // ── Event Bus ──
 
-/// Thread-safe broadcaster for reporter events.
-/// Workers send events through this; the main thread fans out to reporters.
+/// Builder for constructing an `EventBus` with registered subscribers.
+///
+/// Register all subscribers before calling `build()`. Once built, the bus
+/// is immutable — no new subscribers can be added. This ensures workers
+/// (which clone the bus) fan out to a fixed set of consumers.
+pub struct EventBusBuilder {
+  subscribers: Vec<mpsc::UnboundedSender<ReporterEvent>>,
+}
+
+impl EventBusBuilder {
+  pub fn new() -> Self {
+    Self { subscribers: Vec::new() }
+  }
+
+  /// Register a subscriber. Returns a `Subscription` (the receiving end).
+  /// Must be called before `build()`.
+  pub fn subscribe(&mut self) -> Subscription {
+    let (tx, rx) = mpsc::unbounded_channel();
+    self.subscribers.push(tx);
+    Subscription { rx }
+  }
+
+  /// Finalize the bus. No more subscribers can be added after this.
+  pub fn build(self) -> EventBus {
+    EventBus {
+      inner: Arc::new(EventBusInner {
+        subscribers: self.subscribers,
+      }),
+    }
+  }
+}
+
+/// The receiving end of a subscriber channel.
+pub struct Subscription {
+  pub rx: mpsc::UnboundedReceiver<ReporterEvent>,
+}
+
+/// Fan-out event bus. Workers clone this and call `emit()` — events are
+/// delivered to all subscribers registered at build time.
+///
+/// Clone is cheap (Arc internals). All clones share the same subscriber list.
 #[derive(Clone)]
 pub struct EventBus {
-  tx: mpsc::UnboundedSender<ReporterEvent>,
+  inner: Arc<EventBusInner>,
+}
+
+struct EventBusInner {
+  subscribers: Vec<mpsc::UnboundedSender<ReporterEvent>>,
 }
 
 impl EventBus {
-  pub fn new(tx: mpsc::UnboundedSender<ReporterEvent>) -> Self {
-    Self { tx }
+  /// Emit an event to all subscribers. Clones for N-1, moves to the last.
+  /// Kept `async` to avoid churn on ~50 call sites (body is synchronous).
+  pub async fn emit(&self, event: ReporterEvent) {
+    let subs = &self.inner.subscribers;
+    if subs.is_empty() {
+      return;
+    }
+    let last = subs.len() - 1;
+    for sub in &subs[..last] {
+      let _ = sub.send(event.clone());
+    }
+    let _ = subs[last].send(event);
+  }
+}
+
+// ── Reporter Driver ──
+
+/// Standalone consumer that drains a `Subscription` and drives a `ReporterSet`.
+/// Decoupled from test execution — can run as an independent tokio task.
+///
+/// Spawn this with `tokio::spawn(driver.run())`. When the event bus is dropped
+/// (all senders gone), the subscription channel closes, the driver finalizes
+/// all reporters, and returns the `ReporterSet` for potential reuse.
+pub struct ReporterDriver {
+  reporters: ReporterSet,
+  subscription: Subscription,
+}
+
+impl ReporterDriver {
+  pub fn new(reporters: ReporterSet, subscription: Subscription) -> Self {
+    Self { reporters, subscription }
   }
 
-  pub async fn emit(&self, event: ReporterEvent) {
-    let _ = self.tx.send(event);
+  /// Consume events until the channel closes, finalize reporters, return them.
+  pub async fn run(mut self) -> ReporterSet {
+    while let Some(event) = self.subscription.rx.recv().await {
+      self.reporters.emit(&event).await;
+    }
+    self.reporters.finalize().await;
+    self.reporters
   }
 }
 

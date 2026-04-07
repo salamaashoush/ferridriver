@@ -11,7 +11,7 @@ use crate::config::{CliOverrides, TestConfig};
 use crate::dispatcher::Dispatcher;
 use crate::fixture::{builtin_fixtures, validate_dag, FixturePool, FixtureScope};
 use crate::model::{Hooks, TestPlan, TestStatus};
-use crate::reporter::{EventBus, ReporterEvent, ReporterSet};
+use crate::reporter::{EventBus, EventBusBuilder, ReporterDriver, ReporterEvent, ReporterSet};
 use crate::shard;
 use crate::worker::{Worker, WorkerTestResult};
 
@@ -45,7 +45,38 @@ impl TestRunner {
   }
 
   /// Run the full test plan. Returns exit code (0 = all passed).
-  pub async fn run(&mut self, mut plan: TestPlan) -> i32 {
+  ///
+  /// Convenience wrapper: creates an `EventBus`, subscribes a `ReporterDriver`,
+  /// and delegates to `execute()`. For real-time external observation (TUI, WebSocket),
+  /// use `execute()` directly with a custom bus.
+  pub async fn run(&mut self, plan: TestPlan) -> i32 {
+    let mut builder = EventBusBuilder::new();
+    let reporter_sub = builder.subscribe();
+    let bus = builder.build();
+
+    let reporters = std::mem::take(&mut self.reporters);
+    let driver = ReporterDriver::new(reporters, reporter_sub);
+    let driver_handle = tokio::spawn(driver.run());
+
+    let exit_code = self.execute(plan, bus).await;
+
+    // Bus is dropped after execute returns (last clone). Channel closes,
+    // driver finalizes reporters, returns them for potential reuse.
+    if let Ok(reporters) = driver_handle.await {
+      self.reporters = reporters;
+    }
+
+    exit_code
+  }
+
+  /// Core execution engine. Emits events on the provided `EventBus`.
+  ///
+  /// Takes `&self` — no reporter ownership, no mutable state. The caller
+  /// controls who subscribes to the bus (reporters, TUI, external consumers).
+  ///
+  /// The bus is consumed by value and dropped when execution completes,
+  /// closing all subscriber channels and signaling consumers to finalize.
+  pub async fn execute(&self, mut plan: TestPlan, event_bus: EventBus) -> i32 {
     // ── Filtering ──
     if let Some(shard_arg) = &self.overrides.shard {
       shard::filter_by_shard(
@@ -116,20 +147,6 @@ impl TestRunner {
       }
     }
 
-    // ── Event bus + reporter consumer ──
-    let (event_tx, mut event_rx) = mpsc::unbounded_channel::<ReporterEvent>();
-    let event_bus = EventBus::new(event_tx);
-
-    let reporters = std::mem::take(&mut self.reporters);
-    let reporter_handle = tokio::spawn(async move {
-      let mut reporters = reporters;
-      while let Some(event) = event_rx.recv().await {
-        reporters.emit(&event).await;
-      }
-      reporters.finalize().await;
-      reporters
-    });
-
     event_bus
       .emit(ReporterEvent::RunStarted {
         total_tests,
@@ -155,10 +172,6 @@ impl TestRunner {
               duration: start.elapsed(),
             })
             .await;
-          drop(event_bus);
-          if let Ok(reporters) = reporter_handle.await {
-            self.reporters = reporters;
-          }
           return 1;
         }
       }
@@ -352,11 +365,6 @@ impl TestRunner {
       })
       .await;
 
-    drop(event_bus);
-    if let Ok(reporters) = reporter_handle.await {
-      self.reporters = reporters;
-    }
-
     if failed > 0 { 1 } else { 0 }
   }
 
@@ -375,8 +383,7 @@ impl TestRunner {
   where
     F: Fn(Option<&[std::path::PathBuf]>) -> TestPlan,
   {
-    use crate::interactive::{self, WatchCommand};
-    use crate::watch::{ChangeKind, FileWatcher};
+    use crate::watch::FileWatcher;
 
     // Launch browser once — reuse across all watch cycles.
     let launch_opts = build_launch_options(&self.config.browser);
@@ -420,6 +427,49 @@ impl TestRunner {
     0
   }
 
+  /// Execute a plan while draining TUI messages in real-time.
+  ///
+  /// Creates a fresh `EventBus` + `ReporterDriver` per run cycle. The driver
+  /// runs in a spawned task; `execute()` and `tui.drain_while_running()` run
+  /// concurrently via `tokio::join!`, so the TUI renders events as they arrive.
+  /// Execute a plan while draining TUI messages in real-time.
+  /// Returns true if the user cancelled (q/Ctrl+C during run).
+  async fn run_with_tui_drain(
+    &mut self,
+    plan: TestPlan,
+    tui: &mut crate::tui::WatchTui,
+  ) -> bool {
+    let mut builder = EventBusBuilder::new();
+    let reporter_sub = builder.subscribe();
+    let bus = builder.build();
+
+    let reporters = std::mem::take(&mut self.reporters);
+    let driver = ReporterDriver::new(reporters, reporter_sub);
+    let driver_handle = tokio::spawn(driver.run());
+
+    // Execute tests and drain TUI concurrently via select!.
+    // If the user presses q/Ctrl+C, drain returns Cancelled and
+    // select! drops the execute future (cancelling it).
+    let cancelled = tokio::select! {
+      _ = self.execute(plan, bus) => {
+        // Run completed. Drain remaining messages.
+        tui.flush();
+        false
+      }
+      result = tui.drain_while_running() => {
+        matches!(result, crate::tui::DrainResult::Cancelled)
+      }
+    };
+
+    // Drop bus clones held by execute (already dropped by select!).
+    // Wait for reporter driver to finalize.
+    if let Ok(reporters) = driver_handle.await {
+      self.reporters = reporters;
+    }
+
+    cancelled
+  }
+
   /// TUI watch loop: ratatui inline viewport with status bar + key controls.
   async fn run_watch_tui<F>(
     &mut self,
@@ -427,27 +477,27 @@ impl TestRunner {
     tui_tx: tokio::sync::mpsc::UnboundedSender<crate::tui::TuiMessage>,
     watcher: &crate::watch::FileWatcher,
     plan_factory: &F,
-    browser: &Arc<Browser>,
+    _browser: &Arc<Browser>,
   )
   where
     F: Fn(Option<&[std::path::PathBuf]>) -> TestPlan,
   {
     use crate::interactive::WatchCommand;
-    use crate::watch::ChangeKind;
 
     let mut grep_filter: Option<String> = None;
 
     // Replace ALL reporters with TUI reporter + rerun.
-    // Set once — they persist across watch cycles via run()'s take/restore pattern.
+    // Persist across watch cycles via run_with_tui_drain's take/restore.
     self.reporters.replace(vec![
       Box::new(crate::tui_reporter::TuiReporter::new(tui_tx.clone(), self.config.mode)),
       Box::new(crate::reporter::rerun::RerunReporter::new(self.config.output_dir.join("@rerun.txt"))),
     ]);
 
-    // Initial run.
+    // Initial run — TUI drains messages in real-time.
     let plan = plan_factory(None);
-    let _ = self.run(plan).await;
-    tui.flush();
+    if self.run_with_tui_drain(plan, tui).await {
+      return; // User cancelled during initial run.
+    }
     tui.set_status(crate::tui::WatchStatus::Idle);
 
     // Watch loop — TUI handles both key input and message display.
@@ -462,11 +512,13 @@ impl TestRunner {
           if !run_all && changed_paths.is_empty() { continue; }
 
           let mut plan = build_plan_for_changes(plan_factory, run_all, &changed_paths);
+          // Apply active filter to file-change re-runs.
+          if let Some(ref pattern) = grep_filter {
+            crate::discovery::filter_by_grep(&mut plan, pattern, false);
+          }
           if plan.total_tests == 0 { continue; }
 
-
-          let _ = self.run(plan).await;
-          tui.flush();
+          if self.run_with_tui_drain(plan, tui).await { break; }
           tui.set_status(crate::tui::WatchStatus::Idle);
         }
 
@@ -476,9 +528,8 @@ impl TestRunner {
             WatchCommand::Quit => break,
             WatchCommand::RunAll => {
               grep_filter = None;
-
-              let _ = self.run(plan_factory(None)).await;
-              tui.flush();
+              tui.active_filter = None;
+              if self.run_with_tui_drain(plan_factory(None), tui).await { break; }
               tui.set_status(crate::tui::WatchStatus::Idle);
             }
             WatchCommand::RunFailed => {
@@ -487,11 +538,12 @@ impl TestRunner {
               if rerun_path.exists() {
                 crate::discovery::filter_by_rerun(&mut plan, &rerun_path);
               }
+              // Apply active filter on top of failed filter.
+              if let Some(ref pattern) = grep_filter {
+                crate::discovery::filter_by_grep(&mut plan, pattern, false);
+              }
               if plan.total_tests > 0 {
-                let tui_reporter = crate::tui_reporter::TuiReporter::new(tui_tx.clone(), self.config.mode);
-                self.reporters.add(Box::new(tui_reporter));
-                let _ = self.run(plan).await;
-                tui.flush();
+                if self.run_with_tui_drain(plan, tui).await { break; }
               }
               tui.set_status(crate::tui::WatchStatus::Idle);
             }
@@ -500,9 +552,7 @@ impl TestRunner {
               if let Some(ref pattern) = grep_filter {
                 crate::discovery::filter_by_grep(&mut plan, pattern, false);
               }
-
-              let _ = self.run(plan).await;
-              tui.flush();
+              if self.run_with_tui_drain(plan, tui).await { break; }
               tui.set_status(crate::tui::WatchStatus::Idle);
             }
             WatchCommand::FilterByName(pattern) => {
@@ -510,10 +560,7 @@ impl TestRunner {
                 grep_filter = Some(pattern.clone());
                 let mut plan = plan_factory(None);
                 crate::discovery::filter_by_grep(&mut plan, &pattern, false);
-                let tui_reporter = crate::tui_reporter::TuiReporter::new(tui_tx.clone(), self.config.mode);
-                self.reporters.add(Box::new(tui_reporter));
-                let _ = self.run(plan).await;
-                tui.flush();
+                if self.run_with_tui_drain(plan, tui).await { break; }
               }
               tui.set_status(crate::tui::WatchStatus::Idle);
             }
@@ -532,8 +579,6 @@ impl TestRunner {
   where
     F: Fn(Option<&[std::path::PathBuf]>) -> TestPlan,
   {
-    use crate::watch::ChangeKind;
-
     // Initial run.
     let plan = plan_factory(None);
     let _ = self.run(plan).await;
@@ -549,7 +594,7 @@ impl TestRunner {
 
       eprintln!("\n\x1b[2mChange detected, re-running...\x1b[0m\n");
 
-      let mut plan = build_plan_for_changes(plan_factory, run_all, &changed_paths);
+      let plan = build_plan_for_changes(plan_factory, run_all, &changed_paths);
       if plan.total_tests == 0 {
         eprintln!("No tests matched changed files.");
         continue;
