@@ -15,8 +15,6 @@ ferridriver (core library)
   ├── @ferridriver/test      CLI: test runner + component testing (TypeScript)
   │
   ├── ferridriver-test       Test runner core: parallel, hooks, expect, reporters
-  ├── ferridriver-ct-leptos  Component testing for Leptos (trunk)
-  ├── ferridriver-ct-dioxus  Component testing for Dioxus (dx)
   │
   ├── @ferridriver/ct-core   JS CT core: Vite plugin, import transform, browser runtime
   ├── @ferridriver/ct-react  React adapter (createRoot/render)
@@ -186,7 +184,7 @@ height = 720
 | `--list` | List tests without running |
 | `--update-snapshots` / `-u` | Update snapshot files |
 
-**Per-test options** (via `#[ferritest]` / `#[component_test]`):
+**Per-test options** (via `#[ferritest]`):
 ```rust
 #[ferritest(retries = 2, timeout = "30s", tag = "smoke")]
 async fn flaky_test(page: Page) -> Result<(), TestFailure> { ... }
@@ -235,65 +233,29 @@ Utilities: `expect.poll()`, `toPass()`
 
 ## Component Testing
 
-Test UI components in real browsers. Supports Rust WASM and JS frameworks with framework-native toolchains.
+Test UI components in real browsers. JS frameworks use the built-in CT adapters. Rust WASM frameworks (Leptos, Dioxus) use E2E testing with `#[ferritest]` -- build the app with `trunk build` / `dx build`, serve it, and test with the Page API.
 
-### Leptos
+### Leptos / Dioxus (E2E)
 
 ```rust
-use ferridriver_ct_leptos::prelude::*;
+use ferridriver_test_macros::ferritest;
+use ferridriver_test::expect::expect;
 
-#[component_test]
-async fn counter_increments(page: Page) -> Result<(), TestFailure> {
+#[ferritest]
+async fn counter_increments(page: ferridriver::Page) {
+    page.goto("http://localhost:8080", None).await?;
     page.locator("#inc").click().await?;
     expect(&page.locator("#count")).to_have_text("1").await?;
-    Ok(())
-}
-
-// Default config
-ferridriver_ct_leptos::main!();
-
-// Or with custom launch options
-ferridriver_ct_leptos::main! {
-    backend: "webkit",
-    headless: false,
-    workers: 2,
-    timeout: 60000,
 }
 ```
 
 ```bash
-cargo install trunk
-cargo test -p my-leptos-app --test components
-cargo test -p my-leptos-app --test components -- --headed --backend webkit
-```
+# Build the WASM app first, then run E2E tests
+cargo install trunk                  # Leptos
+trunk build && cargo test -p my-leptos-app
 
-### Dioxus
-
-```rust
-use ferridriver_ct_dioxus::prelude::*;
-
-#[component_test]
-async fn counter_increments(page: Page) -> Result<(), TestFailure> {
-    page.locator("#inc").click().await?;
-    expect(&page.locator("#count")).to_have_text("1").await?;
-    Ok(())
-}
-
-// Default config
-ferridriver_ct_dioxus::main!();
-
-// Or with custom launch options
-ferridriver_ct_dioxus::main! {
-    backend: "cdp-pipe",
-    headless: false,
-    workers: 1,
-}
-```
-
-```bash
-cargo install dioxus-cli
-cargo test -p my-dioxus-app --test components
-cargo test -p my-dioxus-app --test components -- --headed --workers 1
+cargo install dioxus-cli             # Dioxus
+dx build --platform web && cargo test -p my-dioxus-app
 ```
 
 ### React / Vue / Svelte / Solid
@@ -445,10 +407,6 @@ crates/
   ferridriver-napi           Node.js/Bun bindings (NAPI-RS)
   ferridriver-test           Test runner: parallel, hooks, expect, reporters
   ferridriver-test-macros    #[ferritest] proc macro
-  ferridriver-ct-leptos      Leptos CT adapter (#[component_test] + trunk)
-  ferridriver-ct-leptos-macros
-  ferridriver-ct-dioxus      Dioxus CT adapter (#[component_test] + dx)
-  ferridriver-ct-dioxus-macros
 packages/
   ferridriver-test           @ferridriver/test — TS CLI + test API
   ct-core                    @ferridriver/ct-core — Vite plugin, import transform, browser runtime
@@ -457,9 +415,8 @@ packages/
   ct-svelte                  @ferridriver/ct-svelte — Svelte registerSource
   ct-solid                   @ferridriver/ct-solid — Solid registerSource
 examples/
-  ct-leptos                  Leptos counter (4 tests)
-  ct-leptos-todomvc          Leptos TodoMVC (15 tests)
-  ct-dioxus-todomvc          Dioxus TodoMVC (15 tests)
+  ct-leptos-todomvc          Leptos TodoMVC E2E (#[ferritest] + trunk)
+  ct-dioxus-todomvc          Dioxus TodoMVC E2E (#[ferritest] + dx)
   ct-react                   React TodoMVC (15 tests)
   ct-vue                     Vue TodoMVC (15 tests)
   ct-svelte                  Svelte TodoMVC (15 tests)
@@ -483,10 +440,9 @@ examples/
 - 250 NAPI tests (Bun, across 3 backends)
 - 14 test runner feature tests
 - 3 visual screenshot diff tests
-- 30 Rust component tests (15 Leptos + 15 Dioxus TodoMVC)
 - 60 JS component tests (15 each: React, Vue, Svelte, Solid TodoMVC)
 - 3 CT infrastructure tests
-- **427+ total tests**
+- **397+ total tests**
 
 ## Building
 
@@ -500,9 +456,9 @@ cargo build -p ferridriver-cli
 # NAPI addon
 cd crates/ferridriver-napi && bun run build && bun test
 
-# Rust component tests
-cargo test -p ct-leptos-todomvc --test todomvc     # requires: cargo install trunk
-cargo test -p ct-dioxus-todomvc --test todomvc     # requires: cargo install dioxus-cli
+# Rust WASM E2E tests (requires trunk / dioxus-cli + trunk build / dx build first)
+cargo test -p ct-leptos-todomvc --test todomvc
+cargo test -p ct-dioxus-todomvc --test todomvc
 
 # JS component tests
 cd examples/ct-react && bun install && bun run test:ct

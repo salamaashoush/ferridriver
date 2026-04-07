@@ -41,10 +41,6 @@ ferridriver-test         E2E test runner: parallel workers, fixtures, reporters,
 ferridriver-test-macros  Proc macros: #[ferritest], #[ferritest_each]
 ferridriver-bdd          BDD/Cucumber framework: step registry, Gherkin parser, translators
 ferridriver-bdd-macros   Proc macros: #[given], #[when], #[then], #[step]
-ferridriver-ct-leptos    Component testing adapter for Leptos (trunk build + serve)
-ferridriver-ct-leptos-macros  Proc macro: #[component_test] for Leptos
-ferridriver-ct-dioxus    Component testing adapter for Dioxus (dx build + serve)
-ferridriver-ct-dioxus-macros  Proc macro: #[component_test] for Dioxus
 ```
 
 TS packages in `packages/`:
