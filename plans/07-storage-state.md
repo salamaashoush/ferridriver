@@ -1,4 +1,4 @@
-# Feature: Storage State Save/Load
+# [DONE] Feature: Storage State Save/Load
 
 ## Context
 Most web apps require authentication. Without storage state, every test must log in independently, wasting time and adding flakiness. Storage state serializes cookies + localStorage to JSON, letting tests reuse authenticated sessions. This is Playwright's recommended pattern for auth: log in once in global setup, save state, all tests start pre-authenticated.

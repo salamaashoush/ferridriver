@@ -136,6 +136,10 @@ pub struct TestArgs {
   /// Record trace: off, on, retain-on-failure, on-first-retry
   #[arg(long)]
   pub trace: Option<String>,
+
+  /// Path to storage state JSON (pre-authenticated session)
+  #[arg(long)]
+  pub storage_state: Option<String>,
 }
 
 /// BDD runner options.
@@ -228,6 +232,10 @@ pub struct BddArgs {
   /// Record trace: off, on, retain-on-failure, on-first-retry
   #[arg(long)]
   pub trace: Option<String>,
+
+  /// Path to storage state JSON (pre-authenticated session)
+  #[arg(long)]
+  pub storage_state: Option<String>,
 }
 
 /// Browser backend and connection options.

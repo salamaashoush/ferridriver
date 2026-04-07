@@ -366,6 +366,26 @@ impl Worker {
         test_pool.inject("page", Arc::new(page.clone())).await;
         test_pool.inject("test_info", Arc::clone(&test_info)).await;
 
+        // ── Storage state (apply before any test code) ──
+        if let Some(ref ss_path) = self.config.storage_state {
+          let path = std::path::Path::new(ss_path);
+          match std::fs::read_to_string(path) {
+            Ok(json_str) => match serde_json::from_str::<serde_json::Value>(&json_str) {
+              Ok(state) => {
+                if let Err(e) = page.set_storage_state(&state).await {
+                  tracing::warn!(target: "ferridriver::worker", "set_storage_state failed: {e}");
+                }
+              }
+              Err(e) => {
+                tracing::warn!(target: "ferridriver::worker", "parse storage state {}: {e}", path.display());
+              }
+            },
+            Err(e) => {
+              tracing::warn!(target: "ferridriver::worker", "read storage state {}: {e}", path.display());
+            }
+          }
+        }
+
         // ── Video recording (start before any test code) ──
         // retain-on-failure: buffer frames in memory, only encode if test fails (zero ffmpeg cost for passing tests)
         // on: eager mode, pipe frames to ffmpeg in real-time

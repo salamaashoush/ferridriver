@@ -152,6 +152,8 @@ pub struct BddRunnerConfig {
   pub video: Option<String>,
   /// Trace recording mode: "off", "on", "retain-on-failure", "on-first-retry".
   pub trace: Option<String>,
+  /// Path to storage state JSON file (pre-authenticated session).
+  pub storage_state: Option<String>,
 }
 
 /// A registered TS step definition.
@@ -262,6 +264,9 @@ impl BddRunner {
     }
     if let Some(ref t) = cfg.trace {
       tc.trace = ferridriver_test::tracing::TraceMode::from_str(t);
+    }
+    if let Some(ref ss) = cfg.storage_state {
+      tc.storage_state = Some(ss.clone());
     }
     if tc.features.is_empty() {
       tc.features = vec!["features/**/*.feature".to_string()];

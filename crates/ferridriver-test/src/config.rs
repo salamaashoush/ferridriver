@@ -118,6 +118,11 @@ pub struct TestConfig {
   #[serde(default)]
   pub trace: crate::tracing::TraceMode,
 
+  /// Path to storage state JSON file (cookies + localStorage).
+  /// When set, every test starts with this state pre-loaded (Playwright auth pattern).
+  #[serde(default)]
+  pub storage_state: Option<String>,
+
   /// Strict mode: treat undefined/pending steps as errors. Default: false.
   pub strict: bool,
 
@@ -227,6 +232,7 @@ pub struct CliOverrides {
   pub last_failed: bool,
   pub video: Option<String>,
   pub trace: Option<String>,
+  pub storage_state: Option<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -281,6 +287,7 @@ impl Default for TestConfig {
       screenshot_on_failure: true,
       video: VideoConfig::default(),
       trace: crate::tracing::TraceMode::Off,
+      storage_state: None,
       strict: false,
       order: "defined".into(),
       language: None,
@@ -381,6 +388,9 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
   }
   if let Some(trace) = &overrides.trace {
     config.trace = crate::tracing::TraceMode::from_str(trace);
+  }
+  if let Some(ref ss) = overrides.storage_state {
+    config.storage_state = Some(ss.clone());
   }
   // Environment variable: FERRIDRIVER_VIDEO=on|off|retain-on-failure
   if let Ok(v) = std::env::var("FERRIDRIVER_VIDEO") {

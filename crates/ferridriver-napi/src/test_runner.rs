@@ -54,6 +54,8 @@ pub struct TestRunnerConfig {
   pub video: Option<String>,
   /// Trace recording mode: "off", "on", "retain-on-failure", "on-first-retry".
   pub trace: Option<String>,
+  /// Path to storage state JSON file (pre-authenticated session).
+  pub storage_state: Option<String>,
 }
 
 /// Metadata for a registered test.
@@ -203,6 +205,9 @@ impl TestRunner {
     }
     if let Some(ref t) = cfg.trace {
       tc.trace = ferridriver_test::tracing::TraceMode::from_str(t);
+    }
+    if let Some(ref ss) = cfg.storage_state {
+      tc.storage_state = Some(ss.clone());
     }
     if tc.workers == 0 {
       let cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);

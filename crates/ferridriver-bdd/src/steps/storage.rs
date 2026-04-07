@@ -71,3 +71,41 @@ async fn clear_session_storage(world: &mut BrowserWorld) {
     .await
     .map_err(|e| StepError::from(format!("clear sessionStorage: {e}")))?;
 }
+
+// ── Storage State save/load (Playwright auth pattern) ──────────────────
+
+#[step("I save the storage state to {string}")]
+async fn save_storage_state(world: &mut BrowserWorld, file_path: String) {
+  let path = world.resolve_fixture_path(&file_path);
+  let state = world
+    .page()
+    .storage_state()
+    .await
+    .map_err(|e| StepError::from(format!("save storage state: {e}")))?;
+
+  let json = serde_json::to_string_pretty(&state)
+    .map_err(|e| StepError::from(format!("serialize storage state: {e}")))?;
+
+  if let Some(parent) = path.parent() {
+    std::fs::create_dir_all(parent)
+      .map_err(|e| StepError::from(format!("create dir for {}: {e}", path.display())))?;
+  }
+  std::fs::write(&path, json)
+    .map_err(|e| StepError::from(format!("write storage state to {}: {e}", path.display())))?;
+}
+
+#[step("I load the storage state from {string}")]
+async fn load_storage_state(world: &mut BrowserWorld, file_path: String) {
+  let path = world.resolve_fixture_path(&file_path);
+  let json = std::fs::read_to_string(&path)
+    .map_err(|e| StepError::from(format!("read storage state from {}: {e}", path.display())))?;
+
+  let state: serde_json::Value = serde_json::from_str(&json)
+    .map_err(|e| StepError::from(format!("parse storage state: {e}")))?;
+
+  world
+    .page()
+    .set_storage_state(&state)
+    .await
+    .map_err(|e| StepError::from(format!("load storage state: {e}")))?;
+}

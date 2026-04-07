@@ -903,7 +903,17 @@ impl Page {
   // ── Storage State ──────────────────────────────────────────────────────
 
   /// Serialize the current page's storage state (cookies + localStorage) to JSON.
-  /// Can be used to save a session and restore it later with `set_storage_state`.
+  ///
+  /// Returns Playwright-compatible format:
+  /// ```json
+  /// {
+  ///   "cookies": [{ "name": "...", "value": "...", "domain": "...", ... }],
+  ///   "origins": [{ "origin": "https://...", "localStorage": [{ "name": "...", "value": "..." }] }]
+  /// }
+  /// ```
+  ///
+  /// Can be saved to a file and loaded later with `set_storage_state` or via
+  /// test config `storage_state: "auth.json"`.
   ///
   /// # Errors
   ///
@@ -913,64 +923,118 @@ impl Page {
     let cookies_json: Vec<serde_json::Value> = cookies
       .iter()
       .map(|c| {
-        serde_json::json!({
+        let mut obj = serde_json::json!({
           "name": c.name, "value": c.value, "domain": c.domain, "path": c.path,
-          "secure": c.secure, "httpOnly": c.http_only, "expires": c.expires
-        })
+          "secure": c.secure, "httpOnly": c.http_only
+        });
+        if let Some(expires) = c.expires {
+          obj["expires"] = serde_json::json!(expires);
+        }
+        if let Some(same_site) = c.same_site {
+          obj["sameSite"] = serde_json::json!(same_site.as_str());
+        }
+        obj
       })
       .collect();
 
-    let storage_r = self
+    // Get the current origin for localStorage grouping.
+    let origin = self
       .inner
-      .evaluate("JSON.stringify(Object.fromEntries(Object.entries(localStorage)))")
+      .evaluate("location.origin")
       .await
       .ok()
-      .flatten();
-    let local_storage: serde_json::Value = storage_r
+      .flatten()
+      .and_then(|v| v.as_str().map(str::to_string))
+      .unwrap_or_default();
+
+    // Dump localStorage as array of { name, value } pairs (Playwright format).
+    let storage_js = r#"JSON.stringify(
+      Object.keys(localStorage).map(k => ({ name: k, value: localStorage.getItem(k) }))
+    )"#;
+    let storage_r = self.inner.evaluate(storage_js).await.ok().flatten();
+    let local_storage: Vec<serde_json::Value> = storage_r
       .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
-      .unwrap_or(serde_json::json!({}));
+      .unwrap_or_default();
+
+    let mut origins = Vec::new();
+    if !local_storage.is_empty() && !origin.is_empty() {
+      origins.push(serde_json::json!({
+        "origin": origin,
+        "localStorage": local_storage,
+      }));
+    }
 
     Ok(serde_json::json!({
       "cookies": cookies_json,
-      "localStorage": local_storage,
+      "origins": origins,
     }))
   }
 
   /// Restore a previously saved storage state (cookies + localStorage).
   ///
+  /// Accepts Playwright-compatible format with `origins[].localStorage[]` (name/value pairs).
+  ///
   /// # Errors
   ///
   /// Returns an error if cookies or localStorage cannot be restored.
   pub async fn set_storage_state(&self, state: &serde_json::Value) -> Result<(), String> {
-    // Restore cookies
+    // Restore cookies.
     if let Some(cookies) = state.get("cookies").and_then(|v| v.as_array()) {
       for c in cookies {
         let cookie = CookieData {
           name: c.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string(),
           value: c.get("value").and_then(|v| v.as_str()).unwrap_or("").to_string(),
           domain: c.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string(),
-          path: c.get("path").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+          path: c.get("path").and_then(|v| v.as_str()).unwrap_or("/").to_string(),
           secure: c.get("secure").and_then(serde_json::Value::as_bool).unwrap_or(false),
           http_only: c.get("httpOnly").and_then(serde_json::Value::as_bool).unwrap_or(false),
           expires: c.get("expires").and_then(serde_json::Value::as_f64),
-          same_site: c.get("sameSite").and_then(|v| v.as_str()).and_then(|v| v.parse::<crate::backend::SameSite>().ok()),
+          same_site: c
+            .get("sameSite")
+            .and_then(|v| v.as_str())
+            .and_then(|v| v.parse::<crate::backend::SameSite>().ok()),
         };
         self.inner.set_cookie(cookie).await?;
       }
     }
 
-    // Restore localStorage
-    if let Some(storage) = state.get("localStorage").and_then(|v| v.as_object()) {
-      for (key, value) in storage {
-        let val_str = value.as_str().unwrap_or("");
-        self
-          .inner
-          .evaluate(&format!(
-            "localStorage.setItem('{}', '{}')",
-            crate::steps::js_escape(key),
-            crate::steps::js_escape(val_str)
-          ))
-          .await?;
+    // Restore per-origin localStorage (Playwright format).
+    if let Some(origins) = state.get("origins").and_then(|v| v.as_array()) {
+      for origin_entry in origins {
+        let origin = origin_entry
+          .get("origin")
+          .and_then(|v| v.as_str())
+          .unwrap_or("");
+        if let Some(items) = origin_entry.get("localStorage").and_then(|v| v.as_array()) {
+          // Navigate to the origin so localStorage.setItem works in the right scope.
+          // Only navigate if the current page isn't already on this origin.
+          let current_origin = self
+            .inner
+            .evaluate("location.origin")
+            .await
+            .ok()
+            .flatten()
+            .and_then(|v| v.as_str().map(str::to_string))
+            .unwrap_or_default();
+          if !origin.is_empty() && current_origin != origin {
+            let _ = self
+              .inner
+              .goto(origin, crate::backend::NavLifecycle::Load, 10_000)
+              .await;
+          }
+          for item in items {
+            let key = item.get("name").and_then(|v| v.as_str()).unwrap_or("");
+            let val = item.get("value").and_then(|v| v.as_str()).unwrap_or("");
+            self
+              .inner
+              .evaluate(&format!(
+                "localStorage.setItem('{}', '{}')",
+                crate::steps::js_escape(key),
+                crate::steps::js_escape(val)
+              ))
+              .await?;
+          }
+        }
       }
     }
 

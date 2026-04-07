@@ -908,29 +908,26 @@ async fn storage_state_tests() {
 
   page.goto(&data_url("<body>storage</body>"), None).await.unwrap();
 
-  // Save storage state (returns correct structure)
+  // Save storage state (returns Playwright-compatible structure)
   let state = page.storage_state().await.unwrap();
   assert!(state.get("cookies").is_some(), "state should have cookies key");
   assert!(state.get("cookies").unwrap().is_array(), "cookies should be an array");
-  assert!(
-    state.get("localStorage").is_some(),
-    "state should have localStorage key"
-  );
+  assert!(state.get("origins").is_some(), "state should have origins key");
+  assert!(state.get("origins").unwrap().is_array(), "origins should be an array");
 
-  // Test set_storage_state with manual state
+  // Test set_storage_state with Playwright-compatible format
   let manual_state = serde_json::json!({
     "cookies": [
       {"name": "test", "value": "val123", "domain": "localhost", "path": "/", "secure": false, "httpOnly": false}
     ],
-    "localStorage": {}
+    "origins": []
   });
-  // set_storage_state should not error
   page.set_storage_state(&manual_state).await.unwrap();
 
   // Save and verify round-trip structure
   let state2 = page.storage_state().await.unwrap();
   assert!(state2.get("cookies").unwrap().is_array());
-  assert!(state2.get("localStorage").unwrap().is_object());
+  assert!(state2.get("origins").unwrap().is_array());
 
   browser.close().await.unwrap();
 }
