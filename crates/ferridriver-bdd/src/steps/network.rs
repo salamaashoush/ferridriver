@@ -222,3 +222,105 @@ async fn assert_request_count(world: &mut BrowserWorld, expected: i64, pattern: 
     });
   }
 }
+
+// ── Fetch + response assertion (cucumber-rest-bdd style) ───────────────
+
+/// Last fetch response stored in world state for assertion chaining.
+#[derive(Clone)]
+struct LastFetchResponse {
+  status: i32,
+  body: String,
+  headers: rustc_hash::FxHashMap<String, String>,
+}
+
+fn last_response(world: &BrowserWorld) -> Result<LastFetchResponse, StepError> {
+  world
+    .get_state::<LastFetchResponse>()
+    .cloned()
+    .ok_or_else(|| StepError::from("no fetch response stored -- use 'When I fetch \"...\"' first"))
+}
+
+#[when("I fetch {string}")]
+async fn fetch_url(world: &mut BrowserWorld, url: String) {
+  let js = format!(
+    r#"(async () => {{
+      const r = await fetch({url});
+      const hdrs = {{}};
+      r.headers.forEach((v, k) => {{ hdrs[k] = v; }});
+      return JSON.stringify({{ status: r.status, body: await r.text(), headers: hdrs }});
+    }})()"#,
+    url = serde_json::to_string(&url).unwrap_or_else(|_| format!("\"{url}\""))
+  );
+  let result = world
+    .page()
+    .evaluate_str(&js)
+    .await
+    .map_err(|e| StepError::from(format!("fetch \"{url}\": {e}")))?;
+
+  let parsed: serde_json::Value =
+    serde_json::from_str(&result).map_err(|e| StepError::from(format!("parse fetch result: {e}")))?;
+
+  let headers: rustc_hash::FxHashMap<String, String> = parsed
+    .get("headers")
+    .and_then(|h| h.as_object())
+    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
+    .unwrap_or_default();
+
+  world.set_state(LastFetchResponse {
+    status: parsed.get("status").and_then(|v| v.as_i64()).unwrap_or(0) as i32,
+    body: parsed.get("body").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    headers,
+  });
+}
+
+#[then("the response status should be {int}")]
+async fn response_status_should_be(world: &mut BrowserWorld, expected: i64) {
+  let resp = last_response(world)?;
+  let expected = expected as i32;
+  if resp.status != expected {
+    return Err(StepError {
+      message: format!("expected response status {expected}, got {}", resp.status),
+      diff: Some((expected.to_string(), resp.status.to_string())),
+      pending: false,
+    });
+  }
+}
+
+#[then("the response body should contain {string}")]
+async fn response_body_should_contain(world: &mut BrowserWorld, expected: String) {
+  let resp = last_response(world)?;
+  if !resp.body.contains(&expected) {
+    return Err(StepError {
+      message: format!("response body does not contain \"{expected}\""),
+      diff: Some((expected, resp.body)),
+      pending: false,
+    });
+  }
+}
+
+#[then("the response body should equal {string}")]
+async fn response_body_should_equal(world: &mut BrowserWorld, expected: String) {
+  let resp = last_response(world)?;
+  if resp.body.trim() != expected.trim() {
+    return Err(StepError {
+      message: "response body does not match expected".to_string(),
+      diff: Some((expected, resp.body)),
+      pending: false,
+    });
+  }
+}
+
+#[then("the response header {string} should contain {string}")]
+async fn response_header_should_contain(world: &mut BrowserWorld, header: String, expected: String) {
+  let resp = last_response(world)?;
+  let header_val = resp.headers.get(&header.to_lowercase()).map(String::as_str).unwrap_or("");
+  if !header_val.contains(&expected) {
+    return Err(StepError {
+      message: format!(
+        "response header \"{header}\" does not contain \"{expected}\" (got \"{header_val}\")"
+      ),
+      diff: Some((expected, header_val.to_string())),
+      pending: false,
+    });
+  }
+}
