@@ -50,6 +50,24 @@ pub enum Command {
     #[arg(last = true)]
     features: Vec<String>,
   },
+
+  /// Record user interactions and generate test code
+  Codegen {
+    /// URL to open in the browser
+    url: String,
+
+    /// Output language: rust, typescript (ts), gherkin (bdd)
+    #[arg(long, short, default_value = "rust")]
+    language: String,
+
+    /// Write generated code to file instead of stdout
+    #[arg(long, short)]
+    output: Option<String>,
+
+    /// Viewport size (WxH, e.g. "1280x720")
+    #[arg(long)]
+    viewport: Option<String>,
+  },
 }
 
 /// Test runner options.

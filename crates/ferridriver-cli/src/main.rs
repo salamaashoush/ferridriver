@@ -37,6 +37,26 @@ async fn main() -> anyhow::Result<()> {
     cli::Command::Bdd { features, bdd_args } => {
       run_bdd(features, bdd_args).await
     }
+    cli::Command::Codegen { url, language, output, viewport } => {
+      let vp = viewport.and_then(|s| {
+        let parts: Vec<&str> = s.split('x').collect();
+        if parts.len() == 2 {
+          Some((parts[0].parse::<u32>().ok()?, parts[1].parse::<u32>().ok()?))
+        } else {
+          None
+        }
+      });
+      let options = ferridriver::codegen::recorder::RecorderOptions {
+        url,
+        language: ferridriver::codegen::OutputLanguage::from_str(&language),
+        output_file: output,
+        viewport: vp,
+      };
+      ferridriver::codegen::recorder::Recorder::new(options)
+        .start()
+        .await
+        .map_err(|e| anyhow::anyhow!(e))
+    }
   }
 }
 

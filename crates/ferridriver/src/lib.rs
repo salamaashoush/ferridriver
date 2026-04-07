@@ -48,6 +48,7 @@ pub mod actions;
 pub mod selectors;
 pub mod ffmpeg;
 pub mod video;
+pub mod codegen;
 
 // ── BDD steps (use crate-internal APIs) ──
 #[macro_use]

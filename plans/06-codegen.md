@@ -1,4 +1,4 @@
-# Feature: Code Generation (Interactive Recorder)
+# [DONE] Feature: Code Generation (Interactive Recorder)
 
 ## Context
 Playwright's `codegen` command opens a headed browser and records user interactions into test code. This is the fastest way for new users to create tests and for experienced users to capture complex interaction sequences. It also serves as a selector discovery tool, showing the best selector for each element.
