@@ -1,4 +1,10 @@
-# Feature: Real Per-Component Testing for WASM Frameworks (Leptos/Dioxus)
+# [CLOSED] Feature: Real Per-Component Testing for WASM Frameworks (Leptos/Dioxus)
+#
+# Decision: WASM per-component mount/unmount is too complex for the value.
+# Leptos/Dioxus apps are tested via E2E using #[ferritest] + trunk build/dx build,
+# which matches how both frameworks' own repos test. The CT adapter crates
+# (ferridriver-ct-leptos, ferridriver-ct-dioxus, and their macro/wasm variants)
+# have been removed. Examples converted to #[ferritest] E2E tests.
 
 ## Context
 Current CT implementation is broken — it builds the entire app with `trunk build`/`dx build` and tests it as a whole. This is E2E testing, NOT component testing. Real CT means mounting a single component in isolation with controlled props, testing it, unmounting, and repeating.

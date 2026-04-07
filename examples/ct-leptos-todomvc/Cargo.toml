@@ -9,11 +9,7 @@ console_error_panic_hook = "0.1"
 web-sys = { version = "0.3", features = ["Storage", "Window"] }
 
 [dev-dependencies]
-ferridriver-ct-leptos = { path = "../../crates/ferridriver-ct-leptos" }
 ferridriver = { path = "../../crates/ferridriver" }
 ferridriver-test = { path = "../../crates/ferridriver-test" }
+ferridriver-test-macros = { path = "../../crates/ferridriver-test-macros" }
 tokio = { version = "1", features = ["full"] }
-
-[[test]]
-name = "todomvc"
-harness = false

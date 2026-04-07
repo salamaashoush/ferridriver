@@ -7,11 +7,7 @@ edition = "2024"
 dioxus = { version = "0.7", features = ["web"] }
 
 [dev-dependencies]
-ferridriver-ct-dioxus = { path = "../../crates/ferridriver-ct-dioxus" }
 ferridriver = { path = "../../crates/ferridriver" }
 ferridriver-test = { path = "../../crates/ferridriver-test" }
+ferridriver-test-macros = { path = "../../crates/ferridriver-test-macros" }
 tokio = { version = "1", features = ["full"] }
-
-[[test]]
-name = "todomvc"
-harness = false
