@@ -10,6 +10,6 @@ import { Given, When, Then, Step } from '../../packages/ferridriver-test/src/bdd
 // For this test, we DON'T register navigation steps -- let the Rust built-ins handle them.
 // We only register custom steps that don't exist in Rust.
 
-Given('I am on a blank page', async (page) => {
+Given('I am on a blank page', async ({ page }) => {
   await page.goto('about:blank');
 });
