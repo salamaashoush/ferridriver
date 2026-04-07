@@ -4,7 +4,7 @@
   clippy::expect_used,
   clippy::needless_pass_by_value,
   clippy::redundant_closure_for_method_calls,
-  clippy::uninlined_format_args,
+  clippy::uninlined_format_args
 )]
 //! MCP-level test: connect to running Chrome + page select.
 //! Reproduces the exact flow Claude Code uses via MCP stdio.
@@ -143,7 +143,10 @@ fn mcp_connect_and_select() {
     let elapsed = t3.elapsed();
     // Print first line + timing
     let first_line = text.lines().next().unwrap_or("<empty>");
-    eprintln!("[test] {:?} select {idx} returned ({elapsed:?}): {first_line}", t.elapsed());
+    eprintln!(
+      "[test] {:?} select {idx} returned ({elapsed:?}): {first_line}",
+      t.elapsed()
+    );
 
     if elapsed.as_secs() > 10 {
       eprintln!("[test] WARNING: page {idx} took over 10s!");
@@ -174,7 +177,10 @@ fn mcp_connect_and_select() {
     // Step 5: Check if snapshot includes chat list with collapsing
     let has_collapsing = snap.contains("... (") && snap.contains("more ");
     let row_count = snap.matches("row ").count();
-    eprintln!("[test] snapshot: {} rows visible, collapsing={}", row_count, has_collapsing);
+    eprintln!(
+      "[test] snapshot: {} rows visible, collapsing={}",
+      row_count, has_collapsing
+    );
 
     // Step 6: Click on first chat (should be 7bibty or whatever is at top)
     eprintln!("\n[test] {:?} === click first chat (e22) ===", t.elapsed());
@@ -193,8 +199,14 @@ fn mcp_connect_and_select() {
     let snap2 = extract_text(&resp);
     let has_message_input = snap2.contains("Type a message") || snap2.contains("textbox \"Type a message\"");
     let textbox_count = snap2.matches("textbox").count();
-    eprintln!("[test] {:?} snapshot ({:?}): {} chars, {} textboxes, has_message_input={}",
-      t.elapsed(), t5.elapsed(), snap2.len(), textbox_count, has_message_input);
+    eprintln!(
+      "[test] {:?} snapshot ({:?}): {} chars, {} textboxes, has_message_input={}",
+      t.elapsed(),
+      t5.elapsed(),
+      snap2.len(),
+      textbox_count,
+      has_message_input
+    );
 
     if has_message_input {
       eprintln!("[test] SUCCESS: message input visible in snapshot!");
@@ -211,7 +223,12 @@ fn mcp_connect_and_select() {
     let t6 = Instant::now();
     let resp = client.call_tool("evaluate", json!({"expression": "document.title"}));
     let eval_text = extract_text(&resp);
-    eprintln!("[test] {:?} evaluate returned ({:?}): {}", t.elapsed(), t6.elapsed(), eval_text);
+    eprintln!(
+      "[test] {:?} evaluate returned ({:?}): {}",
+      t.elapsed(),
+      t6.elapsed(),
+      eval_text
+    );
 
     // Step 9: Test type_text (type into focused element)
     eprintln!("\n[test] {:?} === type_text test ===", t.elapsed());
@@ -219,7 +236,8 @@ fn mcp_connect_and_select() {
     // First find and click the message input ref if visible
     if has_message_input {
       // Find the ref for the message input textbox
-      if let Some(ref_str) = snap2.lines()
+      if let Some(ref_str) = snap2
+        .lines()
         .find(|l| l.contains("Type a message"))
         .and_then(|l| l.split("[ref=").nth(1))
         .and_then(|s| s.split(']').next())
@@ -238,7 +256,12 @@ fn mcp_connect_and_select() {
         // Try type_text
         let resp = client.call_tool("type_text", json!({"text": "hello test"}));
         let type_result = extract_text(&resp);
-        eprintln!("[test] {:?} type_text returned ({:?}): {}", t.elapsed(), t7.elapsed(), &type_result[..type_result.len().min(100)]);
+        eprintln!(
+          "[test] {:?} type_text returned ({:?}): {}",
+          t.elapsed(),
+          t7.elapsed(),
+          &type_result[..type_result.len().min(100)]
+        );
         std::thread::sleep(std::time::Duration::from_millis(300));
 
         // Verify: check what's actually in the input now
@@ -262,9 +285,12 @@ fn mcp_connect_and_select() {
             client.call_tool("press_key", json!({"key": ch.to_string()}));
           }
           std::thread::sleep(std::time::Duration::from_millis(300));
-          let resp = client.call_tool("evaluate", json!({
-            "expression": "document.activeElement?.textContent"
-          }));
+          let resp = client.call_tool(
+            "evaluate",
+            json!({
+              "expression": "document.activeElement?.textContent"
+            }),
+          );
           let after_keys = extract_text(&resp);
           eprintln!("[test] content after press_key: {after_keys}");
         }

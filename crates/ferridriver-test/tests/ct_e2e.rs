@@ -3,7 +3,7 @@
   clippy::cast_lossless,
   clippy::uninlined_format_args,
   clippy::doc_markdown,
-  clippy::if_same_then_else,
+  clippy::if_same_then_else
 )]
 //! Component testing integration tests.
 //!
@@ -125,8 +125,16 @@ window.__ferriMount = function(componentRef, rootEl, options) {
     .unwrap();
 
   // Verify the component was mounted.
-  let text = page.locator("#mounted").text_content().await.unwrap().unwrap_or_default();
-  assert!(text.contains("MyCounter"), "mounted component should contain ID: {text}");
+  let text = page
+    .locator("#mounted")
+    .text_content()
+    .await
+    .unwrap()
+    .unwrap_or_default();
+  assert!(
+    text.contains("MyCounter"),
+    "mounted component should contain ID: {text}"
+  );
 
   let _ = browser.close().await;
   server.stop().await;

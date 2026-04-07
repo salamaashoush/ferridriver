@@ -15,12 +15,23 @@ async fn event_bus_delivers_to_single_subscriber() {
   let sub = builder.subscribe();
   let bus = builder.build();
 
-  bus.emit(ReporterEvent::RunStarted { total_tests: 5, num_workers: 2 }).await;
+  bus
+    .emit(ReporterEvent::RunStarted {
+      total_tests: 5,
+      num_workers: 2,
+    })
+    .await;
   drop(bus);
 
   let mut rx = sub.rx;
   let event = rx.recv().await.unwrap();
-  assert!(matches!(event, ReporterEvent::RunStarted { total_tests: 5, num_workers: 2 }));
+  assert!(matches!(
+    event,
+    ReporterEvent::RunStarted {
+      total_tests: 5,
+      num_workers: 2
+    }
+  ));
   assert!(rx.recv().await.is_none(), "channel should be closed after bus drop");
 }
 
@@ -32,20 +43,37 @@ async fn event_bus_delivers_to_multiple_subscribers() {
   let sub3 = builder.subscribe();
   let bus = builder.build();
 
-  bus.emit(ReporterEvent::RunStarted { total_tests: 10, num_workers: 4 }).await;
-  bus.emit(ReporterEvent::RunFinished {
-    total: 10, passed: 8, failed: 1, skipped: 1, flaky: 0,
-    duration: Duration::from_secs(5),
-  }).await;
+  bus
+    .emit(ReporterEvent::RunStarted {
+      total_tests: 10,
+      num_workers: 4,
+    })
+    .await;
+  bus
+    .emit(ReporterEvent::RunFinished {
+      total: 10,
+      passed: 8,
+      failed: 1,
+      skipped: 1,
+      flaky: 0,
+      duration: Duration::from_secs(5),
+    })
+    .await;
   drop(bus);
 
   // All three subscribers should receive both events.
   for (i, sub) in [sub1, sub2, sub3].into_iter().enumerate() {
     let mut rx = sub.rx;
     let e1 = rx.recv().await.unwrap();
-    assert!(matches!(e1, ReporterEvent::RunStarted { total_tests: 10, .. }), "sub {i} missing RunStarted");
+    assert!(
+      matches!(e1, ReporterEvent::RunStarted { total_tests: 10, .. }),
+      "sub {i} missing RunStarted"
+    );
     let e2 = rx.recv().await.unwrap();
-    assert!(matches!(e2, ReporterEvent::RunFinished { total: 10, .. }), "sub {i} missing RunFinished");
+    assert!(
+      matches!(e2, ReporterEvent::RunFinished { total: 10, .. }),
+      "sub {i} missing RunFinished"
+    );
     assert!(rx.recv().await.is_none(), "sub {i} channel should be closed");
   }
 }
@@ -79,7 +107,12 @@ async fn event_bus_no_subscribers_does_not_panic() {
   let bus = builder.build();
 
   // Should not panic or error.
-  bus.emit(ReporterEvent::RunStarted { total_tests: 1, num_workers: 1 }).await;
+  bus
+    .emit(ReporterEvent::RunStarted {
+      total_tests: 1,
+      num_workers: 1,
+    })
+    .await;
   drop(bus);
 }
 
@@ -93,7 +126,12 @@ async fn event_bus_dropped_subscriber_does_not_block() {
   // Drop sub1's receiver — bus should still deliver to sub2 without error.
   drop(sub1);
 
-  bus.emit(ReporterEvent::RunStarted { total_tests: 1, num_workers: 1 }).await;
+  bus
+    .emit(ReporterEvent::RunStarted {
+      total_tests: 1,
+      num_workers: 1,
+    })
+    .await;
   drop(bus);
 
   let mut rx = sub2.rx;
@@ -133,7 +171,9 @@ impl ferridriver_test::reporter::Reporter for CollectorReporter {
 #[tokio::test]
 async fn reporter_driver_forwards_events_and_finalizes() {
   let collected = Arc::new(Mutex::new(Vec::<String>::new()));
-  let reporter = CollectorReporter { events: Arc::clone(&collected) };
+  let reporter = CollectorReporter {
+    events: Arc::clone(&collected),
+  };
   let reporters = ReporterSet::new(vec![Box::new(reporter)]);
 
   let mut builder = EventBusBuilder::new();
@@ -144,11 +184,22 @@ async fn reporter_driver_forwards_events_and_finalizes() {
   let driver_handle = tokio::spawn(driver.run());
 
   // Emit events.
-  bus.emit(ReporterEvent::RunStarted { total_tests: 2, num_workers: 1 }).await;
-  bus.emit(ReporterEvent::RunFinished {
-    total: 2, passed: 2, failed: 0, skipped: 0, flaky: 0,
-    duration: Duration::from_millis(100),
-  }).await;
+  bus
+    .emit(ReporterEvent::RunStarted {
+      total_tests: 2,
+      num_workers: 1,
+    })
+    .await;
+  bus
+    .emit(ReporterEvent::RunFinished {
+      total: 2,
+      passed: 2,
+      failed: 0,
+      skipped: 0,
+      flaky: 0,
+      duration: Duration::from_millis(100),
+    })
+    .await;
 
   // Drop bus — closes channel, driver finalizes and exits.
   drop(bus);
@@ -161,7 +212,9 @@ async fn reporter_driver_forwards_events_and_finalizes() {
 #[tokio::test]
 async fn reporter_driver_returns_reporters_after_run() {
   let collected = Arc::new(Mutex::new(Vec::<String>::new()));
-  let reporter = CollectorReporter { events: Arc::clone(&collected) };
+  let reporter = CollectorReporter {
+    events: Arc::clone(&collected),
+  };
   let reporters = ReporterSet::new(vec![Box::new(reporter)]);
 
   let mut builder = EventBusBuilder::new();
@@ -171,7 +224,12 @@ async fn reporter_driver_returns_reporters_after_run() {
   let driver = ReporterDriver::new(reporters, sub);
   let driver_handle = tokio::spawn(driver.run());
 
-  bus.emit(ReporterEvent::RunStarted { total_tests: 1, num_workers: 1 }).await;
+  bus
+    .emit(ReporterEvent::RunStarted {
+      total_tests: 1,
+      num_workers: 1,
+    })
+    .await;
   drop(bus);
 
   // Driver should return the ReporterSet (not consume it permanently).
@@ -194,11 +252,19 @@ async fn real_time_delivery_not_batched() {
   let mut rx = sub.rx;
 
   // Emit one event and immediately check it arrived.
-  bus.emit(ReporterEvent::RunStarted { total_tests: 1, num_workers: 1 }).await;
+  bus
+    .emit(ReporterEvent::RunStarted {
+      total_tests: 1,
+      num_workers: 1,
+    })
+    .await;
 
   // Use try_recv — if the event is delivered in real-time, it's already in the channel.
   let result = rx.try_recv();
-  assert!(result.is_ok(), "event should be available immediately (real-time delivery), got: {result:?}");
+  assert!(
+    result.is_ok(),
+    "event should be available immediately (real-time delivery), got: {result:?}"
+  );
   assert!(matches!(result.unwrap(), ReporterEvent::RunStarted { .. }));
 
   // Emit another and verify.
@@ -224,16 +290,27 @@ async fn concurrent_execution_and_observation() {
   // Bus is explicitly dropped to close the channel, mirroring how
   // execute(plan, bus) consumes bus by value in real usage.
   let execute_fut = async {
-    bus.emit(ReporterEvent::RunStarted { total_tests: 3, num_workers: 1 }).await;
+    bus
+      .emit(ReporterEvent::RunStarted {
+        total_tests: 3,
+        num_workers: 1,
+      })
+      .await;
     tokio::task::yield_now().await;
     bus.emit(ReporterEvent::WorkerStarted { worker_id: 0 }).await;
     tokio::task::yield_now().await;
     bus.emit(ReporterEvent::WorkerFinished { worker_id: 0 }).await;
     tokio::task::yield_now().await;
-    bus.emit(ReporterEvent::RunFinished {
-      total: 3, passed: 3, failed: 0, skipped: 0, flaky: 0,
-      duration: Duration::from_millis(50),
-    }).await;
+    bus
+      .emit(ReporterEvent::RunFinished {
+        total: 3,
+        passed: 3,
+        failed: 0,
+        skipped: 0,
+        flaky: 0,
+        duration: Duration::from_millis(50),
+      })
+      .await;
     drop(bus); // Must explicitly drop — tokio::join! holds MaybeDone alive
   };
 
@@ -255,5 +332,8 @@ async fn concurrent_execution_and_observation() {
   tokio::join!(execute_fut, drain_fut);
 
   let events = received.lock().await;
-  assert_eq!(&*events, &["RunStarted", "WorkerStarted", "WorkerFinished", "RunFinished"]);
+  assert_eq!(
+    &*events,
+    &["RunStarted", "WorkerStarted", "WorkerFinished", "RunFinished"]
+  );
 }

@@ -13,7 +13,7 @@ async fn test_react_counter_live() {
     Err(_) => {
       eprintln!("VITE_URL not set, skipping live React CT test");
       return;
-    }
+    },
   };
 
   let browser = ferridriver::Browser::launch(ferridriver::options::LaunchOptions::default())

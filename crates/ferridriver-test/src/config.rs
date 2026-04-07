@@ -36,7 +36,11 @@ pub struct VideoConfig {
 
 impl Default for VideoConfig {
   fn default() -> Self {
-    Self { mode: VideoMode::Off, width: 1280, height: 720 }
+    Self {
+      mode: VideoMode::Off,
+      width: 1280,
+      height: 720,
+    }
   }
 }
 
@@ -307,7 +311,10 @@ impl std::fmt::Debug for TestConfig {
       .field("retries", &self.retries)
       .field("browser", &self.browser)
       .field("global_setup_fns", &format!("[{} fn(s)]", self.global_setup_fns.len()))
-      .field("global_teardown_fns", &format!("[{} fn(s)]", self.global_teardown_fns.len()))
+      .field(
+        "global_teardown_fns",
+        &format!("[{} fn(s)]", self.global_teardown_fns.len()),
+      )
       .finish_non_exhaustive()
   }
 }
@@ -456,9 +463,9 @@ fn json_merge(base: &mut serde_json::Value, overlay: &serde_json::Value) {
           base_map.insert(key.clone(), value.clone());
         }
       }
-    }
+    },
     (base, _) => {
       *base = overlay.clone();
-    }
+    },
   }
 }

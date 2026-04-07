@@ -34,11 +34,7 @@ impl DataTable {
 
   /// All rows except the header row.
   pub fn data_rows(&self) -> &[Vec<String>] {
-    if self.rows.len() > 1 {
-      &self.rows[1..]
-    } else {
-      &[]
-    }
+    if self.rows.len() > 1 { &self.rows[1..] } else { &[] }
   }
 
   /// Convert to array of header→value maps (one per data row).
@@ -46,15 +42,27 @@ impl DataTable {
     let Some(headers) = self.headers() else {
       return Vec::new();
     };
-    self.data_rows()
+    self
+      .data_rows()
       .iter()
-      .map(|row| headers.iter().zip(row.iter()).map(|(h, v)| (h.as_str(), v.as_str())).collect())
+      .map(|row| {
+        headers
+          .iter()
+          .zip(row.iter())
+          .map(|(h, v)| (h.as_str(), v.as_str()))
+          .collect()
+      })
       .collect()
   }
 
   /// Convert two-column table to key→value map (first col = key, second col = value).
   pub fn rows_hash(&self) -> FxHashMap<&str, &str> {
-    self.rows.iter().filter(|r| r.len() >= 2).map(|r| (r[0].as_str(), r[1].as_str())).collect()
+    self
+      .rows
+      .iter()
+      .filter(|r| r.len() >= 2)
+      .map(|r| (r[0].as_str(), r[1].as_str()))
+      .collect()
   }
 
   /// Transpose rows and columns.

@@ -25,8 +25,7 @@ pub fn encode_frames(
   let h = (height & !1) as u32;
 
   // ── Output container ──
-  let mut output_ctx =
-    ffmpeg::format::output(output_path).map_err(|e| format!("open output: {e}"))?;
+  let mut output_ctx = ffmpeg::format::output(output_path).map_err(|e| format!("open output: {e}"))?;
 
   let codec = find_encoder();
   let mut enc_ctx = ffmpeg::codec::context::Context::new_with_codec(codec)
@@ -50,39 +49,32 @@ pub fn encode_frames(
       opts.set("deadline", "realtime");
       opts.set("speed", "8");
       opts.set("threads", "1");
-    }
+    },
     "h264_videotoolbox" => {
       opts.set("allow_sw", "1");
       opts.set("realtime", "0");
-    }
+    },
     _ => {
       // libx264 fallback
       opts.set("preset", "veryfast");
       opts.set("crf", "23");
       opts.set("tune", "fastdecode");
-    }
+    },
   }
 
-  let mut encoder = enc_ctx
-    .open_with(opts)
-    .map_err(|e| format!("open encoder: {e}"))?;
+  let mut encoder = enc_ctx.open_with(opts).map_err(|e| format!("open encoder: {e}"))?;
 
   let stream_index = {
-    let mut stream = output_ctx
-      .add_stream(codec)
-      .map_err(|e| format!("add stream: {e}"))?;
+    let mut stream = output_ctx.add_stream(codec).map_err(|e| format!("add stream: {e}"))?;
     stream.set_parameters(&encoder);
     stream.set_time_base(ffmpeg::Rational::new(1, fps as i32));
     stream.index()
   };
 
-  output_ctx
-    .write_header()
-    .map_err(|e| format!("write header: {e}"))?;
+  output_ctx.write_header().map_err(|e| format!("write header: {e}"))?;
 
   // ── Reused MJPEG decoder -- created ONCE, not per frame ──
-  let jpeg_codec =
-    ffmpeg::decoder::find(ffmpeg::codec::Id::MJPEG).ok_or("MJPEG decoder not found")?;
+  let jpeg_codec = ffmpeg::decoder::find(ffmpeg::codec::Id::MJPEG).ok_or("MJPEG decoder not found")?;
   let mut jpeg_decoder = ffmpeg::codec::context::Context::new_with_codec(jpeg_codec)
     .decoder()
     .video()
@@ -157,9 +149,7 @@ pub fn encode_frames(
   encoder.send_eof().map_err(|e| format!("send eof: {e}"))?;
   drain_all(&mut output_ctx, &mut encoder, stream_index, &mut pkt)?;
 
-  output_ctx
-    .write_trailer()
-    .map_err(|e| format!("write trailer: {e}"))?;
+  output_ctx.write_trailer().map_err(|e| format!("write trailer: {e}"))?;
 
   Ok(())
 }
@@ -187,9 +177,7 @@ fn send_frame_and_drain(
   stream_index: usize,
   pkt: &mut ffmpeg::Packet,
 ) -> Result<(), String> {
-  encoder
-    .send_frame(frame)
-    .map_err(|e| format!("send frame: {e}"))?;
+  encoder.send_frame(frame).map_err(|e| format!("send frame: {e}"))?;
   drain_all(output_ctx, encoder, stream_index, pkt)
 }
 
@@ -200,10 +188,7 @@ fn drain_all(
   pkt: &mut ffmpeg::Packet,
 ) -> Result<(), String> {
   let enc_tb = encoder.time_base();
-  let stream_tb = output_ctx
-    .stream(stream_index)
-    .ok_or("stream not found")?
-    .time_base();
+  let stream_tb = output_ctx.stream(stream_index).ok_or("stream not found")?.time_base();
 
   while encoder.receive_packet(pkt).is_ok() {
     pkt.set_stream(stream_index);
@@ -231,8 +216,7 @@ pub fn encode_stream(
   let w = (width & !1) as u32;
   let h = (height & !1) as u32;
 
-  let mut output_ctx =
-    ffmpeg::format::output(output_path).map_err(|e| format!("open output: {e}"))?;
+  let mut output_ctx = ffmpeg::format::output(output_path).map_err(|e| format!("open output: {e}"))?;
 
   let codec = find_encoder();
   let mut enc_ctx = ffmpeg::codec::context::Context::new_with_codec(codec)
@@ -255,37 +239,30 @@ pub fn encode_stream(
       opts.set("deadline", "realtime");
       opts.set("speed", "8");
       opts.set("threads", "1");
-    }
+    },
     "h264_videotoolbox" => {
       opts.set("allow_sw", "1");
       opts.set("realtime", "0");
-    }
+    },
     _ => {
       opts.set("preset", "veryfast");
       opts.set("crf", "23");
       opts.set("tune", "fastdecode");
-    }
+    },
   }
 
-  let mut encoder = enc_ctx
-    .open_with(opts)
-    .map_err(|e| format!("open encoder: {e}"))?;
+  let mut encoder = enc_ctx.open_with(opts).map_err(|e| format!("open encoder: {e}"))?;
 
   let stream_index = {
-    let mut stream = output_ctx
-      .add_stream(codec)
-      .map_err(|e| format!("add stream: {e}"))?;
+    let mut stream = output_ctx.add_stream(codec).map_err(|e| format!("add stream: {e}"))?;
     stream.set_parameters(&encoder);
     stream.set_time_base(ffmpeg::Rational::new(1, fps as i32));
     stream.index()
   };
 
-  output_ctx
-    .write_header()
-    .map_err(|e| format!("write header: {e}"))?;
+  output_ctx.write_header().map_err(|e| format!("write header: {e}"))?;
 
-  let jpeg_codec =
-    ffmpeg::decoder::find(ffmpeg::codec::Id::MJPEG).ok_or("MJPEG decoder not found")?;
+  let jpeg_codec = ffmpeg::decoder::find(ffmpeg::codec::Id::MJPEG).ok_or("MJPEG decoder not found")?;
   let mut jpeg_decoder = ffmpeg::codec::context::Context::new_with_codec(jpeg_codec)
     .decoder()
     .video()
@@ -353,9 +330,7 @@ pub fn encode_stream(
   encoder.send_eof().map_err(|e| format!("send eof: {e}"))?;
   drain_all(&mut output_ctx, &mut encoder, stream_index, &mut pkt)?;
 
-  output_ctx
-    .write_trailer()
-    .map_err(|e| format!("write trailer: {e}"))?;
+  output_ctx.write_trailer().map_err(|e| format!("write trailer: {e}"))?;
 
   Ok(())
 }

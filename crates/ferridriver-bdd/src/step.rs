@@ -113,7 +113,11 @@ impl std::error::Error for StepError {}
 
 impl From<String> for StepError {
   fn from(message: String) -> Self {
-    Self { message, diff: None, pending: false }
+    Self {
+      message,
+      diff: None,
+      pending: false,
+    }
   }
 }
 
@@ -190,10 +194,7 @@ pub struct StepMatch<'a> {
 #[derive(Debug)]
 pub enum MatchError {
   /// No step definition matched the text.
-  Undefined {
-    text: String,
-    suggestions: Vec<String>,
-  },
+  Undefined { text: String, suggestions: Vec<String> },
   /// Multiple step definitions matched the text (ambiguous).
   Ambiguous {
     text: String,
@@ -214,14 +215,18 @@ impl fmt::Display for MatchError {
           }
         }
         Ok(())
-      }
-      Self::Ambiguous { text, matches, expressions } => {
+      },
+      Self::Ambiguous {
+        text,
+        matches,
+        expressions,
+      } => {
         write!(f, "ambiguous step: \"{text}\" matched {} definitions:", matches.len())?;
         for (i, (loc, expr)) in matches.iter().zip(expressions.iter()).enumerate() {
           write!(f, "\n  {}. {} ({})", i + 1, expr, loc)?;
         }
         Ok(())
-      }
+      },
     }
   }
 }

@@ -26,37 +26,55 @@ impl Default for TerminalReporter {
 
 // ── Styles ──
 
-fn s_pass() -> Style { Style::new().green() }
-fn s_fail() -> Style { Style::new().red().bold() }
-fn s_skip() -> Style { Style::new().dim() }
-fn s_flaky() -> Style { Style::new().yellow().bold() }
-fn s_dim() -> Style { Style::new().dim() }
-fn s_bold() -> Style { Style::new().bold() }
-fn s_cyan() -> Style { Style::new().cyan().bold() }
+fn s_pass() -> Style {
+  Style::new().green()
+}
+fn s_fail() -> Style {
+  Style::new().red().bold()
+}
+fn s_skip() -> Style {
+  Style::new().dim()
+}
+fn s_flaky() -> Style {
+  Style::new().yellow().bold()
+}
+fn s_dim() -> Style {
+  Style::new().dim()
+}
+fn s_bold() -> Style {
+  Style::new().bold()
+}
+fn s_cyan() -> Style {
+  Style::new().cyan().bold()
+}
 
 fn status_icon(status: &TestStatus) -> (&'static str, Style) {
   match status {
     TestStatus::Passed => ("\u{2713}", s_pass()),   // checkmark
-    TestStatus::Failed => ("\u{2717}", s_fail()),    // cross
-    TestStatus::TimedOut => ("\u{2717}", s_fail()),   // cross (same as failed)
-    TestStatus::Skipped => ("\u{2212}", s_skip()),   // minus
-    TestStatus::Flaky => ("\u{25ce}", s_flaky()),    // bullseye
+    TestStatus::Failed => ("\u{2717}", s_fail()),   // cross
+    TestStatus::TimedOut => ("\u{2717}", s_fail()), // cross (same as failed)
+    TestStatus::Skipped => ("\u{2212}", s_skip()),  // minus
+    TestStatus::Flaky => ("\u{25ce}", s_flaky()),   // bullseye
     TestStatus::Interrupted => ("!", s_fail()),
   }
 }
 
 fn step_icon(status: StepStatus) -> (&'static str, Style) {
   match status {
-    StepStatus::Passed => ("\u{2713}", s_pass()),   // checkmark
-    StepStatus::Failed => ("\u{2717}", s_fail()),    // cross
-    StepStatus::Skipped => ("\u{2212}", s_skip()),   // minus
-    StepStatus::Pending => ("\u{25cb}", s_skip()),   // empty circle
+    StepStatus::Passed => ("\u{2713}", s_pass()),  // checkmark
+    StepStatus::Failed => ("\u{2717}", s_fail()),  // cross
+    StepStatus::Skipped => ("\u{2212}", s_skip()), // minus
+    StepStatus::Pending => ("\u{25cb}", s_skip()), // empty circle
   }
 }
 
 fn format_duration(d: Duration) -> String {
   let ms = d.as_millis();
-  if ms < 1000 { format!("{ms}ms") } else { format!("{:.1}s", d.as_secs_f64()) }
+  if ms < 1000 {
+    format!("{ms}ms")
+  } else {
+    format!("{:.1}s", d.as_secs_f64())
+  }
 }
 
 fn print_steps(steps: &[&TestStep], indent: usize) {
@@ -66,14 +84,24 @@ fn print_steps(steps: &[&TestStep], indent: usize) {
     let dur = format_duration(step.duration);
     match step.status {
       StepStatus::Passed => {
-        println!("{pad}{} {} {}", icon_style.apply_to(icon), step.title, s_dim().apply_to(format!("({dur})")));
-      }
+        println!(
+          "{pad}{} {} {}",
+          icon_style.apply_to(icon),
+          step.title,
+          s_dim().apply_to(format!("({dur})"))
+        );
+      },
       StepStatus::Failed => {
-        println!("{pad}{} {} {}", icon_style.apply_to(icon), s_fail().apply_to(&step.title), s_dim().apply_to(format!("({dur})")));
-      }
+        println!(
+          "{pad}{} {} {}",
+          icon_style.apply_to(icon),
+          s_fail().apply_to(&step.title),
+          s_dim().apply_to(format!("({dur})"))
+        );
+      },
       StepStatus::Skipped | StepStatus::Pending => {
         println!("{pad}{} {}", icon_style.apply_to(icon), s_skip().apply_to(&step.title));
-      }
+      },
     }
 
     if let Some(ref err) = step.error {
@@ -93,16 +121,20 @@ fn print_steps(steps: &[&TestStep], indent: usize) {
 impl Reporter for TerminalReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
     match event {
-      ReporterEvent::RunStarted { total_tests, num_workers } => {
+      ReporterEvent::RunStarted {
+        total_tests,
+        num_workers,
+      } => {
         self.total = *total_tests;
         println!();
-        println!("  {} Running {} test(s) with {} worker(s)",
+        println!(
+          "  {} Running {} test(s) with {} worker(s)",
           s_cyan().apply_to("\u{25b6}"), // play icon
           s_bold().apply_to(total_tests),
           num_workers,
         );
         println!();
-      }
+      },
 
       ReporterEvent::TestFinished { test_id, outcome } => {
         self.completed += 1;
@@ -111,41 +143,43 @@ impl Reporter for TerminalReporter {
 
         match outcome.status {
           TestStatus::Passed => {
-            println!("  {} {} {}",
+            println!(
+              "  {} {} {}",
               icon_style.apply_to(icon),
               test_id.full_name(),
               s_dim().apply_to(format!("({duration})")),
             );
-          }
+          },
           TestStatus::Failed | TestStatus::TimedOut => {
-            println!("  {} {} {}",
+            println!(
+              "  {} {} {}",
               icon_style.apply_to(icon),
               s_fail().apply_to(test_id.full_name()),
               s_dim().apply_to(format!("({duration})")),
             );
-          }
+          },
           TestStatus::Skipped => {
-            println!("  {} {}",
+            println!(
+              "  {} {}",
               icon_style.apply_to(icon),
               s_skip().apply_to(test_id.full_name()),
             );
-          }
+          },
           TestStatus::Flaky => {
-            println!("  {} {} {}",
+            println!(
+              "  {} {} {}",
               icon_style.apply_to(icon),
               s_flaky().apply_to(test_id.full_name()),
               s_dim().apply_to(format!("({duration}) [flaky]")),
             );
-          }
+          },
           TestStatus::Interrupted => {
             println!("  {} {}", icon_style.apply_to(icon), test_id.full_name());
-          }
+          },
         }
 
         // Steps.
-        let user_steps: Vec<&TestStep> = outcome.steps.iter()
-          .filter(|s| s.category.is_visible())
-          .collect();
+        let user_steps: Vec<&TestStep> = outcome.steps.iter().filter(|s| s.category.is_visible()).collect();
         if !user_steps.is_empty() {
           print_steps(&user_steps, 4);
         }
@@ -163,9 +197,16 @@ impl Reporter for TerminalReporter {
           }
           println!();
         }
-      }
+      },
 
-      ReporterEvent::RunFinished { total, passed, failed, skipped, flaky, duration } => {
+      ReporterEvent::RunFinished {
+        total,
+        passed,
+        failed,
+        skipped,
+        flaky,
+        duration,
+      } => {
         let dur = format_duration(*duration);
         println!();
 
@@ -184,16 +225,17 @@ impl Reporter for TerminalReporter {
           parts.push(format!("{}", s_skip().apply_to(format!("{skipped} skipped"))));
         }
 
-        println!("  {} {}: {} {}",
+        println!(
+          "  {} {}: {} {}",
           s_bold().apply_to("Tests"),
           s_dim().apply_to(format!("{total} total")),
           parts.join(&format!("{}", s_dim().apply_to(" | "))),
           s_dim().apply_to(format!("({dur})")),
         );
         println!();
-      }
+      },
 
-      _ => {}
+      _ => {},
     }
   }
 }

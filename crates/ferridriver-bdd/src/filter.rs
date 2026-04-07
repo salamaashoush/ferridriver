@@ -69,15 +69,15 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
     match c {
       ' ' | '\t' | '\n' | '\r' => {
         chars.next();
-      }
+      },
       '(' => {
         tokens.push(Token::LParen);
         chars.next();
-      }
+      },
       ')' => {
         tokens.push(Token::RParen);
         chars.next();
-      }
+      },
       '@' => {
         chars.next();
         let mut name = String::new();
@@ -93,7 +93,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
           return Err("expected tag name after '@'".to_string());
         }
         tokens.push(Token::Tag(format!("@{name}")));
-      }
+      },
       _ => {
         let mut word = String::new();
         while let Some(&nc) = chars.peek() {
@@ -111,7 +111,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
           "" => return Err(format!("unexpected character: '{c}'")),
           _ => return Err(format!("unexpected word: '{word}'")),
         }
-      }
+      },
     }
   }
 
@@ -159,7 +159,7 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<TagExpression, String
       let result = TagExpression::Tag(name.clone());
       *pos += 1;
       Ok(result)
-    }
+    },
     Token::LParen => {
       *pos += 1;
       let inner = parse_or(tokens, pos)?;
@@ -168,7 +168,7 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<TagExpression, String
       }
       *pos += 1;
       Ok(inner)
-    }
+    },
     other => Err(format!("unexpected token: {other:?}")),
   }
 }
@@ -184,10 +184,7 @@ pub fn filter_scenarios(scenarios: &mut Vec<ScenarioExecution>, expr: &TagExpres
 pub fn filter_by_grep(scenarios: &mut Vec<ScenarioExecution>, pattern: &str, invert: bool) {
   // Case-insensitive regex. If pattern is invalid regex, fall back to
   // case-insensitive substring match (user typed plain text, not regex).
-  let re = regex::RegexBuilder::new(pattern)
-    .case_insensitive(true)
-    .build()
-    .ok();
+  let re = regex::RegexBuilder::new(pattern).case_insensitive(true).build().ok();
   let pattern_lower = pattern.to_lowercase();
 
   scenarios.retain(|s| {

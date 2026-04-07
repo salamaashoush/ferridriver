@@ -27,7 +27,7 @@ use proc_macro::TokenStream;
 use quote::quote;
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, FnArg, ItemFn, Lit, Meta, Pat, Token};
+use syn::{FnArg, ItemFn, Lit, Meta, Pat, Token, parse_macro_input};
 
 // ── Step macro argument parsing ──
 
@@ -46,7 +46,10 @@ impl Parse for StepArgs {
         let _: Token![=] = input.parse()?;
         let lit: Lit = input.parse()?;
         return match lit {
-          Lit::Str(s) => Ok(Self { expression: s.value(), is_regex: true }),
+          Lit::Str(s) => Ok(Self {
+            expression: s.value(),
+            is_regex: true,
+          }),
           _ => Err(syn::Error::new_spanned(lit, "expected a string literal regex pattern")),
         };
       }
@@ -54,8 +57,14 @@ impl Parse for StepArgs {
     // Otherwise parse as a cucumber expression string.
     let lit: Lit = input.parse()?;
     match lit {
-      Lit::Str(s) => Ok(Self { expression: s.value(), is_regex: false }),
-      _ => Err(syn::Error::new_spanned(lit, "expected a string literal cucumber expression")),
+      Lit::Str(s) => Ok(Self {
+        expression: s.value(),
+        is_regex: false,
+      }),
+      _ => Err(syn::Error::new_spanned(
+        lit,
+        "expected a string literal cucumber expression",
+      )),
     }
   }
 }
@@ -96,20 +105,20 @@ impl Parse for HookArgs {
                   tags = Some(s.value());
                 }
               }
-            }
+            },
             "order" => {
               if let syn::Expr::Lit(lit) = &nv.value {
                 if let Lit::Int(i) = &lit.lit {
                   order = i.base10_parse()?;
                 }
               }
-            }
+            },
             _ => {
               return Err(syn::Error::new_spanned(
                 &nv.path,
                 format!("unknown hook attribute: {ident}"),
               ));
-            }
+            },
           }
         }
       }
@@ -200,10 +209,7 @@ fn generate_step(kind: &str, attr: TokenStream, item: TokenStream) -> TokenStrea
     &format!("__bdd_step_handler_{fn_name_str}"),
     proc_macro2::Span::call_site(),
   );
-  let reg_name = syn::Ident::new(
-    &format!("__bdd_step_reg_{fn_name_str}"),
-    proc_macro2::Span::call_site(),
-  );
+  let reg_name = syn::Ident::new(&format!("__bdd_step_reg_{fn_name_str}"), proc_macro2::Span::call_site());
 
   let expanded = quote! {
     #(#attrs)*
@@ -289,28 +295,28 @@ fn generate_hook(prefix: &str, attr: TokenStream, item: TokenStream) -> TokenStr
       } else {
         quote! { ferridriver_bdd::hook::HookPoint::AfterAll }
       }
-    }
+    },
     "feature" => {
       if prefix == "Before" {
         quote! { ferridriver_bdd::hook::HookPoint::BeforeFeature }
       } else {
         quote! { ferridriver_bdd::hook::HookPoint::AfterFeature }
       }
-    }
+    },
     "scenario" => {
       if prefix == "Before" {
         quote! { ferridriver_bdd::hook::HookPoint::BeforeScenario }
       } else {
         quote! { ferridriver_bdd::hook::HookPoint::AfterScenario }
       }
-    }
+    },
     "step" => {
       if prefix == "Before" {
         quote! { ferridriver_bdd::hook::HookPoint::BeforeStep }
       } else {
         quote! { ferridriver_bdd::hook::HookPoint::AfterStep }
       }
-    }
+    },
     _ => unreachable!(),
   };
 
@@ -332,10 +338,7 @@ fn generate_hook(prefix: &str, attr: TokenStream, item: TokenStream) -> TokenStr
     &format!("__bdd_hook_handler_{fn_name_str}"),
     proc_macro2::Span::call_site(),
   );
-  let reg_name = syn::Ident::new(
-    &format!("__bdd_hook_reg_{fn_name_str}"),
-    proc_macro2::Span::call_site(),
-  );
+  let reg_name = syn::Ident::new(&format!("__bdd_hook_reg_{fn_name_str}"), proc_macro2::Span::call_site());
 
   let (fn_sig, handler_factory) = if is_global {
     (
@@ -433,7 +436,7 @@ impl Parse for ParamTypeArgs {
                   &nv.path,
                   format!("unknown param_type attribute: {ident} (expected name, regex)"),
                 ));
-              }
+              },
             }
           }
         }

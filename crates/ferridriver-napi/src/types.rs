@@ -243,7 +243,10 @@ impl From<&CookieData> for ferridriver::backend::CookieData {
       secure: o.secure,
       http_only: o.http_only,
       expires: o.expires,
-      same_site: o.same_site.as_deref().and_then(|v| v.parse::<ferridriver::backend::SameSite>().ok()),
+      same_site: o
+        .same_site
+        .as_deref()
+        .and_then(|v| v.parse::<ferridriver::backend::SameSite>().ok()),
     }
   }
 }

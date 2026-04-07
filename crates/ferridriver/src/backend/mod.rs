@@ -344,9 +344,7 @@ impl AnyPage {
 
   // ── Navigation ──
 
-  pub async fn goto(
-    &self, url: &str, lifecycle: NavLifecycle, timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn goto(&self, url: &str, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
     page_dispatch!(self, goto(url, lifecycle, timeout_ms))
   }
 
@@ -354,21 +352,15 @@ impl AnyPage {
     page_dispatch!(self, wait_for_navigation())
   }
 
-  pub async fn reload(
-    &self, lifecycle: NavLifecycle, timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
     page_dispatch!(self, reload(lifecycle, timeout_ms))
   }
 
-  pub async fn go_back(
-    &self, lifecycle: NavLifecycle, timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn go_back(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
     page_dispatch!(self, go_back(lifecycle, timeout_ms))
   }
 
-  pub async fn go_forward(
-    &self, lifecycle: NavLifecycle, timeout_ms: u64,
-  ) -> Result<(), String> {
+  pub async fn go_forward(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
     page_dispatch!(self, go_forward(lifecycle, timeout_ms))
   }
 

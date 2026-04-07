@@ -23,7 +23,9 @@ pub struct ParameterTypeRegistry {
 
 impl ParameterTypeRegistry {
   pub fn new() -> Self {
-    Self { types: FxHashMap::default() }
+    Self {
+      types: FxHashMap::default(),
+    }
   }
 
   pub fn register(&mut self, param_type: CustomParamType) {

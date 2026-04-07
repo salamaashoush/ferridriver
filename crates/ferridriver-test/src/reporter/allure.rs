@@ -151,39 +151,41 @@ impl AllureReporter {
 impl Reporter for AllureReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
     match event {
-      ReporterEvent::RunStarted { total_tests, num_workers } => {
+      ReporterEvent::RunStarted {
+        total_tests,
+        num_workers,
+      } => {
         self.run_start = epoch_ms();
         self.env.insert("Total Tests".into(), total_tests.to_string());
         self.env.insert("Workers".into(), num_workers.to_string());
         self.env.insert("OS".into(), std::env::consts::OS.into());
         self.env.insert("Arch".into(), std::env::consts::ARCH.into());
         self.env.insert("ferridriver".into(), env!("CARGO_PKG_VERSION").into());
-      }
+      },
       ReporterEvent::TestStarted { test_id, .. } => {
         self.test_starts.insert(test_id.full_name(), epoch_ms());
-      }
+      },
       ReporterEvent::TestFinished { outcome, .. } => {
         self.collect_result(outcome);
-      }
+      },
       ReporterEvent::RunFinished { duration, .. } => {
-        self.env.insert("Duration".into(), format!("{:.1}s", duration.as_secs_f64()));
-      }
-      _ => {}
+        self
+          .env
+          .insert("Duration".into(), format!("{:.1}s", duration.as_secs_f64()));
+      },
+      _ => {},
     }
   }
 
   async fn finalize(&mut self) -> Result<(), String> {
-    std::fs::create_dir_all(&self.output_dir)
-      .map_err(|e| format!("cannot create allure output dir: {e}"))?;
+    std::fs::create_dir_all(&self.output_dir).map_err(|e| format!("cannot create allure output dir: {e}"))?;
 
     // Write each test result.
     for pending in &self.results {
       let filename = format!("{}-result.json", pending.result.uuid);
       let path = self.output_dir.join(&filename);
-      let json = serde_json::to_string_pretty(&pending.result)
-        .map_err(|e| format!("allure serialize error: {e}"))?;
-      std::fs::write(&path, json)
-        .map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+      let json = serde_json::to_string_pretty(&pending.result).map_err(|e| format!("allure serialize error: {e}"))?;
+      std::fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
 
       // Write attachments.
       for attach in &pending.attachments {
@@ -192,13 +194,13 @@ impl Reporter for AllureReporter {
           AttachmentBody::Bytes(bytes) => {
             std::fs::write(&attach_path, bytes)
               .map_err(|e| format!("cannot write attachment {}: {e}", attach_path.display()))?;
-          }
+          },
           AttachmentBody::Path(src) => {
             if src.exists() {
               std::fs::copy(src, &attach_path)
                 .map_err(|e| format!("cannot copy attachment {}: {e}", attach_path.display()))?;
             }
-          }
+          },
         }
       }
     }
@@ -232,12 +234,15 @@ impl Reporter for AllureReporter {
         message_regex: None,
       },
     ];
-    let cats_json = serde_json::to_string_pretty(&categories)
-      .map_err(|e| format!("allure categories serialize: {e}"))?;
+    let cats_json =
+      serde_json::to_string_pretty(&categories).map_err(|e| format!("allure categories serialize: {e}"))?;
     std::fs::write(self.output_dir.join("categories.json"), cats_json).ok();
 
     let count = self.results.len();
-    tracing::info!("Allure results written to {} ({count} tests)", self.output_dir.display());
+    tracing::info!(
+      "Allure results written to {} ({count} tests)",
+      self.output_dir.display()
+    );
     Ok(())
   }
 }
@@ -302,55 +307,95 @@ impl AllureReporter {
       .or_else(|| outcome.test_id.suite.clone())
       .unwrap_or_default();
     let mut labels = vec![
-      AllureLabel { name: "suite".into(), value: suite_value },
-      AllureLabel { name: "parentSuite".into(), value: outcome.test_id.file.clone() },
+      AllureLabel {
+        name: "suite".into(),
+        value: suite_value,
+      },
+      AllureLabel {
+        name: "parentSuite".into(),
+        value: outcome.test_id.file.clone(),
+      },
     ];
     let mut links = Vec::new();
 
     for annotation in &outcome.annotations {
       match annotation {
         TestAnnotation::Tag(tag) => {
-          labels.push(AllureLabel { name: "tag".into(), value: tag.clone() });
-        }
-        TestAnnotation::Info { type_name, description } => {
-          match type_name.as_str() {
-            "severity" => labels.push(AllureLabel { name: "severity".into(), value: description.clone() }),
-            "owner" => labels.push(AllureLabel { name: "owner".into(), value: description.clone() }),
-            "epic" => labels.push(AllureLabel { name: "epic".into(), value: description.clone() }),
-            "feature" => labels.push(AllureLabel { name: "feature".into(), value: description.clone() }),
-            "story" => labels.push(AllureLabel { name: "story".into(), value: description.clone() }),
-            "issue" => links.push(AllureLink {
-              name: description.clone(),
-              url: description.clone(),
-              link_type: "issue".into(),
-            }),
-            "tms" => links.push(AllureLink {
-              name: description.clone(),
-              url: description.clone(),
-              link_type: "tms".into(),
-            }),
-            _ => labels.push(AllureLabel { name: type_name.clone(), value: description.clone() }),
-          }
-        }
+          labels.push(AllureLabel {
+            name: "tag".into(),
+            value: tag.clone(),
+          });
+        },
+        TestAnnotation::Info { type_name, description } => match type_name.as_str() {
+          "severity" => labels.push(AllureLabel {
+            name: "severity".into(),
+            value: description.clone(),
+          }),
+          "owner" => labels.push(AllureLabel {
+            name: "owner".into(),
+            value: description.clone(),
+          }),
+          "epic" => labels.push(AllureLabel {
+            name: "epic".into(),
+            value: description.clone(),
+          }),
+          "feature" => labels.push(AllureLabel {
+            name: "feature".into(),
+            value: description.clone(),
+          }),
+          "story" => labels.push(AllureLabel {
+            name: "story".into(),
+            value: description.clone(),
+          }),
+          "issue" => links.push(AllureLink {
+            name: description.clone(),
+            url: description.clone(),
+            link_type: "issue".into(),
+          }),
+          "tms" => links.push(AllureLink {
+            name: description.clone(),
+            url: description.clone(),
+            link_type: "tms".into(),
+          }),
+          _ => labels.push(AllureLabel {
+            name: type_name.clone(),
+            value: description.clone(),
+          }),
+        },
         TestAnnotation::Slow => {
-          labels.push(AllureLabel { name: "tag".into(), value: "slow".into() });
-        }
+          labels.push(AllureLabel {
+            name: "tag".into(),
+            value: "slow".into(),
+          });
+        },
         TestAnnotation::Fixme { reason, .. } => {
-          labels.push(AllureLabel { name: "tag".into(), value: "fixme".into() });
+          labels.push(AllureLabel {
+            name: "tag".into(),
+            value: "fixme".into(),
+          });
           if let Some(r) = reason {
-            labels.push(AllureLabel { name: "description".into(), value: r.clone() });
+            labels.push(AllureLabel {
+              name: "description".into(),
+              value: r.clone(),
+            });
           }
-        }
+        },
         TestAnnotation::Fail => {
-          labels.push(AllureLabel { name: "tag".into(), value: "expected-failure".into() });
-        }
-        _ => {}
+          labels.push(AllureLabel {
+            name: "tag".into(),
+            value: "expected-failure".into(),
+          });
+        },
+        _ => {},
       }
     }
 
     // Flaky label.
     if outcome.status == TestStatus::Flaky {
-      labels.push(AllureLabel { name: "tag".into(), value: "flaky".into() });
+      labels.push(AllureLabel {
+        name: "tag".into(),
+        value: "flaky".into(),
+      });
     }
 
     // Parameters: attempt info if retried.

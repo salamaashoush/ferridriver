@@ -2,7 +2,7 @@
 
 use ferridriver::Page;
 
-use super::{poll_until, Expect, ExpectContext, MatchError, StringOrRegex};
+use super::{Expect, ExpectContext, MatchError, StringOrRegex, poll_until};
 use crate::model::TestFailure;
 
 fn page_ctx(method: &'static str, is_not: bool) -> ExpectContext {
@@ -23,7 +23,10 @@ impl Expect<'_, Page> {
     poll_until(self.timeout, page_ctx("toHaveTitle", is_not), || {
       let expected = expected.clone();
       async move {
-        let actual = page.title().await.map_err(|e| MatchError::new("(title)", e.to_string()))?;
+        let actual = page
+          .title()
+          .await
+          .map_err(|e| MatchError::new("(title)", e.to_string()))?;
         let matches = expected.matches(&actual);
         if matches == is_not {
           Err(MatchError::new(
@@ -47,7 +50,10 @@ impl Expect<'_, Page> {
     poll_until(self.timeout, page_ctx("toContainTitle", is_not), || {
       let expected = expected.clone();
       async move {
-        let actual = page.title().await.map_err(|e| MatchError::new("(title)", e.to_string()))?;
+        let actual = page
+          .title()
+          .await
+          .map_err(|e| MatchError::new("(title)", e.to_string()))?;
         let contains = actual.contains(&expected);
         if contains == is_not {
           Err(MatchError::new(

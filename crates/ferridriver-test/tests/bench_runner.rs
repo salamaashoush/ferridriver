@@ -2,7 +2,7 @@
   clippy::cast_precision_loss,
   clippy::cast_lossless,
   clippy::uninlined_format_args,
-  clippy::implicit_clone,
+  clippy::implicit_clone
 )]
 //! Performance benchmark: measures ferridriver-test runner overhead and parallelism.
 //! Compare against Playwright Test for the same 50-test workload.
@@ -23,7 +23,7 @@ fn data_url(html: &str) -> String {
       .map(|b| match b {
         b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
           (b as char).to_string()
-        }
+        },
         _ => format!("%{b:02X}"),
       })
       .collect::<String>()
@@ -41,14 +41,23 @@ fn make_nav_test(i: usize) -> TestCase {
     test_fn: Arc::new(move |pool| {
       Box::pin(async move {
         let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
-          message: e, stack: None, diff: None, screenshot: None,
+          message: e,
+          stack: None,
+          diff: None,
+          screenshot: None,
         })?;
         let html = format!("<title>Test {i}</title><body><h1>Page {i}</h1></body>");
         page.goto(&data_url(&html), None).await.map_err(|e| TestFailure {
-          message: e.to_string(), stack: None, diff: None, screenshot: None,
+          message: e.to_string(),
+          stack: None,
+          diff: None,
+          screenshot: None,
         })?;
         let title = page.title().await.map_err(|e| TestFailure {
-          message: e.to_string(), stack: None, diff: None, screenshot: None,
+          message: e.to_string(),
+          stack: None,
+          diff: None,
+          screenshot: None,
         })?;
         assert!(title.contains(&format!("Test {i}")));
         Ok(())
@@ -73,20 +82,35 @@ fn make_interaction_test(i: usize) -> TestCase {
     test_fn: Arc::new(move |pool| {
       Box::pin(async move {
         let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
-          message: e, stack: None, diff: None, screenshot: None,
+          message: e,
+          stack: None,
+          diff: None,
+          screenshot: None,
         })?;
-        let html = format!(
-          "<button id='btn' onclick=\"this.textContent='done {i}'\">Click {i}</button>"
-        );
+        let html = format!("<button id='btn' onclick=\"this.textContent='done {i}'\">Click {i}</button>");
         page.goto(&data_url(&html), None).await.map_err(|e| TestFailure {
-          message: e.to_string(), stack: None, diff: None, screenshot: None,
+          message: e.to_string(),
+          stack: None,
+          diff: None,
+          screenshot: None,
         })?;
         page.locator("#btn").click().await.map_err(|e| TestFailure {
-          message: e.to_string(), stack: None, diff: None, screenshot: None,
+          message: e.to_string(),
+          stack: None,
+          diff: None,
+          screenshot: None,
         })?;
-        let text = page.locator("#btn").text_content().await.map_err(|e| TestFailure {
-          message: e.to_string(), stack: None, diff: None, screenshot: None,
-        })?.unwrap_or_default();
+        let text = page
+          .locator("#btn")
+          .text_content()
+          .await
+          .map_err(|e| TestFailure {
+            message: e.to_string(),
+            stack: None,
+            diff: None,
+            screenshot: None,
+          })?
+          .unwrap_or_default();
         assert!(text.contains(&format!("done {i}")));
         Ok(())
       })
@@ -100,9 +124,15 @@ fn make_interaction_test(i: usize) -> TestCase {
 }
 
 fn make_tests(n: usize) -> Vec<TestCase> {
-  (0..n).map(|i| {
-    if i % 2 == 0 { make_nav_test(i) } else { make_interaction_test(i) }
-  }).collect()
+  (0..n)
+    .map(|i| {
+      if i % 2 == 0 {
+        make_nav_test(i)
+      } else {
+        make_interaction_test(i)
+      }
+    })
+    .collect()
 }
 
 async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> Duration {
@@ -171,8 +201,14 @@ async fn bench_parallel_scaling() {
   println!("  Playwright comparison (50 tests): ~2200ms (self-reported)");
   println!("  ferridriver-test (50 tests, 4w): {}ms", t50_4.as_millis());
   println!("  ferridriver-test (50 tests, 6w): {}ms", t50_6.as_millis());
-  println!("  Speedup vs Playwright (4w): {:.1}x", 2200.0 / t50_4.as_millis() as f64);
-  println!("  Speedup vs Playwright (6w): {:.1}x", 2200.0 / t50_6.as_millis() as f64);
+  println!(
+    "  Speedup vs Playwright (4w): {:.1}x",
+    2200.0 / t50_4.as_millis() as f64
+  );
+  println!(
+    "  Speedup vs Playwright (6w): {:.1}x",
+    2200.0 / t50_6.as_millis() as f64
+  );
   println!();
 
   // Large scale: 100 tests.

@@ -51,18 +51,28 @@ impl McpServer {
           .ok_or_else(|| Self::err(format!("Context '{s}' not found")))?;
         let limit = p.limit.unwrap_or(50);
         let log = handles.network.read().await;
-        let reqs: Vec<_> = log.iter().rev().take(limit).cloned().collect::<Vec<_>>().into_iter().rev().collect();
+        let reqs: Vec<_> = log
+          .iter()
+          .rev()
+          .take(limit)
+          .cloned()
+          .collect::<Vec<_>>()
+          .into_iter()
+          .rev()
+          .collect();
         drop(log);
         Ok(CallToolResult::success(vec![Content::text(
           serde_json::to_string_pretty(&reqs).unwrap_or_default(),
         )]))
       },
       "trace_start" => {
+        let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.start_tracing().await.map_err(Self::err)?;
         Ok(CallToolResult::success(vec![Content::text("Trace started.")]))
       },
       "trace_stop" => {
+        let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.stop_tracing().await.map_err(Self::err)?;
         let metrics = page.metrics().await.map_err(Self::err)?;

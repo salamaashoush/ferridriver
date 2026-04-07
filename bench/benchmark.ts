@@ -269,19 +269,9 @@ async function runAllTests(client: Client, backend: string): Promise<Result[]> {
     assert(!r.isError, `network: ${text(r)}`);
   });
 
-  // ── BDD ──
-
-  await t("list_steps", async () => {
-    const r = await call(client, "list_steps", {});
-    assert(!r.isError, `list_steps: ${text(r)}`);
-    assert(text(r).includes("navigate"), "missing navigate step");
-  });
-
-  await t("run_scenario", async () => {
-    const r = await call(client, "run_scenario", {
-      script: `Given I navigate to "${TEST_PAGE}"\nThen the page should contain text "Hello World"`,
-    });
-    assert(!r.isError, `scenario: ${text(r)}`);
+  await t("find_elements", async () => {
+    const r = await call(client, "find_elements", { selector: "a", max_results: 5 });
+    assert(!r.isError, `find_elements: ${text(r)}`);
   });
 
   // ── Dropdown ──

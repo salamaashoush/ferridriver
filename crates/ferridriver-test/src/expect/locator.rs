@@ -2,7 +2,7 @@
 
 use ferridriver::Locator;
 
-use super::{poll_until, Expect, ExpectContext, MatchError, StringOrRegex};
+use super::{Expect, ExpectContext, MatchError, StringOrRegex, poll_until};
 use crate::model::TestFailure;
 
 /// Build ExpectContext for a locator assertion.
@@ -21,10 +21,14 @@ impl Expect<'_, Locator> {
   pub async fn to_be_visible(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeVisible", is_not), || async move {
-      let visible = locator.is_visible().await.unwrap_or(false);
-      check_bool(visible, is_not, "visible")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeVisible", is_not),
+      || async move {
+        let visible = locator.is_visible().await.unwrap_or(false);
+        check_bool(visible, is_not, "visible")
+      },
+    )
     .await
   }
 
@@ -32,10 +36,14 @@ impl Expect<'_, Locator> {
   pub async fn to_be_hidden(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeHidden", is_not), || async move {
-      let hidden = locator.is_hidden().await.unwrap_or(true);
-      check_bool(hidden, is_not, "to be hidden")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeHidden", is_not),
+      || async move {
+        let hidden = locator.is_hidden().await.unwrap_or(true);
+        check_bool(hidden, is_not, "to be hidden")
+      },
+    )
     .await
   }
 
@@ -43,10 +51,14 @@ impl Expect<'_, Locator> {
   pub async fn to_be_enabled(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeEnabled", is_not), || async move {
-      let enabled = locator.is_enabled().await.unwrap_or(false);
-      check_bool(enabled, is_not, "to be enabled")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeEnabled", is_not),
+      || async move {
+        let enabled = locator.is_enabled().await.unwrap_or(false);
+        check_bool(enabled, is_not, "to be enabled")
+      },
+    )
     .await
   }
 
@@ -54,10 +66,14 @@ impl Expect<'_, Locator> {
   pub async fn to_be_disabled(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeDisabled", is_not), || async move {
-      let disabled = locator.is_disabled().await.unwrap_or(false);
-      check_bool(disabled, is_not, "to be disabled")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeDisabled", is_not),
+      || async move {
+        let disabled = locator.is_disabled().await.unwrap_or(false);
+        check_bool(disabled, is_not, "to be disabled")
+      },
+    )
     .await
   }
 
@@ -65,10 +81,14 @@ impl Expect<'_, Locator> {
   pub async fn to_be_checked(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeChecked", is_not), || async move {
-      let checked = locator.is_checked().await.unwrap_or(false);
-      check_bool(checked, is_not, "to be checked")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeChecked", is_not),
+      || async move {
+        let checked = locator.is_checked().await.unwrap_or(false);
+        check_bool(checked, is_not, "to be checked")
+      },
+    )
     .await
   }
 
@@ -76,10 +96,14 @@ impl Expect<'_, Locator> {
   pub async fn to_be_editable(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeEditable", is_not), || async move {
-      let editable = locator.is_editable().await.unwrap_or(false);
-      check_bool(editable, is_not, "to be editable")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeEditable", is_not),
+      || async move {
+        let editable = locator.is_editable().await.unwrap_or(false);
+        check_bool(editable, is_not, "to be editable")
+      },
+    )
     .await
   }
 
@@ -87,10 +111,14 @@ impl Expect<'_, Locator> {
   pub async fn to_be_attached(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeAttached", is_not), || async move {
-      let attached = locator.is_attached().await.unwrap_or(false);
-      check_bool(attached, is_not, "to be attached")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeAttached", is_not),
+      || async move {
+        let attached = locator.is_attached().await.unwrap_or(false);
+        check_bool(attached, is_not, "to be attached")
+      },
+    )
     .await
   }
 
@@ -117,15 +145,19 @@ impl Expect<'_, Locator> {
   pub async fn to_be_focused(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeFocused", is_not), || async move {
-      let focused = locator
-        .evaluate("document.activeElement === el")
-        .await
-        .unwrap_or(None)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-      check_bool(focused, is_not, "to be focused")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeFocused", is_not),
+      || async move {
+        let focused = locator
+          .evaluate("document.activeElement === el")
+          .await
+          .unwrap_or(None)
+          .and_then(|v| v.as_bool())
+          .unwrap_or(false);
+        check_bool(focused, is_not, "to be focused")
+      },
+    )
     .await
   }
 
@@ -133,19 +165,23 @@ impl Expect<'_, Locator> {
   pub async fn to_be_in_viewport(&self) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeInViewport", is_not), || async move {
-      let in_viewport = locator
-        .evaluate(
-          "(function() { var r = el.getBoundingClientRect(); \
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeInViewport", is_not),
+      || async move {
+        let in_viewport = locator
+          .evaluate(
+            "(function() { var r = el.getBoundingClientRect(); \
            return r.top < window.innerHeight && r.bottom > 0 && \
            r.left < window.innerWidth && r.right > 0; })()",
-        )
-        .await
-        .unwrap_or(None)
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-      check_bool(in_viewport, is_not, "to be in viewport")
-    })
+          )
+          .await
+          .unwrap_or(None)
+          .and_then(|v| v.as_bool())
+          .unwrap_or(false);
+        check_bool(in_viewport, is_not, "to be in viewport")
+      },
+    )
     .await
   }
 
@@ -181,7 +217,11 @@ impl Expect<'_, Locator> {
         };
         if matches == is_not {
           Err(MatchError::new(
-            format!("{}containing {}", if is_not { "not " } else { "" }, expected.description()),
+            format!(
+              "{}containing {}",
+              if is_not { "not " } else { "" },
+              expected.description()
+            ),
             format!("\"{actual}\""),
           ))
         } else {
@@ -245,11 +285,7 @@ impl Expect<'_, Locator> {
   // ── Attributes ──
 
   /// Assert the locator has an attribute with the expected value.
-  pub async fn to_have_attribute(
-    &self,
-    name: &str,
-    value: impl Into<StringOrRegex>,
-  ) -> Result<(), TestFailure> {
+  pub async fn to_have_attribute(&self, name: &str, value: impl Into<StringOrRegex>) -> Result<(), TestFailure> {
     let expected = value.into();
     let locator = self.subject;
     let is_not = self.is_not;
@@ -309,11 +345,7 @@ impl Expect<'_, Locator> {
   }
 
   /// Assert the locator has the expected CSS property value.
-  pub async fn to_have_css(
-    &self,
-    property: &str,
-    value: impl Into<StringOrRegex>,
-  ) -> Result<(), TestFailure> {
+  pub async fn to_have_css(&self, property: &str, value: impl Into<StringOrRegex>) -> Result<(), TestFailure> {
     let expected = value.into();
     let locator = self.subject;
     let is_not = self.is_not;
@@ -368,73 +400,78 @@ impl Expect<'_, Locator> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveAccessibleName", is_not), || {
-      let expected = expected.clone();
-      async move {
-        let actual = locator
-          .evaluate(
-            "(function() { \
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toHaveAccessibleName", is_not),
+      || {
+        let expected = expected.clone();
+        async move {
+          let actual = locator
+            .evaluate(
+              "(function() { \
               var label = el.getAttribute('aria-label') || \
                 (el.getAttribute('aria-labelledby') ? \
                   (document.getElementById(el.getAttribute('aria-labelledby')) || {}).textContent : null) || \
                 (el.labels && el.labels[0] ? el.labels[0].textContent : null) || ''; \
               return label.trim(); \
             })()",
-          )
-          .await
-          .unwrap_or(None)
-          .and_then(|v| v.as_str().map(String::from))
-          .unwrap_or_default();
-        check_text_match(&expected, &actual, is_not, "accessible name")
-      }
-    })
+            )
+            .await
+            .unwrap_or(None)
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+          check_text_match(&expected, &actual, is_not, "accessible name")
+        }
+      },
+    )
     .await
   }
 
   /// Assert the locator has the expected accessible description.
-  pub async fn to_have_accessible_description(
-    &self,
-    expected: impl Into<StringOrRegex>,
-  ) -> Result<(), TestFailure> {
+  pub async fn to_have_accessible_description(&self, expected: impl Into<StringOrRegex>) -> Result<(), TestFailure> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveAccessibleDescription", is_not), || {
-      let expected = expected.clone();
-      async move {
-        let actual = locator
-          .evaluate(
-            "(function() { \
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toHaveAccessibleDescription", is_not),
+      || {
+        let expected = expected.clone();
+        async move {
+          let actual = locator
+            .evaluate(
+              "(function() { \
               var desc = el.getAttribute('aria-description') || \
                 (el.getAttribute('aria-describedby') ? \
                   (document.getElementById(el.getAttribute('aria-describedby')) || {}).textContent : null) || ''; \
               return desc.trim(); \
             })()",
-          )
-          .await
-          .unwrap_or(None)
-          .and_then(|v| v.as_str().map(String::from))
-          .unwrap_or_default();
-        check_text_match(&expected, &actual, is_not, "accessible description")
-      }
-    })
+            )
+            .await
+            .unwrap_or(None)
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+          check_text_match(&expected, &actual, is_not, "accessible description")
+        }
+      },
+    )
     .await
   }
 
   /// Assert the locator has the expected accessible error message.
-  pub async fn to_have_accessible_error_message(
-    &self,
-    expected: impl Into<StringOrRegex>,
-  ) -> Result<(), TestFailure> {
+  pub async fn to_have_accessible_error_message(&self, expected: impl Into<StringOrRegex>) -> Result<(), TestFailure> {
     let expected = expected.into();
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveAccessibleErrorMessage", is_not), || {
-      let expected = expected.clone();
-      async move {
-        let actual = locator
-          .evaluate(
-            "(function() { \
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toHaveAccessibleErrorMessage", is_not),
+      || {
+        let expected = expected.clone();
+        async move {
+          let actual = locator
+            .evaluate(
+              "(function() { \
               var errId = el.getAttribute('aria-errormessage'); \
               if (errId) { \
                 var errEl = document.getElementById(errId); \
@@ -442,23 +479,20 @@ impl Expect<'_, Locator> {
               } \
               return el.validationMessage || ''; \
             })()",
-          )
-          .await
-          .unwrap_or(None)
-          .and_then(|v| v.as_str().map(String::from))
-          .unwrap_or_default();
-        check_text_match(&expected, &actual, is_not, "accessible error message")
-      }
-    })
+            )
+            .await
+            .unwrap_or(None)
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_default();
+          check_text_match(&expected, &actual, is_not, "accessible error message")
+        }
+      },
+    )
     .await
   }
 
   /// Assert the locator has a JS property with the expected value.
-  pub async fn to_have_js_property(
-    &self,
-    name: &str,
-    value: serde_json::Value,
-  ) -> Result<(), TestFailure> {
+  pub async fn to_have_js_property(&self, name: &str, value: serde_json::Value) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
     let prop_name = name.to_string();
@@ -466,15 +500,15 @@ impl Expect<'_, Locator> {
       let prop_name = prop_name.clone();
       let expected = value.clone();
       async move {
-        let js = format!(
-          "JSON.stringify(el['{}'])",
-          prop_name.replace('\'', "\\'")
-        );
+        let js = format!("JSON.stringify(el['{}'])", prop_name.replace('\'', "\\'"));
         let actual = locator
           .evaluate(&js)
           .await
           .unwrap_or(None)
-          .and_then(|v| v.as_str().and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()))
+          .and_then(|v| {
+            v.as_str()
+              .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
+          })
           .unwrap_or(serde_json::Value::Null);
         let matches = actual == expected;
         if matches == is_not {
@@ -521,9 +555,15 @@ impl Expect<'_, Locator> {
 
         if actuals.len() != expected.len() {
           let matches = false;
-          if matches == is_not { return Ok(()); }
+          if matches == is_not {
+            return Ok(());
+          }
           return Err(MatchError::new(
-            format!("{} texts: {:?}", expected.len(), expected.iter().map(|e| e.description()).collect::<Vec<_>>()),
+            format!(
+              "{} texts: {:?}",
+              expected.len(),
+              expected.iter().map(|e| e.description()).collect::<Vec<_>>()
+            ),
             format!("{} texts: {actuals:?}", actuals.len()),
           ));
         }
@@ -567,7 +607,9 @@ impl Expect<'_, Locator> {
         }
 
         if actuals.len() != expected.len() {
-          if is_not { return Ok(()); }
+          if is_not {
+            return Ok(());
+          }
           return Err(MatchError::new(
             format!("{} texts", expected.len()),
             format!("{} texts", actuals.len()),
@@ -596,11 +638,7 @@ impl Expect<'_, Locator> {
   /// Pass `update = true` (or `--update-snapshots` CLI) to overwrite.
   pub async fn to_match_snapshot(&self, name: &str) -> Result<(), TestFailure> {
     let locator = self.subject;
-    let actual = locator
-      .text_content()
-      .await
-      .unwrap_or(None)
-      .unwrap_or_default();
+    let actual = locator.text_content().await.unwrap_or(None).unwrap_or_default();
     // Snapshot dir defaults to __snapshots__ relative to cwd.
     let snap_dir = std::path::PathBuf::from("__snapshots__");
     let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
@@ -642,13 +680,12 @@ impl Expect<'_, Locator> {
   /// First run creates the baseline. Set `UPDATE_SNAPSHOTS=1` to overwrite.
   pub async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure> {
     let locator = self.subject;
-    let actual_png = locator
-      .screenshot()
-      .await
-      .map_err(|e| TestFailure {
-        message: format!("screenshot failed: {e}"),
-        stack: None, diff: None, screenshot: None,
-      })?;
+    let actual_png = locator.screenshot().await.map_err(|e| TestFailure {
+      message: format!("screenshot failed: {e}"),
+      stack: None,
+      diff: None,
+      screenshot: None,
+    })?;
 
     crate::snapshot::compare_screenshot_png(&actual_png, name)
   }
@@ -660,13 +697,16 @@ impl Expect<'_, Locator> {
   pub async fn to_match_aria_snapshot(&self, expected_yaml: &str) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toMatchAriaSnapshot", is_not), || {
-      let expected_yaml = expected_yaml.to_string();
-      async move {
-        // Get the accessible name and role of matched elements.
-        let aria_tree = locator
-          .evaluate(
-            "(() => { \
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toMatchAriaSnapshot", is_not),
+      || {
+        let expected_yaml = expected_yaml.to_string();
+        async move {
+          // Get the accessible name and role of matched elements.
+          let aria_tree = locator
+            .evaluate(
+              "(() => { \
               const el = document.querySelector(selector); \
               if (!el) return 'EMPTY'; \
               function walk(node, indent) { \
@@ -681,30 +721,33 @@ impl Expect<'_, Locator> {
                 return lines; \
               } \
               return walk(el, '').join('\\n'); \
-            })()"
-          )
-          .await
-          .unwrap_or(None)
-          .and_then(|v| v.as_str().map(String::from))
-          .unwrap_or_else(|| "EMPTY".into());
+            })()",
+            )
+            .await
+            .unwrap_or(None)
+            .and_then(|v| v.as_str().map(String::from))
+            .unwrap_or_else(|| "EMPTY".into());
 
-        // Simple substring matching against the expected YAML.
-        let lines_match = expected_yaml.lines().all(|expected_line| {
-          let trimmed = expected_line.trim();
-          if trimmed.is_empty() { return true; }
-          aria_tree.contains(trimmed)
-        });
+          // Simple substring matching against the expected YAML.
+          let lines_match = expected_yaml.lines().all(|expected_line| {
+            let trimmed = expected_line.trim();
+            if trimmed.is_empty() {
+              return true;
+            }
+            aria_tree.contains(trimmed)
+          });
 
-        if lines_match == is_not {
-          Err(MatchError::new(
-            format!("{}\n{expected_yaml}", if is_not { "not matching" } else { "matching" }),
-            aria_tree,
-          ))
-        } else {
-          Ok(())
+          if lines_match == is_not {
+            Err(MatchError::new(
+              format!("{}\n{expected_yaml}", if is_not { "not matching" } else { "matching" }),
+              aria_tree,
+            ))
+          } else {
+            Ok(())
+          }
         }
-      }
-    })
+      },
+    )
     .await
   }
 
@@ -714,18 +757,22 @@ impl Expect<'_, Locator> {
   pub async fn to_have_count(&self, expected: usize) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveCount", is_not), || async move {
-      let actual = locator.count().await.unwrap_or(0);
-      let matches = actual == expected;
-      if matches == is_not {
-        Err(MatchError::new(
-          format!("{}{expected}", if is_not { "not " } else { "" }),
-          format!("{actual}"),
-        ))
-      } else {
-        Ok(())
-      }
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toHaveCount", is_not),
+      || async move {
+        let actual = locator.count().await.unwrap_or(0);
+        let matches = actual == expected;
+        if matches == is_not {
+          Err(MatchError::new(
+            format!("{}{expected}", if is_not { "not " } else { "" }),
+            format!("{actual}"),
+          ))
+        } else {
+          Ok(())
+        }
+      },
+    )
     .await
   }
 }
@@ -742,19 +789,10 @@ fn check_bool(actual: bool, is_not: bool, expected_state: &str) -> Result<(), Ma
   }
 }
 
-fn check_text_match(
-  expected: &StringOrRegex,
-  actual: &str,
-  is_not: bool,
-  _label: &str,
-) -> Result<(), MatchError> {
+fn check_text_match(expected: &StringOrRegex, actual: &str, is_not: bool, _label: &str) -> Result<(), MatchError> {
   let matches = expected.matches(actual);
   if matches == is_not {
-    let exp = format!(
-      "{}{}",
-      if is_not { "not " } else { "" },
-      expected.description()
-    );
+    let exp = format!("{}{}", if is_not { "not " } else { "" }, expected.description());
     Err(MatchError::new(exp, format!("\"{actual}\"")))
   } else {
     Ok(())

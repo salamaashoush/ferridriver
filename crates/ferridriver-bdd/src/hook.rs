@@ -28,15 +28,11 @@ pub enum HookPoint {
 /// The actual hook function, typed by scope.
 pub enum HookHandler {
   /// Global hooks (BeforeAll/AfterAll): no world context.
-  Global(
-    Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>,
-  ),
+  Global(Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>),
   /// Scenario-scoped hooks (BeforeScenario/AfterScenario, BeforeFeature/AfterFeature).
   Scenario(
     Arc<
-      dyn for<'a> Fn(
-          &'a mut BrowserWorld,
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>
+      dyn for<'a> Fn(&'a mut BrowserWorld) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>
         + Send
         + Sync,
     >,
@@ -44,10 +40,7 @@ pub enum HookHandler {
   /// Step-scoped hooks (BeforeStep/AfterStep): receive step text.
   Step(
     Arc<
-      dyn for<'a> Fn(
-          &'a mut BrowserWorld,
-          &'a str,
-        ) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>
+      dyn for<'a> Fn(&'a mut BrowserWorld, &'a str) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>
         + Send
         + Sync,
     >,
@@ -122,12 +115,7 @@ impl HookRegistry {
   }
 
   /// Run all scenario hooks for a given point with the given world and tags.
-  pub async fn run_scenario(
-    &self,
-    point: HookPoint,
-    world: &mut BrowserWorld,
-    tags: &[String],
-  ) -> Result<(), String> {
+  pub async fn run_scenario(&self, point: HookPoint, world: &mut BrowserWorld, tags: &[String]) -> Result<(), String> {
     for hook in self.get(point, tags) {
       if let HookHandler::Scenario(handler) = &hook.handler {
         handler(world).await?;
@@ -148,7 +136,7 @@ impl HookRegistry {
       match &hook.handler {
         HookHandler::Step(handler) => handler(world, step_text).await?,
         HookHandler::Scenario(handler) => handler(world).await?,
-        _ => {}
+        _ => {},
       }
     }
     Ok(())

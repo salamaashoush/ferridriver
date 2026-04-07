@@ -15,9 +15,9 @@ use std::time::Duration;
 use rustc_hash::FxHashMap;
 use tokio::sync::{Mutex, RwLock};
 
+use ferridriver::Browser;
 use ferridriver::backend::BackendKind;
 use ferridriver::options::LaunchOptions;
-use ferridriver::Browser;
 
 use crate::config::BrowserConfig;
 
@@ -38,9 +38,8 @@ pub enum FixtureScope {
 type ArcValue = Arc<dyn Any + Send + Sync>;
 
 /// Async setup function: receives the `FixturePool` (to resolve deps), returns the value.
-pub type SetupFn = Arc<
-  dyn Fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<ArcValue, String>> + Send>> + Send + Sync,
->;
+pub type SetupFn =
+  Arc<dyn Fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<ArcValue, String>> + Send>> + Send + Sync>;
 
 /// Async teardown function: receives the Arc value to clean up.
 pub type TeardownFn = Arc<dyn Fn(ArcValue) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
@@ -342,11 +341,14 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
   let headless = browser_config.headless;
   let executable_path = browser_config.executable_path.clone();
   let args = browser_config.args.clone();
-  let viewport = browser_config.viewport.as_ref().map(|v| ferridriver::options::ViewportConfig {
-    width: v.width,
-    height: v.height,
-    ..Default::default()
-  });
+  let viewport = browser_config
+    .viewport
+    .as_ref()
+    .map(|v| ferridriver::options::ViewportConfig {
+      width: v.width,
+      height: v.height,
+      ..Default::default()
+    });
 
   // browser (Worker scope) -- stored as Arc<Browser>
   defs.insert(

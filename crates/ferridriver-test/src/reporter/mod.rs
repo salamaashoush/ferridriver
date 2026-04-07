@@ -90,9 +90,7 @@ pub struct ReporterSet {
 
 impl Default for ReporterSet {
   fn default() -> Self {
-    Self {
-      reporters: Vec::new(),
-    }
+    Self { reporters: Vec::new() }
   }
 }
 
@@ -139,7 +137,9 @@ pub struct EventBusBuilder {
 
 impl EventBusBuilder {
   pub fn new() -> Self {
-    Self { subscribers: Vec::new() }
+    Self {
+      subscribers: Vec::new(),
+    }
   }
 
   /// Register a subscriber. Returns a `Subscription` (the receiving end).
@@ -209,7 +209,10 @@ pub struct ReporterDriver {
 
 impl ReporterDriver {
   pub fn new(reporters: ReporterSet, subscription: Subscription) -> Self {
-    Self { reporters, subscription }
+    Self {
+      reporters,
+      subscription,
+    }
   }
 
   /// Consume events until the channel closes, finalize reporters, return them.
@@ -245,28 +248,32 @@ pub(crate) fn create_reporters(
           }
           has_terminal = true;
         }
-      }
+      },
       "json" => match mode {
         crate::config::RunMode::E2e => {
           reporters.push(Box::new(json::JsonReporter::new(output_dir.join("results.json"))));
-        }
+        },
         crate::config::RunMode::Bdd => {
-          reporters.push(Box::new(bdd::json::BddJsonReporter::new(output_dir.join("bdd-results.json"))));
-        }
+          reporters.push(Box::new(bdd::json::BddJsonReporter::new(
+            output_dir.join("bdd-results.json"),
+          )));
+        },
       },
       "junit" => match mode {
         crate::config::RunMode::E2e => {
           reporters.push(Box::new(junit::JUnitReporter::new(output_dir.join("junit.xml"))));
-        }
+        },
         crate::config::RunMode::Bdd => {
-          reporters.push(Box::new(bdd::junit::BddJunitReporter::new(output_dir.join("bdd-junit.xml"))));
-        }
+          reporters.push(Box::new(bdd::junit::BddJunitReporter::new(
+            output_dir.join("bdd-junit.xml"),
+          )));
+        },
       },
 
       // ── Shared reporters (same for both modes) ──
       "html" => {
         reporters.push(Box::new(html::HtmlReporter::new(output_dir.join("report.html"))));
-      }
+      },
       "allure" => {
         let dir = config
           .options
@@ -279,32 +286,32 @@ pub(crate) fn create_reporters(
           reporter = reporter.with_suite_title(title.to_string());
         }
         reporters.push(Box::new(reporter));
-      }
+      },
       "progress" => {
         reporters.push(Box::new(progress::ProgressReporter::new()));
-      }
+      },
       "rerun" => {
         reporters.push(Box::new(rerun::RerunReporter::new(output_dir.join("@rerun.txt"))));
-      }
+      },
 
       // ── BDD-specific reporters (usable in any mode) ──
       "cucumber-json" | "cucumber" => {
         reporters.push(Box::new(bdd::cucumber_json::CucumberJsonReporter::new(
           output_dir.join("cucumber.json"),
         )));
-      }
+      },
       "messages" | "ndjson" => {
         reporters.push(Box::new(bdd::messages::CucumberMessagesReporter::new(
           output_dir.join("cucumber-messages.ndjson"),
         )));
-      }
+      },
       "usage" => {
         reporters.push(Box::new(bdd::usage::UsageReporter::new()));
-      }
+      },
 
       other => {
         tracing::warn!("unknown reporter: {other}, skipping");
-      }
+      },
     }
   }
 

@@ -41,8 +41,7 @@ fn intercepted_requests(world: &mut BrowserWorld) -> InterceptedRequests {
 
 #[given("I mock requests to {string} with status {int} and body {string}")]
 async fn mock_with_status_and_body(world: &mut BrowserWorld, pattern: String, status: i64, body: String) {
-  let status = i32::try_from(status)
-    .map_err(|_| StepError::from(format!("invalid status code: {status}")))?;
+  let status = i32::try_from(status).map_err(|_| StepError::from(format!("invalid status code: {status}")))?;
   let body_bytes = body.into_bytes();
   world
     .page()
@@ -83,8 +82,7 @@ async fn mock_with_json(world: &mut BrowserWorld, pattern: String, json_body: St
 #[given("I mock requests to {string} with fixture {string}")]
 async fn mock_with_fixture(world: &mut BrowserWorld, pattern: String, fixture_path: String) {
   let path = world.resolve_fixture_path(&fixture_path);
-  let body = std::fs::read(&path)
-    .map_err(|e| StepError::from(format!("read fixture {}: {e}", path.display())))?;
+  let body = std::fs::read(&path).map_err(|e| StepError::from(format!("read fixture {}: {e}", path.display())))?;
 
   // Infer content type from extension.
   let content_type = match path.extension().and_then(|e| e.to_str()) {
@@ -116,17 +114,10 @@ async fn mock_with_fixture(world: &mut BrowserWorld, pattern: String, fixture_pa
 }
 
 #[given("I mock requests to {string} with fixture {string} and status {int}")]
-async fn mock_with_fixture_and_status(
-  world: &mut BrowserWorld,
-  pattern: String,
-  fixture_path: String,
-  status: i64,
-) {
-  let status = i32::try_from(status)
-    .map_err(|_| StepError::from(format!("invalid status code: {status}")))?;
+async fn mock_with_fixture_and_status(world: &mut BrowserWorld, pattern: String, fixture_path: String, status: i64) {
+  let status = i32::try_from(status).map_err(|_| StepError::from(format!("invalid status code: {status}")))?;
   let path = world.resolve_fixture_path(&fixture_path);
-  let body = std::fs::read(&path)
-    .map_err(|e| StepError::from(format!("read fixture {}: {e}", path.display())))?;
+  let body = std::fs::read(&path).map_err(|e| StepError::from(format!("read fixture {}: {e}", path.display())))?;
 
   let content_type = match path.extension().and_then(|e| e.to_str()) {
     Some("json") => "application/json",
@@ -210,13 +201,10 @@ async fn assert_request_made(world: &mut BrowserWorld, pattern: String) {
 async fn assert_request_count(world: &mut BrowserWorld, expected: i64, pattern: String) {
   let tracker = intercepted_requests(world);
   let actual = tracker.count_matching(&pattern);
-  let expected_usize = usize::try_from(expected)
-    .map_err(|_| StepError::from(format!("invalid count: {expected}")))?;
+  let expected_usize = usize::try_from(expected).map_err(|_| StepError::from(format!("invalid count: {expected}")))?;
   if actual != expected_usize {
     return Err(StepError {
-      message: format!(
-        "expected {expected_usize} request(s) matching \"{pattern}\", but found {actual}"
-      ),
+      message: format!("expected {expected_usize} request(s) matching \"{pattern}\", but found {actual}"),
       diff: Some((expected_usize.to_string(), actual.to_string())),
       pending: false,
     });
@@ -263,7 +251,12 @@ async fn fetch_url(world: &mut BrowserWorld, url: String) {
   let headers: rustc_hash::FxHashMap<String, String> = parsed
     .get("headers")
     .and_then(|h| h.as_object())
-    .map(|obj| obj.iter().map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string())).collect())
+    .map(|obj| {
+      obj
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+        .collect()
+    })
     .unwrap_or_default();
 
   world.set_state(LastFetchResponse {
@@ -313,12 +306,14 @@ async fn response_body_should_equal(world: &mut BrowserWorld, expected: String) 
 #[then("the response header {string} should contain {string}")]
 async fn response_header_should_contain(world: &mut BrowserWorld, header: String, expected: String) {
   let resp = last_response(world)?;
-  let header_val = resp.headers.get(&header.to_lowercase()).map(String::as_str).unwrap_or("");
+  let header_val = resp
+    .headers
+    .get(&header.to_lowercase())
+    .map(String::as_str)
+    .unwrap_or("");
   if !header_val.contains(&expected) {
     return Err(StepError {
-      message: format!(
-        "response header \"{header}\" does not contain \"{expected}\" (got \"{header_val}\")"
-      ),
+      message: format!("response header \"{header}\" does not contain \"{expected}\" (got \"{header_val}\")"),
       diff: Some((expected, header_val.to_string())),
       pending: false,
     });

@@ -9,15 +9,15 @@ use tokio::sync::mpsc;
 
 use crate::config::{CliOverrides, TestConfig};
 use crate::dispatcher::Dispatcher;
-use crate::fixture::{builtin_fixtures, validate_dag, FixturePool, FixtureScope};
+use crate::fixture::{FixturePool, FixtureScope, builtin_fixtures, validate_dag};
 use crate::model::{Hooks, TestPlan, TestStatus};
 use crate::reporter::{EventBus, EventBusBuilder, ReporterDriver, ReporterEvent, ReporterSet};
 use crate::shard;
 use crate::worker::{Worker, WorkerTestResult};
 
+use ferridriver::Browser;
 use ferridriver::backend::BackendKind;
 use ferridriver::options::LaunchOptions;
-use ferridriver::Browser;
 
 /// Top-level test runner.
 pub struct TestRunner {
@@ -213,7 +213,7 @@ impl TestRunner {
               };
               dispatcher.enqueue_single(assignment).await;
             }
-          }
+          },
           crate::model::SuiteMode::Serial => {
             let assignments: Vec<_> = suite
               .tests
@@ -241,7 +241,7 @@ impl TestRunner {
                 hooks: Arc::clone(&hooks),
               })
               .await;
-          }
+          },
         }
       }
     }
@@ -274,7 +274,7 @@ impl TestRunner {
             Err(e) => {
               tracing::error!(target: "ferridriver::worker", "worker {worker_id}: browser launch failed: {e}");
               return;
-            }
+            },
           }
         };
         worker.run(browser, custom_pool, rx, tx).await;
@@ -348,7 +348,7 @@ impl TestRunner {
         TestStatus::Flaky => {
           flaky += 1;
           passed += 1;
-        }
+        },
         TestStatus::Skipped => skipped += 1,
         _ => failed += 1,
       }
@@ -392,7 +392,7 @@ impl TestRunner {
       Err(e) => {
         eprintln!("Failed to launch browser: {e}");
         return 1;
-      }
+      },
     };
     self.shared_browser = Some(Arc::clone(&browser));
 
@@ -402,7 +402,7 @@ impl TestRunner {
       Err(e) => {
         eprintln!("Failed to start file watcher: {e}");
         return 1;
-      }
+      },
     };
 
     // Try TUI (requires TTY). Falls back to non-interactive for CI/pipes.
@@ -410,14 +410,16 @@ impl TestRunner {
 
     match tui_result {
       Ok((mut tui, tui_tx)) => {
-        self.run_watch_tui(&mut tui, tui_tx, &watcher, &plan_factory, &browser).await;
+        self
+          .run_watch_tui(&mut tui, tui_tx, &watcher, &plan_factory, &browser)
+          .await;
         tui.shutdown();
-      }
+      },
       Err(e) => {
         // Non-TTY fallback: file changes only, no keyboard, normal terminal output.
         tracing::debug!(target: "ferridriver::watch", "TUI unavailable ({e}), running non-interactive");
         self.run_watch_headless(&watcher, &plan_factory).await;
-      }
+      },
     }
 
     // Cleanup.
@@ -434,11 +436,7 @@ impl TestRunner {
   /// concurrently via `tokio::join!`, so the TUI renders events as they arrive.
   /// Execute a plan while draining TUI messages in real-time.
   /// Returns true if the user cancelled (q/Ctrl+C during run).
-  async fn run_with_tui_drain(
-    &mut self,
-    plan: TestPlan,
-    tui: &mut crate::tui::WatchTui,
-  ) -> bool {
+  async fn run_with_tui_drain(&mut self, plan: TestPlan, tui: &mut crate::tui::WatchTui) -> bool {
     let mut builder = EventBusBuilder::new();
     let reporter_sub = builder.subscribe();
     let bus = builder.build();
@@ -478,8 +476,7 @@ impl TestRunner {
     watcher: &crate::watch::FileWatcher,
     plan_factory: &F,
     _browser: &Arc<Browser>,
-  )
-  where
+  ) where
     F: Fn(Option<&[std::path::PathBuf]>) -> TestPlan,
   {
     use crate::interactive::WatchCommand;
@@ -490,7 +487,9 @@ impl TestRunner {
     // Persist across watch cycles via run_with_tui_drain's take/restore.
     self.reporters.replace(vec![
       Box::new(crate::tui_reporter::TuiReporter::new(tui_tx.clone(), self.config.mode)),
-      Box::new(crate::reporter::rerun::RerunReporter::new(self.config.output_dir.join("@rerun.txt"))),
+      Box::new(crate::reporter::rerun::RerunReporter::new(
+        self.config.output_dir.join("@rerun.txt"),
+      )),
     ]);
 
     // Initial run — TUI drains messages in real-time.
@@ -571,11 +570,7 @@ impl TestRunner {
   }
 
   /// Non-interactive watch: file changes only, no keyboard, normal terminal output.
-  async fn run_watch_headless<F>(
-    &mut self,
-    watcher: &crate::watch::FileWatcher,
-    plan_factory: &F,
-  )
+  async fn run_watch_headless<F>(&mut self, watcher: &crate::watch::FileWatcher, plan_factory: &F)
   where
     F: Fn(Option<&[std::path::PathBuf]>) -> TestPlan,
   {
@@ -590,7 +585,9 @@ impl TestRunner {
       all_changes.extend(watcher.drain_deduped());
 
       let (run_all, changed_paths) = classify_changes(&all_changes);
-      if !run_all && changed_paths.is_empty() { continue; }
+      if !run_all && changed_paths.is_empty() {
+        continue;
+      }
 
       eprintln!("\n\x1b[2mChange detected, re-running...\x1b[0m\n");
 
@@ -607,9 +604,7 @@ impl TestRunner {
 }
 
 /// Classify file changes into run-all vs specific changed files.
-fn classify_changes(
-  changes: &[crate::watch::ChangeKind],
-) -> (bool, Vec<std::path::PathBuf>) {
+fn classify_changes(changes: &[crate::watch::ChangeKind]) -> (bool, Vec<std::path::PathBuf>) {
   use crate::watch::ChangeKind;
   let mut run_all = false;
   let mut changed_paths = Vec::new();
@@ -617,10 +612,10 @@ fn classify_changes(
     match change {
       ChangeKind::SourceFile(_) | ChangeKind::StepFile(_) | ChangeKind::Config => {
         run_all = true;
-      }
+      },
       ChangeKind::TestFile(p) | ChangeKind::FeatureFile(p) => {
         changed_paths.push(p.clone());
-      }
+      },
     }
   }
   (run_all, changed_paths)
@@ -642,7 +637,9 @@ fn build_plan_for_changes(
       .filter_map(|p| p.file_name().and_then(|n| n.to_str()))
       .collect();
     for suite in &mut plan.suites {
-      suite.tests.retain(|t| changed_names.iter().any(|name| t.id.file.contains(name)));
+      suite
+        .tests
+        .retain(|t| changed_names.iter().any(|name| t.id.file.contains(name)));
     }
     plan.suites.retain(|s| !s.tests.is_empty());
     plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
@@ -663,11 +660,14 @@ fn build_launch_options(browser_config: &crate::config::BrowserConfig) -> Launch
     headless: browser_config.headless,
     executable_path: browser_config.executable_path.clone(),
     args: browser_config.args.clone(),
-    viewport: browser_config.viewport.as_ref().map(|v| ferridriver::options::ViewportConfig {
-      width: v.width,
-      height: v.height,
-      ..Default::default()
-    }),
+    viewport: browser_config
+      .viewport
+      .as_ref()
+      .map(|v| ferridriver::options::ViewportConfig {
+        width: v.width,
+        height: v.height,
+        ..Default::default()
+      }),
     ..Default::default()
   }
 }

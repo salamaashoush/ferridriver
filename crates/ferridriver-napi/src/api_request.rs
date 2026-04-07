@@ -44,7 +44,11 @@ impl FetchOptions {
       headers: self.headers.as_ref().map(|h| {
         h.iter()
           .filter_map(|pair| {
-            if pair.len() == 2 { Some((pair[0].clone(), pair[1].clone())) } else { None }
+            if pair.len() == 2 {
+              Some((pair[0].clone(), pair[1].clone()))
+            } else {
+              None
+            }
           })
           .collect()
       }),
@@ -53,14 +57,22 @@ impl FetchOptions {
       form: self.form.as_ref().map(|f| {
         f.iter()
           .filter_map(|pair| {
-            if pair.len() == 2 { Some((pair[0].clone(), pair[1].clone())) } else { None }
+            if pair.len() == 2 {
+              Some((pair[0].clone(), pair[1].clone()))
+            } else {
+              None
+            }
           })
           .collect()
       }),
       params: self.params.as_ref().map(|p| {
         p.iter()
           .filter_map(|pair| {
-            if pair.len() == 2 { Some((pair[0].clone(), pair[1].clone())) } else { None }
+            if pair.len() == 2 {
+              Some((pair[0].clone(), pair[1].clone()))
+            } else {
+              None
+            }
           })
           .collect()
       }),
@@ -154,7 +166,11 @@ impl ApiRequestContext {
         .map(|h| {
           h.iter()
             .filter_map(|pair| {
-              if pair.len() == 2 { Some((pair[0].clone(), pair[1].clone())) } else { None }
+              if pair.len() == 2 {
+                Some((pair[0].clone(), pair[1].clone()))
+              } else {
+                None
+              }
             })
             .collect()
         })

@@ -14,5 +14,13 @@ pub mod params;
 pub mod server;
 pub mod tools;
 
+use rmcp::model::Tool;
+
 // Re-export key types at crate root for ergonomic imports.
 pub use server::{DefaultConfig, McpServer, McpServerConfig, SharedState, State};
+
+/// Browser tool definitions (no live `BrowserState` required). Sorted by name.
+#[must_use]
+pub fn list_browser_tools() -> Vec<Tool> {
+  McpServer::combined_router().list_all()
+}

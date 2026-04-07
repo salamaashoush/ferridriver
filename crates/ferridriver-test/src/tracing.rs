@@ -206,8 +206,7 @@ impl<'a> TraceRecorder<'a> {
     let cursor = std::io::Cursor::new(&mut buf);
     let mut zip = zip::ZipWriter::new(cursor);
 
-    let options = zip::write::SimpleFileOptions::default()
-      .compression_method(zip::CompressionMethod::Stored);
+    let options = zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Stored);
 
     zip
       .start_file("test.trace", options)

@@ -12,7 +12,10 @@ pub struct CucumberMessagesReporter {
 
 impl CucumberMessagesReporter {
   pub fn new(output_path: PathBuf) -> Self {
-    Self { output_path, messages: Vec::new() }
+    Self {
+      output_path,
+      messages: Vec::new(),
+    }
   }
 }
 
@@ -29,9 +32,11 @@ impl Reporter for CucumberMessagesReporter {
             "timestamp": timestamp_now(),
           }
         }));
-      }
+      },
       ReporterEvent::StepFinished(event) => {
-        if !event.category.is_visible() { return; }
+        if !event.category.is_visible() {
+          return;
+        }
         let status = if event.error.is_some() { "FAILED" } else { "PASSED" };
         self.messages.push(serde_json::json!({
           "testStepFinished": {
@@ -45,7 +50,7 @@ impl Reporter for CucumberMessagesReporter {
             "timestamp": timestamp_now(),
           }
         }));
-      }
+      },
       ReporterEvent::TestFinished { test_id, outcome } => {
         self.messages.push(serde_json::json!({
           "testCaseFinished": {
@@ -54,14 +59,18 @@ impl Reporter for CucumberMessagesReporter {
             "willBeRetried": outcome.attempt < outcome.max_attempts,
           }
         }));
-      }
+      },
       ReporterEvent::RunStarted { .. } => {
-        self.messages.push(serde_json::json!({ "testRunStarted": { "timestamp": timestamp_now() } }));
-      }
+        self
+          .messages
+          .push(serde_json::json!({ "testRunStarted": { "timestamp": timestamp_now() } }));
+      },
       ReporterEvent::RunFinished { .. } => {
-        self.messages.push(serde_json::json!({ "testRunFinished": { "timestamp": timestamp_now(), "success": true } }));
-      }
-      _ => {}
+        self
+          .messages
+          .push(serde_json::json!({ "testRunFinished": { "timestamp": timestamp_now(), "success": true } }));
+      },
+      _ => {},
     }
   }
 

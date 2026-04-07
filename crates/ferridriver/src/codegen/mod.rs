@@ -16,14 +16,40 @@ pub mod recorder;
 #[derive(Debug, Clone, serde::Deserialize)]
 #[serde(tag = "type", rename_all = "camelCase")]
 pub enum Action {
-  Navigate { url: String },
-  Click { selector: String, locator: String },
-  Dblclick { selector: String, locator: String },
-  Fill { selector: String, locator: String, value: String },
-  Press { selector: String, locator: String, key: String },
-  Select { selector: String, locator: String, value: String },
-  Check { selector: String, locator: String },
-  Uncheck { selector: String, locator: String },
+  Navigate {
+    url: String,
+  },
+  Click {
+    selector: String,
+    locator: String,
+  },
+  Dblclick {
+    selector: String,
+    locator: String,
+  },
+  Fill {
+    selector: String,
+    locator: String,
+    value: String,
+  },
+  Press {
+    selector: String,
+    locator: String,
+    key: String,
+  },
+  Select {
+    selector: String,
+    locator: String,
+    value: String,
+  },
+  Check {
+    selector: String,
+    locator: String,
+  },
+  Uncheck {
+    selector: String,
+    locator: String,
+  },
 }
 
 /// Output language for code generation.

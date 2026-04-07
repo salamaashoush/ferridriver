@@ -108,10 +108,7 @@ impl CdpDispatcher {
     state: Arc<std::sync::Mutex<super::LifecycleState>>,
     notify: Arc<tokio::sync::Notify>,
   ) {
-    lock_or_recover(&self.lifecycle_trackers).insert(
-      session_id.to_string(),
-      LifecycleTracker { state, notify },
-    );
+    lock_or_recover(&self.lifecycle_trackers).insert(session_id.to_string(), LifecycleTracker { state, notify });
   }
 
   pub fn subscribe_events(&self) -> broadcast::Receiver<serde_json::Value> {
@@ -159,8 +156,8 @@ impl CdpDispatcher {
         if result_field.is_empty() {
           Ok(serde_json::Value::Object(serde_json::Map::new()))
         } else {
-          let val: serde_json::Value = serde_json::from_slice(result_field)
-            .unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
+          let val: serde_json::Value =
+            serde_json::from_slice(result_field).unwrap_or(serde_json::Value::Object(serde_json::Map::new()));
           Ok(val)
         }
       } else {
@@ -193,9 +190,11 @@ impl CdpDispatcher {
         match method_str {
           "Page.frameNavigated" => {
             if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::Commit)) {
-              if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
+              if let Some(w) = waiters.remove(&key) {
+                let _ = w.tx.send(Ok(()));
+              }
             }
-          }
+          },
           "Page.lifecycleEvent" => {
             let params = json_scan::json_field(raw, b"params");
             let name = json_scan::json_string(json_scan::json_field(params, b"name"));
@@ -203,28 +202,40 @@ impl CdpDispatcher {
             let resolve = matches!(
               (name_str, waiters.get(&key).map(|w| w.target)),
               ("DOMContentLoaded", Some(NavLifecycle::DomContentLoaded))
-              | ("load", Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded))
+                | ("load", Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded))
             );
             if resolve {
-              if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
+              if let Some(w) = waiters.remove(&key) {
+                let _ = w.tx.send(Ok(()));
+              }
             }
-          }
+          },
           "Page.loadEventFired" => {
-            if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded)) {
-              if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
+            if matches!(
+              waiters.get(&key).map(|w| w.target),
+              Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded)
+            ) {
+              if let Some(w) = waiters.remove(&key) {
+                let _ = w.tx.send(Ok(()));
+              }
             }
-          }
+          },
           "Page.domContentEventFired" => {
-            if matches!(waiters.get(&key).map(|w| w.target), Some(NavLifecycle::DomContentLoaded)) {
-              if let Some(w) = waiters.remove(&key) { let _ = w.tx.send(Ok(())); }
+            if matches!(
+              waiters.get(&key).map(|w| w.target),
+              Some(NavLifecycle::DomContentLoaded)
+            ) {
+              if let Some(w) = waiters.remove(&key) {
+                let _ = w.tx.send(Ok(()));
+              }
             }
-          }
+          },
           "Inspector.targetCrashed" => {
             if let Some(w) = waiters.remove(&key) {
               let _ = w.tx.send(Err("Target crashed".into()));
             }
-          }
-          _ => {}
+          },
+          _ => {},
         }
       }
 
@@ -259,7 +270,7 @@ impl CdpDispatcher {
           state.fired.insert("commit".to_string());
           drop(state);
           tracker.notify.notify_waiters();
-        }
+        },
         "Page.lifecycleEvent" => {
           let params = json_scan::json_field(raw, b"params");
           let loader_id = json_scan::json_string(json_scan::json_field(params, b"loaderId"));
@@ -279,8 +290,8 @@ impl CdpDispatcher {
               tracker.notify.notify_waiters();
             }
           }
-        }
-        _ => {}
+        },
+        _ => {},
       }
     }
   }

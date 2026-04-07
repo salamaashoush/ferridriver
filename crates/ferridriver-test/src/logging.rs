@@ -91,7 +91,7 @@ fn parse_debug_categories(debug_val: &str) -> EnvFilter {
         let owned = format!("{other}=trace");
         filter = filter.add_directive(owned.parse().unwrap_or_else(|_| "warn".parse().unwrap()));
         continue;
-      }
+      },
     };
     filter = filter.add_directive(directive.parse().unwrap_or_else(|_| "warn".parse().unwrap()));
   }
