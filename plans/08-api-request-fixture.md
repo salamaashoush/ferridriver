@@ -1,4 +1,4 @@
-# Feature: API Request Fixture
+# [DONE] Feature: API Request Fixture
 
 ## Context
 Many tests need to set up data via API calls before browser interaction, or verify server state after actions. An API request fixture provides a high-level HTTP client that shares cookies with the browser context, eliminating the need for external HTTP libraries. This is Playwright's `request` fixture — clean API testing alongside E2E.

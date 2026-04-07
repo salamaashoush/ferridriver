@@ -40,6 +40,7 @@
   clippy::manual_let_else,
 )]
 
+mod api_request;
 mod bdd_runner;
 mod browser;
 mod codegen;

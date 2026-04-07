@@ -3,6 +3,7 @@
 //! All steps use cucumber expressions and operate on `BrowserWorld`.
 //! They are registered via `#[given]`, `#[when]`, `#[then]` proc macros.
 
+pub mod api;
 pub mod assertion;
 pub mod cookie;
 pub mod dialog;

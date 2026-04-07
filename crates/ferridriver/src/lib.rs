@@ -48,6 +48,7 @@ pub mod actions;
 pub mod selectors;
 pub mod ffmpeg;
 pub mod video;
+pub mod api_request;
 pub mod codegen;
 
 // ── BDD steps (use crate-internal APIs) ──

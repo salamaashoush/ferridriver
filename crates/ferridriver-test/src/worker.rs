@@ -366,6 +366,15 @@ impl Worker {
         test_pool.inject("page", Arc::new(page.clone())).await;
         test_pool.inject("test_info", Arc::clone(&test_info)).await;
 
+        // ── Request fixture (API testing context) ──
+        let request_ctx = Arc::new(ferridriver::api_request::APIRequestContext::new(
+          ferridriver::api_request::RequestContextOptions {
+            base_url: self.config.base_url.clone(),
+            ..Default::default()
+          },
+        ));
+        test_pool.inject("request", request_ctx).await;
+
         // ── Storage state (apply before any test code) ──
         if let Some(ref ss_path) = self.config.storage_state {
           let path = std::path::Path::new(ss_path);
