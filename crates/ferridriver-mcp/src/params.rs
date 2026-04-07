@@ -6,7 +6,9 @@ use serde::Deserialize;
 pub struct NavigateParams {
   #[schemars(description = "Target URL.")]
   pub url: String,
-  #[schemars(description = "'load' or 'none'.")]
+  #[schemars(
+    description = "Navigation wait: `commit` (default, earliest navigation commit), `load`, `domcontentloaded`, `networkidle`, or `none`."
+  )]
   pub wait_until: Option<String>,
   #[schemars(description = "Session name. Defaults to 'default'.")]
   pub session: Option<String>,
@@ -50,9 +52,9 @@ pub struct ClickParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClickAtParams {
-  #[schemars(description = "X coordinate.")]
+  #[schemars(description = "X coordinate in viewport pixels.")]
   pub x: f64,
-  #[schemars(description = "Y coordinate.")]
+  #[schemars(description = "Y coordinate in viewport pixels.")]
   pub y: f64,
   #[schemars(description = "Session name. Defaults to 'default'.")]
   pub session: Option<String>,
@@ -82,7 +84,9 @@ pub struct FillParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct TypeTextParams {
-  #[schemars(description = "Text to type.")]
+  #[schemars(
+    description = "Text to send as keyboard input. Types into whichever element is focused—use click(ref=...) on the field first."
+  )]
   pub text: String,
   #[schemars(description = "Session name. Defaults to 'default'.")]
   pub session: Option<String>,
@@ -90,7 +94,9 @@ pub struct TypeTextParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct PressKeyParams {
-  #[schemars(description = "Key name or combo.")]
+  #[schemars(
+    description = "Key or shortcut. Examples: Enter, Tab, ArrowDown, Escape, Control+a, Meta+v, Control+Shift+t (Playwright-style)."
+  )]
   pub key: String,
   #[schemars(description = "Session name. Defaults to 'default'.")]
   pub session: Option<String>,
@@ -98,9 +104,13 @@ pub struct PressKeyParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DragParams {
+  #[schemars(description = "Start X coordinate in viewport pixels.")]
   pub from_x: f64,
+  #[schemars(description = "Start Y coordinate in viewport pixels.")]
   pub from_y: f64,
+  #[schemars(description = "End X coordinate in viewport pixels.")]
   pub to_x: f64,
+  #[schemars(description = "End Y coordinate in viewport pixels.")]
   pub to_y: f64,
   #[schemars(description = "Session name. Defaults to 'default'.")]
   pub session: Option<String>,
@@ -108,9 +118,15 @@ pub struct DragParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ScrollParams {
+  #[schemars(description = "Horizontal scroll amount in pixels. Positive = right, negative = left.")]
   pub delta_x: Option<f64>,
+  #[schemars(
+    description = "Vertical scroll amount in pixels. Positive = down, negative = up. Common values: 300 (one scroll), -300 (scroll up)."
+  )]
   pub delta_y: Option<f64>,
-  #[schemars(description = "Selector to scroll into view.")]
+  #[schemars(
+    description = "CSS selector to scroll into view. When provided, delta_x/delta_y are ignored and the element is scrolled into the viewport."
+  )]
   pub selector: Option<String>,
   #[schemars(description = "Session name. Defaults to 'default'.")]
   pub session: Option<String>,
@@ -118,11 +134,13 @@ pub struct ScrollParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ScreenshotParams_ {
-  #[schemars(description = "png, jpeg, or webp.")]
+  #[schemars(description = "Image format: 'png' (default, lossless), 'jpeg' (smaller, lossy), or 'webp'.")]
   pub format: Option<String>,
+  #[schemars(description = "Image quality 0-100 for jpeg/webp. Ignored for png. Default: 80.")]
   pub quality: Option<i64>,
+  #[schemars(description = "Capture the full scrollable page, not just the viewport. Default: false.")]
   pub full_page: Option<bool>,
-  #[schemars(description = "Element selector for partial screenshot.")]
+  #[schemars(description = "CSS selector to screenshot a specific element instead of the full page.")]
   pub selector: Option<String>,
   #[schemars(description = "Session name. Defaults to 'default'.")]
   pub session: Option<String>,
@@ -150,7 +168,11 @@ pub struct SnapshotParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct WaitForParams {
+  #[schemars(
+    description = "CSS selector to wait for. Resolves when at least one matching element appears in the DOM."
+  )]
   pub selector: Option<String>,
+  #[schemars(description = "Text substring to wait for in the page body. Case-sensitive.")]
   pub text: Option<String>,
   #[schemars(description = "Timeout ms.")]
   pub timeout: Option<u64>,
@@ -332,8 +354,10 @@ pub struct GetDropdownOptionsParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct UploadFileParams {
-  #[schemars(description = "CSS selector for the file input element.")]
-  pub selector: String,
+  #[schemars(description = "Element ref from snapshot (preferred for file inputs).")]
+  pub r#ref: Option<String>,
+  #[schemars(description = "CSS selector for the file input when `ref` is not used.")]
+  pub selector: Option<String>,
   #[schemars(description = "Absolute path to the file to upload.")]
   pub path: String,
   #[schemars(description = "Session name. Defaults to 'default'.")]
@@ -362,10 +386,15 @@ pub struct CookiesParams {
   pub name: Option<String>,
   #[schemars(description = "Cookie value (required for set).")]
   pub value: Option<String>,
+  #[schemars(description = "Cookie domain (e.g. '.example.com'). Required for set. Used to scope delete.")]
   pub domain: Option<String>,
+  #[schemars(description = "Cookie path. Defaults to '/'.")]
   pub path: Option<String>,
+  #[schemars(description = "Restrict cookie to HTTPS only. Default: false.")]
   pub secure: Option<bool>,
+  #[schemars(description = "Prevent JavaScript access to cookie. Default: false.")]
   pub http_only: Option<bool>,
+  #[schemars(description = "Cookie expiry as Unix timestamp in seconds. Omit for session cookie.")]
   pub expires: Option<f64>,
   #[schemars(description = "Session name. Defaults to 'default'.")]
   pub session: Option<String>,
@@ -385,22 +414,29 @@ pub struct StorageParams {
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EmulateParams {
-  #[schemars(description = "Viewport width.")]
+  #[schemars(description = "Viewport width in pixels. Common: 375 (iPhone), 768 (tablet), 1280 (desktop).")]
   pub width: Option<i64>,
-  #[schemars(description = "Viewport height.")]
+  #[schemars(description = "Viewport height in pixels.")]
   pub height: Option<i64>,
+  #[schemars(description = "Device pixel ratio. 1.0 = standard, 2.0 = retina/HiDPI, 3.0 = ultra-high density.")]
   pub device_scale_factor: Option<f64>,
+  #[schemars(description = "Enable mobile mode (touch events, mobile viewport behavior). Default: false.")]
   pub mobile: Option<bool>,
+  #[schemars(description = "Custom User-Agent string to override the browser default.")]
   pub user_agent: Option<String>,
-  #[schemars(description = "Latitude for geolocation override.")]
+  #[schemars(description = "Latitude for geolocation override (-90 to 90).")]
   pub latitude: Option<f64>,
-  #[schemars(description = "Longitude for geolocation override.")]
+  #[schemars(description = "Longitude for geolocation override (-180 to 180).")]
   pub longitude: Option<f64>,
+  #[schemars(description = "Geolocation accuracy in meters. Default: 1.0.")]
   pub accuracy: Option<f64>,
-  #[schemars(description = "Network state: 'offline' or 'online'.")]
+  #[schemars(description = "Network state: 'offline' (disable network) or 'online' (restore network).")]
   pub network: Option<String>,
+  #[schemars(description = "Network latency in milliseconds. Simulates slow connections.")]
   pub latency: Option<f64>,
+  #[schemars(description = "Download speed limit in bytes/sec. -1 = unlimited. Example: 50000 = ~50KB/s (slow 3G).")]
   pub download_throughput: Option<f64>,
+  #[schemars(description = "Upload speed limit in bytes/sec. -1 = unlimited.")]
   pub upload_throughput: Option<f64>,
   #[schemars(description = "Session name. Defaults to 'default'.")]
   pub session: Option<String>,

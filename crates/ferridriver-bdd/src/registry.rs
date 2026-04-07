@@ -6,9 +6,7 @@ use crate::expression;
 use crate::filter::TagExpression;
 use crate::hook::{Hook, HookHandler, HookRegistration, HookRegistry};
 use crate::param_type::{CustomParamType, ParameterTypeRegistration, ParameterTypeRegistry};
-use crate::step::{
-  MatchError, StepDef, StepHandler, StepLocation, StepMatch, StepParam, StepRegistration,
-};
+use crate::step::{MatchError, StepDef, StepHandler, StepLocation, StepMatch, StepParam, StepRegistration};
 
 /// Central registry of step definitions and hooks.
 pub struct StepRegistry {
@@ -49,7 +47,10 @@ impl StepRegistry {
               regex,
               param_types: vec![expression::ParamType::Word; num_groups],
               param_infos: (0..num_groups)
-                .map(|i| expression::ParamInfo { ty: expression::ParamType::Word, id: i })
+                .map(|i| expression::ParamInfo {
+                  ty: expression::ParamType::Word,
+                  id: i,
+                })
                 .collect(),
               handler: (reg.handler_factory)(),
               location: StepLocation {
@@ -57,7 +58,7 @@ impl StepRegistry {
                 line: reg.line,
               },
             });
-          }
+          },
           Err(e) => {
             tracing::error!(
               "failed to compile regex step \"{}\" at {}:{}: {}",
@@ -66,7 +67,7 @@ impl StepRegistry {
               reg.line,
               e
             );
-          }
+          },
         }
       } else {
         // Cucumber expression: compile via expression engine.
@@ -84,7 +85,7 @@ impl StepRegistry {
                 line: reg.line,
               },
             });
-          }
+          },
           Err(e) => {
             tracing::error!(
               "failed to compile step expression \"{}\" at {}:{}: {}",
@@ -93,7 +94,7 @@ impl StepRegistry {
               reg.line,
               e
             );
-          }
+          },
         }
       }
     }
@@ -164,8 +165,7 @@ impl StepRegistry {
     handler: StepHandler,
     location: StepLocation,
   ) -> Result<(), String> {
-    let regex = regex::Regex::new(pattern)
-      .map_err(|e| format!("invalid regex \"{pattern}\": {e}"))?;
+    let regex = regex::Regex::new(pattern).map_err(|e| format!("invalid regex \"{pattern}\": {e}"))?;
     let num_groups = regex.captures_len().saturating_sub(1);
     self.steps.push(StepDef {
       kind,
@@ -173,7 +173,10 @@ impl StepRegistry {
       regex,
       param_types: vec![expression::ParamType::Word; num_groups],
       param_infos: (0..num_groups)
-        .map(|i| expression::ParamInfo { ty: expression::ParamType::Word, id: i })
+        .map(|i| expression::ParamInfo {
+          ty: expression::ParamType::Word,
+          id: i,
+        })
         .collect(),
       handler,
       location,
@@ -204,38 +207,69 @@ impl StepRegistry {
   /// Returns `Ambiguous` if multiple definitions match.
   /// Returns `Undefined` with suggestions if no definition matches.
   pub fn find_match(&self, text: &str) -> Result<StepMatch<'_>, MatchError> {
-    let mut matches: Vec<(&StepDef, Vec<StepParam>)> = Vec::new();
+    // Fast path: find first match, then only continue scanning to detect ambiguity.
+    // Most steps have exactly 1 match among 100+ definitions, so we avoid
+    // collecting all matches into a Vec on the common path.
+    let mut first_match: Option<(&StepDef, Vec<StepParam>)> = None;
 
     for def in &self.steps {
       if let Some(captures) = def.regex.captures(text) {
-        match expression::extract_params_with_custom(&captures, &def.param_types, &def.param_infos, Some(&self.param_types)) {
-          Ok(params) => matches.push((def, params)),
+        match expression::extract_params_with_custom(
+          &captures,
+          &def.param_types,
+          &def.param_infos,
+          Some(&self.param_types),
+        ) {
+          Ok(params) => {
+            if let Some((first_def, _)) = &first_match {
+              // Second match found -- ambiguous.
+              // Collect remaining matches for the error message.
+              let mut all = vec![(first_def.location.clone(), first_def.expression.clone())];
+              all.push((def.location.clone(), def.expression.clone()));
+              for remaining in self
+                .steps
+                .iter()
+                .skip(self.steps.iter().position(|d| std::ptr::eq(d, def)).unwrap_or(0) + 1)
+              {
+                if let Some(caps) = remaining.regex.captures(text) {
+                  if expression::extract_params_with_custom(
+                    &caps,
+                    &remaining.param_types,
+                    &remaining.param_infos,
+                    Some(&self.param_types),
+                  )
+                  .is_ok()
+                  {
+                    all.push((remaining.location.clone(), remaining.expression.clone()));
+                  }
+                }
+              }
+              tracing::warn!(target: "ferridriver::bdd::step", text, count = all.len(), "step AMBIGUOUS");
+              return Err(MatchError::Ambiguous {
+                text: text.to_string(),
+                matches: all.iter().map(|(loc, _)| loc.clone()).collect(),
+                expressions: all.iter().map(|(_, expr)| expr.clone()).collect(),
+              });
+            }
+            first_match = Some((def, params));
+          },
           Err(_) => continue,
         }
       }
     }
 
-    match matches.len() {
-      0 => {
+    match first_match {
+      Some((def, params)) => {
+        tracing::debug!(target: "ferridriver::bdd::step", text, expression = def.expression, "step matched");
+        Ok(StepMatch { def, params })
+      },
+      None => {
         tracing::debug!(target: "ferridriver::bdd::step", text, "step UNDEFINED — no match");
         Err(MatchError::Undefined {
           text: text.to_string(),
           suggestions: self.suggest(text),
         })
-      }
-      1 => {
-        let (def, params) = matches.into_iter().next().expect("checked len == 1");
-        tracing::debug!(target: "ferridriver::bdd::step", text, expression = def.expression, "step matched");
-        Ok(StepMatch { def, params })
-      }
-      _ => {
-        tracing::warn!(target: "ferridriver::bdd::step", text, count = matches.len(), "step AMBIGUOUS");
-        Err(MatchError::Ambiguous {
-          text: text.to_string(),
-          matches: matches.iter().map(|(def, _)| def.location.clone()).collect(),
-          expressions: matches.iter().map(|(def, _)| def.expression.clone()).collect(),
-        })
-      }
+      },
     }
   }
 

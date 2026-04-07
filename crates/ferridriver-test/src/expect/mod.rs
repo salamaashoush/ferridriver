@@ -282,7 +282,14 @@ where
   F: Fn() -> Fut,
   Fut: Future<Output = Result<(), TestFailure>>,
 {
-  to_pass_with_options(body, ToPassOptions { timeout, ..Default::default() }).await
+  to_pass_with_options(
+    body,
+    ToPassOptions {
+      timeout,
+      ..Default::default()
+    },
+  )
+  .await
 }
 
 /// Retry an async block with full options.
@@ -314,7 +321,7 @@ where
           break;
         }
         tokio::time::sleep(sleep_dur).await;
-      }
+      },
     }
   }
 
@@ -327,7 +334,10 @@ where
 
   // Wrap with context.
   let prefix = options.message.as_deref().unwrap_or("toPass()");
-  err.message = format!("{prefix} failed after {attempts} attempt(s) ({:?}): {}", options.timeout, err.message);
+  err.message = format!(
+    "{prefix} failed after {attempts} attempt(s) ({:?}): {}",
+    options.timeout, err.message
+  );
   Err(err)
 }
 
@@ -347,7 +357,6 @@ impl MatchError {
       received: received.into(),
     }
   }
-
 }
 
 /// Context for an expect assertion — used to build Playwright-style error messages.
@@ -362,11 +371,7 @@ pub(crate) struct ExpectContext {
 
 /// Poll a condition until it passes or timeout, using Playwright's interval pattern.
 /// Produces Playwright-style error messages with method name, locator, expected/received, and call log.
-pub(crate) async fn poll_until<F, Fut>(
-  timeout: Duration,
-  ctx: ExpectContext,
-  mut check: F,
-) -> Result<(), TestFailure>
+pub(crate) async fn poll_until<F, Fut>(timeout: Duration, ctx: ExpectContext, mut check: F) -> Result<(), TestFailure>
 where
   F: FnMut() -> Fut,
   Fut: Future<Output = Result<(), MatchError>>,
@@ -375,20 +380,13 @@ where
   let mut last_error: Option<MatchError>;
   let mut interval_idx = 0;
   let mut call_log: Vec<String> = Vec::new();
-  let mut retries = 0u32;
-
-  call_log.push(format!(
-    "expect.{} with timeout {}ms",
-    ctx.method,
-    timeout.as_millis()
-  ));
+  call_log.push(format!("expect.{} with timeout {}ms", ctx.method, timeout.as_millis()));
   call_log.push(format!("waiting for {}", ctx.subject));
 
   loop {
     match check().await {
       Ok(()) => return Ok(()),
       Err(e) => {
-        retries += 1;
         call_log.push(format!("  unexpected value {}", e.received));
         last_error = Some(e);
         let interval_ms = POLL_INTERVALS
@@ -402,7 +400,7 @@ where
           break;
         }
         tokio::time::sleep(sleep_dur).await;
-      }
+      },
     }
   }
 
@@ -426,7 +424,11 @@ where
   } else {
     format!(
       "\n\nCall log:\n{}",
-      call_log.iter().map(|l| format!("  - {l}")).collect::<Vec<_>>().join("\n")
+      call_log
+        .iter()
+        .map(|l| format!("  - {l}"))
+        .collect::<Vec<_>>()
+        .join("\n")
     )
   };
 
@@ -446,10 +448,7 @@ Timeout:  {timeout_ms}ms\
     received = err.received,
   );
 
-  let diff = format!(
-    "Expected: {}\nReceived: {}",
-    err.expected, err.received,
-  );
+  let diff = format!("Expected: {}\nReceived: {}", err.expected, err.received,);
 
   Err(TestFailure {
     message,

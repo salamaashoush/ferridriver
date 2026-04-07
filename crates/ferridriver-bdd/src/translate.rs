@@ -7,26 +7,22 @@
 use std::sync::Arc;
 use std::time::Duration;
 
+use ferridriver_test::FixturePool;
 use ferridriver_test::config::TestConfig;
 use ferridriver_test::model::{
-  ExpectedStatus, Hooks, StepCategory, TestAnnotation, TestCase, TestFailure, TestFn, TestId,
-  TestInfo, TestPlan, TestSuite, SuiteMode,
+  ExpectedStatus, Hooks, StepCategory, SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId, TestInfo,
+  TestPlan, TestSuite,
 };
-use ferridriver_test::FixturePool;
 
+use crate::executor::{ScenarioExecutor, StepEvent, StepObserver};
 use crate::feature::FeatureSet;
-use crate::hook::HookPoint;
 use crate::registry::StepRegistry;
-use crate::scenario::{self, ScenarioExecution, ScenarioStep};
+use crate::scenario::{self, ScenarioExecution, ScenarioStep, StepStatus};
 use crate::step::MatchError;
 use crate::world::BrowserWorld;
 
 /// Translate parsed Gherkin features into a `TestPlan` for the core test runner.
-pub fn translate_features(
-  feature_set: &FeatureSet,
-  registry: Arc<StepRegistry>,
-  config: &TestConfig,
-) -> TestPlan {
+pub fn translate_features(feature_set: &FeatureSet, registry: Arc<StepRegistry>, config: &TestConfig) -> TestPlan {
   let mut suites = Vec::new();
 
   for feature in &feature_set.features {
@@ -39,9 +35,7 @@ pub fn translate_features(
     let feature_path = feature.path.display().to_string();
 
     // @serial tag on any scenario means the whole feature runs serially.
-    let is_serial = scenarios
-      .iter()
-      .any(|s| s.tags.iter().any(|t| t == "@serial"));
+    let is_serial = scenarios.iter().any(|s| s.tags.iter().any(|t| t == "@serial"));
 
     let test_cases: Vec<TestCase> = scenarios
       .iter()
@@ -96,11 +90,7 @@ pub fn translate_features(
 }
 
 /// Translate a single scenario into a `TestCase`.
-fn translate_scenario(
-  scenario: &ScenarioExecution,
-  registry: Arc<StepRegistry>,
-  config: &TestConfig,
-) -> TestCase {
+fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>, config: &TestConfig) -> TestCase {
   let scenario_clone = scenario.clone();
   let step_timeout = Duration::from_millis(config.timeout);
   let screenshot_on_failure = config.screenshot_on_failure;
@@ -129,128 +119,27 @@ fn translate_scenario(
 
       // Construct BrowserWorld from the fixtures.
       let mut world = BrowserWorld::new((*page).clone(), (*context).clone());
-
-      // Wire test_info and registry for attachments and step composition.
       world.set_test_info(Arc::clone(&test_info));
-      world.set_registry(Arc::clone(&registry));
 
-      // Set feature directory for fixture path resolution.
-      if let Some(dir) = scenario.feature_path.parent() {
-        world.set_feature_dir(dir.to_path_buf());
-      }
+      // Delegate to the single execution engine with a TestInfo observer.
+      let executor = ScenarioExecutor::new(Arc::clone(&registry), step_timeout, strict, screenshot_on_failure);
+      let observer = TestInfoObserver {
+        test_info: Arc::clone(&test_info),
+      };
+      let result = executor.run_scenario_observed(&mut world, &scenario, &observer).await;
 
-      // Inject Scenario Outline example values as variables.
-      if let Some(values) = &scenario.example_values {
-        for (key, val) in values {
-          world.set_var(key, val);
-        }
-      }
-
-      // Run BDD BeforeScenario hooks (tag-filtered).
-      if let Err(e) = registry
-        .hooks()
-        .run_scenario(HookPoint::BeforeScenario, &mut world, &scenario.tags)
-        .await
-      {
-        return Err(TestFailure::from(format!("BeforeScenario hook failed: {e}")));
-      }
-
-      // Execute steps.
-      let mut had_failure = false;
-      let mut failure_message: Option<String> = None;
-
-      for step in &scenario.steps {
-        if had_failure {
-          // Record skipped step.
-          let handle = test_info
-            .begin_step(format!("{}{}", step.keyword, step.text), StepCategory::TestStep)
-            .await;
-          handle
-            .skip(Some("skipped due to previous failure".to_string()))
-            .await;
-          continue;
-        }
-
-        // Interpolate variables.
-        let text = world.interpolate(&step.text);
-        let step_title = format!("{}{}", step.keyword, text);
-
-        // Begin step (emits StepStarted event).
-        let mut handle = test_info
-          .begin_step(&step_title, StepCategory::TestStep)
+      // Attach failure screenshot via TestInfo (for test reports).
+      if let Some(bytes) = result.failure_screenshot {
+        test_info
+          .attach(
+            "failure-screenshot".to_string(),
+            "image/png".to_string(),
+            ferridriver_test::model::AttachmentBody::Bytes(bytes),
+          )
           .await;
-
-        // Attach BDD metadata (keyword, original text) for domain-specific reporters.
-        handle.metadata = Some(serde_json::json!({
-          "bdd_keyword": step.keyword.trim(),
-          "bdd_text": text,
-          "bdd_line": step.line,
-        }));
-
-        // Run BeforeStep hooks.
-        if let Err(e) = registry
-          .hooks()
-          .run_step(HookPoint::BeforeStep, &mut world, &text, &scenario.tags)
-          .await
-        {
-          tracing::warn!("BeforeStep hook failed: {e}");
-        }
-
-        // Match and execute.
-        let result =
-          execute_bdd_step(&registry, &mut world, &text, step, step_timeout, strict).await;
-
-        match result {
-          Ok(()) => handle.end(None).await,
-          Err(e) if e.pending && !strict => {
-            // Pending step in non-strict mode: mark as pending, don't fail.
-            handle.pending(Some(e.to_string())).await;
-          }
-          Err(e) => {
-            let msg = e.to_string();
-            had_failure = true;
-            failure_message = Some(msg.clone());
-            handle.end(Some(msg)).await;
-          }
-        }
-
-        // Run AfterStep hooks (always, even on failure).
-        if let Err(e) = registry
-          .hooks()
-          .run_step(HookPoint::AfterStep, &mut world, &text, &scenario.tags)
-          .await
-        {
-          tracing::warn!("AfterStep hook failed: {e}");
-        }
       }
 
-      // Run AfterScenario hooks (always, even on failure).
-      if let Err(e) = registry
-        .hooks()
-        .run_scenario(HookPoint::AfterScenario, &mut world, &scenario.tags)
-        .await
-      {
-        tracing::warn!("AfterScenario hook failed: {e}");
-      }
-
-      // Screenshot on failure.
-      if had_failure && screenshot_on_failure {
-        if let Ok(bytes) = world
-          .page()
-          .screenshot(ferridriver::options::ScreenshotOptions::default())
-          .await
-        {
-          test_info
-            .attach(
-              "failure-screenshot".to_string(),
-              "image/png".to_string(),
-              ferridriver_test::model::AttachmentBody::Bytes(bytes),
-            )
-            .await;
-        }
-      }
-
-      if let Some(msg) = failure_message {
+      if let Some(msg) = result.error {
         Err(TestFailure::from(msg))
       } else {
         Ok(())
@@ -259,11 +148,7 @@ fn translate_scenario(
   });
 
   // Map BDD tags to TestAnnotations.
-  let mut annotations: Vec<TestAnnotation> = scenario
-    .tags
-    .iter()
-    .map(|t| TestAnnotation::Tag(t.clone()))
-    .collect();
+  let mut annotations: Vec<TestAnnotation> = scenario.tags.iter().map(|t| TestAnnotation::Tag(t.clone())).collect();
 
   if scenario
     .tags
@@ -286,7 +171,10 @@ fn translate_scenario(
   // @fixme or @fixme(condition)
   for tag in &scenario.tags {
     if tag == "@fixme" {
-      annotations.push(TestAnnotation::Fixme { reason: Some("tagged @fixme".to_string()), condition: None });
+      annotations.push(TestAnnotation::Fixme {
+        reason: Some("tagged @fixme".to_string()),
+        condition: None,
+      });
     } else if let Some(cond) = tag.strip_prefix("@fixme(").and_then(|s| s.strip_suffix(')')) {
       annotations.push(TestAnnotation::Fixme {
         reason: Some(format!("tagged @fixme({cond})")),
@@ -341,8 +229,51 @@ fn translate_scenario(
   }
 }
 
+// ── TestInfo observer ───────────────────────────────────────────────────────
+
+/// Observer that bridges `ScenarioExecutor` step events to `TestInfo` for
+/// the test runner's real-time reporting pipeline.
+struct TestInfoObserver {
+  test_info: Arc<TestInfo>,
+}
+
+impl StepObserver for TestInfoObserver {
+  fn on_step<'a>(
+    &'a self,
+    event: StepEvent<'a>,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
+    Box::pin(async move {
+      let step_title = format!("{}{}", event.step.keyword, event.text);
+
+      match event.result.status {
+        StepStatus::Skipped => {
+          let handle = self.test_info.begin_step(&step_title, StepCategory::TestStep).await;
+          handle.skip(event.result.error.clone()).await;
+        },
+        _ => {
+          let mut handle = self.test_info.begin_step(&step_title, StepCategory::TestStep).await;
+
+          // Attach BDD metadata for domain-specific reporters.
+          handle.metadata = Some(serde_json::json!({
+            "bdd_keyword": event.step.keyword.trim(),
+            "bdd_text": event.text,
+            "bdd_line": event.step.line,
+          }));
+
+          match event.result.status {
+            StepStatus::Passed => handle.end(None).await,
+            StepStatus::Pending => handle.pending(event.result.error.clone()).await,
+            StepStatus::Failed => handle.end(event.result.error.clone()).await,
+            _ => {},
+          }
+        },
+      }
+    })
+  }
+}
+
 /// Execute a single BDD step: match against registry, extract params, call handler.
-async fn execute_bdd_step(
+pub async fn execute_bdd_step(
   registry: &StepRegistry,
   world: &mut BrowserWorld,
   text: &str,
@@ -355,12 +286,7 @@ async fn execute_bdd_step(
     Ok(m) => m,
     Err(MatchError::Undefined { text: t, suggestions }) => {
       let keyword = step.keyword.trim();
-      let snippet = crate::snippet::generate_snippet(
-        keyword,
-        &t,
-        step.table.is_some(),
-        step.docstring.is_some(),
-      );
+      let snippet = crate::snippet::generate_snippet(keyword, &t, step.table.is_some(), step.docstring.is_some());
       let mut msg = format!("undefined step: \"{t}\"");
       if !suggestions.is_empty() {
         msg.push_str("\n  did you mean:");
@@ -374,14 +300,18 @@ async fn execute_bdd_step(
         return Err(crate::step::StepError::from(msg));
       }
       return Err(crate::step::StepError::pending(msg));
-    }
-    Err(MatchError::Ambiguous { text: t, matches, expressions }) => {
+    },
+    Err(MatchError::Ambiguous {
+      text: t,
+      matches,
+      expressions,
+    }) => {
       let mut msg = format!("ambiguous step: \"{t}\" matched {} definitions:", matches.len());
       for (i, (loc, expr)) in matches.iter().zip(expressions.iter()).enumerate() {
         msg.push_str(&format!("\n  {}. {} ({})", i + 1, expr, loc));
       }
       return Err(crate::step::StepError::from(msg));
-    }
+    },
   };
 
   // Prepare data table and docstring.
@@ -392,8 +322,7 @@ async fn execute_bdd_step(
   let handler = &step_match.def.handler;
   let params = step_match.params;
 
-  let result =
-    tokio::time::timeout(timeout, handler(world, params, table_data, docstring)).await;
+  let result = tokio::time::timeout(timeout, handler(world, params, table_data, docstring)).await;
 
   match result {
     Ok(Ok(())) => Ok(()),

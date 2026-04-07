@@ -7,7 +7,10 @@ use rmcp::{ErrorData, handler::server::wrapper::Parameters, model::CallToolResul
 
 #[tool_router(router = input_router, vis = "pub")]
 impl McpServer {
-  #[tool(name = "click", description = "Click an element. Prefer 'ref' from snapshot (e.g. ref='e5') over CSS selector. Refs work across frames; CSS selectors only match the main frame.")]
+  #[tool(
+    name = "click",
+    description = "Click an element. Prefer 'ref' from snapshot (e.g. ref='e5') over CSS selector. Refs work across frames; CSS selectors only match the main frame."
+  )]
   async fn click(&self, Parameters(p): Parameters<ClickParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -39,7 +42,10 @@ impl McpServer {
     }
   }
 
-  #[tool(name = "click_at", description = "Click at X,Y coordinates.")]
+  #[tool(
+    name = "click_at",
+    description = "Click at exact X,Y viewport pixel coordinates. Use this only for canvas, maps, or elements without accessible refs. For interactive elements, prefer 'click' with a ref from snapshot."
+  )]
   async fn click_at(&self, Parameters(p): Parameters<ClickAtParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -50,7 +56,10 @@ impl McpServer {
       .await
   }
 
-  #[tool(name = "hover", description = "Hover over an element. Prefer 'ref' from snapshot over CSS selector.")]
+  #[tool(
+    name = "hover",
+    description = "Hover over an element. Prefer 'ref' from snapshot over CSS selector."
+  )]
   async fn hover(&self, Parameters(p): Parameters<HoverParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -70,7 +79,10 @@ impl McpServer {
     self.action_ok(&page, s, &format!("Hovered '{target}'.")).await
   }
 
-  #[tool(name = "fill", description = "Fill an input or contenteditable element. Prefer 'ref' from snapshot over CSS selector. For contenteditable elements (e.g. WhatsApp message box), use type_text after clicking the element instead.")]
+  #[tool(
+    name = "fill",
+    description = "Fill an input or contenteditable element. Prefer 'ref' from snapshot over CSS selector. For contenteditable elements (e.g. WhatsApp message box), use type_text after clicking the element instead."
+  )]
   async fn fill(&self, Parameters(p): Parameters<FillParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -96,7 +108,10 @@ impl McpServer {
       .await
   }
 
-  #[tool(name = "fill_form", description = "Fill multiple form fields at once.")]
+  #[tool(
+    name = "fill_form",
+    description = "Fill multiple form fields in a single call. More efficient than calling fill repeatedly. Each field is identified by ref (preferred) or CSS selector."
+  )]
   async fn fill_form(&self, Parameters(p): Parameters<FillFormParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -124,7 +139,10 @@ impl McpServer {
       .await
   }
 
-  #[tool(name = "type_text", description = "Type text via keyboard.")]
+  #[tool(
+    name = "type_text",
+    description = "Type text character-by-character via keyboard into the currently focused element. Click on the target element first using click(ref=...). Unlike fill, this fires keydown/keypress/keyup events per character -- use for contenteditable elements, rich text editors, or when keystroke events matter."
+  )]
   async fn type_text(&self, Parameters(p): Parameters<TypeTextParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -135,7 +153,10 @@ impl McpServer {
       .await
   }
 
-  #[tool(name = "press_key", description = "Press a key or combo.")]
+  #[tool(
+    name = "press_key",
+    description = "Press a keyboard key or shortcut combination. Supports named keys (Enter, Tab, Escape, ArrowDown) and combos (Control+a, Meta+v, Control+Shift+t). Uses Playwright key naming."
+  )]
   async fn press_key(&self, Parameters(p): Parameters<PressKeyParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -144,7 +165,10 @@ impl McpServer {
     self.action_ok(&page, s, &format!("Pressed '{}'.", p.key)).await
   }
 
-  #[tool(name = "drag", description = "Drag between two points.")]
+  #[tool(
+    name = "drag",
+    description = "Drag from one point to another using mouse down + move + up. Coordinates are in viewport pixels. Use for drag-and-drop interfaces, sliders, or resizable elements."
+  )]
   async fn drag(&self, Parameters(p): Parameters<DragParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -156,7 +180,10 @@ impl McpServer {
     self.action_ok(&page, s, "Drag complete.").await
   }
 
-  #[tool(name = "scroll", description = "Scroll the page.")]
+  #[tool(
+    name = "scroll",
+    description = "Scroll the page by pixel delta or scroll a specific element into view. Use delta_y for vertical scroll (positive = down), or provide a CSS selector to auto-scroll that element into the viewport."
+  )]
   async fn scroll(&self, Parameters(p): Parameters<ScrollParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -200,17 +227,45 @@ impl McpServer {
       .await
   }
 
-  #[tool(name = "upload_file", description = "Upload a file to a file input element.")]
+  #[tool(
+    name = "upload_file",
+    description = "Upload a file to a file input. Prefer `ref` from snapshot; otherwise pass a CSS selector for the input."
+  )]
   async fn upload_file(&self, Parameters(p): Parameters<UploadFileParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
-    page
-      .set_input_files(&p.selector, std::slice::from_ref(&p.path))
-      .await
-      .map_err(Self::err)?;
-    self
-      .action_ok(&page, s, &format!("Uploaded file '{}' to '{}'.", p.path, p.selector))
-      .await
+    let path_str = p.path.clone();
+    let paths = std::slice::from_ref(&path_str);
+    if p.r#ref.is_some() {
+      let ref_map = self.state.ref_map_for(s).await;
+      let _ = Self::resolve(&page, &ref_map, p.r#ref.as_ref(), None)
+        .await
+        .map_err(Self::err)?;
+      page
+        .set_input_files("[data-fd-sel='0']", paths)
+        .await
+        .map_err(Self::err)?;
+      self
+        .action_ok(
+          &page,
+          s,
+          &format!(
+            "Uploaded file '{}' to ref '{}'.",
+            p.path,
+            p.r#ref.as_deref().unwrap_or("")
+          ),
+        )
+        .await
+    } else if let Some(sel) = &p.selector {
+      page.set_input_files(sel, paths).await.map_err(Self::err)?;
+      self
+        .action_ok(&page, s, &format!("Uploaded file '{}' to '{}'.", p.path, sel))
+        .await
+    } else {
+      Err(Self::err(
+        "Provide `ref` (from snapshot) or `selector` for the file input.",
+      ))
+    }
   }
 }

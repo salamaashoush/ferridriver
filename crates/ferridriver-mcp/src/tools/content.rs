@@ -1,5 +1,6 @@
 use crate::params::{
-  EvaluateParams, ScreenshotParams_, SearchPageParams, SessionOnlyParams, SnapshotParams, WaitForParams,
+  EvaluateParams, FindElementsParams, ScreenshotParams_, SearchPageParams, SessionOnlyParams, SnapshotParams,
+  WaitForParams,
 };
 use crate::server::{McpServer, sess};
 use base64::Engine;
@@ -46,7 +47,10 @@ impl McpServer {
     }
   }
 
-  #[tool(name = "screenshot", description = "Take a screenshot.")]
+  #[tool(
+    name = "screenshot",
+    description = "Take a visual screenshot of the page as a base64-encoded image. Use 'selector' to capture a specific element, or 'full_page' for the entire scrollable page. Prefer snapshot for structured page content -- screenshot is for visual verification only."
+  )]
   async fn screenshot(&self, Parameters(p): Parameters<ScreenshotParams_>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
@@ -83,11 +87,17 @@ impl McpServer {
     Ok(CallToolResult::success(vec![Content::text(val)]))
   }
 
-  #[tool(name = "wait_for", description = "Wait for selector or text to appear.")]
+  #[tool(
+    name = "wait_for",
+    description = "Wait until a CSS selector matches or body text contains a substring. Provide at least one of `selector` or `text`."
+  )]
   async fn wait_for(&self, Parameters(p): Parameters<WaitForParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
+    if p.selector.is_none() && p.text.is_none() {
+      return Err(Self::err("Provide `selector` and/or `text` to wait for."));
+    }
     let timeout_ms = p.timeout.unwrap_or(30000);
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
@@ -100,10 +110,9 @@ impl McpServer {
         }
       }
       if let Some(text) = &p.text {
-        let js = format!(
-          "document.body?.innerText?.includes('{}') || false",
-          text.replace('\'', "\\'")
-        );
+        let needle = serde_json::to_string(text).map_err(|e| Self::err(format!("Invalid text for wait: {e}")))?;
+        let js =
+          format!("(() => {{ const body = document.body?.innerText ?? ''; return body.includes({needle}); }})()");
         if let Ok(r) = page.evaluate(&js).await {
           if r == Some(serde_json::Value::Bool(true)) {
             return self.action_ok(&page, s, &format!("Found text '{text}'.")).await;
@@ -135,6 +144,28 @@ impl McpServer {
       .map_err(Self::err)?;
     Ok(CallToolResult::success(vec![Content::text(
       ferridriver::actions::format_search_results(&result, &p.pattern),
+    )]))
+  }
+
+  #[tool(
+    name = "find_elements",
+    description = "List DOM nodes matching a CSS or ferridriver rich selector. Use snapshot+ref to interact with one element; use this to discover many links/rows at once."
+  )]
+  async fn find_elements(&self, Parameters(p): Parameters<FindElementsParams>) -> Result<CallToolResult, ErrorData> {
+    let s = sess(p.session.as_ref());
+    let _guard = self.session_guard(s).await;
+    let page = Box::pin(self.page(s)).await?;
+    let opts = ferridriver::actions::FindElementsOptions {
+      selector: p.selector.clone(),
+      attributes: p.attributes.clone(),
+      max_results: p.max_results.unwrap_or(50),
+      include_text: p.include_text.unwrap_or(true),
+    };
+    let result = ferridriver::actions::find_elements(page.inner(), &opts)
+      .await
+      .map_err(Self::err)?;
+    Ok(CallToolResult::success(vec![Content::text(
+      ferridriver::actions::format_find_results(&result, &p.selector),
     )]))
   }
 

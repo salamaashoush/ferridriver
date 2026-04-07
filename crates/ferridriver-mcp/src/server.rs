@@ -122,6 +122,11 @@ impl SharedState {
     self.ref_maps.clear();
     self.log_handles.clear();
   }
+
+  /// Get a clone of the inner `Arc<RwLock<BrowserState>>` for constructing `ContextRef`.
+  pub(crate) fn state_arc(&self) -> Arc<RwLock<BrowserState>> {
+    Arc::clone(&self.inner)
+  }
 }
 
 /// Backward-compat type alias.
@@ -202,15 +207,21 @@ pub trait McpServerConfig: Send + Sync + 'static {
 }
 
 /// Default instructions embedded in the MCP server.
-pub const DEFAULT_INSTRUCTIONS: &str = "Browser automation. All tools accept optional 'session' param (default: 'default'). \
-     Different sessions have isolated cookies/storage -- use for multi-user testing.\n\
-     Actions return an accessibility snapshot with [ref=eN] identifiers. \
-     Use these refs with click/hover/fill. Prefer snapshot over screenshot.\n\
-     IMPORTANT: Refs are tied to the current page snapshot. After page(select) or navigate, \
-     old refs are invalid -- use the new snapshot's refs. Always prefer 'ref' over CSS selectors \
-     in click/fill/hover since refs are resolved from the snapshot and work reliably across frames.\n\
-     To switch between browser tabs, use page(action='list') then page(action='select', page_index=N). \
-     Do NOT use evaluate to list or switch tabs.";
+pub const DEFAULT_INSTRUCTIONS: &str = "\
+Browser automation. All tools accept optional 'session' param (default: 'default'). \
+Different sessions have isolated cookies/storage -- use for multi-user testing.\n\
+\n\
+Actions return an accessibility snapshot with [ref=eN] identifiers. \
+Use these refs with click/hover/fill. Prefer snapshot over screenshot.\n\
+IMPORTANT: Refs are tied to the current page snapshot. After page(select) or navigate, \
+old refs are invalid -- use the new snapshot's refs. Always prefer 'ref' over CSS selectors \
+in click/fill/hover since refs are resolved from the snapshot and work reliably across frames.\n\
+To switch between browser tabs, use page(action='list') then page(action='select', page_index=N). \
+Do NOT use evaluate to list or switch tabs.\n\
+\n\
+BDD/Gherkin: Use run_step for natural-language browser actions (e.g. 'I click \"Submit\"'), \
+run_scenario to execute full .feature files or inline Gherkin, and list_steps to discover \
+available step patterns. BDD steps run on the same live session as other tools.";
 
 /// Default config for standalone ferridriver (no customization).
 pub struct DefaultConfig;
@@ -227,6 +238,10 @@ pub struct McpServer {
   pub config: Arc<dyn McpServerConfig>,
   /// Typed extension slot for consumer-specific state (e.g. Jira clients).
   extensions: Arc<dyn std::any::Any + Send + Sync>,
+  /// BDD step registry -- built once at startup from `inventory`-collected step definitions.
+  pub(crate) step_registry: Arc<ferridriver_bdd::registry::StepRegistry>,
+  /// Cached BDD executor -- avoids re-creating per tool call.
+  pub(crate) bdd_executor: ferridriver_bdd::executor::ScenarioExecutor,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -257,7 +272,12 @@ impl McpServer {
   }
 
   /// Create a server with all options.
-  pub fn with_options(mode: ConnectMode, backend: BackendKind, headless: bool, config: Arc<dyn McpServerConfig>) -> Self {
+  pub fn with_options(
+    mode: ConnectMode,
+    backend: BackendKind,
+    headless: bool,
+    config: Arc<dyn McpServerConfig>,
+  ) -> Self {
     let mut browser_state = BrowserState::new(mode, backend);
     browser_state.headless = headless;
     browser_state.extra_args = config.chrome_args();
@@ -268,15 +288,22 @@ impl McpServer {
     }));
     // Wire per-instance connection resolver from config trait.
     let config_clone = Arc::clone(&config);
-    browser_state.set_instance_resolver_fn(Box::new(move |instance| {
-      config_clone.resolve_instance(instance)
-    }));
+    browser_state.set_instance_resolver_fn(Box::new(move |instance| config_clone.resolve_instance(instance)));
     let state = SharedState::new(browser_state);
+    let step_registry = Arc::new(ferridriver_bdd::registry::StepRegistry::build());
+    let bdd_executor = ferridriver_bdd::executor::ScenarioExecutor::new(
+      Arc::clone(&step_registry),
+      std::time::Duration::from_secs(30),
+      false, // not strict -- pending steps don't fail
+      true,  // screenshot on failure
+    );
     Self {
       state,
       tool_router: Self::combined_router(),
       config,
       extensions: Arc::new(NoExtensions),
+      step_registry,
+      bdd_executor,
     }
   }
 
@@ -319,31 +346,35 @@ impl McpServer {
     self.context_guard(context).await
   }
 
-  /// Get a Page for a context, ensuring the required browser instance exists.
-  /// Parses the composite session key to ensure the correct instance is launched.
+  /// Ensure a browser instance exists for the context and return its active `AnyPage`.
   ///
-  /// Fast path (instance exists): shared read lock — concurrent reads allowed.
-  /// Slow path (cold start): exclusive write lock — only when launching a new browser.
+  /// Fast path (instance exists): shared read lock -- concurrent reads allowed.
+  /// Slow path (cold start): exclusive write lock -- only when launching a new browser.
+  async fn ensure_active_page(&self, context: &str) -> Result<AnyPage, ErrorData> {
+    // Fast path: instance already exists, read lock only.
+    {
+      let state = self.state.read().await;
+      if let Ok(any_page) = state.active_page(context) {
+        return Ok(any_page.clone());
+      }
+    }
+    // Slow path: need to create instance (write lock).
+    let key = ferridriver::state::SessionKey::parse(context);
+    let mut state = self.state.write().await;
+    Box::pin(state.ensure_instance(&key.instance))
+      .await
+      .map_err(Self::err)?;
+    state.active_page(context).map_err(Self::err).cloned()
+  }
+
+  /// Get a `Page` for a context, ensuring the required browser instance exists.
   ///
   /// # Errors
   ///
   /// Returns an error if the browser instance cannot be launched or the active page
   /// for the given context cannot be retrieved.
   pub async fn page(&self, context: &str) -> Result<Page, ErrorData> {
-    // Fast path: instance already exists, read lock only
-    {
-      let state = self.state.read().await;
-      if let Ok(any_page) = state.active_page(context) {
-        return Ok(Page::new(any_page.clone()));
-      }
-    }
-    // Slow path: need to create instance (write lock)
-    let key = ferridriver::state::SessionKey::parse(context);
-    let mut state = self.state.write().await;
-    Box::pin(state.ensure_instance(&key.instance))
-      .await
-      .map_err(Self::err)?;
-    let any_page = state.active_page(context).map_err(Self::err)?.clone();
+    let any_page = Box::pin(self.ensure_active_page(context)).await?;
     Ok(Page::new(any_page))
   }
 
@@ -354,21 +385,25 @@ impl McpServer {
   /// Returns an error if the browser instance cannot be launched or the active page
   /// for the given context cannot be retrieved.
   pub async fn raw_page(&self, context: &str) -> Result<AnyPage, ErrorData> {
-    // Fast path: read lock
-    {
-      let state = self.state.read().await;
-      if let Ok(any_page) = state.active_page(context) {
-        return Ok(any_page.clone());
-      }
-    }
-    // Slow path: write lock
-    let key = ferridriver::state::SessionKey::parse(context);
-    let mut state = self.state.write().await;
-    Box::pin(state.ensure_instance(&key.instance))
-      .await
-      .map_err(Self::err)?;
-    let page = state.active_page(context).map_err(Self::err)?.clone();
-    Ok(page)
+    Box::pin(self.ensure_active_page(context)).await
+  }
+
+  /// Get a `Page` and `ContextRef` for a session in a single operation.
+  ///
+  /// This is the primary entry point for BDD integration -- provides both
+  /// the page (for DOM interaction) and the context handle (for cookies,
+  /// permissions, etc.) on the same live MCP session.  A single
+  /// `ensure_active_page` call handles both, avoiding redundant lock
+  /// acquisitions.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser instance cannot be launched or accessed.
+  pub async fn page_and_context(&self, context: &str) -> Result<(Page, ferridriver::context::ContextRef), ErrorData> {
+    let any_page = Box::pin(self.ensure_active_page(context)).await?;
+    let page = Page::new(any_page);
+    let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
+    Ok((page, ctx_ref))
   }
 
   /// Resolve ref to element -- delegates to `actions::resolve_element`.
@@ -561,7 +596,15 @@ impl ServerHandler for McpServer {
           .await
           .ok_or_else(|| Self::err(format!("Context '{context_name}' not found")))?;
         let msgs = handles.console.read().await;
-        let last: Vec<_> = msgs.iter().rev().take(100).cloned().collect::<Vec<_>>().into_iter().rev().collect();
+        let last: Vec<_> = msgs
+          .iter()
+          .rev()
+          .take(100)
+          .cloned()
+          .collect::<Vec<_>>()
+          .into_iter()
+          .rev()
+          .collect();
         drop(msgs);
         let text = serde_json::to_string_pretty(&last).unwrap_or_default();
         Ok(ReadResourceResult::new(vec![
@@ -575,7 +618,15 @@ impl ServerHandler for McpServer {
           .await
           .ok_or_else(|| Self::err(format!("Context '{context_name}' not found")))?;
         let reqs = handles.network.read().await;
-        let last: Vec<_> = reqs.iter().rev().take(100).cloned().collect::<Vec<_>>().into_iter().rev().collect();
+        let last: Vec<_> = reqs
+          .iter()
+          .rev()
+          .take(100)
+          .cloned()
+          .collect::<Vec<_>>()
+          .into_iter()
+          .rev()
+          .collect();
         drop(reqs);
         let text = serde_json::to_string_pretty(&last).unwrap_or_default();
         Ok(ReadResourceResult::new(vec![

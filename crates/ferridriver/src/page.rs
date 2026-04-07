@@ -1001,10 +1001,7 @@ impl Page {
     // Restore per-origin localStorage (Playwright format).
     if let Some(origins) = state.get("origins").and_then(|v| v.as_array()) {
       for origin_entry in origins {
-        let origin = origin_entry
-          .get("origin")
-          .and_then(|v| v.as_str())
-          .unwrap_or("");
+        let origin = origin_entry.get("origin").and_then(|v| v.as_str()).unwrap_or("");
         if let Some(items) = origin_entry.get("localStorage").and_then(|v| v.as_array()) {
           // Navigate to the origin so localStorage.setItem works in the right scope.
           // Only navigate if the current page isn't already on this origin.
@@ -1478,7 +1475,6 @@ impl Page {
     self.inner.unroute(pattern).await
   }
 
-
   // ── Exposed Functions ───────────────────────────────────────────────────
 
   /// Expose a Rust function to the page as `window.<name>(...)`.
@@ -1634,7 +1630,7 @@ impl Page {
 
     // Remove closed page from context's page list so context.pages() stays accurate.
     if let Some(ctx) = &self.context_ref {
-      let mut state = ctx.state.lock().await;
+      let mut state = ctx.state.write().await;
       if let Ok(browser_ctx) = state.context_mut_checked(&ctx.name) {
         browser_ctx.pages.retain(|p| !p.is_closed());
         if browser_ctx.active_page_idx >= browser_ctx.pages.len() && !browser_ctx.pages.is_empty() {

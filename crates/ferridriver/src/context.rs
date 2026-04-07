@@ -7,10 +7,10 @@
 //! - Created by `Browser.new_context()`
 //! - Pages are created by `context.new_page()`
 
-use arc_swap::ArcSwap;
 use crate::backend::{AnyPage, CookieData};
 use crate::page::Page;
 use crate::state::SessionKey;
+use arc_swap::ArcSwap;
 use rustc_hash::FxHashMap as HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
@@ -195,13 +195,12 @@ impl BrowserContext {
 // -- ContextRef: handle for the high-level Browser API -----------------------
 
 use crate::state::BrowserState;
-use tokio::sync::Mutex;
 
 /// Handle to a browser context. Created by `Browser::new_context()` / `default_context()`.
 /// Provides the Playwright-compatible context API by delegating to `BrowserState`.
 #[derive(Clone)]
 pub struct ContextRef {
-  pub(crate) state: Arc<Mutex<BrowserState>>,
+  pub(crate) state: Arc<RwLock<BrowserState>>,
   pub(crate) name: String,
   /// Pre-parsed session key (avoids re-parsing on every operation).
   pub(crate) key: SessionKey,
@@ -212,7 +211,7 @@ pub struct ContextRef {
 }
 
 impl ContextRef {
-  pub(crate) fn new(state: Arc<Mutex<BrowserState>>, name: String) -> Self {
+  pub fn new(state: Arc<RwLock<BrowserState>>, name: String) -> Self {
     let key = SessionKey::parse(&name);
     Self {
       state,
@@ -235,7 +234,7 @@ impl ContextRef {
   ///
   /// Returns an error if page creation fails.
   pub async fn new_page(&self) -> Result<Page, String> {
-    let mut state = self.state.lock().await;
+    let mut state = self.state.write().await;
     let any_page = Box::pin(state.open_page_keyed(&self.key, "about:blank")).await?;
     Ok(Page::with_context(any_page, self.clone()))
   }
@@ -246,9 +245,15 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist.
   pub async fn pages(&self) -> Result<Vec<Page>, String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
-    Ok(ctx.pages.iter().map(|p| Page::with_context(p.clone(), self.clone())).collect())
+    Ok(
+      ctx
+        .pages
+        .iter()
+        .map(|p| Page::with_context(p.clone(), self.clone()))
+        .collect(),
+    )
   }
 
   /// Get all cookies in this context.
@@ -257,7 +262,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or cookie retrieval fails.
   pub async fn cookies(&self) -> Result<Vec<CookieData>, String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     ctx.cookies().await
   }
@@ -268,7 +273,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or setting cookies fails.
   pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<(), String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     ctx.add_cookies(cookies).await
   }
@@ -279,7 +284,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or clearing cookies fails.
   pub async fn clear_cookies(&self) -> Result<(), String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     ctx.clear_cookies().await
   }
@@ -290,14 +295,11 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or clearing cookies fails.
-  pub async fn clear_cookies_filtered(
-    &self,
-    options: &crate::backend::ClearCookieOptions,
-  ) -> Result<(), String> {
+  pub async fn clear_cookies_filtered(&self, options: &crate::backend::ClearCookieOptions) -> Result<(), String> {
     if options.name.is_none() && options.domain.is_none() && options.path.is_none() {
       return self.clear_cookies().await;
     }
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     let cookies = ctx.cookies().await?;
     if let Some(page) = ctx.active_page() {
@@ -321,7 +323,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or deleting fails.
   pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     ctx.delete_cookie(name, domain).await
   }
@@ -342,7 +344,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context or page does not exist, or granting fails.
   pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<(), String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     if let Some(page) = ctx.active_page() {
       page.grant_permissions(permissions, origin).await
@@ -357,7 +359,7 @@ impl ContextRef {
   ///
   /// Returns an error if resetting permissions fails.
   pub async fn clear_permissions(&self) -> Result<(), String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     if let Some(page) = ctx.active_page() {
       page.reset_permissions().await
@@ -372,14 +374,14 @@ impl ContextRef {
   ///
   /// Returns an error if state lock acquisition fails.
   pub async fn close(&self) -> Result<(), String> {
-    let mut state = self.state.lock().await;
+    let mut state = self.state.write().await;
     state.remove_context(&self.name);
     Ok(())
   }
 
   /// Access the internal state (for MCP server integration).
   #[must_use]
-  pub fn state(&self) -> &Arc<Mutex<BrowserState>> {
+  pub fn state(&self) -> &Arc<RwLock<BrowserState>> {
     &self.state
   }
 
@@ -392,7 +394,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or script injection fails.
   pub async fn add_init_script(&self, source: &str) -> Result<Vec<String>, String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     let mut ids = Vec::new();
     for page in &ctx.pages {
@@ -407,7 +409,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or geolocation emulation fails.
   pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<(), String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
       page.set_geolocation(lat, lng, accuracy).await?;
@@ -421,7 +423,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or setting headers fails.
   pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
       page.set_extra_http_headers(headers).await?;
@@ -435,7 +437,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or network state change fails.
   pub async fn set_offline(&self, offline: bool) -> Result<(), String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
       page.set_network_state(offline, 0.0, -1.0, -1.0).await?;
@@ -449,7 +451,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or route registration fails.
   pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<(), String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
       page.route(pattern, handler.clone()).await?;
@@ -463,7 +465,7 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or route removal fails.
   pub async fn unroute(&self, pattern: &str) -> Result<(), String> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
       page.unroute(pattern).await?;

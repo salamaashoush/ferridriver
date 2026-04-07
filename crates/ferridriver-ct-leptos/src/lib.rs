@@ -24,10 +24,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ferridriver_test::config::TestConfig;
 use ferridriver_test::ct::server::ComponentServer;
 use ferridriver_test::model::*;
-use ferridriver_test::config::TestConfig;
-use ferridriver_test::reporter;
 use ferridriver_test::runner::TestRunner;
 
 pub use ferridriver_ct_leptos_macros::component_test;
@@ -35,10 +34,10 @@ pub use ferridriver_test;
 pub use inventory;
 
 pub mod prelude {
+  pub use crate::component_test;
   pub use ferridriver::{Locator, Page};
   pub use ferridriver_test::expect::expect;
   pub use ferridriver_test::model::TestFailure;
-  pub use crate::component_test;
 }
 
 /// A registered component test (populated by `#[component_test]` via inventory).
@@ -102,9 +101,7 @@ async fn run_inner(harness_cfg: HarnessConfig) -> i32 {
 
   // Step 2: Serve dist/.
   let dist_dir = project_dir.join("dist");
-  let server = ComponentServer::start(&dist_dir)
-    .await
-    .expect("failed to start server");
+  let server = ComponentServer::start(&dist_dir).await.expect("failed to start server");
   let url = server.url();
   eprintln!("[ferridriver-ct] Serving {} test(s) at {url}", registrations.len());
 
@@ -185,14 +182,26 @@ async fn run_inner(harness_cfg: HarnessConfig) -> i32 {
   };
 
   // Apply harness config (from main! macro)
-  if let Some(ref b) = harness_cfg.backend { config.browser.backend.clone_from(b); }
-  if let Some(h) = harness_cfg.headless { config.browser.headless = h; }
-  if let Some(w) = harness_cfg.workers { config.workers = w; }
-  if let Some(t) = harness_cfg.timeout { config.timeout = t; }
+  if let Some(ref b) = harness_cfg.backend {
+    config.browser.backend.clone_from(b);
+  }
+  if let Some(h) = harness_cfg.headless {
+    config.browser.headless = h;
+  }
+  if let Some(w) = harness_cfg.workers {
+    config.workers = w;
+  }
+  if let Some(t) = harness_cfg.timeout {
+    config.timeout = t;
+  }
 
   // CLI args override harness config (highest priority)
-  if let Some(w) = cli.workers { config.workers = w; }
-  if cli.headed { config.browser.headless = false; }
+  if let Some(w) = cli.workers {
+    config.workers = w;
+  }
+  if cli.headed {
+    config.browser.headless = false;
+  }
   if let Ok(backend) = std::env::var("FERRIDRIVER_BACKEND") {
     config.browser.backend = backend;
   }
@@ -227,7 +236,9 @@ fn parse_ct_args() -> ferridriver_test::CliOverrides {
         if let Some(val) = args.get(i) {
           // SAFETY: single-threaded at this point (called before runner starts)
           #[allow(unused_unsafe)]
-          unsafe { std::env::set_var("FERRIDRIVER_BACKEND", val); }
+          unsafe {
+            std::env::set_var("FERRIDRIVER_BACKEND", val);
+          }
         }
       },
       _ => {},
@@ -261,7 +272,11 @@ async fn trunk_build(project_dir: &PathBuf) {
 fn find_project_dir() -> PathBuf {
   let mut dir = std::env::current_dir().expect("cannot get cwd");
   loop {
-    if dir.join("Cargo.toml").exists() { return dir; }
-    if !dir.pop() { panic!("cannot find Cargo.toml"); }
+    if dir.join("Cargo.toml").exists() {
+      return dir;
+    }
+    if !dir.pop() {
+      panic!("cannot find Cargo.toml");
+    }
   }
 }

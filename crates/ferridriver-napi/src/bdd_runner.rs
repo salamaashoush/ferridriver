@@ -104,15 +104,8 @@ impl StepContext {
 }
 
 /// Step callback TSFN: async JS function receiving (StepContext) -> Promise<void>.
-type StepCallbackFn = ThreadsafeFunction<
-  StepContext,
-  napi::bindgen_prelude::Promise<()>,
-  StepContext,
-  Status,
-  false,
-  true,
-  0,
->;
+type StepCallbackFn =
+  ThreadsafeFunction<StepContext, napi::bindgen_prelude::Promise<()>, StepContext, Status, false, true, 0>;
 
 /// BDD runner configuration from TypeScript.
 #[napi(object)]
@@ -162,6 +155,7 @@ struct TsStepDef {
   pattern: String,
   callback: Arc<StepCallbackFn>,
   is_regex: bool,
+  #[allow(dead_code)]
   timeout: Option<f64>,
 }
 
@@ -298,11 +292,7 @@ impl BddRunner {
     &self,
     kind: String,
     pattern: String,
-    callback: napi::bindgen_prelude::Function<
-      '_,
-      StepContext,
-      napi::bindgen_prelude::Promise<()>,
-    >,
+    callback: napi::bindgen_prelude::Function<'_, StepContext, napi::bindgen_prelude::Promise<()>>,
     is_regex: Option<bool>,
     timeout: Option<f64>,
   ) -> Result<()> {
@@ -347,11 +337,7 @@ impl BddRunner {
     &self,
     point: String,
     scope: String,
-    callback: napi::bindgen_prelude::Function<
-      '_,
-      StepContext,
-      napi::bindgen_prelude::Promise<()>,
-    >,
+    callback: napi::bindgen_prelude::Function<'_, StepContext, napi::bindgen_prelude::Promise<()>>,
     tags: Option<String>,
     name: Option<String>,
     timeout: Option<f64>,
@@ -481,7 +467,7 @@ impl BddRunner {
                 .map_err(|e| format!("{e}"))
             })
           }))
-        }
+        },
         _ => {
           // scenario scope (default)
           let cb = Arc::clone(&cb);
@@ -497,7 +483,7 @@ impl BddRunner {
                 .map_err(|e| format!("{e}"))
             })
           }))
-        }
+        },
       };
 
       let tag_filter = ts_hook
@@ -538,8 +524,7 @@ impl BddRunner {
     }
 
     // Translate to TestPlan.
-    let plan =
-      ferridriver_bdd::translate::translate_features(&feature_set, registry, &self.config);
+    let plan = ferridriver_bdd::translate::translate_features(&feature_set, registry, &self.config);
 
     if plan.total_tests == 0 {
       return Ok(BddRunSummary {

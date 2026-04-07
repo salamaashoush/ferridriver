@@ -53,7 +53,10 @@ impl McpServer {
     }
   }
 
-  #[tool(name = "navigate", description = "Navigate to a URL.")]
+  #[tool(
+    name = "navigate",
+    description = "Navigate the browser to a URL and wait for the page to load. Returns an accessibility snapshot of the loaded page. After navigation, all previous element refs are invalidated -- use the new snapshot's refs."
+  )]
   async fn navigate(&self, Parameters(p): Parameters<NavigateParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;

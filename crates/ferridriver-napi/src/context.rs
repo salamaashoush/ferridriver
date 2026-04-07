@@ -65,7 +65,7 @@ impl BrowserContext {
 
   #[napi]
   pub async fn delete_cookie(&self, name: String, domain: Option<String>) -> Result<()> {
-    let state = self.inner.state().lock().await;
+    let state = self.inner.state().read().await;
     let ctx = state.context(self.inner.name()).map_err(napi::Error::from_reason)?;
     ctx
       .delete_cookie(&name, domain.as_deref())

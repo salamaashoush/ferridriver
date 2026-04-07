@@ -12,18 +12,19 @@
 //! 4. `run()` returns `RunSummary`
 
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use napi::Result;
-use napi_derive::napi;
 use napi::Status;
 use napi::threadsafe_function::ThreadsafeFunction;
+use napi_derive::napi;
 use tokio::sync::Mutex;
 
 /// Test callback TSFN type — async JS function receiving a Page, returning Promise<void>.
 /// callee_handled=false (modern async), weak=true (doesn't block Node exit), unbounded queue.
 /// Return type is Promise<()> because JS test bodies are async functions.
-type TestCallbackFn = ThreadsafeFunction<crate::page::Page, napi::bindgen_prelude::Promise<()>, crate::page::Page, Status, false, true, 0>;
+type TestCallbackFn =
+  ThreadsafeFunction<crate::page::Page, napi::bindgen_prelude::Promise<()>, crate::page::Page, Status, false, true, 0>;
 
 /// Test runner configuration from TypeScript.
 #[napi(object)]
@@ -167,7 +168,9 @@ impl TestRunner {
     // This works around Bun not propagating process.env to std::env::var.
     if let Some(ref debug) = cfg.debug {
       #[allow(unused_unsafe)]
-      unsafe { std::env::set_var("FERRIDRIVER_DEBUG", debug); }
+      unsafe {
+        std::env::set_var("FERRIDRIVER_DEBUG", debug);
+      }
     }
     let verbose = cfg.verbose.unwrap_or(0) as u8;
     if verbose > 0 {
@@ -177,28 +180,58 @@ impl TestRunner {
     }
     let mut tc = ferridriver_test::TestConfig::default();
 
-    if let Some(t) = cfg.timeout { tc.timeout = crate::types::f64_to_u64(t); }
-    if let Some(w) = cfg.workers { tc.workers = w as u32; }
-    if let Some(r) = cfg.retries { tc.retries = r as u32; }
-    if let Some(headed) = cfg.headed { tc.browser.headless = !headed; }
-    if let Some(ref b) = cfg.backend { tc.browser.backend.clone_from(b); }
-    if let Some(ref p) = cfg.executable_path { tc.browser.executable_path = Some(p.clone()); }
-    if let Some(ref args) = cfg.browser_args { tc.browser.args.clone_from(args); }
-    if let Some(ref r) = cfg.reporter {
-      tc.reporter = r.iter().map(|name| ferridriver_test::config::ReporterConfig {
-        name: name.clone(), options: Default::default(),
-      }).collect();
+    if let Some(t) = cfg.timeout {
+      tc.timeout = crate::types::f64_to_u64(t);
     }
-    if let Some(ref url) = cfg.base_url { tc.base_url = Some(url.clone()); }
-    if let Some(ref dir) = cfg.output_dir { tc.output_dir = dir.into(); }
-    if let Some(ref patterns) = cfg.test_match { tc.test_match.clone_from(patterns); }
+    if let Some(w) = cfg.workers {
+      tc.workers = w as u32;
+    }
+    if let Some(r) = cfg.retries {
+      tc.retries = r as u32;
+    }
+    if let Some(headed) = cfg.headed {
+      tc.browser.headless = !headed;
+    }
+    if let Some(ref b) = cfg.backend {
+      tc.browser.backend.clone_from(b);
+    }
+    if let Some(ref p) = cfg.executable_path {
+      tc.browser.executable_path = Some(p.clone());
+    }
+    if let Some(ref args) = cfg.browser_args {
+      tc.browser.args.clone_from(args);
+    }
+    if let Some(ref r) = cfg.reporter {
+      tc.reporter = r
+        .iter()
+        .map(|name| ferridriver_test::config::ReporterConfig {
+          name: name.clone(),
+          options: Default::default(),
+        })
+        .collect();
+    }
+    if let Some(ref url) = cfg.base_url {
+      tc.base_url = Some(url.clone());
+    }
+    if let Some(ref dir) = cfg.output_dir {
+      tc.output_dir = dir.into();
+    }
+    if let Some(ref patterns) = cfg.test_match {
+      tc.test_match.clone_from(patterns);
+    }
     if let Some(w) = cfg.viewport_width {
-      if let Some(ref mut vp) = tc.browser.viewport { vp.width = w as i64; }
+      if let Some(ref mut vp) = tc.browser.viewport {
+        vp.width = w as i64;
+      }
     }
     if let Some(h) = cfg.viewport_height {
-      if let Some(ref mut vp) = tc.browser.viewport { vp.height = h as i64; }
+      if let Some(ref mut vp) = tc.browser.viewport {
+        vp.height = h as i64;
+      }
     }
-    if let Some(fo) = cfg.forbid_only { tc.forbid_only = fo; }
+    if let Some(fo) = cfg.forbid_only {
+      tc.forbid_only = fo;
+    }
     if let Some(ref v) = cfg.video {
       tc.video.mode = match v.as_str() {
         "on" => ferridriver_test::config::VideoMode::On,
@@ -213,7 +246,9 @@ impl TestRunner {
       tc.storage_state = Some(ss.clone());
     }
     if tc.workers == 0 {
-      let cpus = std::thread::available_parallelism().map(|n| n.get() as u32).unwrap_or(4);
+      let cpus = std::thread::available_parallelism()
+        .map(|n| n.get() as u32)
+        .unwrap_or(4);
       tc.workers = (cpus / 2).max(1);
     }
 
@@ -247,9 +282,14 @@ impl TestRunner {
       .build()?;
 
     // Can't use .await in a sync method, so use try_lock.
-    let mut tests = self.tests.try_lock()
+    let mut tests = self
+      .tests
+      .try_lock()
       .map_err(|_| napi::Error::from_reason("tests lock contended during registration"))?;
-    tests.push(RegisteredTest { meta, callback: Arc::new(tsfn) });
+    tests.push(RegisteredTest {
+      meta,
+      callback: Arc::new(tsfn),
+    });
     Ok(())
   }
 
@@ -257,7 +297,9 @@ impl TestRunner {
   #[napi]
   pub fn register_suite(&self, meta: SuiteMeta) -> Result<String> {
     let id = format!("{}::{}", meta.file, meta.name);
-    let mut suites = self.suites.try_lock()
+    let mut suites = self
+      .suites
+      .try_lock()
       .map_err(|_| napi::Error::from_reason("suites lock contended"))?;
     suites.push(RegisteredSuite { meta, id: id.clone() });
     Ok(id)
@@ -277,9 +319,14 @@ impl TestRunner {
       .max_queue_size::<0>()
       .build()?;
 
-    let mut hooks = self.hooks.try_lock()
+    let mut hooks = self
+      .hooks
+      .try_lock()
       .map_err(|_| napi::Error::from_reason("hooks lock contended"))?;
-    hooks.push(RegisteredHook { meta, callback: Arc::new(tsfn) });
+    hooks.push(RegisteredHook {
+      meta,
+      callback: Arc::new(tsfn),
+    });
     Ok(())
   }
 
@@ -296,8 +343,13 @@ impl TestRunner {
 
     if tests.is_empty() {
       return Ok(RunSummary {
-        total: 0, passed: 0, failed: 0, skipped: 0, flaky: 0,
-        duration_ms: 0.0, results: Vec::new(),
+        total: 0,
+        passed: 0,
+        failed: 0,
+        skipped: 0,
+        flaky: 0,
+        duration_ms: 0.0,
+        results: Vec::new(),
       });
     }
 
@@ -309,7 +361,8 @@ impl TestRunner {
         let meta = t.meta.clone();
 
         // Deserialize annotations from JSON — same type as Rust core.
-        let annotations: Vec<TestAnnotation> = meta.annotations
+        let annotations: Vec<TestAnnotation> = meta
+          .annotations
           .iter()
           .filter_map(|v| serde_json::from_value::<TestAnnotation>(v.clone()).ok())
           .collect();
@@ -325,17 +378,20 @@ impl TestRunner {
             let cb = Arc::clone(&cb);
             Box::pin(async move {
               // Get Page from the fixture pool (created by the core worker).
-              let page: std::sync::Arc<ferridriver::Page> = pool.get("page").await
-                .map_err(|e| TestFailure {
-                  message: format!("fixture 'page' failed: {e}"),
-                  stack: None, diff: None, screenshot: None,
-                })?;
+              let page: std::sync::Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
+                message: format!("fixture 'page' failed: {e}"),
+                stack: None,
+                diff: None,
+                screenshot: None,
+              })?;
 
               // Wrap as NAPI Page and call JS callback.
               let napi_page = crate::page::Page::wrap((*page).clone());
               call_js_test(&cb, napi_page).await.map_err(|e| TestFailure {
                 message: e,
-                stack: None, diff: None, screenshot: None,
+                stack: None,
+                diff: None,
+                screenshot: None,
               })
             })
           }),
@@ -403,7 +459,10 @@ impl TestRunner {
       match r.status.as_str() {
         "passed" => passed += 1,
         "skipped" => skipped += 1,
-        "flaky" => { flaky += 1; passed += 1; }
+        "flaky" => {
+          flaky += 1;
+          passed += 1;
+        },
         _ => failed += 1,
       }
       results.push(r.clone());
@@ -422,30 +481,36 @@ impl TestRunner {
 
   /// Get config accessors.
   #[napi]
-  pub fn get_timeout(&self) -> f64 { self.config.timeout as f64 }
+  pub fn get_timeout(&self) -> f64 {
+    self.config.timeout as f64
+  }
   #[napi]
-  pub fn get_expect_timeout(&self) -> f64 { self.config.expect_timeout as f64 }
+  pub fn get_expect_timeout(&self) -> f64 {
+    self.config.expect_timeout as f64
+  }
   #[napi]
-  pub fn get_retries(&self) -> i32 { self.config.retries as i32 }
+  pub fn get_retries(&self) -> i32 {
+    self.config.retries as i32
+  }
   #[napi]
-  pub fn worker_count(&self) -> i32 { self.config.workers as i32 }
+  pub fn worker_count(&self) -> i32 {
+    self.config.workers as i32
+  }
   #[napi]
-  pub fn get_base_url(&self) -> Option<String> { self.config.base_url.clone() }
+  pub fn get_base_url(&self) -> Option<String> {
+    self.config.base_url.clone()
+  }
 
   /// Discover test files.
   #[napi]
   pub fn discover_files(&self, root_dir: String) -> Result<Vec<String>> {
-    ferridriver_test::discovery::find_test_files(
-      &root_dir, &self.config.test_match, &self.config.test_ignore,
-    ).map_err(napi::Error::from_reason)
+    ferridriver_test::discovery::find_test_files(&root_dir, &self.config.test_match, &self.config.test_ignore)
+      .map_err(napi::Error::from_reason)
   }
 }
 
 /// Call a JS test callback with a Page and await the returned Promise.
-async fn call_js_test(
-  tsfn: &TestCallbackFn,
-  page: crate::page::Page,
-) -> std::result::Result<(), String> {
+async fn call_js_test(tsfn: &TestCallbackFn, page: crate::page::Page) -> std::result::Result<(), String> {
   // ThreadsafeFunction::call_async sends the Page to the JS thread,
   // calls the callback, and returns the result as a Future.
   // call_async returns Promise<()>, then we await the promise itself.
@@ -497,4 +562,3 @@ impl ferridriver_test::reporter::Reporter for ResultCollectorReporter {
     Ok(())
   }
 }
-

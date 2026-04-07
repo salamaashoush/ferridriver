@@ -27,7 +27,7 @@
   clippy::unnecessary_sort_by,
   clippy::collapsible_match,
   clippy::if_same_then_else,
-  clippy::single_match,
+  clippy::single_match
 )]
 // BDD step proc macros use BrowserWorld, DataTable etc. in expanded code; clippy can't see through macros.
 #![allow(unused_imports)]
@@ -80,6 +80,7 @@ pub use ferridriver_bdd_macros::{after, before, given, param_type, step, then, w
 pub use inventory;
 
 pub mod data_table;
+pub mod executor;
 pub mod expression;
 pub mod feature;
 pub mod filter;
@@ -173,11 +174,10 @@ pub fn run_bdd_harness() {
     let overrides = parse_bdd_cli_args();
 
     // Resolve config.
-    let mut config = ferridriver_test::config::resolve_config(&overrides)
-      .unwrap_or_else(|e| {
-        eprintln!("config error: {e}");
-        std::process::exit(1);
-      });
+    let mut config = ferridriver_test::config::resolve_config(&overrides).unwrap_or_else(|e| {
+      eprintln!("config error: {e}");
+      std::process::exit(1);
+    });
 
     // BDD-specific config from env vars.
     let feature_patterns = std::env::var("FERRIDRIVER_FEATURES")
@@ -196,15 +196,12 @@ pub fn run_bdd_harness() {
     }
 
     // Discover and parse .feature files.
-    let feature_set = match feature::FeatureSet::discover_and_parse(
-      &config.features,
-      &config.test_ignore,
-    ) {
+    let feature_set = match feature::FeatureSet::discover_and_parse(&config.features, &config.test_ignore) {
       Ok(fs) => fs,
       Err(e) => {
         eprintln!("feature discovery error: {e}");
         return 1;
-      }
+      },
     };
 
     if feature_set.features.is_empty() {
@@ -243,27 +240,27 @@ fn parse_bdd_cli_args() -> ferridriver_test::config::CliOverrides {
       "--workers" | "-j" => {
         i += 1;
         overrides.workers = args.get(i).and_then(|v| v.parse().ok());
-      }
+      },
       "--retries" => {
         i += 1;
         overrides.retries = args.get(i).and_then(|v| v.parse().ok());
-      }
+      },
       "--grep" | "-g" => {
         i += 1;
         overrides.grep = args.get(i).cloned();
-      }
+      },
       "--tag" => {
         i += 1;
         overrides.tag = args.get(i).cloned();
-      }
+      },
       "--list" => overrides.list_only = true,
       "--forbid-only" => overrides.forbid_only = true,
       "--last-failed" => overrides.last_failed = true,
       "--profile" => {
         i += 1;
         overrides.profile = args.get(i).cloned();
-      }
-      _ => {}
+      },
+      _ => {},
     }
     i += 1;
   }

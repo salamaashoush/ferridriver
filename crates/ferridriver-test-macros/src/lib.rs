@@ -22,7 +22,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{parse_macro_input, Expr, FnArg, ItemFn, Lit, Meta, Pat, Token, Type};
+use syn::{Expr, FnArg, ItemFn, Lit, Meta, Pat, Token, Type, parse_macro_input};
 
 /// Attribute arguments: `#[ferritest(retries = 2, timeout = "30s", tag = "smoke")]`
 struct FerritestArgs {
@@ -60,31 +60,36 @@ impl Parse for FerritestArgs {
                   args.retries = Some(i.base10_parse()?);
                 }
               }
-            }
+            },
             "timeout" => {
               if let syn::Expr::Lit(lit) = &nv.value {
                 if let Lit::Str(s) = &lit.lit {
                   args.timeout_ms = Some(parse_duration_str(&s.value())?);
                 }
               }
-            }
+            },
             "tag" => {
               if let syn::Expr::Lit(lit) = &nv.value {
                 if let Lit::Str(s) = &lit.lit {
                   args.tags.push(s.value());
                 }
               }
-            }
+            },
             "fixme" => {
               if let syn::Expr::Lit(lit) = &nv.value {
                 if let Lit::Str(s) = &lit.lit {
                   args.fixme = Some(Some(s.value()));
                 }
               }
-            }
-            _ => return Err(syn::Error::new_spanned(&nv.path, format!("unknown ferritest attribute: {ident}"))),
+            },
+            _ => {
+              return Err(syn::Error::new_spanned(
+                &nv.path,
+                format!("unknown ferritest attribute: {ident}"),
+              ));
+            },
           }
-        }
+        },
         Meta::Path(p) => {
           let ident = p.get_ident().map(ToString::to_string).unwrap_or_default();
           match ident.as_str() {
@@ -94,10 +99,10 @@ impl Parse for FerritestArgs {
             "only" => args.only = true,
             _ => return Err(syn::Error::new_spanned(p, format!("unknown ferritest flag: {ident}"))),
           }
-        }
+        },
         Meta::List(_) => {
           return Err(syn::Error::new_spanned(&meta, "unexpected nested attribute"));
-        }
+        },
       }
     }
     Ok(args)
@@ -117,8 +122,12 @@ fn parse_duration_str(s: &str) -> syn::Result<u64> {
       .parse::<u64>()
       .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(), format!("invalid timeout: {e}")))
   } else {
-    s.parse::<u64>()
-      .map_err(|e| syn::Error::new(proc_macro2::Span::call_site(), format!("invalid timeout (use '30s' or '5000ms'): {e}")))
+    s.parse::<u64>().map_err(|e| {
+      syn::Error::new(
+        proc_macro2::Span::call_site(),
+        format!("invalid timeout (use '30s' or '5000ms'): {e}"),
+      )
+    })
   }
 }
 
@@ -190,11 +199,13 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   match &args.fixme {
     Some(None) => {
       annotations.push(quote! { ferridriver_test::model::TestAnnotation::Fixme { reason: None, condition: None } });
-    }
+    },
     Some(Some(cond)) => {
-      annotations.push(quote! { ferridriver_test::model::TestAnnotation::Fixme { reason: None, condition: Some(#cond.to_string()) } });
-    }
-    None => {}
+      annotations.push(
+        quote! { ferridriver_test::model::TestAnnotation::Fixme { reason: None, condition: Some(#cond.to_string()) } },
+      );
+    },
+    None => {},
   }
   if args.only {
     annotations.push(quote! { ferridriver_test::model::TestAnnotation::Only });
@@ -325,7 +336,7 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
     }
   }
 
-  let fixture_array = fixture_names.iter().map(|f| quote! { #f });
+  let _fixture_array = fixture_names.iter().map(|f| quote! { #f });
 
   // Generate one inventory::submit! per data row.
   let mut submissions = Vec::new();

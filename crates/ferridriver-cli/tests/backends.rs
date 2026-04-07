@@ -9,7 +9,7 @@
   clippy::needless_pass_by_value,
   clippy::redundant_closure_for_method_calls,
   clippy::format_push_string,
-  clippy::semicolon_if_nothing_returned,
+  clippy::semicolon_if_nothing_returned
 )]
 //! Integration tests for ferridriver across all backends.
 //!
@@ -497,7 +497,10 @@ fn test_cookies(c: &mut McpClient) {
   let r = c.call_tool("cookies", json!({"action": "get"}));
   ok(&r, "cookies get");
   // set
-  let r = c.call_tool("cookies", json!({"action": "set", "name": "k", "value": "v", "domain": "example.com"}));
+  let r = c.call_tool(
+    "cookies",
+    json!({"action": "set", "name": "k", "value": "v", "domain": "example.com"}),
+  );
   ok(&r, "cookies set");
   // get (has cookie)
   let t = c.tool_text("cookies", json!({"action": "get"}));
@@ -738,6 +741,103 @@ fn test_markdown_links(c: &mut McpClient) {
   assert!(t.contains("[Example](https://example.com)"), "markdown links: {t}");
 }
 
+// ─── BDD tools ─────────────────────────────────────────────────────────────
+
+fn test_list_steps(c: &mut McpClient) {
+  let t = c.tool_text("list_steps", json!({}));
+  assert!(t.contains("Step Definitions"), "list_steps should return header: {t}");
+  assert!(
+    t.contains("I navigate to"),
+    "list_steps should include navigation step: {t}"
+  );
+  assert!(t.contains("I click"), "list_steps should include click step: {t}");
+}
+
+fn test_list_steps_filter(c: &mut McpClient) {
+  let t = c.tool_text("list_steps", json!({"filter": "navigate"}));
+  assert!(t.contains("navigate"), "filtered list should include navigate: {t}");
+  assert!(!t.contains("I click"), "filtered list should not include click: {t}");
+}
+
+fn test_list_steps_kind(c: &mut McpClient) {
+  let t = c.tool_text("list_steps", json!({"kind": "then"}));
+  assert!(t.contains("Then"), "kind filter should show Then steps: {t}");
+  // Then section should not contain Given steps.
+  assert!(!t.contains("## Given"), "kind=then should not show Given section: {t}");
+}
+
+fn test_run_step_navigate(c: &mut McpClient) {
+  let t = c.tool_text("run_step", json!({"step": "I navigate to \"https://example.com\""}));
+  assert!(t.contains("[Passed]"), "run_step navigate should pass: {t}");
+  assert!(t.contains("Example Domain"), "run_step should return snapshot: {t}");
+}
+
+fn test_run_step_click(c: &mut McpClient) {
+  c.nav("<button id='btn' onclick='document.title=\"clicked\"'>Click Me</button>");
+  let t = c.tool_text("run_step", json!({"step": "I click \"#btn\""}));
+  assert!(t.contains("[Passed]"), "run_step click should pass: {t}");
+}
+
+fn test_run_step_fill(c: &mut McpClient) {
+  c.nav("<input id='name' type='text'>");
+  let t = c.tool_text("run_step", json!({"step": "I fill \"#name\" with \"test value\""}));
+  assert!(t.contains("[Passed]"), "run_step fill should pass: {t}");
+}
+
+fn test_run_step_undefined(c: &mut McpClient) {
+  let t = c.tool_text("run_step", json!({"step": "I do something that does not exist"}));
+  assert!(
+    t.contains("Pending") || t.contains("undefined"),
+    "undefined step should be pending: {t}"
+  );
+}
+
+fn test_run_step_assertion(c: &mut McpClient) {
+  c.nav_url("https://example.com");
+  let t = c.tool_text("run_step", json!({"step": "\"h1\" should be visible"}));
+  assert!(t.contains("[Passed]"), "run_step assertion should pass: {t}");
+}
+
+fn test_run_scenario_inline(c: &mut McpClient) {
+  let feature = r#"Feature: Inline test
+  Scenario: Visit example
+    Given I navigate to "https://example.com"
+    Then "h1" should be visible"#;
+  let t = c.tool_text("run_scenario", json!({"feature": feature}));
+  assert!(t.contains("[PASS]"), "run_scenario should show PASS: {t}");
+  assert!(t.contains("1 passed"), "run_scenario should show summary: {t}");
+  assert!(t.contains("0 failed"), "run_scenario should show 0 failed: {t}");
+}
+
+fn test_run_scenario_multi_step(c: &mut McpClient) {
+  let feature = r##"Feature: Multi step
+  Scenario: Fill and check
+    Given I navigate to "https://demo.playwright.dev/todomvc/#/"
+    When I fill ".new-todo" with "Buy milk"
+    And I press "Enter"
+    Then ".todo-list" should be visible"##;
+  let t = c.tool_text("run_scenario", json!({"feature": feature}));
+  assert!(t.contains("[PASS]"), "multi-step scenario should pass: {t}");
+  assert!(t.contains("[ok]"), "individual steps should show ok: {t}");
+}
+
+fn test_run_scenario_failure(c: &mut McpClient) {
+  let feature = r##"Feature: Fail test
+  Scenario: Bad selector
+    Given I navigate to "https://example.com"
+    When I click "#nonexistent""##;
+  let t = c.tool_text("run_scenario", json!({"feature": feature}));
+  assert!(t.contains("[FAIL]"), "failing scenario should show FAIL: {t}");
+  assert!(t.contains("1 failed"), "summary should show 1 failed: {t}");
+}
+
+fn test_run_scenario_filter(c: &mut McpClient) {
+  let feature = "Feature: Filtered\n  Scenario: First\n    Given I navigate to \"https://example.com\"\n  Scenario: Second\n    Given I navigate to \"https://example.com\"";
+  let t = c.tool_text("run_scenario", json!({"feature": feature, "scenario": "First"}));
+  assert!(t.contains("1 passed"), "filter should run only 1 scenario: {t}");
+  assert!(!t.contains("Second"), "filter should exclude Second: {t}");
+}
+
 // ─── Run all tests on one client ────────────────────────────────────────────
 
 fn run_all_tests(backend: &str) {
@@ -834,6 +934,20 @@ fn run_all_tests(backend: &str) {
   run_cdp!(test_set_geolocation);
   run_cdp!(test_set_network_state);
   run_cdp!(test_trace);
+
+  // BDD tools
+  run!(test_list_steps);
+  run!(test_list_steps_filter);
+  run!(test_list_steps_kind);
+  run!(test_run_step_navigate);
+  run!(test_run_step_click);
+  run!(test_run_step_fill);
+  run!(test_run_step_undefined);
+  run!(test_run_step_assertion);
+  run!(test_run_scenario_inline);
+  run!(test_run_scenario_multi_step);
+  run!(test_run_scenario_failure);
+  run!(test_run_scenario_filter);
 
   // Multi-page tests last (they change session state)
   run!(test_new_page);

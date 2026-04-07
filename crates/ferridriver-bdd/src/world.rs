@@ -5,8 +5,8 @@ use std::sync::Arc;
 
 use rustc_hash::FxHashMap;
 
-use ferridriver::context::ContextRef;
 use ferridriver::Page;
+use ferridriver::context::ContextRef;
 
 /// Shared mutable state for a single BDD scenario.
 ///
@@ -89,7 +89,11 @@ impl BrowserWorld {
 
   /// Remove and return typed state.
   pub fn take_state<T: Send + Sync + 'static>(&mut self) -> Option<T> {
-    self.state.remove(&TypeId::of::<T>()).and_then(|b| b.downcast().ok()).map(|b| *b)
+    self
+      .state
+      .remove(&TypeId::of::<T>())
+      .and_then(|b| b.downcast().ok())
+      .map(|b| *b)
   }
 
   /// Set the test info for attachments.
@@ -105,6 +109,14 @@ impl BrowserWorld {
   /// Set the feature file directory for resolving relative fixture paths.
   pub fn set_feature_dir(&mut self, dir: std::path::PathBuf) {
     self.feature_dir = Some(dir);
+  }
+
+  /// Clear scenario-specific state (variables, typed state) between scenario runs.
+  /// Page and context are preserved -- only transient per-scenario data is reset.
+  pub fn reset_scenario_state(&mut self) {
+    self.vars.clear();
+    self.state.clear();
+    self.feature_dir = None;
   }
 
   /// Resolve a path relative to the feature file directory.
@@ -125,11 +137,13 @@ impl BrowserWorld {
   /// Attach binary data to the current test (appears in reports).
   pub async fn attach(&self, name: &str, content_type: &str, data: Vec<u8>) {
     if let Some(info) = &self.test_info {
-      info.attach(
-        name.to_string(),
-        content_type.to_string(),
-        ferridriver_test::model::AttachmentBody::Bytes(data),
-      ).await;
+      info
+        .attach(
+          name.to_string(),
+          content_type.to_string(),
+          ferridriver_test::model::AttachmentBody::Bytes(data),
+        )
+        .await;
     }
   }
 
@@ -140,10 +154,13 @@ impl BrowserWorld {
 
   /// Execute another step from within a step handler (step composition).
   pub async fn run_step(&mut self, text: &str) -> Result<(), crate::step::StepError> {
-    let registry = self.registry.clone().ok_or_else(|| {
-      crate::step::StepError::from("step composition requires registry (internal error)")
-    })?;
-    let step_match = registry.find_match(text).map_err(|e| crate::step::StepError::from(e.to_string()))?;
+    let registry = self
+      .registry
+      .clone()
+      .ok_or_else(|| crate::step::StepError::from("step composition requires registry (internal error)"))?;
+    let step_match = registry
+      .find_match(text)
+      .map_err(|e| crate::step::StepError::from(e.to_string()))?;
     (step_match.def.handler)(self, step_match.params, None, None).await
   }
 

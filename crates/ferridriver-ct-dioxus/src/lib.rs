@@ -25,10 +25,9 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use ferridriver_test::config::TestConfig;
 use ferridriver_test::ct::server::ComponentServer;
 use ferridriver_test::model::*;
-use ferridriver_test::config::TestConfig;
-use ferridriver_test::reporter;
 use ferridriver_test::runner::TestRunner;
 
 pub use ferridriver_ct_dioxus_macros::component_test;
@@ -36,10 +35,10 @@ pub use ferridriver_test;
 pub use inventory;
 
 pub mod prelude {
+  pub use crate::component_test;
   pub use ferridriver::{Locator, Page};
   pub use ferridriver_test::expect::expect;
   pub use ferridriver_test::model::TestFailure;
-  pub use crate::component_test;
 }
 
 pub struct ComponentTestRegistration {
@@ -103,9 +102,7 @@ async fn run_inner(harness_cfg: HarnessConfig) -> i32 {
   // Step 2: Find and serve the built output.
   // Dioxus outputs to target/dx/<app-name>/public/
   let dist_dir = find_dx_dist(&project_dir);
-  let server = ComponentServer::start(&dist_dir)
-    .await
-    .expect("failed to start server");
+  let server = ComponentServer::start(&dist_dir).await.expect("failed to start server");
   let url = server.url();
   eprintln!("[ferridriver-ct] Serving {} test(s) at {url}", registrations.len());
 
@@ -127,10 +124,16 @@ async fn run_inner(harness_cfg: HarnessConfig) -> i32 {
           let nav_url = nav_url.clone();
           Box::pin(async move {
             let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
-              message: e, stack: None, diff: None, screenshot: None,
+              message: e,
+              stack: None,
+              diff: None,
+              screenshot: None,
             })?;
             page.goto(&nav_url, None).await.map_err(|e| TestFailure {
-              message: format!("navigate failed: {e}"), stack: None, diff: None, screenshot: None,
+              message: format!("navigate failed: {e}"),
+              stack: None,
+              diff: None,
+              screenshot: None,
             })?;
             let page_owned = ferridriver::Page::new(page.inner().clone());
             test_fn_ptr(page_owned).await
@@ -173,14 +176,26 @@ async fn run_inner(harness_cfg: HarnessConfig) -> i32 {
   };
 
   // Apply harness config (from main! macro)
-  if let Some(ref b) = harness_cfg.backend { config.browser.backend.clone_from(b); }
-  if let Some(h) = harness_cfg.headless { config.browser.headless = h; }
-  if let Some(w) = harness_cfg.workers { config.workers = w; }
-  if let Some(t) = harness_cfg.timeout { config.timeout = t; }
+  if let Some(ref b) = harness_cfg.backend {
+    config.browser.backend.clone_from(b);
+  }
+  if let Some(h) = harness_cfg.headless {
+    config.browser.headless = h;
+  }
+  if let Some(w) = harness_cfg.workers {
+    config.workers = w;
+  }
+  if let Some(t) = harness_cfg.timeout {
+    config.timeout = t;
+  }
 
   // CLI args override harness config (highest priority)
-  if let Some(w) = cli.workers { config.workers = w; }
-  if cli.headed { config.browser.headless = false; }
+  if let Some(w) = cli.workers {
+    config.workers = w;
+  }
+  if cli.headed {
+    config.browser.headless = false;
+  }
   if let Ok(backend) = std::env::var("FERRIDRIVER_BACKEND") {
     config.browser.backend = backend;
   }
@@ -229,7 +244,9 @@ fn find_dx_dist(project_dir: &PathBuf) -> PathBuf {
     if workspace_target.exists() && !search_dirs.contains(&workspace_target) {
       search_dirs.push(workspace_target);
     }
-    if !dir.pop() { break; }
+    if !dir.pop() {
+      break;
+    }
   }
 
   for dx_dir in &search_dirs {
@@ -252,7 +269,11 @@ fn find_dx_dist(project_dir: &PathBuf) -> PathBuf {
 
   panic!(
     "[ferridriver-ct] cannot find Dioxus build output. Searched:\n  {}",
-    search_dirs.iter().map(|p| p.display().to_string()).collect::<Vec<_>>().join("\n  ")
+    search_dirs
+      .iter()
+      .map(|p| p.display().to_string())
+      .collect::<Vec<_>>()
+      .join("\n  ")
   );
 }
 
@@ -296,7 +317,9 @@ fn parse_ct_args() -> ferridriver_test::CliOverrides {
         if let Some(val) = args.get(i) {
           // SAFETY: single-threaded at this point (called before runner starts)
           #[allow(unused_unsafe)]
-          unsafe { std::env::set_var("FERRIDRIVER_BACKEND", val); }
+          unsafe {
+            std::env::set_var("FERRIDRIVER_BACKEND", val);
+          }
         }
       },
       _ => {},
@@ -309,7 +332,11 @@ fn parse_ct_args() -> ferridriver_test::CliOverrides {
 fn find_project_dir() -> PathBuf {
   let mut dir = std::env::current_dir().expect("cannot get cwd");
   loop {
-    if dir.join("Cargo.toml").exists() { return dir; }
-    if !dir.pop() { panic!("cannot find Cargo.toml"); }
+    if dir.join("Cargo.toml").exists() {
+      return dir;
+    }
+    if !dir.pop() {
+      panic!("cannot find Cargo.toml");
+    }
   }
 }

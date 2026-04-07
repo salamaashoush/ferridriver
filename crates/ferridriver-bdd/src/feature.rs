@@ -33,26 +33,23 @@ impl FeatureSet {
         raw_pattern.clone()
       };
 
-      let entries =
-        glob::glob(&pattern).map_err(|e| format!("invalid glob pattern \"{pattern}\": {e}"))?;
+      let entries = glob::glob(&pattern).map_err(|e| format!("invalid glob pattern \"{pattern}\": {e}"))?;
 
       for entry in entries {
         match entry {
           Ok(path) => {
             if path.extension().and_then(|e| e.to_str()) == Some("feature") {
-              let should_ignore = ignore.iter().any(|ig| {
-                glob::Pattern::new(ig)
-                  .map(|p| p.matches_path(&path))
-                  .unwrap_or(false)
-              });
+              let should_ignore = ignore
+                .iter()
+                .any(|ig| glob::Pattern::new(ig).map(|p| p.matches_path(&path)).unwrap_or(false));
               if !should_ignore {
                 files.push(path);
               }
             }
-          }
+          },
           Err(e) => {
             tracing::warn!("glob error: {e}");
-          }
+          },
         }
       }
     }
@@ -76,13 +73,12 @@ impl FeatureSet {
 
     for path in files {
       let env = if let Some(lang) = language {
-        gherkin::GherkinEnv::new(lang)
-          .map_err(|e| format!("unsupported language \"{lang}\": {e}"))?
+        gherkin::GherkinEnv::new(lang).map_err(|e| format!("unsupported language \"{lang}\": {e}"))?
       } else {
         gherkin::GherkinEnv::default()
       };
-      let mut feature = gherkin::Feature::parse_path(&path, env)
-        .map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+      let mut feature =
+        gherkin::Feature::parse_path(&path, env).map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
 
       // parse_path may not set the path field, ensure it is set.
       if feature.path.is_none() {
@@ -95,11 +91,20 @@ impl FeatureSet {
     Ok(Self { features })
   }
 
+  /// Parse inline Gherkin text into a `FeatureSet`.
+  pub fn parse_text(text: &str) -> Result<Self, String> {
+    let env = gherkin::GherkinEnv::default();
+    let feature = gherkin::Feature::parse(text, env).map_err(|e| format!("failed to parse Gherkin text: {e}"))?;
+    Ok(Self {
+      features: vec![ParsedFeature {
+        path: PathBuf::from("<inline>"),
+        feature,
+      }],
+    })
+  }
+
   /// Discover and parse in one step.
-  pub fn discover_and_parse(
-    patterns: &[String],
-    ignore: &[String],
-  ) -> Result<Self, String> {
+  pub fn discover_and_parse(patterns: &[String], ignore: &[String]) -> Result<Self, String> {
     let files = Self::discover(patterns, ignore)?;
     if files.is_empty() {
       tracing::warn!("no .feature files found matching patterns: {patterns:?}");
@@ -112,13 +117,7 @@ impl FeatureSet {
 pub fn extract_tags(tags: &[String]) -> Vec<String> {
   tags
     .iter()
-    .map(|t| {
-      if t.starts_with('@') {
-        t.clone()
-      } else {
-        format!("@{t}")
-      }
-    })
+    .map(|t| if t.starts_with('@') { t.clone() } else { format!("@{t}") })
     .collect()
 }
 

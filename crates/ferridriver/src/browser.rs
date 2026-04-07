@@ -23,11 +23,11 @@ use crate::options::LaunchOptions;
 use crate::page::Page;
 use crate::state::{BrowserState, ConnectMode};
 use std::sync::Arc;
-use tokio::sync::Mutex;
+use tokio::sync::RwLock;
 
 /// Browser instance. Manages contexts, pages, and browser lifecycle.
 pub struct Browser {
-  state: Arc<Mutex<BrowserState>>,
+  state: Arc<RwLock<BrowserState>>,
   backend_kind: BackendKind,
 }
 
@@ -53,7 +53,7 @@ impl Browser {
     let mut state = BrowserState::with_options(mode, options);
     Box::pin(state.ensure_browser()).await?;
     Ok(Self {
-      state: Arc::new(Mutex::new(state)),
+      state: Arc::new(RwLock::new(state)),
       backend_kind,
     })
   }
@@ -130,20 +130,20 @@ impl Browser {
   ///
   /// Returns an error if the browser cannot be closed cleanly.
   pub async fn close(&self) -> Result<(), String> {
-    let mut state = self.state.lock().await;
+    let mut state = self.state.write().await;
     state.shutdown().await;
     Ok(())
   }
 
   /// Access the internal state (for MCP server integration).
   #[must_use]
-  pub fn state(&self) -> &Arc<Mutex<BrowserState>> {
+  pub fn state(&self) -> &Arc<RwLock<BrowserState>> {
     &self.state
   }
 
   /// List all browser contexts.
   pub async fn contexts(&self) -> Vec<ContextRef> {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     state
       .list_contexts()
       .await
@@ -164,7 +164,7 @@ impl Browser {
 
   /// Check if the browser is connected and alive.
   pub async fn is_connected(&self) -> bool {
-    let state = self.state.lock().await;
+    let state = self.state.read().await;
     state.is_connected()
   }
 }
