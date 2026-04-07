@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::{StepCategory, StepStatus, TestStep};
+use crate::model::{StepStatus, TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct CucumberJsonReporter {
@@ -94,7 +94,7 @@ impl Reporter for CucumberJsonReporter {
 
       let mut steps = Vec::new();
       for step in &outcome.steps {
-        if step.category != StepCategory::TestStep {
+        if !step.category.is_visible() {
           continue;
         }
         let status = match step.status {

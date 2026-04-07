@@ -4,7 +4,6 @@ use std::time::Duration;
 
 use rustc_hash::FxHashMap;
 
-use crate::model::StepCategory;
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct UsageReporter {
@@ -39,7 +38,7 @@ impl Default for UsageReporter {
 impl Reporter for UsageReporter {
   async fn on_event(&mut self, event: &ReporterEvent) {
     if let ReporterEvent::StepFinished(ev) = event {
-      if ev.category != StepCategory::TestStep {
+      if !ev.category.is_visible() {
         return;
       }
 

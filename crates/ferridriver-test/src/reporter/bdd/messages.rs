@@ -3,7 +3,6 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use crate::model::StepCategory;
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct CucumberMessagesReporter {
@@ -32,7 +31,7 @@ impl Reporter for CucumberMessagesReporter {
         }));
       }
       ReporterEvent::StepFinished(event) => {
-        if event.category != StepCategory::TestStep { return; }
+        if !event.category.is_visible() { return; }
         let status = if event.error.is_some() { "FAILED" } else { "PASSED" };
         self.messages.push(serde_json::json!({
           "testStepFinished": {

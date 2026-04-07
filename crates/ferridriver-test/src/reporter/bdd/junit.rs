@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::{StepCategory, StepStatus, TestOutcome, TestStatus, TestStep};
+use crate::model::{StepStatus, TestOutcome, TestStatus, TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct BddJunitReporter {
@@ -99,7 +99,7 @@ impl Reporter for BddJunitReporter {
           _ => {}
         }
 
-        let user_steps: Vec<&TestStep> = test.steps.iter().filter(|s| s.category == StepCategory::TestStep).collect();
+        let user_steps: Vec<&TestStep> = test.steps.iter().filter(|s| s.category.is_visible()).collect();
         if !user_steps.is_empty() {
           let mut lines = String::new();
           format_steps(&user_steps, &mut lines, 0);
@@ -135,7 +135,7 @@ fn format_steps(steps: &[&TestStep], out: &mut String, indent: usize) {
     if let Some(err) = &step.error {
       let _ = writeln!(out, "{pad}  Error: {err}");
     }
-    let nested: Vec<&TestStep> = step.steps.iter().filter(|s| s.category == StepCategory::TestStep).collect();
+    let nested: Vec<&TestStep> = step.steps.iter().filter(|s| s.category.is_visible()).collect();
     if !nested.is_empty() {
       format_steps(&nested, out, indent + 1);
     }

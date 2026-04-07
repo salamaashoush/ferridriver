@@ -6,7 +6,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::model::{StepCategory, TestStep};
+use crate::model::{TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 /// Serializable test result for the HTML report.
@@ -152,7 +152,7 @@ impl Reporter for HtmlReporter {
 fn serialize_html_steps(steps: &[TestStep]) -> Vec<HtmlStep> {
   steps
     .iter()
-    .filter(|s| s.category == StepCategory::TestStep)
+    .filter(|s| s.category.is_visible())
     .map(|s| HtmlStep {
       title: s.title.clone(),
       status: format!("{:?}", s.status),

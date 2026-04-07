@@ -485,6 +485,15 @@ pub enum StepCategory {
   PwApi,
 }
 
+impl StepCategory {
+  /// Whether this step category is visible in standard reporter output.
+  /// TestStep and Hook are always shown. Expect, Fixture, PwApi are hidden
+  /// unless verbose mode is enabled.
+  pub fn is_visible(&self) -> bool {
+    matches!(self, Self::TestStep | Self::Hook)
+  }
+}
+
 impl fmt::Display for StepCategory {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     match self {

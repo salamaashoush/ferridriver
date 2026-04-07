@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde::Serialize;
 
-use crate::model::{StepCategory, TestStep};
+use crate::model::{TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct JsonReporter {
@@ -68,7 +68,7 @@ impl JsonReporter {
 fn serialize_steps(steps: &[TestStep]) -> Vec<JsonStep> {
   steps
     .iter()
-    .filter(|s| s.category == StepCategory::TestStep)
+    .filter(|s| s.category.is_visible())
     .map(|s| JsonStep {
       title: s.title.clone(),
       duration_ms: s.duration.as_millis(),

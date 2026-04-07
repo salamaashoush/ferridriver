@@ -19,8 +19,8 @@ use crate::config::TestConfig;
 use crate::dispatcher::{SerialBatch, TestAssignment, WorkItem};
 use crate::fixture::{FixturePool, FixtureScope};
 use crate::model::{
-  Attachment, AttachmentBody, ExpectedStatus, Hooks, TestAnnotation, TestFailure, TestInfo,
-  TestOutcome, TestStatus,
+  Attachment, AttachmentBody, ExpectedStatus, Hooks, StepCategory, TestAnnotation, TestFailure,
+  TestInfo, TestOutcome, TestStatus,
 };
 use crate::reporter::{EventBus, ReporterEvent};
 
@@ -92,10 +92,44 @@ impl Worker {
     }
 
     // Run afterAll for every suite that had beforeAll on this worker.
-    for state in active_suites.values() {
+    for (suite_key, state) in &active_suites {
       if state.before_all_ran {
-        for hook in &state.hooks.after_all {
-          if let Err(e) = hook(custom_fixture_pool.clone()).await {
+        for (i, hook) in state.hooks.after_all.iter().enumerate() {
+          let step_title = if state.hooks.after_all.len() == 1 {
+            "afterAll".to_string()
+          } else {
+            format!("afterAll [{i}]")
+          };
+          // afterAll has no test context — emit synthetic step events.
+          let step_id = format!("hook:afterAll:{suite_key}:{i}");
+          // Use a synthetic TestId for the suite.
+          let synthetic_id = crate::model::TestId {
+            file: suite_key.clone(),
+            suite: None,
+            name: step_title.clone(),
+            line: None,
+          };
+          self.event_bus.emit(ReporterEvent::StepStarted(Box::new(crate::reporter::StepStartedEvent {
+            test_id: synthetic_id.clone(),
+            step_id: step_id.clone(),
+            parent_step_id: None,
+            title: step_title.clone(),
+            category: StepCategory::Hook,
+          }))).await;
+          let start = Instant::now();
+          let result = hook(custom_fixture_pool.clone()).await;
+          let duration = start.elapsed();
+          let error = result.as_ref().err().map(|e| format!("{e}"));
+          self.event_bus.emit(ReporterEvent::StepFinished(Box::new(crate::reporter::StepFinishedEvent {
+            test_id: synthetic_id,
+            step_id,
+            title: step_title,
+            category: StepCategory::Hook,
+            duration,
+            error: error.clone(),
+            metadata: None,
+          }))).await;
+          if let Err(e) = result {
             tracing::warn!(target: "ferridriver::worker", "afterAll error: {e}");
           }
         }
@@ -213,8 +247,33 @@ impl Worker {
       });
 
     if !suite_state.before_all_ran && !hooks.before_all.is_empty() {
-      for hook in &hooks.before_all {
-        if let Err(e) = hook(custom_pool.clone()).await {
+      for (i, hook) in hooks.before_all.iter().enumerate() {
+        let step_title = if hooks.before_all.len() == 1 {
+          "beforeAll".to_string()
+        } else {
+          format!("beforeAll [{i}]")
+        };
+        self.event_bus.emit(ReporterEvent::StepStarted(Box::new(crate::reporter::StepStartedEvent {
+          test_id: test_id.clone(),
+          step_id: format!("hook:beforeAll:{suite_key}:{i}"),
+          parent_step_id: None,
+          title: step_title.clone(),
+          category: StepCategory::Hook,
+        }))).await;
+        let start = Instant::now();
+        let result = hook(custom_pool.clone()).await;
+        let duration = start.elapsed();
+        let error = result.as_ref().err().map(|e| e.message.clone());
+        self.event_bus.emit(ReporterEvent::StepFinished(Box::new(crate::reporter::StepFinishedEvent {
+          test_id: test_id.clone(),
+          step_id: format!("hook:beforeAll:{suite_key}:{i}"),
+          title: step_title,
+          category: StepCategory::Hook,
+          duration,
+          error: error.clone(),
+          metadata: None,
+        }))).await;
+        if let Err(e) = result {
           tracing::error!(target: "ferridriver::worker", "beforeAll failed for {suite_key}: {e}");
           suite_state.before_all_failed = true;
           break;
@@ -431,8 +490,17 @@ impl Worker {
 
         // ── beforeEach hooks ──
         let mut before_each_err = None;
-        for hook in &hooks.before_each {
-          if let Err(e) = hook(test_pool.clone(), Arc::clone(&test_info)).await {
+        for (i, hook) in hooks.before_each.iter().enumerate() {
+          let title = if hooks.before_each.len() == 1 {
+            "beforeEach".to_string()
+          } else {
+            format!("beforeEach [{i}]")
+          };
+          let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
+          let result = hook(test_pool.clone(), Arc::clone(&test_info)).await;
+          let err_msg = result.as_ref().err().map(|e| e.message.clone());
+          step_handle.end(err_msg).await;
+          if let Err(e) = result {
             before_each_err = Some(e);
             break;
           }
@@ -445,8 +513,17 @@ impl Worker {
         };
 
         // ── afterEach hooks (ALWAYS run, even on failure) ──
-        for hook in &hooks.after_each {
-          if let Err(e) = hook(test_pool.clone(), Arc::clone(&test_info)).await {
+        for (i, hook) in hooks.after_each.iter().enumerate() {
+          let title = if hooks.after_each.len() == 1 {
+            "afterEach".to_string()
+          } else {
+            format!("afterEach [{i}]")
+          };
+          let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
+          let result = hook(test_pool.clone(), Arc::clone(&test_info)).await;
+          let err_msg = result.as_ref().err().map(|e| e.message.clone());
+          step_handle.end(err_msg).await;
+          if let Err(e) = result {
             tracing::warn!(target: "ferridriver::worker", "afterEach error: {e}");
           }
         }

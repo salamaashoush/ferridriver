@@ -2,7 +2,7 @@
 
 use std::path::PathBuf;
 
-use crate::model::{StepCategory, TestStep};
+use crate::model::{TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct BddJsonReporter {
@@ -58,7 +58,7 @@ impl BddJsonReporter {
 fn serialize_steps(steps: &[TestStep]) -> Vec<StepEntry> {
   steps
     .iter()
-    .filter(|s| s.category == StepCategory::TestStep)
+    .filter(|s| s.category.is_visible())
     .map(|s| StepEntry {
       title: s.title.clone(),
       status: format!("{:?}", s.status),

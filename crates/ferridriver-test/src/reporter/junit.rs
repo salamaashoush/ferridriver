@@ -3,7 +3,7 @@
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::model::{StepCategory, StepStatus, TestOutcome, TestStep};
+use crate::model::{StepStatus, TestOutcome, TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct JUnitReporter {
@@ -121,7 +121,7 @@ impl Reporter for JUnitReporter {
         }
 
         // Include step summary as system-out for tests with user-defined steps.
-        let user_steps: Vec<&TestStep> = test.steps.iter().filter(|s| s.category == StepCategory::TestStep).collect();
+        let user_steps: Vec<&TestStep> = test.steps.iter().filter(|s| s.category.is_visible()).collect();
         if !user_steps.is_empty() {
           let mut step_lines = String::new();
           format_step_lines(&user_steps, &mut step_lines, 0);
@@ -156,7 +156,7 @@ fn find_failing_step_path(steps: &[TestStep]) -> String {
 
 fn find_failing_step_recursive(steps: &[TestStep], path: &mut Vec<String>) {
   for step in steps {
-    if step.category != StepCategory::TestStep {
+    if !step.category.is_visible() {
       continue;
     }
     if step.status == StepStatus::Failed {
@@ -183,7 +183,7 @@ fn format_step_lines(steps: &[&TestStep], out: &mut String, indent: usize) {
     if let Some(err) = &step.error {
       let _ = writeln!(out, "{pad}  Error: {err}");
     }
-    let nested: Vec<&TestStep> = step.steps.iter().filter(|s| s.category == StepCategory::TestStep).collect();
+    let nested: Vec<&TestStep> = step.steps.iter().filter(|s| s.category.is_visible()).collect();
     if !nested.is_empty() {
       format_step_lines(&nested, out, indent + 1);
     }
