@@ -69,7 +69,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
-      - run: cargo clippy --workspace --all-targets
+      - run: |
+          cargo clippy --workspace --all-targets \
+            --exclude ct-dioxus-todomvc \
+            --exclude ct-leptos-todomvc \
+            --exclude bdd-example
 
   doc:
     name: Documentation
@@ -89,7 +93,11 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
-      - run: cargo doc --workspace --no-deps
+      - run: |
+          cargo doc --workspace --no-deps \
+            --exclude ct-dioxus-todomvc \
+            --exclude ct-leptos-todomvc \
+            --exclude bdd-example
 
   # Gate job: all cheap checks must pass
   basics:

@@ -1,7 +1,7 @@
 //! `BrowserContext` -- isolated browser environment with pages, cookies, and logs.
 //!
 //! Mirrors Playwright's `BrowserContext` exactly:
-//! - Owns pages (Vec<AnyPage>)
+//! - Owns pages (`Vec<AnyPage>`)
 //! - Owns cookies (via any page in the context)
 //! - Owns console/network/dialog logs
 //! - Created by `Browser.new_context()`
