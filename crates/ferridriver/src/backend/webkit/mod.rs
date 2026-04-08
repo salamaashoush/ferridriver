@@ -508,6 +508,10 @@ impl WebKitPage {
     p.extend_from_slice(&self.vid().to_le_bytes());
     p.extend_from_slice(&depth.to_le_bytes());
     let r = self.client.send(ipc::Op::AccessibilityTree, &p).await?;
+    Self::parse_ax_response(r)
+  }
+
+  fn parse_ax_response(r: IpcResponse) -> Result<Vec<AxNodeData>, String> {
     let json_str = match r {
       IpcResponse::Value(v) => {
         if let Some(s) = v.as_str() {
