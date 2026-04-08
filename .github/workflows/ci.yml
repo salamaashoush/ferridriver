@@ -63,6 +63,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
+            libclang-dev pkg-config
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   doc:
@@ -77,6 +83,12 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
+            libclang-dev pkg-config
       - run: cargo doc --workspace --no-deps
 
   # Gate job: all cheap checks must pass
@@ -117,6 +129,18 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
+
+      - name: Install system deps (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
+            libclang-dev pkg-config
+
+      - name: Install system deps (macOS)
+        if: runner.os == 'macOS'
+        run: brew install ffmpeg pkg-config
 
       - name: Build ferridriver binary
         run: cargo build --bin ferridriver
@@ -164,6 +188,12 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: oven-sh/setup-bun@v2
 
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
+            libclang-dev pkg-config
       - name: Build ferridriver binary
         run: cargo build --bin ferridriver
       - name: Install Chromium with system deps
@@ -204,6 +234,12 @@ jobs:
         with:
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@nightly
+      - name: Install system deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
+            libclang-dev pkg-config
       - run: cargo check --locked --workspace
 
   # ---------------------------------------------------------------------------
