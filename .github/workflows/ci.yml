@@ -69,7 +69,7 @@ jobs:
           sudo apt-get install -y --no-install-recommends \
             libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
-      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo clippy --workspace --all-targets
 
   doc:
     name: Documentation

@@ -20,6 +20,7 @@
 
 use std::path::{Path, PathBuf};
 
+use futures::StreamExt;
 use reqwest::Client;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
@@ -107,6 +108,7 @@ impl BrowserInstaller {
   /// - Windows: `%LOCALAPPDATA%/ferridriver/`
   ///
   /// Override with `FERRIDRIVER_BROWSERS_PATH` env var.
+  #[must_use]
   pub fn new() -> Self {
     let cache_dir = if let Ok(p) = std::env::var("FERRIDRIVER_BROWSERS_PATH") {
       PathBuf::from(p)
@@ -123,6 +125,7 @@ impl BrowserInstaller {
   }
 
   /// Create an installer with a custom cache directory.
+  #[must_use]
   pub fn with_cache_dir(cache_dir: PathBuf) -> Self {
     Self {
       cache_dir,
@@ -131,6 +134,7 @@ impl BrowserInstaller {
   }
 
   /// Return the cache directory path.
+  #[must_use]
   pub fn cache_dir(&self) -> &Path {
     &self.cache_dir
   }
@@ -142,6 +146,11 @@ impl BrowserInstaller {
   ///
   /// If the version is already installed (marker file exists), skips the download.
   /// Retries up to 5 times on download failure (matching Playwright behavior).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the Chrome for Testing API is unreachable, the download
+  /// fails after all retries, extraction fails, or the platform is unsupported.
   pub async fn install_chromium<F>(&self, progress: F) -> Result<String, String>
   where
     F: Fn(InstallProgress),
@@ -206,10 +215,7 @@ impl BrowserInstaller {
         total_bytes: None,
       });
 
-      match self
-        .download_file(&download.url, &zip_path, &progress)
-        .await
-      {
+      match self.download_file(&download.url, &zip_path, &progress).await {
         Ok(()) => {
           last_error.clear();
           break;
@@ -218,7 +224,9 @@ impl BrowserInstaller {
           last_error = format!("attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
           let _ = tokio::fs::remove_file(&zip_path).await;
           if attempt == DOWNLOAD_RETRIES {
-            return Err(format!("download failed after {DOWNLOAD_RETRIES} attempts: {last_error}"));
+            return Err(format!(
+              "download failed after {DOWNLOAD_RETRIES} attempts: {last_error}"
+            ));
           }
         },
       }
@@ -269,12 +277,7 @@ impl BrowserInstaller {
   }
 
   /// Download a file with streaming progress.
-  async fn download_file<F>(
-    &self,
-    url: &str,
-    dest: &Path,
-    progress: &F,
-  ) -> Result<(), String>
+  async fn download_file<F>(&self, url: &str, dest: &Path, progress: &F) -> Result<(), String>
   where
     F: Fn(InstallProgress),
   {
@@ -297,23 +300,16 @@ impl BrowserInstaller {
       .map_err(|e| format!("failed to create file: {e}"))?;
 
     let mut stream = response.bytes_stream();
-    use futures::StreamExt;
     while let Some(chunk) = stream.next().await {
       let chunk = chunk.map_err(|e| format!("download error: {e}"))?;
-      file
-        .write_all(&chunk)
-        .await
-        .map_err(|e| format!("write error: {e}"))?;
+      file.write_all(&chunk).await.map_err(|e| format!("write error: {e}"))?;
       bytes_downloaded += chunk.len() as u64;
       progress(InstallProgress::Downloading {
         bytes_downloaded,
         total_bytes,
       });
     }
-    file
-      .flush()
-      .await
-      .map_err(|e| format!("flush error: {e}"))?;
+    file.flush().await.map_err(|e| format!("flush error: {e}"))?;
 
     Ok(())
   }
@@ -325,6 +321,11 @@ impl BrowserInstaller {
   ///
   /// This is equivalent to `npx playwright install-deps chromium`.
   /// On macOS and Windows this is a no-op (no system deps needed).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the Linux distribution is unsupported or `apt-get`/`pacman` fails.
+  #[allow(clippy::unused_async)] // async needed on linux cfg, not on macOS/Windows
   pub async fn install_system_deps<F>(&self, progress: F) -> Result<(), String>
   where
     F: Fn(InstallProgress),
@@ -332,7 +333,7 @@ impl BrowserInstaller {
     #[cfg(not(target_os = "linux"))]
     {
       let _ = progress;
-      return Ok(());
+      Ok(())
     }
 
     #[cfg(target_os = "linux")]
@@ -346,9 +347,7 @@ impl BrowserInstaller {
         ));
       }
 
-      progress(InstallProgress::InstallingDeps {
-        distro: distro.clone(),
-      });
+      progress(InstallProgress::InstallingDeps { distro: distro.clone() });
 
       // Build the install command based on the package manager
       let commands = match pkg_manager {
@@ -356,10 +355,7 @@ impl BrowserInstaller {
           "apt-get update && apt-get install -y --no-install-recommends {}",
           packages.join(" ")
         ),
-        PackageManager::Pacman => format!(
-          "pacman -Sy --noconfirm --needed {}",
-          packages.join(" ")
-        ),
+        PackageManager::Pacman => format!("pacman -Sy --noconfirm --needed {}", packages.join(" ")),
       };
 
       // Determine if we need sudo
@@ -383,10 +379,7 @@ impl BrowserInstaller {
         .map_err(|e| format!("failed to run apt-get: {e}"))?;
 
       if !status.success() {
-        return Err(format!(
-          "apt-get exited with code: {}",
-          status.code().unwrap_or(-1)
-        ));
+        return Err(format!("apt-get exited with code: {}", status.code().unwrap_or(-1)));
       }
 
       progress(InstallProgress::DepsInstalled);
@@ -395,6 +388,7 @@ impl BrowserInstaller {
   }
 
   /// Return the path to an installed chromium, or `None` if not installed.
+  #[must_use]
   pub fn find_installed_chromium(&self) -> Option<String> {
     let entries = std::fs::read_dir(&self.cache_dir).ok()?;
     let mut candidates: Vec<_> = entries
@@ -431,8 +425,8 @@ fn current_platform() -> String {
   let arch = std::env::consts::ARCH;
 
   match (os, arch) {
-    ("linux", "x86_64") => "linux64".to_string(),
-    ("linux", "aarch64") => "linux64".to_string(), // CfT doesn't have arm64 linux yet
+    // CfT doesn't have arm64 linux yet, use linux64 for both
+    ("linux", "x86_64" | "aarch64") => "linux64".to_string(),
     ("macos", "x86_64") => "mac-x64".to_string(),
     ("macos", "aarch64") => "mac-arm64".to_string(),
     ("windows", "x86_64") => "win64".to_string(),
@@ -444,12 +438,12 @@ fn current_platform() -> String {
 fn chrome_executable_path(install_dir: &Path, platform: &str) -> PathBuf {
   match platform {
     "linux64" => install_dir.join("chrome-linux64/chrome"),
-    "mac-x64" => install_dir.join(
-      "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-    ),
-    "mac-arm64" => install_dir.join(
-      "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
-    ),
+    "mac-x64" => {
+      install_dir.join("chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing")
+    },
+    "mac-arm64" => {
+      install_dir.join("chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing")
+    },
     "win64" => install_dir.join("chrome-win64/chrome.exe"),
     "win32" => install_dir.join("chrome-win32/chrome.exe"),
     _ => install_dir.join("chrome"),
@@ -495,12 +489,10 @@ fn detect_linux_distro() -> String {
         format!("ubuntu24.04{arch_suffix}")
       }
     },
-    "debian" | "raspbian" => {
-      match version.as_str() {
-        "11" => format!("debian11{arch_suffix}"),
-        "12" => format!("debian12{arch_suffix}"),
-        _ => format!("debian13{arch_suffix}"),
-      }
+    "debian" | "raspbian" => match version.as_str() {
+      "11" => format!("debian11{arch_suffix}"),
+      "12" => format!("debian12{arch_suffix}"),
+      _ => format!("debian13{arch_suffix}"),
     },
     // Arch Linux and derivatives
     "arch" | "manjaro" | "endeavouros" | "garuda" | "artix" | "cachyos" => {
@@ -555,39 +547,86 @@ fn system_packages_for_distro(distro: &str) -> (PackageManager, Vec<&'static str
   let chromium: &[&str] = match distro {
     d if d.starts_with("ubuntu20.04") => &[
       // Core runtime
-      "libasound2", "libatk-bridge2.0-0", "libatk1.0-0", "libatspi2.0-0",
-      "libcairo2", "libcups2", "libdbus-1-3", "libdrm2", "libgbm1",
-      "libglib2.0-0", "libnspr4", "libnss3", "libpango-1.0-0",
+      "libasound2",
+      "libatk-bridge2.0-0",
+      "libatk1.0-0",
+      "libatspi2.0-0",
+      "libcairo2",
+      "libcups2",
+      "libdbus-1-3",
+      "libdrm2",
+      "libgbm1",
+      "libglib2.0-0",
+      "libnspr4",
+      "libnss3",
+      "libpango-1.0-0",
       // X11 (required by the binary even in headless)
-      "libxcb1", "libxcomposite1", "libxdamage1", "libxfixes3", "libxrandr2",
+      "libxcb1",
+      "libxcomposite1",
+      "libxdamage1",
+      "libxfixes3",
+      "libxrandr2",
       "libxkbcommon0",
       // Fonts (minimum for text rendering)
       "fonts-liberation",
       // Headed mode (X11 display)
-      "libx11-6", "libxext6", "libwayland-client0",
+      "libx11-6",
+      "libxext6",
+      "libwayland-client0",
       // Emoji
       "fonts-noto-color-emoji",
     ],
     d if d.starts_with("ubuntu22.04") | d.starts_with("debian11") | d.starts_with("debian12") => &[
-      "libasound2", "libatk-bridge2.0-0", "libatk1.0-0", "libatspi2.0-0",
-      "libcairo2", "libcups2", "libdbus-1-3", "libdrm2", "libgbm1",
-      "libglib2.0-0", "libnspr4", "libnss3", "libpango-1.0-0",
-      "libxcb1", "libxcomposite1", "libxdamage1", "libxfixes3", "libxrandr2",
+      "libasound2",
+      "libatk-bridge2.0-0",
+      "libatk1.0-0",
+      "libatspi2.0-0",
+      "libcairo2",
+      "libcups2",
+      "libdbus-1-3",
+      "libdrm2",
+      "libgbm1",
+      "libglib2.0-0",
+      "libnspr4",
+      "libnss3",
+      "libpango-1.0-0",
+      "libxcb1",
+      "libxcomposite1",
+      "libxdamage1",
+      "libxfixes3",
+      "libxrandr2",
       "libxkbcommon0",
       "fonts-liberation",
-      "libx11-6", "libxext6", "libwayland-client0",
+      "libx11-6",
+      "libxext6",
+      "libwayland-client0",
       "fonts-noto-color-emoji",
     ],
     // ubuntu24.04, debian13, and fallback (t64 ABI transition packages)
     _ => &[
-      "libasound2t64", "libatk-bridge2.0-0t64", "libatk1.0-0t64",
-      "libatspi2.0-0t64", "libcairo2", "libcups2t64", "libdbus-1-3",
-      "libdrm2", "libgbm1", "libglib2.0-0t64", "libnspr4", "libnss3",
+      "libasound2t64",
+      "libatk-bridge2.0-0t64",
+      "libatk1.0-0t64",
+      "libatspi2.0-0t64",
+      "libcairo2",
+      "libcups2t64",
+      "libdbus-1-3",
+      "libdrm2",
+      "libgbm1",
+      "libglib2.0-0t64",
+      "libnspr4",
+      "libnss3",
       "libpango-1.0-0",
-      "libxcb1", "libxcomposite1", "libxdamage1", "libxfixes3", "libxrandr2",
+      "libxcb1",
+      "libxcomposite1",
+      "libxdamage1",
+      "libxfixes3",
+      "libxrandr2",
       "libxkbcommon0",
       "fonts-liberation",
-      "libx11-6", "libxext6", "libwayland-client0",
+      "libx11-6",
+      "libxext6",
+      "libwayland-client0",
       "fonts-noto-color-emoji",
     ],
   };
@@ -602,33 +641,33 @@ fn system_packages_for_distro(distro: &str) -> (PackageManager, Vec<&'static str
 fn arch_chromium_packages() -> Vec<&'static str> {
   vec![
     // Core runtime (matches ldd requirements)
-    "alsa-lib",       // libasound.so.2
-    "at-spi2-core",   // libatk-bridge, libatk, libatspi
-    "cairo",          // libcairo.so.2
-    "libcups",        // libcups.so.2
-    "dbus",           // libdbus-1.so.3
-    "libdrm",         // libdrm.so.2
-    "mesa",           // libgbm.so.1
-    "glib2",          // libglib, libgio, libgobject
-    "nspr",           // libnspr4.so
-    "nss",            // libnss3.so
-    "pango",          // libpango-1.0.so.0
+    "alsa-lib",     // libasound.so.2
+    "at-spi2-core", // libatk-bridge, libatk, libatspi
+    "cairo",        // libcairo.so.2
+    "libcups",      // libcups.so.2
+    "dbus",         // libdbus-1.so.3
+    "libdrm",       // libdrm.so.2
+    "mesa",         // libgbm.so.1
+    "glib2",        // libglib, libgio, libgobject
+    "nspr",         // libnspr4.so
+    "nss",          // libnss3.so
+    "pango",        // libpango-1.0.so.0
     // X11 (required by Chrome binary even in headless)
-    "libxcb",         // libxcb.so.1
-    "libxcomposite",  // libXcomposite.so.1
-    "libxdamage",     // libXdamage.so.1
-    "libxfixes",      // libXfixes.so.3
-    "libxrandr",      // libXrandr.so.2
-    "libxkbcommon",   // libxkbcommon.so.0
+    "libxcb",        // libxcb.so.1
+    "libxcomposite", // libXcomposite.so.1
+    "libxdamage",    // libXdamage.so.1
+    "libxfixes",     // libXfixes.so.3
+    "libxrandr",     // libXrandr.so.2
+    "libxkbcommon",  // libxkbcommon.so.0
     // Headed mode
-    "libx11",         // libX11.so.6
-    "libxext",        // libXext.so.6
-    "wayland",        // libwayland-client.so.0
+    "libx11",  // libX11.so.6
+    "libxext", // libXext.so.6
+    "wayland", // libwayland-client.so.0
     // Fonts
-    "ttf-liberation", // basic web fonts
+    "ttf-liberation",   // basic web fonts
     "noto-fonts-emoji", // emoji rendering
-    "fontconfig",     // font discovery
-    "freetype2",      // font rendering
+    "fontconfig",       // font discovery
+    "freetype2",        // font rendering
   ]
 }
 
@@ -638,8 +677,7 @@ fn arch_chromium_packages() -> Vec<&'static str> {
 
 fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
   let file = std::fs::File::open(zip_path).map_err(|e| format!("failed to open zip: {e}"))?;
-  let mut archive =
-    zip::ZipArchive::new(file).map_err(|e| format!("failed to read zip archive: {e}"))?;
+  let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("failed to read zip archive: {e}"))?;
 
   for i in 0..archive.len() {
     let mut entry = archive
@@ -650,17 +688,14 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
     let out_path = dest.join(&name);
 
     if entry.is_dir() {
-      std::fs::create_dir_all(&out_path)
-        .map_err(|e| format!("failed to create dir {}: {e}", out_path.display()))?;
+      std::fs::create_dir_all(&out_path).map_err(|e| format!("failed to create dir {}: {e}", out_path.display()))?;
     } else {
       if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent)
-          .map_err(|e| format!("failed to create parent dir: {e}"))?;
+        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create parent dir: {e}"))?;
       }
-      let mut out_file = std::fs::File::create(&out_path)
-        .map_err(|e| format!("failed to create file {}: {e}", out_path.display()))?;
-      std::io::copy(&mut entry, &mut out_file)
-        .map_err(|e| format!("failed to write {}: {e}", out_path.display()))?;
+      let mut out_file =
+        std::fs::File::create(&out_path).map_err(|e| format!("failed to create file {}: {e}", out_path.display()))?;
+      std::io::copy(&mut entry, &mut out_file).map_err(|e| format!("failed to write {}: {e}", out_path.display()))?;
 
       // Preserve executable permissions on Unix
       #[cfg(unix)]
