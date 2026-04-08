@@ -12,6 +12,7 @@ use ferridriver::Browser;
 use ferridriver::options::LaunchOptions;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "benchmark, not for CI"]
 async fn measure_operation_costs() {
   println!("\n=== Operation cost breakdown ===\n");
 

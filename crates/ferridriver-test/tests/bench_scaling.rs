@@ -15,6 +15,7 @@ use ferridriver::Browser;
 use ferridriver::options::LaunchOptions;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark, not for CI"]
 async fn diagnose_scaling() {
   println!("\n=== Scaling Diagnosis ===\n");
 
