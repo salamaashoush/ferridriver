@@ -164,6 +164,12 @@ pub struct LaunchOptions {
   pub backend: Option<String>,
   /// WebSocket URL to connect to (instead of launching)
   pub ws_endpoint: Option<String>,
+  /// Run in headless mode (default: true)
+  pub headless: Option<bool>,
+  /// Path to the browser executable
+  pub executable_path: Option<String>,
+  /// Additional browser arguments
+  pub args: Option<Vec<String>>,
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────

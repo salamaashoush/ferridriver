@@ -33,7 +33,10 @@ impl Browser {
     let backend = parse_backend(opts.backend.as_deref())?;
     let launch_opts = ferridriver::options::LaunchOptions {
       backend,
+      headless: opts.headless.unwrap_or(true),
       ws_endpoint: opts.ws_endpoint.clone(),
+      executable_path: opts.executable_path.clone(),
+      args: opts.args.clone().unwrap_or_default(),
       ..Default::default()
     };
     let inner = Box::pin(ferridriver::Browser::launch(launch_opts))
