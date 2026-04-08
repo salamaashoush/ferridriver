@@ -58,6 +58,12 @@ for (const backend of BACKENDS) {
       // Use data URL instead of setContent to ensure addScriptToEvaluateOnNewDocument fires
       const dataUrl = `data:text/html,${encodeURIComponent(HTML)}`;
       await page.goto(dataUrl);
+      // Wait for the injected script to be available
+      for (let i = 0; i < 50; i++) {
+        const ready = await page.evaluate('typeof window.__fd !== "undefined"');
+        if (ready === "true" || ready === true) break;
+        await new Promise(r => setTimeout(r, 100));
+      }
     });
 
     afterAll(async () => {

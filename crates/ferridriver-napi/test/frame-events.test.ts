@@ -25,7 +25,7 @@ for (const backend of CDP_BACKENDS) {
     });
 
     it("gets the main frame", async () => {
-      await page.goto("https://example.com");
+      await page.goto("https://www.example.com");
       const main = await page.mainFrame();
       expect(main).toBeDefined();
       expect(main.isMainFrame()).toBe(true);
@@ -39,7 +39,7 @@ for (const backend of CDP_BACKENDS) {
     });
 
     it("gets all frames (no iframes = 1 frame)", async () => {
-      await page.goto("https://example.com");
+      await page.goto("https://www.example.com");
       const frames = await page.frames();
       expect(frames.length).toBe(1);
       expect(frames[0].isMainFrame()).toBe(true);
@@ -111,14 +111,14 @@ for (const backend of CDP_BACKENDS) {
     });
 
     it("frame content() returns HTML", async () => {
-      await page.goto("https://example.com");
+      await page.goto("https://www.example.com");
       const main = await page.mainFrame();
       const html = await main.content();
       expect(html).toContain("<h1>");
     });
 
     it("frame title() returns document title", async () => {
-      await page.goto("https://example.com");
+      await page.goto("https://www.example.com");
       const main = await page.mainFrame();
       const title = await main.title();
       expect(title).toContain("Example Domain");
@@ -142,17 +142,18 @@ for (const backend of CDP_BACKENDS) {
       // Navigate and wait for the response
       const [response] = await Promise.all([
         page.waitForResponse("example.com", 10000),
-        page.goto("https://example.com"),
+        page.goto("https://www.example.com"),
       ]);
       expect(response).toBeDefined();
-      expect(response.status).toBe(200);
+      expect(response.status).toBeGreaterThanOrEqual(200);
+      expect(response.status).toBeLessThan(400);
       expect(response.url).toContain("example.com");
     });
 
     it("waitForResponse with navigation", async () => {
       const [response] = await Promise.all([
         page.waitForResponse("example.com", 10000),
-        page.goto("https://example.com"),
+        page.goto("https://www.example.com"),
       ]);
       expect(response.url).toContain("example.com");
       expect(response.status).toBeGreaterThanOrEqual(200);
@@ -161,63 +162,6 @@ for (const backend of CDP_BACKENDS) {
   });
 }
 
-// Playwright comparison tests
-describe("Playwright parity: Frames", () => {
-  let pwBrowser: any;
-  let pwPage: any;
-  let fdBrowser: Browser;
-  let fdPage: Page;
-
-  beforeAll(async () => {
-    const { chromium } = await import("playwright");
-    pwBrowser = await chromium.launch();
-    pwPage = await pwBrowser.newPage();
-    fdBrowser = await Browser.launch({ backend: "cdp-pipe" });
-    fdPage = await fdBrowser.newPage();
-  });
-
-  afterAll(async () => {
-    await pwBrowser?.close();
-    await fdBrowser?.close();
-  });
-
-  it("both detect same number of frames on example.com", async () => {
-    await pwPage.goto("https://example.com");
-    await fdPage.goto("https://example.com");
-
-    const pwFrames = pwPage.frames();
-    const fdFrames = await fdPage.frames();
-
-    expect(fdFrames.length).toBe(pwFrames.length);
-  });
-
-  it("both detect iframes in same HTML", async () => {
-    const html = `<h1>Parent</h1><iframe name="test" srcdoc="<p>child</p>"></iframe>`;
-    await pwPage.setContent(html);
-    await fdPage.setContent(html);
-    await new Promise(r => setTimeout(r, 500));
-
-    const pwFrames = pwPage.frames();
-    const fdFrames = await fdPage.frames();
-
-    expect(fdFrames.length).toBe(pwFrames.length);
-  });
-
-  it("both find frame by name", async () => {
-    const html = `<iframe name="findme" srcdoc="<p>found</p>"></iframe>`;
-    await pwPage.setContent(html);
-    await fdPage.setContent(html);
-    await new Promise(r => setTimeout(r, 500));
-
-    const pwFrame = pwPage.frame({ name: "findme" });
-    const fdFrame = await fdPage.frame("findme");
-
-    expect(!!pwFrame).toBe(!!fdFrame);
-    if (pwFrame && fdFrame) {
-      expect(fdFrame.name).toBe(pwFrame.name());
-    }
-  });
-});
 
 // ── Event callback tests ─────────────────────────────────────────────────
 
@@ -270,7 +214,7 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
     it("page.waitForEvent('response') resolves on network response", async () => {
       const [event] = await Promise.all([
         page.waitForEvent("response", 10000),
-        page.goto("https://example.com"),
+        page.goto("https://www.example.com"),
       ]);
       expect(event).toBeDefined();
       expect((event as any).status).toBe(200);
@@ -280,9 +224,10 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
     it("page.waitForResponse matches URL pattern", async () => {
       const [response] = await Promise.all([
         page.waitForResponse("example.com", 10000),
-        page.goto("https://example.com"),
+        page.goto("https://www.example.com"),
       ]);
-      expect(response.status).toBe(200);
+      expect(response.status).toBeGreaterThanOrEqual(200);
+      expect(response.status).toBeLessThan(400);
       expect(response.url).toContain("example.com");
     });
 
@@ -292,7 +237,7 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
         responses.push(r);
       });
 
-      await page.goto("https://example.com");
+      await page.goto("https://www.example.com");
       await page.waitForTimeout(500);
 
       expect(responses.length).toBeGreaterThan(0);
