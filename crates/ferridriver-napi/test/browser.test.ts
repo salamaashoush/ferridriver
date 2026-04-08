@@ -241,14 +241,15 @@ for (const backend of BACKENDS) {
       expect(width).toBe(800);
     });
 
-    // TODO: mobile emulation (deviceScaleFactor, isMobile) not yet implemented in CDP backend
-    it.skip("sets viewport with full config", async () => {
+    it("sets viewport with full config", async () => {
       await page.setViewport({
         width: 375,
         height: 812,
         deviceScaleFactor: 3,
         isMobile: true,
       });
+      // Mobile emulation requires navigation to take effect
+      await page.goto(testUrl);
       const width = await page.evaluate("window.innerWidth");
       expect(width).toBe(375);
     });
@@ -293,43 +294,49 @@ for (const backend of BACKENDS) {
       expect(isReduced).toBe(true);
     });
 
-    // ── Cookies ───────────────────────────────────────────────────────
-    // TODO: setCookie, deleteCookie, clearCookies not yet exposed on NAPI Page
+    // ── Cookies (Playwright API: cookies live on BrowserContext) ───────
 
-    it.skip("sets and gets a cookie", async () => {
+    it("sets and gets a cookie via context", async () => {
       await page.goto(testUrl);
-      await page.setCookie({
-        name: "test",
-        value: "hello",
-        domain: "127.0.0.1",
-        path: "/",
-        secure: false,
-        httpOnly: false,
-      });
-      const cookies = await page.cookies();
-      const found = cookies.find((c) => c.name === "test");
+      const context = browser.defaultContext();
+      await context.addCookies([
+        {
+          name: "test",
+          value: "hello",
+          domain: "127.0.0.1",
+          path: "/",
+          secure: false,
+          httpOnly: false,
+        },
+      ]);
+      const cookies = await context.cookies();
+      const found = cookies.find((c: any) => c.name === "test");
       expect(found).toBeDefined();
       expect(found!.value).toBe("hello");
     });
 
-    it.skip("deletes a specific cookie by name and domain", async () => {
-      await page.deleteCookie("test", "127.0.0.1");
-      const cookies = await page.cookies();
-      const found = cookies.find((c) => c.name === "test");
+    it("deletes a specific cookie by name and domain", async () => {
+      const context = browser.defaultContext();
+      await context.deleteCookie("test", "127.0.0.1");
+      const cookies = await context.cookies();
+      const found = cookies.find((c: any) => c.name === "test");
       expect(found).toBeUndefined();
     });
 
-    it.skip("clears all cookies", async () => {
-      await page.setCookie({
-        name: "a",
-        value: "1",
-        domain: "127.0.0.1",
-        path: "/",
-        secure: false,
-        httpOnly: false,
-      });
-      await page.clearCookies();
-      const cookies = await page.cookies();
+    it("clears all cookies", async () => {
+      const context = browser.defaultContext();
+      await context.addCookies([
+        {
+          name: "a",
+          value: "1",
+          domain: "127.0.0.1",
+          path: "/",
+          secure: false,
+          httpOnly: false,
+        },
+      ]);
+      await context.clearCookies();
+      const cookies = await context.cookies();
       expect(cookies.length).toBe(0);
     });
 
