@@ -4,6 +4,22 @@
   "description": "Ferridriver component testing adapter for React",
   "type": "module",
   "main": "src/index.mjs",
+  "license": "MIT OR Apache-2.0",
+  "author": "Salama Ashoush <salamaashoush@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/salamaashoush/ferridriver",
+    "directory": "packages/ct-react"
+  },
+  "homepage": "https://github.com/salamaashoush/ferridriver",
+  "bugs": {
+    "url": "https://github.com/salamaashoush/ferridriver/issues"
+  },
+  "keywords": [
+    "ferridriver",
+    "component-testing",
+    "react"
+  ],
   "exports": {
     ".": "./src/index.mjs",
     "./register": "./src/registerSource.mjs"
@@ -14,6 +30,5 @@
   "peerDependencies": {
     "react": ">=18.0.0",
     "react-dom": ">=18.0.0"
-  },
-  "keywords": ["ferridriver", "component-testing", "react"]
+  }
 }

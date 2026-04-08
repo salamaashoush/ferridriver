@@ -1,8 +1,24 @@
 {
   "name": "@ferridriver/ct-core",
   "version": "0.1.0",
-  "description": "Ferridriver component testing core — Vite build, mount fixture, import transform, browser runtime",
+  "description": "Ferridriver component testing core -- Vite build, mount fixture, import transform, browser runtime",
   "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "author": "Salama Ashoush <salamaashoush@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/salamaashoush/ferridriver",
+    "directory": "packages/ct-core"
+  },
+  "homepage": "https://github.com/salamaashoush/ferridriver",
+  "bugs": {
+    "url": "https://github.com/salamaashoush/ferridriver/issues"
+  },
+  "keywords": [
+    "ferridriver",
+    "component-testing",
+    "vite"
+  ],
   "exports": {
     ".": "./src/index.mjs",
     "./mount": "./src/mount.mjs",
@@ -14,6 +30,5 @@
   },
   "peerDependencies": {
     "vite": ">=5.0.0"
-  },
-  "keywords": ["ferridriver", "component-testing", "vite"]
+  }
 }
