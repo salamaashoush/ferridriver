@@ -1,5 +1,28 @@
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { Browser, type Page } from "../index.js";
+import { createServer, type Server } from "node:http";
+
+// Local test server -- guaranteed 200 responses, no external network dependency.
+let testServer: Server;
+let testUrl: string;
+
+beforeAll(async () => {
+  testServer = createServer((req, res) => {
+    res.writeHead(200, { "Content-Type": "text/html" });
+    res.end(`<!DOCTYPE html><html><head><title>Test Page</title></head><body><h1>Test Page</h1><p>More information...</p><a href="/about">More information</a></body></html>`);
+  });
+  await new Promise<void>((resolve) => {
+    testServer.listen(0, "127.0.0.1", () => {
+      const addr = testServer.address() as any;
+      testUrl = `http://127.0.0.1:${addr.port}`;
+      resolve();
+    });
+  });
+});
+
+afterAll(() => {
+  testServer?.close();
+});
 
 // When FERRIDRIVER_BACKEND is set, run only that backend (enables parallel
 // execution: `FERRIDRIVER_BACKEND=cdp-pipe bun test & FERRIDRIVER_BACKEND=cdp-raw bun test`).
@@ -26,7 +49,7 @@ for (const backend of BACKENDS) {
 
     beforeAll(async () => {
       browser = await Browser.launch({ backend });
-      page = await browser.newPageWithUrl("https://www.example.com");
+      page = await browser.newPageWithUrl(testUrl);
     });
 
     afterAll(async () => {
@@ -37,35 +60,35 @@ for (const backend of BACKENDS) {
 
     it("navigates to a URL", async () => {
       const url = await page.url();
-      expect(url).toContain("example.com");
+      expect(url).toContain("127.0.0.1");
     });
 
     it("gets the page title", async () => {
       const title = await page.title();
-      expect(title).toContain("Example Domain");
+      expect(title).toContain("Test Page");
     });
 
     it("gets page content", async () => {
       const html = await page.content();
-      expect(html).toContain("<h1>Example Domain</h1>");
+      expect(html).toContain("<h1>Test Page</h1>");
     });
 
     it("extracts markdown", async () => {
       const md = await page.markdown();
-      expect(md).toContain("Example Domain");
+      expect(md).toContain("Test Page");
     });
 
     it("navigates with goto", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const url = await page.url();
-      expect(url).toContain("example.com");
+      expect(url).toContain("127.0.0.1");
     });
 
     it("waits for load state", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       await page.waitForLoadState();
       const title = await page.title();
-      expect(title).toContain("Example Domain");
+      expect(title).toContain("Test Page");
     });
 
     // ── Evaluation ────────────────────────────────────────────────────
@@ -77,7 +100,7 @@ for (const backend of BACKENDS) {
 
     it("evaluates JS and returns string", async () => {
       const result = await page.evaluateStr("document.title");
-      expect(result).toContain("Example Domain");
+      expect(result).toContain("Test Page");
     });
 
     it("evaluates JS and returns null", async () => {
@@ -93,14 +116,14 @@ for (const backend of BACKENDS) {
     // ── Selectors ─────────────────────────────────────────────────────
 
     it("finds element text with selector", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const text = await page.innerText("h1");
-      expect(text).toBe("Example Domain");
+      expect(text).toBe("Test Page");
     });
 
     it("gets innerHTML", async () => {
       const html = await page.innerHtml("h1");
-      expect(html).toBe("Example Domain");
+      expect(html).toBe("Test Page");
     });
 
     it("checks element visibility", async () => {
@@ -132,12 +155,12 @@ for (const backend of BACKENDS) {
 
     it("gets text content via locator", async () => {
       const text = await page.locator("h1").textContent();
-      expect(text).toBe("Example Domain");
+      expect(text).toBe("Test Page");
     });
 
     it("gets inner text via locator", async () => {
       const text = await page.locator("h1").innerText();
-      expect(text).toBe("Example Domain");
+      expect(text).toBe("Test Page");
     });
 
     it("checks visibility via locator", async () => {
@@ -168,7 +191,7 @@ for (const backend of BACKENDS) {
     });
 
     it("creates locator with getByText", () => {
-      const loc = page.getByText("Example Domain");
+      const loc = page.getByText("Test Page");
       expect(loc.selector).toContain("text=");
     });
 
@@ -237,14 +260,14 @@ for (const backend of BACKENDS) {
 
     it("sets locale", async () => {
       await page.setLocale("de-DE");
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const lang = await page.evaluateStr("navigator.language");
       expect(lang).toBe("de-DE");
     });
 
     it("sets timezone", async () => {
       await page.setTimezone("America/New_York");
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const tz = await page.evaluateStr(
         "Intl.DateTimeFormat().resolvedOptions().timeZone"
       );
@@ -253,7 +276,7 @@ for (const backend of BACKENDS) {
 
     it("emulates dark color scheme", async () => {
       await page.emulateMedia(undefined, "dark");
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const isDark = await page.evaluate(
         "window.matchMedia('(prefers-color-scheme: dark)').matches"
       );
@@ -262,7 +285,7 @@ for (const backend of BACKENDS) {
 
     it("emulates reduced motion", async () => {
       await page.emulateMedia(undefined, undefined, "reduce");
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const isReduced = await page.evaluate(
         "window.matchMedia('(prefers-reduced-motion: reduce)').matches"
       );
@@ -272,13 +295,13 @@ for (const backend of BACKENDS) {
     // ── Cookies ───────────────────────────────────────────────────────
 
     it("sets and gets a cookie", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       await page.setCookie({
         name: "test",
         value: "hello",
-        domain: ".example.com",
+        domain: "127.0.0.1",
         path: "/",
-        secure: true,
+        secure: false,
         httpOnly: false,
       });
       const cookies = await page.cookies();
@@ -288,7 +311,7 @@ for (const backend of BACKENDS) {
     });
 
     it("deletes a specific cookie by name and domain", async () => {
-      await page.deleteCookie("test", ".example.com");
+      await page.deleteCookie("test", "127.0.0.1");
       const cookies = await page.cookies();
       const found = cookies.find((c) => c.name === "test");
       expect(found).toBeUndefined();
@@ -298,7 +321,7 @@ for (const backend of BACKENDS) {
       await page.setCookie({
         name: "a",
         value: "1",
-        domain: ".example.com",
+        domain: "127.0.0.1",
         path: "/",
         secure: false,
         httpOnly: false,
@@ -548,7 +571,7 @@ for (const backend of BACKENDS) {
     // ── Page.goto with options ───────────────────────────────────────
 
     it("page.goto accepts GotoOptions", async () => {
-      await page.goto("https://www.example.com", {
+      await page.goto(testUrl, {
         waitUntil: "domcontentloaded",
         timeout: 10000,
       });
@@ -559,7 +582,7 @@ for (const backend of BACKENDS) {
     // ── Page.waitForLoadState with state ──────────────────────────────
 
     it("waitForLoadState accepts state string", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       await page.waitForLoadState("domcontentloaded");
       const ready = await page.evaluateStr("document.readyState");
       expect(ready === "interactive" || ready === "complete").toBe(true);
@@ -572,7 +595,7 @@ for (const backend of BACKENDS) {
         "window.__test_init_napi = 'injected'"
       );
       expect(id.length).toBeGreaterThan(0);
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const val = await page.evaluateStr("window.__test_init_napi || 'missing'");
       expect(val).toBe("injected");
       await page.removeInitScript(id);
@@ -599,7 +622,7 @@ for (const backend of BACKENDS) {
     // ── Page.storageState ────────────────────────────────────────────
 
     it("storageState returns cookies and localStorage", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const state = await page.storageState();
       expect(state).toHaveProperty("cookies");
       expect(state).toHaveProperty("localStorage");
@@ -778,7 +801,7 @@ for (const backend of BACKENDS) {
     // ── Frame methods ────────────────────────────────────────────────
 
     it("frame.isDetached returns false for active frame", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const main = await page.mainFrame();
       expect(await main.isDetached()).toBe(false);
     });
@@ -796,7 +819,7 @@ for (const backend of BACKENDS) {
       // Navigating should fail or return error
       await ctx.setOffline(false);
       // Restore connectivity -- page should work again
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const title = await page.title();
       expect(title).toContain("Example");
     });

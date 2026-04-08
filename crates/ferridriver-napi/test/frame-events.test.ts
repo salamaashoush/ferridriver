@@ -4,6 +4,34 @@
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { Browser, type Page } from "../index.js";
+import { createServer, type Server } from "node:http";
+
+// Local test server -- guaranteed 200 responses, no external network dependency.
+let testServer: Server;
+let testUrl: string;
+
+beforeAll(async () => {
+  testServer = createServer((req, res) => {
+    if (req.url === "/json") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+    } else {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end(`<!DOCTYPE html><html><head><title>Test Page</title></head><body><h1>Hello</h1></body></html>`);
+    }
+  });
+  await new Promise<void>((resolve) => {
+    testServer.listen(0, "127.0.0.1", () => {
+      const addr = testServer.address() as any;
+      testUrl = `http://127.0.0.1:${addr.port}`;
+      resolve();
+    });
+  });
+});
+
+afterAll(() => {
+  testServer?.close();
+});
 
 // When FERRIDRIVER_BACKEND is set, run only that backend for parallel execution.
 const CDP_BACKENDS = process.env.FERRIDRIVER_BACKEND
@@ -25,11 +53,11 @@ for (const backend of CDP_BACKENDS) {
     });
 
     it("gets the main frame", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const main = await page.mainFrame();
       expect(main).toBeDefined();
       expect(main.isMainFrame()).toBe(true);
-      expect(main.url).toContain("example.com");
+      expect(main.url).toContain("127.0.0.1");
     });
 
     it("main frame has no parent", async () => {
@@ -39,7 +67,7 @@ for (const backend of CDP_BACKENDS) {
     });
 
     it("gets all frames (no iframes = 1 frame)", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const frames = await page.frames();
       expect(frames.length).toBe(1);
       expect(frames[0].isMainFrame()).toBe(true);
@@ -111,17 +139,17 @@ for (const backend of CDP_BACKENDS) {
     });
 
     it("frame content() returns HTML", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const main = await page.mainFrame();
       const html = await main.content();
       expect(html).toContain("<h1>");
     });
 
     it("frame title() returns document title", async () => {
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       const main = await page.mainFrame();
       const title = await main.title();
-      expect(title).toContain("Example Domain");
+      expect(title).toBe("Test Page");
     });
   });
 
@@ -139,25 +167,22 @@ for (const backend of CDP_BACKENDS) {
     });
 
     it("waitForResponse catches network response", async () => {
-      // Navigate and wait for the response
       const [response] = await Promise.all([
-        page.waitForResponse("example.com", 10000),
-        page.goto("https://www.example.com"),
+        page.waitForResponse("127.0.0.1", 10000),
+        page.goto(testUrl),
       ]);
       expect(response).toBeDefined();
-      expect(response.status).toBeGreaterThanOrEqual(200);
-      expect(response.status).toBeLessThan(400);
-      expect(response.url).toContain("example.com");
+      expect(response.status).toBe(200);
+      expect(response.url).toContain("127.0.0.1");
     });
 
     it("waitForResponse with navigation", async () => {
       const [response] = await Promise.all([
-        page.waitForResponse("example.com", 10000),
-        page.goto("https://www.example.com"),
+        page.waitForResponse("127.0.0.1", 10000),
+        page.goto(testUrl),
       ]);
-      expect(response.url).toContain("example.com");
-      expect(response.status).toBeGreaterThanOrEqual(200);
-      expect(response.status).toBeLessThan(400);
+      expect(response.url).toContain("127.0.0.1");
+      expect(response.status).toBe(200);
     });
   });
 }
@@ -214,21 +239,20 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
     it("page.waitForEvent('response') resolves on network response", async () => {
       const [event] = await Promise.all([
         page.waitForEvent("response", 10000),
-        page.goto("https://www.example.com"),
+        page.goto(testUrl),
       ]);
       expect(event).toBeDefined();
       expect((event as any).status).toBe(200);
-      expect((event as any).url).toContain("example.com");
+      expect((event as any).url).toContain("127.0.0.1");
     });
 
     it("page.waitForResponse matches URL pattern", async () => {
       const [response] = await Promise.all([
-        page.waitForResponse("example.com", 10000),
-        page.goto("https://www.example.com"),
+        page.waitForResponse("127.0.0.1", 10000),
+        page.goto(testUrl),
       ]);
-      expect(response.status).toBeGreaterThanOrEqual(200);
-      expect(response.status).toBeLessThan(400);
-      expect(response.url).toContain("example.com");
+      expect(response.status).toBe(200);
+      expect(response.url).toContain("127.0.0.1");
     });
 
     it("page.on('response') fires for every request", async () => {
@@ -237,12 +261,12 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
         responses.push(r);
       });
 
-      await page.goto("https://www.example.com");
+      await page.goto(testUrl);
       await page.waitForTimeout(500);
 
       expect(responses.length).toBeGreaterThan(0);
-      expect(responses[0].status).toBeDefined();
-      expect(responses[0].url).toBeDefined();
+      expect(responses[0].status).toBe(200);
+      expect(responses[0].url).toContain("127.0.0.1");
     });
   }
 });
