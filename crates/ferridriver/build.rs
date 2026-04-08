@@ -20,8 +20,6 @@ fn main() {
     .file("src/backend/webkit/host.m")
     .flag("-fobjc-arc")
     .flag("-fmodules")
-    .flag("-Wno-deprecated-declarations")
-    .cargo_warnings(false)
     .compile("webkit_host_obj");
 
   // host_main.c -> host_main.o

@@ -141,19 +141,41 @@ window.__ferriMount = function(componentRef, rootEl, options) {
   let _ = std::fs::remove_dir_all(&tmp);
 }
 
-/// Test: DevServer URL extraction from various log formats.
+/// Test: DevServer config presets produce correct commands and arguments.
 #[test]
-fn test_devserver_url_extraction() {
+fn test_devserver_config_presets() {
   use ferridriver_test::ct::devserver;
+  let cwd = std::path::Path::new("/tmp/project");
 
-  // These are internal — test via starting a simple HTTP server.
-  // For now just verify the module compiles and types are accessible.
-  let config = devserver::DevServerConfig::vite(std::path::Path::new("."));
-  assert_eq!(config.cmd, if cfg!(target_os = "linux") { "bunx" } else { "bunx" });
+  // Vite: uses bunx if available, falls back to npx
+  let vite = devserver::DevServerConfig::vite(cwd);
+  assert!(
+    vite.cmd == "bunx" || vite.cmd == "npx",
+    "vite cmd should be bunx or npx, got: {}",
+    vite.cmd
+  );
+  assert!(vite.args.contains(&"vite".to_string()), "vite args should contain 'vite'");
+  assert_eq!(vite.cwd, cwd);
+  assert_eq!(vite.timeout_secs, 30);
 
-  let config = devserver::DevServerConfig::trunk(std::path::Path::new("."));
-  assert_eq!(config.cmd, "trunk");
+  // Trunk: always uses trunk binary
+  let trunk = devserver::DevServerConfig::trunk(cwd);
+  assert_eq!(trunk.cmd, "trunk");
+  assert_eq!(trunk.args, vec!["serve"]);
+  assert_eq!(trunk.cwd, cwd);
+  assert_eq!(trunk.timeout_secs, 60);
 
-  let config = devserver::DevServerConfig::dioxus(std::path::Path::new("."));
-  assert_eq!(config.cmd, "dx");
+  // Dioxus: always uses dx binary
+  let dx = devserver::DevServerConfig::dioxus(cwd);
+  assert_eq!(dx.cmd, "dx");
+  assert_eq!(dx.args, vec!["serve"]);
+  assert_eq!(dx.cwd, cwd);
+  assert_eq!(dx.timeout_secs, 60);
+
+  // Cargo-leptos: uses cargo subcommand
+  let leptos = devserver::DevServerConfig::cargo_leptos(cwd);
+  assert_eq!(leptos.cmd, "cargo");
+  assert_eq!(leptos.args, vec!["leptos", "watch"]);
+  assert_eq!(leptos.cwd, cwd);
+  assert_eq!(leptos.timeout_secs, 120);
 }

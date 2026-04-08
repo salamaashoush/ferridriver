@@ -11,6 +11,7 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #import <CoreFoundation/CoreFoundation.h>
+#import <UniformTypeIdentifiers/UniformTypeIdentifiers.h>
 #import <objc/runtime.h>
 #import <objc/message.h>
 #include <unistd.h>
@@ -349,6 +350,8 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                            const uint8_t *payload, uint32_t payload_len);
 
 static void cf_callback(CFFileDescriptorRef cffd, CFOptionFlags flags, void *info) {
+    (void)cffd;
+    (void)info;
     if (flags & kCFFileDescriptorWriteCallBack) writer_on_writable();
     if (!(flags & kCFFileDescriptorReadCallBack)) return;
     // Read all available data (to EAGAIN) — same as Bun's Host::onReadable
@@ -765,7 +768,7 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 if (!cg) { write_frame_str(rid, REP_ERROR, @"no CGImage"); return; }
 
                 CFMutableDataRef imgData;
-                CFStringRef utType = (captured_format == 1) ? kUTTypeJPEG : kUTTypePNG;
+                CFStringRef utType = (captured_format == 1) ? (__bridge CFStringRef)UTTypeJPEG.identifier : (__bridge CFStringRef)UTTypePNG.identifier;
                 imgData = CFDataCreateMutable(NULL, 0);
                 CGImageDestinationRef dest = CGImageDestinationCreateWithData(imgData, utType, 1, NULL);
                 if (!dest) { CFRelease(imgData); write_frame_str(rid, REP_ERROR, @"encoder fail"); return; }
@@ -900,6 +903,7 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 if ([v->webview respondsToSelector:execSel]) {
                     uint32_t captured_rid = req_id;
                     void (^block)(BOOL) = ^(BOOL success) {
+                        (void)success;
                         write_frame(captured_rid, REP_OK, NULL, 0);
                     };
                     ((void(*)(id,SEL,id,id,id))objc_msgSend)(
@@ -1168,12 +1172,10 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 NSHTTPCookiePath: path.length > 0 ? path : @"/",
             }];
             if (secure) props[NSHTTPCookieSecure] = @"TRUE";
+            if (httpOnly) props[@"HttpOnly"] = @"TRUE";
             if (expires > 0) {
                 props[NSHTTPCookieExpires] = [NSDate dateWithTimeIntervalSince1970:expires];
             }
-            // Note: NSHTTPCookie doesn't expose httpOnly setter via properties,
-            // but cookies created via WKHTTPCookieStore respect the httpOnly
-            // from the original Set-Cookie header if present.
 
             NSHTTPCookie *cookie = [NSHTTPCookie cookieWithProperties:props];
             if (!cookie) { write_frame_str(req_id, REP_ERROR, @"invalid cookie"); break; }
@@ -1607,8 +1609,10 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                     if ([ariaRole isEqualToString:@"heading"]) {
                         id levelVal = nil;
                         @try {
-                            levelVal = [elem accessibilityAttributeValue:@"AXHeadingLevel"];
-                        } @catch (NSException *e) {}
+                            levelVal = [elem valueForKey:@"accessibilityHeadingLevel"];
+                        } @catch (NSException *e) {
+                            // AXHeadingLevel is not available via KVC on all elements
+                        }
                         if (levelVal && [levelVal respondsToSelector:@selector(integerValue)]) {
                             [props addObject:@{@"name": @"level",
                                                @"value": [NSNumber numberWithInteger:[levelVal integerValue]]}];
@@ -1630,7 +1634,10 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 // URL for links
                 if ([ariaRole isEqualToString:@"link"]) {
                     @try {
-                        id urlVal = [elem accessibilityAttributeValue:NSAccessibilityURLAttribute];
+                        NSURL *urlVal = nil;
+                        if ([elem respondsToSelector:@selector(accessibilityURL)]) {
+                            urlVal = [elem accessibilityURL];
+                        }
                         if ([urlVal isKindOfClass:[NSURL class]]) {
                             [props addObject:@{@"name": @"url",
                                                @"value": [urlVal absoluteString]}];
@@ -1648,11 +1655,9 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 // Expanded state
                 if ([elem respondsToSelector:@selector(isAccessibilityExpanded)]) {
                     @try {
-                        id expVal = [elem accessibilityAttributeValue:NSAccessibilityExpandedAttribute];
-                        if (expVal) {
-                            [props addObject:@{@"name": @"expanded",
-                                               @"value": @([expVal boolValue])}];
-                        }
+                        BOOL expanded = [elem isAccessibilityExpanded];
+                        [props addObject:@{@"name": @"expanded",
+                                           @"value": @(expanded)}];
                     } @catch (NSException *e) {}
                 }
 
@@ -1663,13 +1668,14 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                     }
                 }
 
-                // Required state (custom attribute)
-                @try {
-                    id reqVal = [elem accessibilityAttributeValue:@"AXRequired"];
-                    if (reqVal && [reqVal boolValue]) {
-                        [props addObject:@{@"name": @"required", @"value": @YES}];
-                    }
-                } @catch (NSException *e) {}
+                // Required state
+                if ([elem respondsToSelector:@selector(isAccessibilityRequired)]) {
+                    @try {
+                        if ([elem isAccessibilityRequired]) {
+                            [props addObject:@{@"name": @"required", @"value": @YES}];
+                        }
+                    } @catch (NSException *e) {}
+                }
 
                 // Focused state
                 if ([elem respondsToSelector:@selector(isAccessibilityFocused)]) {
