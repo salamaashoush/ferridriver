@@ -174,6 +174,7 @@ async fn run_bench(label: &str, num_tests: usize, num_workers: u32) -> Duration 
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+#[ignore = "benchmark, not for CI"]
 async fn bench_parallel_scaling() {
   println!("\n============================================================");
   println!("  ferridriver-test performance benchmark");

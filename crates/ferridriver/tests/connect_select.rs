@@ -3,6 +3,7 @@
 //! Launches its own headless Chrome, connects via `CdpRaw`, and tests page ops.
 
 use ferridriver::backend::cdp::{CdpBrowser, ws::WsTransport};
+use ferridriver::state::detect_chromium;
 use std::io::BufRead;
 use std::time::Instant;
 
@@ -10,7 +11,7 @@ use std::time::Instant;
 async fn connect_and_select_pages() {
   let t = Instant::now();
 
-  let chrome_path = std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| "google-chrome-stable".to_string());
+  let chrome_path = detect_chromium();
 
   // Launch Chrome with port=0 and parse the actual port from stderr
   eprintln!("[test] launching Chrome...");
@@ -165,8 +166,9 @@ async fn connect_and_select_pages() {
 }
 
 /// Connect to the user's running Chrome (not headless) and test page ops.
-/// Run: `cargo test --test connect_select connect_real_chrome -- --nocapture`
+/// Run: `cargo test --test connect_select connect_real_chrome -- --nocapture --ignored`
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires user's running Chrome instance"]
 async fn connect_real_chrome() {
   use ferridriver::backend::BackendKind;
   use ferridriver::state::{BrowserState, ConnectMode};
