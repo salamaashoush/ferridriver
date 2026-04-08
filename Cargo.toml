@@ -5,6 +5,7 @@ members = ["crates/*", "examples/ct-leptos-todomvc", "examples/ct-dioxus-todomvc
 [workspace.package]
 version = "0.2.0"
 edition = "2024"
+rust-version = "1.91.0"
 license = "MIT OR Apache-2.0"
 authors = ["Salama Ashoush <salamaashoush@gmail.com>"]
 repository = "https://github.com/salamaashoush/ferridriver"
