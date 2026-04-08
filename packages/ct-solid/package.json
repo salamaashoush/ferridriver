@@ -4,12 +4,30 @@
   "description": "Ferridriver component testing adapter for Solid",
   "type": "module",
   "main": "src/index.mjs",
+  "license": "MIT OR Apache-2.0",
+  "author": "Salama Ashoush <salamaashoush@gmail.com>",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/salamaashoush/ferridriver",
+    "directory": "packages/ct-solid"
+  },
+  "homepage": "https://github.com/salamaashoush/ferridriver",
+  "bugs": {
+    "url": "https://github.com/salamaashoush/ferridriver/issues"
+  },
+  "keywords": [
+    "ferridriver",
+    "component-testing",
+    "solid"
+  ],
   "exports": {
     ".": "./src/index.mjs",
     "./register": "./src/registerSource.mjs"
   },
+  "dependencies": {
+    "@ferridriver/ct-core": "workspace:*"
+  },
   "peerDependencies": {
     "solid-js": ">=1.0.0"
-  },
-  "keywords": ["ferridriver", "component-testing", "solid"]
+  }
 }

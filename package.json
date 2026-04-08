@@ -1,5 +1,5 @@
 {
-  "name": "ferridriver",
+  "name": "@ferridriver/monorepo",
   "private": true,
   "workspaces": [
     "packages/*",

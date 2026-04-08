@@ -6,6 +6,12 @@ members = ["crates/*", "examples/ct-leptos-todomvc", "examples/ct-dioxus-todomvc
 version = "0.2.0"
 edition = "2024"
 license = "MIT OR Apache-2.0"
+authors = ["Salama Ashoush <salamaashoush@gmail.com>"]
+repository = "https://github.com/salamaashoush/ferridriver"
+homepage = "https://github.com/salamaashoush/ferridriver"
+readme = "README.md"
+keywords = ["browser", "automation", "playwright", "cdp", "testing"]
+categories = ["development-tools::testing", "web-programming"]
 
 [workspace.lints.rust]
 unsafe_code = "warn"

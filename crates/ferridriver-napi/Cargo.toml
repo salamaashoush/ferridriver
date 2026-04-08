@@ -4,6 +4,7 @@ description = "NAPI-RS native addon exposing ferridriver browser automation to N
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+publish = false
 
 [lib]
 crate-type = ["cdylib"]
