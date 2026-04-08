@@ -154,7 +154,10 @@ fn test_devserver_config_presets() {
     "vite cmd should be bunx or npx, got: {}",
     vite.cmd
   );
-  assert!(vite.args.contains(&"vite".to_string()), "vite args should contain 'vite'");
+  assert!(
+    vite.args.contains(&"vite".to_string()),
+    "vite args should contain 'vite'"
+  );
   assert_eq!(vite.cwd, cwd);
   assert_eq!(vite.timeout_secs, 30);
 
