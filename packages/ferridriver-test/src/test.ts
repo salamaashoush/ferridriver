@@ -7,7 +7,7 @@
  * In component testing mode (--ct), a `mount` fixture is also provided.
  */
 
-import type { Page, TestMeta } from 'ferridriver';
+import type { Page, TestMeta } from '@ferridriver/core';
 
 /** Mount function for component testing. */
 export type MountFunction = (
