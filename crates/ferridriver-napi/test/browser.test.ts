@@ -576,7 +576,7 @@ for (const backend of BACKENDS) {
         timeout: 10000,
       });
       const title = await page.title();
-      expect(title).toContain("Example");
+      expect(title).toContain("Test Page");
     });
 
     // ── Page.waitForLoadState with state ──────────────────────────────
@@ -621,12 +621,13 @@ for (const backend of BACKENDS) {
 
     // ── Page.storageState ────────────────────────────────────────────
 
-    it("storageState returns cookies and localStorage", async () => {
+    it("storageState returns cookies and origins", async () => {
       await page.goto(testUrl);
       const state = await page.storageState();
       expect(state).toHaveProperty("cookies");
-      expect(state).toHaveProperty("localStorage");
+      expect(state).toHaveProperty("origins");
       expect(Array.isArray(state.cookies)).toBe(true);
+      expect(Array.isArray(state.origins)).toBe(true);
     });
 
     // ── Page.mouseWheel / mouseDown / mouseUp ────────────────────────
@@ -821,7 +822,7 @@ for (const backend of BACKENDS) {
       // Restore connectivity -- page should work again
       await page.goto(testUrl);
       const title = await page.title();
-      expect(title).toContain("Example");
+      expect(title).toContain("Test Page");
     });
   });
 }
