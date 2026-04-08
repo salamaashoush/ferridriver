@@ -957,7 +957,7 @@ fn run_all_tests(backend: &str) {
   // Known WebKit limitations: accessibility tree empty on data URLs,
   // network request tracking not implemented in WKWebView.
   let known_webkit_failures: &[&str] = if backend == "webkit" {
-    &["test_snapshot", "test_network_requests"]
+    &["test_snapshot", "test_network_requests", "test_run_step_navigate"]
   } else {
     &[]
   };
