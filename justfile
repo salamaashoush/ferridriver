@@ -2,6 +2,11 @@ set shell := ["bash", "-cu"]
 
 default: check
 
+# Set up git hooks (run once after cloning)
+setup:
+  git config core.hooksPath .githooks
+  @echo "Git hooks configured"
+
 # Full CI check
 ready: fmt lint test
   @echo "Ready to commit"

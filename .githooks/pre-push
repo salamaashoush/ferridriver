@@ -1,0 +1,32 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "[pre-push] Running checks..."
+
+# Format
+echo "[pre-push] cargo fmt..."
+if ! cargo fmt --all -- --check 2>/dev/null; then
+  echo "[pre-push] FAILED: code is not formatted. Run: cargo fmt --all"
+  exit 1
+fi
+
+# Clippy (workspace, excluding broken examples)
+echo "[pre-push] cargo clippy..."
+if ! cargo clippy --workspace --all-targets \
+  --exclude ct-dioxus-todomvc \
+  --exclude ct-leptos-todomvc \
+  --exclude bdd-example 2>&1 | grep -q "^error"; then
+  : # no errors
+else
+  echo "[pre-push] FAILED: clippy errors found"
+  exit 1
+fi
+
+# Unit tests (lib only, fast)
+echo "[pre-push] cargo test --lib..."
+if ! cargo test --workspace --lib 2>/dev/null; then
+  echo "[pre-push] FAILED: unit tests failed"
+  exit 1
+fi
+
+echo "[pre-push] All checks passed."
