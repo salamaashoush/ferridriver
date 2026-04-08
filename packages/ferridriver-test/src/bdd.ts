@@ -18,7 +18,7 @@
  *   });
  */
 
-import { BddRunner as NativeBddRunner, type BddRunnerConfig, type BddRunSummary, type Page, type StepContext as NativeStepContext } from 'ferridriver';
+import { BddRunner as NativeBddRunner, type BddRunnerConfig, type BddRunSummary, type Page, type StepContext as NativeStepContext } from '@ferridriver/core';
 
 // ── Cucumber Expression Type Inference ────────────────────────────────────
 

@@ -3,7 +3,7 @@
  * All polling/retry logic runs in Rust for zero NAPI round-trips per retry.
  */
 
-import type { Page, Locator } from 'ferridriver';
+import type { Page, Locator } from '@ferridriver/core';
 
 const DEFAULT_TIMEOUT = 5000;
 

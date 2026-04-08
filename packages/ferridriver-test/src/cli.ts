@@ -15,8 +15,8 @@
 import { defineCommand, defineArgs, runMain, withCompletions } from 'clap-ts';
 import type { CommandDef } from 'clap-ts';
 
-import { TestRunner, BddRunner } from 'ferridriver';
-import type { Page, BddRunnerConfig } from 'ferridriver';
+import { TestRunner, BddRunner } from '@ferridriver/core';
+import type { Page, BddRunnerConfig } from '@ferridriver/core';
 import { _setCurrentFile, _drainTests, _hasOnly, _setCtMountFactory } from './test.js';
 import type { MountFunction } from './test.js';
 import { resolve, relative } from 'path';
@@ -546,6 +546,44 @@ const codegenCommand = defineCommand({
 
 // ---- Root command ----
 
+const installCommand = defineCommand({
+  meta: {
+    name: 'install',
+    description: 'Install browsers for automation',
+  },
+  args: defineArgs({
+    'with-deps': {
+      type: 'boolean',
+      description: 'Also install system dependencies (fonts, libs)',
+      default: false,
+    },
+  }),
+  positionals: {
+    browser: {
+      type: 'string',
+      description: 'Browser to install',
+      default: 'chromium',
+    },
+  },
+  async run({ args, positionals }) {
+    const { installChromium, installSystemDeps, getBrowserCacheDir } = await import('@ferridriver/core');
+    const browser = positionals.browser || 'chromium';
+    if (browser !== 'chromium' && browser !== 'chrome') {
+      console.error(`Unsupported browser: ${browser}. Only 'chromium' is supported.`);
+      process.exit(1);
+    }
+    console.log(`Browser cache: ${getBrowserCacheDir()}`);
+    if (args['with-deps']) {
+      console.log('Installing system dependencies...');
+      await installSystemDeps();
+      console.log('System dependencies installed.');
+    }
+    console.log('Installing Chromium...');
+    const path = await installChromium();
+    console.log(`Chromium installed: ${path}`);
+  },
+});
+
 const root = defineCommand({
   meta: {
     name: 'ferridriver-test',
@@ -559,13 +597,15 @@ const root = defineCommand({
       '  ferridriver-test ct --framework react         # Component tests with React\n' +
       '  ferridriver-test bdd --tags "@smoke"           # BDD tests filtered by tag\n' +
       '  ferridriver-test bdd features/ --steps steps/  # Custom feature/step paths\n' +
-      '  ferridriver-test codegen https://example.com   # Record interactions as test code',
+      '  ferridriver-test codegen https://example.com   # Record interactions as test code\n' +
+      '  ferridriver-test install --with-deps           # Install Chromium + system deps',
   },
   subCommands: {
     test: testCommand,
     ct: ctCommand,
     bdd: bddCommand,
     codegen: codegenCommand,
+    install: installCommand,
   },
 });
 
