@@ -23,6 +23,74 @@ ferridriver (core library)
   └── @ferridriver/ct-solid  Solid adapter (render/dispose)
 ```
 
+## Installation
+
+### One-line install (Linux/macOS)
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/salamaashoush/ferridriver/main/install.sh | bash
+```
+
+This installs system dependencies, the `ferridriver` binary, and downloads Chromium.
+
+### Manual install
+
+#### 1. System dependencies
+
+ferridriver requires **ffmpeg** libraries for video recording.
+
+**Ubuntu/Debian:**
+```bash
+sudo apt-get install -y ffmpeg libavutil-dev libavformat-dev libavfilter-dev \
+  libavdevice-dev libswscale-dev libswresample-dev libavcodec-dev \
+  pkg-config libclang-dev
+```
+
+**Arch Linux:**
+```bash
+sudo pacman -S ffmpeg pkgconf clang
+```
+
+**macOS (Homebrew):**
+```bash
+brew install ffmpeg pkg-config
+```
+
+**Fedora/RHEL:**
+```bash
+sudo dnf install ffmpeg-devel clang-devel pkgconfig
+```
+
+#### 2. Install the CLI
+
+**From GitHub releases:**
+```bash
+# Download the latest release for your platform
+curl -fsSL https://github.com/salamaashoush/ferridriver/releases/latest/download/ferridriver-VERSION-TARGET.tar.gz | tar xz
+```
+
+**From source:**
+```bash
+cargo install ferridriver-cli
+```
+
+#### 3. Install a browser
+
+```bash
+ferridriver install chromium                # download Chrome for Testing
+ferridriver install --with-deps chromium    # also install Chromium system deps (fonts, libs)
+```
+
+### npm (Node.js/Bun)
+
+```bash
+npm install @ferridriver/core
+# or
+bun add @ferridriver/core
+```
+
+The native addon includes all browser automation functionality. On macOS, it also ships the WebKit host binary.
+
 ## Quick Start (Rust)
 
 ```rust
@@ -50,7 +118,7 @@ async fn main() -> Result<(), String> {
 ## Quick Start (Node.js/Bun)
 
 ```typescript
-import { Browser } from 'ferridriver';
+import { Browser } from '@ferridriver/core';
 
 const browser = await Browser.launch();
 const page = await browser.newPageWithUrl('https://example.com');
