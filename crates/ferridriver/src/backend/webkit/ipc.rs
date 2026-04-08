@@ -324,14 +324,20 @@ impl IpcClient {
       }
     }
 
-    // Priority 3: Cache directory
+    // Priority 3: Cache directories (macOS Library/Caches + XDG ~/.cache)
     if let Some(home) = std::env::var_os("HOME") {
-      let cached = std::path::Path::new(&home)
-        .join(".cache")
-        .join("ferridriver")
+      let home = std::path::Path::new(&home);
+      // macOS-native cache location (used by npm postinstall)
+      let mac_cached = home
+        .join("Library/Caches/ferridriver")
         .join(HOST_BINARY_NAME);
-      if cached.exists() {
-        return Ok(cached);
+      if mac_cached.exists() {
+        return Ok(mac_cached);
+      }
+      // XDG-style fallback (used by build.rs)
+      let xdg_cached = home.join(".cache/ferridriver").join(HOST_BINARY_NAME);
+      if xdg_cached.exists() {
+        return Ok(xdg_cached);
       }
     }
 
@@ -345,8 +351,9 @@ impl IpcClient {
       "WebKit host binary not found. Checked:\n  \
        1. $FERRIDRIVER_WEBKIT_HOST (not set)\n  \
        2. sibling to current executable\n  \
-       3. ~/.cache/ferridriver/{HOST_BINARY_NAME}\n  \
-       4. {HOST_BINARY_PATH}\n\
+       3. ~/Library/Caches/ferridriver/{HOST_BINARY_NAME}\n  \
+       4. ~/.cache/ferridriver/{HOST_BINARY_NAME}\n  \
+       5. {HOST_BINARY_PATH}\n\
        Set FERRIDRIVER_WEBKIT_HOST or rebuild with `cargo build`."
     ))
   }

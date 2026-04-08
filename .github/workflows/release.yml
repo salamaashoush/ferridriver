@@ -96,7 +96,12 @@ jobs:
         run: |
           ARCHIVE="ferridriver-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz"
           cd target/${{ matrix.target }}/release
-          tar czf "../../../${ARCHIVE}" ferridriver
+          # Include fd_webkit_host alongside the CLI binary on macOS
+          if [ -f fd_webkit_host ]; then
+            tar czf "../../../${ARCHIVE}" ferridriver fd_webkit_host
+          else
+            tar czf "../../../${ARCHIVE}" ferridriver
+          fi
           cd ../../..
           shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
           echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
@@ -170,7 +175,9 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: napi-${{ matrix.target }}
-          path: crates/ferridriver-napi/*.node
+          path: |
+            crates/ferridriver-napi/*.node
+            crates/ferridriver-napi/fd_webkit_host
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -213,6 +220,9 @@ jobs:
           cp ../../artifacts/napi-x86_64-unknown-linux-gnu/*.node npm/linux-x64-gnu/
           cp ../../artifacts/napi-aarch64-unknown-linux-gnu/*.node npm/linux-arm64-gnu/
           cp ../../artifacts/napi-x86_64-pc-windows-msvc/*.node npm/win32-x64-msvc/
+          # Include fd_webkit_host in macOS platform packages
+          cp ../../artifacts/napi-aarch64-apple-darwin/fd_webkit_host npm/darwin-arm64/ 2>/dev/null || true
+          cp ../../artifacts/napi-x86_64-apple-darwin/fd_webkit_host npm/darwin-x64/ 2>/dev/null || true
 
       - name: List npm packages
         run: ls -R crates/ferridriver-napi/npm/

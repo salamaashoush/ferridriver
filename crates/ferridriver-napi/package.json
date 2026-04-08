@@ -25,7 +25,9 @@
   ],
   "files": [
     "index.d.ts",
-    "index.js"
+    "index.js",
+    "fd_webkit_host",
+    "postinstall.js"
   ],
   "napi": {
     "binaryName": "ferridriver-napi",
@@ -52,7 +54,8 @@
     "build:debug": "napi build --platform",
     "artifacts": "napi artifacts",
     "prepublishOnly": "napi prepublish -t npm",
-    "version": "napi version"
+    "version": "napi version",
+    "postinstall": "node postinstall.js"
   },
   "devDependencies": {
     "@napi-rs/cli": "^3.2.0",
