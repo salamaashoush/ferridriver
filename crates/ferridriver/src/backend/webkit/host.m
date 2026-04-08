@@ -1555,8 +1555,7 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 else if ([role isEqualToString:@"AXTab"]) ariaRole = @"tab";
                 else if ([role isEqualToString:NSAccessibilitySliderRole]) ariaRole = @"slider";
                 else if ([role isEqualToString:NSAccessibilityImageRole]) ariaRole = @"img";
-                else if ([role isEqualToString:NSAccessibilityHeadingRole] ||
-                         [role isEqualToString:@"AXHeading"]) ariaRole = @"heading";
+                else if ([role isEqualToString:@"AXHeading"]) ariaRole = @"heading";
                 else if ([role isEqualToString:NSAccessibilityListRole]) ariaRole = @"list";
                 else if ([role isEqualToString:NSAccessibilityTableRole]) ariaRole = @"table";
                 else if ([role isEqualToString:NSAccessibilityRowRole]) ariaRole = @"row";
@@ -1566,8 +1565,7 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 else if ([role isEqualToString:NSAccessibilityMenuRole]) ariaRole = @"menu";
                 else if ([role isEqualToString:NSAccessibilityMenuBarRole]) ariaRole = @"menubar";
                 else if ([role isEqualToString:NSAccessibilityStaticTextRole]) ariaRole = @"StaticText";
-                else if ([role isEqualToString:NSAccessibilityWebAreaRole] ||
-                         [role isEqualToString:@"AXWebArea"]) ariaRole = @"RootWebArea";
+                else if ([role isEqualToString:@"AXWebArea"]) ariaRole = @"RootWebArea";
                 else if ([role isEqualToString:@"AXLandmarkNavigation"]) ariaRole = @"navigation";
                 else if ([role isEqualToString:@"AXLandmarkMain"]) ariaRole = @"main";
                 else if ([role isEqualToString:@"AXLandmarkBanner"]) ariaRole = @"banner";
