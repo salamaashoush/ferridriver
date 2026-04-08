@@ -4,7 +4,7 @@
 //! - Instance = Chrome process (owns chrome flags)
 //! - Context = isolated browser context within an instance (isolated cookies, storage)
 //! - Page = tab within a context
-//! - Composite session key: "<instance>:<context>" (backwards compat: bare name = default instance)
+//! - Composite session key: `"<instance>:<context>"` (backwards compat: bare name = default instance)
 //! - No global "active page" -- every tool call specifies its session key
 //! - No races possible: there is no shared mutable selection state
 

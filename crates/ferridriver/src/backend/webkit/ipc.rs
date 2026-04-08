@@ -1,7 +1,7 @@
 //! IPC between parent and `WebKit` host subprocess.
 //!
 //! Binary frame protocol over Unix socketpair (ported from Bun's `ipc_protocol.h)`:
-//!   Frame = { u32 len, u32 `req_id`, u8 op } (9 bytes LE) + payload[len]
+//!   Frame = { u32 len, u32 `req_id`, u8 op } (9 bytes LE) + payload\[len\]
 //!   Strings = u32 len (LE) + UTF-8 bytes
 //!
 //! Child: single-threaded, nonblocking socket, `NSRunLoop` for `AppKit` callbacks.
