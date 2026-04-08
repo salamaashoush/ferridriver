@@ -30,7 +30,7 @@ fn is_ignored(path: &Path, extra_ignore: &[String]) -> bool {
   path.components().any(|c| {
     if let std::path::Component::Normal(s) = c {
       let s = s.to_str().unwrap_or("");
-      DEFAULT_IGNORE_SEGMENTS.iter().any(|ign| *ign == s) || extra_ignore.iter().any(|ign| ign == s)
+      DEFAULT_IGNORE_SEGMENTS.contains(&s) || extra_ignore.iter().any(|ign| ign == s)
     } else {
       false
     }
