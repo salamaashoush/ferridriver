@@ -31,6 +31,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Transport::Http => ferridriver_mcp::mcp::serve_http(mode, backend, transport.port, headless).await,
       }
     },
+    cli::Command::Install { browser, with_deps } => install_browser(&browser, with_deps).await,
     cli::Command::Test { files, test_args } => run_tests(files, test_args).await,
     cli::Command::Bdd { features, bdd_args } => run_bdd(features, bdd_args).await,
     cli::Command::Codegen {
@@ -326,6 +327,84 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
   let exit_code = runner.run(plan).await;
 
   std::process::exit(exit_code);
+}
+
+async fn install_browser(browser: &str, with_deps: bool) -> anyhow::Result<()> {
+  use ferridriver::install::{BrowserInstaller, InstallProgress};
+
+  match browser {
+    "chromium" | "chrome" => {},
+    other => anyhow::bail!("unsupported browser: {other}. Only 'chromium' is supported."),
+  }
+
+  let installer = BrowserInstaller::new();
+  println!("Browser cache: {}", installer.cache_dir().display());
+
+  // Install system dependencies first if requested
+  if with_deps {
+    installer
+      .install_system_deps(|p| match p {
+        InstallProgress::InstallingDeps { distro } => {
+          println!("Installing system dependencies for {distro}...");
+        },
+        InstallProgress::DepsInstalled => {
+          println!("System dependencies installed.");
+        },
+        _ => {},
+      })
+      .await
+      .map_err(|e| anyhow::anyhow!(e))?;
+  }
+
+  let path = installer
+    .install_chromium(|p| match p {
+      InstallProgress::Resolving => {
+        println!("Resolving latest stable Chrome for Testing...");
+      },
+      InstallProgress::Downloading {
+        bytes_downloaded,
+        total_bytes,
+      } => {
+        if let Some(total) = total_bytes {
+          let pct = (bytes_downloaded as f64 / total as f64 * 100.0) as u32;
+          let mb = bytes_downloaded as f64 / 1_048_576.0;
+          let total_mb = total as f64 / 1_048_576.0;
+          eprint!("\rDownloading... {mb:.1}/{total_mb:.1} MB ({pct}%)");
+        } else {
+          let mb = bytes_downloaded as f64 / 1_048_576.0;
+          eprint!("\rDownloading... {mb:.1} MB");
+        }
+      },
+      InstallProgress::Extracting => {
+        eprintln!();
+        println!("Extracting...");
+      },
+      InstallProgress::Complete { version, path } => {
+        println!("Chromium {version} installed: {path}");
+      },
+      InstallProgress::AlreadyInstalled { version, path } => {
+        println!("Chromium {version} already installed: {path}");
+      },
+      _ => {},
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!(e))?;
+
+  // Verify it works
+  let output = std::process::Command::new(&path)
+    .arg("--version")
+    .output();
+  match output {
+    Ok(o) if o.status.success() => {
+      let ver = String::from_utf8_lossy(&o.stdout);
+      println!("Verified: {}", ver.trim());
+    },
+    _ => {
+      eprintln!("Warning: could not verify browser at {path}");
+    },
+  }
+
+  Ok(())
 }
 
 fn empty_plan() -> ferridriver_test::model::TestPlan {

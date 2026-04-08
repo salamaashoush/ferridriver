@@ -51,6 +51,17 @@ pub enum Command {
     features: Vec<String>,
   },
 
+  /// Install browsers for automation
+  Install {
+    /// Browser to install (default: chromium)
+    #[arg(default_value = "chromium")]
+    browser: String,
+
+    /// Also install system dependencies (Linux: apt packages for fonts, libs)
+    #[arg(long)]
+    with_deps: bool,
+  },
+
   /// Record user interactions and generate test code
   Codegen {
     /// URL to open in the browser

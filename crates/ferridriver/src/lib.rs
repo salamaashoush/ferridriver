@@ -43,6 +43,9 @@ pub mod route;
 pub mod snapshot;
 pub mod state;
 
+// ── Browser installation ──
+pub mod install;
+
 // ── Implementation modules (used by MCP server, will be internalized) ──
 pub mod actions;
 pub mod api_request;

@@ -43,6 +43,7 @@
 mod api_request;
 mod bdd_runner;
 mod browser;
+mod install;
 mod codegen;
 mod context;
 mod frame;

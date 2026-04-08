@@ -983,6 +983,11 @@ pub fn detect_chromium() -> String {
     }
   }
 
+  // Check ferridriver's own browser cache
+  if let Some(p) = crate::install::BrowserInstaller::new().find_installed_chromium() {
+    return p;
+  }
+
   if let Some(p) = find_playwright_chrome() {
     return p;
   }
