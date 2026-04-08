@@ -560,7 +560,10 @@ fn test_search_page_no_match(c: &mut McpClient) {
 
 fn test_select_option(c: &mut McpClient) {
   c.nav("<select id='s'><option value='apple'>Apple</option><option value='banana'>Banana</option><option value='cherry'>Cherry</option></select>");
-  c.call_tool("select_option", json!({"selector": "#s", "label": "Banana"}));
+  let r = c.call_tool("select_option", json!({"selector": "#s", "label": "Banana"}));
+  ok(&r, "select_option");
+  // Flush microtasks to ensure DOM mutation from select is complete
+  c.tool_text("evaluate", json!({"expression": "new Promise(r => setTimeout(r, 0))"}));
   let t = c.tool_text("evaluate", json!({"expression": "document.getElementById('s').value"}));
   assert!(t.contains("banana"), "should select Banana: {t}");
 }
