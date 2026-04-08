@@ -1,0 +1,348 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  CARGO_NET_RETRY: 10
+  RUSTUP_MAX_RETRIES: 10
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Create a draft GitHub release with changelog
+  # ---------------------------------------------------------------------------
+  create-release:
+    name: Create release
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Extract version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+      - name: Generate changelog
+        id: changelog
+        uses: orhun/git-cliff-action@v4
+        with:
+          config: cliff.toml
+          args: --latest --strip header
+      - name: Create draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            --draft \
+            --verify-tag \
+            --title "$GITHUB_REF_NAME" \
+            --notes "${{ steps.changelog.outputs.content }}"
+
+  # ---------------------------------------------------------------------------
+  # Build CLI binaries for all platforms
+  # ---------------------------------------------------------------------------
+  build-cli:
+    name: CLI ${{ matrix.target }}
+    needs: [create-release]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: aarch64-unknown-linux-musl
+            os: ubuntu-latest
+            cross: true
+          - target: x86_64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: aarch64-apple-darwin
+            os: macos-latest
+            cross: false
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+            cross: false
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - name: Install cross
+        if: matrix.cross
+        uses: taiki-e/install-action@cross
+
+      - name: Build binary
+        shell: bash
+        run: |
+          if [ "${{ matrix.cross }}" = "true" ]; then
+            cross build --release --target ${{ matrix.target }} -p ferridriver-cli
+          else
+            cargo build --release --target ${{ matrix.target }} -p ferridriver-cli
+          fi
+
+      - name: Package (Unix)
+        if: runner.os != 'Windows'
+        run: |
+          ARCHIVE="ferridriver-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.tar.gz"
+          cd target/${{ matrix.target }}/release
+          tar czf "../../../${ARCHIVE}" ferridriver
+          cd ../../..
+          shasum -a 256 "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        shell: bash
+        run: |
+          ARCHIVE="ferridriver-${{ needs.create-release.outputs.version }}-${{ matrix.target }}.zip"
+          cd target/${{ matrix.target }}/release
+          7z a "../../../${ARCHIVE}" ferridriver.exe
+          cd ../../..
+          sha256sum "${ARCHIVE}" > "${ARCHIVE}.sha256"
+          echo "ARCHIVE=${ARCHIVE}" >> "$GITHUB_ENV"
+
+      - name: Upload to release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: gh release upload "$GITHUB_REF_NAME" ${{ env.ARCHIVE }} ${{ env.ARCHIVE }}.sha256 --clobber
+
+  # ---------------------------------------------------------------------------
+  # Build NAPI native addons for all platforms
+  # ---------------------------------------------------------------------------
+  build-napi:
+    name: NAPI ${{ matrix.target }}
+    needs: [create-release]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: x86_64-apple-darwin
+            os: macos-latest
+          - target: aarch64-apple-darwin
+            os: macos-latest
+          - target: x86_64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-napi-cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-latest
+            use-napi-cross: true
+          - target: x86_64-pc-windows-msvc
+            os: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@nightly
+        with:
+          targets: ${{ matrix.target }}
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install napi-rs CLI
+        run: bun install -g @napi-rs/cli@3
+
+      - name: Install dependencies
+        run: bun install
+
+      - name: Build native
+        working-directory: crates/ferridriver-napi
+        shell: bash
+        run: |
+          if [ "${{ matrix.use-napi-cross }}" = "true" ]; then
+            napi build --platform --release --target ${{ matrix.target }} --use-napi-cross
+          else
+            napi build --platform --release --target ${{ matrix.target }}
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: napi-${{ matrix.target }}
+          path: crates/ferridriver-napi/*.node
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Publish NAPI package to npm
+  # ---------------------------------------------------------------------------
+  publish-npm:
+    name: Publish to npm
+    needs: [build-napi]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      - name: Install napi-rs CLI
+        run: bun install -g @napi-rs/cli@3
+
+      - name: Configure npm auth
+        run: echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" > ~/.npmrc
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create npm dirs
+        working-directory: crates/ferridriver-napi
+        run: napi create-npm-dirs
+
+      - name: Move artifacts to npm dirs
+        working-directory: crates/ferridriver-napi
+        run: |
+          cp ../../artifacts/napi-x86_64-apple-darwin/*.node npm/darwin-x64/
+          cp ../../artifacts/napi-aarch64-apple-darwin/*.node npm/darwin-arm64/
+          cp ../../artifacts/napi-x86_64-unknown-linux-gnu/*.node npm/linux-x64-gnu/
+          cp ../../artifacts/napi-aarch64-unknown-linux-gnu/*.node npm/linux-arm64-gnu/
+          cp ../../artifacts/napi-x86_64-pc-windows-msvc/*.node npm/win32-x64-msvc/
+
+      - name: List npm packages
+        run: ls -R crates/ferridriver-napi/npm/
+
+      - name: Publish
+        working-directory: crates/ferridriver-napi
+        run: npm publish --access public
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  # Publish to crates.io (ordered by dependency graph)
+  # ---------------------------------------------------------------------------
+  publish-crates:
+    name: Publish to crates.io
+    needs: [create-release]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@nightly
+
+      # Layer 1: proc-macro crates (no internal deps)
+      - name: Publish ferridriver-test-macros
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          output=$(cargo publish -p ferridriver-test-macros 2>&1) && exit 0
+          if echo "$output" | grep -q "already exists"; then
+            echo "ferridriver-test-macros already published, skipping"
+          else
+            echo "$output"; exit 1
+          fi
+
+      - name: Publish ferridriver-bdd-macros
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          output=$(cargo publish -p ferridriver-bdd-macros 2>&1) && exit 0
+          if echo "$output" | grep -q "already exists"; then
+            echo "ferridriver-bdd-macros already published, skipping"
+          else
+            echo "$output"; exit 1
+          fi
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      # Layer 2: core library
+      - name: Publish ferridriver
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          output=$(cargo publish -p ferridriver 2>&1) && exit 0
+          if echo "$output" | grep -q "already exists"; then
+            echo "ferridriver already published, skipping"
+          else
+            echo "$output"; exit 1
+          fi
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      # Layer 3: test runner (depends on ferridriver)
+      - name: Publish ferridriver-test
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          output=$(cargo publish -p ferridriver-test 2>&1) && exit 0
+          if echo "$output" | grep -q "already exists"; then
+            echo "ferridriver-test already published, skipping"
+          else
+            echo "$output"; exit 1
+          fi
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      # Layer 4: BDD framework (depends on ferridriver, ferridriver-test, ferridriver-bdd-macros)
+      - name: Publish ferridriver-bdd
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          output=$(cargo publish -p ferridriver-bdd 2>&1) && exit 0
+          if echo "$output" | grep -q "already exists"; then
+            echo "ferridriver-bdd already published, skipping"
+          else
+            echo "$output"; exit 1
+          fi
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      # Layer 5: MCP server (depends on ferridriver, ferridriver-bdd)
+      - name: Publish ferridriver-mcp
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          output=$(cargo publish -p ferridriver-mcp 2>&1) && exit 0
+          if echo "$output" | grep -q "already exists"; then
+            echo "ferridriver-mcp already published, skipping"
+          else
+            echo "$output"; exit 1
+          fi
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      # Layer 6: CLI binary (depends on all)
+      - name: Publish ferridriver-cli
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          output=$(cargo publish -p ferridriver-cli 2>&1) && exit 0
+          if echo "$output" | grep -q "already exists"; then
+            echo "ferridriver-cli already published, skipping"
+          else
+            echo "$output"; exit 1
+          fi
+
+  # ---------------------------------------------------------------------------
+  # Publish the release (un-draft after all builds succeed)
+  # ---------------------------------------------------------------------------
+  publish-release:
+    name: Publish release
+    needs: [build-cli, publish-npm, publish-crates]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Un-draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release edit "$GITHUB_REF_NAME" --draft=false
