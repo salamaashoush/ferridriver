@@ -1,4 +1,4 @@
 [toolchain]
-channel = "nightly"
+channel = "stable"
 components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
 targets = ["aarch64-apple-darwin", "x86_64-unknown-linux-gnu"]
