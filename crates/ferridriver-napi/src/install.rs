@@ -53,8 +53,5 @@ pub fn find_installed_chromium() -> Option<String> {
 /// Get the browser cache directory path.
 #[napi]
 pub fn get_browser_cache_dir() -> String {
-  BrowserInstaller::new()
-    .cache_dir()
-    .to_string_lossy()
-    .to_string()
+  BrowserInstaller::new().cache_dir().to_string_lossy().to_string()
 }

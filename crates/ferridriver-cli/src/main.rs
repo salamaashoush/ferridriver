@@ -391,9 +391,7 @@ async fn install_browser(browser: &str, with_deps: bool) -> anyhow::Result<()> {
     .map_err(|e| anyhow::anyhow!(e))?;
 
   // Verify it works
-  let output = std::process::Command::new(&path)
-    .arg("--version")
-    .output();
+  let output = std::process::Command::new(&path).arg("--version").output();
   match output {
     Ok(o) if o.status.success() => {
       let ver = String::from_utf8_lossy(&o.stdout);

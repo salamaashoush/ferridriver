@@ -328,9 +328,7 @@ impl IpcClient {
     if let Some(home) = std::env::var_os("HOME") {
       let home = std::path::Path::new(&home);
       // macOS-native cache location (used by npm postinstall)
-      let mac_cached = home
-        .join("Library/Caches/ferridriver")
-        .join(HOST_BINARY_NAME);
+      let mac_cached = home.join("Library/Caches/ferridriver").join(HOST_BINARY_NAME);
       if mac_cached.exists() {
         return Ok(mac_cached);
       }
