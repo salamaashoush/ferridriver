@@ -317,15 +317,15 @@ for (const backend of BACKENDS) {
     // ── Utilities ──
 
     test("searchPage() finds text matches", async () => {
-      const r = await page.evaluate('window.__fd.searchPage("Hello", false, false, 10, "", 10)');
-      const parsed = typeof r === "string" ? JSON.parse(r) : r;
+      const r = await page.evaluateStr('JSON.stringify(window.__fd.searchPage("Hello", false, false, 10, "", 10))');
+      const parsed = JSON.parse(r);
       expect(parsed.count).toBeGreaterThanOrEqual(1);
       expect(parsed.matches[0].match).toBe("Hello");
     });
 
     test("searchPage() supports regex", async () => {
-      const r = await page.evaluate('window.__fd.searchPage("Item \\\\d+", true, false, 10, "", 10)');
-      const parsed = typeof r === "string" ? JSON.parse(r) : r;
+      const r = await page.evaluateStr('JSON.stringify(window.__fd.searchPage("Item \\\\d+", true, false, 10, "", 10))');
+      const parsed = JSON.parse(r);
       expect(parsed.count).toBe(3);
     });
 
