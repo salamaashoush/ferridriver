@@ -318,14 +318,14 @@ for (const backend of BACKENDS) {
 
     test("searchPage() finds text matches", async () => {
       const r = await page.evaluate('window.__fd.searchPage("Hello", false, false, 10, "", 10)');
-      const parsed = JSON.parse(r);
+      const parsed = typeof r === "string" ? JSON.parse(r) : r;
       expect(parsed.count).toBeGreaterThanOrEqual(1);
       expect(parsed.matches[0].match).toBe("Hello");
     });
 
     test("searchPage() supports regex", async () => {
       const r = await page.evaluate('window.__fd.searchPage("Item \\\\d+", true, false, 10, "", 10)');
-      const parsed = JSON.parse(r);
+      const parsed = typeof r === "string" ? JSON.parse(r) : r;
       expect(parsed.count).toBe(3);
     });
 
@@ -337,8 +337,8 @@ for (const backend of BACKENDS) {
     });
 
     test("scrollInfo() returns scroll data", async () => {
-      const r = await page.evaluate('JSON.stringify(window.__fd.scrollInfo())');
-      const parsed = JSON.parse(r);
+      const r = await page.evaluate('window.__fd.scrollInfo()');
+      const parsed = typeof r === "string" ? JSON.parse(r) : r;
       expect(parsed.viewportHeight).toBeGreaterThan(0);
       expect(parsed.scrollHeight).toBeGreaterThan(0);
     });
