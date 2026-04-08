@@ -70,19 +70,26 @@ fn main() {
     }
   }
 
-  // Copy to ~/.cache/ferridriver/ (survives cargo clean, works for cargo install)
+  // Copy to cache directories (survives cargo clean, works for cargo install)
   if let Some(home) = std::env::var_os("HOME") {
-    let cache_dir = std::path::Path::new(&home).join(".cache").join("ferridriver");
-    match std::fs::create_dir_all(&cache_dir) {
-      Ok(()) => {
-        let dest = cache_dir.join("fd_webkit_host");
-        if let Err(e) = std::fs::copy(&host_bin, &dest) {
-          println!("cargo:warning=Could not copy fd_webkit_host to {}: {e}", dest.display());
-        }
-      },
-      Err(e) => {
-        println!("cargo:warning=Could not create cache dir {}: {e}", cache_dir.display());
-      },
+    let home = std::path::Path::new(&home);
+
+    // macOS-native: ~/Library/Caches/ferridriver/
+    let mac_cache = home.join("Library/Caches/ferridriver");
+    if let Ok(()) = std::fs::create_dir_all(&mac_cache) {
+      let dest = mac_cache.join("fd_webkit_host");
+      if let Err(e) = std::fs::copy(&host_bin, &dest) {
+        println!("cargo:warning=Could not copy fd_webkit_host to {}: {e}", dest.display());
+      }
+    }
+
+    // XDG-style: ~/.cache/ferridriver/
+    let xdg_cache = home.join(".cache/ferridriver");
+    if let Ok(()) = std::fs::create_dir_all(&xdg_cache) {
+      let dest = xdg_cache.join("fd_webkit_host");
+      if let Err(e) = std::fs::copy(&host_bin, &dest) {
+        println!("cargo:warning=Could not copy fd_webkit_host to {}: {e}", dest.display());
+      }
     }
   }
 
