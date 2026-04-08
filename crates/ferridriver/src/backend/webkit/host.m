@@ -76,6 +76,56 @@ enum Rep {
     REP_NET_EVENT = 10,     // unsolicited: payload = str id + str method + str url + str resourceType
 };
 
+// ─── JS-based accessibility tree builder ────────────────────────────────────
+// Used when the native NSAccessibility tree is empty (e.g. data: URLs where
+// the WebContent process doesn't establish the AX bridge).  Walks the DOM
+// and maps HTML elements / ARIA attributes to the same JSON format as the
+// native walker, so the Rust side parses it identically.
+static NSString *g_ax_tree_js = @"(function(){"
+    "var nodes=[],seq=0;"
+    "var RM={'A':'link','BUTTON':'button','INPUT':'textbox','TEXTAREA':'textbox',"
+    "'SELECT':'combobox','IMG':'img','H1':'heading','H2':'heading','H3':'heading',"
+    "'H4':'heading','H5':'heading','H6':'heading','NAV':'navigation','MAIN':'main',"
+    "'HEADER':'banner','FOOTER':'contentinfo','ASIDE':'complementary','FORM':'form',"
+    "'TABLE':'table','TR':'row','TD':'cell','TH':'columnheader','UL':'list','OL':'list',"
+    "'LI':'listitem','LABEL':'label','PROGRESS':'progressbar','DIALOG':'dialog',"
+    "'DETAILS':'group','SECTION':'generic','ARTICLE':'article','SUMMARY':'button'};"
+    "var HL={'H1':1,'H2':2,'H3':3,'H4':4,'H5':5,'H6':6};"
+    "nodes.push({nodeId:'n'+(seq++),role:'RootWebArea',name:document.title||'',properties:[],ignored:false});"
+    "function walk(el,pid){"
+    "if(!el||el.nodeType!==1)return;"
+    "var tag=el.tagName,ar=el.getAttribute('role'),role=ar||RM[tag]||'';"
+    "var nm=el.getAttribute('aria-label')||el.getAttribute('alt')||'';"
+    "if(!nm&&(tag==='BUTTON'||tag==='A'||tag==='LABEL'))nm=el.textContent.trim().substring(0,200);"
+    "var isLeafText=!role&&el.children.length===0&&el.textContent.trim().length>0;"
+    "if(role||isLeafText){"
+    "var nid='n'+(seq++),nd={nodeId:nid,parentId:pid,role:role||(isLeafText?'StaticText':'generic'),"
+    "properties:[],ignored:false};"
+    "if(nm)nd.name=nm;"
+    "if(isLeafText)nd.name=el.textContent.trim().substring(0,500);"
+    "var hl=HL[tag];if(hl)nd.properties.push({name:'level',value:hl});"
+    "if(tag==='INPUT'||tag==='TEXTAREA'){"
+    "var t=el.type||'text';"
+    "if(t==='checkbox')nd.role='checkbox';"
+    "else if(t==='radio')nd.role='radio';"
+    "else if(t==='submit'||t==='button')nd.role='button';"
+    "if(el.value)nd.properties.push({name:'value',value:el.value});"
+    "if(el.disabled)nd.properties.push({name:'disabled',value:true});"
+    "if(el.required)nd.properties.push({name:'required',value:true});"
+    "}"
+    "if(el.getAttribute('aria-checked'))nd.properties.push({name:'checked',value:el.getAttribute('aria-checked')==='true'});"
+    "if(el.getAttribute('aria-expanded'))nd.properties.push({name:'expanded',value:el.getAttribute('aria-expanded')==='true'});"
+    "if(el.getAttribute('aria-selected'))nd.properties.push({name:'selected',value:el.getAttribute('aria-selected')==='true'});"
+    "nodes.push(nd);"
+    "for(var i=0;i<el.children.length;i++)walk(el.children[i],nid);"
+    "}else{"
+    "for(var i=0;i<el.children.length;i++)walk(el.children[i],pid);"
+    "}"
+    "}"
+    "if(document.body)walk(document.body,'n0');"
+    "return JSON.stringify(nodes);"
+    "})()";
+
 // ─── FrameWriter (port of Bun's FrameWriter) ────────────────────────────────
 // Uses writev for initial write. On partial write, queues remainder and
 // enables kCFFileDescriptorWriteCallBack to drain. No spinning, no blocking.
@@ -306,6 +356,30 @@ static NSMutableDictionary<NSNumber*, void(^)(id, NSString*)> *g_pending_routes 
     void(^block)(NSError*) = _waiters[key];
     if (block) { [_waiters removeObjectForKey:key]; block(error); }
 }
+// Emit REP_NET_EVENT for main-frame navigations so they appear in network diagnostics.
+// The JS interceptors only capture fetch/XHR; this catches the document navigation itself.
+- (void)webView:(WKWebView *)wv decidePolicyForNavigationAction:(WKNavigationAction *)act
+    decisionHandler:(void (^)(WKNavigationActionPolicy))handler {
+    if (act.targetFrame.isMainFrame && act.request.URL) {
+        NSString *url = act.request.URL.absoluteString;
+        NSString *method = act.request.HTTPMethod ?: @"GET";
+        static int navSeq = 0;
+        NSString *rid = [NSString stringWithFormat:@"nav%d", navSeq++];
+        NSString *resType = @"Document";
+        const char *r = [rid UTF8String], *m = [method UTF8String], *u = [url UTF8String], *rt = [resType UTF8String];
+        uint32_t rl = (uint32_t)strlen(r), ml = (uint32_t)strlen(m), ul = (uint32_t)strlen(u), rtl = (uint32_t)strlen(rt);
+        uint32_t total = 16 + rl + ml + ul + rtl;
+        uint8_t *buf = malloc(total);
+        uint32_t off = 0;
+        memcpy(buf+off, &rl, 4); off+=4; memcpy(buf+off, r, rl); off+=rl;
+        memcpy(buf+off, &ml, 4); off+=4; memcpy(buf+off, m, ml); off+=ml;
+        memcpy(buf+off, &ul, 4); off+=4; memcpy(buf+off, u, ul); off+=ul;
+        memcpy(buf+off, &rtl, 4); off+=4; memcpy(buf+off, rt, rtl); off+=rtl;
+        write_frame(0, REP_NET_EVENT, buf, total);
+        free(buf);
+    }
+    handler(WKNavigationActionPolicyAllow);
+}
 @end
 
 // ─── Custom window (isVisible/isKeyWindow/screen overrides) ─────────────────
@@ -535,6 +609,15 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 initWithFrame:NSMakeRect(0, 0, 1280, 720)
                 configuration:config];
             [wv setNavigationDelegate:g_nav_delegate];
+
+            // Enable enhanced-UI accessibility so WKWebView creates its
+            // web-content AX tree bridge (needed for data: URLs especially).
+            // Use performSelector to avoid deprecated-API warning.
+            SEL axSel = NSSelectorFromString(@"accessibilitySetOverrideValue:forAttribute:");
+            if ([wv respondsToSelector:axSel]) {
+                ((BOOL(*)(id,SEL,id,NSString*))objc_msgSend)(
+                    wv, axSel, @YES, @"AXEnhancedUserInterface");
+            }
 
             // Add tracking area so mouseMoved events propagate to the web content
             NSTrackingArea *trackingArea = [[NSTrackingArea alloc]
@@ -1718,8 +1801,49 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             };
             weakWalkTree = walkTree;
 
-            // Start walking from the WKWebView
+            // Start walking from the WKWebView.
+            // After WKWebView finishes loading (didFinishNavigation), the
+            // NSAccessibility tree may not be populated yet -- the WebContent
+            // process needs runloop cycles to bridge its AX tree.  Retry
+            // until we see a RootWebArea node (max ~200 ms).
             walkTree(v->webview, nil, 0);
+            BOOL hasWebArea = NO;
+            for (NSDictionary *n in nodes) {
+                if ([@"RootWebArea" isEqualToString:n[@"role"]]) { hasWebArea = YES; break; }
+            }
+            for (int attempt = 0; attempt < 4 && !hasWebArea; attempt++) {
+                CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.05, false);
+                [nodes removeAllObjects];
+                nodeCounter = 0;
+                [elemToId removeAllObjects];
+                walkTree(v->webview, nil, 0);
+                for (NSDictionary *n in nodes) {
+                    if ([@"RootWebArea" isEqualToString:n[@"role"]]) { hasWebArea = YES; break; }
+                }
+            }
+
+            // NSAccessibility doesn't expose the web content tree when
+            // WKWebView loads data: URLs (the WebContent process doesn't
+            // establish the AX bridge in this case).  Playwright works
+            // around this by using the WebKit inspector protocol; since
+            // that isn't available here, build the tree from the DOM.
+            if (!hasWebArea) {
+                __block NSString *jsResult = nil;
+                __block BOOL jsDone = NO;
+                [v->webview evaluateJavaScript:g_ax_tree_js completionHandler:^(id result, NSError *error) {
+                    if (!error && [result isKindOfClass:[NSString class]]) {
+                        jsResult = result;
+                    }
+                    jsDone = YES;
+                }];
+                for (int w = 0; w < 200 && !jsDone; w++) {
+                    CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.01, false);
+                }
+                if (jsResult) {
+                    write_frame_str(req_id, REP_VALUE, jsResult);
+                    break;
+                }
+            }
 
             // Serialize to JSON
             NSError *jsonErr = nil;
