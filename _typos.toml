@@ -1,0 +1,26 @@
+[files]
+extend-exclude = [
+  # Minified/bundled JS (ported from Playwright, not our code)
+  "crates/ferridriver/src/injected/dist/",
+  # Playwright-ported injected scripts (contain intentional non-standard identifiers)
+  "crates/ferridriver/src/injected/injectedScript.ts",
+  "crates/ferridriver/src/injected/isomorphic/",
+]
+
+[default.extend-words]
+# "uncomplete" is used intentionally in test code (DOM state before load completes)
+uncomplete = "uncomplete"
+# "fo" appears in test HTML content and selectors
+fo = "fo"
+# "PN" is a variable/identifier in code
+PN = "PN"
+# "ba" appears in test data
+ba = "ba"
+# "bui" appears in identifiers
+bui = "bui"
+# "mis" appears as a prefix in identifiers
+mis = "mis"
+
+[default.extend-identifiers]
+# Intentional misspelling in Playwright-ported code
+deperecated = "deperecated"
