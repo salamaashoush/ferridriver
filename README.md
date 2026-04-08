@@ -84,12 +84,12 @@ ferridriver install --with-deps chromium    # also install Chromium system deps 
 ### npm (Node.js/Bun)
 
 ```bash
-npm install @ferridriver/core
+npm install @ferridriver/test
 # or
-bun add @ferridriver/core
+bun add @ferridriver/test
 ```
 
-The native addon includes all browser automation functionality. On macOS, it also ships the WebKit host binary.
+This installs the test runner CLI (`ferridriver-test`) and the `@ferridriver/core` native addon as a dependency. On macOS, it also ships the WebKit host binary.
 
 ## Quick Start (Rust)
 
