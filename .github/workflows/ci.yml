@@ -65,8 +65,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install system deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          DEBIAN_FRONTEND=noninteractive sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
             libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
       - run: |
@@ -89,8 +89,8 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - name: Install system deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          DEBIAN_FRONTEND=noninteractive sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
             libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
       - run: |
@@ -141,8 +141,8 @@ jobs:
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          DEBIAN_FRONTEND=noninteractive sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
             libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
 
@@ -198,8 +198,8 @@ jobs:
 
       - name: Install system deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          DEBIAN_FRONTEND=noninteractive sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
             libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
       - name: Build ferridriver binary
@@ -244,8 +244,8 @@ jobs:
       - uses: dtolnay/rust-toolchain@nightly
       - name: Install system deps
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          DEBIAN_FRONTEND=noninteractive sudo apt-get update
+          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
             libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
       - run: cargo check --locked --workspace
