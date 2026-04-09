@@ -354,7 +354,16 @@ impl BrowserState {
   }
 
   /// Auto-discover and connect to a running Chrome instance.
-  /// Reads Chrome's `DevToolsActivePort` file to find the WebSocket URL.
+  ///
+  /// Checks the instance resolver first (allowing consumers to route
+  /// `instance_name` to a managed browser, e.g. connecting to an
+  /// environment-specific browser launched by another tool). Falls back
+  /// to reading Chrome's `DevToolsActivePort` file for the given
+  /// channel/profile.
+  ///
+  /// The resolver is tried with the full `instance_name` first, then with
+  /// the prefix before `:` (supporting composite keys like `"staging:default"`
+  /// where only the first segment identifies the browser instance).
   ///
   /// # Errors
   ///
@@ -365,8 +374,47 @@ impl BrowserState {
     channel: &str,
     user_data_dir: Option<&str>,
   ) -> Result<usize, String> {
+    if let Some(resolved) = self.resolve_via_instance_fn(instance_name) {
+      return self.connect_with_resolved_mode(instance_name, resolved).await;
+    }
+
     let ws_url = discover_chrome_ws(channel, user_data_dir)?;
     Box::pin(self.connect_to_url(instance_name, &ws_url)).await
+  }
+
+  /// Try the instance resolver with the full name, then with the prefix before `:`.
+  fn resolve_via_instance_fn(&self, instance_name: &str) -> Option<ConnectMode> {
+    let resolver = self.instance_resolver_fn.as_ref()?;
+
+    // Try full name first
+    if let Some(mode) = resolver(instance_name) {
+      return Some(mode);
+    }
+
+    // Try prefix before ':' (composite keys like "staging:default")
+    if let Some(prefix) = instance_name.split(':').next()
+      && prefix != instance_name
+    {
+      return resolver(prefix);
+    }
+
+    None
+  }
+
+  /// Connect using a resolved mode from the instance resolver.
+  async fn connect_with_resolved_mode(&mut self, instance_name: &str, mode: ConnectMode) -> Result<usize, String> {
+    match mode {
+      ConnectMode::ConnectUrl(url) => Box::pin(self.connect_to_url(instance_name, &url)).await,
+      ConnectMode::AutoConnect { channel, user_data_dir } => {
+        let ws_url = discover_chrome_ws(&channel, user_data_dir.as_deref())?;
+        Box::pin(self.connect_to_url(instance_name, &ws_url)).await
+      },
+      // Launch mode is not meaningful for connect_auto -- the caller should
+      // launch a browser separately and use ConnectUrl for the result.
+      ConnectMode::Launch => Err(format!(
+        "Instance resolver returned Launch mode for '{instance_name}', expected ConnectUrl"
+      )),
+    }
   }
 
   // ── Routing helpers ─────────────────────────────────────────────────────

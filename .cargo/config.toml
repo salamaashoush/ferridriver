@@ -4,3 +4,9 @@ lint = "clippy --workspace --all-targets --all-features"
 lintfix = "clippy --workspace --all-targets --all-features --fix --allow-dirty"
 release = "build --release --bin ferridriver"
 release-fast = "build --profile release-fast --bin ferridriver"
+
+[env]
+# Use LLVM ar on macOS to avoid Xcode ar rejecting the -D (deterministic) flag.
+# The cc crate passes -D to ar, but Apple's ar does not support it.
+AR_aarch64_apple_darwin = "/opt/homebrew/opt/llvm/bin/llvm-ar"
+AR_x86_64_apple_darwin = "/opt/homebrew/opt/llvm/bin/llvm-ar"
