@@ -29,17 +29,17 @@ regex = { workspace = true }
 async-channel = "2"
 inventory = "0.3"
 rustc-hash = "2"
-toml = "0.8"
+toml = "1.1"
 glob = "0.3"
-console = "0.15"
-quick-xml = "0.37"
-similar = "2"
+console = "0.16"
+quick-xml = "0.39"
+similar = "3"
 base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png"] }
-zip = { version = "2", default-features = false, features = ["deflate"] }
-notify = { version = "7", default-features = false, features = ["macos_fsevent"] }
-notify-debouncer-mini = "0.5"
-crossterm = { version = "0.28", features = ["event-stream"] }
+zip = { version = "8", default-features = false, features = ["deflate"] }
+notify = { version = "8", default-features = false, features = ["macos_fsevent"] }
+notify-debouncer-mini = "0.7"
+crossterm = { version = "0.29", features = ["event-stream"] }
 ratatui = { version = "0.30", default-features = false, features = ["crossterm_0_28"] }
 axum = { workspace = true }
 tower = "0.5"
