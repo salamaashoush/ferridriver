@@ -1,7 +1,7 @@
 //! MCP tool definitions -- split by category, each with its own `tool_router`.
 //!
 //! Each submodule defines tools in a separate `#[tool_router]` impl block.
-//! Routers are combined via `+` in `McpServer::combined_router()`.
+//! Routers are combined via `+` in `McpServer::tool_router()`.
 
 pub mod bdd;
 pub mod content;
@@ -16,9 +16,13 @@ use crate::server::McpServer;
 use rmcp::handler::server::router::tool::ToolRouter;
 
 impl McpServer {
-  /// Combine all category routers into one.
+  /// Build the base tool router by combining all category routers.
+  ///
+  /// Stored in a field on construction so consumers can merge extra tools
+  /// via `with_extra_tools()`. The `#[tool_handler]` macro dispatches
+  /// through the field (`self.tool_router`) rather than calling this method.
   #[must_use]
-  pub fn combined_router() -> ToolRouter<Self> {
+  pub fn tool_router() -> ToolRouter<Self> {
     Self::navigation_router()
       + Self::input_router()
       + Self::content_router()

@@ -299,7 +299,7 @@ impl McpServer {
     );
     Self {
       state,
-      tool_router: Self::combined_router(),
+      tool_router: Self::tool_router(),
       config,
       extensions: Arc::new(NoExtensions),
       step_registry,
@@ -461,7 +461,7 @@ impl McpServer {
   }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for McpServer {
   fn get_info(&self) -> ServerInfo {
     ServerInfo::new(
