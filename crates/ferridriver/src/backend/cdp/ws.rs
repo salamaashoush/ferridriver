@@ -98,7 +98,7 @@ impl super::transport::CdpTransport for WsTransport {
     let text = String::from_utf8(data).map_err(|e| format!("UTF-8: {e}"))?;
     self
       .write_tx
-      .send(Message::Text(text))
+      .send(Message::Text(text.into()))
       .await
       .map_err(|_| "WS writer closed".to_string())?;
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
