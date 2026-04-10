@@ -251,6 +251,14 @@ impl BrowserState {
       all_extra.extend(f(instance_name));
     }
 
+    // Inject --window-size from viewport config so the browser window matches the
+    // viewport dimensions. Skip if the user already supplied --window-size.
+    if !all_extra.iter().any(|a| a.starts_with("--window-size")) {
+      if let Some(ref vp) = self.default_viewport {
+        all_extra.push(format!("--window-size={},{}", vp.width, vp.height));
+      }
+    }
+
     // Use resolved mode if available, otherwise fall back to default connect_mode.
     let effective_mode = resolved_mode.as_ref().unwrap_or(&self.connect_mode);
 

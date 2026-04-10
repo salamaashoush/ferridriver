@@ -18,7 +18,7 @@ use super::types::EvaluateResult;
 use crate::backend::{
   AnyElement, AxNodeData, AxProperty, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle, ScreenshotOpts,
 };
-use crate::events::EventEmitter;
+use crate::events::{EventEmitter, NetResponse, PageEvent};
 use crate::state::{ConsoleMsg, DialogEvent, NetRequest};
 
 /// Page handle for the BiDi backend. Cheaply cloneable (Arc-based).
@@ -138,6 +138,29 @@ impl BidiPage {
     let mut frames = Vec::new();
     for ctx in contexts {
       collect_frames(ctx, None, &mut frames);
+    }
+
+    // BiDi doesn't include frame names in the context tree.
+    // Resolve names in parallel by evaluating `window.name` in each child frame.
+    let child_indices: Vec<usize> = frames
+      .iter()
+      .enumerate()
+      .filter(|(_, f)| f.parent_frame_id.is_some() && f.name.is_empty())
+      .map(|(i, _)| i)
+      .collect();
+    if !child_indices.is_empty() {
+      let futs: Vec<_> = child_indices
+        .iter()
+        .map(|&i| self.eval_internal("window.name", &frames[i].frame_id))
+        .collect();
+      let results = futures::future::join_all(futs).await;
+      for (idx, result) in child_indices.into_iter().zip(results) {
+        if let Ok(Some(val)) = result {
+          if let Some(name) = val.as_str() {
+            frames[idx].name = name.to_string();
+          }
+        }
+      }
     }
     Ok(frames)
   }
@@ -945,6 +968,7 @@ impl BidiPage {
     let dialog_handler = self.dialog_handler.clone();
     let session = self.session.clone();
     let closed = self.closed.clone();
+    let emitter = self.events.clone();
 
     tokio::spawn(async move {
       while let Ok(event) = rx.recv().await {
@@ -962,24 +986,61 @@ impl BidiPage {
               level: level.to_string(),
               text: text.to_string(),
             };
-            console_log.write().await.push(msg);
+            console_log.write().await.push(msg.clone());
+            emitter.emit(PageEvent::Console(msg));
           },
           "network.beforeRequestSent" => {
-            let request = &event.params.get("request");
-            if let Some(req) = request {
+            if let Some(req) = event.params.get("request") {
               let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
               let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string();
               let id = req.get("request").and_then(|v| v.as_str()).unwrap_or("").to_string();
-              network_log.write().await.push(NetRequest {
+
+              // Defer header parsing — only parse when there are active event subscribers.
+              // Most requests don't need full header parsing on the hot path.
+              let has_listeners = emitter.receiver_count() > 0;
+              let headers = if has_listeners {
+                req.get("headers").map(parse_bidi_headers)
+              } else {
+                None
+              };
+
+              let resource_type = event
+                .params
+                .get("initiator")
+                .and_then(|i| i.get("type"))
+                .and_then(|v| v.as_str())
+                .map(|t| match t {
+                  "parser" => "Document",
+                  "script" => "Script",
+                  "preflight" => "Preflight",
+                  other => other,
+                })
+                .unwrap_or("")
+                .to_string();
+
+              let post_data = req
+                .get("body")
+                .and_then(|b| b.get("value"))
+                .and_then(|v| v.as_str())
+                .map(|s| s.to_string());
+
+              let mime_type =
+                headers.as_ref().and_then(|h| h.get("content-type").or_else(|| h.get("Content-Type")).cloned());
+
+              let net_request = NetRequest {
                 id,
                 url,
                 method,
                 status: None,
-                resource_type: String::new(),
-                mime_type: None,
-                headers: None,
-                post_data: None,
-              });
+                resource_type,
+                mime_type,
+                headers,
+                post_data,
+              };
+              if has_listeners {
+                emitter.emit(PageEvent::Request(net_request.clone()));
+              }
+              network_log.write().await.push(net_request);
             }
           },
           "network.responseCompleted" => {
@@ -988,11 +1049,28 @@ impl BidiPage {
             if let (Some(resp), Some(req)) = (response, request) {
               let request_id = req.get("request").and_then(|v| v.as_str()).unwrap_or("");
               let status = resp.get("status").and_then(|v| v.as_i64());
+              let status_text = resp.get("statusText").and_then(|v| v.as_str()).unwrap_or("").to_string();
+              let mime_type = resp.get("mimeType").and_then(|v| v.as_str()).unwrap_or("").to_string();
+              let url = resp.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+              // Extract response headers from BiDi format
+              let headers = resp.get("headers").map(parse_bidi_headers);
+
               // Update existing network log entry
               let mut log = network_log.write().await;
               if let Some(entry) = log.iter_mut().find(|e| e.id == request_id) {
                 entry.status = status;
+                entry.mime_type = Some(mime_type.clone());
               }
+
+              emitter.emit(PageEvent::Response(NetResponse {
+                request_id: request_id.to_string(),
+                url,
+                status: status.unwrap_or(0),
+                status_text,
+                mime_type,
+                headers,
+              }));
             }
           },
           "browsingContext.userPromptOpened" => {
@@ -1007,6 +1085,7 @@ impl BidiPage {
               message: message.to_string(),
               default_value: default_value.unwrap_or("").to_string(),
             };
+            emitter.emit(PageEvent::Dialog(pending.clone()));
             let action = handler(&pending);
 
             let (accept, text) = match action {
@@ -1036,6 +1115,7 @@ impl BidiPage {
           },
           "browsingContext.contextDestroyed" => {
             closed.store(true, Ordering::Relaxed);
+            emitter.emit(PageEvent::Close);
           },
           _ => {},
         }
@@ -1069,17 +1149,96 @@ impl BidiPage {
 
   // ── Screencast (not supported) ──────────────────────────────────────────
 
+  /// Start screencast via repeated screenshots + event-driven captures.
+  /// BiDi has no native screencast API. We combine polling at ~15 fps with
+  /// captures on navigation/load events to ensure key visual transitions
+  /// are recorded even for fast tests.
   pub async fn start_screencast(
     &self,
-    _quality: u8,
+    quality: u8,
     _max_width: u32,
     _max_height: u32,
   ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>, String> {
-    Err("Video recording not supported on BiDi backend".into())
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let session = self.session.clone();
+    let ctx_id = self.context_id.clone();
+    let closed = self.closed.clone();
+
+    // Subscribe to navigation events to capture frames at key moments.
+    let mut event_rx = self.session.transport.subscribe_events();
+    let event_notify = Arc::new(tokio::sync::Notify::new());
+    let event_notify2 = event_notify.clone();
+    let event_ctx = self.context_id.clone();
+
+    tokio::spawn(async move {
+      while let Ok(event) = event_rx.recv().await {
+        let is_relevant = matches!(
+          event.method.as_str(),
+          "browsingContext.load" | "browsingContext.domContentLoaded" | "browsingContext.navigationCommitted"
+        );
+        if is_relevant {
+          if let Some(c) = event.params.get("context").and_then(|v| v.as_str()) {
+            if c == event_ctx {
+              event_notify2.notify_one();
+            }
+          }
+        }
+      }
+    });
+
+    tokio::spawn(async move {
+      let target_interval = std::time::Duration::from_millis(66); // ~15 fps
+      let capture_params = json!({
+        "context": ctx_id,
+        "format": {"type": "image/jpeg", "quality": f64::from(quality) / 100.0},
+        "origin": "viewport"
+      });
+
+      loop {
+        if closed.load(Ordering::Relaxed) {
+          break;
+        }
+        let frame_start = tokio::time::Instant::now();
+
+        let result = session
+          .transport
+          .send_command("browsingContext.captureScreenshot", capture_params.clone())
+          .await;
+
+        if let Ok(result) = result {
+          if let Some(data_str) = result.get("data").and_then(|v| v.as_str()) {
+            if let Ok(jpeg_bytes) = base64::engine::general_purpose::STANDARD.decode(data_str) {
+              let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64();
+              if tx.send((jpeg_bytes, ts)).is_err() {
+                break;
+              }
+            }
+          }
+        } else {
+          break;
+        }
+
+        // Sleep for the remainder of the frame interval, or wake early on
+        // navigation events to capture content transitions.
+        let elapsed = frame_start.elapsed();
+        if elapsed < target_interval {
+          let remaining = target_interval - elapsed;
+          tokio::select! {
+            () = tokio::time::sleep(remaining) => {},
+            () = event_notify.notified() => {},
+          }
+        }
+      }
+    });
+
+    Ok(rx)
   }
 
   pub async fn stop_screencast(&self) -> Result<(), String> {
-    Ok(()) // No-op
+    Ok(())
   }
 
   // ── File upload ─────────────────────────────────────────────────────────
@@ -1108,118 +1267,123 @@ impl BidiPage {
   // ── Network Interception ────────────────────────────────────────────────
 
   pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<(), String> {
-    let result = self
-      .cmd(
-        "network.addIntercept",
-        json!({
-          "phases": ["beforeRequestSent"],
-          "urlPatterns": [{"type": "string", "pattern": pattern}],
-          "contexts": [self.context_id]
-        }),
-      )
-      .await?;
-
-    let intercept_id = result
-      .get("intercept")
-      .and_then(|v| v.as_str())
-      .ok_or("addIntercept: missing intercept id")?
-      .to_string();
-
-    self.intercept_ids.write().await.push(intercept_id.clone());
     let regex = crate::route::glob_to_regex(pattern)?;
+
+    let needs_intercept = self.intercept_ids.read().await.is_empty();
+    if needs_intercept {
+      // Register a single intercept for ALL requests on this context (no urlPatterns).
+      // BiDi urlPatterns have limited syntax — filtering happens client-side via regex.
+      // This matches Puppeteer's approach.
+      let result = self
+        .cmd(
+          "network.addIntercept",
+          json!({
+            "phases": ["beforeRequestSent"],
+            "contexts": [self.context_id]
+          }),
+        )
+        .await?;
+
+      let intercept_id = result
+        .get("intercept")
+        .and_then(|v| v.as_str())
+        .ok_or("addIntercept: missing intercept id")?
+        .to_string();
+
+      self.intercept_ids.write().await.push(intercept_id);
+
+      // Spawn a single listener task for all route handlers on this page
+      let mut rx = self.session.transport.subscribe_events();
+      let ctx = self.context_id.clone();
+      let session = self.session.clone();
+      let routes = self.routes.clone();
+
+      tokio::spawn(async move {
+        while let Ok(event) = rx.recv().await {
+          if event.method != "network.beforeRequestSent" {
+            continue;
+          }
+          let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
+          if event_ctx != ctx {
+            continue;
+          }
+          let is_blocked = event.params.get("isBlocked").and_then(|v| v.as_bool()).unwrap_or(false);
+          if !is_blocked {
+            continue;
+          }
+
+          let req_obj = event.params.get("request");
+          let request_id = req_obj
+            .and_then(|v| v.get("request"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+          let url = req_obj
+            .and_then(|v| v.get("url"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+
+          let matched_handler = {
+            let routes_guard = routes.read().await;
+            routes_guard
+              .iter()
+              .find(|r| r.pattern.is_match(url))
+              .map(|r| std::sync::Arc::clone(&r.handler))
+          };
+
+          if let Some(handler) = matched_handler {
+            let method = req_obj
+              .and_then(|r| r.get("method"))
+              .and_then(|v| v.as_str())
+              .unwrap_or("GET");
+            let headers: FxHashMap<String, String> = req_obj
+              .and_then(|r| r.get("headers"))
+              .map(parse_bidi_headers)
+              .unwrap_or_default();
+
+            let intercepted = crate::route::InterceptedRequest {
+              request_id: request_id.to_string(),
+              url: url.to_string(),
+              method: method.to_string(),
+              headers,
+              post_data: None,
+              resource_type: String::new(),
+            };
+
+            let (tx, action_rx) = tokio::sync::oneshot::channel();
+            let route = crate::route::Route::new(intercepted, tx);
+            handler(route);
+            let action = action_rx.await.unwrap_or(crate::route::RouteAction::Continue(
+              crate::route::ContinueOverrides::default(),
+            ));
+            execute_bidi_route_action(&session.transport, request_id, action).await;
+          } else {
+            let _ = session
+              .transport
+              .send_command("network.continueRequest", json!({"request": request_id}))
+              .await;
+          }
+        }
+      });
+    }
+
     self.routes.write().await.push(crate::route::RegisteredRoute {
       pattern: regex,
       pattern_str: pattern.to_string(),
       handler,
     });
 
-    // Spawn a task to handle intercepted requests
-    let mut rx = self.session.transport.subscribe_events();
-    let ctx = self.context_id.clone();
-    let session = self.session.clone();
-    let routes = self.routes.clone();
-
-    tokio::spawn(async move {
-      while let Ok(event) = rx.recv().await {
-        if event.method != "network.beforeRequestSent" {
-          continue;
-        }
-        let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
-        if event_ctx != ctx {
-          continue;
-        }
-        let is_blocked = event.params.get("isBlocked").and_then(|v| v.as_bool()).unwrap_or(false);
-        if !is_blocked {
-          continue;
-        }
-
-        let request_id = event
-          .params
-          .get("request")
-          .and_then(|v| v.get("request"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("");
-        let url = event
-          .params
-          .get("request")
-          .and_then(|v| v.get("url"))
-          .and_then(|v| v.as_str())
-          .unwrap_or("");
-
-        // Find matching route
-        let routes = routes.read().await;
-        let mut handled = false;
-        for route in routes.iter() {
-          if route.pattern.is_match(url) {
-            // For now, just continue the request (full route handler integration TBD)
-            let _ = session
-              .transport
-              .send_command("network.continueRequest", json!({"request": request_id}))
-              .await;
-            handled = true;
-            break;
-          }
-        }
-        if !handled {
-          let _ = session
-            .transport
-            .send_command("network.continueRequest", json!({"request": request_id}))
-            .await;
-        }
-      }
-    });
-
     Ok(())
   }
 
   pub async fn unroute(&self, pattern: &str) -> Result<(), String> {
-    let mut ids = self.intercept_ids.write().await;
     let mut routes = self.routes.write().await;
-
-    // Remove matching routes
     routes.retain(|r| r.pattern_str != pattern);
 
-    // Remove all intercepts (BiDi doesn't track pattern-to-id, so remove all and re-add remaining)
-    for id in ids.drain(..) {
-      let _ = self.cmd("network.removeIntercept", json!({"intercept": id})).await;
-    }
-
-    // Re-add remaining routes
-    for route in routes.iter() {
-      let result = self
-        .cmd(
-          "network.addIntercept",
-          json!({
-            "phases": ["beforeRequestSent"],
-            "urlPatterns": [{"type": "string", "pattern": route.pattern_str}],
-            "contexts": [self.context_id]
-          }),
-        )
-        .await;
-      if let Ok(r) = result {
-        if let Some(id) = r.get("intercept").and_then(|v| v.as_str()) {
-          ids.push(id.to_string());
-        }
+    // If no routes left, remove the intercept entirely
+    if routes.is_empty() {
+      let mut ids = self.intercept_ids.write().await;
+      for id in ids.drain(..) {
+        let _ = self.cmd("network.removeIntercept", json!({"intercept": id})).await;
       }
     }
 
@@ -1351,6 +1515,87 @@ fn collect_frames(ctx: &serde_json::Value, parent_id: Option<&str>, frames: &mut
     for child in children {
       collect_frames(child, Some(context_id), frames);
     }
+  }
+}
+
+/// Parse BiDi-format headers `[{name, value: {type, value}}]` into a `FxHashMap`.
+fn parse_bidi_headers(headers_val: &serde_json::Value) -> FxHashMap<String, String> {
+  headers_val
+    .as_array()
+    .map(|arr| {
+      arr
+        .iter()
+        .filter_map(|entry| {
+          let name = entry.get("name")?.as_str()?;
+          let value = entry.get("value").and_then(|v| v.get("value")).and_then(|v| v.as_str()).unwrap_or("");
+          Some((name.to_string(), value.to_string()))
+        })
+        .collect()
+    })
+    .unwrap_or_default()
+}
+
+/// Execute a route action via BiDi network commands.
+async fn execute_bidi_route_action(
+  transport: &super::transport::BidiTransport,
+  request_id: &str,
+  action: crate::route::RouteAction,
+) {
+  match action {
+    crate::route::RouteAction::Fulfill(resp) => {
+      let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp.body);
+      let mut hdrs: Vec<serde_json::Value> = resp
+        .headers
+        .iter()
+        .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
+        .collect();
+      if let Some(ct) = &resp.content_type {
+        if !hdrs
+          .iter()
+          .any(|h| h.get("name").and_then(|n| n.as_str()) == Some("content-type"))
+        {
+          hdrs.push(json!({"name": "content-type", "value": {"type": "string", "value": ct}}));
+        }
+      }
+      let _ = transport
+        .send_command(
+          "network.provideResponse",
+          json!({
+            "request": request_id,
+            "statusCode": resp.status,
+            "reasonPhrase": crate::route::status_text(resp.status),
+            "headers": hdrs,
+            "body": {"type": "base64", "value": body_b64},
+          }),
+        )
+        .await;
+    },
+    crate::route::RouteAction::Continue(overrides) => {
+      let mut params = json!({"request": request_id});
+      if let Some(url) = &overrides.url {
+        params["url"] = serde_json::Value::String(url.clone());
+      }
+      if let Some(method) = &overrides.method {
+        params["method"] = serde_json::Value::String(method.clone());
+      }
+      if let Some(headers) = &overrides.headers {
+        let hdrs: Vec<serde_json::Value> = headers
+          .iter()
+          .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
+          .collect();
+        params["headers"] = serde_json::Value::Array(hdrs);
+      }
+      if let Some(post_data) = &overrides.post_data {
+        let encoded = base64::engine::general_purpose::STANDARD.encode(post_data);
+        params["body"] = json!({"type": "base64", "value": encoded});
+      }
+      let _ = transport.send_command("network.continueRequest", params).await;
+    },
+    crate::route::RouteAction::Abort(_reason) => {
+      let _ = transport
+        .send_command("network.failRequest", json!({"request": request_id}))
+        .await;
+    },
   }
 }
 

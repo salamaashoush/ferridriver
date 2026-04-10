@@ -174,7 +174,7 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
         let fixture = fixture_name_from_type(param_type).unwrap_or_else(|| param_name.to_string());
         fixture_names.push(fixture.clone());
         param_bindings.push(quote! {
-          let #param_name: #param_type = __pool.get::<#param_type>(#fixture).await
+          let #param_name: std::sync::Arc<#param_type> = __pool.get::<#param_type>(#fixture).await
             .map_err(|e| ferridriver_test::model::TestFailure {
               message: format!("fixture '{}' failed: {}", #fixture, e),
               stack: None,
@@ -218,8 +218,8 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
     Some(r) => quote! { Some(#r) },
     None => quote! { None },
   };
-  let timeout_expr = match args.timeout_ms {
-    Some(ms) => quote! { Some(std::time::Duration::from_millis(#ms)) },
+  let timeout_ms_expr = match args.timeout_ms {
+    Some(ms) => quote! { Some(#ms) },
     None => quote! { None },
   };
 
@@ -239,9 +239,7 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
         suite: None,
         fixture_requests: &[#(#fixture_array),*],
         annotations: &[#(#annotations),*],
-        timeout_ms: {
-          #timeout_expr.map(|d: std::time::Duration| d.as_millis() as u64)
-        },
+        timeout_ms: #timeout_ms_expr,
         retries: #retries_expr,
         test_fn: |pool| Box::pin(#fn_name(pool)),
       }

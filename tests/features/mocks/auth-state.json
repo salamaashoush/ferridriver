@@ -4,12 +4,12 @@
     {
       "localStorage": [
         {
-          "name": "token",
-          "value": "abc123"
-        },
-        {
           "name": "theme",
           "value": "dark"
+        },
+        {
+          "name": "token",
+          "value": "abc123"
         }
       ],
       "origin": "https://example.com"

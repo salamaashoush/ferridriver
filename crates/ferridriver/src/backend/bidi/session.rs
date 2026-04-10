@@ -23,39 +23,9 @@ pub(crate) struct BidiSession {
   pub browser_version: String,
 }
 
-/// Core BiDi events supported across browsers.
-/// We subscribe to these individually (not all at once) to handle
-/// browsers that don't support all event types.
-const BIDI_CORE_EVENTS: &[&str] = &[
-  "browsingContext.contextCreated",
-  "browsingContext.contextDestroyed",
-  "browsingContext.load",
-  "browsingContext.domContentLoaded",
-  "browsingContext.navigationStarted",
-  "browsingContext.fragmentNavigated",
-  "browsingContext.userPromptOpened",
-  "browsingContext.userPromptClosed",
-  "log.entryAdded",
-  "network.beforeRequestSent",
-  "network.responseStarted",
-  "network.responseCompleted",
-  "network.fetchError",
-  "network.authRequired",
-  "script.realmCreated",
-  "script.realmDestroyed",
-  "script.message",
-];
-
-/// Extended BiDi events (may not be supported in all browsers).
-const BIDI_EXTENDED_EVENTS: &[&str] = &[
-  "browsingContext.navigationCommitted",
-  "browsingContext.navigationFailed",
-  "browsingContext.navigationAborted",
-  "browsingContext.downloadWillBegin",
-  "browsingContext.downloadEnd",
-  "browsingContext.historyUpdated",
-  "input.fileDialogOpened",
-];
+// Event subscriptions use top-level module names (e.g. "browsingContext", "network")
+// rather than individual event names. This matches Puppeteer's approach and avoids
+// issues with unsupported event names breaking the session.
 
 impl BidiSession {
   /// Connect to a BiDi endpoint directly via WebSocket.
@@ -69,12 +39,22 @@ impl BidiSession {
 
     let transport = Arc::new(BidiTransport::connect(ws_url).await?);
 
-    // Create a new session
+    // Create a new session with proper capabilities.
+    // webSocketUrl: true tells Firefox to maintain the BiDi WebSocket across navigations.
+    // unhandledPromptBehavior: ignore prevents dialogs from blocking automation.
     let result = transport
       .send_command(
         "session.new",
         json!({
-          "capabilities": {}
+          "capabilities": {
+            "alwaysMatch": {
+              "acceptInsecureCerts": true,
+              "webSocketUrl": true,
+              "unhandledPromptBehavior": {
+                "default": "ignore"
+              }
+            }
+          }
         }),
       )
       .await?;
@@ -98,17 +78,15 @@ impl BidiSession {
 
     debug!("BiDi session created: id={session_id}, browser={browser_name} {browser_version}");
 
-    // Subscribe to core events (one round-trip)
-    let core_events: Vec<&str> = BIDI_CORE_EVENTS.to_vec();
+    // Subscribe to top-level event modules (matching Puppeteer's approach).
+    // Using module names instead of individual events ensures we receive ALL
+    // events under each module and avoids issues with unsupported event names.
     transport
-      .send_command("session.subscribe", json!({"events": core_events}))
+      .send_command(
+        "session.subscribe",
+        json!({"events": ["browsingContext", "network", "log", "script", "input"]}),
+      )
       .await?;
-
-    // Try subscribing to extended events (ignore failures for unsupported ones)
-    let ext_events: Vec<&str> = BIDI_EXTENDED_EVENTS.to_vec();
-    let _ = transport
-      .send_command("session.subscribe", json!({"events": ext_events}))
-      .await;
 
     info!("BiDi session ready: {browser_name} {browser_version}");
     Ok(Self {
@@ -130,8 +108,16 @@ impl BidiSession {
   ///
   /// Firefox natively supports BiDi: launch with `--remote-debugging-port`,
   /// read the BiDi WebSocket URL from stderr, connect directly.
-  pub async fn launch_firefox(firefox_path: &str, headless: bool) -> Result<(Self, tokio::process::Child), String> {
+  pub async fn launch_firefox(
+    firefox_path: &str,
+    flags: &[String],
+    headless: bool,
+  ) -> Result<(Self, tokio::process::Child), String> {
     let profile_dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+
+    // Write automation preferences to user.js in the profile directory.
+    // Matches Playwright's firefoxPreferences + Puppeteer's essentials.
+    write_firefox_prefs(profile_dir.path()).map_err(|e| format!("write prefs: {e}"))?;
 
     let mut command = tokio::process::Command::new(firefox_path);
     command.arg("--remote-debugging-port").arg("0");
@@ -140,6 +126,20 @@ impl BidiSession {
     if headless {
       command.arg("--headless");
     }
+
+    // Translate Chrome-style --window-size=W,H to Firefox's --width/--height flags,
+    // and forward any other extra flags.
+    for flag in flags {
+      if let Some(dims) = flag.strip_prefix("--window-size=") {
+        if let Some((w, h)) = dims.split_once(',') {
+          command.arg("--width").arg(w);
+          command.arg("--height").arg(h);
+        }
+      } else if flag != "--headless" {
+        command.arg(flag);
+      }
+    }
+
     command.env("MOZ_CRASHREPORTER_DISABLE", "1");
     command
       .stdin(std::process::Stdio::null())
@@ -166,12 +166,12 @@ impl BidiSession {
   /// BiDi support -- use the CDP backend for Chrome instead.
   pub async fn launch(
     browser_path: &str,
-    _flags: &[String],
+    flags: &[String],
     headless: bool,
   ) -> Result<(Self, tokio::process::Child), String> {
     let path_lower = browser_path.to_lowercase();
     if path_lower.contains("firefox") {
-      Self::launch_firefox(browser_path, headless).await
+      Self::launch_firefox(browser_path, flags, headless).await
     } else {
       Err(format!(
         "BiDi backend requires Firefox (found: {browser_path}). \
@@ -241,4 +241,130 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
       },
     }
   }
+}
+
+/// Write Firefox automation preferences to `user.js` in the given profile directory.
+/// Based on Playwright's `playwright.cfg` and Puppeteer's Firefox defaults.
+fn write_firefox_prefs(profile_dir: &std::path::Path) -> std::io::Result<()> {
+  use std::io::Write;
+
+  let prefs_path = profile_dir.join("user.js");
+  let mut f = std::fs::File::create(prefs_path)?;
+
+  // Each line: user_pref("key", value);
+  // Organised by category matching Playwright's structure.
+  write!(
+    f,
+    r#"// ── Process model ──────────────────────────────────────────────────────
+// Force single content process for reliable mouse event dispatch (Playwright + Puppeteer).
+user_pref("fission.webContentIsolationStrategy", 0);
+user_pref("fission.bfcacheInParent", false);
+user_pref("fission.autostart", false);
+user_pref("dom.ipc.processCount", 1);
+user_pref("dom.ipc.processPrelaunchEnabled", false);
+
+// ── Input events ──────────────────────────────────────────────────────
+// Remove minimum tick/time restrictions for synthetic input events.
+user_pref("dom.input_events.security.minNumTicks", 0);
+user_pref("dom.input_events.security.minTimeElapsedInMS", 0);
+
+// ── Startup & UI ──────────────────────────────────────────────────────
+user_pref("browser.startup.homepage", "about:blank");
+user_pref("browser.startup.page", 0);
+user_pref("browser.newtabpage.enabled", false);
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.tabs.warnOnClose", false);
+user_pref("browser.tabs.warnOnCloseOtherTabs", false);
+user_pref("browser.tabs.warnOnOpen", false);
+user_pref("browser.warnOnQuit", false);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("browser.uitour.enabled", false);
+user_pref("toolkit.cosmeticAnimations.enabled", false);
+user_pref("browser.rights.3.shown", true);
+
+// ── Updates & telemetry (all disabled) ────────────────────────────────
+user_pref("app.update.enabled", false);
+user_pref("app.update.auto", false);
+user_pref("app.update.mode", 0);
+user_pref("app.update.service.enabled", false);
+user_pref("app.update.checkInstallTime", false);
+user_pref("app.update.disabledForTesting", true);
+user_pref("app.normandy.enabled", false);
+user_pref("app.normandy.api_url", "");
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("datareporting.healthreport.service.enabled", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("toolkit.telemetry.enabled", false);
+user_pref("toolkit.telemetry.server", "");
+user_pref("browser.translations.enable", false);
+
+// ── Extensions ────────────────────────────────────────────────────────
+user_pref("extensions.autoDisableScopes", 0);
+user_pref("extensions.enabledScopes", 5);
+user_pref("extensions.update.enabled", false);
+user_pref("extensions.screenshots.disabled", true);
+user_pref("extensions.blocklist.enabled", false);
+
+// ── Network (isolate from external services) ──────────────────────────
+user_pref("network.captive-portal-service.enabled", false);
+user_pref("network.connectivity-service.enabled", false);
+user_pref("network.dns.disablePrefetch", true);
+user_pref("network.http.speculative-parallel-limit", 0);
+user_pref("network.cookie.CHIPS.enabled", false);
+user_pref("browser.pocket.enabled", false);
+
+// ── Security (relaxed for testing) ────────────────────────────────────
+user_pref("browser.safebrowsing.blockedURIs.enabled", false);
+user_pref("browser.safebrowsing.downloads.enabled", false);
+user_pref("browser.safebrowsing.passwords.enabled", false);
+user_pref("browser.safebrowsing.malware.enabled", false);
+user_pref("browser.safebrowsing.phishing.enabled", false);
+user_pref("security.fileuri.strict_origin_policy", false);
+user_pref("signon.autofillForms", false);
+user_pref("signon.rememberSignons", false);
+user_pref("privacy.trackingprotection.enabled", false);
+user_pref("dom.security.https_first", false);
+
+// ── Timeouts & hangs ──────────────────────────────────────────────────
+user_pref("dom.max_script_run_time", 0);
+user_pref("dom.max_chrome_script_run_time", 0);
+user_pref("dom.ipc.reportProcessHangs", false);
+user_pref("hangmonitor.timeout", 0);
+user_pref("apz.content_response_timeout", 60000);
+user_pref("toolkit.startup.max_resumed_crashes", -1);
+
+// ── Remote / BiDi (essential) ─────────────────────────────────────────
+user_pref("remote.enabled", true);
+user_pref("remote.bidi.dismiss_file_pickers.enabled", true);
+
+// ── Miscellaneous ─────────────────────────────────────────────────────
+user_pref("dom.disable_open_during_load", false);
+user_pref("dom.iframe_lazy_loading.enabled", false);
+user_pref("dom.file.createInChild", true);
+user_pref("dom.push.serverURL", "");
+user_pref("focusmanager.testmode", true);
+user_pref("geo.provider.testing", true);
+user_pref("geo.wifi.scan", false);
+user_pref("general.useragent.updates.enabled", false);
+user_pref("services.settings.server", "http://dummy.test/dummy/blocklist/");
+user_pref("services.sync.enabled", false);
+user_pref("media.gmp-manager.updateEnabled", false);
+user_pref("media.sanity-test.disabled", true);
+user_pref("devtools.jsonview.enabled", false);
+user_pref("webgl.forbid-software", false);
+user_pref("ui.systemUsesDarkTheme", 0);
+user_pref("plugin.state.flash", 0);
+user_pref("javascript.options.showInConsole", true);
+user_pref("network.cookie.sameSite.laxByDefault", false);
+user_pref("network.http.prompt-temp-redirect", false);
+user_pref("network.manage-offline-status", false);
+user_pref("security.notification_enable_delay", 0);
+user_pref("security.certerrors.mitm.priming.enabled", false);
+user_pref("startup.homepage_welcome_url", "about:blank");
+user_pref("startup.homepage_welcome_url.additional", "");
+user_pref("screenshots.browser.component.enabled", false);
+"#
+  )?;
+
+  Ok(())
 }

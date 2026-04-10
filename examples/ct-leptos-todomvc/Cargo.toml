@@ -13,4 +13,5 @@ web-sys = { version = "0.3", features = ["Storage", "Window"] }
 ferridriver = { path = "../../crates/ferridriver" }
 ferridriver-test = { path = "../../crates/ferridriver-test" }
 ferridriver-test-macros = { path = "../../crates/ferridriver-test-macros" }
+inventory = "0.3"
 tokio = { version = "1", features = ["full"] }

@@ -89,10 +89,20 @@ impl BidiTransport {
     let pending2 = pending.clone();
     tokio::spawn(async move {
       let mut read = read;
-      while let Some(Ok(msg)) = read.next().await {
+      while let Some(result) = read.next().await {
+        let msg = match result {
+          Ok(m) => m,
+          Err(e) => {
+            warn!("BiDi WebSocket error: {e:?}");
+            break;
+          },
+        };
         let text = match msg {
           Message::Text(t) => t,
-          Message::Close(_) => break,
+          Message::Close(frame) => {
+            debug!("BiDi WebSocket close frame: {frame:?}");
+            break;
+          },
           _ => continue,
         };
         let bytes = text.as_bytes();
