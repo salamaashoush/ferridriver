@@ -158,7 +158,12 @@ pub enum ConnectMode {
 impl BrowserState {
   #[must_use]
   pub fn new(connect_mode: ConnectMode, backend_kind: BackendKind) -> Self {
-    let chromium_path = std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium());
+    let chromium_path = match backend_kind {
+      BackendKind::Bidi => std::env::var("FIREFOX_PATH")
+        .or_else(|_| detect_firefox().map_err(|_| std::env::VarError::NotPresent))
+        .unwrap_or_else(|_| std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium())),
+      _ => std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium()),
+    };
     Self {
       instances: HashMap::default(),
       chromium_path,
@@ -176,9 +181,23 @@ impl BrowserState {
   /// Create state from `LaunchOptions`.
   #[must_use]
   pub fn with_options(connect_mode: ConnectMode, opts: crate::options::LaunchOptions) -> Self {
-    let chromium_path = opts
-      .executable_path
-      .unwrap_or_else(|| std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium()));
+    let chromium_path = if let Some(path) = opts.executable_path {
+      path
+    } else {
+      // Infer browser type from backend if not explicitly set
+      let browser = opts.browser.unwrap_or(match opts.backend {
+        BackendKind::Bidi => crate::options::BrowserType::Firefox,
+        #[cfg(target_os = "macos")]
+        BackendKind::WebKit => crate::options::BrowserType::WebKit,
+        _ => crate::options::BrowserType::Chromium,
+      });
+      match browser {
+        crate::options::BrowserType::Firefox => std::env::var("FIREFOX_PATH")
+          .or_else(|_| detect_firefox().map_err(|_| std::env::VarError::NotPresent))
+          .unwrap_or_else(|_| std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium())),
+        _ => std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium()),
+      }
+    };
     Self {
       instances: HashMap::default(),
       chromium_path,
@@ -266,6 +285,15 @@ impl BrowserState {
         BackendKind::WebKit => {
           use crate::backend::webkit::WebKitBrowser;
           AnyBrowser::WebKit(WebKitBrowser::launch_with_options(self.headless).await?)
+        },
+
+        BackendKind::Bidi => {
+          use crate::backend::bidi::BidiBrowser;
+          let mut flags = all_extra.clone();
+          if self.headless {
+            flags.push("--headless".into());
+          }
+          AnyBrowser::Bidi(BidiBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
         },
       },
     };
@@ -1041,6 +1069,138 @@ pub fn detect_chromium() -> String {
   }
 
   "chromium".to_string()
+}
+
+/// Detect Firefox binary on the system.
+///
+/// Search order (matches Chrome detection pattern):
+/// 1. `FIREFOX_PATH` environment variable
+/// 2. ferridriver's own browser cache (installed via `install_firefox()`)
+/// 3. Playwright's browser cache
+/// 4. System-installed Firefox (platform-specific paths)
+/// 5. `which firefox` fallback
+pub fn detect_firefox() -> Result<String, String> {
+  // 1. Env var (highest priority)
+  if let Ok(p) = std::env::var("FIREFOX_PATH") {
+    if std::path::Path::new(&p).exists() {
+      return Ok(p);
+    }
+  }
+
+  // 2. ferridriver's own cache
+  if let Some(p) = crate::install::BrowserInstaller::new().find_installed_firefox() {
+    return Ok(p);
+  }
+
+  // 3. Playwright's Firefox cache
+  if let Some(p) = find_playwright_firefox() {
+    return Ok(p);
+  }
+
+  // 4. System-installed Firefox
+  #[cfg(target_os = "macos")]
+  {
+    let paths = [
+      "/Applications/Firefox.app/Contents/MacOS/firefox",
+      "/Applications/Firefox Nightly.app/Contents/MacOS/firefox",
+      "/Applications/Firefox Developer Edition.app/Contents/MacOS/firefox",
+    ];
+    for path in &paths {
+      if std::path::Path::new(path).exists() {
+        return Ok(path.to_string());
+      }
+    }
+  }
+
+  #[cfg(target_os = "linux")]
+  {
+    let paths = [
+      "/usr/bin/firefox",
+      "/usr/bin/firefox-esr",
+      "/snap/bin/firefox",
+      "/usr/lib/firefox/firefox",
+      "/usr/lib64/firefox/firefox",
+    ];
+    for path in &paths {
+      if std::path::Path::new(path).exists() {
+        return Ok(path.to_string());
+      }
+    }
+  }
+
+  #[cfg(target_os = "windows")]
+  {
+    let paths = [
+      r"C:\Program Files\Mozilla Firefox\firefox.exe",
+      r"C:\Program Files (x86)\Mozilla Firefox\firefox.exe",
+    ];
+    for path in &paths {
+      if std::path::Path::new(path).exists() {
+        return Ok(path.to_string());
+      }
+    }
+  }
+
+  // 5. which/where fallback
+  let cmd = if cfg!(windows) { "where" } else { "which" };
+  if let Ok(output) = std::process::Command::new(cmd).arg("firefox").output() {
+    if output.status.success() {
+      let p = String::from_utf8_lossy(&output.stdout)
+        .lines()
+        .next()
+        .unwrap_or("")
+        .trim()
+        .to_string();
+      if !p.is_empty() && std::path::Path::new(&p).exists() {
+        return Ok(p);
+      }
+    }
+  }
+
+  Err("Firefox not found. Install with `ferridriver install firefox` or set FIREFOX_PATH.".into())
+}
+
+/// Search Playwright's cache for an installed Firefox binary.
+fn find_playwright_firefox() -> Option<String> {
+  let home = std::env::var("HOME").ok()?;
+
+  #[cfg(target_os = "macos")]
+  let cache_base = std::path::PathBuf::from(&home).join("Library/Caches/ms-playwright");
+  #[cfg(target_os = "linux")]
+  let cache_base = std::env::var("XDG_CACHE_HOME")
+    .map(std::path::PathBuf::from)
+    .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".cache"))
+    .join("ms-playwright");
+  #[cfg(target_os = "windows")]
+  let cache_base = std::env::var("LOCALAPPDATA")
+    .map(std::path::PathBuf::from)
+    .unwrap_or_else(|_| std::path::PathBuf::from(&home))
+    .join("ms-playwright");
+
+  let entries = std::fs::read_dir(&cache_base).ok()?;
+  let mut firefox_dirs: Vec<_> = entries
+    .filter_map(std::result::Result::ok)
+    .filter(|e| {
+      let name = e.file_name().to_string_lossy().to_string();
+      name.starts_with("firefox-")
+    })
+    .collect();
+  firefox_dirs.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+
+  for dir in firefox_dirs {
+    let path = dir.path();
+    #[cfg(target_os = "macos")]
+    let exe = path.join("Firefox.app/Contents/MacOS/firefox");
+    #[cfg(target_os = "linux")]
+    let exe = path.join("firefox/firefox");
+    #[cfg(target_os = "windows")]
+    let exe = path.join("firefox/firefox.exe");
+
+    if exe.exists() {
+      return Some(exe.to_string_lossy().to_string());
+    }
+  }
+  None
 }
 
 /// Search Playwright's cache dir for a chromium headless shell binary.

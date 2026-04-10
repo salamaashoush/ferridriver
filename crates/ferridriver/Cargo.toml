@@ -33,6 +33,10 @@ bytes = "1"
 zip = { version = "2", default-features = false, features = ["deflate"] }
 tokio-stream = "0.1"
 dirs = "6"
+tempfile = "3"
+tar = "0.4"
+xz2 = "0.1"
+bzip2 = "0.5"
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_Security", "Win32_Storage_FileSystem", "Win32_System_Pipes"] }

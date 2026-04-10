@@ -6,6 +6,17 @@ use ferridriver::backend::BackendKind;
 use napi::Result;
 use napi_derive::napi;
 
+/// Parse browser type string to `BrowserType`.
+fn parse_browser_type(s: Option<&str>) -> Option<ferridriver::options::BrowserType> {
+  match s {
+    None => None,
+    Some("chromium" | "chrome") => Some(ferridriver::options::BrowserType::Chromium),
+    Some("firefox") => Some(ferridriver::options::BrowserType::Firefox),
+    Some("webkit" | "safari") => Some(ferridriver::options::BrowserType::WebKit),
+    Some(_) => None,
+  }
+}
+
 /// Parse backend string to `BackendKind`.
 fn parse_backend(s: Option<&str>) -> Result<BackendKind> {
   match s {
@@ -13,6 +24,7 @@ fn parse_backend(s: Option<&str>) -> Result<BackendKind> {
     Some("cdp-raw" | "cdpRaw") => Ok(BackendKind::CdpRaw),
     #[cfg(target_os = "macos")]
     Some("webkit") => Ok(BackendKind::WebKit),
+    Some("bidi") => Ok(BackendKind::Bidi),
     Some(other) => Err(napi::Error::from_reason(format!("Unknown backend: {other}"))),
   }
 }
@@ -30,9 +42,21 @@ impl Browser {
   pub async fn launch(options: Option<LaunchOptions>) -> Result<Self> {
     let opts = options.unwrap_or_default();
 
-    let backend = parse_backend(opts.backend.as_deref())?;
+    let browser_type = parse_browser_type(opts.browser.as_deref());
+    // If backend not explicitly set, infer from browser type
+    let backend = if let Some(b) = opts.backend.as_deref() {
+      parse_backend(Some(b))?
+    } else {
+      match browser_type {
+        Some(ferridriver::options::BrowserType::Firefox) => BackendKind::Bidi,
+        #[cfg(target_os = "macos")]
+        Some(ferridriver::options::BrowserType::WebKit) => BackendKind::WebKit,
+        _ => BackendKind::CdpPipe,
+      }
+    };
     let launch_opts = ferridriver::options::LaunchOptions {
       backend,
+      browser: browser_type,
       headless: opts.headless.unwrap_or(true),
       ws_endpoint: opts.ws_endpoint.clone(),
       executable_path: opts.executable_path.clone(),

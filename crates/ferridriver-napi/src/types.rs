@@ -160,8 +160,15 @@ impl From<&EmulateMediaOptions> for ferridriver::options::EmulateMediaOptions {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct LaunchOptions {
-  /// Backend to use: "cdp-pipe" (default), "cdp-raw", "webkit"
+  /// Backend protocol: "cdp-pipe" (default), "cdp-raw", "webkit", "bidi".
+  /// Inferred from `browser` if not set.
   pub backend: Option<String>,
+  /// Browser product to launch: "chromium" (default), "firefox", "webkit".
+  /// Determines the default backend and executable detection:
+  /// - "chromium" -> cdp-pipe backend, detects Chrome/Chromium
+  /// - "firefox"  -> bidi backend, detects Firefox
+  /// - "webkit"   -> webkit backend (macOS only)
+  pub browser: Option<String>,
   /// WebSocket URL to connect to (instead of launching)
   pub ws_endpoint: Option<String>,
   /// Run in headless mode (default: true)

@@ -62,8 +62,13 @@ const runnerArgs = defineArgs({
   },
   backend: {
     type: 'string',
-    description: 'Browser backend',
-    valueParser: ['cdp-pipe', 'cdp-raw', 'webkit'],
+    description: 'Browser backend protocol',
+    valueParser: ['cdp-pipe', 'cdp-raw', 'webkit', 'bidi'],
+  },
+  browser: {
+    type: 'string',
+    description: 'Browser product to launch (sets default backend)',
+    valueParser: ['chromium', 'firefox', 'webkit'],
   },
   reporter: {
     type: 'string',
@@ -340,6 +345,14 @@ const testCommand = defineCommand({
     if (args.headed) config.headed = true;
     if (args.grep) config.grep = args.grep;
     if (args.backend) config.backend = args.backend;
+    if (args.browser) {
+      config.browser = args.browser;
+      // Infer default backend from browser product if not explicitly set
+      if (!args.backend) {
+        if (config.browser === 'firefox') config.backend = 'bidi';
+        else if (config.browser === 'webkit') config.backend = 'webkit';
+      }
+    }
     if (args.reporter) config.reporter = [args.reporter];
     if (args['update-snapshots']) config.updateSnapshots = true;
     if (args['forbid-only']) config.forbidOnly = true;
@@ -393,6 +406,13 @@ const ctCommand = defineCommand({
     if (args.headed) config.headed = true;
     if (args.grep) config.grep = args.grep;
     if (args.backend) config.backend = args.backend;
+    if (args.browser) {
+      config.browser = args.browser;
+      if (!args.backend) {
+        if (args.browser === 'firefox') config.backend = 'bidi';
+        else if (args.browser === 'webkit') config.backend = 'webkit';
+      }
+    }
     if (args.reporter) config.reporter = [args.reporter];
     if (args['update-snapshots']) config.updateSnapshots = true;
     if (args['forbid-only']) config.forbidOnly = true;
@@ -469,7 +489,8 @@ const bddCommand = defineCommand({
       timeout: args.timeout ?? args['step-timeout'],
       retries: args.retries,
       headed: args.headed,
-      backend: args.backend,
+      backend: args.backend || (args.browser === 'firefox' ? 'bidi' : args.browser === 'webkit' ? 'webkit' : undefined),
+      browser: args.browser,
       reporter: args.reporter ? [args.reporter] : undefined,
       strict: args.strict || undefined,
       order: args.order || undefined,
@@ -568,8 +589,8 @@ const installCommand = defineCommand({
   async run({ args, positionals }) {
     const { installChromium, installSystemDeps, getBrowserCacheDir } = await import('@ferridriver/core');
     const browser = positionals.browser || 'chromium';
-    if (browser !== 'chromium' && browser !== 'chrome') {
-      console.error(`Unsupported browser: ${browser}. Only 'chromium' is supported.`);
+    if (!['chromium', 'chrome', 'firefox'].includes(browser)) {
+      console.error(`Unsupported browser: ${browser}. Supported: chromium, firefox.`);
       process.exit(1);
     }
     console.log(`Browser cache: ${getBrowserCacheDir()}`);

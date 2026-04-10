@@ -157,11 +157,15 @@ pub struct TestConfig {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct BrowserConfig {
-  /// Backend: "cdp-pipe", "cdp-raw", "webkit".
+  /// Browser product: "chromium" (default), "firefox", "webkit".
+  /// Determines the default backend and executable detection.
+  pub browser: String,
+  /// Backend protocol: "cdp-pipe", "cdp-raw", "webkit", "bidi".
+  /// Inferred from `browser` if not set.
   pub backend: String,
   /// Run headless. Default: true.
   pub headless: bool,
-  /// Path to browser executable.
+  /// Path to browser executable (overrides auto-detection).
   pub executable_path: Option<String>,
   /// Extra browser launch arguments.
   pub args: Vec<String>,
@@ -174,6 +178,7 @@ pub struct BrowserConfig {
 impl Default for BrowserConfig {
   fn default() -> Self {
     Self {
+      browser: "chromium".into(),
       backend: "cdp-pipe".into(),
       headless: true,
       executable_path: None,

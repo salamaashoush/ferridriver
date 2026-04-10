@@ -159,6 +159,8 @@ impl Browser {
       BackendKind::CdpPipe | BackendKind::CdpRaw => "Chromium",
       #[cfg(target_os = "macos")]
       BackendKind::WebKit => "WebKit",
+
+      BackendKind::Bidi => "BiDi",
     }
   }
 
