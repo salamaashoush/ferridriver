@@ -980,6 +980,7 @@ dependencies = [
  "ferridriver",
  "ferridriver-test",
  "ferridriver-test-macros",
+ "inventory",
  "tokio",
 ]
 
@@ -991,6 +992,7 @@ dependencies = [
  "ferridriver",
  "ferridriver-test",
  "ferridriver-test-macros",
+ "inventory",
  "leptos",
  "tokio",
  "web-sys",

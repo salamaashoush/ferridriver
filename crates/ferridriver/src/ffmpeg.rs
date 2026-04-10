@@ -108,7 +108,23 @@ pub fn encode_frames(
       .map_err(|e| format!("receive jpeg frame: {e}"))?;
 
     // ── Lazy scaler: recreate only if format changed ──
-    let src_fmt = decoded_frame.format();
+    // JPEG decoders output deprecated YUVJ* (full-range YUV) pixel formats.
+    // Rewrite the frame's format metadata to the standard equivalent before
+    // creating the scaler. The pixel data is identical — only the tag differs.
+    let raw_fmt = decoded_frame.format();
+    let src_fmt = match raw_fmt {
+      Pixel::YUVJ420P => Pixel::YUV420P,
+      Pixel::YUVJ422P => Pixel::YUV422P,
+      Pixel::YUVJ444P => Pixel::YUV444P,
+      other => other,
+    };
+    if raw_fmt != src_fmt {
+      #[allow(unsafe_code)]
+      unsafe {
+        (*decoded_frame.as_mut_ptr()).format =
+          ffmpeg_next::ffi::AVPixelFormat::from(src_fmt) as libc::c_int;
+      }
+    }
     if scaler.is_none() || src_fmt != scaler_src_fmt {
       scaler = Some(
         scaling::Context::get(src_fmt, w, h, Pixel::YUV420P, w, h, scaling::Flags::BILINEAR)
@@ -291,7 +307,20 @@ pub fn encode_stream(
       .receive_frame(&mut decoded_frame)
       .map_err(|e| format!("receive jpeg frame: {e}"))?;
 
-    let src_fmt = decoded_frame.format();
+    let raw_fmt = decoded_frame.format();
+    let src_fmt = match raw_fmt {
+      Pixel::YUVJ420P => Pixel::YUV420P,
+      Pixel::YUVJ422P => Pixel::YUV422P,
+      Pixel::YUVJ444P => Pixel::YUV444P,
+      other => other,
+    };
+    if raw_fmt != src_fmt {
+      #[allow(unsafe_code)]
+      unsafe {
+        (*decoded_frame.as_mut_ptr()).format =
+          ffmpeg_next::ffi::AVPixelFormat::from(src_fmt) as libc::c_int;
+      }
+    }
     if scaler.is_none() || src_fmt != scaler_src_fmt {
       scaler = Some(
         scaling::Context::get(src_fmt, w, h, Pixel::YUV420P, w, h, scaling::Flags::BILINEAR)

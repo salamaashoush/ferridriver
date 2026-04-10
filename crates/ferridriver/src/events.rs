@@ -193,6 +193,12 @@ impl EventEmitter {
     let _ = self.tx.send(event);
   }
 
+  /// Number of active broadcast subscribers (zero = nobody is listening).
+  #[must_use]
+  pub fn receiver_count(&self) -> usize {
+    self.tx.receiver_count()
+  }
+
   /// Subscribe to events. Returns a receiver that gets all future events.
   #[must_use]
   pub fn subscribe(&self) -> broadcast::Receiver<PageEvent> {
