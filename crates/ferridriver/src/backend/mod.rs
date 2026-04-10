@@ -13,6 +13,8 @@ pub(crate) mod json_scan;
 #[cfg(target_os = "macos")]
 pub mod webkit;
 
+pub mod bidi;
+
 /// Empty JSON object `{}` — avoids `serde_json::json!({})` heap allocation per call.
 #[inline]
 pub(crate) fn empty_params() -> serde_json::Value {
@@ -221,6 +223,8 @@ pub enum BackendKind {
   /// Native WebKit/WKWebView (macOS only)
   #[cfg(target_os = "macos")]
   WebKit,
+  /// WebDriver BiDi protocol (cross-browser: Chrome, Firefox, future Safari)
+  Bidi,
 }
 
 // ─── AnyBrowser ─────────────────────────────────────────────────────────────
@@ -231,6 +235,8 @@ pub enum AnyBrowser {
   CdpRaw(cdp::CdpBrowser<cdp::ws::WsTransport>),
   #[cfg(target_os = "macos")]
   WebKit(webkit::WebKitBrowser),
+
+  Bidi(bidi::BidiBrowser),
 }
 
 impl AnyBrowser {
@@ -245,6 +251,8 @@ impl AnyBrowser {
       Self::CdpRaw(b) => b.pages().await,
       #[cfg(target_os = "macos")]
       Self::WebKit(b) => b.pages().await,
+
+      Self::Bidi(b) => b.pages().await,
     }
   }
 
@@ -259,6 +267,8 @@ impl AnyBrowser {
       Self::CdpRaw(b) => b.new_page(url).await,
       #[cfg(target_os = "macos")]
       Self::WebKit(b) => b.new_page(url).await,
+
+      Self::Bidi(b) => b.new_page(url).await,
     }
   }
 
@@ -277,6 +287,8 @@ impl AnyBrowser {
       Self::CdpRaw(b) => b.new_page_isolated(url, viewport).await,
       #[cfg(target_os = "macos")]
       Self::WebKit(b) => b.new_page_isolated(url, viewport).await,
+
+      Self::Bidi(b) => b.new_page_isolated(url, viewport).await,
     }
   }
 
@@ -291,6 +303,8 @@ impl AnyBrowser {
       Self::CdpRaw(b) => b.close().await,
       #[cfg(target_os = "macos")]
       Self::WebKit(b) => b.close().await,
+
+      Self::Bidi(b) => b.close().await,
     }
   }
 }
@@ -304,6 +318,8 @@ pub enum AnyPage {
   CdpRaw(cdp::CdpPage<cdp::ws::WsTransport>),
   #[cfg(target_os = "macos")]
   WebKit(webkit::WebKitPage),
+
+  Bidi(bidi::BidiPage),
 }
 
 /// Macro to dispatch a method call across all `AnyPage` variants.
@@ -314,6 +330,8 @@ macro_rules! page_dispatch {
             AnyPage::CdpRaw(p) => p.$method($($arg),*).await,
             #[cfg(target_os = "macos")]
             AnyPage::WebKit(p) => p.$method($($arg),*).await,
+
+            AnyPage::Bidi(p) => p.$method($($arg),*).await,
         }
     };
 }
@@ -329,6 +347,8 @@ impl AnyPage {
       AnyPage::CdpRaw(p) => &p.events,
       #[cfg(target_os = "macos")]
       AnyPage::WebKit(p) => &p.events,
+
+      AnyPage::Bidi(p) => &p.events,
     }
   }
 
@@ -584,6 +604,8 @@ impl AnyPage {
       Self::CdpRaw(p) => p.attach_listeners(console_log, network_log, dialog_log),
       #[cfg(target_os = "macos")]
       Self::WebKit(p) => p.attach_listeners(console_log, network_log, dialog_log),
+
+      Self::Bidi(p) => p.attach_listeners(console_log, network_log, dialog_log),
     }
   }
 
@@ -612,6 +634,8 @@ impl AnyPage {
       AnyPage::CdpRaw(p) => p.start_screencast(quality, max_width, max_height).await,
       #[cfg(target_os = "macos")]
       AnyPage::WebKit(_) => Err("Video recording is not supported on WebKit backend".into()),
+
+      AnyPage::Bidi(p) => p.start_screencast(quality, max_width, max_height).await,
     }
   }
 
@@ -621,6 +645,8 @@ impl AnyPage {
       AnyPage::CdpRaw(p) => p.stop_screencast().await,
       #[cfg(target_os = "macos")]
       AnyPage::WebKit(_) => Ok(()), // No-op if never started.
+
+      AnyPage::Bidi(p) => p.stop_screencast().await,
     }
   }
 
@@ -641,6 +667,8 @@ impl AnyPage {
         // WebKit dialog handling is in the ObjC subprocess via WKUIDelegate.
         // Custom handlers would need a new IPC op. For now, auto-behavior only.
       },
+
+      Self::Bidi(p) => *p.dialog_handler.write().await = handler,
     }
   }
 
@@ -667,6 +695,8 @@ impl AnyPage {
       Self::CdpRaw(p) => p.is_closed(),
       #[cfg(target_os = "macos")]
       Self::WebKit(p) => p.is_closed(),
+
+      Self::Bidi(p) => p.is_closed(),
     }
   }
 
@@ -699,6 +729,8 @@ pub enum AnyElement {
   CdpRaw(cdp::CdpElement<cdp::ws::WsTransport>),
   #[cfg(target_os = "macos")]
   WebKit(webkit::WebKitElement),
+
+  Bidi(bidi::BidiElement),
 }
 
 macro_rules! element_dispatch {
@@ -708,6 +740,8 @@ macro_rules! element_dispatch {
             AnyElement::CdpRaw(e) => e.$method($($arg),*).await,
             #[cfg(target_os = "macos")]
             AnyElement::WebKit(e) => e.$method($($arg),*).await,
+
+            AnyElement::Bidi(e) => e.$method($($arg),*).await,
         }
     };
 }

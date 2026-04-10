@@ -32,6 +32,12 @@ use tokio::io::AsyncWriteExt;
 const CFT_VERSIONS_URL: &str =
   "https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json";
 
+/// Mozilla product-details API for resolving Firefox versions.
+const FIREFOX_VERSIONS_URL: &str = "https://product-details.mozilla.org/1.0/firefox_versions.json";
+
+/// Base URL for Firefox stable releases.
+const FIREFOX_RELEASES_URL: &str = "https://archive.mozilla.org/pub/firefox/releases";
+
 /// Download retry count (matches Playwright's 5 attempts).
 const DOWNLOAD_RETRIES: u32 = 5;
 
@@ -408,6 +414,161 @@ impl BrowserInstaller {
     }
     None
   }
+
+  /// Install the latest stable Firefox.
+  ///
+  /// Downloads from Mozilla's official archive, extracts to the cache directory,
+  /// and returns the absolute path to the firefox executable.
+  ///
+  /// Uses the same cache/marker/retry pattern as `install_chromium()`.
+  /// Archive format: `.tar.bz2` on Linux, `.dmg` on macOS (mounted via hdiutil).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the Mozilla API is unreachable, the download
+  /// fails after all retries, extraction fails, or the platform is unsupported.
+  pub async fn install_firefox<F>(&self, progress: F) -> Result<String, String>
+  where
+    F: Fn(InstallProgress),
+  {
+    progress(InstallProgress::Resolving);
+
+    // Fetch the latest stable Firefox version from Mozilla's API
+    let versions: std::collections::HashMap<String, String> = self
+      .client
+      .get(FIREFOX_VERSIONS_URL)
+      .send()
+      .await
+      .map_err(|e| format!("failed to fetch Firefox versions: {e}"))?
+      .json()
+      .await
+      .map_err(|e| format!("failed to parse Firefox versions: {e}"))?;
+
+    let version = versions
+      .get("LATEST_FIREFOX_VERSION")
+      .ok_or("Firefox versions response missing LATEST_FIREFOX_VERSION")?
+      .clone();
+
+    let (platform_dir, archive_name, archive_ext) = firefox_archive_info(&version)?;
+
+    // Build download URL:
+    // https://archive.mozilla.org/pub/firefox/releases/{version}/{platform}/en-US/{archive}
+    let download_url = format!("{FIREFOX_RELEASES_URL}/{version}/{platform_dir}/en-US/{archive_name}");
+
+    // Check if already installed
+    let install_dir = self.cache_dir.join(format!("firefox-{version}"));
+    let marker_file = install_dir.join(".downloaded");
+    let executable = firefox_executable_path(&install_dir);
+
+    if marker_file.exists() && executable.exists() {
+      let path = executable.to_string_lossy().to_string();
+      progress(InstallProgress::AlreadyInstalled {
+        version: version.clone(),
+        path: path.clone(),
+      });
+      return Ok(path);
+    }
+
+    // Clean up partial install
+    if install_dir.exists() {
+      let _ = tokio::fs::remove_dir_all(&install_dir).await;
+    }
+
+    // Download with retries
+    let tmp_dir = self.cache_dir.join(".tmp");
+    tokio::fs::create_dir_all(&tmp_dir)
+      .await
+      .map_err(|e| format!("failed to create temp dir: {e}"))?;
+
+    let archive_path = tmp_dir.join(format!("firefox-{version}{archive_ext}"));
+    let mut last_error = String::new();
+
+    for attempt in 1..=DOWNLOAD_RETRIES {
+      progress(InstallProgress::Downloading {
+        bytes_downloaded: 0,
+        total_bytes: None,
+      });
+
+      match self.download_file(&download_url, &archive_path, &progress).await {
+        Ok(()) => {
+          last_error.clear();
+          break;
+        },
+        Err(e) => {
+          last_error = format!("attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
+          let _ = tokio::fs::remove_file(&archive_path).await;
+          if attempt == DOWNLOAD_RETRIES {
+            return Err(format!(
+              "Firefox download failed after {DOWNLOAD_RETRIES} attempts: {last_error}"
+            ));
+          }
+        },
+      }
+    }
+
+    // Extract
+    progress(InstallProgress::Extracting);
+
+    tokio::fs::create_dir_all(&install_dir)
+      .await
+      .map_err(|e| format!("failed to create install dir: {e}"))?;
+
+    let install_dir_clone = install_dir.clone();
+    let archive_path_clone = archive_path.clone();
+    tokio::task::spawn_blocking(move || extract_firefox_archive(&archive_path_clone, &install_dir_clone))
+      .await
+      .map_err(|e| format!("extract task failed: {e}"))?
+      .map_err(|e| format!("Firefox extraction failed: {e}"))?;
+
+    // Clean up temp file
+    let _ = tokio::fs::remove_file(&archive_path).await;
+
+    // Set executable permissions on Unix
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      if executable.exists() {
+        let _ = std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755));
+      }
+    }
+
+    let path = executable.to_string_lossy().to_string();
+    if !executable.exists() {
+      return Err(format!(
+        "extraction completed but firefox executable not found at: {path}"
+      ));
+    }
+
+    // Write marker file
+    let _ = tokio::fs::write(&marker_file, version.as_bytes()).await;
+
+    progress(InstallProgress::Complete {
+      version: version.clone(),
+      path: path.clone(),
+    });
+
+    Ok(path)
+  }
+
+  /// Return the path to an installed Firefox, or `None` if not installed.
+  #[must_use]
+  pub fn find_installed_firefox(&self) -> Option<String> {
+    let entries = std::fs::read_dir(&self.cache_dir).ok()?;
+    let mut candidates: Vec<_> = entries
+      .filter_map(std::result::Result::ok)
+      .filter(|e| e.file_name().to_string_lossy().starts_with("firefox-"))
+      .collect();
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+
+    for entry in candidates {
+      let marker = entry.path().join(".downloaded");
+      let exe = firefox_executable_path(&entry.path());
+      if marker.exists() && exe.exists() {
+        return Some(exe.to_string_lossy().to_string());
+      }
+    }
+    None
+  }
 }
 
 impl Default for BrowserInstaller {
@@ -673,6 +834,147 @@ fn arch_chromium_packages() -> Vec<&'static str> {
 
 // ---------------------------------------------------------------------------
 // Zip extraction
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// Firefox platform helpers
+// ---------------------------------------------------------------------------
+
+/// Return (platform_dir, archive_filename, archive_extension) for Firefox downloads.
+/// Matches Puppeteer's `archive()` and `platformName()` for stable channel.
+fn firefox_archive_info(version: &str) -> Result<(String, String, String), String> {
+  let os = std::env::consts::OS;
+  let arch = std::env::consts::ARCH;
+
+  let major: u32 = version.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(0);
+  let tar_ext = if major >= 135 { "xz" } else { "bz2" };
+
+  match (os, arch) {
+    ("linux", "x86_64") => Ok((
+      "linux-x86_64".into(),
+      format!("firefox-{version}.tar.{tar_ext}"),
+      format!(".tar.{tar_ext}"),
+    )),
+    ("linux", "aarch64") => Ok((
+      "linux-aarch64".into(),
+      format!("firefox-{version}.tar.{tar_ext}"),
+      format!(".tar.{tar_ext}"),
+    )),
+    ("macos", "x86_64" | "aarch64") => Ok(("mac".into(), format!("Firefox {version}.dmg"), ".dmg".into())),
+    ("windows", "x86_64") => Ok(("win64".into(), format!("Firefox Setup {version}.exe"), ".exe".into())),
+    ("windows", "x86") => Ok(("win32".into(), format!("Firefox Setup {version}.exe"), ".exe".into())),
+    _ => Err(format!("unsupported platform for Firefox: {os}-{arch}")),
+  }
+}
+
+/// Return the path to the Firefox executable inside the install directory.
+/// Matches Puppeteer's `relativeExecutablePath()` for stable channel.
+fn firefox_executable_path(install_dir: &Path) -> PathBuf {
+  let os = std::env::consts::OS;
+  match os {
+    "macos" => install_dir.join("Firefox.app/Contents/MacOS/firefox"),
+    "windows" => install_dir.join("core/firefox.exe"),
+    // Linux: tar extracts to firefox/ subdirectory
+    _ => install_dir.join("firefox/firefox"),
+  }
+}
+
+/// Extract a Firefox archive (tar.bz2, tar.xz, or DMG).
+fn extract_firefox_archive(archive_path: &Path, dest: &Path) -> Result<(), String> {
+  let path_str = archive_path.to_string_lossy();
+
+  if path_str.ends_with(".tar.bz2") {
+    extract_tar_bz2(archive_path, dest)
+  } else if path_str.ends_with(".tar.xz") {
+    extract_tar_xz(archive_path, dest)
+  } else if path_str.ends_with(".dmg") {
+    extract_dmg(archive_path, dest)
+  } else {
+    Err(format!("unsupported Firefox archive format: {path_str}"))
+  }
+}
+
+/// Extract a .tar.bz2 archive.
+fn extract_tar_bz2(archive_path: &Path, dest: &Path) -> Result<(), String> {
+  let file = std::fs::File::open(archive_path).map_err(|e| format!("failed to open tar.bz2: {e}"))?;
+  let decoder = bzip2::read::BzDecoder::new(file);
+  let mut archive = tar::Archive::new(decoder);
+  archive
+    .unpack(dest)
+    .map_err(|e| format!("failed to extract tar.bz2: {e}"))
+}
+
+/// Extract a .tar.xz archive.
+fn extract_tar_xz(archive_path: &Path, dest: &Path) -> Result<(), String> {
+  let file = std::fs::File::open(archive_path).map_err(|e| format!("failed to open tar.xz: {e}"))?;
+  let decoder = xz2::read::XzDecoder::new(file);
+  let mut archive = tar::Archive::new(decoder);
+  archive
+    .unpack(dest)
+    .map_err(|e| format!("failed to extract tar.xz: {e}"))
+}
+
+/// Extract a .dmg (macOS disk image) by mounting, copying, and unmounting.
+/// Same approach as Puppeteer: hdiutil attach -> cp -R -> hdiutil detach.
+fn extract_dmg(dmg_path: &Path, dest: &Path) -> Result<(), String> {
+  // Mount the DMG
+  let output = std::process::Command::new("hdiutil")
+    .args(["attach", "-nobrowse", "-noautoopen"])
+    .arg(dmg_path)
+    .output()
+    .map_err(|e| format!("hdiutil attach failed: {e}"))?;
+
+  if !output.status.success() {
+    return Err(format!(
+      "hdiutil attach failed: {}",
+      String::from_utf8_lossy(&output.stderr)
+    ));
+  }
+
+  let stdout = String::from_utf8_lossy(&output.stdout);
+  let mount_path = stdout
+    .lines()
+    .filter_map(|line| {
+      let parts: Vec<&str> = line.split('\t').collect();
+      parts.last().map(|p| p.trim().to_string())
+    })
+    .find(|p| p.starts_with("/Volumes/"))
+    .ok_or("could not find volume mount path in hdiutil output")?;
+
+  // Find the .app directory inside the mount
+  let result = (|| -> Result<(), String> {
+    let entries = std::fs::read_dir(&mount_path).map_err(|e| format!("failed to read mounted volume: {e}"))?;
+    let app_name = entries
+      .filter_map(std::result::Result::ok)
+      .find(|e| e.file_name().to_string_lossy().ends_with(".app"))
+      .ok_or("no .app found in mounted DMG")?;
+
+    let source = std::path::Path::new(&mount_path).join(app_name.file_name());
+
+    // cp -R to destination
+    let status = std::process::Command::new("cp")
+      .args(["-R"])
+      .arg(&source)
+      .arg(dest)
+      .status()
+      .map_err(|e| format!("cp -R failed: {e}"))?;
+
+    if !status.success() {
+      return Err("cp -R failed to copy Firefox.app".into());
+    }
+    Ok(())
+  })();
+
+  // Always detach the DMG
+  let _ = std::process::Command::new("hdiutil")
+    .args(["detach", &mount_path, "-quiet"])
+    .status();
+
+  result
+}
+
+// ---------------------------------------------------------------------------
+// Zip extraction (for Chrome)
 // ---------------------------------------------------------------------------
 
 fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {

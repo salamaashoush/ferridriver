@@ -103,6 +103,14 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
 
   let mut config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;
 
+  // Apply backend/browser CLI overrides.
+  if let Some(backend) = &args.backend {
+    config.browser.backend = cli::backend_to_string(backend);
+  }
+  if let Some(ref browser) = args.browser {
+    cli::apply_browser_defaults(&mut config.browser, browser);
+  }
+
   // Apply BDD-specific CLI overrides.
   if !features.is_empty() {
     config.features = features;
@@ -308,7 +316,15 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
   };
 
   let watch = args.watch;
-  let config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;
+  let mut config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;
+
+  // Apply backend/browser CLI overrides.
+  if let Some(backend) = &args.backend {
+    config.browser.backend = cli::backend_to_string(backend);
+  }
+  if let Some(ref browser) = args.browser {
+    cli::apply_browser_defaults(&mut config.browser, browser);
+  }
 
   if watch {
     let config_clone = config.clone();
@@ -332,16 +348,11 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
 async fn install_browser(browser: &str, with_deps: bool) -> anyhow::Result<()> {
   use ferridriver::install::{BrowserInstaller, InstallProgress};
 
-  match browser {
-    "chromium" | "chrome" => {},
-    other => anyhow::bail!("unsupported browser: {other}. Only 'chromium' is supported."),
-  }
-
   let installer = BrowserInstaller::new();
   println!("Browser cache: {}", installer.cache_dir().display());
 
-  // Install system dependencies first if requested
-  if with_deps {
+  // Install system dependencies first if requested (chromium only for now)
+  if with_deps && matches!(browser, "chromium" | "chrome") {
     installer
       .install_system_deps(|p| match p {
         InstallProgress::InstallingDeps { distro } => {
@@ -356,39 +367,54 @@ async fn install_browser(browser: &str, with_deps: bool) -> anyhow::Result<()> {
       .map_err(|e| anyhow::anyhow!(e))?;
   }
 
-  let path = installer
-    .install_chromium(|p| match p {
-      InstallProgress::Resolving => {
-        println!("Resolving latest stable Chrome for Testing...");
-      },
-      InstallProgress::Downloading {
-        bytes_downloaded,
-        total_bytes,
-      } => {
-        if let Some(total) = total_bytes {
-          let pct = (bytes_downloaded as f64 / total as f64 * 100.0) as u32;
-          let mb = bytes_downloaded as f64 / 1_048_576.0;
-          let total_mb = total as f64 / 1_048_576.0;
-          eprint!("\rDownloading... {mb:.1}/{total_mb:.1} MB ({pct}%)");
-        } else {
-          let mb = bytes_downloaded as f64 / 1_048_576.0;
-          eprint!("\rDownloading... {mb:.1} MB");
-        }
-      },
-      InstallProgress::Extracting => {
-        eprintln!();
-        println!("Extracting...");
-      },
-      InstallProgress::Complete { version, path } => {
-        println!("Chromium {version} installed: {path}");
-      },
-      InstallProgress::AlreadyInstalled { version, path } => {
-        println!("Chromium {version} already installed: {path}");
-      },
-      _ => {},
-    })
-    .await
-    .map_err(|e| anyhow::anyhow!(e))?;
+  let browser_label = match browser {
+    "chromium" | "chrome" => "Chromium",
+    "firefox" => "Firefox",
+    other => anyhow::bail!("unsupported browser: {other}. Supported: chromium, firefox."),
+  };
+
+  let progress_fn = |p: InstallProgress| match p {
+    InstallProgress::Resolving => {
+      println!("Resolving latest stable {browser_label}...");
+    },
+    InstallProgress::Downloading {
+      bytes_downloaded,
+      total_bytes,
+    } => {
+      if let Some(total) = total_bytes {
+        let pct = (bytes_downloaded as f64 / total as f64 * 100.0) as u32;
+        let mb = bytes_downloaded as f64 / 1_048_576.0;
+        let total_mb = total as f64 / 1_048_576.0;
+        eprint!("\rDownloading... {mb:.1}/{total_mb:.1} MB ({pct}%)");
+      } else {
+        let mb = bytes_downloaded as f64 / 1_048_576.0;
+        eprint!("\rDownloading... {mb:.1} MB");
+      }
+    },
+    InstallProgress::Extracting => {
+      eprintln!();
+      println!("Extracting...");
+    },
+    InstallProgress::Complete { version, path } => {
+      println!("{browser_label} {version} installed: {path}");
+    },
+    InstallProgress::AlreadyInstalled { version, path } => {
+      println!("{browser_label} {version} already installed: {path}");
+    },
+    _ => {},
+  };
+
+  let path = match browser {
+    "chromium" | "chrome" => installer
+      .install_chromium(&progress_fn)
+      .await
+      .map_err(|e| anyhow::anyhow!(e))?,
+    "firefox" => installer
+      .install_firefox(&progress_fn)
+      .await
+      .map_err(|e| anyhow::anyhow!(e))?,
+    _ => unreachable!(),
+  };
 
   // Verify it works
   let output = std::process::Command::new(&path).arg("--version").output();

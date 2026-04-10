@@ -84,6 +84,14 @@ pub enum Command {
 /// Test runner options.
 #[derive(Args)]
 pub struct TestArgs {
+  /// Backend protocol: cdp-pipe (default), cdp-raw, webkit, bidi
+  #[arg(long)]
+  pub backend: Option<Backend>,
+
+  /// Browser to launch: chromium (default), firefox, webkit
+  #[arg(long)]
+  pub browser: Option<String>,
+
   /// Number of parallel workers (0 = auto)
   #[arg(long, short = 'j')]
   pub workers: Option<u32>,
@@ -160,6 +168,14 @@ pub struct TestArgs {
 /// BDD runner options.
 #[derive(Args)]
 pub struct BddArgs {
+  /// Backend protocol: cdp-pipe (default), cdp-raw, webkit, bidi
+  #[arg(long)]
+  pub backend: Option<Backend>,
+
+  /// Browser to launch: chromium (default), firefox, webkit
+  #[arg(long)]
+  pub browser: Option<String>,
+
   /// Tag filter expression (e.g., "@smoke and not @wip")
   #[arg(long, short = 't')]
   pub tags: Option<String>,
@@ -298,7 +314,7 @@ pub struct TransportArgs {
 }
 
 #[derive(Clone, ValueEnum)]
-enum Backend {
+pub enum Backend {
   /// Chrome `DevTools` Protocol over pipes (fd 3/4)
   #[value(name = "cdp-pipe")]
   CdpPipe,
@@ -309,6 +325,10 @@ enum Backend {
   #[cfg(target_os = "macos")]
   #[value(name = "webkit")]
   WebKit,
+  /// WebDriver BiDi protocol (W3C standard, cross-browser)
+
+  #[value(name = "bidi")]
+  Bidi,
 }
 
 #[derive(Clone, ValueEnum)]
@@ -319,6 +339,45 @@ pub enum Transport {
   Http,
 }
 
+/// Apply browser-type defaults to config.
+/// When `--browser firefox` is specified, it sets the backend to `bidi`
+/// (unless explicitly overridden). When `--browser chromium`, sets `cdp-pipe`.
+/// This matches Playwright's model: browser type determines protocol.
+pub fn apply_browser_defaults(config: &mut ferridriver_test::config::BrowserConfig, browser: &str) {
+  match browser {
+    "firefox" => {
+      // Firefox uses BiDi backend by default
+      if config.backend == "cdp-pipe" {
+        config.backend = "bidi".into();
+      }
+    },
+    "chromium" | "chrome" => {
+      // Chromium uses CDP by default
+      if config.backend == "bidi" {
+        config.backend = "cdp-pipe".into();
+      }
+    },
+    "webkit" | "safari" => {
+      #[cfg(target_os = "macos")]
+      {
+        config.backend = "webkit".into();
+      }
+    },
+    _ => {},
+  }
+}
+
+/// Convert a `Backend` enum to its config string name.
+pub fn backend_to_string(b: &Backend) -> String {
+  match b {
+    Backend::CdpPipe => "cdp-pipe".into(),
+    Backend::CdpRaw => "cdp-raw".into(),
+    #[cfg(target_os = "macos")]
+    Backend::WebKit => "webkit".into(),
+    Backend::Bidi => "bidi".into(),
+  }
+}
+
 impl BrowserArgs {
   pub fn backend_kind(&self) -> BackendKind {
     match self.backend {
@@ -326,6 +385,8 @@ impl BrowserArgs {
       Backend::CdpRaw => BackendKind::CdpRaw,
       #[cfg(target_os = "macos")]
       Backend::WebKit => BackendKind::WebKit,
+
+      Backend::Bidi => BackendKind::Bidi,
     }
   }
 

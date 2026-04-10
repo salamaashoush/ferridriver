@@ -36,9 +36,10 @@ test-fast:
   cargo test --workspace & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_pipe" & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_raw" & \
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_bidi" & \
   wait
 
-# Run specific backend test (use underscores: cdp_ws, cdp_pipe, webkit)
+# Run specific backend test (use underscores: cdp_ws, cdp_pipe, webkit, bidi)
 test-backend backend:
   cargo build --bin ferridriver
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_{{backend}}" --nocapture

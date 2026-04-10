@@ -98,16 +98,30 @@ pub struct GotoOptions {
   pub timeout: Option<u64>,
 }
 
+/// Which browser to use.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BrowserType {
+  /// Google Chrome / Chromium
+  Chromium,
+  /// Mozilla Firefox
+  Firefox,
+  /// Apple WebKit (macOS only)
+  WebKit,
+}
+
 /// Launch options for the browser -- matches Playwright's `browserType.launch()`.
 #[derive(Debug, Clone)]
 pub struct LaunchOptions {
-  /// Backend to use: `CdpPipe`, `CdpRaw`, `WebKit`.
+  /// Backend protocol: `CdpPipe`, `CdpRaw`, `WebKit`, `Bidi`.
   pub backend: crate::backend::BackendKind,
+  /// Which browser to launch. Inferred from backend if not set.
+  /// `Chromium` for CDP backends, `Firefox` for BiDi, `WebKit` for WebKit.
+  pub browser: Option<BrowserType>,
   /// Run in headful mode (show browser window). Default: false (headless).
   pub headless: bool,
-  /// Path to Chrome/Chromium binary. Default: auto-detect.
+  /// Path to browser executable. Default: auto-detect based on `browser` type.
   pub executable_path: Option<String>,
-  /// Extra command-line arguments to pass to Chrome.
+  /// Extra command-line arguments to pass to the browser.
   pub args: Vec<String>,
   /// User data directory. Default: temp dir per launch.
   pub user_data_dir: Option<String>,
@@ -115,7 +129,7 @@ pub struct LaunchOptions {
   pub ws_endpoint: Option<String>,
   /// Auto-connect to running Chrome instance.
   pub auto_connect: Option<AutoConnectOptions>,
-  /// Default viewport for new pages. None = use Chrome defaults.
+  /// Default viewport for new pages. None = use browser defaults.
   pub viewport: Option<ViewportConfig>,
   /// Slow down operations by this many ms (for debugging).
   pub slow_mo: Option<u64>,
@@ -133,6 +147,7 @@ impl Default for LaunchOptions {
   fn default() -> Self {
     Self {
       backend: crate::backend::BackendKind::CdpPipe,
+      browser: None,
       headless: true,
       executable_path: None,
       args: Vec::new(),
