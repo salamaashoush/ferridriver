@@ -121,6 +121,7 @@ impl BidiSession {
 
   /// Connect to a BiDi endpoint at the given port.
   /// Constructs `ws://127.0.0.1:{port}/session` and connects.
+  #[allow(dead_code, reason = "public library API for external consumers")]
   pub async fn connect_to_port(port: u16) -> Result<Self, String> {
     Self::connect(&format!("ws://127.0.0.1:{port}/session")).await
   }

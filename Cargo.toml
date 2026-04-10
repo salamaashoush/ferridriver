@@ -49,7 +49,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
-rmcp = { version = "1.3", features = ["server", "transport-io", "transport-streamable-http-server", "tower"] }
+rmcp = { version = "1.4", features = ["server", "transport-io", "transport-streamable-http-server", "tower"] }
 schemars = "1"
 axum = "0.8"
 tokio-util = "0.7"

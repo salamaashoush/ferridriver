@@ -22,5 +22,5 @@ pub use server::{DefaultConfig, McpServer, McpServerConfig, SharedState, State};
 /// Browser tool definitions (no live `BrowserState` required). Sorted by name.
 #[must_use]
 pub fn list_browser_tools() -> Vec<Tool> {
-  McpServer::combined_router().list_all()
+  McpServer::tool_router().list_all()
 }
