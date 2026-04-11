@@ -99,6 +99,8 @@ pub struct TestMeta {
   pub suite_id: Option<String>,
   /// Annotations — same as Rust TestAnnotation, deserialized from JSON.
   pub annotations: Vec<serde_json::Value>,
+  /// Fixture overrides from test.use() — merged with global config by the worker.
+  pub use_options: Option<serde_json::Value>,
 }
 
 /// Metadata for a test suite (describe block).
@@ -450,23 +452,43 @@ impl TestRunner {
       ..Default::default()
     };
 
-    // Run through core pipeline — reporters created from config internally.
-    // Append ResultCollector so we can return per-test results to TS.
+    // Run through core pipeline on a SEPARATE Tokio runtime.
+    //
+    // Critical: the core runner uses `tokio::spawn` for parallel workers, and those
+    // workers call TSFN callbacks back to the JS main thread. If we run on the NAPI
+    // runtime, the JS thread blocks waiting for `run()` to resolve, but the TSFN
+    // callbacks need the JS thread → deadlock.
+    //
+    // Solution: run the core pipeline on a dedicated multi-thread runtime spawned on
+    // a blocking thread. The NAPI async method yields (`spawn_blocking().await`),
+    // freeing the JS main thread to process TSFN callbacks.
     let collector = Arc::new(tokio::sync::Mutex::new(ResultCollector::new()));
     let start = Instant::now();
     let config = self.config.clone();
     let watch = self.watch;
-    let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
-    runner.add_reporter(Box::new(ResultCollectorReporter(Arc::clone(&collector))));
+    let collector_clone = Arc::clone(&collector);
 
-    if watch {
-      // Watch mode: core Rust watch loop handles file watching + keyboard.
-      // TestPlan::clone() is cheap — TestFn is Arc (refcount bump).
-      let cwd = std::env::current_dir().unwrap_or_default();
-      let _exit_code = runner.run_watch(move |_changed| plan.clone(), cwd).await;
-    } else {
-      let _exit_code = runner.run(plan).await;
-    }
+    tokio::task::spawn_blocking(move || {
+      let rt = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build test runner tokio runtime");
+
+      rt.block_on(async move {
+        let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
+        runner.add_reporter(Box::new(ResultCollectorReporter(collector_clone)));
+
+        if watch {
+          let cwd = std::env::current_dir().unwrap_or_default();
+          let _exit_code = runner.run_watch(move |_changed| plan.clone(), cwd).await;
+        } else {
+          let _exit_code = runner.run(plan).await;
+        }
+      });
+    })
+    .await
+    .map_err(|e| napi::Error::from_reason(format!("test runner task failed: {e}")))?;
+
     let duration = start.elapsed();
 
     // Collect results from the reporter.
