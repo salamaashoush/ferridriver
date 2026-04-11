@@ -703,8 +703,12 @@ impl Worker {
       Ok(Err(failure)) => {
         // Runtime skip: test body called test.skip() — treat as skip, not failure.
         // This mirrors Playwright's TestSkipError thrown by test.skip() inside body.
-        if failure.message.starts_with("__FERRIDRIVER_SKIP__:") {
-          let reason = failure.message.strip_prefix("__FERRIDRIVER_SKIP__:").unwrap_or("");
+        if failure.message.contains("__FERRIDRIVER_SKIP__:") {
+          let reason = failure
+            .message
+            .split("__FERRIDRIVER_SKIP__:")
+            .nth(1)
+            .unwrap_or("");
           tracing::debug!(target: "ferridriver::worker", "test skipped at runtime: {reason}");
           let outcome = TestOutcome {
             test_id: test_id.clone(),

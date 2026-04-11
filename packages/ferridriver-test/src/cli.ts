@@ -317,7 +317,10 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
   const summary = await runner.run();
 
   if (viteProcess) viteProcess.kill();
-  process.exit(summary.failed > 0 ? 1 : 0);
+  // Force exit — NAPI native addon may hold browser process handles that prevent
+  // clean shutdown. process.exit() is the correct behavior here (same as Playwright).
+  const exitCode = summary.failed > 0 ? 1 : 0;
+  process.exit(exitCode);
 }
 
 // ---- Commands ----
