@@ -28,10 +28,10 @@
     "./bdd": "./src/bdd.ts"
   },
   "bin": {
-    "ferridriver-test": "src/cli.ts"
+    "ferridriver-test": "src/bin.mjs"
   },
   "scripts": {
-    "build:cli": "bun build src/cli.ts --target=node --outfile=dist/cli.mjs --external @ferridriver/core --external @ferridriver/ct-core --external clap-ts"
+    "build:cli": "bun build src/cli.ts --target=node --outdir=dist --external @ferridriver/core --external @ferridriver/ct-core --external clap-ts --external '*.node'"
   },
   "dependencies": {
     "clap-ts": "^0.2.1",
