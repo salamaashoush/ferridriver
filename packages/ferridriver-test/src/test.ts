@@ -123,11 +123,11 @@ function buildAnnotations(details?: TestDetails): any[] {
   return annotations;
 }
 
-// ── Body wrapper (3 lines — sets _currentTestInfo for runtime modifiers) ──
+// ── Body wrapper (sets _currentTestInfo for runtime modifiers) ──
 
 function wrapBody(body: TestBody): (fixtures: TestFixtures) => Promise<void> {
   return async (fixtures: TestFixtures) => {
-    _currentTestInfo = fixtures.testInfo;
+    _currentTestInfo = (fixtures as any).testInfo;
     try { await body(fixtures); }
     finally { _currentTestInfo = null; }
   };
@@ -360,6 +360,87 @@ Object.defineProperty(testFn, 'expect', {
     return _expect;
   },
 });
+
+// ── test.extend() — custom fixtures ──
+
+type FixtureFactory<T> = (fixtures: any, use: (value: T) => Promise<void>) => Promise<void>;
+
+/**
+ * test.extend() — Playwright-compatible custom fixture extension.
+ *
+ * Returns a new `test` function with additional fixtures. Custom fixture factories
+ * run TS-side (same as Playwright where custom fixtures are JS functions).
+ * The Rust core handles the built-in fixtures; custom ones wrap around them.
+ *
+ * Usage:
+ *   const myTest = test.extend<{ myFixture: string }>({
+ *     myFixture: async ({ page }, use) => {
+ *       const value = await setup();
+ *       await use(value);
+ *       await teardown();
+ *     },
+ *   });
+ *   myTest('uses custom fixture', async ({ page, myFixture }) => { ... });
+ */
+testFn.extend = <T extends Record<string, any>>(customFixtures: { [K in keyof T]: FixtureFactory<T[K]> }) => {
+  // Create a new test function that wraps bodies to inject custom fixtures.
+  // Follows Playwright's setup/use/teardown pattern.
+  const extendedTest = (name: string, ...args: any[]) => {
+    const body = typeof args[args.length - 1] === 'function' ? args.pop() as TestBody : undefined;
+    const details = args[0] as TestDetails | undefined;
+    if (!body) throw new Error('test() requires a body function');
+
+    const wrappedBody: TestBody = async (baseFixtures: any) => {
+      // Snapshot NAPI getters into a plain object so we can spread custom values in.
+      const base: Record<string, any> = {};
+      for (const k of Object.getOwnPropertyNames(Object.getPrototypeOf(baseFixtures))) {
+        if (k !== 'constructor') try { base[k] = baseFixtures[k]; } catch { /* skip */ }
+      }
+
+      const customValues: Record<string, any> = {};
+      const factoryCleanups: (() => void)[] = [];
+
+      // Resolve each custom fixture via setup/use/teardown.
+      for (const [fixtureName, factory] of Object.entries(customFixtures)) {
+        const allFixtures = { ...base, ...customValues };
+
+        let resolveUse: (() => void) | null = null;
+        const useComplete = new Promise<void>((r) => { resolveUse = r; });
+        let resolveSetup: ((v?: any) => void) | null = null;
+        const setupComplete = new Promise<void>((r) => { resolveSetup = r; });
+
+        const factoryDone = (factory as FixtureFactory<any>)(allFixtures, async (value) => {
+          customValues[fixtureName] = value;
+          resolveSetup!();
+          await useComplete;
+        });
+
+        await setupComplete;
+        factoryCleanups.push(() => { resolveUse!(); });
+        factoryDone.catch(() => { resolveSetup?.(); });
+      }
+
+      const merged = { ...base, ...customValues };
+
+      try {
+        await body(merged);
+      } finally {
+        for (const cleanup of factoryCleanups.reverse()) cleanup();
+        await new Promise<void>((r) => setTimeout(r, 0));
+      }
+    };
+
+    if (details) {
+      testFn(name, details, wrappedBody);
+    } else {
+      testFn(name, wrappedBody);
+    }
+  };
+
+  // Copy all methods from the original test function.
+  Object.assign(extendedTest, testFn);
+  return extendedTest as typeof testFn;
+};
 
 // ── describe() ──
 
