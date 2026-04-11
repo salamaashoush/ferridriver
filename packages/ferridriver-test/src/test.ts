@@ -1,112 +1,70 @@
 /**
- * Test declaration API — mirrors Playwright's test() and test.describe().
+ * Test declaration API — Playwright-compatible.
  *
- * Playwright-compatible API:
- *   test('name', async ({ page, browserName }) => {
+ * Rust is the source of truth. This module is a thin registration layer.
+ * Runtime modifiers (skip/fail/slow) delegate directly to NAPI TestInfo methods.
+ *
+ * Usage (matches Playwright):
+ *   test('name', async ({ page, browserName, testInfo }) => {
  *     test.skip(browserName === 'firefox', 'not supported');
- *     test.slow();
  *     await page.goto('...');
  *   });
- *
- * The Rust test runner is the single execution engine. This module is a thin
- * registration layer — it collects test metadata and callbacks, then the CLI
- * hands them to the Rust runner via NAPI.
  */
 
-import type { Page, TestMeta, TestRunner } from '@ferridriver/core';
+import type { TestMeta, TestRunner, TestFixtures } from '@ferridriver/core';
 
-/** Mount function for component testing. */
-export type MountFunction = (
-  component: any,
-  options?: { props?: Record<string, any>; hooksConfig?: Record<string, any> },
-) => Promise<void>;
+// ── Types ──
 
-/** Fixtures available in test callbacks — mirrors Playwright's fixtures. */
-export interface TestFixtures {
-  page: Page;
-  browserName: string;
-  headless: boolean;
-  isMobile: boolean;
-  hasTouch: boolean;
-  colorScheme: string | null;
-  locale: string | null;
-  channel: string | null;
-  /** Available in component testing mode (--ct). */
-  mount: MountFunction;
-}
-
-/** Test function signature. */
+/** Test function signature — receives Playwright-compatible fixtures. */
 type TestBody = (fixtures: TestFixtures) => Promise<void>;
 
 /** Parameterized test body. */
 type EachTestBody<T> = (fixtures: TestFixtures, data: T) => Promise<void>;
 
-/** Options for test registration. */
-interface TestOptions {
+/** Test details — matches Playwright's TestDetails. */
+interface TestDetails {
   tag?: string | string[];
+  annotation?: { type: string; description?: string } | { type: string; description?: string }[];
   timeout?: number;
   retries?: number;
 }
 
-// ── Errors ──
-
-/** Thrown by test.skip() / test.fixme() inside a test body — caught by the Rust worker. */
-class TestSkipError extends Error {
-  constructor(reason?: string) {
-    super(`__FERRIDRIVER_SKIP__:${reason || ''}`);
-    this.name = 'TestSkipError';
-  }
-}
-
-// ── Runtime test context (set per-test before body executes) ──
-
-interface RuntimeContext {
-  browserName: string;
-  headless: boolean;
-  isMobile: boolean;
-  hasTouch: boolean;
-  colorScheme: string | null;
-  locale: string | null;
-  channel: string | null;
-  /** Set by test.fail() inside body — wrapper handles inversion. */
-  _expectedFailure: boolean;
-  /** Set by test.slow() inside body — annotation added. */
-  _slow: boolean;
-}
-
-let _currentContext: RuntimeContext | null = null;
-
-// ── Global test registry ──
+// ── Registry ──
 
 interface RegisteredTest {
   meta: TestMeta;
-  body: (page: Page) => Promise<void>;
+  body: (fixtures: TestFixtures) => Promise<void>;
 }
 
 const registry: RegisteredTest[] = [];
 const describeStack: string[] = [];
+const suiteIdStack: string[] = [];
 let hasOnly = false;
+let currentFile = '';
 
-// ── Runner reference (set by CLI after TestRunner.create()) ──
+// ── Runner + TestInfo (set by CLI) ──
 
 let _runner: TestRunner | null = null;
+let _currentTestInfo: any | null = null;
 
-/** Called by CLI to provide the runner for fixture resolution. */
+/** Called by CLI after TestRunner.create(). */
 export function _setRunner(runner: TestRunner): void {
   _runner = runner;
 }
 
-// ── Component testing ──
+// ── Mount (CT mode) ──
 
-let _ctMountFactory: ((page: Page) => MountFunction) | null = null;
+type MountFunction = (
+  component: any,
+  options?: { props?: Record<string, any>; hooksConfig?: Record<string, any> },
+) => Promise<void>;
 
-export function _setCtMountFactory(factory: (page: Page) => MountFunction): void {
+export type { MountFunction };
+
+let _ctMountFactory: ((page: any) => MountFunction) | null = null;
+
+export function _setCtMountFactory(factory: (page: any) => MountFunction): void {
   _ctMountFactory = factory;
-}
-
-function createMount(page: Page): MountFunction {
-  if (_ctMountFactory) return _ctMountFactory(page);
-  return async () => { throw new Error('mount() is only available in component testing mode (--ct)'); };
 }
 
 // ── Helpers ──
@@ -131,9 +89,8 @@ function parseTemplateTable(strings: TemplateStringsArray, values: any[]): Recor
 }
 
 function interpolateTemplate(template: string, data: any): string {
-  if (typeof data !== 'object' || data === null) {
+  if (typeof data !== 'object' || data === null)
     return template.replace(/\$\{?\w+\}?/g, String(data));
-  }
   return template.replace(/\$(\w+)/g, (_, key) => key in data ? String(data[key]) : `$${key}`);
 }
 
@@ -145,140 +102,108 @@ function makeId(file: string, title: string): string {
   return `${file}:${title}`;
 }
 
-// ── Annotation builder ──
+function currentSuiteId(): string | undefined {
+  return suiteIdStack.length > 0 ? suiteIdStack[suiteIdStack.length - 1] : undefined;
+}
 
-function buildAnnotations(options: TestOptions, extra?: any[]): any[] {
-  const annotations: any[] = extra ? [...extra] : [];
-  if (options.tag) {
-    const tags = Array.isArray(options.tag) ? options.tag : [options.tag];
+// ── Annotations builder ──
+
+function buildAnnotations(details?: TestDetails): any[] {
+  const annotations: any[] = [];
+  if (details?.tag) {
+    const tags = Array.isArray(details.tag) ? details.tag : [details.tag];
     for (const t of tags) annotations.push({ tag: t });
+  }
+  if (details?.annotation) {
+    const anns = Array.isArray(details.annotation) ? details.annotation : [details.annotation];
+    for (const a of anns) {
+      annotations.push({ info: { type_name: a.type, description: a.description ?? '' } });
+    }
   }
   return annotations;
 }
 
-// ── Body wrapper: injects fixtures from runner config, handles runtime modifiers ──
+// ── Body wrapper (3 lines — sets _currentTestInfo for runtime modifiers) ──
 
-function wrapBody(body: TestBody): (page: Page) => Promise<void> {
-  return async (page: Page) => {
-    // Build fixture object from runner config (set by CLI).
-    const ctx: RuntimeContext = {
-      browserName: _runner?.getBrowserName() ?? 'chromium',
-      headless: _runner?.getHeadless() ?? true,
-      isMobile: _runner?.getIsMobile() ?? false,
-      hasTouch: _runner?.getHasTouch() ?? false,
-      colorScheme: _runner?.getColorScheme() ?? null,
-      locale: _runner?.getLocale() ?? null,
-      channel: _runner?.getChannel() ?? null,
-      _expectedFailure: false,
-      _slow: false,
-    };
-    _currentContext = ctx;
-
-    const fixtures: TestFixtures = {
-      page,
-      browserName: ctx.browserName,
-      headless: ctx.headless,
-      isMobile: ctx.isMobile,
-      hasTouch: ctx.hasTouch,
-      colorScheme: ctx.colorScheme,
-      locale: ctx.locale,
-      channel: ctx.channel,
-      mount: createMount(page),
-    };
-
-    try {
-      await body(fixtures);
-      // Body passed. If test.fail() was called, this is unexpected → report failure.
-      if (ctx._expectedFailure) {
-        throw new Error('expected test to fail, but it passed');
-      }
-    } catch (e) {
-      // test.skip() / test.fixme() → TestSkipError → propagate as-is for Rust worker.
-      if (e instanceof TestSkipError) throw e;
-      // test.fail() was called and body failed → expected, swallow error (report pass).
-      if (ctx._expectedFailure) return;
-      // Normal failure → propagate.
-      throw e;
-    } finally {
-      _currentContext = null;
-    }
+function wrapBody(body: TestBody): (fixtures: TestFixtures) => Promise<void> {
+  return async (fixtures: TestFixtures) => {
+    _currentTestInfo = fixtures.testInfo;
+    try { await body(fixtures); }
+    finally { _currentTestInfo = null; }
   };
 }
 
 // ── test() ──
 
 function testFn(name: string, body: TestBody): void;
-function testFn(name: string, options: TestOptions, body: TestBody): void;
-function testFn(name: string, optionsOrBody: TestOptions | TestBody, maybeBody?: TestBody): void {
-  const body = typeof optionsOrBody === 'function' ? optionsOrBody : maybeBody!;
-  const options = typeof optionsOrBody === 'function' ? {} : optionsOrBody;
+function testFn(name: string, details: TestDetails, body: TestBody): void;
+function testFn(name: string, detailsOrBody: TestDetails | TestBody, maybeBody?: TestBody): void {
+  const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody!;
+  const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
   registry.push({
     meta: {
       id: makeId(currentFile, title),
       title,
       file: currentFile,
-      timeout: options.timeout,
-      retries: options.retries,
-      annotations: buildAnnotations(options),
+      timeout: details?.timeout,
+      retries: details?.retries,
+      suite_id: currentSuiteId(),
+      annotations: buildAnnotations(details),
     },
     body: wrapBody(body),
   });
 }
 
-// ── Runtime modifiers (Playwright API) ──
-// Called inside test body: test.skip(condition, reason)
+// ── Runtime modifiers — delegate to NAPI TestInfo ──
 
 /**
  * test.skip() — Playwright-compatible.
  *
- * At describe level (registration time):
- *   test.skip('name', body)  — register a skipped test
- *
- * Inside test body (runtime):
- *   test.skip(browserName === 'firefox', 'not supported')
- *   test.skip()  — unconditional skip
+ * Registration: test.skip('name', body)
+ * Runtime:      test.skip(browserName === 'firefox', 'not supported')
+ *               test.skip()
  */
 testFn.skip = (...args: any[]) => {
-  // Runtime: test.skip() or test.skip(condition, reason)
   if (args.length === 0 || typeof args[0] === 'boolean') {
-    const condition = args[0] ?? true;
-    const reason = args[1] as string | undefined;
-    if (condition) throw new TestSkipError(reason);
+    // Runtime: delegate to NAPI TestInfo.skip() — Rust handles everything.
+    if (!_currentTestInfo) throw new Error('test.skip() can only be called inside a test body');
+    _currentTestInfo.skip(args[0] ?? true, args[1]);
     return;
   }
-  // Registration: test.skip('name', body)
-  const [name, body] = args as [string, TestBody];
+  // Registration: test.skip('name', body) or test.skip('name', details, body)
+  const [name, detailsOrBody, maybeBody] = args;
+  const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody;
+  const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
   registry.push({
     meta: {
-      id: makeId(currentFile, title),
-      title,
-      file: currentFile,
-      annotations: [{ skip: { reason: null, condition: null } }],
+      id: makeId(currentFile, title), title, file: currentFile,
+      timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
+      annotations: [...buildAnnotations(details), { skip: { reason: null, condition: null } }],
     },
     body: wrapBody(body),
   });
 };
 
 /**
- * test.fixme() — same as skip, communicates intent to fix.
+ * test.fixme() — known bug, same as skip semantically.
  */
 testFn.fixme = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
-    const condition = args[0] ?? true;
-    const reason = args[1] as string | undefined;
-    if (condition) throw new TestSkipError(reason);
+    if (!_currentTestInfo) throw new Error('test.fixme() can only be called inside a test body');
+    _currentTestInfo.fixme(args[0] ?? true, args[1]);
     return;
   }
-  const [name, body] = args as [string, TestBody];
+  const [name, detailsOrBody, maybeBody] = args;
+  const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody;
+  const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
   registry.push({
     meta: {
-      id: makeId(currentFile, title),
-      title,
-      file: currentFile,
-      annotations: [{ fixme: { reason: null, condition: null } }],
+      id: makeId(currentFile, title), title, file: currentFile,
+      timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
+      annotations: [...buildAnnotations(details), { fixme: { reason: null, condition: null } }],
     },
     body: wrapBody(body),
   });
@@ -287,27 +212,24 @@ testFn.fixme = (...args: any[]) => {
 /**
  * test.fail() — expect failure (inverts pass/fail).
  *
- * Inside test body:
- *   test.fail()  — unconditional
- *   test.fail(browserName === 'webkit', 'known bug')
+ * Runtime: test.fail() or test.fail(condition, reason)
+ * Registration: test.fail('name', body)
  */
 testFn.fail = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
-    const condition = args[0] ?? true;
-    if (condition && _currentContext) {
-      _currentContext._expectedFailure = true;
-    }
+    if (!_currentTestInfo) throw new Error('test.fail() can only be called inside a test body');
+    _currentTestInfo.fail(args[0] ?? true, args[1]);
     return;
   }
-  // Registration: test.fail('name', body)
-  const [name, body] = args as [string, TestBody];
+  const [name, detailsOrBody, maybeBody] = args;
+  const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody;
+  const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
   registry.push({
     meta: {
-      id: makeId(currentFile, title),
-      title,
-      file: currentFile,
-      annotations: [{ fail: { reason: null, condition: null } }],
+      id: makeId(currentFile, title), title, file: currentFile,
+      timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
+      annotations: [...buildAnnotations(details), { fail: { reason: null, condition: null } }],
     },
     body: wrapBody(body),
   });
@@ -316,39 +238,41 @@ testFn.fail = (...args: any[]) => {
 /**
  * test.slow() — triple timeout.
  *
- * Inside test body:
- *   test.slow()
- *   test.slow(condition, reason)
- *
- * At registration:
- *   test.slow('name', body)
+ * Runtime: test.slow() or test.slow(condition, reason)
+ * Registration: test.slow('name', body)
  */
 testFn.slow = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
-    const condition = args[0] ?? true;
-    if (condition && _currentContext) {
-      _currentContext._slow = true;
-    }
+    if (!_currentTestInfo) throw new Error('test.slow() can only be called inside a test body');
+    _currentTestInfo.slow(args[0] ?? true, args[1]);
     return;
   }
-  const [name, body] = args as [string, TestBody];
+  const [name, detailsOrBody, maybeBody] = args;
+  const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody;
+  const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
   registry.push({
     meta: {
-      id: makeId(currentFile, title),
-      title,
-      file: currentFile,
-      annotations: [{ slow: { reason: null, condition: null } }],
+      id: makeId(currentFile, title), title, file: currentFile,
+      timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
+      annotations: [...buildAnnotations(details), { slow: { reason: null, condition: null } }],
     },
     body: wrapBody(body),
   });
 };
 
-testFn.only = (name: string, body: TestBody) => {
+testFn.only = (...args: any[]) => {
   hasOnly = true;
+  const [name, detailsOrBody, maybeBody] = args;
+  const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody;
+  const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
   registry.push({
-    meta: { id: makeId(currentFile, title), title, file: currentFile, annotations: ['only'] },
+    meta: {
+      id: makeId(currentFile, title), title, file: currentFile,
+      timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
+      annotations: [...buildAnnotations(details), 'only'],
+    },
     body: wrapBody(body),
   });
 };
@@ -362,26 +286,72 @@ testFn.each = <T>(dataOrStrings: T[] | TemplateStringsArray, ...templateValues: 
       const name = interpolateTemplate(nameTemplate, row);
       const title = fullTitle(name);
       registry.push({
-        meta: { id: makeId(currentFile, title), title, file: currentFile, annotations: [] },
+        meta: { id: makeId(currentFile, title), title, file: currentFile, annotations: [], suite_id: currentSuiteId() },
         body: wrapBody((fixtures) => body(fixtures, row as T)),
       });
     }
   };
 };
 
-/** Runtime test info. */
+/** Runtime test info — delegates to NAPI TestInfo. */
 testFn.info = () => {
-  if (!_currentContext) throw new Error('test.info() can only be called inside a test body');
-  return {
-    browserName: _currentContext.browserName,
-    headless: _currentContext.headless,
-    isMobile: _currentContext.isMobile,
-    hasTouch: _currentContext.hasTouch,
-    colorScheme: _currentContext.colorScheme,
-    locale: _currentContext.locale,
-    channel: _currentContext.channel,
-  };
+  if (!_currentTestInfo) throw new Error('test.info() can only be called inside a test body');
+  return _currentTestInfo;
 };
+
+/** Runtime timeout change — delegates to NAPI TestInfo.setTimeout(). */
+testFn.setTimeout = (ms: number) => {
+  if (!_currentTestInfo) throw new Error('test.setTimeout() can only be called inside a test body');
+  _currentTestInfo.setTimeout(ms);
+};
+
+/** Step API — delegates to NAPI TestInfo. */
+testFn.step = async <T>(title: string, body: () => T | Promise<T>): Promise<T> => {
+  if (!_currentTestInfo) throw new Error('test.step() can only be called inside a test body');
+  // TODO: wire to testInfo.beginStep() once NAPI StepHandle is implemented
+  return await body();
+};
+
+// ── Hooks ──
+
+testFn.beforeAll = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
+  const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
+  if (!_runner) throw new Error('test.beforeAll() requires runner to be initialized');
+  const suiteId = currentSuiteId() ?? '';
+  _runner.registerHook({ suiteId, kind: 'beforeAll' }, wrapBody(fn));
+};
+
+testFn.afterAll = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
+  const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
+  if (!_runner) throw new Error('test.afterAll() requires runner to be initialized');
+  const suiteId = currentSuiteId() ?? '';
+  _runner.registerHook({ suiteId, kind: 'afterAll' }, wrapBody(fn));
+};
+
+testFn.beforeEach = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
+  const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
+  if (!_runner) throw new Error('test.beforeEach() requires runner to be initialized');
+  const suiteId = currentSuiteId() ?? '';
+  _runner.registerHook({ suiteId, kind: 'beforeEach' }, wrapBody(fn));
+};
+
+testFn.afterEach = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
+  const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
+  if (!_runner) throw new Error('test.afterEach() requires runner to be initialized');
+  const suiteId = currentSuiteId() ?? '';
+  _runner.registerHook({ suiteId, kind: 'afterEach' }, wrapBody(fn));
+};
+
+// ── test.expect (alias for the expect export) ──
+
+// Lazily imported to avoid circular dependency.
+let _expect: any = null;
+Object.defineProperty(testFn, 'expect', {
+  get: () => {
+    if (!_expect) _expect = require('./expect.js').expect;
+    return _expect;
+  },
+});
 
 // ── describe() ──
 
@@ -422,6 +392,32 @@ describe.only = (name: string, fn: () => void) => {
   describeStack.pop();
 };
 
+describe.serial = (name: string, fn: () => void) => {
+  describeStack.push(name);
+  if (_runner) {
+    const suiteId = _runner.registerSuite({ name, file: currentFile, mode: 'serial' });
+    suiteIdStack.push(suiteId);
+  }
+  fn();
+  if (_runner) suiteIdStack.pop();
+  describeStack.pop();
+};
+
+describe.parallel = (name: string, fn: () => void) => {
+  describeStack.push(name);
+  if (_runner) {
+    const suiteId = _runner.registerSuite({ name, file: currentFile, mode: 'parallel' });
+    suiteIdStack.push(suiteId);
+  }
+  fn();
+  if (_runner) suiteIdStack.pop();
+  describeStack.pop();
+};
+
+describe.configure = (_opts: { mode?: 'serial' | 'parallel'; retries?: number; timeout?: number }) => {
+  // TODO: apply opts to current suite once suite-level config override is wired
+};
+
 describe.each = <T>(data: T[]) => {
   return (nameTemplate: string, fn: (data: T) => void) => {
     for (const row of data) {
@@ -433,9 +429,13 @@ describe.each = <T>(data: T[]) => {
   };
 };
 
-// ── Internal state ──
+// ── test.use() ──
 
-let currentFile = '';
+testFn.use = (_options: Record<string, any>) => {
+  // TODO: wire to fixture override system once TestMeta.use_options is implemented
+};
+
+// ── Internal state ──
 
 export function _setCurrentFile(file: string): void {
   currentFile = file;
