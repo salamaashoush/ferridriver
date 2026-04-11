@@ -46,6 +46,7 @@ mod browser;
 mod codegen;
 mod context;
 mod frame;
+#[allow(dead_code)]
 mod install;
 mod locator;
 mod page;

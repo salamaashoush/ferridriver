@@ -17,7 +17,6 @@ use ferridriver::Browser;
 use ferridriver::options::LaunchOptions;
 use ferridriver_test::config::{CliOverrides, TestConfig};
 use ferridriver_test::model::*;
-use ferridriver_test::reporter;
 use ferridriver_test::runner::TestRunner;
 
 fn data_url(html: &str) -> String {
