@@ -193,24 +193,11 @@ fn parse_cli_args() -> CliOverrides {
       },
       "--timeout" => {
         i += 1;
-        // Stored as env var since CliOverrides doesn't have timeout field
-        if let Some(v) = args.get(i) {
-          // SAFETY: single-threaded before runner starts
-          #[allow(unused_unsafe)]
-          unsafe {
-            std::env::set_var("FERRIDRIVER_TIMEOUT", v);
-          }
-        }
+        overrides.timeout = args.get(i).and_then(|v| v.parse().ok());
       },
       "--backend" => {
         i += 1;
-        if let Some(v) = args.get(i) {
-          // SAFETY: single-threaded before runner starts
-          #[allow(unused_unsafe)]
-          unsafe {
-            std::env::set_var("FERRIDRIVER_BACKEND", v);
-          }
-        }
+        overrides.backend = args.get(i).cloned();
       },
       "--grep" | "-g" => {
         i += 1;

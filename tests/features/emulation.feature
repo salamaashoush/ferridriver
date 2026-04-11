@@ -12,7 +12,9 @@ Feature: Emulation
     And I navigate to "/emulation.html"
     Then "#language" should contain text "de"
 
+  @skip(firefox)
   Scenario: Emulate dark color scheme
+    # Requires emulation.setForcedColorsModeThemeOverride (not yet in Firefox/BiDi)
     Given I emulate color scheme "dark"
     And I navigate to "/emulation.html"
     Then "#color-scheme" should have text "dark"

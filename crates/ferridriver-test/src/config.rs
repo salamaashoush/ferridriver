@@ -23,6 +23,17 @@ pub enum VideoMode {
   RetainOnFailure,
 }
 
+impl VideoMode {
+  /// Parse from string. Mirrors `TraceMode::from_str`.
+  pub fn from_str(s: &str) -> Self {
+    match s {
+      "on" => Self::On,
+      "retain-on-failure" => Self::RetainOnFailure,
+      _ => Self::Off,
+    }
+  }
+}
+
 /// Video recording configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -168,6 +179,8 @@ pub struct BrowserConfig {
   /// Backend protocol: "cdp-pipe", "cdp-raw", "webkit", "bidi".
   /// Inferred from `browser` if not set.
   pub backend: String,
+  /// Browser channel: "chrome", "chrome-beta", "msedge", etc.
+  pub channel: Option<String>,
   /// Run headless. Default: true.
   pub headless: bool,
   /// Path to browser executable (overrides auto-detection).
@@ -178,6 +191,106 @@ pub struct BrowserConfig {
   pub viewport: Option<ViewportConfig>,
   /// Slow down operations by this many ms (debugging).
   pub slow_mo: Option<u64>,
+  /// Context options (Playwright `use` block equivalents).
+  #[serde(default)]
+  pub context: ContextConfig,
+}
+
+/// Context-level options — mirrors Playwright's `use` config block.
+/// These are applied to every browser context created for tests and
+/// are available as condition predicates in annotations.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ContextConfig {
+  /// Simulate mobile device. Condition: `"mobile"`.
+  pub is_mobile: bool,
+  /// Enable touch events. Condition: `"touch"`.
+  pub has_touch: bool,
+  /// Color scheme: "light", "dark", "no-preference".
+  pub color_scheme: Option<String>,
+  /// Browser locale (e.g., "en-US", "de-DE"). Condition: `"locale:de-DE"`.
+  pub locale: Option<String>,
+  /// Device scale factor (DPR).
+  pub device_scale_factor: Option<f64>,
+  /// Simulate offline mode. Condition: `"offline"`.
+  pub offline: bool,
+  /// Enable JavaScript. Condition: `"!js"` for disabled.
+  pub java_script_enabled: bool,
+  /// Bypass CSP. Condition: `"bypass-csp"`.
+  pub bypass_csp: bool,
+  /// Accept downloads automatically.
+  pub accept_downloads: bool,
+  /// Custom user agent string.
+  pub user_agent: Option<String>,
+  /// Timezone ID (e.g., "America/New_York").
+  pub timezone_id: Option<String>,
+  /// Geolocation.
+  pub geolocation: Option<GeolocationConfig>,
+  /// Permissions to grant (e.g., ["geolocation", "notifications"]).
+  #[serde(default)]
+  pub permissions: Vec<String>,
+}
+
+impl Default for ContextConfig {
+  fn default() -> Self {
+    Self {
+      is_mobile: false,
+      has_touch: false,
+      color_scheme: None,
+      locale: None,
+      device_scale_factor: None,
+      offline: false,
+      java_script_enabled: true,
+      bypass_csp: false,
+      accept_downloads: true,
+      user_agent: None,
+      timezone_id: None,
+      geolocation: None,
+      permissions: Vec::new(),
+    }
+  }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GeolocationConfig {
+  pub latitude: f64,
+  pub longitude: f64,
+  pub accuracy: Option<f64>,
+}
+
+impl BrowserConfig {
+  /// Normalize browser↔backend consistency after all overrides are applied.
+  ///
+  /// Ensures `browser` and `backend` agree — like Playwright where `browserName`
+  /// is the single source of truth and the protocol is implicit.
+  ///
+  /// Rules:
+  /// - `backend = "bidi"` implies `browser = "firefox"` (BiDi is Firefox-only)
+  /// - `browser = "firefox"` implies `backend = "bidi"` (Firefox only speaks BiDi)
+  /// - `browser = "webkit"` implies `backend = "webkit"` on macOS
+  /// - Everything else defaults to `browser = "chromium"`, `backend = "cdp-pipe"`
+  pub fn normalize(&mut self) {
+    match self.backend.as_str() {
+      "bidi" => {
+        // BiDi backend is Firefox-only.
+        self.browser = "firefox".into();
+      },
+      "webkit" => {
+        self.browser = "webkit".into();
+      },
+      _ => {
+        // CDP backends — infer backend from browser if browser was set to non-chromium.
+        match self.browser.as_str() {
+          "firefox" => self.backend = "bidi".into(),
+          #[cfg(target_os = "macos")]
+          "webkit" => self.backend = "webkit".into(),
+          _ => {
+            // chromium + cdp-pipe/cdp-raw — no change needed.
+          },
+        }
+      },
+    }
+  }
 }
 
 impl Default for BrowserConfig {
@@ -185,11 +298,13 @@ impl Default for BrowserConfig {
     Self {
       browser: "chromium".into(),
       backend: "cdp-pipe".into(),
+      channel: None,
       headless: true,
       executable_path: None,
       args: Vec::new(),
       viewport: Some(ViewportConfig::default()),
       slow_mo: None,
+      context: ContextConfig::default(),
     }
   }
 }
@@ -291,10 +406,16 @@ impl Default for WebServerConfig {
 }
 
 /// CLI overrides that take highest priority.
+///
+/// All layers (CLI, NAPI, programmatic) should map their inputs into this struct
+/// and call `resolve_config()`, which is the single place that merges
+/// defaults < config file < env vars < overrides, auto-detects workers,
+/// and normalizes browser↔backend.
 #[derive(Debug, Clone, Default)]
 pub struct CliOverrides {
   pub workers: Option<u32>,
   pub retries: Option<u32>,
+  pub timeout: Option<u64>,
   pub reporter: Vec<String>,
   pub grep: Option<String>,
   pub grep_invert: Option<String>,
@@ -304,6 +425,8 @@ pub struct CliOverrides {
   pub config_path: Option<String>,
   pub output_dir: Option<String>,
   pub test_files: Vec<String>,
+  /// Override test file glob patterns.
+  pub test_match: Option<Vec<String>>,
   pub list_only: bool,
   pub update_snapshots: bool,
   pub profile: Option<String>,
@@ -312,6 +435,30 @@ pub struct CliOverrides {
   pub video: Option<String>,
   pub trace: Option<String>,
   pub storage_state: Option<String>,
+  // ── Browser overrides ──
+  /// Browser product: "chromium", "firefox", "webkit".
+  pub browser: Option<String>,
+  /// Backend protocol: "cdp-pipe", "cdp-raw", "bidi", "webkit".
+  pub backend: Option<String>,
+  /// Browser channel: "chrome", "chrome-beta", "msedge".
+  pub channel: Option<String>,
+  /// Path to browser executable.
+  pub executable_path: Option<String>,
+  /// Extra browser launch arguments.
+  pub browser_args: Vec<String>,
+  /// Base URL for relative navigation.
+  pub base_url: Option<String>,
+  /// Viewport width override.
+  pub viewport_width: Option<i64>,
+  /// Viewport height override.
+  pub viewport_height: Option<i64>,
+  // ── Context overrides (Playwright `use` block) ──
+  pub is_mobile: Option<bool>,
+  pub has_touch: Option<bool>,
+  pub color_scheme: Option<String>,
+  pub locale: Option<String>,
+  pub offline: Option<bool>,
+  pub bypass_csp: Option<bool>,
 }
 
 #[derive(Debug, Clone)]
@@ -443,6 +590,9 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
   if let Some(w) = overrides.workers {
     config.workers = w;
   }
+  if let Some(t) = overrides.timeout {
+    config.timeout = t;
+  }
   if let Some(r) = overrides.retries {
     config.retries = r;
   }
@@ -459,15 +609,64 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
   if overrides.headed {
     config.browser.headless = false;
   }
+  if let Some(ref b) = overrides.browser {
+    config.browser.browser.clone_from(b);
+  }
+  if let Some(ref b) = overrides.backend {
+    config.browser.backend.clone_from(b);
+  }
+  if let Some(ref ch) = overrides.channel {
+    config.browser.channel = Some(ch.clone());
+  }
+  if let Some(ref p) = overrides.executable_path {
+    config.browser.executable_path = Some(p.clone());
+  }
+  if !overrides.browser_args.is_empty() {
+    config.browser.args.clone_from(&overrides.browser_args);
+  }
+  if let Some(ref url) = overrides.base_url {
+    config.base_url = Some(url.clone());
+  }
+  if let Some(w) = overrides.viewport_width {
+    if let Some(ref mut vp) = config.browser.viewport {
+      vp.width = w;
+    }
+  }
+  if let Some(h) = overrides.viewport_height {
+    if let Some(ref mut vp) = config.browser.viewport {
+      vp.height = h;
+    }
+  }
+  // Context options.
+  if let Some(m) = overrides.is_mobile {
+    config.browser.context.is_mobile = m;
+  }
+  if let Some(t) = overrides.has_touch {
+    config.browser.context.has_touch = t;
+  }
+  if let Some(ref cs) = overrides.color_scheme {
+    config.browser.context.color_scheme = Some(cs.clone());
+  }
+  if let Some(ref l) = overrides.locale {
+    config.browser.context.locale = Some(l.clone());
+  }
+  if let Some(o) = overrides.offline {
+    config.browser.context.offline = o;
+  }
+  if let Some(b) = overrides.bypass_csp {
+    config.browser.context.bypass_csp = b;
+  }
   if let Some(dir) = &overrides.output_dir {
     config.output_dir = PathBuf::from(dir);
   }
+  if let Some(ref patterns) = overrides.test_match {
+    config.test_match.clone_from(patterns);
+  }
+  if overrides.forbid_only {
+    config.forbid_only = true;
+  }
   if let Some(video) = &overrides.video {
-    config.video.mode = match video.as_str() {
-      "on" => VideoMode::On,
-      "retain-on-failure" => VideoMode::RetainOnFailure,
-      _ => VideoMode::Off,
-    };
+    config.video.mode = VideoMode::from_str(video);
   }
   if let Some(trace) = &overrides.trace {
     config.trace = crate::tracing::TraceMode::from_str(trace);
@@ -477,11 +676,7 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
   }
   // Environment variable: FERRIDRIVER_VIDEO=on|off|retain-on-failure
   if let Ok(v) = std::env::var("FERRIDRIVER_VIDEO") {
-    config.video.mode = match v.as_str() {
-      "on" => VideoMode::On,
-      "retain-on-failure" => VideoMode::RetainOnFailure,
-      _ => VideoMode::Off,
-    };
+    config.video.mode = VideoMode::from_str(&v);
   }
   // Environment variable: FERRIDRIVER_TRACE=off|on|retain-on-failure|on-first-retry
   if let Ok(t) = std::env::var("FERRIDRIVER_TRACE") {
@@ -495,6 +690,9 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
       .unwrap_or(4);
     config.workers = (cpus / 2).max(1);
   }
+
+  // Normalize browser↔backend consistency after all overrides are applied.
+  config.browser.normalize();
 
   Ok(config)
 }

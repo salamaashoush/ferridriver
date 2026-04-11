@@ -362,7 +362,7 @@ impl AllureReporter {
             value: description.clone(),
           }),
         },
-        TestAnnotation::Slow => {
+        TestAnnotation::Slow { .. } => {
           labels.push(AllureLabel {
             name: "tag".into(),
             value: "slow".into(),
@@ -380,7 +380,7 @@ impl AllureReporter {
             });
           }
         },
-        TestAnnotation::Fail => {
+        TestAnnotation::Fail { .. } => {
           labels.push(AllureLabel {
             name: "tag".into(),
             value: "expected-failure".into(),

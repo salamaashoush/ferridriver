@@ -17,7 +17,7 @@ import type { CommandDef } from 'clap-ts';
 
 import { TestRunner, BddRunner } from '@ferridriver/core';
 import type { Page, BddRunnerConfig } from '@ferridriver/core';
-import { _setCurrentFile, _drainTests, _hasOnly, _setCtMountFactory } from './test.js';
+import { _setCurrentFile, _drainTests, _hasOnly, _setCtMountFactory, _setRunner } from './test.js';
 import type { MountFunction } from './test.js';
 import { resolve, relative } from 'path';
 import { statSync } from 'fs';
@@ -293,6 +293,7 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
   }
 
   const runner = await TestRunner.create(config);
+  _setRunner(runner);
   const workerCount = runner.workerCount();
 
   for (const file of testFiles) {

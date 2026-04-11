@@ -52,11 +52,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
       annotations: reg.annotations.to_vec(),
       timeout: reg.timeout_ms.map(std::time::Duration::from_millis),
       retries: reg.retries,
-      expected_status: if reg.annotations.iter().any(|a| matches!(a, TestAnnotation::Fail)) {
-        ExpectedStatus::Fail
-      } else {
-        ExpectedStatus::Pass
-      },
+      expected_status: ExpectedStatus::Pass,
     };
 
     let suite = suites.entry(suite_key).or_insert_with(|| TestSuite {

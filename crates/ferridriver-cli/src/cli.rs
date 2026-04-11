@@ -245,6 +245,9 @@ impl CommonRunArgs {
       video: self.video.clone(),
       trace: self.trace.clone(),
       storage_state: self.storage_state.clone(),
+      browser: self.browser.clone(),
+      backend: self.backend.as_ref().map(|b| backend_to_string(b)),
+      ..Default::default()
     })
   }
 
@@ -353,25 +356,6 @@ pub fn backend_to_kind(b: &Backend) -> BackendKind {
     #[cfg(target_os = "macos")]
     Backend::Webkit => BackendKind::WebKit,
     Backend::Bidi => BackendKind::Bidi,
-  }
-}
-
-/// Apply browser-specific defaults (e.g., "firefox" -> bidi backend).
-pub fn apply_browser_defaults(browser_config: &mut ferridriver_test::config::BrowserConfig, browser_name: &str) {
-  browser_config.browser = browser_name.to_string();
-  match browser_name {
-    "firefox" => {
-      if browser_config.backend == "cdp-pipe" {
-        browser_config.backend = "bidi".into();
-      }
-    },
-    #[cfg(target_os = "macos")]
-    "webkit" => {
-      if browser_config.backend == "cdp-pipe" {
-        browser_config.backend = "webkit".into();
-      }
-    },
-    _ => {},
   }
 }
 

@@ -279,13 +279,6 @@ fn resolve_and_apply_common(
 ) -> anyhow::Result<ferridriver_test::config::TestConfig> {
   let mut config = ferridriver_test::config::resolve_config(overrides).map_err(|e| anyhow::anyhow!(e))?;
 
-  if let Some(backend) = &args.backend {
-    config.browser.backend = cli::backend_to_string(backend);
-  }
-  if let Some(ref browser) = args.browser {
-    cli::apply_browser_defaults(&mut config.browser, browser);
-  }
-
   // Merge CLI webServer flags into config (CLI takes precedence).
   let cli_servers = args.web_server_configs();
   if !cli_servers.is_empty() {

@@ -507,15 +507,30 @@ impl fmt::Display for StepCategory {
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum TestAnnotation {
+  /// Skip this test. Optional condition: `"firefox"`, `"chromium"`, `"linux"`, `"ci"`, `"!webkit"`.
+  /// When condition is None, always skips. When condition is Some, skips only if condition matches.
   Skip {
     reason: Option<String>,
+    condition: Option<String>,
   },
-  Slow,
+  /// Triple the timeout for this test (×3). Optional condition + description.
+  /// Matches Playwright's `test.slow()` / `test.slow(condition, description)`.
+  Slow {
+    reason: Option<String>,
+    condition: Option<String>,
+  },
+  /// Known bug — skip with intent to fix. Same condition semantics as Skip.
+  /// Matches Playwright's `test.fixme()` / `test.fixme(condition, description)`.
   Fixme {
     reason: Option<String>,
     condition: Option<String>,
   },
-  Fail,
+  /// Expect this test to fail (inverts pass/fail). Optional condition + description.
+  /// Matches Playwright's `test.fail()` / `test.fail(condition, description)`.
+  Fail {
+    reason: Option<String>,
+    condition: Option<String>,
+  },
   Only,
   Tag(String),
   /// Structured metadata: type + description (e.g., issue/JIRA-1234, severity/critical).
