@@ -66,6 +66,7 @@ fn make_flaky_test() -> TestCase {
     timeout: Some(Duration::from_secs(5)),
     retries: Some(1), // Allow 1 retry.
     expected_status: ExpectedStatus::Pass,
+      use_options: None,
   }
 }
 
@@ -246,6 +247,7 @@ fn make_matchers_test() -> TestCase {
     timeout: Some(Duration::from_secs(30)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
+      use_options: None,
   }
 }
 
@@ -318,6 +320,7 @@ fn make_poll_test() -> TestCase {
     timeout: Some(Duration::from_secs(10)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
+      use_options: None,
   }
 }
 
@@ -397,6 +400,7 @@ fn make_to_pass_test() -> TestCase {
     timeout: Some(Duration::from_secs(15)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
+      use_options: None,
   }
 }
 
@@ -458,6 +462,7 @@ fn make_page_assertions_test() -> TestCase {
     timeout: Some(Duration::from_secs(15)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
+      use_options: None,
   }
 }
 

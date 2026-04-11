@@ -53,6 +53,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
       timeout: reg.timeout_ms.map(std::time::Duration::from_millis),
       retries: reg.retries,
       expected_status: ExpectedStatus::Pass,
+      use_options: None,
     };
 
     let suite = suites.entry(suite_key).or_insert_with(|| TestSuite {
@@ -275,6 +276,7 @@ mod tests {
       timeout: None,
       retries: None,
       expected_status: ExpectedStatus::Pass,
+      use_options: None,
     }
   }
 
