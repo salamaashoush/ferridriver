@@ -489,6 +489,30 @@ impl Worker {
           })
           .await;
       }
+      // Bypass CSP (must be before first navigation).
+      if ctx_config.bypass_csp {
+        let _ = page.set_bypass_csp(true).await;
+      }
+      // Ignore HTTPS certificate errors.
+      if ctx_config.ignore_https_errors {
+        let _ = page.set_ignore_certificate_errors(true).await;
+      }
+      // Accept downloads — configure download behavior.
+      if ctx_config.accept_downloads {
+        let download_dir = self.config.output_dir.join("downloads");
+        let _ = std::fs::create_dir_all(&download_dir);
+        let _ = page
+          .set_download_behavior("allowAndName", &download_dir.display().to_string())
+          .await;
+      }
+      // HTTP credentials (basic auth).
+      if let Some(ref creds) = ctx_config.http_credentials {
+        let _ = page.set_http_credentials(&creds.username, &creds.password).await;
+      }
+      // Block service workers.
+      if ctx_config.service_workers.as_deref() == Some("block") {
+        let _ = page.set_service_workers_blocked(true).await;
+      }
     }
 
     // Create TestInfo for this test execution.
@@ -549,7 +573,15 @@ impl Worker {
         test_pool.inject("request", request_ctx).await;
 
         // ── Storage state (apply before any test code) ──
-        if let Some(ref ss_path) = self.config.storage_state {
+        // Context-level storage_state takes precedence over top-level.
+        let ss_path = self
+          .config
+          .browser
+          .context
+          .storage_state
+          .as_ref()
+          .or(self.config.storage_state.as_ref());
+        if let Some(ss_path) = ss_path {
           let path = std::path::Path::new(ss_path);
           match std::fs::read_to_string(path) {
             Ok(json_str) => match serde_json::from_str::<serde_json::Value>(&json_str) {

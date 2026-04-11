@@ -30,7 +30,7 @@ pub struct TestRunner {
 
 impl TestRunner {
   pub fn new(config: TestConfig, overrides: CliOverrides) -> Self {
-    let reporters = crate::reporter::create_reporters(&config.reporter, &config.output_dir, config.mode);
+    let reporters = crate::reporter::create_reporters(&config.reporter, &config.output_dir, config.mode, config.quiet);
     Self {
       config: Arc::new(config),
       reporters,
@@ -179,6 +179,7 @@ impl TestRunner {
       .emit(ReporterEvent::RunStarted {
         total_tests,
         num_workers,
+        metadata: self.config.metadata.clone(),
       })
       .await;
 
@@ -722,12 +723,25 @@ fn build_launch_options(browser_config: &crate::config::BrowserConfig) -> Launch
     _ => None,
   };
 
+  let mut args = browser_config.args.clone();
+  // Proxy launch args.
+  if let Some(ref proxy) = browser_config.context.proxy {
+    args.push(format!("--proxy-server={}", proxy.server));
+    if let Some(ref bypass) = proxy.bypass {
+      args.push(format!("--proxy-bypass-list={bypass}"));
+    }
+  }
+  // Ignore HTTPS errors launch arg.
+  if browser_config.context.ignore_https_errors {
+    args.push("--ignore-certificate-errors".to_string());
+  }
+
   LaunchOptions {
     backend,
     browser: browser_type,
     headless: browser_config.headless,
     executable_path: browser_config.executable_path.clone(),
-    args: browser_config.args.clone(),
+    args,
     viewport: browser_config
       .viewport
       .as_ref()

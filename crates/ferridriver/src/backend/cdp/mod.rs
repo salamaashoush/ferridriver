@@ -1653,6 +1653,56 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  pub async fn set_bypass_csp(&self, enabled: bool) -> Result<(), String> {
+    self
+      .cmd("Page.setBypassCSP", serde_json::json!({"enabled": enabled}))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn set_ignore_certificate_errors(&self, ignore: bool) -> Result<(), String> {
+    self
+      .cmd(
+        "Security.setIgnoreCertificateErrors",
+        serde_json::json!({"ignore": ignore}),
+      )
+      .await?;
+    Ok(())
+  }
+
+  pub async fn set_download_behavior(&self, behavior: &str, download_path: &str) -> Result<(), String> {
+    self
+      .cmd(
+        "Browser.setDownloadBehavior",
+        serde_json::json!({"behavior": behavior, "downloadPath": download_path, "eventsEnabled": true}),
+      )
+      .await?;
+    Ok(())
+  }
+
+  pub async fn set_http_credentials(&self, username: &str, password: &str) -> Result<(), String> {
+    // Set basic auth credentials via Authorization header.
+    use base64::Engine;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
+    let mut headers = FxHashMap::default();
+    headers.insert("Authorization".to_string(), format!("Basic {encoded}"));
+    self.set_extra_http_headers(&headers).await
+  }
+
+  pub async fn set_service_workers_blocked(&self, blocked: bool) -> Result<(), String> {
+    if blocked {
+      self
+        .cmd(
+          "Page.addScriptToEvaluateOnNewDocument",
+          serde_json::json!({
+            "source": "if(navigator.serviceWorker){navigator.serviceWorker.register=()=>Promise.reject(new Error('Service workers blocked'))}"
+          }),
+        )
+        .await?;
+    }
+    Ok(())
+  }
+
   pub async fn set_extra_http_headers(&self, headers: &FxHashMap<String, String>) -> Result<(), String> {
     let h: serde_json::Map<String, serde_json::Value> = headers
       .iter()

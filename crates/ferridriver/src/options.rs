@@ -56,7 +56,7 @@ pub struct BoundingBox {
 }
 
 /// Viewport configuration -- consistent across all backends.
-/// Matches Playwright's viewport options and chromiumoxide's Viewport struct.
+/// Matches Playwright's viewport options.
 #[derive(Debug, Clone)]
 pub struct ViewportConfig {
   /// CSS pixel width of the viewport.

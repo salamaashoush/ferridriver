@@ -47,6 +47,7 @@ impl crate::reporter::Reporter for TuiReporter {
       ReporterEvent::RunStarted {
         total_tests,
         num_workers,
+        ..
       } => {
         // We don't have the test names yet at RunStarted — they arrive via TestStarted.
         // Pre-populate with placeholders that will be updated.
