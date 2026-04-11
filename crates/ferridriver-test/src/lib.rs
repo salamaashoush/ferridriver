@@ -114,8 +114,8 @@ pub use discovery::TestRegistration;
 pub use expect::{ToPassOptions, expect, expect_configured, expect_poll, to_pass, to_pass_with_options};
 pub use fixture::FixturePool;
 pub use model::{
-  SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId, TestInfo, TestOutcome, TestPlan, TestStatus,
-  TestStep,
+  SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId, TestInfo, TestModifiers, TestOutcome, TestPlan,
+  TestStatus, TestStep,
 };
 pub use reporter::{EventBus, EventBusBuilder, Reporter, ReporterDriver, ReporterEvent, ReporterSet, Subscription};
 pub use runner::TestRunner;

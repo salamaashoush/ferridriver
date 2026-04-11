@@ -50,5 +50,7 @@ mod install;
 mod locator;
 mod page;
 mod route;
+mod test_fixtures;
+mod test_info;
 mod test_runner;
 mod types;
