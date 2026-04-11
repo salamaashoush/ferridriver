@@ -43,7 +43,12 @@ pub struct StepFinishedEvent {
 #[derive(Debug, Clone)]
 pub enum ReporterEvent {
   /// The entire run is starting.
-  RunStarted { total_tests: usize, num_workers: u32 },
+  RunStarted {
+    total_tests: usize,
+    num_workers: u32,
+    /// Arbitrary metadata from config (Playwright's `metadata` field).
+    metadata: serde_json::Value,
+  },
   /// A worker has been spawned.
   WorkerStarted { worker_id: u32 },
   /// A test is about to execute.
@@ -233,6 +238,7 @@ pub(crate) fn create_reporters(
   names: &[crate::config::ReporterConfig],
   output_dir: &std::path::Path,
   mode: crate::config::RunMode,
+  quiet: bool,
 ) -> ReporterSet {
   let mut reporters: Vec<Box<dyn Reporter>> = Vec::new();
   let mut has_terminal = false;
@@ -240,8 +246,9 @@ pub(crate) fn create_reporters(
   for config in names {
     match config.name.as_str() {
       // ── Mode-dependent reporters ──
+      // When quiet, skip terminal-based reporters (only file-based reporters are created).
       "terminal" | "list" | "bdd" | "default" | "" => {
-        if !has_terminal {
+        if !has_terminal && !quiet {
           match mode {
             crate::config::RunMode::E2e => reporters.push(Box::new(terminal::TerminalReporter::new())),
             crate::config::RunMode::Bdd => reporters.push(Box::new(bdd::terminal::BddTerminalReporter::new())),

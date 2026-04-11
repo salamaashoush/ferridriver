@@ -19,6 +19,7 @@ async fn event_bus_delivers_to_single_subscriber() {
     .emit(ReporterEvent::RunStarted {
       total_tests: 5,
       num_workers: 2,
+      metadata: serde_json::Value::Null,
     })
     .await;
   drop(bus);
@@ -29,7 +30,8 @@ async fn event_bus_delivers_to_single_subscriber() {
     event,
     ReporterEvent::RunStarted {
       total_tests: 5,
-      num_workers: 2
+      num_workers: 2,
+      ..
     }
   ));
   assert!(rx.recv().await.is_none(), "channel should be closed after bus drop");
@@ -47,6 +49,7 @@ async fn event_bus_delivers_to_multiple_subscribers() {
     .emit(ReporterEvent::RunStarted {
       total_tests: 10,
       num_workers: 4,
+      metadata: serde_json::Value::Null,
     })
     .await;
   bus
@@ -111,6 +114,7 @@ async fn event_bus_no_subscribers_does_not_panic() {
     .emit(ReporterEvent::RunStarted {
       total_tests: 1,
       num_workers: 1,
+      metadata: serde_json::Value::Null,
     })
     .await;
   drop(bus);
@@ -130,6 +134,7 @@ async fn event_bus_dropped_subscriber_does_not_block() {
     .emit(ReporterEvent::RunStarted {
       total_tests: 1,
       num_workers: 1,
+      metadata: serde_json::Value::Null,
     })
     .await;
   drop(bus);
@@ -188,6 +193,7 @@ async fn reporter_driver_forwards_events_and_finalizes() {
     .emit(ReporterEvent::RunStarted {
       total_tests: 2,
       num_workers: 1,
+      metadata: serde_json::Value::Null,
     })
     .await;
   bus
@@ -228,6 +234,7 @@ async fn reporter_driver_returns_reporters_after_run() {
     .emit(ReporterEvent::RunStarted {
       total_tests: 1,
       num_workers: 1,
+      metadata: serde_json::Value::Null,
     })
     .await;
   drop(bus);
@@ -256,6 +263,7 @@ async fn real_time_delivery_not_batched() {
     .emit(ReporterEvent::RunStarted {
       total_tests: 1,
       num_workers: 1,
+      metadata: serde_json::Value::Null,
     })
     .await;
 
@@ -294,6 +302,7 @@ async fn concurrent_execution_and_observation() {
       .emit(ReporterEvent::RunStarted {
         total_tests: 3,
         num_workers: 1,
+      metadata: serde_json::Value::Null,
       })
       .await;
     tokio::task::yield_now().await;

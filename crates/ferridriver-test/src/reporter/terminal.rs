@@ -124,6 +124,7 @@ impl Reporter for TerminalReporter {
       ReporterEvent::RunStarted {
         total_tests,
         num_workers,
+        ..
       } => {
         self.total = *total_tests;
         println!();

@@ -557,6 +557,26 @@ impl AnyPage {
     page_dispatch!(self, grant_permissions(permissions, origin))
   }
 
+  pub async fn set_bypass_csp(&self, enabled: bool) -> Result<(), String> {
+    page_dispatch!(self, set_bypass_csp(enabled))
+  }
+
+  pub async fn set_ignore_certificate_errors(&self, ignore: bool) -> Result<(), String> {
+    page_dispatch!(self, set_ignore_certificate_errors(ignore))
+  }
+
+  pub async fn set_download_behavior(&self, behavior: &str, download_path: &str) -> Result<(), String> {
+    page_dispatch!(self, set_download_behavior(behavior, download_path))
+  }
+
+  pub async fn set_http_credentials(&self, username: &str, password: &str) -> Result<(), String> {
+    page_dispatch!(self, set_http_credentials(username, password))
+  }
+
+  pub async fn set_service_workers_blocked(&self, blocked: bool) -> Result<(), String> {
+    page_dispatch!(self, set_service_workers_blocked(blocked))
+  }
+
   pub async fn reset_permissions(&self) -> Result<(), String> {
     page_dispatch!(self, reset_permissions())
   }

@@ -877,6 +877,31 @@ impl BidiPage {
     Ok(())
   }
 
+  pub async fn set_bypass_csp(&self, _enabled: bool) -> Result<(), String> {
+    // BiDi does not have a direct equivalent. Stubbed.
+    Ok(())
+  }
+
+  pub async fn set_ignore_certificate_errors(&self, _ignore: bool) -> Result<(), String> {
+    // BiDi: acceptInsecureCerts is set at session level, not per-page. Stubbed.
+    Ok(())
+  }
+
+  pub async fn set_download_behavior(&self, _behavior: &str, _download_path: &str) -> Result<(), String> {
+    // BiDi download behavior is not standardized yet. Stubbed.
+    Ok(())
+  }
+
+  pub async fn set_http_credentials(&self, _username: &str, _password: &str) -> Result<(), String> {
+    // BiDi: use network.addIntercept for auth. Stubbed.
+    Ok(())
+  }
+
+  pub async fn set_service_workers_blocked(&self, _blocked: bool) -> Result<(), String> {
+    // BiDi does not have service worker control yet. Stubbed.
+    Ok(())
+  }
+
   pub async fn set_extra_http_headers(&self, headers: &FxHashMap<String, String>) -> Result<(), String> {
     let header_list: Vec<serde_json::Value> = headers
       .iter()

@@ -65,6 +65,7 @@ impl Reporter for BddTerminalReporter {
       ReporterEvent::RunStarted {
         total_tests,
         num_workers,
+        ..
       } => {
         println!();
         println!(

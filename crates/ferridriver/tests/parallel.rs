@@ -1,9 +1,9 @@
 //! Test multi-page automation.
 //!
-//! Note: chromiumoxide multiplexes all pages over one WebSocket connection.
-//! True parallel `tokio::join!` on different pages works but CDP commands
-//! are serialized through the single handler. For independent parallelism,
-//! use separate Browser instances or the cdp-pipe backend.
+//! CDP multiplexes all pages over one connection. True parallel `tokio::join!`
+//! on different pages works but CDP commands are serialized through the single
+//! handler. For independent parallelism, use separate Browser instances or
+//! the cdp-pipe backend.
 
 use ferridriver::Browser;
 use ferridriver::backend::BackendKind;

@@ -862,6 +862,56 @@ impl Page {
     self.inner.reset_permissions().await
   }
 
+  /// Bypass Content Security Policy. Must be called before any navigation.
+  /// Matches Playwright's `bypassCSP` context option.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend rejects the change.
+  pub async fn set_bypass_csp(&self, enabled: bool) -> Result<(), String> {
+    self.inner.set_bypass_csp(enabled).await
+  }
+
+  /// Ignore HTTPS certificate errors for this page.
+  /// Matches Playwright's `ignoreHTTPSErrors` option.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend rejects the change.
+  pub async fn set_ignore_certificate_errors(&self, ignore: bool) -> Result<(), String> {
+    self.inner.set_ignore_certificate_errors(ignore).await
+  }
+
+  /// Configure download behavior (allow/deny, download directory).
+  /// Matches Playwright's `acceptDownloads` option.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend rejects the change.
+  pub async fn set_download_behavior(&self, behavior: &str, download_path: &str) -> Result<(), String> {
+    self.inner.set_download_behavior(behavior, download_path).await
+  }
+
+  /// Set HTTP credentials for basic/digest auth.
+  /// Matches Playwright's `httpCredentials` option.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend rejects the change.
+  pub async fn set_http_credentials(&self, username: &str, password: &str) -> Result<(), String> {
+    self.inner.set_http_credentials(username, password).await
+  }
+
+  /// Block service worker registration.
+  /// Matches Playwright's `serviceWorkers: "block"` option.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend rejects the change.
+  pub async fn set_service_workers_blocked(&self, blocked: bool) -> Result<(), String> {
+    self.inner.set_service_workers_blocked(blocked).await
+  }
+
   /// Emulate focus state (page always appears focused even when not).
   ///
   /// # Errors
