@@ -634,4 +634,4 @@ const root = defineCommand({
   },
 });
 
-void runMain(withCompletions(root));
+await runMain(withCompletions(root));
