@@ -152,6 +152,12 @@ pub struct ApiRequestContext {
   inner: ferridriver::api_request::APIRequestContext,
 }
 
+impl ApiRequestContext {
+  pub(crate) fn wrap(inner: ferridriver::api_request::APIRequestContext) -> Self {
+    Self { inner }
+  }
+}
+
 #[napi]
 impl ApiRequestContext {
   /// Create a new API request context.

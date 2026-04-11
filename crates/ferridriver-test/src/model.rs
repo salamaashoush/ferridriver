@@ -6,7 +6,7 @@ use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use tokio::sync::Mutex;
@@ -545,6 +545,49 @@ pub enum ExpectedStatus {
   #[default]
   Pass,
   Fail,
+}
+
+// ── Runtime Modifiers (shared between JS test body and Rust worker) ──
+
+/// Runtime test modifiers set by `test.skip()`, `test.fail()`, `test.slow()` inside
+/// a test body. Shared via `Arc` between the NAPI layer (JS thread writes) and the
+/// Rust worker (reads after callback returns).
+///
+/// Uses atomics and `std::sync::Mutex` for cross-thread safety. No actual race —
+/// the worker reads strictly after the TSFN callback completes.
+pub struct TestModifiers {
+  /// Set by `test.skip()` / `test.fixme()` inside test body.
+  pub skipped: AtomicBool,
+  /// Reason for runtime skip.
+  pub skip_reason: std::sync::Mutex<Option<String>>,
+  /// Set by `test.fail()` inside test body — inverts pass/fail.
+  pub expected_failure: AtomicBool,
+  /// Set by `test.slow()` inside test body.
+  pub slow: AtomicBool,
+  /// Set by `testInfo.setTimeout()` inside test body.
+  pub timeout_override: std::sync::Mutex<Option<u64>>,
+}
+
+impl Default for TestModifiers {
+  fn default() -> Self {
+    Self {
+      skipped: AtomicBool::new(false),
+      skip_reason: std::sync::Mutex::new(None),
+      expected_failure: AtomicBool::new(false),
+      slow: AtomicBool::new(false),
+      timeout_override: std::sync::Mutex::new(None),
+    }
+  }
+}
+
+impl std::fmt::Debug for TestModifiers {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("TestModifiers")
+      .field("skipped", &self.skipped.load(Ordering::Relaxed))
+      .field("expected_failure", &self.expected_failure.load(Ordering::Relaxed))
+      .field("slow", &self.slow.load(Ordering::Relaxed))
+      .finish()
+  }
 }
 
 // ── Outcome ──

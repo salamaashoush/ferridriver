@@ -668,7 +668,7 @@ impl Worker {
         };
 
         let _ = ctx.close().await;
-        (r, screenshot, video_path)
+        (r, screenshot, video_path, Some(test_pool))
       },
       Err(e) => {
         let _ = ctx.close().await;
@@ -681,12 +681,13 @@ impl Worker {
           })),
           None,
           None,
+          None,
         )
       },
     };
 
     let duration = start.elapsed();
-    let (timeout_result, screenshot, video_path) = result;
+    let (timeout_result, screenshot, video_path, test_pool) = result;
 
     let mut attachments = Vec::new();
     if let Some(ref png) = screenshot {
@@ -753,7 +754,19 @@ impl Worker {
       ),
     };
 
-    // Expected failure inversion (test.fail() annotation).
+    // Read runtime modifiers set by test body (via NAPI TestInfo.skip/fail/slow/setTimeout).
+    // These are injected into the fixture pool by the NAPI test_fn closure.
+    if let Some(ref pool) = test_pool {
+      if let Ok(modifiers) = pool.get::<crate::TestModifiers>("__test_modifiers").await {
+        if modifiers.expected_failure.load(std::sync::atomic::Ordering::Relaxed) {
+          expected_status = ExpectedStatus::Fail;
+        }
+        // slow: test already ran, but we could annotate for reporting.
+        // timeout_override: would apply on retry.
+      }
+    }
+
+    // Expected failure inversion (test.fail() annotation OR runtime test.fail()).
     let (status, error) = match (&raw_status, &expected_status) {
       (TestStatus::Failed | TestStatus::TimedOut, ExpectedStatus::Fail) => (TestStatus::Passed, None),
       (TestStatus::Passed, ExpectedStatus::Fail) => (

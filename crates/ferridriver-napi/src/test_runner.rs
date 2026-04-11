@@ -20,11 +20,18 @@ use napi::threadsafe_function::ThreadsafeFunction;
 use napi_derive::napi;
 use tokio::sync::Mutex;
 
-/// Test callback TSFN type — async JS function receiving a Page, returning Promise<void>.
+/// Test callback TSFN type — async JS function receiving TestFixtures, returning Promise<void>.
+/// Matches Playwright's `({ page, browserName, testInfo, ... }) => Promise<void>` signature.
 /// callee_handled=false (modern async), weak=true (doesn't block Node exit), unbounded queue.
-/// Return type is Promise<()> because JS test bodies are async functions.
-type TestCallbackFn =
-  ThreadsafeFunction<crate::page::Page, napi::bindgen_prelude::Promise<()>, crate::page::Page, Status, false, true, 0>;
+type TestCallbackFn = ThreadsafeFunction<
+  crate::test_fixtures::TestFixtures,
+  napi::bindgen_prelude::Promise<()>,
+  crate::test_fixtures::TestFixtures,
+  Status,
+  false,
+  true,
+  0,
+>;
 
 /// Test runner configuration from TypeScript.
 #[napi(object)]
@@ -240,13 +247,17 @@ impl TestRunner {
     })
   }
 
-  /// Register a test. The callback receives a Page and should return a Promise.
+  /// Register a test. The callback receives fixtures (page, testInfo, browserName, etc.).
   /// Called from TS after loading each test file.
-  #[napi(ts_args_type = "meta: TestMeta, callback: (page: Page) => Promise<void>")]
+  #[napi(ts_args_type = "meta: TestMeta, callback: (fixtures: TestFixtures) => Promise<void>")]
   pub fn register_test(
     &self,
     meta: TestMeta,
-    callback: napi::bindgen_prelude::Function<'_, crate::page::Page, napi::bindgen_prelude::Promise<()>>,
+    callback: napi::bindgen_prelude::Function<
+      '_,
+      crate::test_fixtures::TestFixtures,
+      napi::bindgen_prelude::Promise<()>,
+    >,
   ) -> Result<()> {
     // callee_handled::<false>() — modern async pattern (rspack/rolldown standard).
     // max_queue_size::<0>() — unbounded queue, prevents backpressure blocking Rust.
@@ -283,11 +294,15 @@ impl TestRunner {
   }
 
   /// Register a lifecycle hook for a suite.
-  #[napi(ts_args_type = "meta: HookMeta, callback: (page: Page) => Promise<void>")]
+  #[napi(ts_args_type = "meta: HookMeta, callback: (fixtures: TestFixtures) => Promise<void>")]
   pub fn register_hook(
     &self,
     meta: HookMeta,
-    callback: napi::bindgen_prelude::Function<'_, crate::page::Page, napi::bindgen_prelude::Promise<()>>,
+    callback: napi::bindgen_prelude::Function<
+      '_,
+      crate::test_fixtures::TestFixtures,
+      napi::bindgen_prelude::Promise<()>,
+    >,
   ) -> Result<()> {
     let tsfn = callback
       .build_threadsafe_function()
@@ -331,11 +346,13 @@ impl TestRunner {
     }
 
     // Convert registered JS tests into core TestCase objects.
+    let browser_config = self.config.browser.clone();
     let test_cases: Vec<TestCase> = tests
       .iter()
       .map(|t| {
         let cb = Arc::clone(&t.callback);
         let meta = t.meta.clone();
+        let bcfg = browser_config.clone();
 
         // Deserialize annotations from JSON — same type as Rust core.
         let annotations: Vec<TestAnnotation> = meta
@@ -353,18 +370,40 @@ impl TestRunner {
           },
           test_fn: Arc::new(move |pool| {
             let cb = Arc::clone(&cb);
+            let bcfg = bcfg.clone();
             Box::pin(async move {
-              // Get Page from the fixture pool (created by the core worker).
-              let page: std::sync::Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
-                message: format!("fixture 'page' failed: {e}"),
-                stack: None,
-                diff: None,
-                screenshot: None,
-              })?;
+              // Pull ALL fixtures from the pool (created by the core worker).
+              let page: Arc<ferridriver::Page> =
+                pool.get("page").await.map_err(|e| TestFailure::from(format!("fixture 'page': {e}")))?;
+              let context: Arc<ferridriver::context::ContextRef> =
+                pool.get("context").await.map_err(|e| TestFailure::from(format!("fixture 'context': {e}")))?;
+              let test_info: Arc<ferridriver_test::model::TestInfo> =
+                pool.get("test_info").await.map_err(|e| TestFailure::from(format!("fixture 'test_info': {e}")))?;
+              let request: Arc<ferridriver::api_request::APIRequestContext> =
+                pool.get("request").await.map_err(|e| TestFailure::from(format!("fixture 'request': {e}")))?;
 
-              // Wrap as NAPI Page and call JS callback.
-              let napi_page = crate::page::Page::wrap((*page).clone());
-              call_js_test(&cb, napi_page).await.map_err(|e| TestFailure {
+              // Create shared modifiers — worker reads these after callback returns.
+              let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
+              pool.inject("__test_modifiers", Arc::clone(&modifiers)).await;
+
+              // Build the TestFixtures object for JS.
+              let fixtures = crate::test_fixtures::TestFixtures::new(
+                (*page).clone(),
+                (*context).clone(),
+                request,
+                Arc::clone(&test_info),
+                Arc::clone(&modifiers),
+                bcfg.browser.clone(),
+                bcfg.headless,
+                bcfg.context.is_mobile,
+                bcfg.context.has_touch,
+                bcfg.context.color_scheme.clone(),
+                bcfg.context.locale.clone(),
+                bcfg.channel.clone(),
+              );
+
+              // Call JS callback with full fixtures.
+              call_js_test(&cb, fixtures).await.map_err(|e| TestFailure {
                 message: e,
                 stack: None,
                 diff: None,
@@ -372,7 +411,13 @@ impl TestRunner {
               })
             })
           }),
-          fixture_requests: vec!["page".into()],
+          fixture_requests: vec![
+            "browser".into(),
+            "context".into(),
+            "page".into(),
+            "test_info".into(),
+            "request".into(),
+          ],
           expected_status: ExpectedStatus::Pass,
           annotations,
           timeout: meta.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
@@ -530,12 +575,14 @@ impl TestRunner {
   }
 }
 
-/// Call a JS test callback with a Page and await the returned Promise.
-async fn call_js_test(tsfn: &TestCallbackFn, page: crate::page::Page) -> std::result::Result<(), String> {
-  // ThreadsafeFunction::call_async sends the Page to the JS thread,
+/// Call a JS test callback with fixtures and await the returned Promise.
+async fn call_js_test(
+  tsfn: &TestCallbackFn,
+  fixtures: crate::test_fixtures::TestFixtures,
+) -> std::result::Result<(), String> {
+  // ThreadsafeFunction::call_async sends TestFixtures to the JS thread,
   // calls the callback, and returns the result as a Future.
-  // call_async returns Promise<()>, then we await the promise itself.
-  match tsfn.call_async(page).await {
+  match tsfn.call_async(fixtures).await {
     Ok(promise) => promise.await.map_err(|e| format!("{e}")),
     Err(e) => Err(format!("{e}")),
   }

@@ -140,6 +140,7 @@ impl APIResponse {
 ///
 /// Supports all HTTP methods, JSON/form/multipart bodies, query parameters,
 /// custom headers, timeouts, and cookie persistence via reqwest's cookie jar.
+#[derive(Clone)]
 pub struct APIRequestContext {
   client: reqwest::Client,
   base_url: Option<String>,
