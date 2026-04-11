@@ -32,8 +32,8 @@ async fn main() -> anyhow::Result<()> {
       }
     },
     cli::Command::Install { browser, with_deps } => install_browser(&browser, with_deps).await,
-    cli::Command::Test { files, test_args } => run_tests(files, test_args).await,
-    cli::Command::Bdd { features, bdd_args } => run_bdd(features, bdd_args).await,
+    cli::Command::Test { files, common } => run_tests(files, common).await,
+    cli::Command::Bdd { features, common, bdd } => run_bdd(features, common, bdd).await,
     cli::Command::Codegen {
       url,
       language,
@@ -63,53 +63,17 @@ async fn main() -> anyhow::Result<()> {
 }
 
 #[allow(clippy::too_many_lines)]
-async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()> {
+async fn run_bdd(features: Vec<String>, args: cli::CommonRunArgs, bdd: cli::BddOnlyArgs) -> anyhow::Result<()> {
   use ferridriver_bdd::feature::FeatureSet;
   use ferridriver_bdd::filter::TagExpression;
   use ferridriver_bdd::registry::StepRegistry;
   use ferridriver_bdd::scenario;
   use ferridriver_bdd::translate;
-  use ferridriver_test::config::{CliOverrides, ShardArg};
   use ferridriver_test::runner::TestRunner;
   use std::sync::Arc;
 
-  // Resolve config (same config file, same system).
-  let overrides = CliOverrides {
-    workers: args.workers,
-    retries: args.retries,
-    reporter: args.reporter.clone(),
-    grep: args.grep.clone(),
-    grep_invert: args.grep_invert.clone(),
-    tag: None, // BDD tag filtering done via tag expression below
-    headed: args.headed,
-    shard: args
-      .shard
-      .as_deref()
-      .map(ShardArg::parse)
-      .transpose()
-      .map_err(|e| anyhow::anyhow!(e))?,
-    config_path: args.config.clone(),
-    output_dir: args.output.clone(),
-    test_files: Vec::new(),
-    list_only: args.list,
-    update_snapshots: false,
-    profile: args.profile.clone(),
-    forbid_only: args.forbid_only,
-    last_failed: args.last_failed,
-    video: args.video.clone(),
-    trace: args.trace.clone(),
-    storage_state: args.storage_state.clone(),
-  };
-
-  let mut config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;
-
-  // Apply backend/browser CLI overrides.
-  if let Some(backend) = &args.backend {
-    config.browser.backend = cli::backend_to_string(backend);
-  }
-  if let Some(ref browser) = args.browser {
-    cli::apply_browser_defaults(&mut config.browser, browser);
-  }
+  let overrides = args.to_overrides().map_err(|e| anyhow::anyhow!(e))?;
+  let mut config = resolve_and_apply_common(&args, &overrides)?;
 
   // Apply BDD-specific CLI overrides.
   if !features.is_empty() {
@@ -118,26 +82,26 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
   if config.features.is_empty() {
     config.features = vec!["features/**/*.feature".to_string()];
   }
-  if let Some(tags) = &args.tags {
+  if let Some(tags) = &bdd.tags {
     config.tags = Some(tags.clone());
   }
-  if args.dry_run {
+  if bdd.dry_run {
     config.dry_run = true;
   }
-  if args.fail_fast {
+  if bdd.fail_fast {
     config.fail_fast = true;
   }
-  if let Some(t) = args.step_timeout {
+  if let Some(t) = bdd.step_timeout {
     config.timeout = t;
   }
-  if args.strict {
+  if bdd.strict {
     config.strict = true;
   }
-  if let Some(order) = &args.order {
+  if let Some(order) = &bdd.order {
     config.order = order.clone();
   }
-  if args.language.is_some() {
-    config.language = args.language.clone();
+  if bdd.language.is_some() {
+    config.language = bdd.language.clone();
   }
 
   // Discover and parse .feature files (with optional i18n language).
@@ -173,7 +137,7 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
   }
 
   // List mode.
-  if args.list {
+  if overrides.list_only {
     println!("\n  Scenarios ({total}):\n");
     for s in &all_scenarios {
       let tags = if s.tags.is_empty() {
@@ -227,7 +191,7 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
     let cwd = std::env::current_dir().unwrap_or_default();
     let exit_code = runner
       .run_watch(
-        move |changed_files: Option<&[std::path::PathBuf]>| {
+        move |changed_files: Option<&[::std::path::PathBuf]>| {
           // When specific files changed, only discover/parse those.
           // Otherwise (None = full run), discover all features.
           let files = if let Some(changed) = changed_files {
@@ -281,59 +245,22 @@ async fn run_bdd(features: Vec<String>, args: cli::BddArgs) -> anyhow::Result<()
   std::process::exit(exit_code);
 }
 
-async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()> {
-  use ferridriver_test::{
-    config::{CliOverrides, ShardArg},
-    discovery::collect_rust_tests,
-    runner::TestRunner,
-  };
+async fn run_tests(files: Vec<String>, args: cli::CommonRunArgs) -> anyhow::Result<()> {
+  use ferridriver_test::{discovery::collect_rust_tests, runner::TestRunner};
 
-  let overrides = CliOverrides {
-    workers: args.workers,
-    retries: args.retries,
-    reporter: args.reporter,
-    grep: args.grep,
-    grep_invert: args.grep_invert,
-    tag: args.tag,
-    headed: args.headed,
-    shard: args
-      .shard
-      .as_deref()
-      .map(ShardArg::parse)
-      .transpose()
-      .map_err(|e| anyhow::anyhow!(e))?,
-    config_path: args.config,
-    output_dir: args.output,
-    test_files: files,
-    list_only: args.list,
-    update_snapshots: false,
-    profile: args.profile,
-    forbid_only: args.forbid_only,
-    last_failed: args.last_failed,
-    video: args.video,
-    trace: args.trace,
-    storage_state: args.storage_state,
-  };
+  let mut overrides = args.to_overrides().map_err(|e| anyhow::anyhow!(e))?;
+  overrides.test_files = files;
+  let config = resolve_and_apply_common(&args, &overrides)?;
 
-  let watch = args.watch;
-  let mut config = ferridriver_test::config::resolve_config(&overrides).map_err(|e| anyhow::anyhow!(e))?;
-
-  // Apply backend/browser CLI overrides.
-  if let Some(backend) = &args.backend {
-    config.browser.backend = cli::backend_to_string(backend);
-  }
-  if let Some(ref browser) = args.browser {
-    cli::apply_browser_defaults(&mut config.browser, browser);
-  }
-
-  if watch {
+  if args.watch {
     let config_clone = config.clone();
     let mut runner = TestRunner::new(config, overrides);
     let cwd = std::env::current_dir().unwrap_or_default();
-    // Rust tests are inventory-based (compile-time), can't re-discover individual files.
-    // Changed files parameter is ignored — always returns the full plan.
     let exit_code = runner
-      .run_watch(move |_changed| collect_rust_tests(&config_clone), cwd)
+      .run_watch(
+        move |_changed: Option<&[std::path::PathBuf]>| collect_rust_tests(&config_clone),
+        cwd,
+      )
       .await;
     std::process::exit(exit_code);
   }
@@ -343,6 +270,29 @@ async fn run_tests(files: Vec<String>, args: cli::TestArgs) -> anyhow::Result<()
   let exit_code = runner.run(plan).await;
 
   std::process::exit(exit_code);
+}
+
+/// Shared config resolution: resolve config file, apply common CLI overrides, merge webServer configs.
+fn resolve_and_apply_common(
+  args: &cli::CommonRunArgs,
+  overrides: &ferridriver_test::config::CliOverrides,
+) -> anyhow::Result<ferridriver_test::config::TestConfig> {
+  let mut config = ferridriver_test::config::resolve_config(overrides).map_err(|e| anyhow::anyhow!(e))?;
+
+  if let Some(backend) = &args.backend {
+    config.browser.backend = cli::backend_to_string(backend);
+  }
+  if let Some(ref browser) = args.browser {
+    cli::apply_browser_defaults(&mut config.browser, browser);
+  }
+
+  // Merge CLI webServer flags into config (CLI takes precedence).
+  let cli_servers = args.web_server_configs();
+  if !cli_servers.is_empty() {
+    config.web_server = cli_servers;
+  }
+
+  Ok(config)
 }
 
 async fn install_browser(browser: &str, with_deps: bool) -> anyhow::Result<()> {

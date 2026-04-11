@@ -16,11 +16,25 @@ fn to_step_err(e: TestFailure) -> StepError {
 
 #[given("I navigate to {string}")]
 async fn navigate(world: &mut BrowserWorld, url: String) {
+  let resolved = resolve_url(&url);
   world
     .page()
-    .goto(&url, None)
+    .goto(&resolved, None)
     .await
-    .map_err(|e| StepError::from(format!("navigate to \"{url}\": {e}")))?;
+    .map_err(|e| StepError::from(format!("navigate to \"{resolved}\": {e}")))?;
+}
+
+/// Resolve relative URLs against FERRIDRIVER_BASE_URL or config base_url.
+fn resolve_url(url: &str) -> String {
+  if url.starts_with("http://") || url.starts_with("https://") || url.starts_with("data:") {
+    return url.to_string();
+  }
+  if let Ok(base) = std::env::var("FERRIDRIVER_BASE_URL") {
+    let base = base.trim_end_matches('/');
+    let path = url.strip_prefix('/').unwrap_or(url);
+    return format!("{base}/{path}");
+  }
+  url.to_string()
 }
 
 #[given("I go back")]

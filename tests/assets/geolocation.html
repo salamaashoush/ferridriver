@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html><head><title>Geolocation</title></head>
+<body>
+<div id="result">Waiting...</div>
+<script>
+  window.geoResult = null;
+  window.geoError = null;
+  navigator.geolocation.getCurrentPosition(
+    pos => {
+      window.geoResult = { lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy };
+      document.getElementById('result').textContent = window.geoResult.lat + ',' + window.geoResult.lng;
+    },
+    err => {
+      window.geoError = err.message;
+      document.getElementById('result').textContent = 'Error: ' + err.message;
+    }
+  );
+</script>
+</body></html>

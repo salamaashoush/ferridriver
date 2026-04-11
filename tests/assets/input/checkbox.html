@@ -1,0 +1,19 @@
+<!DOCTYPE html>
+<html><head><title>Checkbox test</title></head>
+<body>
+<label><input type="checkbox" id="agree"> I agree to the terms</label>
+<label><input type="checkbox" id="newsletter" checked> Subscribe to newsletter</label>
+<label><input type="radio" name="choice" value="a" id="radio-a"> Option A</label>
+<label><input type="radio" name="choice" value="b" id="radio-b"> Option B</label>
+<label><input type="radio" name="choice" value="c" id="radio-c" checked> Option C</label>
+<div id="output"></div>
+<script>
+  window.lastChanged = '';
+  document.querySelectorAll('input').forEach(el => {
+    el.addEventListener('change', e => {
+      window.lastChanged = e.target.id + ':' + (e.target.type === 'checkbox' ? e.target.checked : e.target.value);
+      document.getElementById('output').textContent = window.lastChanged;
+    });
+  });
+</script>
+</body></html>

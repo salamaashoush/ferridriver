@@ -99,6 +99,7 @@ pub mod model;
 pub mod reporter;
 pub mod retry;
 pub mod runner;
+pub mod server;
 pub mod shard;
 pub mod snapshot;
 pub mod tracing;

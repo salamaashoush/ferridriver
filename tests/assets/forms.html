@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html><head><title>Forms test</title>
+<style>
+  .form-group { margin: 10px 0; }
+  label { display: block; font-weight: bold; margin-bottom: 4px; }
+  input, select, textarea { padding: 6px; width: 300px; }
+  #output { margin-top: 20px; padding: 10px; background: #f5f5f5; white-space: pre; font-family: monospace; }
+</style>
+</head>
+<body>
+<h1>Registration Form</h1>
+<form id="registration" onsubmit="return handleSubmit(event)">
+  <div class="form-group">
+    <label for="fullname">Full Name</label>
+    <input id="fullname" name="fullname" type="text" required placeholder="John Doe" />
+  </div>
+  <div class="form-group">
+    <label for="email">Email</label>
+    <input id="email" name="email" type="email" required placeholder="john@example.com" />
+  </div>
+  <div class="form-group">
+    <label for="phone">Phone</label>
+    <input id="phone" name="phone" type="tel" placeholder="+1 (555) 123-4567" />
+  </div>
+  <div class="form-group">
+    <label for="dob">Date of Birth</label>
+    <input id="dob" name="dob" type="date" />
+  </div>
+  <div class="form-group">
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" minlength="8" required placeholder="Min 8 chars" />
+  </div>
+  <div class="form-group">
+    <label for="confirm-password">Confirm Password</label>
+    <input id="confirm-password" name="confirm-password" type="password" required />
+  </div>
+  <div class="form-group">
+    <label for="country">Country</label>
+    <select id="country" name="country">
+      <option value="">Select country</option>
+      <option value="us">United States</option>
+      <option value="uk">United Kingdom</option>
+      <option value="de">Germany</option>
+      <option value="fr">France</option>
+      <option value="jp">Japan</option>
+    </select>
+  </div>
+  <div class="form-group">
+    <label for="interests">Interests</label>
+    <select id="interests" name="interests" multiple size="4">
+      <option value="tech">Technology</option>
+      <option value="science">Science</option>
+      <option value="art">Art</option>
+      <option value="music">Music</option>
+      <option value="sports">Sports</option>
+    </select>
+  </div>
+  <div class="form-group">
+    <label for="bio">Bio</label>
+    <textarea id="bio" name="bio" rows="4" placeholder="Tell us about yourself..."></textarea>
+  </div>
+  <div class="form-group">
+    <label><input type="checkbox" id="terms" name="terms" required /> I agree to the Terms of Service</label>
+  </div>
+  <div class="form-group">
+    <label><input type="checkbox" id="newsletter" name="newsletter" /> Subscribe to newsletter</label>
+  </div>
+  <div class="form-group">
+    <label>Preferred contact:</label>
+    <label><input type="radio" name="contact" value="email" checked /> Email</label>
+    <label><input type="radio" name="contact" value="phone" /> Phone</label>
+    <label><input type="radio" name="contact" value="sms" /> SMS</label>
+  </div>
+  <div class="form-group">
+    <label for="avatar">Avatar</label>
+    <input type="file" id="avatar" name="avatar" accept="image/*" />
+  </div>
+  <div class="form-group">
+    <label for="documents">Documents</label>
+    <input type="file" id="documents" name="documents" multiple />
+  </div>
+  <div class="form-group">
+    <input type="range" id="age" name="age" min="18" max="100" value="25" />
+    <span id="age-display">25</span>
+  </div>
+  <button type="submit" id="submit-btn">Register</button>
+  <button type="reset" id="reset-btn">Reset</button>
+</form>
+<div id="output"></div>
+<script>
+  window.submitted = false;
+  window.formData = null;
+  document.getElementById('age').addEventListener('input', e => {
+    document.getElementById('age-display').textContent = e.target.value;
+  });
+  function handleSubmit(e) {
+    e.preventDefault();
+    const fd = new FormData(e.target);
+    window.formData = Object.fromEntries(fd.entries());
+    window.submitted = true;
+    document.getElementById('output').textContent = JSON.stringify(window.formData, null, 2);
+    return false;
+  }
+  // Track all input events
+  window.inputEvents = [];
+  document.querySelectorAll('input, select, textarea').forEach(el => {
+    el.addEventListener('input', e => { window.inputEvents.push(e.target.name + ':input'); });
+    el.addEventListener('change', e => { window.inputEvents.push(e.target.name + ':change'); });
+    el.addEventListener('focus', e => { window.inputEvents.push(e.target.name + ':focus'); });
+    el.addEventListener('blur', e => { window.inputEvents.push(e.target.name + ':blur'); });
+  });
+</script>
+</body></html>

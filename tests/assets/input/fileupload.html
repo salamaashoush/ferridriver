@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html><head><title>File upload test</title></head>
+<body>
+<input type="file" id="single" />
+<input type="file" id="multi" multiple />
+<div id="output"></div>
+<script>
+  window.uploadedFiles = [];
+  document.getElementById('single').addEventListener('change', e => {
+    window.uploadedFiles = Array.from(e.target.files).map(f => f.name);
+    document.getElementById('output').textContent = window.uploadedFiles.join(', ');
+  });
+  document.getElementById('multi').addEventListener('change', e => {
+    window.uploadedFiles = Array.from(e.target.files).map(f => f.name);
+    document.getElementById('output').textContent = window.uploadedFiles.join(', ');
+  });
+</script>
+</body></html>

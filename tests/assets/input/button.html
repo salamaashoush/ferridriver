@@ -1,0 +1,33 @@
+<!DOCTYPE html>
+<html><head><title>Button test</title></head>
+<body>
+<button>Click target</button>
+<script>
+  window.result = 'Was not clicked';
+  window.offsetX = undefined;
+  window.offsetY = undefined;
+  window.pageX = undefined;
+  window.pageY = undefined;
+  window.shiftKey = undefined;
+  window.bubbles = undefined;
+  window.detail = undefined;
+  document.querySelector('button').addEventListener('click', e => {
+    window.result = 'Clicked';
+    window.offsetX = e.offsetX;
+    window.offsetY = e.offsetY;
+    window.pageX = e.pageX;
+    window.pageY = e.pageY;
+    window.shiftKey = e.shiftKey;
+    window.bubbles = e.bubbles;
+    window.detail = e.detail;
+  }, false);
+  document.querySelector('button').addEventListener('dblclick', e => {
+    window.result = 'Double-clicked';
+    window.detail = e.detail;
+  }, false);
+  document.querySelector('button').addEventListener('contextmenu', e => {
+    e.preventDefault();
+    window.result = 'Right-clicked';
+  }, false);
+</script>
+</body></html>

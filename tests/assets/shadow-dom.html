@@ -1,0 +1,21 @@
+<!DOCTYPE html>
+<html><head><title>Shadow DOM test</title></head>
+<body>
+<div id="host"></div>
+<script>
+  const host = document.getElementById('host');
+  const shadow = host.attachShadow({ mode: 'open' });
+  shadow.innerHTML = `
+    <style>
+      .inner { padding: 10px; background: #e0e0e0; }
+      button { padding: 8px 16px; }
+    </style>
+    <div class="inner">
+      <h3>Shadow Content</h3>
+      <p id="shadow-text">Inside shadow DOM</p>
+      <button id="shadow-btn" onclick="this.textContent = 'Shadow Clicked'">Shadow Button</button>
+      <input id="shadow-input" placeholder="Shadow input" />
+    </div>
+  `;
+</script>
+</body></html>

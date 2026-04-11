@@ -799,7 +799,7 @@ impl BidiPage {
         "emulation.setLocaleOverride",
         json!({
           "contexts": [self.context_id],
-          "locales": [locale]
+          "locale": locale
         }),
       )
       .await?;
@@ -812,7 +812,7 @@ impl BidiPage {
         "emulation.setTimezoneOverride",
         json!({
           "contexts": [self.context_id],
-          "timezoneId": timezone_id
+          "timezone": timezone_id
         }),
       )
       .await?;
@@ -820,23 +820,42 @@ impl BidiPage {
   }
 
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
-    // BiDi has setForcedColorsModeThemeOverride for color scheme
     if let Some(ref color_scheme) = opts.color_scheme {
-      let theme = match color_scheme.as_str() {
-        "dark" => "dark",
-        "light" => "light",
-        "no-preference" => "no-preference",
-        _ => "no-preference",
-      };
-      let _ = self
+      // Override matchMedia via JS — works on all browsers without CDP fallback.
+      let dark_match = if color_scheme == "dark" { "true" } else { "false" };
+      let light_match = if color_scheme == "light" { "true" } else { "false" };
+      let js = format!(
+        r#"() => {{
+          const orig = window.matchMedia;
+          window.matchMedia = function(query) {{
+            const result = orig.call(window, query);
+            if (query === '(prefers-color-scheme: dark)') {{
+              return Object.assign({{}}, result, {{ matches: {dark_match} }});
+            }}
+            if (query === '(prefers-color-scheme: light)') {{
+              return Object.assign({{}}, result, {{ matches: {light_match} }});
+            }}
+            return result;
+          }};
+        }}"#
+      );
+      self
         .cmd(
-          "emulation.setForcedColorsModeThemeOverride",
+          "script.addPreloadScript",
+          json!({"functionDeclaration": js}),
+        )
+        .await?;
+      self
+        .cmd(
+          "script.callFunction",
           json!({
-            "contexts": [self.context_id],
-            "colorScheme": theme
+            "functionDeclaration": js,
+            "target": {"context": self.context_id},
+            "awaitPromise": false,
+            "resultOwnership": "none"
           }),
         )
-        .await;
+        .await?;
     }
     // Media type requires JS workaround (no direct BiDi command)
     if let Some(ref media) = opts.media {

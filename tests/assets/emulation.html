@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html><head><title>Emulation test</title></head>
+<body>
+<div id="results"></div>
+<script>
+  const r = document.getElementById('results');
+  function show(id, val) {
+    const el = document.createElement('div');
+    el.id = id;
+    el.textContent = val;
+    r.appendChild(el);
+  }
+  show('language', navigator.language);
+  show('languages', navigator.languages.join(','));
+  show('user-agent', navigator.userAgent);
+  show('timezone', Intl.DateTimeFormat().resolvedOptions().timeZone);
+  show('color-scheme', window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light');
+  show('reduced-motion', window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'reduce' : 'no-preference');
+  show('forced-colors', window.matchMedia('(forced-colors: active)').matches ? 'active' : 'none');
+  show('viewport-width', window.innerWidth);
+  show('viewport-height', window.innerHeight);
+  show('device-pixel-ratio', window.devicePixelRatio);
+  show('online', navigator.onLine);
+  show('platform', navigator.platform);
+</script>
+</body></html>

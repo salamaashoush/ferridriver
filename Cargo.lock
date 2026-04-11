@@ -1935,6 +1935,7 @@ dependencies = [
  "http",
  "image",
  "inventory",
+ "mime_guess",
  "notify",
  "notify-debouncer-mini",
  "quick-xml",

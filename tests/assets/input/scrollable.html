@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html><head><title>Scrollable test</title></head>
+<body>
+<script>
+  for (let i = 0; i < 100; i++) {
+    const btn = document.createElement('button');
+    btn.textContent = i + ': not clicked';
+    btn.id = 'button-' + i;
+    btn.onclick = () => { btn.textContent = 'clicked'; window.lastClicked = i; };
+    btn.oncontextmenu = e => { e.preventDefault(); btn.textContent = 'context menu'; };
+    document.body.appendChild(btn);
+    document.body.appendChild(document.createElement('br'));
+  }
+</script>
+</body></html>

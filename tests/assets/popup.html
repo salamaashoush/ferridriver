@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html><head><title>Popup test</title></head>
+<body>
+<button id="open-popup" onclick="window.popup = window.open('about:blank', 'popup', 'width=400,height=300')">Open popup</button>
+<button id="open-tab" onclick="window.open('/empty.html', '_blank')">Open tab</button>
+<a id="link-new-tab" href="/counter.html" target="_blank">Link to counter (new tab)</a>
+<div id="output"></div>
+<script>
+  window.popupOpened = false;
+  window.addEventListener('message', e => {
+    document.getElementById('output').textContent = 'Message: ' + e.data;
+    window.lastMessage = e.data;
+  });
+</script>
+</body></html>

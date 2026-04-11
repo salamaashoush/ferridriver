@@ -1,0 +1,36 @@
+<!DOCTYPE html>
+<html><head><title>Waiting test</title></head>
+<body>
+<div id="container"></div>
+<button id="add-delayed" onclick="addDelayed()">Add delayed element</button>
+<button id="add-hidden" onclick="addHidden()">Add hidden element</button>
+<button id="enable-input" onclick="document.getElementById('disabled-input').disabled = false">Enable input</button>
+<input id="disabled-input" disabled placeholder="Initially disabled" />
+<script>
+  function addDelayed() {
+    setTimeout(() => {
+      const el = document.createElement('div');
+      el.id = 'delayed';
+      el.textContent = 'I appeared!';
+      el.className = 'dynamic';
+      document.getElementById('container').appendChild(el);
+    }, 800);
+  }
+  function addHidden() {
+    const el = document.createElement('div');
+    el.id = 'will-show';
+    el.textContent = 'Hidden for now';
+    el.style.display = 'none';
+    document.getElementById('container').appendChild(el);
+    setTimeout(() => { el.style.display = 'block'; }, 600);
+  }
+  // Element that changes text after delay
+  setTimeout(() => {
+    const el = document.createElement('p');
+    el.id = 'changing-text';
+    el.textContent = 'Loading...';
+    document.getElementById('container').appendChild(el);
+    setTimeout(() => { el.textContent = 'Ready!'; }, 700);
+  }, 200);
+</script>
+</body></html>
