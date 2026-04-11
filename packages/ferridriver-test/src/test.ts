@@ -365,6 +365,50 @@ Object.defineProperty(testFn, 'expect', {
 
 type FixtureFactory<T> = (fixtures: any, use: (value: T) => Promise<void>) => Promise<void>;
 
+/** Options for tuple-syntax fixture definitions. */
+interface FixtureOptions {
+  /** 'test' (default) or 'worker' — worker-scoped fixtures persist across tests in a worker. */
+  scope?: 'test' | 'worker';
+  /** Auto fixtures run even when not explicitly requested by the test. */
+  auto?: boolean;
+  /** Option fixtures can be overridden via test.use(). Default value is the first tuple element. */
+  option?: boolean;
+}
+
+/** A fixture definition: either a factory function or [factory, options] tuple. */
+type FixtureDef<T> = FixtureFactory<T> | [FixtureFactory<T>, FixtureOptions] | [T, { option: true }];
+
+/** Parsed fixture definition after normalization. */
+interface ParsedFixture<T> {
+  factory: FixtureFactory<T>;
+  scope: 'test' | 'worker';
+  auto: boolean;
+  option: boolean;
+}
+
+function parseFixtureDef<T>(def: FixtureDef<T>): ParsedFixture<T> {
+  if (typeof def === 'function') {
+    return { factory: def as FixtureFactory<T>, scope: 'test', auto: false, option: false };
+  }
+  if (Array.isArray(def)) {
+    const [first, opts] = def;
+    if (typeof first === 'function') {
+      // [factory, options] tuple
+      const o = (opts || {}) as FixtureOptions;
+      return { factory: first as FixtureFactory<T>, scope: o.scope || 'test', auto: o.auto || false, option: o.option || false };
+    }
+    // [defaultValue, { option: true }] — option fixture with static default
+    const defaultValue = first as T;
+    return {
+      factory: async (_fixtures, use) => { await use(defaultValue); },
+      scope: 'test',
+      auto: false,
+      option: true,
+    };
+  }
+  throw new Error(`Invalid fixture definition: expected function or [fn, options] tuple`);
+}
+
 /**
  * test.extend() — Playwright-compatible custom fixture extension.
  *
@@ -372,19 +416,26 @@ type FixtureFactory<T> = (fixtures: any, use: (value: T) => Promise<void>) => Pr
  * run TS-side (same as Playwright where custom fixtures are JS functions).
  * The Rust core handles the built-in fixtures; custom ones wrap around them.
  *
- * Usage:
- *   const myTest = test.extend<{ myFixture: string }>({
- *     myFixture: async ({ page }, use) => {
- *       const value = await setup();
- *       await use(value);
- *       await teardown();
- *     },
- *   });
- *   myTest('uses custom fixture', async ({ page, myFixture }) => { ... });
+ * Supports three forms:
+ *   // Simple factory
+ *   myFixture: async ({ page }, use) => { await use(value); }
+ *   // Tuple with options: scope, auto, option
+ *   db: [async ({}, use) => { ... }, { scope: 'worker' }]
+ *   // Option with default value (overridable via test.use())
+ *   baseURL: ['http://localhost', { option: true }]
  */
-testFn.extend = <T extends Record<string, any>>(customFixtures: { [K in keyof T]: FixtureFactory<T[K]> }) => {
+testFn.extend = <T extends Record<string, any>>(customFixtures: { [K in keyof T]: FixtureDef<T[K]> }) => {
+  // Parse all fixture definitions upfront.
+  const parsed: Record<string, ParsedFixture<any>> = {};
+  for (const [name, def] of Object.entries(customFixtures)) {
+    parsed[name] = parseFixtureDef(def as FixtureDef<any>);
+  }
+
+  // Worker-scoped fixture cache — persists across tests within the same extended test fn.
+  const workerCache: Record<string, any> = {};
+  const workerCleanups: (() => void)[] = [];
+
   // Create a new test function that wraps bodies to inject custom fixtures.
-  // Follows Playwright's setup/use/teardown pattern.
   const extendedTest = (name: string, ...args: any[]) => {
     const body = typeof args[args.length - 1] === 'function' ? args.pop() as TestBody : undefined;
     const details = args[0] as TestDetails | undefined;
@@ -401,7 +452,13 @@ testFn.extend = <T extends Record<string, any>>(customFixtures: { [K in keyof T]
       const factoryCleanups: (() => void)[] = [];
 
       // Resolve each custom fixture via setup/use/teardown.
-      for (const [fixtureName, factory] of Object.entries(customFixtures)) {
+      for (const [fixtureName, fix] of Object.entries(parsed)) {
+        // Worker-scoped: use cached value if available.
+        if (fix.scope === 'worker' && fixtureName in workerCache) {
+          customValues[fixtureName] = workerCache[fixtureName];
+          continue;
+        }
+
         const allFixtures = { ...base, ...customValues };
 
         let resolveUse: (() => void) | null = null;
@@ -409,14 +466,21 @@ testFn.extend = <T extends Record<string, any>>(customFixtures: { [K in keyof T]
         let resolveSetup: ((v?: any) => void) | null = null;
         const setupComplete = new Promise<void>((r) => { resolveSetup = r; });
 
-        const factoryDone = (factory as FixtureFactory<any>)(allFixtures, async (value) => {
+        const factoryDone = (fix.factory as FixtureFactory<any>)(allFixtures, async (value) => {
           customValues[fixtureName] = value;
+          if (fix.scope === 'worker') workerCache[fixtureName] = value;
           resolveSetup!();
           await useComplete;
         });
 
         await setupComplete;
-        factoryCleanups.push(() => { resolveUse!(); });
+
+        if (fix.scope === 'worker') {
+          // Worker-scoped cleanup deferred until process exit.
+          workerCleanups.push(() => { resolveUse!(); });
+        } else {
+          factoryCleanups.push(() => { resolveUse!(); });
+        }
         factoryDone.catch(() => { resolveSetup?.(); });
       }
 
@@ -439,6 +503,8 @@ testFn.extend = <T extends Record<string, any>>(customFixtures: { [K in keyof T]
 
   // Copy all methods from the original test function.
   Object.assign(extendedTest, testFn);
+  // Inherit extend so extended tests can be further extended.
+  (extendedTest as any).extend = testFn.extend;
   return extendedTest as typeof testFn;
 };
 

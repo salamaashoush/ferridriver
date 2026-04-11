@@ -159,6 +159,132 @@ pub struct ShardInfo {
   pub total: u32,
 }
 
+// ── Plan Builder ──
+
+/// Suite metadata for plan building.
+pub struct SuiteDef {
+  /// Suite ID (e.g. `"file::SuiteName"`). Must match `TestCase.id.suite`.
+  pub id: String,
+  pub name: String,
+  pub file: String,
+  pub mode: SuiteMode,
+}
+
+/// Hook registration for plan building.
+pub struct HookDef {
+  /// Suite ID this hook belongs to. Empty string = root/default suite.
+  pub suite_id: String,
+  pub kind: HookKind,
+}
+
+/// Hook kind with the associated callback.
+pub enum HookKind {
+  BeforeAll(SuiteHookFn),
+  AfterAll(SuiteHookFn),
+  BeforeEach(HookFn),
+  AfterEach(HookFn),
+}
+
+/// Builds a `TestPlan` from flat test cases, suite definitions, and hooks.
+///
+/// Groups tests by `TestCase.id.suite`, attaches hooks to matching suites,
+/// and respects suite mode (parallel/serial). This is the single place
+/// where suite→test→hook association happens — callers (NAPI, CLI, macros)
+/// just register flat data.
+pub struct TestPlanBuilder {
+  tests: Vec<TestCase>,
+  suites: Vec<SuiteDef>,
+  hooks: Vec<HookDef>,
+}
+
+impl TestPlanBuilder {
+  pub fn new() -> Self {
+    Self {
+      tests: Vec::new(),
+      suites: Vec::new(),
+      hooks: Vec::new(),
+    }
+  }
+
+  pub fn add_test(&mut self, test: TestCase) {
+    self.tests.push(test);
+  }
+
+  pub fn add_suite(&mut self, suite: SuiteDef) {
+    self.suites.push(suite);
+  }
+
+  pub fn add_hook(&mut self, hook: HookDef) {
+    self.hooks.push(hook);
+  }
+
+  /// Consume the builder and produce a `TestPlan`.
+  ///
+  /// Tests are grouped by `id.suite` (matching `SuiteDef.id`).
+  /// Tests without a suite go into a default parallel suite.
+  /// Hooks are attached to their matching suite by `suite_id`.
+  pub fn build(self) -> TestPlan {
+    use rustc_hash::FxHashMap;
+
+    // Index suite metadata by ID.
+    let suite_meta: FxHashMap<String, (String, String, SuiteMode)> = self
+      .suites
+      .into_iter()
+      .map(|s| (s.id, (s.name, s.file, s.mode)))
+      .collect();
+
+    // Group tests by suite key.
+    let mut grouped: FxHashMap<String, Vec<TestCase>> = FxHashMap::default();
+    for tc in self.tests {
+      let key = tc.id.suite.clone().unwrap_or_default();
+      grouped.entry(key).or_default().push(tc);
+    }
+
+    // Build hooks per suite.
+    let mut hook_map: FxHashMap<String, Hooks> = FxHashMap::default();
+    for h in self.hooks {
+      let hooks = hook_map.entry(h.suite_id).or_default();
+      match h.kind {
+        HookKind::BeforeAll(f) => hooks.before_all.push(f),
+        HookKind::AfterAll(f) => hooks.after_all.push(f),
+        HookKind::BeforeEach(f) => hooks.before_each.push(f),
+        HookKind::AfterEach(f) => hooks.after_each.push(f),
+      }
+    }
+
+    // Assemble suites.
+    let mut plan_suites: Vec<TestSuite> = Vec::new();
+    let mut total = 0usize;
+
+    for (suite_key, tests) in grouped {
+      total += tests.len();
+      let (name, file, mode) = if suite_key.is_empty() {
+        ("tests".to_string(), String::new(), SuiteMode::Parallel)
+      } else if let Some((n, f, m)) = suite_meta.get(&suite_key) {
+        (n.clone(), f.clone(), *m)
+      } else {
+        // Suite ID exists on tests but no SuiteDef was registered — use defaults.
+        (suite_key.clone(), String::new(), SuiteMode::Parallel)
+      };
+      let hooks = hook_map.remove(&suite_key).unwrap_or_default();
+      plan_suites.push(TestSuite {
+        name,
+        file,
+        tests,
+        hooks,
+        annotations: Vec::new(),
+        mode,
+      });
+    }
+
+    TestPlan {
+      suites: plan_suites,
+      total_tests: total,
+      shard: None,
+    }
+  }
+}
+
 // ── Test Info (runtime context available during test execution) ──
 
 /// Runtime test information accessible during test execution.
@@ -181,6 +307,10 @@ pub struct TestInfo {
   pub output_dir: PathBuf,
   /// Snapshot directory for this test.
   pub snapshot_dir: PathBuf,
+  /// Snapshot path template (e.g. `{testDir}/__snapshots__/{testFilePath}/{arg}{ext}`).
+  pub snapshot_path_template: Option<String>,
+  /// Snapshot update mode.
+  pub update_snapshots: crate::config::UpdateSnapshotsMode,
   /// Collected attachments.
   pub attachments: Arc<Mutex<Vec<Attachment>>>,
   /// Collected test steps.
@@ -635,6 +765,8 @@ pub struct TestOutcome {
   pub stderr: String,
   /// Annotations from the test definition + runtime (tags, severity, issues, etc.).
   pub annotations: Vec<TestAnnotation>,
+  /// Project/run metadata (from config). Available to reporters for JSON/HTML output.
+  pub metadata: serde_json::Value,
 }
 
 /// A test failure with diagnostic information.

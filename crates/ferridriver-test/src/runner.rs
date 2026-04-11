@@ -7,7 +7,7 @@ use std::time::Instant;
 use rustc_hash::FxHashMap;
 use tokio::sync::mpsc;
 
-use crate::config::{CliOverrides, TestConfig};
+use crate::config::{CliOverrides, ProjectConfig, TestConfig};
 use crate::dispatcher::Dispatcher;
 use crate::fixture::{FixturePool, FixtureScope, builtin_fixtures, validate_dag};
 use crate::model::{Hooks, TestPlan, TestStatus};
@@ -30,7 +30,7 @@ pub struct TestRunner {
 
 impl TestRunner {
   pub fn new(config: TestConfig, overrides: CliOverrides) -> Self {
-    let reporters = crate::reporter::create_reporters(&config.reporter, &config.output_dir, config.mode, config.quiet);
+    let reporters = crate::reporter::create_reporters(&config.reporter, &config.output_dir, config.mode, config.quiet, config.report_slow_tests.clone());
     Self {
       config: Arc::new(config),
       reporters,
@@ -46,10 +46,20 @@ impl TestRunner {
 
   /// Run the full test plan. Returns exit code (0 = all passed).
   ///
+  /// When `config.projects` is non-empty, topologically sorts projects by
+  /// dependencies and runs each with a merged config. Otherwise runs the
+  /// plan directly (single-project path).
+  ///
   /// Convenience wrapper: creates an `EventBus`, subscribes a `ReporterDriver`,
   /// and delegates to `execute()`. For real-time external observation (TUI, WebSocket),
   /// use `execute()` directly with a custom bus.
   pub async fn run(&mut self, plan: TestPlan) -> i32 {
+    // ── Multi-project path ──
+    if !self.config.projects.is_empty() {
+      return self.run_projects(plan).await;
+    }
+
+    // ── Single-project path ──
     let mut builder = EventBusBuilder::new();
     let reporter_sub = builder.subscribe();
     let bus = builder.build();
@@ -62,6 +72,170 @@ impl TestRunner {
 
     // Bus is dropped after execute returns (last clone). Channel closes,
     // driver finalizes reporters, returns them for potential reuse.
+    if let Ok(reporters) = driver_handle.await {
+      self.reporters = reporters;
+    }
+
+    exit_code
+  }
+
+  /// Run multiple projects in dependency order.
+  ///
+  /// Each project creates a merged config and runs the full execute pipeline
+  /// with its own browser instance. Results are aggregated — if any project
+  /// fails, the overall exit code is non-zero.
+  ///
+  /// Follows Playwright's project semantics:
+  /// - Projects are topologically sorted by `dependencies`
+  /// - A project only runs after all its dependencies have passed
+  /// - `teardown` projects run after the project and all its dependents complete
+  /// - If a dependency fails, dependent projects are skipped
+  async fn run_projects(&mut self, plan: TestPlan) -> i32 {
+    let projects = self.config.projects.clone();
+
+    let sorted = match topo_sort_projects(&projects) {
+      Ok(order) => order,
+      Err(e) => {
+        tracing::error!(target: "ferridriver::runner", "project dependency error: {e}");
+        return 1;
+      },
+    };
+
+    tracing::info!(
+      target: "ferridriver::runner",
+      projects = sorted.len(),
+      order = ?sorted.iter().map(|i| &projects[*i].name).collect::<Vec<_>>(),
+      "running projects in dependency order",
+    );
+
+    let mut exit_code = 0i32;
+    let mut failed_projects: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+    // Track completed projects for teardown scheduling.
+    let mut completed_projects: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+    // Collect teardown projects to run after all dependents finish.
+    let mut pending_teardowns: Vec<usize> = Vec::new();
+
+    for &idx in &sorted {
+      let project = &projects[idx];
+
+      // Skip if any dependency failed.
+      let dep_failed = project
+        .dependencies
+        .iter()
+        .any(|dep| failed_projects.contains(dep));
+      if dep_failed {
+        tracing::warn!(
+          target: "ferridriver::runner",
+          project = project.name,
+          "skipping — dependency failed",
+        );
+        failed_projects.insert(project.name.clone());
+        continue;
+      }
+
+      // Check if this is a teardown-only project (referenced by another project's `teardown` field).
+      // Teardown projects are deferred until after their parent and all dependents complete.
+      let is_teardown = projects.iter().any(|p| p.teardown.as_deref() == Some(&project.name));
+      if is_teardown && !completed_projects.contains(&project.name) {
+        // Haven't been explicitly scheduled yet — defer.
+        pending_teardowns.push(idx);
+        continue;
+      }
+
+      let project_exit = self.run_single_project(project, &plan).await;
+
+      completed_projects.insert(project.name.clone());
+
+      if project_exit != 0 {
+        exit_code = 1;
+        failed_projects.insert(project.name.clone());
+      }
+
+      // Run any teardown projects whose parent just completed.
+      if let Some(ref teardown_name) = project.teardown {
+        if let Some(td_idx) = projects.iter().position(|p| p.name == *teardown_name) {
+          let td_project = &projects[td_idx];
+          tracing::info!(
+            target: "ferridriver::runner",
+            project = td_project.name,
+            parent = project.name,
+            "running teardown project",
+          );
+          let td_exit = self.run_single_project(td_project, &plan).await;
+          completed_projects.insert(td_project.name.clone());
+          // Remove from pending if it was deferred.
+          pending_teardowns.retain(|&i| i != td_idx);
+          if td_exit != 0 {
+            exit_code = 1;
+          }
+        }
+      }
+    }
+
+    // Run any remaining deferred teardown projects.
+    for td_idx in pending_teardowns {
+      let td_project = &projects[td_idx];
+      if completed_projects.contains(&td_project.name) {
+        continue;
+      }
+      tracing::info!(
+        target: "ferridriver::runner",
+        project = td_project.name,
+        "running deferred teardown project",
+      );
+      let td_exit = self.run_single_project(td_project, &plan).await;
+      if td_exit != 0 {
+        exit_code = 1;
+      }
+    }
+
+    exit_code
+  }
+
+  /// Run a single project with merged config.
+  async fn run_single_project(&mut self, project: &ProjectConfig, base_plan: &TestPlan) -> i32 {
+    let merged_config = self.config.merge_project(project);
+
+    // Clone and filter the plan for this project.
+    let mut plan = base_plan.clone();
+    filter_plan_for_project(&mut plan, &merged_config, project);
+
+    if plan.total_tests == 0 {
+      tracing::debug!(
+        target: "ferridriver::runner",
+        project = project.name,
+        "no tests matched, skipping",
+      );
+      return 0;
+    }
+
+    tracing::info!(
+      target: "ferridriver::runner",
+      project = project.name,
+      tests = plan.total_tests,
+      "running project",
+    );
+
+    // Create a sub-runner with merged config. Reuse our reporters + overrides.
+    let reporters = std::mem::take(&mut self.reporters);
+
+    let mut builder = EventBusBuilder::new();
+    let reporter_sub = builder.subscribe();
+    let bus = builder.build();
+
+    let driver = ReporterDriver::new(reporters, reporter_sub);
+    let driver_handle = tokio::spawn(driver.run());
+
+    // Build a temporary runner with the merged config.
+    let sub_runner = TestRunner {
+      config: Arc::new(merged_config),
+      reporters: ReporterSet::default(),
+      overrides: self.overrides.clone(),
+      shared_browser: self.shared_browser.clone(),
+    };
+
+    let exit_code = sub_runner.execute(plan, bus).await;
+
     if let Ok(reporters) = driver_handle.await {
       self.reporters = reporters;
     }
@@ -115,6 +289,11 @@ impl TestRunner {
     if self.overrides.last_failed {
       let rerun_path = self.config.output_dir.join("@rerun.txt");
       crate::discovery::filter_by_rerun(&mut plan, &rerun_path);
+    }
+
+    // ── preserve_output: "never" — wipe output_dir at run start ──
+    if self.config.preserve_output == "never" {
+      let _ = std::fs::remove_dir_all(&self.config.output_dir);
     }
 
     let total_tests = plan.total_tests;
@@ -406,6 +585,19 @@ impl TestRunner {
         },
         TestStatus::Skipped => skipped += 1,
         _ => failed += 1,
+      }
+    }
+
+    // ── preserve_output: "failures-only" — delete output dirs for passing tests ──
+    if self.config.preserve_output == "failures-only" {
+      for (test_key, attempts) in &attempt_history {
+        let status = crate::retry::RetryPolicy::final_status(attempts);
+        if matches!(status, TestStatus::Passed | TestStatus::Skipped | TestStatus::Flaky) {
+          let test_output_dir = self.config.output_dir.join(test_key);
+          if test_output_dir.exists() {
+            let _ = std::fs::remove_dir_all(&test_output_dir);
+          }
+        }
       }
     }
 
@@ -706,6 +898,86 @@ fn build_plan_for_changes(
   }
 
   plan
+}
+
+/// Topologically sort projects by `dependencies`. Returns indices in execution order.
+///
+/// Uses Kahn's algorithm. Returns `Err` if there's a cycle or a missing dependency.
+fn topo_sort_projects(projects: &[ProjectConfig]) -> Result<Vec<usize>, String> {
+  let name_to_idx: FxHashMap<&str, usize> = projects
+    .iter()
+    .enumerate()
+    .map(|(i, p)| (p.name.as_str(), i))
+    .collect();
+
+  // Build adjacency list + in-degree.
+  let n = projects.len();
+  let mut in_degree = vec![0usize; n];
+  let mut adj: Vec<Vec<usize>> = vec![Vec::new(); n];
+
+  for (i, project) in projects.iter().enumerate() {
+    for dep_name in &project.dependencies {
+      let &dep_idx = name_to_idx
+        .get(dep_name.as_str())
+        .ok_or_else(|| format!("project '{}' depends on unknown project '{dep_name}'", project.name))?;
+      adj[dep_idx].push(i);
+      in_degree[i] += 1;
+    }
+  }
+
+  // Kahn's algorithm.
+  let mut queue: std::collections::VecDeque<usize> = in_degree
+    .iter()
+    .enumerate()
+    .filter(|(_, d)| **d == 0)
+    .map(|(i, _)| i)
+    .collect();
+
+  let mut order = Vec::with_capacity(n);
+  while let Some(node) = queue.pop_front() {
+    order.push(node);
+    for next in &adj[node] {
+      in_degree[*next] -= 1;
+      if in_degree[*next] == 0 {
+        queue.push_back(*next);
+      }
+    }
+  }
+
+  if order.len() != n {
+    return Err("circular dependency detected among projects".into());
+  }
+
+  Ok(order)
+}
+
+/// Filter a test plan for a specific project's scope.
+///
+/// Applies project-level test_match, test_dir, grep, grep_invert, and tag filters.
+fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &ProjectConfig) {
+  // Filter by test_dir: only keep suites whose file starts with test_dir.
+  if let Some(ref test_dir) = config.test_dir {
+    plan.suites.retain(|s| s.file.starts_with(test_dir.as_str()));
+  }
+
+  // Apply project-level grep filter (already merged into config.config_grep).
+  if let Some(ref grep) = config.config_grep {
+    crate::discovery::filter_by_grep(plan, grep, false);
+  }
+  if let Some(ref grep_inv) = config.config_grep_invert {
+    crate::discovery::filter_by_grep(plan, grep_inv, true);
+  }
+
+  // Apply project-level tag filter.
+  if let Some(ref tags) = project.tag {
+    for tag in tags {
+      crate::discovery::filter_by_tag(plan, tag);
+    }
+  }
+
+  // Recount after filtering.
+  plan.suites.retain(|s| !s.tests.is_empty());
+  plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
 }
 
 fn build_launch_options(browser_config: &crate::config::BrowserConfig) -> LaunchOptions {

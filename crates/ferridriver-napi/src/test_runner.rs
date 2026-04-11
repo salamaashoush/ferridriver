@@ -84,6 +84,40 @@ pub struct TestRunnerConfig {
   pub offline: Option<bool>,
   /// Bypass CSP. Condition: "bypass-csp".
   pub bypass_csp: Option<bool>,
+  /// Project configurations — matches Playwright's `projects` array.
+  pub projects: Option<Vec<NapiProjectConfig>>,
+}
+
+/// Project config passed from TS — maps to Rust `ProjectConfig`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct NapiProjectConfig {
+  pub name: String,
+  pub test_match: Option<Vec<String>>,
+  pub test_ignore: Option<Vec<String>>,
+  pub test_dir: Option<String>,
+  pub grep: Option<String>,
+  pub grep_invert: Option<String>,
+  pub timeout: Option<f64>,
+  pub retries: Option<i32>,
+  pub repeat_each: Option<i32>,
+  pub fully_parallel: Option<bool>,
+  pub output_dir: Option<String>,
+  pub snapshot_dir: Option<String>,
+  pub dependencies: Option<Vec<String>>,
+  pub teardown: Option<String>,
+  pub tag: Option<Vec<String>>,
+  /// Browser/context config (Playwright's `use` block).
+  pub browser: Option<String>,
+  pub backend: Option<String>,
+  pub channel: Option<String>,
+  pub headed: Option<bool>,
+  pub viewport_width: Option<i32>,
+  pub viewport_height: Option<i32>,
+  pub is_mobile: Option<bool>,
+  pub has_touch: Option<bool>,
+  pub color_scheme: Option<String>,
+  pub locale: Option<String>,
 }
 
 /// Metadata for a registered test.
@@ -235,8 +269,13 @@ impl TestRunner {
       bypass_csp: cfg.bypass_csp,
       ..Default::default()
     };
-    let tc = ferridriver_test::config::resolve_config(&overrides)
+    let mut tc = ferridriver_test::config::resolve_config(&overrides)
       .map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
+
+    // Wire NAPI projects into Rust config.
+    if let Some(ref napi_projects) = cfg.projects {
+      tc.projects = napi_projects.iter().map(napi_project_to_rust).collect();
+    }
 
     Ok(Self {
       config: tc,
@@ -375,6 +414,8 @@ impl TestRunner {
             let bcfg = bcfg.clone();
             Box::pin(async move {
               // Pull ALL fixtures from the pool (created by the core worker).
+              let browser: Arc<ferridriver::Browser> =
+                pool.get("browser").await.map_err(|e| TestFailure::from(format!("fixture 'browser': {e}")))?;
               let page: Arc<ferridriver::Page> =
                 pool.get("page").await.map_err(|e| TestFailure::from(format!("fixture 'page': {e}")))?;
               let context: Arc<ferridriver::context::ContextRef> =
@@ -390,6 +431,7 @@ impl TestRunner {
 
               // Build the TestFixtures object for JS.
               let fixtures = crate::test_fixtures::TestFixtures::new(
+                (*browser).clone(),
                 (*page).clone(),
                 (*context).clone(),
                 request,
@@ -429,22 +471,67 @@ impl TestRunner {
       })
       .collect();
 
-    let total = test_cases.len();
-    drop(tests); // Release lock before running.
+    drop(tests); // Release lock before building plan.
 
-    // Build TestPlan.
-    let plan = TestPlan {
-      suites: vec![TestSuite {
-        name: "tests".into(),
-        file: "".into(),
-        tests: test_cases,
-        hooks: Hooks::default(),
-        annotations: Vec::new(),
-        mode: SuiteMode::Parallel,
-      }],
-      total_tests: total,
-      shard: None,
-    };
+    // ── Build TestPlan via core builder (grouping + hook wiring in Rust core) ──
+    let mut builder = ferridriver_test::TestPlanBuilder::new();
+
+    for tc in test_cases {
+      builder.add_test(tc);
+    }
+
+    // Register suites.
+    let suites_reg = self.suites.lock().await;
+    for s in suites_reg.iter() {
+      builder.add_suite(ferridriver_test::SuiteDef {
+        id: s.id.clone(),
+        name: s.meta.name.clone(),
+        file: s.meta.file.clone(),
+        mode: match s.meta.mode.as_deref() {
+          Some("serial") => SuiteMode::Serial,
+          _ => SuiteMode::Parallel,
+        },
+      });
+    }
+    drop(suites_reg);
+
+    // Register hooks — NAPI wraps JS callbacks into Rust hook fns, core handles association.
+    let hooks_reg = self.hooks.lock().await;
+    for h in hooks_reg.iter() {
+      let cb = Arc::clone(&h.callback);
+      let bcfg = browser_config.clone();
+      let kind = match h.meta.kind.as_str() {
+        "beforeAll" => {
+          ferridriver_test::HookKind::BeforeAll(Arc::new(move |_pool| {
+            let cb = Arc::clone(&cb);
+            Box::pin(async move {
+              // TODO: proper suite-scoped fixtures for beforeAll/afterAll
+              let _ = cb;
+              Ok(())
+            })
+          }))
+        },
+        "afterAll" => {
+          ferridriver_test::HookKind::AfterAll(Arc::new(move |_pool| {
+            let cb = Arc::clone(&cb);
+            Box::pin(async move {
+              let _ = cb;
+              Ok(())
+            })
+          }))
+        },
+        "beforeEach" => ferridriver_test::HookKind::BeforeEach(make_each_hook(cb, bcfg)),
+        "afterEach" => ferridriver_test::HookKind::AfterEach(make_each_hook(cb, bcfg)),
+        _ => continue,
+      };
+      builder.add_hook(ferridriver_test::HookDef {
+        suite_id: h.meta.suite_id.clone(),
+        kind,
+      });
+    }
+    drop(hooks_reg);
+
+    let plan = builder.build();
 
     // Build CLI overrides.
     let overrides = ferridriver_test::config::CliOverrides {
@@ -598,6 +685,55 @@ impl TestRunner {
   }
 }
 
+/// Build a beforeEach/afterEach hook fn that wraps a JS callback.
+fn make_each_hook(
+  cb: Arc<TestCallbackFn>,
+  browser_config: ferridriver_test::config::BrowserConfig,
+) -> ferridriver_test::model::HookFn {
+  Arc::new(move |pool, test_info| {
+    let cb = Arc::clone(&cb);
+    let bcfg = browser_config.clone();
+    Box::pin(async move {
+      let browser: Arc<ferridriver::Browser> = pool
+        .get("browser")
+        .await
+        .map_err(|e| ferridriver_test::TestFailure::from(format!("hook fixture 'browser': {e}")))?;
+      let page: Arc<ferridriver::Page> =
+        pool.get("page").await.map_err(|e| ferridriver_test::TestFailure::from(format!("hook fixture 'page': {e}")))?;
+      let context: Arc<ferridriver::context::ContextRef> = pool
+        .get("context")
+        .await
+        .map_err(|e| ferridriver_test::TestFailure::from(format!("hook fixture 'context': {e}")))?;
+      let request: Arc<ferridriver::api_request::APIRequestContext> = pool
+        .get("request")
+        .await
+        .map_err(|e| ferridriver_test::TestFailure::from(format!("hook fixture 'request': {e}")))?;
+      let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
+      let fixtures = crate::test_fixtures::TestFixtures::new(
+        (*browser).clone(),
+        (*page).clone(),
+        (*context).clone(),
+        request,
+        test_info,
+        modifiers,
+        bcfg.browser.clone(),
+        bcfg.headless,
+        bcfg.context.is_mobile,
+        bcfg.context.has_touch,
+        bcfg.context.color_scheme.clone(),
+        bcfg.context.locale.clone(),
+        bcfg.channel.clone(),
+      );
+      call_js_test(&cb, fixtures).await.map_err(|e| ferridriver_test::TestFailure {
+        message: e,
+        stack: None,
+        diff: None,
+        screenshot: None,
+      })
+    })
+  })
+}
+
 /// Call a JS test callback with fixtures and await the returned Promise.
 async fn call_js_test(
   tsfn: &TestCallbackFn,
@@ -651,5 +787,76 @@ impl ferridriver_test::reporter::Reporter for ResultCollectorReporter {
 
   async fn finalize(&mut self) -> std::result::Result<(), String> {
     Ok(())
+  }
+}
+
+/// Convert NAPI project config to Rust `ProjectConfig`.
+fn napi_project_to_rust(napi: &NapiProjectConfig) -> ferridriver_test::config::ProjectConfig {
+  let browser_config = if napi.browser.is_some()
+    || napi.backend.is_some()
+    || napi.channel.is_some()
+    || napi.headed.is_some()
+    || napi.viewport_width.is_some()
+    || napi.is_mobile.is_some()
+    || napi.has_touch.is_some()
+    || napi.color_scheme.is_some()
+    || napi.locale.is_some()
+  {
+    let mut bc = ferridriver_test::config::BrowserConfig::default();
+    if let Some(ref b) = napi.browser {
+      bc.browser.clone_from(b);
+    }
+    if let Some(ref b) = napi.backend {
+      bc.backend.clone_from(b);
+    }
+    if let Some(ref ch) = napi.channel {
+      bc.channel = Some(ch.clone());
+    }
+    if let Some(headed) = napi.headed {
+      bc.headless = !headed;
+    }
+    if let Some(w) = napi.viewport_width {
+      if let Some(h) = napi.viewport_height {
+        bc.viewport = Some(ferridriver_test::config::ViewportConfig {
+          width: w as i64,
+          height: h as i64,
+        });
+      }
+    }
+    if let Some(m) = napi.is_mobile {
+      bc.context.is_mobile = m;
+    }
+    if let Some(t) = napi.has_touch {
+      bc.context.has_touch = t;
+    }
+    if let Some(ref cs) = napi.color_scheme {
+      bc.context.color_scheme = Some(cs.clone());
+    }
+    if let Some(ref l) = napi.locale {
+      bc.context.locale = Some(l.clone());
+    }
+    Some(bc)
+  } else {
+    None
+  };
+
+  ferridriver_test::config::ProjectConfig {
+    name: napi.name.clone(),
+    test_match: napi.test_match.clone(),
+    test_ignore: napi.test_ignore.clone(),
+    test_dir: napi.test_dir.clone(),
+    browser: browser_config,
+    output_dir: napi.output_dir.clone(),
+    snapshot_dir: napi.snapshot_dir.clone(),
+    retries: napi.retries.map(|r| r as u32),
+    timeout: napi.timeout.map(|t| t as u64),
+    repeat_each: napi.repeat_each.map(|r| r as u32),
+    fully_parallel: napi.fully_parallel,
+    grep: napi.grep.clone(),
+    grep_invert: napi.grep_invert.clone(),
+    dependencies: napi.dependencies.clone().unwrap_or_default(),
+    teardown: napi.teardown.clone(),
+    tag: napi.tag.clone(),
+    ..Default::default()
   }
 }

@@ -646,6 +646,8 @@ fn test_snapshot_create_and_match() {
     repeat_each_index: 0,
     output_dir: tmp.join("output"),
     snapshot_dir: tmp.join("snaps"),
+    snapshot_path_template: None,
+    update_snapshots: ferridriver_test::config::UpdateSnapshotsMode::default(),
     attachments: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     steps: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     soft_errors: Arc::new(tokio::sync::Mutex::new(Vec::new())),

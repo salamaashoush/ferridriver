@@ -186,6 +186,7 @@ impl Worker {
           stdout: String::new(),
           stderr: String::new(),
           annotations: test.annotations.clone(),
+          metadata: self.config.metadata.clone(),
         };
         self
           .event_bus
@@ -315,6 +316,7 @@ impl Worker {
         stdout: String::new(),
         stderr: String::new(),
         annotations: test.annotations.clone(),
+        metadata: self.config.metadata.clone(),
       };
       self
         .event_bus
@@ -356,6 +358,7 @@ impl Worker {
         stdout: String::new(),
         stderr: String::new(),
         annotations: test.annotations.clone(),
+        metadata: self.config.metadata.clone(),
       };
       self
         .event_bus
@@ -468,19 +471,76 @@ impl Worker {
         if let Some(v) = opts.get("ignoreHTTPSErrors").and_then(|v| v.as_bool()) {
           ctx_config.ignore_https_errors = v;
         }
+        // Geolocation: { latitude, longitude, accuracy? }
+        if let Some(geo) = opts.get("geolocation").and_then(|v| v.as_object()) {
+          if let (Some(lat), Some(lon)) = (
+            geo.get("latitude").and_then(|v| v.as_f64()),
+            geo.get("longitude").and_then(|v| v.as_f64()),
+          ) {
+            ctx_config.geolocation = Some(crate::config::GeolocationConfig {
+              latitude: lat,
+              longitude: lon,
+              accuracy: geo.get("accuracy").and_then(|v| v.as_f64()),
+            });
+          }
+        }
+        // Permissions: string[]
+        if let Some(arr) = opts.get("permissions").and_then(|v| v.as_array()) {
+          let perms: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+          if !perms.is_empty() {
+            ctx_config.permissions = perms;
+          }
+        }
+        // Extra HTTP headers: Record<string, string>
+        if let Some(obj) = opts.get("extraHTTPHeaders").and_then(|v| v.as_object()) {
+          let headers: std::collections::BTreeMap<String, String> = obj
+            .iter()
+            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+            .collect();
+          if !headers.is_empty() {
+            ctx_config.extra_http_headers = headers;
+          }
+        }
+        // HTTP credentials: { username, password, origin? }
+        if let Some(creds) = opts.get("httpCredentials").and_then(|v| v.as_object()) {
+          if let (Some(user), Some(pass)) = (
+            creds.get("username").and_then(|v| v.as_str()),
+            creds.get("password").and_then(|v| v.as_str()),
+          ) {
+            ctx_config.http_credentials = Some(crate::config::HttpCredentialsConfig {
+              username: user.to_string(),
+              password: pass.to_string(),
+              origin: creds.get("origin").and_then(|v| v.as_str()).map(String::from),
+            });
+          }
+        }
       }
+      // Viewport override from use_options: { width, height }
+      let viewport_override = test.use_options.as_ref().and_then(|opts| {
+        opts.get("viewport").and_then(|v| {
+          let w = v.get("width").and_then(|w| w.as_i64());
+          let h = v.get("height").and_then(|h| h.as_i64());
+          match (w, h) {
+            (Some(w), Some(h)) => Some(crate::config::ViewportConfig { width: w, height: h }),
+            _ => None,
+          }
+        })
+      });
+
       let ctx_config = &ctx_config;
       // Viewport + mobile/touch emulation.
-      if let Some(ref vp) = self.config.browser.viewport {
-        let viewport_config = ferridriver::options::ViewportConfig {
-          width: vp.width,
-          height: vp.height,
-          device_scale_factor: ctx_config.device_scale_factor.unwrap_or(1.0),
-          is_mobile: ctx_config.is_mobile,
-          has_touch: ctx_config.has_touch,
-          is_landscape: false,
-        };
-        let _ = page.set_viewport(&viewport_config).await;
+      let effective_vp = viewport_override.as_ref().or(self.config.browser.viewport.as_ref());
+      if let Some(vp) = effective_vp {
+        let _ = page
+          .set_viewport(&ferridriver::options::ViewportConfig {
+            width: vp.width,
+            height: vp.height,
+            device_scale_factor: ctx_config.device_scale_factor.unwrap_or(1.0),
+            is_mobile: ctx_config.is_mobile,
+            has_touch: ctx_config.has_touch,
+            is_landscape: ctx_config.is_mobile && vp.width > vp.height,
+          })
+          .await;
       }
       // Color scheme / media emulation.
       if ctx_config.color_scheme.is_some() {
@@ -590,6 +650,8 @@ impl Worker {
         .as_ref()
         .map(std::path::PathBuf::from)
         .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
+      snapshot_path_template: self.config.snapshot_path_template.clone(),
+      update_snapshots: self.config.update_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(Mutex::new(Vec::new())),
@@ -616,9 +678,15 @@ impl Worker {
         test_pool.inject("test_info", Arc::clone(&test_info)).await;
 
         // ── Request fixture (API testing context) ──
+        // baseURL from test.use() overrides global config.
+        let effective_base_url = test
+          .use_options
+          .as_ref()
+          .and_then(|opts| opts.get("baseURL").and_then(|v| v.as_str()).map(String::from))
+          .or_else(|| self.config.base_url.clone());
         let request_ctx = Arc::new(ferridriver::api_request::APIRequestContext::new(
           ferridriver::api_request::RequestContextOptions {
-            base_url: self.config.base_url.clone(),
+            base_url: effective_base_url,
             ..Default::default()
           },
         ));
@@ -839,6 +907,7 @@ impl Worker {
             stdout: String::new(),
             stderr: String::new(),
             annotations: test.annotations.clone(),
+            metadata: self.config.metadata.clone(),
           };
           self
             .event_bus
@@ -1011,6 +1080,7 @@ impl Worker {
       stdout: String::new(),
       stderr: String::new(),
       annotations,
+      metadata: self.config.metadata.clone(),
     };
 
     self

@@ -35,6 +35,13 @@ pub struct Browser {
   inner: ferridriver::Browser,
 }
 
+impl Browser {
+  /// Wrap a core Browser into a NAPI Browser.
+  pub(crate) fn wrap(inner: ferridriver::Browser) -> Self {
+    Self { inner }
+  }
+}
+
 #[napi]
 impl Browser {
   /// Launch a new browser with default settings.
