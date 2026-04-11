@@ -69,7 +69,7 @@ impl TestFixtures {
 
 #[napi]
 impl TestFixtures {
-  // ── Core fixtures (reconstruct NAPI wrappers from Clone-able inner types) ──
+  // ── Core fixtures ──
 
   #[napi(getter)]
   pub fn page(&self) -> crate::page::Page {
