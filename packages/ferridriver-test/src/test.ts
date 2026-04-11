@@ -150,6 +150,7 @@ function testFn(name: string, detailsOrBody: TestDetails | TestBody, maybeBody?:
       retries: details?.retries,
       suite_id: currentSuiteId(),
       annotations: buildAnnotations(details),
+      use_options: currentUseOverrides(),
     },
     body: wrapBody(body),
   });
@@ -305,11 +306,18 @@ testFn.setTimeout = (ms: number) => {
   _currentTestInfo.setTimeout(ms);
 };
 
-/** Step API — delegates to NAPI TestInfo. */
+/** Step API — delegates to NAPI TestInfo.beginStep(). */
 testFn.step = async <T>(title: string, body: () => T | Promise<T>): Promise<T> => {
   if (!_currentTestInfo) throw new Error('test.step() can only be called inside a test body');
-  // TODO: wire to testInfo.beginStep() once NAPI StepHandle is implemented
-  return await body();
+  const handle = await _currentTestInfo.beginStep(title);
+  try {
+    const result = await body();
+    await handle.end();
+    return result;
+  } catch (e: any) {
+    await handle.end(e?.message ?? String(e));
+    throw e;
+  }
 };
 
 // ── Hooks ──
@@ -357,7 +365,9 @@ Object.defineProperty(testFn, 'expect', {
 
 export function describe(name: string, fn: () => void): void {
   describeStack.push(name);
+  useOverridesStack.push({});
   fn();
+  useOverridesStack.pop();
   describeStack.pop();
 }
 
@@ -431,8 +441,31 @@ describe.each = <T>(data: T[]) => {
 
 // ── test.use() ──
 
-testFn.use = (_options: Record<string, any>) => {
-  // TODO: wire to fixture override system once TestMeta.use_options is implemented
+/** Scope-level fixture overrides stack. Pushed by test.use(), popped when scope ends. */
+const useOverridesStack: Record<string, any>[] = [{}];
+
+function currentUseOverrides(): Record<string, any> | undefined {
+  // Merge all overrides on the stack (inner scopes override outer).
+  let merged: Record<string, any> | undefined;
+  for (const o of useOverridesStack) {
+    if (Object.keys(o).length > 0) {
+      merged = { ...merged, ...o };
+    }
+  }
+  return merged;
+}
+
+/**
+ * test.use() — Playwright-compatible fixture overrides.
+ *
+ * Sets fixture options for all tests in the current scope (describe block).
+ * Overrides are serialized as `use_options` on each test's TestMeta and
+ * applied by the Rust worker when creating the browser context.
+ */
+testFn.use = (options: Record<string, any>) => {
+  if (useOverridesStack.length > 0) {
+    Object.assign(useOverridesStack[useOverridesStack.length - 1], options);
+  }
 };
 
 // ── Internal state ──

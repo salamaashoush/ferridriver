@@ -185,4 +185,35 @@ impl TestInfo {
     }
     path.display().to_string()
   }
+
+  /// Begin a structured test step. Returns a `StepHandle` that must be completed via `end()`.
+  /// Mirrors Playwright's `testInfo.step()`.
+  #[napi]
+  pub async fn begin_step(&self, title: String) -> crate::step_handle::StepHandle {
+    let handle = self
+      .inner
+      .begin_step(&title, ferridriver_test::model::StepCategory::TestStep)
+      .await;
+    crate::step_handle::StepHandle::new(handle)
+  }
+
+  /// Add an attachment to this test. Mirrors Playwright's `testInfo.attach()`.
+  #[napi]
+  pub async fn attach(&self, name: String, content_type: String, body: napi::bindgen_prelude::Buffer) {
+    let bytes = body.to_vec();
+    self
+      .inner
+      .attach(
+        name,
+        content_type,
+        ferridriver_test::model::AttachmentBody::Bytes(bytes),
+      )
+      .await;
+  }
+
+  /// Add a structured annotation. Mirrors Playwright's `testInfo.annotations.push()`.
+  #[napi]
+  pub async fn annotate(&self, type_name: String, description: String) {
+    self.inner.annotate(type_name, description).await;
+  }
 }

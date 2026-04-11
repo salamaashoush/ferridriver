@@ -120,6 +120,58 @@ test('test with details', { tag: ['smoke', 'fast'], annotation: { type: 'issue',
   await page.goto('data:text/html,<title>Details</title>');
 });
 
+// ── test.step() ──
+
+test('test.step creates structured steps', async ({ page }) => {
+  await test.step('navigate', async () => {
+    await page.goto('data:text/html,<title>Steps</title>');
+  });
+  await test.step('verify title', async () => {
+    const title = await page.title();
+    if (title !== 'Steps') throw new Error(`unexpected: ${title}`);
+  });
+});
+
+test('test.step returns value', async ({ page }) => {
+  const title = await test.step('get title', async () => {
+    await page.goto('data:text/html,<title>ReturnVal</title>');
+    return await page.title();
+  });
+  if (title !== 'ReturnVal') throw new Error(`expected ReturnVal, got ${title}`);
+});
+
+// ── test.use() ──
+
+describe('test.use scope', () => {
+  test.use({ locale: 'de-DE', colorScheme: 'dark' });
+
+  test('use options are set', async ({ page }) => {
+    // test.use() sets options that the worker applies to the context.
+    // For now we just verify the test runs without error.
+    await page.goto('data:text/html,<title>UseOptions</title>');
+  });
+});
+
+// ── test.setTimeout() ──
+
+test('test.setTimeout adjusts timeout', async ({ page, testInfo }) => {
+  test.setTimeout(60000);
+  await page.goto('data:text/html,<title>Timeout</title>');
+});
+
+// ── test.info() ──
+
+test('test.info returns testInfo', async ({ page }) => {
+  const info = test.info();
+  if (!info) throw new Error('test.info() returned null');
+  if (!info.title) throw new Error('test.info().title is empty');
+  if (typeof info.workerIndex !== 'number') throw new Error('workerIndex not a number');
+});
+
+// ── Hooks ──
+// Note: beforeEach/afterEach hooks require suite registration wiring.
+// TODO: test once hook-to-suite association is implemented.
+
 // ── test.each ──
 
 test.each([
