@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use tokio::sync::Mutex;
 
-use ferridriver_test::reporter::{EventBus, EventBusBuilder, ReporterDriver, ReporterEvent, ReporterSet};
+use ferridriver_test::reporter::{EventBusBuilder, ReporterDriver, ReporterEvent, ReporterSet};
 
 // ── EventBus fan-out tests ──
 
