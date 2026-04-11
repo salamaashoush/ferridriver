@@ -334,14 +334,13 @@ impl Worker {
       };
     }
 
-    // Check for skip/fixme (with conditional fixme evaluation).
-    let browser_backend = &self.config.browser.backend;
+    // Check for skip/fixme (with conditional evaluation).
+    let browser_config = &self.config.browser;
     let should_skip = test.annotations.iter().any(|a| match a {
-      TestAnnotation::Skip { .. } => true,
+      TestAnnotation::Skip { condition: None, .. } => true,
+      TestAnnotation::Skip { condition: Some(cond), .. } => evaluate_condition(cond, browser_config),
       TestAnnotation::Fixme { condition: None, .. } => true,
-      TestAnnotation::Fixme {
-        condition: Some(cond), ..
-      } => evaluate_fixme_condition(cond, browser_backend),
+      TestAnnotation::Fixme { condition: Some(cond), .. } => evaluate_condition(cond, browser_config),
       _ => false,
     });
     if should_skip {
@@ -384,9 +383,28 @@ impl Worker {
       })
       .await;
 
-    // Timeout with slow multiplier.
+    // Evaluate Fail condition: if condition matches, expect failure (invert pass/fail).
+    let mut expected_status = test.expected_status.clone();
+    for ann in &test.annotations {
+      if let TestAnnotation::Fail { condition, .. } = ann {
+        let applies = match condition {
+          None => true,
+          Some(cond) => evaluate_condition(cond, browser_config),
+        };
+        if applies {
+          expected_status = ExpectedStatus::Fail;
+        }
+      }
+    }
+
+    // Timeout with slow multiplier (conditional).
     let mut timeout_dur = test.timeout.unwrap_or(Duration::from_millis(self.config.timeout));
-    if test.annotations.iter().any(|a| matches!(a, TestAnnotation::Slow)) {
+    let is_slow = test.annotations.iter().any(|a| match a {
+      TestAnnotation::Slow { condition: None, .. } => true,
+      TestAnnotation::Slow { condition: Some(cond), .. } => evaluate_condition(cond, browser_config),
+      _ => false,
+    });
+    if is_slow {
       timeout_dur *= 3;
     }
 
@@ -395,6 +413,55 @@ impl Worker {
     // Create fresh isolated context + page.
     let ctx = browser.new_context();
     let page_result = ctx.new_page().await;
+
+    // Apply context config to the page (Playwright's `use` block).
+    // This makes the config values the actual runtime state, not just condition inputs.
+    if let Ok(ref page) = page_result {
+      let ctx_config = &self.config.browser.context;
+      // Viewport + mobile/touch emulation.
+      if let Some(ref vp) = self.config.browser.viewport {
+        let viewport_config = ferridriver::options::ViewportConfig {
+          width: vp.width,
+          height: vp.height,
+          device_scale_factor: ctx_config.device_scale_factor.unwrap_or(1.0),
+          is_mobile: ctx_config.is_mobile,
+          has_touch: ctx_config.has_touch,
+          is_landscape: false,
+        };
+        let _ = page.set_viewport(&viewport_config).await;
+      }
+      // Color scheme / media emulation.
+      if ctx_config.color_scheme.is_some() {
+        let _ = page
+          .emulate_media(&ferridriver::options::EmulateMediaOptions {
+            color_scheme: ctx_config.color_scheme.clone(),
+            ..Default::default()
+          })
+          .await;
+      }
+      // Locale.
+      if let Some(ref locale) = ctx_config.locale {
+        let _ = page.set_locale(locale).await;
+      }
+      // Timezone.
+      if let Some(ref tz) = ctx_config.timezone_id {
+        let _ = page.set_timezone(tz).await;
+      }
+      // Geolocation.
+      if let Some(ref geo) = ctx_config.geolocation {
+        let _ = page
+          .set_geolocation(geo.latitude, geo.longitude, geo.accuracy.unwrap_or(0.0))
+          .await;
+      }
+      // Offline mode.
+      if ctx_config.offline {
+        let _ = page.set_network_state(true, 0.0, -1.0, -1.0).await;
+      }
+      // Permissions.
+      if !ctx_config.permissions.is_empty() {
+        let _ = page.grant_permissions(&ctx_config.permissions, None).await;
+      }
+    }
 
     // Create TestInfo for this test execution.
     let test_info = Arc::new(TestInfo {
@@ -632,7 +699,44 @@ impl Worker {
 
     let (raw_status, raw_error) = match timeout_result {
       Ok(Ok(())) => (TestStatus::Passed, None),
-      Ok(Err(mut failure)) => {
+      Ok(Err(failure)) => {
+        // Runtime skip: test body called test.skip() — treat as skip, not failure.
+        // This mirrors Playwright's TestSkipError thrown by test.skip() inside body.
+        if failure.message.starts_with("__FERRIDRIVER_SKIP__:") {
+          let reason = failure.message.strip_prefix("__FERRIDRIVER_SKIP__:").unwrap_or("");
+          tracing::debug!(target: "ferridriver::worker", "test skipped at runtime: {reason}");
+          let outcome = TestOutcome {
+            test_id: test_id.clone(),
+            status: TestStatus::Skipped,
+            duration: start.elapsed(),
+            attempt,
+            max_attempts,
+            error: None,
+            attachments: Vec::new(),
+            steps: Vec::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            annotations: test.annotations.clone(),
+          };
+          self
+            .event_bus
+            .emit(ReporterEvent::TestFinished {
+              test_id: test_id.clone(),
+              outcome: outcome.clone(),
+            })
+            .await;
+          return WorkerTestResult {
+            outcome,
+            should_retry: false,
+            test_fn,
+            test_id,
+            fixture_requests,
+            suite_key,
+            hooks,
+          };
+        }
+
+        let mut failure = failure;
         if failure.screenshot.is_none() {
           failure.screenshot = screenshot;
         }
@@ -650,7 +754,7 @@ impl Worker {
     };
 
     // Expected failure inversion (test.fail() annotation).
-    let (status, error) = match (&raw_status, &test.expected_status) {
+    let (status, error) = match (&raw_status, &expected_status) {
       (TestStatus::Failed | TestStatus::TimedOut, ExpectedStatus::Fail) => (TestStatus::Passed, None),
       (TestStatus::Passed, ExpectedStatus::Fail) => (
         TestStatus::Failed,
@@ -811,31 +915,97 @@ async fn capture_screenshot(page: &ferridriver::Page) -> Option<Vec<u8>> {
   page.screenshot(opts).await.ok()
 }
 
-/// Evaluate a fixme condition string against the current environment.
+/// Evaluate an annotation condition string against the current environment.
 ///
-/// Supported conditions:
-/// - `"linux"`, `"macos"`, `"windows"` — matches current OS
-/// - `"chromium"`, `"webkit"`, `"firefox"` — matches browser backend
-/// - `"ci"` — matches when `CI` env var is set
-/// - `"headed"`, `"headless"` — matches browser mode
-/// - `"!condition"` — negation
-fn evaluate_fixme_condition(condition: &str, browser_backend: &str) -> bool {
+/// Mirrors Playwright's fixture-based condition system. Conditions match against
+/// the browser config (equivalent to Playwright's `browserName`, `headless`,
+/// `isMobile`, etc. fixtures from the `use` block).
+///
+/// ## Supported conditions
+///
+/// **Browser name** (Playwright's `browserName` fixture):
+/// - `"chromium"`, `"chrome"` — matches browser name "chromium"
+/// - `"firefox"` — matches browser name "firefox"
+/// - `"webkit"` — matches browser name "webkit"
+///
+/// **Browser channel** (Playwright's `channel` fixture):
+/// - `"msedge"`, `"chrome-beta"`, `"chrome-canary"`
+///
+/// **OS / platform:**
+/// - `"linux"`, `"macos"` / `"darwin"`, `"windows"` / `"win32"`
+///
+/// **Browser mode** (Playwright's `headless` fixture):
+/// - `"headed"`, `"headless"`
+///
+/// **Context options** (Playwright's `use` block fixtures):
+/// - `"mobile"` — `isMobile` is true
+/// - `"touch"` — `hasTouch` is true
+/// - `"dark"` — `colorScheme` is "dark"
+/// - `"light"` — `colorScheme` is "light"
+/// - `"offline"` — offline network mode
+/// - `"bypass-csp"` — CSP bypass enabled
+///
+/// **Environment:**
+/// - `"ci"` — `CI` env var is set
+/// - `"debug"` — debug build (`cfg!(debug_assertions)`)
+/// - `"env:VAR_NAME"` — generic env var check, true if set and non-empty
+///
+/// **Operators:**
+/// - `"!condition"` — negation (invert any condition)
+/// - `"cond1+cond2"` — conjunction (AND), all must match
+fn evaluate_condition(condition: &str, browser: &crate::config::BrowserConfig) -> bool {
   let condition = condition.trim();
+
+  // Negation: !condition
   if let Some(inner) = condition.strip_prefix('!') {
-    return !evaluate_fixme_condition(inner, browser_backend);
+    return !evaluate_condition(inner, browser);
   }
+
+  // Conjunction: condition1+condition2+...
+  if condition.contains('+') {
+    return condition.split('+').all(|part| evaluate_condition(part, browser));
+  }
+
   match condition {
     // OS conditions.
     "linux" => cfg!(target_os = "linux"),
     "macos" | "darwin" => cfg!(target_os = "macos"),
     "windows" | "win32" => cfg!(target_os = "windows"),
-    // Browser conditions.
-    "chromium" | "chrome" => browser_backend.contains("cdp"),
-    "webkit" => browser_backend == "webkit",
-    "firefox" => browser_backend == "firefox",
-    // Environment conditions.
+
+    // Browser name (Playwright's browserName fixture).
+    "chromium" | "chrome" => browser.browser == "chromium",
+    "webkit" => browser.browser == "webkit",
+    "firefox" => browser.browser == "firefox",
+
+    // Browser channel (Playwright's channel fixture).
+    "msedge" => browser.channel.as_deref() == Some("msedge"),
+    "chrome-beta" => browser.channel.as_deref() == Some("chrome-beta"),
+    "chrome-canary" => browser.channel.as_deref() == Some("chrome-canary"),
+
+    // Browser mode.
+    "headed" => !browser.headless,
+    "headless" => browser.headless,
+
+    // Context options (Playwright's use block fixtures).
+    "mobile" => browser.context.is_mobile,
+    "touch" => browser.context.has_touch,
+    "dark" => browser.context.color_scheme.as_deref() == Some("dark"),
+    "light" => browser.context.color_scheme.as_deref() == Some("light"),
+    "offline" => browser.context.offline,
+    "bypass-csp" => browser.context.bypass_csp,
+
+    // Environment.
     "ci" => std::env::var("CI").is_ok(),
-    // Unknown condition: don't skip.
+    "debug" => cfg!(debug_assertions),
+
+    // Generic env var: `env:VAR_NAME` — true if the env var is set and non-empty.
+    // Example: `@skip(env:SKIP_SLOW_TESTS)`, `#[ferritest(skip = "env:NO_GPU")]`
+    other if other.starts_with("env:") => {
+      let var_name = &other[4..];
+      std::env::var(var_name).is_ok_and(|v| !v.is_empty())
+    },
+
+    // Unknown condition: don't match.
     _ => false,
   }
 }

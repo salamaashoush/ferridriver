@@ -282,6 +282,7 @@ fn make_skip_test() -> TestCase {
     fixture_requests: vec![],
     annotations: vec![TestAnnotation::Skip {
       reason: Some("testing skip".into()),
+      condition: None,
     }],
     timeout: None,
     retries: None,

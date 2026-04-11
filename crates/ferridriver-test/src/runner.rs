@@ -679,39 +679,22 @@ fn build_plan_for_changes(
 }
 
 fn build_launch_options(browser_config: &crate::config::BrowserConfig) -> LaunchOptions {
-  // If backend is explicitly set, use it. Otherwise infer from browser type.
-  let backend = if browser_config.backend != "cdp-pipe" || browser_config.browser == "chromium" {
-    match browser_config.backend.as_str() {
-      "cdp-raw" => BackendKind::CdpRaw,
-      #[cfg(target_os = "macos")]
-      "webkit" => BackendKind::WebKit,
-      "bidi" => BackendKind::Bidi,
-      _ => BackendKind::CdpPipe,
-    }
-  } else {
-    // Infer from browser product
-    match browser_config.browser.as_str() {
-      "firefox" => BackendKind::Bidi,
-      #[cfg(target_os = "macos")]
-      "webkit" => BackendKind::WebKit,
-      _ => BackendKind::CdpPipe,
-    }
+  // BrowserConfig is already normalized (browser↔backend consistent).
+  let backend = match browser_config.backend.as_str() {
+    "cdp-raw" => BackendKind::CdpRaw,
+    #[cfg(target_os = "macos")]
+    "webkit" => BackendKind::WebKit,
+    "bidi" => BackendKind::Bidi,
+    _ => BackendKind::CdpPipe,
   };
 
-  // Infer browser type: if explicitly set use it, otherwise infer from backend.
   let browser_type = match browser_config.browser.as_str() {
     "firefox" => Some(ferridriver::options::BrowserType::Firefox),
     "webkit" => Some(ferridriver::options::BrowserType::WebKit),
-    "chromium" => {
-      // If backend is bidi, the user wants Firefox even if browser wasn't explicitly set
-      if matches!(backend, BackendKind::Bidi) {
-        Some(ferridriver::options::BrowserType::Firefox)
-      } else {
-        Some(ferridriver::options::BrowserType::Chromium)
-      }
-    },
+    "chromium" => Some(ferridriver::options::BrowserType::Chromium),
     _ => None,
   };
+
   LaunchOptions {
     backend,
     browser: browser_type,

@@ -821,38 +821,20 @@ impl BidiPage {
 
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
     if let Some(ref color_scheme) = opts.color_scheme {
-      // Override matchMedia via JS — works on all browsers without CDP fallback.
-      let dark_match = if color_scheme == "dark" { "true" } else { "false" };
-      let light_match = if color_scheme == "light" { "true" } else { "false" };
-      let js = format!(
-        r#"() => {{
-          const orig = window.matchMedia;
-          window.matchMedia = function(query) {{
-            const result = orig.call(window, query);
-            if (query === '(prefers-color-scheme: dark)') {{
-              return Object.assign({{}}, result, {{ matches: {dark_match} }});
-            }}
-            if (query === '(prefers-color-scheme: light)') {{
-              return Object.assign({{}}, result, {{ matches: {light_match} }});
-            }}
-            return result;
-          }};
-        }}"#
-      );
+      // BiDi spec: emulation.setForcedColorsModeThemeOverride
+      // theme: "light" | "dark" | null (null = reset/no-preference)
+      // Not yet supported by all Firefox versions — returns error if unavailable.
+      let theme: serde_json::Value = match color_scheme.as_str() {
+        "dark" => json!("dark"),
+        "light" => json!("light"),
+        _ => serde_json::Value::Null,
+      };
       self
         .cmd(
-          "script.addPreloadScript",
-          json!({"functionDeclaration": js}),
-        )
-        .await?;
-      self
-        .cmd(
-          "script.callFunction",
+          "emulation.setForcedColorsModeThemeOverride",
           json!({
-            "functionDeclaration": js,
-            "target": {"context": self.context_id},
-            "awaitPromise": false,
-            "resultOwnership": "none"
+            "contexts": [self.context_id],
+            "theme": theme
           }),
         )
         .await?;

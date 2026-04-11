@@ -34,7 +34,12 @@ pub struct TestRunnerConfig {
   pub timeout: Option<f64>,
   pub retries: Option<i32>,
   pub headed: Option<bool>,
+  /// Browser name: "chromium" (default), "firefox", "webkit".
+  pub browser: Option<String>,
+  /// Backend protocol: "cdp-pipe", "cdp-raw", "bidi", "webkit".
   pub backend: Option<String>,
+  /// Browser channel: "chrome", "chrome-beta", "msedge", etc.
+  pub channel: Option<String>,
   pub executable_path: Option<String>,
   pub browser_args: Option<Vec<String>>,
   pub base_url: Option<String>,
@@ -59,6 +64,19 @@ pub struct TestRunnerConfig {
   pub storage_state: Option<String>,
   /// Watch mode: re-run tests on file changes.
   pub watch: Option<bool>,
+  // ── Context options (Playwright `use` block) ──
+  /// Simulate mobile device (isMobile). Condition: "mobile".
+  pub is_mobile: Option<bool>,
+  /// Enable touch events (hasTouch). Condition: "touch".
+  pub has_touch: Option<bool>,
+  /// Color scheme: "light", "dark", "no-preference". Condition: "dark", "light".
+  pub color_scheme: Option<String>,
+  /// Browser locale (e.g. "en-US", "de-DE").
+  pub locale: Option<String>,
+  /// Simulate offline mode. Condition: "offline".
+  pub offline: Option<bool>,
+  /// Bypass CSP. Condition: "bypass-csp".
+  pub bypass_csp: Option<bool>,
 }
 
 /// Metadata for a registered test.
@@ -178,79 +196,38 @@ impl TestRunner {
     } else {
       ferridriver_test::logging::init_from_env();
     }
-    let mut tc = ferridriver_test::TestConfig::default();
-
-    if let Some(t) = cfg.timeout {
-      tc.timeout = crate::types::f64_to_u64(t);
-    }
-    if let Some(w) = cfg.workers {
-      tc.workers = w as u32;
-    }
-    if let Some(r) = cfg.retries {
-      tc.retries = r as u32;
-    }
-    if let Some(headed) = cfg.headed {
-      tc.browser.headless = !headed;
-    }
-    if let Some(ref b) = cfg.backend {
-      tc.browser.backend.clone_from(b);
-    }
-    if let Some(ref p) = cfg.executable_path {
-      tc.browser.executable_path = Some(p.clone());
-    }
-    if let Some(ref args) = cfg.browser_args {
-      tc.browser.args.clone_from(args);
-    }
-    if let Some(ref r) = cfg.reporter {
-      tc.reporter = r
-        .iter()
-        .map(|name| ferridriver_test::config::ReporterConfig {
-          name: name.clone(),
-          options: Default::default(),
-        })
-        .collect();
-    }
-    if let Some(ref url) = cfg.base_url {
-      tc.base_url = Some(url.clone());
-    }
-    if let Some(ref dir) = cfg.output_dir {
-      tc.output_dir = dir.into();
-    }
-    if let Some(ref patterns) = cfg.test_match {
-      tc.test_match.clone_from(patterns);
-    }
-    if let Some(w) = cfg.viewport_width {
-      if let Some(ref mut vp) = tc.browser.viewport {
-        vp.width = w as i64;
-      }
-    }
-    if let Some(h) = cfg.viewport_height {
-      if let Some(ref mut vp) = tc.browser.viewport {
-        vp.height = h as i64;
-      }
-    }
-    if let Some(fo) = cfg.forbid_only {
-      tc.forbid_only = fo;
-    }
-    if let Some(ref v) = cfg.video {
-      tc.video.mode = match v.as_str() {
-        "on" => ferridriver_test::config::VideoMode::On,
-        "retain-on-failure" => ferridriver_test::config::VideoMode::RetainOnFailure,
-        _ => ferridriver_test::config::VideoMode::Off,
-      };
-    }
-    if let Some(ref t) = cfg.trace {
-      tc.trace = ferridriver_test::tracing::TraceMode::from_str(t);
-    }
-    if let Some(ref ss) = cfg.storage_state {
-      tc.storage_state = Some(ss.clone());
-    }
-    if tc.workers == 0 {
-      let cpus = std::thread::available_parallelism()
-        .map(|n| n.get() as u32)
-        .unwrap_or(4);
-      tc.workers = (cpus / 2).max(1);
-    }
+    // Map NAPI config → CliOverrides and use the single resolve_config() path.
+    // This ensures env vars, normalization, and worker auto-detection all work.
+    let overrides = ferridriver_test::config::CliOverrides {
+      workers: cfg.workers.map(|w| w as u32),
+      timeout: cfg.timeout.map(|t| t as u64),
+      retries: cfg.retries.map(|r| r as u32),
+      headed: cfg.headed.unwrap_or(false),
+      browser: cfg.browser.clone(),
+      backend: cfg.backend.clone(),
+      channel: cfg.channel.clone(),
+      executable_path: cfg.executable_path.clone(),
+      browser_args: cfg.browser_args.clone().unwrap_or_default(),
+      base_url: cfg.base_url.clone(),
+      reporter: cfg.reporter.clone().unwrap_or_default(),
+      output_dir: cfg.output_dir.clone(),
+      test_match: cfg.test_match.clone(),
+      viewport_width: cfg.viewport_width.map(|v| v as i64),
+      viewport_height: cfg.viewport_height.map(|v| v as i64),
+      forbid_only: cfg.forbid_only.unwrap_or(false),
+      video: cfg.video.clone(),
+      trace: cfg.trace.clone(),
+      storage_state: cfg.storage_state.clone(),
+      is_mobile: cfg.is_mobile,
+      has_touch: cfg.has_touch,
+      color_scheme: cfg.color_scheme.clone(),
+      locale: cfg.locale.clone(),
+      offline: cfg.offline,
+      bypass_csp: cfg.bypass_csp,
+      ..Default::default()
+    };
+    let tc = ferridriver_test::config::resolve_config(&overrides)
+      .map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
 
     Ok(Self {
       config: tc,
@@ -396,10 +373,10 @@ impl TestRunner {
             })
           }),
           fixture_requests: vec!["page".into()],
+          expected_status: ExpectedStatus::Pass,
           annotations,
           timeout: meta.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
           retries: meta.retries.map(|r| r as u32),
-          expected_status: ExpectedStatus::Pass,
         }
       })
       .collect();
@@ -499,6 +476,50 @@ impl TestRunner {
   #[napi]
   pub fn get_base_url(&self) -> Option<String> {
     self.config.base_url.clone()
+  }
+
+  // ── Browser config accessors (Playwright fixture equivalents) ──
+
+  /// Browser name: "chromium", "firefox", "webkit".
+  #[napi]
+  pub fn get_browser_name(&self) -> String {
+    self.config.browser.browser.clone()
+  }
+
+  /// Whether running headless.
+  #[napi]
+  pub fn get_headless(&self) -> bool {
+    self.config.browser.headless
+  }
+
+  /// Browser channel (e.g. "chrome", "msedge").
+  #[napi]
+  pub fn get_channel(&self) -> Option<String> {
+    self.config.browser.channel.clone()
+  }
+
+  /// Whether isMobile is set.
+  #[napi]
+  pub fn get_is_mobile(&self) -> bool {
+    self.config.browser.context.is_mobile
+  }
+
+  /// Whether hasTouch is set.
+  #[napi]
+  pub fn get_has_touch(&self) -> bool {
+    self.config.browser.context.has_touch
+  }
+
+  /// Color scheme: "light", "dark", or null.
+  #[napi]
+  pub fn get_color_scheme(&self) -> Option<String> {
+    self.config.browser.context.color_scheme.clone()
+  }
+
+  /// Locale (e.g. "en-US").
+  #[napi]
+  pub fn get_locale(&self) -> Option<String> {
+    self.config.browser.context.locale.clone()
   }
 
   /// Discover test files.

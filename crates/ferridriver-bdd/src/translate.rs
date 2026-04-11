@@ -153,24 +153,32 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
   if scenario
     .tags
     .iter()
-    .any(|t| t == "@skip" || t == "@wip" || t == "@pending")
+    .any(|t| t == "@wip" || t == "@pending")
   {
     annotations.push(TestAnnotation::Skip {
-      reason: Some("tagged @skip/@wip/@pending".to_string()),
+      reason: Some("tagged @wip/@pending".to_string()),
+      condition: None,
     });
-  }
-
-  if scenario.tags.iter().any(|t| t == "@slow") {
-    annotations.push(TestAnnotation::Slow);
   }
 
   if scenario.tags.iter().any(|t| t == "@only") {
     annotations.push(TestAnnotation::Only);
   }
 
-  // @fixme or @fixme(condition)
+  // @skip, @skip(condition), @fixme, @fixme(condition), @fail, @fail(condition),
+  // @slow, @slow(condition)
   for tag in &scenario.tags {
-    if tag == "@fixme" {
+    if tag == "@skip" {
+      annotations.push(TestAnnotation::Skip {
+        reason: Some("tagged @skip".to_string()),
+        condition: None,
+      });
+    } else if let Some(cond) = tag.strip_prefix("@skip(").and_then(|s| s.strip_suffix(')')) {
+      annotations.push(TestAnnotation::Skip {
+        reason: Some(format!("tagged @skip({cond})")),
+        condition: Some(cond.to_string()),
+      });
+    } else if tag == "@fixme" {
       annotations.push(TestAnnotation::Fixme {
         reason: Some("tagged @fixme".to_string()),
         condition: None,
@@ -178,6 +186,26 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
     } else if let Some(cond) = tag.strip_prefix("@fixme(").and_then(|s| s.strip_suffix(')')) {
       annotations.push(TestAnnotation::Fixme {
         reason: Some(format!("tagged @fixme({cond})")),
+        condition: Some(cond.to_string()),
+      });
+    } else if tag == "@fail" {
+      annotations.push(TestAnnotation::Fail {
+        reason: Some("tagged @fail".to_string()),
+        condition: None,
+      });
+    } else if let Some(cond) = tag.strip_prefix("@fail(").and_then(|s| s.strip_suffix(')')) {
+      annotations.push(TestAnnotation::Fail {
+        reason: Some(format!("tagged @fail({cond})")),
+        condition: Some(cond.to_string()),
+      });
+    } else if tag == "@slow" {
+      annotations.push(TestAnnotation::Slow {
+        reason: Some("tagged @slow".to_string()),
+        condition: None,
+      });
+    } else if let Some(cond) = tag.strip_prefix("@slow(").and_then(|s| s.strip_suffix(')')) {
+      annotations.push(TestAnnotation::Slow {
+        reason: Some(format!("tagged @slow({cond})")),
         condition: Some(cond.to_string()),
       });
     }
@@ -190,8 +218,8 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
         if rest.ends_with(')') {
           let key = &rest[..paren_pos];
           let value = &rest[paren_pos + 1..rest.len() - 1];
-          // Skip fixme — handled above. Skip known tags.
-          if key != "fixme" && key != "only" && key != "skip" && key != "slow" {
+          // Skip annotation tags handled above.
+          if !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only") {
             annotations.push(TestAnnotation::Info {
               type_name: key.to_string(),
               description: value.to_string(),

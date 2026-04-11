@@ -29,10 +29,14 @@ struct FerritestArgs {
   retries: Option<u32>,
   timeout_ms: Option<u64>,
   tags: Vec<String>,
-  skip: bool,
-  slow: bool,
+  /// None = not set, Some(None) = unconditional, Some(Some("firefox")) = conditional
+  skip: Option<Option<String>>,
+  /// None = not set, Some(None) = unconditional, Some(Some("ci")) = conditional
+  slow: Option<Option<String>>,
   /// None = not set, Some(None) = unconditional, Some(Some("linux")) = conditional
   fixme: Option<Option<String>>,
+  /// None = not set, Some(None) = unconditional, Some(Some("webkit")) = conditional
+  fail: Option<Option<String>>,
   only: bool,
 }
 
@@ -42,9 +46,10 @@ impl Parse for FerritestArgs {
       retries: None,
       timeout_ms: None,
       tags: Vec::new(),
-      skip: false,
-      slow: false,
+      skip: None,
+      slow: None,
       fixme: None,
+      fail: None,
       only: false,
     };
 
@@ -75,10 +80,31 @@ impl Parse for FerritestArgs {
                 }
               }
             },
+            "skip" => {
+              if let syn::Expr::Lit(lit) = &nv.value {
+                if let Lit::Str(s) = &lit.lit {
+                  args.skip = Some(Some(s.value()));
+                }
+              }
+            },
+            "slow" => {
+              if let syn::Expr::Lit(lit) = &nv.value {
+                if let Lit::Str(s) = &lit.lit {
+                  args.slow = Some(Some(s.value()));
+                }
+              }
+            },
             "fixme" => {
               if let syn::Expr::Lit(lit) = &nv.value {
                 if let Lit::Str(s) = &lit.lit {
                   args.fixme = Some(Some(s.value()));
+                }
+              }
+            },
+            "fail" => {
+              if let syn::Expr::Lit(lit) = &nv.value {
+                if let Lit::Str(s) = &lit.lit {
+                  args.fail = Some(Some(s.value()));
                 }
               }
             },
@@ -93,9 +119,10 @@ impl Parse for FerritestArgs {
         Meta::Path(p) => {
           let ident = p.get_ident().map(ToString::to_string).unwrap_or_default();
           match ident.as_str() {
-            "skip" => args.skip = true,
-            "slow" => args.slow = true,
+            "skip" => args.skip = Some(None),
+            "slow" => args.slow = Some(None),
             "fixme" => args.fixme = Some(None),
+            "fail" => args.fail = Some(None),
             "only" => args.only = true,
             _ => return Err(syn::Error::new_spanned(p, format!("unknown ferritest flag: {ident}"))),
           }
@@ -190,11 +217,31 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
 
   // Build annotations.
   let mut annotations = Vec::new();
-  if args.skip {
-    annotations.push(quote! { ferridriver_test::model::TestAnnotation::Skip { reason: None } });
+  match &args.skip {
+    Some(None) => {
+      annotations.push(
+        quote! { ferridriver_test::model::TestAnnotation::Skip { reason: None, condition: None } },
+      );
+    },
+    Some(Some(cond)) => {
+      annotations.push(
+        quote! { ferridriver_test::model::TestAnnotation::Skip { reason: None, condition: Some(#cond.to_string()) } },
+      );
+    },
+    None => {},
   }
-  if args.slow {
-    annotations.push(quote! { ferridriver_test::model::TestAnnotation::Slow });
+  match &args.slow {
+    Some(None) => {
+      annotations.push(
+        quote! { ferridriver_test::model::TestAnnotation::Slow { reason: None, condition: None } },
+      );
+    },
+    Some(Some(cond)) => {
+      annotations.push(
+        quote! { ferridriver_test::model::TestAnnotation::Slow { reason: None, condition: Some(#cond.to_string()) } },
+      );
+    },
+    None => {},
   }
   match &args.fixme {
     Some(None) => {
@@ -203,6 +250,19 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
     Some(Some(cond)) => {
       annotations.push(
         quote! { ferridriver_test::model::TestAnnotation::Fixme { reason: None, condition: Some(#cond.to_string()) } },
+      );
+    },
+    None => {},
+  }
+  match &args.fail {
+    Some(None) => {
+      annotations.push(
+        quote! { ferridriver_test::model::TestAnnotation::Fail { reason: None, condition: None } },
+      );
+    },
+    Some(Some(cond)) => {
+      annotations.push(
+        quote! { ferridriver_test::model::TestAnnotation::Fail { reason: None, condition: Some(#cond.to_string()) } },
       );
     },
     None => {},
