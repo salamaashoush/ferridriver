@@ -220,57 +220,48 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   let fixture_array = fixture_names.iter().map(|f| quote! { #f });
 
   // Build annotations.
+  // Helper: parse "condition" or "condition | reason" into (condition, reason) tokens.
+  fn annotation_tokens(
+    variant: &str,
+    arg: &Option<Option<String>>,
+    annotations: &mut Vec<proc_macro2::TokenStream>,
+  ) {
+    let variant_ident = quote::format_ident!("{}", variant);
+    match arg {
+      Some(None) => {
+        annotations.push(
+          quote! { ferridriver_test::model::TestAnnotation::#variant_ident { reason: None, condition: None } },
+        );
+      },
+      Some(Some(val)) => {
+        // Support "condition | reason" format.
+        if let Some((cond, reason)) = val.split_once('|') {
+          let cond = cond.trim();
+          let reason = reason.trim();
+          annotations.push(
+            quote! { ferridriver_test::model::TestAnnotation::#variant_ident {
+              reason: Some(#reason.to_string()),
+              condition: Some(#cond.to_string()),
+            } },
+          );
+        } else {
+          annotations.push(
+            quote! { ferridriver_test::model::TestAnnotation::#variant_ident {
+              reason: None,
+              condition: Some(#val.to_string()),
+            } },
+          );
+        }
+      },
+      None => {},
+    }
+  }
+
   let mut annotations = Vec::new();
-  match &args.skip {
-    Some(None) => {
-      annotations.push(
-        quote! { ferridriver_test::model::TestAnnotation::Skip { reason: None, condition: None } },
-      );
-    },
-    Some(Some(cond)) => {
-      annotations.push(
-        quote! { ferridriver_test::model::TestAnnotation::Skip { reason: None, condition: Some(#cond.to_string()) } },
-      );
-    },
-    None => {},
-  }
-  match &args.slow {
-    Some(None) => {
-      annotations.push(
-        quote! { ferridriver_test::model::TestAnnotation::Slow { reason: None, condition: None } },
-      );
-    },
-    Some(Some(cond)) => {
-      annotations.push(
-        quote! { ferridriver_test::model::TestAnnotation::Slow { reason: None, condition: Some(#cond.to_string()) } },
-      );
-    },
-    None => {},
-  }
-  match &args.fixme {
-    Some(None) => {
-      annotations.push(quote! { ferridriver_test::model::TestAnnotation::Fixme { reason: None, condition: None } });
-    },
-    Some(Some(cond)) => {
-      annotations.push(
-        quote! { ferridriver_test::model::TestAnnotation::Fixme { reason: None, condition: Some(#cond.to_string()) } },
-      );
-    },
-    None => {},
-  }
-  match &args.fail {
-    Some(None) => {
-      annotations.push(
-        quote! { ferridriver_test::model::TestAnnotation::Fail { reason: None, condition: None } },
-      );
-    },
-    Some(Some(cond)) => {
-      annotations.push(
-        quote! { ferridriver_test::model::TestAnnotation::Fail { reason: None, condition: Some(#cond.to_string()) } },
-      );
-    },
-    None => {},
-  }
+  annotation_tokens("Skip", &args.skip, &mut annotations);
+  annotation_tokens("Slow", &args.slow, &mut annotations);
+  annotation_tokens("Fixme", &args.fixme, &mut annotations);
+  annotation_tokens("Fail", &args.fail, &mut annotations);
   if args.only {
     annotations.push(quote! { ferridriver_test::model::TestAnnotation::Only });
   }
