@@ -1,4 +1,4 @@
-#!/usr/bin/env bun
+#!/usr/bin/env node
 /**
  * ferridriver-test CLI -- runs E2E, component, and BDD tests using the Rust engine.
  *
@@ -12,6 +12,13 @@
  *   ferridriver-test bdd [features...] [--steps steps/] [--tags "@smoke"]
  */
 
+// Register ESM loader for TypeScript when running on Node.js.
+// Bun handles .ts imports natively; Node.js needs our oxc-powered loader hook.
+if (typeof globalThis.Bun === 'undefined') {
+  const { register } = await import('node:module');
+  register(new URL('./loader.mjs', import.meta.url));
+}
+
 import { defineCommand, defineArgs, runMain, withCompletions } from 'clap-ts';
 import type { CommandDef } from 'clap-ts';
 
@@ -20,7 +27,81 @@ import type { Page, BddRunnerConfig } from '@ferridriver/core';
 import { _setCurrentFile, _drainTests, _hasOnly, _setCtMountFactory, _setRunner } from './test.js';
 import type { MountFunction } from './test.js';
 import { resolve, relative } from 'path';
-import { statSync } from 'fs';
+import { existsSync, statSync } from 'fs';
+
+import type { FerridriverTestConfig } from './config.js';
+
+// ---- Config file loading ----
+
+const CONFIG_CANDIDATES = [
+  'ferridriver.config.ts',
+  'ferridriver.config.js',
+  'ferridriver.config.mjs',
+  'ferridriver.config.mts',
+];
+
+async function loadConfig(explicitPath?: string): Promise<FerridriverTestConfig> {
+  const candidates = explicitPath
+    ? [resolve(explicitPath)]
+    : CONFIG_CANDIDATES.map((f) => resolve(f));
+
+  for (const path of candidates) {
+    if (!existsSync(path)) continue;
+    try {
+      const mod = await import(path);
+      return mod.default ?? mod;
+    } catch (e: any) {
+      if (explicitPath) {
+        console.error(`Failed to load config ${path}: ${e.message}`);
+        process.exit(1);
+      }
+    }
+  }
+  return {};
+}
+
+/** Merge config file values with CLI arg overrides. CLI always wins. */
+function mergeConfig(fileConfig: FerridriverTestConfig, cliArgs: Record<string, any>): Record<string, any> {
+  const config: Record<string, any> = {};
+
+  // Flatten file config's `use` block into top-level config (Playwright convention).
+  if (fileConfig.use) {
+    if (fileConfig.use.browserName) config.browser = fileConfig.use.browserName;
+    if (fileConfig.use.headless !== undefined) config.headed = !fileConfig.use.headless;
+    if (fileConfig.use.viewport) {
+      config.viewportWidth = fileConfig.use.viewport.width;
+      config.viewportHeight = fileConfig.use.viewport.height;
+    }
+    if (fileConfig.use.locale) config.locale = fileConfig.use.locale;
+    if (fileConfig.use.colorScheme) config.colorScheme = fileConfig.use.colorScheme;
+    if (fileConfig.use.isMobile !== undefined) config.isMobile = fileConfig.use.isMobile;
+    if (fileConfig.use.hasTouch !== undefined) config.hasTouch = fileConfig.use.hasTouch;
+    if (fileConfig.use.baseURL) config.baseUrl = fileConfig.use.baseURL;
+    if (fileConfig.use.storageState) config.storageState = typeof fileConfig.use.storageState === 'string' ? fileConfig.use.storageState : undefined;
+    if (fileConfig.use.channel) config.channel = fileConfig.use.channel;
+  }
+
+  // Map file config top-level fields.
+  if (fileConfig.workers !== undefined) config.workers = fileConfig.workers;
+  if (fileConfig.retries !== undefined) config.retries = fileConfig.retries;
+  if (fileConfig.timeout !== undefined) config.timeout = fileConfig.timeout;
+  if (fileConfig.forbidOnly) config.forbidOnly = true;
+  if (fileConfig.outputDir) config.outputDir = fileConfig.outputDir;
+  if (fileConfig.reporter) {
+    const reporters = Array.isArray(fileConfig.reporter) ? fileConfig.reporter : [fileConfig.reporter];
+    config.reporter = reporters.map((r) => (typeof r === 'string' ? r : r[0]));
+  }
+  if (fileConfig.projects) config.projects = fileConfig.projects;
+
+  // CLI args override everything.
+  for (const [key, value] of Object.entries(cliArgs)) {
+    if (value !== undefined && value !== false && value !== null) {
+      config[key] = value;
+    }
+  }
+
+  return config;
+}
 
 // ---- Glob abstraction: use Bun.Glob if available, fall back to node:fs glob ----
 
@@ -118,6 +199,13 @@ const runnerArgs = defineArgs({
   debug: {
     type: 'string',
     description: 'Debug categories: cdp, steps, action, worker, fixture (comma-separated)',
+  },
+  config: {
+    type: 'string',
+    short: 'c',
+    valueName: 'PATH',
+    description: 'Path to config file (default: auto-detect ferridriver.config.ts)',
+    valueHint: 'filePath',
   },
 });
 
@@ -336,38 +424,41 @@ const testCommand = defineCommand({
     files: { type: 'positional', valueName: 'FILES', trailingVarArg: true },
   },
   async run({ args }) {
+    const fileConfig = await loadConfig(args.config);
     const fileList = (args.files as string[] | undefined) ?? [];
     const testFiles = await discoverFiles(fileList, ['**/*.spec.ts', '**/*.test.ts']);
     if (testFiles.length === 0) {
       console.log('  No test files found.');
       process.exit(0);
     }
-    const config: Record<string, any> = {};
-    if (args.workers !== undefined) config.workers = args.workers;
-    if (args.retries !== undefined) config.retries = args.retries;
-    if (args.timeout !== undefined) config.timeout = args.timeout;
-    if (args.headed) config.headed = true;
-    if (args.grep) config.grep = args.grep;
-    if (args.backend) config.backend = args.backend;
+    // Build CLI overrides.
+    const cliOverrides: Record<string, any> = {};
+    if (args.workers !== undefined) cliOverrides.workers = args.workers;
+    if (args.retries !== undefined) cliOverrides.retries = args.retries;
+    if (args.timeout !== undefined) cliOverrides.timeout = args.timeout;
+    if (args.headed) cliOverrides.headed = true;
+    if (args.grep) cliOverrides.grep = args.grep;
+    if (args.backend) cliOverrides.backend = args.backend;
     if (args.browser) {
-      config.browser = args.browser;
-      // Infer default backend from browser product if not explicitly set
+      cliOverrides.browser = args.browser;
       if (!args.backend) {
-        if (config.browser === 'firefox') config.backend = 'bidi';
-        else if (config.browser === 'webkit') config.backend = 'webkit';
+        if (cliOverrides.browser === 'firefox') cliOverrides.backend = 'bidi';
+        else if (cliOverrides.browser === 'webkit') cliOverrides.backend = 'webkit';
       }
     }
-    if (args.reporter) config.reporter = [args.reporter];
-    if (args['update-snapshots']) config.updateSnapshots = true;
-    if (args['forbid-only']) config.forbidOnly = true;
-    if (args['last-failed']) config.lastFailed = true;
-    if (args.video) config.video = args.video;
-    if (args.trace) config.trace = args.trace;
-    if (args['storage-state']) config.storageState = args['storage-state'];
-    if (args.watch) config.watch = true;
-    if (args.verbose) config.verbose = 1;
-    if (args.debug) config.debug = args.debug;
-    else if (args.verbose) config.debug = '*';
+    if (args.reporter) cliOverrides.reporter = [args.reporter];
+    if (args['update-snapshots']) cliOverrides.updateSnapshots = true;
+    if (args['forbid-only']) cliOverrides.forbidOnly = true;
+    if (args['last-failed']) cliOverrides.lastFailed = true;
+    if (args.video) cliOverrides.video = args.video;
+    if (args.trace) cliOverrides.trace = args.trace;
+    if (args['storage-state']) cliOverrides.storageState = args['storage-state'];
+    if (args.watch) cliOverrides.watch = true;
+    if (args.verbose) cliOverrides.verbose = 1;
+    if (args.debug) cliOverrides.debug = args.debug;
+    else if (args.verbose) cliOverrides.debug = '*';
+
+    const config = mergeConfig(fileConfig, cliOverrides);
     await runTests(config, testFiles, false);
   },
 });
@@ -395,6 +486,7 @@ const ctCommand = defineCommand({
     files: { type: 'positional', valueName: 'FILES', trailingVarArg: true },
   },
   async run({ args }) {
+    const fileConfig = await loadConfig(args.config);
     const fileList = (args.files as string[] | undefined) ?? [];
     const testFiles = await discoverFiles(fileList, [
       '**/*.ct.ts', '**/*.ct.tsx', '**/*.ct.spec.ts', '**/*.ct.spec.tsx',
@@ -403,29 +495,31 @@ const ctCommand = defineCommand({
       console.log('  No component test files found.');
       process.exit(0);
     }
-    const config: Record<string, any> = {};
-    if (args.workers !== undefined) config.workers = args.workers;
-    if (args.retries !== undefined) config.retries = args.retries;
-    if (args.timeout !== undefined) config.timeout = args.timeout;
-    if (args.headed) config.headed = true;
-    if (args.grep) config.grep = args.grep;
-    if (args.backend) config.backend = args.backend;
+    const cliOverrides: Record<string, any> = {};
+    if (args.workers !== undefined) cliOverrides.workers = args.workers;
+    if (args.retries !== undefined) cliOverrides.retries = args.retries;
+    if (args.timeout !== undefined) cliOverrides.timeout = args.timeout;
+    if (args.headed) cliOverrides.headed = true;
+    if (args.grep) cliOverrides.grep = args.grep;
+    if (args.backend) cliOverrides.backend = args.backend;
     if (args.browser) {
-      config.browser = args.browser;
+      cliOverrides.browser = args.browser;
       if (!args.backend) {
-        if (args.browser === 'firefox') config.backend = 'bidi';
-        else if (args.browser === 'webkit') config.backend = 'webkit';
+        if (args.browser === 'firefox') cliOverrides.backend = 'bidi';
+        else if (args.browser === 'webkit') cliOverrides.backend = 'webkit';
       }
     }
-    if (args.reporter) config.reporter = [args.reporter];
-    if (args['update-snapshots']) config.updateSnapshots = true;
-    if (args['forbid-only']) config.forbidOnly = true;
-    if (args['last-failed']) config.lastFailed = true;
-    if (args.video) config.video = args.video;
-    if (args.trace) config.trace = args.trace;
-    if (args['storage-state']) config.storageState = args['storage-state'];
-    if (args.watch) config.watch = true;
+    if (args.reporter) cliOverrides.reporter = [args.reporter];
+    if (args['update-snapshots']) cliOverrides.updateSnapshots = true;
+    if (args['forbid-only']) cliOverrides.forbidOnly = true;
+    if (args['last-failed']) cliOverrides.lastFailed = true;
+    if (args.video) cliOverrides.video = args.video;
+    if (args.trace) cliOverrides.trace = args.trace;
+    if (args['storage-state']) cliOverrides.storageState = args['storage-state'];
+    if (args.watch) cliOverrides.watch = true;
     if (args.verbose && !process.env.FERRIDRIVER_DEBUG) process.env.FERRIDRIVER_DEBUG = '*';
+
+    const config = mergeConfig(fileConfig, cliOverrides);
     await runTests(config, testFiles, true);
   },
 });
@@ -478,6 +572,7 @@ const bddCommand = defineCommand({
     features: { type: 'positional', valueName: 'FEATURES', trailingVarArg: true },
   },
   async run({ args }) {
+    const fileConfig = await loadConfig(args.config);
     const featureFiles = (args.features as string[] | undefined) ?? [];
     const featurePatterns = featureFiles.length > 0
       ? normalizePaths(featureFiles, '**/*.feature')
@@ -486,23 +581,39 @@ const bddCommand = defineCommand({
     const stepsGlobs = (args.steps as string[] | undefined) ?? [];
     const stepFiles = await discoverStepFiles(stepsGlobs);
 
-    const bddConfig: BddRunnerConfig = {
-      features: featurePatterns,
-      tags: args.tags || undefined,
+    // Merge file config with CLI overrides for BDD runner.
+    const merged = mergeConfig(fileConfig, {
       workers: args.workers,
-      timeout: args.timeout ?? args['step-timeout'],
       retries: args.retries,
+      timeout: args.timeout ?? args['step-timeout'],
       headed: args.headed,
+      grep: args.grep,
       backend: args.backend || (args.browser === 'firefox' ? 'bidi' : args.browser === 'webkit' ? 'webkit' : undefined),
       browser: args.browser,
       reporter: args.reporter ? [args.reporter] : undefined,
+      video: args.video,
+      trace: args.trace,
+      'storage-state': args['storage-state'],
+      watch: args.watch,
+    });
+
+    const bddConfig: BddRunnerConfig = {
+      features: featurePatterns,
+      tags: args.tags || undefined,
+      workers: merged.workers,
+      timeout: merged.timeout,
+      retries: merged.retries,
+      headed: merged.headed,
+      backend: merged.backend,
+      browser: merged.browser,
+      reporter: merged.reporter,
       strict: args.strict || undefined,
       order: args.order || undefined,
       language: args.language || undefined,
-      video: args.video || undefined,
-      trace: args.trace || undefined,
-      storageState: args['storage-state'] || undefined,
-      watch: args.watch || undefined,
+      video: merged.video || undefined,
+      trace: merged.trace || undefined,
+      storageState: merged.storageState || undefined,
+      watch: merged.watch || undefined,
     };
 
     const runner = BddRunner.create(bddConfig);
