@@ -20,7 +20,8 @@ async fn add_todo(page: &Page, text: &str) -> Result<(), String> {
 // ── Adding todos ──
 
 #[ferritest]
-async fn add_single_todo(page: Page) {
+async fn add_single_todo(ctx: TestContext) {
+  let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Buy milk")
     .await
@@ -32,7 +33,8 @@ async fn add_single_todo(page: Page) {
 }
 
 #[ferritest]
-async fn add_multiple_todos(page: Page) {
+async fn add_multiple_todos(ctx: TestContext) {
+  let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Buy milk")
     .await
@@ -47,7 +49,8 @@ async fn add_multiple_todos(page: Page) {
 }
 
 #[ferritest]
-async fn empty_input_does_not_add(page: Page) {
+async fn empty_input_does_not_add(ctx: TestContext) {
+  let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
   page.locator("#new-todo").press("Enter").await?;
   expect(&page.locator(".todo-list li")).to_have_count(0).await?;
@@ -56,7 +59,8 @@ async fn empty_input_does_not_add(page: Page) {
 // ── Completing todos ──
 
 #[ferritest]
-async fn toggle_todo_complete(page: Page) {
+async fn toggle_todo_complete(ctx: TestContext) {
+  let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Buy milk")
     .await
@@ -70,7 +74,8 @@ async fn toggle_todo_complete(page: Page) {
 // ── Deleting todos ──
 
 #[ferritest]
-async fn delete_todo(page: Page) {
+async fn delete_todo(ctx: TestContext) {
+  let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Delete me")
     .await
@@ -88,7 +93,8 @@ async fn delete_todo(page: Page) {
 // ── Filtering ──
 
 #[ferritest]
-async fn filter_active(page: Page) {
+async fn filter_active(ctx: TestContext) {
+  let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Active todo")
     .await
@@ -107,7 +113,8 @@ async fn filter_active(page: Page) {
 // ── Clear completed ──
 
 #[ferritest]
-async fn clear_completed(page: Page) {
+async fn clear_completed(ctx: TestContext) {
+  let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Keep")
     .await
@@ -126,7 +133,8 @@ async fn clear_completed(page: Page) {
 // ── Toggle all ──
 
 #[ferritest]
-async fn toggle_all_completes_all(page: Page) {
+async fn toggle_all_completes_all(ctx: TestContext) {
+  let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
   add_todo(&page, "One")
     .await

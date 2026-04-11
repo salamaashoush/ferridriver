@@ -170,8 +170,8 @@ pub fn run_bdd_harness() {
     .expect("failed to build tokio runtime");
 
   let exit_code = rt.block_on(async {
-    // Parse CLI args (same as ferridriver-test's main!()).
-    let overrides = parse_bdd_cli_args();
+    // Parse CLI args (shared parser from ferridriver-test).
+    let overrides = ferridriver_test::parse_common_cli_args();
 
     // Resolve config.
     let mut config = ferridriver_test::config::resolve_config(&overrides).unwrap_or_else(|e| {
@@ -193,6 +193,29 @@ pub fn run_bdd_harness() {
       if config.tags.is_none() {
         config.tags = Some(tags);
       }
+    }
+
+    // Apply BDD-specific CLI overrides.
+    if let Some(ref tags) = overrides.bdd_tags {
+      config.tags = Some(tags.clone());
+    }
+    if overrides.bdd_dry_run {
+      config.dry_run = true;
+    }
+    if overrides.bdd_fail_fast {
+      config.fail_fast = true;
+    }
+    if let Some(t) = overrides.bdd_step_timeout {
+      config.timeout = t;
+    }
+    if overrides.bdd_strict {
+      config.strict = true;
+    }
+    if let Some(ref order) = overrides.bdd_order {
+      config.order = order.clone();
+    }
+    if overrides.bdd_language.is_some() {
+      config.language = overrides.bdd_language.clone();
     }
 
     // Discover and parse .feature files.
@@ -229,40 +252,3 @@ pub fn run_bdd_harness() {
   std::process::exit(exit_code);
 }
 
-/// Parse CLI args for the BDD harness (same pattern as ferridriver-test's `parse_cli_args`).
-fn parse_bdd_cli_args() -> ferridriver_test::config::CliOverrides {
-  let args: Vec<String> = std::env::args().collect();
-  let mut overrides = ferridriver_test::config::CliOverrides::default();
-  let mut i = 1;
-  while i < args.len() {
-    match args[i].as_str() {
-      "--headed" => overrides.headed = true,
-      "--workers" | "-j" => {
-        i += 1;
-        overrides.workers = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "--retries" => {
-        i += 1;
-        overrides.retries = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "--grep" | "-g" => {
-        i += 1;
-        overrides.grep = args.get(i).cloned();
-      },
-      "--tag" => {
-        i += 1;
-        overrides.tag = args.get(i).cloned();
-      },
-      "--list" => overrides.list_only = true,
-      "--forbid-only" => overrides.forbid_only = true,
-      "--last-failed" => overrides.last_failed = true,
-      "--profile" => {
-        i += 1;
-        overrides.profile = args.get(i).cloned();
-      },
-      _ => {},
-    }
-    i += 1;
-  }
-  overrides
-}

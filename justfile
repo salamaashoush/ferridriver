@@ -81,20 +81,19 @@ build-fast:
 
 # Run MCP server (stdio)
 run *args:
-  cargo run --bin ferridriver -- mcp {{args}}
+  cargo run --bin ferridriver -- {{args}}
 
 # Run MCP server (http)
 run-http port="8080":
-  cargo run --bin ferridriver -- mcp --transport http --port {{port}}
+  cargo run --bin ferridriver -- --transport http --port {{port}}
 
-# Run BDD feature tests
+# Run BDD feature tests (via TS CLI)
 bdd *args:
-  cargo run --bin ferridriver -- bdd {{args}} -- tests/features/
+  cd packages/ferridriver-test && bun run src/cli.ts bdd {{args}} -- tests/features/
 
-# Build + run BDD feature tests
+# Build + run BDD feature tests (via TS CLI)
 test-bdd *args:
-  cargo build --bin ferridriver
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo run --bin ferridriver -- bdd {{args}} -- tests/features/
+  cd packages/ferridriver-test && bun run src/cli.ts bdd {{args}} -- tests/features/
 
 # Generate docs
 doc:
