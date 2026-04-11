@@ -26,6 +26,8 @@ pub struct TestRegistration {
   pub annotations: &'static [TestAnnotation],
   pub timeout_ms: Option<u64>,
   pub retries: Option<u32>,
+  /// Raw JSON string for fixture/context overrides (viewport, locale, etc.)
+  pub use_options: Option<&'static str>,
   pub test_fn: fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>,
 }
 
@@ -91,7 +93,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
       timeout: reg.timeout_ms.map(std::time::Duration::from_millis),
       retries: reg.retries,
       expected_status: ExpectedStatus::Pass,
-      use_options: None,
+      use_options: reg.use_options.map(|s| serde_json::from_str(s).unwrap_or_default()),
     };
 
     let suite = suites.entry(suite_key).or_insert_with(|| TestSuite {
