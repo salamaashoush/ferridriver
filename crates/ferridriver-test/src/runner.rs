@@ -87,10 +87,13 @@ impl TestRunner {
         },
       );
     }
-    if let Some(grep) = &self.overrides.grep {
+    // Apply grep: CLI overrides take precedence, then config-level grep.
+    let grep = self.overrides.grep.as_ref().or(self.config.config_grep.as_ref());
+    let grep_inv = self.overrides.grep_invert.as_ref().or(self.config.config_grep_invert.as_ref());
+    if let Some(grep) = grep {
       crate::discovery::filter_by_grep(&mut plan, grep, false);
     }
-    if let Some(grep_inv) = &self.overrides.grep_invert {
+    if let Some(grep_inv) = grep_inv {
       crate::discovery::filter_by_grep(&mut plan, grep_inv, true);
     }
     if let Some(tag) = &self.overrides.tag {
@@ -311,6 +314,12 @@ impl TestRunner {
     // ── Collect results with retry re-dispatch ──
     let mut attempt_history: FxHashMap<String, Vec<TestStatus>> = FxHashMap::default();
     let mut final_count = 0usize;
+    let mut failure_count = 0usize;
+    let max_failures = if self.config.fail_fast {
+      1 // fail_fast = stop after first failure
+    } else {
+      self.config.max_failures as usize // 0 = unlimited
+    };
 
     while let Some(result) = result_rx.recv().await {
       let test_key = result.outcome.test_id.full_name();
@@ -338,6 +347,24 @@ impl TestRunner {
           .await;
       } else {
         final_count += 1;
+        // Track failures for max_failures / fail_fast.
+        if matches!(
+          result.outcome.status,
+          TestStatus::Failed | TestStatus::TimedOut
+        ) {
+          failure_count += 1;
+        }
+      }
+
+      // Stop early if max_failures reached.
+      if max_failures > 0 && failure_count >= max_failures {
+        tracing::info!(
+          target: "ferridriver::runner",
+          failure_count,
+          max_failures,
+          "max failures reached, stopping",
+        );
+        dispatcher.close();
       }
 
       if final_count >= total_executions {

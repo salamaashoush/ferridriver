@@ -461,6 +461,34 @@ impl Worker {
       if !ctx_config.permissions.is_empty() {
         let _ = page.grant_permissions(&ctx_config.permissions, None).await;
       }
+      // Extra HTTP headers.
+      if !ctx_config.extra_http_headers.is_empty() {
+        let headers: rustc_hash::FxHashMap<String, String> = ctx_config
+          .extra_http_headers
+          .iter()
+          .map(|(k, v)| (k.clone(), v.clone()))
+          .collect();
+        let _ = page.set_extra_http_headers(&headers).await;
+      }
+      // User agent.
+      if let Some(ref ua) = ctx_config.user_agent {
+        let _ = page.set_user_agent(ua).await;
+      }
+      // JavaScript enabled/disabled.
+      if !ctx_config.java_script_enabled {
+        let _ = page.set_javascript_enabled(false).await;
+      }
+      // Reduced motion + forced colors via emulate_media.
+      if ctx_config.reduced_motion.is_some() || ctx_config.forced_colors.is_some() {
+        let _ = page
+          .emulate_media(&ferridriver::options::EmulateMediaOptions {
+            color_scheme: None, // Already set above if needed.
+            reduced_motion: ctx_config.reduced_motion.clone(),
+            forced_colors: ctx_config.forced_colors.clone(),
+            ..Default::default()
+          })
+          .await;
+      }
     }
 
     // Create TestInfo for this test execution.
@@ -480,7 +508,12 @@ impl Worker {
       parallel_index: self.id,
       repeat_each_index: 0,
       output_dir: self.config.output_dir.join(test_id.full_name()),
-      snapshot_dir: std::path::PathBuf::from("__snapshots__"),
+      snapshot_dir: self
+        .config
+        .snapshot_dir
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(Mutex::new(Vec::new())),
@@ -765,8 +798,18 @@ impl Worker {
         if modifiers.expected_failure.load(std::sync::atomic::Ordering::Relaxed) {
           expected_status = ExpectedStatus::Fail;
         }
-        // slow: test already ran, but we could annotate for reporting.
-        // timeout_override: would apply on retry.
+        // Runtime slow: annotate via test_info for reporters.
+        if modifiers.slow.load(std::sync::atomic::Ordering::Relaxed) {
+          test_info
+            .annotate("slow", "test.slow() called at runtime")
+            .await;
+        }
+        // timeout_override: already elapsed for this attempt, but log for debugging.
+        if let Ok(guard) = modifiers.timeout_override.lock() {
+          if let Some(ms) = *guard {
+            tracing::debug!(target: "ferridriver::worker", "test.setTimeout({ms}ms) called at runtime");
+          }
+        }
       }
     }
 
