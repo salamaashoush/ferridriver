@@ -172,6 +172,27 @@ test('test.info returns testInfo', async ({ page }) => {
 // Note: beforeEach/afterEach hooks require suite registration wiring.
 // TODO: test once hook-to-suite association is implemented.
 
+// ── test.extend() — custom fixtures ──
+
+const myTest = test.extend<{ greeting: string }>({
+  greeting: async ({ browserName }: any, use: (v: string) => Promise<void>) => {
+    // Setup
+    const value = `Hello from ${browserName}`;
+    // Use (suspends factory, runs test body, then resumes for teardown)
+    await use(value);
+    // Teardown (runs after test body completes)
+  },
+});
+
+myTest('custom fixture via test.extend', async ({ page, greeting }: any) => {
+  if (!greeting || !greeting.startsWith('Hello from ')) {
+    throw new Error(`unexpected greeting: ${greeting}`);
+  }
+  await page.goto('data:text/html,<title>Extend</title>');
+  const title = await page.title();
+  if (title !== 'Extend') throw new Error(`unexpected title: ${title}`);
+});
+
 // ── test.each ──
 
 test.each([
