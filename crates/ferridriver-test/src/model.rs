@@ -76,6 +76,8 @@ pub struct TestCase {
   pub retries: Option<u32>,
   /// Expected status (for `test.fail()` annotation).
   pub expected_status: ExpectedStatus,
+  /// Per-test fixture overrides from `test.use()`. Merged with global config by the worker.
+  pub use_options: Option<serde_json::Value>,
 }
 
 // ── Test Suite ──

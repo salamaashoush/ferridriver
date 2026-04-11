@@ -254,6 +254,7 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
     timeout: None,
     retries: None,
     expected_status: ExpectedStatus::Pass,
+      use_options: None,
   }
 }
 

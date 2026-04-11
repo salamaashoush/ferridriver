@@ -76,6 +76,7 @@ impl Dispatcher {
         timeout: None,
         retries: None,
         expected_status: crate::model::ExpectedStatus::Pass,
+        use_options: None,
       },
       attempt,
       suite_key,

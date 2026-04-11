@@ -415,9 +415,61 @@ impl Worker {
     let page_result = ctx.new_page().await;
 
     // Apply context config to the page (Playwright's `use` block).
-    // This makes the config values the actual runtime state, not just condition inputs.
+    // Merge per-test use_options over global config (test.use() overrides).
     if let Ok(ref page) = page_result {
-      let ctx_config = &self.config.browser.context;
+      let mut ctx_config = self.config.browser.context.clone();
+      if let Some(ref opts) = test.use_options {
+        // Merge use_options fields over the global context config.
+        if let Some(v) = opts.get("locale").and_then(|v| v.as_str()) {
+          ctx_config.locale = Some(v.to_string());
+        }
+        if let Some(v) = opts.get("colorScheme").and_then(|v| v.as_str()) {
+          ctx_config.color_scheme = Some(v.to_string());
+        }
+        if let Some(v) = opts.get("timezoneId").and_then(|v| v.as_str()) {
+          ctx_config.timezone_id = Some(v.to_string());
+        }
+        if let Some(v) = opts.get("isMobile").and_then(|v| v.as_bool()) {
+          ctx_config.is_mobile = v;
+        }
+        if let Some(v) = opts.get("hasTouch").and_then(|v| v.as_bool()) {
+          ctx_config.has_touch = v;
+        }
+        if let Some(v) = opts.get("offline").and_then(|v| v.as_bool()) {
+          ctx_config.offline = v;
+        }
+        if let Some(v) = opts.get("javaScriptEnabled").and_then(|v| v.as_bool()) {
+          ctx_config.java_script_enabled = v;
+        }
+        if let Some(v) = opts.get("bypassCSP").and_then(|v| v.as_bool()) {
+          ctx_config.bypass_csp = v;
+        }
+        if let Some(v) = opts.get("userAgent").and_then(|v| v.as_str()) {
+          ctx_config.user_agent = Some(v.to_string());
+        }
+        if let Some(v) = opts.get("deviceScaleFactor").and_then(|v| v.as_f64()) {
+          ctx_config.device_scale_factor = Some(v);
+        }
+        if let Some(v) = opts.get("reducedMotion").and_then(|v| v.as_str()) {
+          ctx_config.reduced_motion = Some(v.to_string());
+        }
+        if let Some(v) = opts.get("forcedColors").and_then(|v| v.as_str()) {
+          ctx_config.forced_colors = Some(v.to_string());
+        }
+        if let Some(v) = opts.get("serviceWorkers").and_then(|v| v.as_str()) {
+          ctx_config.service_workers = Some(v.to_string());
+        }
+        if let Some(v) = opts.get("storageState").and_then(|v| v.as_str()) {
+          ctx_config.storage_state = Some(v.to_string());
+        }
+        if let Some(v) = opts.get("acceptDownloads").and_then(|v| v.as_bool()) {
+          ctx_config.accept_downloads = v;
+        }
+        if let Some(v) = opts.get("ignoreHTTPSErrors").and_then(|v| v.as_bool()) {
+          ctx_config.ignore_https_errors = v;
+        }
+      }
+      let ctx_config = &ctx_config;
       // Viewport + mobile/touch emulation.
       if let Some(ref vp) = self.config.browser.viewport {
         let viewport_config = ferridriver::options::ViewportConfig {

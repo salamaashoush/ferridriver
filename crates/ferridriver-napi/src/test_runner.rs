@@ -424,6 +424,7 @@ impl TestRunner {
           annotations,
           timeout: meta.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
           retries: meta.retries.map(|r| r as u32),
+          use_options: meta.use_options.clone(),
         }
       })
       .collect();
