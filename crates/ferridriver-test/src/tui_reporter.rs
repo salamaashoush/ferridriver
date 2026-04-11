@@ -5,23 +5,22 @@
 
 use tokio::sync::mpsc;
 
-use crate::config::RunMode;
 use crate::model::TestStatus;
 use crate::reporter::ReporterEvent;
 use crate::tui::{EntryStatus, TestEntry, TuiMessage};
 
 pub struct TuiReporter {
   tx: mpsc::UnboundedSender<TuiMessage>,
-  mode: RunMode,
+  has_bdd: bool,
   /// Accumulated test names from discovery (built during RunStarted).
   pending_names: Vec<TestEntry>,
 }
 
 impl TuiReporter {
-  pub fn new(tx: mpsc::UnboundedSender<TuiMessage>, mode: RunMode) -> Self {
+  pub fn new(tx: mpsc::UnboundedSender<TuiMessage>, has_bdd: bool) -> Self {
     Self {
       tx,
-      mode,
+      has_bdd,
       pending_names: Vec::new(),
     }
   }
@@ -30,9 +29,10 @@ impl TuiReporter {
     let _ = self.tx.send(msg);
   }
 
-  /// Format a test name for display based on mode.
+  /// Format a test name for display. BDD tests (identified by suite starting
+  /// with a feature path) get "Scenario: " prefix.
   fn display_name(&self, test_id: &crate::model::TestId) -> String {
-    if self.mode == RunMode::Bdd {
+    if self.has_bdd && test_id.suite.as_ref().is_some_and(|s| s.ends_with(".feature")) {
       format!("Scenario: {}", test_id.name)
     } else {
       test_id.full_name()
@@ -65,7 +65,7 @@ impl crate::reporter::Reporter for TuiReporter {
       },
 
       ReporterEvent::StepStarted(step) => {
-        if step.category.is_visible() || self.mode == RunMode::Bdd {
+        if step.category.is_visible() || self.has_bdd {
           let test_name = self.display_name(&step.test_id);
           self.send(TuiMessage::StepUpdate {
             test_name,
@@ -77,7 +77,7 @@ impl crate::reporter::Reporter for TuiReporter {
       },
 
       ReporterEvent::StepFinished(step) => {
-        if step.category.is_visible() || self.mode == RunMode::Bdd {
+        if step.category.is_visible() || self.has_bdd {
           let test_name = self.display_name(&step.test_id);
           let status = if step.error.is_some() {
             EntryStatus::Failed

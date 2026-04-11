@@ -75,6 +75,12 @@ impl Browser {
     .await
   }
 
+  /// Wrap an existing shared state as a Browser handle.
+  /// Used by MCP server and other contexts that already manage browser state.
+  pub fn from_shared_state(state: Arc<RwLock<BrowserState>>, backend_kind: BackendKind) -> Self {
+    Self { state, backend_kind }
+  }
+
   /// Create a new isolated browser context.
   /// Mirrors Playwright's `browser.newContext()`.
   pub fn new_context(&self) -> ContextRef {

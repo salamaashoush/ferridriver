@@ -159,7 +159,7 @@ impl EventBusBuilder {
   pub fn build(self) -> EventBus {
     EventBus {
       inner: Arc::new(EventBusInner {
-        subscribers: self.subscribers,
+        subscribers: std::sync::Mutex::new(self.subscribers),
       }),
     }
   }
@@ -180,14 +180,14 @@ pub struct EventBus {
 }
 
 struct EventBusInner {
-  subscribers: Vec<mpsc::UnboundedSender<ReporterEvent>>,
+  subscribers: std::sync::Mutex<Vec<mpsc::UnboundedSender<ReporterEvent>>>,
 }
 
 impl EventBus {
   /// Emit an event to all subscribers. Clones for N-1, moves to the last.
   /// Kept `async` to avoid churn on ~50 call sites (body is synchronous).
   pub async fn emit(&self, event: ReporterEvent) {
-    let subs = &self.inner.subscribers;
+    let subs = self.inner.subscribers.lock().unwrap();
     if subs.is_empty() {
       return;
     }
@@ -196,6 +196,16 @@ impl EventBus {
       let _ = sub.send(event.clone());
     }
     let _ = subs[last].send(event);
+  }
+
+  /// Explicitly close all sender channels. This causes the `ReporterDriver`
+  /// to see `recv() → None` and finalize.
+  ///
+  /// Required because `tokio::spawn` tasks may defer deallocation of captured
+  /// state (including `EventBus` clones) after `JoinHandle::await` returns.
+  /// Relying on `Drop` to close the channel is not deterministic in Tokio.
+  pub fn close(&self) {
+    self.inner.subscribers.lock().unwrap().clear();
   }
 }
 
@@ -237,7 +247,7 @@ impl ReporterDriver {
 pub(crate) fn create_reporters(
   names: &[crate::config::ReporterConfig],
   output_dir: &std::path::Path,
-  mode: crate::config::RunMode,
+  has_bdd: bool,
   quiet: bool,
   report_slow_tests: Option<crate::config::ReportSlowTestsConfig>,
 ) -> ReporterSet {
@@ -248,34 +258,35 @@ pub(crate) fn create_reporters(
     match config.name.as_str() {
       // ── Mode-dependent reporters ──
       // When quiet, skip terminal-based reporters (only file-based reporters are created).
-      "terminal" | "list" | "bdd" | "default" | "" => {
+      "terminal" | "list" | "default" | "" => {
         if !has_terminal && !quiet {
-          match mode {
-            crate::config::RunMode::E2e => reporters.push(Box::new(terminal::TerminalReporter::new().with_slow_tests_config(report_slow_tests.clone()))),
-            crate::config::RunMode::Bdd => reporters.push(Box::new(bdd::terminal::BddTerminalReporter::new())),
-          }
+          // E2E reporter works for mixed runs — it uses "Tests" in summary.
+          // BDD step details are emitted via StepFinished events regardless of reporter.
+          reporters.push(Box::new(terminal::TerminalReporter::new().with_slow_tests_config(report_slow_tests.clone())));
           has_terminal = true;
         }
       },
-      "json" => match mode {
-        crate::config::RunMode::E2e => {
-          reporters.push(Box::new(json::JsonReporter::new(output_dir.join("results.json"))));
-        },
-        crate::config::RunMode::Bdd => {
+      "bdd" => {
+        if !has_terminal && !quiet {
+          reporters.push(Box::new(bdd::terminal::BddTerminalReporter::new()));
+          has_terminal = true;
+        }
+      },
+      "json" => {
+        reporters.push(Box::new(json::JsonReporter::new(output_dir.join("results.json"))));
+        if has_bdd {
           reporters.push(Box::new(bdd::json::BddJsonReporter::new(
             output_dir.join("bdd-results.json"),
           )));
-        },
+        }
       },
-      "junit" => match mode {
-        crate::config::RunMode::E2e => {
-          reporters.push(Box::new(junit::JUnitReporter::new(output_dir.join("junit.xml"))));
-        },
-        crate::config::RunMode::Bdd => {
+      "junit" => {
+        reporters.push(Box::new(junit::JUnitReporter::new(output_dir.join("junit.xml"))));
+        if has_bdd {
           reporters.push(Box::new(bdd::junit::BddJunitReporter::new(
             output_dir.join("bdd-junit.xml"),
           )));
-        },
+        }
       },
 
       // ── Shared reporters (same for both modes) ──
@@ -324,10 +335,7 @@ pub(crate) fn create_reporters(
   }
 
   if reporters.is_empty() {
-    match mode {
-      crate::config::RunMode::E2e => reporters.push(Box::new(terminal::TerminalReporter::new())),
-      crate::config::RunMode::Bdd => reporters.push(Box::new(bdd::terminal::BddTerminalReporter::new())),
-    }
+    reporters.push(Box::new(terminal::TerminalReporter::new()));
   }
 
   // Always add the rerun reporter so @rerun.txt is available for --last-failed.

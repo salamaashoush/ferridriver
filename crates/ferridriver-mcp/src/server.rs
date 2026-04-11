@@ -242,6 +242,8 @@ pub struct McpServer {
   pub(crate) step_registry: Arc<ferridriver_bdd::registry::StepRegistry>,
   /// Cached BDD executor -- avoids re-creating per tool call.
   pub(crate) bdd_executor: ferridriver_bdd::executor::ScenarioExecutor,
+  /// Backend kind — needed to construct Browser handles for BDD fixtures.
+  pub(crate) backend_kind: BackendKind,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -304,6 +306,7 @@ impl McpServer {
       extensions: Arc::new(NoExtensions),
       step_registry,
       bdd_executor,
+      backend_kind: backend,
     }
   }
 
@@ -404,6 +407,26 @@ impl McpServer {
     let page = Page::new(any_page);
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
     Ok((page, ctx_ref))
+  }
+
+  /// Build unified `TestFixtures` for a session — provides full browser/page/context/request
+  /// so BDD steps and hooks have the same fixture set as the test runner path.
+  pub async fn fixtures_for_session(&self, context: &str) -> Result<ferridriver_test::model::TestFixtures, ErrorData> {
+    let (page, ctx_ref) = Box::pin(self.page_and_context(context)).await?;
+    let browser = ferridriver::Browser::from_shared_state(self.state.state_arc(), self.backend_kind);
+    let request = ferridriver::api_request::APIRequestContext::new(Default::default());
+    Ok(ferridriver_test::model::TestFixtures {
+      browser: std::sync::Arc::new(browser),
+      page: std::sync::Arc::new(page),
+      context: std::sync::Arc::new(ctx_ref),
+      request: std::sync::Arc::new(request),
+      test_info: std::sync::Arc::new(ferridriver_test::model::TestInfo::new_anonymous()),
+      modifiers: std::sync::Arc::new(ferridriver_test::model::TestModifiers::default()),
+      browser_config: ferridriver_test::config::BrowserConfig::default(),
+      bdd_args: None,
+      bdd_data_table: None,
+      bdd_doc_string: None,
+    })
   }
 
   /// Resolve ref to element -- delegates to `actions::resolve_element`.

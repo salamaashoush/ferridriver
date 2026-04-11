@@ -112,14 +112,14 @@ pub mod watch;
 pub mod worker;
 
 // -- Re-exports --
-pub use config::{CliOverrides, RunMode, TestConfig, parse_common_cli_args};
+pub use config::{CliOverrides, TestConfig, parse_common_cli_args};
 pub use context::TestContext;
 pub use discovery::{HookKindTag, HookRegistration, TestRegistration};
 pub use expect::{ToPassOptions, expect, expect_configured, expect_poll, to_pass, to_pass_with_options};
 pub use fixture::FixturePool;
 pub use model::{
-  HookDef, HookKind, SuiteDef, SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId, TestInfo,
-  TestModifiers, TestOutcome, TestPlan, TestPlanBuilder, TestStatus, TestStep,
+  HookDef, HookKind, SuiteDef, SuiteMode, TestAnnotation, TestCase, TestFailure, TestFixtures, TestFn, TestId,
+  TestInfo, TestModifiers, TestOutcome, TestPlan, TestPlanBuilder, TestStatus, TestStep,
 };
 pub use reporter::{EventBus, EventBusBuilder, Reporter, ReporterDriver, ReporterEvent, ReporterSet, Subscription};
 pub use runner::TestRunner;

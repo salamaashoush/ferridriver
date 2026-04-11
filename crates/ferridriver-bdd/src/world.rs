@@ -1,4 +1,4 @@
-//! BrowserWorld: shared scenario state with Page, variables, and typed extensions.
+//! BrowserWorld: shared scenario state with fixtures, variables, and typed extensions.
 
 use std::any::{Any, TypeId};
 use std::sync::Arc;
@@ -10,84 +10,101 @@ use ferridriver::context::ContextRef;
 
 /// Shared mutable state for a single BDD scenario.
 ///
-/// Each scenario gets a fresh `BrowserWorld` with a new browser context and page.
-/// Custom state can be stored via the type-map methods (`set_state` / `get_state`).
+/// Holds the unified `TestFixtures` from the core runner, plus scenario-specific
+/// state (variables, typed extensions, registry). Built-in steps access page/context
+/// via delegate methods; NAPI step handlers access the full `TestFixtures` directly.
 pub struct BrowserWorld {
-  page: Page,
-  context: ContextRef,
+  fixtures: ferridriver_test::model::TestFixtures,
   vars: FxHashMap<String, String>,
   state: FxHashMap<TypeId, Box<dyn Any + Send + Sync>>,
-  test_info: Option<Arc<ferridriver_test::model::TestInfo>>,
   registry: Option<Arc<crate::registry::StepRegistry>>,
-  /// Directory of the current feature file (for resolving relative fixture paths).
   feature_dir: Option<std::path::PathBuf>,
 }
 
 impl BrowserWorld {
-  /// Create a new world with the given page and context.
-  pub fn new(page: Page, context: ContextRef) -> Self {
+  /// Create a new world from the unified test fixtures.
+  pub fn new(fixtures: ferridriver_test::model::TestFixtures) -> Self {
     Self {
-      page,
-      context,
+      fixtures,
       vars: FxHashMap::default(),
       state: FxHashMap::default(),
-      test_info: None,
       registry: None,
       feature_dir: None,
     }
   }
 
-  /// Access the browser page.
+  /// Access the unified test fixtures.
+  pub fn fixtures(&self) -> &ferridriver_test::model::TestFixtures {
+    &self.fixtures
+  }
+
+  /// Mutable access to the unified test fixtures.
+  pub fn fixtures_mut(&mut self) -> &mut ferridriver_test::model::TestFixtures {
+    &mut self.fixtures
+  }
+
+  // ── Delegate accessors (used by built-in steps) ──
+
   pub fn page(&self) -> &Page {
-    &self.page
+    &self.fixtures.page
   }
 
-  /// Mutable access to the browser page.
   pub fn page_mut(&mut self) -> &mut Page {
-    &mut self.page
+    Arc::make_mut(&mut self.fixtures.page)
   }
 
-  /// Access the browser context (for cookies, permissions, etc.).
   pub fn context(&self) -> &ContextRef {
-    &self.context
+    &self.fixtures.context
   }
 
-  /// Access scenario variables.
+  pub fn browser(&self) -> &ferridriver::Browser {
+    &self.fixtures.browser
+  }
+
+  pub fn request(&self) -> &ferridriver::api_request::APIRequestContext {
+    &self.fixtures.request
+  }
+
+  pub fn test_info(&self) -> &Arc<ferridriver_test::model::TestInfo> {
+    &self.fixtures.test_info
+  }
+
+  pub fn browser_config(&self) -> &ferridriver_test::config::BrowserConfig {
+    &self.fixtures.browser_config
+  }
+
+  // ── Scenario variables ──
+
   pub fn vars(&self) -> &FxHashMap<String, String> {
     &self.vars
   }
 
-  /// Mutable access to scenario variables.
   pub fn vars_mut(&mut self) -> &mut FxHashMap<String, String> {
     &mut self.vars
   }
 
-  /// Get a variable value by name.
   pub fn var(&self, name: &str) -> Option<&str> {
     self.vars.get(name).map(String::as_str)
   }
 
-  /// Set a variable value.
   pub fn set_var(&mut self, name: impl Into<String>, value: impl Into<String>) {
     self.vars.insert(name.into(), value.into());
   }
 
-  /// Get typed state by type.
+  // ── Typed state extensions ──
+
   pub fn get_state<T: Send + Sync + 'static>(&self) -> Option<&T> {
     self.state.get(&TypeId::of::<T>())?.downcast_ref()
   }
 
-  /// Get mutable typed state by type.
   pub fn get_state_mut<T: Send + Sync + 'static>(&mut self) -> Option<&mut T> {
     self.state.get_mut(&TypeId::of::<T>())?.downcast_mut()
   }
 
-  /// Set typed state. Overwrites any previous value of the same type.
   pub fn set_state<T: Send + Sync + 'static>(&mut self, val: T) {
     self.state.insert(TypeId::of::<T>(), Box::new(val));
   }
 
-  /// Remove and return typed state.
   pub fn take_state<T: Send + Sync + 'static>(&mut self) -> Option<T> {
     self
       .state
@@ -96,31 +113,23 @@ impl BrowserWorld {
       .map(|b| *b)
   }
 
-  /// Set the test info for attachments.
-  pub fn set_test_info(&mut self, info: Arc<ferridriver_test::model::TestInfo>) {
-    self.test_info = Some(info);
-  }
+  // ── Registry + feature dir ──
 
-  /// Set the step registry for step composition.
   pub fn set_registry(&mut self, registry: Arc<crate::registry::StepRegistry>) {
     self.registry = Some(registry);
   }
 
-  /// Set the feature file directory for resolving relative fixture paths.
   pub fn set_feature_dir(&mut self, dir: std::path::PathBuf) {
     self.feature_dir = Some(dir);
   }
 
-  /// Clear scenario-specific state (variables, typed state) between scenario runs.
-  /// Page and context are preserved -- only transient per-scenario data is reset.
+  /// Clear scenario-specific state between runs. Fixtures are preserved.
   pub fn reset_scenario_state(&mut self) {
     self.vars.clear();
     self.state.clear();
     self.feature_dir = None;
   }
 
-  /// Resolve a path relative to the feature file directory.
-  /// Falls back to current working directory if feature dir is not set.
   pub fn resolve_fixture_path(&self, relative: &str) -> std::path::PathBuf {
     if let Some(dir) = &self.feature_dir {
       dir.join(relative)
@@ -129,30 +138,24 @@ impl BrowserWorld {
     }
   }
 
-  /// Get the step registry Arc (for retry step composition).
   pub fn registry_arc(&self) -> Option<Arc<crate::registry::StepRegistry>> {
     self.registry.clone()
   }
 
-  /// Attach binary data to the current test (appears in reports).
   pub async fn attach(&self, name: &str, content_type: &str, data: Vec<u8>) {
-    if let Some(info) = &self.test_info {
-      info
-        .attach(
-          name.to_string(),
-          content_type.to_string(),
-          ferridriver_test::model::AttachmentBody::Bytes(data),
-        )
-        .await;
-    }
+    self.fixtures.test_info
+      .attach(
+        name.to_string(),
+        content_type.to_string(),
+        ferridriver_test::model::AttachmentBody::Bytes(data),
+      )
+      .await;
   }
 
-  /// Log a text message as an attachment.
   pub async fn log(&self, text: &str) {
     self.attach("log", "text/plain", text.as_bytes().to_vec()).await;
   }
 
-  /// Execute another step from within a step handler (step composition).
   pub async fn run_step(&mut self, text: &str) -> Result<(), crate::step::StepError> {
     let registry = self
       .registry
@@ -164,8 +167,6 @@ impl BrowserWorld {
     (step_match.def.handler)(self, step_match.params, None, None).await
   }
 
-  /// Interpolate variables in a string.
-  /// `$name` is replaced with the variable value. `$$` escapes to `$`.
   pub fn interpolate(&self, text: &str) -> String {
     let mut result = String::with_capacity(text.len());
     let mut chars = text.chars().peekable();

@@ -30,7 +30,7 @@ pub struct TestRunner {
 
 impl TestRunner {
   pub fn new(config: TestConfig, overrides: CliOverrides) -> Self {
-    let reporters = crate::reporter::create_reporters(&config.reporter, &config.output_dir, config.mode, config.quiet, config.report_slow_tests.clone());
+    let reporters = crate::reporter::create_reporters(&config.reporter, &config.output_dir, config.has_bdd, config.quiet, config.report_slow_tests.clone());
     Self {
       config: Arc::new(config),
       reporters,
@@ -68,10 +68,13 @@ impl TestRunner {
     let driver = ReporterDriver::new(reporters, reporter_sub);
     let driver_handle = tokio::spawn(driver.run());
 
-    let exit_code = self.execute(plan, bus).await;
+    let exit_code = self.execute(plan, bus.clone()).await;
 
-    // Bus is dropped after execute returns (last clone). Channel closes,
-    // driver finalizes reporters, returns them for potential reuse.
+    // Explicitly close senders so the driver's recv() returns None.
+    // Cannot rely on Drop — tokio::spawn defers task deallocation,
+    // keeping Arc<EventBusInner> alive after JoinHandle::await returns.
+    bus.close();
+
     if let Ok(reporters) = driver_handle.await {
       self.reporters = reporters;
     }
@@ -234,7 +237,8 @@ impl TestRunner {
       shared_browser: self.shared_browser.clone(),
     };
 
-    let exit_code = sub_runner.execute(plan, bus).await;
+    let exit_code = sub_runner.execute(plan, bus.clone()).await;
+    bus.close();
 
     if let Ok(reporters) = driver_handle.await {
       self.reporters = reporters;
@@ -318,7 +322,8 @@ impl TestRunner {
       return 0;
     }
 
-    let num_workers = self.config.workers;
+    // Never launch more workers than tests — extra workers launch browsers for nothing.
+    let num_workers = (self.config.workers as usize).min(total_tests).max(1) as u32;
 
     // ── Validate fixture DAG ──
     {
@@ -701,8 +706,7 @@ impl TestRunner {
     // If the user presses q/Ctrl+C, drain returns Cancelled and
     // select! drops the execute future (cancelling it).
     let cancelled = tokio::select! {
-      _ = self.execute(plan, bus) => {
-        // Run completed. Drain remaining messages.
+      _ = self.execute(plan, bus.clone()) => {
         tui.flush();
         false
       }
@@ -711,8 +715,7 @@ impl TestRunner {
       }
     };
 
-    // Drop bus clones held by execute (already dropped by select!).
-    // Wait for reporter driver to finalize.
+    bus.close();
     if let Ok(reporters) = driver_handle.await {
       self.reporters = reporters;
     }
@@ -738,7 +741,7 @@ impl TestRunner {
     // Replace ALL reporters with TUI reporter + rerun.
     // Persist across watch cycles via run_with_tui_drain's take/restore.
     self.reporters.replace(vec![
-      Box::new(crate::tui_reporter::TuiReporter::new(tui_tx.clone(), self.config.mode)),
+      Box::new(crate::tui_reporter::TuiReporter::new(tui_tx.clone(), self.config.has_bdd)),
       Box::new(crate::reporter::rerun::RerunReporter::new(
         self.config.output_dir.join("@rerun.txt"),
       )),

@@ -8,5 +8,8 @@
     "examples/ct-vue",
     "examples/ct-svelte",
     "examples/ct-solid"
-  ]
+  ],
+  "devDependencies": {
+    "@ferridriver/test": "workspace:*"
+  }
 }

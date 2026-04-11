@@ -4,14 +4,12 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Whether we're running E2E tests or BDD scenarios.
+/// Whether the plan contains BDD (.feature) tests.
 /// Controls reporter variant selection (e.g., terminal vs BDD terminal).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-pub enum RunMode {
-  #[default]
-  E2e,
-  Bdd,
-}
+/// When true, BDD-aware reporters are used; otherwise E2E reporters.
+/// A mixed run (both .spec.ts and .feature) sets this to true.
+// Kept as a simple bool rather than an enum — mixed runs are the goal.
+
 
 /// Video recording mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -187,9 +185,9 @@ pub struct TestConfig {
   /// Named configuration presets, merged onto the base config via `--profile NAME`.
   pub profiles: BTreeMap<String, serde_json::Value>,
 
-  /// Run mode: E2E tests or BDD scenarios. Controls reporter variants.
+  /// Whether the plan contains BDD features. Controls reporter variant selection.
   #[serde(default)]
-  pub mode: RunMode,
+  pub has_bdd: bool,
 
   /// Programmatic global setup hooks (run before any tests).
   /// Not serializable — set by code, not config files.
@@ -771,7 +769,7 @@ impl Default for TestConfig {
       order: "defined".into(),
       language: None,
       profiles: BTreeMap::new(),
-      mode: RunMode::E2e,
+      has_bdd: false,
       global_setup_fns: Vec::new(),
       global_teardown_fns: Vec::new(),
     }

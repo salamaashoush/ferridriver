@@ -41,7 +41,7 @@
 )]
 
 mod api_request;
-mod bdd_runner;
+mod bdd_registry;
 mod browser;
 mod codegen;
 mod context;

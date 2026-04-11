@@ -330,6 +330,35 @@ pub struct TestInfo {
 }
 
 impl TestInfo {
+  /// Create a minimal TestInfo for non-test-runner contexts (MCP, standalone).
+  pub fn new_anonymous() -> Self {
+    Self {
+      test_id: TestId {
+        file: String::new(),
+        suite: None,
+        name: "anonymous".into(),
+        line: None,
+      },
+      title_path: Vec::new(),
+      retry: 0,
+      worker_index: 0,
+      parallel_index: 0,
+      repeat_each_index: 0,
+      output_dir: PathBuf::new(),
+      snapshot_dir: PathBuf::new(),
+      snapshot_path_template: None,
+      update_snapshots: crate::config::UpdateSnapshotsMode::default(),
+      attachments: Arc::new(Mutex::new(Vec::new())),
+      steps: Arc::new(Mutex::new(Vec::new())),
+      soft_errors: Arc::new(Mutex::new(Vec::new())),
+      timeout: Duration::from_secs(30),
+      tags: Vec::new(),
+      start_time: Instant::now(),
+      event_bus: None,
+      annotations: Arc::new(Mutex::new(Vec::new())),
+    }
+  }
+
   /// Add a structured annotation at runtime.
   pub async fn annotate(&self, type_name: impl Into<String>, description: impl Into<String>) {
     let mut annotations = self.annotations.lock().await;
@@ -822,4 +851,26 @@ pub struct Attachment {
 pub enum AttachmentBody {
   Bytes(Vec<u8>),
   Path(PathBuf),
+}
+
+// ── Unified Fixtures ──
+
+/// Unified fixture bag for test/step/hook callbacks.
+///
+/// E2E tests and hooks get browser/page/context/request/testInfo.
+/// BDD steps additionally get args/data_table/doc_string.
+/// BDD hooks get the E2E fields with BDD fields as None.
+#[derive(Clone)]
+pub struct TestFixtures {
+  pub browser: Arc<ferridriver::Browser>,
+  pub page: Arc<ferridriver::Page>,
+  pub context: Arc<ferridriver::context::ContextRef>,
+  pub request: Arc<ferridriver::api_request::APIRequestContext>,
+  pub test_info: Arc<TestInfo>,
+  pub modifiers: Arc<TestModifiers>,
+  pub browser_config: crate::config::BrowserConfig,
+  // BDD fields (None for E2E tests/hooks)
+  pub bdd_args: Option<Vec<serde_json::Value>>,
+  pub bdd_data_table: Option<Vec<Vec<String>>>,
+  pub bdd_doc_string: Option<String>,
 }

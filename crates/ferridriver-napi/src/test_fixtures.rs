@@ -1,74 +1,35 @@
-//! NAPI `TestFixtures` class — the fixture bag passed to JS test callbacks.
+//! NAPI `TestFixtures` class — thin wrapper over the core `TestFixtures` model.
 //!
-//! Mirrors Playwright's `({ page, browserName, isMobile, ... }, testInfo)` signature.
-//! In ferridriver, everything is in a single fixtures object: `({ page, testInfo, browserName, ... })`.
+//! Unified fixture bag for both E2E and BDD callbacks. E2E tests get
+//! browser/page/context/request/testInfo. BDD steps additionally get
+//! args/dataTable/docString.
 
 use std::sync::Arc;
 
 use napi_derive::napi;
 
-/// Fixture object passed to JS test callbacks.
+/// Fixture object passed to all JS callbacks (tests, steps, hooks).
 ///
-/// Matches Playwright's test function signature — JS tests destructure this:
+/// E2E usage:
 /// ```js
 /// test('name', async ({ page, browserName, testInfo }) => { ... });
 /// ```
+///
+/// BDD usage:
+/// ```js
+/// Given('I click {string}', async ({ page, args: [selector], testInfo }) => { ... });
+/// ```
 #[napi]
 pub struct TestFixtures {
-  /// Core browser (Clone is cheap — Arc-wrapped internally).
-  inner_browser: ferridriver::Browser,
-  /// Core page (Clone-able, reconstructed as NAPI Page on each getter call).
-  inner_page: ferridriver::Page,
-  /// Core context.
-  inner_context: ferridriver::context::ContextRef,
-  /// Core request context.
-  inner_request: Arc<ferridriver::api_request::APIRequestContext>,
-  /// Core test info + modifiers (shared Arc).
-  inner_test_info: Arc<ferridriver_test::model::TestInfo>,
-  modifiers: Arc<ferridriver_test::model::TestModifiers>,
-  // Browser config fixtures.
-  browser_name: String,
-  headless: bool,
-  is_mobile: bool,
-  has_touch: bool,
-  color_scheme: Option<String>,
-  locale: Option<String>,
-  channel: Option<String>,
+  inner: ferridriver_test::model::TestFixtures,
 }
 
 impl TestFixtures {
-  #[allow(clippy::too_many_arguments)]
-  pub(crate) fn new(
-    browser: ferridriver::Browser,
-    page: ferridriver::Page,
-    context: ferridriver::context::ContextRef,
-    request: Arc<ferridriver::api_request::APIRequestContext>,
-    test_info: Arc<ferridriver_test::model::TestInfo>,
-    modifiers: Arc<ferridriver_test::model::TestModifiers>,
-    browser_name: String,
-    headless: bool,
-    is_mobile: bool,
-    has_touch: bool,
-    color_scheme: Option<String>,
-    locale: Option<String>,
-    channel: Option<String>,
-  ) -> Self {
-    Self {
-      inner_browser: browser,
-      inner_page: page,
-      inner_context: context,
-      inner_request: request,
-      inner_test_info: test_info,
-      modifiers,
-      browser_name,
-      headless,
-      is_mobile,
-      has_touch,
-      color_scheme,
-      locale,
-      channel,
-    }
+  /// Wrap a core `TestFixtures` for NAPI consumption.
+  pub(crate) fn wrap(inner: ferridriver_test::model::TestFixtures) -> Self {
+    Self { inner }
   }
+
 }
 
 #[napi]
@@ -77,65 +38,92 @@ impl TestFixtures {
 
   #[napi(getter)]
   pub fn browser(&self) -> crate::browser::Browser {
-    crate::browser::Browser::wrap(self.inner_browser.clone())
+    crate::browser::Browser::wrap((*self.inner.browser).clone())
   }
 
   #[napi(getter)]
   pub fn page(&self) -> crate::page::Page {
-    crate::page::Page::wrap(self.inner_page.clone())
+    crate::page::Page::wrap((*self.inner.page).clone())
   }
 
   #[napi(getter)]
   pub fn context(&self) -> crate::context::BrowserContext {
-    crate::context::BrowserContext::wrap(self.inner_context.clone())
+    crate::context::BrowserContext::wrap((*self.inner.context).clone())
   }
 
   #[napi(getter)]
   pub fn request(&self) -> crate::api_request::ApiRequestContext {
-    crate::api_request::ApiRequestContext::wrap((*self.inner_request).clone())
+    crate::api_request::ApiRequestContext::wrap((*self.inner.request).clone())
   }
 
   #[napi(getter, js_name = "testInfo")]
   pub fn test_info(&self) -> crate::test_info::TestInfo {
-    crate::test_info::TestInfo::new(Arc::clone(&self.inner_test_info), Arc::clone(&self.modifiers))
+    crate::test_info::TestInfo::new(Arc::clone(&self.inner.test_info), Arc::clone(&self.inner.modifiers))
   }
 
   // ── Browser config fixtures (Playwright worker-scoped options) ──
 
   #[napi(getter, js_name = "browserName")]
   pub fn browser_name(&self) -> String {
-    self.browser_name.clone()
+    self.inner.browser_config.browser.clone()
   }
 
   #[napi(getter)]
   pub fn headless(&self) -> bool {
-    self.headless
+    self.inner.browser_config.headless
   }
 
   #[napi(getter)]
   pub fn channel(&self) -> Option<String> {
-    self.channel.clone()
+    self.inner.browser_config.channel.clone()
   }
 
   // ── Context config fixtures (Playwright test-scoped options) ──
 
   #[napi(getter, js_name = "isMobile")]
   pub fn is_mobile(&self) -> bool {
-    self.is_mobile
+    self.inner.browser_config.context.is_mobile
   }
 
   #[napi(getter, js_name = "hasTouch")]
   pub fn has_touch(&self) -> bool {
-    self.has_touch
+    self.inner.browser_config.context.has_touch
   }
 
   #[napi(getter, js_name = "colorScheme")]
   pub fn color_scheme(&self) -> Option<String> {
-    self.color_scheme.clone()
+    self.inner.browser_config.context.color_scheme.clone()
   }
 
   #[napi(getter)]
   pub fn locale(&self) -> Option<String> {
-    self.locale.clone()
+    self.inner.browser_config.context.locale.clone()
+  }
+
+  // ── BDD fixtures (None for E2E tests/hooks) ──
+
+  /// Extracted parameters from the BDD step expression (typed: int→number, string→string).
+  /// Returns null for E2E tests.
+  #[napi(getter, ts_return_type = "unknown[] | null")]
+  pub fn args(&self) -> Option<serde_json::Value> {
+    self.inner.bdd_args.as_ref().map(|a| serde_json::Value::Array(a.clone()))
+  }
+
+  /// Alias for `args`.
+  #[napi(getter, ts_return_type = "unknown[] | null")]
+  pub fn params(&self) -> Option<serde_json::Value> {
+    self.args()
+  }
+
+  /// The inline data table attached to this BDD step, if any.
+  #[napi(getter, js_name = "dataTable")]
+  pub fn data_table(&self) -> Option<Vec<Vec<String>>> {
+    self.inner.bdd_data_table.clone()
+  }
+
+  /// The doc string attached to this BDD step, if any.
+  #[napi(getter, js_name = "docString")]
+  pub fn doc_string(&self) -> Option<String> {
+    self.inner.bdd_doc_string.clone()
   }
 }

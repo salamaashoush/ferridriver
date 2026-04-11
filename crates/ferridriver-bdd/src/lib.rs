@@ -244,7 +244,7 @@ pub fn run_bdd_harness() {
     }
 
     // Run via core TestRunner.
-    config.mode = ferridriver_test::config::RunMode::Bdd;
+    config.has_bdd = true;
     let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
     runner.run(plan).await
   });
