@@ -99,6 +99,48 @@ impl TestInfo {
     self.inner.elapsed().as_millis() as f64
   }
 
+  /// Source line number of the test declaration.
+  #[napi(getter)]
+  pub fn line(&self) -> i32 {
+    self.inner.test_id.line.unwrap_or(0) as i32
+  }
+
+  /// Expected status: "passed", "failed", "skipped".
+  #[napi(getter, js_name = "expectedStatus")]
+  pub fn expected_status(&self) -> String {
+    if self.modifiers.skipped.load(std::sync::atomic::Ordering::Relaxed) {
+      "skipped".to_string()
+    } else if self.modifiers.expected_failure.load(std::sync::atomic::Ordering::Relaxed) {
+      "failed".to_string()
+    } else {
+      "passed".to_string()
+    }
+  }
+
+  /// Annotations as JSON array (read-only snapshot).
+  #[napi(getter)]
+  pub fn annotations(&self) -> Vec<serde_json::Value> {
+    // Annotations are behind an async Mutex, use try_lock for sync getter.
+    if let Ok(anns) = self.inner.annotations.try_lock() {
+      anns
+        .iter()
+        .filter_map(|a| serde_json::to_value(a).ok())
+        .collect()
+    } else {
+      Vec::new()
+    }
+  }
+
+  /// Attachments count (attachments are collected by Rust, not exposed as objects).
+  #[napi(getter, js_name = "attachmentCount")]
+  pub fn attachment_count(&self) -> i32 {
+    if let Ok(atts) = self.inner.attachments.try_lock() {
+      atts.len() as i32
+    } else {
+      0
+    }
+  }
+
   // ── Runtime modifiers (Playwright TestInfo methods) ──
 
   /// Skip this test at runtime. Mirrors Playwright's `testInfo.skip()`.
@@ -198,17 +240,25 @@ impl TestInfo {
   }
 
   /// Add an attachment to this test. Mirrors Playwright's `testInfo.attach()`.
+  ///
+  /// Accepts either `body` (Buffer) or `path` (file path string) — same as Playwright.
   #[napi]
-  pub async fn attach(&self, name: String, content_type: String, body: napi::bindgen_prelude::Buffer) {
-    let bytes = body.to_vec();
-    self
-      .inner
-      .attach(
-        name,
-        content_type,
-        ferridriver_test::model::AttachmentBody::Bytes(bytes),
-      )
-      .await;
+  pub async fn attach(
+    &self,
+    name: String,
+    content_type: Option<String>,
+    body: Option<napi::bindgen_prelude::Buffer>,
+    path: Option<String>,
+  ) {
+    let ct = content_type.unwrap_or_else(|| "application/octet-stream".to_string());
+    let attachment_body = if let Some(buf) = body {
+      ferridriver_test::model::AttachmentBody::Bytes(buf.to_vec())
+    } else if let Some(p) = path {
+      ferridriver_test::model::AttachmentBody::Path(std::path::PathBuf::from(p))
+    } else {
+      return;
+    };
+    self.inner.attach(name, ct, attachment_body).await;
   }
 
   /// Add a structured annotation. Mirrors Playwright's `testInfo.annotations.push()`.
