@@ -24,12 +24,6 @@ async-trait = { workspace = true }
 rustc-hash = "2"
 async-channel = "2"
 
-# TypeScript → JavaScript transpilation (type stripping via parse + codegen)
-oxc_allocator = "0.124"
-oxc_parser = "0.124"
-oxc_codegen = "0.124"
-oxc_span = "0.124"
-
 [build-dependencies]
 napi-build = "2"
 
