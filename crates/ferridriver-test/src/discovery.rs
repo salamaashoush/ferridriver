@@ -9,7 +9,9 @@ use crate::fixture::FixturePool;
 use std::fmt;
 use std::path::Path;
 
-use crate::model::{ExpectedStatus, Hooks, TestAnnotation, TestCase, TestFailure, TestId, TestPlan, TestSuite};
+use crate::model::{
+  ExpectedStatus, Hooks, TestAnnotation, TestCase, TestFailure, TestId, TestInfo, TestPlan, TestSuite,
+};
 
 // ── Inventory-based registration (populated by #[ferritest] macro) ──
 
@@ -28,6 +30,29 @@ pub struct TestRegistration {
 }
 
 inventory::collect!(TestRegistration);
+
+/// Hook kind tag for inventory registration (no closures — just the discriminant).
+#[derive(Debug, Clone, Copy)]
+pub enum HookKindTag {
+  BeforeAll,
+  AfterAll,
+  BeforeEach,
+  AfterEach,
+}
+
+/// What `#[before_all]` / `#[after_all]` / `#[before_each]` / `#[after_each]` submit.
+pub struct HookRegistration {
+  pub module_path: &'static str,
+  /// For before_all/after_all: `fn(FixturePool) -> Future<Result<(), TestFailure>>`
+  pub suite_hook_fn:
+    Option<fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>>,
+  /// For before_each/after_each: `fn(FixturePool, Arc<TestInfo>) -> Future<Result<(), TestFailure>>`
+  pub each_hook_fn:
+    Option<fn(FixturePool, Arc<TestInfo>) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>>,
+  pub kind: HookKindTag,
+}
+
+inventory::collect!(HookRegistration);
 
 // ── Discovery ──
 
@@ -78,6 +103,38 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
       mode: crate::model::SuiteMode::default(),
     });
     suite.tests.push(test_case);
+  }
+
+  // Collect hooks and attach them to matching suites.
+  for reg in inventory::iter::<HookRegistration> {
+    let hook_suite = suite_from_module_path(reg.module_path);
+    // Find the matching suite — hooks attach to the suite derived from their module.
+    for suite in suites.values_mut() {
+      if suite.name == hook_suite {
+        match reg.kind {
+          HookKindTag::BeforeAll => {
+            if let Some(f) = reg.suite_hook_fn {
+              suite.hooks.before_all.push(Arc::new(move |pool| f(pool)));
+            }
+          },
+          HookKindTag::AfterAll => {
+            if let Some(f) = reg.suite_hook_fn {
+              suite.hooks.after_all.push(Arc::new(move |pool| f(pool)));
+            }
+          },
+          HookKindTag::BeforeEach => {
+            if let Some(f) = reg.each_hook_fn {
+              suite.hooks.before_each.push(Arc::new(move |pool, info| f(pool, info)));
+            }
+          },
+          HookKindTag::AfterEach => {
+            if let Some(f) = reg.each_hook_fn {
+              suite.hooks.after_each.push(Arc::new(move |pool, info| f(pool, info)));
+            }
+          },
+        }
+      }
+    }
   }
 
   let suites: Vec<TestSuite> = suites.into_values().collect();

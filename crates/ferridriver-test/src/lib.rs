@@ -114,7 +114,7 @@ pub mod worker;
 // -- Re-exports --
 pub use config::{CliOverrides, RunMode, TestConfig, parse_common_cli_args};
 pub use context::TestContext;
-pub use discovery::TestRegistration;
+pub use discovery::{HookKindTag, HookRegistration, TestRegistration};
 pub use expect::{ToPassOptions, expect, expect_configured, expect_poll, to_pass, to_pass_with_options};
 pub use fixture::FixturePool;
 pub use model::{
@@ -125,7 +125,7 @@ pub use reporter::{EventBus, EventBusBuilder, Reporter, ReporterDriver, Reporter
 pub use runner::TestRunner;
 
 // Re-export proc macros.
-pub use ferridriver_test_macros::{ferritest, ferritest_each};
+pub use ferridriver_test_macros::{after_all, after_each, before_all, before_each, ferritest, ferritest_each};
 
 // Re-export inventory for the proc macro expansion.
 pub use inventory;
@@ -188,5 +188,5 @@ pub mod prelude {
   pub use crate::expect::{expect, expect_configured, expect_poll, to_pass};
   pub use crate::fixture::FixturePool;
   pub use crate::model::{TestFailure, TestInfo};
-  pub use ferridriver_test_macros::{ferritest, ferritest_each};
+  pub use ferridriver_test_macros::{after_all, after_each, before_all, before_each, ferritest, ferritest_each};
 }
