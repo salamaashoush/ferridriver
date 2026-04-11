@@ -48,6 +48,12 @@ async fn should_be_checked(world: &mut BrowserWorld, selector: String) {
   expect(&locator).to_be_checked().await.map_err(to_step_err)?;
 }
 
+#[then("{string} should not be checked")]
+async fn should_not_be_checked(world: &mut BrowserWorld, selector: String) {
+  let locator = world.page().locator(&selector);
+  expect(&locator).not().to_be_checked().await.map_err(to_step_err)?;
+}
+
 #[then("{string} should contain text {string}")]
 async fn should_contain_text(world: &mut BrowserWorld, selector: String, expected: String) {
   let locator = world.page().locator(&selector);

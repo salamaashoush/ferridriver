@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html><head><title>Locators test</title></head>
+<body>
+<nav role="navigation" aria-label="Main">
+  <a href="#home">Home</a>
+  <a href="#about">About</a>
+  <a href="#contact">Contact</a>
+</nav>
+
+<main>
+  <h1>Welcome</h1>
+  <p>This page tests advanced locator strategies.</p>
+
+  <form>
+    <label for="username">Username</label>
+    <input id="username" name="username" placeholder="Enter username" />
+
+    <label for="email">Email address</label>
+    <input id="email" name="email" type="email" placeholder="you@example.com" />
+
+    <label for="password">Password</label>
+    <input id="password" name="password" type="password" placeholder="Secret" />
+
+    <label for="bio">Bio</label>
+    <textarea id="bio" name="bio" placeholder="Tell us about yourself"></textarea>
+
+    <fieldset>
+      <legend>Role</legend>
+      <label><input type="radio" name="role" value="admin"> Admin</label>
+      <label><input type="radio" name="role" value="editor"> Editor</label>
+      <label><input type="radio" name="role" value="viewer" checked> Viewer</label>
+    </fieldset>
+
+    <label><input type="checkbox" id="terms"> I accept the terms</label>
+
+    <button type="submit">Submit</button>
+    <button type="reset">Reset</button>
+    <button type="button" disabled>Disabled</button>
+  </form>
+
+  <section aria-label="Results">
+    <ul id="item-list">
+      <li>Item Alpha</li>
+      <li>Item Beta</li>
+      <li>Item Gamma</li>
+      <li>Item Delta</li>
+      <li>Item Epsilon</li>
+    </ul>
+  </section>
+
+  <div id="hidden-section" style="display: none;">
+    <p>This is hidden content</p>
+  </div>
+
+  <div id="delayed-content"></div>
+  <script>
+    setTimeout(() => {
+      document.getElementById('delayed-content').innerHTML = '<p id="appeared">I appeared after 500ms</p>';
+    }, 500);
+  </script>
+</main>
+
+<footer role="contentinfo">
+  <p>&copy; 2025 Test Corp</p>
+</footer>
+</body></html>

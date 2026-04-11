@@ -1,0 +1,15 @@
+<!DOCTYPE html>
+<html><head><title>Inner Frame</title>
+<style>
+  body { background: #f0f0f0; font-family: sans-serif; padding: 10px; }
+  .frame-info { color: #333; }
+</style>
+</head>
+<body>
+<div class="frame-info">
+  <h2>Frame Content</h2>
+  <p id="name">Frame: <script>document.write(window.name || 'unnamed')</script></p>
+  <input id="frame-input" placeholder="Type in frame" />
+  <button id="frame-button" onclick="window.frameClicked = true; this.textContent = 'Clicked!'">Click in frame</button>
+</div>
+</body></html>

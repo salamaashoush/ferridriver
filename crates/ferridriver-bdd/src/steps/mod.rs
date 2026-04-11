@@ -7,6 +7,7 @@ pub mod api;
 pub mod assertion;
 pub mod cookie;
 pub mod dialog;
+pub mod emulation;
 pub mod file;
 pub mod frame;
 pub mod interaction;

@@ -1,0 +1,20 @@
+<!DOCTYPE html>
+<html><head><title>Nested Frames</title></head>
+<body>
+<h1>Outer Page</h1>
+<iframe name="outer" srcdoc='
+<!DOCTYPE html>
+<html><head><title>Outer Frame</title></head>
+<body>
+<h2>Outer Frame</h2>
+<iframe name="inner" srcdoc="
+<!DOCTYPE html>
+<html><head><title>Inner Frame</title></head>
+<body>
+<h3>Inner Frame</h3>
+<button id=deep-button onclick=this.textContent=&quot;Deep Clicked&quot;>Deep Button</button>
+</body></html>
+"></iframe>
+</body></html>
+' width="500" height="400"></iframe>
+</body></html>

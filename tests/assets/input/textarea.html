@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html><head><title>Textarea test</title></head>
+<body>
+<textarea spellcheck="false"></textarea>
+<input id="input" />
+<div id="editable" contenteditable="true"></div>
+<div class="plain">Plain div</div>
+<script>
+  window.result = '';
+  window.events = [];
+  const textarea = document.querySelector('textarea');
+  textarea.addEventListener('input', () => { window.result = textarea.value; });
+  textarea.addEventListener('keydown', e => { window.events.push('keydown:' + e.key); });
+  textarea.addEventListener('keyup', e => { window.events.push('keyup:' + e.key); });
+  const input = document.querySelector('#input');
+  input.addEventListener('input', () => { window.result = input.value; });
+</script>
+</body></html>

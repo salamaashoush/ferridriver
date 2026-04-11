@@ -1,0 +1,32 @@
+<!DOCTYPE html>
+<html><head><title>Select test</title></head>
+<body>
+<select id="single">
+  <option value="">Choose a color</option>
+  <option value="red">Red</option>
+  <option value="green">Green</option>
+  <option value="blue">Blue</option>
+  <option value="yellow">Yellow</option>
+</select>
+
+<select id="multi" multiple size="4">
+  <option value="cat">Cat</option>
+  <option value="dog">Dog</option>
+  <option value="bird">Bird</option>
+  <option value="fish">Fish</option>
+</select>
+
+<div id="output"></div>
+<script>
+  window.singleResult = '';
+  window.multiResult = [];
+  document.getElementById('single').addEventListener('change', e => {
+    window.singleResult = e.target.value;
+    document.getElementById('output').textContent = 'single:' + e.target.value;
+  });
+  document.getElementById('multi').addEventListener('change', e => {
+    window.multiResult = Array.from(e.target.selectedOptions).map(o => o.value);
+    document.getElementById('output').textContent = 'multi:' + window.multiResult.join(',');
+  });
+</script>
+</body></html>

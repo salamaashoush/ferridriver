@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html><head><title>Drag and Drop test</title>
+<style>
+  #source, #target { width: 150px; height: 150px; border: 2px solid #333; margin: 10px; display: inline-block; }
+  #source { background: #4CAF50; cursor: grab; }
+  #target { background: #ddd; }
+  .dragging { opacity: 0.5; }
+</style>
+</head>
+<body>
+<div id="source" draggable="true">Drag me</div>
+<div id="target">Drop here</div>
+<div id="output"></div>
+<script>
+  window.events = [];
+  const source = document.getElementById('source');
+  const target = document.getElementById('target');
+  const output = document.getElementById('output');
+
+  source.addEventListener('dragstart', e => {
+    e.dataTransfer.setData('text/plain', 'hello');
+    source.classList.add('dragging');
+    window.events.push('dragstart');
+  });
+  source.addEventListener('dragend', () => {
+    source.classList.remove('dragging');
+    window.events.push('dragend');
+  });
+  target.addEventListener('dragover', e => { e.preventDefault(); });
+  target.addEventListener('drop', e => {
+    e.preventDefault();
+    window.events.push('drop');
+    target.textContent = 'Dropped: ' + e.dataTransfer.getData('text/plain');
+    output.textContent = window.events.join(',');
+  });
+
+  // Also track raw pointer events for non-drag testing
+  window.mouseEvents = [];
+  document.addEventListener('mousedown', e => { window.mouseEvents.push('mousedown:' + e.clientX + ',' + e.clientY); });
+  document.addEventListener('mousemove', e => { window.mouseEvents.push('mousemove:' + e.clientX + ',' + e.clientY); });
+  document.addEventListener('mouseup', e => { window.mouseEvents.push('mouseup:' + e.clientX + ',' + e.clientY); });
+</script>
+</body></html>

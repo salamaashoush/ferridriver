@@ -147,6 +147,31 @@ impl TestRunner {
       }
     }
 
+    // ── Web server lifecycle ──
+    // Follows Playwright's pattern: start servers, set FERRIDRIVER_BASE_URL env var.
+    let web_server_manager = if !self.config.web_server.is_empty() {
+      match crate::server::WebServerManager::start(&self.config.web_server).await {
+        Ok(mgr) => {
+          if let Some(url) = mgr.first_url() {
+            if self.config.base_url.is_none() {
+              // SAFETY: set_var is called before worker threads are spawned,
+              // so no concurrent reads can race.
+              #[allow(unsafe_code)]
+              unsafe { std::env::set_var("FERRIDRIVER_BASE_URL", &url) };
+              tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
+            }
+          }
+          Some(mgr)
+        },
+        Err(e) => {
+          tracing::error!(target: "ferridriver::runner", "webServer start failed: {e}");
+          return 1;
+        },
+      }
+    } else {
+      None
+    };
+
     event_bus
       .emit(ReporterEvent::RunStarted {
         total_tests,
@@ -352,6 +377,11 @@ impl TestRunner {
         TestStatus::Skipped => skipped += 1,
         _ => failed += 1,
       }
+    }
+
+    // ── Web server teardown ──
+    if let Some(mgr) = web_server_manager {
+      mgr.stop().await;
     }
 
     event_bus

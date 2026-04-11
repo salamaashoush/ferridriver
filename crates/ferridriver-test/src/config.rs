@@ -127,6 +127,11 @@ pub struct TestConfig {
   #[serde(default)]
   pub storage_state: Option<String>,
 
+  /// Web server configurations. Started before tests, stopped after.
+  /// Supports both external commands (dev servers) and static file serving.
+  #[serde(default)]
+  pub web_server: Vec<WebServerConfig>,
+
   /// Strict mode: treat undefined/pending steps as errors. Default: false.
   pub strict: bool,
 
@@ -220,6 +225,71 @@ pub struct ProjectConfig {
   pub timeout: Option<u64>,
 }
 
+/// Web server configuration — matches Playwright's `webServer` option.
+///
+/// Two modes:
+/// - **Command**: spawn a process (e.g. `npm run dev`), wait for `url` to be reachable
+/// - **Static**: serve a directory over HTTP with SPA fallback support
+///
+/// The server's URL is injected as `base_url` if `base_url` is not already set.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct WebServerConfig {
+  /// Shell command to start the server (e.g. `"npm run dev"`).
+  /// Mutually exclusive with `static_dir`.
+  pub command: Option<String>,
+
+  /// Directory to serve as static files. Mutually exclusive with `command`.
+  pub static_dir: Option<String>,
+
+  /// URL to wait for before starting tests. Required for `command` mode.
+  /// For `static_dir` mode, auto-assigned to `http://127.0.0.1:<random>`.
+  pub url: Option<String>,
+
+  /// Port to listen on. 0 = auto-assign. Only for `static_dir` mode.
+  pub port: u16,
+
+  /// Reuse an already running server at `url` instead of starting a new one.
+  pub reuse_existing_server: bool,
+
+  /// Timeout in ms for the server to be ready. Default: 30000.
+  pub timeout: u64,
+
+  /// Working directory for the command. Default: config file directory.
+  pub cwd: Option<String>,
+
+  /// Environment variables for the command.
+  #[serde(default)]
+  pub env: std::collections::BTreeMap<String, String>,
+
+  /// Enable SPA fallback: serve `index.html` for unmatched routes.
+  pub spa: bool,
+
+  /// Stdout disposition: "pipe" (capture), "ignore", "inherit". Default: "pipe".
+  pub stdout: Option<String>,
+
+  /// Stderr disposition: "pipe" (capture), "ignore", "inherit". Default: "pipe".
+  pub stderr: Option<String>,
+}
+
+impl Default for WebServerConfig {
+  fn default() -> Self {
+    Self {
+      command: None,
+      static_dir: None,
+      url: None,
+      port: 0,
+      reuse_existing_server: false,
+      timeout: 30_000,
+      cwd: None,
+      env: std::collections::BTreeMap::new(),
+      spa: false,
+      stdout: None,
+      stderr: None,
+    }
+  }
+}
+
 /// CLI overrides that take highest priority.
 #[derive(Debug, Clone, Default)]
 pub struct CliOverrides {
@@ -297,6 +367,7 @@ impl Default for TestConfig {
       video: VideoConfig::default(),
       trace: crate::tracing::TraceMode::Off,
       storage_state: None,
+      web_server: Vec::new(),
       strict: false,
       order: "defined".into(),
       language: None,

@@ -1,0 +1,44 @@
+<!DOCTYPE html>
+<html><head><title>Network test</title></head>
+<body>
+<div id="result"></div>
+<button id="fetch-json" onclick="doFetch('/api/data')">Fetch JSON</button>
+<button id="fetch-post" onclick="doPost('/api/submit', {name:'test'})">POST</button>
+<button id="fetch-headers" onclick="doFetchHeaders('/api/echo-headers')">Check Headers</button>
+<script>
+  window.lastResponse = null;
+  window.lastStatus = null;
+  window.lastHeaders = null;
+  window.fetchCount = 0;
+
+  async function doFetch(url) {
+    window.fetchCount++;
+    const res = await fetch(url);
+    window.lastStatus = res.status;
+    window.lastHeaders = Object.fromEntries(res.headers.entries());
+    const text = await res.text();
+    window.lastResponse = text;
+    document.getElementById('result').textContent = text;
+  }
+
+  async function doPost(url, body) {
+    window.fetchCount++;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify(body),
+    });
+    window.lastStatus = res.status;
+    window.lastResponse = await res.text();
+    document.getElementById('result').textContent = window.lastResponse;
+  }
+
+  async function doFetchHeaders(url) {
+    window.fetchCount++;
+    const res = await fetch(url);
+    window.lastStatus = res.status;
+    window.lastResponse = await res.text();
+    document.getElementById('result').textContent = window.lastResponse;
+  }
+</script>
+</body></html>

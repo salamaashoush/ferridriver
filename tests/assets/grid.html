@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html><head><title>Grid</title>
+<style>
+  .box { width: 50px; height: 50px; display: inline-block; margin: 1px; }
+  body { margin: 0; font-size: 0; }
+</style>
+</head>
+<body>
+<script>
+  function palette(n) {
+    const r = [];
+    const step = 360 / n;
+    for (let i = 0; i < n; i++) r.push('hsl(' + (step * i) + ', 100%, 90%)');
+    return r;
+  }
+  const colors = palette(100);
+  for (let i = 0; i < 200; i++) {
+    const box = document.createElement('div');
+    box.classList.add('box');
+    box.style.backgroundColor = colors[i % colors.length];
+    box.id = 'box-' + i;
+    box.onclick = () => { window.clickedBox = i; };
+    document.body.appendChild(box);
+  }
+</script>
+</body></html>

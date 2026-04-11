@@ -1,0 +1,31 @@
+<!DOCTYPE html>
+<html><head><title>Animations test</title>
+<style>
+  .fade-in { opacity: 0; transition: opacity 0.5s ease; }
+  .fade-in.visible { opacity: 1; }
+  .slide-in { transform: translateX(-200px); transition: transform 0.5s ease; }
+  .slide-in.visible { transform: translateX(0); }
+  .expand { width: 0; height: 50px; background: #4CAF50; transition: width 0.5s ease; overflow: hidden; }
+  .expand.visible { width: 300px; }
+  #moving-box { width: 50px; height: 50px; background: #2196F3; position: absolute; top: 200px; left: 0; }
+  @keyframes moveRight { from { left: 0; } to { left: 400px; } }
+  .animating { animation: moveRight 1s ease forwards; }
+</style>
+</head>
+<body>
+<button id="trigger" onclick="triggerAll()">Trigger animations</button>
+<div class="fade-in" id="fade-el">Fade in content</div>
+<div class="slide-in" id="slide-el">Slide in content</div>
+<div class="expand" id="expand-el">Expanding bar</div>
+<div id="moving-box">Box</div>
+<script>
+  window.animationsDone = false;
+  function triggerAll() {
+    document.getElementById('fade-el').classList.add('visible');
+    document.getElementById('slide-el').classList.add('visible');
+    document.getElementById('expand-el').classList.add('visible');
+    document.getElementById('moving-box').classList.add('animating');
+    setTimeout(() => { window.animationsDone = true; }, 1100);
+  }
+</script>
+</body></html>

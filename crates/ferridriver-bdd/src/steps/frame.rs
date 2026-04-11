@@ -87,3 +87,31 @@ async fn evaluate_in_frame(world: &mut BrowserWorld, expression: String) {
     .await
     .map_err(|e| StepError::from(format!("evaluate in frame: {e}")))?;
 }
+
+#[then("I evaluate {string} in the active frame and expect {string}")]
+async fn evaluate_in_frame_expect(world: &mut BrowserWorld, expression: String, expected: String) {
+  let frame = world
+    .get_state::<ActiveFrame>()
+    .ok_or_else(|| StepError::from("no active frame -- use 'I switch to frame' first"))?;
+  let result = frame
+    .0
+    .evaluate(&expression)
+    .await
+    .map_err(|e| StepError::from(format!("evaluate in frame: {e}")))?;
+
+  let actual = match result {
+    Some(serde_json::Value::String(s)) => s,
+    Some(serde_json::Value::Number(n)) => n.to_string(),
+    Some(serde_json::Value::Bool(b)) => b.to_string(),
+    Some(serde_json::Value::Null) | None => "null".to_string(),
+    Some(other) => serde_json::to_string(&other).unwrap_or_else(|_| other.to_string()),
+  };
+
+  if actual != expected {
+    return Err(StepError {
+      message: format!("frame evaluate {expression}: expected {expected:?}, got {actual:?}"),
+      diff: Some((expected, actual)),
+      pending: false,
+    });
+  }
+}

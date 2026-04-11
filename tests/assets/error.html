@@ -1,0 +1,11 @@
+<!DOCTYPE html>
+<html><head><title>Error test</title></head>
+<body>
+<button id="throw" onclick="throw new Error('Intentional error')">Throw</button>
+<button id="reject" onclick="Promise.reject(new Error('Unhandled rejection'))">Reject</button>
+<script>
+  window.errors = [];
+  window.addEventListener('error', e => { window.errors.push('error:' + e.message); });
+  window.addEventListener('unhandledrejection', e => { window.errors.push('rejection:' + e.reason.message); });
+</script>
+</body></html>

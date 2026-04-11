@@ -1,0 +1,7 @@
+<!DOCTYPE html>
+<html><head><title>History API</title></head>
+<body>
+<a id="push" href="javascript:void(0)" onclick="history.pushState({}, '', '/next')">Push</a>
+<a id="replace" href="javascript:void(0)" onclick="history.replaceState({}, '', '/replaced')">Replace</a>
+<script>window.addEventListener('popstate', () => { window.popstateCount = (window.popstateCount || 0) + 1; });</script>
+</body></html>

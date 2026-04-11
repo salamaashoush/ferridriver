@@ -1,0 +1,9 @@
+<!DOCTYPE html>
+<html><head><title>Dialog test</title></head>
+<body>
+<button id="alert" onclick="alert('Hello alert')">Alert</button>
+<button id="confirm" onclick="window.confirmResult = confirm('Are you sure?')">Confirm</button>
+<button id="prompt" onclick="window.promptResult = prompt('Enter name:', 'default')">Prompt</button>
+<button id="beforeunload" onclick="window.onbeforeunload = () => 'unsaved'">Set beforeunload</button>
+<div id="output"></div>
+</body></html>
