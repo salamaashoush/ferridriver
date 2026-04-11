@@ -37,7 +37,7 @@ impl McpClient {
     let binary = std::env::var("FERRIDRIVER_BIN")
       .unwrap_or_else(|_| format!("{}/../../target/release/ferridriver", env!("CARGO_MANIFEST_DIR")));
     let mut cmd = Command::new(&binary);
-    cmd.arg("mcp").arg("--backend").arg(backend);
+    cmd.arg("--backend").arg(backend);
     if std::env::var("FERRIDRIVER_HEADED").is_err() {
       cmd.arg("--headless");
     }

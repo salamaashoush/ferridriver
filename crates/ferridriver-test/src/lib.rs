@@ -71,23 +71,26 @@
 //! use ferridriver_test::prelude::*;
 //!
 //! #[ferritest]
-//! async fn basic_navigation(page: Page) {
-//!     page.goto("https://example.com", None).await.unwrap();
-//!     expect(&page).to_have_title("Example Domain").await.unwrap();
+//! async fn basic_navigation(ctx: TestContext) {
+//!     let page = ctx.page().await?;
+//!     page.goto("https://example.com", None).await?;
+//!     expect(&*page).to_have_title("Example Domain").await?;
 //! }
 //!
 //! #[ferritest(retries = 2, tag = "smoke")]
-//! async fn login_test(page: Page) {
-//!     page.goto("https://app.example.com/login", None).await.unwrap();
-//!     page.locator("#email").fill("user@example.com").await.unwrap();
-//!     page.locator("#password").fill("password").await.unwrap();
-//!     page.locator("button[type=submit]").click().await.unwrap();
-//!     expect(&page).to_have_url("https://app.example.com/dashboard").await.unwrap();
+//! async fn login_test(ctx: TestContext) {
+//!     let page = ctx.page().await?;
+//!     page.goto("https://app.example.com/login", None).await?;
+//!     page.locator("#email").fill("user@example.com").await?;
+//!     page.locator("#password").fill("password").await?;
+//!     page.locator("button[type=submit]").click().await?;
+//!     expect(&*page).to_have_url("https://app.example.com/dashboard").await?;
 //! }
 //! ```
 
 // -- Core modules --
 pub mod config;
+pub mod context;
 pub mod ct;
 pub mod discovery;
 pub mod dispatcher;
@@ -109,7 +112,8 @@ pub mod watch;
 pub mod worker;
 
 // -- Re-exports --
-pub use config::{CliOverrides, RunMode, TestConfig};
+pub use config::{CliOverrides, RunMode, TestConfig, parse_common_cli_args};
+pub use context::TestContext;
 pub use discovery::TestRegistration;
 pub use expect::{ToPassOptions, expect, expect_configured, expect_poll, to_pass, to_pass_with_options};
 pub use fixture::FixturePool;
@@ -162,7 +166,7 @@ pub fn run_harness() {
     .expect("failed to build tokio runtime");
 
   let exit_code = rt.block_on(async {
-    let overrides = parse_cli_args();
+    let overrides = config::parse_common_cli_args();
     let config = config::resolve_config(&overrides).unwrap_or_else(|e| {
       eprintln!("config error: {e}");
       std::process::exit(1);
@@ -175,57 +179,12 @@ pub fn run_harness() {
   std::process::exit(exit_code);
 }
 
-#[allow(unsafe_code)]
-fn parse_cli_args() -> CliOverrides {
-  let args: Vec<String> = std::env::args().collect();
-  let mut overrides = CliOverrides::default();
-  let mut i = 1;
-  while i < args.len() {
-    match args[i].as_str() {
-      "--headed" => overrides.headed = true,
-      "--workers" | "-j" => {
-        i += 1;
-        overrides.workers = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "--retries" => {
-        i += 1;
-        overrides.retries = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "--timeout" => {
-        i += 1;
-        overrides.timeout = args.get(i).and_then(|v| v.parse().ok());
-      },
-      "--backend" => {
-        i += 1;
-        overrides.backend = args.get(i).cloned();
-      },
-      "--grep" | "-g" => {
-        i += 1;
-        overrides.grep = args.get(i).cloned();
-      },
-      "--tag" => {
-        i += 1;
-        overrides.tag = args.get(i).cloned();
-      },
-      "--list" => overrides.list_only = true,
-      "--update-snapshots" | "-u" => overrides.update_snapshots = Some(config::UpdateSnapshotsMode::All),
-      "--forbid-only" => overrides.forbid_only = true,
-      "--last-failed" => overrides.last_failed = true,
-      "--profile" => {
-        i += 1;
-        overrides.profile = args.get(i).cloned();
-      },
-      _ => {},
-    }
-    i += 1;
-  }
-  overrides
-}
 
 /// Prelude for convenient imports in test files.
 pub mod prelude {
   pub use ferridriver::{Browser, ContextRef as BrowserContext, Locator, Page};
 
+  pub use crate::context::TestContext;
   pub use crate::expect::{expect, expect_configured, expect_poll, to_pass};
   pub use crate::fixture::FixturePool;
   pub use crate::model::{TestFailure, TestInfo};

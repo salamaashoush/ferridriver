@@ -158,22 +158,6 @@ fn parse_duration_str(s: &str) -> syn::Result<u64> {
   }
 }
 
-/// Extract fixture name from a type path like `Page`, `Browser`, `BrowserContext`.
-fn fixture_name_from_type(ty: &Type) -> Option<String> {
-  if let Type::Path(tp) = ty {
-    let seg = tp.path.segments.last()?;
-    let name = seg.ident.to_string();
-    Some(match name.as_str() {
-      "Page" => "page".to_string(),
-      "Browser" => "browser".to_string(),
-      "BrowserContext" | "ContextRef" => "context".to_string(),
-      other => other.to_lowercase(),
-    })
-  } else {
-    None
-  }
-}
-
 /// `#[ferritest]` attribute macro.
 ///
 /// Transforms an async function into a registered test case with automatic
@@ -189,30 +173,25 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   let block = &input.block;
   let attrs = &input.attrs;
 
-  // Parse parameters to determine fixture requests.
-  let mut fixture_names: Vec<String> = Vec::new();
-  let mut param_bindings = Vec::new();
-
-  for arg in &input.sig.inputs {
-    if let FnArg::Typed(pat_type) = arg {
-      if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
-        let param_name = &pat_ident.ident;
-        let param_type = &pat_type.ty;
-        let fixture = fixture_name_from_type(param_type).unwrap_or_else(|| param_name.to_string());
-        fixture_names.push(fixture.clone());
-        param_bindings.push(quote! {
-          let #param_name: std::sync::Arc<#param_type> = __pool.get::<#param_type>(#fixture).await
-            .map_err(|e| ferridriver_test::model::TestFailure {
-              message: format!("fixture '{}' failed: {}", #fixture, e),
-              stack: None,
-              diff: None,
-              screenshot: None,
-            })?;
-        });
-      }
+  // The function receives a TestContext. Extract the parameter name the user chose
+  // (e.g., `ctx`, `context`, `t`, etc.)
+  let ctx_param_name = if let Some(FnArg::Typed(pt)) = input.sig.inputs.first() {
+    if let Pat::Ident(pi) = pt.pat.as_ref() {
+      pi.ident.clone()
+    } else {
+      format_ident!("ctx")
     }
-  }
+  } else {
+    format_ident!("ctx")
+  };
 
+  // Request all standard fixtures so the worker provisions them.
+  let fixture_names: Vec<String> = vec![
+    "browser".into(),
+    "context".into(),
+    "page".into(),
+    "test_info".into(),
+  ];
   let fixture_array = fixture_names.iter().map(|f| quote! { #f });
 
   // Build annotations.
@@ -286,7 +265,7 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   let expanded = quote! {
     #(#attrs)*
     #vis async fn #fn_name(__pool: ferridriver_test::fixture::FixturePool) -> Result<(), ferridriver_test::model::TestFailure> {
-      #(#param_bindings)*
+      let #ctx_param_name = ferridriver_test::TestContext::new(__pool);
       #block
       Ok(())
     }
@@ -294,9 +273,8 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
     inventory::submit! {
       ferridriver_test::discovery::TestRegistration {
         file: file!(),
-        line: line!(),
+        module_path: module_path!(),
         name: #fn_name_str,
-        suite: None,
         fixture_requests: &[#(#fixture_array),*],
         annotations: &[#(#annotations),*],
         timeout_ms: #timeout_ms_expr,
@@ -345,11 +323,12 @@ impl Parse for FerritestEachArgs {
 /// `#[ferritest_each(data = [("a", 1), ("b", 2)])]` — parameterized test macro.
 ///
 /// Expands a single async test function into N registered tests, one per data row.
-/// Parameters after fixture types (Page, Browser, etc.) receive the data values.
+/// First parameter is `FixturePool`, remaining parameters receive the data values.
 ///
 /// ```ignore
 /// #[ferritest_each(data = [("admin", "admin@example.com"), ("guest", "guest@example.com")])]
-/// async fn login(page: Page, role: &str, email: &str) {
+/// async fn login(pool: FixturePool, role: &str, email: &str) {
+///     let page = pool.page().await.unwrap();
 ///     page.goto(&format!("/login?role={role}"), None).await.unwrap();
 /// }
 /// ```
@@ -364,37 +343,37 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
   let block = &input.block;
   let attrs = &input.attrs;
 
-  // Split parameters into fixture params and data params.
+  // First param is TestContext, rest are data params.
   let all_params: Vec<_> = input.sig.inputs.iter().collect();
-  let mut fixture_names: Vec<String> = Vec::new();
-  let mut fixture_bindings = Vec::new();
-  let mut data_params: Vec<(&syn::Ident, &Type)> = Vec::new();
+  let ctx_param_name = if let Some(FnArg::Typed(pt)) = all_params.first() {
+    if let Pat::Ident(pi) = pt.pat.as_ref() {
+      pi.ident.clone()
+    } else {
+      format_ident!("ctx")
+    }
+  } else {
+    format_ident!("ctx")
+  };
 
-  for arg in &all_params {
-    if let FnArg::Typed(pat_type) = arg {
-      if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
-        let param_name = &pat_ident.ident;
-        let param_type = &*pat_type.ty;
-        let fixture = fixture_name_from_type(param_type);
-        if let Some(fixture) = fixture {
-          fixture_names.push(fixture.clone());
-          fixture_bindings.push(quote! {
-            let #param_name: #param_type = __pool.get::<#param_type>(#fixture).await
-              .map_err(|e| ferridriver_test::model::TestFailure {
-                message: format!("fixture '{}' failed: {}", #fixture, e),
-                stack: None,
-                diff: None,
-                screenshot: None,
-              })?;
-          });
-        } else {
-          data_params.push((param_name, param_type));
+  let data_params: Vec<(&syn::Ident, &Type)> = all_params
+    .iter()
+    .skip(1) // skip FixturePool
+    .filter_map(|arg| {
+      if let FnArg::Typed(pat_type) = arg {
+        if let Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
+          return Some((&pat_ident.ident, &*pat_type.ty));
         }
       }
-    }
-  }
+      None
+    })
+    .collect();
 
-  let _fixture_array = fixture_names.iter().map(|f| quote! { #f });
+  let fixture_names: Vec<String> = vec![
+    "browser".into(),
+    "context".into(),
+    "page".into(),
+    "test_info".into(),
+  ];
 
   // Generate one inventory::submit! per data row.
   let mut submissions = Vec::new();
@@ -428,11 +407,12 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
       .collect();
 
     let inner_fn_name = format_ident!("__ferritest_each_{}_{}", fn_name, row_idx);
-    let fixture_array2 = fixture_names.iter().map(|f| quote! { #f });
+    let fixture_array = fixture_names.iter().map(|f| quote! { #f });
+    let ctx_param = ctx_param_name.clone();
 
     submissions.push(quote! {
       async fn #inner_fn_name(__pool: ferridriver_test::fixture::FixturePool) -> Result<(), ferridriver_test::model::TestFailure> {
-        #(#fixture_bindings)*
+        let #ctx_param = ferridriver_test::TestContext::new(__pool);
         #(#data_bindings)*
         #block
         Ok(())
@@ -441,10 +421,9 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
       inventory::submit! {
         ferridriver_test::discovery::TestRegistration {
           file: file!(),
-          line: line!(),
+          module_path: module_path!(),
           name: #test_name,
-          suite: None,
-          fixture_requests: &[#(#fixture_array2),*],
+          fixture_requests: &[#(#fixture_array),*],
           annotations: &[],
           timeout_ms: None,
           retries: None,

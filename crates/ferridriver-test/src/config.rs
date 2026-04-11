@@ -615,6 +615,92 @@ pub struct CliOverrides {
   pub locale: Option<String>,
   pub offline: Option<bool>,
   pub bypass_csp: Option<bool>,
+  // ── BDD-specific overrides (used by bdd_main!()) ──
+  /// Tag filter expression (e.g., "@smoke and not @wip").
+  pub bdd_tags: Option<String>,
+  /// Dry run: validate step definitions without executing.
+  pub bdd_dry_run: bool,
+  /// Strict mode: treat undefined/pending steps as errors.
+  pub bdd_strict: bool,
+  /// Stop on first scenario failure.
+  pub bdd_fail_fast: bool,
+  /// Per-step timeout in milliseconds.
+  pub bdd_step_timeout: Option<u64>,
+  /// Scenario execution order: "defined" (default) or "random" / "random:SEED".
+  pub bdd_order: Option<String>,
+  /// Default language for Gherkin keyword i18n (e.g., "fr", "de").
+  pub bdd_language: Option<String>,
+}
+
+/// Parse common CLI args from `std::env::args()` into `CliOverrides`.
+///
+/// Handles all flags shared between E2E tests and BDD tests, plus BDD-specific
+/// flags (--tags, --dry-run, --strict, --fail-fast, --step-timeout, --order, --language).
+/// BDD flags are silently ignored when running E2E tests.
+pub fn parse_common_cli_args() -> CliOverrides {
+  let args: Vec<String> = std::env::args().collect();
+  let mut overrides = CliOverrides::default();
+  let mut i = 1;
+  while i < args.len() {
+    match args[i].as_str() {
+      "--headed" => overrides.headed = true,
+      "--workers" | "-j" => {
+        i += 1;
+        overrides.workers = args.get(i).and_then(|v| v.parse().ok());
+      },
+      "--retries" => {
+        i += 1;
+        overrides.retries = args.get(i).and_then(|v| v.parse().ok());
+      },
+      "--timeout" => {
+        i += 1;
+        overrides.timeout = args.get(i).and_then(|v| v.parse().ok());
+      },
+      "--backend" => {
+        i += 1;
+        overrides.backend = args.get(i).cloned();
+      },
+      "--grep" | "-g" => {
+        i += 1;
+        overrides.grep = args.get(i).cloned();
+      },
+      "--tag" => {
+        i += 1;
+        overrides.tag = args.get(i).cloned();
+      },
+      "--list" => overrides.list_only = true,
+      "--update-snapshots" | "-u" => overrides.update_snapshots = Some(UpdateSnapshotsMode::All),
+      "--forbid-only" => overrides.forbid_only = true,
+      "--last-failed" => overrides.last_failed = true,
+      "--profile" => {
+        i += 1;
+        overrides.profile = args.get(i).cloned();
+      },
+      // BDD-specific flags
+      "--tags" | "-t" => {
+        i += 1;
+        overrides.bdd_tags = args.get(i).cloned();
+      },
+      "--dry-run" => overrides.bdd_dry_run = true,
+      "--strict" => overrides.bdd_strict = true,
+      "--fail-fast" => overrides.bdd_fail_fast = true,
+      "--step-timeout" => {
+        i += 1;
+        overrides.bdd_step_timeout = args.get(i).and_then(|v| v.parse().ok());
+      },
+      "--order" => {
+        i += 1;
+        overrides.bdd_order = args.get(i).cloned();
+      },
+      "--language" => {
+        i += 1;
+        overrides.bdd_language = args.get(i).cloned();
+      },
+      _ => {},
+    }
+    i += 1;
+  }
+  overrides
 }
 
 #[derive(Debug, Clone)]

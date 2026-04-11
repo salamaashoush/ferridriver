@@ -16,9 +16,10 @@ use crate::model::{ExpectedStatus, Hooks, TestAnnotation, TestCase, TestFailure,
 /// What the `#[ferritest]` proc macro submits via `inventory::submit!`.
 pub struct TestRegistration {
   pub file: &'static str,
-  pub line: u32,
+  /// The `module_path!()` of the test function.
+  /// Used to derive the suite name from the Rust module structure.
+  pub module_path: &'static str,
   pub name: &'static str,
-  pub suite: Option<&'static str>,
   pub fixture_requests: &'static [&'static str],
   pub annotations: &'static [TestAnnotation],
   pub timeout_ms: Option<u64>,
@@ -30,20 +31,32 @@ inventory::collect!(TestRegistration);
 
 // ── Discovery ──
 
+/// Derive suite name from `module_path!()`.
+///
+/// Given `"my_crate::tests::login_tests::test_fn"`, returns `"tests::login_tests"`.
+/// Strips the crate root (first segment) and the test function name (last segment).
+fn suite_from_module_path(mp: &str) -> &str {
+  // Strip last segment (the function name).
+  let without_fn = mp.rsplit_once("::").map_or(mp, |(prefix, _)| prefix);
+  // Strip first segment (the crate name).
+  without_fn.split_once("::").map_or(without_fn, |(_, rest)| rest)
+}
+
 /// Collect all registered tests and build a `TestPlan`.
 pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
   let mut suites: rustc_hash::FxHashMap<String, TestSuite> = rustc_hash::FxHashMap::default();
 
   for reg in inventory::iter::<TestRegistration> {
     let file = reg.file.to_string();
-    let suite_name = reg.suite.map(String::from);
-    let suite_key = format!("{}::{}", file, suite_name.as_deref().unwrap_or(""));
+    // Derive suite name from module_path: strip the last segment (fn name).
+    let suite_name = suite_from_module_path(reg.module_path);
+    let suite_key = format!("{}::{}", file, suite_name);
 
     let test_fn_ptr = reg.test_fn;
     let test_case: TestCase = TestCase {
       id: TestId {
         file: file.clone(),
-        suite: suite_name.clone(),
+        suite: Some(suite_name.to_string()),
         name: reg.name.to_string(),
         line: None,
       },
@@ -57,7 +70,7 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
     };
 
     let suite = suites.entry(suite_key).or_insert_with(|| TestSuite {
-      name: suite_name.unwrap_or_else(|| file.clone()),
+      name: suite_name.to_string(),
       file: file.clone(),
       tests: Vec::new(),
       hooks: Hooks::default(),

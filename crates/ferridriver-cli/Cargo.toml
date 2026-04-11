@@ -1,6 +1,6 @@
 [package]
 name = "ferridriver-cli"
-description = "ferridriver CLI -- browser automation command-line tool"
+description = "ferridriver CLI -- MCP server for browser automation"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -19,8 +19,6 @@ workspace = true
 
 [dependencies]
 ferridriver-mcp = { path = "../ferridriver-mcp" }
-ferridriver-test = { workspace = true }
-ferridriver-bdd = { workspace = true }
 ferridriver = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
