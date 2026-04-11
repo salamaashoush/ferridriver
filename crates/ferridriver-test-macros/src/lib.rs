@@ -440,3 +440,132 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
 
   expanded.into()
 }
+
+// ── Hook macros ──
+
+/// Shared implementation for all four hook macros.
+fn hook_impl(kind_tag: &str, is_suite_hook: bool, item: TokenStream) -> TokenStream {
+  let input = parse_macro_input!(item as ItemFn);
+  let fn_name = &input.sig.ident;
+  let vis = &input.vis;
+  let block = &input.block;
+  let attrs = &input.attrs;
+
+  let kind_ident = format_ident!("{}", kind_tag);
+
+  // Extract parameter name for TestContext.
+  let ctx_param_name = if let Some(FnArg::Typed(pt)) = input.sig.inputs.first() {
+    if let Pat::Ident(pi) = pt.pat.as_ref() {
+      pi.ident.clone()
+    } else {
+      format_ident!("ctx")
+    }
+  } else {
+    format_ident!("ctx")
+  };
+
+  if is_suite_hook {
+    // before_all / after_all: fn(FixturePool) -> Result
+    let expanded = quote! {
+      #(#attrs)*
+      #vis fn #fn_name(__pool: ferridriver_test::fixture::FixturePool)
+        -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Result<(), ferridriver_test::model::TestFailure>> + Send>>
+      {
+        Box::pin(async move {
+          let #ctx_param_name = ferridriver_test::TestContext::new(__pool);
+          #block
+          Ok(())
+        })
+      }
+
+      inventory::submit! {
+        ferridriver_test::discovery::HookRegistration {
+          module_path: module_path!(),
+          suite_hook_fn: Some(#fn_name),
+          each_hook_fn: None,
+          kind: ferridriver_test::discovery::HookKindTag::#kind_ident,
+        }
+      }
+    };
+    expanded.into()
+  } else {
+    // before_each / after_each: fn(FixturePool, Arc<TestInfo>) -> Result
+    let expanded = quote! {
+      #(#attrs)*
+      #vis fn #fn_name(
+        __pool: ferridriver_test::fixture::FixturePool,
+        __info: ::std::sync::Arc<ferridriver_test::model::TestInfo>,
+      ) -> ::std::pin::Pin<Box<dyn ::std::future::Future<Output = Result<(), ferridriver_test::model::TestFailure>> + Send>>
+      {
+        Box::pin(async move {
+          let #ctx_param_name = ferridriver_test::TestContext::new(__pool);
+          #block
+          Ok(())
+        })
+      }
+
+      inventory::submit! {
+        ferridriver_test::discovery::HookRegistration {
+          module_path: module_path!(),
+          suite_hook_fn: None,
+          each_hook_fn: Some(#fn_name),
+          kind: ferridriver_test::discovery::HookKindTag::#kind_ident,
+        }
+      }
+    };
+    expanded.into()
+  }
+}
+
+/// Runs once before all tests in the containing module (suite).
+///
+/// ```ignore
+/// mod my_suite {
+///     use ferridriver_test::prelude::*;
+///
+///     #[before_all]
+///     async fn setup(ctx: TestContext) {
+///         // seed database, etc.
+///     }
+///
+///     #[ferritest]
+///     async fn test_one(ctx: TestContext) { ... }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn before_all(_attr: TokenStream, item: TokenStream) -> TokenStream {
+  hook_impl("BeforeAll", true, item)
+}
+
+/// Runs once after all tests in the containing module (suite).
+#[proc_macro_attribute]
+pub fn after_all(_attr: TokenStream, item: TokenStream) -> TokenStream {
+  hook_impl("AfterAll", true, item)
+}
+
+/// Runs before each test in the containing module (suite).
+///
+/// ```ignore
+/// mod my_suite {
+///     use ferridriver_test::prelude::*;
+///
+///     #[before_each]
+///     async fn login(ctx: TestContext) {
+///         let page = ctx.page().await?;
+///         page.goto("/login", None).await?;
+///     }
+///
+///     #[ferritest]
+///     async fn dashboard_test(ctx: TestContext) { ... }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn before_each(_attr: TokenStream, item: TokenStream) -> TokenStream {
+  hook_impl("BeforeEach", false, item)
+}
+
+/// Runs after each test in the containing module (suite), even on failure.
+#[proc_macro_attribute]
+pub fn after_each(_attr: TokenStream, item: TokenStream) -> TokenStream {
+  hook_impl("AfterEach", false, item)
+}
