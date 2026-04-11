@@ -21,9 +21,36 @@ use crate::model::{TestFailure, TestInfo};
 ///
 /// Returns `TestFailure` with a unified diff if the snapshot doesn't match.
 pub fn assert_snapshot(test_info: &TestInfo, actual: &str, name: &str, update: bool) -> Result<(), TestFailure> {
-  let snap_path = snapshot_path(&test_info.snapshot_dir, &test_info.test_id.full_name(), name);
+  use crate::config::UpdateSnapshotsMode;
 
-  if update || !snap_path.exists() {
+  let snap_path = if let Some(ref template) = test_info.snapshot_path_template {
+    resolve_template_path(
+      template,
+      &test_info.test_id.file,
+      &test_info.test_id.full_name(),
+      &test_info.snapshot_dir,
+      name,
+      ".snap",
+    )
+  } else {
+    snapshot_path(&test_info.snapshot_dir, &test_info.test_id.full_name(), name)
+  };
+
+  // Resolve effective update behavior from mode + legacy bool.
+  let mode = test_info.update_snapshots;
+  let should_create = update || matches!(mode, UpdateSnapshotsMode::All | UpdateSnapshotsMode::Missing | UpdateSnapshotsMode::Changed);
+  let should_update = update || matches!(mode, UpdateSnapshotsMode::All | UpdateSnapshotsMode::Changed);
+
+  if matches!(mode, UpdateSnapshotsMode::None) && !snap_path.exists() {
+    return Err(TestFailure {
+      message: format!("snapshot '{name}' missing and updateSnapshots is 'none'"),
+      stack: None,
+      diff: None,
+      screenshot: None,
+    });
+  }
+
+  if (should_update && snap_path.exists()) || (should_create && !snap_path.exists()) {
     if let Some(parent) = snap_path.parent() {
       std::fs::create_dir_all(parent).map_err(|e| TestFailure {
         message: format!("failed to create snapshot dir: {e}"),
@@ -226,4 +253,58 @@ fn snapshot_path(snapshot_dir: &Path, test_full_name: &str, snap_name: &str) -> 
     .replace(['/', '\\', ':', '<', '>', '"', '|', '?', '*'], "_")
     .replace(' ', "_");
   snapshot_dir.join(sanitized).join(format!("{snap_name}.snap"))
+}
+
+/// Resolve a snapshot path using a Playwright-style template.
+///
+/// Supported placeholders:
+/// - `{testDir}` — directory containing the test file
+/// - `{snapshotDir}` — configured snapshot directory
+/// - `{snapshotSuffix}` — empty (platform suffix, not used)
+/// - `{testFileDir}` — relative directory of the test file
+/// - `{testFileName}` — test file name without extension
+/// - `{testFilePath}` — relative test file path without extension
+/// - `{testName}` — sanitized test name (including suite hierarchy)
+/// - `{arg}` — snapshot argument name
+/// - `{ext}` — file extension (e.g. `.snap`, `.png`)
+///
+/// Example template: `{testDir}/__snapshots__/{testFilePath}/{arg}{ext}`
+pub fn resolve_template_path(
+  template: &str,
+  test_file: &str,
+  test_name: &str,
+  snapshot_dir: &Path,
+  arg: &str,
+  ext: &str,
+) -> PathBuf {
+  let test_file_path = Path::new(test_file);
+  let test_dir = test_file_path
+    .parent()
+    .unwrap_or(Path::new("."))
+    .to_string_lossy();
+  let test_file_name = test_file_path
+    .file_stem()
+    .unwrap_or_default()
+    .to_string_lossy();
+  let test_file_no_ext = test_file_path
+    .with_extension("")
+    .to_string_lossy()
+    .into_owned();
+
+  let sanitized_name = test_name
+    .replace(['/', '\\', ':', '<', '>', '"', '|', '?', '*'], "_")
+    .replace(' ', "_");
+
+  let resolved = template
+    .replace("{testDir}", &test_dir)
+    .replace("{snapshotDir}", &snapshot_dir.to_string_lossy())
+    .replace("{snapshotSuffix}", "")
+    .replace("{testFileDir}", &test_dir)
+    .replace("{testFileName}", &test_file_name)
+    .replace("{testFilePath}", &test_file_no_ext)
+    .replace("{testName}", &sanitized_name)
+    .replace("{arg}", arg)
+    .replace("{ext}", ext);
+
+  PathBuf::from(resolved)
 }

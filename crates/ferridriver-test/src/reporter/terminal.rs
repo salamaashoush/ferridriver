@@ -4,17 +4,32 @@ use std::time::Duration;
 
 use console::Style;
 
+use crate::config::ReportSlowTestsConfig;
 use crate::model::{StepStatus, TestStatus, TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct TerminalReporter {
   completed: usize,
   total: usize,
+  /// Config for slow test reporting. None = disabled.
+  slow_tests_config: Option<ReportSlowTestsConfig>,
+  /// Collected (test_name, file, duration) for slow test reporting.
+  test_durations: Vec<(String, String, Duration)>,
 }
 
 impl TerminalReporter {
   pub fn new() -> Self {
-    Self { completed: 0, total: 0 }
+    Self {
+      completed: 0,
+      total: 0,
+      slow_tests_config: Some(ReportSlowTestsConfig::default()),
+      test_durations: Vec::new(),
+    }
+  }
+
+  pub fn with_slow_tests_config(mut self, config: Option<ReportSlowTestsConfig>) -> Self {
+    self.slow_tests_config = config;
+    self
   }
 }
 
@@ -37,6 +52,9 @@ fn s_skip() -> Style {
 }
 fn s_flaky() -> Style {
   Style::new().yellow().bold()
+}
+fn s_warn() -> Style {
+  Style::new().yellow()
 }
 fn s_dim() -> Style {
   Style::new().dim()
@@ -139,6 +157,12 @@ impl Reporter for TerminalReporter {
 
       ReporterEvent::TestFinished { test_id, outcome } => {
         self.completed += 1;
+        // Collect durations for slow test reporting.
+        self.test_durations.push((
+          test_id.full_name(),
+          test_id.file.clone(),
+          outcome.duration,
+        ));
         let (icon, icon_style) = status_icon(&outcome.status);
         let duration = format_duration(outcome.duration);
 
@@ -208,6 +232,34 @@ impl Reporter for TerminalReporter {
         flaky,
         duration,
       } => {
+        // ── Slow test report ──
+        if let Some(ref config) = self.slow_tests_config {
+          let threshold = Duration::from_millis(config.threshold);
+          let mut slow: Vec<_> = self
+            .test_durations
+            .iter()
+            .filter(|(_, _, d)| *d >= threshold)
+            .collect();
+          slow.sort_by(|a, b| b.2.cmp(&a.2)); // Slowest first.
+          let show = if config.max > 0 { config.max.min(slow.len()) } else { slow.len() };
+          if show > 0 {
+            println!();
+            println!("  {} Slow test{} —", s_warn().apply_to("⚠"), if show == 1 { "" } else { "s" });
+            for (name, file, dur) in &slow[..show] {
+              println!(
+                "    {} {} ({})",
+                s_warn().apply_to(format_duration(*dur)),
+                name,
+                s_dim().apply_to(file),
+              );
+            }
+            let remaining = slow.len() - show;
+            if remaining > 0 {
+              println!("    {} {remaining} more slow test(s)", s_dim().apply_to("…"));
+            }
+          }
+        }
+
         let dur = format_duration(*duration);
         println!();
 

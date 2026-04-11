@@ -26,6 +26,10 @@ use std::sync::Arc;
 use tokio::sync::RwLock;
 
 /// Browser instance. Manages contexts, pages, and browser lifecycle.
+///
+/// `Clone` is cheap — all clones share the same underlying browser process
+/// and state via `Arc`. This enables exposing `browser` as a test fixture.
+#[derive(Clone)]
 pub struct Browser {
   state: Arc<RwLock<BrowserState>>,
   backend_kind: BackendKind,

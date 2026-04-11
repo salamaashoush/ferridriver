@@ -22,7 +22,27 @@ impl WsTransport {
   ///
   /// Returns an error if the WebSocket connection fails.
   pub async fn connect(ws_url: &str) -> Result<Self, String> {
-    let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
+    Self::connect_with_headers(ws_url, &std::collections::HashMap::new()).await
+  }
+
+  /// Connect with custom HTTP headers (Playwright's `connectOptions.headers`).
+  pub async fn connect_with_headers(
+    ws_url: &str,
+    headers: &std::collections::HashMap<String, String>,
+  ) -> Result<Self, String> {
+    use tokio_tungstenite::tungstenite::client::IntoClientRequest;
+    use tokio_tungstenite::tungstenite::http;
+    let mut request = ws_url
+      .into_client_request()
+      .map_err(|e| format!("WebSocket request build: {e}"))?;
+    for (key, value) in headers {
+      let header_name = http::header::HeaderName::from_bytes(key.as_bytes())
+        .map_err(|e| format!("invalid header name '{key}': {e}"))?;
+      let header_value = http::header::HeaderValue::from_str(value)
+        .map_err(|e| format!("invalid header value for '{key}': {e}"))?;
+      request.headers_mut().insert(header_name, header_value);
+    }
+    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
       .await
       .map_err(|e| format!("WebSocket connect to {ws_url}: {e}"))?;
 

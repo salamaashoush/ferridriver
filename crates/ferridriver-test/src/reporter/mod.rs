@@ -239,6 +239,7 @@ pub(crate) fn create_reporters(
   output_dir: &std::path::Path,
   mode: crate::config::RunMode,
   quiet: bool,
+  report_slow_tests: Option<crate::config::ReportSlowTestsConfig>,
 ) -> ReporterSet {
   let mut reporters: Vec<Box<dyn Reporter>> = Vec::new();
   let mut has_terminal = false;
@@ -250,7 +251,7 @@ pub(crate) fn create_reporters(
       "terminal" | "list" | "bdd" | "default" | "" => {
         if !has_terminal && !quiet {
           match mode {
-            crate::config::RunMode::E2e => reporters.push(Box::new(terminal::TerminalReporter::new())),
+            crate::config::RunMode::E2e => reporters.push(Box::new(terminal::TerminalReporter::new().with_slow_tests_config(report_slow_tests.clone()))),
             crate::config::RunMode::Bdd => reporters.push(Box::new(bdd::terminal::BddTerminalReporter::new())),
           }
           has_terminal = true;

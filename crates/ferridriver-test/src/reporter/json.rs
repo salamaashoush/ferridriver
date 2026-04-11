@@ -41,6 +41,21 @@ struct JsonTestResult {
   /// Step hierarchy (only user-defined steps, matching Playwright's JSON reporter).
   #[serde(skip_serializing_if = "Vec::is_empty")]
   steps: Vec<JsonStep>,
+  /// Metadata from config/project.
+  #[serde(skip_serializing_if = "serde_json::Value::is_null")]
+  metadata: serde_json::Value,
+  /// Artifact attachments (screenshots, videos, traces).
+  #[serde(skip_serializing_if = "Vec::is_empty")]
+  attachments: Vec<JsonAttachment>,
+}
+
+#[derive(Serialize, Clone)]
+struct JsonAttachment {
+  name: String,
+  content_type: String,
+  /// File path (for file-based attachments) or null (for inline bytes).
+  #[serde(skip_serializing_if = "Option::is_none")]
+  path: Option<String>,
 }
 
 #[derive(Serialize, Clone)]
@@ -93,6 +108,19 @@ impl Reporter for JsonReporter {
           attempt: outcome.attempt,
           error: outcome.error.as_ref().map(|e| e.message.clone()),
           steps: serialize_steps(&outcome.steps),
+          metadata: outcome.metadata.clone(),
+          attachments: outcome
+            .attachments
+            .iter()
+            .map(|a| JsonAttachment {
+              name: a.name.clone(),
+              content_type: a.content_type.clone(),
+              path: match &a.body {
+                crate::model::AttachmentBody::Path(p) => Some(p.display().to_string()),
+                crate::model::AttachmentBody::Bytes(_) => None,
+              },
+            })
+            .collect(),
         });
       },
       ReporterEvent::RunFinished { total, duration, .. } => {

@@ -152,8 +152,16 @@ pub struct TestConfig {
   /// Snapshot path template (e.g. `{testDir}/__snapshots__/{testFilePath}/{arg}{ext}`).
   pub snapshot_path_template: Option<String>,
 
+  /// Snapshot update mode: "all", "changed", "missing" (default), "none".
+  #[serde(default)]
+  pub update_snapshots: UpdateSnapshotsMode,
+
   /// Whether to preserve test output: "always", "never", "failures-only".
   pub preserve_output: String,
+
+  /// Report slow tests after the run. `null` disables. Playwright: `reportSlowTests`.
+  #[serde(default)]
+  pub report_slow_tests: Option<ReportSlowTestsConfig>,
 
   /// Suppress stdio output from tests. Playwright: `quiet`.
   pub quiet: bool,
@@ -394,6 +402,40 @@ pub struct ReporterConfig {
   pub options: BTreeMap<String, serde_json::Value>,
 }
 
+/// Snapshot update mode. Playwright: `updateSnapshots`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum UpdateSnapshotsMode {
+  /// Update all snapshots unconditionally.
+  All,
+  /// Only update changed snapshots.
+  Changed,
+  /// Only create missing snapshots (default).
+  #[default]
+  Missing,
+  /// Never update snapshots — always fail on mismatch or missing.
+  None,
+}
+
+/// Configuration for slow test reporting. Playwright: `reportSlowTests`.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct ReportSlowTestsConfig {
+  /// Maximum number of slow tests to report. 0 = unlimited.
+  pub max: usize,
+  /// Duration threshold in ms. Tests slower than this are reported.
+  pub threshold: u64,
+}
+
+impl Default for ReportSlowTestsConfig {
+  fn default() -> Self {
+    Self {
+      max: 5,
+      threshold: 15_000,
+    }
+  }
+}
+
 /// Project configuration — matches Playwright's `TestProject`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
@@ -542,7 +584,7 @@ pub struct CliOverrides {
   /// Override test file glob patterns.
   pub test_match: Option<Vec<String>>,
   pub list_only: bool,
-  pub update_snapshots: bool,
+  pub update_snapshots: Option<UpdateSnapshotsMode>,
   pub profile: Option<String>,
   pub forbid_only: bool,
   pub last_failed: bool,
@@ -630,8 +672,10 @@ impl Default for TestConfig {
       storage_state: None,
       web_server: Vec::new(),
       max_failures: 0,
+      report_slow_tests: Some(ReportSlowTestsConfig::default()),
       snapshot_dir: None,
       snapshot_path_template: None,
+      update_snapshots: UpdateSnapshotsMode::default(),
       preserve_output: "always".into(),
       quiet: false,
       config_grep: None,
@@ -796,6 +840,9 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
   if let Some(ref ss) = overrides.storage_state {
     config.storage_state = Some(ss.clone());
   }
+  if let Some(mode) = overrides.update_snapshots {
+    config.update_snapshots = mode;
+  }
   // Environment variable: FERRIDRIVER_VIDEO=on|off|retain-on-failure
   if let Ok(v) = std::env::var("FERRIDRIVER_VIDEO") {
     config.video.mode = VideoMode::from_str(&v);
@@ -846,6 +893,174 @@ fn load_config_file(path: &Path) -> Result<TestConfig, String> {
     "toml" => toml::from_str(&content).map_err(|e| format!("invalid TOML config: {e}")),
     "json" => serde_json::from_str(&content).map_err(|e| format!("invalid JSON config: {e}")),
     _ => Err(format!("unsupported config format: {ext}")),
+  }
+}
+
+impl TestConfig {
+  /// Create a new config with project overrides merged on top.
+  ///
+  /// Follows Playwright's merge semantics: project fields override base config
+  /// when present, `browser`/`use` config is deep-merged, and the project name
+  /// is stored in metadata for reporter access.
+  #[must_use]
+  pub fn merge_project(&self, project: &ProjectConfig) -> Self {
+    let mut merged = self.clone();
+
+    // Project identity — stored in metadata for reporters.
+    if !project.name.is_empty() {
+      if let serde_json::Value::Object(ref mut map) = merged.metadata {
+        map.insert("project".into(), serde_json::Value::String(project.name.clone()));
+      } else {
+        merged.metadata = serde_json::json!({ "project": project.name });
+      }
+    }
+
+    // Test discovery overrides.
+    if let Some(ref patterns) = project.test_match {
+      merged.test_match = patterns.clone();
+    }
+    if let Some(ref patterns) = project.test_ignore {
+      merged.test_ignore = patterns.clone();
+    }
+    if let Some(ref dir) = project.test_dir {
+      merged.test_dir = Some(dir.clone());
+    }
+
+    // Execution overrides.
+    if let Some(retries) = project.retries {
+      merged.retries = retries;
+    }
+    if let Some(timeout) = project.timeout {
+      merged.timeout = timeout;
+    }
+    if let Some(repeat_each) = project.repeat_each {
+      merged.repeat_each = repeat_each;
+    }
+    if let Some(fully_parallel) = project.fully_parallel {
+      merged.fully_parallel = fully_parallel;
+    }
+
+    // Grep filters.
+    if let Some(ref grep) = project.grep {
+      merged.config_grep = Some(grep.clone());
+    }
+    if let Some(ref grep_inv) = project.grep_invert {
+      merged.config_grep_invert = Some(grep_inv.clone());
+    }
+
+    // Output paths.
+    if let Some(ref dir) = project.output_dir {
+      merged.output_dir = PathBuf::from(dir);
+    }
+    if let Some(ref dir) = project.snapshot_dir {
+      merged.snapshot_dir = Some(dir.clone());
+    }
+
+    // Browser/context config — deep merge: project browser overrides individual fields.
+    if let Some(ref pb) = project.browser {
+      if pb.browser != "chromium" || pb.backend != "cdp-pipe" {
+        // Only override if explicitly set (non-default).
+        merged.browser.browser.clone_from(&pb.browser);
+        merged.browser.backend.clone_from(&pb.backend);
+      }
+      if let Some(ref ch) = pb.channel {
+        merged.browser.channel = Some(ch.clone());
+      }
+      if !pb.headless {
+        merged.browser.headless = false;
+      }
+      if let Some(ref ep) = pb.executable_path {
+        merged.browser.executable_path = Some(ep.clone());
+      }
+      if !pb.args.is_empty() {
+        merged.browser.args = pb.args.clone();
+      }
+      if let Some(ref vp) = pb.viewport {
+        merged.browser.viewport = Some(vp.clone());
+      }
+      if let Some(slow_mo) = pb.slow_mo {
+        merged.browser.slow_mo = Some(slow_mo);
+      }
+      // Deep-merge context config.
+      merge_context(&mut merged.browser.context, &pb.context);
+    }
+
+    // Re-normalize browser↔backend after merge.
+    merged.browser.normalize();
+
+    // Clear projects list — merged config runs as a single project.
+    merged.projects = Vec::new();
+
+    merged
+  }
+}
+
+/// Deep-merge context config: only override fields that differ from defaults.
+fn merge_context(base: &mut ContextConfig, overlay: &ContextConfig) {
+  let defaults = ContextConfig::default();
+
+  if overlay.is_mobile != defaults.is_mobile {
+    base.is_mobile = overlay.is_mobile;
+  }
+  if overlay.has_touch != defaults.has_touch {
+    base.has_touch = overlay.has_touch;
+  }
+  if overlay.color_scheme != defaults.color_scheme {
+    base.color_scheme.clone_from(&overlay.color_scheme);
+  }
+  if overlay.locale != defaults.locale {
+    base.locale.clone_from(&overlay.locale);
+  }
+  if overlay.device_scale_factor != defaults.device_scale_factor {
+    base.device_scale_factor = overlay.device_scale_factor;
+  }
+  if overlay.offline != defaults.offline {
+    base.offline = overlay.offline;
+  }
+  if overlay.java_script_enabled != defaults.java_script_enabled {
+    base.java_script_enabled = overlay.java_script_enabled;
+  }
+  if overlay.bypass_csp != defaults.bypass_csp {
+    base.bypass_csp = overlay.bypass_csp;
+  }
+  if overlay.accept_downloads != defaults.accept_downloads {
+    base.accept_downloads = overlay.accept_downloads;
+  }
+  if overlay.user_agent.is_some() {
+    base.user_agent.clone_from(&overlay.user_agent);
+  }
+  if overlay.timezone_id.is_some() {
+    base.timezone_id.clone_from(&overlay.timezone_id);
+  }
+  if overlay.geolocation.is_some() {
+    base.geolocation.clone_from(&overlay.geolocation);
+  }
+  if !overlay.permissions.is_empty() {
+    base.permissions.clone_from(&overlay.permissions);
+  }
+  if !overlay.extra_http_headers.is_empty() {
+    base.extra_http_headers.clone_from(&overlay.extra_http_headers);
+  }
+  if overlay.http_credentials.is_some() {
+    base.http_credentials.clone_from(&overlay.http_credentials);
+  }
+  if overlay.ignore_https_errors != defaults.ignore_https_errors {
+    base.ignore_https_errors = overlay.ignore_https_errors;
+  }
+  if overlay.proxy.is_some() {
+    base.proxy.clone_from(&overlay.proxy);
+  }
+  if overlay.service_workers.is_some() {
+    base.service_workers.clone_from(&overlay.service_workers);
+  }
+  if overlay.storage_state.is_some() {
+    base.storage_state.clone_from(&overlay.storage_state);
+  }
+  if overlay.reduced_motion.is_some() {
+    base.reduced_motion.clone_from(&overlay.reduced_motion);
+  }
+  if overlay.forced_colors.is_some() {
+    base.forced_colors.clone_from(&overlay.forced_colors);
   }
 }
 

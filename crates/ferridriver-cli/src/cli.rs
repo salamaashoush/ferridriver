@@ -238,7 +238,7 @@ impl CommonRunArgs {
       output_dir: self.output.clone(),
       test_files: Vec::new(),
       list_only: self.list,
-      update_snapshots: false,
+      update_snapshots: None,
       profile: self.profile.clone(),
       forbid_only: self.forbid_only,
       last_failed: self.last_failed,

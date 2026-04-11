@@ -252,6 +252,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
         fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+        http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
         main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
         lifecycle: lc_state.clone(),
         lifecycle_notify: lc_notify.clone(),
@@ -309,6 +310,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       lifecycle: lc_state.clone(),
       lifecycle_notify: lc_notify.clone(),
@@ -396,6 +398,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       lifecycle: lc_state.clone(),
       lifecycle_notify: lc_notify.clone(),
@@ -606,6 +609,8 @@ pub struct CdpPage<T: CdpTransport> {
   routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
   /// Whether Fetch domain is enabled for interception.
   fetch_enabled: Arc<std::sync::atomic::AtomicBool>,
+  /// HTTP credentials for Fetch.authRequired handling (digest/NTLM/basic).
+  http_credentials: Arc<tokio::sync::RwLock<Option<(String, String)>>>,
   /// Cached main frame ID to avoid repeated `Page.getFrameTree` calls.
   main_frame_id: Arc<tokio::sync::OnceCell<String>>,
   /// Lifecycle state for current document — tracks loaderId + fired events.
@@ -629,6 +634,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       closed: self.closed.clone(),
       routes: self.routes.clone(),
       fetch_enabled: self.fetch_enabled.clone(),
+      http_credentials: self.http_credentials.clone(),
       main_frame_id: self.main_frame_id.clone(),
       lifecycle: self.lifecycle.clone(),
       lifecycle_notify: self.lifecycle_notify.clone(),
@@ -1681,12 +1687,12 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn set_http_credentials(&self, username: &str, password: &str) -> Result<(), String> {
-    // Set basic auth credentials via Authorization header.
-    use base64::Engine;
-    let encoded = base64::engine::general_purpose::STANDARD.encode(format!("{username}:{password}"));
-    let mut headers = FxHashMap::default();
-    headers.insert("Authorization".to_string(), format!("Basic {encoded}"));
-    self.set_extra_http_headers(&headers).await
+    // Store credentials for Fetch.authRequired event handling.
+    // This supports all auth schemes (Basic, Digest, NTLM) — the browser
+    // sends the challenge, we respond via Fetch.continueWithAuth.
+    *self.http_credentials.write().await = Some((username.to_string(), password.to_string()));
+    // Ensure Fetch domain is enabled with auth handling.
+    self.ensure_fetch_enabled().await
   }
 
   pub async fn set_service_workers_blocked(&self, blocked: bool) -> Result<(), String> {
@@ -2342,7 +2348,21 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   // ---- Network Interception ----
 
   async fn ensure_fetch_enabled(&self) -> Result<(), String> {
+    let has_creds = self.http_credentials.read().await.is_some();
     if self.fetch_enabled.swap(true, std::sync::atomic::Ordering::SeqCst) {
+      // Already enabled — but may need to re-enable with auth handling.
+      if has_creds {
+        let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
+        self
+          .cmd(
+            "Fetch.enable",
+            serde_json::json!({
+                "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
+                "handleAuthRequests": true,
+            }),
+          )
+          .await?;
+      }
       return Ok(());
     }
     self
@@ -2350,7 +2370,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         "Fetch.enable",
         serde_json::json!({
             "patterns": [{"urlPattern": "*", "requestStage": "Request"}],
-            "handleAuthRequests": false,
+            "handleAuthRequests": has_creds,
         }),
       )
       .await?;
@@ -2358,8 +2378,9 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     let t = self.transport.clone();
     let sid = self.session_id.clone();
     let routes = self.routes.clone();
+    let creds = self.http_credentials.clone();
     tokio::spawn(async move {
-      Self::handle_fetch_events(t, sid, routes).await;
+      Self::handle_fetch_events(t, sid, routes, creds).await;
     });
     Ok(())
   }
@@ -2368,6 +2389,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     transport: Arc<T>,
     session_id: Option<String>,
     routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
+    http_credentials: Arc<tokio::sync::RwLock<Option<(String, String)>>>,
   ) {
     let mut rx = transport.subscribe_events();
     while let Ok(event) = rx.recv().await {
@@ -2377,7 +2399,35 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           continue;
         }
       }
-      if event.get("method").and_then(|m| m.as_str()) != Some("Fetch.requestPaused") {
+      let method = event.get("method").and_then(|m| m.as_str());
+
+      // ── Handle Fetch.authRequired — respond with stored credentials ──
+      if method == Some("Fetch.authRequired") {
+        let Some(params) = event.get("params") else { continue };
+        let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+        let creds = http_credentials.read().await;
+        let response = if let Some((ref user, ref pass)) = *creds {
+          serde_json::json!({
+            "requestId": request_id,
+            "authChallengeResponse": {
+              "response": "ProvideCredentials",
+              "username": user,
+              "password": pass,
+            }
+          })
+        } else {
+          serde_json::json!({
+            "requestId": request_id,
+            "authChallengeResponse": { "response": "CancelAuth" }
+          })
+        };
+        let _ = transport
+          .send_command(session_id.as_deref(), "Fetch.continueWithAuth", response)
+          .await;
+        continue;
+      }
+
+      if method != Some("Fetch.requestPaused") {
         continue;
       }
       let Some(params) = event.get("params") else { continue };

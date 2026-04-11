@@ -114,8 +114,8 @@ pub use discovery::TestRegistration;
 pub use expect::{ToPassOptions, expect, expect_configured, expect_poll, to_pass, to_pass_with_options};
 pub use fixture::FixturePool;
 pub use model::{
-  SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId, TestInfo, TestModifiers, TestOutcome, TestPlan,
-  TestStatus, TestStep,
+  HookDef, HookKind, SuiteDef, SuiteMode, TestAnnotation, TestCase, TestFailure, TestFn, TestId, TestInfo,
+  TestModifiers, TestOutcome, TestPlan, TestPlanBuilder, TestStatus, TestStep,
 };
 pub use reporter::{EventBus, EventBusBuilder, Reporter, ReporterDriver, ReporterEvent, ReporterSet, Subscription};
 pub use runner::TestRunner;
@@ -208,7 +208,7 @@ fn parse_cli_args() -> CliOverrides {
         overrides.tag = args.get(i).cloned();
       },
       "--list" => overrides.list_only = true,
-      "--update-snapshots" | "-u" => overrides.update_snapshots = true,
+      "--update-snapshots" | "-u" => overrides.update_snapshots = Some(config::UpdateSnapshotsMode::All),
       "--forbid-only" => overrides.forbid_only = true,
       "--last-failed" => overrides.last_failed = true,
       "--profile" => {

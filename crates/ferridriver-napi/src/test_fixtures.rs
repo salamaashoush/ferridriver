@@ -15,6 +15,8 @@ use napi_derive::napi;
 /// ```
 #[napi]
 pub struct TestFixtures {
+  /// Core browser (Clone is cheap — Arc-wrapped internally).
+  inner_browser: ferridriver::Browser,
   /// Core page (Clone-able, reconstructed as NAPI Page on each getter call).
   inner_page: ferridriver::Page,
   /// Core context.
@@ -37,6 +39,7 @@ pub struct TestFixtures {
 impl TestFixtures {
   #[allow(clippy::too_many_arguments)]
   pub(crate) fn new(
+    browser: ferridriver::Browser,
     page: ferridriver::Page,
     context: ferridriver::context::ContextRef,
     request: Arc<ferridriver::api_request::APIRequestContext>,
@@ -51,6 +54,7 @@ impl TestFixtures {
     channel: Option<String>,
   ) -> Self {
     Self {
+      inner_browser: browser,
       inner_page: page,
       inner_context: context,
       inner_request: request,
@@ -70,6 +74,11 @@ impl TestFixtures {
 #[napi]
 impl TestFixtures {
   // ── Core fixtures ──
+
+  #[napi(getter)]
+  pub fn browser(&self) -> crate::browser::Browser {
+    crate::browser::Browser::wrap(self.inner_browser.clone())
+  }
 
   #[napi(getter)]
   pub fn page(&self) -> crate::page::Page {
