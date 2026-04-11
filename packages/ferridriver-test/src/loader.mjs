@@ -1,52 +1,31 @@
 /**
- * Node.js ESM loader hook for TypeScript files.
+ * Node.js ESM resolve hook.
  *
- * Registered via `module.register()` in the CLI entry point.
- * Intercepts .ts/.tsx/.mts imports and transpiles them to JS using
- * ferridriver's built-in oxc transpiler (via NAPI). No external
- * tooling (tsx, ts-node, esbuild) needed.
+ * Maps .js imports to .ts files — the standard TypeScript convention where
+ * source code uses `import './foo.js'` but the actual file is `./foo.ts`.
  *
- * In-memory cache ensures shared imports are only transpiled once.
+ * TypeScript syntax handling is done by Node.js --experimental-transform-types
+ * (or native strip-types on Node 22.6+). This hook only handles resolution.
  */
 
-import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+const JS_TO_TS = { '.js': '.ts', '.mjs': '.mts', '.cjs': '.cts', '.jsx': '.tsx' };
+const TS_EXTENSIONS = ['.ts', '.tsx', '.mts', '.cts'];
 
-/** @type {Map<string, string>} file path → transpiled JS */
-const cache = new Map();
-
-/** @type {import('@ferridriver/core').transformTypeScript | null} */
-let _transform = null;
-
-async function getTransform() {
-  if (!_transform) {
-    const core = await import('@ferridriver/core');
-    _transform = core.transformTypeScript;
-  }
-  return _transform;
-}
-
-const TS_RE = /\.[mc]?tsx?$/;
-
-/**
- * ESM load hook — called for every module load.
- * Transpiles TypeScript files, passes everything else through.
- */
-export async function load(url, context, nextLoad) {
-  // Only handle TypeScript files outside node_modules.
-  if (TS_RE.test(url) && !url.includes('node_modules')) {
-    const filePath = fileURLToPath(url);
-
-    let source = cache.get(filePath);
-    if (!source) {
-      const transform = await getTransform();
-      const code = readFileSync(filePath, 'utf-8');
-      source = transform(code, filePath);
-      cache.set(filePath, source);
+export async function resolve(specifier, context, nextResolve) {
+  try {
+    return await nextResolve(specifier, context);
+  } catch (err) {
+    if (err.code !== 'ERR_MODULE_NOT_FOUND') throw err;
+    // .js → .ts mapping
+    for (const [jsExt, tsExt] of Object.entries(JS_TO_TS)) {
+      if (specifier.endsWith(jsExt)) {
+        try { return await nextResolve(specifier.slice(0, -jsExt.length) + tsExt, context); } catch {}
+      }
     }
-
-    return { format: 'module', source, shortCircuit: true };
+    // Extensionless → try .ts extensions
+    for (const ext of TS_EXTENSIONS) {
+      try { return await nextResolve(specifier + ext, context); } catch {}
+    }
+    throw err;
   }
-
-  return nextLoad(url, context);
 }

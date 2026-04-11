@@ -1,6 +1,9 @@
-#!/usr/bin/env node
 /**
  * ferridriver-test CLI -- runs E2E, component, and BDD tests using the Rust engine.
+ *
+ * Entry points:
+ *   - Node.js: src/bin.mjs (registers TS loader, then imports this file)
+ *   - Bun: src/cli.ts (native TS support, no loader needed)
  *
  * E2E mode (default):
  *   ferridriver-test [files...] [--workers N] [--retries N] [--headed]
@@ -11,13 +14,6 @@
  * BDD mode:
  *   ferridriver-test bdd [features...] [--steps steps/] [--tags "@smoke"]
  */
-
-// Register ESM loader for TypeScript when running on Node.js.
-// Bun handles .ts imports natively; Node.js needs our oxc-powered loader hook.
-if (typeof globalThis.Bun === 'undefined') {
-  const { register } = await import('node:module');
-  register(new URL('./loader.mjs', import.meta.url));
-}
 
 import { defineCommand, defineArgs, runMain, withCompletions } from 'clap-ts';
 import type { CommandDef } from 'clap-ts';
@@ -107,8 +103,7 @@ function mergeConfig(fileConfig: FerridriverTestConfig, cliArgs: Record<string, 
 
 async function* scanGlob(pattern: string, cwd: string): AsyncIterable<string> {
   if (typeof globalThis.Bun !== 'undefined') {
-    const { Glob } = await import('bun');
-    const g = new Glob(pattern);
+    const g = new globalThis.Bun.Glob(pattern);
     yield* g.scan({ cwd, absolute: true });
   } else {
     const { glob } = await import('fs/promises');
