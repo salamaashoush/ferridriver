@@ -1,31 +1,39 @@
+#!/usr/bin/env node
 /**
  * ferridriver-test CLI -- runs E2E, component, and BDD tests using the Rust engine.
  *
- * Entry points:
- *   - Node.js: src/bin.mjs (registers TS loader, then imports this file)
- *   - Bun: src/cli.ts (native TS support, no loader needed)
- *
- * E2E mode (default):
- *   ferridriver-test [files...] [--workers N] [--retries N] [--headed]
- *
- * Component testing mode:
- *   ferridriver-test ct [files...] [--framework react]
- *
- * BDD mode:
- *   ferridriver-test bdd [features...] [--steps steps/] [--tags "@smoke"]
+ * Compiled to dist/cli.js via `bun run build:cli`. User TS files (config,
+ * tests, step definitions) are loaded at runtime via jiti (Node) or
+ * native import (Bun).
  */
 
 import { defineCommand, defineArgs, runMain, withCompletions } from 'clap-ts';
 import type { CommandDef } from 'clap-ts';
 
-import { TestRunner, BddRunner } from '@ferridriver/core';
-import type { Page, BddRunnerConfig } from '@ferridriver/core';
-import { _setCurrentFile, _drainTests, _hasOnly, _setCtMountFactory, _setRunner } from './test.js';
+import { TestRunner } from '@ferridriver/core';
+import type { Page } from '@ferridriver/core';
+import { _setCurrentFile, _runWithFile, _drainTests, _hasOnly, _setCtMountFactory, _setRunner } from './test.js';
 import type { MountFunction } from './test.js';
 import { resolve, relative } from 'path';
 import { existsSync, statSync } from 'fs';
 
 import type { FerridriverTestConfig } from './config.js';
+
+// ---- TS file loader: jiti on Node, native on Bun ----
+
+let _importTs: (path: string) => Promise<any>;
+
+if (typeof globalThis.Bun !== 'undefined') {
+  _importTs = (path: string) => import(path);
+} else {
+  const { createJiti } = await import('jiti');
+  const jiti = createJiti(import.meta.url, {
+    fsCache: true,        // cache transpiled files to node_modules/.cache/jiti
+    moduleCache: true,    // cache loaded modules in memory
+    interopDefault: true, // auto-extract default exports
+  });
+  _importTs = (path: string) => jiti.import(path);
+}
 
 // ---- Config file loading ----
 
@@ -44,7 +52,7 @@ async function loadConfig(explicitPath?: string): Promise<FerridriverTestConfig>
   for (const path of candidates) {
     if (!existsSync(path)) continue;
     try {
-      const mod = await import(path);
+      const mod = await _importTs(path);
       return mod.default ?? mod;
     } catch (e: any) {
       if (explicitPath) {
@@ -88,6 +96,10 @@ function mergeConfig(fileConfig: FerridriverTestConfig, cliArgs: Record<string, 
     config.reporter = reporters.map((r) => (typeof r === 'string' ? r : r[0]));
   }
   if (fileConfig.projects) config.projects = fileConfig.projects;
+  if (fileConfig.testMatch) config.testMatch = fileConfig.testMatch;
+  if (fileConfig.testIgnore) config.testIgnore = fileConfig.testIgnore;
+  if (fileConfig.testDir) config.testDir = fileConfig.testDir;
+  if (fileConfig.webServer) config.webServer = fileConfig.webServer;
 
   // CLI args override everything.
   for (const [key, value] of Object.entries(cliArgs)) {
@@ -97,6 +109,47 @@ function mergeConfig(fileConfig: FerridriverTestConfig, cliArgs: Record<string, 
   }
 
   return config;
+}
+
+/** Map CLI args to runner config overrides. Single source of truth — no duplication. */
+function buildCliOverrides(args: Record<string, any>): Record<string, any> {
+  const o: Record<string, any> = {};
+  if (args.workers !== undefined) o.workers = args.workers;
+  if (args.retries !== undefined) o.retries = args.retries;
+  if (args.timeout !== undefined) o.timeout = args.timeout;
+  if (args.headed) o.headed = true;
+  if (args.grep) o.grep = args.grep;
+  if (args['grep-invert']) o.grepInvert = args['grep-invert'];
+  if (args.shard) o.shard = args.shard;
+  if (args.tag) o.tag = args.tag;
+  if (args.output) o.outputDir = args.output;
+  if (args.profile) o.profile = args.profile;
+  if (args.backend) o.backend = args.backend;
+  if (args.browser) {
+    o.browser = args.browser;
+    if (!args.backend) {
+      if (o.browser === 'firefox') o.backend = 'bidi';
+      else if (o.browser === 'webkit') o.backend = 'webkit';
+    }
+  }
+  if (args.reporter) o.reporter = [args.reporter];
+  if (args['update-snapshots']) o.updateSnapshots = true;
+  if (args['forbid-only']) o.forbidOnly = true;
+  if (args['last-failed']) o.lastFailed = true;
+  if (args.video) o.video = args.video;
+  if (args.trace) o.trace = args.trace;
+  if (args['storage-state']) o.storageState = args['storage-state'];
+  if (args['web-server-dir'] || args['web-server-cmd']) {
+    o.webServer = {
+      staticDir: args['web-server-dir'] || undefined,
+      command: args['web-server-cmd'] || undefined,
+      url: args['web-server-url'] || undefined,
+    };
+  }
+  if (args.watch) o.watch = true;
+  if (args.verbose) { o.verbose = 1; if (!args.debug) o.debug = '*'; }
+  if (args.debug) o.debug = args.debug;
+  return o;
 }
 
 // ---- Glob abstraction: use Bun.Glob if available, fall back to node:fs glob ----
@@ -135,6 +188,42 @@ const runnerArgs = defineArgs({
     type: 'string',
     short: 'g',
     description: 'Only run tests matching regex pattern',
+  },
+  'grep-invert': {
+    type: 'string',
+    description: 'Exclude tests matching regex pattern',
+  },
+  shard: {
+    type: 'string',
+    description: 'Shard: current/total (e.g., "1/3")',
+  },
+  tag: {
+    type: 'string',
+    description: 'Tag filter',
+  },
+  output: {
+    type: 'string',
+    valueName: 'DIR',
+    description: 'Output directory for reports and artifacts',
+    valueHint: 'filePath',
+  },
+  profile: {
+    type: 'string',
+    description: 'Configuration profile to apply',
+  },
+  'web-server-dir': {
+    type: 'string',
+    valueName: 'DIR',
+    description: 'Serve a static directory as the test server (sets base_url automatically)',
+    valueHint: 'filePath',
+  },
+  'web-server-cmd': {
+    type: 'string',
+    description: 'Start a dev server command before tests (requires --web-server-url)',
+  },
+  'web-server-url': {
+    type: 'string',
+    description: 'URL to wait for when using --web-server-cmd',
   },
   backend: {
     type: 'string',
@@ -318,7 +407,7 @@ async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
 
 // ---- E2E test runner (shared by default and ct modes) ----
 
-async function runTests(config: Record<string, any>, testFiles: string[], ctMode: boolean) {
+async function runTests(config: Record<string, any>, testFiles: string[], ctMode: boolean, featureFiles: string[] = [], stepFiles: string[] = []) {
   let viteProcess: any = null;
 
   if (ctMode) {
@@ -375,29 +464,37 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
     console.log(`[ct] Serving at ${viteUrl}`);
   }
 
-  const runner = await TestRunner.create(config);
-  _setRunner(runner);
-  const workerCount = runner.workerCount();
-
-  for (const file of testFiles) {
-    _setCurrentFile(relative(process.cwd(), file));
-    await import(file);
+  // Normalize webServer to array for NAPI.
+  if (config.webServer && !Array.isArray(config.webServer)) {
+    config.webServer = [config.webServer];
   }
 
+  const runner = await TestRunner.create(config);
+  _setRunner(runner);
+
+  // Load all test files and step definitions in parallel.
+  // Each file import runs within its own AsyncLocalStorage context
+  // so test registrations get the correct file path.
+  // All files load in parallel — E2E test files get per-file context via AsyncLocalStorage,
+  // step files register on the shared runner via globalThis.__ferridriver.runner.
+  await Promise.all([
+    ...testFiles.map(file =>
+      _runWithFile(relative(process.cwd(), file), () => _importTs(file)),
+    ),
+    ...stepFiles.map(f => _importTs(f)),
+  ]);
+
   const tests = _drainTests();
-  if (tests.length === 0) {
+  for (const t of tests) runner.registerTest(t.meta, t.body);
+
+  if (tests.length === 0 && featureFiles.length === 0) {
     console.log('  No tests found.');
     if (viteProcess) viteProcess.kill();
     process.exit(0);
   }
 
-  // Register all tests — core Rust runner handles all filtering
-  // (only, skip, fixme, grep, tag, shard, last-failed).
-  for (const t of tests) runner.registerTest(t.meta, t.body);
-
-  // Rust reporters handle all terminal output (icons, colors, progress, summary).
-  // TS CLI only needs the exit code from the summary.
-  const summary = await runner.run();
+  // Run — feature files passed to Rust for parsing/translation into the same plan.
+  const summary = await runner.run(featureFiles.length > 0 ? featureFiles : undefined);
 
   if (viteProcess) viteProcess.kill();
   // Force exit — NAPI native addon may hold browser process handles that prevent
@@ -411,50 +508,68 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
 const testCommand = defineCommand({
   meta: {
     name: 'test',
-    description: 'Run E2E tests (default when no subcommand)',
-    aliases: ['e2e'],
+    description: 'Run tests (.spec.ts, .feature, or mixed)',
+    aliases: ['e2e', 'bdd', 'run'],
   },
   args: {
     ...runnerArgs,
+    // BDD-specific args
+    steps: {
+      type: 'string',
+      action: 'append',
+      valueName: 'GLOB',
+      description: 'Step definition file glob patterns',
+      valueHint: 'filePath',
+    },
+    tags: {
+      type: 'string',
+      short: 't',
+      description: 'BDD tag expression filter (e.g., "@smoke and not @wip")',
+    },
+    strict: {
+      type: 'boolean',
+      description: 'Treat undefined/pending BDD steps as errors',
+    },
+    order: {
+      type: 'string',
+      description: 'BDD scenario order: "defined" (default) or "random" / "random:SEED"',
+    },
+    language: {
+      type: 'string',
+      description: 'Gherkin keyword language (e.g., "fr", "de")',
+    },
     files: { type: 'positional', valueName: 'FILES', trailingVarArg: true },
   },
   async run({ args }) {
     const fileConfig = await loadConfig(args.config);
+    const overrides = buildCliOverrides(args);
+    const config = mergeConfig(fileConfig, overrides);
+
+    // Wire BDD config from CLI args.
+    if (args.tags) config.tags = args.tags;
+    if (args.strict) config.strict = true;
+    if (args.order) config.order = args.order;
+    if (args.language) config.language = args.language;
+
+    // Discover all files — use testMatch from config, or default patterns.
     const fileList = (args.files as string[] | undefined) ?? [];
-    const testFiles = await discoverFiles(fileList, ['**/*.spec.ts', '**/*.test.ts']);
-    if (testFiles.length === 0) {
+    const defaultPatterns = ['**/*.spec.ts', '**/*.test.ts', '**/*.feature'];
+    const patterns = (config.testMatch as string[] | undefined) ?? defaultPatterns;
+    const allFiles = await discoverFiles(fileList, patterns);
+
+    const testFiles = allFiles.filter(f => /\.(spec|test)\.[tj]sx?$/.test(f));
+    const featureFiles = allFiles.filter(f => f.endsWith('.feature'));
+
+    if (testFiles.length === 0 && featureFiles.length === 0) {
       console.log('  No test files found.');
       process.exit(0);
     }
-    // Build CLI overrides.
-    const cliOverrides: Record<string, any> = {};
-    if (args.workers !== undefined) cliOverrides.workers = args.workers;
-    if (args.retries !== undefined) cliOverrides.retries = args.retries;
-    if (args.timeout !== undefined) cliOverrides.timeout = args.timeout;
-    if (args.headed) cliOverrides.headed = true;
-    if (args.grep) cliOverrides.grep = args.grep;
-    if (args.backend) cliOverrides.backend = args.backend;
-    if (args.browser) {
-      cliOverrides.browser = args.browser;
-      if (!args.backend) {
-        if (cliOverrides.browser === 'firefox') cliOverrides.backend = 'bidi';
-        else if (cliOverrides.browser === 'webkit') cliOverrides.backend = 'webkit';
-      }
-    }
-    if (args.reporter) cliOverrides.reporter = [args.reporter];
-    if (args['update-snapshots']) cliOverrides.updateSnapshots = true;
-    if (args['forbid-only']) cliOverrides.forbidOnly = true;
-    if (args['last-failed']) cliOverrides.lastFailed = true;
-    if (args.video) cliOverrides.video = args.video;
-    if (args.trace) cliOverrides.trace = args.trace;
-    if (args['storage-state']) cliOverrides.storageState = args['storage-state'];
-    if (args.watch) cliOverrides.watch = true;
-    if (args.verbose) cliOverrides.verbose = 1;
-    if (args.debug) cliOverrides.debug = args.debug;
-    else if (args.verbose) cliOverrides.debug = '*';
 
-    const config = mergeConfig(fileConfig, cliOverrides);
-    await runTests(config, testFiles, false);
+    // Load step definitions if we have feature files.
+    const stepsGlobs = (args.steps as string[] | undefined) ?? [];
+    const stepFiles = featureFiles.length > 0 ? await discoverStepFiles(stepsGlobs) : [];
+
+    await runTests(config, testFiles, false, featureFiles, stepFiles);
   },
 });
 
@@ -490,149 +605,11 @@ const ctCommand = defineCommand({
       console.log('  No component test files found.');
       process.exit(0);
     }
-    const cliOverrides: Record<string, any> = {};
-    if (args.workers !== undefined) cliOverrides.workers = args.workers;
-    if (args.retries !== undefined) cliOverrides.retries = args.retries;
-    if (args.timeout !== undefined) cliOverrides.timeout = args.timeout;
-    if (args.headed) cliOverrides.headed = true;
-    if (args.grep) cliOverrides.grep = args.grep;
-    if (args.backend) cliOverrides.backend = args.backend;
-    if (args.browser) {
-      cliOverrides.browser = args.browser;
-      if (!args.backend) {
-        if (args.browser === 'firefox') cliOverrides.backend = 'bidi';
-        else if (args.browser === 'webkit') cliOverrides.backend = 'webkit';
-      }
-    }
-    if (args.reporter) cliOverrides.reporter = [args.reporter];
-    if (args['update-snapshots']) cliOverrides.updateSnapshots = true;
-    if (args['forbid-only']) cliOverrides.forbidOnly = true;
-    if (args['last-failed']) cliOverrides.lastFailed = true;
-    if (args.video) cliOverrides.video = args.video;
-    if (args.trace) cliOverrides.trace = args.trace;
-    if (args['storage-state']) cliOverrides.storageState = args['storage-state'];
-    if (args.watch) cliOverrides.watch = true;
-    if (args.verbose && !process.env.FERRIDRIVER_DEBUG) process.env.FERRIDRIVER_DEBUG = '*';
-
-    const config = mergeConfig(fileConfig, cliOverrides);
+    const config = mergeConfig(fileConfig, buildCliOverrides(args));
     await runTests(config, testFiles, true);
   },
 });
 
-const bddCommand = defineCommand({
-  meta: {
-    name: 'bdd',
-    description: 'Run BDD/Gherkin feature tests',
-    aliases: ['features'],
-  },
-  args: {
-    ...runnerArgs,
-    steps: {
-      type: 'string',
-      action: 'append',
-      valueName: 'GLOB',
-      description: 'Step definition file glob patterns',
-      valueHint: 'filePath',
-    },
-    tags: {
-      type: 'string',
-      short: 't',
-      description: 'Tag expression filter (e.g., "@smoke and not @wip")',
-    },
-    'dry-run': {
-      type: 'boolean',
-      description: 'Parse features and match steps without executing',
-    },
-    'fail-fast': {
-      type: 'boolean',
-      description: 'Stop on first failure',
-    },
-    'step-timeout': {
-      type: 'number',
-      valueName: 'MS',
-      description: 'Timeout per step in milliseconds',
-    },
-    strict: {
-      type: 'boolean',
-      description: 'Treat undefined/pending steps as errors',
-    },
-    order: {
-      type: 'string',
-      description: 'Scenario order: "defined" (default) or "random" / "random:SEED"',
-    },
-    language: {
-      type: 'string',
-      description: 'Gherkin keyword language (e.g., "fr", "de")',
-    },
-    features: { type: 'positional', valueName: 'FEATURES', trailingVarArg: true },
-  },
-  async run({ args }) {
-    const fileConfig = await loadConfig(args.config);
-    const featureFiles = (args.features as string[] | undefined) ?? [];
-    const featurePatterns = featureFiles.length > 0
-      ? normalizePaths(featureFiles, '**/*.feature')
-      : ['features/**/*.feature'];
-
-    const stepsGlobs = (args.steps as string[] | undefined) ?? [];
-    const stepFiles = await discoverStepFiles(stepsGlobs);
-
-    // Merge file config with CLI overrides for BDD runner.
-    const merged = mergeConfig(fileConfig, {
-      workers: args.workers,
-      retries: args.retries,
-      timeout: args.timeout ?? args['step-timeout'],
-      headed: args.headed,
-      grep: args.grep,
-      backend: args.backend || (args.browser === 'firefox' ? 'bidi' : args.browser === 'webkit' ? 'webkit' : undefined),
-      browser: args.browser,
-      reporter: args.reporter ? [args.reporter] : undefined,
-      video: args.video,
-      trace: args.trace,
-      'storage-state': args['storage-state'],
-      watch: args.watch,
-    });
-
-    const bddConfig: BddRunnerConfig = {
-      features: featurePatterns,
-      tags: args.tags || undefined,
-      workers: merged.workers,
-      timeout: merged.timeout,
-      retries: merged.retries,
-      headed: merged.headed,
-      backend: merged.backend,
-      browser: merged.browser,
-      reporter: merged.reporter,
-      strict: args.strict || undefined,
-      order: args.order || undefined,
-      language: args.language || undefined,
-      video: merged.video || undefined,
-      trace: merged.trace || undefined,
-      storageState: merged.storageState || undefined,
-      watch: merged.watch || undefined,
-    };
-
-    const runner = BddRunner.create(bddConfig);
-
-    const { _setRunner } = await import('./bdd.js');
-    _setRunner(runner);
-
-    if (stepFiles.length > 0) {
-      console.log(`  Loading ${stepFiles.length} step file(s)...`);
-      for (const file of stepFiles) {
-        await import(file);
-      }
-    } else {
-      console.log('  No step definition files found. Using built-in steps only.');
-    }
-
-    console.log(`  Running features: ${featurePatterns.join(', ')}`);
-    if (args.tags) console.log(`  Tags: ${args.tags}`);
-    console.log();
-
-    const summary = await runner.run();
-    process.exit(summary.failed > 0 ? 1 : 0);
-  },
-});
 
 const codegenCommand = defineCommand({
   meta: {
@@ -723,18 +700,18 @@ const root = defineCommand({
     about: 'Runs tests using the ferridriver Rust engine with Playwright-compatible API',
     afterHelp:
       'Examples:\n' +
-      '  ferridriver-test test                         # Run all E2E tests\n' +
-      '  ferridriver-test test --headed -j 4           # 4 workers, headed browser\n' +
-      '  ferridriver-test ct --framework react         # Component tests with React\n' +
-      '  ferridriver-test bdd --tags "@smoke"           # BDD tests filtered by tag\n' +
-      '  ferridriver-test bdd features/ --steps steps/  # Custom feature/step paths\n' +
-      '  ferridriver-test codegen https://example.com   # Record interactions as test code\n' +
-      '  ferridriver-test install --with-deps           # Install Chromium + system deps',
+      '  ferridriver-test test                                    # Run all .spec.ts + .feature\n' +
+      '  ferridriver-test test --headed -j 4                      # 4 workers, headed browser\n' +
+      '  ferridriver-test test tests/smoke.spec.ts                # Run specific E2E test\n' +
+      '  ferridriver-test test tests/features/*.feature --tags "@smoke"  # BDD with tag filter\n' +
+      '  ferridriver-test test tests/ --steps steps/              # Mixed E2E + BDD\n' +
+      '  ferridriver-test ct --framework react                    # Component tests with React\n' +
+      '  ferridriver-test codegen https://example.com             # Record interactions as test code\n' +
+      '  ferridriver-test install --with-deps                     # Install Chromium + system deps',
   },
   subCommands: {
     test: testCommand,
     ct: ctCommand,
-    bdd: bddCommand,
     codegen: codegenCommand,
     install: installCommand,
   },

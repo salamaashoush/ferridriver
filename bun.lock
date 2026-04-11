@@ -4,6 +4,9 @@
   "workspaces": {
     "": {
       "name": "ferridriver",
+      "devDependencies": {
+        "@ferridriver/test": "workspace:*",
+      },
     },
     "crates/ferridriver-napi": {
       "name": "@ferridriver/core",
@@ -124,12 +127,13 @@
       "name": "@ferridriver/test",
       "version": "0.2.0",
       "bin": {
-        "ferridriver-test": "src/cli.ts",
+        "ferridriver-test": "dist/cli.js",
       },
       "dependencies": {
         "@ferridriver/core": "workspace:*",
         "@ferridriver/ct-core": "workspace:*",
         "clap-ts": "^0.2.1",
+        "jiti": "^2.6.1",
       },
     },
   },
@@ -601,6 +605,8 @@
     "is-reference": ["is-reference@3.0.3", "", { "dependencies": { "@types/estree": "^1.0.6" } }, "sha512-ixkJoqQvAP88E6wLydLGGqCJsrFUnqoH6HnaczB8XmDH1oaWU+xxdptvikTgaEhtZ53Ky6YXiBuUI2WXLMCwjw=="],
 
     "is-what": ["is-what@4.1.16", "", {}, "sha512-ZhMwEosbFJkA0YhFnNDgTM4ZxDRsS6HqTo7qsZM08fehyRYIYa0yHu5R6mgo1n/8MgaPBXiPimPD77baVFYg+A=="],
+
+    "jiti": ["jiti@2.6.1", "", { "bin": { "jiti": "lib/jiti-cli.mjs" } }, "sha512-ekilCSN1jwRvIbgeg/57YFh8qQDNbwDb9xT/qu2DAHbFFZUicIl4ygVaAvzveMhMVr3LnpSKTNnwt8PoOfmKhQ=="],
 
     "js-tokens": ["js-tokens@4.0.0", "", {}, "sha512-RdJUflcE3cUzKiMqQgsCu06FPu9UdIJO0beYbPhHN4k6apgJtifcoCtT9bcxOpYBtpD2kCM6Sbzg4CausW/PKQ=="],
 

@@ -118,11 +118,11 @@ impl McpServer {
       )]));
     }
 
-    // Single page + context acquisition for all scenarios.
-    let (page, context_ref) = Box::pin(self.page_and_context(s)).await?;
+    // Build full fixtures for the session — BDD steps get browser, request, etc.
+    let fixtures = Box::pin(self.fixtures_for_session(s)).await?;
 
     // Reuse one BrowserWorld across scenarios -- reset between runs.
-    let mut world = BrowserWorld::new(page.clone(), context_ref);
+    let mut world = BrowserWorld::new(fixtures);
     let executor = &self.bdd_executor;
 
     let mut output = String::new();
@@ -188,7 +188,7 @@ impl McpServer {
     ));
 
     // Final snapshot of page state.
-    let snap = self.snap(&page, s).await;
+    let snap = self.snap(world.page(), s).await;
     output.push_str(&format!("\n{snap}"));
 
     Ok(CallToolResult::success(vec![Content::text(output)]))
@@ -206,8 +206,8 @@ impl McpServer {
     let s = sess(p.session.as_ref());
     let _guard = self.session_guard(s).await;
 
-    let (page, context_ref) = Box::pin(self.page_and_context(s)).await?;
-    let mut world = BrowserWorld::new(page.clone(), context_ref);
+    let fixtures = Box::pin(self.fixtures_for_session(s)).await?;
+    let mut world = BrowserWorld::new(fixtures);
     let result = self.bdd_executor.run_step(&mut world, &p.step, None, None).await;
 
     let status_text = match result.status {
@@ -223,7 +223,7 @@ impl McpServer {
       msg.push_str(&format!("\n{err}"));
     }
 
-    self.action_ok(&page, s, &msg).await
+    self.action_ok(world.page(), s, &msg).await
   }
 
   #[tool(

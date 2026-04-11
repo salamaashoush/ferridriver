@@ -18,7 +18,7 @@
  *   });
  */
 
-import { BddRunner as NativeBddRunner, type BddRunnerConfig, type BddRunSummary, type Page, type StepContext as NativeStepContext } from '@ferridriver/core';
+import { TestRunner, type Page, type RunSummary, type TestFixtures } from '@ferridriver/core';
 
 // ── Cucumber Expression Type Inference ────────────────────────────────────
 
@@ -37,19 +37,18 @@ type ExtractParams<T extends string> =
     ? [CucumberParamType<P>, ...ExtractParams<Rest>]
     : [];
 
-// ── StepContext with typed params ─────────────────────────────────────────
+// ── StepContext — TestFixtures with typed BDD params ─────────────────────
 
 /**
- * Step context passed to step/hook callbacks.
+ * BDD step/hook context — extends TestFixtures with typed BDD params.
  *
- * `args`/`params` are typed tuples when using cucumber expressions:
+ * Steps get the full E2E fixture set (page, browser, context, request, testInfo)
+ * plus typed params from cucumber expressions:
  *   `{string}` → `string`, `{int}` → `number`, `{float}` → `number`
  *
- * Runtime values match: ints/floats are actual JS numbers, strings are strings.
+ * Hooks get the same fixtures with args/dataTable/docString as null.
  */
-export interface StepContext<Params extends unknown[] = unknown[]> {
-  /** The browser page. */
-  readonly page: Page;
+export interface StepContext<Params extends unknown[] = unknown[]> extends TestFixtures {
   /** Extracted parameters from the expression (typed: int→number, string→string). */
   readonly args: Params;
   /** Alias for args. */
@@ -66,8 +65,8 @@ type TypedStepCallback<P extends unknown[] = unknown[]> = (ctx: StepContext<P>) 
 /** Untyped step callback (for RegExp and hooks). */
 type StepCallback = (ctx: StepContext) => Promise<void>;
 
-/** Hook callback. */
-type HookCallback = (ctx: StepContext) => Promise<void>;
+/** Hook callback — receives TestFixtures (BDD fields are null). */
+type HookCallback = (fixtures: TestFixtures) => Promise<void>;
 
 interface HookOptions {
   tags?: string;
@@ -149,32 +148,24 @@ export const version = '0.2.0';
 
 // ── Runner ────────────────────────────────────────────────────────────────
 
-let _runner: InstanceType<typeof NativeBddRunner> | null = null;
-let _config: BddRunnerConfig = {};
+// Runner is shared via globalThis.__ferridriver.runner — set once by CLI via test.ts._setRunner().
+// No separate _setRunner needed for BDD.
+const _state = (globalThis as any).__ferridriver;
 
-function getRunner(): InstanceType<typeof NativeBddRunner> {
-  if (!_runner) {
-    _runner = NativeBddRunner.create(_config);
+function getRunner(): InstanceType<typeof TestRunner> {
+  const runner = _state?.runner;
+  if (!runner) {
+    throw new Error('Runner not initialized — test.ts._setRunner() must be called before step registration');
   }
-  return _runner;
+  return runner;
 }
 
-export function configureBdd(config: BddRunnerConfig): void {
-  _config = config;
-  _runner = null;
+export function configureBdd(config: Record<string, any>): void {
+  // Config is applied via TestRunner.create() — this is a no-op now.
 }
 
 export function setDefaultTimeout(ms: number): void {
-  _config = { ..._config, timeout: ms };
-  _runner = null;
-}
-
-export function _setRunner(runner: InstanceType<typeof NativeBddRunner>): void {
-  _runner = runner;
-}
-
-export function _getRunner(): InstanceType<typeof NativeBddRunner> {
-  return getRunner();
+  // Timeout is set via TestRunnerConfig — this is a no-op now.
 }
 
 // ── Step Registration ─────────────────────────────────────────────────────
@@ -274,11 +265,11 @@ function registerHook(
   callback?: HookCallback,
 ): void {
   if (typeof optionsOrTagsOrCallback === 'function') {
-    getRunner().registerHook(point, scope, optionsOrTagsOrCallback as any);
+    getRunner().registerBddHook(point, scope, optionsOrTagsOrCallback as any);
   } else if (typeof optionsOrTagsOrCallback === 'string') {
-    getRunner().registerHook(point, scope, callback as any, optionsOrTagsOrCallback);
+    getRunner().registerBddHook(point, scope, callback as any, optionsOrTagsOrCallback);
   } else {
-    getRunner().registerHook(point, scope, callback as any, optionsOrTagsOrCallback.tags, optionsOrTagsOrCallback.name, optionsOrTagsOrCallback.timeout);
+    getRunner().registerBddHook(point, scope, callback as any, optionsOrTagsOrCallback.tags, optionsOrTagsOrCallback.name, optionsOrTagsOrCallback.timeout);
   }
 }
 
@@ -319,11 +310,11 @@ export function AfterStep(a: HookOptions | string | HookCallback, b?: HookCallba
 }
 
 export function BeforeAll(callback: () => Promise<void>): void {
-  getRunner().registerHook('before', 'all', callback as any);
+  getRunner().registerBddHook('before', 'all', callback as any);
 }
 
 export function AfterAll(callback: () => Promise<void>): void {
-  getRunner().registerHook('after', 'all', callback as any);
+  getRunner().registerBddHook('after', 'all', callback as any);
 }
 
 // ── World ─────────────────────────────────────────────────────────────────
@@ -342,11 +333,9 @@ export function Pending(message = 'step not yet implemented'): never {
 
 // ── Run ───────────────────────────────────────────────────────────────────
 
-export async function runFeatures(features?: string | string[]): Promise<BddRunSummary> {
-  if (features) {
-    configureBdd({ ..._config, features: Array.isArray(features) ? features : [features] });
-  }
-  return getRunner().run();
+export async function runFeatures(features?: string | string[]): Promise<RunSummary> {
+  const featureList = features ? (Array.isArray(features) ? features : [features]) : undefined;
+  return getRunner().run(featureList);
 }
 
-export type { BddRunnerConfig, BddRunSummary, Page, StepCallback, HookCallback, HookOptions, StepOptions, ParameterTypeOptions };
+export type { RunSummary, Page, StepCallback, HookCallback, HookOptions, StepOptions, ParameterTypeOptions };

@@ -67,8 +67,7 @@ async fn within_seconds(world: &mut BrowserWorld, timeout_secs: String, inner_st
   })?;
 
   let timeout = Duration::from_secs(timeout_secs);
-  let page = world.page().clone();
-  let context = world.context().clone();
+  let base_fixtures = world.fixtures().clone();
   let registry = world.registry_arc();
 
   // Pre-match the inner step once to validate it exists.
@@ -88,11 +87,10 @@ async fn within_seconds(world: &mut BrowserWorld, timeout_secs: String, inner_st
   expect::to_pass(timeout, || {
     let handler = handler.clone();
     let params = params.clone();
-    let page = page.clone();
-    let context = context.clone();
+    let base_fixtures = base_fixtures.clone();
     let registry = registry.clone();
     async move {
-      let mut temp_world = BrowserWorld::new(page, context);
+      let mut temp_world = BrowserWorld::new(base_fixtures);
       temp_world.set_registry(registry);
       handler(&mut temp_world, params, None, None)
         .await

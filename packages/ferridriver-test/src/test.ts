@@ -11,6 +11,7 @@
  *   });
  */
 
+import { AsyncLocalStorage } from 'node:async_hooks';
 import type { TestMeta, TestRunner, TestFixtures } from '@ferridriver/core';
 
 // ── Types ──
@@ -36,20 +37,27 @@ interface RegisteredTest {
   body: (fixtures: TestFixtures) => Promise<void>;
 }
 
-const registry: RegisteredTest[] = [];
+// Shared state lives on globalThis so compiled CLI and jiti-loaded user
+// files always access the same registry (avoids dual-package hazard).
+const G = globalThis as any;
+G.__ferridriver ??= {
+  registry: [] as RegisteredTest[],
+  hasOnly: false,
+  fileStorage: new AsyncLocalStorage<string>(),
+  runner: null as TestRunner | null,
+  currentTestInfo: null as any,
+};
+
+const _state = G.__ferridriver;
+const _fileStorage: AsyncLocalStorage<string> = _state.fileStorage;
 const describeStack: string[] = [];
 const suiteIdStack: string[] = [];
-let hasOnly = false;
-let currentFile = '';
 
 // ── Runner + TestInfo (set by CLI) ──
 
-let _runner: TestRunner | null = null;
-let _currentTestInfo: any | null = null;
-
 /** Called by CLI after TestRunner.create(). */
 export function _setRunner(runner: TestRunner): void {
-  _runner = runner;
+  _state.runner = runner;
 }
 
 // ── Mount (CT mode) ──
@@ -94,6 +102,11 @@ function interpolateTemplate(template: string, data: any): string {
   return template.replace(/\$(\w+)/g, (_, key) => key in data ? String(data[key]) : `$${key}`);
 }
 
+/** Get the current file from AsyncLocalStorage. */
+function currentFile(): string {
+  return _fileStorage.getStore() ?? '';
+}
+
 function fullTitle(name: string): string {
   return [...describeStack, name].join(' > ');
 }
@@ -123,13 +136,13 @@ function buildAnnotations(details?: TestDetails): any[] {
   return annotations;
 }
 
-// ── Body wrapper (sets _currentTestInfo for runtime modifiers) ──
+// ── Body wrapper (sets _state.currentTestInfo for runtime modifiers) ──
 
 function wrapBody(body: TestBody): (fixtures: TestFixtures) => Promise<void> {
   return async (fixtures: TestFixtures) => {
-    _currentTestInfo = (fixtures as any).testInfo;
+    _state.currentTestInfo = (fixtures as any).testInfo;
     try { await body(fixtures); }
-    finally { _currentTestInfo = null; }
+    finally { _state.currentTestInfo = null; }
   };
 }
 
@@ -141,11 +154,11 @@ function testFn(name: string, detailsOrBody: TestDetails | TestBody, maybeBody?:
   const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody!;
   const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
-  registry.push({
+  _state.registry.push({
     meta: {
-      id: makeId(currentFile, title),
+      id: makeId(currentFile(), title),
       title,
-      file: currentFile,
+      file: currentFile(),
       timeout: details?.timeout,
       retries: details?.retries,
       suite_id: currentSuiteId(),
@@ -168,8 +181,8 @@ function testFn(name: string, detailsOrBody: TestDetails | TestBody, maybeBody?:
 testFn.skip = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
     // Runtime: delegate to NAPI TestInfo.skip() — Rust handles everything.
-    if (!_currentTestInfo) throw new Error('test.skip() can only be called inside a test body');
-    _currentTestInfo.skip(args[0] ?? true, args[1]);
+    if (!_state.currentTestInfo) throw new Error('test.skip() can only be called inside a test body');
+    _state.currentTestInfo.skip(args[0] ?? true, args[1]);
     return;
   }
   // Registration: test.skip('name', body) or test.skip('name', details, body)
@@ -177,9 +190,9 @@ testFn.skip = (...args: any[]) => {
   const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody;
   const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
-  registry.push({
+  _state.registry.push({
     meta: {
-      id: makeId(currentFile, title), title, file: currentFile,
+      id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
       annotations: [...buildAnnotations(details), { skip: { reason: null, condition: null } }],
     },
@@ -192,17 +205,17 @@ testFn.skip = (...args: any[]) => {
  */
 testFn.fixme = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
-    if (!_currentTestInfo) throw new Error('test.fixme() can only be called inside a test body');
-    _currentTestInfo.fixme(args[0] ?? true, args[1]);
+    if (!_state.currentTestInfo) throw new Error('test.fixme() can only be called inside a test body');
+    _state.currentTestInfo.fixme(args[0] ?? true, args[1]);
     return;
   }
   const [name, detailsOrBody, maybeBody] = args;
   const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody;
   const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
-  registry.push({
+  _state.registry.push({
     meta: {
-      id: makeId(currentFile, title), title, file: currentFile,
+      id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
       annotations: [...buildAnnotations(details), { fixme: { reason: null, condition: null } }],
     },
@@ -218,17 +231,17 @@ testFn.fixme = (...args: any[]) => {
  */
 testFn.fail = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
-    if (!_currentTestInfo) throw new Error('test.fail() can only be called inside a test body');
-    _currentTestInfo.fail(args[0] ?? true, args[1]);
+    if (!_state.currentTestInfo) throw new Error('test.fail() can only be called inside a test body');
+    _state.currentTestInfo.fail(args[0] ?? true, args[1]);
     return;
   }
   const [name, detailsOrBody, maybeBody] = args;
   const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody;
   const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
-  registry.push({
+  _state.registry.push({
     meta: {
-      id: makeId(currentFile, title), title, file: currentFile,
+      id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
       annotations: [...buildAnnotations(details), { fail: { reason: null, condition: null } }],
     },
@@ -244,17 +257,17 @@ testFn.fail = (...args: any[]) => {
  */
 testFn.slow = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
-    if (!_currentTestInfo) throw new Error('test.slow() can only be called inside a test body');
-    _currentTestInfo.slow(args[0] ?? true, args[1]);
+    if (!_state.currentTestInfo) throw new Error('test.slow() can only be called inside a test body');
+    _state.currentTestInfo.slow(args[0] ?? true, args[1]);
     return;
   }
   const [name, detailsOrBody, maybeBody] = args;
   const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody;
   const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
-  registry.push({
+  _state.registry.push({
     meta: {
-      id: makeId(currentFile, title), title, file: currentFile,
+      id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
       annotations: [...buildAnnotations(details), { slow: { reason: null, condition: null } }],
     },
@@ -263,14 +276,14 @@ testFn.slow = (...args: any[]) => {
 };
 
 testFn.only = (...args: any[]) => {
-  hasOnly = true;
+  _state.hasOnly = true;
   const [name, detailsOrBody, maybeBody] = args;
   const body = typeof detailsOrBody === 'function' ? detailsOrBody : maybeBody;
   const details = typeof detailsOrBody === 'function' ? undefined : detailsOrBody;
   const title = fullTitle(name);
-  registry.push({
+  _state.registry.push({
     meta: {
-      id: makeId(currentFile, title), title, file: currentFile,
+      id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
       annotations: [...buildAnnotations(details), 'only'],
     },
@@ -286,8 +299,8 @@ testFn.each = <T>(dataOrStrings: T[] | TemplateStringsArray, ...templateValues: 
     for (const row of rows) {
       const name = interpolateTemplate(nameTemplate, row);
       const title = fullTitle(name);
-      registry.push({
-        meta: { id: makeId(currentFile, title), title, file: currentFile, annotations: [], suite_id: currentSuiteId() },
+      _state.registry.push({
+        meta: { id: makeId(currentFile(), title), title, file: currentFile(), annotations: [], suite_id: currentSuiteId() },
         body: wrapBody((fixtures) => body(fixtures, row as T)),
       });
     }
@@ -296,20 +309,20 @@ testFn.each = <T>(dataOrStrings: T[] | TemplateStringsArray, ...templateValues: 
 
 /** Runtime test info — delegates to NAPI TestInfo. */
 testFn.info = () => {
-  if (!_currentTestInfo) throw new Error('test.info() can only be called inside a test body');
-  return _currentTestInfo;
+  if (!_state.currentTestInfo) throw new Error('test.info() can only be called inside a test body');
+  return _state.currentTestInfo;
 };
 
 /** Runtime timeout change — delegates to NAPI TestInfo.setTimeout(). */
 testFn.setTimeout = (ms: number) => {
-  if (!_currentTestInfo) throw new Error('test.setTimeout() can only be called inside a test body');
-  _currentTestInfo.setTimeout(ms);
+  if (!_state.currentTestInfo) throw new Error('test.setTimeout() can only be called inside a test body');
+  _state.currentTestInfo.setTimeout(ms);
 };
 
 /** Step API — delegates to NAPI TestInfo.beginStep(). */
 testFn.step = async <T>(title: string, body: () => T | Promise<T>): Promise<T> => {
-  if (!_currentTestInfo) throw new Error('test.step() can only be called inside a test body');
-  const handle = await _currentTestInfo.beginStep(title);
+  if (!_state.currentTestInfo) throw new Error('test.step() can only be called inside a test body');
+  const handle = await _state.currentTestInfo.beginStep(title);
   try {
     const result = await body();
     await handle.end();
@@ -324,30 +337,30 @@ testFn.step = async <T>(title: string, body: () => T | Promise<T>): Promise<T> =
 
 testFn.beforeAll = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
   const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
-  if (!_runner) throw new Error('test.beforeAll() requires runner to be initialized');
+  if (!_state.runner) throw new Error('test.beforeAll() requires runner to be initialized');
   const suiteId = currentSuiteId() ?? '';
-  _runner.registerHook({ suiteId, kind: 'beforeAll' }, wrapBody(fn));
+  _state.runner.registerHook({ suiteId, kind: 'beforeAll' }, wrapBody(fn));
 };
 
 testFn.afterAll = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
   const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
-  if (!_runner) throw new Error('test.afterAll() requires runner to be initialized');
+  if (!_state.runner) throw new Error('test.afterAll() requires runner to be initialized');
   const suiteId = currentSuiteId() ?? '';
-  _runner.registerHook({ suiteId, kind: 'afterAll' }, wrapBody(fn));
+  _state.runner.registerHook({ suiteId, kind: 'afterAll' }, wrapBody(fn));
 };
 
 testFn.beforeEach = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
   const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
-  if (!_runner) throw new Error('test.beforeEach() requires runner to be initialized');
+  if (!_state.runner) throw new Error('test.beforeEach() requires runner to be initialized');
   const suiteId = currentSuiteId() ?? '';
-  _runner.registerHook({ suiteId, kind: 'beforeEach' }, wrapBody(fn));
+  _state.runner.registerHook({ suiteId, kind: 'beforeEach' }, wrapBody(fn));
 };
 
 testFn.afterEach = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
   const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
-  if (!_runner) throw new Error('test.afterEach() requires runner to be initialized');
+  if (!_state.runner) throw new Error('test.afterEach() requires runner to be initialized');
   const suiteId = currentSuiteId() ?? '';
-  _runner.registerHook({ suiteId, kind: 'afterEach' }, wrapBody(fn));
+  _state.runner.registerHook({ suiteId, kind: 'afterEach' }, wrapBody(fn));
 };
 
 // ── test.expect (alias for the expect export) ──
@@ -520,63 +533,63 @@ export function describe(name: string, fn: () => void): void {
 
 describe.skip = (name: string, fn: () => void) => {
   describeStack.push(name);
-  const startIdx = registry.length;
+  const startIdx = _state.registry.length;
   fn();
-  for (let i = startIdx; i < registry.length; i++) {
-    registry[i].meta.annotations.push({ skip: { reason: null, condition: null } });
+  for (let i = startIdx; i < _state.registry.length; i++) {
+    _state.registry[i].meta.annotations.push({ skip: { reason: null, condition: null } });
   }
   describeStack.pop();
 };
 
 describe.fixme = (name: string, fn: () => void) => {
   describeStack.push(name);
-  const startIdx = registry.length;
+  const startIdx = _state.registry.length;
   fn();
-  for (let i = startIdx; i < registry.length; i++) {
-    registry[i].meta.annotations.push({ fixme: { reason: null, condition: null } });
+  for (let i = startIdx; i < _state.registry.length; i++) {
+    _state.registry[i].meta.annotations.push({ fixme: { reason: null, condition: null } });
   }
   describeStack.pop();
 };
 
 describe.only = (name: string, fn: () => void) => {
-  hasOnly = true;
+  _state.hasOnly = true;
   describeStack.push(name);
-  const startIdx = registry.length;
+  const startIdx = _state.registry.length;
   fn();
-  for (let i = startIdx; i < registry.length; i++) {
-    registry[i].meta.annotations.push('only');
+  for (let i = startIdx; i < _state.registry.length; i++) {
+    _state.registry[i].meta.annotations.push('only');
   }
   describeStack.pop();
 };
 
 describe.serial = (name: string, fn: () => void) => {
   describeStack.push(name);
-  if (_runner) {
-    const suiteId = _runner.registerSuite({ name, file: currentFile, mode: 'serial' });
+  if (_state.runner) {
+    const suiteId = _state.runner.registerSuite({ name, file: currentFile(), mode: 'serial' });
     suiteIdStack.push(suiteId);
   }
   fn();
-  if (_runner) suiteIdStack.pop();
+  if (_state.runner) suiteIdStack.pop();
   describeStack.pop();
 };
 
 describe.parallel = (name: string, fn: () => void) => {
   describeStack.push(name);
-  if (_runner) {
-    const suiteId = _runner.registerSuite({ name, file: currentFile, mode: 'parallel' });
+  if (_state.runner) {
+    const suiteId = _state.runner.registerSuite({ name, file: currentFile(), mode: 'parallel' });
     suiteIdStack.push(suiteId);
   }
   fn();
-  if (_runner) suiteIdStack.pop();
+  if (_state.runner) suiteIdStack.pop();
   describeStack.pop();
 };
 
 describe.configure = (opts: { mode?: 'serial' | 'parallel'; retries?: number; timeout?: number }) => {
   // Apply suite-level config to all tests registered in this scope.
   // Mode is handled by registering a suite; retries/timeout are stored as overrides.
-  if (opts.mode && _runner) {
+  if (opts.mode && _state.runner) {
     const name = describeStack[describeStack.length - 1] || '';
-    const suiteId = _runner.registerSuite({ name, file: currentFile, mode: opts.mode });
+    const suiteId = _state.runner.registerSuite({ name, file: currentFile(), mode: opts.mode });
     suiteIdStack.push(suiteId);
     // Note: suiteId is NOT popped here — it persists for the describe scope.
     // The caller (describe()) handles scope cleanup.
@@ -625,19 +638,27 @@ testFn.use = (options: Record<string, any>) => {
 
 // ── Internal state ──
 
+/** @deprecated Use _runWithFile instead. Kept for backwards compat. */
 export function _setCurrentFile(file: string): void {
-  currentFile = file;
+  // No-op — file context is now per-async-scope via AsyncLocalStorage.
+  // Callers should migrate to _runWithFile.
+}
+
+/** Run a callback with the given file as the current file context.
+ *  Works with both sync and async callbacks — AsyncLocalStorage propagates through awaits. */
+export function _runWithFile<T>(file: string, fn: () => T): T {
+  return _fileStorage.run(file, fn);
 }
 
 export function _drainTests(): RegisteredTest[] {
-  const tests = [...registry];
-  registry.length = 0;
-  hasOnly = false;
+  const tests = [..._state.registry];
+  _state.registry.length = 0;
+  _state.hasOnly = false;
   return tests;
 }
 
 export function _hasOnly(): boolean {
-  return hasOnly;
+  return _state.hasOnly;
 }
 
 // test.describe — alias for the standalone describe, matching Playwright.

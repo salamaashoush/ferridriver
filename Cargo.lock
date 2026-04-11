@@ -1887,6 +1887,7 @@ dependencies = [
  "dashmap",
  "ferridriver",
  "ferridriver-bdd",
+ "ferridriver-test",
  "rmcp",
  "rustc-hash 2.1.1",
  "schemars",

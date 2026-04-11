@@ -95,31 +95,54 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
   let step_timeout = Duration::from_millis(config.timeout);
   let screenshot_on_failure = config.screenshot_on_failure;
   let strict = config.strict;
+  let browser_config = config.browser.clone();
 
   let test_fn: TestFn = Arc::new(move |pool: FixturePool| {
     let scenario = scenario_clone.clone();
     let registry = Arc::clone(&registry);
+    let browser_config = browser_config.clone();
 
     Box::pin(async move {
       // Get fixtures injected by the core worker.
-      let test_info: Arc<TestInfo> = pool
-        .get("test_info")
+      let browser: Arc<ferridriver::Browser> = pool
+        .get("browser")
         .await
-        .map_err(|e| TestFailure::from(format!("fixture 'test_info' failed: {e}")))?;
-
+        .map_err(|e| TestFailure::from(format!("fixture 'browser' failed: {e}")))?;
       let page: Arc<ferridriver::Page> = pool
         .get("page")
         .await
         .map_err(|e| TestFailure::from(format!("fixture 'page' failed: {e}")))?;
-
       let context: Arc<ferridriver::context::ContextRef> = pool
         .get("context")
         .await
         .map_err(|e| TestFailure::from(format!("fixture 'context' failed: {e}")))?;
+      let test_info: Arc<TestInfo> = pool
+        .get("test_info")
+        .await
+        .map_err(|e| TestFailure::from(format!("fixture 'test_info' failed: {e}")))?;
+      let request: Arc<ferridriver::api_request::APIRequestContext> = pool
+        .get("request")
+        .await
+        .map_err(|e| TestFailure::from(format!("fixture 'request' failed: {e}")))?;
 
-      // Construct BrowserWorld from the fixtures.
-      let mut world = BrowserWorld::new((*page).clone(), (*context).clone());
-      world.set_test_info(Arc::clone(&test_info));
+      // Create shared modifiers — worker reads these after callback returns.
+      let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
+      pool.inject("__test_modifiers", Arc::clone(&modifiers)).await;
+
+      // Build unified TestFixtures and construct BrowserWorld from it.
+      let fixtures = ferridriver_test::model::TestFixtures {
+        browser,
+        page,
+        context,
+        request,
+        test_info: Arc::clone(&test_info),
+        modifiers,
+        browser_config,
+        bdd_args: None,
+        bdd_data_table: None,
+        bdd_doc_string: None,
+      };
+      let mut world = BrowserWorld::new(fixtures);
 
       // Delegate to the single execution engine with a TestInfo observer.
       let executor = ScenarioExecutor::new(Arc::clone(&registry), step_timeout, strict, screenshot_on_failure);
@@ -249,6 +272,7 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
       "context".to_string(),
       "page".to_string(),
       "test_info".to_string(),
+      "request".to_string(),
     ],
     annotations,
     timeout: None,
