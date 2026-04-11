@@ -143,6 +143,29 @@ pub struct TestConfig {
   #[serde(default)]
   pub web_server: Vec<WebServerConfig>,
 
+  /// Stop after N test failures. 0 = no limit. Playwright: `maxFailures`.
+  pub max_failures: u32,
+
+  /// Snapshot directory path template.
+  pub snapshot_dir: Option<String>,
+
+  /// Snapshot path template (e.g. `{testDir}/__snapshots__/{testFilePath}/{arg}{ext}`).
+  pub snapshot_path_template: Option<String>,
+
+  /// Whether to preserve test output: "always", "never", "failures-only".
+  pub preserve_output: String,
+
+  /// Suppress stdio output from tests. Playwright: `quiet`.
+  pub quiet: bool,
+
+  /// Global grep filter at config level (in addition to CLI grep).
+  pub config_grep: Option<String>,
+  pub config_grep_invert: Option<String>,
+
+  /// Arbitrary metadata object.
+  #[serde(default)]
+  pub metadata: serde_json::Value,
+
   /// Strict mode: treat undefined/pending steps as errors. Default: false.
   pub strict: bool,
 
@@ -229,6 +252,38 @@ pub struct ContextConfig {
   /// Permissions to grant (e.g., ["geolocation", "notifications"]).
   #[serde(default)]
   pub permissions: Vec<String>,
+  /// Extra HTTP headers applied to every request.
+  #[serde(default)]
+  pub extra_http_headers: std::collections::BTreeMap<String, String>,
+  /// HTTP credentials for basic auth.
+  pub http_credentials: Option<HttpCredentialsConfig>,
+  /// Ignore HTTPS errors.
+  pub ignore_https_errors: bool,
+  /// Proxy settings.
+  pub proxy: Option<ProxyConfig>,
+  /// Service workers mode: "allow" (default) or "block".
+  pub service_workers: Option<String>,
+  /// Storage state at context level (overrides top-level).
+  pub storage_state: Option<String>,
+  /// Reduced motion: "reduce" or "no-preference".
+  pub reduced_motion: Option<String>,
+  /// Forced colors: "active" or "none".
+  pub forced_colors: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct HttpCredentialsConfig {
+  pub username: String,
+  pub password: String,
+  pub origin: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProxyConfig {
+  pub server: String,
+  pub bypass: Option<String>,
+  pub username: Option<String>,
+  pub password: Option<String>,
 }
 
 impl Default for ContextConfig {
@@ -247,6 +302,14 @@ impl Default for ContextConfig {
       timezone_id: None,
       geolocation: None,
       permissions: Vec::new(),
+      extra_http_headers: std::collections::BTreeMap::new(),
+      http_credentials: None,
+      ignore_https_errors: false,
+      proxy: None,
+      service_workers: None,
+      storage_state: None,
+      reduced_motion: None,
+      forced_colors: None,
     }
   }
 }
@@ -331,13 +394,64 @@ pub struct ReporterConfig {
   pub options: BTreeMap<String, serde_json::Value>,
 }
 
+/// Project configuration — matches Playwright's `TestProject`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
 pub struct ProjectConfig {
   pub name: String,
+  /// Test file glob patterns (per-project override).
   pub test_match: Option<Vec<String>>,
+  /// Test file ignore patterns.
+  pub test_ignore: Option<Vec<String>>,
+  /// Root directory for test files.
+  pub test_dir: Option<String>,
+  /// Browser/context config (Playwright's `use` block).
   pub browser: Option<BrowserConfig>,
+  /// Output directory for project artifacts.
+  pub output_dir: Option<String>,
+  /// Snapshot directory.
+  pub snapshot_dir: Option<String>,
   pub retries: Option<u32>,
   pub timeout: Option<u64>,
+  pub repeat_each: Option<u32>,
+  /// Run all tests in parallel.
+  pub fully_parallel: Option<bool>,
+  /// Filter by test title regex.
+  pub grep: Option<String>,
+  pub grep_invert: Option<String>,
+  /// Projects that must run before this one (setup dependencies).
+  pub dependencies: Vec<String>,
+  /// Project to run after this one (teardown).
+  pub teardown: Option<String>,
+  /// Arbitrary metadata.
+  #[serde(default)]
+  pub metadata: serde_json::Value,
+  /// Tags for project-level filtering.
+  pub tag: Option<Vec<String>>,
+}
+
+impl Default for ProjectConfig {
+  fn default() -> Self {
+    Self {
+      name: String::new(),
+      test_match: None,
+      test_ignore: None,
+      test_dir: None,
+      browser: None,
+      output_dir: None,
+      snapshot_dir: None,
+      retries: None,
+      timeout: None,
+      repeat_each: None,
+      fully_parallel: None,
+      grep: None,
+      grep_invert: None,
+      dependencies: Vec::new(),
+      teardown: None,
+      metadata: serde_json::Value::Null,
+      tag: None,
+    }
+  }
 }
 
 /// Web server configuration — matches Playwright's `webServer` option.
@@ -515,6 +629,14 @@ impl Default for TestConfig {
       trace: crate::tracing::TraceMode::Off,
       storage_state: None,
       web_server: Vec::new(),
+      max_failures: 0,
+      snapshot_dir: None,
+      snapshot_path_template: None,
+      preserve_output: "always".into(),
+      quiet: false,
+      config_grep: None,
+      config_grep_invert: None,
+      metadata: serde_json::Value::Null,
       strict: false,
       order: "defined".into(),
       language: None,

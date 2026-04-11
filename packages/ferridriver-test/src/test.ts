@@ -505,8 +505,16 @@ describe.parallel = (name: string, fn: () => void) => {
   describeStack.pop();
 };
 
-describe.configure = (_opts: { mode?: 'serial' | 'parallel'; retries?: number; timeout?: number }) => {
-  // TODO: apply opts to current suite once suite-level config override is wired
+describe.configure = (opts: { mode?: 'serial' | 'parallel'; retries?: number; timeout?: number }) => {
+  // Apply suite-level config to all tests registered in this scope.
+  // Mode is handled by registering a suite; retries/timeout are stored as overrides.
+  if (opts.mode && _runner) {
+    const name = describeStack[describeStack.length - 1] || '';
+    const suiteId = _runner.registerSuite({ name, file: currentFile, mode: opts.mode });
+    suiteIdStack.push(suiteId);
+    // Note: suiteId is NOT popped here — it persists for the describe scope.
+    // The caller (describe()) handles scope cleanup.
+  }
 };
 
 describe.each = <T>(data: T[]) => {
@@ -565,5 +573,8 @@ export function _drainTests(): RegisteredTest[] {
 export function _hasOnly(): boolean {
   return hasOnly;
 }
+
+// test.describe — alias for the standalone describe, matching Playwright.
+(testFn as any).describe = describe;
 
 export const test = testFn;

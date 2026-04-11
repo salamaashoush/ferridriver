@@ -2,6 +2,7 @@
   "cookies": [
     {
       "domain": "example.com",
+      "expires": -1.0,
       "httpOnly": false,
       "name": "session",
       "path": "/",

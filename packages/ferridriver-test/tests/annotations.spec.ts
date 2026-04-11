@@ -193,6 +193,38 @@ myTest('custom fixture via test.extend', async ({ page, greeting }: any) => {
   if (title !== 'Extend') throw new Error(`unexpected title: ${title}`);
 });
 
+// ── test.describe (as method on test object) ──
+
+test.describe('test.describe method', () => {
+  test('works via test.describe', async ({ page }) => {
+    await page.goto('data:text/html,<title>DescribeMethod</title>');
+    const title = await page.title();
+    if (title !== 'DescribeMethod') throw new Error(`unexpected: ${title}`);
+  });
+});
+
+// ── TestInfo properties ──
+
+test('testInfo has expectedStatus', async ({ testInfo }) => {
+  if (testInfo.expectedStatus !== 'passed') throw new Error(`expected 'passed', got ${testInfo.expectedStatus}`);
+});
+
+test('testInfo has annotations getter', async ({ testInfo }) => {
+  const anns = testInfo.annotations;
+  if (!Array.isArray(anns)) throw new Error('annotations is not an array');
+});
+
+test('testInfo has line number', async ({ testInfo }) => {
+  if (typeof testInfo.line !== 'number') throw new Error('line is not a number');
+});
+
+// ── testInfo.attach ──
+
+test('testInfo.attach with body', async ({ testInfo }) => {
+  await testInfo.attach('test-data', 'text/plain', Buffer.from('hello'), undefined);
+  if (testInfo.attachmentCount < 1) throw new Error('attachment not recorded');
+});
+
 // ── test.each ──
 
 test.each([
