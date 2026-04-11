@@ -38,6 +38,10 @@ struct FerritestArgs {
   /// None = not set, Some(None) = unconditional, Some(Some("webkit")) = conditional
   fail: Option<Option<String>>,
   only: bool,
+  /// Structured metadata annotations: `info = "type:description"`.
+  infos: Vec<(String, String)>,
+  /// Raw JSON string for fixture/context overrides (viewport, locale, etc.)
+  use_options: Option<String>,
 }
 
 impl Parse for FerritestArgs {
@@ -51,6 +55,8 @@ impl Parse for FerritestArgs {
       fixme: None,
       fail: None,
       only: false,
+      infos: Vec::new(),
+      use_options: None,
     };
 
     let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
@@ -105,6 +111,25 @@ impl Parse for FerritestArgs {
               if let syn::Expr::Lit(lit) = &nv.value {
                 if let Lit::Str(s) = &lit.lit {
                   args.fail = Some(Some(s.value()));
+                }
+              }
+            },
+            "use_options" => {
+              if let syn::Expr::Lit(lit) = &nv.value {
+                if let Lit::Str(s) = &lit.lit {
+                  args.use_options = Some(s.value());
+                }
+              }
+            },
+            "info" => {
+              if let syn::Expr::Lit(lit) = &nv.value {
+                if let Lit::Str(s) = &lit.lit {
+                  let val = s.value();
+                  if let Some((type_name, desc)) = val.split_once(':') {
+                    args.infos.push((type_name.trim().to_string(), desc.trim().to_string()));
+                  } else {
+                    args.infos.push((val, String::new()));
+                  }
                 }
               }
             },
@@ -252,6 +277,11 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   for tag in &args.tags {
     annotations.push(quote! { ferridriver_test::model::TestAnnotation::Tag(#tag.to_string()) });
   }
+  for (type_name, desc) in &args.infos {
+    annotations.push(
+      quote! { ferridriver_test::model::TestAnnotation::Info { type_name: #type_name.to_string(), description: #desc.to_string() } },
+    );
+  }
 
   let retries_expr = match args.retries {
     Some(r) => quote! { Some(#r) },
@@ -259,6 +289,10 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   };
   let timeout_ms_expr = match args.timeout_ms {
     Some(ms) => quote! { Some(#ms) },
+    None => quote! { None },
+  };
+  let use_options_expr = match &args.use_options {
+    Some(json) => quote! { Some(#json) },
     None => quote! { None },
   };
 
@@ -279,6 +313,7 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
         annotations: &[#(#annotations),*],
         timeout_ms: #timeout_ms_expr,
         retries: #retries_expr,
+        use_options: #use_options_expr,
         test_fn: |pool| Box::pin(#fn_name(pool)),
       }
     }
