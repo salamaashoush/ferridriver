@@ -65,6 +65,8 @@ struct JsonStep {
   status: String,
   #[serde(skip_serializing_if = "Option::is_none")]
   error: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  metadata: Option<serde_json::Value>,
   #[serde(skip_serializing_if = "Vec::is_empty")]
   steps: Vec<JsonStep>,
 }
@@ -89,6 +91,7 @@ fn serialize_steps(steps: &[TestStep]) -> Vec<JsonStep> {
       duration_ms: s.duration.as_millis(),
       status: format!("{:?}", s.status),
       error: s.error.clone(),
+      metadata: s.metadata.clone(),
       steps: serialize_steps(&s.steps),
     })
     .collect()

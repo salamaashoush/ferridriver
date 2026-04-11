@@ -67,13 +67,18 @@ impl Reporter for JUnitReporter {
     )
     .ok();
 
-    // Group by file.
-    let mut by_file: rustc_hash::FxHashMap<&str, Vec<&TestOutcome>> = rustc_hash::FxHashMap::default();
+    // Group by suite (BDD feature name) with fallback to file (E2E).
+    let mut by_suite: rustc_hash::FxHashMap<String, Vec<&TestOutcome>> = rustc_hash::FxHashMap::default();
     for result in &self.results {
-      by_file.entry(&result.test_id.file).or_default().push(result);
+      let suite = result
+        .test_id
+        .suite
+        .clone()
+        .unwrap_or_else(|| result.test_id.file.clone());
+      by_suite.entry(suite).or_default().push(result);
     }
 
-    for (file, tests) in &by_file {
+    for (suite_name, tests) in &by_suite {
       let suite_failures = tests
         .iter()
         .filter(|t| {
@@ -87,16 +92,18 @@ impl Reporter for JUnitReporter {
 
       writeln!(
         xml,
-        r#"  <testsuite name="{file}" tests="{}" failures="{suite_failures}" time="{suite_time:.3}">"#,
+        r#"  <testsuite name="{}" tests="{}" failures="{suite_failures}" time="{suite_time:.3}">"#,
+        xml_escape(suite_name),
         tests.len()
       )
       .ok();
 
       for test in tests {
         let name = xml_escape(&test.test_id.name);
+        let classname = xml_escape(suite_name);
         let time = test.duration.as_secs_f64();
 
-        writeln!(xml, r#"    <testcase name="{name}" time="{time:.3}">"#).ok();
+        writeln!(xml, r#"    <testcase name="{name}" classname="{classname}" time="{time:.3}">"#).ok();
 
         match test.status {
           crate::model::TestStatus::Failed | crate::model::TestStatus::TimedOut => {

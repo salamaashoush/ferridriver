@@ -1,20 +1,24 @@
-//! Rich terminal reporter: Playwright/Vitest-style output with colors and icons.
+//! Rich terminal reporter: unified output for E2E and BDD tests.
+//!
+//! Automatically detects BDD tests by checking step metadata for `bdd_keyword`.
+//! E2E tests show as flat results. BDD tests show Feature > Scenario > Step hierarchy
+//! with keyword coloring.
 
 use std::time::Duration;
 
 use console::Style;
 
 use crate::config::ReportSlowTestsConfig;
-use crate::model::{StepStatus, TestStatus, TestStep};
+use crate::model::{StepCategory, StepStatus, TestStatus, TestStep};
 use crate::reporter::{Reporter, ReporterEvent};
 
 pub struct TerminalReporter {
   completed: usize,
   total: usize,
-  /// Config for slow test reporting. None = disabled.
   slow_tests_config: Option<ReportSlowTestsConfig>,
-  /// Collected (test_name, file, duration) for slow test reporting.
   test_durations: Vec<(String, String, Duration)>,
+  /// Current BDD feature/suite — used to print Feature headers when suite changes.
+  current_suite: Option<String>,
 }
 
 impl TerminalReporter {
@@ -24,6 +28,7 @@ impl TerminalReporter {
       total: 0,
       slow_tests_config: Some(ReportSlowTestsConfig::default()),
       test_durations: Vec::new(),
+      current_suite: None,
     }
   }
 
@@ -65,24 +70,27 @@ fn s_bold() -> Style {
 fn s_cyan() -> Style {
   Style::new().cyan().bold()
 }
+fn s_feature() -> Style {
+  Style::new().magenta().bold()
+}
 
 fn status_icon(status: &TestStatus) -> (&'static str, Style) {
   match status {
-    TestStatus::Passed => ("\u{2713}", s_pass()),   // checkmark
-    TestStatus::Failed => ("\u{2717}", s_fail()),   // cross
-    TestStatus::TimedOut => ("\u{2717}", s_fail()), // cross (same as failed)
-    TestStatus::Skipped => ("\u{2212}", s_skip()),  // minus
-    TestStatus::Flaky => ("\u{25ce}", s_flaky()),   // bullseye
+    TestStatus::Passed => ("\u{2713}", s_pass()),
+    TestStatus::Failed => ("\u{2717}", s_fail()),
+    TestStatus::TimedOut => ("\u{2717}", s_fail()),
+    TestStatus::Skipped => ("\u{2212}", s_skip()),
+    TestStatus::Flaky => ("\u{25ce}", s_flaky()),
     TestStatus::Interrupted => ("!", s_fail()),
   }
 }
 
 fn step_icon(status: StepStatus) -> (&'static str, Style) {
   match status {
-    StepStatus::Passed => ("\u{2713}", s_pass()),  // checkmark
-    StepStatus::Failed => ("\u{2717}", s_fail()),  // cross
-    StepStatus::Skipped => ("\u{2212}", s_skip()), // minus
-    StepStatus::Pending => ("\u{25cb}", s_skip()), // empty circle
+    StepStatus::Passed => ("\u{2713}", s_pass()),
+    StepStatus::Failed => ("\u{2717}", s_fail()),
+    StepStatus::Skipped => ("\u{2212}", s_skip()),
+    StepStatus::Pending => ("\u{25cb}", s_skip()),
   }
 }
 
@@ -95,37 +103,85 @@ fn format_duration(d: Duration) -> String {
   }
 }
 
+/// Check if a test outcome has BDD steps (any step with bdd_keyword metadata).
+fn is_bdd_test(steps: &[TestStep]) -> bool {
+  steps.iter().any(|s| {
+    s.metadata
+      .as_ref()
+      .is_some_and(|m| m.get("bdd_keyword").is_some())
+      || is_bdd_test(&s.steps)
+  })
+}
+
 fn print_steps(steps: &[&TestStep], indent: usize) {
   let pad = " ".repeat(indent);
   for step in steps {
+    if step.category == StepCategory::Hook {
+      // Hook steps get a distinct dimmed style.
+      let icon = if step.error.is_some() { "\u{2717}" } else { "\u{2713}" };
+      let style = if step.error.is_some() { s_fail() } else { s_dim() };
+      let dur = format_duration(step.duration);
+      println!(
+        "{pad}{} {} {}",
+        style.apply_to(icon),
+        s_dim().apply_to(format!("[{}]", step.title)),
+        s_dim().apply_to(format!("({dur})")),
+      );
+      if let Some(ref err) = step.error {
+        for line in err.lines() {
+          println!("{pad}  {}", s_fail().apply_to(line));
+        }
+      }
+      continue;
+    }
+
     let (icon, icon_style) = step_icon(step.status);
     let dur = format_duration(step.duration);
+
+    // BDD steps: color the keyword part in cyan.
+    let keyword = step
+      .metadata
+      .as_ref()
+      .and_then(|m| m.get("bdd_keyword"))
+      .and_then(|v| v.as_str())
+      .map(|k| k.trim().to_string());
+
     match step.status {
       StepStatus::Passed => {
-        println!(
-          "{pad}{} {} {}",
-          icon_style.apply_to(icon),
-          step.title,
-          s_dim().apply_to(format!("({dur})"))
-        );
+        if let Some(ref kw) = keyword {
+          let rest = step.title.strip_prefix(kw.as_str()).unwrap_or(&step.title);
+          println!(
+            "{pad}{} {}{} {}",
+            icon_style.apply_to(icon),
+            s_cyan().apply_to(kw),
+            rest,
+            s_dim().apply_to(format!("({dur})")),
+          );
+        } else {
+          println!(
+            "{pad}{} {} {}",
+            icon_style.apply_to(icon),
+            step.title,
+            s_dim().apply_to(format!("({dur})")),
+          );
+        }
       },
       StepStatus::Failed => {
         println!(
           "{pad}{} {} {}",
           icon_style.apply_to(icon),
           s_fail().apply_to(&step.title),
-          s_dim().apply_to(format!("({dur})"))
+          s_dim().apply_to(format!("({dur})")),
         );
+        if let Some(ref err) = step.error {
+          for line in err.lines() {
+            println!("{pad}  {}", s_fail().apply_to(line));
+          }
+        }
       },
       StepStatus::Skipped | StepStatus::Pending => {
         println!("{pad}{} {}", icon_style.apply_to(icon), s_skip().apply_to(&step.title));
       },
-    }
-
-    if let Some(ref err) = step.error {
-      for line in err.lines() {
-        println!("{pad}  {}", s_fail().apply_to(line));
-      }
     }
 
     let nested: Vec<&TestStep> = step.steps.iter().filter(|s| s.category.is_visible()).collect();
@@ -148,7 +204,7 @@ impl Reporter for TerminalReporter {
         println!();
         println!(
           "  {} Running {} test(s) with {} worker(s)",
-          s_cyan().apply_to("\u{25b6}"), // play icon
+          s_cyan().apply_to("\u{25b6}"),
           s_bold().apply_to(total_tests),
           num_workers,
         );
@@ -157,12 +213,27 @@ impl Reporter for TerminalReporter {
 
       ReporterEvent::TestFinished { test_id, outcome } => {
         self.completed += 1;
-        // Collect durations for slow test reporting.
         self.test_durations.push((
           test_id.full_name(),
           test_id.file.clone(),
           outcome.duration,
         ));
+
+        let bdd = is_bdd_test(&outcome.steps);
+
+        // BDD: print Feature header when suite changes.
+        if bdd {
+          if self.current_suite.as_ref() != test_id.suite.as_ref() {
+            if self.current_suite.is_some() {
+              println!();
+            }
+            if let Some(suite) = &test_id.suite {
+              println!("  {} {}", s_feature().apply_to("Feature:"), s_bold().apply_to(suite));
+            }
+            self.current_suite = test_id.suite.clone();
+          }
+        }
+
         let (icon, icon_style) = status_icon(&outcome.status);
         let duration = format_duration(outcome.duration);
 
@@ -232,7 +303,7 @@ impl Reporter for TerminalReporter {
         flaky,
         duration,
       } => {
-        // ── Slow test report ──
+        // Slow test report.
         if let Some(ref config) = self.slow_tests_config {
           let threshold = Duration::from_millis(config.threshold);
           let mut slow: Vec<_> = self
@@ -240,11 +311,11 @@ impl Reporter for TerminalReporter {
             .iter()
             .filter(|(_, _, d)| *d >= threshold)
             .collect();
-          slow.sort_by(|a, b| b.2.cmp(&a.2)); // Slowest first.
+          slow.sort_by(|a, b| b.2.cmp(&a.2));
           let show = if config.max > 0 { config.max.min(slow.len()) } else { slow.len() };
           if show > 0 {
             println!();
-            println!("  {} Slow test{} —", s_warn().apply_to("⚠"), if show == 1 { "" } else { "s" });
+            println!("  {} Slow test{} —", s_warn().apply_to("\u{26a0}"), if show == 1 { "" } else { "s" });
             for (name, file, dur) in &slow[..show] {
               println!(
                 "    {} {} ({})",
@@ -255,7 +326,7 @@ impl Reporter for TerminalReporter {
             }
             let remaining = slow.len() - show;
             if remaining > 0 {
-              println!("    {} {remaining} more slow test(s)", s_dim().apply_to("…"));
+              println!("    {} {remaining} more slow test(s)", s_dim().apply_to("\u{2026}"));
             }
           }
         }
@@ -263,7 +334,6 @@ impl Reporter for TerminalReporter {
         let dur = format_duration(*duration);
         println!();
 
-        // Summary with colored counts.
         let mut parts = Vec::new();
         if *passed > 0 {
           parts.push(format!("{}", s_pass().apply_to(format!("{passed} passed"))));

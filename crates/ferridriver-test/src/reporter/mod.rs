@@ -247,7 +247,7 @@ impl ReporterDriver {
 pub(crate) fn create_reporters(
   names: &[crate::config::ReporterConfig],
   output_dir: &std::path::Path,
-  has_bdd: bool,
+  _has_bdd: bool,
   quiet: bool,
   report_slow_tests: Option<crate::config::ReportSlowTestsConfig>,
 ) -> ReporterSet {
@@ -256,37 +256,18 @@ pub(crate) fn create_reporters(
 
   for config in names {
     match config.name.as_str() {
-      // ── Mode-dependent reporters ──
-      // When quiet, skip terminal-based reporters (only file-based reporters are created).
-      "terminal" | "list" | "default" | "" => {
+      // Terminal reporter handles both E2E and BDD — detects BDD by step metadata.
+      "terminal" | "list" | "bdd" | "default" | "" => {
         if !has_terminal && !quiet {
-          // E2E reporter works for mixed runs — it uses "Tests" in summary.
-          // BDD step details are emitted via StepFinished events regardless of reporter.
           reporters.push(Box::new(terminal::TerminalReporter::new().with_slow_tests_config(report_slow_tests.clone())));
-          has_terminal = true;
-        }
-      },
-      "bdd" => {
-        if !has_terminal && !quiet {
-          reporters.push(Box::new(bdd::terminal::BddTerminalReporter::new()));
           has_terminal = true;
         }
       },
       "json" => {
         reporters.push(Box::new(json::JsonReporter::new(output_dir.join("results.json"))));
-        if has_bdd {
-          reporters.push(Box::new(bdd::json::BddJsonReporter::new(
-            output_dir.join("bdd-results.json"),
-          )));
-        }
       },
       "junit" => {
         reporters.push(Box::new(junit::JUnitReporter::new(output_dir.join("junit.xml"))));
-        if has_bdd {
-          reporters.push(Box::new(bdd::junit::BddJunitReporter::new(
-            output_dir.join("bdd-junit.xml"),
-          )));
-        }
       },
 
       // ── Shared reporters (same for both modes) ──
