@@ -1,121 +1,132 @@
 import { test, describe } from '../src/index.js';
 
-// ── test.skip() — unconditional ──
+// ── Runtime skip (Playwright API) ──
 
-test.skip('unconditional skip never runs', async ({ page }) => {
+test('runtime skip on firefox', async ({ page, browserName }) => {
+  test.skip(browserName === 'firefox', 'not supported on firefox');
+  await page.goto('data:text/html,<title>Not Firefox</title>');
+  const title = await page.title();
+  if (title !== 'Not Firefox') throw new Error(`unexpected: ${title}`);
+});
+
+test('runtime skip unconditional', async ({ page }) => {
+  test.skip();
   throw new Error('should not reach here');
 });
 
-// ── test.skip via options — conditional ──
+// ── Registration-time skip ──
 
-test('conditional skip via options — skip on webkit', { skip: 'webkit' }, async ({ page }) => {
-  await page.goto('data:text/html,<title>Not WebKit</title>');
-  const title = await page.title();
-  if (title !== 'Not WebKit') throw new Error(`unexpected title: ${title}`);
+test.skip('registration skip', async ({ page }) => {
+  throw new Error('should not reach here');
 });
 
-// ── test.fixme() — unconditional ──
+// ── Runtime fixme ──
 
-test.fixme('fixme skips like skip', async ({ page }) => {
-  throw new Error('should not reach here — fixme skips');
+test('runtime fixme', async ({ page, browserName }) => {
+  test.fixme(browserName === 'webkit', 'known webkit bug');
+  await page.goto('data:text/html,<title>OK</title>');
 });
 
-// ── test.fixme via options — conditional ──
+// ── Registration-time fixme ──
 
-test('conditional fixme via options', { fixme: 'webkit' }, async ({ page }) => {
-  await page.goto('data:text/html,<title>Hello</title>');
-  const title = await page.title();
-  if (title !== 'Hello') throw new Error(`unexpected title: ${title}`);
+test.fixme('registration fixme', async ({ page }) => {
+  throw new Error('should not reach here');
 });
 
-// ── test.slow() — unconditional ──
+// ── Runtime fail ──
 
-test.slow('slow test has tripled timeout', async ({ page }) => {
-  await page.goto('data:text/html,<title>Slow</title>');
-  const title = await page.title();
-  if (title !== 'Slow') throw new Error(`unexpected title: ${title}`);
+test('runtime fail inverts result', async ({ page }) => {
+  test.fail();
+  throw new Error('intentional failure — inverted to pass');
 });
 
-// ── test.slow via options — conditional ──
-
-test('conditional slow via options', { slow: 'ci' }, async ({ page }) => {
-  await page.goto('data:text/html,<title>Maybe Slow</title>');
-  const title = await page.title();
-  if (title !== 'Maybe Slow') throw new Error(`unexpected title: ${title}`);
-});
-
-// ── test.fail() — unconditional ──
-
-test.fail('expected failure inverts result', async ({ page }) => {
-  // This test deliberately fails — @fail inverts, so it passes.
-  await page.goto('data:text/html,<title>Fail</title>');
-  const title = await page.title();
-  if (title !== 'WRONG TITLE') throw new Error('intentional failure');
-});
-
-// ── test.fail via options — conditional ──
-// fail: 'webkit' means only invert on webkit. On chromium body must pass.
-
-test('conditional fail via options — pass on chromium', { fail: 'webkit' }, async ({ page }) => {
+test('runtime fail conditional', async ({ page, browserName }) => {
+  test.fail(browserName === 'webkit', 'expected to fail on webkit');
   await page.goto('data:text/html,<title>OK</title>');
   const title = await page.title();
-  if (title !== 'OK') throw new Error(`unexpected title: ${title}`);
+  if (title !== 'OK') throw new Error(`unexpected: ${title}`);
 });
 
-// ── Options: combined annotations ──
+// ── Registration-time fail ──
 
-test('multiple annotations via options', { tag: 'smoke', slow: true }, async ({ page }) => {
-  await page.goto('data:text/html,<title>Tagged</title>');
+test.fail('registration fail', async ({ page }) => {
+  throw new Error('intentional failure — inverted to pass');
+});
+
+// ── Runtime slow ──
+
+test('runtime slow', async ({ page }) => {
+  test.slow();
+  await page.goto('data:text/html,<title>Slow</title>');
+});
+
+// ── Registration-time slow ──
+
+test.slow('registration slow', async ({ page }) => {
+  await page.goto('data:text/html,<title>Slow</title>');
+});
+
+// ── test.info() ──
+
+test('test info accessible', async ({ page, testInfo }) => {
+  if (!testInfo.title) throw new Error('testInfo.title is empty');
+  if (typeof testInfo.retry !== 'number') throw new Error('testInfo.retry is not a number');
+  if (typeof testInfo.workerIndex !== 'number') throw new Error('testInfo.workerIndex is not a number');
+  await page.goto('data:text/html,<title>Info</title>');
+});
+
+// ── Fixtures ──
+
+test('all fixtures available', async ({ page, browserName, headless, isMobile, hasTouch, context, request }) => {
+  if (typeof browserName !== 'string') throw new Error('browserName not a string');
+  if (typeof headless !== 'boolean') throw new Error('headless not a boolean');
+  if (typeof isMobile !== 'boolean') throw new Error('isMobile not a boolean');
+  if (typeof hasTouch !== 'boolean') throw new Error('hasTouch not a boolean');
+  if (!context) throw new Error('context is null');
+  if (!request) throw new Error('request is null');
+  await page.goto('data:text/html,<title>Fixtures</title>');
+});
+
+// ── describe.skip ──
+
+describe.skip('skipped describe', () => {
+  test('inside skipped describe', async () => {
+    throw new Error('should not run');
+  });
+});
+
+// ── describe.fixme ──
+
+describe.fixme('fixme describe', () => {
+  test('inside fixme describe', async () => {
+    throw new Error('should not run');
+  });
+});
+
+// ── describe.serial ──
+
+describe.serial('serial suite', () => {
+  test('serial test 1', async ({ page }) => {
+    await page.goto('data:text/html,<title>Serial1</title>');
+  });
+  test('serial test 2', async ({ page }) => {
+    await page.goto('data:text/html,<title>Serial2</title>');
+  });
+});
+
+// ── test(name, details, body) — TestDetails ──
+
+test('test with details', { tag: ['smoke', 'fast'], annotation: { type: 'issue', description: 'JIRA-123' } }, async ({ page }) => {
+  await page.goto('data:text/html,<title>Details</title>');
+});
+
+// ── test.each ──
+
+test.each([
+  { name: 'Alice', greeting: 'Hello Alice' },
+  { name: 'Bob', greeting: 'Hello Bob' },
+])('greeting for $name', async ({ page }, { name, greeting }) => {
+  await page.goto(`data:text/html,<title>${greeting}</title>`);
   const title = await page.title();
-  if (title !== 'Tagged') throw new Error(`unexpected title: ${title}`);
-});
-
-// ── env: condition ──
-
-test('env condition skip — runs when env var unset', { skip: 'env:FERRIDRIVER_SKIP_THIS_TEST' }, async ({ page }) => {
-  await page.goto('data:text/html,<title>EnvCheck</title>');
-  const title = await page.title();
-  if (title !== 'EnvCheck') throw new Error(`unexpected title: ${title}`);
-});
-
-// ── Negation condition ──
-
-test('negation condition — skip on non-chromium', { skip: '!chromium' }, async ({ page }) => {
-  await page.goto('data:text/html,<title>ChromOnly</title>');
-  const title = await page.title();
-  if (title !== 'ChromOnly') throw new Error(`unexpected title: ${title}`);
-});
-
-// ── describe.skip() ──
-
-describe.skip('skipped describe block', () => {
-  test('test inside skipped describe', async ({ page }) => {
-    throw new Error('should not reach here');
-  });
-});
-
-// ── describe.fixme() ──
-
-describe.fixme('fixme describe block', () => {
-  test('test inside fixme describe', async ({ page }) => {
-    throw new Error('should not reach here');
-  });
-});
-
-// ── describe.slow() ──
-
-describe.slow('slow describe block', () => {
-  test('test inside slow describe has tripled timeout', async ({ page }) => {
-    await page.goto('data:text/html,<title>SlowBlock</title>');
-    const title = await page.title();
-    if (title !== 'SlowBlock') throw new Error(`unexpected title: ${title}`);
-  });
-});
-
-// ── describe.fail() ──
-
-describe.fail('fail describe block', () => {
-  test('test inside fail describe expects failure', async ({ page }) => {
-    throw new Error('intentional failure — inverted by describe.fail');
-  });
+  if (title !== greeting) throw new Error(`expected ${greeting}, got ${title}`);
 });
