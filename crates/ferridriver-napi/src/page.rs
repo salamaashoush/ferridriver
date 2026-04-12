@@ -996,15 +996,14 @@ fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value>
     ("response", PageEvent::Response(r)) => serde_json::to_value(r).ok(),
     ("request", PageEvent::Request(r)) => serde_json::to_value(r).ok(),
     ("dialog", PageEvent::Dialog(d)) => serde_json::to_value(d).ok(),
-    ("frameattached", PageEvent::FrameAttached(f))
-    | ("framenavigated", PageEvent::FrameNavigated(f)) => serde_json::to_value(f).ok(),
-    ("framedetached", PageEvent::FrameDetached { frame_id }) => {
-      Some(serde_json::json!({"frameId": frame_id}))
+    ("frameattached", PageEvent::FrameAttached(f)) | ("framenavigated", PageEvent::FrameNavigated(f)) => {
+      serde_json::to_value(f).ok()
     },
+    ("framedetached", PageEvent::FrameDetached { frame_id }) => Some(serde_json::json!({"frameId": frame_id})),
     ("download", PageEvent::Download(d)) => serde_json::to_value(d).ok(),
-    ("load", PageEvent::Load)
-    | ("domcontentloaded", PageEvent::DomContentLoaded)
-    | ("close", PageEvent::Close) => Some(serde_json::Value::Object(Default::default())),
+    ("load", PageEvent::Load) | ("domcontentloaded", PageEvent::DomContentLoaded) | ("close", PageEvent::Close) => {
+      Some(serde_json::Value::Object(Default::default()))
+    },
     ("pageerror", PageEvent::PageError(msg)) => Some(serde_json::json!({"message": msg})),
     _ => None,
   }
@@ -1017,9 +1016,7 @@ fn page_event_to_value(event: &PageEvent) -> serde_json::Value {
     PageEvent::Response(r) => serde_json::to_value(r).unwrap_or_default(),
     PageEvent::Request(r) => serde_json::to_value(r).unwrap_or_default(),
     PageEvent::Dialog(d) => serde_json::to_value(d).unwrap_or_default(),
-    PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => {
-      serde_json::to_value(f).unwrap_or_default()
-    },
+    PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
     PageEvent::FrameDetached { frame_id } => serde_json::json!({"frameId": frame_id}),
     PageEvent::Download(d) => serde_json::to_value(d).unwrap_or_default(),
     PageEvent::Load => serde_json::json!({"type": "load"}),
