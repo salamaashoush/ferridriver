@@ -610,20 +610,14 @@ impl TestRunner {
             let cb = Arc::clone(&cb);
             let bcfg = bcfg.clone();
             Box::pin(async move {
-              // Only pull test_info (always needed for modifiers).
-              // All other fixtures (browser, page, context, request) are already
-              // in the pool's DashMap — NAPI getters resolve them lazily via
-              // sync cache reads, eliminating 4 redundant async pool.get() calls.
               let test_info: Arc<ferridriver_test::model::TestInfo> = pool
                 .get("test_info")
                 .await
                 .map_err(|e| TestFailure::from(format!("fixture 'test_info': {e}")))?;
 
-              // Create shared modifiers — worker reads these after callback returns.
               let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
               pool.inject("__test_modifiers", Arc::clone(&modifiers));
 
-              // Pool-backed TestFixtures: getters resolve lazily from pool's DashMap.
               let fixtures = crate::test_fixtures::TestFixtures::from_pool(
                 pool.clone(),
                 Arc::clone(&test_info),
@@ -631,7 +625,6 @@ impl TestRunner {
                 bcfg.clone(),
               );
 
-              // Call JS callback with lazy fixtures.
               call_js_test(&cb, fixtures).await.map_err(|e| TestFailure {
                 message: e,
                 stack: None,
@@ -926,12 +919,13 @@ async fn call_js_test(
   tsfn: &TestCallbackFn,
   fixtures: crate::test_fixtures::TestFixtures,
 ) -> std::result::Result<(), String> {
-  // ThreadsafeFunction::call_async sends TestFixtures to the JS thread,
-  // calls the callback, and returns the result as a Future.
-  match tsfn.call_async(fixtures).await {
+  let t = std::time::Instant::now();
+  let result = match tsfn.call_async(fixtures).await {
     Ok(promise) => promise.await.map_err(|e| format!("{e}")),
     Err(e) => Err(format!("{e}")),
-  }
+  };
+  tracing::debug!(target: "ferridriver::napi", elapsed_us = t.elapsed().as_micros() as u64, "call_js_test");
+  result
 }
 
 /// In-memory result collector for returning test outcomes to TS.
