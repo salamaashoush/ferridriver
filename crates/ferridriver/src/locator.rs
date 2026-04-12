@@ -38,9 +38,7 @@ macro_rules! retry_resolve {
         ::std::result::Result::Ok($el) => match ($body).await {
           ::std::result::Result::Ok(val) => return ::std::result::Result::Ok(val),
           ::std::result::Result::Err(e)
-            if e.contains("not connected")
-              || e.contains("not found")
-              || e.contains("detached") =>
+            if e.contains("not connected") || e.contains("not found") || e.contains("detached") =>
           {
             if __i >= Locator::RETRY_BACKOFFS_MS.len() - 1 {
               return ::std::result::Result::Err(e);
@@ -52,10 +50,7 @@ macro_rules! retry_resolve {
         ::std::result::Result::Err(e) => return ::std::result::Result::Err(e),
       }
     }
-    ::std::result::Result::Err(format!(
-      "No element found for selector: {}",
-      $self.selector
-    ))
+    ::std::result::Result::Err(format!("No element found for selector: {}", $self.selector))
   }};
 }
 
@@ -148,15 +143,21 @@ impl Locator {
       let _ = write!(suffix, "has-text={text}");
     }
     if let Some(text) = &opts.has_not_text {
-      if !suffix.is_empty() { suffix.push_str(" >> "); }
+      if !suffix.is_empty() {
+        suffix.push_str(" >> ");
+      }
       let _ = write!(suffix, "has-not-text={text}");
     }
     if let Some(sel) = &opts.has {
-      if !suffix.is_empty() { suffix.push_str(" >> "); }
+      if !suffix.is_empty() {
+        suffix.push_str(" >> ");
+      }
       let _ = write!(suffix, "has={sel}");
     }
     if let Some(sel) = &opts.has_not {
-      if !suffix.is_empty() { suffix.push_str(" >> "); }
+      if !suffix.is_empty() {
+        suffix.push_str(" >> ");
+      }
       let _ = write!(suffix, "has-not={sel}");
     }
     if suffix.is_empty() {
@@ -226,9 +227,7 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or is not a fillable element.
   pub async fn fill(&self, value: &str) -> Result<(), String> {
-    retry_resolve!(self, |el, _page| async move {
-      actions::fill(&el, value).await
-    })
+    retry_resolve!(self, |el, _page| async move { actions::fill(&el, value).await })
   }
 
   /// Clear the value of an input or textarea element.
@@ -267,9 +266,7 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or the key press fails.
   pub async fn press(&self, key: &str) -> Result<(), String> {
-    retry_resolve!(self, |_el, page| async move {
-      page.press_key(key).await
-    })
+    retry_resolve!(self, |_el, page| async move { page.press_key(key).await })
   }
 
   /// Hover over the element matched by this locator.

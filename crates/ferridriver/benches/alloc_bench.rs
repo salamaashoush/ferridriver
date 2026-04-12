@@ -17,8 +17,7 @@ fn build_parts_json_before(parts: &[(&str, &str)]) -> String {
   let json_parts: Vec<String> = parts
     .iter()
     .map(|(engine, body)| {
-      let body_escaped =
-        serde_json::to_string(body).unwrap_or_else(|_| format!("\"{body}\""));
+      let body_escaped = serde_json::to_string(body).unwrap_or_else(|_| format!("\"{body}\""));
       format!(r#"{{"engine":"{engine}","body":{body_escaped}}}"#)
     })
     .collect();
