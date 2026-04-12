@@ -1,13 +1,10 @@
 import { defineConfig } from '@playwright/test';
-
 export default defineConfig({
   testDir: '.',
-  testMatch: 'bench.spec.ts',
+  testMatch: 'bench_compare.spec.ts',
   fullyParallel: true,
-  timeout: 10000,
+  timeout: 30000,
   retries: 0,
-  reporter: [['null']],
-  use: {
-    headless: true,
-  },
+  reporter: 'null',
+  use: { headless: true },
 });
