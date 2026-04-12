@@ -85,7 +85,11 @@ step!(WaitNavigation {
 
 // ── Helpers ──
 
-async fn wait_for_selector(page: &std::sync::Arc<crate::page::Page>, selector: &str, timeout_ms: u64) -> Result<(), String> {
+async fn wait_for_selector(
+  page: &std::sync::Arc<crate::page::Page>,
+  selector: &str,
+  timeout_ms: u64,
+) -> Result<(), String> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
   loop {
     if tokio::time::Instant::now() >= deadline {

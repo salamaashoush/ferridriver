@@ -225,7 +225,7 @@ async fn deep_profile() {
     timeout: Some(Duration::from_secs(5)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   };
   let plan = TestPlan {
     suites: vec![TestSuite {

@@ -149,12 +149,19 @@ impl TestServer {
 
     let handle = tokio::spawn(async move {
       axum::serve(listener, app)
-        .with_graceful_shutdown(async { let _ = shutdown_rx.await; })
+        .with_graceful_shutdown(async {
+          let _ = shutdown_rx.await;
+        })
         .await
         .ok();
     });
 
-    Ok(Self { addr, state, shutdown_tx, handle })
+    Ok(Self {
+      addr,
+      state,
+      shutdown_tx,
+      handle,
+    })
   }
 
   /// The base URL, e.g. `http://127.0.0.1:39201`.
@@ -184,12 +191,17 @@ impl TestServer {
   pub async fn set_content(&self, path: &str, content_type: &str, body: &str) {
     let ct = content_type.to_string();
     let b = body.as_bytes().to_vec();
-    self.set_route(path, Arc::new(move |_, _| RouteResponse {
-      status: 200,
-      content_type: ct.clone(),
-      body: b.clone(),
-      headers: vec![],
-    })).await;
+    self
+      .set_route(
+        path,
+        Arc::new(move |_, _| RouteResponse {
+          status: 200,
+          content_type: ct.clone(),
+          body: b.clone(),
+          headers: vec![],
+        }),
+      )
+      .await;
   }
 
   /// Get all recorded requests.
@@ -199,7 +211,11 @@ impl TestServer {
 
   /// Get recorded requests matching a path prefix.
   pub async fn requests_for(&self, path: &str) -> Vec<RecordedRequest> {
-    self.state.requests.read().await
+    self
+      .state
+      .requests
+      .read()
+      .await
       .iter()
       .filter(|r| r.path.starts_with(path))
       .cloned()
@@ -251,9 +267,9 @@ async fn handle_request(
     for (k, v) in &resp.headers {
       builder = builder.header(k.as_str(), v.as_str());
     }
-    return builder.body(Body::from(resp.body)).unwrap_or_else(|_| {
-      Response::builder().status(500).body(Body::empty()).unwrap()
-    });
+    return builder
+      .body(Body::from(resp.body))
+      .unwrap_or_else(|_| Response::builder().status(500).body(Body::empty()).unwrap());
   }
   drop(routes);
 
@@ -261,18 +277,14 @@ async fn handle_request(
   // axum's fallback_service will serve static files if this handler returns 404.
   let file_path = state.assets_dir.join(request_path.trim_start_matches('/'));
   if file_path.exists() && file_path.is_file() {
-    let content_type = mime_guess::from_path(&file_path)
-      .first_or_octet_stream()
-      .to_string();
+    let content_type = mime_guess::from_path(&file_path).first_or_octet_stream().to_string();
     match tokio::fs::read(&file_path).await {
-      Ok(contents) => {
-        Response::builder()
-          .status(200)
-          .header("content-type", content_type)
-          .header("access-control-allow-origin", "*")
-          .body(Body::from(contents))
-          .unwrap()
-      },
+      Ok(contents) => Response::builder()
+        .status(200)
+        .header("content-type", content_type)
+        .header("access-control-allow-origin", "*")
+        .body(Body::from(contents))
+        .unwrap(),
       Err(_) => Response::builder().status(500).body(Body::empty()).unwrap(),
     }
   } else if state.spa {
@@ -280,14 +292,12 @@ async fn handle_request(
     let index = state.assets_dir.join("index.html");
     if index.exists() {
       match tokio::fs::read(&index).await {
-        Ok(contents) => {
-          Response::builder()
-            .status(200)
-            .header("content-type", "text/html")
-            .header("access-control-allow-origin", "*")
-            .body(Body::from(contents))
-            .unwrap()
-        },
+        Ok(contents) => Response::builder()
+          .status(200)
+          .header("content-type", "text/html")
+          .header("access-control-allow-origin", "*")
+          .body(Body::from(contents))
+          .unwrap(),
         Err(_) => Response::builder().status(500).body(Body::empty()).unwrap(),
       }
     } else {
@@ -316,10 +326,7 @@ pub struct WebServerManager {
 
 enum RunningServer {
   Static(TestServer),
-  Command {
-    child: tokio::process::Child,
-    url: String,
-  },
+  Command { child: tokio::process::Child, url: String },
 }
 
 impl WebServerManager {
@@ -337,14 +344,18 @@ impl WebServerManager {
         tracing::info!("Static server ready at {} (serving {})", server.url(), dir);
         servers.push(RunningServer::Static(server));
       } else if let Some(ref command) = config.command {
-        let url = config.url.as_deref()
+        let url = config
+          .url
+          .as_deref()
           .ok_or_else(|| format!("webServer command requires 'url' to wait for: {command}"))?;
 
         // Check if server is already running (reuse).
         if config.reuse_existing_server && is_url_reachable(url).await {
           tracing::info!("Reusing existing server at {url}");
           servers.push(RunningServer::Command {
-            child: tokio::process::Command::new("true").spawn().map_err(|e| e.to_string())?,
+            child: tokio::process::Command::new("true")
+              .spawn()
+              .map_err(|e| e.to_string())?,
             url: url.to_string(),
           });
           continue;
@@ -354,7 +365,10 @@ impl WebServerManager {
         let child = spawn_command(command, cwd, &config.env)?;
         wait_for_url(url, config.timeout).await?;
         tracing::info!("Dev server ready at {url} (command: {command})");
-        servers.push(RunningServer::Command { child, url: url.to_string() });
+        servers.push(RunningServer::Command {
+          child,
+          url: url.to_string(),
+        });
       } else {
         return Err("webServer config must have either 'command' or 'staticDir'".into());
       }

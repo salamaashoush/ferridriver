@@ -67,7 +67,7 @@ fn make_nav_test(i: usize) -> TestCase {
     timeout: Some(Duration::from_secs(10)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   }
 }
 
@@ -120,7 +120,7 @@ fn make_interaction_test(i: usize) -> TestCase {
     timeout: Some(Duration::from_secs(10)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   }
 }
 

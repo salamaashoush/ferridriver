@@ -70,28 +70,36 @@ impl TestFixtures {
 impl TestFixtures {
   #[napi(getter)]
   pub fn browser(&self) -> crate::browser::Browser {
-    let b = self.pool.try_get_cached::<ferridriver::Browser>("browser")
+    let b = self
+      .pool
+      .try_get_cached::<ferridriver::Browser>("browser")
       .expect("fixture 'browser' not resolved");
     crate::browser::Browser::wrap((*b).clone())
   }
 
   #[napi(getter)]
   pub fn page(&self) -> crate::page::Page {
-    let p = self.pool.try_get_cached::<ferridriver::Page>("page")
+    let p = self
+      .pool
+      .try_get_cached::<ferridriver::Page>("page")
       .expect("fixture 'page' not resolved");
     crate::page::Page::wrap(p)
   }
 
   #[napi(getter)]
   pub fn context(&self) -> crate::context::BrowserContext {
-    let c = self.pool.try_get_cached::<ferridriver::context::ContextRef>("context")
+    let c = self
+      .pool
+      .try_get_cached::<ferridriver::context::ContextRef>("context")
       .expect("fixture 'context' not resolved");
     crate::context::BrowserContext::wrap((*c).clone())
   }
 
   #[napi(getter)]
   pub fn request(&self) -> crate::api_request::ApiRequestContext {
-    let r = self.pool.try_get_cached::<ferridriver::api_request::APIRequestContext>("request")
+    let r = self
+      .pool
+      .try_get_cached::<ferridriver::api_request::APIRequestContext>("request")
       .expect("fixture 'request' not resolved");
     crate::api_request::ApiRequestContext::wrap((*r).clone())
   }

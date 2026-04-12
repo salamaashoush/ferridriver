@@ -251,4 +251,3 @@ pub fn run_bdd_harness() {
 
   std::process::exit(exit_code);
 }
-

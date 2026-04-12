@@ -302,7 +302,7 @@ async fn concurrent_execution_and_observation() {
       .emit(ReporterEvent::RunStarted {
         total_tests: 3,
         num_workers: 1,
-      metadata: serde_json::Value::Null,
+        metadata: serde_json::Value::Null,
       })
       .await;
     tokio::task::yield_now().await;

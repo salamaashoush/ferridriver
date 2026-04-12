@@ -144,7 +144,9 @@ impl BrowserWorld {
   }
 
   pub async fn attach(&self, name: &str, content_type: &str, data: Vec<u8>) {
-    self.fixtures.test_info
+    self
+      .fixtures
+      .test_info
       .attach(
         name.to_string(),
         content_type.to_string(),

@@ -103,7 +103,11 @@ impl Reporter for JUnitReporter {
         let classname = xml_escape(suite_name);
         let time = test.duration.as_secs_f64();
 
-        writeln!(xml, r#"    <testcase name="{name}" classname="{classname}" time="{time:.3}">"#).ok();
+        writeln!(
+          xml,
+          r#"    <testcase name="{name}" classname="{classname}" time="{time:.3}">"#
+        )
+        .ok();
 
         match test.status {
           crate::model::TestStatus::Failed | crate::model::TestStatus::TimedOut => {

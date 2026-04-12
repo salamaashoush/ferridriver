@@ -73,7 +73,7 @@ fn make_navigation_test() -> TestCase {
     timeout: Some(Duration::from_secs(15)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   }
 }
 
@@ -134,7 +134,7 @@ fn make_click_test() -> TestCase {
     timeout: Some(Duration::from_secs(15)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   }
 }
 
@@ -194,7 +194,7 @@ fn make_fill_test() -> TestCase {
     timeout: Some(Duration::from_secs(15)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   }
 }
 
@@ -259,7 +259,7 @@ fn make_expect_test() -> TestCase {
     timeout: Some(Duration::from_secs(15)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   }
 }
 
@@ -290,7 +290,7 @@ fn make_skip_test() -> TestCase {
     timeout: None,
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   }
 }
 

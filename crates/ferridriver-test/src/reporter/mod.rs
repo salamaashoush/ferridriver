@@ -256,7 +256,9 @@ pub(crate) fn create_reporters(
       // Terminal reporter handles both E2E and BDD — detects BDD by step metadata.
       "terminal" | "list" | "bdd" | "default" | "" => {
         if !has_terminal && !quiet {
-          reporters.push(Box::new(terminal::TerminalReporter::new().with_slow_tests_config(report_slow_tests.clone())));
+          reporters.push(Box::new(
+            terminal::TerminalReporter::new().with_slow_tests_config(report_slow_tests.clone()),
+          ));
           has_terminal = true;
         }
       },

@@ -38,8 +38,8 @@ impl WsTransport {
     for (key, value) in headers {
       let header_name = http::header::HeaderName::from_bytes(key.as_bytes())
         .map_err(|e| format!("invalid header name '{key}': {e}"))?;
-      let header_value = http::header::HeaderValue::from_str(value)
-        .map_err(|e| format!("invalid header value for '{key}': {e}"))?;
+      let header_value =
+        http::header::HeaderValue::from_str(value).map_err(|e| format!("invalid header value for '{key}': {e}"))?;
       request.headers_mut().insert(header_name, header_value);
     }
     let (ws_stream, _) = tokio_tungstenite::connect_async(request)

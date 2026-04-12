@@ -110,7 +110,11 @@ impl TestInfo {
   pub fn expected_status(&self) -> String {
     if self.modifiers.skipped.load(std::sync::atomic::Ordering::Relaxed) {
       "skipped".to_string()
-    } else if self.modifiers.expected_failure.load(std::sync::atomic::Ordering::Relaxed) {
+    } else if self
+      .modifiers
+      .expected_failure
+      .load(std::sync::atomic::Ordering::Relaxed)
+    {
       "failed".to_string()
     } else {
       "passed".to_string()
@@ -122,10 +126,7 @@ impl TestInfo {
   pub fn annotations(&self) -> Vec<serde_json::Value> {
     // Annotations are behind an async Mutex, use try_lock for sync getter.
     if let Ok(anns) = self.inner.annotations.try_lock() {
-      anns
-        .iter()
-        .filter_map(|a| serde_json::to_value(a).ok())
-        .collect()
+      anns.iter().filter_map(|a| serde_json::to_value(a).ok()).collect()
     } else {
       Vec::new()
     }
@@ -153,10 +154,7 @@ impl TestInfo {
     if !condition {
       return Ok(());
     }
-    self
-      .modifiers
-      .skipped
-      .store(true, std::sync::atomic::Ordering::Relaxed);
+    self.modifiers.skipped.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut r) = self.modifiers.skip_reason.lock() {
       *r = reason.clone();
     }
@@ -193,10 +191,7 @@ impl TestInfo {
   pub fn slow(&self, condition: Option<bool>, _reason: Option<String>) {
     let condition = condition.unwrap_or(true);
     if condition {
-      self
-        .modifiers
-        .slow
-        .store(true, std::sync::atomic::Ordering::Relaxed);
+      self.modifiers.slow.store(true, std::sync::atomic::Ordering::Relaxed);
     }
   }
 

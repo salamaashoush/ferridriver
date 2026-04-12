@@ -402,7 +402,10 @@ impl McpServer {
   /// # Errors
   ///
   /// Returns an error if the browser instance cannot be launched or accessed.
-  pub async fn page_and_context(&self, context: &str) -> Result<(Arc<Page>, ferridriver::context::ContextRef), ErrorData> {
+  pub async fn page_and_context(
+    &self,
+    context: &str,
+  ) -> Result<(Arc<Page>, ferridriver::context::ContextRef), ErrorData> {
     let any_page = Box::pin(self.ensure_active_page(context)).await?;
     let page = Page::new(any_page);
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
