@@ -29,7 +29,7 @@ use tokio::sync::RwLock;
 // ─── Backend-agnostic types ─────────────────────────────────────────────────
 
 /// Frame metadata (backend-agnostic).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct FrameInfo {
   pub frame_id: String,
   pub parent_frame_id: Option<String>,

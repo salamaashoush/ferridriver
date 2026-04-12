@@ -34,37 +34,37 @@ impl Locator {
 
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
-    let opts: ferridriver::options::RoleOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::RoleOptions = options.map_or_else(Default::default, Into::into);
     Self::wrap(self.inner.get_by_role(&role, &opts))
   }
 
   #[napi]
   pub fn get_by_text(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Self::wrap(self.inner.get_by_text(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_label(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Self::wrap(self.inner.get_by_label(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_placeholder(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Self::wrap(self.inner.get_by_placeholder(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_alt_text(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Self::wrap(self.inner.get_by_alt_text(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_title(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Self::wrap(self.inner.get_by_title(&text, &opts))
   }
 
@@ -90,7 +90,7 @@ impl Locator {
 
   #[napi]
   pub fn filter(&self, options: FilterOptions) -> Locator {
-    Self::wrap(self.inner.filter(&ferridriver::options::FilterOptions::from(&options)))
+    Self::wrap(self.inner.filter(&ferridriver::options::FilterOptions::from(options)))
   }
 
   // ── Actions ─────────────────────────────────────────────────────────────
@@ -256,7 +256,7 @@ impl Locator {
 
   #[napi]
   pub async fn wait_for(&self, options: Option<WaitOptions>) -> Result<()> {
-    let opts: ferridriver::options::WaitOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::WaitOptions = options.map_or_else(Default::default, Into::into);
     self.inner.wait_for(opts).await.map_err(napi::Error::from_reason)
   }
 

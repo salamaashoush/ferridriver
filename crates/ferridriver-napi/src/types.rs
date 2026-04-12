@@ -124,10 +124,10 @@ pub struct GotoOptions {
   pub timeout: Option<f64>,
 }
 
-impl From<&GotoOptions> for ferridriver::options::GotoOptions {
-  fn from(o: &GotoOptions) -> Self {
+impl From<GotoOptions> for ferridriver::options::GotoOptions {
+  fn from(o: GotoOptions) -> Self {
     Self {
-      wait_until: o.wait_until.clone(),
+      wait_until: o.wait_until,
       timeout: o.timeout.map(f64_to_u64),
     }
   }
@@ -144,14 +144,14 @@ pub struct EmulateMediaOptions {
   pub contrast: Option<String>,
 }
 
-impl From<&EmulateMediaOptions> for ferridriver::options::EmulateMediaOptions {
-  fn from(o: &EmulateMediaOptions) -> Self {
+impl From<EmulateMediaOptions> for ferridriver::options::EmulateMediaOptions {
+  fn from(o: EmulateMediaOptions) -> Self {
     Self {
-      media: o.media.clone(),
-      color_scheme: o.color_scheme.clone(),
-      reduced_motion: o.reduced_motion.clone(),
-      forced_colors: o.forced_colors.clone(),
-      contrast: o.contrast.clone(),
+      media: o.media,
+      color_scheme: o.color_scheme,
+      reduced_motion: o.reduced_motion,
+      forced_colors: o.forced_colors,
+      contrast: o.contrast,
     }
   }
 }
@@ -181,10 +181,10 @@ pub struct LaunchOptions {
 
 // ── Conversion helpers ────────────────────────────────────────────────────
 
-impl From<&RoleOptions> for ferridriver::options::RoleOptions {
-  fn from(o: &RoleOptions) -> Self {
+impl From<RoleOptions> for ferridriver::options::RoleOptions {
+  fn from(o: RoleOptions) -> Self {
     Self {
-      name: o.name.clone(),
+      name: o.name,
       exact: o.exact,
       checked: o.checked,
       disabled: o.disabled,
@@ -197,44 +197,44 @@ impl From<&RoleOptions> for ferridriver::options::RoleOptions {
   }
 }
 
-impl From<&TextOptions> for ferridriver::options::TextOptions {
-  fn from(o: &TextOptions) -> Self {
+impl From<TextOptions> for ferridriver::options::TextOptions {
+  fn from(o: TextOptions) -> Self {
     Self { exact: o.exact }
   }
 }
 
-impl From<&FilterOptions> for ferridriver::options::FilterOptions {
-  fn from(o: &FilterOptions) -> Self {
+impl From<FilterOptions> for ferridriver::options::FilterOptions {
+  fn from(o: FilterOptions) -> Self {
     Self {
-      has_text: o.has_text.clone(),
-      has_not_text: o.has_not_text.clone(),
-      has: o.has.clone(),
-      has_not: o.has_not.clone(),
+      has_text: o.has_text,
+      has_not_text: o.has_not_text,
+      has: o.has,
+      has_not: o.has_not,
     }
   }
 }
 
-impl From<&WaitOptions> for ferridriver::options::WaitOptions {
-  fn from(o: &WaitOptions) -> Self {
+impl From<WaitOptions> for ferridriver::options::WaitOptions {
+  fn from(o: WaitOptions) -> Self {
     Self {
-      state: o.state.clone(),
+      state: o.state,
       timeout: o.timeout.map(f64_to_u64),
     }
   }
 }
 
-impl From<&ScreenshotOptions> for ferridriver::options::ScreenshotOptions {
-  fn from(o: &ScreenshotOptions) -> Self {
+impl From<ScreenshotOptions> for ferridriver::options::ScreenshotOptions {
+  fn from(o: ScreenshotOptions) -> Self {
     Self {
       full_page: o.full_page,
-      format: o.format.clone(),
+      format: o.format,
       quality: o.quality.map(i64::from),
     }
   }
 }
 
-impl From<&ViewportConfig> for ferridriver::options::ViewportConfig {
-  fn from(o: &ViewportConfig) -> Self {
+impl From<ViewportConfig> for ferridriver::options::ViewportConfig {
+  fn from(o: ViewportConfig) -> Self {
     Self {
       width: i64::from(o.width),
       height: i64::from(o.height),

@@ -84,13 +84,13 @@ impl Frame {
 
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<crate::types::RoleOptions>) -> Locator {
-    let opts: ferridriver::options::RoleOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::RoleOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_role(&role, &opts))
   }
 
   #[napi]
   pub fn get_by_text(&self, text: String, options: Option<crate::types::TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_text(&text, &opts))
   }
 
@@ -127,7 +127,7 @@ impl Frame {
 
   #[napi]
   pub async fn wait_for_selector(&self, selector: String, options: Option<crate::types::WaitOptions>) -> Result<()> {
-    let opts: ferridriver::options::WaitOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::WaitOptions = options.map_or_else(Default::default, Into::into);
     self
       .inner
       .wait_for_selector(&selector, opts)
@@ -174,13 +174,13 @@ impl Frame {
 
   #[napi]
   pub fn get_by_label(&self, text: String, options: Option<crate::types::TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_label(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_placeholder(&self, text: String, options: Option<crate::types::TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_placeholder(&text, &opts))
   }
 }

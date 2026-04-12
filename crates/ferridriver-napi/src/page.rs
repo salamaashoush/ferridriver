@@ -37,25 +37,25 @@ impl Page {
 
   #[napi]
   pub async fn goto(&self, url: String, options: Option<GotoOptions>) -> Result<()> {
-    let opts = options.as_ref().map(ferridriver::options::GotoOptions::from);
+    let opts = options.map(ferridriver::options::GotoOptions::from);
     self.inner.goto(&url, opts).await.map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn go_back(&self, options: Option<GotoOptions>) -> Result<()> {
-    let opts = options.as_ref().map(ferridriver::options::GotoOptions::from);
+    let opts = options.map(ferridriver::options::GotoOptions::from);
     self.inner.go_back(opts).await.map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn go_forward(&self, options: Option<GotoOptions>) -> Result<()> {
-    let opts = options.as_ref().map(ferridriver::options::GotoOptions::from);
+    let opts = options.map(ferridriver::options::GotoOptions::from);
     self.inner.go_forward(opts).await.map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn reload(&self, options: Option<GotoOptions>) -> Result<()> {
-    let opts = options.as_ref().map(ferridriver::options::GotoOptions::from);
+    let opts = options.map(ferridriver::options::GotoOptions::from);
     self.inner.reload(opts).await.map_err(napi::Error::from_reason)
   }
 
@@ -78,37 +78,37 @@ impl Page {
 
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
-    let opts: ferridriver::options::RoleOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::RoleOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_role(&role, &opts))
   }
 
   #[napi]
   pub fn get_by_text(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_text(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_label(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_label(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_placeholder(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_placeholder(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_alt_text(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_alt_text(&text, &opts))
   }
 
   #[napi]
   pub fn get_by_title(&self, text: String, options: Option<TextOptions>) -> Locator {
-    let opts: ferridriver::options::TextOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_title(&text, &opts))
   }
 
@@ -427,7 +427,7 @@ impl Page {
 
   #[napi]
   pub async fn wait_for_selector(&self, selector: String, options: Option<WaitOptions>) -> Result<()> {
-    let opts: ferridriver::options::WaitOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::WaitOptions = options.map_or_else(Default::default, Into::into);
     self
       .inner
       .wait_for_selector(&selector, opts)
@@ -480,7 +480,7 @@ impl Page {
 
   #[napi]
   pub async fn screenshot(&self, options: Option<ScreenshotOptions>) -> Result<Buffer> {
-    let opts: ferridriver::options::ScreenshotOptions = options.as_ref().map_or_else(Default::default, Into::into);
+    let opts: ferridriver::options::ScreenshotOptions = options.map_or_else(Default::default, Into::into);
     let bytes = self.inner.screenshot(opts).await.map_err(napi::Error::from_reason)?;
     Ok(bytes.into())
   }
@@ -521,7 +521,7 @@ impl Page {
   pub async fn set_viewport(&self, config: ViewportConfig) -> Result<()> {
     self
       .inner
-      .set_viewport(&ferridriver::options::ViewportConfig::from(&config))
+      .set_viewport(&ferridriver::options::ViewportConfig::from(config))
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -988,55 +988,24 @@ use ferridriver::events::PageEvent;
 /// Convert a `PageEvent` to a JS-friendly `serde_json::Value`, filtered by event name.
 /// Returns None if the event doesn't match the requested name.
 #[allow(clippy::match_same_arms)] // arms differ by event name filter, bodies intentionally identical
+/// Convert a named event to a JS value. Uses serde::Serialize on the event
+/// structs directly — avoids the `json!()` macro's per-field string cloning.
 fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value> {
   match (event_name, event) {
-    ("console", PageEvent::Console(msg)) => Some(serde_json::json!({
-        "type": msg.level,
-        "text": msg.text,
-    })),
-    ("response", PageEvent::Response(r)) => Some(serde_json::json!({
-        "url": r.url,
-        "status": r.status,
-        "statusText": r.status_text,
-        "mimeType": r.mime_type,
-        "headers": r.headers,
-    })),
-    ("request", PageEvent::Request(r)) => Some(serde_json::json!({
-        "url": r.url,
-        "method": r.method,
-        "resourceType": r.resource_type,
-        "headers": r.headers,
-        "postData": r.post_data,
-    })),
-    ("dialog", PageEvent::Dialog(d)) => Some(serde_json::json!({
-        "type": d.dialog_type,
-        "message": d.message,
-        "defaultValue": d.default_value,
-    })),
-    ("frameattached", PageEvent::FrameAttached(f)) => Some(serde_json::json!({
-        "frameId": f.frame_id,
-        "name": f.name,
-        "url": f.url,
-    })),
-    ("framedetached", PageEvent::FrameDetached { frame_id }) => Some(serde_json::json!({
-        "frameId": frame_id,
-    })),
-    ("framenavigated", PageEvent::FrameNavigated(f)) => Some(serde_json::json!({
-        "frameId": f.frame_id,
-        "name": f.name,
-        "url": f.url,
-    })),
-    ("load", PageEvent::Load) => Some(serde_json::json!({})),
-    ("domcontentloaded", PageEvent::DomContentLoaded) => Some(serde_json::json!({})),
-    ("close", PageEvent::Close) => Some(serde_json::json!({})),
-    ("pageerror", PageEvent::PageError(msg)) => Some(serde_json::json!({
-        "message": msg,
-    })),
-    ("download", PageEvent::Download(d)) => Some(serde_json::json!({
-        "guid": d.guid,
-        "url": d.url,
-        "suggestedFilename": d.suggested_filename,
-    })),
+    ("console", PageEvent::Console(msg)) => serde_json::to_value(msg).ok(),
+    ("response", PageEvent::Response(r)) => serde_json::to_value(r).ok(),
+    ("request", PageEvent::Request(r)) => serde_json::to_value(r).ok(),
+    ("dialog", PageEvent::Dialog(d)) => serde_json::to_value(d).ok(),
+    ("frameattached", PageEvent::FrameAttached(f))
+    | ("framenavigated", PageEvent::FrameNavigated(f)) => serde_json::to_value(f).ok(),
+    ("framedetached", PageEvent::FrameDetached { frame_id }) => {
+      Some(serde_json::json!({"frameId": frame_id}))
+    },
+    ("download", PageEvent::Download(d)) => serde_json::to_value(d).ok(),
+    ("load", PageEvent::Load)
+    | ("domcontentloaded", PageEvent::DomContentLoaded)
+    | ("close", PageEvent::Close) => Some(serde_json::Value::Object(Default::default())),
+    ("pageerror", PageEvent::PageError(msg)) => Some(serde_json::json!({"message": msg})),
     _ => None,
   }
 }
@@ -1044,26 +1013,18 @@ fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value>
 /// Convert any `PageEvent` to a JS value (for waitForEvent).
 fn page_event_to_value(event: &PageEvent) -> serde_json::Value {
   match event {
-    PageEvent::Console(msg) => serde_json::json!({"type": msg.level, "text": msg.text}),
-    PageEvent::Response(r) => {
-      serde_json::json!({"url": r.url, "status": r.status, "statusText": r.status_text, "mimeType": r.mime_type, "headers": r.headers})
-    },
-    PageEvent::Request(r) => {
-      serde_json::json!({"url": r.url, "method": r.method, "resourceType": r.resource_type, "headers": r.headers, "postData": r.post_data})
-    },
-    PageEvent::Dialog(d) => {
-      serde_json::json!({"type": d.dialog_type, "message": d.message, "defaultValue": d.default_value})
-    },
+    PageEvent::Console(msg) => serde_json::to_value(msg).unwrap_or_default(),
+    PageEvent::Response(r) => serde_json::to_value(r).unwrap_or_default(),
+    PageEvent::Request(r) => serde_json::to_value(r).unwrap_or_default(),
+    PageEvent::Dialog(d) => serde_json::to_value(d).unwrap_or_default(),
     PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => {
-      serde_json::json!({"frameId": f.frame_id, "name": f.name, "url": f.url})
+      serde_json::to_value(f).unwrap_or_default()
     },
     PageEvent::FrameDetached { frame_id } => serde_json::json!({"frameId": frame_id}),
+    PageEvent::Download(d) => serde_json::to_value(d).unwrap_or_default(),
     PageEvent::Load => serde_json::json!({"type": "load"}),
     PageEvent::DomContentLoaded => serde_json::json!({"type": "domcontentloaded"}),
     PageEvent::Close => serde_json::json!({"type": "close"}),
     PageEvent::PageError(msg) => serde_json::json!({"message": msg}),
-    PageEvent::Download(d) => {
-      serde_json::json!({"guid": d.guid, "url": d.url, "suggestedFilename": d.suggested_filename})
-    },
   }
 }
