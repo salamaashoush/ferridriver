@@ -364,7 +364,8 @@ impl BrowserInstaller {
         PackageManager::Pacman => format!("pacman -Sy --noconfirm --needed {}", packages.join(" ")),
       };
 
-      // Determine if we need sudo
+      // Determine if we need sudo (getuid is always safe, just FFI-marked unsafe).
+      #[allow(unsafe_code)]
       let uid = unsafe { libc::getuid() };
       let (cmd, args) = if uid == 0 {
         ("sh".to_string(), vec!["-c".to_string(), commands])
