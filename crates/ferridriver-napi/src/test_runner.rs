@@ -35,6 +35,27 @@ type TestCallbackFn = ThreadsafeFunction<
   0,
 >;
 
+/// Static fixture names shared across all test registrations.
+/// Avoids per-test String allocations for the standard fixture set.
+const STANDARD_FIXTURE_NAMES: &[&str] = &["browser", "context", "page", "test_info", "request"];
+
+/// Build the standard fixture request Vec from static strings.
+fn standard_fixture_requests() -> Vec<String> {
+  STANDARD_FIXTURE_NAMES.iter().map(|s| (*s).to_string()).collect()
+}
+
+/// A single entry in the batch registration array.
+/// `object_to_js = false` because it contains a Function (can only be received from JS, not sent).
+#[napi(object, object_to_js = false)]
+pub struct TestBatchEntry<'a> {
+  pub meta: TestMeta,
+  pub callback: napi::bindgen_prelude::Function<
+    'a,
+    crate::test_fixtures::TestFixtures,
+    napi::bindgen_prelude::Promise<()>,
+  >,
+}
+
 /// Test runner configuration from TypeScript.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
@@ -151,6 +172,53 @@ pub struct NapiProjectConfig {
   pub locale: Option<String>,
 }
 
+/// Flattened annotation passed from TS — avoids serde_json round-trip.
+/// Exactly one of the fields should be set.
+#[napi(object, use_nullable = true)]
+#[derive(Debug, Clone)]
+pub struct NapiAnnotation {
+  /// "skip", "slow", "fixme", "fail", "only", "tag", "info"
+  pub kind: String,
+  pub reason: Option<String>,
+  pub condition: Option<String>,
+  /// For "tag" annotations: the tag string. For "info": the type_name.
+  pub value: Option<String>,
+  /// For "info" annotations: the description.
+  pub description: Option<String>,
+}
+
+impl NapiAnnotation {
+  /// Convert to core TestAnnotation.
+  fn to_core(&self) -> Option<ferridriver_test::model::TestAnnotation> {
+    match self.kind.as_str() {
+      "skip" => Some(ferridriver_test::model::TestAnnotation::Skip {
+        reason: self.reason.clone(),
+        condition: self.condition.clone(),
+      }),
+      "slow" => Some(ferridriver_test::model::TestAnnotation::Slow {
+        reason: self.reason.clone(),
+        condition: self.condition.clone(),
+      }),
+      "fixme" => Some(ferridriver_test::model::TestAnnotation::Fixme {
+        reason: self.reason.clone(),
+        condition: self.condition.clone(),
+      }),
+      "fail" => Some(ferridriver_test::model::TestAnnotation::Fail {
+        reason: self.reason.clone(),
+        condition: self.condition.clone(),
+      }),
+      "only" => Some(ferridriver_test::model::TestAnnotation::Only),
+      "tag" => self.value.as_ref().map(|v| ferridriver_test::model::TestAnnotation::Tag(v.clone())),
+      "info" => {
+        let type_name = self.value.clone().unwrap_or_default();
+        let description = self.description.clone().unwrap_or_default();
+        Some(ferridriver_test::model::TestAnnotation::Info { type_name, description })
+      },
+      _ => None,
+    }
+  }
+}
+
 /// Metadata for a registered test.
 #[napi(object)]
 #[derive(Debug, Clone)]
@@ -162,10 +230,15 @@ pub struct TestMeta {
   pub retries: Option<i32>,
   /// Suite ID this test belongs to (from register_suite).
   pub suite_id: Option<String>,
-  /// Annotations — same as Rust TestAnnotation, deserialized from JSON.
-  pub annotations: Vec<serde_json::Value>,
+  /// Annotations — flattened for direct NAPI transfer (no JSON round-trip).
+  pub annotations: Vec<NapiAnnotation>,
   /// Fixture overrides from test.use() — merged with global config by the worker.
   pub use_options: Option<serde_json::Value>,
+  /// Optional list of fixture names this test actually uses (e.g. ["page"]).
+  /// When set, only these fixtures (plus test_info) are requested from the pool,
+  /// saving browser/context/request creation for tests that don't need them.
+  /// When None, all standard fixtures are requested (backwards-compatible).
+  pub requested_fixtures: Option<Vec<String>>,
 }
 
 /// Metadata for a test suite (describe block).
@@ -370,6 +443,37 @@ impl TestRunner {
     Ok(())
   }
 
+  /// Batch-register multiple tests in a single NAPI call.
+  /// Takes the lock once, reserves capacity, and builds all TSFNs in one go.
+  /// Reduces N NAPI boundary crossings + N lock acquisitions to 1 each.
+  #[napi(
+    ts_args_type = "entries: Array<{ meta: TestMeta, callback: (fixtures: TestFixtures) => Promise<void> }>"
+  )]
+  pub fn register_tests_batch(&self, entries: Vec<TestBatchEntry<'_>>) -> Result<()> {
+    let mut tests = self
+      .tests
+      .try_lock()
+      .map_err(|_| napi::Error::from_reason("tests lock contended during batch registration"))?;
+    tests.reserve(entries.len());
+
+    for entry in entries {
+      let tsfn = entry
+        .callback
+        .build_threadsafe_function()
+        .callee_handled::<false>()
+        .weak::<true>()
+        .max_queue_size::<0>()
+        .build()?;
+
+      tests.push(RegisteredTest {
+        meta: entry.meta,
+        callback: Arc::new(tsfn),
+      });
+    }
+
+    Ok(())
+  }
+
   /// Register a test suite (describe block). Returns a suite ID for test/hook registration.
   #[napi]
   pub fn register_suite(&self, meta: SuiteMeta) -> Result<String> {
@@ -481,11 +585,11 @@ impl TestRunner {
         let meta = t.meta.clone();
         let bcfg = browser_config.clone();
 
-        // Deserialize annotations from JSON — same type as Rust core.
+        // Convert flattened NAPI annotations directly — no JSON round-trip.
         let annotations: Vec<TestAnnotation> = meta
           .annotations
           .iter()
-          .filter_map(|v| serde_json::from_value::<TestAnnotation>(v.clone()).ok())
+          .filter_map(NapiAnnotation::to_core)
           .collect();
 
         TestCase {
@@ -499,39 +603,26 @@ impl TestRunner {
             let cb = Arc::clone(&cb);
             let bcfg = bcfg.clone();
             Box::pin(async move {
-              // Pull ALL fixtures from the pool (created by the core worker).
-              let browser: Arc<ferridriver::Browser> =
-                pool.get("browser").await.map_err(|e| TestFailure::from(format!("fixture 'browser': {e}")))?;
-              let page: Arc<ferridriver::Page> =
-                pool.get("page").await.map_err(|e| TestFailure::from(format!("fixture 'page': {e}")))?;
-              let context: Arc<ferridriver::context::ContextRef> =
-                pool.get("context").await.map_err(|e| TestFailure::from(format!("fixture 'context': {e}")))?;
+              // Only pull test_info (always needed for modifiers).
+              // All other fixtures (browser, page, context, request) are already
+              // in the pool's DashMap — NAPI getters resolve them lazily via
+              // sync cache reads, eliminating 4 redundant async pool.get() calls.
               let test_info: Arc<ferridriver_test::model::TestInfo> =
                 pool.get("test_info").await.map_err(|e| TestFailure::from(format!("fixture 'test_info': {e}")))?;
-              let request: Arc<ferridriver::api_request::APIRequestContext> =
-                pool.get("request").await.map_err(|e| TestFailure::from(format!("fixture 'request': {e}")))?;
 
               // Create shared modifiers — worker reads these after callback returns.
               let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
               pool.inject("__test_modifiers", Arc::clone(&modifiers));
 
-              // Build the core TestFixtures, then wrap for NAPI.
-              let fixtures = crate::test_fixtures::TestFixtures::wrap(
-                ferridriver_test::model::TestFixtures {
-                  browser,
-                  page,
-                  context,
-                  request,
-                  test_info: Arc::clone(&test_info),
-                  modifiers: Arc::clone(&modifiers),
-                  browser_config: bcfg.clone(),
-                  bdd_args: None,
-                  bdd_data_table: None,
-                  bdd_doc_string: None,
-                },
+              // Pool-backed TestFixtures: getters resolve lazily from pool's DashMap.
+              let fixtures = crate::test_fixtures::TestFixtures::from_pool(
+                pool.clone(),
+                Arc::clone(&test_info),
+                Arc::clone(&modifiers),
+                bcfg.clone(),
               );
 
-              // Call JS callback with full fixtures.
+              // Call JS callback with lazy fixtures.
               call_js_test(&cb, fixtures).await.map_err(|e| TestFailure {
                 message: e,
                 stack: None,
@@ -540,13 +631,7 @@ impl TestRunner {
               })
             })
           }),
-          fixture_requests: vec![
-            "browser".into(),
-            "context".into(),
-            "page".into(),
-            "test_info".into(),
-            "request".into(),
-          ],
+          fixture_requests: meta.requested_fixtures.clone().unwrap_or_else(standard_fixture_requests),
           expected_status: ExpectedStatus::Pass,
           annotations,
           timeout: meta.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
@@ -808,34 +893,13 @@ fn make_each_hook(
     let cb = Arc::clone(&cb);
     let bcfg = browser_config.clone();
     Box::pin(async move {
-      let browser: Arc<ferridriver::Browser> = pool
-        .get("browser")
-        .await
-        .map_err(|e| ferridriver_test::TestFailure::from(format!("hook fixture 'browser': {e}")))?;
-      let page: Arc<ferridriver::Page> =
-        pool.get("page").await.map_err(|e| ferridriver_test::TestFailure::from(format!("hook fixture 'page': {e}")))?;
-      let context: Arc<ferridriver::context::ContextRef> = pool
-        .get("context")
-        .await
-        .map_err(|e| ferridriver_test::TestFailure::from(format!("hook fixture 'context': {e}")))?;
-      let request: Arc<ferridriver::api_request::APIRequestContext> = pool
-        .get("request")
-        .await
-        .map_err(|e| ferridriver_test::TestFailure::from(format!("hook fixture 'request': {e}")))?;
+      // Pool-backed: no eager fetching. Getters resolve lazily from DashMap.
       let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
-      let fixtures = crate::test_fixtures::TestFixtures::wrap(
-        ferridriver_test::model::TestFixtures {
-          browser,
-          page,
-          context,
-          request,
-          test_info,
-          modifiers,
-          browser_config: bcfg.clone(),
-          bdd_args: None,
-          bdd_data_table: None,
-          bdd_doc_string: None,
-        },
+      let fixtures = crate::test_fixtures::TestFixtures::from_pool(
+        pool.clone(),
+        test_info,
+        modifiers,
+        bcfg.clone(),
       );
       call_js_test(&cb, fixtures).await.map_err(|e| ferridriver_test::TestFailure {
         message: e,

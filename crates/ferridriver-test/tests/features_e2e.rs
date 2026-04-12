@@ -444,12 +444,12 @@ fn make_page_assertions_test() -> TestCase {
         let url = data_url("<title>My Title</title><body>Hello</body>");
         page.goto(&url, None).await.map_err(make_failure)?;
 
-        ferridriver_test::expect(&*page).to_have_title("My Title").await?;
-        ferridriver_test::expect(&*page)
+        ferridriver_test::expect(&page).to_have_title("My Title").await?;
+        ferridriver_test::expect(&page)
           .not()
           .to_have_title("Wrong Title")
           .await?;
-        ferridriver_test::expect(&*page)
+        ferridriver_test::expect(&page)
           .to_have_url(regex::Regex::new("^data:").unwrap())
           .await?;
 

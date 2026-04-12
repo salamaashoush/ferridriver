@@ -46,6 +46,7 @@ G.__ferridriver ??= {
   fileStorage: new AsyncLocalStorage<string>(),
   runner: null as TestRunner | null,
   currentTestInfo: null as any,
+  workerFixtureTeardowns: [] as Array<{ resolve: () => void; done: Promise<void> }>,
 };
 
 const _state = G.__ferridriver;
@@ -121,19 +122,28 @@ function currentSuiteId(): string | undefined {
 
 // ── Annotations builder ──
 
-function buildAnnotations(details?: TestDetails): any[] {
-  const annotations: any[] = [];
+/** Build flattened NapiAnnotation objects -- avoids JSON round-trip at the NAPI boundary. */
+function buildAnnotations(details?: TestDetails): NapiAnnotation[] {
+  const annotations: NapiAnnotation[] = [];
   if (details?.tag) {
     const tags = Array.isArray(details.tag) ? details.tag : [details.tag];
-    for (const t of tags) annotations.push({ tag: t });
+    for (const t of tags) annotations.push({ kind: 'tag', reason: null, condition: null, value: t, description: null });
   }
   if (details?.annotation) {
     const anns = Array.isArray(details.annotation) ? details.annotation : [details.annotation];
     for (const a of anns) {
-      annotations.push({ info: { type_name: a.type, description: a.description ?? '' } });
+      annotations.push({ kind: 'info', reason: null, condition: null, value: a.type, description: a.description ?? '' });
     }
   }
   return annotations;
+}
+
+interface NapiAnnotation {
+  kind: string;
+  reason: string | null;
+  condition: string | null;
+  value: string | null;
+  description: string | null;
 }
 
 // ── Body wrapper (sets _state.currentTestInfo for runtime modifiers) ──
@@ -194,7 +204,7 @@ testFn.skip = (...args: any[]) => {
     meta: {
       id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
-      annotations: [...buildAnnotations(details), { skip: { reason: null, condition: null } }],
+      annotations: [...buildAnnotations(details), { kind: 'skip', reason: null, condition: null, value: null, description: null }],
     },
     body: wrapBody(body),
   });
@@ -217,7 +227,7 @@ testFn.fixme = (...args: any[]) => {
     meta: {
       id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
-      annotations: [...buildAnnotations(details), { fixme: { reason: null, condition: null } }],
+      annotations: [...buildAnnotations(details), { kind: 'fixme', reason: null, condition: null, value: null, description: null }],
     },
     body: wrapBody(body),
   });
@@ -243,7 +253,7 @@ testFn.fail = (...args: any[]) => {
     meta: {
       id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
-      annotations: [...buildAnnotations(details), { fail: { reason: null, condition: null } }],
+      annotations: [...buildAnnotations(details), { kind: 'fail', reason: null, condition: null, value: null, description: null }],
     },
     body: wrapBody(body),
   });
@@ -269,7 +279,7 @@ testFn.slow = (...args: any[]) => {
     meta: {
       id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
-      annotations: [...buildAnnotations(details), { slow: { reason: null, condition: null } }],
+      annotations: [...buildAnnotations(details), { kind: 'slow', reason: null, condition: null, value: null, description: null }],
     },
     body: wrapBody(body),
   });
@@ -285,7 +295,7 @@ testFn.only = (...args: any[]) => {
     meta: {
       id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
-      annotations: [...buildAnnotations(details), 'only'],
+      annotations: [...buildAnnotations(details), { kind: 'only', reason: null, condition: null, value: null, description: null }],
     },
     body: wrapBody(body),
   });
@@ -446,7 +456,6 @@ testFn.extend = <T extends Record<string, any>>(customFixtures: { [K in keyof T]
 
   // Worker-scoped fixture cache — persists across tests within the same extended test fn.
   const workerCache: Record<string, any> = {};
-  const workerCleanups: (() => void)[] = [];
 
   // Create a new test function that wraps bodies to inject custom fixtures.
   const extendedTest = (name: string, ...args: any[]) => {
@@ -489,8 +498,8 @@ testFn.extend = <T extends Record<string, any>>(customFixtures: { [K in keyof T]
         await setupComplete;
 
         if (fix.scope === 'worker') {
-          // Worker-scoped cleanup deferred until process exit.
-          workerCleanups.push(() => { resolveUse!(); });
+          // Worker-scoped: track globally so _drainWorkerFixtures() can tear down.
+          _state.workerFixtureTeardowns.push({ resolve: () => { resolveUse!(); }, done: factoryDone });
         } else {
           factoryCleanups.push(() => { resolveUse!(); });
         }
@@ -536,7 +545,7 @@ describe.skip = (name: string, fn: () => void) => {
   const startIdx = _state.registry.length;
   fn();
   for (let i = startIdx; i < _state.registry.length; i++) {
-    _state.registry[i].meta.annotations.push({ skip: { reason: null, condition: null } });
+    _state.registry[i].meta.annotations.push({ kind: 'skip', reason: null, condition: null, value: null, description: null });
   }
   describeStack.pop();
 };
@@ -546,7 +555,7 @@ describe.fixme = (name: string, fn: () => void) => {
   const startIdx = _state.registry.length;
   fn();
   for (let i = startIdx; i < _state.registry.length; i++) {
-    _state.registry[i].meta.annotations.push({ fixme: { reason: null, condition: null } });
+    _state.registry[i].meta.annotations.push({ kind: 'fixme', reason: null, condition: null, value: null, description: null });
   }
   describeStack.pop();
 };
@@ -557,7 +566,7 @@ describe.only = (name: string, fn: () => void) => {
   const startIdx = _state.registry.length;
   fn();
   for (let i = startIdx; i < _state.registry.length; i++) {
-    _state.registry[i].meta.annotations.push('only');
+    _state.registry[i].meta.annotations.push({ kind: 'only', reason: null, condition: null, value: null, description: null });
   }
   describeStack.pop();
 };
@@ -659,6 +668,23 @@ export function _drainTests(): RegisteredTest[] {
 
 export function _hasOnly(): boolean {
   return _state.hasOnly;
+}
+
+/**
+ * Drain all worker-scoped fixture teardowns.
+ * Unblocks each factory's `await use()` so teardown code runs,
+ * then waits for all factories to complete.
+ * Must be called after runner.run() finishes and before process.exit().
+ */
+export async function _drainWorkerFixtures(): Promise<void> {
+  const teardowns = _state.workerFixtureTeardowns;
+  _state.workerFixtureTeardowns = [];
+  // Unblock all factories in reverse order (LIFO teardown).
+  for (let i = teardowns.length - 1; i >= 0; i--) {
+    teardowns[i].resolve();
+  }
+  // Wait for all factory functions to finish their teardown.
+  await Promise.allSettled(teardowns.map((t: { done: Promise<void> }) => t.done));
 }
 
 // test.describe — alias for the standalone describe, matching Playwright.

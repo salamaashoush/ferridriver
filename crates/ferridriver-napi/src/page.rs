@@ -11,11 +11,11 @@ use napi_derive::napi;
 /// High-level page API, mirrors Playwright's Page interface.
 #[napi]
 pub struct Page {
-  inner: ferridriver::Page,
+  inner: std::sync::Arc<ferridriver::Page>,
 }
 
 impl Page {
-  pub(crate) fn wrap(inner: ferridriver::Page) -> Self {
+  pub(crate) fn wrap(inner: std::sync::Arc<ferridriver::Page>) -> Self {
     Self { inner }
   }
 
@@ -29,7 +29,7 @@ impl Page {
 impl Page {
   /// Set the default timeout for all operations (milliseconds).
   #[napi]
-  pub fn set_default_timeout(&mut self, ms: f64) {
+  pub fn set_default_timeout(&self, ms: f64) {
     self.inner.set_default_timeout(crate::types::f64_to_u64(ms));
   }
 

@@ -180,7 +180,7 @@ impl BddRegistry {
         let cb = Arc::clone(&cb);
         let fixtures = fixtures_with_bdd_params(world, Some(&params), table, docstring);
         Box::pin(async move {
-          let napi_fixtures = crate::test_fixtures::TestFixtures::wrap(fixtures);
+          let napi_fixtures = crate::test_fixtures::TestFixtures::from_resolved(fixtures);
           match cb.call_async(napi_fixtures).await {
             Ok(promise) => promise
               .await
@@ -235,7 +235,7 @@ impl BddRegistry {
             // Hook gets full fixtures but no BDD args.
             let fixtures = fixtures_with_bdd_params(world, None, None, None);
             Box::pin(async move {
-              let napi_fixtures = crate::test_fixtures::TestFixtures::wrap(fixtures);
+              let napi_fixtures = crate::test_fixtures::TestFixtures::from_resolved(fixtures);
               cb.call_async(napi_fixtures)
                 .await
                 .map_err(|e| format!("{e}"))?
@@ -251,7 +251,7 @@ impl BddRegistry {
             let cb = Arc::clone(&cb);
             let fixtures = fixtures_with_bdd_params(world, None, None, None);
             Box::pin(async move {
-              let napi_fixtures = crate::test_fixtures::TestFixtures::wrap(fixtures);
+              let napi_fixtures = crate::test_fixtures::TestFixtures::from_resolved(fixtures);
               cb.call_async(napi_fixtures)
                 .await
                 .map_err(|e| format!("{e}"))?

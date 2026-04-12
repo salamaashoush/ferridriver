@@ -73,7 +73,7 @@ pub struct MountOptions {
 ///
 /// The framework adapter's `registerSource` must define `window.__ferriMount`.
 pub async fn mount(
-  page: &ferridriver::Page,
+  page: &std::sync::Arc<ferridriver::Page>,
   _base_url: &str,
   component: &ComponentRef,
   options: &MountOptions,

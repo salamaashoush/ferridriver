@@ -4,6 +4,7 @@ use crate::page::Page;
 use async_trait::async_trait;
 use regex::Regex;
 use rustc_hash::FxHashMap as HashMap;
+use std::sync::Arc;
 
 #[macro_use]
 mod macros;
@@ -31,7 +32,7 @@ pub trait StepDef: Send + Sync {
 
   async fn execute(
     &self,
-    page: &Page,
+    page: &Arc<Page>,
     caps: &regex::Captures<'_>,
     data_table: Option<&[Vec<String>]>,
     vars: &mut HashMap<String, String>,
@@ -93,7 +94,7 @@ pub fn js_escape(s: &str) -> String {
 ///
 /// Returns an error if the element cannot be found using the given selector,
 /// or if the underlying browser query fails.
-pub async fn find(page: &Page, selector: &str) -> Result<crate::backend::AnyElement, String> {
+pub async fn find(page: &Arc<Page>, selector: &str) -> Result<crate::backend::AnyElement, String> {
   let inner = page.inner();
   if crate::selectors::is_rich_selector(selector) {
     crate::selectors::query_one(inner, selector, false).await

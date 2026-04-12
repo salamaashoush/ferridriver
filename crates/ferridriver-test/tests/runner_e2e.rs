@@ -228,7 +228,7 @@ fn make_expect_test() -> TestCase {
         })?;
 
         // Test page title assertion.
-        ferridriver_test::expect::expect(&*page)
+        ferridriver_test::expect::expect(&page)
           .to_have_title("Expect Test")
           .await?;
 

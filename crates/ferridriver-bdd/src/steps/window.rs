@@ -29,7 +29,7 @@ async fn open_new_tab(world: &mut BrowserWorld) {
     .map_err(|e| StepError::from(format!("open new tab: {e}")))?;
 
   // Replace the active page with the newly opened tab.
-  *world.page_mut() = page;
+  world.set_page(page);
 }
 
 #[when("I switch to tab {int}")]
@@ -51,7 +51,7 @@ async fn switch_to_tab(world: &mut BrowserWorld, index: i64) {
     .await
     .map_err(|e| StepError::from(format!("bring tab {idx} to front: {e}")))?;
 
-  *world.page_mut() = page;
+  world.set_page(page);
 }
 
 #[when("I close the current tab")]
@@ -70,7 +70,7 @@ async fn close_current_tab(world: &mut BrowserWorld) {
     .map_err(|e| StepError::from(format!("list tabs after close: {e}")))?;
 
   if let Some(page) = pages.into_iter().next() {
-    *world.page_mut() = page;
+    world.set_page(page);
   }
 }
 

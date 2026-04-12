@@ -953,6 +953,31 @@ impl WebKitPage {
     std::future::ready(result)
   }
 
+  /// Bypass CSP. Not supported on WebKit backend — stubbed.
+  pub async fn set_bypass_csp(&self, _enabled: bool) -> Result<(), String> {
+    Ok(())
+  }
+
+  /// Ignore certificate errors. Not supported on WebKit backend — stubbed.
+  pub async fn set_ignore_certificate_errors(&self, _ignore: bool) -> Result<(), String> {
+    Ok(())
+  }
+
+  /// Set download behavior. Not supported on WebKit backend — stubbed.
+  pub async fn set_download_behavior(&self, _behavior: &str, _download_path: &str) -> Result<(), String> {
+    Ok(())
+  }
+
+  /// Set HTTP credentials. Not supported on WebKit backend — stubbed.
+  pub async fn set_http_credentials(&self, _username: &str, _password: &str) -> Result<(), String> {
+    Ok(())
+  }
+
+  /// Block service workers. Not supported on WebKit backend — stubbed.
+  pub async fn set_service_workers_blocked(&self, _blocked: bool) -> Result<(), String> {
+    Ok(())
+  }
+
   /// Reset permissions. No-op on `WebKit` backend.
   ///
   /// # Errors

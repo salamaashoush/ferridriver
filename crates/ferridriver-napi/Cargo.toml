@@ -22,6 +22,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 rustc-hash = "2"
+mimalloc = { workspace = true }
 async-channel = "2"
 
 [build-dependencies]

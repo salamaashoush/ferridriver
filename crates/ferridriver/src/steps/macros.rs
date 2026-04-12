@@ -27,7 +27,7 @@ macro_rules! step {
 
             async fn execute(
                 &self,
-                $page: &$crate::page::Page,
+                $page: &::std::sync::Arc<$crate::page::Page>,
                 $caps: &::regex::Captures<'_>,
                 $table: Option<&[Vec<String>]>,
                 $vars: &mut ::rustc_hash::FxHashMap<String, String>,

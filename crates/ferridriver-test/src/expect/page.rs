@@ -1,6 +1,7 @@
 //! Auto-retrying Page assertions.
 
 use ferridriver::Page;
+use std::sync::Arc;
 
 use super::{Expect, ExpectContext, MatchError, StringOrRegex, poll_until};
 use crate::model::TestFailure;
@@ -13,7 +14,7 @@ fn page_ctx(method: &'static str, is_not: bool) -> ExpectContext {
   }
 }
 
-impl Expect<'_, Page> {
+impl Expect<'_, Arc<Page>> {
   /// Assert the page title matches the expected value.
   pub async fn to_have_title(&self, expected: impl Into<StringOrRegex>) -> Result<(), TestFailure> {
     let expected = expected.into();

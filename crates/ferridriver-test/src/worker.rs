@@ -682,7 +682,7 @@ impl Worker {
         let test_pool = custom_pool.child(FixtureScope::Test);
         test_pool.inject("browser", Arc::clone(browser));
         test_pool.inject("context", Arc::new(ctx.clone()));
-        test_pool.inject("page", Arc::new(page.clone()));
+        test_pool.inject("page", Arc::clone(&page));
         test_pool.inject("test_info", Arc::clone(&test_info));
 
         // ── Request fixture (API testing context) ──

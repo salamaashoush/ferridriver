@@ -55,6 +55,7 @@ axum = "0.8"
 tokio-util = "0.7"
 dashmap = "6"
 arc-swap = "1"
+mimalloc = { version = "0.1", default-features = false }
 
 [profile.release]
 opt-level = 3
