@@ -55,8 +55,8 @@ pub fn init(verbose: u8) {
     if std::env::var("FERRIDRIVER_PROFILE").as_deref() == Ok("chrome") {
       use tracing_subscriber::prelude::*;
 
-      let trace_file = std::env::var("FERRIDRIVER_TRACE_FILE")
-        .unwrap_or_else(|_| format!("trace-{}.json", std::process::id()));
+      let trace_file =
+        std::env::var("FERRIDRIVER_TRACE_FILE").unwrap_or_else(|_| format!("trace-{}.json", std::process::id()));
       let (chrome_layer, guard) = tracing_chrome::ChromeLayerBuilder::new()
         .file(trace_file)
         .include_args(true)
