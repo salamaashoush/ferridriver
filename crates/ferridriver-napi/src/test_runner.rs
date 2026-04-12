@@ -671,41 +671,25 @@ impl TestRunner {
       config.has_bdd = true;
     }
 
-    // Run through core pipeline on a SEPARATE Tokio runtime.
-    //
-    // Critical: the core runner uses `tokio::spawn` for parallel workers, and those
-    // workers call TSFN callbacks back to the JS main thread. If we run on the NAPI
-    // runtime, the JS thread blocks waiting for `run()` to resolve, but the TSFN
-    // callbacks need the JS thread → deadlock.
-    //
-    // Solution: run the core pipeline on a dedicated multi-thread runtime spawned on
-    // a blocking thread. The NAPI async method yields (`spawn_blocking().await`),
-    // freeing the JS main thread to process TSFN callbacks.
+    // Run on the NAPI tokio runtime directly. The #[napi] async method yields
+    // via .await, freeing the JS main thread to process TSFN callbacks from workers.
+    // No separate runtime needed — workers use tokio::spawn which runs on this runtime.
     let collector = Arc::new(tokio::sync::Mutex::new(ResultCollector::new()));
     let start = Instant::now();
     let watch = self.watch;
     let collector_clone = Arc::clone(&collector);
 
-    tokio::task::spawn_blocking(move || {
-      let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()
-        .expect("failed to build test runner tokio runtime");
+    {
+      let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
+      runner.add_reporter(Box::new(ResultCollectorReporter(collector_clone)));
 
-      rt.block_on(async move {
-        let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
-        runner.add_reporter(Box::new(ResultCollectorReporter(collector_clone)));
-
-        if watch {
-          let cwd = std::env::current_dir().unwrap_or_default();
-          let _exit_code = runner.run_watch(move |_changed| plan.clone(), cwd).await;
-        } else {
-          let _exit_code = runner.run(plan).await;
-        }
-      });
-    })
-    .await
-    .map_err(|e| napi::Error::from_reason(format!("test runner task failed: {e}")))?;
+      if watch {
+        let cwd = std::env::current_dir().unwrap_or_default();
+        let _exit_code = runner.run_watch(move |_changed| plan.clone(), cwd).await;
+      } else {
+        let _exit_code = runner.run(plan).await;
+      }
+    }
 
     let duration = start.elapsed();
 
