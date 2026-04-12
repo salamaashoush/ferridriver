@@ -159,7 +159,7 @@ impl EventBusBuilder {
   pub fn build(self) -> EventBus {
     EventBus {
       inner: Arc::new(EventBusInner {
-        subscribers: std::sync::Mutex::new(self.subscribers),
+        subscribers: std::sync::RwLock::new(self.subscribers),
       }),
     }
   }
@@ -180,14 +180,16 @@ pub struct EventBus {
 }
 
 struct EventBusInner {
-  subscribers: std::sync::Mutex<Vec<mpsc::UnboundedSender<ReporterEvent>>>,
+  /// Subscriber channels — frozen after build. Read-only during emit (no lock needed).
+  /// `close()` swaps to empty Vec via `std::sync::RwLock` (write only on shutdown).
+  subscribers: std::sync::RwLock<Vec<mpsc::UnboundedSender<ReporterEvent>>>,
 }
 
 impl EventBus {
-  /// Emit an event to all subscribers. Clones for N-1, moves to the last.
-  /// Kept `async` to avoid churn on ~50 call sites (body is synchronous).
+  /// Emit an event to all subscribers. Lock-free read path — `RwLock::read()` never
+  /// blocks other readers. Only `close()` takes a write lock (once, at shutdown).
   pub async fn emit(&self, event: ReporterEvent) {
-    let subs = self.inner.subscribers.lock().unwrap();
+    let subs = self.inner.subscribers.read().unwrap();
     if subs.is_empty() {
       return;
     }
@@ -198,14 +200,9 @@ impl EventBus {
     let _ = subs[last].send(event);
   }
 
-  /// Explicitly close all sender channels. This causes the `ReporterDriver`
-  /// to see `recv() → None` and finalize.
-  ///
-  /// Required because `tokio::spawn` tasks may defer deallocation of captured
-  /// state (including `EventBus` clones) after `JoinHandle::await` returns.
-  /// Relying on `Drop` to close the channel is not deterministic in Tokio.
+  /// Explicitly close all sender channels.
   pub fn close(&self) {
-    self.inner.subscribers.lock().unwrap().clear();
+    self.inner.subscribers.write().unwrap().clear();
   }
 }
 
