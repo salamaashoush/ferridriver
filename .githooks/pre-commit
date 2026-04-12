@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Auto-format on commit so we never need a separate "style: cargo fmt" commit.
+cargo fmt --all
+git diff --quiet || {
+  echo "[pre-commit] cargo fmt applied changes, staging them..."
+  git add -u
+}
