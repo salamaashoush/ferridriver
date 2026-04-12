@@ -61,7 +61,7 @@ fn noop_test(name: &str) -> TestCase {
     timeout: Some(Duration::from_secs(5)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   }
 }
 
@@ -186,7 +186,7 @@ async fn test_after_each_runs_even_on_failure() {
     timeout: Some(Duration::from_secs(5)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   };
 
   let plan = TestPlan {
@@ -323,7 +323,7 @@ async fn test_serial_mode_skips_after_failure() {
     timeout: Some(Duration::from_secs(5)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   };
 
   let should_skip = TestCase {
@@ -344,7 +344,7 @@ async fn test_serial_mode_skips_after_failure() {
     timeout: Some(Duration::from_secs(5)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   };
 
   let plan = TestPlan {
@@ -423,7 +423,7 @@ async fn test_expected_failure_fails_when_test_passes() {
     timeout: Some(Duration::from_secs(5)),
     retries: None,
     expected_status: ExpectedStatus::Fail,
-      use_options: None,
+    use_options: None,
   };
 
   let plan = TestPlan {
@@ -474,7 +474,7 @@ async fn test_global_setup_runs_before_tests() {
     timeout: Some(Duration::from_secs(5)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   };
 
   let plan = TestPlan {
@@ -559,7 +559,7 @@ async fn test_testinfo_injected_into_pool() {
     timeout: Some(Duration::from_secs(5)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   };
 
   let plan = TestPlan {
@@ -602,7 +602,7 @@ async fn test_soft_assertions_collected() {
     timeout: Some(Duration::from_secs(5)),
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   };
 
   let plan = TestPlan {

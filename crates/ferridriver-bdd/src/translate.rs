@@ -173,11 +173,7 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
   // Map BDD tags to TestAnnotations.
   let mut annotations: Vec<TestAnnotation> = scenario.tags.iter().map(|t| TestAnnotation::Tag(t.clone())).collect();
 
-  if scenario
-    .tags
-    .iter()
-    .any(|t| t == "@wip" || t == "@pending")
-  {
+  if scenario.tags.iter().any(|t| t == "@wip" || t == "@pending") {
     annotations.push(TestAnnotation::Skip {
       reason: Some("tagged @wip/@pending".to_string()),
       condition: None,
@@ -278,7 +274,7 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
     timeout: None,
     retries: None,
     expected_status: ExpectedStatus::Pass,
-      use_options: None,
+    use_options: None,
   }
 }
 

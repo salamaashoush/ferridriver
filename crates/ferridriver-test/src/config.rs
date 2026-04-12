@@ -10,7 +10,6 @@ use std::path::{Path, PathBuf};
 /// A mixed run (both .spec.ts and .feature) sets this to true.
 // Kept as a simple bool rather than an enum — mixed runs are the goal.
 
-
 /// Video recording mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

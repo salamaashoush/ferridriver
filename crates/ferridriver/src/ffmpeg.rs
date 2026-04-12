@@ -121,8 +121,7 @@ pub fn encode_frames(
     if raw_fmt != src_fmt {
       #[allow(unsafe_code)]
       unsafe {
-        (*decoded_frame.as_mut_ptr()).format =
-          ffmpeg_next::ffi::AVPixelFormat::from(src_fmt) as libc::c_int;
+        (*decoded_frame.as_mut_ptr()).format = ffmpeg_next::ffi::AVPixelFormat::from(src_fmt) as libc::c_int;
       }
     }
     if scaler.is_none() || src_fmt != scaler_src_fmt {
@@ -317,8 +316,7 @@ pub fn encode_stream(
     if raw_fmt != src_fmt {
       #[allow(unsafe_code)]
       unsafe {
-        (*decoded_frame.as_mut_ptr()).format =
-          ffmpeg_next::ffi::AVPixelFormat::from(src_fmt) as libc::c_int;
+        (*decoded_frame.as_mut_ptr()).format = ffmpeg_next::ffi::AVPixelFormat::from(src_fmt) as libc::c_int;
       }
     }
     if scaler.is_none() || src_fmt != scaler_src_fmt {

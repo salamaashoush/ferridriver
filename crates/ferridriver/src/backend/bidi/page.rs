@@ -1050,8 +1050,9 @@ impl BidiPage {
                 .and_then(|v| v.as_str())
                 .map(|s| s.to_string());
 
-              let mime_type =
-                headers.as_ref().and_then(|h| h.get("content-type").or_else(|| h.get("Content-Type")).cloned());
+              let mime_type = headers
+                .as_ref()
+                .and_then(|h| h.get("content-type").or_else(|| h.get("Content-Type")).cloned());
 
               let net_request = NetRequest {
                 id,
@@ -1075,7 +1076,11 @@ impl BidiPage {
             if let (Some(resp), Some(req)) = (response, request) {
               let request_id = req.get("request").and_then(|v| v.as_str()).unwrap_or("");
               let status = resp.get("status").and_then(|v| v.as_i64());
-              let status_text = resp.get("statusText").and_then(|v| v.as_str()).unwrap_or("").to_string();
+              let status_text = resp
+                .get("statusText")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
               let mime_type = resp.get("mimeType").and_then(|v| v.as_str()).unwrap_or("").to_string();
               let url = resp.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
 
@@ -1553,7 +1558,11 @@ fn parse_bidi_headers(headers_val: &serde_json::Value) -> FxHashMap<String, Stri
         .iter()
         .filter_map(|entry| {
           let name = entry.get("name")?.as_str()?;
-          let value = entry.get("value").and_then(|v| v.get("value")).and_then(|v| v.as_str()).unwrap_or("");
+          let value = entry
+            .get("value")
+            .and_then(|v| v.get("value"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
           Some((name.to_string(), value.to_string()))
         })
         .collect()

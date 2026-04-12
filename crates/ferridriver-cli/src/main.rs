@@ -19,9 +19,7 @@ async fn main() -> anyhow::Result<()> {
     _ => "trace",
   };
   tracing_subscriber::fmt()
-    .with_env_filter(
-      tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()),
-    )
+    .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()))
     .init();
 
   let backend = cli.browser.backend_kind();

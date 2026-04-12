@@ -49,11 +49,8 @@ fn standard_fixture_requests() -> Vec<String> {
 #[napi(object, object_to_js = false)]
 pub struct TestBatchEntry<'a> {
   pub meta: TestMeta,
-  pub callback: napi::bindgen_prelude::Function<
-    'a,
-    crate::test_fixtures::TestFixtures,
-    napi::bindgen_prelude::Promise<()>,
-  >,
+  pub callback:
+    napi::bindgen_prelude::Function<'a, crate::test_fixtures::TestFixtures, napi::bindgen_prelude::Promise<()>>,
 }
 
 /// Test runner configuration from TypeScript.
@@ -208,7 +205,10 @@ impl NapiAnnotation {
         condition: self.condition.clone(),
       }),
       "only" => Some(ferridriver_test::model::TestAnnotation::Only),
-      "tag" => self.value.as_ref().map(|v| ferridriver_test::model::TestAnnotation::Tag(v.clone())),
+      "tag" => self
+        .value
+        .as_ref()
+        .map(|v| ferridriver_test::model::TestAnnotation::Tag(v.clone())),
       "info" => {
         let type_name = self.value.clone().unwrap_or_default();
         let description = self.description.clone().unwrap_or_default();
@@ -376,8 +376,8 @@ impl TestRunner {
       bypass_csp: cfg.bypass_csp,
       ..Default::default()
     };
-    let mut tc = ferridriver_test::config::resolve_config(&overrides)
-      .map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
+    let mut tc =
+      ferridriver_test::config::resolve_config(&overrides).map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
 
     // Wire NAPI projects into Rust config.
     if let Some(ref napi_projects) = cfg.projects {
@@ -385,12 +385,24 @@ impl TestRunner {
     }
 
     // BDD overrides.
-    if let Some(ref t) = cfg.tags { tc.tags = Some(t.clone()); }
-    if let Some(s) = cfg.strict { tc.strict = s; }
-    if let Some(ref o) = cfg.order { tc.order.clone_from(o); }
-    if let Some(ref l) = cfg.language { tc.language = Some(l.clone()); }
-    if let Some(ref f) = cfg.features { tc.features.clone_from(f); }
-    if let Some(ss) = cfg.screenshot_on_failure { tc.screenshot_on_failure = ss; }
+    if let Some(ref t) = cfg.tags {
+      tc.tags = Some(t.clone());
+    }
+    if let Some(s) = cfg.strict {
+      tc.strict = s;
+    }
+    if let Some(ref o) = cfg.order {
+      tc.order.clone_from(o);
+    }
+    if let Some(ref l) = cfg.language {
+      tc.language = Some(l.clone());
+    }
+    if let Some(ref f) = cfg.features {
+      tc.features.clone_from(f);
+    }
+    if let Some(ss) = cfg.screenshot_on_failure {
+      tc.screenshot_on_failure = ss;
+    }
 
     // Web server config.
     if let Some(ref servers) = cfg.web_server {
@@ -446,9 +458,7 @@ impl TestRunner {
   /// Batch-register multiple tests in a single NAPI call.
   /// Takes the lock once, reserves capacity, and builds all TSFNs in one go.
   /// Reduces N NAPI boundary crossings + N lock acquisitions to 1 each.
-  #[napi(
-    ts_args_type = "entries: Array<{ meta: TestMeta, callback: (fixtures: TestFixtures) => Promise<void> }>"
-  )]
+  #[napi(ts_args_type = "entries: Array<{ meta: TestMeta, callback: (fixtures: TestFixtures) => Promise<void> }>")]
   pub fn register_tests_batch(&self, entries: Vec<TestBatchEntry<'_>>) -> Result<()> {
     let mut tests = self
       .tests
@@ -586,11 +596,7 @@ impl TestRunner {
         let bcfg = browser_config.clone();
 
         // Convert flattened NAPI annotations directly — no JSON round-trip.
-        let annotations: Vec<TestAnnotation> = meta
-          .annotations
-          .iter()
-          .filter_map(NapiAnnotation::to_core)
-          .collect();
+        let annotations: Vec<TestAnnotation> = meta.annotations.iter().filter_map(NapiAnnotation::to_core).collect();
 
         TestCase {
           id: TestId {
@@ -607,8 +613,10 @@ impl TestRunner {
               // All other fixtures (browser, page, context, request) are already
               // in the pool's DashMap — NAPI getters resolve them lazily via
               // sync cache reads, eliminating 4 redundant async pool.get() calls.
-              let test_info: Arc<ferridriver_test::model::TestInfo> =
-                pool.get("test_info").await.map_err(|e| TestFailure::from(format!("fixture 'test_info': {e}")))?;
+              let test_info: Arc<ferridriver_test::model::TestInfo> = pool
+                .get("test_info")
+                .await
+                .map_err(|e| TestFailure::from(format!("fixture 'test_info': {e}")))?;
 
               // Create shared modifiers — worker reads these after callback returns.
               let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
@@ -631,7 +639,10 @@ impl TestRunner {
               })
             })
           }),
-          fixture_requests: meta.requested_fixtures.clone().unwrap_or_else(standard_fixture_requests),
+          fixture_requests: meta
+            .requested_fixtures
+            .clone()
+            .unwrap_or_else(standard_fixture_requests),
           expected_status: ExpectedStatus::Pass,
           annotations,
           timeout: meta.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
@@ -682,15 +693,13 @@ impl TestRunner {
             })
           }))
         },
-        "afterAll" => {
-          ferridriver_test::HookKind::AfterAll(Arc::new(move |_pool| {
-            let cb = Arc::clone(&cb);
-            Box::pin(async move {
-              let _ = cb;
-              Ok(())
-            })
-          }))
-        },
+        "afterAll" => ferridriver_test::HookKind::AfterAll(Arc::new(move |_pool| {
+          let cb = Arc::clone(&cb);
+          Box::pin(async move {
+            let _ = cb;
+            Ok(())
+          })
+        })),
         "beforeEach" => ferridriver_test::HookKind::BeforeEach(make_each_hook(cb, bcfg)),
         "afterEach" => ferridriver_test::HookKind::AfterEach(make_each_hook(cb, bcfg)),
         _ => continue,
@@ -704,8 +713,11 @@ impl TestRunner {
 
     // ── BDD features ──
     let features = feature_files.or_else(|| {
-      if self.config.features.is_empty() { None }
-      else { Some(self.config.features.clone()) }
+      if self.config.features.is_empty() {
+        None
+      } else {
+        Some(self.config.features.clone())
+      }
     });
 
     let mut has_bdd = false;
@@ -714,9 +726,9 @@ impl TestRunner {
 
       let files = ferridriver_bdd::feature::FeatureSet::discover(&patterns, &self.config.test_ignore)
         .map_err(|e| napi::Error::from_reason(format!("feature discovery: {e}")))?;
-      let feature_set = ferridriver_bdd::feature::FeatureSet::parse_with_language(
-        files, self.config.language.as_deref()
-      ).map_err(|e| napi::Error::from_reason(format!("feature parse: {e}")))?;
+      let feature_set =
+        ferridriver_bdd::feature::FeatureSet::parse_with_language(files, self.config.language.as_deref())
+          .map_err(|e| napi::Error::from_reason(format!("feature parse: {e}")))?;
 
       if !feature_set.features.is_empty() {
         let bdd_plan = ferridriver_bdd::translate::translate_features(&feature_set, registry, &self.config);
@@ -895,18 +907,15 @@ fn make_each_hook(
     Box::pin(async move {
       // Pool-backed: no eager fetching. Getters resolve lazily from DashMap.
       let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
-      let fixtures = crate::test_fixtures::TestFixtures::from_pool(
-        pool.clone(),
-        test_info,
-        modifiers,
-        bcfg.clone(),
-      );
-      call_js_test(&cb, fixtures).await.map_err(|e| ferridriver_test::TestFailure {
-        message: e,
-        stack: None,
-        diff: None,
-        screenshot: None,
-      })
+      let fixtures = crate::test_fixtures::TestFixtures::from_pool(pool.clone(), test_info, modifiers, bcfg.clone());
+      call_js_test(&cb, fixtures)
+        .await
+        .map_err(|e| ferridriver_test::TestFailure {
+          message: e,
+          stack: None,
+          diff: None,
+          screenshot: None,
+        })
     })
   })
 }

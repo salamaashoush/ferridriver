@@ -153,7 +153,8 @@ impl Reporter for AllureReporter {
     match event {
       ReporterEvent::RunStarted {
         total_tests,
-        num_workers, ..
+        num_workers,
+        ..
       } => {
         self.run_start = epoch_ms();
         self.env.insert("Total Tests".into(), total_tests.to_string());

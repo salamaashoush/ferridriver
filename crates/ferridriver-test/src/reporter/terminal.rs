@@ -105,12 +105,9 @@ fn format_duration(d: Duration) -> String {
 
 /// Check if a test outcome has BDD steps (any step with bdd_keyword metadata).
 fn is_bdd_test(steps: &[TestStep]) -> bool {
-  steps.iter().any(|s| {
-    s.metadata
-      .as_ref()
-      .is_some_and(|m| m.get("bdd_keyword").is_some())
-      || is_bdd_test(&s.steps)
-  })
+  steps
+    .iter()
+    .any(|s| s.metadata.as_ref().is_some_and(|m| m.get("bdd_keyword").is_some()) || is_bdd_test(&s.steps))
 }
 
 fn print_steps(steps: &[&TestStep], indent: usize) {
@@ -213,11 +210,9 @@ impl Reporter for TerminalReporter {
 
       ReporterEvent::TestFinished { test_id, outcome } => {
         self.completed += 1;
-        self.test_durations.push((
-          test_id.full_name(),
-          test_id.file.clone(),
-          outcome.duration,
-        ));
+        self
+          .test_durations
+          .push((test_id.full_name(), test_id.file.clone(), outcome.duration));
 
         let bdd = is_bdd_test(&outcome.steps);
 
@@ -306,16 +301,20 @@ impl Reporter for TerminalReporter {
         // Slow test report.
         if let Some(ref config) = self.slow_tests_config {
           let threshold = Duration::from_millis(config.threshold);
-          let mut slow: Vec<_> = self
-            .test_durations
-            .iter()
-            .filter(|(_, _, d)| *d >= threshold)
-            .collect();
+          let mut slow: Vec<_> = self.test_durations.iter().filter(|(_, _, d)| *d >= threshold).collect();
           slow.sort_by(|a, b| b.2.cmp(&a.2));
-          let show = if config.max > 0 { config.max.min(slow.len()) } else { slow.len() };
+          let show = if config.max > 0 {
+            config.max.min(slow.len())
+          } else {
+            slow.len()
+          };
           if show > 0 {
             println!();
-            println!("  {} Slow test{} —", s_warn().apply_to("\u{26a0}"), if show == 1 { "" } else { "s" });
+            println!(
+              "  {} Slow test{} —",
+              s_warn().apply_to("\u{26a0}"),
+              if show == 1 { "" } else { "s" }
+            );
             for (name, file, dur) in &slow[..show] {
               println!(
                 "    {} {} ({})",

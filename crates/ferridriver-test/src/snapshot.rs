@@ -38,7 +38,11 @@ pub fn assert_snapshot(test_info: &TestInfo, actual: &str, name: &str, update: b
 
   // Resolve effective update behavior from mode + legacy bool.
   let mode = test_info.update_snapshots;
-  let should_create = update || matches!(mode, UpdateSnapshotsMode::All | UpdateSnapshotsMode::Missing | UpdateSnapshotsMode::Changed);
+  let should_create = update
+    || matches!(
+      mode,
+      UpdateSnapshotsMode::All | UpdateSnapshotsMode::Missing | UpdateSnapshotsMode::Changed
+    );
   let should_update = update || matches!(mode, UpdateSnapshotsMode::All | UpdateSnapshotsMode::Changed);
 
   if matches!(mode, UpdateSnapshotsMode::None) && !snap_path.exists() {
@@ -278,18 +282,9 @@ pub fn resolve_template_path(
   ext: &str,
 ) -> PathBuf {
   let test_file_path = Path::new(test_file);
-  let test_dir = test_file_path
-    .parent()
-    .unwrap_or(Path::new("."))
-    .to_string_lossy();
-  let test_file_name = test_file_path
-    .file_stem()
-    .unwrap_or_default()
-    .to_string_lossy();
-  let test_file_no_ext = test_file_path
-    .with_extension("")
-    .to_string_lossy()
-    .into_owned();
+  let test_dir = test_file_path.parent().unwrap_or(Path::new(".")).to_string_lossy();
+  let test_file_name = test_file_path.file_stem().unwrap_or_default().to_string_lossy();
+  let test_file_no_ext = test_file_path.with_extension("").to_string_lossy().into_owned();
 
   let sanitized_name = test_name
     .replace(['/', '\\', ':', '<', '>', '"', '|', '?', '*'], "_")

@@ -179,7 +179,6 @@ pub fn run_harness() {
   std::process::exit(exit_code);
 }
 
-
 /// Prelude for convenient imports in test files.
 pub mod prelude {
   pub use ferridriver::{Browser, ContextRef as BrowserContext, Locator, Page};

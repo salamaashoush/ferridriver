@@ -33,17 +33,29 @@ impl TestContext {
 
   /// Get the `Page` fixture (test-scoped, fresh per test).
   pub async fn page(&self) -> Result<Arc<ferridriver::Page>, TestFailure> {
-    self.pool.get::<ferridriver::Page>("page").await.map_err(TestFailure::from)
+    self
+      .pool
+      .get::<ferridriver::Page>("page")
+      .await
+      .map_err(TestFailure::from)
   }
 
   /// Get the `Browser` fixture (worker-scoped, shared across tests in a worker).
   pub async fn browser(&self) -> Result<Arc<ferridriver::Browser>, TestFailure> {
-    self.pool.get::<ferridriver::Browser>("browser").await.map_err(TestFailure::from)
+    self
+      .pool
+      .get::<ferridriver::Browser>("browser")
+      .await
+      .map_err(TestFailure::from)
   }
 
   /// Get the `BrowserContext` fixture (test-scoped).
   pub async fn browser_context(&self) -> Result<Arc<ferridriver::ContextRef>, TestFailure> {
-    self.pool.get::<ferridriver::ContextRef>("context").await.map_err(TestFailure::from)
+    self
+      .pool
+      .get::<ferridriver::ContextRef>("context")
+      .await
+      .map_err(TestFailure::from)
   }
 
   /// Get the `TestInfo` fixture (test-scoped runtime context).

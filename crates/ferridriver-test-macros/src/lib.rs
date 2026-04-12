@@ -211,46 +211,32 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
   };
 
   // Request all standard fixtures so the worker provisions them.
-  let fixture_names: Vec<String> = vec![
-    "browser".into(),
-    "context".into(),
-    "page".into(),
-    "test_info".into(),
-  ];
+  let fixture_names: Vec<String> = vec!["browser".into(), "context".into(), "page".into(), "test_info".into()];
   let fixture_array = fixture_names.iter().map(|f| quote! { #f });
 
   // Build annotations.
   // Helper: parse "condition" or "condition | reason" into (condition, reason) tokens.
-  fn annotation_tokens(
-    variant: &str,
-    arg: &Option<Option<String>>,
-    annotations: &mut Vec<proc_macro2::TokenStream>,
-  ) {
+  fn annotation_tokens(variant: &str, arg: &Option<Option<String>>, annotations: &mut Vec<proc_macro2::TokenStream>) {
     let variant_ident = quote::format_ident!("{}", variant);
     match arg {
       Some(None) => {
-        annotations.push(
-          quote! { ferridriver_test::model::TestAnnotation::#variant_ident { reason: None, condition: None } },
-        );
+        annotations
+          .push(quote! { ferridriver_test::model::TestAnnotation::#variant_ident { reason: None, condition: None } });
       },
       Some(Some(val)) => {
         // Support "condition | reason" format.
         if let Some((cond, reason)) = val.split_once('|') {
           let cond = cond.trim();
           let reason = reason.trim();
-          annotations.push(
-            quote! { ferridriver_test::model::TestAnnotation::#variant_ident {
-              reason: Some(#reason.to_string()),
-              condition: Some(#cond.to_string()),
-            } },
-          );
+          annotations.push(quote! { ferridriver_test::model::TestAnnotation::#variant_ident {
+            reason: Some(#reason.to_string()),
+            condition: Some(#cond.to_string()),
+          } });
         } else {
-          annotations.push(
-            quote! { ferridriver_test::model::TestAnnotation::#variant_ident {
-              reason: None,
-              condition: Some(#val.to_string()),
-            } },
-          );
+          annotations.push(quote! { ferridriver_test::model::TestAnnotation::#variant_ident {
+            reason: None,
+            condition: Some(#val.to_string()),
+          } });
         }
       },
       None => {},
@@ -394,12 +380,7 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
     })
     .collect();
 
-  let fixture_names: Vec<String> = vec![
-    "browser".into(),
-    "context".into(),
-    "page".into(),
-    "test_info".into(),
-  ];
+  let fixture_names: Vec<String> = vec!["browser".into(), "context".into(), "page".into(), "test_info".into()];
 
   // Generate one inventory::submit! per data row.
   let mut submissions = Vec::new();

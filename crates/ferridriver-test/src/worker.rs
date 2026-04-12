@@ -340,9 +340,13 @@ impl Worker {
     let browser_config = &self.config.browser;
     let should_skip = test.annotations.iter().any(|a| match a {
       TestAnnotation::Skip { condition: None, .. } => true,
-      TestAnnotation::Skip { condition: Some(cond), .. } => evaluate_condition(cond, browser_config),
+      TestAnnotation::Skip {
+        condition: Some(cond), ..
+      } => evaluate_condition(cond, browser_config),
       TestAnnotation::Fixme { condition: None, .. } => true,
-      TestAnnotation::Fixme { condition: Some(cond), .. } => evaluate_condition(cond, browser_config),
+      TestAnnotation::Fixme {
+        condition: Some(cond), ..
+      } => evaluate_condition(cond, browser_config),
       _ => false,
     });
     if should_skip {
@@ -404,7 +408,9 @@ impl Worker {
     let mut timeout_dur = test.timeout.unwrap_or(Duration::from_millis(self.config.timeout));
     let is_slow = test.annotations.iter().any(|a| match a {
       TestAnnotation::Slow { condition: None, .. } => true,
-      TestAnnotation::Slow { condition: Some(cond), .. } => evaluate_condition(cond, browser_config),
+      TestAnnotation::Slow {
+        condition: Some(cond), ..
+      } => evaluate_condition(cond, browser_config),
       _ => false,
     });
     if is_slow {
@@ -535,7 +541,9 @@ impl Worker {
       let has_ctx_overrides = viewport_override.is_some()
         || ctx_config.is_mobile
         || ctx_config.has_touch
-        || ctx_config.device_scale_factor.is_some_and(|d| (d - 1.0).abs() > f64::EPSILON);
+        || ctx_config
+          .device_scale_factor
+          .is_some_and(|d| (d - 1.0).abs() > f64::EPSILON);
       if has_ctx_overrides {
         if let Some(vp) = effective_vp {
           let _ = page
@@ -897,11 +905,7 @@ impl Worker {
         // Runtime skip: test body called test.skip() — treat as skip, not failure.
         // This mirrors Playwright's TestSkipError thrown by test.skip() inside body.
         if failure.message.contains("__FERRIDRIVER_SKIP__:") {
-          let reason = failure
-            .message
-            .split("__FERRIDRIVER_SKIP__:")
-            .nth(1)
-            .unwrap_or("");
+          let reason = failure.message.split("__FERRIDRIVER_SKIP__:").nth(1).unwrap_or("");
           tracing::debug!(target: "ferridriver::worker", "test skipped at runtime: {reason}");
           let outcome = TestOutcome {
             test_id: test_id.clone(),
@@ -961,9 +965,7 @@ impl Worker {
         }
         // Runtime slow: annotate via test_info for reporters.
         if modifiers.slow.load(std::sync::atomic::Ordering::Relaxed) {
-          test_info
-            .annotate("slow", "test.slow() called at runtime")
-            .await;
+          test_info.annotate("slow", "test.slow() called at runtime").await;
         }
         // timeout_override: already elapsed for this attempt, but log for debugging.
         if let Ok(guard) = modifiers.timeout_override.lock() {

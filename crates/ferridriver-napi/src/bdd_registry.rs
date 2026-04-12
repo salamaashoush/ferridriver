@@ -225,9 +225,7 @@ impl BddRegistry {
 
       let cb = Arc::clone(&ts_hook.callback);
       let handler = match ts_hook.scope.as_str() {
-        "all" => ferridriver_bdd::hook::HookHandler::Global(Arc::new(move || {
-          Box::pin(async { Ok(()) })
-        })),
+        "all" => ferridriver_bdd::hook::HookHandler::Global(Arc::new(move || Box::pin(async { Ok(()) }))),
         "step" => {
           let cb = Arc::clone(&cb);
           ferridriver_bdd::hook::HookHandler::Step(Arc::new(move |world, _step_text| {

@@ -46,8 +46,7 @@ pub enum HookKindTag {
 pub struct HookRegistration {
   pub module_path: &'static str,
   /// For before_all/after_all: `fn(FixturePool) -> Future<Result<(), TestFailure>>`
-  pub suite_hook_fn:
-    Option<fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>>,
+  pub suite_hook_fn: Option<fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>>,
   /// For before_each/after_each: `fn(FixturePool, Arc<TestInfo>) -> Future<Result<(), TestFailure>>`
   pub each_hook_fn:
     Option<fn(FixturePool, Arc<TestInfo>) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>>>,

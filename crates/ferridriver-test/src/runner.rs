@@ -30,7 +30,13 @@ pub struct TestRunner {
 
 impl TestRunner {
   pub fn new(config: TestConfig, overrides: CliOverrides) -> Self {
-    let reporters = crate::reporter::create_reporters(&config.reporter, &config.output_dir, config.has_bdd, config.quiet, config.report_slow_tests.clone());
+    let reporters = crate::reporter::create_reporters(
+      &config.reporter,
+      &config.output_dir,
+      config.has_bdd,
+      config.quiet,
+      config.report_slow_tests.clone(),
+    );
     Self {
       config: Arc::new(config),
       reporters,
@@ -122,10 +128,7 @@ impl TestRunner {
       let project = &projects[idx];
 
       // Skip if any dependency failed.
-      let dep_failed = project
-        .dependencies
-        .iter()
-        .any(|dep| failed_projects.contains(dep));
+      let dep_failed = project.dependencies.iter().any(|dep| failed_projects.contains(dep));
       if dep_failed {
         tracing::warn!(
           target: "ferridriver::runner",
@@ -267,7 +270,11 @@ impl TestRunner {
     }
     // Apply grep: CLI overrides take precedence, then config-level grep.
     let grep = self.overrides.grep.as_ref().or(self.config.config_grep.as_ref());
-    let grep_inv = self.overrides.grep_invert.as_ref().or(self.config.config_grep_invert.as_ref());
+    let grep_inv = self
+      .overrides
+      .grep_invert
+      .as_ref()
+      .or(self.config.config_grep_invert.as_ref());
     if let Some(grep) = grep {
       crate::discovery::filter_by_grep(&mut plan, grep, false);
     }
@@ -344,7 +351,9 @@ impl TestRunner {
               // SAFETY: set_var is called before worker threads are spawned,
               // so no concurrent reads can race.
               #[allow(unsafe_code)]
-              unsafe { std::env::set_var("FERRIDRIVER_BASE_URL", &url) };
+              unsafe {
+                std::env::set_var("FERRIDRIVER_BASE_URL", &url)
+              };
               tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
             }
           }
@@ -535,10 +544,7 @@ impl TestRunner {
       } else {
         final_count += 1;
         // Track failures for max_failures / fail_fast.
-        if matches!(
-          result.outcome.status,
-          TestStatus::Failed | TestStatus::TimedOut
-        ) {
+        if matches!(result.outcome.status, TestStatus::Failed | TestStatus::TimedOut) {
           failure_count += 1;
         }
       }
@@ -741,7 +747,10 @@ impl TestRunner {
     // Replace ALL reporters with TUI reporter + rerun.
     // Persist across watch cycles via run_with_tui_drain's take/restore.
     self.reporters.replace(vec![
-      Box::new(crate::tui_reporter::TuiReporter::new(tui_tx.clone(), self.config.has_bdd)),
+      Box::new(crate::tui_reporter::TuiReporter::new(
+        tui_tx.clone(),
+        self.config.has_bdd,
+      )),
       Box::new(crate::reporter::rerun::RerunReporter::new(
         self.config.output_dir.join("@rerun.txt"),
       )),
@@ -907,11 +916,7 @@ fn build_plan_for_changes(
 ///
 /// Uses Kahn's algorithm. Returns `Err` if there's a cycle or a missing dependency.
 fn topo_sort_projects(projects: &[ProjectConfig]) -> Result<Vec<usize>, String> {
-  let name_to_idx: FxHashMap<&str, usize> = projects
-    .iter()
-    .enumerate()
-    .map(|(i, p)| (p.name.as_str(), i))
-    .collect();
+  let name_to_idx: FxHashMap<&str, usize> = projects.iter().enumerate().map(|(i, p)| (p.name.as_str(), i)).collect();
 
   // Build adjacency list + in-degree.
   let n = projects.len();
