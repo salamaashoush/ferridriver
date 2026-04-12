@@ -19,8 +19,8 @@ use crate::page::Page;
 pub struct Frame {
   /// The page this frame belongs to (Arc for cheap cloning in locator chains).
   page: Arc<Page>,
-  /// Frame ID (from CDP or backend).
-  pub(crate) id: String,
+  /// Frame ID (from CDP or backend). `Arc<str>` so locator chains are cheap.
+  pub(crate) id: Arc<str>,
   /// Parent frame ID (None for main frame).
   pub(crate) parent_id: Option<String>,
   /// Frame name (from `<iframe name="...">` attribute).
@@ -34,7 +34,7 @@ impl Frame {
   pub(crate) fn from_info(page: Arc<Page>, info: FrameInfo) -> Self {
     Self {
       page,
-      id: info.frame_id,
+      id: Arc::from(info.frame_id),
       parent_id: info.parent_frame_id,
       name_str: info.name,
       url_str: info.url,
@@ -67,7 +67,7 @@ impl Frame {
   pub async fn parent_frame(&self) -> Result<Option<Frame>, String> {
     if let Some(pid) = &self.parent_id {
       let frames = self.page.frames().await?;
-      Ok(frames.into_iter().find(|f| f.id == *pid))
+      Ok(frames.into_iter().find(|f| &*f.id == pid.as_str()))
     } else {
       Ok(None)
     }
@@ -259,7 +259,7 @@ impl Frame {
   /// Returns an error if the frame tree cannot be retrieved.
   pub async fn is_detached(&self) -> Result<bool, String> {
     let frames = self.page.inner().get_frame_tree().await?;
-    Ok(!frames.iter().any(|f| f.frame_id == self.id))
+    Ok(!frames.iter().any(|f| f.frame_id.as_str() == &*self.id))
   }
 
   /// Get the page this frame belongs to.

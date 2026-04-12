@@ -201,7 +201,7 @@ use crate::state::BrowserState;
 #[derive(Clone)]
 pub struct ContextRef {
   pub(crate) state: Arc<RwLock<BrowserState>>,
-  pub(crate) name: String,
+  pub(crate) name: Arc<str>,
   /// Pre-parsed session key (avoids re-parsing on every operation).
   pub(crate) key: SessionKey,
   /// Default timeout for actions in this context (ms). 0 = no override.
@@ -215,7 +215,7 @@ impl ContextRef {
     let key = SessionKey::parse(&name);
     Self {
       state,
-      name,
+      name: Arc::from(name),
       key,
       default_timeout_ms: 0,
       default_navigation_timeout_ms: 0,

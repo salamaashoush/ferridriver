@@ -17,6 +17,48 @@ use crate::backend::AnyElement;
 use crate::options::{BoundingBox, FilterOptions, RoleOptions, TextOptions, WaitOptions};
 use crate::selectors;
 
+/// Zero-cost retry macro that resolves an element with backoff, then runs an
+/// action body inline. Provides `$el: AnyElement` and `$page: &AnyPage` to the
+/// body without any AnyPage cloning — the page reference is borrowed from `self`
+/// for the entire retry loop.
+///
+/// The body must be an `async move { ... }` block returning `Result<R, String>`.
+/// References to outer variables (parameters, locals) are captured by copy for
+/// `Copy` types (like `&str`, `&Arc<Page>`) or by move for owned types.
+macro_rules! retry_resolve {
+  ($self:expr, |$el:ident, $page:ident| $body:expr) => {{
+    let __sel_js = $crate::selectors::build_selone_js(&$self.selector)?;
+    let $page: &$crate::backend::AnyPage = $self.page.inner();
+
+    for (__i, &__delay_ms) in Locator::RETRY_BACKOFFS_MS.iter().enumerate() {
+      if __delay_ms > 0 {
+        ::tokio::time::sleep(::std::time::Duration::from_millis(__delay_ms)).await;
+      }
+      match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector).await {
+        ::std::result::Result::Ok($el) => match ($body).await {
+          ::std::result::Result::Ok(val) => return ::std::result::Result::Ok(val),
+          ::std::result::Result::Err(e)
+            if e.contains("not connected")
+              || e.contains("not found")
+              || e.contains("detached") =>
+          {
+            if __i >= Locator::RETRY_BACKOFFS_MS.len() - 1 {
+              return ::std::result::Result::Err(e);
+            }
+          },
+          ::std::result::Result::Err(e) => return ::std::result::Result::Err(e),
+        },
+        ::std::result::Result::Err(_) if __i < Locator::RETRY_BACKOFFS_MS.len() - 1 => {},
+        ::std::result::Result::Err(e) => return ::std::result::Result::Err(e),
+      }
+    }
+    ::std::result::Result::Err(format!(
+      "No element found for selector: {}",
+      $self.selector
+    ))
+  }};
+}
+
 /// A lazy element locator. Does not query the DOM until an action is called.
 /// Holds `Arc<Page>` instead of owned Page — locator chains are just atomic
 /// refcount bumps, not full Page clones.
@@ -25,7 +67,8 @@ pub struct Locator {
   pub(crate) page: Arc<crate::page::Page>,
   pub(crate) selector: String,
   /// If set, evaluate in this frame instead of the main frame.
-  pub(crate) frame_id: Option<String>,
+  /// Uses `Arc<str>` so that chaining locators only bumps a refcount.
+  pub(crate) frame_id: Option<Arc<str>>,
 }
 
 impl Locator {
@@ -96,23 +139,40 @@ impl Locator {
   /// Filter this locator by text content, sub-selector presence, or absence.
   #[must_use]
   pub fn filter(&self, opts: &FilterOptions) -> Locator {
-    let mut loc = self.clone();
+    use std::fmt::Write as _;
+
+    // Build the combined filter suffix in one buffer, then chain once.
+    // Avoids: self.clone() + up to 4 intermediate chain allocations.
+    let mut suffix = String::new();
     if let Some(text) = &opts.has_text {
-      loc = loc.chain(&format!("has-text={text}"));
+      let _ = write!(suffix, "has-text={text}");
     }
     if let Some(text) = &opts.has_not_text {
-      loc = loc.chain(&format!("has-not-text={text}"));
+      if !suffix.is_empty() { suffix.push_str(" >> "); }
+      let _ = write!(suffix, "has-not-text={text}");
     }
     if let Some(sel) = &opts.has {
-      loc = loc.chain(&format!("has={sel}"));
+      if !suffix.is_empty() { suffix.push_str(" >> "); }
+      let _ = write!(suffix, "has={sel}");
     }
     if let Some(sel) = &opts.has_not {
-      loc = loc.chain(&format!("has-not={sel}"));
+      if !suffix.is_empty() { suffix.push_str(" >> "); }
+      let _ = write!(suffix, "has-not={sel}");
     }
-    loc
+    if suffix.is_empty() {
+      self.clone()
+    } else {
+      self.chain(&suffix)
+    }
   }
 
   // ── Actions ───────────────────────────────────────────────────────────────
+  //
+  // All action methods use the `retry_resolve!` macro which:
+  //   1. Pre-builds selector JS once (no re-parsing per retry)
+  //   2. Borrows `&AnyPage` from self — zero AnyPage clones
+  //   3. Borrows `&str` parameters directly — zero String clones
+  //   4. Expands inline — no closure/future type-erasure overhead
 
   /// Click the element matched by this locator.
   ///
@@ -121,19 +181,11 @@ impl Locator {
   /// Returns an error if the element cannot be found, is not actionable
   /// (e.g. a `<select>` or file input), or the click fails.
   pub async fn click(&self) -> Result<(), String> {
-    let page = self.page.inner().clone();
-    self
-      .retry_with_element(|el| {
-        let page = page.clone();
-        async move {
-          if let Err(e) = actions::check_click_guard(&el, &page).await {
-            return Err(e.to_string());
-          }
-          actions::wait_for_actionable(&el, &page).await.ok();
-          el.click().await
-        }
-      })
-      .await
+    retry_resolve!(self, |el, page| async move {
+      actions::check_click_guard(&el, page).await.map_err(|e| e.to_string())?;
+      actions::wait_for_actionable(&el, page).await.ok();
+      el.click().await
+    })
   }
 
   /// Double-click the element matched by this locator.
@@ -142,16 +194,10 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or the double-click fails.
   pub async fn dblclick(&self) -> Result<(), String> {
-    let page = self.page.inner().clone();
-    self
-      .retry_with_element(|el| {
-        let page = page.clone();
-        async move {
-          actions::wait_for_actionable(&el, &page).await.ok();
-          el.dblclick().await
-        }
-      })
-      .await
+    retry_resolve!(self, |el, page| async move {
+      actions::wait_for_actionable(&el, page).await.ok();
+      el.dblclick().await
+    })
   }
 
   /// Right-click (context menu click) on the element.
@@ -161,21 +207,17 @@ impl Locator {
   /// Returns an error if the element cannot be found, its bounding box
   /// cannot be computed, or the right-click dispatch fails.
   pub async fn right_click(&self) -> Result<(), String> {
-    let page_ref = self.page.clone();
-    self.retry_with_element(|el| {
-      let page_ref = page_ref.clone();
-      async move {
-        let center = el.call_js_fn_value(
-          "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
-        ).await?;
-        if let Some(c) = center {
-          let x = c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-          let y = c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-          page_ref.click_at_opts(x, y, "right", 1).await?;
-        }
-        Ok(())
+    retry_resolve!(self, |el, page| async move {
+      let center = el.call_js_fn_value(
+        "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
+      ).await?;
+      if let Some(c) = center {
+        let x = c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        let y = c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+        page.click_at_opts(x, y, "right", 1).await?;
       }
-    }).await
+      Ok::<(), String>(())
+    })
   }
 
   /// Fill an input or textarea element with the given value.
@@ -184,13 +226,9 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or is not a fillable element.
   pub async fn fill(&self, value: &str) -> Result<(), String> {
-    let value = value.to_string();
-    self
-      .retry_with_element(|el| {
-        let value = value.clone();
-        async move { actions::fill(&el, &value).await }
-      })
-      .await
+    retry_resolve!(self, |el, _page| async move {
+      actions::fill(&el, value).await
+    })
   }
 
   /// Clear the value of an input or textarea element.
@@ -199,18 +237,16 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found.
   pub async fn clear(&self) -> Result<(), String> {
-    self
-      .retry_with_element(|el| async move {
-        el.call_js_fn(
-          "function() { \
-          if (window.__fd) window.__fd.clearAndDispatch(this); \
-          else { this.value = ''; } \
-        }",
-        )
-        .await?;
-        Ok(())
-      })
-      .await
+    retry_resolve!(self, |el, _page| async move {
+      el.call_js_fn(
+        "function() { \
+        if (window.__fd) window.__fd.clearAndDispatch(this); \
+        else { this.value = ''; } \
+      }",
+      )
+      .await?;
+      Ok::<(), String>(())
+    })
   }
 
   /// Type text into the element character by character using keyboard events.
@@ -219,18 +255,10 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or key dispatch fails.
   pub async fn type_text(&self, text: &str) -> Result<(), String> {
-    let text = text.to_string();
-    let page = self.page.inner().clone();
-    self
-      .retry_with_element(|el| {
-        let text = text.clone();
-        let page = page.clone();
-        async move {
-          actions::wait_for_actionable(&el, &page).await.ok();
-          el.type_str(&text).await
-        }
-      })
-      .await
+    retry_resolve!(self, |el, page| async move {
+      actions::wait_for_actionable(&el, page).await.ok();
+      el.type_str(text).await
+    })
   }
 
   /// Press a key or key combination (e.g. "Enter", "Control+a").
@@ -239,15 +267,9 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or the key press fails.
   pub async fn press(&self, key: &str) -> Result<(), String> {
-    let key = key.to_string();
-    let page = self.page.inner().clone();
-    self
-      .retry_with_element(|_el| {
-        let key = key.clone();
-        let page = page.clone();
-        async move { page.press_key(&key).await }
-      })
-      .await
+    retry_resolve!(self, |_el, page| async move {
+      page.press_key(key).await
+    })
   }
 
   /// Hover over the element matched by this locator.
@@ -256,16 +278,10 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or the hover action fails.
   pub async fn hover(&self) -> Result<(), String> {
-    let page = self.page.inner().clone();
-    self
-      .retry_with_element(|el| {
-        let page = page.clone();
-        async move {
-          actions::wait_for_actionable(&el, &page).await.ok();
-          el.hover().await
-        }
-      })
-      .await
+    retry_resolve!(self, |el, page| async move {
+      actions::wait_for_actionable(&el, page).await.ok();
+      el.hover().await
+    })
   }
 
   /// Focus the element matched by this locator.
@@ -274,12 +290,10 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found.
   pub async fn focus(&self) -> Result<(), String> {
-    self
-      .retry_with_element(|el| async move {
-        el.call_js_fn("function() { this.focus(); }").await?;
-        Ok(())
-      })
-      .await
+    retry_resolve!(self, |el, _page| async move {
+      el.call_js_fn("function() { this.focus(); }").await?;
+      Ok::<(), String>(())
+    })
   }
 
   /// Check a checkbox or radio button if it is not already checked.
@@ -288,17 +302,11 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or is not actionable.
   pub async fn check(&self) -> Result<(), String> {
-    let page = self.page.inner().clone();
-    self
-      .retry_with_element(|el| {
-        let page = page.clone();
-        async move {
-          actions::wait_for_actionable(&el, &page).await.ok();
-          el.call_js_fn("function() { if (!this.checked) this.click(); }").await?;
-          Ok(())
-        }
-      })
-      .await
+    retry_resolve!(self, |el, page| async move {
+      actions::wait_for_actionable(&el, page).await.ok();
+      el.call_js_fn("function() { if (!this.checked) this.click(); }").await?;
+      Ok::<(), String>(())
+    })
   }
 
   /// Uncheck a checkbox if it is currently checked.
@@ -307,17 +315,11 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or is not actionable.
   pub async fn uncheck(&self) -> Result<(), String> {
-    let page = self.page.inner().clone();
-    self
-      .retry_with_element(|el| {
-        let page = page.clone();
-        async move {
-          actions::wait_for_actionable(&el, &page).await.ok();
-          el.call_js_fn("function() { if (this.checked) this.click(); }").await?;
-          Ok(())
-        }
-      })
-      .await
+    retry_resolve!(self, |el, page| async move {
+      actions::wait_for_actionable(&el, page).await.ok();
+      el.call_js_fn("function() { if (this.checked) this.click(); }").await?;
+      Ok::<(), String>(())
+    })
   }
 
   /// Set the checked state of a checkbox or radio button.
@@ -774,8 +776,19 @@ impl Locator {
   pub async fn all(&self) -> Result<Vec<Locator>, String> {
     let count = self.count().await?;
     let mut locators = Vec::with_capacity(count);
+    let base = &self.selector;
     for i in 0..count {
-      locators.push(self.nth(i32::try_from(i).unwrap_or(i32::MAX)));
+      let idx = i32::try_from(i).unwrap_or(i32::MAX);
+      let selector = if base.is_empty() {
+        format!("nth={idx}")
+      } else {
+        format!("{base} >> nth={idx}")
+      };
+      locators.push(Locator {
+        page: Arc::clone(&self.page),
+        selector,
+        frame_id: self.frame_id.clone(),
+      });
     }
     Ok(locators)
   }
@@ -868,35 +881,6 @@ impl Locator {
   /// Backoff schedule matching Playwright's retryWithProgressAndTimeouts.
   const RETRY_BACKOFFS_MS: &'static [u64] = &[0, 0, 20, 50, 100, 100, 500];
 
-  /// Resolve element with retry, then run an action on it.
-  /// Used by: click, fill, hover, check, uncheck, tap, dblclick, type, press, etc.
-  /// Matches Playwright's `_retryWithProgressIfNotConnected`.
-  async fn retry_with_element<F, Fut, R>(&self, action: F) -> Result<R, String>
-  where
-    F: Fn(AnyElement) -> Fut,
-    Fut: std::future::Future<Output = Result<R, String>>,
-  {
-    for (i, &delay_ms) in Self::RETRY_BACKOFFS_MS.iter().enumerate() {
-      if delay_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
-      }
-      match self.resolve().await {
-        Ok(el) => match action(el).await {
-          Ok(result) => return Ok(result),
-          Err(e) if e.contains("not connected") || e.contains("not found") || e.contains("detached") => {
-            if i >= Self::RETRY_BACKOFFS_MS.len() - 1 {
-              return Err(e);
-            }
-          },
-          Err(e) => return Err(e),
-        },
-        Err(_) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => {},
-        Err(e) => return Err(e),
-      }
-    }
-    Err(format!("No element found for selector: {}", self.selector))
-  }
-
   /// Resolve element + run JS callback in ONE CDP call, with retry.
   /// Used by: innerText, textContent, innerHTML, getAttribute, inputValue, isVisible, etc.
   /// Matches Playwright's `_callOnElementOnceMatches`.
@@ -927,7 +911,8 @@ impl Locator {
   // ── Internal helpers ────────────────────────────────────────────────────────
 
   async fn resolve(&self) -> Result<AnyElement, String> {
-    selectors::query_one(self.page.inner(), &self.selector, false).await
+    let sel_js = selectors::build_selone_js(&self.selector)?;
+    selectors::query_one_prebuilt(self.page.inner(), &sel_js, &self.selector).await
   }
 
   fn chain(&self, sub: &str) -> Locator {

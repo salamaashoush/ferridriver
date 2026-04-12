@@ -235,35 +235,70 @@ fn build_query_js(selector: &Selector) -> String {
 }
 
 /// Builds a JSON array of selector parts for the injected engine.
+/// Writes directly into a single buffer to avoid intermediate allocations.
 #[must_use]
 pub fn build_parts_json(selector: &Selector) -> String {
-  let parts: Vec<String> = selector
-    .parts
-    .iter()
-    .map(|p| {
-      let engine = match p.engine {
-        Engine::Css => "css",
-        Engine::Text => "text",
-        Engine::Role => "role",
-        Engine::TestId => "testid",
-        Engine::Label => "label",
-        Engine::Placeholder => "placeholder",
-        Engine::Alt => "alt",
-        Engine::Title => "title",
-        Engine::XPath => "xpath",
-        Engine::Id => "id",
-        Engine::Nth => "nth",
-        Engine::Visible => "visible",
-        Engine::Has => "has",
-        Engine::HasText => "has-text",
-        Engine::HasNot => "has-not",
-        Engine::HasNotText => "has-not-text",
-      };
-      let body_escaped = serde_json::to_string(&p.body).unwrap_or_else(|_| format!("\"{}\"", p.body));
-      format!(r#"{{"engine":"{engine}","body":{body_escaped}}}"#)
-    })
-    .collect();
-  format!("[{}]", parts.join(","))
+  // Pre-allocate: ~40 bytes per part is a reasonable estimate
+  let mut buf = String::with_capacity(selector.parts.len() * 40 + 2);
+  buf.push('[');
+  for (i, p) in selector.parts.iter().enumerate() {
+    if i > 0 {
+      buf.push(',');
+    }
+    let engine = engine_str(&p.engine);
+    buf.push_str(r#"{"engine":""#);
+    buf.push_str(engine);
+    buf.push_str(r#"","body":"#);
+    // Inline JSON string escaping into the buffer
+    json_escape_string_into(&mut buf, &p.body);
+    buf.push('}');
+  }
+  buf.push(']');
+  buf
+}
+
+/// Map Engine variant to its protocol string.
+fn engine_str(engine: &Engine) -> &'static str {
+  match engine {
+    Engine::Css => "css",
+    Engine::Text => "text",
+    Engine::Role => "role",
+    Engine::TestId => "testid",
+    Engine::Label => "label",
+    Engine::Placeholder => "placeholder",
+    Engine::Alt => "alt",
+    Engine::Title => "title",
+    Engine::XPath => "xpath",
+    Engine::Id => "id",
+    Engine::Nth => "nth",
+    Engine::Visible => "visible",
+    Engine::Has => "has",
+    Engine::HasText => "has-text",
+    Engine::HasNot => "has-not",
+    Engine::HasNotText => "has-not-text",
+  }
+}
+
+/// Write a JSON-escaped string (with surrounding quotes) directly into `buf`.
+/// Avoids the intermediate String allocation that `serde_json::to_string` would produce.
+fn json_escape_string_into(buf: &mut String, s: &str) {
+  use std::fmt::Write as _;
+
+  buf.push('"');
+  for ch in s.chars() {
+    match ch {
+      '"' => buf.push_str(r#"\""#),
+      '\\' => buf.push_str(r"\\"),
+      '\n' => buf.push_str(r"\n"),
+      '\r' => buf.push_str(r"\r"),
+      '\t' => buf.push_str(r"\t"),
+      c if c.is_control() => {
+        let _ = write!(buf, "\\u{:04x}", c as u32);
+      },
+      c => buf.push(c),
+    }
+  }
+  buf.push('"');
 }
 
 /// The injected JS engine — bundled from `src/injected/` TypeScript sources.
@@ -336,6 +371,31 @@ pub async fn query_one(page: &AnyPage, selector: &str, strict: bool) -> Result<A
     .evaluate_to_element(&js)
     .await
     .map_err(|_| format!("No element found for selector: {selector}"))
+}
+
+/// Query a single element using pre-built JS (avoids re-parsing the selector).
+/// The `sel_js` should be the output of `build_selone_js()`.
+///
+/// # Errors
+///
+/// Returns an error if no element is found or JS evaluation fails.
+pub async fn query_one_prebuilt(page: &AnyPage, sel_js: &str, selector_display: &str) -> Result<AnyElement, String> {
+  page
+    .evaluate_to_element(sel_js)
+    .await
+    .map_err(|_| format!("No element found for selector: {selector_display}"))
+}
+
+/// Build the JS expression for `selOne` from a selector string.
+/// Call once, then pass to `query_one_prebuilt` in a retry loop.
+///
+/// # Errors
+///
+/// Returns an error if the selector string cannot be parsed.
+pub fn build_selone_js(selector: &str) -> Result<String, String> {
+  let parsed = parse(selector)?;
+  let parts_json = build_parts_json(&parsed);
+  Ok(format!("window.__fd.selOne({parts_json})"))
 }
 
 /// Clean up any leftover selector tags (call after operations).
