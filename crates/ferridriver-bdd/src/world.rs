@@ -45,12 +45,13 @@ impl BrowserWorld {
 
   // ── Delegate accessors (used by built-in steps) ──
 
-  pub fn page(&self) -> &Page {
+  pub fn page(&self) -> &Arc<Page> {
     &self.fixtures.page
   }
 
-  pub fn page_mut(&mut self) -> &mut Page {
-    Arc::make_mut(&mut self.fixtures.page)
+  /// Replace the active page Arc entirely (used for tab switching).
+  pub fn set_page(&mut self, page: Arc<Page>) {
+    self.fixtures.page = page;
   }
 
   pub fn context(&self) -> &ContextRef {

@@ -174,6 +174,20 @@ impl FixturePool {
     })
   }
 
+  /// Synchronously get an already-resolved fixture from the cache.
+  /// Returns None if the fixture hasn't been resolved yet.
+  /// Lock-free DashMap read — no async needed.
+  /// Used by NAPI lazy fixture getters to avoid redundant async resolution.
+  pub fn try_get_cached<T: Any + Send + Sync>(&self, name: &str) -> Option<Arc<T>> {
+    if let Some(val) = self.inner.values.get(name) {
+      val.value().clone().downcast::<T>().ok()
+    } else if let Some(parent) = &self.inner.parent {
+      parent.try_get_cached::<T>(name)
+    } else {
+      None
+    }
+  }
+
   /// Inject a pre-created fixture value into the pool (skips setup).
   /// Lock-free DashMap insert — no async needed.
   pub fn inject<T: Any + Send + Sync>(&self, name: &str, value: Arc<T>) {

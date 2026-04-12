@@ -40,6 +40,17 @@
   clippy::manual_let_else
 )]
 
+//! NAPI-RS native addon for ferridriver browser automation.
+//!
+//! Exposes the Playwright-compatible Browser/Page/Locator API to Node.js.
+
+// Use mimalloc as the global allocator for better NAPI workload performance.
+// Reduces fragmentation and improves throughput for the frequent small allocations
+// that occur at the Rust/JS boundary (strings, options structs, callbacks).
+#[cfg(not(target_os = "windows"))]
+#[global_allocator]
+static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod api_request;
 mod bdd_registry;
 mod browser;

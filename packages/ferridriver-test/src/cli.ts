@@ -12,7 +12,7 @@ import type { CommandDef } from 'clap-ts';
 
 import { TestRunner } from '@ferridriver/core';
 import type { Page } from '@ferridriver/core';
-import { _setCurrentFile, _runWithFile, _drainTests, _hasOnly, _setCtMountFactory, _setRunner } from './test.js';
+import { _setCurrentFile, _runWithFile, _drainTests, _hasOnly, _setCtMountFactory, _setRunner, _drainWorkerFixtures } from './test.js';
 import type { MountFunction } from './test.js';
 import { resolve, relative } from 'path';
 import { existsSync, statSync } from 'fs';
@@ -410,6 +410,18 @@ async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
 async function runTests(config: Record<string, any>, testFiles: string[], ctMode: boolean, featureFiles: string[] = [], stepFiles: string[] = []) {
   let viteProcess: any = null;
 
+  // Graceful shutdown on SIGINT/SIGTERM -- kill child processes and exit.
+  const onSignal = () => {
+    if (viteProcess) {
+      viteProcess.stdout?.destroy();
+      viteProcess.stderr?.destroy();
+      viteProcess.kill();
+    }
+    process.exit(130);
+  };
+  process.on('SIGINT', onSignal);
+  process.on('SIGTERM', onSignal);
+
   if (ctMode) {
     const { spawn } = await import('child_process');
     const port = 3100 + Math.floor(Math.random() * 1000);
@@ -433,6 +445,9 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
         const match = line.match(/http:\/\/127\.0\.0\.1:\d+/);
         if (match) {
           clearTimeout(timeout);
+          // Remove listeners once URL is found to prevent leaks and stale references.
+          viteProcess.stdout?.off('data', onData);
+          viteProcess.stderr?.off('data', onData);
           resolveUrl(match[0]);
         }
       };
@@ -485,18 +500,33 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
   ]);
 
   const tests = _drainTests();
-  for (const t of tests) runner.registerTest(t.meta, t.body);
+  if (tests.length > 0) {
+    // Batch-register all tests in a single NAPI call: one lock acquisition,
+    // one boundary crossing, pre-allocated capacity.
+    runner.registerTestsBatch(tests.map(t => ({ meta: t.meta, callback: t.body })));
+  }
 
   if (tests.length === 0 && featureFiles.length === 0) {
     console.log('  No tests found.');
-    if (viteProcess) viteProcess.kill();
+    if (viteProcess) {
+      viteProcess.stdout?.destroy();
+      viteProcess.stderr?.destroy();
+      viteProcess.kill();
+    }
     process.exit(0);
   }
 
   // Run — feature files passed to Rust for parsing/translation into the same plan.
   const summary = await runner.run(featureFiles.length > 0 ? featureFiles : undefined);
 
-  if (viteProcess) viteProcess.kill();
+  // Drain worker-scoped fixture teardowns (unblocks factory cleanup code).
+  await _drainWorkerFixtures();
+
+  if (viteProcess) {
+    viteProcess.stdout?.destroy();
+    viteProcess.stderr?.destroy();
+    viteProcess.kill();
+  }
   // Force exit — NAPI native addon may hold browser process handles that prevent
   // clean shutdown. process.exit() is the correct behavior here (same as Playwright).
   const exitCode = summary.failed > 0 ? 1 : 0;

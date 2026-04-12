@@ -2,7 +2,7 @@
 
 use super::{StepCategory, StepDef};
 use crate::page::Page;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 pub struct StepRegistry {
   steps: Vec<Box<dyn StepDef>>,
@@ -72,7 +72,7 @@ impl StepRegistry {
   /// matched step's execution fails (e.g. element not found, assertion failed).
   pub async fn execute(
     &self,
-    page: &Page,
+    page: &Arc<Page>,
     body: &str,
     data_table: Option<&[Vec<String>]>,
     vars: &mut rustc_hash::FxHashMap<String, String>,

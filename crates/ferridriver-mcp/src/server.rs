@@ -376,7 +376,7 @@ impl McpServer {
   ///
   /// Returns an error if the browser instance cannot be launched or the active page
   /// for the given context cannot be retrieved.
-  pub async fn page(&self, context: &str) -> Result<Page, ErrorData> {
+  pub async fn page(&self, context: &str) -> Result<Arc<Page>, ErrorData> {
     let any_page = Box::pin(self.ensure_active_page(context)).await?;
     Ok(Page::new(any_page))
   }
@@ -402,7 +402,7 @@ impl McpServer {
   /// # Errors
   ///
   /// Returns an error if the browser instance cannot be launched or accessed.
-  pub async fn page_and_context(&self, context: &str) -> Result<(Page, ferridriver::context::ContextRef), ErrorData> {
+  pub async fn page_and_context(&self, context: &str) -> Result<(Arc<Page>, ferridriver::context::ContextRef), ErrorData> {
     let any_page = Box::pin(self.ensure_active_page(context)).await?;
     let page = Page::new(any_page);
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
@@ -417,7 +417,7 @@ impl McpServer {
     let request = ferridriver::api_request::APIRequestContext::new(Default::default());
     Ok(ferridriver_test::model::TestFixtures {
       browser: std::sync::Arc::new(browser),
-      page: std::sync::Arc::new(page),
+      page,
       context: std::sync::Arc::new(ctx_ref),
       request: std::sync::Arc::new(request),
       test_info: std::sync::Arc::new(ferridriver_test::model::TestInfo::new_anonymous()),

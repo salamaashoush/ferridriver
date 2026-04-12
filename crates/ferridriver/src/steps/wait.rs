@@ -85,7 +85,7 @@ step!(WaitNavigation {
 
 // ── Helpers ──
 
-async fn wait_for_selector(page: &crate::page::Page, selector: &str, timeout_ms: u64) -> Result<(), String> {
+async fn wait_for_selector(page: &std::sync::Arc<crate::page::Page>, selector: &str, timeout_ms: u64) -> Result<(), String> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
   loop {
     if tokio::time::Instant::now() >= deadline {
@@ -98,7 +98,7 @@ async fn wait_for_selector(page: &crate::page::Page, selector: &str, timeout_ms:
   }
 }
 
-async fn wait_for_text(page: &crate::page::Page, text: &str, timeout_ms: u64) -> Result<(), String> {
+async fn wait_for_text(page: &std::sync::Arc<crate::page::Page>, text: &str, timeout_ms: u64) -> Result<(), String> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
   let loc = page.locator("body");
   loop {

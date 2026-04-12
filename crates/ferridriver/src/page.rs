@@ -11,40 +11,40 @@ use crate::locator::Locator;
 use crate::options::{GotoOptions, RoleOptions, ScreenshotOptions, TextOptions, WaitOptions};
 use crate::snapshot;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::Mutex;
 
 /// High-level page API, mirrors Playwright's Page interface.
-#[derive(Clone)]
+/// Always constructed behind `Arc<Page>` — locators, frames, and consumers
+/// hold Arc refs. No cloning of the Page struct itself.
 pub struct Page {
   pub(crate) inner: AnyPage,
-  default_timeout: u64,
-  /// Incremental snapshot tracker for `snapshot_for_ai()`.
+  default_timeout: AtomicU64,
   snapshot_tracker: Arc<Mutex<snapshot::SnapshotTracker>>,
-  /// The context this page belongs to (matches Playwright's `page.context()`).
   context_ref: Option<crate::context::ContextRef>,
 }
 
 impl Page {
-  /// Wrap a backend page. Used internally -- prefer `BrowserContext.new_page()`.
+  /// Create a new Page behind Arc. The only construction path.
   #[must_use]
-  pub fn new(inner: AnyPage) -> Self {
-    Self {
+  pub fn new(inner: AnyPage) -> Arc<Self> {
+    Arc::new(Self {
       inner,
-      default_timeout: 30000,
+      default_timeout: AtomicU64::new(30000),
       snapshot_tracker: Arc::new(Mutex::new(snapshot::SnapshotTracker::new())),
       context_ref: None,
-    }
+    })
   }
 
-  /// Wrap a backend page with a context reference (matches Playwright's `page.context()`).
+  /// Create a new Page with context reference, behind Arc.
   #[must_use]
-  pub fn with_context(inner: AnyPage, context: crate::context::ContextRef) -> Self {
-    Self {
+  pub fn with_context(inner: AnyPage, context: crate::context::ContextRef) -> Arc<Self> {
+    Arc::new(Self {
       inner,
-      default_timeout: 30000,
+      default_timeout: AtomicU64::new(30000),
       snapshot_tracker: Arc::new(Mutex::new(snapshot::SnapshotTracker::new())),
       context_ref: Some(context),
-    }
+    })
   }
 
   /// Get the `BrowserContext` this page belongs to (matches Playwright's `page.context()`).
@@ -60,14 +60,14 @@ impl Page {
   }
 
   /// Set the default timeout for all operations (milliseconds).
-  pub fn set_default_timeout(&mut self, ms: u64) {
-    self.default_timeout = ms;
+  pub fn set_default_timeout(&self, ms: u64) {
+    self.default_timeout.store(ms, Ordering::Relaxed);
   }
 
   /// Get the default timeout (milliseconds).
   #[must_use]
   pub fn default_timeout(&self) -> u64 {
-    self.default_timeout
+    self.default_timeout.load(Ordering::Relaxed)
   }
 
   /// Get the current viewport size by querying the browser.
@@ -98,7 +98,7 @@ impl Page {
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<(), String> {
     tracing::debug!(target: "ferridriver::action", action = "goto", url, "page.goto");
-    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout);
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
     self.inner.goto(url, lifecycle, timeout).await
   }
 
@@ -108,7 +108,7 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn go_back(&self, opts: Option<GotoOptions>) -> Result<(), String> {
-    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout);
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
     self.inner.go_back(lifecycle, timeout).await
   }
 
@@ -118,7 +118,7 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn go_forward(&self, opts: Option<GotoOptions>) -> Result<(), String> {
-    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout);
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
     self.inner.go_forward(lifecycle, timeout).await
   }
 
@@ -128,7 +128,7 @@ impl Page {
   ///
   /// Returns an error if the reload fails or the wait condition times out.
   pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<(), String> {
-    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout);
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
     self.inner.reload(lifecycle, timeout).await
   }
 
@@ -160,97 +160,97 @@ impl Page {
   // ── Locators (lazy) ─────────────────────────────────────────────────────
 
   #[must_use]
-  pub fn locator(&self, selector: &str) -> Locator {
+  pub fn locator(self: &Arc<Self>, selector: &str) -> Locator {
     Locator {
-      page: self.clone(),
+      page: Arc::clone(self),
       frame_id: None,
       selector: selector.to_string(),
     }
   }
 
   #[must_use]
-  pub fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Locator {
+  pub fn get_by_role(self: &Arc<Self>, role: &str, opts: &RoleOptions) -> Locator {
     Locator {
-      page: self.clone(),
+      page: Arc::clone(self),
       frame_id: None,
       selector: crate::locator::build_role_selector(role, opts),
     }
   }
 
   #[must_use]
-  pub fn get_by_text(&self, text: &str, opts: &TextOptions) -> Locator {
+  pub fn get_by_text(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
     let sel = if opts.exact == Some(true) {
       format!("text=\"{text}\"")
     } else {
       format!("text={text}")
     };
     Locator {
-      page: self.clone(),
+      page: Arc::clone(self),
       frame_id: None,
       selector: sel,
     }
   }
 
   #[must_use]
-  pub fn get_by_label(&self, text: &str, opts: &TextOptions) -> Locator {
+  pub fn get_by_label(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
     let sel = if opts.exact == Some(true) {
       format!("label=\"{text}\"")
     } else {
       format!("label={text}")
     };
     Locator {
-      page: self.clone(),
+      page: Arc::clone(self),
       frame_id: None,
       selector: sel,
     }
   }
 
   #[must_use]
-  pub fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Locator {
+  pub fn get_by_placeholder(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
     let sel = if opts.exact == Some(true) {
       format!("placeholder=\"{text}\"")
     } else {
       format!("placeholder={text}")
     };
     Locator {
-      page: self.clone(),
+      page: Arc::clone(self),
       frame_id: None,
       selector: sel,
     }
   }
 
   #[must_use]
-  pub fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Locator {
+  pub fn get_by_alt_text(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
     let sel = if opts.exact == Some(true) {
       format!("alt=\"{text}\"")
     } else {
       format!("alt={text}")
     };
     Locator {
-      page: self.clone(),
+      page: Arc::clone(self),
       frame_id: None,
       selector: sel,
     }
   }
 
   #[must_use]
-  pub fn get_by_title(&self, text: &str, opts: &TextOptions) -> Locator {
+  pub fn get_by_title(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
     let sel = if opts.exact == Some(true) {
       format!("title=\"{text}\"")
     } else {
       format!("title={text}")
     };
     Locator {
-      page: self.clone(),
+      page: Arc::clone(self),
       frame_id: None,
       selector: sel,
     }
   }
 
   #[must_use]
-  pub fn get_by_test_id(&self, test_id: &str) -> Locator {
+  pub fn get_by_test_id(self: &Arc<Self>, test_id: &str) -> Locator {
     Locator {
-      page: self.clone(),
+      page: Arc::clone(self),
       frame_id: None,
       selector: format!("testid={test_id}"),
     }
@@ -263,7 +263,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the click fails.
-  pub async fn click(&self, selector: &str) -> Result<(), String> {
+  pub async fn click(self: &Arc<Self>, selector: &str) -> Result<(), String> {
     tracing::debug!(target: "ferridriver::action", action = "click", selector, "page.click");
     self.locator(selector).click().await
   }
@@ -273,7 +273,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not fillable.
-  pub async fn fill(&self, selector: &str, value: &str) -> Result<(), String> {
+  pub async fn fill(self: &Arc<Self>, selector: &str, value: &str) -> Result<(), String> {
     tracing::debug!(target: "ferridriver::action", action = "fill", selector, "page.fill");
     self.locator(selector).fill(value).await
   }
@@ -283,7 +283,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or typing fails.
-  pub async fn type_text(&self, selector: &str, text: &str) -> Result<(), String> {
+  pub async fn type_text(self: &Arc<Self>, selector: &str, text: &str) -> Result<(), String> {
     self.locator(selector).type_text(text).await
   }
 
@@ -292,7 +292,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the key press fails.
-  pub async fn press(&self, selector: &str, key: &str) -> Result<(), String> {
+  pub async fn press(self: &Arc<Self>, selector: &str, key: &str) -> Result<(), String> {
     self.locator(selector).press(key).await
   }
 
@@ -301,7 +301,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the hover fails.
-  pub async fn hover(&self, selector: &str) -> Result<(), String> {
+  pub async fn hover(self: &Arc<Self>, selector: &str) -> Result<(), String> {
     self.locator(selector).hover().await
   }
 
@@ -310,7 +310,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the option cannot be selected.
-  pub async fn select_option(&self, selector: &str, value: &str) -> Result<Vec<String>, String> {
+  pub async fn select_option(self: &Arc<Self>, selector: &str, value: &str) -> Result<Vec<String>, String> {
     self.locator(selector).select_option(value).await
   }
 
@@ -319,7 +319,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or file setting fails.
-  pub async fn set_input_files(&self, selector: &str, paths: &[String]) -> Result<(), String> {
+  pub async fn set_input_files(self: &Arc<Self>, selector: &str, paths: &[String]) -> Result<(), String> {
     self.locator(selector).set_input_files(paths).await
   }
 
@@ -328,7 +328,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
-  pub async fn check(&self, selector: &str) -> Result<(), String> {
+  pub async fn check(self: &Arc<Self>, selector: &str) -> Result<(), String> {
     self.locator(selector).check().await
   }
 
@@ -337,7 +337,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not uncheckable.
-  pub async fn uncheck(&self, selector: &str) -> Result<(), String> {
+  pub async fn uncheck(self: &Arc<Self>, selector: &str) -> Result<(), String> {
     self.locator(selector).uncheck().await
   }
 
@@ -375,7 +375,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn text_content(&self, selector: &str) -> Result<Option<String>, String> {
+  pub async fn text_content(self: &Arc<Self>, selector: &str) -> Result<Option<String>, String> {
     self.locator(selector).text_content().await
   }
 
@@ -384,7 +384,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn inner_text(&self, selector: &str) -> Result<String, String> {
+  pub async fn inner_text(self: &Arc<Self>, selector: &str) -> Result<String, String> {
     self.locator(selector).inner_text().await
   }
 
@@ -393,7 +393,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn inner_html(&self, selector: &str) -> Result<String, String> {
+  pub async fn inner_html(self: &Arc<Self>, selector: &str) -> Result<String, String> {
     self.locator(selector).inner_html().await
   }
 
@@ -402,7 +402,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn get_attribute(&self, selector: &str, name: &str) -> Result<Option<String>, String> {
+  pub async fn get_attribute(self: &Arc<Self>, selector: &str, name: &str) -> Result<Option<String>, String> {
     self.locator(selector).get_attribute(name).await
   }
 
@@ -411,7 +411,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn input_value(&self, selector: &str) -> Result<String, String> {
+  pub async fn input_value(self: &Arc<Self>, selector: &str) -> Result<String, String> {
     self.locator(selector).input_value().await
   }
 
@@ -422,7 +422,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_visible(&self, selector: &str) -> Result<bool, String> {
+  pub async fn is_visible(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
     self.locator(selector).is_visible().await
   }
 
@@ -431,7 +431,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_hidden(&self, selector: &str) -> Result<bool, String> {
+  pub async fn is_hidden(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
     self.locator(selector).is_hidden().await
   }
 
@@ -440,7 +440,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_enabled(&self, selector: &str) -> Result<bool, String> {
+  pub async fn is_enabled(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
     self.locator(selector).is_enabled().await
   }
 
@@ -449,7 +449,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_disabled(&self, selector: &str) -> Result<bool, String> {
+  pub async fn is_disabled(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
     self.locator(selector).is_disabled().await
   }
 
@@ -458,7 +458,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_checked(&self, selector: &str) -> Result<bool, String> {
+  pub async fn is_checked(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
     self.locator(selector).is_checked().await
   }
 
@@ -498,7 +498,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out.
-  pub async fn wait_for_selector(&self, selector: &str, opts: WaitOptions) -> Result<(), String> {
+  pub async fn wait_for_selector(self: &Arc<Self>, selector: &str, opts: WaitOptions) -> Result<(), String> {
     self.locator(selector).wait_for(opts).await
   }
 
@@ -508,7 +508,7 @@ impl Page {
   ///
   /// Returns an error if the wait times out.
   pub async fn wait_for_url(&self, url_pattern: &str) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(self.default_timeout);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(self.default_timeout());
     loop {
       if tokio::time::Instant::now() >= deadline {
         return Err(format!("Timeout waiting for URL matching '{url_pattern}'"));
@@ -535,7 +535,7 @@ impl Page {
   /// Returns an error if the wait times out before the load state is reached.
   pub async fn wait_for_load_state(&self, state: Option<&str>) -> Result<(), String> {
     let state = state.unwrap_or("load");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(self.default_timeout);
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(self.default_timeout());
 
     match state {
       "domcontentloaded" => loop {
@@ -623,7 +623,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or screenshot capture fails.
-  pub async fn screenshot_element(&self, selector: &str) -> Result<Vec<u8>, String> {
+  pub async fn screenshot_element(self: &Arc<Self>, selector: &str) -> Result<Vec<u8>, String> {
     self.locator(selector).screenshot().await
   }
 
@@ -1095,7 +1095,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn focus(&self, selector: &str) -> Result<(), String> {
+  pub async fn focus(self: &Arc<Self>, selector: &str) -> Result<(), String> {
     self.locator(selector).focus().await
   }
 
@@ -1104,7 +1104,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the event dispatch fails.
-  pub async fn dispatch_event(&self, selector: &str, event_type: &str) -> Result<(), String> {
+  pub async fn dispatch_event(self: &Arc<Self>, selector: &str, event_type: &str) -> Result<(), String> {
     self.locator(selector).dispatch_event(event_type).await
   }
 
@@ -1113,7 +1113,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_editable(&self, selector: &str) -> Result<bool, String> {
+  pub async fn is_editable(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
     self.locator(selector).is_editable().await
   }
 
@@ -1129,7 +1129,7 @@ impl Page {
     expression: &str,
     timeout_ms: Option<u64>,
   ) -> Result<serde_json::Value, String> {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout);
+    let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
     loop {
       if tokio::time::Instant::now() >= deadline {
@@ -1157,7 +1157,7 @@ impl Page {
   ///
   /// Returns an error if the wait times out.
   pub async fn wait_for_navigation(&self, timeout_ms: Option<u64>) -> Result<(), String> {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout);
+    let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let current = self.url().await.unwrap_or_default();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
     loop {
@@ -1218,13 +1218,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the frame tree cannot be retrieved or no main frame exists.
-  pub async fn main_frame(&self) -> Result<Frame, String> {
+  pub async fn main_frame(self: &Arc<Self>) -> Result<Frame, String> {
     let frames = self.inner.get_frame_tree().await?;
     let main = frames
       .into_iter()
       .find(|f| f.parent_frame_id.is_none())
       .ok_or("No main frame found")?;
-    Ok(Frame::from_info(self.clone(), main))
+    Ok(Frame::from_info(Arc::clone(self), main))
   }
 
   /// Get all frames in the page (main frame + all iframes).
@@ -1232,12 +1232,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn frames(&self) -> Result<Vec<Frame>, String> {
+  pub async fn frames(self: &Arc<Self>) -> Result<Vec<Frame>, String> {
     let infos = self.inner.get_frame_tree().await?;
     Ok(
       infos
         .into_iter()
-        .map(|info| Frame::from_info(self.clone(), info))
+        .map(|info| Frame::from_info(Arc::clone(self), info))
         .collect(),
     )
   }
@@ -1247,7 +1247,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn frame(&self, name_or_url: &str) -> Result<Option<Frame>, String> {
+  pub async fn frame(self: &Arc<Self>, name_or_url: &str) -> Result<Option<Frame>, String> {
     let frames = self.frames().await?;
     Ok(
       frames
@@ -1309,7 +1309,7 @@ impl Page {
     &self,
     timeout_ms: Option<u64>,
   ) -> impl std::future::Future<Output = Result<(), String>> + '_ {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout);
+    let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let events = self.inner.events().clone();
     async move {
       events
@@ -1329,7 +1329,7 @@ impl Page {
     url_pattern: &str,
     timeout_ms: Option<u64>,
   ) -> impl std::future::Future<Output = Result<crate::events::NetResponse, String>> + '_ {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout);
+    let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let events = self.inner.events().clone();
     let pattern = url_pattern.to_string();
     async move {
@@ -1356,7 +1356,7 @@ impl Page {
     url_pattern: &str,
     timeout_ms: Option<u64>,
   ) -> impl std::future::Future<Output = Result<crate::context::NetRequest, String>> + '_ {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout);
+    let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let events = self.inner.events().clone();
     let pattern = url_pattern.to_string();
     async move {
@@ -1382,7 +1382,7 @@ impl Page {
     &self,
     timeout_ms: Option<u64>,
   ) -> impl std::future::Future<Output = Result<crate::events::DownloadInfo, String>> + '_ {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout);
+    let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let events = self.inner.events().clone();
     async move {
       let event = events
@@ -1404,7 +1404,7 @@ impl Page {
     self
       .inner
       .events()
-      .wait_for_event(event_name, timeout_ms.unwrap_or(self.default_timeout))
+      .wait_for_event(event_name, timeout_ms.unwrap_or(self.default_timeout()))
       .await
   }
 
@@ -1424,7 +1424,7 @@ impl Page {
       .events()
       .wait_for(
         move |e| matches!(e, PageEvent::Download(d) if pattern.as_ref().is_none_or(|p| d.url.contains(p))),
-        timeout_ms.unwrap_or(self.default_timeout),
+        timeout_ms.unwrap_or(self.default_timeout()),
       )
       .await?;
     match event {
@@ -1449,7 +1449,7 @@ impl Page {
       .events()
       .wait_for(
         move |e| matches!(e, PageEvent::Request(r) if r.url.contains(&pattern)),
-        timeout_ms.unwrap_or(self.default_timeout),
+        timeout_ms.unwrap_or(self.default_timeout()),
       )
       .await?;
     match event {
@@ -1474,7 +1474,7 @@ impl Page {
       .events()
       .wait_for(
         move |e| matches!(e, PageEvent::Response(r) if r.url.contains(&pattern)),
-        timeout_ms.unwrap_or(self.default_timeout),
+        timeout_ms.unwrap_or(self.default_timeout()),
       )
       .await?;
     match event {

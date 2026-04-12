@@ -233,7 +233,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if page creation fails.
-  pub async fn new_page(&self) -> Result<Page, String> {
+  pub async fn new_page(&self) -> Result<Arc<Page>, String> {
     let mut state = self.state.write().await;
     let any_page = Box::pin(state.open_page_keyed(&self.key, "about:blank")).await?;
     Ok(Page::with_context(any_page, self.clone()))
@@ -244,7 +244,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist.
-  pub async fn pages(&self) -> Result<Vec<Page>, String> {
+  pub async fn pages(&self) -> Result<Vec<Arc<Page>>, String> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     Ok(

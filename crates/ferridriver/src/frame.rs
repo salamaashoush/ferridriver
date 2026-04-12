@@ -7,6 +7,8 @@
 //! Frame has the same evaluation and locator methods as Page,
 //! but scoped to its specific frame context.
 
+use std::sync::Arc;
+
 use crate::backend::FrameInfo;
 use crate::locator::Locator;
 use crate::options::{RoleOptions, TextOptions, WaitOptions};
@@ -15,8 +17,8 @@ use crate::page::Page;
 /// A frame within a page. Mirrors Playwright's Frame interface.
 #[derive(Clone)]
 pub struct Frame {
-  /// The page this frame belongs to.
-  page: Page,
+  /// The page this frame belongs to (Arc for cheap cloning in locator chains).
+  page: Arc<Page>,
   /// Frame ID (from CDP or backend).
   pub(crate) id: String,
   /// Parent frame ID (None for main frame).
@@ -29,7 +31,7 @@ pub struct Frame {
 
 impl Frame {
   /// Create a frame from backend `FrameInfo`.
-  pub(crate) fn from_info(page: Page, info: FrameInfo) -> Self {
+  pub(crate) fn from_info(page: Arc<Page>, info: FrameInfo) -> Self {
     Self {
       page,
       id: info.frame_id,
@@ -125,7 +127,7 @@ impl Frame {
   #[must_use]
   pub fn locator(&self, selector: &str) -> Locator {
     Locator {
-      page: self.page.clone(),
+      page: Arc::clone(&self.page),
       selector: selector.to_string(),
       frame_id: Some(self.id.clone()),
     }
@@ -135,7 +137,7 @@ impl Frame {
   pub fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Locator {
     let sel = crate::locator::build_role_selector(role, opts);
     Locator {
-      page: self.page.clone(),
+      page: Arc::clone(&self.page),
       selector: sel,
       frame_id: Some(self.id.clone()),
     }
@@ -149,7 +151,7 @@ impl Frame {
       format!("text={text}")
     };
     Locator {
-      page: self.page.clone(),
+      page: Arc::clone(&self.page),
       selector: sel,
       frame_id: Some(self.id.clone()),
     }
@@ -158,7 +160,7 @@ impl Frame {
   #[must_use]
   pub fn get_by_test_id(&self, test_id: &str) -> Locator {
     Locator {
-      page: self.page.clone(),
+      page: Arc::clone(&self.page),
       selector: format!("testid={test_id}"),
       frame_id: Some(self.id.clone()),
     }
@@ -172,7 +174,7 @@ impl Frame {
       format!("label={text}")
     };
     Locator {
-      page: self.page.clone(),
+      page: Arc::clone(&self.page),
       selector: sel,
       frame_id: Some(self.id.clone()),
     }
@@ -186,7 +188,7 @@ impl Frame {
       format!("placeholder={text}")
     };
     Locator {
-      page: self.page.clone(),
+      page: Arc::clone(&self.page),
       selector: sel,
       frame_id: Some(self.id.clone()),
     }

@@ -10,6 +10,7 @@
 //! ```
 
 use std::fmt::Write as _;
+use std::sync::Arc;
 
 use crate::actions;
 use crate::backend::AnyElement;
@@ -17,9 +18,11 @@ use crate::options::{BoundingBox, FilterOptions, RoleOptions, TextOptions, WaitO
 use crate::selectors;
 
 /// A lazy element locator. Does not query the DOM until an action is called.
+/// Holds `Arc<Page>` instead of owned Page — locator chains are just atomic
+/// refcount bumps, not full Page clones.
 #[derive(Clone)]
 pub struct Locator {
-  pub(crate) page: crate::page::Page,
+  pub(crate) page: Arc<crate::page::Page>,
   pub(crate) selector: String,
   /// If set, evaluate in this frame instead of the main frame.
   pub(crate) frame_id: Option<String>,
@@ -934,7 +937,7 @@ impl Locator {
       format!("{} >> {sub}", self.selector)
     };
     Locator {
-      page: self.page.clone(),
+      page: Arc::clone(&self.page),
       selector,
       frame_id: self.frame_id.clone(),
     }

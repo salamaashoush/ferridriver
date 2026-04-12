@@ -1,129 +1,158 @@
-//! NAPI `TestFixtures` class — thin wrapper over the core `TestFixtures` model.
+//! NAPI `TestFixtures` — pool-backed lazy fixture resolution.
 //!
-//! Unified fixture bag for both E2E and BDD callbacks. E2E tests get
-//! browser/page/context/request/testInfo. BDD steps additionally get
-//! args/dataTable/docString.
+//! Single construction path: all fixtures resolve lazily from a `FixturePool`
+//! via sync DashMap reads. No eager fetching, no cloning until a getter is
+//! actually called by JS.
 
 use std::sync::Arc;
 
 use napi_derive::napi;
 
 /// Fixture object passed to all JS callbacks (tests, steps, hooks).
-///
-/// E2E usage:
-/// ```js
-/// test('name', async ({ page, browserName, testInfo }) => { ... });
-/// ```
-///
-/// BDD usage:
-/// ```js
-/// Given('I click {string}', async ({ page, args: [selector], testInfo }) => { ... });
-/// ```
+/// Backed by a FixturePool — getters resolve lazily via sync DashMap reads.
 #[napi]
 pub struct TestFixtures {
-  inner: ferridriver_test::model::TestFixtures,
+  pool: ferridriver_test::fixture::FixturePool,
+  test_info: Arc<ferridriver_test::model::TestInfo>,
+  modifiers: Arc<ferridriver_test::model::TestModifiers>,
+  browser_config: ferridriver_test::config::BrowserConfig,
+  bdd_args: Option<Vec<serde_json::Value>>,
+  bdd_data_table: Option<Vec<Vec<String>>>,
+  bdd_doc_string: Option<String>,
 }
 
 impl TestFixtures {
-  /// Wrap a core `TestFixtures` for NAPI consumption.
-  pub(crate) fn wrap(inner: ferridriver_test::model::TestFixtures) -> Self {
-    Self { inner }
+  /// Construct from a pool. The only construction path.
+  /// Pool already has fixtures cached in its DashMap — getters do sync reads.
+  pub(crate) fn from_pool(
+    pool: ferridriver_test::fixture::FixturePool,
+    test_info: Arc<ferridriver_test::model::TestInfo>,
+    modifiers: Arc<ferridriver_test::model::TestModifiers>,
+    browser_config: ferridriver_test::config::BrowserConfig,
+  ) -> Self {
+    Self {
+      pool,
+      test_info,
+      modifiers,
+      browser_config,
+      bdd_args: None,
+      bdd_data_table: None,
+      bdd_doc_string: None,
+    }
   }
 
+  /// Construct from already-resolved model::TestFixtures.
+  /// Injects the resolved fixtures into a fresh pool so getters
+  /// use the same code path.
+  pub(crate) fn from_resolved(inner: ferridriver_test::model::TestFixtures) -> Self {
+    let pool = ferridriver_test::fixture::FixturePool::new(
+      rustc_hash::FxHashMap::default(),
+      ferridriver_test::fixture::FixtureScope::Test,
+    );
+    pool.inject("browser", inner.browser);
+    pool.inject("page", inner.page);
+    pool.inject("context", inner.context);
+    pool.inject("request", inner.request);
+
+    Self {
+      pool,
+      test_info: inner.test_info,
+      modifiers: inner.modifiers,
+      browser_config: inner.browser_config,
+      bdd_args: inner.bdd_args,
+      bdd_data_table: inner.bdd_data_table,
+      bdd_doc_string: inner.bdd_doc_string,
+    }
+  }
 }
 
 #[napi]
 impl TestFixtures {
-  // ── Core fixtures ──
-
   #[napi(getter)]
   pub fn browser(&self) -> crate::browser::Browser {
-    crate::browser::Browser::wrap((*self.inner.browser).clone())
+    let b = self.pool.try_get_cached::<ferridriver::Browser>("browser")
+      .expect("fixture 'browser' not resolved");
+    crate::browser::Browser::wrap((*b).clone())
   }
 
   #[napi(getter)]
   pub fn page(&self) -> crate::page::Page {
-    crate::page::Page::wrap((*self.inner.page).clone())
+    let p = self.pool.try_get_cached::<ferridriver::Page>("page")
+      .expect("fixture 'page' not resolved");
+    crate::page::Page::wrap(p)
   }
 
   #[napi(getter)]
   pub fn context(&self) -> crate::context::BrowserContext {
-    crate::context::BrowserContext::wrap((*self.inner.context).clone())
+    let c = self.pool.try_get_cached::<ferridriver::context::ContextRef>("context")
+      .expect("fixture 'context' not resolved");
+    crate::context::BrowserContext::wrap((*c).clone())
   }
 
   #[napi(getter)]
   pub fn request(&self) -> crate::api_request::ApiRequestContext {
-    crate::api_request::ApiRequestContext::wrap((*self.inner.request).clone())
+    let r = self.pool.try_get_cached::<ferridriver::api_request::APIRequestContext>("request")
+      .expect("fixture 'request' not resolved");
+    crate::api_request::ApiRequestContext::wrap((*r).clone())
   }
 
   #[napi(getter, js_name = "testInfo")]
   pub fn test_info(&self) -> crate::test_info::TestInfo {
-    crate::test_info::TestInfo::new(Arc::clone(&self.inner.test_info), Arc::clone(&self.inner.modifiers))
+    crate::test_info::TestInfo::new(Arc::clone(&self.test_info), Arc::clone(&self.modifiers))
   }
-
-  // ── Browser config fixtures (Playwright worker-scoped options) ──
 
   #[napi(getter, js_name = "browserName")]
   pub fn browser_name(&self) -> String {
-    self.inner.browser_config.browser.clone()
+    self.browser_config.browser.clone()
   }
 
   #[napi(getter)]
   pub fn headless(&self) -> bool {
-    self.inner.browser_config.headless
+    self.browser_config.headless
   }
 
   #[napi(getter)]
   pub fn channel(&self) -> Option<String> {
-    self.inner.browser_config.channel.clone()
+    self.browser_config.channel.clone()
   }
-
-  // ── Context config fixtures (Playwright test-scoped options) ──
 
   #[napi(getter, js_name = "isMobile")]
   pub fn is_mobile(&self) -> bool {
-    self.inner.browser_config.context.is_mobile
+    self.browser_config.context.is_mobile
   }
 
   #[napi(getter, js_name = "hasTouch")]
   pub fn has_touch(&self) -> bool {
-    self.inner.browser_config.context.has_touch
+    self.browser_config.context.has_touch
   }
 
   #[napi(getter, js_name = "colorScheme")]
   pub fn color_scheme(&self) -> Option<String> {
-    self.inner.browser_config.context.color_scheme.clone()
+    self.browser_config.context.color_scheme.clone()
   }
 
   #[napi(getter)]
   pub fn locale(&self) -> Option<String> {
-    self.inner.browser_config.context.locale.clone()
+    self.browser_config.context.locale.clone()
   }
 
-  // ── BDD fixtures (None for E2E tests/hooks) ──
-
-  /// Extracted parameters from the BDD step expression (typed: int→number, string→string).
-  /// Returns null for E2E tests.
   #[napi(getter, ts_return_type = "unknown[] | null")]
   pub fn args(&self) -> Option<serde_json::Value> {
-    self.inner.bdd_args.as_ref().map(|a| serde_json::Value::Array(a.clone()))
+    self.bdd_args.as_ref().map(|a| serde_json::Value::Array(a.clone()))
   }
 
-  /// Alias for `args`.
   #[napi(getter, ts_return_type = "unknown[] | null")]
   pub fn params(&self) -> Option<serde_json::Value> {
     self.args()
   }
 
-  /// The inline data table attached to this BDD step, if any.
   #[napi(getter, js_name = "dataTable")]
   pub fn data_table(&self) -> Option<Vec<Vec<String>>> {
-    self.inner.bdd_data_table.clone()
+    self.bdd_data_table.clone()
   }
 
-  /// The doc string attached to this BDD step, if any.
   #[napi(getter, js_name = "docString")]
   pub fn doc_string(&self) -> Option<String> {
-    self.inner.bdd_doc_string.clone()
+    self.bdd_doc_string.clone()
   }
 }

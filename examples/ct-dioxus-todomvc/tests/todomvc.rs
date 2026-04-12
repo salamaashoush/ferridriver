@@ -11,7 +11,7 @@ use ferridriver_test_macros::ferritest;
 
 const APP_URL: &str = "http://127.0.0.1:8787";
 
-async fn add_todo(page: &Page, text: &str) -> Result<(), String> {
+async fn add_todo(page: &std::sync::Arc<Page>, text: &str) -> Result<(), String> {
   page.locator("#new-todo").fill(text).await?;
   page.locator("#new-todo").press("Enter").await?;
   Ok(())
