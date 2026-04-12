@@ -22,8 +22,12 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 async-trait = { workspace = true }
 rustc-hash = "2"
+tracing = { workspace = true }
 mimalloc = { workspace = true }
 async-channel = "2"
+
+[features]
+profiling = ["ferridriver-test/profiling"]
 
 [build-dependencies]
 napi-build = "2"

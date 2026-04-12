@@ -131,6 +131,7 @@ fn parse_debug_categories(debug_val: &str) -> EnvFilter {
       "reporter" => "ferridriver::reporter=trace",
       "action" => "ferridriver::action=trace",
       "runner" => "ferridriver::runner=trace",
+      "napi" => "napi=trace",
       other => {
         // Allow arbitrary target names.
         let owned = format!("{other}=trace");
