@@ -262,8 +262,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       let lc_notify = Arc::new(tokio::sync::Notify::new());
       pages.push(T::wrap_page(CdpPage {
         transport: self.transport.clone(),
-        session_id: sid,
-        target_id,
+        session_id: sid.map(Arc::from),
+        target_id: Arc::from(target_id),
         browser_context_id: None,
         events: crate::events::EventEmitter::new(),
         frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
@@ -380,9 +380,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let lc_notify = Arc::new(tokio::sync::Notify::new());
     let page = CdpPage {
       transport: self.transport.clone(),
-      session_id: sid,
-      target_id,
-      browser_context_id: browser_context_id.map(String::from),
+      session_id: sid.map(Arc::from),
+      target_id: Arc::from(target_id),
+      browser_context_id: browser_context_id.map(Arc::from),
       events: crate::events::EventEmitter::new(),
       frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
       dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
@@ -584,10 +584,10 @@ impl LifecycleState {
 
 pub struct CdpPage<T: CdpTransport> {
   transport: Arc<T>,
-  session_id: Option<String>,
-  target_id: String,
+  session_id: Option<Arc<str>>,
+  target_id: Arc<str>,
   /// Browser context ID for isolated contexts (used for `Target.disposeBrowserContext` on close).
-  browser_context_id: Option<String>,
+  browser_context_id: Option<Arc<str>>,
   /// Event emitter for page events (console, dialog, network, frame lifecycle).
   pub events: crate::events::EventEmitter,
   /// Frame ID -> execution context ID mapping for frame-scoped evaluation.
@@ -1120,7 +1120,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// (matching Playwright's approach) so Chrome sends the next frame ASAP.
   fn spawn_screencast_listener(
     transport: Arc<T>,
-    session_id: Option<String>,
+    session_id: Option<Arc<str>>,
     frame_tx: tokio::sync::mpsc::UnboundedSender<(Vec<u8>, f64)>,
   ) {
     tokio::spawn(async move {
@@ -1129,7 +1129,7 @@ impl<T: CdpWrap> CdpPage<T> {
         // Filter by CDP session.
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-          if event_sid != Some(expected_sid.as_str()) {
+          if event_sid != Some(&**expected_sid) {
             continue;
           }
         }
@@ -1846,7 +1846,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   fn spawn_console_listener(
     transport: Arc<T>,
-    session_id: Option<String>,
+    session_id: Option<Arc<str>>,
     console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
     emitter: crate::events::EventEmitter,
   ) {
@@ -1855,7 +1855,7 @@ impl<T: CdpWrap> CdpPage<T> {
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-          if event_sid != Some(expected_sid.as_str()) {
+          if event_sid != Some(&**expected_sid) {
             continue;
           }
         }
@@ -1885,7 +1885,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   fn spawn_network_listener(
     transport: Arc<T>,
-    session_id: Option<String>,
+    session_id: Option<Arc<str>>,
     network_log: Arc<RwLock<Vec<NetRequest>>>,
     emitter: crate::events::EventEmitter,
   ) {
@@ -1894,7 +1894,7 @@ impl<T: CdpWrap> CdpPage<T> {
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-          if event_sid != Some(expected_sid.as_str()) {
+          if event_sid != Some(&**expected_sid) {
             continue;
           }
         }
@@ -2027,7 +2027,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   fn spawn_dialog_listener(
     transport: Arc<T>,
-    session_id: Option<String>,
+    session_id: Option<Arc<str>>,
     handler: Arc<tokio::sync::RwLock<crate::events::DialogHandler>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
     emitter: crate::events::EventEmitter,
@@ -2037,7 +2037,7 @@ impl<T: CdpWrap> CdpPage<T> {
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-          if event_sid != Some(expected_sid.as_str()) {
+          if event_sid != Some(&**expected_sid) {
             continue;
           }
         }
@@ -2090,7 +2090,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   fn spawn_frame_context_tracker(
     transport: Arc<T>,
-    session_id: Option<String>,
+    session_id: Option<Arc<str>>,
     frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
     emitter: crate::events::EventEmitter,
   ) {
@@ -2099,7 +2099,7 @@ impl<T: CdpWrap> CdpPage<T> {
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-          if event_sid != Some(expected_sid.as_str()) {
+          if event_sid != Some(&**expected_sid) {
             continue;
           }
         }
@@ -2245,7 +2245,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = sid {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-          if event_sid != Some(expected_sid.as_str()) {
+          if event_sid != Some(&**expected_sid) {
             continue;
           }
         }
@@ -2329,7 +2329,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       .send_command(
         None,
         "Target.closeTarget",
-        serde_json::json!({"targetId": self.target_id}),
+        serde_json::json!({"targetId": &*self.target_id}),
       )
       .await;
     // Dispose the browser context if this page was created in an isolated context.
@@ -2342,7 +2342,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         .send_command(
           None,
           "Target.disposeBrowserContext",
-          serde_json::json!({"browserContextId": ctx_id}),
+          serde_json::json!({"browserContextId": &**ctx_id}),
         )
         .await;
     }
@@ -2397,7 +2397,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
   async fn handle_fetch_events(
     transport: Arc<T>,
-    session_id: Option<String>,
+    session_id: Option<Arc<str>>,
     routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
     http_credentials: Arc<tokio::sync::RwLock<Option<(String, String)>>>,
   ) {
@@ -2405,7 +2405,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     while let Ok(event) = rx.recv().await {
       if let Some(ref expected_sid) = session_id {
         let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-        if event_sid != Some(expected_sid.as_str()) {
+        if event_sid != Some(&**expected_sid) {
           continue;
         }
       }
@@ -2627,7 +2627,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
 pub struct CdpElement<T: CdpTransport> {
   transport: Arc<T>,
-  session_id: Option<String>,
+  session_id: Option<Arc<str>>,
   node_id: i64,
 }
 

@@ -16,12 +16,12 @@ use crate::backend::ImageFormat;
 /// Element handle for the BiDi backend.
 pub struct BidiElement {
   pub(crate) session: Arc<BidiSession>,
-  pub(crate) context_id: String,
+  pub(crate) context_id: Arc<str>,
   pub(crate) shared_id: String,
 }
 
 impl BidiElement {
-  pub(crate) fn new(session: Arc<BidiSession>, context_id: String, shared_id: String) -> Self {
+  pub(crate) fn new(session: Arc<BidiSession>, context_id: Arc<str>, shared_id: String) -> Self {
     Self {
       session,
       context_id,
@@ -41,7 +41,7 @@ impl BidiElement {
         "script.callFunction",
         json!({
           "functionDeclaration": func,
-          "target": {"context": self.context_id},
+          "target": {"context": &*self.context_id},
           "this": {"type": "sharedReference", "sharedId": self.shared_id},
           "arguments": [{"type": "sharedReference", "sharedId": self.shared_id}],
           "awaitPromise": true,
@@ -175,7 +175,7 @@ impl BidiElement {
       .send_command(
         "browsingContext.captureScreenshot",
         json!({
-          "context": self.context_id,
+          "context": &*self.context_id,
           "format": {"type": format_type},
           "clip": {"type": "element", "element": {"sharedId": self.shared_id}}
         }),

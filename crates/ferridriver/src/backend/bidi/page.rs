@@ -25,7 +25,7 @@ use crate::state::{ConsoleMsg, DialogEvent, NetRequest};
 #[derive(Clone)]
 pub struct BidiPage {
   pub(crate) session: Arc<BidiSession>,
-  pub(crate) context_id: String,
+  pub(crate) context_id: Arc<str>,
   pub events: EventEmitter,
   routes: Arc<RwLock<Vec<crate::route::RegisteredRoute>>>,
   intercept_ids: Arc<RwLock<Vec<String>>>,
@@ -41,7 +41,7 @@ impl BidiPage {
   pub(crate) async fn create(session: Arc<BidiSession>, context_id: String) -> Result<Self, String> {
     let page = Self {
       session,
-      context_id,
+      context_id: Arc::from(context_id),
       events: EventEmitter::new(),
       routes: Arc::new(RwLock::new(Vec::new())),
       intercept_ids: Arc::new(RwLock::new(Vec::new())),
@@ -68,14 +68,14 @@ impl BidiPage {
         "script.addPreloadScript",
         json!({
           "functionDeclaration": format!("() => {{ {engine_js} }}"),
-          "contexts": [self.context_id]
+          "contexts": [&*self.context_id]
         }),
       ),
       self.cmd(
         "script.evaluate",
         json!({
           "expression": engine_js,
-          "target": {"context": self.context_id},
+          "target": {"context": &*self.context_id},
           "awaitPromise": false,
           "resultOwnership": "none"
         }),
@@ -128,7 +128,7 @@ impl BidiPage {
 
   pub async fn get_frame_tree(&self) -> Result<Vec<FrameInfo>, String> {
     let result = self
-      .cmd("browsingContext.getTree", json!({"root": self.context_id}))
+      .cmd("browsingContext.getTree", json!({"root": &*self.context_id}))
       .await?;
     let contexts = result
       .get("contexts")
@@ -179,7 +179,7 @@ impl BidiPage {
       self.cmd(
         "browsingContext.navigate",
         json!({
-          "context": self.context_id,
+          "context": &*self.context_id,
           "url": url,
           "wait": wait
         }),
@@ -202,7 +202,7 @@ impl BidiPage {
       while let Ok(event) = rx.recv().await {
         if event.method == "browsingContext.load" {
           if let Some(c) = event.params.get("context").and_then(|v| v.as_str()) {
-            if c == ctx {
+            if c == &*ctx {
               return Ok(());
             }
           }
@@ -223,7 +223,7 @@ impl BidiPage {
       self.cmd(
         "browsingContext.reload",
         json!({
-          "context": self.context_id,
+          "context": &*self.context_id,
           "wait": wait
         }),
       ),
@@ -243,7 +243,7 @@ impl BidiPage {
       self.cmd(
         "browsingContext.traverseHistory",
         json!({
-          "context": self.context_id,
+          "context": &*self.context_id,
           "delta": -1
         }),
       ),
@@ -263,7 +263,7 @@ impl BidiPage {
       self.cmd(
         "browsingContext.traverseHistory",
         json!({
-          "context": self.context_id,
+          "context": &*self.context_id,
           "delta": 1
         }),
       ),
@@ -279,14 +279,14 @@ impl BidiPage {
 
   pub async fn url(&self) -> Result<Option<String>, String> {
     self
-      .eval_internal("location.href", &self.context_id)
+      .eval_internal("location.href", &&*self.context_id)
       .await
       .map(|v| v.and_then(|val| val.as_str().map(String::from)))
   }
 
   pub async fn title(&self) -> Result<Option<String>, String> {
     self
-      .eval_internal("document.title", &self.context_id)
+      .eval_internal("document.title", &&*self.context_id)
       .await
       .map(|v| v.and_then(|val| val.as_str().map(String::from)))
   }
@@ -294,7 +294,7 @@ impl BidiPage {
   // ── JavaScript ──────────────────────────────────────────────────────────
 
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
-    self.eval_internal(expression, &self.context_id).await
+    self.eval_internal(expression, &&*self.context_id).await
   }
 
   // ── Elements ────────────────────────────────────────────────────────────
@@ -304,7 +304,7 @@ impl BidiPage {
       .cmd(
         "browsingContext.locateNodes",
         json!({
-          "context": self.context_id,
+          "context": &*self.context_id,
           "locator": {"type": "css", "value": selector},
           "maxNodeCount": 1
         }),
@@ -345,7 +345,7 @@ impl BidiPage {
           "script.callFunction",
           json!({
             "functionDeclaration": js,
-            "target": {"context": self.context_id},
+            "target": {"context": &*self.context_id},
             "awaitPromise": true,
             "resultOwnership": "root"
           }),
@@ -357,7 +357,7 @@ impl BidiPage {
           "script.evaluate",
           json!({
             "expression": js,
-            "target": {"context": self.context_id},
+            "target": {"context": &*self.context_id},
             "awaitPromise": true,
             "resultOwnership": "root"
           }),
@@ -389,7 +389,7 @@ impl BidiPage {
 
   pub async fn content(&self) -> Result<String, String> {
     let result = self
-      .eval_internal("document.documentElement.outerHTML", &self.context_id)
+      .eval_internal("document.documentElement.outerHTML", &&*self.context_id)
       .await?;
     Ok(result.and_then(|v| v.as_str().map(String::from)).unwrap_or_default())
   }
@@ -400,7 +400,7 @@ impl BidiPage {
         "script.callFunction",
         json!({
           "functionDeclaration": "(html) => { document.open(); document.write(html); document.close(); }",
-          "target": {"context": self.context_id},
+          "target": {"context": &*self.context_id},
           "arguments": [{"type": "string", "value": html}],
           "awaitPromise": false,
           "resultOwnership": "none"
@@ -422,7 +422,7 @@ impl BidiPage {
     let origin = if opts.full_page { "document" } else { "viewport" };
 
     let mut params = json!({
-      "context": self.context_id,
+      "context": &*self.context_id,
       "origin": origin,
       "format": {
         "type": format_type
@@ -460,7 +460,7 @@ impl BidiPage {
       .cmd(
         "browsingContext.captureScreenshot",
         json!({
-          "context": self.context_id,
+          "context": &*self.context_id,
           "format": {"type": format_type},
           "clip": {"type": "element", "element": {"sharedId": shared_id}}
         }),
@@ -489,7 +489,7 @@ impl BidiPage {
     let result = self
       .eval_internal(
         &format!("JSON.stringify(window.__fd.accessibilityTree({max_depth}))"),
-        &self.context_id,
+        &&*self.context_id,
       )
       .await?;
 
@@ -571,7 +571,7 @@ impl BidiPage {
 
   pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
     self
-      .cmd("input.performActions", input::click(&self.context_id, x, y))
+      .cmd("input.performActions", input::click(&&*self.context_id, x, y))
       .await?;
     Ok(())
   }
@@ -581,7 +581,7 @@ impl BidiPage {
     self
       .cmd(
         "input.performActions",
-        input::click_button(&self.context_id, x, y, btn, click_count),
+        input::click_button(&&*self.context_id, x, y, btn, click_count),
       )
       .await?;
     Ok(())
@@ -589,7 +589,7 @@ impl BidiPage {
 
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
     self
-      .cmd("input.performActions", input::pointer_move(&self.context_id, x, y))
+      .cmd("input.performActions", input::pointer_move(&&*self.context_id, x, y))
       .await?;
     Ok(())
   }
@@ -605,7 +605,7 @@ impl BidiPage {
     self
       .cmd(
         "input.performActions",
-        input::pointer_move_smooth(&self.context_id, from_x, from_y, to_x, to_y, steps),
+        input::pointer_move_smooth(&&*self.context_id, from_x, from_y, to_x, to_y, steps),
       )
       .await?;
     Ok(())
@@ -615,7 +615,7 @@ impl BidiPage {
     self
       .cmd(
         "input.performActions",
-        input::wheel_scroll(&self.context_id, delta_x, delta_y),
+        input::wheel_scroll(&&*self.context_id, delta_x, delta_y),
       )
       .await?;
     Ok(())
@@ -624,7 +624,7 @@ impl BidiPage {
   pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
     let btn = input::button_name_to_id(button);
     self
-      .cmd("input.performActions", input::mouse_down(&self.context_id, x, y, btn))
+      .cmd("input.performActions", input::mouse_down(&&*self.context_id, x, y, btn))
       .await?;
     Ok(())
   }
@@ -632,7 +632,7 @@ impl BidiPage {
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
     let btn = input::button_name_to_id(button);
     self
-      .cmd("input.performActions", input::mouse_up(&self.context_id, x, y, btn))
+      .cmd("input.performActions", input::mouse_up(&&*self.context_id, x, y, btn))
       .await?;
     Ok(())
   }
@@ -641,7 +641,7 @@ impl BidiPage {
     self
       .cmd(
         "input.performActions",
-        input::click_and_drag(&self.context_id, from, to),
+        input::click_and_drag(&&*self.context_id, from, to),
       )
       .await?;
     Ok(())
@@ -649,14 +649,14 @@ impl BidiPage {
 
   pub async fn type_str(&self, text: &str) -> Result<(), String> {
     self
-      .cmd("input.performActions", input::type_text(&self.context_id, text))
+      .cmd("input.performActions", input::type_text(&&*self.context_id, text))
       .await?;
     Ok(())
   }
 
   pub async fn press_key(&self, key: &str) -> Result<(), String> {
     self
-      .cmd("input.performActions", input::press_key(&self.context_id, key))
+      .cmd("input.performActions", input::press_key(&&*self.context_id, key))
       .await?;
     Ok(())
   }
@@ -668,7 +668,7 @@ impl BidiPage {
       .cmd(
         "storage.getCookies",
         json!({
-          "partition": {"type": "context", "context": self.context_id}
+          "partition": {"type": "context", "context": &*self.context_id}
         }),
       )
       .await?;
@@ -710,7 +710,7 @@ impl BidiPage {
         "storage.setCookie",
         json!({
           "cookie": cookie_obj,
-          "partition": {"type": "context", "context": self.context_id}
+          "partition": {"type": "context", "context": &*self.context_id}
         }),
       )
       .await?;
@@ -727,7 +727,7 @@ impl BidiPage {
         "storage.deleteCookies",
         json!({
           "filter": filter,
-          "partition": {"type": "context", "context": self.context_id}
+          "partition": {"type": "context", "context": &*self.context_id}
         }),
       )
       .await?;
@@ -739,7 +739,7 @@ impl BidiPage {
       .cmd(
         "storage.deleteCookies",
         json!({
-          "partition": {"type": "context", "context": self.context_id}
+          "partition": {"type": "context", "context": &*self.context_id}
         }),
       )
       .await?;
@@ -750,7 +750,7 @@ impl BidiPage {
 
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
     let mut params = json!({
-      "context": self.context_id,
+      "context": &*self.context_id,
       "viewport": {
         "width": config.width,
         "height": config.height
@@ -768,7 +768,7 @@ impl BidiPage {
       .cmd(
         "emulation.setUserAgentOverride",
         json!({
-          "contexts": [self.context_id],
+          "contexts": [&*self.context_id],
           "value": ua
         }),
       )
@@ -781,7 +781,7 @@ impl BidiPage {
       .cmd(
         "emulation.setGeolocationOverride",
         json!({
-          "contexts": [self.context_id],
+          "contexts": [&*self.context_id],
           "coordinates": {
             "latitude": lat,
             "longitude": lng,
@@ -798,7 +798,7 @@ impl BidiPage {
       .cmd(
         "emulation.setLocaleOverride",
         json!({
-          "contexts": [self.context_id],
+          "contexts": [&*self.context_id],
           "locale": locale
         }),
       )
@@ -811,7 +811,7 @@ impl BidiPage {
       .cmd(
         "emulation.setTimezoneOverride",
         json!({
-          "contexts": [self.context_id],
+          "contexts": [&*self.context_id],
           "timezone": timezone_id
         }),
       )
@@ -833,7 +833,7 @@ impl BidiPage {
         .cmd(
           "emulation.setForcedColorsModeThemeOverride",
           json!({
-            "contexts": [self.context_id],
+            "contexts": [&*self.context_id],
             "theme": theme
           }),
         )
@@ -854,7 +854,7 @@ impl BidiPage {
           "script.callFunction",
           json!({
             "functionDeclaration": js,
-            "target": {"context": self.context_id},
+            "target": {"context": &*self.context_id},
             "awaitPromise": false,
             "resultOwnership": "none"
           }),
@@ -869,7 +869,7 @@ impl BidiPage {
       .cmd(
         "emulation.setScriptingEnabled",
         json!({
-          "contexts": [self.context_id],
+          "contexts": [&*self.context_id],
           "enabled": enabled
         }),
       )
@@ -917,7 +917,7 @@ impl BidiPage {
       .cmd(
         "network.setExtraHeaders",
         json!({
-          "contexts": [self.context_id],
+          "contexts": [&*self.context_id],
           "headers": header_list
         }),
       )
@@ -937,7 +937,7 @@ impl BidiPage {
   pub async fn set_focus_emulation_enabled(&self, _enabled: bool) -> Result<(), String> {
     // Activate the browsing context to give it focus
     let _ = self
-      .cmd("browsingContext.activate", json!({"context": self.context_id}))
+      .cmd("browsingContext.activate", json!({"context": &*self.context_id}))
       .await;
     Ok(())
   }
@@ -949,7 +949,7 @@ impl BidiPage {
       .cmd(
         "emulation.setNetworkConditions",
         json!({
-          "contexts": [self.context_id],
+          "contexts": [&*self.context_id],
           "offline": offline,
           "latency": latency,
           "downloadThroughput": download,
@@ -1000,7 +1000,7 @@ impl BidiPage {
       while let Ok(event) = rx.recv().await {
         // Filter events for this context
         let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
-        if event_ctx != ctx && !event_ctx.is_empty() {
+        if event_ctx != &*ctx && !event_ctx.is_empty() {
           continue;
         }
 
@@ -1132,7 +1132,7 @@ impl BidiPage {
             });
 
             let mut handle_params = json!({
-              "context": ctx,
+              "context": &*ctx,
               "accept": accept
             });
             if let Some(t) = text {
@@ -1165,7 +1165,7 @@ impl BidiPage {
       .cmd(
         "browsingContext.print",
         json!({
-          "context": self.context_id,
+          "context": &*self.context_id,
           "landscape": landscape,
           "background": print_background
         }),
@@ -1209,7 +1209,7 @@ impl BidiPage {
         );
         if is_relevant {
           if let Some(c) = event.params.get("context").and_then(|v| v.as_str()) {
-            if c == event_ctx {
+            if c == &*event_ctx {
               event_notify2.notify_one();
             }
           }
@@ -1220,7 +1220,7 @@ impl BidiPage {
     tokio::spawn(async move {
       let target_interval = std::time::Duration::from_millis(66); // ~15 fps
       let capture_params = json!({
-        "context": ctx_id,
+        "context": &*ctx_id,
         "format": {"type": "image/jpeg", "quality": f64::from(quality) / 100.0},
         "origin": "viewport"
       });
@@ -1286,7 +1286,7 @@ impl BidiPage {
       .cmd(
         "input.setFiles",
         json!({
-          "context": self.context_id,
+          "context": &*self.context_id,
           "element": {"sharedId": shared_id},
           "files": paths
         }),
@@ -1310,7 +1310,7 @@ impl BidiPage {
           "network.addIntercept",
           json!({
             "phases": ["beforeRequestSent"],
-            "contexts": [self.context_id]
+            "contexts": [&*self.context_id]
           }),
         )
         .await?;
@@ -1335,7 +1335,7 @@ impl BidiPage {
             continue;
           }
           let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
-          if event_ctx != ctx {
+          if event_ctx != &*ctx {
             continue;
           }
           let is_blocked = event.params.get("isBlocked").and_then(|v| v.as_bool()).unwrap_or(false);
@@ -1425,7 +1425,7 @@ impl BidiPage {
 
   pub async fn close_page(&self) -> Result<(), String> {
     self
-      .cmd("browsingContext.close", json!({"context": self.context_id}))
+      .cmd("browsingContext.close", json!({"context": &*self.context_id}))
       .await?;
     self.closed.store(true, Ordering::Relaxed);
     Ok(())
@@ -1444,7 +1444,7 @@ impl BidiPage {
         "script.addPreloadScript",
         json!({
           "functionDeclaration": wrapped,
-          "contexts": [self.context_id]
+          "contexts": [&*self.context_id]
         }),
       )
       .await?;
@@ -1498,7 +1498,7 @@ impl BidiPage {
         "script.addPreloadScript",
         json!({
           "functionDeclaration": js,
-          "contexts": [self.context_id]
+          "contexts": [&*self.context_id]
         }),
       )
       .await?;
@@ -1509,7 +1509,7 @@ impl BidiPage {
         "script.callFunction",
         json!({
           "functionDeclaration": js,
-          "target": {"context": self.context_id},
+          "target": {"context": &*self.context_id},
           "awaitPromise": false,
           "resultOwnership": "none"
         }),

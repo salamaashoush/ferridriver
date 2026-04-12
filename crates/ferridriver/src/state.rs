@@ -8,6 +8,8 @@
 //! - No global "active page" -- every tool call specifies its session key
 //! - No races possible: there is no shared mutable selection state
 
+use std::sync::Arc;
+
 use crate::backend::{AnyBrowser, AnyPage, BackendKind};
 use crate::context::BrowserContext;
 use rustc_hash::FxHashMap as HashMap;
@@ -32,8 +34,8 @@ pub struct ContextLogHandles {
 /// Parsed composite session key: `"<instance>:<context>"`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SessionKey {
-  pub instance: String,
-  pub context: String,
+  pub instance: Arc<str>,
+  pub context: Arc<str>,
 }
 
 impl SessionKey {
@@ -46,19 +48,19 @@ impl SessionKey {
   pub fn parse(raw: &str) -> Self {
     if let Some((inst, ctx)) = raw.split_once(':') {
       SessionKey {
-        instance: inst.to_string(),
-        context: ctx.to_string(),
+        instance: Arc::from(inst),
+        context: Arc::from(ctx),
       }
     } else if raw == "default" {
       SessionKey {
-        instance: "default".to_string(),
-        context: "default".to_string(),
+        instance: Arc::from("default"),
+        context: Arc::from("default"),
       }
     } else {
       // Backwards compat: bare name → default instance, name as context
       SessionKey {
-        instance: "default".to_string(),
-        context: raw.to_string(),
+        instance: Arc::from("default"),
+        context: Arc::from(raw),
       }
     }
   }
@@ -481,14 +483,14 @@ impl BrowserState {
   ///
   /// Returns an error if the browser instance or page creation fails.
   pub async fn open_page_keyed(&mut self, key: &SessionKey, url: &str) -> Result<AnyPage, String> {
-    if !self.instances.contains_key(&key.instance) {
-      Box::pin(self.ensure_instance(&key.instance)).await?;
+    if !self.instances.contains_key(&*key.instance) {
+      Box::pin(self.ensure_instance(&*key.instance)).await?;
     }
 
     let vp = self.default_viewport.clone();
-    let inst = self.instance_mut(&key.instance)?;
+    let inst = self.instance_mut(&*key.instance)?;
 
-    let page = if key.context == "default" {
+    let page = if &*key.context == "default" {
       inst.browser.new_page(url, None, vp.as_ref()).await?
     } else {
       // Create isolated browser context + page (like Playwright's browser.newContext() + context.newPage()).
@@ -496,7 +498,7 @@ impl BrowserState {
       inst.browser.new_page(url, Some(&ctx_id), vp.as_ref()).await?
     };
 
-    let ctx = inst.context_mut(&key.context);
+    let ctx = inst.context_mut(&*key.context);
     page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
     ctx.pages.push(page.clone());
     ctx.active_page_idx = ctx.pages.len() - 1;
@@ -509,8 +511,8 @@ impl BrowserState {
   /// Returns an error if the instance, context, or page does not exist.
   pub fn active_page(&self, context: &str) -> Result<&AnyPage, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance(&key.instance)?;
-    let ctx = inst.context(&key.context)?;
+    let inst = self.instance(&*key.instance)?;
+    let ctx = inst.context(&*key.context)?;
     ctx
       .active_page()
       .ok_or_else(|| format!("No pages in context '{context}'"))
@@ -521,8 +523,8 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist.
   pub fn context(&self, context: &str) -> Result<&BrowserContext, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance(&key.instance)?;
-    inst.context(&key.context)
+    let inst = self.instance(&*key.instance)?;
+    inst.context(&*key.context)
   }
 
   /// # Errors
@@ -530,14 +532,14 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist.
   pub fn context_mut_checked(&mut self, context: &str) -> Result<&mut BrowserContext, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance_mut(&key.instance)?;
-    inst.context_mut_checked(&key.context)
+    let inst = self.instance_mut(&*key.instance)?;
+    inst.context_mut_checked(&*key.context)
   }
 
   pub fn remove_context(&mut self, context: &str) {
     let key = SessionKey::parse(context);
-    if let Some(inst) = self.instances.get_mut(&key.instance) {
-      inst.remove_context(&key.context);
+    if let Some(inst) = self.instances.get_mut(&*key.instance) {
+      inst.remove_context(&*key.context);
     }
   }
 
@@ -546,8 +548,8 @@ impl BrowserState {
   /// Returns an error if the context does not exist or the page index is out of range.
   pub fn select_page(&mut self, context: &str, page_idx: usize) -> Result<(), String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance_mut(&key.instance)?;
-    let ctx = inst.context_mut_checked(&key.context)?;
+    let inst = self.instance_mut(&*key.instance)?;
+    let ctx = inst.context_mut_checked(&*key.context)?;
     if page_idx >= ctx.pages.len() {
       return Err(format!(
         "Page index {page_idx} out of range (context '{context}' has {} pages)",
@@ -563,8 +565,8 @@ impl BrowserState {
   /// Returns an error if this is the last page, context does not exist, or index is out of range.
   pub fn close_page(&mut self, context: &str, page_idx: usize) -> Result<(), String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance_mut(&key.instance)?;
-    let ctx = inst.context_mut_checked(&key.context)?;
+    let inst = self.instance_mut(&*key.instance)?;
+    let ctx = inst.context_mut_checked(&*key.context)?;
     if ctx.pages.len() <= 1 {
       return Err("Cannot close the last page in a context".into());
     }
@@ -614,8 +616,8 @@ impl BrowserState {
   /// Store a new ref map for the given context (atomic, no `&mut self` needed).
   pub fn set_ref_map(&self, context: &str, ref_map: HashMap<String, i64>) {
     let key = SessionKey::parse(context);
-    if let Some(inst) = self.instances.get(&key.instance) {
-      if let Some(ctx) = inst.contexts.get(&key.context) {
+    if let Some(inst) = self.instances.get(&*key.instance) {
+      if let Some(ctx) = inst.contexts.get(&*key.context) {
         ctx.ref_map.store(std::sync::Arc::new(ref_map));
       }
     }
@@ -626,8 +628,8 @@ impl BrowserState {
     let key = SessionKey::parse(context);
     self
       .instances
-      .get(&key.instance)
-      .and_then(|inst| inst.contexts.get(&key.context))
+      .get(&*key.instance)
+      .and_then(|inst| inst.contexts.get(&*key.context))
       .map(|c| (**c.ref_map.load()).clone())
       .unwrap_or_default()
   }
@@ -638,8 +640,8 @@ impl BrowserState {
     let key = SessionKey::parse(context);
     self
       .instances
-      .get(&key.instance)
-      .and_then(|inst| inst.contexts.get(&key.context))
+      .get(&*key.instance)
+      .and_then(|inst| inst.contexts.get(&*key.context))
       .map(|c| std::sync::Arc::clone(&c.ref_map))
   }
 
@@ -649,8 +651,8 @@ impl BrowserState {
     let key = SessionKey::parse(context);
     self
       .instances
-      .get(&key.instance)
-      .and_then(|inst| inst.contexts.get(&key.context))
+      .get(&*key.instance)
+      .and_then(|inst| inst.contexts.get(&*key.context))
       .map(|ctx| ContextLogHandles {
         console: std::sync::Arc::clone(&ctx.console_log),
         network: std::sync::Arc::clone(&ctx.network_log),
@@ -668,8 +670,8 @@ impl BrowserState {
     limit: usize,
   ) -> Result<Vec<ConsoleMsg>, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance(&key.instance)?;
-    let ctx = inst.context(&key.context)?;
+    let inst = self.instance(&*key.instance)?;
+    let ctx = inst.context(&*key.context)?;
     Ok(ctx.console_messages(level, limit).await)
   }
 
@@ -678,8 +680,8 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist.
   pub async fn network_requests(&self, context: &str, limit: usize) -> Result<Vec<NetRequest>, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance(&key.instance)?;
-    let ctx = inst.context(&key.context)?;
+    let inst = self.instance(&*key.instance)?;
+    let ctx = inst.context(&*key.context)?;
     Ok(ctx.network_requests(limit).await)
   }
 
@@ -688,9 +690,9 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist, or page discovery fails.
   pub async fn refresh_pages(&mut self, context: &str) -> Result<usize, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance_mut(&key.instance)?;
+    let inst = self.instance_mut(&*key.instance)?;
     let current_pages = inst.browser.pages().await?;
-    let ctx = inst.context_mut_checked(&key.context)?;
+    let ctx = inst.context_mut_checked(&*key.context)?;
 
     let existing_count = ctx.pages.len();
     if current_pages.len() > existing_count {
@@ -707,8 +709,8 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist.
   pub async fn dialog_messages(&self, context: &str, limit: usize) -> Result<Vec<DialogEvent>, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance(&key.instance)?;
-    let ctx = inst.context(&key.context)?;
+    let inst = self.instance(&*key.instance)?;
+    let ctx = inst.context(&*key.context)?;
     Ok(ctx.dialog_messages(limit).await)
   }
 
