@@ -2324,6 +2324,9 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
       return Ok(());
     }
+    // Just close the target. Context disposal is handled by context.close() →
+    // BrowserState::remove_context() → Target.disposeBrowserContext (one CDP call
+    // kills the context + all its pages, matching Playwright's doClose).
     let _ = self
       .transport
       .send_command(
@@ -2332,20 +2335,6 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         serde_json::json!({"targetId": &*self.target_id}),
       )
       .await;
-    // Dispose the browser context if this page was created in an isolated context.
-    // This matches Playwright's behavior — `Target.disposeBrowserContext` frees
-    // all Chrome-side state (cookies, storage, renderer processes) for the context.
-    // Without this, contexts accumulate and overwhelm Chrome under parallelism.
-    if let Some(ref ctx_id) = self.browser_context_id {
-      let _ = self
-        .transport
-        .send_command(
-          None,
-          "Target.disposeBrowserContext",
-          serde_json::json!({"browserContextId": &**ctx_id}),
-        )
-        .await;
-    }
     self.events.emit(crate::events::PageEvent::Close);
     Ok(())
   }
