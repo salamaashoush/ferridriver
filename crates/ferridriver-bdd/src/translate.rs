@@ -127,7 +127,7 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
 
       // Create shared modifiers — worker reads these after callback returns.
       let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
-      pool.inject("__test_modifiers", Arc::clone(&modifiers)).await;
+      pool.inject("__test_modifiers", Arc::clone(&modifiers));
 
       // Build unified TestFixtures and construct BrowserWorld from it.
       let fixtures = ferridriver_test::model::TestFixtures {

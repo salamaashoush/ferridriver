@@ -672,10 +672,10 @@ impl Worker {
     let result = match page_result {
       Ok(page) => {
         let test_pool = custom_pool.child(FixtureScope::Test);
-        test_pool.inject("browser", Arc::clone(browser)).await;
-        test_pool.inject("context", Arc::new(ctx.clone())).await;
-        test_pool.inject("page", Arc::new(page.clone())).await;
-        test_pool.inject("test_info", Arc::clone(&test_info)).await;
+        test_pool.inject("browser", Arc::clone(browser));
+        test_pool.inject("context", Arc::new(ctx.clone()));
+        test_pool.inject("page", Arc::new(page.clone()));
+        test_pool.inject("test_info", Arc::clone(&test_info));
 
         // ── Request fixture (API testing context) ──
         // baseURL from test.use() overrides global config.
@@ -690,7 +690,7 @@ impl Worker {
             ..Default::default()
           },
         ));
-        test_pool.inject("request", request_ctx).await;
+        test_pool.inject("request", request_ctx);
 
         // ── Storage state (apply before any test code) ──
         // Context-level storage_state takes precedence over top-level.

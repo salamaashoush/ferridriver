@@ -1927,6 +1927,7 @@ dependencies = [
  "base64",
  "console",
  "crossterm 0.29.0",
+ "dashmap",
  "ferridriver",
  "ferridriver-test-macros",
  "futures",

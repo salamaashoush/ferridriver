@@ -513,7 +513,7 @@ impl TestRunner {
 
               // Create shared modifiers — worker reads these after callback returns.
               let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
-              pool.inject("__test_modifiers", Arc::clone(&modifiers)).await;
+              pool.inject("__test_modifiers", Arc::clone(&modifiers));
 
               // Build the core TestFixtures, then wrap for NAPI.
               let fixtures = crate::test_fixtures::TestFixtures::wrap(
