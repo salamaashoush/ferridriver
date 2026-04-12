@@ -65,6 +65,9 @@ pub struct BrowserContext {
   pub dialog_log: Arc<RwLock<Vec<DialogEvent>>>,
   /// Context name (unique identifier).
   name: String,
+  /// CDP browser context ID (for `Target.disposeBrowserContext` on close).
+  /// None for the default context.
+  pub browser_context_id: Option<String>,
 }
 
 impl BrowserContext {
@@ -78,6 +81,7 @@ impl BrowserContext {
       network_log: Arc::new(RwLock::new(Vec::new())),
       dialog_log: Arc::new(RwLock::new(Vec::new())),
       name,
+      browser_context_id: None,
     }
   }
 
@@ -375,7 +379,7 @@ impl ContextRef {
   /// Returns an error if state lock acquisition fails.
   pub async fn close(&self) -> Result<(), String> {
     let mut state = self.state.write().await;
-    state.remove_context(&self.name);
+    state.remove_context(&self.name).await;
     Ok(())
   }
 
