@@ -3,8 +3,7 @@
 //! Built-in fixtures: `browser` (worker scope), `context` (test scope), `page` (test scope).
 //! Custom fixtures can depend on built-ins and each other, forming a DAG.
 //!
-//! Since core ferridriver types (`Browser`, `Page`, `ContextRef`) do not implement `Clone`,
-//! all fixture values are stored as `Arc<T>` and retrieved as `Arc<T>`.
+//! Uses lock-free DashMap for fixture values — zero contention on concurrent reads.
 
 use std::any::Any;
 use std::future::Future;
@@ -12,8 +11,8 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
 
+use dashmap::DashMap;
 use rustc_hash::FxHashMap;
-use tokio::sync::{Mutex, RwLock};
 
 use ferridriver::Browser;
 use ferridriver::backend::BackendKind;
@@ -60,6 +59,7 @@ pub struct FixtureDef {
 
 /// Runtime cache of instantiated fixtures with scoped lifecycle management.
 ///
+/// Uses lock-free DashMap for fixture values — concurrent reads never block.
 /// Each scope level (global, worker, test) has its own pool instance.
 /// Child pools inherit from parent pools for cross-scope fixture access.
 #[derive(Clone)]
@@ -68,12 +68,12 @@ pub struct FixturePool {
 }
 
 struct FixturePoolInner {
-  /// Cached fixture values, keyed by name.
-  values: RwLock<FxHashMap<String, ArcValue>>,
+  /// Cached fixture values — lock-free concurrent map.
+  values: DashMap<String, ArcValue>,
   /// Fixture definitions (shared reference).
   defs: Arc<FxHashMap<String, FixtureDef>>,
-  /// Teardown stack: LIFO order for cleanup.
-  teardown_stack: Mutex<Vec<(String, TeardownFn)>>,
+  /// Teardown stack: LIFO order for cleanup. std::sync::Mutex — only locked briefly.
+  teardown_stack: std::sync::Mutex<Vec<(String, TeardownFn)>>,
   /// Parent pool (for cross-scope access).
   parent: Option<FixturePool>,
   /// This pool's scope.
@@ -85,9 +85,9 @@ impl FixturePool {
   pub fn new(defs: FxHashMap<String, FixtureDef>, scope: FixtureScope) -> Self {
     Self {
       inner: Arc::new(FixturePoolInner {
-        values: RwLock::new(FxHashMap::default()),
+        values: DashMap::new(),
         defs: Arc::new(defs),
-        teardown_stack: Mutex::new(Vec::new()),
+        teardown_stack: std::sync::Mutex::new(Vec::new()),
         parent: None,
         scope,
       }),
@@ -98,9 +98,9 @@ impl FixturePool {
   pub fn child(&self, scope: FixtureScope) -> Self {
     Self {
       inner: Arc::new(FixturePoolInner {
-        values: RwLock::new(FxHashMap::default()),
+        values: DashMap::new(),
         defs: Arc::clone(&self.inner.defs),
-        teardown_stack: Mutex::new(Vec::new()),
+        teardown_stack: std::sync::Mutex::new(Vec::new()),
         parent: Some(self.clone()),
         scope,
       }),
@@ -111,23 +111,17 @@ impl FixturePool {
   ///
   /// Returns `Arc<T>` since fixture values are shared and not cloneable.
   /// Resolves dependencies recursively (DAG walk).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the fixture is not defined, setup fails, or type mismatches.
   pub fn get<T: Any + Send + Sync>(&self, name: &str) -> Pin<Box<dyn Future<Output = Result<Arc<T>, String>> + Send>> {
     let pool = self.clone();
     let name = name.to_string();
     Box::pin(async move {
-      // Check local cache first.
-      {
-        let values = pool.inner.values.read().await;
-        if let Some(val) = values.get(name.as_str()) {
-          return val
-            .clone()
-            .downcast::<T>()
-            .map_err(|_| format!("fixture '{name}' type mismatch"));
-        }
+      // Check local cache first (lock-free read).
+      if let Some(val) = pool.inner.values.get(name.as_str()) {
+        return val
+          .value()
+          .clone()
+          .downcast::<T>()
+          .map_err(|_| format!("fixture '{name}' type mismatch"));
       }
 
       // Check if this fixture belongs to a parent scope.
@@ -165,15 +159,12 @@ impl FixturePool {
         .map_err(|_| format!("fixture '{name}' setup timed out after {timeout:?}"))?
         .map_err(|e| format!("fixture '{name}' setup failed: {e}"))?;
 
-      // Cache.
-      {
-        let mut values = pool.inner.values.write().await;
-        values.insert(name.to_string(), Arc::clone(&arc_val));
-      }
+      // Cache (lock-free insert).
+      pool.inner.values.insert(name.to_string(), Arc::clone(&arc_val));
 
       // Register teardown.
       if let Some(td) = teardown {
-        let mut stack = pool.inner.teardown_stack.lock().await;
+        let mut stack = pool.inner.teardown_stack.lock().unwrap();
         stack.push((name.to_string(), td));
       }
 
@@ -184,24 +175,20 @@ impl FixturePool {
   }
 
   /// Inject a pre-created fixture value into the pool (skips setup).
-  /// Used by the worker to inject persistent page fixtures for performance.
-  pub async fn inject<T: Any + Send + Sync>(&self, name: &str, value: Arc<T>) {
-    let mut values = self.inner.values.write().await;
-    values.insert(name.to_string(), value as ArcValue);
+  /// Lock-free DashMap insert — no async needed.
+  pub fn inject<T: Any + Send + Sync>(&self, name: &str, value: Arc<T>) {
+    self.inner.values.insert(name.to_string(), value as ArcValue);
   }
 
   /// Tear down all fixtures in this pool (reverse order).
   pub async fn teardown_all(&self) {
     let items: Vec<(String, TeardownFn)> = {
-      let mut stack = self.inner.teardown_stack.lock().await;
+      let mut stack = self.inner.teardown_stack.lock().unwrap();
       stack.drain(..).rev().collect()
     };
 
     for (name, teardown_fn) in items {
-      let value = {
-        let mut values = self.inner.values.write().await;
-        values.remove(&name)
-      };
+      let value = self.inner.values.remove(&name).map(|(_, v)| v);
       if let Some(val) = value {
         tracing::debug!(target: "ferridriver::fixture", "tearing down fixture: {name}");
         teardown_fn(val).await;
@@ -215,12 +202,9 @@ fn ensure_resolved(pool: &FixturePool, name: &str) -> Pin<Box<dyn Future<Output 
   let pool = pool.clone();
   let name = name.to_string();
   Box::pin(async move {
-    // Check if already cached.
-    {
-      let values = pool.inner.values.read().await;
-      if values.contains_key(name.as_str()) {
-        return Ok(());
-      }
+    // Check if already cached (lock-free read).
+    if pool.inner.values.contains_key(name.as_str()) {
+      return Ok(());
     }
 
     // Check parent scope.
@@ -254,12 +238,9 @@ fn ensure_resolved(pool: &FixturePool, name: &str) -> Pin<Box<dyn Future<Output 
       .map_err(|_| format!("fixture '{name}' setup timed out after {timeout:?}"))?
       .map_err(|e| format!("fixture '{name}' setup failed: {e}"))?;
 
-    {
-      let mut values = pool.inner.values.write().await;
-      values.insert(name.to_string(), arc_val);
-    }
+    pool.inner.values.insert(name.to_string(), arc_val);
     if let Some(td) = teardown {
-      let mut stack = pool.inner.teardown_stack.lock().await;
+      let mut stack = pool.inner.teardown_stack.lock().unwrap();
       stack.push((name.to_string(), td));
     }
     Ok(())
@@ -274,61 +255,41 @@ fn scope_rank(scope: FixtureScope) -> u8 {
   }
 }
 
-// ── DAG Validation ──
+/// Validate that fixture definitions form a DAG (no cycles).
+pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> Result<(), String> {
+  use std::collections::HashSet;
 
-/// Validates the fixture dependency graph (no cycles, all deps exist).
-/// Returns topological sort order for setup.
-///
-/// # Errors
-///
-/// Returns an error if a cycle is detected or a dependency is missing.
-pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> Result<Vec<String>, String> {
-  let mut in_degree: FxHashMap<&str, usize> = FxHashMap::default();
-  let mut adjacency: FxHashMap<&str, Vec<&str>> = FxHashMap::default();
-
-  for (name, def) in defs {
-    in_degree.entry(name.as_str()).or_insert(0);
-    for dep in &def.dependencies {
-      if !defs.contains_key(dep) {
-        return Err(format!("fixture '{name}' depends on undefined fixture '{dep}'"));
-      }
-      adjacency.entry(dep.as_str()).or_default().push(name.as_str());
-      *in_degree.entry(name.as_str()).or_insert(0) += 1;
+  fn visit(
+    name: &str,
+    defs: &FxHashMap<String, FixtureDef>,
+    visiting: &mut HashSet<String>,
+    visited: &mut HashSet<String>,
+  ) -> Result<(), String> {
+    if visited.contains(name) {
+      return Ok(());
     }
-  }
-
-  let mut queue: Vec<&str> = in_degree
-    .iter()
-    .filter(|(_, deg)| **deg == 0)
-    .map(|(name, _)| *name)
-    .collect();
-  queue.sort();
-
-  let mut order = Vec::new();
-  while let Some(node) = queue.pop() {
-    order.push(node.to_string());
-    if let Some(children) = adjacency.get(node) {
-      for child in children {
-        if let Some(deg) = in_degree.get_mut(child) {
-          *deg -= 1;
-          if *deg == 0 {
-            queue.push(child);
-          }
-        }
+    if !visiting.insert(name.to_string()) {
+      return Err(format!("circular fixture dependency involving '{name}'"));
+    }
+    if let Some(def) = defs.get(name) {
+      for dep in &def.dependencies {
+        visit(dep, defs, visiting, visited)?;
       }
     }
+    visiting.remove(name);
+    visited.insert(name.to_string());
+    Ok(())
   }
 
-  if order.len() != defs.len() {
-    return Err("fixture dependency cycle detected".to_string());
+  let mut visiting = HashSet::new();
+  let mut visited = HashSet::new();
+  for name in defs.keys() {
+    visit(name, defs, &mut visiting, &mut visited)?;
   }
-
-  Ok(order)
+  Ok(())
 }
 
-// ── Built-in Fixtures ──
-
-/// Create the built-in fixture definitions (browser, context, page).
+/// Built-in fixture definitions for the ferridriver test runner.
 pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, FixtureDef> {
   let mut defs = FxHashMap::default();
 
@@ -350,7 +311,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
       ..Default::default()
     });
 
-  // browser (Worker scope) -- stored as Arc<Browser>
+  // browser (Worker scope)
   defs.insert(
     "browser".into(),
     FixtureDef {
@@ -386,7 +347,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
     },
   );
 
-  // context (Test scope, depends on browser) -- stored as Arc<ContextRef>
+  // context (Test scope, depends on browser)
   defs.insert(
     "context".into(),
     FixtureDef {
@@ -411,7 +372,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
     },
   );
 
-  // page (Test scope, depends on context) -- stored as Arc<Page>
+  // page (Test scope, depends on context)
   defs.insert(
     "page".into(),
     FixtureDef {
@@ -428,7 +389,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
           Ok(Arc::new(page) as ArcValue)
         })
       }),
-      teardown: None, // Context teardown closes all pages.
+      teardown: None,
       timeout: Duration::from_secs(10),
     },
   );

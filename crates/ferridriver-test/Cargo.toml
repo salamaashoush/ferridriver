@@ -27,6 +27,7 @@ anyhow = { workspace = true }
 regex = { workspace = true }
 
 async-channel = "2"
+dashmap = { workspace = true }
 inventory = "0.3"
 rustc-hash = "2"
 toml = "1.1"
