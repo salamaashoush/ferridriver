@@ -59,12 +59,14 @@ pub struct CdpBrowser<T: CdpTransport> {
 
 impl<T: CdpWrap> CdpBrowser<T> {
   /// Enable required CDP domains on a session so events and queries work.
-  /// If `viewport` is provided, sets viewport in the same parallel batch
-  /// (saves a sequential round-trip vs calling `emulate_viewport` afterwards).
+  /// If `viewport` is provided, sets viewport in the same parallel batch.
+  /// If `unpause` is true, sends `Runtime.runIfWaitingForDebugger` in the same
+  /// batch (for targets created with `waitForDebuggerOnStart`).
   async fn enable_domains(
     transport: &T,
     session_id: Option<&str>,
     viewport: Option<&crate::options::ViewportConfig>,
+    unpause: bool,
   ) -> Result<(), String> {
     let ep = super::empty_params();
     let engine_js = crate::selectors::build_inject_js();
@@ -107,7 +109,20 @@ impl<T: CdpWrap> CdpBrowser<T> {
       }
     };
 
-    let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = tokio::join!(
+    // Unpause future — included in parallel batch so Chrome processes it after
+    // all enables (CDP commands on a session are processed in order).
+    let unpause_fut = async {
+      if unpause {
+        transport
+          .send_command(session_id, "Runtime.runIfWaitingForDebugger", super::empty_params())
+          .await
+          .map(|_| ())
+      } else {
+        Ok(())
+      }
+    };
+
+    let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep.clone()),
       transport.send_command(session_id, "Runtime.enable", ep.clone()),
       transport.send_command(session_id, "Log.enable", ep.clone()),
@@ -122,19 +137,18 @@ impl<T: CdpWrap> CdpBrowser<T> {
         "Page.addScriptToEvaluateOnNewDocument",
         serde_json::json!({"source": engine_js})
       ),
-      // Auto-attach on each page session for OOPIF (out-of-process iframe) support.
       transport.send_command(
         session_id,
         "Target.setAutoAttach",
         serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true})
       ),
-      // Consistent focus behavior — page behaves as always-focused for reliable tests.
       transport.send_command(
         session_id,
         "Emulation.setFocusEmulationEnabled",
         serde_json::json!({"enabled": true})
       ),
       vp_fut,
+      unpause_fut,
     );
     r1?;
     r2?;
@@ -145,6 +159,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     r7?;
     r8?;
     r9?;
+    r10?;
     Ok(())
   }
 
@@ -238,7 +253,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
           .map_err(|e| format!("Lock poisoned: {e}"))?
           .insert(target_id.clone(), sid.clone());
 
-        Self::enable_domains(&self.transport, sid.as_deref(), None).await?;
+        Self::enable_domains(&self.transport, sid.as_deref(), None, false).await?;
 
         sid
       };
@@ -358,12 +373,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .map_err(|e| format!("Lock poisoned: {e}"))?
       .insert(target_id.clone(), sid.clone());
 
-    // Enable domains while target is paused, then unpause.
-    Self::enable_domains(&self.transport, sid.as_deref(), viewport).await?;
-    self
-      .transport
-      .send_command(sid.as_deref(), "Runtime.runIfWaitingForDebugger", super::empty_params())
-      .await?;
+    // Enable domains + unpause in one parallel batch (saves a round-trip).
+    Self::enable_domains(&self.transport, sid.as_deref(), viewport, true).await?;
 
     let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
     let lc_notify = Arc::new(tokio::sync::Notify::new());
@@ -489,7 +500,7 @@ impl CdpBrowser<ws::WsTransport> {
             .get("sessionId")
             .and_then(|v| v.as_str())
             .map(std::string::ToString::to_string);
-          Self::enable_domains(&transport, sid.as_deref(), None).await?;
+          Self::enable_domains(&transport, sid.as_deref(), None, false).await?;
           attached.insert(target_id, sid);
           found_page = true;
           break; // take first page
@@ -518,7 +529,7 @@ impl CdpBrowser<ws::WsTransport> {
         .get("sessionId")
         .and_then(|v| v.as_str())
         .map(std::string::ToString::to_string);
-      Self::enable_domains(&transport, sid.as_deref(), None).await?;
+      Self::enable_domains(&transport, sid.as_deref(), None, false).await?;
       attached.insert(target_id, sid);
     }
 

@@ -529,18 +529,26 @@ impl Worker {
 
       let ctx_config = &ctx_config;
       // Viewport + mobile/touch emulation.
+      // Skip if no context-level overrides — new_page() already set the base viewport.
+      // Only re-send if test.use() changed viewport, or context needs mobile/touch/scale.
       let effective_vp = viewport_override.as_ref().or(self.config.browser.viewport.as_ref());
-      if let Some(vp) = effective_vp {
-        let _ = page
-          .set_viewport(&ferridriver::options::ViewportConfig {
-            width: vp.width,
-            height: vp.height,
-            device_scale_factor: ctx_config.device_scale_factor.unwrap_or(1.0),
-            is_mobile: ctx_config.is_mobile,
-            has_touch: ctx_config.has_touch,
-            is_landscape: ctx_config.is_mobile && vp.width > vp.height,
-          })
-          .await;
+      let has_ctx_overrides = viewport_override.is_some()
+        || ctx_config.is_mobile
+        || ctx_config.has_touch
+        || ctx_config.device_scale_factor.is_some_and(|d| (d - 1.0).abs() > f64::EPSILON);
+      if has_ctx_overrides {
+        if let Some(vp) = effective_vp {
+          let _ = page
+            .set_viewport(&ferridriver::options::ViewportConfig {
+              width: vp.width,
+              height: vp.height,
+              device_scale_factor: ctx_config.device_scale_factor.unwrap_or(1.0),
+              is_mobile: ctx_config.is_mobile,
+              has_touch: ctx_config.has_touch,
+              is_landscape: ctx_config.is_mobile && vp.width > vp.height,
+            })
+            .await;
+        }
       }
       // Color scheme / media emulation.
       if ctx_config.color_scheme.is_some() {

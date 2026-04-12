@@ -318,23 +318,16 @@ impl BrowserState {
       effective_mode,
       ConnectMode::ConnectUrl(_) | ConnectMode::AutoConnect { .. }
     );
-    let existing_pages = inst.browser.pages().await.unwrap_or_default();
-    let vp = self.default_viewport.clone().unwrap_or_default();
-    let ctx = inst.context_mut("default");
-    if !existing_pages.is_empty() {
+    // For connect mode, adopt existing pages into the default context.
+    // For launch mode, skip default page creation — pages are created on demand
+    // by the caller (test runner creates isolated contexts, MCP creates pages lazily).
+    if is_connect {
+      let existing_pages = inst.browser.pages().await.unwrap_or_default();
+      let ctx = inst.context_mut("default");
       for page in existing_pages {
-        if !is_connect {
-          let _ = page.emulate_viewport(&vp).await;
-        }
         page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
         ctx.pages.push(page);
       }
-    }
-    if ctx.pages.is_empty() {
-      let page = inst.browser.new_page("about:blank", None, Some(&vp)).await?;
-      let ctx = inst.context_mut("default");
-      page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
-      ctx.pages.push(page);
     }
 
     self.instances.insert(instance_name.to_string(), inst);
