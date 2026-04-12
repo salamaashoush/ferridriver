@@ -84,54 +84,6 @@ impl BidiBrowser {
     Ok(AnyPage::Bidi(page))
   }
 
-  /// Create a new page in an isolated user context (BiDi equivalent of CDP browser contexts).
-  pub async fn new_page_isolated(
-    &self,
-    url: &str,
-    viewport: Option<&crate::options::ViewportConfig>,
-  ) -> Result<AnyPage, String> {
-    // Create an isolated user context
-    let uc_result = self
-      .session
-      .transport
-      .send_command("browser.createUserContext", json!({}))
-      .await?;
-    let user_context = uc_result
-      .get("userContext")
-      .and_then(|v| v.as_str())
-      .ok_or("browser.createUserContext: missing userContext")?;
-
-    let result = self
-      .session
-      .transport
-      .send_command(
-        "browsingContext.create",
-        json!({
-          "type": "tab",
-          "userContext": user_context
-        }),
-      )
-      .await?;
-    let context_id = result
-      .get("context")
-      .and_then(|v| v.as_str())
-      .ok_or("browsingContext.create: missing context id")?
-      .to_string();
-
-    debug!("BiDi new isolated page: context={context_id}, userContext={user_context}");
-    let page = BidiPage::create(self.session.clone(), context_id).await?;
-
-    if let Some(vp) = viewport {
-      let _ = page.emulate_viewport(vp).await;
-    }
-
-    if !url.is_empty() && url != "about:blank" {
-      page.goto(url, NavLifecycle::Load, 30_000).await?;
-    }
-
-    Ok(AnyPage::Bidi(page))
-  }
-
   /// Close the browser.
   pub async fn close(&mut self) -> Result<(), String> {
     // Try graceful BiDi close first

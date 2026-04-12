@@ -331,8 +331,7 @@ impl BrowserState {
       }
     }
     if ctx.pages.is_empty() {
-      let page = inst.browser.new_page("about:blank").await?;
-      let _ = page.emulate_viewport(&vp).await;
+      let page = inst.browser.new_page("about:blank", None, Some(&vp)).await?;
       let ctx = inst.context_mut("default");
       page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
       ctx.pages.push(page);
@@ -497,13 +496,11 @@ impl BrowserState {
     let inst = self.instance_mut(&key.instance)?;
 
     let page = if key.context == "default" {
-      let p = inst.browser.new_page(url).await?;
-      if let Some(ref vp) = vp {
-        let _ = p.emulate_viewport(vp).await;
-      }
-      p
+      inst.browser.new_page(url, None, vp.as_ref()).await?
     } else {
-      inst.browser.new_page_isolated(url, vp.as_ref()).await?
+      // Create isolated browser context + page (like Playwright's browser.newContext() + context.newPage()).
+      let ctx_id = inst.browser.new_context().await?;
+      inst.browser.new_page(url, Some(&ctx_id), vp.as_ref()).await?
     };
 
     let ctx = inst.context_mut(&key.context);

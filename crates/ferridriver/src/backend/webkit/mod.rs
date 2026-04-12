@@ -107,21 +107,6 @@ impl WebKitBrowser {
   /// Create a new page in an isolated context. If a viewport config is provided,
   /// it is applied immediately after page creation (saves a sequential round-trip).
   ///
-  /// # Errors
-  ///
-  /// Returns an error if page creation or viewport setup fails.
-  pub async fn new_page_isolated(
-    &self,
-    url: &str,
-    viewport: Option<&crate::options::ViewportConfig>,
-  ) -> Result<AnyPage, String> {
-    let page = self.new_page(url).await?;
-    if let Some(vp) = viewport {
-      page.emulate_viewport(vp).await?;
-    }
-    Ok(page)
-  }
-
   /// Close the browser by killing the host subprocess.
   ///
   /// # Errors

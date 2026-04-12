@@ -56,10 +56,10 @@ async fn connect_and_select_pages() {
   // --- Create extra pages via CDP to simulate multiple tabs ---
   eprintln!("[test] {:?} creating extra pages...", t.elapsed());
   let _ = browser
-    .new_page("data:text/html,<title>Page2</title><body>Hello2</body>")
+    .new_page("data:text/html,<title>Page2</title><body>Hello2</body>", None, None)
     .await;
   let _ = browser
-    .new_page("data:text/html,<title>Page3</title><body>Hello3</body>")
+    .new_page("data:text/html,<title>Page3</title><body>Hello3</body>", None, None)
     .await;
   eprintln!("[test] {:?} created extra pages", t.elapsed());
 
@@ -108,7 +108,7 @@ async fn connect_and_select_pages() {
   // Create a chrome:// page to simulate what a real user has
   eprintln!("\n[test] {:?} creating chrome:// page...", t.elapsed());
   let t6 = Instant::now();
-  let chrome_page = browser.new_page("chrome://version").await;
+  let chrome_page = browser.new_page("chrome://version", None, None).await;
   eprintln!(
     "[test] {:?} chrome:// page created: {:?} ({:?})",
     t.elapsed(),

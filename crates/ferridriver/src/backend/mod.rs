@@ -256,39 +256,53 @@ impl AnyBrowser {
     }
   }
 
-  /// Open a new page and navigate to the given URL.
+  /// Create a new browser context (isolated cookies, storage, cache).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if context creation fails.
+  pub async fn new_context(&self) -> Result<String, String> {
+    match self {
+      Self::CdpPipe(b) => b.new_context().await,
+      Self::CdpRaw(b) => b.new_context().await,
+      #[cfg(target_os = "macos")]
+      Self::WebKit(_) => Err("WebKit does not support multiple browser contexts".into()),
+      Self::Bidi(_) => Err("BiDi does not support browser contexts yet".into()),
+    }
+  }
+
+  /// Dispose a browser context.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if context disposal fails.
+  pub async fn dispose_context(&self, browser_context_id: &str) -> Result<(), String> {
+    match self {
+      Self::CdpPipe(b) => b.dispose_context(browser_context_id).await,
+      Self::CdpRaw(b) => b.dispose_context(browser_context_id).await,
+      #[cfg(target_os = "macos")]
+      Self::WebKit(_) => Ok(()),
+      Self::Bidi(_) => Ok(()),
+    }
+  }
+
+  /// Open a new page, optionally in a specific browser context.
   ///
   /// # Errors
   ///
   /// Returns an error if the backend fails to create a new target or navigate to the URL.
-  pub async fn new_page(&self, url: &str) -> Result<AnyPage, String> {
-    match self {
-      Self::CdpPipe(b) => b.new_page(url).await,
-      Self::CdpRaw(b) => b.new_page(url).await,
-      #[cfg(target_os = "macos")]
-      Self::WebKit(b) => b.new_page(url).await,
-
-      Self::Bidi(b) => b.new_page(url).await,
-    }
-  }
-
-  /// Open a new page in an isolated browser context and navigate to the given URL.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend fails to create an isolated context or navigate.
-  pub async fn new_page_isolated(
+  pub async fn new_page(
     &self,
     url: &str,
+    browser_context_id: Option<&str>,
     viewport: Option<&crate::options::ViewportConfig>,
   ) -> Result<AnyPage, String> {
     match self {
-      Self::CdpPipe(b) => b.new_page_isolated(url, viewport).await,
-      Self::CdpRaw(b) => b.new_page_isolated(url, viewport).await,
+      Self::CdpPipe(b) => b.new_page(url, browser_context_id, viewport).await,
+      Self::CdpRaw(b) => b.new_page(url, browser_context_id, viewport).await,
       #[cfg(target_os = "macos")]
-      Self::WebKit(b) => b.new_page_isolated(url, viewport).await,
-
-      Self::Bidi(b) => b.new_page_isolated(url, viewport).await,
+      Self::WebKit(b) => b.new_page(url).await,
+      Self::Bidi(b) => b.new_page(url).await,
     }
   }
 

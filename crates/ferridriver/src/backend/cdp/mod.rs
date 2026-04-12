@@ -91,7 +91,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
       })
     });
 
-    // Fire all CDP commands in parallel — domain enables + optional viewport.
+    // Fire all CDP commands in parallel — matches Playwright's FrameSession._initialize().
+    // Playwright enables: Page, Runtime, Log, Network, Page.setLifecycleEventsEnabled,
+    // Page.addScriptToEvaluateOnNewDocument, Target.setAutoAttach (for OOPIFs),
+    // Emulation.setFocusEmulationEnabled.
+    // Playwright does NOT enable: DOM, Accessibility (ferridriver enables on demand).
     let vp_fut = async {
       if let Some(params) = vp_params {
         transport
@@ -103,12 +107,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
       }
     };
 
-    let (r1, r2, r3, r4, r5, r6, r7, r8) = tokio::join!(
+    let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep.clone()),
       transport.send_command(session_id, "Runtime.enable", ep.clone()),
-      transport.send_command(session_id, "DOM.enable", ep.clone()),
+      transport.send_command(session_id, "Log.enable", ep.clone()),
       transport.send_command(session_id, "Network.enable", ep.clone()),
-      transport.send_command(session_id, "Accessibility.enable", ep.clone()),
       transport.send_command(
         session_id,
         "Page.setLifecycleEventsEnabled",
@@ -118,6 +121,18 @@ impl<T: CdpWrap> CdpBrowser<T> {
         session_id,
         "Page.addScriptToEvaluateOnNewDocument",
         serde_json::json!({"source": engine_js})
+      ),
+      // Auto-attach on each page session for OOPIF (out-of-process iframe) support.
+      transport.send_command(
+        session_id,
+        "Target.setAutoAttach",
+        serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true})
+      ),
+      // Consistent focus behavior — page behaves as always-focused for reliable tests.
+      transport.send_command(
+        session_id,
+        "Emulation.setFocusEmulationEnabled",
+        serde_json::json!({"enabled": true})
       ),
       vp_fut,
     );
@@ -129,50 +144,38 @@ impl<T: CdpWrap> CdpBrowser<T> {
     r6?;
     r7?;
     r8?;
+    r9?;
     Ok(())
   }
 
   /// Internal constructor for after transport + child process setup.
+  ///
+  /// Matches Playwright's `CRBrowser.connect()` exactly:
+  /// 1. `Browser.getVersion` — handshake, ensures pipe is ready
+  /// 2. `Target.setAutoAttach` — auto-attach new targets with `waitForDebuggerOnStart`
+  ///
+  /// No page creation here — pages are created on demand via `new_page()`.
   async fn init(transport: Arc<T>, child: Option<tokio::process::Child>) -> Result<Self, String> {
-    // Enable target discovery.
     transport
-      .send_command(None, "Target.setDiscoverTargets", serde_json::json!({"discover": true}))
+      .send_command(None, "Browser.getVersion", super::empty_params())
       .await?;
 
-    // Create initial page target.
-    let create_result = transport
-      .send_command(None, "Target.createTarget", serde_json::json!({"url": "about:blank"}))
-      .await?;
-
-    let target_id = create_result
-      .get("targetId")
-      .and_then(|v| v.as_str())
-      .ok_or("No targetId from Target.createTarget")?
-      .to_string();
-
-    let attach_result = transport
+    transport
       .send_command(
         None,
-        "Target.attachToTarget",
-        serde_json::json!({"targetId": target_id, "flatten": true}),
+        "Target.setAutoAttach",
+        serde_json::json!({
+          "autoAttach": true,
+          "waitForDebuggerOnStart": true,
+          "flatten": true,
+        }),
       )
       .await?;
-
-    let session_id = attach_result
-      .get("sessionId")
-      .and_then(|v| v.as_str())
-      .map(String::from);
-
-    // Enable required domains on the new session
-    Self::enable_domains(&transport, session_id.as_deref(), None).await?;
-
-    let mut attached = FxHashMap::default();
-    attached.insert(target_id, session_id);
 
     Ok(Self {
       transport,
       child,
-      attached_targets: std::sync::Mutex::new(attached),
+      attached_targets: std::sync::Mutex::new(FxHashMap::default()),
     })
   }
 
@@ -213,6 +216,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       let sid = if let Some(sid) = existing_sid {
         sid
       } else {
+        // Target not yet tracked — manually attach. This handles pre-existing targets
+        // (connect flow) and targets created before setAutoAttach was enabled.
         let attach = self
           .transport
           .send_command(
@@ -244,6 +249,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         transport: self.transport.clone(),
         session_id: sid,
         target_id,
+        browser_context_id: None,
         events: crate::events::EventEmitter::new(),
         frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
         dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
@@ -261,99 +267,60 @@ impl<T: CdpWrap> CdpBrowser<T> {
     Ok(pages)
   }
 
-  /// Create a new page target, attach to it, and optionally navigate to a URL.
-  pub async fn new_page(&self, url: &str) -> Result<AnyPage, String> {
-    let result = self
-      .transport
-      .send_command(None, "Target.createTarget", serde_json::json!({"url": "about:blank"}))
-      .await?;
-
-    let target_id = result
-      .get("targetId")
-      .and_then(|v| v.as_str())
-      .ok_or("No targetId")?
-      .to_string();
-
-    let attach = self
-      .transport
-      .send_command(
-        None,
-        "Target.attachToTarget",
-        serde_json::json!({"targetId": target_id, "flatten": true}),
-      )
-      .await?;
-
-    let sid = attach
-      .get("sessionId")
-      .and_then(|v| v.as_str())
-      .map(std::string::ToString::to_string);
-
-    self
-      .attached_targets
-      .lock()
-      .map_err(|e| format!("Lock poisoned: {e}"))?
-      .insert(target_id.clone(), sid.clone());
-
-    Self::enable_domains(&self.transport, sid.as_deref(), None).await?;
-
-    let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
-    let lc_notify = Arc::new(tokio::sync::Notify::new());
-    let page = CdpPage {
-      transport: self.transport.clone(),
-      session_id: sid,
-      target_id,
-      events: crate::events::EventEmitter::new(),
-      frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
-      dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
-      exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
-      binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
-      fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
-      http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
-      main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
-      lifecycle: lc_state.clone(),
-      lifecycle_notify: lc_notify.clone(),
-    };
-
-    // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
-    page.transport.register_lifecycle_tracker(
-      page.session_id.as_deref().unwrap_or(""),
-      page.lifecycle.clone(),
-      page.lifecycle_notify.clone(),
-    );
-
-    if url != "about:blank" && !url.is_empty() {
-      page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await?;
-    }
-
-    Ok(T::wrap_page(page))
-  }
-
-  /// Create a new page in an isolated browser context (separate cookies/storage).
-  pub async fn new_page_isolated(
-    &self,
-    url: &str,
-    viewport: Option<&crate::options::ViewportConfig>,
-  ) -> Result<AnyPage, String> {
+  /// Create a new browser context (isolated cookies, storage, cache).
+  /// Matches Playwright's `browser.newContext()` → `Target.createBrowserContext`.
+  pub async fn new_context(&self) -> Result<String, String> {
     let ctx = self
       .transport
-      .send_command(None, "Target.createBrowserContext", super::empty_params())
+      .send_command(
+        None,
+        "Target.createBrowserContext",
+        serde_json::json!({"disposeOnDetach": true}),
+      )
       .await?;
 
-    let ctx_id = ctx
+    ctx
       .get("browserContextId")
       .and_then(|v| v.as_str())
-      .ok_or("No browserContextId")?
-      .to_string();
+      .map(String::from)
+      .ok_or_else(|| "No browserContextId".to_string())
+  }
 
-    let result = self
+  /// Dispose a browser context. Matches Playwright's `context.close()`.
+  pub async fn dispose_context(&self, browser_context_id: &str) -> Result<(), String> {
+    self
       .transport
       .send_command(
         None,
-        "Target.createTarget",
-        serde_json::json!({"url": "about:blank", "browserContextId": ctx_id}),
+        "Target.disposeBrowserContext",
+        serde_json::json!({"browserContextId": browser_context_id}),
       )
+      .await?;
+    Ok(())
+  }
+
+  /// Create a new page, optionally in a specific browser context.
+  ///
+  /// Follows Playwright's sequence: `Target.createTarget` → wait for auto-attach
+  /// event (target is paused) → enable domains → `Runtime.runIfWaitingForDebugger`.
+  pub async fn new_page(
+    &self,
+    url: &str,
+    browser_context_id: Option<&str>,
+    viewport: Option<&crate::options::ViewportConfig>,
+  ) -> Result<AnyPage, String> {
+    // Subscribe to events BEFORE createTarget so we don't miss the auto-attach.
+    let mut event_rx = self.transport.subscribe_events();
+
+    let create_params = if let Some(ctx_id) = browser_context_id {
+      serde_json::json!({"url": "about:blank", "browserContextId": ctx_id})
+    } else {
+      serde_json::json!({"url": "about:blank"})
+    };
+
+    let result = self
+      .transport
+      .send_command(None, "Target.createTarget", create_params)
       .await?;
 
     let target_id = result
@@ -362,19 +329,28 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .ok_or("No targetId")?
       .to_string();
 
-    let attach = self
-      .transport
-      .send_command(
-        None,
-        "Target.attachToTarget",
-        serde_json::json!({"targetId": target_id, "flatten": true}),
-      )
-      .await?;
-
-    let sid = attach
-      .get("sessionId")
-      .and_then(|v| v.as_str())
-      .map(std::string::ToString::to_string);
+    // Wait for Target.attachedToTarget event (from setAutoAttach in init).
+    // The target is paused (waitForDebuggerOnStart) so we can set up everything.
+    let tid = target_id.clone();
+    let sid = tokio::time::timeout(Duration::from_secs(30), async move {
+      while let Ok(event) = event_rx.recv().await {
+        if event.get("method").and_then(|m| m.as_str()) == Some("Target.attachedToTarget") {
+          if let Some(params) = event.get("params") {
+            let event_tid = params
+              .get("targetInfo")
+              .and_then(|i| i.get("targetId"))
+              .and_then(|v| v.as_str())
+              .unwrap_or("");
+            if event_tid == tid {
+              return Ok(params.get("sessionId").and_then(|v| v.as_str()).map(String::from));
+            }
+          }
+        }
+      }
+      Err("Event channel closed".to_string())
+    })
+    .await
+    .map_err(|_| format!("Timeout waiting for auto-attach of {target_id}"))??;
 
     self
       .attached_targets
@@ -382,7 +358,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .map_err(|e| format!("Lock poisoned: {e}"))?
       .insert(target_id.clone(), sid.clone());
 
+    // Enable domains while target is paused, then unpause.
     Self::enable_domains(&self.transport, sid.as_deref(), viewport).await?;
+    self
+      .transport
+      .send_command(sid.as_deref(), "Runtime.runIfWaitingForDebugger", super::empty_params())
+      .await?;
 
     let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
     let lc_notify = Arc::new(tokio::sync::Notify::new());
@@ -390,6 +371,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       transport: self.transport.clone(),
       session_id: sid,
       target_id,
+      browser_context_id: browser_context_id.map(String::from),
       events: crate::events::EventEmitter::new(),
       frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
       dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
@@ -593,6 +575,8 @@ pub struct CdpPage<T: CdpTransport> {
   transport: Arc<T>,
   session_id: Option<String>,
   target_id: String,
+  /// Browser context ID for isolated contexts (used for `Target.disposeBrowserContext` on close).
+  browser_context_id: Option<String>,
   /// Event emitter for page events (console, dialog, network, frame lifecycle).
   pub events: crate::events::EventEmitter,
   /// Frame ID -> execution context ID mapping for frame-scoped evaluation.
@@ -626,6 +610,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       transport: self.transport.clone(),
       session_id: self.session_id.clone(),
       target_id: self.target_id.clone(),
+      browser_context_id: self.browser_context_id.clone(),
       events: self.events.clone(),
       frame_contexts: self.frame_contexts.clone(),
       dialog_handler: self.dialog_handler.clone(),
@@ -2336,6 +2321,20 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         serde_json::json!({"targetId": self.target_id}),
       )
       .await;
+    // Dispose the browser context if this page was created in an isolated context.
+    // This matches Playwright's behavior — `Target.disposeBrowserContext` frees
+    // all Chrome-side state (cookies, storage, renderer processes) for the context.
+    // Without this, contexts accumulate and overwhelm Chrome under parallelism.
+    if let Some(ref ctx_id) = self.browser_context_id {
+      let _ = self
+        .transport
+        .send_command(
+          None,
+          "Target.disposeBrowserContext",
+          serde_json::json!({"browserContextId": ctx_id}),
+        )
+        .await;
+    }
     self.events.emit(crate::events::PageEvent::Close);
     Ok(())
   }
