@@ -106,3 +106,49 @@ clean:
 # Watch for changes and check
 watch:
   cargo watch -x 'check --workspace'
+
+# ── Profiling ──────────────────────────────────────────────────────────────
+
+# Run deep profile: microsecond breakdown + chrome trace timeline
+profile:
+  FERRIDRIVER_PROFILE=chrome RUST_LOG=info \
+    cargo test --profile release-fast -p ferridriver-test --test bench_profile deep_profile \
+    --features ferridriver-test/profiling -- --ignored --nocapture
+  @echo ""
+  @echo "Chrome trace written to trace-*.json"
+  @echo "Open in: chrome://tracing  or  ui.perfetto.dev"
+
+# Install profiling tools (one-time)
+profile-setup:
+  cargo install samply tokio-console
+
+# CPU flame graph with samply (4 parallel workers, 80 test cycles)
+profile-cpu:
+  cargo build --profile release-fast -p ferridriver-test --bin bench-profile
+  samply record -- ./target/release-fast/bench-profile
+
+# Chrome trace only (parallel bench, no timing report)
+profile-trace:
+  FERRIDRIVER_PROFILE=chrome RUST_LOG=info \
+    cargo run --profile release-fast -p ferridriver-test --bin bench-profile --features ferridriver-test/profiling
+  @echo "Open chrome://tracing or ui.perfetto.dev and load trace-*.json"
+
+# CPU flame graph single-threaded
+profile-cpu-single:
+  cargo build --profile release-fast -p ferridriver-test --bin bench-single
+  samply record -- ./target/release-fast/bench-single
+
+# Chrome trace single-threaded
+profile-trace-single:
+  FERRIDRIVER_PROFILE=chrome RUST_LOG=info \
+    cargo run --profile release-fast -p ferridriver-test --bin bench-single --features ferridriver-test/profiling
+  @echo "Open chrome://tracing or ui.perfetto.dev and load trace-*.json"
+
+# Profile the TS CLI pipeline (file discovery, import, registration, execution)
+profile-ts *args:
+  cd packages/ferridriver-test && FERRIDRIVER_PROFILE=cli bun run src/cli.ts test {{args}}
+
+# tokio-console live async runtime dashboard
+profile-console:
+  FERRIDRIVER_PROFILE=console \
+    cargo run --profile release-fast -p ferridriver-test --bin bench-profile --features ferridriver-test/tokio-console

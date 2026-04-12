@@ -257,6 +257,7 @@ impl TestRunner {
   ///
   /// The bus is consumed by value and dropped when execution completes,
   /// closing all subscriber channels and signaling consumers to finalize.
+  #[tracing::instrument(skip_all, fields(workers = self.config.workers, tests = plan.total_tests))]
   pub async fn execute(&self, mut plan: TestPlan, event_bus: EventBus) -> i32 {
     // ── Filtering ──
     if let Some(shard_arg) = &self.overrides.shard {

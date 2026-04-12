@@ -7,6 +7,7 @@ use std::time::Instant;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
+  ferridriver_test::logging::init(1);
   let browser = Browser::launch(LaunchOptions::default()).await.unwrap();
   eprintln!("=== BROWSER LAUNCHED, starting test cycles ===");
 
