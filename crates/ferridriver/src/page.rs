@@ -96,6 +96,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
+  #[tracing::instrument(skip(self, opts), fields(url))]
   pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<(), String> {
     tracing::debug!(target: "ferridriver::action", action = "goto", url, "page.goto");
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
@@ -1675,6 +1676,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the page cannot be closed.
+  #[tracing::instrument(skip(self))]
   pub async fn close(&self) -> Result<(), String> {
     self.inner.close_page().await?;
 

@@ -14,6 +14,7 @@ use std::time::Instant;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 4)]
 async fn main() {
+  ferridriver_test::logging::init(1);
   let iters = 20;
 
   // Launch 4 browsers in parallel.

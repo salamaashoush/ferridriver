@@ -104,6 +104,7 @@ impl WsTransport {
 }
 
 impl super::transport::CdpTransport for WsTransport {
+  #[tracing::instrument(skip(self, session_id, params), fields(method))]
   async fn send_command(
     &self,
     session_id: Option<&str>,

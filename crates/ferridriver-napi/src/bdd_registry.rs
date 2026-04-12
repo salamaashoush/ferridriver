@@ -14,7 +14,6 @@ extern crate ferridriver_bdd;
 use napi::Result;
 use napi::Status;
 use napi::threadsafe_function::ThreadsafeFunction;
-use tokio::sync::Mutex;
 
 /// Step/hook callback TSFN: async JS function receiving TestFixtures -> Promise<void>.
 /// Same callback type as E2E tests — unified fixture bag.
@@ -52,16 +51,16 @@ struct TsHook {
 /// Encapsulates BDD step definitions, hooks, and parameter types.
 /// Constructed by TS registration calls, consumed during run().
 pub(crate) struct BddRegistry {
-  steps: Mutex<Vec<TsStepDef>>,
-  hooks: Mutex<Vec<TsHook>>,
+  steps: StdMutex<Vec<TsStepDef>>,
+  hooks: StdMutex<Vec<TsHook>>,
   param_types: StdMutex<Vec<(String, String)>>,
 }
 
 impl BddRegistry {
   pub fn new() -> Self {
     Self {
-      steps: Mutex::new(Vec::new()),
-      hooks: Mutex::new(Vec::new()),
+      steps: StdMutex::new(Vec::new()),
+      hooks: StdMutex::new(Vec::new()),
       param_types: StdMutex::new(Vec::new()),
     }
   }
@@ -144,8 +143,11 @@ impl BddRegistry {
   }
 
   /// Build a StepRegistry from registered TS steps + built-in Rust steps.
-  pub async fn build_step_registry(&self) -> Result<Arc<ferridriver_bdd::registry::StepRegistry>> {
-    let ts_steps = self.steps.lock().await;
+  pub fn build_step_registry(&self) -> Result<Arc<ferridriver_bdd::registry::StepRegistry>> {
+    let ts_steps = self
+      .steps
+      .lock()
+      .map_err(|_| napi::Error::from_reason("steps lock poisoned"))?;
 
     let mut registry = ferridriver_bdd::registry::StepRegistry::build();
 
@@ -211,7 +213,10 @@ impl BddRegistry {
     drop(ts_steps);
 
     // Register TS hooks into the Rust hook registry.
-    let ts_hooks = self.hooks.lock().await;
+    let ts_hooks = self
+      .hooks
+      .lock()
+      .map_err(|_| napi::Error::from_reason("hooks lock poisoned"))?;
     for ts_hook in ts_hooks.iter() {
       let hook_point = match (ts_hook.point.as_str(), ts_hook.scope.as_str()) {
         ("before", "scenario") => ferridriver_bdd::hook::HookPoint::BeforeScenario,

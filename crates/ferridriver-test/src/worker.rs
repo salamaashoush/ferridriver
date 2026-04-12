@@ -54,6 +54,7 @@ impl Worker {
     Self { id, config, event_bus }
   }
 
+  #[tracing::instrument(skip_all, fields(worker_id = self.id))]
   pub async fn run(
     &self,
     browser: Arc<ferridriver::Browser>,
@@ -218,6 +219,7 @@ impl Worker {
   }
 
   /// Run a single test with full hook lifecycle.
+  #[tracing::instrument(skip_all, fields(worker_id = self.id, test, attempt = assignment.attempt))]
   async fn run_single(
     &self,
     browser: &Arc<ferridriver::Browser>,
@@ -227,6 +229,7 @@ impl Worker {
   ) -> WorkerTestResult {
     let test = &assignment.test;
     let test_id = test.id.clone();
+    tracing::Span::current().record("test", &test_id.full_name().as_str());
     let test_fn = Arc::clone(&test.test_fn);
     let fixture_requests = test.fixture_requests.clone();
     let attempt = assignment.attempt;

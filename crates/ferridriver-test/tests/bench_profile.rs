@@ -37,6 +37,7 @@ fn data_url(html: &str) -> String {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "benchmark, not for CI"]
 async fn deep_profile() {
+  ferridriver_test::logging::init(1);
   println!("\n======================================================================");
   println!("  DEEP PROFILING: microsecond-level breakdown");
   println!("======================================================================\n");

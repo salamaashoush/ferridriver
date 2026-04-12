@@ -19,6 +19,38 @@ import { existsSync, statSync } from 'fs';
 
 import type { FerridriverTestConfig } from './config.js';
 
+// ---- Profiling timers (enabled with --profile or FERRIDRIVER_PROFILE=cli) ----
+
+const _profiling = process.argv.includes('--profile') || process.env.FERRIDRIVER_PROFILE === 'cli';
+const _marks: { label: string; ms: number }[] = [];
+let _phaseStart = performance.now();
+
+function _markPhase(label: string) {
+  if (!_profiling) return;
+  const elapsed = performance.now() - _phaseStart;
+  _marks.push({ label, ms: elapsed });
+  _phaseStart = performance.now();
+}
+
+function _printProfile() {
+  if (!_profiling || _marks.length === 0) return;
+  const total = _marks.reduce((s, m) => s + m.ms, 0);
+  const bar = (ms: number) => {
+    const pct = (ms / total) * 100;
+    const width = Math.max(1, Math.round(pct / 2));
+    return '\u2588'.repeat(width);
+  };
+  console.log('\n  PROFILE: CLI phase breakdown');
+  console.log('  \u2500'.repeat(60));
+  for (const m of _marks) {
+    const pct = ((m.ms / total) * 100).toFixed(1);
+    console.log(`  ${m.label.padEnd(28)} ${m.ms.toFixed(1).padStart(8)}ms  ${pct.padStart(5)}%  ${bar(m.ms)}`);
+  }
+  console.log('  \u2500'.repeat(60));
+  console.log(`  ${'Total'.padEnd(28)} ${total.toFixed(1).padStart(8)}ms`);
+  console.log();
+}
+
 // ---- TS file loader: jiti on Node, native on Bun ----
 
 let _importTs: (path: string) => Promise<any>;
@@ -408,6 +440,7 @@ async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
 // ---- E2E test runner (shared by default and ct modes) ----
 
 async function runTests(config: Record<string, any>, testFiles: string[], ctMode: boolean, featureFiles: string[] = [], stepFiles: string[] = []) {
+  _phaseStart = performance.now(); // reset so config+discovery captures time since CLI start
   let viteProcess: any = null;
 
   // Graceful shutdown on SIGINT/SIGTERM -- kill child processes and exit.
@@ -484,8 +517,11 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
     config.webServer = [config.webServer];
   }
 
-  const runner = await TestRunner.create(config);
+  _markPhase('config + discovery');
+
+  const runner = TestRunner.create(config);
   _setRunner(runner);
+  _markPhase('TestRunner.create (NAPI)');
 
   // Load all test files and step definitions in parallel.
   // Each file import runs within its own AsyncLocalStorage context
@@ -498,6 +534,7 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
     ),
     ...stepFiles.map(f => _importTs(f)),
   ]);
+  _markPhase(`import ${testFiles.length} test files`);
 
   const tests = _drainTests();
   if (tests.length > 0) {
@@ -505,9 +542,11 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
     // one boundary crossing, pre-allocated capacity.
     runner.registerTestsBatch(tests.map(t => ({ meta: t.meta, callback: t.body })));
   }
+  _markPhase(`register ${tests.length} tests`);
 
   if (tests.length === 0 && featureFiles.length === 0) {
     console.log('  No tests found.');
+    _printProfile();
     if (viteProcess) {
       viteProcess.stdout?.destroy();
       viteProcess.stderr?.destroy();
@@ -518,6 +557,7 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
 
   // Run — feature files passed to Rust for parsing/translation into the same plan.
   const summary = await runner.run(featureFiles.length > 0 ? featureFiles : undefined);
+  _markPhase('runner.run (execution)');
 
   // Drain worker-scoped fixture teardowns (unblocks factory cleanup code).
   await _drainWorkerFixtures();
@@ -529,6 +569,7 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
   }
   // Force exit — NAPI native addon may hold browser process handles that prevent
   // clean shutdown. process.exit() is the correct behavior here (same as Playwright).
+  _printProfile();
   const exitCode = summary.failed > 0 ? 1 : 0;
   process.exit(exitCode);
 }

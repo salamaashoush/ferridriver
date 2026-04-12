@@ -329,8 +329,9 @@ pub struct TestRunner {
 #[napi]
 impl TestRunner {
   /// Create a new test runner.
+  /// Sync factory -- no async work needed. Avoids NAPI async overhead (~60ms thread hop).
   #[napi(factory)]
-  pub async fn create(config: Option<TestRunnerConfig>) -> Result<Self> {
+  pub fn create(config: Option<TestRunnerConfig>) -> Result<Self> {
     let cfg = config.unwrap_or_default();
     // Inject debug config as env var so the centralized logging picks it up.
     // This works around Bun not propagating process.env to std::env::var.
@@ -722,7 +723,7 @@ impl TestRunner {
 
     let mut has_bdd = false;
     if let Some(patterns) = features {
-      let registry = self.bdd.build_step_registry().await?;
+      let registry = self.bdd.build_step_registry()?;
 
       let files = ferridriver_bdd::feature::FeatureSet::discover(&patterns, &self.config.test_ignore)
         .map_err(|e| napi::Error::from_reason(format!("feature discovery: {e}")))?;

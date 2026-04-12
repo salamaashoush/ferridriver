@@ -95,6 +95,7 @@ impl PipeTransport {
 }
 
 impl super::transport::CdpTransport for PipeTransport {
+  #[tracing::instrument(skip(self, session_id, params), fields(method))]
   async fn send_command(
     &self,
     session_id: Option<&str>,
