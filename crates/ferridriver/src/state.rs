@@ -490,15 +490,18 @@ impl BrowserState {
     let vp = self.default_viewport.clone();
     let inst = self.instance_mut(&*key.instance)?;
 
-    let page = if &*key.context == "default" {
-      inst.browser.new_page(url, None, vp.as_ref()).await?
+    let (page, cdp_ctx_id) = if &*key.context == "default" {
+      (inst.browser.new_page(url, None, vp.as_ref()).await?, None)
     } else {
-      // Create isolated browser context + page (like Playwright's browser.newContext() + context.newPage()).
       let ctx_id = inst.browser.new_context().await?;
-      inst.browser.new_page(url, Some(&ctx_id), vp.as_ref()).await?
+      let p = inst.browser.new_page(url, Some(&ctx_id), vp.as_ref()).await?;
+      (p, Some(ctx_id))
     };
 
     let ctx = inst.context_mut(&*key.context);
+    if let Some(id) = cdp_ctx_id {
+      ctx.browser_context_id = Some(id);
+    }
     page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
     ctx.pages.push(page.clone());
     ctx.active_page_idx = ctx.pages.len() - 1;
@@ -536,9 +539,16 @@ impl BrowserState {
     inst.context_mut_checked(&*key.context)
   }
 
-  pub fn remove_context(&mut self, context: &str) {
+  /// Remove a context. If it has a CDP browser context ID, dispose it
+  /// (one CDP call kills the context + all pages, matching Playwright's doClose).
+  pub async fn remove_context(&mut self, context: &str) {
     let key = SessionKey::parse(context);
     if let Some(inst) = self.instances.get_mut(&*key.instance) {
+      if let Ok(ctx) = inst.context(&*key.context) {
+        if let Some(ref ctx_id) = ctx.browser_context_id {
+          let _ = inst.browser.dispose_context(ctx_id).await;
+        }
+      }
       inst.remove_context(&*key.context);
     }
   }
