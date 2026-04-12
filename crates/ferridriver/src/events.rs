@@ -68,7 +68,7 @@ pub struct NetResponse {
 }
 
 /// A dialog that is pending user action (accept/dismiss).
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct PendingDialog {
   /// Dialog type: "alert", "confirm", "prompt", "beforeunload"
   pub dialog_type: String,
