@@ -174,7 +174,11 @@ pub async fn resolve_element<S: std::hash::BuildHasher>(
 
 /// Suggest available selectors on the page.
 pub async fn suggest_selectors(page: &AnyPage) -> Vec<String> {
-  let json_str = rt_eval_str(page, "window.__fd.suggestSelectors()")
+  let fd = match page.injected_script().await {
+    Ok(fd) => fd,
+    Err(_) => return Vec::new(),
+  };
+  let json_str = rt_eval_str(page, &format!("{fd}.suggestSelectors()"))
     .await
     .unwrap_or_default();
   if let Ok(data) = serde_json::from_str::<serde_json::Value>(&json_str) {
@@ -203,10 +207,11 @@ pub async fn suggest_selectors(page: &AnyPage) -> Vec<String> {
 ///
 /// Returns `ClickGuardError::IsSelect` or `ClickGuardError::IsFileInput` if the element
 /// should not be clicked directly.
-pub async fn check_click_guard(element: &AnyElement, _page: &AnyPage) -> Result<(), ClickGuardError> {
-  // Single CDP roundtrip: call_js_fn_value returns the guard value directly
+pub async fn check_click_guard(element: &AnyElement, page: &AnyPage) -> Result<(), ClickGuardError> {
+  let _ = page.ensure_engine_injected().await;
+  let fd = "window.__fd";
   let guard = element
-    .call_js_fn_value("function() { return window.__fd ? window.__fd.clickGuard(this) : ''; }")
+    .call_js_fn_value(&format!("function() {{ return {fd} ? {fd}.clickGuard(this) : ''; }}"))
     .await
     .ok()
     .flatten()
@@ -309,8 +314,9 @@ pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchR
   let css_scope = serde_json::to_string(&opts.css_scope).map_err(|e| e.to_string())?;
   let max_results = opts.max_results;
 
+  let fd = page.injected_script().await?;
   let js = format!(
-    "window.__fd.searchPage({pattern}, {is_regex}, {case_sensitive}, {context_chars}, {css_scope}, {max_results})"
+    "{fd}.searchPage({pattern}, {is_regex}, {case_sensitive}, {context_chars}, {css_scope}, {max_results})"
   );
 
   let result_str = rt_eval_str(page, &js).await?;
@@ -408,7 +414,8 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
   let max_results = opts.max_results;
   let include_text = if opts.include_text { "true" } else { "false" };
 
-  let js = format!("window.__fd.findElementsCSS({selector}, {attributes}, {max_results}, {include_text})");
+  let fd = page.injected_script().await?;
+  let js = format!("{fd}.findElementsCSS({selector}, {attributes}, {max_results}, {include_text})");
 
   let result_str = rt_eval_str(page, &js).await?;
   let data: serde_json::Value = serde_json::from_str(&result_str).unwrap_or(serde_json::json!({}));
@@ -494,12 +501,12 @@ pub fn format_find_results(result: &FindResult, selector: &str) -> String {
 /// # Errors
 ///
 /// Returns an error if the element is not a select or the target option is not found.
-pub async fn select_option(element: &AnyElement, _page: &AnyPage, target: &str) -> Result<SelectResult, String> {
+pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -> Result<SelectResult, String> {
   let escaped = target.replace('\\', "\\\\").replace('\'', "\\'");
-  // Single CDP roundtrip: call_js_fn_value returns JSON result directly
+  let fd = page.injected_script().await?;
   let result_json = element
     .call_js_fn_value(&format!(
-      "function() {{ return JSON.stringify(window.__fd.selectOption(this, '{escaped}')); }}"
+      "function() {{ return JSON.stringify({fd}.selectOption(this, '{escaped}')); }}"
     ))
     .await
     .ok()
@@ -529,10 +536,10 @@ pub async fn select_option(element: &AnyElement, _page: &AnyPage, target: &str) 
 /// # Errors
 ///
 /// Returns an error if the element is not a select or options cannot be retrieved.
-pub async fn get_dropdown_options(element: &AnyElement, _page: &AnyPage) -> Result<Vec<DropdownOption>, String> {
-  // Single CDP roundtrip: call_js_fn_value returns JSON result directly
+pub async fn get_dropdown_options(element: &AnyElement, page: &AnyPage) -> Result<Vec<DropdownOption>, String> {
+  let fd = page.injected_script().await?;
   let result_json = element
-    .call_js_fn_value("function() { return JSON.stringify(window.__fd.getOptions(this)); }")
+    .call_js_fn_value(&format!("function() {{ return JSON.stringify({fd}.getOptions(this)); }}"))
     .await
     .ok()
     .flatten()
@@ -571,7 +578,8 @@ pub async fn get_dropdown_options(element: &AnyElement, _page: &AnyPage) -> Resu
 ///
 /// Returns an error if JS evaluation fails.
 pub async fn scroll_info(page: &AnyPage) -> Result<ScrollInfo, String> {
-  let result = rt_eval_str(page, "window.__fd.scrollInfo()").await?;
+  let fd = page.injected_script().await?;
+  let result = rt_eval_str(page, &format!("{fd}.scrollInfo()")).await?;
   let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or(serde_json::json!({}));
 
   Ok(ScrollInfo {
@@ -585,7 +593,11 @@ pub async fn scroll_info(page: &AnyPage) -> Result<ScrollInfo, String> {
 
 /// Get console error count (installs interceptor on first call). Uses runtime.
 pub async fn console_error_count(page: &AnyPage) -> i64 {
-  rt_eval(page, "window.__fd.consoleErrors()")
+  let fd = match page.injected_script().await {
+    Ok(fd) => fd,
+    Err(_) => return 0,
+  };
+  rt_eval(page, &format!("{fd}.consoleErrors()"))
     .await
     .ok()
     .flatten()
@@ -601,7 +613,8 @@ pub async fn console_error_count(page: &AnyPage) -> i64 {
 ///
 /// Returns an error if JS evaluation fails.
 pub async fn extract_markdown(page: &AnyPage) -> Result<String, String> {
-  rt_eval_str(page, "window.__fd.extractMarkdown()").await
+  let fd = page.injected_script().await?;
+  rt_eval_str(page, &format!("{fd}.extractMarkdown()")).await
 }
 
 // ─── File Upload ────────────────────────────────────────────────────────────
@@ -625,21 +638,22 @@ pub async fn upload_file(page: &AnyPage, selector: &str, paths: &[String]) -> Re
 /// # Errors
 ///
 /// Returns an error if the element is not actionable within the timeout.
-pub async fn wait_for_actionable(element: &AnyElement, _page: &AnyPage) -> Result<(), String> {
+pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result<(), String> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+  let _ = page.ensure_engine_injected().await;
+  let fd = "window.__fd";
 
   loop {
     if tokio::time::Instant::now() >= deadline {
       return Err("Timeout: element not actionable".into());
     }
 
-    // Single CDP roundtrip: uses Playwright's isVisible + getAriaDisabled via window.__fd
     let val = element
-      .call_js_fn_value(
-        "function() { \
-            return JSON.stringify(window.__fd.isActionable(this)); \
-        }",
-      )
+      .call_js_fn_value(&format!(
+        "function() {{ \
+            return JSON.stringify({fd}.isActionable(this)); \
+        }}"
+      ))
       .await
       .ok()
       .flatten()

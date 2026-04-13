@@ -52,9 +52,25 @@ impl CdpWrap for ws::WsTransport {
 
 pub struct CdpBrowser<T: CdpTransport> {
   transport: Arc<T>,
-  child: Option<tokio::process::Child>,
+  child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
   /// Track targetId -> sessionId for already-attached targets.
   attached_targets: std::sync::Mutex<FxHashMap<String, Option<String>>>,
+}
+
+impl<T: CdpTransport> Clone for CdpBrowser<T> {
+  fn clone(&self) -> Self {
+    Self {
+      transport: Arc::clone(&self.transport),
+      child: Arc::clone(&self.child),
+      attached_targets: std::sync::Mutex::new(
+        self
+          .attached_targets
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .clone(),
+      ),
+    }
+  }
 }
 
 impl<T: CdpWrap> CdpBrowser<T> {
@@ -69,7 +85,6 @@ impl<T: CdpWrap> CdpBrowser<T> {
     unpause: bool,
   ) -> Result<(), String> {
     let ep = super::empty_params();
-    let engine_js = crate::selectors::build_inject_js();
 
     let vp_params = viewport.map(|vp| {
       let is_landscape = vp.is_landscape || vp.width > vp.height;
@@ -94,10 +109,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
     });
 
     // Fire all CDP commands in parallel — matches Playwright's FrameSession._initialize().
-    // Playwright enables: Page, Runtime, Log, Network, Page.setLifecycleEventsEnabled,
-    // Page.addScriptToEvaluateOnNewDocument, Target.setAutoAttach (for OOPIFs),
-    // Emulation.setFocusEmulationEnabled.
-    // Playwright does NOT enable: DOM, Accessibility (ferridriver enables on demand).
+    // Keep default page bootstrap minimal. Domains for logging and explicit focus
+    // emulation are feature-specific and can be enabled later if needed.
     let vp_fut = async {
       if let Some(params) = vp_params {
         transport
@@ -122,10 +135,9 @@ impl<T: CdpWrap> CdpBrowser<T> {
       }
     };
 
-    let (r1, r2, r3, r4, r5, r6, r7, r8, r9, r10) = tokio::join!(
+    let (r1, r2, r3, r4, r5, r6, r7) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep.clone()),
       transport.send_command(session_id, "Runtime.enable", ep.clone()),
-      transport.send_command(session_id, "Log.enable", ep.clone()),
       transport.send_command(session_id, "Network.enable", ep.clone()),
       transport.send_command(
         session_id,
@@ -134,18 +146,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       ),
       transport.send_command(
         session_id,
-        "Page.addScriptToEvaluateOnNewDocument",
-        serde_json::json!({"source": engine_js})
-      ),
-      transport.send_command(
-        session_id,
         "Target.setAutoAttach",
         serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true})
-      ),
-      transport.send_command(
-        session_id,
-        "Emulation.setFocusEmulationEnabled",
-        serde_json::json!({"enabled": true})
       ),
       vp_fut,
       unpause_fut,
@@ -157,9 +159,6 @@ impl<T: CdpWrap> CdpBrowser<T> {
     r5?;
     r6?;
     r7?;
-    r8?;
-    r9?;
-    r10?;
     Ok(())
   }
 
@@ -189,7 +188,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
 
     Ok(Self {
       transport,
-      child,
+      child: Arc::new(tokio::sync::Mutex::new(child)),
       attached_targets: std::sync::Mutex::new(FxHashMap::default()),
     })
   }
@@ -277,6 +276,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
         lifecycle: lc_state.clone(),
         lifecycle_notify: lc_notify.clone(),
+        injected_script: Arc::new(InjectedScriptManager::new()),
       }));
     }
     Ok(pages)
@@ -395,6 +395,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
       lifecycle: lc_state.clone(),
       lifecycle_notify: lc_notify.clone(),
+      injected_script: Arc::new(InjectedScriptManager::new()),
     };
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
@@ -417,7 +418,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .transport
       .send_command(None, "Browser.close", super::empty_params())
       .await;
-    if let Some(ref mut child) = self.child {
+    if let Some(mut child) = self.child.lock().await.take() {
       let _ = child.kill().await;
     }
     Ok(())
@@ -535,7 +536,7 @@ impl CdpBrowser<ws::WsTransport> {
 
     Ok(Self {
       transport,
-      child: None,
+      child: Arc::new(tokio::sync::Mutex::new(None)),
       attached_targets: std::sync::Mutex::new(attached),
     })
   }
@@ -613,6 +614,42 @@ pub struct CdpPage<T: CdpTransport> {
   lifecycle: Arc<std::sync::Mutex<LifecycleState>>,
   /// Notification sent when lifecycle state is updated.
   lifecycle_notify: Arc<tokio::sync::Notify>,
+  /// Manager for lazy engine injection.
+  injected_script: Arc<InjectedScriptManager>,
+}
+
+pub struct InjectedScriptManager {
+  injected: std::sync::atomic::AtomicBool,
+}
+
+impl InjectedScriptManager {
+  fn new() -> Self {
+    Self {
+      injected: std::sync::atomic::AtomicBool::new(false),
+    }
+  }
+
+  fn reset(&self) {
+    self.injected.store(false, std::sync::atomic::Ordering::Relaxed);
+  }
+
+  async fn ensure<T: CdpWrap>(&self, page: &CdpPage<T>) -> Result<(), String> {
+    if !self.injected.load(std::sync::atomic::Ordering::Relaxed) {
+      let full_check_js = crate::selectors::build_lazy_inject_js();
+      let _ = page
+        .cmd(
+          "Runtime.evaluate",
+          serde_json::json!({
+              "expression": full_check_js,
+              "returnByValue": false,
+              "awaitPromise": true,
+          }),
+        )
+        .await?;
+      self.injected.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+  }
 }
 
 impl<T: CdpTransport> Clone for CdpPage<T> {
@@ -634,6 +671,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       main_frame_id: self.main_frame_id.clone(),
       lifecycle: self.lifecycle.clone(),
       lifecycle_notify: self.lifecycle_notify.clone(),
+      injected_script: self.injected_script.clone(),
     }
   }
 }
@@ -650,6 +688,7 @@ impl<T: CdpWrap> CdpPage<T> {
   // ---- Navigation ----
 
   pub async fn goto(&self, url: &str, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+    self.injected_script.reset();
     let target_event = match lifecycle {
       crate::backend::NavLifecycle::Commit => "commit",
       crate::backend::NavLifecycle::DomContentLoaded => "domcontentloaded",
@@ -704,6 +743,7 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn reload(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+    self.injected_script.reset();
     let rx = self
       .transport
       .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
@@ -801,6 +841,17 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   // ---- JavaScript ----
+
+  pub async fn injected_script(&self) -> Result<String, String> {
+    self.ensure_engine_injected().await?;
+    Ok("window.__fd".to_string())
+  }
+
+  /// Ensures the selector engine is injected into the current execution context.
+  /// Idempotent and navigation-aware.
+  pub async fn ensure_engine_injected(&self) -> Result<(), String> {
+    self.injected_script.ensure(self).await
+  }
 
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
     let result = self
@@ -900,7 +951,10 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(T::wrap_element(CdpElement {
       transport: self.transport.clone(),
       session_id: self.session_id.clone(),
-      node_id,
+      handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
+        node_id: Some(node_id),
+        object_id: None,
+      })),
     }))
   }
 
@@ -923,23 +977,13 @@ impl<T: CdpWrap> CdpPage<T> {
       .and_then(|v| v.as_str())
       .ok_or("JS did not return a DOM element")?;
 
-    let node_result = self
-      .cmd("DOM.requestNode", serde_json::json!({"objectId": object_id}))
-      .await?;
-
-    let node_id = node_result
-      .get("nodeId")
-      .and_then(serde_json::Value::as_i64)
-      .ok_or("Could not resolve element nodeId")?;
-
-    if node_id == 0 {
-      return Err("Element not found".into());
-    }
-
     Ok(T::wrap_element(CdpElement {
       transport: self.transport.clone(),
       session_id: self.session_id.clone(),
-      node_id,
+      handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
+        node_id: None,
+        object_id: Some(Arc::from(object_id)),
+      })),
     }))
   }
 
@@ -1800,17 +1844,25 @@ impl<T: CdpWrap> CdpPage<T> {
       .and_then(|v| v.as_str())
       .ok_or_else(|| format!("Ref '{ref_id}' no longer valid."))?;
 
-    self
-      .cmd(
-        "Runtime.callFunctionOn",
-        serde_json::json!({
-            "objectId": object_id,
-            "functionDeclaration": format!("function() {{ this.setAttribute('data-cref', '{ref_id}'); }}")
-        }),
-      )
-      .await?;
+    let node_id = self
+      .cmd("DOM.requestNode", serde_json::json!({"objectId": object_id}))
+      .await?
+      .get("nodeId")
+      .and_then(serde_json::Value::as_i64)
+      .ok_or_else(|| format!("Ref '{ref_id}' no longer valid."))?;
 
-    self.find_element(&format!("[data-cref='{ref_id}']")).await
+    if node_id == 0 {
+      return Err(format!("Ref '{ref_id}' no longer valid."));
+    }
+
+    Ok(T::wrap_element(CdpElement {
+      transport: self.transport.clone(),
+      session_id: self.session_id.clone(),
+      handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
+        node_id: Some(node_id),
+        object_id: Some(Arc::from(object_id)),
+      })),
+    }))
   }
 
   // ---- Event listeners ----
@@ -1841,6 +1893,7 @@ impl<T: CdpWrap> CdpPage<T> {
       self.session_id.clone(),
       self.frame_contexts.clone(),
       self.events.clone(),
+      self.injected_script.clone(),
     );
   }
 
@@ -2093,6 +2146,7 @@ impl<T: CdpWrap> CdpPage<T> {
     session_id: Option<Arc<str>>,
     frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
     emitter: crate::events::EventEmitter,
+    injected_script: Arc<InjectedScriptManager>,
   ) {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_events();
@@ -2133,6 +2187,7 @@ impl<T: CdpWrap> CdpPage<T> {
           },
           "Runtime.executionContextsCleared" => {
             frame_contexts.write().await.clear();
+            injected_script.reset();
           },
           "Page.frameAttached" => {
             if let Some(params) = event.get("params") {
@@ -2161,6 +2216,10 @@ impl<T: CdpWrap> CdpPage<T> {
           },
           "Page.frameNavigated" => {
             if let Some(frame) = event.get("params").and_then(|p| p.get("frame")) {
+              let is_main = frame.get("parentId").is_none();
+              if is_main {
+                injected_script.reset();
+              }
               emitter.emit(crate::events::PageEvent::FrameNavigated(super::FrameInfo {
                 frame_id: frame.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 parent_frame_id: frame
@@ -2617,7 +2676,12 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 pub struct CdpElement<T: CdpTransport> {
   transport: Arc<T>,
   session_id: Option<Arc<str>>,
-  node_id: i64,
+  handles: Arc<tokio::sync::Mutex<CdpElementHandles>>,
+}
+
+struct CdpElementHandles {
+  node_id: Option<i64>,
+  object_id: Option<Arc<str>>,
 }
 
 impl<T: CdpTransport> Clone for CdpElement<T> {
@@ -2625,7 +2689,7 @@ impl<T: CdpTransport> Clone for CdpElement<T> {
     Self {
       transport: self.transport.clone(),
       session_id: self.session_id.clone(),
-      node_id: self.node_id,
+      handles: self.handles.clone(),
     }
   }
 }
@@ -2638,10 +2702,73 @@ impl<T: CdpTransport> CdpElement<T> {
       .await
   }
 
+  async fn resolve_node_id_from_object(&self, object_id: &str) -> Result<i64, String> {
+    let node_result = self
+      .cmd("DOM.requestNode", serde_json::json!({"objectId": object_id}))
+      .await?;
+    let node_id = node_result
+      .get("nodeId")
+      .and_then(serde_json::Value::as_i64)
+      .ok_or("Could not resolve element nodeId")?;
+    if node_id == 0 {
+      return Err("Element not found".into());
+    }
+    Ok(node_id)
+  }
+
+  async fn resolve_object_id_from_node(&self, node_id: i64) -> Result<Arc<str>, String> {
+    let resolved = self
+      .cmd("DOM.resolveNode", serde_json::json!({"nodeId": node_id}))
+      .await?;
+    resolved
+      .get("object")
+      .and_then(|o| o.get("objectId"))
+      .and_then(|v| v.as_str())
+      .map(Arc::from)
+      .ok_or("Cannot resolve element".into())
+  }
+
+  async fn node_id(&self) -> Result<i64, String> {
+    let object_id = {
+      let handles = self.handles.lock().await;
+      if let Some(node_id) = handles.node_id {
+        return Ok(node_id);
+      }
+      handles.object_id.clone()
+    };
+
+    let Some(object_id) = object_id else {
+      return Err("Element handle has neither nodeId nor objectId".into());
+    };
+    let node_id = self.resolve_node_id_from_object(&object_id).await?;
+    let mut handles = self.handles.lock().await;
+    handles.node_id = Some(node_id);
+    Ok(node_id)
+  }
+
+  async fn object_id(&self) -> Result<Arc<str>, String> {
+    let node_id = {
+      let handles = self.handles.lock().await;
+      if let Some(object_id) = &handles.object_id {
+        return Ok(object_id.clone());
+      }
+      handles.node_id
+    };
+
+    let Some(node_id) = node_id else {
+      return Err("Element handle has neither nodeId nor objectId".into());
+    };
+    let object_id = self.resolve_object_id_from_node(node_id).await?;
+    let mut handles = self.handles.lock().await;
+    handles.object_id = Some(object_id.clone());
+    Ok(object_id)
+  }
+
   /// Get element center coordinates for clicking.
   async fn get_center(&self) -> Result<(f64, f64), String> {
+    let node_id = self.node_id().await?;
     let result = self
-      .cmd("DOM.getBoxModel", serde_json::json!({"nodeId": self.node_id}))
+      .cmd("DOM.getBoxModel", serde_json::json!({"nodeId": node_id}))
       .await?;
     let content = result
       .get("model")
@@ -2660,26 +2787,13 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok((f64::midpoint(x1, x3), f64::midpoint(y1, y3)))
   }
 
-  /// Resolve this element's nodeId to a Runtime objectId.
-  async fn resolve_object_id(&self) -> Result<String, String> {
-    let resolved = self
-      .cmd("DOM.resolveNode", serde_json::json!({"nodeId": self.node_id}))
-      .await?;
-    resolved
-      .get("object")
-      .and_then(|o| o.get("objectId"))
-      .and_then(|v| v.as_str())
-      .map(std::string::ToString::to_string)
-      .ok_or("Cannot resolve element".into())
-  }
-
   pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>, String> {
-    let object_id = self.resolve_object_id().await?;
+    let object_id = self.object_id().await?;
     let result = self
       .cmd(
         "Runtime.callFunctionOn",
         serde_json::json!({
-            "objectId": object_id,
+            "objectId": &*object_id,
             "functionDeclaration": function,
             "returnByValue": true,
         }),
@@ -2783,12 +2897,12 @@ impl<T: CdpTransport> CdpElement<T> {
   }
 
   pub async fn call_js_fn(&self, function: &str) -> Result<(), String> {
-    let object_id = self.resolve_object_id().await?;
+    let object_id = self.object_id().await?;
     self
       .cmd(
         "Runtime.callFunctionOn",
         serde_json::json!({
-            "objectId": object_id,
+            "objectId": &*object_id,
             "functionDeclaration": function,
         }),
       )
@@ -2797,18 +2911,20 @@ impl<T: CdpTransport> CdpElement<T> {
   }
 
   pub async fn scroll_into_view(&self) -> Result<(), String> {
+    let node_id = self.node_id().await?;
     self
       .cmd(
         "DOM.scrollIntoViewIfNeeded",
-        serde_json::json!({"nodeId": self.node_id}),
+        serde_json::json!({"nodeId": node_id}),
       )
       .await?;
     Ok(())
   }
 
   pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>, String> {
+    let node_id = self.node_id().await?;
     let result = self
-      .cmd("DOM.getBoxModel", serde_json::json!({"nodeId": self.node_id}))
+      .cmd("DOM.getBoxModel", serde_json::json!({"nodeId": node_id}))
       .await?;
     let content = result
       .get("model")

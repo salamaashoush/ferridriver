@@ -51,6 +51,37 @@ pub enum Engine {
   HasNotText,
 }
 
+/// Bootstrap JS script to be evaluated on new document.
+/// Resets the injection promise so we know we need to re-inject after navigation.
+pub const ENGINE_BOOTSTRAP_JS: &str = "window.__fd_promise = null;";
+
+/// Unified lazy-injection IIFE.
+/// 1. Checks if already ready.
+/// 2. Checks if currently injecting.
+/// 3. Otherwise, starts injection and stores the promise.
+/// Returns the InjectedScript instance.
+pub fn build_lazy_inject_js() -> String {
+  let engine_js = build_inject_js();
+  format!(
+    r#"(async () => {{
+      if (window.__fd) return window.__fd;
+      if (window.__fd_promise) return await window.__fd_promise;
+      window.__fd_promise = (async () => {{
+        try {{
+          const module = {{ exports: {{}} }};
+          {engine_js}
+          window.__fd = new (module.exports.InjectedScript())(globalThis, {{}});
+          return window.__fd;
+        }} catch (e) {{
+          window.__fd_promise = null;
+          throw e;
+        }}
+      }})();
+      return await window.__fd_promise;
+    }})()"#
+  )
+}
+
 /// Result of a selector query -- lightweight info returned from JS.
 #[derive(Debug, Clone, serde::Deserialize)]
 pub struct MatchedElement {
@@ -229,9 +260,9 @@ pub fn build_inject_js() -> String {
 }
 
 /// Build a lightweight query call (runtime must already be injected).
-fn build_query_js(selector: &Selector) -> String {
+fn build_query_js(selector: &Selector, fd: &str) -> String {
   let parts_json = build_parts_json(selector);
-  format!("window.__fd.sel({parts_json})")
+  format!("{fd}.sel({parts_json})")
 }
 
 /// Builds a JSON array of selector parts for the injected engine.
@@ -315,8 +346,9 @@ const ENGINE_JS: &str = include_str!("injected/dist/engine.min.js");
 /// Returns an error if selector parsing or JS evaluation fails.
 pub async fn query_all(page: &AnyPage, selector: &str) -> Result<Vec<MatchedElement>, String> {
   let parsed = parse(selector)?;
-  // Ensure engine is injected (idempotent)
-  let js = build_query_js(&parsed);
+  page.ensure_engine_injected().await?;
+  let fd = "window.__fd";
+  let js = build_query_js(&parsed, &fd);
   let result_str = page
     .evaluate(&js)
     .await?
@@ -365,8 +397,9 @@ pub async fn query_one(page: &AnyPage, selector: &str, strict: bool) -> Result<A
     return Ok(el);
   }
 
-  let js = format!("window.__fd.selOne({parts_json})");
-
+  page.ensure_engine_injected().await?;
+  let fd = "window.__fd";
+  let js = format!("{fd}.selOne({parts_json})");
   page
     .evaluate_to_element(&js)
     .await
@@ -392,10 +425,10 @@ pub async fn query_one_prebuilt(page: &AnyPage, sel_js: &str, selector_display: 
 /// # Errors
 ///
 /// Returns an error if the selector string cannot be parsed.
-pub fn build_selone_js(selector: &str) -> Result<String, String> {
+pub fn build_selone_js(selector: &str, fd: &str) -> Result<String, String> {
   let parsed = parse(selector)?;
   let parts_json = build_parts_json(&parsed);
-  Ok(format!("window.__fd.selOne({parts_json})"))
+  Ok(format!("{fd}.selOne({parts_json})"))
 }
 
 /// Clean up any leftover selector tags (call after operations).

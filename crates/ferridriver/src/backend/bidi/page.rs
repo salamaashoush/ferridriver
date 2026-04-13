@@ -31,10 +31,46 @@ pub struct BidiPage {
   intercept_ids: Arc<RwLock<Vec<String>>>,
   closed: Arc<AtomicBool>,
   preload_scripts: Arc<RwLock<FxHashMap<String, String>>>,
-  pub exposed_fns: Arc<RwLock<FxHashMap<String, crate::events::ExposedFn>>>,
+  exposed_fns: Arc<RwLock<FxHashMap<String, crate::events::ExposedFn>>>,
   pub dialog_handler: Arc<RwLock<crate::events::DialogHandler>>,
-}
+  /// Manager for lazy engine injection.
+  injected_script: Arc<InjectedScriptManager>,
+  }
 
+  pub struct InjectedScriptManager {
+  injected: AtomicBool,
+  }
+
+  impl InjectedScriptManager {
+  fn new() -> Self {
+    Self {
+      injected: AtomicBool::new(false),
+    }
+  }
+
+  fn reset(&self) {
+    self.injected.store(false, Ordering::Relaxed);
+  }
+
+  async fn ensure(&self, page: &BidiPage) -> Result<(), String> {
+    if !self.injected.load(Ordering::Relaxed) {
+      let full_check_js = crate::selectors::build_lazy_inject_js();
+      let _ = page
+        .cmd(
+          "script.evaluate",
+          json!({
+            "expression": full_check_js,
+            "target": {"context": &*page.context_id},
+            "awaitPromise": true,
+            "resultOwnership": "none"
+          }),
+        )
+        .await?;
+      self.injected.store(true, Ordering::Relaxed);
+    }
+    Ok(())
+  }
+  }
 impl BidiPage {
   /// Create a new BidiPage and enable required domains (inject engine, etc.).
   /// This is the BiDi equivalent of CDP's `enable_domains()`.
@@ -49,6 +85,7 @@ impl BidiPage {
       preload_scripts: Arc::new(RwLock::new(FxHashMap::default())),
       exposed_fns: Arc::new(RwLock::new(FxHashMap::default())),
       dialog_handler: Arc::new(RwLock::new(crate::events::default_dialog_handler())),
+      injected_script: Arc::new(InjectedScriptManager::new()),
     };
 
     page.enable_domains().await?;
@@ -60,30 +97,8 @@ impl BidiPage {
   /// This mirrors CDP's `enable_domains()` which fires `Page.addScriptToEvaluateOnNewDocument`
   /// + domain enables in parallel.
   async fn enable_domains(&self) -> Result<(), String> {
-    let engine_js = crate::selectors::build_inject_js();
-
-    // Fire both in parallel: preload script registration + immediate evaluation
-    let (preload_result, eval_result) = tokio::join!(
-      self.cmd(
-        "script.addPreloadScript",
-        json!({
-          "functionDeclaration": format!("() => {{ {engine_js} }}"),
-          "contexts": [&*self.context_id]
-        }),
-      ),
-      self.cmd(
-        "script.evaluate",
-        json!({
-          "expression": engine_js,
-          "target": {"context": &*self.context_id},
-          "awaitPromise": false,
-          "resultOwnership": "none"
-        }),
-      ),
-    );
-    preload_result?;
-    // eval_result can fail on about:blank, that's ok
-    let _ = eval_result;
+    // BiDi handles navigation-aware injection via script.addPreloadScript.
+    // However, we want lazy injection, so we skip upfront injection here.
     Ok(())
   }
 
@@ -173,6 +188,7 @@ impl BidiPage {
   // ── Navigation ──────────────────────────────────────────────────────────
 
   pub async fn goto(&self, url: &str, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+    self.injected_script.reset();
     let wait = Self::lifecycle_to_wait(lifecycle);
     let result = tokio::time::timeout(
       std::time::Duration::from_millis(timeout_ms),
@@ -217,6 +233,7 @@ impl BidiPage {
   }
 
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+    self.injected_script.reset();
     let wait = Self::lifecycle_to_wait(lifecycle);
     let result = tokio::time::timeout(
       std::time::Duration::from_millis(timeout_ms),
@@ -293,6 +310,17 @@ impl BidiPage {
 
   // ── JavaScript ──────────────────────────────────────────────────────────
 
+  pub async fn injected_script(&self) -> Result<String, String> {
+    self.ensure_engine_injected().await?;
+    Ok("window.__fd".to_string())
+  }
+
+  /// Ensures the selector engine is injected into the current execution context.
+  /// Idempotent and navigation-aware.
+  pub async fn ensure_engine_injected(&self) -> Result<(), String> {
+    self.injected_script.ensure(self).await
+  }
+
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
     self.eval_internal(expression, &&*self.context_id).await
   }
@@ -335,7 +363,7 @@ impl BidiPage {
   }
 
   pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
-    // The JS can be either an expression (e.g. "window.__fd.selOne(...)") or a function.
+    // The JS can be either an expression or a function.
     // Use script.evaluate for expressions, script.callFunction for functions.
     let is_function = js.trim_start().starts_with("function") || js.trim_start().starts_with("(");
 
@@ -483,12 +511,13 @@ impl BidiPage {
   }
 
   pub async fn accessibility_tree_with_depth(&self, max_depth: i32) -> Result<Vec<AxNodeData>, String> {
+    let fd = self.injected_script().await?;
     // Use the shared JS accessibility tree helper from window.__fd.accessibilityTree().
     // This uses Playwright's ARIA role/name computation and tags elements with data-fdref
     // for ref resolution. Shared between BiDi and WebKit backends.
     let result = self
       .eval_internal(
-        &format!("JSON.stringify(window.__fd.accessibilityTree({max_depth}))"),
+        &format!("JSON.stringify({fd}.accessibilityTree({max_depth}))"),
         &&*self.context_id,
       )
       .await?;
@@ -995,6 +1024,7 @@ impl BidiPage {
     let session = self.session.clone();
     let closed = self.closed.clone();
     let emitter = self.events.clone();
+    let injected_script = self.injected_script.clone();
 
     tokio::spawn(async move {
       while let Ok(event) = rx.recv().await {
@@ -1005,6 +1035,12 @@ impl BidiPage {
         }
 
         match event.method.as_str() {
+          "browsingContext.navigationStarted"
+          | "browsingContext.fragmentNavigated"
+          | "browsingContext.domContentLoaded"
+          | "browsingContext.load" => {
+            injected_script.reset();
+          },
           "log.entryAdded" => {
             let level = event.params.get("level").and_then(|v| v.as_str()).unwrap_or("log");
             let text = event.params.get("text").and_then(|v| v.as_str()).unwrap_or("");

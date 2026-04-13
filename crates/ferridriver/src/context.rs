@@ -238,8 +238,43 @@ impl ContextRef {
   ///
   /// Returns an error if page creation fails.
   pub async fn new_page(&self) -> Result<Arc<Page>, String> {
-    let mut state = self.state.write().await;
-    let any_page = Box::pin(state.open_page_keyed(&self.key, "about:blank")).await?;
+    {
+      let mut state = self.state.write().await;
+      Box::pin(state.ensure_instance(&self.key.instance)).await?;
+    }
+
+    let plan = {
+      let state = self.state.read().await;
+      state.page_open_plan(&self.key)?
+    };
+
+    let (any_page, browser_context_id) = if &*self.key.context == "default" {
+      (
+        plan
+          .browser
+          .new_page("about:blank", plan.browser_context_id.as_deref(), plan.viewport.as_ref())
+          .await?,
+        None,
+      )
+    } else if let Some(existing_ctx_id) = plan.browser_context_id.clone() {
+      (
+        plan
+          .browser
+          .new_page("about:blank", Some(&existing_ctx_id), plan.viewport.as_ref())
+          .await?,
+        Some(existing_ctx_id),
+      )
+    } else {
+      let ctx_id = plan.browser.new_context().await?;
+      let page = plan.browser.new_page("about:blank", Some(&ctx_id), plan.viewport.as_ref()).await?;
+      (page, Some(ctx_id))
+    };
+
+    {
+      let mut state = self.state.write().await;
+      state.register_opened_page(&self.key, any_page.clone(), browser_context_id)?;
+    }
+
     Ok(Page::with_context(any_page, self.clone()))
   }
 

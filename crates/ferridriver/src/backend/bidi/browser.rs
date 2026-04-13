@@ -8,10 +8,11 @@ use super::page::BidiPage;
 use super::session::BidiSession;
 use crate::backend::{AnyPage, NavLifecycle};
 
+#[derive(Clone)]
 /// Browser instance using the WebDriver BiDi protocol.
 pub struct BidiBrowser {
   pub(crate) session: Arc<BidiSession>,
-  child: Option<tokio::process::Child>,
+  child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
 }
 
 impl BidiBrowser {
@@ -23,7 +24,7 @@ impl BidiBrowser {
     let (session, child) = BidiSession::launch(browser_path, flags, headless).await?;
     Ok(Self {
       session: Arc::new(session),
-      child: Some(child),
+      child: Arc::new(tokio::sync::Mutex::new(Some(child))),
     })
   }
 
@@ -32,7 +33,7 @@ impl BidiBrowser {
     let session = BidiSession::connect(ws_url).await?;
     Ok(Self {
       session: Arc::new(session),
-      child: None,
+      child: Arc::new(tokio::sync::Mutex::new(None)),
     })
   }
 
@@ -90,7 +91,7 @@ impl BidiBrowser {
     let _ = self.session.transport.send_command("browser.close", json!({})).await;
 
     // Then kill the child process if we own it
-    if let Some(mut child) = self.child.take() {
+    if let Some(mut child) = self.child.lock().await.take() {
       let _ = child.kill().await;
     }
 

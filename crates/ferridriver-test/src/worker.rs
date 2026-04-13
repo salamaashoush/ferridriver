@@ -15,14 +15,445 @@ use std::time::{Duration, Instant};
 use rustc_hash::FxHashMap;
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::TestConfig;
+use crate::config::{ContextConfig, TestConfig, ViewportConfig};
 use crate::dispatcher::{SerialBatch, TestAssignment, WorkItem};
-use crate::fixture::{FixturePool, FixtureScope};
+use crate::fixture::{FixtureDef, FixturePool, FixtureScope};
 use crate::model::{
   Attachment, AttachmentBody, ExpectedStatus, Hooks, StepCategory, TestAnnotation, TestFailure, TestInfo, TestOutcome,
   TestStatus,
 };
 use crate::reporter::{EventBus, ReporterEvent};
+
+struct PreparedPage {
+  ctx: ferridriver::ContextRef,
+  page_result: Result<Arc<ferridriver::Page>, String>,
+}
+
+#[derive(Clone)]
+struct EffectiveContextConfig {
+  context: ContextConfig,
+  default_viewport: Option<ViewportConfig>,
+  viewport_override: Option<ViewportConfig>,
+  request_base_url: Option<String>,
+}
+
+enum TestBrowserState {
+  Empty(Option<tokio::task::JoinHandle<PreparedPage>>),
+  Context(Arc<ferridriver::ContextRef>),
+  Page {
+    ctx: Arc<ferridriver::ContextRef>,
+    page: Arc<ferridriver::Page>,
+  },
+  Failed(String),
+}
+
+struct TestBrowserResources {
+  browser: Arc<ferridriver::Browser>,
+  effective: EffectiveContextConfig,
+  output_dir: std::path::PathBuf,
+  state: Mutex<TestBrowserState>,
+}
+
+impl TestBrowserResources {
+  fn new(
+    browser: Arc<ferridriver::Browser>,
+    effective: EffectiveContextConfig,
+    output_dir: std::path::PathBuf,
+    prepared_page: Option<tokio::task::JoinHandle<PreparedPage>>,
+  ) -> Self {
+    Self {
+      browser,
+      effective,
+      output_dir,
+      state: Mutex::new(TestBrowserState::Empty(prepared_page)),
+    }
+  }
+
+  async fn context(&self) -> Result<Arc<ferridriver::ContextRef>, String> {
+    let mut state = self.state.lock().await;
+    match &mut *state {
+      TestBrowserState::Context(ctx) => Ok(Arc::clone(ctx)),
+      TestBrowserState::Page { ctx, .. } => Ok(Arc::clone(ctx)),
+      TestBrowserState::Failed(err) => Err(err.clone()),
+      TestBrowserState::Empty(prepared_page) => {
+        if let Some(handle) = prepared_page.take() {
+          handle.abort();
+        }
+        let ctx = Arc::new(self.browser.new_context());
+        *state = TestBrowserState::Context(Arc::clone(&ctx));
+        Ok(ctx)
+      },
+    }
+  }
+
+  async fn page(&self) -> Result<Arc<ferridriver::Page>, String> {
+    let mut state = self.state.lock().await;
+    match &mut *state {
+      TestBrowserState::Page { page, .. } => Ok(Arc::clone(page)),
+      TestBrowserState::Failed(err) => Err(err.clone()),
+      TestBrowserState::Context(ctx) => {
+        let page = ctx.new_page().await?;
+        apply_page_config(&page, &self.effective, &self.output_dir).await?;
+        let ctx = Arc::clone(ctx);
+        *state = TestBrowserState::Page {
+          ctx,
+          page: Arc::clone(&page),
+        };
+        Ok(page)
+      },
+      TestBrowserState::Empty(prepared_page) => {
+        let prepared = match prepared_page.take() {
+          Some(handle) => match handle.await {
+            Ok(prepared) => prepared,
+            Err(_) => {
+              let ctx = self.browser.new_context();
+              let page_result = ctx.new_page().await;
+              PreparedPage { ctx, page_result }
+            },
+          },
+          None => {
+            let ctx = self.browser.new_context();
+            let page_result = ctx.new_page().await;
+            PreparedPage { ctx, page_result }
+          },
+        };
+
+        match prepared.page_result {
+          Ok(page) => {
+            apply_page_config(&page, &self.effective, &self.output_dir).await?;
+            let ctx = Arc::new(prepared.ctx);
+            *state = TestBrowserState::Page {
+              ctx,
+              page: Arc::clone(&page),
+            };
+            Ok(page)
+          },
+          Err(err) => {
+            *state = TestBrowserState::Failed(err.clone());
+            Err(err)
+          },
+        }
+      },
+    }
+  }
+
+  async fn close(&self) {
+    let mut state = self.state.lock().await;
+    match std::mem::replace(&mut *state, TestBrowserState::Empty(None)) {
+      TestBrowserState::Empty(Some(handle)) => handle.abort(),
+      TestBrowserState::Context(ctx) => {
+        let _ = ctx.close().await;
+      },
+      TestBrowserState::Page { ctx, .. } => {
+        let _ = ctx.close().await;
+      },
+      TestBrowserState::Empty(None) | TestBrowserState::Failed(_) => {},
+    }
+  }
+}
+
+fn build_effective_context_config(config: &TestConfig, test: &crate::model::TestCase) -> EffectiveContextConfig {
+  let mut ctx_config = config.browser.context.clone();
+  if let Some(ref opts) = test.use_options {
+    if let Some(v) = opts.get("locale").and_then(|v| v.as_str()) {
+      ctx_config.locale = Some(v.to_string());
+    }
+    if let Some(v) = opts.get("colorScheme").and_then(|v| v.as_str()) {
+      ctx_config.color_scheme = Some(v.to_string());
+    }
+    if let Some(v) = opts.get("timezoneId").and_then(|v| v.as_str()) {
+      ctx_config.timezone_id = Some(v.to_string());
+    }
+    if let Some(v) = opts.get("isMobile").and_then(|v| v.as_bool()) {
+      ctx_config.is_mobile = v;
+    }
+    if let Some(v) = opts.get("hasTouch").and_then(|v| v.as_bool()) {
+      ctx_config.has_touch = v;
+    }
+    if let Some(v) = opts.get("offline").and_then(|v| v.as_bool()) {
+      ctx_config.offline = v;
+    }
+    if let Some(v) = opts.get("javaScriptEnabled").and_then(|v| v.as_bool()) {
+      ctx_config.java_script_enabled = v;
+    }
+    if let Some(v) = opts.get("bypassCSP").and_then(|v| v.as_bool()) {
+      ctx_config.bypass_csp = v;
+    }
+    if let Some(v) = opts.get("userAgent").and_then(|v| v.as_str()) {
+      ctx_config.user_agent = Some(v.to_string());
+    }
+    if let Some(v) = opts.get("deviceScaleFactor").and_then(|v| v.as_f64()) {
+      ctx_config.device_scale_factor = Some(v);
+    }
+    if let Some(v) = opts.get("reducedMotion").and_then(|v| v.as_str()) {
+      ctx_config.reduced_motion = Some(v.to_string());
+    }
+    if let Some(v) = opts.get("forcedColors").and_then(|v| v.as_str()) {
+      ctx_config.forced_colors = Some(v.to_string());
+    }
+    if let Some(v) = opts.get("serviceWorkers").and_then(|v| v.as_str()) {
+      ctx_config.service_workers = Some(v.to_string());
+    }
+    if let Some(v) = opts.get("storageState").and_then(|v| v.as_str()) {
+      ctx_config.storage_state = Some(v.to_string());
+    }
+    if let Some(v) = opts.get("acceptDownloads").and_then(|v| v.as_bool()) {
+      ctx_config.accept_downloads = v;
+    }
+    if let Some(v) = opts.get("ignoreHTTPSErrors").and_then(|v| v.as_bool()) {
+      ctx_config.ignore_https_errors = v;
+    }
+    if let Some(geo) = opts.get("geolocation").and_then(|v| v.as_object()) {
+      if let (Some(lat), Some(lon)) = (
+        geo.get("latitude").and_then(|v| v.as_f64()),
+        geo.get("longitude").and_then(|v| v.as_f64()),
+      ) {
+        ctx_config.geolocation = Some(crate::config::GeolocationConfig {
+          latitude: lat,
+          longitude: lon,
+          accuracy: geo.get("accuracy").and_then(|v| v.as_f64()),
+        });
+      }
+    }
+    if let Some(arr) = opts.get("permissions").and_then(|v| v.as_array()) {
+      let perms: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
+      if !perms.is_empty() {
+        ctx_config.permissions = perms;
+      }
+    }
+    if let Some(obj) = opts.get("extraHTTPHeaders").and_then(|v| v.as_object()) {
+      let headers: std::collections::BTreeMap<String, String> = obj
+        .iter()
+        .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
+        .collect();
+      if !headers.is_empty() {
+        ctx_config.extra_http_headers = headers;
+      }
+    }
+    if let Some(creds) = opts.get("httpCredentials").and_then(|v| v.as_object()) {
+      if let (Some(user), Some(pass)) = (
+        creds.get("username").and_then(|v| v.as_str()),
+        creds.get("password").and_then(|v| v.as_str()),
+      ) {
+        ctx_config.http_credentials = Some(crate::config::HttpCredentialsConfig {
+          username: user.to_string(),
+          password: pass.to_string(),
+          origin: creds.get("origin").and_then(|v| v.as_str()).map(String::from),
+        });
+      }
+    }
+  }
+
+  let viewport_override = test.use_options.as_ref().and_then(|opts| {
+    opts.get("viewport").and_then(|v| {
+      let w = v.get("width").and_then(|w| w.as_i64());
+      let h = v.get("height").and_then(|h| h.as_i64());
+      match (w, h) {
+        (Some(w), Some(h)) => Some(ViewportConfig { width: w, height: h }),
+        _ => None,
+      }
+    })
+  });
+
+  let request_base_url = test
+    .use_options
+    .as_ref()
+    .and_then(|opts| opts.get("baseURL").and_then(|v| v.as_str()).map(String::from))
+    .or_else(|| config.base_url.clone());
+
+  if ctx_config.storage_state.is_none() {
+    ctx_config.storage_state = config.storage_state.clone();
+  }
+
+  EffectiveContextConfig {
+    context: ctx_config,
+    default_viewport: config.browser.viewport.clone(),
+    viewport_override,
+    request_base_url,
+  }
+}
+
+async fn apply_page_config(
+  page: &Arc<ferridriver::Page>,
+  effective: &EffectiveContextConfig,
+  output_dir: &std::path::Path,
+) -> Result<(), String> {
+  let ctx_config = &effective.context;
+  let viewport = effective.viewport_override.as_ref().or(effective.default_viewport.as_ref());
+
+  let has_ctx_overrides = effective.viewport_override.is_some()
+    || ctx_config.is_mobile
+    || ctx_config.has_touch
+    || ctx_config
+      .device_scale_factor
+      .is_some_and(|d| (d - 1.0).abs() > f64::EPSILON);
+  if has_ctx_overrides {
+    if let Some(vp) = viewport {
+      page
+        .set_viewport(&ferridriver::options::ViewportConfig {
+          width: vp.width,
+          height: vp.height,
+          device_scale_factor: ctx_config.device_scale_factor.unwrap_or(1.0),
+          is_mobile: ctx_config.is_mobile,
+          has_touch: ctx_config.has_touch,
+          is_landscape: ctx_config.is_mobile && vp.width > vp.height,
+        })
+        .await?;
+    }
+  }
+  if ctx_config.color_scheme.is_some() {
+    page
+      .emulate_media(&ferridriver::options::EmulateMediaOptions {
+        color_scheme: ctx_config.color_scheme.clone(),
+        ..Default::default()
+      })
+      .await?;
+  }
+  if let Some(ref locale) = ctx_config.locale {
+    page.set_locale(locale).await?;
+  }
+  if let Some(ref tz) = ctx_config.timezone_id {
+    page.set_timezone(tz).await?;
+  }
+  if let Some(ref geo) = ctx_config.geolocation {
+    page
+      .set_geolocation(geo.latitude, geo.longitude, geo.accuracy.unwrap_or(0.0))
+      .await?;
+  }
+  if ctx_config.offline {
+    page.set_network_state(true, 0.0, -1.0, -1.0).await?;
+  }
+  if !ctx_config.permissions.is_empty() {
+    page.grant_permissions(&ctx_config.permissions, None).await?;
+  }
+  if !ctx_config.extra_http_headers.is_empty() {
+    let headers: rustc_hash::FxHashMap<String, String> = ctx_config
+      .extra_http_headers
+      .iter()
+      .map(|(k, v)| (k.clone(), v.clone()))
+      .collect();
+    page.set_extra_http_headers(&headers).await?;
+  }
+  if let Some(ref ua) = ctx_config.user_agent {
+    page.set_user_agent(ua).await?;
+  }
+  if !ctx_config.java_script_enabled {
+    page.set_javascript_enabled(false).await?;
+  }
+  if ctx_config.reduced_motion.is_some() || ctx_config.forced_colors.is_some() {
+    page
+      .emulate_media(&ferridriver::options::EmulateMediaOptions {
+        color_scheme: None,
+        reduced_motion: ctx_config.reduced_motion.clone(),
+        forced_colors: ctx_config.forced_colors.clone(),
+        ..Default::default()
+      })
+      .await?;
+  }
+  if ctx_config.bypass_csp {
+    page.set_bypass_csp(true).await?;
+  }
+  if ctx_config.ignore_https_errors {
+    page.set_ignore_certificate_errors(true).await?;
+  }
+  if ctx_config.accept_downloads {
+    let download_dir = output_dir.join("downloads");
+    let _ = std::fs::create_dir_all(&download_dir);
+    page
+      .set_download_behavior("allowAndName", &download_dir.display().to_string())
+      .await?;
+  }
+  if let Some(ref creds) = ctx_config.http_credentials {
+    page.set_http_credentials(&creds.username, &creds.password).await?;
+  }
+  if ctx_config.service_workers.as_deref() == Some("block") {
+    page.set_service_workers_blocked(true).await?;
+  }
+  if let Some(ss_path) = ctx_config.storage_state.as_deref() {
+    let path = std::path::Path::new(ss_path);
+    match std::fs::read_to_string(path) {
+      Ok(json_str) => match serde_json::from_str::<serde_json::Value>(&json_str) {
+        Ok(state) => page.set_storage_state(&state).await?,
+        Err(e) => tracing::warn!(target: "ferridriver::worker", "parse storage state {}: {e}", path.display()),
+      },
+      Err(e) => tracing::warn!(target: "ferridriver::worker", "read storage state {}: {e}", path.display()),
+    }
+  }
+  Ok(())
+}
+
+fn build_test_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<String, FixtureDef> {
+  let mut defs = FxHashMap::default();
+
+  defs.insert(
+    "context".into(),
+    FixtureDef {
+      name: "context".into(),
+      scope: FixtureScope::Test,
+      dependencies: vec![],
+      setup: Arc::new({
+        let resources = Arc::clone(&resources);
+        move |_pool| {
+          let resources = Arc::clone(&resources);
+          Box::pin(async move {
+            let ctx = resources.context().await?;
+            Ok(ctx as Arc<dyn std::any::Any + Send + Sync>)
+          })
+        }
+      }),
+      teardown: None,
+      timeout: Duration::from_secs(10),
+    },
+  );
+
+  defs.insert(
+    "page".into(),
+    FixtureDef {
+      name: "page".into(),
+      scope: FixtureScope::Test,
+      dependencies: vec![],
+      setup: Arc::new({
+        let resources = Arc::clone(&resources);
+        move |_pool| {
+          let resources = Arc::clone(&resources);
+          Box::pin(async move {
+            let page = resources.page().await?;
+            Ok(page as Arc<dyn std::any::Any + Send + Sync>)
+          })
+        }
+      }),
+      teardown: None,
+      timeout: Duration::from_secs(10),
+    },
+  );
+
+  defs.insert(
+    "request".into(),
+    FixtureDef {
+      name: "request".into(),
+      scope: FixtureScope::Test,
+      dependencies: vec![],
+      setup: Arc::new({
+        let base_url = resources.effective.request_base_url.clone();
+        move |_pool| {
+          let base_url = base_url.clone();
+          Box::pin(async move {
+            Ok(Arc::new(ferridriver::api_request::APIRequestContext::new(
+              ferridriver::api_request::RequestContextOptions {
+                base_url,
+                ..Default::default()
+              },
+            )) as Arc<dyn std::any::Any + Send + Sync>)
+          })
+        }
+      }),
+      teardown: None,
+      timeout: Duration::from_secs(10),
+    },
+  );
+
+  defs
+}
 
 /// Result of a single test execution within a worker.
 pub struct WorkerTestResult {
@@ -54,6 +485,14 @@ impl Worker {
     Self { id, config, event_bus }
   }
 
+  fn spawn_prepared_page(browser: Arc<ferridriver::Browser>) -> tokio::task::JoinHandle<PreparedPage> {
+    tokio::spawn(async move {
+      let ctx = browser.new_context();
+      let page_result = ctx.new_page().await;
+      PreparedPage { ctx, page_result }
+    })
+  }
+
   #[tracing::instrument(skip_all, fields(worker_id = self.id))]
   pub async fn run(
     &self,
@@ -66,14 +505,16 @@ impl Worker {
       .event_bus
       .emit(ReporterEvent::WorkerStarted { worker_id: self.id })
       .await;
+    custom_fixture_pool.inject("browser", Arc::clone(&browser));
 
     let mut active_suites: FxHashMap<String, SuiteState> = FxHashMap::default();
+    let mut prepared_page = Some(Self::spawn_prepared_page(Arc::clone(&browser)));
 
     while let Ok(item) = rx.recv().await {
       match item {
         WorkItem::Single(assignment) => {
           let result = self
-            .run_single(&browser, &custom_fixture_pool, &mut active_suites, assignment)
+            .run_single(&browser, &custom_fixture_pool, &mut active_suites, &mut prepared_page, assignment)
             .await;
           if result_tx.send(result).await.is_err() {
             break;
@@ -81,7 +522,7 @@ impl Worker {
         },
         WorkItem::Serial(batch) => {
           let results = self
-            .run_serial_batch(&browser, &custom_fixture_pool, &mut active_suites, batch)
+            .run_serial_batch(&browser, &custom_fixture_pool, &mut active_suites, &mut prepared_page, batch)
             .await;
           for result in results {
             if result_tx.send(result).await.is_err() {
@@ -89,6 +530,15 @@ impl Worker {
             }
           }
         },
+      }
+    }
+
+    if let Some(handle) = prepared_page.take() {
+      match handle.await {
+        Ok(prepared) => {
+          let _ = prepared.ctx.close().await;
+        },
+        Err(_) => {},
       }
     }
 
@@ -161,6 +611,7 @@ impl Worker {
     browser: &Arc<ferridriver::Browser>,
     custom_pool: &FixturePool,
     active_suites: &mut FxHashMap<String, SuiteState>,
+    prepared_page: &mut Option<tokio::task::JoinHandle<PreparedPage>>,
     batch: SerialBatch,
   ) -> Vec<WorkerTestResult> {
     let mut results = Vec::with_capacity(batch.assignments.len());
@@ -208,7 +659,9 @@ impl Worker {
         continue;
       }
 
-      let result = self.run_single(browser, custom_pool, active_suites, assignment).await;
+      let result = self
+        .run_single(browser, custom_pool, active_suites, prepared_page, assignment)
+        .await;
       if result.outcome.status == TestStatus::Failed || result.outcome.status == TestStatus::TimedOut {
         serial_failed = true;
       }
@@ -225,6 +678,7 @@ impl Worker {
     browser: &Arc<ferridriver::Browser>,
     custom_pool: &FixturePool,
     active_suites: &mut FxHashMap<String, SuiteState>,
+    prepared_page: &mut Option<tokio::task::JoinHandle<PreparedPage>>,
     assignment: TestAssignment,
   ) -> WorkerTestResult {
     let test = &assignment.test;
@@ -421,230 +875,9 @@ impl Worker {
     }
 
     let start = Instant::now();
-
-    // Create fresh isolated context + page.
-    let ctx = browser.new_context();
-    let page_result = ctx.new_page().await;
-
-    // Apply context config to the page (Playwright's `use` block).
-    // Merge per-test use_options over global config (test.use() overrides).
-    if let Ok(ref page) = page_result {
-      let mut ctx_config = self.config.browser.context.clone();
-      if let Some(ref opts) = test.use_options {
-        // Merge use_options fields over the global context config.
-        if let Some(v) = opts.get("locale").and_then(|v| v.as_str()) {
-          ctx_config.locale = Some(v.to_string());
-        }
-        if let Some(v) = opts.get("colorScheme").and_then(|v| v.as_str()) {
-          ctx_config.color_scheme = Some(v.to_string());
-        }
-        if let Some(v) = opts.get("timezoneId").and_then(|v| v.as_str()) {
-          ctx_config.timezone_id = Some(v.to_string());
-        }
-        if let Some(v) = opts.get("isMobile").and_then(|v| v.as_bool()) {
-          ctx_config.is_mobile = v;
-        }
-        if let Some(v) = opts.get("hasTouch").and_then(|v| v.as_bool()) {
-          ctx_config.has_touch = v;
-        }
-        if let Some(v) = opts.get("offline").and_then(|v| v.as_bool()) {
-          ctx_config.offline = v;
-        }
-        if let Some(v) = opts.get("javaScriptEnabled").and_then(|v| v.as_bool()) {
-          ctx_config.java_script_enabled = v;
-        }
-        if let Some(v) = opts.get("bypassCSP").and_then(|v| v.as_bool()) {
-          ctx_config.bypass_csp = v;
-        }
-        if let Some(v) = opts.get("userAgent").and_then(|v| v.as_str()) {
-          ctx_config.user_agent = Some(v.to_string());
-        }
-        if let Some(v) = opts.get("deviceScaleFactor").and_then(|v| v.as_f64()) {
-          ctx_config.device_scale_factor = Some(v);
-        }
-        if let Some(v) = opts.get("reducedMotion").and_then(|v| v.as_str()) {
-          ctx_config.reduced_motion = Some(v.to_string());
-        }
-        if let Some(v) = opts.get("forcedColors").and_then(|v| v.as_str()) {
-          ctx_config.forced_colors = Some(v.to_string());
-        }
-        if let Some(v) = opts.get("serviceWorkers").and_then(|v| v.as_str()) {
-          ctx_config.service_workers = Some(v.to_string());
-        }
-        if let Some(v) = opts.get("storageState").and_then(|v| v.as_str()) {
-          ctx_config.storage_state = Some(v.to_string());
-        }
-        if let Some(v) = opts.get("acceptDownloads").and_then(|v| v.as_bool()) {
-          ctx_config.accept_downloads = v;
-        }
-        if let Some(v) = opts.get("ignoreHTTPSErrors").and_then(|v| v.as_bool()) {
-          ctx_config.ignore_https_errors = v;
-        }
-        // Geolocation: { latitude, longitude, accuracy? }
-        if let Some(geo) = opts.get("geolocation").and_then(|v| v.as_object()) {
-          if let (Some(lat), Some(lon)) = (
-            geo.get("latitude").and_then(|v| v.as_f64()),
-            geo.get("longitude").and_then(|v| v.as_f64()),
-          ) {
-            ctx_config.geolocation = Some(crate::config::GeolocationConfig {
-              latitude: lat,
-              longitude: lon,
-              accuracy: geo.get("accuracy").and_then(|v| v.as_f64()),
-            });
-          }
-        }
-        // Permissions: string[]
-        if let Some(arr) = opts.get("permissions").and_then(|v| v.as_array()) {
-          let perms: Vec<String> = arr.iter().filter_map(|v| v.as_str().map(String::from)).collect();
-          if !perms.is_empty() {
-            ctx_config.permissions = perms;
-          }
-        }
-        // Extra HTTP headers: Record<string, string>
-        if let Some(obj) = opts.get("extraHTTPHeaders").and_then(|v| v.as_object()) {
-          let headers: std::collections::BTreeMap<String, String> = obj
-            .iter()
-            .filter_map(|(k, v)| v.as_str().map(|s| (k.clone(), s.to_string())))
-            .collect();
-          if !headers.is_empty() {
-            ctx_config.extra_http_headers = headers;
-          }
-        }
-        // HTTP credentials: { username, password, origin? }
-        if let Some(creds) = opts.get("httpCredentials").and_then(|v| v.as_object()) {
-          if let (Some(user), Some(pass)) = (
-            creds.get("username").and_then(|v| v.as_str()),
-            creds.get("password").and_then(|v| v.as_str()),
-          ) {
-            ctx_config.http_credentials = Some(crate::config::HttpCredentialsConfig {
-              username: user.to_string(),
-              password: pass.to_string(),
-              origin: creds.get("origin").and_then(|v| v.as_str()).map(String::from),
-            });
-          }
-        }
-      }
-      // Viewport override from use_options: { width, height }
-      let viewport_override = test.use_options.as_ref().and_then(|opts| {
-        opts.get("viewport").and_then(|v| {
-          let w = v.get("width").and_then(|w| w.as_i64());
-          let h = v.get("height").and_then(|h| h.as_i64());
-          match (w, h) {
-            (Some(w), Some(h)) => Some(crate::config::ViewportConfig { width: w, height: h }),
-            _ => None,
-          }
-        })
-      });
-
-      let ctx_config = &ctx_config;
-      // Viewport + mobile/touch emulation.
-      // Skip if no context-level overrides — new_page() already set the base viewport.
-      // Only re-send if test.use() changed viewport, or context needs mobile/touch/scale.
-      let effective_vp = viewport_override.as_ref().or(self.config.browser.viewport.as_ref());
-      let has_ctx_overrides = viewport_override.is_some()
-        || ctx_config.is_mobile
-        || ctx_config.has_touch
-        || ctx_config
-          .device_scale_factor
-          .is_some_and(|d| (d - 1.0).abs() > f64::EPSILON);
-      if has_ctx_overrides {
-        if let Some(vp) = effective_vp {
-          let _ = page
-            .set_viewport(&ferridriver::options::ViewportConfig {
-              width: vp.width,
-              height: vp.height,
-              device_scale_factor: ctx_config.device_scale_factor.unwrap_or(1.0),
-              is_mobile: ctx_config.is_mobile,
-              has_touch: ctx_config.has_touch,
-              is_landscape: ctx_config.is_mobile && vp.width > vp.height,
-            })
-            .await;
-        }
-      }
-      // Color scheme / media emulation.
-      if ctx_config.color_scheme.is_some() {
-        let _ = page
-          .emulate_media(&ferridriver::options::EmulateMediaOptions {
-            color_scheme: ctx_config.color_scheme.clone(),
-            ..Default::default()
-          })
-          .await;
-      }
-      // Locale.
-      if let Some(ref locale) = ctx_config.locale {
-        let _ = page.set_locale(locale).await;
-      }
-      // Timezone.
-      if let Some(ref tz) = ctx_config.timezone_id {
-        let _ = page.set_timezone(tz).await;
-      }
-      // Geolocation.
-      if let Some(ref geo) = ctx_config.geolocation {
-        let _ = page
-          .set_geolocation(geo.latitude, geo.longitude, geo.accuracy.unwrap_or(0.0))
-          .await;
-      }
-      // Offline mode.
-      if ctx_config.offline {
-        let _ = page.set_network_state(true, 0.0, -1.0, -1.0).await;
-      }
-      // Permissions.
-      if !ctx_config.permissions.is_empty() {
-        let _ = page.grant_permissions(&ctx_config.permissions, None).await;
-      }
-      // Extra HTTP headers.
-      if !ctx_config.extra_http_headers.is_empty() {
-        let headers: rustc_hash::FxHashMap<String, String> = ctx_config
-          .extra_http_headers
-          .iter()
-          .map(|(k, v)| (k.clone(), v.clone()))
-          .collect();
-        let _ = page.set_extra_http_headers(&headers).await;
-      }
-      // User agent.
-      if let Some(ref ua) = ctx_config.user_agent {
-        let _ = page.set_user_agent(ua).await;
-      }
-      // JavaScript enabled/disabled.
-      if !ctx_config.java_script_enabled {
-        let _ = page.set_javascript_enabled(false).await;
-      }
-      // Reduced motion + forced colors via emulate_media.
-      if ctx_config.reduced_motion.is_some() || ctx_config.forced_colors.is_some() {
-        let _ = page
-          .emulate_media(&ferridriver::options::EmulateMediaOptions {
-            color_scheme: None, // Already set above if needed.
-            reduced_motion: ctx_config.reduced_motion.clone(),
-            forced_colors: ctx_config.forced_colors.clone(),
-            ..Default::default()
-          })
-          .await;
-      }
-      // Bypass CSP (must be before first navigation).
-      if ctx_config.bypass_csp {
-        let _ = page.set_bypass_csp(true).await;
-      }
-      // Ignore HTTPS certificate errors.
-      if ctx_config.ignore_https_errors {
-        let _ = page.set_ignore_certificate_errors(true).await;
-      }
-      // Accept downloads — configure download behavior.
-      if ctx_config.accept_downloads {
-        let download_dir = self.config.output_dir.join("downloads");
-        let _ = std::fs::create_dir_all(&download_dir);
-        let _ = page
-          .set_download_behavior("allowAndName", &download_dir.display().to_string())
-          .await;
-      }
-      // HTTP credentials (basic auth).
-      if let Some(ref creds) = ctx_config.http_credentials {
-        let _ = page.set_http_credentials(&creds.username, &creds.password).await;
-      }
-      // Block service workers.
-      if ctx_config.service_workers.as_deref() == Some("block") {
-        let _ = page.set_service_workers_blocked(true).await;
-      }
-    }
+    let effective_config = build_effective_context_config(&self.config, test);
+    let current_prepared_page = prepared_page.take();
+    *prepared_page = Some(Self::spawn_prepared_page(Arc::clone(browser)));
 
     // Create TestInfo for this test execution.
     let test_info = Arc::new(TestInfo {
@@ -687,210 +920,192 @@ impl Worker {
       event_bus: Some(self.event_bus.clone()),
       annotations: Arc::new(Mutex::new(Vec::new())),
     });
+    let resources = Arc::new(TestBrowserResources::new(
+      Arc::clone(browser),
+      effective_config,
+      test_info.output_dir.clone(),
+      current_prepared_page,
+    ));
+    let test_pool = custom_pool.child_with_defs(build_test_fixture_defs(Arc::clone(&resources)), FixtureScope::Test);
+    test_pool.inject("test_info", Arc::clone(&test_info));
 
-    let result = match page_result {
-      Ok(page) => {
-        let test_pool = custom_pool.child(FixtureScope::Test);
-        test_pool.inject("browser", Arc::clone(browser));
-        test_pool.inject("context", Arc::new(ctx.clone()));
-        test_pool.inject("page", Arc::clone(&page));
-        test_pool.inject("test_info", Arc::clone(&test_info));
+    enum VideoHandle {
+      Eager(ferridriver::video::VideoRecordingHandle),
+      Buffered(ferridriver::video::BufferedRecordingHandle),
+    }
 
-        // ── Request fixture (API testing context) ──
-        // baseURL from test.use() overrides global config.
-        let effective_base_url = test
-          .use_options
-          .as_ref()
-          .and_then(|opts| opts.get("baseURL").and_then(|v| v.as_str()).map(String::from))
-          .or_else(|| self.config.base_url.clone());
-        let request_ctx = Arc::new(ferridriver::api_request::APIRequestContext::new(
-          ferridriver::api_request::RequestContextOptions {
-            base_url: effective_base_url,
-            ..Default::default()
-          },
-        ));
-        test_pool.inject("request", request_ctx);
-
-        // ── Storage state (apply before any test code) ──
-        // Context-level storage_state takes precedence over top-level.
-        let ss_path = self
-          .config
-          .browser
-          .context
-          .storage_state
-          .as_ref()
-          .or(self.config.storage_state.as_ref());
-        if let Some(ss_path) = ss_path {
-          let path = std::path::Path::new(ss_path);
-          match std::fs::read_to_string(path) {
-            Ok(json_str) => match serde_json::from_str::<serde_json::Value>(&json_str) {
-              Ok(state) => {
-                if let Err(e) = page.set_storage_state(&state).await {
-                  tracing::warn!(target: "ferridriver::worker", "set_storage_state failed: {e}");
-                }
-              },
-              Err(e) => {
-                tracing::warn!(target: "ferridriver::worker", "parse storage state {}: {e}", path.display());
-              },
-            },
-            Err(e) => {
-              tracing::warn!(target: "ferridriver::worker", "read storage state {}: {e}", path.display());
-            },
-          }
-        }
-
-        // ── Video recording (start before any test code) ──
-        // retain-on-failure: buffer frames in memory, only encode if test fails (zero ffmpeg cost for passing tests)
-        // on: eager mode, pipe frames to ffmpeg in real-time
-        enum VideoHandle {
-          Eager(ferridriver::video::VideoRecordingHandle),
-          Buffered(ferridriver::video::BufferedRecordingHandle),
-        }
-        let video_handle: Option<VideoHandle> = match self.config.video.mode {
-          crate::config::VideoMode::Off => None,
-          crate::config::VideoMode::On => {
-            let ext = ferridriver::video::video_extension();
-            let video_path =
-              test_info
-                .output_dir
-                .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
-            let _ = std::fs::create_dir_all(&test_info.output_dir);
-            match ferridriver::video::start_recording(
-              &page,
-              video_path,
-              self.config.video.width,
-              self.config.video.height,
-              80,
-            )
-            .await
-            {
-              Ok(h) => Some(VideoHandle::Eager(h)),
-              Err(e) => {
-                tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-                None
-              },
-            }
-          },
-          crate::config::VideoMode::RetainOnFailure => {
-            match ferridriver::video::start_buffered_recording(
-              &page,
-              self.config.video.width,
-              self.config.video.height,
-              80,
-            )
-            .await
-            {
-              Ok(h) => Some(VideoHandle::Buffered(h)),
-              Err(e) => {
-                tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-                None
-              },
-            }
-          },
-        };
-
-        // ── beforeEach hooks ──
-        let mut before_each_err = None;
-        for (i, hook) in hooks.before_each.iter().enumerate() {
-          let title = if hooks.before_each.len() == 1 {
-            "beforeEach".to_string()
-          } else {
-            format!("beforeEach [{i}]")
-          };
-          let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
-          let result = hook(test_pool.clone(), Arc::clone(&test_info)).await;
-          let err_msg = result.as_ref().err().map(|e| e.message.clone());
-          step_handle.end(err_msg).await;
-          if let Err(e) = result {
-            before_each_err = Some(e);
-            break;
-          }
-        }
-
-        let r = if let Some(err) = before_each_err {
-          Ok(Err(err))
-        } else {
-          tokio::time::timeout(timeout_dur, (test.test_fn)(test_pool.clone())).await
-        };
-
-        // ── afterEach hooks (ALWAYS run, even on failure) ──
-        for (i, hook) in hooks.after_each.iter().enumerate() {
-          let title = if hooks.after_each.len() == 1 {
-            "afterEach".to_string()
-          } else {
-            format!("afterEach [{i}]")
-          };
-          let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
-          let result = hook(test_pool.clone(), Arc::clone(&test_info)).await;
-          let err_msg = result.as_ref().err().map(|e| e.message.clone());
-          step_handle.end(err_msg).await;
-          if let Err(e) = result {
-            tracing::warn!(target: "ferridriver::worker", "afterEach error: {e}");
-          }
-        }
-
-        // Screenshot on failure (before context close).
-        let screenshot = if r.as_ref().is_err() || r.as_ref().is_ok_and(|r| r.is_err()) {
-          capture_screenshot(&page).await
-        } else {
-          None
-        };
-
-        // ── Stop video recording (before context close, page session must be alive) ──
-        let test_failed = r.as_ref().is_err() || r.as_ref().is_ok_and(|r| r.is_err());
-        let video_path = match video_handle {
-          Some(VideoHandle::Eager(handle)) => match handle.stop(&page).await {
-            Ok(path) => Some(path),
-            Err(e) => {
-              tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}");
-              None
-            },
-          },
-          Some(VideoHandle::Buffered(handle)) => {
-            if test_failed {
-              // Test failed — encode the buffered frames to a video file.
+    let mut page_for_artifacts = None;
+    let video_handle: Option<VideoHandle> = match self.config.video.mode {
+      crate::config::VideoMode::Off => None,
+      crate::config::VideoMode::On | crate::config::VideoMode::RetainOnFailure => match test_pool.get::<ferridriver::Page>("page").await
+      {
+        Ok(page) => {
+          page_for_artifacts = Some(Arc::clone(&page));
+          let _ = std::fs::create_dir_all(&test_info.output_dir);
+          match self.config.video.mode {
+            crate::config::VideoMode::On => {
               let ext = ferridriver::video::video_extension();
               let video_path =
                 test_info
                   .output_dir
                   .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
-              let _ = std::fs::create_dir_all(&test_info.output_dir);
-              match handle.encode(&page, video_path).await {
-                Ok(path) => Some(path),
+              match ferridriver::video::start_recording(
+                &page,
+                video_path,
+                self.config.video.width,
+                self.config.video.height,
+                80,
+              )
+              .await
+              {
+                Ok(h) => Some(VideoHandle::Eager(h)),
                 Err(e) => {
-                  tracing::warn!(target: "ferridriver::worker", "video encode failed: {e}");
+                  tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
                   None
                 },
               }
-            } else {
-              // Test passed — discard frames, no encoding cost.
-              handle.discard(&page).await;
-              None
-            }
-          },
-          None => None,
-        };
-
-        let _ = ctx.close().await;
-        (r, screenshot, video_path, Some(test_pool))
-      },
-      Err(e) => {
-        let _ = ctx.close().await;
-        (
-          Ok(Err(TestFailure {
-            message: format!("failed to create page: {e}"),
-            stack: None,
-            diff: None,
-            screenshot: None,
-          })),
-          None,
-          None,
-          None,
-        )
+            },
+            crate::config::VideoMode::RetainOnFailure => {
+              match ferridriver::video::start_buffered_recording(
+                &page,
+                self.config.video.width,
+                self.config.video.height,
+                80,
+              )
+              .await
+              {
+                Ok(h) => Some(VideoHandle::Buffered(h)),
+                Err(e) => {
+                  tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+                  None
+                },
+              }
+            },
+            crate::config::VideoMode::Off => None,
+          }
+        },
+        Err(e) => {
+          let _ = resources.close().await;
+          let duration = start.elapsed();
+          let outcome = TestOutcome {
+            test_id: test_id.clone(),
+            status: TestStatus::Failed,
+            duration,
+            attempt,
+            max_attempts,
+            error: Some(TestFailure::from(format!("failed to create page: {e}"))),
+            attachments: Vec::new(),
+            steps: Vec::new(),
+            stdout: String::new(),
+            stderr: String::new(),
+            annotations: test.annotations.clone(),
+            metadata: self.config.metadata.clone(),
+          };
+          self
+            .event_bus
+            .emit(ReporterEvent::TestFinished {
+              test_id: test_id.clone(),
+              outcome: outcome.clone(),
+            })
+            .await;
+          return WorkerTestResult {
+            outcome,
+            should_retry: attempt <= max_retries,
+            test_fn,
+            test_id,
+            fixture_requests,
+            suite_key,
+            hooks,
+          };
+        },
       },
     };
 
+    let mut before_each_err = None;
+    for (i, hook) in hooks.before_each.iter().enumerate() {
+      let title = if hooks.before_each.len() == 1 {
+        "beforeEach".to_string()
+      } else {
+        format!("beforeEach [{i}]")
+      };
+      let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
+      let result = hook(test_pool.clone(), Arc::clone(&test_info)).await;
+      let err_msg = result.as_ref().err().map(|e| e.message.clone());
+      step_handle.end(err_msg).await;
+      if let Err(e) = result {
+        before_each_err = Some(e);
+        break;
+      }
+    }
+
+    let timeout_result = if let Some(err) = before_each_err {
+      Ok(Err(err))
+    } else {
+      tokio::time::timeout(timeout_dur, (test.test_fn)(test_pool.clone())).await
+    };
+
+    for (i, hook) in hooks.after_each.iter().enumerate() {
+      let title = if hooks.after_each.len() == 1 {
+        "afterEach".to_string()
+      } else {
+        format!("afterEach [{i}]")
+      };
+      let step_handle = test_info.begin_step(&title, StepCategory::Hook).await;
+      let result = hook(test_pool.clone(), Arc::clone(&test_info)).await;
+      let err_msg = result.as_ref().err().map(|e| e.message.clone());
+      step_handle.end(err_msg).await;
+      if let Err(e) = result {
+        tracing::warn!(target: "ferridriver::worker", "afterEach error: {e}");
+      }
+    }
+
+    if page_for_artifacts.is_none() {
+      page_for_artifacts = test_pool.try_get_cached::<ferridriver::Page>("page");
+    }
+    let test_failed = timeout_result.as_ref().is_err() || timeout_result.as_ref().is_ok_and(|r| r.is_err());
+    let screenshot = if test_failed {
+      if let Some(ref page) = page_for_artifacts {
+        capture_screenshot(page).await
+      } else {
+        None
+      }
+    } else {
+      None
+    };
+    let video_path = match (video_handle, page_for_artifacts.as_ref()) {
+      (Some(VideoHandle::Eager(handle)), Some(page)) => match handle.stop(page).await {
+        Ok(path) => Some(path),
+        Err(e) => {
+          tracing::warn!(target: "ferridriver::worker", "video stop failed: {e}");
+          None
+        },
+      },
+      (Some(VideoHandle::Buffered(handle)), Some(page)) => {
+        if test_failed {
+          let ext = ferridriver::video::video_extension();
+          let video_path =
+            test_info
+              .output_dir
+              .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
+          let _ = std::fs::create_dir_all(&test_info.output_dir);
+          match handle.encode(page, video_path).await {
+            Ok(path) => Some(path),
+            Err(e) => {
+              tracing::warn!(target: "ferridriver::worker", "video encode failed: {e}");
+              None
+            },
+          }
+        } else {
+          handle.discard(page).await;
+          None
+        }
+      },
+      _ => None,
+    };
+    resources.close().await;
+
     let duration = start.elapsed();
+    let result = (timeout_result, screenshot, video_path, Some(test_pool));
     let (timeout_result, screenshot, video_path, test_pool) = result;
 
     let mut attachments = Vec::new();

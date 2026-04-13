@@ -210,8 +210,8 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
     format_ident!("ctx")
   };
 
-  // Request all standard fixtures so the worker provisions them.
-  let fixture_names: Vec<String> = vec!["browser".into(), "context".into(), "page".into(), "test_info".into()];
+  // Rust tests resolve built-in fixtures lazily via TestContext getters.
+  let fixture_names: Vec<String> = Vec::new();
   let fixture_array = fixture_names.iter().map(|f| quote! { #f });
 
   // Build annotations.
@@ -380,7 +380,7 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
     })
     .collect();
 
-  let fixture_names: Vec<String> = vec!["browser".into(), "context".into(), "page".into(), "test_info".into()];
+  let fixture_names: Vec<String> = Vec::new();
 
   // Generate one inventory::submit! per data row.
   let mut submissions = Vec::new();

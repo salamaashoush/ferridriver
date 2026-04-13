@@ -44,6 +44,7 @@ pub type SetupFn =
 pub type TeardownFn = Arc<dyn Fn(ArcValue) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
 
 /// Definition of a fixture.
+#[derive(Clone)]
 pub struct FixtureDef {
   pub name: String,
   pub scope: FixtureScope,
@@ -100,6 +101,25 @@ impl FixturePool {
       inner: Arc::new(FixturePoolInner {
         values: DashMap::new(),
         defs: Arc::clone(&self.inner.defs),
+        teardown_stack: std::sync::Mutex::new(Vec::new()),
+        parent: Some(self.clone()),
+        scope,
+      }),
+    }
+  }
+
+  /// Create a child pool with additional or overridden fixture definitions.
+  ///
+  /// This is the core building block for per-test fixture graphs: worker/global
+  /// fixtures live in the parent pool, while test-scoped fixtures can be
+  /// specialized for a single test execution without mutating shared state.
+  pub fn child_with_defs(&self, defs: FxHashMap<String, FixtureDef>, scope: FixtureScope) -> Self {
+    let mut merged = (*self.inner.defs).clone();
+    merged.extend(defs);
+    Self {
+      inner: Arc::new(FixturePoolInner {
+        values: DashMap::new(),
+        defs: Arc::new(merged),
         teardown_stack: std::sync::Mutex::new(Vec::new()),
         parent: Some(self.clone()),
         scope,
@@ -194,6 +214,11 @@ impl FixturePool {
     self.inner.values.insert(name.to_string(), value as ArcValue);
   }
 
+  /// Resolve a fixture by name without knowing its concrete type.
+  pub async fn resolve(&self, name: &str) -> Result<(), String> {
+    ensure_resolved(self, name).await
+  }
+
   /// Tear down all fixtures in this pool (reverse order).
   pub async fn teardown_all(&self) {
     let items: Vec<(String, TeardownFn)> = {
@@ -228,6 +253,8 @@ fn ensure_resolved(pool: &FixturePool, name: &str) -> Pin<Box<dyn Future<Output 
           return ensure_resolved(parent, &name).await;
         }
       }
+    } else if let Some(parent) = &pool.inner.parent {
+      return ensure_resolved(parent, &name).await;
     }
 
     // Resolve dependencies.

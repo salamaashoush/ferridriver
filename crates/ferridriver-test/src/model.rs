@@ -483,6 +483,65 @@ impl TestInfo {
       steps: Arc::clone(&self.steps),
     }
   }
+
+  /// Record a step that already executed elsewhere but still needs to flow
+  /// through reporter events and the stored step tree.
+  pub async fn record_step(
+    &self,
+    title: impl Into<String>,
+    category: StepCategory,
+    status: StepStatus,
+    duration: Duration,
+    error: Option<String>,
+    metadata: Option<serde_json::Value>,
+  ) {
+    let title = title.into();
+    let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
+
+    if let Some(bus) = &self.event_bus {
+      bus
+        .emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
+          crate::reporter::StepStartedEvent {
+            test_id: self.test_id.clone(),
+            step_id: step_id.clone(),
+            parent_step_id: None,
+            title: title.clone(),
+            category: category.clone(),
+          },
+        )))
+        .await;
+      bus
+        .emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
+          crate::reporter::StepFinishedEvent {
+            test_id: self.test_id.clone(),
+            step_id: step_id.clone(),
+            title: title.clone(),
+            category: category.clone(),
+            duration,
+            error: error.clone(),
+            metadata: metadata.clone(),
+          },
+        )))
+        .await;
+    }
+
+    self
+      .steps
+      .lock()
+      .await
+      .push(TestStep {
+        step_id,
+        title,
+        category,
+        duration,
+        status,
+        error,
+        location: None,
+        parent_step_id: None,
+        metadata,
+        steps: Vec::new(),
+      });
+  }
 }
 
 /// Global step ID counter for unique step identification.

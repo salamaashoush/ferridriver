@@ -261,6 +261,8 @@ pub struct HookMeta {
   pub suite_id: String,
   /// "beforeAll", "afterAll", "beforeEach", "afterEach".
   pub kind: String,
+  /// Optional list of fixtures the hook body actually reads.
+  pub requested_fixtures: Option<Vec<String>>,
 }
 
 /// Result of a single test.
@@ -285,6 +287,7 @@ pub struct RunSummary {
   pub skipped: i32,
   pub flaky: i32,
   pub duration_ms: f64,
+  pub exit_code: i32,
   pub results: Vec<TestResultItem>,
 }
 
@@ -595,6 +598,10 @@ impl TestRunner {
         let cb = Arc::clone(&t.callback);
         let meta = t.meta.clone();
         let bcfg = browser_config.clone();
+        let requested_fixtures = meta
+          .requested_fixtures
+          .clone()
+          .unwrap_or_else(standard_fixture_requests);
 
         // Convert flattened NAPI annotations directly — no JSON round-trip.
         let annotations: Vec<TestAnnotation> = meta.annotations.iter().filter_map(NapiAnnotation::to_core).collect();
@@ -606,9 +613,12 @@ impl TestRunner {
             name: meta.title.clone(),
             line: None,
           },
-          test_fn: Arc::new(move |pool| {
+          test_fn: Arc::new({
+            let requested_fixtures_for_test = requested_fixtures.clone();
+            move |pool| {
             let cb = Arc::clone(&cb);
             let bcfg = bcfg.clone();
+            let requested_fixtures = requested_fixtures_for_test.clone();
             Box::pin(async move {
               let test_info: Arc<ferridriver_test::model::TestInfo> = pool
                 .get("test_info")
@@ -617,6 +627,9 @@ impl TestRunner {
 
               let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
               pool.inject("__test_modifiers", Arc::clone(&modifiers));
+              resolve_requested_fixtures(&pool, &requested_fixtures)
+                .await
+                .map_err(TestFailure::from)?;
 
               let fixtures = crate::test_fixtures::TestFixtures::from_pool(
                 pool.clone(),
@@ -632,11 +645,8 @@ impl TestRunner {
                 screenshot: None,
               })
             })
-          }),
-          fixture_requests: meta
-            .requested_fixtures
-            .clone()
-            .unwrap_or_else(standard_fixture_requests),
+          }}),
+          fixture_requests: requested_fixtures,
           expected_status: ExpectedStatus::Pass,
           annotations,
           timeout: meta.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
@@ -676,6 +686,7 @@ impl TestRunner {
     for h in hooks_reg.iter() {
       let cb = Arc::clone(&h.callback);
       let bcfg = browser_config.clone();
+      let requested_fixtures = h.meta.requested_fixtures.clone().unwrap_or_default();
       let kind = match h.meta.kind.as_str() {
         "beforeAll" => {
           ferridriver_test::HookKind::BeforeAll(Arc::new(move |_pool| {
@@ -694,8 +705,10 @@ impl TestRunner {
             Ok(())
           })
         })),
-        "beforeEach" => ferridriver_test::HookKind::BeforeEach(make_each_hook(cb, bcfg)),
-        "afterEach" => ferridriver_test::HookKind::AfterEach(make_each_hook(cb, bcfg)),
+        "beforeEach" => {
+          ferridriver_test::HookKind::BeforeEach(make_each_hook(cb, requested_fixtures.clone(), bcfg))
+        },
+        "afterEach" => ferridriver_test::HookKind::AfterEach(make_each_hook(cb, requested_fixtures, bcfg)),
         _ => continue,
       };
       builder.add_hook(ferridriver_test::HookDef {
@@ -743,6 +756,7 @@ impl TestRunner {
         skipped: 0,
         flaky: 0,
         duration_ms: 0.0,
+        exit_code: 0,
         results: Vec::new(),
       });
     }
@@ -770,17 +784,17 @@ impl TestRunner {
     let watch = self.watch;
     let collector_clone = Arc::clone(&collector);
 
-    {
+    let exit_code = {
       let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
       runner.add_reporter(Box::new(ResultCollectorReporter(collector_clone)));
 
       if watch {
         let cwd = std::env::current_dir().unwrap_or_default();
-        let _exit_code = runner.run_watch(move |_changed| plan.clone(), cwd).await;
+        runner.run_watch(move |_changed| plan.clone(), cwd).await
       } else {
-        let _exit_code = runner.run(plan).await;
+        runner.run(plan).await
       }
-    }
+    };
 
     let duration = start.elapsed();
 
@@ -812,6 +826,7 @@ impl TestRunner {
       skipped,
       flaky,
       duration_ms: duration.as_secs_f64() * 1000.0,
+      exit_code,
       results,
     })
   }
@@ -893,13 +908,17 @@ impl TestRunner {
 /// Build a beforeEach/afterEach hook fn that wraps a JS callback.
 fn make_each_hook(
   cb: Arc<TestCallbackFn>,
+  requested_fixtures: Vec<String>,
   browser_config: ferridriver_test::config::BrowserConfig,
 ) -> ferridriver_test::model::HookFn {
   Arc::new(move |pool, test_info| {
     let cb = Arc::clone(&cb);
+    let requested_fixtures = requested_fixtures.clone();
     let bcfg = browser_config.clone();
     Box::pin(async move {
-      // Pool-backed: no eager fetching. Getters resolve lazily from DashMap.
+      resolve_requested_fixtures(&pool, &requested_fixtures)
+        .await
+        .map_err(ferridriver_test::TestFailure::from)?;
       let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
       let fixtures = crate::test_fixtures::TestFixtures::from_pool(pool.clone(), test_info, modifiers, bcfg.clone());
       call_js_test(&cb, fixtures)
@@ -912,6 +931,16 @@ fn make_each_hook(
         })
     })
   })
+}
+
+async fn resolve_requested_fixtures(
+  pool: &ferridriver_test::fixture::FixturePool,
+  requested_fixtures: &[String],
+) -> std::result::Result<(), String> {
+  for name in requested_fixtures {
+    pool.resolve(name).await?;
+  }
+  Ok(())
 }
 
 /// Call a JS test callback with fixtures and await the returned Promise.

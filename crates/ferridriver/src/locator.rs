@@ -27,8 +27,10 @@ use crate::selectors;
 /// `Copy` types (like `&str`, `&Arc<Page>`) or by move for owned types.
 macro_rules! retry_resolve {
   ($self:expr, |$el:ident, $page:ident| $body:expr) => {{
-    let __sel_js = $crate::selectors::build_selone_js(&$self.selector)?;
     let $page: &$crate::backend::AnyPage = $self.page.inner();
+    $page.ensure_engine_injected().await?;
+    let __fd = "window.__fd";
+    let __sel_js = $crate::selectors::build_selone_js(&$self.selector, &__fd)?;
 
     for (__i, &__delay_ms) in Locator::RETRY_BACKOFFS_MS.iter().enumerate() {
       if __delay_ms > 0 {
@@ -556,7 +558,8 @@ impl Locator {
   pub async fn count(&self) -> Result<usize, String> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    let js = format!("window.__fd.selCount({parts_json})");
+    let fd = self.page.inner().injected_script().await?;
+    let js = format!("{fd}.selCount({parts_json})");
     let val = self
       .page
       .inner()
@@ -798,8 +801,10 @@ impl Locator {
   pub async fn all_text_contents(&self) -> Result<Vec<String>, String> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
+    self.page.inner().ensure_engine_injected().await?;
+    let fd = "window.__fd";
     let js = format!(
-      "(function() {{ var r = window.__fd._exec({parts_json}, document); \
+      "(function() {{ var r = {fd}._exec({parts_json}, document); \
        return r.map(function(e) {{ return (e.textContent || '').trim(); }}); }})()"
     );
     let val = self.page.inner().evaluate(&js).await?;
@@ -854,7 +859,9 @@ impl Locator {
   pub async fn evaluate_all(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    let js = format!("(function() {{ var elements = window.__fd.selAll({parts_json}); return ({expression}); }})()");
+    self.page.inner().ensure_engine_injected().await?;
+    let fd = "window.__fd";
+    let js = format!("(function() {{ var elements = {fd}.selAll({parts_json}); return ({expression}); }})()");
     if let Some(fid) = &self.frame_id {
       self.page.inner().evaluate_in_frame(&js, fid).await
     } else {
@@ -884,7 +891,9 @@ impl Locator {
   async fn retry_eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>, String> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    let js = format!("(function() {{ var el = window.__fd.selOne({parts_json}); if (!el) return null; {js_body} }})()");
+    self.page.inner().ensure_engine_injected().await?;
+    let fd = "window.__fd";
+    let js = format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
 
     for (i, &delay_ms) in Self::RETRY_BACKOFFS_MS.iter().enumerate() {
       if delay_ms > 0 {
@@ -907,8 +916,10 @@ impl Locator {
 
   // ── Internal helpers ────────────────────────────────────────────────────────
 
-  async fn resolve(&self) -> Result<AnyElement, String> {
-    let sel_js = selectors::build_selone_js(&self.selector)?;
+  pub async fn resolve(&self) -> Result<AnyElement, String> {
+    self.page.inner().ensure_engine_injected().await?;
+    let fd = "window.__fd";
+    let sel_js = selectors::build_selone_js(&self.selector, &fd)?;
     selectors::query_one_prebuilt(self.page.inner(), &sel_js, &self.selector).await
   }
 
@@ -947,7 +958,9 @@ impl Locator {
   async fn eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>, String> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    let js = format!("(function() {{ var el = window.__fd.selOne({parts_json}); if (!el) return null; {js_body} }})()");
+    self.page.inner().ensure_engine_injected().await?;
+    let fd = "window.__fd";
+    let js = format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
     if let Some(fid) = &self.frame_id {
       self.page.inner().evaluate_in_frame(&js, fid).await
     } else {
