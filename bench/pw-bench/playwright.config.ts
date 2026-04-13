@@ -6,5 +6,5 @@ export default defineConfig({
   timeout: 30000,
   retries: 0,
   reporter: 'null',
-  use: { headless: true },
+  use: { headless: true, channel: 'chromium' },
 });

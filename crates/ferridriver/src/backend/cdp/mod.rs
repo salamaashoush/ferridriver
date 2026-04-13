@@ -2913,10 +2913,7 @@ impl<T: CdpTransport> CdpElement<T> {
   pub async fn scroll_into_view(&self) -> Result<(), String> {
     let node_id = self.node_id().await?;
     self
-      .cmd(
-        "DOM.scrollIntoViewIfNeeded",
-        serde_json::json!({"nodeId": node_id}),
-      )
+      .cmd("DOM.scrollIntoViewIfNeeded", serde_json::json!({"nodeId": node_id}))
       .await?;
     Ok(())
   }

@@ -616,36 +616,37 @@ impl TestRunner {
           test_fn: Arc::new({
             let requested_fixtures_for_test = requested_fixtures.clone();
             move |pool| {
-            let cb = Arc::clone(&cb);
-            let bcfg = bcfg.clone();
-            let requested_fixtures = requested_fixtures_for_test.clone();
-            Box::pin(async move {
-              let test_info: Arc<ferridriver_test::model::TestInfo> = pool
-                .get("test_info")
-                .await
-                .map_err(|e| TestFailure::from(format!("fixture 'test_info': {e}")))?;
+              let cb = Arc::clone(&cb);
+              let bcfg = bcfg.clone();
+              let requested_fixtures = requested_fixtures_for_test.clone();
+              Box::pin(async move {
+                let test_info: Arc<ferridriver_test::model::TestInfo> = pool
+                  .get("test_info")
+                  .await
+                  .map_err(|e| TestFailure::from(format!("fixture 'test_info': {e}")))?;
 
-              let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
-              pool.inject("__test_modifiers", Arc::clone(&modifiers));
-              resolve_requested_fixtures(&pool, &requested_fixtures)
-                .await
-                .map_err(TestFailure::from)?;
+                let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
+                pool.inject("__test_modifiers", Arc::clone(&modifiers));
+                resolve_requested_fixtures(&pool, &requested_fixtures)
+                  .await
+                  .map_err(TestFailure::from)?;
 
-              let fixtures = crate::test_fixtures::TestFixtures::from_pool(
-                pool.clone(),
-                Arc::clone(&test_info),
-                Arc::clone(&modifiers),
-                bcfg.clone(),
-              );
+                let fixtures = crate::test_fixtures::TestFixtures::from_pool(
+                  pool.clone(),
+                  Arc::clone(&test_info),
+                  Arc::clone(&modifiers),
+                  bcfg.clone(),
+                );
 
-              call_js_test(&cb, fixtures).await.map_err(|e| TestFailure {
-                message: e,
-                stack: None,
-                diff: None,
-                screenshot: None,
+                call_js_test(&cb, fixtures).await.map_err(|e| TestFailure {
+                  message: e,
+                  stack: None,
+                  diff: None,
+                  screenshot: None,
+                })
               })
-            })
-          }}),
+            }
+          }),
           fixture_requests: requested_fixtures,
           expected_status: ExpectedStatus::Pass,
           annotations,
@@ -705,9 +706,7 @@ impl TestRunner {
             Ok(())
           })
         })),
-        "beforeEach" => {
-          ferridriver_test::HookKind::BeforeEach(make_each_hook(cb, requested_fixtures.clone(), bcfg))
-        },
+        "beforeEach" => ferridriver_test::HookKind::BeforeEach(make_each_hook(cb, requested_fixtures.clone(), bcfg)),
         "afterEach" => ferridriver_test::HookKind::AfterEach(make_each_hook(cb, requested_fixtures, bcfg)),
         _ => continue,
       };

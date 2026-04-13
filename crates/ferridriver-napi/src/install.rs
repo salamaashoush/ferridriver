@@ -43,11 +43,30 @@ pub async fn install_chromium_with_deps() -> Result<String> {
     .map_err(|e| Error::from_reason(e))
 }
 
+/// Install the latest stable Chrome Headless Shell.
+/// Returns the path to the installed chrome-headless-shell executable.
+/// This is a lighter, purpose-built binary optimized for headless automation.
+#[napi]
+pub async fn install_chromium_headless_shell() -> Result<String> {
+  let installer = BrowserInstaller::new();
+  installer
+    .install_chromium_headless_shell(|_| {})
+    .await
+    .map_err(|e| Error::from_reason(e))
+}
+
 /// Find an installed Chromium in the ferridriver cache.
 /// Returns the path to the executable or null if not found.
 #[napi]
 pub fn find_installed_chromium() -> Option<String> {
   BrowserInstaller::new().find_installed_chromium()
+}
+
+/// Find an installed Chrome Headless Shell in the ferridriver cache.
+/// Returns the path to the executable or null if not found.
+#[napi]
+pub fn find_installed_headless_shell() -> Option<String> {
+  BrowserInstaller::new().find_installed_headless_shell()
 }
 
 /// Get the browser cache directory path.

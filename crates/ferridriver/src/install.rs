@@ -61,6 +61,8 @@ struct CftChannel {
 #[derive(Debug, Deserialize)]
 struct CftDownloads {
   chrome: Vec<CftDownload>,
+  #[serde(rename = "chrome-headless-shell")]
+  chrome_headless_shell: Vec<CftDownload>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,6 +418,156 @@ impl BrowserInstaller {
     None
   }
 
+  /// Install the latest stable Chrome Headless Shell.
+  ///
+  /// Downloads the purpose-built headless-only Chrome binary from Chrome for Testing CDN.
+  /// This binary is optimized for headless automation (faster startup, less memory than
+  /// full Chrome). Same binary that Playwright uses when `headless: true`.
+  ///
+  /// Follows the same cache/marker/retry pattern as `install_chromium()`.
+  /// Installs to `{cache}/chromium-headless-shell-{version}/`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the Chrome for Testing API is unreachable, the download
+  /// fails after all retries, extraction fails, or the platform is unsupported.
+  pub async fn install_chromium_headless_shell<F>(&self, progress: F) -> Result<String, String>
+  where
+    F: Fn(InstallProgress),
+  {
+    progress(InstallProgress::Resolving);
+
+    let cft: CftResponse = self
+      .client
+      .get(CFT_VERSIONS_URL)
+      .send()
+      .await
+      .map_err(|e| format!("failed to fetch Chrome for Testing versions: {e}"))?
+      .json()
+      .await
+      .map_err(|e| format!("failed to parse Chrome for Testing response: {e}"))?;
+
+    let version = &cft.channels.stable.version;
+    let platform = current_platform();
+
+    let download = cft
+      .channels
+      .stable
+      .downloads
+      .chrome_headless_shell
+      .iter()
+      .find(|d| d.platform == platform)
+      .ok_or_else(|| format!("no Chrome Headless Shell build for platform: {platform}"))?;
+
+    let install_dir = self.cache_dir.join(format!("chromium-headless-shell-{version}"));
+    let marker_file = install_dir.join(".downloaded");
+    let executable = headless_shell_executable_path(&install_dir, &platform);
+
+    if marker_file.exists() && executable.exists() {
+      let path = executable.to_string_lossy().to_string();
+      progress(InstallProgress::AlreadyInstalled {
+        version: version.clone(),
+        path: path.clone(),
+      });
+      return Ok(path);
+    }
+
+    if install_dir.exists() {
+      let _ = tokio::fs::remove_dir_all(&install_dir).await;
+    }
+
+    let tmp_dir = self.cache_dir.join(".tmp");
+    tokio::fs::create_dir_all(&tmp_dir)
+      .await
+      .map_err(|e| format!("failed to create temp dir: {e}"))?;
+
+    let zip_path = tmp_dir.join(format!("chrome-headless-shell-{version}-{platform}.zip"));
+    let mut last_error = String::new();
+
+    for attempt in 1..=DOWNLOAD_RETRIES {
+      progress(InstallProgress::Downloading {
+        bytes_downloaded: 0,
+        total_bytes: None,
+      });
+
+      match self.download_file(&download.url, &zip_path, &progress).await {
+        Ok(()) => {
+          last_error.clear();
+          break;
+        },
+        Err(e) => {
+          last_error = format!("attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
+          let _ = tokio::fs::remove_file(&zip_path).await;
+          if attempt == DOWNLOAD_RETRIES {
+            return Err(format!(
+              "download failed after {DOWNLOAD_RETRIES} attempts: {last_error}"
+            ));
+          }
+        },
+      }
+    }
+
+    progress(InstallProgress::Extracting);
+
+    tokio::fs::create_dir_all(&install_dir)
+      .await
+      .map_err(|e| format!("failed to create install dir: {e}"))?;
+
+    let install_dir_clone = install_dir.clone();
+    let zip_path_clone = zip_path.clone();
+    tokio::task::spawn_blocking(move || extract_zip(&zip_path_clone, &install_dir_clone))
+      .await
+      .map_err(|e| format!("extract task failed: {e}"))?
+      .map_err(|e| format!("extraction failed: {e}"))?;
+
+    let _ = tokio::fs::remove_file(&zip_path).await;
+
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      if executable.exists() {
+        let _ = std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755));
+      }
+    }
+
+    let path = executable.to_string_lossy().to_string();
+    if !executable.exists() {
+      return Err(format!(
+        "extraction completed but chrome-headless-shell executable not found at: {path}"
+      ));
+    }
+
+    let _ = tokio::fs::write(&marker_file, version.as_bytes()).await;
+
+    progress(InstallProgress::Complete {
+      version: version.clone(),
+      path: path.clone(),
+    });
+
+    Ok(path)
+  }
+
+  /// Return the path to an installed Chrome Headless Shell, or `None` if not installed.
+  #[must_use]
+  pub fn find_installed_headless_shell(&self) -> Option<String> {
+    let entries = std::fs::read_dir(&self.cache_dir).ok()?;
+    let mut candidates: Vec<_> = entries
+      .filter_map(std::result::Result::ok)
+      .filter(|e| e.file_name().to_string_lossy().starts_with("chromium-headless-shell-"))
+      .collect();
+    candidates.sort_by_key(|b| std::cmp::Reverse(b.file_name()));
+
+    let platform = current_platform();
+    for entry in candidates {
+      let marker = entry.path().join(".downloaded");
+      let exe = headless_shell_executable_path(&entry.path(), &platform);
+      if marker.exists() && exe.exists() {
+        return Some(exe.to_string_lossy().to_string());
+      }
+    }
+    None
+  }
+
   /// Install the latest stable Firefox.
   ///
   /// Downloads from Mozilla's official archive, extracts to the cache directory,
@@ -609,6 +761,17 @@ fn chrome_executable_path(install_dir: &Path, platform: &str) -> PathBuf {
     "win64" => install_dir.join("chrome-win64/chrome.exe"),
     "win32" => install_dir.join("chrome-win32/chrome.exe"),
     _ => install_dir.join("chrome"),
+  }
+}
+
+fn headless_shell_executable_path(install_dir: &Path, platform: &str) -> PathBuf {
+  match platform {
+    "linux64" => install_dir.join("chrome-headless-shell-linux64/chrome-headless-shell"),
+    "mac-x64" => install_dir.join("chrome-headless-shell-mac-x64/chrome-headless-shell"),
+    "mac-arm64" => install_dir.join("chrome-headless-shell-mac-arm64/chrome-headless-shell"),
+    "win64" => install_dir.join("chrome-headless-shell-win64/chrome-headless-shell.exe"),
+    "win32" => install_dir.join("chrome-headless-shell-win32/chrome-headless-shell.exe"),
+    _ => install_dir.join("chrome-headless-shell"),
   }
 }
 

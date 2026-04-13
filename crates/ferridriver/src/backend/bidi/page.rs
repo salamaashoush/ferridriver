@@ -35,13 +35,13 @@ pub struct BidiPage {
   pub dialog_handler: Arc<RwLock<crate::events::DialogHandler>>,
   /// Manager for lazy engine injection.
   injected_script: Arc<InjectedScriptManager>,
-  }
+}
 
-  pub struct InjectedScriptManager {
+pub struct InjectedScriptManager {
   injected: AtomicBool,
-  }
+}
 
-  impl InjectedScriptManager {
+impl InjectedScriptManager {
   fn new() -> Self {
     Self {
       injected: AtomicBool::new(false),
@@ -70,7 +70,7 @@ pub struct BidiPage {
     }
     Ok(())
   }
-  }
+}
 impl BidiPage {
   /// Create a new BidiPage and enable required domains (inject engine, etc.).
   /// This is the BiDi equivalent of CDP's `enable_domains()`.

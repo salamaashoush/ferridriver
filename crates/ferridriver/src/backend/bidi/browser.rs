@@ -96,7 +96,10 @@ impl BidiBrowser {
 
   /// Dispose an isolated user context.
   pub async fn dispose_context(&self, user_context_id: &str) -> Result<(), String> {
-    let context_ids = self.list_context_ids_for_user_context(user_context_id).await.unwrap_or_default();
+    let context_ids = self
+      .list_context_ids_for_user_context(user_context_id)
+      .await
+      .unwrap_or_default();
     let mut waiters = Vec::with_capacity(context_ids.len());
     for context_id in &context_ids {
       waiters.push(self.wait_for_context_event(
@@ -108,10 +111,7 @@ impl BidiBrowser {
     self
       .session
       .transport
-      .send_command(
-        "browser.removeUserContext",
-        json!({"userContext": user_context_id}),
-      )
+      .send_command("browser.removeUserContext", json!({"userContext": user_context_id}))
       .await?;
     for waiter in waiters {
       let _ = waiter.await;
@@ -137,9 +137,10 @@ impl BidiBrowser {
         .get("context")
         .and_then(|v| v.as_str())
         .ok_or("browsingContext.getTree: context missing 'context' field")?;
-      pages.push(AnyPage::Bidi(
-        BidiPage::create(self.session.clone(), context_id.to_string())?,
-      ));
+      pages.push(AnyPage::Bidi(BidiPage::create(
+        self.session.clone(),
+        context_id.to_string(),
+      )?));
     }
     Ok(pages)
   }

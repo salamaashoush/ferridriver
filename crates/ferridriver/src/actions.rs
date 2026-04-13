@@ -315,9 +315,8 @@ pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchR
   let max_results = opts.max_results;
 
   let fd = page.injected_script().await?;
-  let js = format!(
-    "{fd}.searchPage({pattern}, {is_regex}, {case_sensitive}, {context_chars}, {css_scope}, {max_results})"
-  );
+  let js =
+    format!("{fd}.searchPage({pattern}, {is_regex}, {case_sensitive}, {context_chars}, {css_scope}, {max_results})");
 
   let result_str = rt_eval_str(page, &js).await?;
   let data: serde_json::Value = serde_json::from_str(&result_str).unwrap_or(serde_json::json!({}));
@@ -539,7 +538,9 @@ pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -
 pub async fn get_dropdown_options(element: &AnyElement, page: &AnyPage) -> Result<Vec<DropdownOption>, String> {
   let fd = page.injected_script().await?;
   let result_json = element
-    .call_js_fn_value(&format!("function() {{ return JSON.stringify({fd}.getOptions(this)); }}"))
+    .call_js_fn_value(&format!(
+      "function() {{ return JSON.stringify({fd}.getOptions(this)); }}"
+    ))
     .await
     .ok()
     .flatten()
