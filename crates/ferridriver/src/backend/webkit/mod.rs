@@ -16,9 +16,10 @@ use ipc::{IpcClient, IpcResponse, Op};
 
 // ─── WebKitBrowser ──────────────────────────────────────────────────────────
 
+#[derive(Clone)]
 pub struct WebKitBrowser {
   client: Arc<IpcClient>,
-  child: std::process::Child,
+  child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
 }
 
 impl WebKitBrowser {
@@ -42,7 +43,7 @@ impl WebKitBrowser {
     let (client, child) = IpcClient::spawn(headless).await?;
     Ok(Self {
       client: Arc::new(client),
-      child,
+      child: Arc::new(std::sync::Mutex::new(Some(child))),
     })
   }
 
@@ -64,8 +65,8 @@ impl WebKitBrowser {
               events: crate::events::EventEmitter::new(),
               routes: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
               closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
-            })
-          })
+              injected_script: std::sync::Arc::new(InjectedScriptManager::new()),
+              })          })
           .collect(),
       ),
       IpcResponse::Error(e) => Err(e),
@@ -89,17 +90,10 @@ impl WebKitBrowser {
           events: crate::events::EventEmitter::new(),
           routes: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
           closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
+          injected_script: std::sync::Arc::new(InjectedScriptManager::new()),
         };
-        // Inject selector engine via WKUserScript (runs at document start
-        // on every navigation, equivalent to addScriptToEvaluateOnNewDocument)
-        let engine_js = crate::selectors::build_inject_js();
-        let mut p = Vec::new();
-        p.extend_from_slice(&page.vid().to_le_bytes());
-        ipc::str_encode(&mut p, &engine_js);
-        let _ = page.client.send(Op::AddInitScript, &p).await;
         Ok(AnyPage::WebKit(page))
-      },
-      IpcResponse::Error(e) => Err(e),
+        },      IpcResponse::Error(e) => Err(e),
       _ => Err("unexpected".into()),
     }
   }
@@ -116,8 +110,15 @@ impl WebKitBrowser {
   pub fn close(&mut self) -> impl std::future::Future<Output = Result<(), String>> {
     // OP_SHUTDOWN calls _exit(0) immediately -- no response comes back.
     // Just kill the child process directly.
-    let _ = self.child.kill();
-    let _ = self.child.wait();
+    if let Some(mut child) = self
+      .child
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .take()
+    {
+      let _ = child.kill();
+      let _ = child.wait();
+    }
     std::future::ready(Ok(()))
   }
 }
@@ -135,6 +136,34 @@ pub struct WebKitPage {
   routes: std::sync::Arc<std::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
   /// Whether this page has been closed via `close_page()`.
   closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
+  /// Manager for lazy engine injection.
+  injected_script: std::sync::Arc<InjectedScriptManager>,
+}
+
+pub struct InjectedScriptManager {
+  injected: std::sync::atomic::AtomicBool,
+}
+
+impl InjectedScriptManager {
+  fn new() -> Self {
+    Self {
+      injected: std::sync::atomic::AtomicBool::new(false),
+    }
+  }
+
+  fn reset(&self) {
+    self.injected.store(false, std::sync::atomic::Ordering::Relaxed);
+  }
+
+  async fn ensure(&self, page: &WebKitPage) -> Result<(), String> {
+    if !self.injected.load(std::sync::atomic::Ordering::Relaxed) {
+      let full_check_js = crate::selectors::build_lazy_inject_js();
+      let r = page.client.send_str_vid(Op::Evaluate, &full_check_js, page.vid()).await?;
+      WebKitPage::ok(r)?;
+      self.injected.store(true, std::sync::atomic::Ordering::Relaxed);
+    }
+    Ok(())
+  }
 }
 
 impl WebKitPage {
@@ -226,6 +255,17 @@ impl WebKitPage {
       IpcResponse::Error(e) => Err(e),
       _ => Ok(None),
     }
+  }
+
+  pub async fn injected_script(&self) -> Result<String, String> {
+    self.ensure_engine_injected().await?;
+    Ok("window.__fd".to_string())
+  }
+
+  /// Ensures the selector engine is injected into the current execution context.
+  /// Idempotent and navigation-aware.
+  pub async fn ensure_engine_injected(&self) -> Result<(), String> {
+    self.injected_script.ensure(self).await
   }
 
   /// Evaluate a JavaScript expression in the page and return the result.
@@ -1065,6 +1105,7 @@ impl WebKitPage {
     let client = self.client.clone();
     let emitter = self.events.clone();
     let notify = client.event_notify.clone();
+    let injected_script = self.injected_script.clone();
     tokio::spawn(async move {
       loop {
         // Wait for the IPC reader thread to signal that events arrived.
@@ -1137,6 +1178,9 @@ impl WebKitPage {
           if !evts.is_empty() {
             let mut dest = net_log.write().await;
             for (id, method, url, resource_type) in evts {
+              if resource_type == "Document" {
+                injected_script.reset();
+              }
               let req = NetRequest {
                 id: id.clone(),
                 method: method.clone(),

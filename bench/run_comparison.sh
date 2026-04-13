@@ -15,6 +15,15 @@ RUNS=3  # Average over N runs
 
 mkdir -p "$SCRIPT_DIR/results"
 
+calc_ratio() {
+  local numerator="$1"
+  local denominator="$2"
+  awk -v n="$numerator" -v d="$denominator" 'BEGIN {
+    if (d == 0) print "∞";
+    else printf "%.2f", n / d;
+  }'
+}
+
 # Ensure Playwright is installed
 if ! command -v npx &>/dev/null || ! [ -d "$PW_DIR/node_modules" ]; then
   echo "Installing Playwright..."
@@ -79,11 +88,7 @@ for workers in "${WORKER_COUNTS[@]}"; do
   fd_results+=("$fd_ms")
 
   # Speedup
-  if [ "$fd_ms" -gt 0 ]; then
-    speedup=$(echo "scale=2; $pw_ms / $fd_ms" | bc)
-  else
-    speedup="∞"
-  fi
+  speedup=$(calc_ratio "$pw_ms" "$fd_ms")
 
   printf "%-12s │ %9sms │ %9sms │ %6sx\n" "$workers" "$pw_ms" "$fd_ms" "$speedup"
 done
@@ -103,7 +108,7 @@ echo ""
     w="${WORKER_COUNTS[$i]}"
     pw="${pw_results[$i]}"
     fd="${fd_results[$i]}"
-    sp=$(echo "scale=2; $pw / $fd" | bc 2>/dev/null || echo "?")
+    sp=$(calc_ratio "$pw" "$fd")
     printf "%-12s │ %9sms │ %9sms │ %6sx\n" "$w" "$pw" "$fd" "$sp"
   done
 } > "$RESULTS_FILE"

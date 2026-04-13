@@ -146,6 +146,31 @@ interface NapiAnnotation {
   description: string | null;
 }
 
+const FIXTURE_NAME_MAP: Record<string, string> = {
+  page: 'page',
+  context: 'context',
+  request: 'request',
+  browser: 'browser',
+};
+
+function inferRequestedFixtures(body: TestBody): string[] | undefined {
+  const src = body.toString();
+  const match = src.match(/^\s*(?:async\s*)?(?:function\b[^(]*)?\(\s*\{([^}]*)\}/s);
+  if (!match) return undefined;
+
+  const fixtures = new Set<string>();
+  for (const rawPart of match[1].split(',')) {
+    const part = rawPart.trim();
+    if (!part) continue;
+    if (part.startsWith('...')) return undefined;
+    const key = part.split(':', 1)[0].split('=', 1)[0].trim();
+    const fixture = FIXTURE_NAME_MAP[key];
+    if (fixture) fixtures.add(fixture);
+  }
+
+  return [...fixtures];
+}
+
 // ── Body wrapper (sets _state.currentTestInfo for runtime modifiers) ──
 
 function wrapBody(body: TestBody): (fixtures: TestFixtures) => Promise<void> {
@@ -174,6 +199,7 @@ function testFn(name: string, detailsOrBody: TestDetails | TestBody, maybeBody?:
       suite_id: currentSuiteId(),
       annotations: buildAnnotations(details),
       use_options: currentUseOverrides(),
+      requestedFixtures: inferRequestedFixtures(body),
     },
     body: wrapBody(body),
   });
@@ -205,6 +231,7 @@ testFn.skip = (...args: any[]) => {
       id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
       annotations: [...buildAnnotations(details), { kind: 'skip', reason: null, condition: null, value: null, description: null }],
+      requestedFixtures: inferRequestedFixtures(body),
     },
     body: wrapBody(body),
   });
@@ -228,6 +255,7 @@ testFn.fixme = (...args: any[]) => {
       id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
       annotations: [...buildAnnotations(details), { kind: 'fixme', reason: null, condition: null, value: null, description: null }],
+      requestedFixtures: inferRequestedFixtures(body),
     },
     body: wrapBody(body),
   });
@@ -254,6 +282,7 @@ testFn.fail = (...args: any[]) => {
       id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
       annotations: [...buildAnnotations(details), { kind: 'fail', reason: null, condition: null, value: null, description: null }],
+      requestedFixtures: inferRequestedFixtures(body),
     },
     body: wrapBody(body),
   });
@@ -280,6 +309,7 @@ testFn.slow = (...args: any[]) => {
       id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
       annotations: [...buildAnnotations(details), { kind: 'slow', reason: null, condition: null, value: null, description: null }],
+      requestedFixtures: inferRequestedFixtures(body),
     },
     body: wrapBody(body),
   });
@@ -296,6 +326,7 @@ testFn.only = (...args: any[]) => {
       id: makeId(currentFile(), title), title, file: currentFile(),
       timeout: details?.timeout, retries: details?.retries, suite_id: currentSuiteId(),
       annotations: [...buildAnnotations(details), { kind: 'only', reason: null, condition: null, value: null, description: null }],
+      requestedFixtures: inferRequestedFixtures(body),
     },
     body: wrapBody(body),
   });
@@ -310,7 +341,14 @@ testFn.each = <T>(dataOrStrings: T[] | TemplateStringsArray, ...templateValues: 
       const name = interpolateTemplate(nameTemplate, row);
       const title = fullTitle(name);
       _state.registry.push({
-        meta: { id: makeId(currentFile(), title), title, file: currentFile(), annotations: [], suite_id: currentSuiteId() },
+        meta: {
+          id: makeId(currentFile(), title),
+          title,
+          file: currentFile(),
+          annotations: [],
+          suite_id: currentSuiteId(),
+          requestedFixtures: inferRequestedFixtures((fixtures) => body(fixtures, row as T)),
+        },
         body: wrapBody((fixtures) => body(fixtures, row as T)),
       });
     }
@@ -349,28 +387,28 @@ testFn.beforeAll = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
   const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
   if (!_state.runner) throw new Error('test.beforeAll() requires runner to be initialized');
   const suiteId = currentSuiteId() ?? '';
-  _state.runner.registerHook({ suiteId, kind: 'beforeAll' }, wrapBody(fn));
+  _state.runner.registerHook({ suiteId, kind: 'beforeAll', requestedFixtures: inferRequestedFixtures(fn) }, wrapBody(fn));
 };
 
 testFn.afterAll = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
   const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
   if (!_state.runner) throw new Error('test.afterAll() requires runner to be initialized');
   const suiteId = currentSuiteId() ?? '';
-  _state.runner.registerHook({ suiteId, kind: 'afterAll' }, wrapBody(fn));
+  _state.runner.registerHook({ suiteId, kind: 'afterAll', requestedFixtures: inferRequestedFixtures(fn) }, wrapBody(fn));
 };
 
 testFn.beforeEach = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
   const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
   if (!_state.runner) throw new Error('test.beforeEach() requires runner to be initialized');
   const suiteId = currentSuiteId() ?? '';
-  _state.runner.registerHook({ suiteId, kind: 'beforeEach' }, wrapBody(fn));
+  _state.runner.registerHook({ suiteId, kind: 'beforeEach', requestedFixtures: inferRequestedFixtures(fn) }, wrapBody(fn));
 };
 
 testFn.afterEach = (titleOrFn: string | TestBody, maybeFn?: TestBody) => {
   const fn = typeof titleOrFn === 'function' ? titleOrFn : maybeFn!;
   if (!_state.runner) throw new Error('test.afterEach() requires runner to be initialized');
   const suiteId = currentSuiteId() ?? '';
-  _state.runner.registerHook({ suiteId, kind: 'afterEach' }, wrapBody(fn));
+  _state.runner.registerHook({ suiteId, kind: 'afterEach', requestedFixtures: inferRequestedFixtures(fn) }, wrapBody(fn));
 };
 
 // ── test.expect (alias for the expect export) ──

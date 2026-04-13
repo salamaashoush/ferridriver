@@ -80,6 +80,13 @@ struct BrowserInstance {
   contexts: HashMap<String, BrowserContext>,
 }
 
+#[derive(Clone)]
+pub struct PageOpenPlan {
+  pub browser: AnyBrowser,
+  pub viewport: Option<crate::options::ViewportConfig>,
+  pub browser_context_id: Option<String>,
+}
+
 impl BrowserInstance {
   fn context(&self, name: &str) -> Result<&BrowserContext, String> {
     self
@@ -477,6 +484,44 @@ impl BrowserState {
     Box::pin(self.open_page_keyed(&key, url)).await
   }
 
+  /// Snapshot the immutable data needed to open a page without holding the
+  /// global browser-state write lock across protocol round-trips.
+  pub fn page_open_plan(&self, key: &SessionKey) -> Result<PageOpenPlan, String> {
+    let inst = self.instance(&*key.instance)?;
+    let browser_context_id = if &*key.context == "default" {
+      None
+    } else {
+      inst
+        .contexts
+        .get(&*key.context)
+        .and_then(|ctx| ctx.browser_context_id.clone())
+    };
+
+    Ok(PageOpenPlan {
+      browser: inst.browser.clone(),
+      viewport: self.default_viewport.clone(),
+      browser_context_id,
+    })
+  }
+
+  /// Register a newly created page back into the state after off-lock backend work.
+  pub fn register_opened_page(
+    &mut self,
+    key: &SessionKey,
+    page: AnyPage,
+    browser_context_id: Option<String>,
+  ) -> Result<(), String> {
+    let inst = self.instance_mut(&*key.instance)?;
+    let ctx = inst.context_mut(&*key.context);
+    if let Some(id) = browser_context_id {
+      ctx.browser_context_id = Some(id);
+    }
+    page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+    ctx.pages.push(page);
+    ctx.active_page_idx = ctx.pages.len() - 1;
+    Ok(())
+  }
+
   /// Same as `open_page` but accepts a pre-parsed `SessionKey` (avoids re-parsing).
   ///
   /// # Errors
@@ -487,25 +532,30 @@ impl BrowserState {
       Box::pin(self.ensure_instance(&*key.instance)).await?;
     }
 
-    let vp = self.default_viewport.clone();
-    let inst = self.instance_mut(&*key.instance)?;
-
+    let plan = self.page_open_plan(key)?;
     let (page, cdp_ctx_id) = if &*key.context == "default" {
-      (inst.browser.new_page(url, None, vp.as_ref()).await?, None)
+      (
+        plan
+          .browser
+          .new_page(url, plan.browser_context_id.as_deref(), plan.viewport.as_ref())
+          .await?,
+        None,
+      )
+    } else if let Some(existing_ctx_id) = plan.browser_context_id.clone() {
+      (
+        plan
+          .browser
+          .new_page(url, Some(&existing_ctx_id), plan.viewport.as_ref())
+          .await?,
+        Some(existing_ctx_id),
+      )
     } else {
-      let ctx_id = inst.browser.new_context().await?;
-      let p = inst.browser.new_page(url, Some(&ctx_id), vp.as_ref()).await?;
+      let ctx_id = plan.browser.new_context().await?;
+      let p = plan.browser.new_page(url, Some(&ctx_id), plan.viewport.as_ref()).await?;
       (p, Some(ctx_id))
     };
 
-    let ctx = inst.context_mut(&*key.context);
-    if let Some(id) = cdp_ctx_id {
-      ctx.browser_context_id = Some(id);
-    }
-    page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
-    ctx.pages.push(page.clone());
-    ctx.active_page_idx = ctx.pages.len() - 1;
-
+    self.register_opened_page(key, page.clone(), cdp_ctx_id)?;
     Ok(page)
   }
 

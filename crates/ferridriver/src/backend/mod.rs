@@ -230,6 +230,7 @@ pub enum BackendKind {
 // ─── AnyBrowser ─────────────────────────────────────────────────────────────
 
 /// Browser instance — enum dispatch across backends.
+#[derive(Clone)]
 pub enum AnyBrowser {
   CdpPipe(cdp::CdpBrowser<cdp::pipe::PipeTransport>),
   CdpRaw(cdp::CdpBrowser<cdp::ws::WsTransport>),
@@ -407,6 +408,16 @@ impl AnyPage {
   }
 
   // ── JavaScript ──
+
+  /// Returns a script that ensures the selector engine is injected.
+  /// Mirrored after Playwright's `injectedScript()`.
+  pub async fn injected_script(&self) -> Result<String, String> {
+    page_dispatch!(self, injected_script())
+  }
+
+  pub async fn ensure_engine_injected(&self) -> Result<(), String> {
+    page_dispatch!(self, ensure_engine_injected())
+  }
 
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
     page_dispatch!(self, evaluate(expression))

@@ -293,30 +293,27 @@ impl StepObserver for TestInfoObserver {
   ) -> std::pin::Pin<Box<dyn std::future::Future<Output = ()> + Send + 'a>> {
     Box::pin(async move {
       let step_title = format!("{}{}", event.step.keyword, event.text);
-
-      match event.result.status {
-        StepStatus::Skipped => {
-          let handle = self.test_info.begin_step(&step_title, StepCategory::TestStep).await;
-          handle.skip(event.result.error.clone()).await;
-        },
-        _ => {
-          let mut handle = self.test_info.begin_step(&step_title, StepCategory::TestStep).await;
-
-          // Attach BDD metadata for domain-specific reporters.
-          handle.metadata = Some(serde_json::json!({
+      self
+        .test_info
+        .record_step(
+          step_title,
+          StepCategory::TestStep,
+          match event.result.status {
+            StepStatus::Passed => ferridriver_test::model::StepStatus::Passed,
+            StepStatus::Failed => ferridriver_test::model::StepStatus::Failed,
+            StepStatus::Skipped => ferridriver_test::model::StepStatus::Skipped,
+            StepStatus::Pending => ferridriver_test::model::StepStatus::Pending,
+            StepStatus::Undefined => ferridriver_test::model::StepStatus::Pending,
+          },
+          event.result.duration,
+          event.result.error.clone(),
+          Some(serde_json::json!({
             "bdd_keyword": event.step.keyword.trim(),
             "bdd_text": event.text,
             "bdd_line": event.step.line,
-          }));
-
-          match event.result.status {
-            StepStatus::Passed => handle.end(None).await,
-            StepStatus::Pending => handle.pending(event.result.error.clone()).await,
-            StepStatus::Failed => handle.end(event.result.error.clone()).await,
-            _ => {},
-          }
-        },
-      }
+          })),
+        )
+        .await;
     })
   }
 }

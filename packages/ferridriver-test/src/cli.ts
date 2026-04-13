@@ -14,7 +14,7 @@ import { TestRunner } from '@ferridriver/core';
 import type { Page } from '@ferridriver/core';
 import { _setCurrentFile, _runWithFile, _drainTests, _hasOnly, _setCtMountFactory, _setRunner, _drainWorkerFixtures } from './test.js';
 import type { MountFunction } from './test.js';
-import { resolve, relative } from 'path';
+import { isAbsolute, join, relative, resolve } from 'path';
 import { existsSync, statSync } from 'fs';
 
 import type { FerridriverTestConfig } from './config.js';
@@ -338,6 +338,44 @@ function normalizePaths(paths: string[], suffix: string): string[] {
   });
 }
 
+function asStringArray(value?: string | string[]): string[] {
+  if (!value) return [];
+  return Array.isArray(value) ? value : [value];
+}
+
+function asCliList(value?: string | string[]): string[] {
+  return asStringArray(value).filter((item) => item.length > 0);
+}
+
+function hasGlobMagic(value: string): boolean {
+  return /[*?[\]{}()!+@]/.test(value);
+}
+
+function toGlobPath(value: string): string {
+  return value.replace(/\\/g, '/');
+}
+
+function resolvePattern(pattern: string, baseDir?: string): string {
+  if (isAbsolute(pattern)) return toGlobPath(pattern);
+  if (!baseDir || baseDir === '.') return toGlobPath(pattern);
+  return toGlobPath(join(baseDir, pattern));
+}
+
+function entryScopedPattern(pattern: string): string {
+  const normalized = toGlobPath(pattern);
+  const wildcardIndex = normalized.search(/[*?[\]{}()!+@]/);
+  if (wildcardIndex >= 0) {
+    const slashIndex = normalized.lastIndexOf('/', wildcardIndex);
+    return slashIndex >= 0 ? normalized.slice(slashIndex + 1) : normalized;
+  }
+  const slashIndex = normalized.lastIndexOf('/');
+  return slashIndex >= 0 ? normalized.slice(slashIndex + 1) : normalized;
+}
+
+function buildDirectoryPatterns(dir: string, matchPatterns: string[]): string[] {
+  return matchPatterns.map((pattern) => resolvePattern(entryScopedPattern(pattern), dir));
+}
+
 // ---- File discovery ----
 
 async function collectGlob(pattern: string, cwd: string): Promise<string[]> {
@@ -349,10 +387,72 @@ async function collectGlob(pattern: string, cwd: string): Promise<string[]> {
   return results;
 }
 
-async function discoverFiles(files: string[], patterns: string[]): Promise<string[]> {
-  if (files.length > 0) return files.map((f) => resolve(f));
-  const results = await Promise.all(patterns.map((p) => collectGlob(p, process.cwd())));
-  return results.flat().sort();
+async function collectPatterns(patterns: string[], cwd: string): Promise<string[]> {
+  const results = await Promise.all(patterns.map((pattern) => collectGlob(pattern, cwd)));
+  return results.flat();
+}
+
+type DiscoveryOptions = {
+  entries: string[];
+  matchPatterns: string[];
+  ignorePatterns?: string[];
+  baseDir?: string;
+};
+
+async function discoverFiles({ entries, matchPatterns, ignorePatterns = [], baseDir }: DiscoveryOptions): Promise<string[]> {
+  const cwd = process.cwd();
+  const scopedPatterns = matchPatterns.map((pattern) => resolvePattern(pattern, baseDir));
+  const matchedFiles = new Set<string>();
+  const unresolvedEntries: string[] = [];
+
+  if (entries.length > 0) {
+    for (const entry of entries) {
+      const absoluteEntry = resolve(entry);
+      try {
+        const stats = statSync(absoluteEntry);
+        if (stats.isDirectory()) {
+          const filesInDirectory = await collectPatterns(buildDirectoryPatterns(entry, matchPatterns), cwd);
+          filesInDirectory.forEach((file) => matchedFiles.add(file));
+          continue;
+        }
+        if (stats.isFile()) {
+          matchedFiles.add(absoluteEntry);
+          continue;
+        }
+      } catch {
+        // fall through to glob handling
+      }
+
+      if (hasGlobMagic(entry)) {
+        const globMatches = await collectGlob(resolvePattern(entry, baseDir), cwd);
+        if (globMatches.length > 0) {
+          globMatches.forEach((file) => matchedFiles.add(file));
+          continue;
+        }
+      }
+
+      unresolvedEntries.push(entry);
+    }
+  } else {
+    const discovered = await collectPatterns(scopedPatterns, cwd);
+    discovered.forEach((file) => matchedFiles.add(file));
+  }
+
+  if (unresolvedEntries.length > 0) {
+    const details = unresolvedEntries.map((entry) => `  - ${entry}`).join('\n');
+    throw new Error(`No test files matched the provided path(s):\n${details}`);
+  }
+
+  const ignored = new Set<string>();
+  if (ignorePatterns.length > 0) {
+    const scopedIgnores = ignorePatterns.map((pattern) => resolvePattern(pattern, baseDir));
+    const ignoredFiles = await collectPatterns(scopedIgnores, cwd);
+    ignoredFiles.forEach((file) => ignored.add(file));
+  }
+
+  return [...matchedFiles]
+    .filter((file) => !ignored.has(file))
+    .sort();
 }
 
 // ---- CT: resolve framework adapter ----
@@ -434,7 +534,7 @@ async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
     : defaults;
 
   const results = await Promise.all(raw.map((p) => collectGlob(p, process.cwd())));
-  return results.flat().sort();
+  return [...new Set(results.flat())].sort();
 }
 
 // ---- E2E test runner (shared by default and ct modes) ----
@@ -570,7 +670,10 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
   // Force exit — NAPI native addon may hold browser process handles that prevent
   // clean shutdown. process.exit() is the correct behavior here (same as Playwright).
   _printProfile();
-  const exitCode = summary.failed > 0 ? 1 : 0;
+  if (summary.exitCode !== 0 && summary.total === 0) {
+    console.error('  Test run failed before executing any tests.');
+  }
+  const exitCode = summary.exitCode !== 0 ? summary.exitCode : (summary.failed > 0 ? 1 : 0);
   process.exit(exitCode);
 }
 
@@ -623,10 +726,16 @@ const testCommand = defineCommand({
     if (args.language) config.language = args.language;
 
     // Discover all files — use testMatch from config, or default patterns.
-    const fileList = (args.files as string[] | undefined) ?? [];
+    const fileList = asCliList(args.files as string[] | string | undefined);
     const defaultPatterns = ['**/*.spec.ts', '**/*.test.ts', '**/*.feature'];
-    const patterns = (config.testMatch as string[] | undefined) ?? defaultPatterns;
-    const allFiles = await discoverFiles(fileList, patterns);
+    const patterns = asStringArray(config.testMatch).length > 0 ? asStringArray(config.testMatch) : defaultPatterns;
+    const ignorePatterns = asStringArray(config.testIgnore);
+    const allFiles = await discoverFiles({
+      entries: fileList,
+      matchPatterns: patterns,
+      ignorePatterns,
+      baseDir: config.testDir as string | undefined,
+    });
 
     const testFiles = allFiles.filter(f => /\.(spec|test)\.[tj]sx?$/.test(f));
     const featureFiles = allFiles.filter(f => f.endsWith('.feature'));
@@ -637,7 +746,7 @@ const testCommand = defineCommand({
     }
 
     // Load step definitions if we have feature files.
-    const stepsGlobs = (args.steps as string[] | undefined) ?? [];
+    const stepsGlobs = asCliList(args.steps as string[] | string | undefined);
     const stepFiles = featureFiles.length > 0 ? await discoverStepFiles(stepsGlobs) : [];
 
     await runTests(config, testFiles, false, featureFiles, stepFiles);
@@ -668,10 +777,13 @@ const ctCommand = defineCommand({
   },
   async run({ args }) {
     const fileConfig = await loadConfig(args.config);
-    const fileList = (args.files as string[] | undefined) ?? [];
-    const testFiles = await discoverFiles(fileList, [
-      '**/*.ct.ts', '**/*.ct.tsx', '**/*.ct.spec.ts', '**/*.ct.spec.tsx',
-    ]);
+    const fileList = asCliList(args.files as string[] | string | undefined);
+    const testFiles = await discoverFiles({
+      entries: fileList,
+      matchPatterns: ['**/*.ct.ts', '**/*.ct.tsx', '**/*.ct.spec.ts', '**/*.ct.spec.tsx'],
+      ignorePatterns: asStringArray(fileConfig.testIgnore),
+      baseDir: fileConfig.testDir,
+    });
     if (testFiles.length === 0) {
       console.log('  No component test files found.');
       process.exit(0);
