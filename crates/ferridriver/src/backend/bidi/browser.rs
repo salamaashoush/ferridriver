@@ -56,7 +56,7 @@ impl BidiBrowser {
         .and_then(|v| v.as_str())
         .ok_or("browsingContext.getTree: context missing 'context' field")?;
       pages.push(AnyPage::Bidi(
-        BidiPage::create(self.session.clone(), context_id.to_string()).await?,
+        BidiPage::create(self.session.clone(), context_id.to_string())?,
       ));
     }
     Ok(pages)
@@ -76,7 +76,7 @@ impl BidiBrowser {
       .to_string();
 
     debug!("BiDi new page: context={context_id}");
-    let page = BidiPage::create(self.session.clone(), context_id).await?;
+    let page = BidiPage::create(self.session.clone(), context_id)?;
 
     if !url.is_empty() && url != "about:blank" {
       page.goto(url, NavLifecycle::Load, 30_000).await?;

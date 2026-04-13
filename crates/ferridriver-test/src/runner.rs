@@ -435,7 +435,7 @@ impl TestRunner {
                 hooks: Arc::clone(&hooks),
                 suite_mode: crate::model::SuiteMode::Parallel,
               };
-              dispatcher.enqueue_single(assignment).await;
+              dispatcher.enqueue_single(assignment);
             }
           },
           crate::model::SuiteMode::Serial => {
@@ -459,13 +459,11 @@ impl TestRunner {
                 suite_mode: crate::model::SuiteMode::Serial,
               })
               .collect();
-            dispatcher
-              .enqueue_serial(crate::dispatcher::SerialBatch {
-                suite_key: suite_key.clone(),
-                assignments,
-                hooks: Arc::clone(&hooks),
-              })
-              .await;
+            dispatcher.enqueue_serial(crate::dispatcher::SerialBatch {
+              suite_key: suite_key.clone(),
+              assignments,
+              hooks: Arc::clone(&hooks),
+            });
           },
         }
       }
@@ -532,16 +530,14 @@ impl TestRunner {
           attempt = result.outcome.attempt,
           "retrying failed test",
         );
-        dispatcher
-          .retry_shared(
-            &result.test_fn,
-            &result.test_id,
-            result.fixture_requests.clone(),
-            result.outcome.attempt + 1,
-            result.suite_key.clone(),
-            Arc::clone(&result.hooks),
-          )
-          .await;
+        dispatcher.retry_shared(
+          &result.test_fn,
+          &result.test_id,
+          result.fixture_requests.clone(),
+          result.outcome.attempt + 1,
+          result.suite_key.clone(),
+          Arc::clone(&result.hooks),
+        );
       } else {
         final_count += 1;
         // Track failures for max_failures / fail_fast.

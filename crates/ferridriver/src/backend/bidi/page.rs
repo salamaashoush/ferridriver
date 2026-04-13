@@ -74,7 +74,7 @@ pub struct BidiPage {
 impl BidiPage {
   /// Create a new BidiPage and enable required domains (inject engine, etc.).
   /// This is the BiDi equivalent of CDP's `enable_domains()`.
-  pub(crate) async fn create(session: Arc<BidiSession>, context_id: String) -> Result<Self, String> {
+  pub(crate) fn create(session: Arc<BidiSession>, context_id: String) -> Result<Self, String> {
     let page = Self {
       session,
       context_id: Arc::from(context_id),
@@ -88,7 +88,7 @@ impl BidiPage {
       injected_script: Arc::new(InjectedScriptManager::new()),
     };
 
-    page.enable_domains().await?;
+    page.enable_domains()?;
     Ok(page)
   }
 
@@ -96,7 +96,7 @@ impl BidiPage {
   /// Injects the ferridriver engine JS (selector helpers, click guards, actionability).
   /// This mirrors CDP's `enable_domains()` which fires `Page.addScriptToEvaluateOnNewDocument`
   /// + domain enables in parallel.
-  async fn enable_domains(&self) -> Result<(), String> {
+  fn enable_domains(&self) -> Result<(), String> {
     // BiDi handles navigation-aware injection via script.addPreloadScript.
     // However, we want lazy injection, so we skip upfront injection here.
     Ok(())

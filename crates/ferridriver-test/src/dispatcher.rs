@@ -48,17 +48,17 @@ impl Dispatcher {
   }
 
   /// Enqueue a single parallel test.
-  pub async fn enqueue_single(&self, assignment: TestAssignment) {
-    let _ = self.tx.send(WorkItem::Single(assignment)).await;
+  pub fn enqueue_single(&self, assignment: TestAssignment) {
+    let _ = self.tx.try_send(WorkItem::Single(assignment));
   }
 
   /// Enqueue an entire serial suite as a batch.
-  pub async fn enqueue_serial(&self, batch: SerialBatch) {
-    let _ = self.tx.send(WorkItem::Serial(batch)).await;
+  pub fn enqueue_serial(&self, batch: SerialBatch) {
+    let _ = self.tx.try_send(WorkItem::Serial(batch));
   }
 
   /// Re-enqueue a test for retry (always as single item).
-  pub async fn retry_shared(
+  pub fn retry_shared(
     &self,
     test_fn: &TestFn,
     id: &TestId,
@@ -83,7 +83,7 @@ impl Dispatcher {
       hooks,
       suite_mode: SuiteMode::Parallel,
     };
-    let _ = self.tx.send(WorkItem::Single(assignment)).await;
+    let _ = self.tx.try_send(WorkItem::Single(assignment));
   }
 
   /// Get a receiver clone for a worker.
