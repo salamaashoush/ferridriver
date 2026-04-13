@@ -54,6 +54,23 @@ struct TestBrowserResources {
   state: Mutex<TestBrowserState>,
 }
 
+fn is_retryable_bidi_page_error(err: &str) -> bool {
+  err.contains("DiscardedBrowsingContextError")
+    || err.contains("BrowsingContext does no longer exist")
+    || err.contains("BiDi error 'no such frame'")
+    || err.contains("BiDi error 'no such window'")
+}
+
+async fn ensure_page_alive(page: &Arc<ferridriver::Page>) -> Result<(), String> {
+  page.evaluate("1").await.map(|_| ())
+}
+
+async fn create_ready_page(ctx: &ferridriver::ContextRef) -> Result<Arc<ferridriver::Page>, String> {
+  let page = ctx.new_page().await?;
+  ensure_page_alive(&page).await?;
+  Ok(page)
+}
+
 impl TestBrowserResources {
   fn new(
     browser: Arc<ferridriver::Browser>,
@@ -92,7 +109,7 @@ impl TestBrowserResources {
       TestBrowserState::Page { page, .. } => Ok(Arc::clone(page)),
       TestBrowserState::Failed(err) => Err(err.clone()),
       TestBrowserState::Context(ctx) => {
-        let page = ctx.new_page().await?;
+        let page = create_ready_page(ctx).await?;
         apply_page_config(&page, &self.effective, &self.output_dir).await?;
         let ctx = Arc::clone(ctx);
         *state = TestBrowserState::Page {
@@ -120,6 +137,21 @@ impl TestBrowserResources {
 
         match prepared.page_result {
           Ok(page) => {
+            if let Err(err) = ensure_page_alive(&page).await {
+              if is_retryable_bidi_page_error(&err) {
+                let _ = prepared.ctx.close().await;
+                let ctx = Arc::new(self.browser.new_context());
+                let page = create_ready_page(&ctx).await?;
+                apply_page_config(&page, &self.effective, &self.output_dir).await?;
+                *state = TestBrowserState::Page {
+                  ctx,
+                  page: Arc::clone(&page),
+                };
+                return Ok(page);
+              }
+              *state = TestBrowserState::Failed(err.clone());
+              return Err(err);
+            }
             apply_page_config(&page, &self.effective, &self.output_dir).await?;
             let ctx = Arc::new(prepared.ctx);
             *state = TestBrowserState::Page {
@@ -488,7 +520,7 @@ impl Worker {
   fn spawn_prepared_page(browser: Arc<ferridriver::Browser>) -> tokio::task::JoinHandle<PreparedPage> {
     tokio::spawn(async move {
       let ctx = browser.new_context();
-      let page_result = ctx.new_page().await;
+      let page_result = create_ready_page(&ctx).await;
       PreparedPage { ctx, page_result }
     })
   }

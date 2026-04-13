@@ -268,7 +268,7 @@ impl AnyBrowser {
       Self::CdpRaw(b) => b.new_context().await,
       #[cfg(target_os = "macos")]
       Self::WebKit(_) => Err("WebKit does not support multiple browser contexts".into()),
-      Self::Bidi(_) => Err("BiDi does not support browser contexts yet".into()),
+      Self::Bidi(b) => b.new_context().await,
     }
   }
 
@@ -283,7 +283,7 @@ impl AnyBrowser {
       Self::CdpRaw(b) => b.dispose_context(browser_context_id).await,
       #[cfg(target_os = "macos")]
       Self::WebKit(_) => Ok(()),
-      Self::Bidi(_) => Ok(()),
+      Self::Bidi(b) => b.dispose_context(browser_context_id).await,
     }
   }
 
@@ -303,7 +303,7 @@ impl AnyBrowser {
       Self::CdpRaw(b) => b.new_page(url, browser_context_id, viewport).await,
       #[cfg(target_os = "macos")]
       Self::WebKit(b) => b.new_page(url).await,
-      Self::Bidi(b) => b.new_page(url).await,
+      Self::Bidi(b) => b.new_page(url, browser_context_id, viewport).await,
     }
   }
 
