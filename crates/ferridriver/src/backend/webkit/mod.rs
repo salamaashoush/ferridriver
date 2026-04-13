@@ -66,7 +66,8 @@ impl WebKitBrowser {
               routes: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
               closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
               injected_script: std::sync::Arc::new(InjectedScriptManager::new()),
-              })          })
+            })
+          })
           .collect(),
       ),
       IpcResponse::Error(e) => Err(e),
@@ -93,7 +94,8 @@ impl WebKitBrowser {
           injected_script: std::sync::Arc::new(InjectedScriptManager::new()),
         };
         Ok(AnyPage::WebKit(page))
-        },      IpcResponse::Error(e) => Err(e),
+      },
+      IpcResponse::Error(e) => Err(e),
       _ => Err("unexpected".into()),
     }
   }
@@ -158,7 +160,10 @@ impl InjectedScriptManager {
   async fn ensure(&self, page: &WebKitPage) -> Result<(), String> {
     if !self.injected.load(std::sync::atomic::Ordering::Relaxed) {
       let full_check_js = crate::selectors::build_lazy_inject_js();
-      let r = page.client.send_str_vid(Op::Evaluate, &full_check_js, page.vid()).await?;
+      let r = page
+        .client
+        .send_str_vid(Op::Evaluate, &full_check_js, page.vid())
+        .await?;
       WebKitPage::ok(r)?;
       self.injected.store(true, std::sync::atomic::Ordering::Relaxed);
     }

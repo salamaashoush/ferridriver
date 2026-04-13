@@ -311,7 +311,10 @@ async fn apply_page_config(
   output_dir: &std::path::Path,
 ) -> Result<(), String> {
   let ctx_config = &effective.context;
-  let viewport = effective.viewport_override.as_ref().or(effective.default_viewport.as_ref());
+  let viewport = effective
+    .viewport_override
+    .as_ref()
+    .or(effective.default_viewport.as_ref());
 
   let has_ctx_overrides = effective.viewport_override.is_some()
     || ctx_config.is_mobile
@@ -546,7 +549,13 @@ impl Worker {
       match item {
         WorkItem::Single(assignment) => {
           let result = self
-            .run_single(&browser, &custom_fixture_pool, &mut active_suites, &mut prepared_page, assignment)
+            .run_single(
+              &browser,
+              &custom_fixture_pool,
+              &mut active_suites,
+              &mut prepared_page,
+              assignment,
+            )
             .await;
           if result_tx.send(result).await.is_err() {
             break;
@@ -554,7 +563,13 @@ impl Worker {
         },
         WorkItem::Serial(batch) => {
           let results = self
-            .run_serial_batch(&browser, &custom_fixture_pool, &mut active_suites, &mut prepared_page, batch)
+            .run_serial_batch(
+              &browser,
+              &custom_fixture_pool,
+              &mut active_suites,
+              &mut prepared_page,
+              batch,
+            )
             .await;
           for result in results {
             if result_tx.send(result).await.is_err() {
@@ -969,87 +984,88 @@ impl Worker {
     let mut page_for_artifacts = None;
     let video_handle: Option<VideoHandle> = match self.config.video.mode {
       crate::config::VideoMode::Off => None,
-      crate::config::VideoMode::On | crate::config::VideoMode::RetainOnFailure => match test_pool.get::<ferridriver::Page>("page").await
-      {
-        Ok(page) => {
-          page_for_artifacts = Some(Arc::clone(&page));
-          let _ = std::fs::create_dir_all(&test_info.output_dir);
-          match self.config.video.mode {
-            crate::config::VideoMode::On => {
-              let ext = ferridriver::video::video_extension();
-              let video_path =
-                test_info
-                  .output_dir
-                  .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
-              match ferridriver::video::start_recording(
-                &page,
-                video_path,
-                self.config.video.width,
-                self.config.video.height,
-                80,
-              )
-              .await
-              {
-                Ok(h) => Some(VideoHandle::Eager(h)),
-                Err(e) => {
-                  tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-                  None
-                },
-              }
-            },
-            crate::config::VideoMode::RetainOnFailure => {
-              match ferridriver::video::start_buffered_recording(
-                &page,
-                self.config.video.width,
-                self.config.video.height,
-                80,
-              )
-              .await
-              {
-                Ok(h) => Some(VideoHandle::Buffered(h)),
-                Err(e) => {
-                  tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
-                  None
-                },
-              }
-            },
-            crate::config::VideoMode::Off => None,
-          }
-        },
-        Err(e) => {
-          let _ = resources.close().await;
-          let duration = start.elapsed();
-          let outcome = TestOutcome {
-            test_id: test_id.clone(),
-            status: TestStatus::Failed,
-            duration,
-            attempt,
-            max_attempts,
-            error: Some(TestFailure::from(format!("failed to create page: {e}"))),
-            attachments: Vec::new(),
-            steps: Vec::new(),
-            stdout: String::new(),
-            stderr: String::new(),
-            annotations: test.annotations.clone(),
-            metadata: self.config.metadata.clone(),
-          };
-          self
-            .event_bus
-            .emit(ReporterEvent::TestFinished {
+      crate::config::VideoMode::On | crate::config::VideoMode::RetainOnFailure => {
+        match test_pool.get::<ferridriver::Page>("page").await {
+          Ok(page) => {
+            page_for_artifacts = Some(Arc::clone(&page));
+            let _ = std::fs::create_dir_all(&test_info.output_dir);
+            match self.config.video.mode {
+              crate::config::VideoMode::On => {
+                let ext = ferridriver::video::video_extension();
+                let video_path =
+                  test_info
+                    .output_dir
+                    .join(format!("{}-attempt{}.{ext}", sanitize_filename(&test_id.name), attempt));
+                match ferridriver::video::start_recording(
+                  &page,
+                  video_path,
+                  self.config.video.width,
+                  self.config.video.height,
+                  80,
+                )
+                .await
+                {
+                  Ok(h) => Some(VideoHandle::Eager(h)),
+                  Err(e) => {
+                    tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+                    None
+                  },
+                }
+              },
+              crate::config::VideoMode::RetainOnFailure => {
+                match ferridriver::video::start_buffered_recording(
+                  &page,
+                  self.config.video.width,
+                  self.config.video.height,
+                  80,
+                )
+                .await
+                {
+                  Ok(h) => Some(VideoHandle::Buffered(h)),
+                  Err(e) => {
+                    tracing::warn!(target: "ferridriver::worker", "video start failed: {e}");
+                    None
+                  },
+                }
+              },
+              crate::config::VideoMode::Off => None,
+            }
+          },
+          Err(e) => {
+            let _ = resources.close().await;
+            let duration = start.elapsed();
+            let outcome = TestOutcome {
               test_id: test_id.clone(),
-              outcome: outcome.clone(),
-            })
-            .await;
-          return WorkerTestResult {
-            outcome,
-            should_retry: attempt <= max_retries,
-            test_fn,
-            test_id,
-            fixture_requests,
-            suite_key,
-            hooks,
-          };
-        },
+              status: TestStatus::Failed,
+              duration,
+              attempt,
+              max_attempts,
+              error: Some(TestFailure::from(format!("failed to create page: {e}"))),
+              attachments: Vec::new(),
+              steps: Vec::new(),
+              stdout: String::new(),
+              stderr: String::new(),
+              annotations: test.annotations.clone(),
+              metadata: self.config.metadata.clone(),
+            };
+            self
+              .event_bus
+              .emit(ReporterEvent::TestFinished {
+                test_id: test_id.clone(),
+                outcome: outcome.clone(),
+              })
+              .await;
+            return WorkerTestResult {
+              outcome,
+              should_retry: attempt <= max_retries,
+              test_fn,
+              test_id,
+              fixture_requests,
+              suite_key,
+              hooks,
+            };
+          },
+        }
       },
     };
 

@@ -170,8 +170,8 @@ impl BrowserState {
     let chromium_path = match backend_kind {
       BackendKind::Bidi => std::env::var("FIREFOX_PATH")
         .or_else(|_| detect_firefox().map_err(|_| std::env::VarError::NotPresent))
-        .unwrap_or_else(|_| std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium())),
-      _ => std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium()),
+        .unwrap_or_else(|_| resolve_chromium(false)),
+      _ => resolve_chromium(false),
     };
     Self {
       instances: HashMap::default(),
@@ -203,8 +203,8 @@ impl BrowserState {
       match browser {
         crate::options::BrowserType::Firefox => std::env::var("FIREFOX_PATH")
           .or_else(|_| detect_firefox().map_err(|_| std::env::VarError::NotPresent))
-          .unwrap_or_else(|_| std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium())),
-        _ => std::env::var("CHROMIUM_PATH").unwrap_or_else(|_| detect_chromium()),
+          .unwrap_or_else(|_| resolve_chromium(opts.headless)),
+        _ => resolve_chromium(opts.headless),
       }
     };
     Self {
@@ -551,7 +551,10 @@ impl BrowserState {
       )
     } else {
       let ctx_id = plan.browser.new_context().await?;
-      let p = plan.browser.new_page(url, Some(&ctx_id), plan.viewport.as_ref()).await?;
+      let p = plan
+        .browser
+        .new_page(url, Some(&ctx_id), plan.viewport.as_ref())
+        .await?;
       (p, Some(ctx_id))
     };
 
@@ -1019,6 +1022,69 @@ const CHROMIUM_SWITCHES: &[&str] = &[
   "--disable-sync",
 ];
 
+/// Resolve the Chrome binary to use, respecting env vars and headless mode.
+///
+/// Follows Playwright's resolution strategy:
+/// - `executablePath` (handled by caller before this function) always wins.
+/// - Explicit env vars (`CHROMIUM_HEADLESS_SHELL_PATH`, `CHROMIUM_PATH`) override auto-detection.
+/// - When headless and no explicit path is set, prefer Chrome Headless Shell (lighter, faster).
+/// - Fall back to full Chrome/Chromium otherwise.
+///
+/// Precedence (headless=true):
+/// 1. `CHROMIUM_HEADLESS_SHELL_PATH` env var
+/// 2. `CHROMIUM_PATH` env var (explicit user override always wins over auto-detection)
+/// 3. Auto-detect headless shell (Playwright cache, ferridriver cache)
+/// 4. Auto-detect regular Chrome (`detect_chromium()`)
+///
+/// Precedence (headless=false):
+/// 1. `CHROMIUM_PATH` env var
+/// 2. Auto-detect regular Chrome (`detect_chromium()`)
+#[must_use]
+pub fn resolve_chromium(headless: bool) -> String {
+  if headless {
+    // Explicit headless shell path
+    if let Ok(p) = std::env::var("CHROMIUM_HEADLESS_SHELL_PATH") {
+      if std::path::Path::new(&p).exists() {
+        return p;
+      }
+    }
+
+    // Explicit chrome path -- user chose a specific binary, respect it
+    if let Ok(p) = std::env::var("CHROMIUM_PATH") {
+      if std::path::Path::new(&p).exists() {
+        return p;
+      }
+    }
+
+    // Auto-detect headless shell (Playwright cache, ferridriver cache)
+    if let Some(p) = detect_chromium_headless_shell() {
+      return p;
+    }
+  }
+
+  // Headed mode, or no headless shell found: use regular Chrome
+  detect_chromium()
+}
+
+/// Auto-detect Chrome Headless Shell binary on the system.
+///
+/// Searches Playwright's cache and ferridriver's own cache for installed
+/// headless shell binaries. Does NOT check env vars (that's `resolve_chromium()`'s job).
+#[must_use]
+pub fn detect_chromium_headless_shell() -> Option<String> {
+  // Check Playwright's cache for headless shell
+  if let Some(p) = find_playwright_headless_shell() {
+    return Some(p);
+  }
+
+  // Check ferridriver's own cache
+  if let Some(p) = crate::install::BrowserInstaller::new().find_installed_headless_shell() {
+    return Some(p);
+  }
+
+  None
+}
+
 /// Detect Chrome/Chromium binary on the system.
 #[must_use]
 pub fn detect_chromium() -> String {
@@ -1260,6 +1326,69 @@ fn find_playwright_firefox() -> Option<String> {
       return Some(exe.to_string_lossy().to_string());
     }
   }
+  None
+}
+
+/// Search Playwright's cache dir for a Chrome Headless Shell binary.
+#[cfg(any(target_os = "macos", target_os = "linux"))]
+fn find_playwright_headless_shell() -> Option<String> {
+  let home = std::env::var("HOME").ok()?;
+
+  #[cfg(target_os = "macos")]
+  let cache_dir = std::path::PathBuf::from(&home).join("Library/Caches/ms-playwright");
+  #[cfg(target_os = "linux")]
+  let cache_dir = std::path::PathBuf::from(&home).join(".cache/ms-playwright");
+
+  if !cache_dir.exists() {
+    return None;
+  }
+
+  let mut best_rev: u32 = 0;
+  let mut best_name = String::new();
+  let prefix = "chromium_headless_shell-";
+
+  if let Ok(entries) = std::fs::read_dir(&cache_dir) {
+    for entry in entries.flatten() {
+      let name = entry.file_name().to_string_lossy().to_string();
+      if let Some(rev_str) = name.strip_prefix(prefix) {
+        if let Ok(rev) = rev_str.parse::<u32>() {
+          if rev > best_rev {
+            best_rev = rev;
+            best_name = name;
+          }
+        }
+      }
+    }
+  }
+
+  if best_rev == 0 {
+    return None;
+  }
+
+  #[cfg(target_os = "macos")]
+  let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+  #[cfg(target_os = "linux")]
+  let arch = if cfg!(target_arch = "aarch64") { "arm64" } else { "x64" };
+
+  #[cfg(target_os = "macos")]
+  let plat = "mac";
+  #[cfg(target_os = "linux")]
+  let plat = "linux";
+
+  let cft_binary = cache_dir
+    .join(&best_name)
+    .join(format!("chrome-headless-shell-{plat}-{arch}"))
+    .join("chrome-headless-shell");
+
+  if cft_binary.exists() {
+    return Some(cft_binary.to_string_lossy().to_string());
+  }
+
+  None
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux")))]
+fn find_playwright_headless_shell() -> Option<String> {
   None
 }
 

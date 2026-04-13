@@ -252,7 +252,11 @@ impl ContextRef {
       (
         plan
           .browser
-          .new_page("about:blank", plan.browser_context_id.as_deref(), plan.viewport.as_ref())
+          .new_page(
+            "about:blank",
+            plan.browser_context_id.as_deref(),
+            plan.viewport.as_ref(),
+          )
           .await?,
         None,
       )
@@ -266,7 +270,10 @@ impl ContextRef {
       )
     } else {
       let ctx_id = plan.browser.new_context().await?;
-      let page = plan.browser.new_page("about:blank", Some(&ctx_id), plan.viewport.as_ref()).await?;
+      let page = plan
+        .browser
+        .new_page("about:blank", Some(&ctx_id), plan.viewport.as_ref())
+        .await?;
       (page, Some(ctx_id))
     };
 

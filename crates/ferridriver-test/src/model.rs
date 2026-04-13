@@ -525,22 +525,18 @@ impl TestInfo {
         .await;
     }
 
-    self
-      .steps
-      .lock()
-      .await
-      .push(TestStep {
-        step_id,
-        title,
-        category,
-        duration,
-        status,
-        error,
-        location: None,
-        parent_step_id: None,
-        metadata,
-        steps: Vec::new(),
-      });
+    self.steps.lock().await.push(TestStep {
+      step_id,
+      title,
+      category,
+      duration,
+      status,
+      error,
+      location: None,
+      parent_step_id: None,
+      metadata,
+      steps: Vec::new(),
+    });
   }
 }
 
