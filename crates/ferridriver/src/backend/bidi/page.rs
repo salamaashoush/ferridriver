@@ -107,6 +107,38 @@ impl BidiPage {
     self.session.transport.send_command(method, params).await
   }
 
+  pub(crate) fn is_retryable_context_error(err: &str) -> bool {
+    err.contains("DiscardedBrowsingContextError")
+      || err.contains("BrowsingContext does no longer exist")
+      || err.contains("BiDi error 'no such frame'")
+      || err.contains("BiDi error 'no such window'")
+  }
+
+  pub async fn wait_until_ready(&self) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(2);
+
+    loop {
+      match self
+        .cmd(
+          "script.evaluate",
+          json!({
+            "expression": "document.readyState",
+            "target": {"context": &*self.context_id},
+            "awaitPromise": true,
+            "resultOwnership": "none"
+          }),
+        )
+        .await
+      {
+        Ok(_) => return Ok(()),
+        Err(err) if Self::is_retryable_context_error(&err) && tokio::time::Instant::now() < deadline => {
+          tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+        },
+        Err(err) => return Err(err),
+      }
+    }
+  }
+
   /// Map NavLifecycle to BiDi readiness state.
   fn lifecycle_to_wait(lifecycle: NavLifecycle) -> &'static str {
     match lifecycle {
@@ -328,38 +360,12 @@ impl BidiPage {
   // ── Elements ────────────────────────────────────────────────────────────
 
   pub async fn find_element(&self, selector: &str) -> Result<AnyElement, String> {
-    let result = self
-      .cmd(
-        "browsingContext.locateNodes",
-        json!({
-          "context": &*self.context_id,
-          "locator": {"type": "css", "value": selector},
-          "maxNodeCount": 1
-        }),
-      )
-      .await?;
-
-    let nodes = result
-      .get("nodes")
-      .and_then(|v| v.as_array())
-      .ok_or(format!("No element found for selector: {selector}"))?;
-
-    if nodes.is_empty() {
-      return Err(format!("No element found for selector: {selector}"));
-    }
-
-    let node = &nodes[0];
-    let shared_id = node
-      .get("sharedId")
-      .and_then(|v| v.as_str())
-      .ok_or("Element missing sharedId")?
-      .to_string();
-
-    Ok(AnyElement::Bidi(BidiElement::new(
-      self.session.clone(),
-      self.context_id.clone(),
-      shared_id,
-    )))
+    self.ensure_engine_injected().await?;
+    let sel_js = crate::selectors::build_selone_js(selector, "window.__fd")?;
+    self
+      .evaluate_to_element(&sel_js)
+      .await
+      .map_err(|_| format!("No element found for selector: {selector}"))
   }
 
   pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
