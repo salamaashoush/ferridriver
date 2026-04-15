@@ -64,15 +64,15 @@ pub const ENGINE_BOOTSTRAP_JS: &str = "window.__fd_promise = null;";
 #[must_use]
 pub fn build_lazy_inject_js() -> String {
   let engine_js = build_inject_js();
+  // The engine JS directly creates window.__fd at the end of its IIFE.
+  // We just need to run it once and return the result.
   format!(
     r"(async () => {{
       if (window.__fd) return window.__fd;
       if (window.__fd_promise) return await window.__fd_promise;
       window.__fd_promise = (async () => {{
         try {{
-          const module = {{ exports: {{}} }};
           {engine_js}
-          window.__fd = new (module.exports.InjectedScript())(globalThis, {{}});
           return window.__fd;
         }} catch (e) {{
           window.__fd_promise = null;

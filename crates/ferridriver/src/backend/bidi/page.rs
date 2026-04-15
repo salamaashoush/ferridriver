@@ -1092,10 +1092,10 @@ impl BidiPage {
             injected_script.reset();
           },
           "log.entryAdded" => {
-            let level = event.params.get("level").and_then(|v| v.as_str()).unwrap_or("log");
+            let r#type = event.params.get("level").and_then(|v| v.as_str()).unwrap_or("log");
             let text = event.params.get("text").and_then(|v| v.as_str()).unwrap_or("");
             let msg = ConsoleMsg {
-              level: level.to_string(),
+              r#type: r#type.to_string(),
               text: text.to_string(),
             };
             console_log.write().await.push(msg.clone());

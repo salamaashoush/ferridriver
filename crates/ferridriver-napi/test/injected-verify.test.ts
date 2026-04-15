@@ -58,12 +58,8 @@ for (const backend of BACKENDS) {
       // Use data URL instead of setContent to ensure addScriptToEvaluateOnNewDocument fires
       const dataUrl = `data:text/html,${encodeURIComponent(HTML)}`;
       await page.goto(dataUrl);
-      // Wait for the injected script to be available
-      for (let i = 0; i < 50; i++) {
-        const ready = await page.evaluate('typeof window.__fd !== "undefined"');
-        if (ready === "true" || ready === true) break;
-        await new Promise(r => setTimeout(r, 100));
-      }
+      // Trigger selector engine injection by performing a locator query
+      await page.waitForSelector("#heading");
     });
 
     afterAll(async () => {
@@ -317,16 +313,17 @@ for (const backend of BACKENDS) {
     // ── Utilities ──
 
     test("searchPage() finds text matches", async () => {
-      const r = await page.evaluateStr('JSON.stringify(window.__fd.searchPage("Hello", false, false, 10, "", 10))');
+      // searchPage returns a JSON string already, so use evaluateStr without extra JSON.stringify
+      const r = await page.evaluateStr('window.__fd.searchPage("Hello", false, false, 10, "", 10)');
       const parsed = JSON.parse(r);
-      expect(parsed.count).toBeGreaterThanOrEqual(1);
-      expect(parsed.matches[0].match).toBe("Hello");
+      expect(parsed.total).toBeGreaterThanOrEqual(1);
+      expect(parsed.matches[0].match_text).toBe("Hello");
     });
 
     test("searchPage() supports regex", async () => {
-      const r = await page.evaluateStr('JSON.stringify(window.__fd.searchPage("Item \\\\d+", true, false, 10, "", 10))');
+      const r = await page.evaluateStr('window.__fd.searchPage("Item \\\\d+", true, false, 10, "", 10)');
       const parsed = JSON.parse(r);
-      expect(parsed.count).toBe(3);
+      expect(parsed.total).toBe(3);
     });
 
     test("findElementsCSS() finds elements", async () => {

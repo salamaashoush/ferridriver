@@ -29,7 +29,7 @@ impl McpServer {
         let log = handles.console.read().await;
         let msgs: Vec<_> = log
           .iter()
-          .filter(|m| level.is_none_or(|l| l == "all" || m.level == l))
+          .filter(|m| level.is_none_or(|l| l == "all" || m.r#type == l))
           .rev()
           .take(limit)
           .cloned()

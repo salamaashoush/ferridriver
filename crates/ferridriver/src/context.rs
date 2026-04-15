@@ -15,10 +15,11 @@ use rustc_hash::FxHashMap as HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// A collected console message.
+/// A collected console message (matches Playwright's `ConsoleMessage`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ConsoleMsg {
-  pub level: String,
+  /// Console message type: "log", "warn", "error", "info", "debug", "trace".
+  pub r#type: String,
   pub text: String,
 }
 
@@ -164,7 +165,7 @@ impl BrowserContext {
     let msgs = self.console_log.read().await;
     msgs
       .iter()
-      .filter(|m| level.is_none_or(|l| l == "all" || m.level == l))
+      .filter(|m| level.is_none_or(|l| l == "all" || m.r#type == l))
       .rev()
       .take(limit)
       .cloned()

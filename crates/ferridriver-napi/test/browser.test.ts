@@ -248,8 +248,12 @@ for (const backend of BACKENDS) {
         deviceScaleFactor: 3,
         isMobile: true,
       });
-      // Mobile emulation requires navigation to take effect
-      await page.goto(testUrl);
+      // Navigate to a page with viewport meta tag (required for mobile
+      // emulation to set CSS layout viewport -- without it Chrome defaults
+      // to 980px, matching real mobile browser behavior).
+      await page.goto(
+        'data:text/html,<meta name="viewport" content="width=device-width,initial-scale=1"><h1>Mobile</h1>'
+      );
       const width = await page.evaluate("window.innerWidth");
       expect(width).toBe(375);
     });
