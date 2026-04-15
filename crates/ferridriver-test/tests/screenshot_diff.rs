@@ -4,16 +4,14 @@
 //! so they run serialized behind a mutex.
 #![allow(unsafe_code)]
 
-use std::sync::Mutex;
-
 use ferridriver_test::ct::server::ComponentServer;
 use ferridriver_test::expect::expect;
 
-static TEST_MUTEX: Mutex<()> = Mutex::new(());
+static TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn screenshot_creates_baseline_then_matches() {
-  let _guard = TEST_MUTEX.lock().unwrap();
+  let _guard = TEST_MUTEX.lock().await;
   let tmp = std::env::temp_dir().join(format!("ferri_ss_{}", std::process::id()));
   let _ = std::fs::remove_dir_all(&tmp);
   std::fs::create_dir_all(&tmp).unwrap();
@@ -69,7 +67,7 @@ async fn screenshot_creates_baseline_then_matches() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn screenshot_detects_visual_change() {
-  let _guard = TEST_MUTEX.lock().unwrap();
+  let _guard = TEST_MUTEX.lock().await;
   let tmp = std::env::temp_dir().join(format!("ferri_ss_diff_{}", std::process::id()));
   let _ = std::fs::remove_dir_all(&tmp);
   std::fs::create_dir_all(&tmp).unwrap();
@@ -142,7 +140,7 @@ async fn screenshot_detects_visual_change() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn screenshot_size_mismatch_detected() {
-  let _guard = TEST_MUTEX.lock().unwrap();
+  let _guard = TEST_MUTEX.lock().await;
   let tmp = std::env::temp_dir().join(format!("ferri_ss_size_{}", std::process::id()));
   let _ = std::fs::remove_dir_all(&tmp);
   std::fs::create_dir_all(&tmp).unwrap();
