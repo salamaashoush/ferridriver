@@ -1635,25 +1635,21 @@ impl<T: CdpWrap> CdpPage<T> {
     } else {
       serde_json::json!({"angle": 0, "type": "landscapePrimary"})
     };
-    self
-      .cmd(
-        "Emulation.setDeviceMetricsOverride",
-        serde_json::json!({
-            "width": config.width,
-            "height": config.height,
-            "deviceScaleFactor": config.device_scale_factor,
-            "mobile": config.is_mobile,
-            "screenWidth": config.width,
-            "screenHeight": config.height,
-            "screenOrientation": orientation,
-        }),
-      )
-      .await?;
+    let params = serde_json::json!({
+        "width": config.width,
+        "height": config.height,
+        "deviceScaleFactor": config.device_scale_factor,
+        "mobile": config.is_mobile,
+        "screenWidth": config.width,
+        "screenHeight": config.height,
+        "screenOrientation": orientation,
+    });
+    self.cmd("Emulation.setDeviceMetricsOverride", params).await?;
     if config.has_touch {
       let _ = self
         .cmd(
           "Emulation.setTouchEmulationEnabled",
-          serde_json::json!({"enabled": true, "maxTouchPoints": 5}),
+          serde_json::json!({"enabled": true}),
         )
         .await;
     }
@@ -1948,7 +1944,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
         if event.get("method").and_then(|m| m.as_str()) == Some("Runtime.consoleAPICalled") {
           if let Some(params) = event.get("params") {
-            let level = params.get("type").and_then(|v| v.as_str()).unwrap_or("log").to_string();
+            let r#type = params.get("type").and_then(|v| v.as_str()).unwrap_or("log").to_string();
             let text = params
               .get("args")
               .and_then(|a| a.as_array())
@@ -1960,7 +1956,7 @@ impl<T: CdpWrap> CdpPage<T> {
                   .join(" ")
               })
               .unwrap_or_default();
-            let msg = ConsoleMsg { level, text };
+            let msg = ConsoleMsg { r#type, text };
             console_log.write().await.push(msg.clone());
             emitter.emit(crate::events::PageEvent::Console(msg));
           }

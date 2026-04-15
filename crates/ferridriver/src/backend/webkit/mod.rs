@@ -625,21 +625,31 @@ impl WebKitPage {
     Ok(())
   }
 
-  /// Move the mouse to the given coordinates using native `NSEvent` mouse moved.
+  /// Move the mouse to the given coordinates.
+  /// Sends native `NSEvent` for CSS `:hover` state, plus a JS `mousemove`
+  /// event for DOM listeners (native `mouseMoved:` doesn't reliably fire
+  /// DOM events in headless/offscreen `WKWebView` windows).
   ///
   /// # Errors
   ///
-  /// Returns an error if the native mouse event IPC call fails.
+  /// Returns an error if the native mouse event or JS evaluation fails.
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
-    self.send_mouse_event(0, 0, 0, x, y).await
+    let _ = self.send_mouse_event(0, 0, 0, x, y).await;
+    let js = format!(
+      "document.elementFromPoint({x},{y})?.dispatchEvent(new MouseEvent('mousemove',{{clientX:{x},clientY:{y},bubbles:true,view:window}}))"
+    );
+    let _ = self.evaluate(&js).await;
+    Ok(())
   }
 
   /// Move the mouse smoothly from one point to another with bezier easing.
-  /// Uses native `NSEvent` mouse moved events via IPC (matches CDP optimization).
+  /// Sends native `NSEvent` per step for CSS state, plus JS `mousemove`
+  /// events for DOM listeners (native dispatch alone doesn't fire DOM events
+  /// in headless `WKWebView`).
   ///
   /// # Errors
   ///
-  /// Returns an error if any native mouse event IPC call fails.
+  /// Returns an error if any native mouse event or JS evaluation fails.
   pub async fn move_mouse_smooth(
     &self,
     from_x: f64,
@@ -654,7 +664,11 @@ impl WebKitPage {
       let ease = t * t * (3.0 - 2.0 * t); // bezier easing (matches CDP)
       let x = from_x + (to_x - from_x) * ease;
       let y = from_y + (to_y - from_y) * ease;
-      self.send_mouse_event(0, 0, 0, x, y).await?;
+      let _ = self.send_mouse_event(0, 0, 0, x, y).await;
+      let js = format!(
+        "document.elementFromPoint({x},{y})?.dispatchEvent(new MouseEvent('mousemove',{{clientX:{x},clientY:{y},bubbles:true,view:window}}))"
+      );
+      let _ = self.evaluate(&js).await;
     }
     Ok(())
   }
@@ -1160,8 +1174,8 @@ impl WebKitPage {
           };
           if !msgs.is_empty() {
             let mut dest = console_log.write().await;
-            for (level, text) in msgs {
-              let msg = ConsoleMsg { level, text };
+            for (r#type, text) in msgs {
+              let msg = ConsoleMsg { r#type, text };
               emitter.emit(crate::events::PageEvent::Console(msg.clone()));
               dest.push(msg);
             }
