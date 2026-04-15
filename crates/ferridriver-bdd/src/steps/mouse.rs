@@ -8,7 +8,8 @@ use ferridriver_bdd_macros::when;
 async fn click_at_position(world: &mut BrowserWorld, x: i64, y: i64) {
   world
     .page()
-    .click_at(x as f64, y as f64)
+    .mouse()
+    .click(x as f64, y as f64, None)
     .await
     .map_err(|e| StepError::from(format!("click at ({x},{y}): {e}")))?;
 }
@@ -17,7 +18,8 @@ async fn click_at_position(world: &mut BrowserWorld, x: i64, y: i64) {
 async fn move_mouse(world: &mut BrowserWorld, x: i64, y: i64) {
   world
     .page()
-    .move_mouse(x as f64, y as f64)
+    .mouse()
+    .r#move(x as f64, y as f64, None)
     .await
     .map_err(|e| StepError::from(format!("move mouse to ({x},{y}): {e}")))?;
 }
@@ -26,7 +28,8 @@ async fn move_mouse(world: &mut BrowserWorld, x: i64, y: i64) {
 async fn scroll_wheel_down(world: &mut BrowserWorld, delta: i64) {
   world
     .page()
-    .mouse_wheel(0.0, delta as f64)
+    .mouse()
+    .wheel(0.0, delta as f64)
     .await
     .map_err(|e| StepError::from(format!("scroll wheel down {delta}: {e}")))?;
 }
@@ -35,16 +38,29 @@ async fn scroll_wheel_down(world: &mut BrowserWorld, delta: i64) {
 async fn scroll_wheel_up(world: &mut BrowserWorld, delta: i64) {
   world
     .page()
-    .mouse_wheel(0.0, -(delta as f64))
+    .mouse()
+    .wheel(0.0, -(delta as f64))
     .await
     .map_err(|e| StepError::from(format!("scroll wheel up {delta}: {e}")))?;
 }
 
 #[when("I drag from {int},{int} to {int},{int}")]
 async fn drag_coordinates(world: &mut BrowserWorld, x1: i64, y1: i64, x2: i64, y2: i64) {
-  world
-    .page()
-    .drag_and_drop((x1 as f64, y1 as f64), (x2 as f64, y2 as f64))
+  let mouse = world.page().mouse();
+  mouse
+    .r#move(x1 as f64, y1 as f64, None)
     .await
-    .map_err(|e| StepError::from(format!("drag from ({x1},{y1}) to ({x2},{y2}): {e}")))?;
+    .map_err(|e| StepError::from(format!("move to ({x1},{y1}): {e}")))?;
+  mouse
+    .down(None)
+    .await
+    .map_err(|e| StepError::from(format!("mouse down at ({x1},{y1}): {e}")))?;
+  mouse
+    .r#move(x2 as f64, y2 as f64, Some(10))
+    .await
+    .map_err(|e| StepError::from(format!("move to ({x2},{y2}): {e}")))?;
+  mouse
+    .up(None)
+    .await
+    .map_err(|e| StepError::from(format!("mouse up at ({x2},{y2}): {e}")))?;
 }

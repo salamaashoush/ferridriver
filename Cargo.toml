@@ -58,6 +58,9 @@ tokio-util = "0.7"
 dashmap = "6"
 arc-swap = "1"
 mimalloc = { version = "0.1", default-features = false }
+config = { version = "0.15", default-features = false, features = ["toml", "json", "yaml"] }
+shellexpand = "3"
+dirs = "6"
 
 [profile.release]
 opt-level = 3

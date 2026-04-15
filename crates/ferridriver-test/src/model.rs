@@ -177,6 +177,38 @@ pub struct HookDef {
   pub kind: HookKind,
 }
 
+/// Generic lifecycle phase shared across all front-end hook syntaxes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookPhase {
+  Before,
+  After,
+}
+
+/// Generic lifecycle scope shared across E2E and BDD hooks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HookScope {
+  Suite,
+  Scenario,
+  Step,
+}
+
+/// Where a hook attaches in the runner model.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum HookOwner {
+  Root,
+  Suite(String),
+}
+
+/// Unified hook registration metadata used by adapters before execution hooks are built.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HookRegistration {
+  pub phase: HookPhase,
+  pub scope: HookScope,
+  pub owner: HookOwner,
+  pub tags: Option<String>,
+  pub requested_fixtures: Vec<String>,
+}
+
 /// Hook kind with the associated callback.
 pub enum HookKind {
   BeforeAll(SuiteHookFn),

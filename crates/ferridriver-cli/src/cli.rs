@@ -4,6 +4,8 @@
 //! Test running (E2E, BDD, CT) is handled by the TS CLI (`ferridriver-test`)
 //! or by Rust macros (`main!()`, `bdd_main!()`) via `cargo test`.
 
+use std::path::PathBuf;
+
 use clap::{Args, Parser, ValueEnum};
 use ferridriver::backend::BackendKind;
 use ferridriver::state::ConnectMode;
@@ -19,6 +21,10 @@ pub struct Cli {
   /// Verbose output (-v = debug, -vv = trace including CDP protocol)
   #[arg(short, long, action = clap::ArgAction::Count, global = true)]
   pub verbose: u8,
+
+  /// Config file path (YAML, TOML, or JSON). Auto-searches if not specified.
+  #[arg(short, long, global = true)]
+  pub config: Option<PathBuf>,
 
   #[command(flatten)]
   pub browser: BrowserArgs,

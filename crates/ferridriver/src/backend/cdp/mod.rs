@@ -1465,8 +1465,9 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn press_key(&self, key: &str) -> Result<(), String> {
-    let (dom_key, vk, text) = match key {
+  /// Resolve a Playwright-style key name to (DOM key, virtual keycode, text).
+  fn resolve_key(key: &str) -> (&str, u32, Option<&str>) {
+    match key {
       "Enter" => ("Enter", 13, Some("\r")),
       "Tab" => ("Tab", 9, Some("\t")),
       "Space" | " " => (" ", 32, Some(" ")),
@@ -1481,19 +1482,48 @@ impl<T: CdpWrap> CdpPage<T> {
       "End" => ("End", 35, None),
       "PageUp" => ("PageUp", 33, None),
       "PageDown" => ("PageDown", 34, None),
+      "Shift" | "ShiftLeft" => ("Shift", 16, None),
+      "Control" | "ControlLeft" => ("Control", 17, None),
+      "Alt" | "AltLeft" => ("Alt", 18, None),
+      "Meta" | "MetaLeft" => ("Meta", 91, None),
+      "ShiftRight" => ("Shift", 16, None),
+      "ControlRight" => ("Control", 17, None),
+      "AltRight" => ("Alt", 18, None),
+      "MetaRight" => ("Meta", 93, None),
+      "F1" => ("F1", 112, None),
+      "F2" => ("F2", 113, None),
+      "F3" => ("F3", 114, None),
+      "F4" => ("F4", 115, None),
+      "F5" => ("F5", 116, None),
+      "F6" => ("F6", 117, None),
+      "F7" => ("F7", 118, None),
+      "F8" => ("F8", 119, None),
+      "F9" => ("F9", 120, None),
+      "F10" => ("F10", 121, None),
+      "F11" => ("F11", 122, None),
+      "F12" => ("F12", 123, None),
       ch => (ch, 0, if ch.len() == 1 { Some(ch) } else { None }),
-    };
+    }
+  }
 
+  /// Dispatch a keyDown event for a single key (does NOT release it).
+  pub async fn key_down(&self, key: &str) -> Result<(), String> {
+    let (dom_key, vk, text) = Self::resolve_key(key);
     let down_type = if text.is_some() { "keyDown" } else { "rawKeyDown" };
-    let mut down_params = serde_json::json!({
+    let mut params = serde_json::json!({
         "type": down_type, "key": dom_key,
         "windowsVirtualKeyCode": vk,
     });
     if let Some(t) = text {
-      down_params["text"] = serde_json::json!(t);
+      params["text"] = serde_json::json!(t);
     }
+    self.cmd("Input.dispatchKeyEvent", params).await?;
+    Ok(())
+  }
 
-    self.cmd("Input.dispatchKeyEvent", down_params).await?;
+  /// Dispatch a keyUp event for a single key.
+  pub async fn key_up(&self, key: &str) -> Result<(), String> {
+    let (dom_key, vk, _) = Self::resolve_key(key);
     self
       .cmd(
         "Input.dispatchKeyEvent",
@@ -1503,6 +1533,12 @@ impl<T: CdpWrap> CdpPage<T> {
         }),
       )
       .await?;
+    Ok(())
+  }
+
+  pub async fn press_key(&self, key: &str) -> Result<(), String> {
+    self.key_down(key).await?;
+    self.key_up(key).await?;
     Ok(())
   }
 

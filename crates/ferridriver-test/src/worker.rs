@@ -305,6 +305,20 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
   }
 }
 
+fn build_suite_effective_context_config(config: &TestConfig) -> EffectiveContextConfig {
+  let mut ctx_config = config.browser.context.clone();
+  if ctx_config.storage_state.is_none() {
+    ctx_config.storage_state = config.storage_state.clone();
+  }
+
+  EffectiveContextConfig {
+    context: ctx_config,
+    default_viewport: config.browser.viewport.clone(),
+    viewport_override: None,
+    request_base_url: config.base_url.clone(),
+  }
+}
+
 async fn apply_page_config(
   page: &Arc<ferridriver::Page>,
   effective: &EffectiveContextConfig,
@@ -417,14 +431,17 @@ async fn apply_page_config(
   Ok(())
 }
 
-fn build_test_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<String, FixtureDef> {
+fn build_browser_fixture_defs(
+  resources: Arc<TestBrowserResources>,
+  scope: FixtureScope,
+) -> FxHashMap<String, FixtureDef> {
   let mut defs = FxHashMap::default();
 
   defs.insert(
     "context".into(),
     FixtureDef {
       name: "context".into(),
-      scope: FixtureScope::Test,
+      scope,
       dependencies: vec![],
       setup: Arc::new({
         let resources = Arc::clone(&resources);
@@ -445,7 +462,7 @@ fn build_test_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<St
     "page".into(),
     FixtureDef {
       name: "page".into(),
-      scope: FixtureScope::Test,
+      scope,
       dependencies: vec![],
       setup: Arc::new({
         let resources = Arc::clone(&resources);
@@ -466,7 +483,7 @@ fn build_test_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<St
     "request".into(),
     FixtureDef {
       name: "request".into(),
-      scope: FixtureScope::Test,
+      scope,
       dependencies: vec![],
       setup: Arc::new({
         let base_url = resources.effective.request_base_url.clone();
@@ -490,6 +507,14 @@ fn build_test_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<St
   defs
 }
 
+fn build_test_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<String, FixtureDef> {
+  build_browser_fixture_defs(resources, FixtureScope::Test)
+}
+
+fn build_suite_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<String, FixtureDef> {
+  build_browser_fixture_defs(resources, FixtureScope::Worker)
+}
+
 /// Result of a single test execution within a worker.
 pub struct WorkerTestResult {
   pub outcome: TestOutcome,
@@ -506,6 +531,7 @@ struct SuiteState {
   before_all_ran: bool,
   before_all_failed: bool,
   hooks: Arc<Hooks>,
+  fixture_pool: FixturePool,
 }
 
 /// A worker that owns a browser and processes tests sequentially.
@@ -525,6 +551,43 @@ impl Worker {
       let ctx = browser.new_context();
       let page_result = create_ready_page(&ctx).await;
       PreparedPage { ctx, page_result }
+    })
+  }
+
+  fn create_suite_test_info(&self, suite_key: &str) -> Arc<TestInfo> {
+    Arc::new(TestInfo {
+      test_id: crate::model::TestId {
+        file: suite_key.to_string(),
+        suite: None,
+        name: "suite hooks".to_string(),
+        line: None,
+      },
+      title_path: vec![suite_key.to_string(), "suite hooks".to_string()],
+      retry: 0,
+      worker_index: self.id,
+      parallel_index: self.id,
+      repeat_each_index: 0,
+      output_dir: self
+        .config
+        .output_dir
+        .join("__suite_hooks__")
+        .join(sanitize_filename(suite_key)),
+      snapshot_dir: self
+        .config
+        .snapshot_dir
+        .as_ref()
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
+      snapshot_path_template: self.config.snapshot_path_template.clone(),
+      update_snapshots: self.config.update_snapshots,
+      attachments: Arc::new(Mutex::new(Vec::new())),
+      steps: Arc::new(Mutex::new(Vec::new())),
+      soft_errors: Arc::new(Mutex::new(Vec::new())),
+      timeout: Duration::from_millis(self.config.timeout),
+      tags: Vec::new(),
+      start_time: Instant::now(),
+      event_bus: Some(self.event_bus.clone()),
+      annotations: Arc::new(Mutex::new(Vec::new())),
     })
   }
 
@@ -620,7 +683,7 @@ impl Worker {
             )))
             .await;
           let start = Instant::now();
-          let result = hook(custom_fixture_pool.clone()).await;
+          let result = hook(state.fixture_pool.clone()).await;
           let duration = start.elapsed();
           let error = result.as_ref().err().map(|e| format!("{e}"));
           self
@@ -644,6 +707,9 @@ impl Worker {
       }
     }
 
+    for state in active_suites.values() {
+      state.fixture_pool.teardown_all().await;
+    }
     custom_fixture_pool.teardown_all().await;
 
     self
@@ -749,10 +815,23 @@ impl Worker {
     let hooks = Arc::clone(&assignment.hooks);
 
     // ── beforeAll (once per suite on this worker) ──
-    let suite_state = active_suites.entry(suite_key.clone()).or_insert_with(|| SuiteState {
-      before_all_ran: false,
-      before_all_failed: false,
-      hooks: Arc::clone(&hooks),
+    let suite_state = active_suites.entry(suite_key.clone()).or_insert_with(|| {
+      let suite_test_info = self.create_suite_test_info(&suite_key);
+      let suite_resources = Arc::new(TestBrowserResources::new(
+        Arc::clone(browser),
+        build_suite_effective_context_config(&self.config),
+        suite_test_info.output_dir.clone(),
+        None,
+      ));
+      let suite_pool = custom_pool.child_with_defs(build_suite_fixture_defs(suite_resources), FixtureScope::Worker);
+      suite_pool.inject("test_info", suite_test_info);
+
+      SuiteState {
+        before_all_ran: false,
+        before_all_failed: false,
+        hooks: Arc::clone(&hooks),
+        fixture_pool: suite_pool,
+      }
     });
 
     if !suite_state.before_all_ran && !hooks.before_all.is_empty() {
@@ -775,7 +854,7 @@ impl Worker {
           )))
           .await;
         let start = Instant::now();
-        let result = hook(custom_pool.clone()).await;
+        let result = hook(suite_state.fixture_pool.clone()).await;
         let duration = start.elapsed();
         let error = result.as_ref().err().map(|e| e.message.clone());
         self

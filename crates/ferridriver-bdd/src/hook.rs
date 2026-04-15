@@ -124,6 +124,21 @@ impl HookRegistry {
     Ok(())
   }
 
+  /// Run suite-level hooks for a given point.
+  ///
+  /// `BeforeAll` / `AfterAll` may come from either a world-aware TS hook or
+  /// a world-less Rust hook, so this dispatch supports both variants.
+  pub async fn run_suite(&self, point: HookPoint, world: &mut BrowserWorld, tags: &[String]) -> Result<(), String> {
+    for hook in self.get(point, tags) {
+      match &hook.handler {
+        HookHandler::Scenario(handler) => handler(world).await?,
+        HookHandler::Global(handler) => handler().await?,
+        HookHandler::Step(_) => {},
+      }
+    }
+    Ok(())
+  }
+
   /// Run all step hooks for a given point.
   pub async fn run_step(
     &self,
@@ -146,6 +161,17 @@ impl HookRegistry {
 impl Default for HookRegistry {
   fn default() -> Self {
     Self::new()
+  }
+}
+
+pub fn runtime_hook_point(registration: &ferridriver_test::HookRegistration) -> Option<HookPoint> {
+  match (registration.phase, registration.scope) {
+    (ferridriver_test::HookPhase::Before, ferridriver_test::HookScope::Suite) => Some(HookPoint::BeforeAll),
+    (ferridriver_test::HookPhase::After, ferridriver_test::HookScope::Suite) => Some(HookPoint::AfterAll),
+    (ferridriver_test::HookPhase::Before, ferridriver_test::HookScope::Scenario) => Some(HookPoint::BeforeScenario),
+    (ferridriver_test::HookPhase::After, ferridriver_test::HookScope::Scenario) => Some(HookPoint::AfterScenario),
+    (ferridriver_test::HookPhase::Before, ferridriver_test::HookScope::Step) => Some(HookPoint::BeforeStep),
+    (ferridriver_test::HookPhase::After, ferridriver_test::HookScope::Step) => Some(HookPoint::AfterStep),
   }
 }
 

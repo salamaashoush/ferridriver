@@ -11,8 +11,9 @@ use crate::locator::Locator;
 use crate::options::{GotoOptions, RoleOptions, ScreenshotOptions, TextOptions, WaitOptions};
 use crate::snapshot;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::atomic::{AtomicU64, Ordering};
-use tokio::sync::Mutex;
+use tokio::sync::Mutex as AsyncMutex;
 
 /// High-level page API, mirrors Playwright's Page interface.
 /// Always constructed behind `Arc<Page>` — locators, frames, and consumers
@@ -20,7 +21,8 @@ use tokio::sync::Mutex;
 pub struct Page {
   pub(crate) inner: AnyPage,
   default_timeout: AtomicU64,
-  snapshot_tracker: Arc<Mutex<snapshot::SnapshotTracker>>,
+  snapshot_tracker: Arc<AsyncMutex<snapshot::SnapshotTracker>>,
+  mouse_position: Mutex<(f64, f64)>,
   context_ref: Option<crate::context::ContextRef>,
 }
 
@@ -31,7 +33,8 @@ impl Page {
     Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(30000),
-      snapshot_tracker: Arc::new(Mutex::new(snapshot::SnapshotTracker::new())),
+      snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
+      mouse_position: Mutex::new((0.0, 0.0)),
       context_ref: None,
     })
   }
@@ -42,7 +45,8 @@ impl Page {
     Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(30000),
-      snapshot_tracker: Arc::new(Mutex::new(snapshot::SnapshotTracker::new())),
+      snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
+      mouse_position: Mutex::new((0.0, 0.0)),
       context_ref: Some(context),
     })
   }
@@ -257,6 +261,14 @@ impl Page {
     }
   }
 
+  /// Create a `FrameLocator` for an `<iframe>` matching the selector.
+  ///
+  /// Equivalent to Playwright's `page.frameLocator(selector)`.
+  #[must_use]
+  pub fn frame_locator(self: &Arc<Self>, selector: &str) -> crate::locator::FrameLocator {
+    self.locator(selector).content_frame()
+  }
+
   // ── Page-level actions (convenience, delegate to locator) ───────────────
 
   /// Click on an element matching the selector.
@@ -267,6 +279,16 @@ impl Page {
   pub async fn click(self: &Arc<Self>, selector: &str) -> Result<(), String> {
     tracing::debug!(target: "ferridriver::action", action = "click", selector, "page.click");
     self.locator(selector).click().await
+  }
+
+  /// Double-click an element matching the selector.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or the double-click fails.
+  pub async fn dblclick(self: &Arc<Self>, selector: &str) -> Result<(), String> {
+    tracing::debug!(target: "ferridriver::action", action = "dblclick", selector, "page.dblclick");
+    self.locator(selector).dblclick().await
   }
 
   /// Fill an input element matching the selector with a value.
@@ -284,8 +306,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or typing fails.
-  pub async fn type_text(self: &Arc<Self>, selector: &str, text: &str) -> Result<(), String> {
-    self.locator(selector).type_text(text).await
+  pub async fn r#type(self: &Arc<Self>, selector: &str, text: &str) -> Result<(), String> {
+    self.locator(selector).r#type(text).await
   }
 
   /// Press a key on an element matching the selector.
@@ -688,7 +710,9 @@ impl Page {
   ///
   /// Returns an error if the click dispatch fails.
   pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
-    self.inner.click_at(x, y).await
+    self.inner.click_at(x, y).await?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
   }
 
   /// Click at specific coordinates with button and click count options.
@@ -697,7 +721,9 @@ impl Page {
   ///
   /// Returns an error if the click dispatch fails.
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
-    self.inner.click_at_opts(x, y, button, click_count).await
+    self.inner.click_at_opts(x, y, button, click_count).await?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
   }
 
   /// Move the mouse to specific coordinates.
@@ -705,8 +731,10 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the mouse move dispatch fails.
-  pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
-    self.inner.move_mouse(x, y).await
+  pub(crate) async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
+    self.inner.move_mouse(x, y).await?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
   }
 
   /// Move the mouse smoothly from one point to another over multiple steps.
@@ -722,25 +750,39 @@ impl Page {
     to_y: f64,
     steps: u32,
   ) -> Result<(), String> {
-    self.inner.move_mouse_smooth(from_x, from_y, to_x, to_y, steps).await
+    self.inner.move_mouse_smooth(from_x, from_y, to_x, to_y, steps).await?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (to_x, to_y);
+    Ok(())
   }
 
-  /// Drag from one point and drop at another.
+  /// Drag an element matching `source_selector` onto an element matching `target_selector`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the drag-and-drop operation fails.
-  pub async fn drag_and_drop(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
-    self.inner.click_and_drag(from, to).await
+  /// Returns an error if either element cannot be found or the drag-and-drop operation fails.
+  pub async fn drag_and_drop(self: &Arc<Self>, source_selector: &str, target_selector: &str) -> Result<(), String> {
+    self
+      .locator(source_selector)
+      .drag_to(&self.locator(target_selector))
+      .await
   }
 
-  /// Type text character-by-character into the focused element.
+  /// Dispatch a keyDown event for a single key (does NOT release it).
   ///
   /// # Errors
   ///
-  /// Returns an error if the typing dispatch fails.
-  pub async fn type_str(&self, text: &str) -> Result<(), String> {
-    self.inner.type_str(text).await
+  /// Returns an error if the key down dispatch fails.
+  pub(crate) async fn key_down(&self, key: &str) -> Result<(), String> {
+    self.inner.key_down(key).await
+  }
+
+  /// Dispatch a keyUp event for a single key.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the key up dispatch fails.
+  pub(crate) async fn key_up(&self, key: &str) -> Result<(), String> {
+    self.inner.key_up(key).await
   }
 
   /// Press a key or combo (e.g., "Enter", "Control+a").
@@ -748,7 +790,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the key press dispatch fails.
-  pub async fn press_key(&self, key: &str) -> Result<(), String> {
+  pub(crate) async fn press_key(&self, key: &str) -> Result<(), String> {
     self.inner.press_key(key).await
   }
 
@@ -1180,7 +1222,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wheel event dispatch fails.
-  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
+  pub(crate) async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
     self.inner.mouse_wheel(delta_x, delta_y).await
   }
 
@@ -1189,8 +1231,10 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the mouse down dispatch fails.
-  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
-    self.inner.mouse_down(x, y, button).await
+  pub(crate) async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+    self.inner.mouse_down(x, y, button).await?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
   }
 
   /// Mouse button up.
@@ -1198,8 +1242,10 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the mouse up dispatch fails.
-  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
-    self.inner.mouse_up(x, y, button).await
+  pub(crate) async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+    self.inner.mouse_up(x, y, button).await?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
   }
 
   /// Bring this page to front (focus).
@@ -1753,7 +1799,31 @@ pub struct Keyboard<'a> {
 }
 
 impl Keyboard<'_> {
+  /// Dispatch a keyDown event. The key is held until `up()` is called.
+  ///
+  /// Supports modifier keys: "Shift", "Control", "Alt", "Meta".
+  /// Holding Shift will type uppercase text via subsequent `press()` or `type()` calls.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the key down dispatch fails.
+  pub async fn down(&self, key: &str) -> Result<(), String> {
+    self.page.key_down(key).await
+  }
+
+  /// Dispatch a keyUp event for a previously held key.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the key up dispatch fails.
+  pub async fn up(&self, key: &str) -> Result<(), String> {
+    self.page.key_up(key).await
+  }
+
   /// Press a key or key combination (e.g., "Enter", "Control+a", "Shift+ArrowDown").
+  ///
+  /// Shortcut for `down(key)` followed by `up(key)`. Supports `+` combinator for
+  /// modifier combinations.
   ///
   /// # Errors
   ///
@@ -1762,30 +1832,34 @@ impl Keyboard<'_> {
     self.page.press_key(key).await
   }
 
-  /// Type text character by character with optional delay between keystrokes.
+  /// Type text character by character with full keyboard events.
+  ///
+  /// Sends `keydown`, `keypress`/`input`, and `keyup` events for each character
+  /// in the text. For characters not representable as single key presses,
+  /// falls back to `insert_text` for that character.
   ///
   /// # Errors
   ///
   /// Returns an error if the typing dispatch fails.
   pub async fn r#type(&self, text: &str) -> Result<(), String> {
-    self.page.type_str(text).await
+    for ch in text.chars() {
+      let s = ch.to_string();
+      // Single printable ASCII characters and common keys get full key events
+      self.page.press_key(&s).await?;
+    }
+    Ok(())
   }
 
-  /// Insert text directly (no key events, instant).
+  /// Insert text directly without emitting keyboard events.
+  ///
+  /// Only dispatches an `input` event. Modifier keys do NOT affect `insert_text`.
+  /// Useful for inserting characters not available on a US keyboard layout.
   ///
   /// # Errors
   ///
   /// Returns an error if the text insertion fails.
   pub async fn insert_text(&self, text: &str) -> Result<(), String> {
-    self
-      .page
-      .inner
-      .evaluate(&format!(
-        "document.execCommand('insertText', false, '{}')",
-        crate::steps::js_escape(text)
-      ))
-      .await?;
-    Ok(())
+    self.page.inner.insert_text(text).await
   }
 }
 
@@ -1813,26 +1887,63 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the mouse move dispatch fails.
-  pub async fn r#move(&self, x: f64, y: f64) -> Result<(), String> {
-    self.page.move_mouse(x, y).await
+  pub async fn r#move(&self, x: f64, y: f64, steps: Option<u32>) -> Result<(), String> {
+    match steps {
+      Some(step_count) => {
+        let (from_x, from_y) = *self
+          .page
+          .mouse_position
+          .lock()
+          .map_err(|e| format!("mouse position lock poisoned: {e}"))?;
+        self.page.move_mouse_smooth(from_x, from_y, x, y, step_count).await
+      },
+      None => self.page.move_mouse(x, y).await,
+    }
   }
 
-  /// Press mouse button down at position.
+  /// Double-click at coordinates.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the click dispatch fails.
+  pub async fn dblclick(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<(), String> {
+    let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
+    self.page.move_mouse(x, y).await?;
+    self.page.mouse_down(x, y, button).await?;
+    self.page.mouse_up(x, y, button).await?;
+    self.page.mouse_down(x, y, button).await?;
+    self.page.mouse_up(x, y, button).await?;
+    Ok(())
+  }
+
+  /// Press mouse button down at the current cursor position.
   ///
   /// # Errors
   ///
   /// Returns an error if the mouse down dispatch fails.
-  pub async fn down(&self, x: f64, y: f64, button: Option<&str>) -> Result<(), String> {
-    self.page.mouse_down(x, y, button.unwrap_or("left")).await
+  pub async fn down(&self, opts: Option<MouseDownOptions>) -> Result<(), String> {
+    let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
+    let (x, y) = *self
+      .page
+      .mouse_position
+      .lock()
+      .map_err(|e| format!("mouse position lock poisoned: {e}"))?;
+    self.page.mouse_down(x, y, button).await
   }
 
-  /// Release mouse button at position.
+  /// Release mouse button at the current cursor position.
   ///
   /// # Errors
   ///
   /// Returns an error if the mouse up dispatch fails.
-  pub async fn up(&self, x: f64, y: f64, button: Option<&str>) -> Result<(), String> {
-    self.page.mouse_up(x, y, button.unwrap_or("left")).await
+  pub async fn up(&self, opts: Option<MouseUpOptions>) -> Result<(), String> {
+    let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
+    let (x, y) = *self
+      .page
+      .mouse_position
+      .lock()
+      .map_err(|e| format!("mouse position lock poisoned: {e}"))?;
+    self.page.mouse_up(x, y, button).await
   }
 
   /// Scroll via mouse wheel.
@@ -1851,6 +1962,24 @@ pub struct MouseClickOptions {
   /// Mouse button: "left", "right", "middle"
   pub button: Option<String>,
   /// Click count (1=single, 2=double, 3=triple)
+  pub click_count: Option<u32>,
+}
+
+/// Options for `Mouse.down()`.
+#[derive(Debug, Clone, Default)]
+pub struct MouseDownOptions {
+  /// Mouse button: "left", "right", "middle"
+  pub button: Option<String>,
+  /// Click count for the event
+  pub click_count: Option<u32>,
+}
+
+/// Options for `Mouse.up()`.
+#[derive(Debug, Clone, Default)]
+pub struct MouseUpOptions {
+  /// Mouse button: "left", "right", "middle"
+  pub button: Option<String>,
+  /// Click count for the event
   pub click_count: Option<u32>,
 }
 

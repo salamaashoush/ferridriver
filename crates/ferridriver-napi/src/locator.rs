@@ -117,7 +117,12 @@ impl Locator {
 
   #[napi]
   pub async fn type_text(&self, text: String) -> Result<()> {
-    self.inner.type_text(&text).await.map_err(napi::Error::from_reason)
+    self.inner.r#type(&text).await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi(js_name = "type")]
+  pub async fn type_alias(&self, text: String) -> Result<()> {
+    self.inner.r#type(&text).await.map_err(napi::Error::from_reason)
   }
 
   #[napi]
@@ -157,7 +162,16 @@ impl Locator {
 
   #[napi]
   pub async fn scroll_into_view(&self) -> Result<()> {
-    self.inner.scroll_into_view().await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .scroll_into_view_if_needed()
+      .await
+      .map_err(napi::Error::from_reason)
+  }
+
+  #[napi(js_name = "scrollIntoViewIfNeeded")]
+  pub async fn scroll_into_view_if_needed(&self) -> Result<()> {
+    self.scroll_into_view().await
   }
 
   #[napi]
@@ -192,6 +206,11 @@ impl Locator {
 
   #[napi]
   pub async fn inner_html(&self) -> Result<String> {
+    self.inner.inner_html().await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi(js_name = "innerHTML")]
+  pub async fn inner_html_alias(&self) -> Result<String> {
     self.inner.inner_html().await.map_err(napi::Error::from_reason)
   }
 
@@ -250,6 +269,15 @@ impl Locator {
       width: b.width,
       height: b.height,
     }))
+  }
+
+  #[napi(js_name = "dragTo")]
+  pub async fn drag_to(&self, target: &Locator) -> Result<()> {
+    self
+      .inner
+      .drag_to(&target.inner)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   // ── Waiting ─────────────────────────────────────────────────────────────

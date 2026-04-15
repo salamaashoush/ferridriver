@@ -255,7 +255,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or key dispatch fails.
-  pub async fn type_text(&self, text: &str) -> Result<(), String> {
+  pub async fn r#type(&self, text: &str) -> Result<(), String> {
     retry_resolve!(self, |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
       el.type_str(text).await
@@ -403,7 +403,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or scroll fails.
-  pub async fn scroll_into_view(&self) -> Result<(), String> {
+  pub async fn scroll_into_view_if_needed(&self) -> Result<(), String> {
     let el = self.resolve().await?;
     el.scroll_into_view().await
   }
@@ -869,6 +869,42 @@ impl Locator {
     }
   }
 
+  // ── Page / Frame access ────────────────────────────────────────────────────
+
+  /// Get the page this locator belongs to.
+  #[must_use]
+  pub fn page(&self) -> &Arc<crate::page::Page> {
+    &self.page
+  }
+
+  /// Treat this locator as an `<iframe>` and return a `FrameLocator` for its content.
+  ///
+  /// Equivalent to Playwright's `locator.contentFrame()`. The returned
+  /// `FrameLocator` creates locators scoped to the iframe's content document.
+  #[must_use]
+  pub fn content_frame(&self) -> FrameLocator {
+    FrameLocator {
+      page: Arc::clone(&self.page),
+      iframe_selector: self.selector.clone(),
+    }
+  }
+
+  /// Create a `FrameLocator` targeting an `<iframe>` matched by `selector` within
+  /// this locator's scope.
+  ///
+  /// Equivalent to Playwright's `locator.frameLocator(selector)`.
+  #[must_use]
+  pub fn frame_locator(&self, selector: &str) -> FrameLocator {
+    FrameLocator {
+      page: Arc::clone(&self.page),
+      iframe_selector: if self.selector.is_empty() {
+        selector.to_string()
+      } else {
+        format!("{} >> {selector}", self.selector)
+      },
+    }
+  }
+
   // ── Selector access ───────────────────────────────────────────────────────
 
   #[must_use]
@@ -916,10 +952,15 @@ impl Locator {
 
   // ── Internal helpers ────────────────────────────────────────────────────────
 
+  /// Resolve the locator to a concrete element.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the selector engine cannot be injected or the element is not found.
   pub async fn resolve(&self) -> Result<AnyElement, String> {
     self.page.inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
-    let sel_js = selectors::build_selone_js(&self.selector, &fd)?;
+    let sel_js = selectors::build_selone_js(&self.selector, fd)?;
     selectors::query_one_prebuilt(self.page.inner(), &sel_js, &self.selector).await
   }
 
@@ -974,6 +1015,177 @@ impl std::fmt::Debug for Locator {
     f.debug_struct("Locator")
       .field("selector", &self.selector)
       .field("frame_id", &self.frame_id)
+      .finish_non_exhaustive()
+  }
+}
+
+// ── FrameLocator ──────────────────────────────────────────────────────────────
+
+/// A locator for content inside an `<iframe>`. Mirrors Playwright's `FrameLocator`.
+///
+/// Created via `page.frame_locator(selector)`, `locator.frame_locator(selector)`,
+/// or `locator.content_frame()`. The `FrameLocator` resolves the iframe element
+/// lazily when creating child locators, which then operate in the iframe's context.
+#[derive(Clone)]
+pub struct FrameLocator {
+  page: Arc<crate::page::Page>,
+  iframe_selector: String,
+}
+
+impl FrameLocator {
+  /// Create a locator inside this iframe's content document.
+  ///
+  /// The returned locator resolves elements within the iframe. It first
+  /// resolves the iframe element from `iframe_selector`, finds the corresponding
+  /// frame ID, then evaluates the inner selector in that frame's context.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the iframe cannot be found.
+  pub async fn locator(&self, selector: &str) -> Result<Locator, String> {
+    let frame_id = self.resolve_frame_id().await?;
+    Ok(Locator {
+      page: Arc::clone(&self.page),
+      selector: selector.to_string(),
+      frame_id: Some(frame_id),
+    })
+  }
+
+  /// Locate by ARIA role inside this iframe.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the iframe cannot be resolved.
+  pub async fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Result<Locator, String> {
+    self.locator(&build_role_selector(role, opts)).await
+  }
+
+  /// Locate by visible text inside this iframe.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the iframe cannot be resolved.
+  pub async fn get_by_text(&self, text: &str, opts: &TextOptions) -> Result<Locator, String> {
+    self.locator(&build_text_selector("text", text, opts)).await
+  }
+
+  /// Locate by test ID inside this iframe.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the iframe cannot be resolved.
+  pub async fn get_by_test_id(&self, test_id: &str) -> Result<Locator, String> {
+    self.locator(&format!("testid={test_id}")).await
+  }
+
+  /// Locate by label text inside this iframe.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the iframe cannot be resolved.
+  pub async fn get_by_label(&self, text: &str, opts: &TextOptions) -> Result<Locator, String> {
+    self.locator(&build_text_selector("label", text, opts)).await
+  }
+
+  /// Locate by placeholder text inside this iframe.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the iframe cannot be resolved.
+  pub async fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Result<Locator, String> {
+    self.locator(&build_text_selector("placeholder", text, opts)).await
+  }
+
+  /// Locate by alt text inside this iframe.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the iframe cannot be resolved.
+  pub async fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Result<Locator, String> {
+    self.locator(&build_text_selector("alt", text, opts)).await
+  }
+
+  /// Locate by title attribute inside this iframe.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the iframe cannot be resolved.
+  pub async fn get_by_title(&self, text: &str, opts: &TextOptions) -> Result<Locator, String> {
+    self.locator(&build_text_selector("title", text, opts)).await
+  }
+
+  /// Get the locator that owns the iframe element (the `<iframe>` itself).
+  #[must_use]
+  pub fn owner(&self) -> Locator {
+    Locator {
+      page: Arc::clone(&self.page),
+      selector: self.iframe_selector.clone(),
+      frame_id: None,
+    }
+  }
+
+  /// Target a nested iframe inside this iframe's content.
+  #[must_use]
+  pub fn frame_locator(&self, selector: &str) -> FrameLocator {
+    FrameLocator {
+      page: Arc::clone(&self.page),
+      iframe_selector: format!("{} >> frame >> {selector}", self.iframe_selector),
+    }
+  }
+
+  /// Resolve the iframe element to a frame ID.
+  async fn resolve_frame_id(&self) -> Result<Arc<str>, String> {
+    // Find the iframe element and match it to a frame in the tree
+    let page_inner = self.page.inner();
+    page_inner.ensure_engine_injected().await?;
+    let fd = "window.__fd";
+    let parsed = selectors::parse(&self.iframe_selector)?;
+    let parts_json = selectors::build_parts_json(&parsed);
+    let js = format!(
+      "(function() {{ \
+         var el = {fd}.selOne({parts_json}); \
+         if (!el || el.tagName !== 'IFRAME') return null; \
+         return el.getAttribute('name') || el.src || null; \
+       }})()"
+    );
+    let result = page_inner.evaluate(&js).await?;
+
+    // Get the frame tree and match by name or URL
+    let frames = page_inner.get_frame_tree().await?;
+    let frame_hint = result
+      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .unwrap_or_default();
+
+    // Try matching by name first, then by URL
+    for frame in &frames {
+      if !frame.name.is_empty() && frame.name == frame_hint {
+        return Ok(Arc::from(frame.frame_id.as_str()));
+      }
+    }
+    for frame in &frames {
+      if !frame.url.is_empty() && frame.url == frame_hint {
+        return Ok(Arc::from(frame.frame_id.as_str()));
+      }
+    }
+
+    // Fallback: if there's only one child frame, use it
+    let child_frames: Vec<_> = frames.iter().filter(|f| f.parent_frame_id.is_some()).collect();
+    if child_frames.len() == 1 {
+      return Ok(Arc::from(child_frames[0].frame_id.as_str()));
+    }
+
+    Err(format!(
+      "Could not resolve iframe for selector '{}'. Found {} child frames.",
+      self.iframe_selector,
+      child_frames.len()
+    ))
+  }
+}
+
+impl std::fmt::Debug for FrameLocator {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("FrameLocator")
+      .field("iframe_selector", &self.iframe_selector)
       .finish_non_exhaustive()
   }
 }

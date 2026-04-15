@@ -19,7 +19,7 @@ impl McpServer {
     description = "Take an accessibility snapshot of the page. Supports depth limiting and incremental tracking."
   )]
   async fn snapshot(&self, Parameters(p): Parameters<SnapshotParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let opts = ferridriver::snapshot::SnapshotOptions {
@@ -52,7 +52,7 @@ impl McpServer {
     description = "Take a visual screenshot of the page as a base64-encoded image. Use 'selector' to capture a specific element, or 'full_page' for the entire scrollable page. Prefer snapshot for structured page content -- screenshot is for visual verification only."
   )]
   async fn screenshot(&self, Parameters(p): Parameters<ScreenshotParams_>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let mime = match p.format.as_deref() {
@@ -76,7 +76,7 @@ impl McpServer {
 
   #[tool(name = "evaluate", description = "Evaluate JavaScript on the page.")]
   async fn evaluate(&self, Parameters(p): Parameters<EvaluateParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let result = page.evaluate(p.expression.as_str()).await.map_err(Self::err)?;
@@ -92,7 +92,7 @@ impl McpServer {
     description = "Wait until a CSS selector matches or body text contains a substring. Provide at least one of `selector` or `text`."
   )]
   async fn wait_for(&self, Parameters(p): Parameters<WaitForParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     if p.selector.is_none() && p.text.is_none() {
@@ -128,7 +128,7 @@ impl McpServer {
     description = "Search page text for a pattern (like grep). Zero cost, instant. Returns matches with surrounding context."
   )]
   async fn search_page(&self, Parameters(p): Parameters<SearchPageParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let opts = ferridriver::actions::SearchOptions {
@@ -152,7 +152,7 @@ impl McpServer {
     description = "List DOM nodes matching a CSS or ferridriver rich selector. Use snapshot+ref to interact with one element; use this to discover many links/rows at once."
   )]
   async fn find_elements(&self, Parameters(p): Parameters<FindElementsParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let opts = ferridriver::actions::FindElementsOptions {
@@ -174,7 +174,7 @@ impl McpServer {
     description = "Extract page content as clean markdown. More useful than raw HTML for reading and analysis."
   )]
   async fn get_markdown(&self, Parameters(p): Parameters<SessionOnlyParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let md = page.markdown().await.map_err(Self::err)?;

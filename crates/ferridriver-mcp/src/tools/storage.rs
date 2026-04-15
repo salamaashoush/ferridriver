@@ -14,7 +14,7 @@ impl McpServer {
     description = "Manage localStorage. Actions: get (read key), set (write key=value), list (all entries), clear (remove all)."
   )]
   async fn storage(&self, Parameters(p): Parameters<StorageParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     match p.action.as_str() {

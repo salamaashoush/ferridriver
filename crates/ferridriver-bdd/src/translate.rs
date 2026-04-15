@@ -16,6 +16,7 @@ use ferridriver_test::model::{
 
 use crate::executor::{ScenarioExecutor, StepEvent, StepObserver};
 use crate::feature::FeatureSet;
+use crate::hook::HookPoint;
 use crate::registry::StepRegistry;
 use crate::scenario::{self, ScenarioExecution, ScenarioStep, StepStatus};
 use crate::step::MatchError;
@@ -33,6 +34,7 @@ pub fn translate_features(feature_set: &FeatureSet, registry: Arc<StepRegistry>,
 
     let feature_name = feature.feature.name.clone();
     let feature_path = feature.path.display().to_string();
+    let feature_tags = crate::feature::extract_tags(&feature.feature.tags);
 
     // @serial tag on any scenario means the whole feature runs serially.
     let is_serial = scenarios.iter().any(|s| s.tags.iter().any(|t| t == "@serial"));
@@ -46,7 +48,7 @@ pub fn translate_features(feature_set: &FeatureSet, registry: Arc<StepRegistry>,
       name: feature_name,
       file: feature_path,
       tests: test_cases,
-      hooks: Hooks::default(),
+      hooks: build_feature_hooks(Arc::clone(&registry), feature_tags, config),
       annotations: Vec::new(),
       mode: if is_serial {
         SuiteMode::Serial
@@ -87,6 +89,89 @@ pub fn translate_features(feature_set: &FeatureSet, registry: Arc<StepRegistry>,
     total_tests,
     shard: None,
   }
+}
+
+fn build_feature_hooks(registry: Arc<StepRegistry>, feature_tags: Vec<String>, config: &TestConfig) -> Hooks {
+  let before_registry = Arc::clone(&registry);
+  let before_tags = feature_tags.clone();
+  let before_browser_config = config.browser.clone();
+
+  let after_registry = Arc::clone(&registry);
+  let after_tags = feature_tags;
+  let after_browser_config = config.browser.clone();
+
+  Hooks {
+    before_all: vec![Arc::new(move |pool| {
+      let registry = Arc::clone(&before_registry);
+      let feature_tags = before_tags.clone();
+      let browser_config = before_browser_config.clone();
+      Box::pin(async move {
+        let mut world = build_world_from_pool(pool, browser_config).await?;
+        registry
+          .hooks()
+          .run_suite(HookPoint::BeforeAll, &mut world, &feature_tags)
+          .await
+          .map_err(TestFailure::from)
+      })
+    })],
+    after_all: vec![Arc::new(move |pool| {
+      let registry = Arc::clone(&after_registry);
+      let feature_tags = after_tags.clone();
+      let browser_config = after_browser_config.clone();
+      Box::pin(async move {
+        let mut world = build_world_from_pool(pool, browser_config).await?;
+        registry
+          .hooks()
+          .run_suite(HookPoint::AfterAll, &mut world, &feature_tags)
+          .await
+          .map_err(TestFailure::from)
+      })
+    })],
+    before_each: Vec::new(),
+    after_each: Vec::new(),
+  }
+}
+
+async fn build_world_from_pool(
+  pool: FixturePool,
+  browser_config: ferridriver_test::config::BrowserConfig,
+) -> Result<BrowserWorld, TestFailure> {
+  let browser: Arc<ferridriver::Browser> = pool
+    .get("browser")
+    .await
+    .map_err(|e| TestFailure::from(format!("fixture 'browser' failed: {e}")))?;
+  let page: Arc<ferridriver::Page> = pool
+    .get("page")
+    .await
+    .map_err(|e| TestFailure::from(format!("fixture 'page' failed: {e}")))?;
+  let context: Arc<ferridriver::context::ContextRef> = pool
+    .get("context")
+    .await
+    .map_err(|e| TestFailure::from(format!("fixture 'context' failed: {e}")))?;
+  let request: Arc<ferridriver::api_request::APIRequestContext> = pool
+    .get("request")
+    .await
+    .map_err(|e| TestFailure::from(format!("fixture 'request' failed: {e}")))?;
+  let test_info: Arc<TestInfo> = pool
+    .get("test_info")
+    .await
+    .map_err(|e| TestFailure::from(format!("fixture 'test_info' failed: {e}")))?;
+
+  let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
+  pool.inject("__test_modifiers", Arc::clone(&modifiers));
+
+  Ok(BrowserWorld::new(ferridriver_test::model::TestFixtures {
+    browser,
+    page,
+    context,
+    request,
+    test_info,
+    modifiers,
+    browser_config,
+    bdd_args: None,
+    bdd_data_table: None,
+    bdd_doc_string: None,
+  }))
 }
 
 /// Translate a single scenario into a `TestCase`.

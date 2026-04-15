@@ -15,7 +15,7 @@ impl McpServer {
     description = "Configure device emulation. Set viewport (width/height/scale/mobile), user agent, geolocation (lat/lng), and network conditions (offline/throttle) -- all optional, set any combination."
   )]
   async fn emulate(&self, Parameters(p): Parameters<EmulateParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let mut applied = Vec::new();
