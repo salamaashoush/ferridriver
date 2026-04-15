@@ -44,13 +44,14 @@ G.__ferridriver ??= {
   registry: [] as RegisteredTest[],
   hasOnly: false,
   fileStorage: new AsyncLocalStorage<string>(),
+  testInfoStorage: new AsyncLocalStorage<any>(),
   runner: null as TestRunner | null,
-  currentTestInfo: null as any,
   workerFixtureTeardowns: [] as Array<{ resolve: () => void; done: Promise<void> }>,
 };
 
 const _state = G.__ferridriver;
 const _fileStorage: AsyncLocalStorage<string> = _state.fileStorage;
+const _testInfoStorage: AsyncLocalStorage<any> = _state.testInfoStorage;
 const describeStack: string[] = [];
 const suiteIdStack: string[] = [];
 
@@ -171,13 +172,12 @@ function inferRequestedFixtures(body: TestBody): string[] | undefined {
   return [...fixtures];
 }
 
-// ── Body wrapper (sets _state.currentTestInfo for runtime modifiers) ──
+// ── Body wrapper (sets testInfo in AsyncLocalStorage for runtime modifiers) ──
 
 function wrapBody(body: TestBody): (fixtures: TestFixtures) => Promise<void> {
-  return async (fixtures: TestFixtures) => {
-    _state.currentTestInfo = (fixtures as any).testInfo;
-    try { await body(fixtures); }
-    finally { _state.currentTestInfo = null; }
+  return (fixtures: TestFixtures) => {
+    const testInfo = (fixtures as any).testInfo;
+    return _testInfoStorage.run(testInfo, () => body(fixtures));
   };
 }
 
@@ -217,8 +217,8 @@ function testFn(name: string, detailsOrBody: TestDetails | TestBody, maybeBody?:
 testFn.skip = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
     // Runtime: delegate to NAPI TestInfo.skip() — Rust handles everything.
-    if (!_state.currentTestInfo) throw new Error('test.skip() can only be called inside a test body');
-    _state.currentTestInfo.skip(args[0] ?? true, args[1]);
+    if (!_testInfoStorage.getStore()) throw new Error('test.skip() can only be called inside a test body');
+    _testInfoStorage.getStore().skip(args[0] ?? true, args[1]);
     return;
   }
   // Registration: test.skip('name', body) or test.skip('name', details, body)
@@ -242,8 +242,8 @@ testFn.skip = (...args: any[]) => {
  */
 testFn.fixme = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
-    if (!_state.currentTestInfo) throw new Error('test.fixme() can only be called inside a test body');
-    _state.currentTestInfo.fixme(args[0] ?? true, args[1]);
+    if (!_testInfoStorage.getStore()) throw new Error('test.fixme() can only be called inside a test body');
+    _testInfoStorage.getStore().fixme(args[0] ?? true, args[1]);
     return;
   }
   const [name, detailsOrBody, maybeBody] = args;
@@ -269,8 +269,8 @@ testFn.fixme = (...args: any[]) => {
  */
 testFn.fail = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
-    if (!_state.currentTestInfo) throw new Error('test.fail() can only be called inside a test body');
-    _state.currentTestInfo.fail(args[0] ?? true, args[1]);
+    if (!_testInfoStorage.getStore()) throw new Error('test.fail() can only be called inside a test body');
+    _testInfoStorage.getStore().fail(args[0] ?? true, args[1]);
     return;
   }
   const [name, detailsOrBody, maybeBody] = args;
@@ -296,8 +296,8 @@ testFn.fail = (...args: any[]) => {
  */
 testFn.slow = (...args: any[]) => {
   if (args.length === 0 || typeof args[0] === 'boolean') {
-    if (!_state.currentTestInfo) throw new Error('test.slow() can only be called inside a test body');
-    _state.currentTestInfo.slow(args[0] ?? true, args[1]);
+    if (!_testInfoStorage.getStore()) throw new Error('test.slow() can only be called inside a test body');
+    _testInfoStorage.getStore().slow(args[0] ?? true, args[1]);
     return;
   }
   const [name, detailsOrBody, maybeBody] = args;
@@ -357,20 +357,20 @@ testFn.each = <T>(dataOrStrings: T[] | TemplateStringsArray, ...templateValues: 
 
 /** Runtime test info — delegates to NAPI TestInfo. */
 testFn.info = () => {
-  if (!_state.currentTestInfo) throw new Error('test.info() can only be called inside a test body');
-  return _state.currentTestInfo;
+  if (!_testInfoStorage.getStore()) throw new Error('test.info() can only be called inside a test body');
+  return _testInfoStorage.getStore();
 };
 
 /** Runtime timeout change — delegates to NAPI TestInfo.setTimeout(). */
 testFn.setTimeout = (ms: number) => {
-  if (!_state.currentTestInfo) throw new Error('test.setTimeout() can only be called inside a test body');
-  _state.currentTestInfo.setTimeout(ms);
+  if (!_testInfoStorage.getStore()) throw new Error('test.setTimeout() can only be called inside a test body');
+  _testInfoStorage.getStore().setTimeout(ms);
 };
 
 /** Step API — delegates to NAPI TestInfo.beginStep(). */
 testFn.step = async <T>(title: string, body: () => T | Promise<T>): Promise<T> => {
-  if (!_state.currentTestInfo) throw new Error('test.step() can only be called inside a test body');
-  const handle = await _state.currentTestInfo.beginStep(title);
+  if (!_testInfoStorage.getStore()) throw new Error('test.step() can only be called inside a test body');
+  const handle = await _testInfoStorage.getStore().beginStep(title);
   try {
     const result = await body();
     await handle.end();
