@@ -21,23 +21,26 @@ alias tf := test-fast
 check:
   cargo check --workspace --all-targets
 
-# Run all tests (debug build)
+# Run all tests: build binary + NAPI, all Rust crates (incl. all backends), TS tests, BDD features
 test:
   cargo build --bin ferridriver
-  cargo test --workspace
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends
+  cd crates/ferridriver-napi && bun run build:debug
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace
+  cd crates/ferridriver-napi && bun test
+  cd packages/ferridriver-test && FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" bun run src/cli.ts bdd -- ../../tests/features/*.feature
 
 # Run all tests with maximum parallelism
-# - Builds binary first
-# - Runs workspace unit tests and backend integration tests concurrently
-# - Backend tests for each backend run as parallel processes
 test-fast:
   cargo build --bin ferridriver
-  cargo test --workspace & \
+  cd crates/ferridriver-napi && bun run build:debug
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace --exclude ferridriver-cli & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_pipe" & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_raw" & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_bidi" & \
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_webkit" & \
+  cd crates/ferridriver-napi && bun test & \
   wait
+  cd packages/ferridriver-test && FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" bun run src/cli.ts bdd -- ../../tests/features/*.feature
 
 # Run specific backend test (use underscores: cdp_ws, cdp_pipe, webkit, bidi)
 test-backend backend:

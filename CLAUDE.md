@@ -13,7 +13,7 @@ Uses `just` (justfile) and cargo aliases (`.cargo/config.toml`):
 | Command | Purpose |
 |---|---|
 | `just check` (or `just c`) | Type-check workspace |
-| `just test` | Build binary + run all workspace tests + CLI backend tests |
+| `just test` | Build binary + NAPI, run all Rust tests, TS tests, backend integration tests, BDD features |
 | `just test-backend cdp_pipe` | Run tests for a single backend (`cdp_pipe`, `cdp_raw`, `webkit`) |
 | `just test-ts` | NAPI/TypeScript tests with Bun |
 | `just bdd *args` | Run BDD feature tests |
@@ -35,7 +35,7 @@ Cargo aliases: `cargo ck`, `cargo lint`, `cargo lintfix`, `cargo release`, `carg
 ```
 ferridriver              Core library: Browser, Page, Locator, Frame, backends
 ferridriver-mcp          MCP server library (rmcp-based, stdio + HTTP transports)
-ferridriver-cli          CLI binary (`ferridriver mcp/test/bdd`)
+ferridriver-cli          CLI binary (MCP server only: stdio + HTTP transports)
 ferridriver-napi         Node.js/Bun native addon via NAPI-RS (thin target over core)
 ferridriver-test         E2E test runner: parallel workers, fixtures, reporters, retries
 ferridriver-test-macros  Proc macros: #[ferritest], #[ferritest_each]
@@ -126,11 +126,17 @@ backend/
 
 ~430 total tests: ~94 Rust tests + ~337 NAPI/TS tests (Bun) + 83 BDD scenarios (81 pass, 2 skip).
 
-Tests require a Chrome/Chromium binary. The CLI backend tests use `FERRIDRIVER_BIN` env var pointing to the built binary (handled automatically by `just test`).
+Tests require a Chrome/Chromium binary and Bun. `just test` handles everything automatically:
+builds the CLI binary and NAPI .node addon, runs all Rust workspace tests (including backend
+integration tests across all 4 backends), runs NAPI/TS tests, and runs BDD feature tests.
 
-To verify BDD baseline: `./target/debug/ferridriver bdd -j 2 -- tests/features/*.feature` — expect 83 scenarios: 81 passed, 2 skipped.
+The CLI backend tests use `FERRIDRIVER_BIN` env var pointing to the built binary (set
+automatically by `just test`). The backend test binary defaults to `target/debug/ferridriver`
+if the env var is not set.
 
-To build NAPI .node binary: `cd crates/ferridriver-napi && bun run build:debug`
+To run BDD features manually: `cd packages/ferridriver-test && bun run src/cli.ts bdd -- ../../tests/features/*.feature`
+
+To build NAPI .node binary manually: `cd crates/ferridriver-napi && bun run build:debug`
 
 ## Git Commits
 
