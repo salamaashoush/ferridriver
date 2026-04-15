@@ -1,4 +1,4 @@
-//! Tests for the EventBus fan-out architecture and ReporterDriver.
+//! Tests for the `EventBus` fan-out architecture and `ReporterDriver`.
 
 use std::sync::Arc;
 use std::time::Duration;

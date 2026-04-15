@@ -468,7 +468,7 @@ impl CdpBrowser<ws::WsTransport> {
 
   /// Connect to a running Chrome instance via WebSocket URL.
   pub async fn connect(ws_url: &str) -> Result<Self, String> {
-    let transport = Arc::new(ws::WsTransport::connect(ws_url).await?);
+    let transport = Arc::new(Box::pin(ws::WsTransport::connect(ws_url)).await?);
 
     transport
       .send_command(None, "Target.setDiscoverTargets", serde_json::json!({"discover": true}))
@@ -1189,7 +1189,7 @@ impl<T: CdpWrap> CdpPage<T> {
         let timestamp = params
           .get("metadata")
           .and_then(|m| m.get("timestamp"))
-          .and_then(|t| t.as_f64())
+          .and_then(serde_json::Value::as_f64)
           .unwrap_or_else(|| {
             std::time::SystemTime::now()
               .duration_since(std::time::UNIX_EPOCH)
@@ -1207,7 +1207,7 @@ impl<T: CdpWrap> CdpPage<T> {
         }
 
         // Acknowledge immediately (non-blocking) so Chrome sends the next frame ASAP.
-        let ack_id = params.get("sessionId").and_then(|v| v.as_i64()).unwrap_or(0);
+        let ack_id = params.get("sessionId").and_then(serde_json::Value::as_i64).unwrap_or(0);
         let t = transport.clone();
         let sid = session_id.clone();
         tokio::spawn(async move {
@@ -1482,13 +1482,10 @@ impl<T: CdpWrap> CdpPage<T> {
       "End" => ("End", 35, None),
       "PageUp" => ("PageUp", 33, None),
       "PageDown" => ("PageDown", 34, None),
-      "Shift" | "ShiftLeft" => ("Shift", 16, None),
-      "Control" | "ControlLeft" => ("Control", 17, None),
-      "Alt" | "AltLeft" => ("Alt", 18, None),
+      "Shift" | "ShiftLeft" | "ShiftRight" => ("Shift", 16, None),
+      "Control" | "ControlLeft" | "ControlRight" => ("Control", 17, None),
+      "Alt" | "AltLeft" | "AltRight" => ("Alt", 18, None),
       "Meta" | "MetaLeft" => ("Meta", 91, None),
-      "ShiftRight" => ("Shift", 16, None),
-      "ControlRight" => ("Control", 17, None),
-      "AltRight" => ("Alt", 18, None),
       "MetaRight" => ("Meta", 93, None),
       "F1" => ("F1", 112, None),
       "F2" => ("F2", 113, None),

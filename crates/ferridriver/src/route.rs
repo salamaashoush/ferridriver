@@ -102,6 +102,7 @@ pub struct Route {
 
 impl Route {
   /// Create a new Route with its response channel.
+  #[must_use]
   pub fn new(request: InterceptedRequest, action_tx: tokio::sync::oneshot::Sender<RouteAction>) -> Self {
     Self {
       request,
@@ -110,6 +111,7 @@ impl Route {
   }
 
   /// The intercepted request.
+  #[must_use]
   pub fn request(&self) -> &InterceptedRequest {
     &self.request
   }

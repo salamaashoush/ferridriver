@@ -17,6 +17,7 @@ pub struct SessionParam {
 
 impl SessionParam {
   /// Get the session string as `Option<&String>` for backward compat with `sess()`.
+  #[must_use]
   pub fn as_opt(&self) -> Option<&String> {
     self.session.as_ref()
   }

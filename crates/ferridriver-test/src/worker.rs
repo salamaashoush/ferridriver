@@ -119,20 +119,18 @@ impl TestBrowserResources {
         Ok(page)
       },
       TestBrowserState::Empty(prepared_page) => {
-        let prepared = match prepared_page.take() {
-          Some(handle) => match handle.await {
-            Ok(prepared) => prepared,
-            Err(_) => {
-              let ctx = self.browser.new_context();
-              let page_result = ctx.new_page().await;
-              PreparedPage { ctx, page_result }
-            },
-          },
-          None => {
+        let prepared = if let Some(handle) = prepared_page.take() {
+          if let Ok(prepared) = handle.await {
+            prepared
+          } else {
             let ctx = self.browser.new_context();
             let page_result = ctx.new_page().await;
             PreparedPage { ctx, page_result }
-          },
+          }
+        } else {
+          let ctx = self.browser.new_context();
+          let page_result = ctx.new_page().await;
+          PreparedPage { ctx, page_result }
         };
 
         match prepared.page_result {
@@ -294,7 +292,7 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
     .or_else(|| config.base_url.clone());
 
   if ctx_config.storage_state.is_none() {
-    ctx_config.storage_state = config.storage_state.clone();
+    ctx_config.storage_state.clone_from(&config.storage_state);
   }
 
   EffectiveContextConfig {
@@ -308,7 +306,7 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
 fn build_suite_effective_context_config(config: &TestConfig) -> EffectiveContextConfig {
   let mut ctx_config = config.browser.context.clone();
   if ctx_config.storage_state.is_none() {
-    ctx_config.storage_state = config.storage_state.clone();
+    ctx_config.storage_state.clone_from(&config.storage_state);
   }
 
   EffectiveContextConfig {
@@ -611,29 +609,27 @@ impl Worker {
     while let Ok(item) = rx.recv().await {
       match item {
         WorkItem::Single(assignment) => {
-          let result = self
-            .run_single(
-              &browser,
-              &custom_fixture_pool,
-              &mut active_suites,
-              &mut prepared_page,
-              assignment,
-            )
-            .await;
+          let result = Box::pin(self.run_single(
+            &browser,
+            &custom_fixture_pool,
+            &mut active_suites,
+            &mut prepared_page,
+            assignment,
+          ))
+          .await;
           if result_tx.send(result).await.is_err() {
             break;
           }
         },
         WorkItem::Serial(batch) => {
-          let results = self
-            .run_serial_batch(
-              &browser,
-              &custom_fixture_pool,
-              &mut active_suites,
-              &mut prepared_page,
-              batch,
-            )
-            .await;
+          let results = Box::pin(self.run_serial_batch(
+            &browser,
+            &custom_fixture_pool,
+            &mut active_suites,
+            &mut prepared_page,
+            batch,
+          ))
+          .await;
           for result in results {
             if result_tx.send(result).await.is_err() {
               break;
@@ -644,11 +640,8 @@ impl Worker {
     }
 
     if let Some(handle) = prepared_page.take() {
-      match handle.await {
-        Ok(prepared) => {
-          let _ = prepared.ctx.close().await;
-        },
-        Err(_) => {},
+      if let Ok(prepared) = handle.await {
+        let _ = prepared.ctx.close().await;
       }
     }
 
@@ -772,9 +765,7 @@ impl Worker {
         continue;
       }
 
-      let result = self
-        .run_single(browser, custom_pool, active_suites, prepared_page, assignment)
-        .await;
+      let result = Box::pin(self.run_single(browser, custom_pool, active_suites, prepared_page, assignment)).await;
       if result.outcome.status == TestStatus::Failed || result.outcome.status == TestStatus::TimedOut {
         serial_failed = true;
       }
@@ -796,7 +787,7 @@ impl Worker {
   ) -> WorkerTestResult {
     let test = &assignment.test;
     let test_id = test.id.clone();
-    tracing::Span::current().record("test", &test_id.full_name().as_str());
+    tracing::Span::current().record("test", test_id.full_name().as_str());
     let test_fn = Arc::clone(&test.test_fn);
     let fixture_requests = test.fixture_requests.clone();
     let attempt = assignment.attempt;
@@ -1111,7 +1102,7 @@ impl Worker {
             }
           },
           Err(e) => {
-            let _ = resources.close().await;
+            let () = resources.close().await;
             let duration = start.elapsed();
             let outcome = TestOutcome {
               test_id: test_id.clone(),

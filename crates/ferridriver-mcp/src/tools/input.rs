@@ -28,7 +28,7 @@ impl McpServer {
       } else {
         el.click().await.map_err(Self::err)?;
       }
-      self.action_ok(&page, s, &format!("Clicked '{r}'.")).await
+      Box::pin(self.action_ok(&page, s, &format!("Clicked '{r}'."))).await
     } else if let Some(sel) = &p.selector {
       // Selector-based: use Page API
       if p.double_click.unwrap_or(false) {
@@ -36,7 +36,7 @@ impl McpServer {
       } else {
         page.click(sel).await.map_err(Self::err)?;
       }
-      self.action_ok(&page, s, &format!("Clicked '{sel}'.")).await
+      Box::pin(self.action_ok(&page, s, &format!("Clicked '{sel}'."))).await
     } else {
       Err(Self::err("Provide 'ref' or 'selector'."))
     }
@@ -51,9 +51,7 @@ impl McpServer {
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     page.click_at(p.x, p.y).await.map_err(Self::err)?;
-    self
-      .action_ok(&page, s, &format!("Clicked at ({}, {}).", p.x, p.y))
-      .await
+    Box::pin(self.action_ok(&page, s, &format!("Clicked at ({}, {}).", p.x, p.y))).await
   }
 
   #[tool(
@@ -76,7 +74,7 @@ impl McpServer {
     } else {
       return Err(Self::err("Provide 'ref' or 'selector'."));
     }
-    self.action_ok(&page, s, &format!("Hovered '{target}'.")).await
+    Box::pin(self.action_ok(&page, s, &format!("Hovered '{target}'."))).await
   }
 
   #[tool(
@@ -103,9 +101,7 @@ impl McpServer {
     } else {
       return Err(Self::err("Provide 'ref' or 'selector'."));
     }
-    self
-      .action_ok(&page, s, &format!("Filled '{target}' with '{}'.", p.value))
-      .await
+    Box::pin(self.action_ok(&page, s, &format!("Filled '{target}' with '{}'.", p.value))).await
   }
 
   #[tool(
@@ -130,13 +126,12 @@ impl McpServer {
       }
       filled.push(format!("  {target} = '{}'", field.value));
     }
-    self
-      .action_ok(
-        &page,
-        s,
-        &format!("Filled {} fields:\n{}", filled.len(), filled.join("\n")),
-      )
-      .await
+    Box::pin(self.action_ok(
+      &page,
+      s,
+      &format!("Filled {} fields:\n{}", filled.len(), filled.join("\n")),
+    ))
+    .await
   }
 
   #[tool(
@@ -148,9 +143,7 @@ impl McpServer {
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     page.keyboard().r#type(&p.text).await.map_err(Self::err)?;
-    self
-      .action_ok(&page, s, &format!("Typed {} chars.", p.text.len()))
-      .await
+    Box::pin(self.action_ok(&page, s, &format!("Typed {} chars.", p.text.len()))).await
   }
 
   #[tool(
@@ -162,7 +155,7 @@ impl McpServer {
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     page.keyboard().press(&p.key).await.map_err(Self::err)?;
-    self.action_ok(&page, s, &format!("Pressed '{}'.", p.key)).await
+    Box::pin(self.action_ok(&page, s, &format!("Pressed '{}'.", p.key))).await
   }
 
   #[tool(
@@ -178,7 +171,7 @@ impl McpServer {
     mouse.down(None).await.map_err(Self::err)?;
     mouse.r#move(p.to_x, p.to_y, Some(10)).await.map_err(Self::err)?;
     mouse.up(None).await.map_err(Self::err)?;
-    self.action_ok(&page, s, "Drag complete.").await
+    Box::pin(self.action_ok(&page, s, "Drag complete.")).await
   }
 
   #[tool(
@@ -205,7 +198,7 @@ impl McpServer {
         .await
         .map_err(Self::err)?;
     }
-    self.action_ok(&page, s, "Scrolled.").await
+    Box::pin(self.action_ok(&page, s, "Scrolled.")).await
   }
 
   #[tool(
@@ -223,13 +216,12 @@ impl McpServer {
       .ok_or_else(|| Self::err("Provide 'label' or 'value' to select."))?;
     let sel = p.selector.as_deref().or(p.r#ref.as_deref()).unwrap_or("select");
     let result = page.select_option(sel, target_text).await.map_err(Self::err)?;
-    self
-      .action_ok(
-        &page,
-        s,
-        &format!("Selected '{}'.", result.first().unwrap_or(&String::new())),
-      )
-      .await
+    Box::pin(self.action_ok(
+      &page,
+      s,
+      &format!("Selected '{}'.", result.first().unwrap_or(&String::new())),
+    ))
+    .await
   }
 
   #[tool(
@@ -251,22 +243,19 @@ impl McpServer {
         .set_input_files("[data-fd-sel='0']", paths)
         .await
         .map_err(Self::err)?;
-      self
-        .action_ok(
-          &page,
-          s,
-          &format!(
-            "Uploaded file '{}' to ref '{}'.",
-            p.path,
-            p.r#ref.as_deref().unwrap_or("")
-          ),
-        )
-        .await
+      Box::pin(self.action_ok(
+        &page,
+        s,
+        &format!(
+          "Uploaded file '{}' to ref '{}'.",
+          p.path,
+          p.r#ref.as_deref().unwrap_or("")
+        ),
+      ))
+      .await
     } else if let Some(sel) = &p.selector {
       page.set_input_files(sel, paths).await.map_err(Self::err)?;
-      self
-        .action_ok(&page, s, &format!("Uploaded file '{}' to '{}'.", p.path, sel))
-        .await
+      Box::pin(self.action_ok(&page, s, &format!("Uploaded file '{}' to '{}'.", p.path, sel))).await
     } else {
       Err(Self::err(
         "Provide `ref` (from snapshot) or `selector` for the file input.",

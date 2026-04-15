@@ -135,11 +135,19 @@ fn parse_debug_categories(debug_val: &str) -> EnvFilter {
       other => {
         // Allow arbitrary target names.
         let owned = format!("{other}=trace");
-        filter = filter.add_directive(owned.parse().unwrap_or_else(|_| "warn".parse().unwrap()));
+        filter = filter.add_directive(
+          owned
+            .parse()
+            .unwrap_or_else(|_| "warn".parse().expect("'warn' is a valid directive")),
+        );
         continue;
       },
     };
-    filter = filter.add_directive(directive.parse().unwrap_or_else(|_| "warn".parse().unwrap()));
+    filter = filter.add_directive(
+      directive
+        .parse()
+        .unwrap_or_else(|_| "warn".parse().expect("'warn' is a valid directive")),
+    );
   }
   filter
 }

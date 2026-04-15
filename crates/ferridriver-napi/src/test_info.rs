@@ -156,7 +156,7 @@ impl TestInfo {
     }
     self.modifiers.skipped.store(true, std::sync::atomic::Ordering::Relaxed);
     if let Ok(mut r) = self.modifiers.skip_reason.lock() {
-      *r = reason.clone();
+      (*r).clone_from(&reason);
     }
     let msg = format!("__FERRIDRIVER_SKIP__:{}", reason.unwrap_or_default());
     Err(napi::Error::new(napi::Status::GenericFailure, msg))

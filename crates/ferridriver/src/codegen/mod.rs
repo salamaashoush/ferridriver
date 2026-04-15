@@ -62,9 +62,10 @@ pub enum OutputLanguage {
 }
 
 impl OutputLanguage {
-  /// Parse from CLI string.
+  /// Parse from a CLI string (e.g. `"typescript"`, `"ts"`, `"gherkin"`).
+  /// Unrecognised values default to Rust.
   #[must_use]
-  pub fn from_str(s: &str) -> Self {
+  pub fn parse_cli(s: &str) -> Self {
     match s {
       "typescript" | "ts" => Self::TypeScript,
       "gherkin" | "feature" | "bdd" => Self::Gherkin,

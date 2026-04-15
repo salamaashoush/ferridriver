@@ -86,7 +86,7 @@ impl Reporter for BddTerminalReporter {
           if let Some(suite) = &test_id.suite {
             println!("  {} {}", s_feature().apply_to("Feature:"), s_bold().apply_to(suite),);
           }
-          self.current_suite = test_id.suite.clone();
+          self.current_suite.clone_from(&test_id.suite);
         }
 
         let retry = if *attempt > 1 {

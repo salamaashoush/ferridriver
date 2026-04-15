@@ -234,7 +234,7 @@ pub struct TestMeta {
   pub annotations: Vec<NapiAnnotation>,
   /// Fixture overrides from test.use() — merged with global config by the worker.
   pub use_options: Option<serde_json::Value>,
-  /// Optional list of fixture names this test actually uses (e.g. ["page"]).
+  /// Optional list of fixture names this test actually uses (e.g. `["page"]`).
   /// When set, only these fixtures (plus test_info) are requested from the pool,
   /// saving browser/context/request creation for tests that don't need them.
   /// When None, all standard fixtures are requested (backwards-compatible).
@@ -655,7 +655,7 @@ impl TestRunner {
   #[napi]
   #[allow(clippy::too_many_lines)]
   pub async fn run(&self, feature_files: Option<Vec<String>>) -> Result<RunSummary> {
-    use ferridriver_test::model::*;
+    use ferridriver_test::model::{ExpectedStatus, SuiteMode, TestAnnotation, TestCase, TestFailure, TestId};
 
     let tests = self.tests.lock().await;
 
@@ -864,7 +864,7 @@ impl TestRunner {
 
       if watch {
         let cwd = std::env::current_dir().unwrap_or_default();
-        runner.run_watch(move |_changed| plan.clone(), cwd).await
+        Box::pin(runner.run_watch(move |_changed| plan.clone(), cwd)).await
       } else {
         runner.run(plan).await
       }
@@ -1077,15 +1077,22 @@ fn register_bdd_hooks(registry: &mut ferridriver_bdd::registry::StepRegistry, ho
   Ok(())
 }
 
-fn make_bdd_scenario_hook(
-  cb: Arc<TestCallbackFn>,
-) -> Arc<
-  dyn for<'a> Fn(
-      &'a mut ferridriver_bdd::world::BrowserWorld,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send + 'a>>
-    + Send
-    + Sync,
-> {
+/// Async callback that receives a mutable `BrowserWorld` reference — used for BDD scenario hooks.
+type BddScenarioHookFn = dyn for<'a> Fn(
+    &'a mut ferridriver_bdd::world::BrowserWorld,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send + 'a>>
+  + Send
+  + Sync;
+
+/// Async callback that receives a mutable `BrowserWorld` reference and step text — used for BDD step hooks.
+type BddStepHookFn = dyn for<'a> Fn(
+    &'a mut ferridriver_bdd::world::BrowserWorld,
+    &'a str,
+  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send + 'a>>
+  + Send
+  + Sync;
+
+fn make_bdd_scenario_hook(cb: Arc<TestCallbackFn>) -> Arc<BddScenarioHookFn> {
   Arc::new(move |world| {
     let cb = Arc::clone(&cb);
     let fixtures = fixtures_with_bdd_params(world, None, None, None);
@@ -1100,16 +1107,7 @@ fn make_bdd_scenario_hook(
   })
 }
 
-fn make_bdd_step_hook(
-  cb: Arc<TestCallbackFn>,
-) -> Arc<
-  dyn for<'a> Fn(
-      &'a mut ferridriver_bdd::world::BrowserWorld,
-      &'a str,
-    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send + 'a>>
-    + Send
-    + Sync,
-> {
+fn make_bdd_step_hook(cb: Arc<TestCallbackFn>) -> Arc<BddStepHookFn> {
   Arc::new(move |world, _step_text| {
     let cb = Arc::clone(&cb);
     let fixtures = fixtures_with_bdd_params(world, None, None, None);
@@ -1144,7 +1142,7 @@ pub(crate) fn fixtures_with_bdd_params(
       })
       .collect()
   });
-  fixtures.bdd_data_table = table.map(|t| t.iter().map(|r| r.clone()).collect());
+  fixtures.bdd_data_table = table.map(|t| t.iter().cloned().collect());
   fixtures.bdd_doc_string = docstring.map(|s| s.to_string());
 
   fixtures

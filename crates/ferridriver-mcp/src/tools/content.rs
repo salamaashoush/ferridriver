@@ -106,7 +106,7 @@ impl McpServer {
       }
       if let Some(sel) = &p.selector {
         if page.find_element(sel).await.is_ok() {
-          return self.action_ok(&page, s, &format!("Found '{sel}'.")).await;
+          return Box::pin(self.action_ok(&page, s, &format!("Found '{sel}'."))).await;
         }
       }
       if let Some(text) = &p.text {
@@ -115,7 +115,7 @@ impl McpServer {
           format!("(() => {{ const body = document.body?.innerText ?? ''; return body.includes({needle}); }})()");
         if let Ok(r) = page.evaluate(&js).await {
           if r == Some(serde_json::Value::Bool(true)) {
-            return self.action_ok(&page, s, &format!("Found text '{text}'.")).await;
+            return Box::pin(self.action_ok(&page, s, &format!("Found text '{text}'."))).await;
           }
         }
       }

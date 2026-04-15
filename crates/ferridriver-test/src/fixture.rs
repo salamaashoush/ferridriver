@@ -184,7 +184,7 @@ impl FixturePool {
 
       // Register teardown.
       if let Some(td) = teardown {
-        let mut stack = pool.inner.teardown_stack.lock().unwrap();
+        let mut stack = pool.inner.teardown_stack.lock().expect("teardown_stack lock poisoned");
         stack.push((name.to_string(), td));
       }
 
@@ -222,7 +222,7 @@ impl FixturePool {
   /// Tear down all fixtures in this pool (reverse order).
   pub async fn teardown_all(&self) {
     let items: Vec<(String, TeardownFn)> = {
-      let mut stack = self.inner.teardown_stack.lock().unwrap();
+      let mut stack = self.inner.teardown_stack.lock().expect("teardown_stack lock poisoned");
       stack.drain(..).rev().collect()
     };
 
@@ -281,7 +281,7 @@ fn ensure_resolved(pool: &FixturePool, name: &str) -> Pin<Box<dyn Future<Output 
 
     pool.inner.values.insert(name.to_string(), arc_val);
     if let Some(td) = teardown {
-      let mut stack = pool.inner.teardown_stack.lock().unwrap();
+      let mut stack = pool.inner.teardown_stack.lock().expect("teardown_stack lock poisoned");
       stack.push((name.to_string(), td));
     }
     Ok(())

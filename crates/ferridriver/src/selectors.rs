@@ -59,11 +59,13 @@ pub const ENGINE_BOOTSTRAP_JS: &str = "window.__fd_promise = null;";
 /// 1. Checks if already ready.
 /// 2. Checks if currently injecting.
 /// 3. Otherwise, starts injection and stores the promise.
-/// Returns the InjectedScript instance.
+///
+/// Returns the `InjectedScript` instance.
+#[must_use]
 pub fn build_lazy_inject_js() -> String {
   let engine_js = build_inject_js();
   format!(
-    r#"(async () => {{
+    r"(async () => {{
       if (window.__fd) return window.__fd;
       if (window.__fd_promise) return await window.__fd_promise;
       window.__fd_promise = (async () => {{
@@ -78,7 +80,7 @@ pub fn build_lazy_inject_js() -> String {
         }}
       }})();
       return await window.__fd_promise;
-    }})()"#
+    }})()"
   )
 }
 
@@ -348,7 +350,7 @@ pub async fn query_all(page: &AnyPage, selector: &str) -> Result<Vec<MatchedElem
   let parsed = parse(selector)?;
   page.ensure_engine_injected().await?;
   let fd = "window.__fd";
-  let js = build_query_js(&parsed, &fd);
+  let js = build_query_js(&parsed, fd);
   let result_str = page
     .evaluate(&js)
     .await?

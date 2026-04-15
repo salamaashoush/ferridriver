@@ -105,7 +105,7 @@ pub enum BrowserType {
   Chromium,
   /// Mozilla Firefox
   Firefox,
-  /// Apple WebKit (macOS only)
+  /// Apple `WebKit` (macOS only)
   WebKit,
 }
 
@@ -115,7 +115,7 @@ pub struct LaunchOptions {
   /// Backend protocol: `CdpPipe`, `CdpRaw`, `WebKit`, `Bidi`.
   pub backend: crate::backend::BackendKind,
   /// Which browser to launch. Inferred from backend if not set.
-  /// `Chromium` for CDP backends, `Firefox` for BiDi, `WebKit` for WebKit.
+  /// `Chromium` for CDP backends, `Firefox` for `BiDi`, `WebKit` for `WebKit`.
   pub browser: Option<BrowserType>,
   /// Run in headful mode (show browser window). Default: false (headless).
   pub headless: bool,

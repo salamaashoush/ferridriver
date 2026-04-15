@@ -6,7 +6,7 @@
 //! **Eager** (`start_recording`): encoder thread runs during the test.
 //! **Deferred** (`start_buffered_recording`): buffers frames, encodes only if needed.
 //!
-//! Shutdown is natural: stop_screencast -> pump sees channel close -> encoder drains
+//! Shutdown is natural: `stop_screencast` -> pump sees channel close -> encoder drains
 //! remaining frames -> finishes. No abort, no hang.
 
 use std::path::PathBuf;
@@ -31,6 +31,10 @@ pub struct VideoRecordingHandle {
 }
 
 /// Start recording. Encoding runs concurrently on a blocking thread.
+///
+/// # Errors
+///
+/// Returns an error if the CDP screencast cannot be started.
 pub async fn start_recording(
   page: &Page,
   output_path: PathBuf,
@@ -71,6 +75,10 @@ pub async fn start_recording(
 
 impl VideoRecordingHandle {
   /// Stop recording: stop screencast, wait for encoder to finish.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the encoder fails or the join handle panics.
   pub async fn stop(self, page: &Page) -> Result<PathBuf, String> {
     // Stop CDP screencast. This makes Chrome stop sending frames.
     let _ = page.stop_screencast().await;
@@ -89,14 +97,21 @@ impl VideoRecordingHandle {
 
 // ── Deferred (buffered) recording: zero encoding cost for passing tests ──
 
+/// A timestamped JPEG frame: `(jpeg_bytes, timestamp_secs)`.
+type FrameBuffer = Arc<Mutex<Vec<(Vec<u8>, f64)>>>;
+
 pub struct BufferedRecordingHandle {
-  frames: Arc<Mutex<Vec<(Vec<u8>, f64)>>>,
+  frames: FrameBuffer,
   pump_task: tokio::task::JoinHandle<()>,
   width: u32,
   height: u32,
 }
 
 /// Start buffered recording: buffer frames in memory, no encoding until requested.
+///
+/// # Errors
+///
+/// Returns an error if the CDP screencast cannot be started.
 pub async fn start_buffered_recording(
   page: &Page,
   width: u32,
@@ -107,7 +122,7 @@ pub async fn start_buffered_recording(
   let h = height & !1;
 
   let cdp_rx = page.start_screencast(quality, w, h).await?;
-  let frames: Arc<Mutex<Vec<(Vec<u8>, f64)>>> = Arc::new(Mutex::new(Vec::with_capacity(64)));
+  let frames: FrameBuffer = Arc::new(Mutex::new(Vec::with_capacity(64)));
 
   let frames_clone = Arc::clone(&frames);
   let pump_task = tokio::spawn(async move {
@@ -127,6 +142,10 @@ pub async fn start_buffered_recording(
 
 impl BufferedRecordingHandle {
   /// Stop capturing and encode buffered frames to video.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if no frames were captured, encoding fails, or the join handle panics.
   pub async fn encode(self, page: &Page, output_path: PathBuf) -> Result<PathBuf, String> {
     let _ = page.stop_screencast().await;
     self.pump_task.abort();

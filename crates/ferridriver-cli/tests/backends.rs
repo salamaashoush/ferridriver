@@ -813,12 +813,12 @@ fn test_run_scenario_inline(c: &mut McpClient) {
 }
 
 fn test_run_scenario_multi_step(c: &mut McpClient) {
-  let feature = r##"Feature: Multi step
+  let feature = r#"Feature: Multi step
   Scenario: Fill and check
     Given I navigate to "https://demo.playwright.dev/todomvc/#/"
     When I fill ".new-todo" with "Buy milk"
     And I press "Enter"
-    Then ".todo-list" should be visible"##;
+    Then ".todo-list" should be visible"#;
   let t = c.tool_text("run_scenario", json!({"feature": feature}));
   assert!(t.contains("[PASS]"), "multi-step scenario should pass: {t}");
   assert!(t.contains("[ok]"), "individual steps should show ok: {t}");

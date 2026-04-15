@@ -140,6 +140,12 @@ pub struct EventBusBuilder {
   subscribers: Vec<mpsc::UnboundedSender<ReporterEvent>>,
 }
 
+impl Default for EventBusBuilder {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl EventBusBuilder {
   pub fn new() -> Self {
     Self {
@@ -189,7 +195,7 @@ impl EventBus {
   /// Emit an event to all subscribers. Lock-free read path — `RwLock::read()` never
   /// blocks other readers. Only `close()` takes a write lock (once, at shutdown).
   pub async fn emit(&self, event: ReporterEvent) {
-    let subs = self.inner.subscribers.read().unwrap();
+    let subs = self.inner.subscribers.read().expect("EventBus RwLock poisoned");
     if subs.is_empty() {
       return;
     }
@@ -202,7 +208,12 @@ impl EventBus {
 
   /// Explicitly close all sender channels.
   pub fn close(&self) {
-    self.inner.subscribers.write().unwrap().clear();
+    self
+      .inner
+      .subscribers
+      .write()
+      .expect("EventBus RwLock poisoned")
+      .clear();
   }
 }
 

@@ -1,8 +1,8 @@
-//! BiDi session management: WebSocket connection, session creation, browser launch.
+//! `BiDi` session management: WebSocket connection, session creation, browser launch.
 //!
-//! The BiDi protocol connects directly via WebSocket -- no HTTP session endpoint.
-//! Firefox exposes native BiDi at `ws://host:port/session`.
-//! Chrome can also be used via chromedriver's BiDi endpoint.
+//! The `BiDi` protocol connects directly via WebSocket -- no HTTP session endpoint.
+//! Firefox exposes native `BiDi` at `ws://host:port/session`.
+//! Chrome can also be used via chromedriver's `BiDi` endpoint.
 
 use std::sync::Arc;
 
@@ -11,7 +11,7 @@ use tracing::{debug, info};
 
 use super::transport::BidiTransport;
 
-/// A BiDi session -- holds the transport and session metadata.
+/// A `BiDi` session -- holds the transport and session metadata.
 #[derive(Clone)]
 pub(crate) struct BidiSession {
   #[allow(dead_code)]
@@ -28,9 +28,9 @@ pub(crate) struct BidiSession {
 // issues with unsupported event names breaking the session.
 
 impl BidiSession {
-  /// Connect to a BiDi endpoint directly via WebSocket.
+  /// Connect to a `BiDi` endpoint directly via WebSocket.
   ///
-  /// This is the native BiDi approach:
+  /// This is the native `BiDi` approach:
   /// 1. Connect WebSocket to `ws://host:port/session`
   /// 2. Send `session.new` to create a session
   /// 3. Subscribe to all events
@@ -97,17 +97,17 @@ impl BidiSession {
     })
   }
 
-  /// Connect to a BiDi endpoint at the given port.
+  /// Connect to a `BiDi` endpoint at the given port.
   /// Constructs `ws://127.0.0.1:{port}/session` and connects.
   #[allow(dead_code, reason = "public library API for external consumers")]
   pub async fn connect_to_port(port: u16) -> Result<Self, String> {
     Self::connect(&format!("ws://127.0.0.1:{port}/session")).await
   }
 
-  /// Launch Firefox and create a BiDi session.
+  /// Launch Firefox and create a `BiDi` session.
   ///
-  /// Firefox natively supports BiDi: launch with `--remote-debugging-port`,
-  /// read the BiDi WebSocket URL from stderr, connect directly.
+  /// Firefox natively supports `BiDi`: launch with `--remote-debugging-port`,
+  /// read the `BiDi` WebSocket URL from stderr, connect directly.
   pub async fn launch_firefox(
     firefox_path: &str,
     flags: &[String],
@@ -161,9 +161,9 @@ impl BidiSession {
     Ok((session, child))
   }
 
-  /// Launch a browser and create a BiDi session.
-  /// Currently supports Firefox (native BiDi). Chrome does not have built-in
-  /// BiDi support -- use the CDP backend for Chrome instead.
+  /// Launch a browser and create a `BiDi` session.
+  /// Currently supports Firefox (native `BiDi`). Chrome does not have built-in
+  /// `BiDi` support -- use the CDP backend for Chrome instead.
   pub async fn launch(
     browser_path: &str,
     flags: &[String],
@@ -171,7 +171,7 @@ impl BidiSession {
   ) -> Result<(Self, tokio::process::Child), String> {
     let path_lower = browser_path.to_lowercase();
     if path_lower.contains("firefox") {
-      Self::launch_firefox(browser_path, flags, headless).await
+      Box::pin(Self::launch_firefox(browser_path, flags, headless)).await
     } else {
       Err(format!(
         "BiDi backend requires Firefox (found: {browser_path}). \
@@ -181,7 +181,7 @@ impl BidiSession {
     }
   }
 
-  /// End the BiDi session gracefully.
+  /// End the `BiDi` session gracefully.
   #[allow(dead_code)]
   pub async fn end(&self) -> Result<(), String> {
     let _ = self.transport.send_command("session.end", json!({})).await;
@@ -189,8 +189,8 @@ impl BidiSession {
   }
 }
 
-/// Read Firefox stderr to find the BiDi WebSocket URL.
-/// Firefox prints: "WebDriver BiDi listening on ws://127.0.0.1:PORT"
+/// Read Firefox stderr to find the `BiDi` WebSocket URL.
+/// Firefox prints: "`WebDriver` `BiDi` listening on ws://127.0.0.1:PORT"
 async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<String, String> {
   use tokio::io::AsyncBufReadExt;
 
@@ -213,7 +213,6 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
         if let Ok(Some(status)) = child.try_wait() {
           return Err(format!("Firefox exited during startup with status: {status}"));
         }
-        continue;
       },
       Ok(Ok(_)) => {
         // Look for the BiDi WebSocket URL

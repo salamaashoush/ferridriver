@@ -1,5 +1,7 @@
 //! BDD tools -- run Gherkin feature files and individual steps on live MCP sessions.
 
+use std::fmt::Write;
+
 use crate::server::{McpServer, sess};
 use rmcp::{
   ErrorData,
@@ -141,12 +143,13 @@ impl McpServer {
         ScenarioStatus::Undefined => "[UNDEFINED]",
       };
 
-      output.push_str(&format!(
-        "{} {} ({:.1}s)\n",
+      let _ = writeln!(
+        output,
+        "{} {} ({:.1}s)",
         status_icon,
         result.scenario_name,
         result.duration.as_secs_f64()
-      ));
+      );
 
       for step in &result.steps {
         let step_icon = match step.status {
@@ -156,16 +159,17 @@ impl McpServer {
           StepStatus::Undefined => "  [?]",
           StepStatus::Pending => "  [pending]",
         };
-        output.push_str(&format!(
-          "{} {}{} ({:.0}ms)\n",
+        let _ = writeln!(
+          output,
+          "{} {}{} ({:.0}ms)",
           step_icon,
           step.keyword,
           step.text,
           step.duration.as_millis()
-        ));
+        );
         if let Some(err) = &step.error {
           if step.status == StepStatus::Failed {
-            output.push_str(&format!("         {}\n", err.lines().next().unwrap_or(err)));
+            let _ = writeln!(output, "         {}", err.lines().next().unwrap_or(err));
           }
         }
       }
@@ -179,17 +183,18 @@ impl McpServer {
       output.push('\n');
     }
 
-    output.push_str(&format!(
-      "--- {} scenario(s): {} passed, {} failed, {} skipped ---\n",
+    let _ = writeln!(
+      output,
+      "--- {} scenario(s): {} passed, {} failed, {} skipped ---",
       scenarios.len(),
       total_passed,
       total_failed,
       total_skipped,
-    ));
+    );
 
     // Final snapshot of page state.
     let snap = self.snap(world.page(), s).await;
-    output.push_str(&format!("\n{snap}"));
+    let _ = write!(output, "\n{snap}");
 
     Ok(CallToolResult::success(vec![Content::text(output)]))
   }
@@ -220,10 +225,10 @@ impl McpServer {
 
     let mut msg = format!("[{}] {} ({:.0}ms)", status_text, p.step, result.duration.as_millis());
     if let Some(err) = &result.error {
-      msg.push_str(&format!("\n{err}"));
+      let _ = write!(msg, "\n{err}");
     }
 
-    self.action_ok(world.page(), s, &msg).await
+    Box::pin(self.action_ok(world.page(), s, &msg)).await
   }
 
   #[tool(
@@ -273,9 +278,9 @@ impl McpServer {
         continue;
       }
 
-      output.push_str(&format!("## {kind}\n\n"));
+      let _ = write!(output, "## {kind}\n\n");
       for step in &filtered {
-        output.push_str(&format!("- {}\n", step.expression));
+        let _ = writeln!(output, "- {}", step.expression);
       }
       output.push('\n');
     }

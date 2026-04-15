@@ -3,11 +3,13 @@
 //! Each benchmark group has a "before" (simulating the old code path) and
 //! "after" (the new optimized code path) so you can see the improvement.
 //!
-//! Run: cargo bench -p ferridriver --bench alloc_bench
+//! Run: cargo bench -p ferridriver --bench `alloc_bench`
 
 use std::sync::Arc;
 
-use criterion::{Criterion, black_box, criterion_group, criterion_main};
+use std::hint::black_box;
+
+use criterion::{Criterion, criterion_group, criterion_main};
 
 // ============================================================================
 // 1. build_parts_json: Vec<String> collect+join (before) vs single buffer (after)
@@ -138,24 +140,48 @@ fn bench_page_handle_clone(c: &mut Criterion) {
 
   // Single clone
   group.bench_function("before/1_clone", |b| {
-    b.iter(|| black_box(before.clone()));
+    b.iter(|| {
+      let c = before.clone();
+      black_box(&c.transport);
+      black_box(&c.session_id);
+      black_box(&c.target_id);
+      black_box(&c.browser_context_id);
+      black_box(&c.events);
+      black_box(&c.frame_contexts);
+      black_box(&c.dialog_handler);
+      black_box(&c.exposed_fns);
+      black_box(&c.routes);
+    });
   });
   group.bench_function("after/1_clone", |b| {
-    b.iter(|| black_box(after.clone()));
+    b.iter(|| {
+      let c = after.clone();
+      black_box(&c.transport);
+      black_box(&c.session_id);
+      black_box(&c.target_id);
+      black_box(&c.browser_context_id);
+      black_box(&c.events);
+      black_box(&c.frame_contexts);
+      black_box(&c.dialog_handler);
+      black_box(&c.exposed_fns);
+      black_box(&c.routes);
+    });
   });
 
   // 7 clones (retry loop depth)
   group.bench_function("before/7_retries", |b| {
     b.iter(|| {
       for _ in 0..7 {
-        black_box(before.clone());
+        let c = before.clone();
+        black_box(&c.target_id);
       }
     });
   });
   group.bench_function("after/7_retries", |b| {
     b.iter(|| {
       for _ in 0..7 {
-        black_box(after.clone());
+        let c = after.clone();
+        black_box(&c.target_id);
       }
     });
   });
@@ -230,10 +256,20 @@ fn bench_locator_clone(c: &mut Criterion) {
   };
 
   group.bench_function("before", |b| {
-    b.iter(|| black_box(before.clone()));
+    b.iter(|| {
+      let c = before.clone();
+      black_box(&c.page);
+      black_box(&c.selector);
+      black_box(&c.frame_id);
+    });
   });
   group.bench_function("after", |b| {
-    b.iter(|| black_box(after.clone()));
+    b.iter(|| {
+      let c = after.clone();
+      black_box(&c.page);
+      black_box(&c.selector);
+      black_box(&c.frame_id);
+    });
   });
   group.finish();
 }
@@ -276,10 +312,22 @@ fn bench_context_ref_clone(c: &mut Criterion) {
   };
 
   group.bench_function("before", |b| {
-    b.iter(|| black_box(before.clone()));
+    b.iter(|| {
+      let c = before.clone();
+      black_box(&c.state);
+      black_box(&c.name);
+      black_box(&c.instance);
+      black_box(&c.context);
+    });
   });
   group.bench_function("after", |b| {
-    b.iter(|| black_box(after.clone()));
+    b.iter(|| {
+      let c = after.clone();
+      black_box(&c.state);
+      black_box(&c.name);
+      black_box(&c.instance);
+      black_box(&c.context);
+    });
   });
   group.finish();
 }

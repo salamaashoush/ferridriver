@@ -229,6 +229,12 @@ pub struct TestPlanBuilder {
   hooks: Vec<HookDef>,
 }
 
+impl Default for TestPlanBuilder {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl TestPlanBuilder {
   pub fn new() -> Self {
     Self {
@@ -834,7 +840,7 @@ impl std::fmt::Debug for TestModifiers {
       .field("skipped", &self.skipped.load(Ordering::Relaxed))
       .field("expected_failure", &self.expected_failure.load(Ordering::Relaxed))
       .field("slow", &self.slow.load(Ordering::Relaxed))
-      .finish()
+      .finish_non_exhaustive()
   }
 }
 

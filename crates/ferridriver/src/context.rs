@@ -67,7 +67,7 @@ pub struct BrowserContext {
   name: String,
   /// CDP browser context ID (for `Target.disposeBrowserContext` on close).
   /// None for the default context.
-  pub browser_context_id: Option<String>,
+  pub cdp_context_id: Option<String>,
 }
 
 impl BrowserContext {
@@ -81,7 +81,7 @@ impl BrowserContext {
       network_log: Arc::new(RwLock::new(Vec::new())),
       dialog_log: Arc::new(RwLock::new(Vec::new())),
       name,
-      browser_context_id: None,
+      cdp_context_id: None,
     }
   }
 
@@ -250,30 +250,32 @@ impl ContextRef {
 
     let (any_page, browser_context_id) = if &*self.key.context == "default" {
       (
-        plan
-          .browser
-          .new_page(
-            "about:blank",
-            plan.browser_context_id.as_deref(),
-            plan.viewport.as_ref(),
-          )
-          .await?,
+        Box::pin(plan.browser.new_page(
+          "about:blank",
+          plan.browser_context_id.as_deref(),
+          plan.viewport.as_ref(),
+        ))
+        .await?,
         None,
       )
     } else if let Some(existing_ctx_id) = plan.browser_context_id.clone() {
       (
-        plan
-          .browser
-          .new_page("about:blank", Some(&existing_ctx_id), plan.viewport.as_ref())
-          .await?,
+        Box::pin(
+          plan
+            .browser
+            .new_page("about:blank", Some(&existing_ctx_id), plan.viewport.as_ref()),
+        )
+        .await?,
         Some(existing_ctx_id),
       )
     } else {
       let ctx_id = plan.browser.new_context().await?;
-      let page = plan
-        .browser
-        .new_page("about:blank", Some(&ctx_id), plan.viewport.as_ref())
-        .await?;
+      let page = Box::pin(
+        plan
+          .browser
+          .new_page("about:blank", Some(&ctx_id), plan.viewport.as_ref()),
+      )
+      .await?;
       (page, Some(ctx_id))
     };
 

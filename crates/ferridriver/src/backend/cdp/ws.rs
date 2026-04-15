@@ -22,7 +22,7 @@ impl WsTransport {
   ///
   /// Returns an error if the WebSocket connection fails.
   pub async fn connect(ws_url: &str) -> Result<Self, String> {
-    Self::connect_with_headers(ws_url, &std::collections::HashMap::new()).await
+    Box::pin(Self::connect_with_headers(ws_url, &std::collections::HashMap::new())).await
   }
 
   /// Connect with custom HTTP headers (Playwright's `connectOptions.headers`).
@@ -42,7 +42,7 @@ impl WsTransport {
         http::header::HeaderValue::from_str(value).map_err(|e| format!("invalid header value for '{key}': {e}"))?;
       request.headers_mut().insert(header_name, header_value);
     }
-    let (ws_stream, _) = tokio_tungstenite::connect_async(request)
+    let (ws_stream, _) = Box::pin(tokio_tungstenite::connect_async(request))
       .await
       .map_err(|e| format!("WebSocket connect to {ws_url}: {e}"))?;
 
@@ -98,7 +98,7 @@ impl WsTransport {
     let port_file = user_data_dir.join("DevToolsActivePort");
     let ws_url = discover_ws_url(&port_file, &mut child).await?;
 
-    let transport = Self::connect(&ws_url).await?;
+    let transport = Box::pin(Self::connect(&ws_url)).await?;
     Ok((transport, child))
   }
 }

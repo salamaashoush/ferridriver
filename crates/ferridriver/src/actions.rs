@@ -174,9 +174,8 @@ pub async fn resolve_element<S: std::hash::BuildHasher>(
 
 /// Suggest available selectors on the page.
 pub async fn suggest_selectors(page: &AnyPage) -> Vec<String> {
-  let fd = match page.injected_script().await {
-    Ok(fd) => fd,
-    Err(_) => return Vec::new(),
+  let Ok(fd) = page.injected_script().await else {
+    return Vec::new();
   };
   let json_str = rt_eval_str(page, &format!("{fd}.suggestSelectors()"))
     .await
@@ -594,9 +593,8 @@ pub async fn scroll_info(page: &AnyPage) -> Result<ScrollInfo, String> {
 
 /// Get console error count (installs interceptor on first call). Uses runtime.
 pub async fn console_error_count(page: &AnyPage) -> i64 {
-  let fd = match page.injected_script().await {
-    Ok(fd) => fd,
-    Err(_) => return 0,
+  let Ok(fd) = page.injected_script().await else {
+    return 0;
   };
   rt_eval(page, &format!("{fd}.consoleErrors()"))
     .await

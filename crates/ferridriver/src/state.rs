@@ -280,12 +280,12 @@ impl BrowserState {
         } else {
           discover_ws_from_http(url).await?
         };
-        AnyBrowser::CdpRaw(CdpBrowser::<WsTransport>::connect(&ws_url).await?)
+        AnyBrowser::CdpRaw(Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?)
       },
       ConnectMode::AutoConnect { channel, user_data_dir } => {
         use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
         let ws_url = discover_chrome_ws(channel, user_data_dir.as_deref())?;
-        AnyBrowser::CdpRaw(CdpBrowser::<WsTransport>::connect(&ws_url).await?)
+        AnyBrowser::CdpRaw(Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?)
       },
       ConnectMode::Launch => match self.backend_kind {
         BackendKind::CdpPipe => {
@@ -310,7 +310,7 @@ impl BrowserState {
           if self.headless {
             flags.push("--headless".into());
           }
-          AnyBrowser::Bidi(BidiBrowser::launch_with_flags(&self.chromium_path, &flags).await?)
+          AnyBrowser::Bidi(Box::pin(BidiBrowser::launch_with_flags(&self.chromium_path, &flags)).await?)
         },
       },
     };
@@ -331,7 +331,7 @@ impl BrowserState {
     // For launch mode, skip default page creation — pages are created on demand
     // by the caller (test runner creates isolated contexts, MCP creates pages lazily).
     if is_connect {
-      let existing_pages = inst.browser.pages().await.unwrap_or_default();
+      let existing_pages = Box::pin(inst.browser.pages()).await.unwrap_or_default();
       let ctx = inst.context_mut("default");
       for page in existing_pages {
         page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
@@ -370,7 +370,7 @@ impl BrowserState {
       discover_ws_from_http(url).await?
     };
 
-    let browser = AnyBrowser::CdpRaw(CdpBrowser::<WsTransport>::connect(&ws_url).await?);
+    let browser = AnyBrowser::CdpRaw(Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?);
     let mut inst = BrowserInstance {
       browser,
       contexts: HashMap::default(),
@@ -378,7 +378,7 @@ impl BrowserState {
 
     // Skip viewport override for existing pages — connect_to_url attaches to a
     // user-managed browser whose window size should not be touched.
-    let existing_pages = inst.browser.pages().await.unwrap_or_default();
+    let existing_pages = Box::pin(inst.browser.pages()).await.unwrap_or_default();
     let ctx = inst.context_mut("default");
     let page_count = existing_pages.len();
     for page in existing_pages {
@@ -486,15 +486,19 @@ impl BrowserState {
 
   /// Snapshot the immutable data needed to open a page without holding the
   /// global browser-state write lock across protocol round-trips.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser instance does not exist.
   pub fn page_open_plan(&self, key: &SessionKey) -> Result<PageOpenPlan, String> {
-    let inst = self.instance(&*key.instance)?;
+    let inst = self.instance(&key.instance)?;
     let browser_context_id = if &*key.context == "default" {
       None
     } else {
       inst
         .contexts
         .get(&*key.context)
-        .and_then(|ctx| ctx.browser_context_id.clone())
+        .and_then(|ctx| ctx.cdp_context_id.clone())
     };
 
     Ok(PageOpenPlan {
@@ -505,16 +509,20 @@ impl BrowserState {
   }
 
   /// Register a newly created page back into the state after off-lock backend work.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the browser instance or context does not exist.
   pub fn register_opened_page(
     &mut self,
     key: &SessionKey,
     page: AnyPage,
     browser_context_id: Option<String>,
   ) -> Result<(), String> {
-    let inst = self.instance_mut(&*key.instance)?;
-    let ctx = inst.context_mut(&*key.context);
+    let inst = self.instance_mut(&key.instance)?;
+    let ctx = inst.context_mut(&key.context);
     if let Some(id) = browser_context_id {
-      ctx.browser_context_id = Some(id);
+      ctx.cdp_context_id = Some(id);
     }
     page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
     ctx.pages.push(page);
@@ -529,32 +537,33 @@ impl BrowserState {
   /// Returns an error if the browser instance or page creation fails.
   pub async fn open_page_keyed(&mut self, key: &SessionKey, url: &str) -> Result<AnyPage, String> {
     if !self.instances.contains_key(&*key.instance) {
-      Box::pin(self.ensure_instance(&*key.instance)).await?;
+      Box::pin(self.ensure_instance(&key.instance)).await?;
     }
 
     let plan = self.page_open_plan(key)?;
     let (page, cdp_ctx_id) = if &*key.context == "default" {
       (
-        plan
-          .browser
-          .new_page(url, plan.browser_context_id.as_deref(), plan.viewport.as_ref())
-          .await?,
+        Box::pin(
+          plan
+            .browser
+            .new_page(url, plan.browser_context_id.as_deref(), plan.viewport.as_ref()),
+        )
+        .await?,
         None,
       )
     } else if let Some(existing_ctx_id) = plan.browser_context_id.clone() {
       (
-        plan
-          .browser
-          .new_page(url, Some(&existing_ctx_id), plan.viewport.as_ref())
-          .await?,
+        Box::pin(
+          plan
+            .browser
+            .new_page(url, Some(&existing_ctx_id), plan.viewport.as_ref()),
+        )
+        .await?,
         Some(existing_ctx_id),
       )
     } else {
       let ctx_id = plan.browser.new_context().await?;
-      let p = plan
-        .browser
-        .new_page(url, Some(&ctx_id), plan.viewport.as_ref())
-        .await?;
+      let p = Box::pin(plan.browser.new_page(url, Some(&ctx_id), plan.viewport.as_ref())).await?;
       (p, Some(ctx_id))
     };
 
@@ -567,8 +576,8 @@ impl BrowserState {
   /// Returns an error if the instance, context, or page does not exist.
   pub fn active_page(&self, context: &str) -> Result<&AnyPage, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance(&*key.instance)?;
-    let ctx = inst.context(&*key.context)?;
+    let inst = self.instance(&key.instance)?;
+    let ctx = inst.context(&key.context)?;
     ctx
       .active_page()
       .ok_or_else(|| format!("No pages in context '{context}'"))
@@ -579,8 +588,8 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist.
   pub fn context(&self, context: &str) -> Result<&BrowserContext, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance(&*key.instance)?;
-    inst.context(&*key.context)
+    let inst = self.instance(&key.instance)?;
+    inst.context(&key.context)
   }
 
   /// # Errors
@@ -588,8 +597,8 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist.
   pub fn context_mut_checked(&mut self, context: &str) -> Result<&mut BrowserContext, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance_mut(&*key.instance)?;
-    inst.context_mut_checked(&*key.context)
+    let inst = self.instance_mut(&key.instance)?;
+    inst.context_mut_checked(&key.context)
   }
 
   /// Remove a context. If it has a CDP browser context ID, dispose it
@@ -597,12 +606,12 @@ impl BrowserState {
   pub async fn remove_context(&mut self, context: &str) {
     let key = SessionKey::parse(context);
     if let Some(inst) = self.instances.get_mut(&*key.instance) {
-      if let Ok(ctx) = inst.context(&*key.context) {
-        if let Some(ref ctx_id) = ctx.browser_context_id {
+      if let Ok(ctx) = inst.context(&key.context) {
+        if let Some(ref ctx_id) = ctx.cdp_context_id {
           let _ = inst.browser.dispose_context(ctx_id).await;
         }
       }
-      inst.remove_context(&*key.context);
+      inst.remove_context(&key.context);
     }
   }
 
@@ -611,8 +620,8 @@ impl BrowserState {
   /// Returns an error if the context does not exist or the page index is out of range.
   pub fn select_page(&mut self, context: &str, page_idx: usize) -> Result<(), String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance_mut(&*key.instance)?;
-    let ctx = inst.context_mut_checked(&*key.context)?;
+    let inst = self.instance_mut(&key.instance)?;
+    let ctx = inst.context_mut_checked(&key.context)?;
     if page_idx >= ctx.pages.len() {
       return Err(format!(
         "Page index {page_idx} out of range (context '{context}' has {} pages)",
@@ -628,8 +637,8 @@ impl BrowserState {
   /// Returns an error if this is the last page, context does not exist, or index is out of range.
   pub fn close_page(&mut self, context: &str, page_idx: usize) -> Result<(), String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance_mut(&*key.instance)?;
-    let ctx = inst.context_mut_checked(&*key.context)?;
+    let inst = self.instance_mut(&key.instance)?;
+    let ctx = inst.context_mut_checked(&key.context)?;
     if ctx.pages.len() <= 1 {
       return Err("Cannot close the last page in a context".into());
     }
@@ -733,8 +742,8 @@ impl BrowserState {
     limit: usize,
   ) -> Result<Vec<ConsoleMsg>, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance(&*key.instance)?;
-    let ctx = inst.context(&*key.context)?;
+    let inst = self.instance(&key.instance)?;
+    let ctx = inst.context(&key.context)?;
     Ok(ctx.console_messages(level, limit).await)
   }
 
@@ -743,8 +752,8 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist.
   pub async fn network_requests(&self, context: &str, limit: usize) -> Result<Vec<NetRequest>, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance(&*key.instance)?;
-    let ctx = inst.context(&*key.context)?;
+    let inst = self.instance(&key.instance)?;
+    let ctx = inst.context(&key.context)?;
     Ok(ctx.network_requests(limit).await)
   }
 
@@ -753,9 +762,9 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist, or page discovery fails.
   pub async fn refresh_pages(&mut self, context: &str) -> Result<usize, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance_mut(&*key.instance)?;
-    let current_pages = inst.browser.pages().await?;
-    let ctx = inst.context_mut_checked(&*key.context)?;
+    let inst = self.instance_mut(&key.instance)?;
+    let current_pages = Box::pin(inst.browser.pages()).await?;
+    let ctx = inst.context_mut_checked(&key.context)?;
 
     let existing_count = ctx.pages.len();
     if current_pages.len() > existing_count {
@@ -772,8 +781,8 @@ impl BrowserState {
   /// Returns an error if the instance or context does not exist.
   pub async fn dialog_messages(&self, context: &str, limit: usize) -> Result<Vec<DialogEvent>, String> {
     let key = SessionKey::parse(context);
-    let inst = self.instance(&*key.instance)?;
-    let ctx = inst.context(&*key.context)?;
+    let inst = self.instance(&key.instance)?;
+    let ctx = inst.context(&key.context)?;
     Ok(ctx.dialog_messages(limit).await)
   }
 
@@ -1205,6 +1214,10 @@ pub fn detect_chromium() -> String {
 /// 3. Playwright's browser cache
 /// 4. System-installed Firefox (platform-specific paths)
 /// 5. `which firefox` fallback
+///
+/// # Errors
+///
+/// Returns an error if no Firefox binary can be found.
 pub fn detect_firefox() -> Result<String, String> {
   // 1. Env var (highest priority)
   if let Ok(p) = std::env::var("FIREFOX_PATH") {

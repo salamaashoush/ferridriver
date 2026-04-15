@@ -267,9 +267,12 @@ async fn handle_request(
     for (k, v) in &resp.headers {
       builder = builder.header(k.as_str(), v.as_str());
     }
-    return builder
-      .body(Body::from(resp.body))
-      .unwrap_or_else(|_| Response::builder().status(500).body(Body::empty()).unwrap());
+    return builder.body(Body::from(resp.body)).unwrap_or_else(|_| {
+      Response::builder()
+        .status(500)
+        .body(Body::empty())
+        .expect("empty 500 response")
+    });
   }
   drop(routes);
 
@@ -284,8 +287,11 @@ async fn handle_request(
         .header("content-type", content_type)
         .header("access-control-allow-origin", "*")
         .body(Body::from(contents))
-        .unwrap(),
-      Err(_) => Response::builder().status(500).body(Body::empty()).unwrap(),
+        .expect("static file response"),
+      Err(_) => Response::builder()
+        .status(500)
+        .body(Body::empty())
+        .expect("empty 500 response"),
     }
   } else if state.spa {
     // SPA fallback: serve index.html for any unmatched route (client-side routing).
@@ -297,22 +303,25 @@ async fn handle_request(
           .header("content-type", "text/html")
           .header("access-control-allow-origin", "*")
           .body(Body::from(contents))
-          .unwrap(),
-        Err(_) => Response::builder().status(500).body(Body::empty()).unwrap(),
+          .expect("SPA index.html response"),
+        Err(_) => Response::builder()
+          .status(500)
+          .body(Body::empty())
+          .expect("empty 500 response"),
       }
     } else {
       Response::builder()
         .status(404)
         .header("content-type", "text/plain")
         .body(Body::from("Not Found (SPA: no index.html)"))
-        .unwrap()
+        .expect("404 response")
     }
   } else {
     Response::builder()
       .status(404)
       .header("content-type", "text/plain")
       .body(Body::from("Not Found"))
-      .unwrap()
+      .expect("404 response")
   }
 }
 
