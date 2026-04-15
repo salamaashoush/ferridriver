@@ -114,7 +114,6 @@ fn print_steps(steps: &[&TestStep], indent: usize) {
   let pad = " ".repeat(indent);
   for step in steps {
     if step.category == StepCategory::Hook {
-      // Hook steps get a distinct dimmed style.
       let icon = if step.error.is_some() { "\u{2717}" } else { "\u{2713}" };
       let style = if step.error.is_some() { s_fail() } else { s_dim() };
       let dur = format_duration(step.duration);
@@ -267,10 +266,16 @@ impl Reporter for TerminalReporter {
           },
         }
 
-        // Steps.
-        let user_steps: Vec<&TestStep> = outcome.steps.iter().filter(|s| s.category.is_visible()).collect();
-        if !user_steps.is_empty() {
-          print_steps(&user_steps, 4);
+        // Only show step details for failed/timed-out tests. Passing tests
+        // (including expected-failure @fail tests whose outcome was inverted)
+        // don't need step-level output. Matches Playwright's list reporter
+        // which hides steps by default.
+        let show_steps = matches!(outcome.status, TestStatus::Failed | TestStatus::TimedOut);
+        if show_steps {
+          let user_steps: Vec<&TestStep> = outcome.steps.iter().filter(|s| s.category.is_visible()).collect();
+          if !user_steps.is_empty() {
+            print_steps(&user_steps, 4);
+          }
         }
 
         // Error.
