@@ -115,7 +115,9 @@ pub fn assert_snapshot(test_info: &TestInfo, actual: &str, name: &str, update: b
 ///
 /// Returns `TestFailure` with diff details if screenshots don't match.
 pub fn compare_screenshot_png(actual_png: &[u8], name: &str) -> Result<(), TestFailure> {
-  let snap_dir = PathBuf::from("__snapshots__");
+  let snap_dir = std::env::var("SNAPSHOT_DIR")
+    .map(PathBuf::from)
+    .unwrap_or_else(|_| PathBuf::from("__snapshots__"));
   let update = std::env::var("UPDATE_SNAPSHOTS").is_ok();
   let snap_path = snap_dir.join(format!("{name}.png"));
   let diff_path = snap_dir.join(format!("{name}-diff.png"));
@@ -167,6 +169,7 @@ pub fn compare_screenshot_png(actual_png: &[u8], name: &str) -> Result<(), TestF
   let (aw, ah) = actual_img.dimensions();
 
   if ew != aw || eh != ah {
+    let _ = std::fs::create_dir_all(&snap_dir);
     let _ = std::fs::write(&actual_path, actual_png);
     return Err(TestFailure {
       message: format!(
