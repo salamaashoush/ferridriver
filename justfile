@@ -27,7 +27,7 @@ test:
   cd crates/ferridriver-napi && bun run build:debug
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace
   cd crates/ferridriver-napi && bun test
-  cd packages/ferridriver-test && FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" bun run src/cli.ts bdd -- ../../tests/features/*.feature
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" bun run packages/ferridriver-test/src/cli.ts test
 
 # Run all tests with maximum parallelism
 test-fast:
@@ -40,7 +40,7 @@ test-fast:
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_webkit" & \
   cd crates/ferridriver-napi && bun test & \
   wait
-  cd packages/ferridriver-test && FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" bun run src/cli.ts bdd -- ../../tests/features/*.feature
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" bun run packages/ferridriver-test/src/cli.ts test
 
 # Run specific backend test (use underscores: cdp_ws, cdp_pipe, webkit, bidi)
 test-backend backend:
@@ -92,11 +92,11 @@ run-http port="8080":
 
 # Run BDD feature tests (via TS CLI)
 bdd *args:
-  cd packages/ferridriver-test && bun run src/cli.ts bdd {{args}} -- tests/features/
+  bun run packages/ferridriver-test/src/cli.ts test {{args}} tests/features/
 
 # Build + run BDD feature tests (via TS CLI)
 test-bdd *args:
-  cd packages/ferridriver-test && bun run src/cli.ts bdd {{args}} -- tests/features/
+  bun run packages/ferridriver-test/src/cli.ts test {{args}} tests/features/
 
 # Generate docs
 doc:

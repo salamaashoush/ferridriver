@@ -682,8 +682,7 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
 const testCommand = defineCommand({
   meta: {
     name: 'test',
-    description: 'Run tests (.spec.ts, .feature, or mixed)',
-    aliases: ['e2e', 'bdd', 'run'],
+    description: 'Run tests (.spec.ts, .test.ts, .feature, or mixed)',
   },
   args: {
     ...runnerArgs,
