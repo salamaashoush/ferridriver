@@ -4,11 +4,12 @@
 //! consumers can customize and extend:
 //!
 //! - Implement [`McpServerConfig`] to control chrome args (base + per-instance),
-//!   server metadata, and pre-dispatch hooks.
+//!   instance resolution, and server metadata.
 //! - Use [`McpServer::with_extra_tools`] to compose additional tool routers.
 //! - Use [`McpServer::with_extension`] to attach custom state accessible
 //!   from tool handlers via [`McpServer::extension`].
 
+pub mod config;
 pub mod mcp;
 pub mod params;
 pub mod server;
@@ -17,6 +18,7 @@ pub mod tools;
 use rmcp::model::Tool;
 
 // Re-export key types at crate root for ergonomic imports.
+pub use config::FileConfig;
 pub use server::{DefaultConfig, McpServer, McpServerConfig, SharedState, State};
 
 /// Browser tool definitions (no live `BrowserState` required). Sorted by name.

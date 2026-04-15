@@ -35,6 +35,8 @@ pub enum Op {
   Click = 10,
   Type = 11,
   PressKey = 12,
+  KeyDown = 13,
+  KeyUp = 14,
   GetUrl = 20,
   GetTitle = 21,
   ListViews = 22,

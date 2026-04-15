@@ -59,7 +59,7 @@ async fn type_into(world: &mut BrowserWorld, text: String, selector: String) {
   world
     .page()
     .locator(&selector)
-    .type_text(&text)
+    .r#type(&text)
     .await
     .map_err(|e| StepError::from(format!("type \"{text}\" into \"{selector}\": {e}")))?;
 }
@@ -137,7 +137,7 @@ async fn scroll_to(world: &mut BrowserWorld, selector: String) {
   world
     .page()
     .locator(&selector)
-    .scroll_into_view()
+    .scroll_into_view_if_needed()
     .await
     .map_err(|e| StepError::from(format!("scroll to \"{selector}\": {e}")))?;
 }

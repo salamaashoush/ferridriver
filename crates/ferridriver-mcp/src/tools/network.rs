@@ -15,7 +15,7 @@ impl McpServer {
     description = "Page diagnostics. Types: console (log/warn/error messages), network (HTTP requests since load), trace_start (begin perf tracing), trace_stop (end tracing + metrics)."
   )]
   async fn diagnostics(&self, Parameters(p): Parameters<DiagnosticsParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     match p.r#type.as_str() {
       "console" => {
         let _guard = self.session_guard(s).await;

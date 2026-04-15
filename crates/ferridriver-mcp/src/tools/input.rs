@@ -12,7 +12,7 @@ impl McpServer {
     description = "Click an element. Prefer 'ref' from snapshot (e.g. ref='e5') over CSS selector. Refs work across frames; CSS selectors only match the main frame."
   )]
   async fn click(&self, Parameters(p): Parameters<ClickParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
 
@@ -47,7 +47,7 @@ impl McpServer {
     description = "Click at exact X,Y viewport pixel coordinates. Use this only for canvas, maps, or elements without accessible refs. For interactive elements, prefer 'click' with a ref from snapshot."
   )]
   async fn click_at(&self, Parameters(p): Parameters<ClickAtParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     page.click_at(p.x, p.y).await.map_err(Self::err)?;
@@ -61,7 +61,7 @@ impl McpServer {
     description = "Hover over an element. Prefer 'ref' from snapshot over CSS selector."
   )]
   async fn hover(&self, Parameters(p): Parameters<HoverParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let target = p.r#ref.as_deref().or(p.selector.as_deref()).unwrap_or("?");
@@ -84,7 +84,7 @@ impl McpServer {
     description = "Fill an input or contenteditable element. Prefer 'ref' from snapshot over CSS selector. For contenteditable elements (e.g. WhatsApp message box), use type_text after clicking the element instead."
   )]
   async fn fill(&self, Parameters(p): Parameters<FillParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let target = p.r#ref.as_deref().or(p.selector.as_deref()).unwrap_or("?");
@@ -113,7 +113,7 @@ impl McpServer {
     description = "Fill multiple form fields in a single call. More efficient than calling fill repeatedly. Each field is identified by ref (preferred) or CSS selector."
   )]
   async fn fill_form(&self, Parameters(p): Parameters<FillFormParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let ref_map = self.state.ref_map_for(s).await;
@@ -144,10 +144,10 @@ impl McpServer {
     description = "Type text character-by-character via keyboard into the currently focused element. Click on the target element first using click(ref=...). Unlike fill, this fires keydown/keypress/keyup events per character -- use for contenteditable elements, rich text editors, or when keystroke events matter."
   )]
   async fn type_text(&self, Parameters(p): Parameters<TypeTextParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
-    page.type_str(&p.text).await.map_err(Self::err)?;
+    page.keyboard().r#type(&p.text).await.map_err(Self::err)?;
     self
       .action_ok(&page, s, &format!("Typed {} chars.", p.text.len()))
       .await
@@ -158,10 +158,10 @@ impl McpServer {
     description = "Press a keyboard key or shortcut combination. Supports named keys (Enter, Tab, Escape, ArrowDown) and combos (Control+a, Meta+v, Control+Shift+t). Uses Playwright key naming."
   )]
   async fn press_key(&self, Parameters(p): Parameters<PressKeyParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
-    page.press_key(&p.key).await.map_err(Self::err)?;
+    page.keyboard().press(&p.key).await.map_err(Self::err)?;
     self.action_ok(&page, s, &format!("Pressed '{}'.", p.key)).await
   }
 
@@ -170,13 +170,14 @@ impl McpServer {
     description = "Drag from one point to another using mouse down + move + up. Coordinates are in viewport pixels. Use for drag-and-drop interfaces, sliders, or resizable elements."
   )]
   async fn drag(&self, Parameters(p): Parameters<DragParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
-    page
-      .drag_and_drop((p.from_x, p.from_y), (p.to_x, p.to_y))
-      .await
-      .map_err(Self::err)?;
+    let mouse = page.mouse();
+    mouse.r#move(p.from_x, p.from_y, None).await.map_err(Self::err)?;
+    mouse.down(None).await.map_err(Self::err)?;
+    mouse.r#move(p.to_x, p.to_y, Some(10)).await.map_err(Self::err)?;
+    mouse.up(None).await.map_err(Self::err)?;
     self.action_ok(&page, s, "Drag complete.").await
   }
 
@@ -185,11 +186,15 @@ impl McpServer {
     description = "Scroll the page by pixel delta or scroll a specific element into view. Use delta_y for vertical scroll (positive = down), or provide a CSS selector to auto-scroll that element into the viewport."
   )]
   async fn scroll(&self, Parameters(p): Parameters<ScrollParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     if let Some(sel) = &p.selector {
-      page.locator(sel).scroll_into_view().await.map_err(Self::err)?;
+      page
+        .locator(sel)
+        .scroll_into_view_if_needed()
+        .await
+        .map_err(Self::err)?;
     } else {
       page
         .evaluate(&format!(
@@ -208,7 +213,7 @@ impl McpServer {
     description = "Select an option in a <select> dropdown by value or label."
   )]
   async fn select_option(&self, Parameters(p): Parameters<SelectOptionParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let target_text = p
@@ -232,7 +237,7 @@ impl McpServer {
     description = "Upload a file to a file input. Prefer `ref` from snapshot; otherwise pass a CSS selector for the input."
   )]
   async fn upload_file(&self, Parameters(p): Parameters<UploadFileParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let path_str = p.path.clone();

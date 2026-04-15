@@ -689,9 +689,23 @@ impl BidiPage {
     Ok(())
   }
 
+  pub async fn key_down(&self, key: &str) -> Result<(), String> {
+    self
+      .cmd("input.performActions", input::key_down(&self.context_id, key))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn key_up(&self, key: &str) -> Result<(), String> {
+    self
+      .cmd("input.performActions", input::key_up(&self.context_id, key))
+      .await?;
+    Ok(())
+  }
+
   pub async fn press_key(&self, key: &str) -> Result<(), String> {
     self
-      .cmd("input.performActions", input::press_key(&&*self.context_id, key))
+      .cmd("input.performActions", input::press_key(&self.context_id, key))
       .await?;
     Ok(())
   }

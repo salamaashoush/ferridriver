@@ -186,7 +186,7 @@ pub trait McpServerConfig: Send + Sync + 'static {
   }
 
   /// Server name for MCP `get_info`.
-  fn server_name(&self) -> &'static str {
+  fn server_name(&self) -> &str {
     "ferridriver"
   }
 
@@ -194,32 +194,39 @@ pub trait McpServerConfig: Send + Sync + 'static {
   fn server_instructions(&self) -> &str {
     DEFAULT_INSTRUCTIONS
   }
-
-  /// Called before dispatching each tool call.
-  /// Return `Err(message)` to block the call with an error.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error string to reject the tool call before it executes.
-  fn before_dispatch(&self, _tool_name: &str, _args: &serde_json::Value) -> Result<(), String> {
-    Ok(())
-  }
 }
 
 /// Default instructions embedded in the MCP server.
 pub const DEFAULT_INSTRUCTIONS: &str = "\
-Browser automation. All tools accept optional 'session' param (default: 'default'). \
-Different sessions have isolated cookies/storage -- use for multi-user testing.\n\
+Browser automation via Chrome DevTools Protocol.\n\
 \n\
+== SESSION KEYS ==\n\
+All tools accept an optional 'session' parameter. Format: 'instance:context'.\n\
+- Instance (before ':') selects which browser process to use. Each instance can have \
+its own Chrome flags, DNS rules, and profile. Examples: 'staging', 'dev', 'prod'.\n\
+- Context (after ':') isolates cookies/storage within that browser. Use for multi-user \
+testing. Examples: 'admin', 'user1', 'tester'.\n\
+- Combined: 'staging:admin' = staging browser, admin context.\n\
+- Plain name without ':' uses the default instance: 'mytest' = 'default:mytest'.\n\
+- Omitted entirely: uses 'default:default'.\n\
+\n\
+When the server is configured with instance_args_command or per-instance chrome_args, \
+each instance name maps to a separate Chrome process with its own configuration \
+(DNS resolution, proxy settings, certificates, etc.).\n\
+\n\
+== SNAPSHOTS AND REFS ==\n\
 Actions return an accessibility snapshot with [ref=eN] identifiers. \
 Use these refs with click/hover/fill. Prefer snapshot over screenshot.\n\
 IMPORTANT: Refs are tied to the current page snapshot. After page(select) or navigate, \
 old refs are invalid -- use the new snapshot's refs. Always prefer 'ref' over CSS selectors \
 in click/fill/hover since refs are resolved from the snapshot and work reliably across frames.\n\
+\n\
+== TAB MANAGEMENT ==\n\
 To switch between browser tabs, use page(action='list') then page(action='select', page_index=N). \
 Do NOT use evaluate to list or switch tabs.\n\
 \n\
-BDD/Gherkin: Use run_step for natural-language browser actions (e.g. 'I click \"Submit\"'), \
+== BDD/GHERKIN ==\n\
+Use run_step for natural-language browser actions (e.g. 'I click \"Submit\"'), \
 run_scenario to execute full .feature files or inline Gherkin, and list_steps to discover \
 available step patterns. BDD steps run on the same live session as other tools.";
 
@@ -354,19 +361,26 @@ impl McpServer {
   /// Fast path (instance exists): shared read lock -- concurrent reads allowed.
   /// Slow path (cold start): exclusive write lock -- only when launching a new browser.
   async fn ensure_active_page(&self, context: &str) -> Result<AnyPage, ErrorData> {
-    // Fast path: instance already exists, read lock only.
+    // Fast path: instance already exists and has a page, read lock only.
     {
       let state = self.state.read().await;
       if let Ok(any_page) = state.active_page(context) {
         return Ok(any_page.clone());
       }
     }
-    // Slow path: need to create instance (write lock).
+    // Slow path: need to create instance and/or default page (write lock).
     let key = ferridriver::state::SessionKey::parse(context);
     let mut state = self.state.write().await;
     Box::pin(state.ensure_instance(&key.instance))
       .await
       .map_err(Self::err)?;
+    // Instance exists but may have no pages yet (fresh launch).
+    // Create a default blank page so callers always get a usable page.
+    if state.active_page(context).is_err() {
+      Box::pin(state.open_page_keyed(&key, "about:blank"))
+        .await
+        .map_err(Self::err)?;
+    }
     state.active_page(context).map_err(Self::err).cloned()
   }
 

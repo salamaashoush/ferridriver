@@ -34,7 +34,7 @@ pub use browser::Browser;
 pub use context::{BrowserContext, ContextRef};
 pub use events::{EventEmitter, PageEvent};
 pub use frame::Frame;
-pub use locator::Locator;
+pub use locator::{FrameLocator, Locator};
 pub use page::Page;
 
 // ── Public lower-level modules (needed by MCP server and consumers) ──

@@ -4,12 +4,6 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
-/// Whether the plan contains BDD (.feature) tests.
-/// Controls reporter variant selection (e.g., terminal vs BDD terminal).
-/// When true, BDD-aware reporters are used; otherwise E2E reporters.
-/// A mixed run (both .spec.ts and .feature) sets this to true.
-// Kept as a simple bool rather than an enum — mixed runs are the goal.
-
 /// Video recording mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]

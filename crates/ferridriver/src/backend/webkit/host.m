@@ -41,6 +41,8 @@ enum Op {
     OP_CLICK = 10,
     OP_TYPE = 11,
     OP_PRESS_KEY = 12,
+    OP_KEY_DOWN = 13,
+    OP_KEY_UP = 14,
     OP_GET_URL = 20,
     OP_GET_TITLE = 21,
     OP_LIST_VIEWS = 22,
@@ -1010,11 +1012,11 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             break;
         }
 
-        case OP_PRESS_KEY: {
-            // Dispatch native NSEvent keyDown/keyUp for ALL keys.
-            // This fires isTrusted:true DOM keyboard events (keydown, keypress, keyup)
-            // that React and other frameworks listen to for form submission, navigation, etc.
-            // Unlike _executeEditCommand which only performs the editing action without DOM events.
+        case OP_PRESS_KEY:
+        case OP_KEY_DOWN:
+        case OP_KEY_UP: {
+            // Dispatch native NSEvent keyDown and/or keyUp.
+            // OP_PRESS_KEY sends both, OP_KEY_DOWN sends only keyDown, OP_KEY_UP sends only keyUp.
             uint32_t off = 0;
             NSString *key = read_str(payload, payload_len, &off);
             uint64_t vid = read_u64(payload, payload_len, &off);
@@ -1026,6 +1028,7 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 // Map key name to character + keyCode for NSEvent
                 NSString *chars = key;
                 uint16_t keyCode = 0;
+                NSUInteger modFlags = 0;
                 if ([key isEqualToString:@"Enter"])       { chars = @"\r"; keyCode = 0x24; }
                 else if ([key isEqualToString:@"Tab"])     { chars = @"\t"; keyCode = 0x30; }
                 else if ([key isEqualToString:@"Backspace"]) { chars = [NSString stringWithFormat:@"%C", (unichar)0x08]; keyCode = 0x33; }
@@ -1040,23 +1043,34 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 else if ([key isEqualToString:@"End"])     { chars = [NSString stringWithFormat:@"%C", (unichar)0xF72B]; keyCode = 0x77; }
                 else if ([key isEqualToString:@"PageUp"])  { chars = [NSString stringWithFormat:@"%C", (unichar)0xF72C]; keyCode = 0x74; }
                 else if ([key isEqualToString:@"PageDown"])  { chars = [NSString stringWithFormat:@"%C", (unichar)0xF72D]; keyCode = 0x79; }
+                else if ([key isEqualToString:@"Shift"] || [key isEqualToString:@"ShiftLeft"] || [key isEqualToString:@"ShiftRight"])
+                  { chars = @""; keyCode = 0x38; modFlags = NSEventModifierFlagShift; }
+                else if ([key isEqualToString:@"Control"] || [key isEqualToString:@"ControlLeft"] || [key isEqualToString:@"ControlRight"])
+                  { chars = @""; keyCode = 0x3B; modFlags = NSEventModifierFlagControl; }
+                else if ([key isEqualToString:@"Alt"] || [key isEqualToString:@"AltLeft"] || [key isEqualToString:@"AltRight"])
+                  { chars = @""; keyCode = 0x3A; modFlags = NSEventModifierFlagOption; }
+                else if ([key isEqualToString:@"Meta"] || [key isEqualToString:@"MetaLeft"] || [key isEqualToString:@"MetaRight"])
+                  { chars = @""; keyCode = 0x37; modFlags = NSEventModifierFlagCommand; }
                 else if (key.length == 1) { chars = key; }
 
-                NSEvent *down = [NSEvent keyEventWithType:NSEventTypeKeyDown
-                    location:NSZeroPoint modifierFlags:0
-                    timestamp:ts windowNumber:winNum
-                    context:nil characters:chars
-                    charactersIgnoringModifiers:chars
-                    isARepeat:NO keyCode:keyCode];
-                NSEvent *up = [NSEvent keyEventWithType:NSEventTypeKeyUp
-                    location:NSZeroPoint modifierFlags:0
-                    timestamp:ts windowNumber:winNum
-                    context:nil characters:chars
-                    charactersIgnoringModifiers:chars
-                    isARepeat:NO keyCode:keyCode];
-
-                [v->webview keyDown:down];
-                [v->webview keyUp:up];
+                if (op != OP_KEY_UP) {
+                    NSEvent *down = [NSEvent keyEventWithType:NSEventTypeKeyDown
+                        location:NSZeroPoint modifierFlags:modFlags
+                        timestamp:ts windowNumber:winNum
+                        context:nil characters:chars
+                        charactersIgnoringModifiers:chars
+                        isARepeat:NO keyCode:keyCode];
+                    [v->webview keyDown:down];
+                }
+                if (op != OP_KEY_DOWN) {
+                    NSEvent *up = [NSEvent keyEventWithType:NSEventTypeKeyUp
+                        location:NSZeroPoint modifierFlags:modFlags
+                        timestamp:ts windowNumber:winNum
+                        context:nil characters:chars
+                        charactersIgnoringModifiers:chars
+                        isARepeat:NO keyCode:keyCode];
+                    [v->webview keyUp:up];
+                }
                 write_frame(req_id, REP_OK, NULL, 0);
             } else {
                 write_frame(req_id, REP_OK, NULL, 0);

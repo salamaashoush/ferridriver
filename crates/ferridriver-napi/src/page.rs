@@ -7,16 +7,21 @@ use crate::types::{
 use napi::Result;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
+use std::sync::{Arc, Mutex};
 
 /// High-level page API, mirrors Playwright's Page interface.
 #[napi]
 pub struct Page {
-  inner: std::sync::Arc<ferridriver::Page>,
+  inner: Arc<ferridriver::Page>,
+  mouse_position: Arc<Mutex<(f64, f64)>>,
 }
 
 impl Page {
-  pub(crate) fn wrap(inner: std::sync::Arc<ferridriver::Page>) -> Self {
-    Self { inner }
+  pub(crate) fn wrap(inner: Arc<ferridriver::Page>) -> Self {
+    Self {
+      inner,
+      mouse_position: Arc::new(Mutex::new((0.0, 0.0))),
+    }
   }
 
   #[allow(dead_code)]
@@ -27,6 +32,31 @@ impl Page {
 
 #[napi]
 impl Page {
+  #[napi(js_name = "context")]
+  pub fn context(&self) -> Result<crate::context::BrowserContext> {
+    let ctx = self
+      .inner
+      .context()
+      .cloned()
+      .ok_or_else(|| napi::Error::from_reason("page has no associated browser context"))?;
+    Ok(crate::context::BrowserContext::wrap(ctx))
+  }
+
+  #[napi(getter)]
+  pub fn keyboard(&self) -> Keyboard {
+    Keyboard {
+      page: Arc::clone(&self.inner),
+    }
+  }
+
+  #[napi(getter)]
+  pub fn mouse(&self) -> Mouse {
+    Mouse {
+      page: Arc::clone(&self.inner),
+      position: Arc::clone(&self.mouse_position),
+    }
+  }
+
   /// Set the default timeout for all operations (milliseconds).
   #[napi]
   pub fn set_default_timeout(&self, ms: f64) {
@@ -263,6 +293,11 @@ impl Page {
   }
 
   #[napi]
+  pub async fn dblclick(&self, selector: String) -> Result<()> {
+    self.inner.dblclick(&selector).await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
   pub async fn fill(&self, selector: String, value: String) -> Result<()> {
     self
       .inner
@@ -275,7 +310,7 @@ impl Page {
   pub async fn type_text(&self, selector: String, text: String) -> Result<()> {
     self
       .inner
-      .type_text(&selector, &text)
+      .r#type(&selector, &text)
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -530,7 +565,9 @@ impl Page {
 
   #[napi]
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
-    self.inner.click_at(x, y).await.map_err(napi::Error::from_reason)
+    self.inner.click_at(x, y).await.map_err(napi::Error::from_reason)?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
   }
 
   /// Click at coordinates with specific button and click count.
@@ -543,13 +580,22 @@ impl Page {
       .inner
       .click_at_opts(x, y, &button, count)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(napi::Error::from_reason)?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
   }
 
   /// Move mouse to coordinates without clicking.
   #[napi]
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
-    self.inner.move_mouse(x, y).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .mouse()
+      .r#move(x, y, None)
+      .await
+      .map_err(napi::Error::from_reason)?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
   }
 
   /// Move mouse smoothly with bezier easing.
@@ -568,26 +614,43 @@ impl Page {
       .inner
       .move_mouse_smooth(from_x, from_y, to_x, to_y, step_count)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(napi::Error::from_reason)?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (to_x, to_y);
+    Ok(())
   }
 
   #[napi]
   pub async fn drag_and_drop(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> Result<()> {
+    let mouse = self.inner.mouse();
+    mouse
+      .r#move(from_x, from_y, None)
+      .await
+      .map_err(napi::Error::from_reason)?;
+    mouse.down(None).await.map_err(napi::Error::from_reason)?;
+    mouse.r#move(to_x, to_y, None).await.map_err(napi::Error::from_reason)?;
+    mouse.up(None).await.map_err(napi::Error::from_reason)?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (to_x, to_y);
+    Ok(())
+  }
+
+  #[napi]
+  pub async fn type_str(&self, text: String) -> Result<()> {
     self
       .inner
-      .drag_and_drop((from_x, from_y), (to_x, to_y))
+      .keyboard()
+      .r#type(&text)
       .await
       .map_err(napi::Error::from_reason)
   }
 
   #[napi]
-  pub async fn type_str(&self, text: String) -> Result<()> {
-    self.inner.type_str(&text).await.map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
   pub async fn press_key(&self, key: String) -> Result<()> {
-    self.inner.press_key(&key).await.map_err(napi::Error::from_reason)
+    self
+      .inner
+      .keyboard()
+      .press(&key)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   // ── Emulation ───────────────────────────────────────────────────────────
@@ -821,27 +884,36 @@ impl Page {
   pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
     self
       .inner
-      .mouse_wheel(delta_x, delta_y)
+      .mouse()
+      .wheel(delta_x, delta_y)
       .await
       .map_err(napi::Error::from_reason)
   }
 
   #[napi]
   pub async fn mouse_down(&self, x: f64, y: f64, button: Option<String>) -> Result<()> {
-    self
-      .inner
-      .mouse_down(x, y, button.as_deref().unwrap_or("left"))
-      .await
-      .map_err(napi::Error::from_reason)
+    let mouse = self.inner.mouse();
+    mouse.r#move(x, y, None).await.map_err(napi::Error::from_reason)?;
+    let opts = ferridriver::page::MouseDownOptions {
+      button,
+      click_count: None,
+    };
+    mouse.down(Some(opts)).await.map_err(napi::Error::from_reason)?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
   }
 
   #[napi]
   pub async fn mouse_up(&self, x: f64, y: f64, button: Option<String>) -> Result<()> {
-    self
-      .inner
-      .mouse_up(x, y, button.as_deref().unwrap_or("left"))
-      .await
-      .map_err(napi::Error::from_reason)
+    let mouse = self.inner.mouse();
+    mouse.r#move(x, y, None).await.map_err(napi::Error::from_reason)?;
+    let opts = ferridriver::page::MouseUpOptions {
+      button,
+      click_count: None,
+    };
+    mouse.up(Some(opts)).await.map_err(napi::Error::from_reason)?;
+    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
   }
 
   #[napi]
@@ -978,6 +1050,148 @@ impl Page {
     e.to_have_url(expected.as_str())
       .await
       .map_err(|e| napi::Error::from_reason(e.message))
+  }
+}
+
+#[napi(object)]
+pub struct MouseClickOptions {
+  pub button: Option<String>,
+  #[napi(js_name = "clickCount")]
+  pub click_count: Option<i32>,
+}
+
+#[napi]
+pub struct Keyboard {
+  page: Arc<ferridriver::Page>,
+}
+
+#[napi]
+impl Keyboard {
+  #[napi]
+  pub async fn down(&self, key: String) -> Result<()> {
+    self.page.keyboard().down(&key).await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn up(&self, key: String) -> Result<()> {
+    self.page.keyboard().up(&key).await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn press(&self, key: String) -> Result<()> {
+    self.page.keyboard().press(&key).await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi(js_name = "type")]
+  pub async fn type_text(&self, text: String) -> Result<()> {
+    self
+      .page
+      .keyboard()
+      .r#type(&text)
+      .await
+      .map_err(napi::Error::from_reason)
+  }
+
+  #[napi(js_name = "insertText")]
+  pub async fn insert_text(&self, text: String) -> Result<()> {
+    self
+      .page
+      .keyboard()
+      .insert_text(&text)
+      .await
+      .map_err(napi::Error::from_reason)
+  }
+}
+
+#[napi]
+pub struct Mouse {
+  page: Arc<ferridriver::Page>,
+  position: Arc<Mutex<(f64, f64)>>,
+}
+
+#[napi]
+impl Mouse {
+  #[napi]
+  pub async fn click(&self, x: f64, y: f64, options: Option<MouseClickOptions>) -> Result<()> {
+    let opts = ferridriver::page::MouseClickOptions {
+      button: options.as_ref().and_then(|o| o.button.clone()),
+      click_count: options
+        .as_ref()
+        .and_then(|o| o.click_count)
+        .and_then(|n| u32::try_from(n).ok()),
+    };
+    self
+      .page
+      .mouse()
+      .click(x, y, Some(opts))
+      .await
+      .map_err(napi::Error::from_reason)?;
+    *self.position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
+  }
+
+  #[napi(js_name = "move")]
+  pub async fn move_to(&self, x: f64, y: f64, steps: Option<i32>) -> Result<()> {
+    let step_count = steps
+      .map(|s| u32::try_from(s).map_err(|_| napi::Error::from_reason("steps must be non-negative")))
+      .transpose()?;
+    self
+      .page
+      .mouse()
+      .r#move(x, y, step_count)
+      .await
+      .map_err(napi::Error::from_reason)?;
+    *self.position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
+  }
+
+  #[napi]
+  pub async fn dblclick(&self, x: f64, y: f64, options: Option<MouseClickOptions>) -> Result<()> {
+    let opts = ferridriver::page::MouseClickOptions {
+      button: options.as_ref().and_then(|o| o.button.clone()),
+      click_count: None,
+    };
+    self
+      .page
+      .mouse()
+      .dblclick(x, y, Some(opts))
+      .await
+      .map_err(napi::Error::from_reason)?;
+    *self.position.lock().expect("mouse position lock poisoned") = (x, y);
+    Ok(())
+  }
+
+  #[napi]
+  pub async fn down(&self, button: Option<String>) -> Result<()> {
+    let opts = ferridriver::page::MouseDownOptions {
+      button,
+      click_count: None,
+    };
+    self
+      .page
+      .mouse()
+      .down(Some(opts))
+      .await
+      .map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn up(&self, button: Option<String>) -> Result<()> {
+    let opts = ferridriver::page::MouseUpOptions {
+      button,
+      click_count: None,
+    };
+    self.page.mouse().up(Some(opts)).await.map_err(napi::Error::from_reason)
+  }
+
+  #[napi]
+  pub async fn wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
+    self
+      .page
+      .mouse()
+      .wheel(delta_x, delta_y)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 }
 

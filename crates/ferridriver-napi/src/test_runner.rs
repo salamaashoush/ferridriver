@@ -308,8 +308,9 @@ struct RegisteredSuite {
 
 /// A registered hook.
 #[allow(dead_code)]
+#[derive(Clone)]
 struct RegisteredHook {
-  meta: HookMeta,
+  meta: ferridriver_test::HookRegistration,
   callback: Arc<TestCallbackFn>,
 }
 
@@ -522,8 +523,32 @@ impl TestRunner {
       .hooks
       .try_lock()
       .map_err(|_| napi::Error::from_reason("hooks lock contended"))?;
+    let (phase, scope) = match meta.kind.as_str() {
+      "beforeAll" => (ferridriver_test::HookPhase::Before, ferridriver_test::HookScope::Suite),
+      "afterAll" => (ferridriver_test::HookPhase::After, ferridriver_test::HookScope::Suite),
+      "beforeEach" => (
+        ferridriver_test::HookPhase::Before,
+        ferridriver_test::HookScope::Scenario,
+      ),
+      "afterEach" => (
+        ferridriver_test::HookPhase::After,
+        ferridriver_test::HookScope::Scenario,
+      ),
+      _ => {
+        return Err(napi::Error::from_reason(format!(
+          "unknown test hook kind: {}",
+          meta.kind
+        )));
+      },
+    };
     hooks.push(RegisteredHook {
-      meta,
+      meta: ferridriver_test::HookRegistration {
+        phase,
+        scope,
+        owner: ferridriver_test::HookOwner::Suite(meta.suite_id),
+        tags: None,
+        requested_fixtures: meta.requested_fixtures.unwrap_or_default(),
+      },
       callback: Arc::new(tsfn),
     });
     Ok(())
@@ -569,7 +594,51 @@ impl TestRunner {
     name: Option<String>,
     timeout: Option<f64>,
   ) -> Result<()> {
-    self.bdd.register_hook(point, scope, callback, tags, name, timeout)
+    let _ = name;
+    let _ = timeout;
+
+    let tsfn = callback
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+
+    let (phase, scope) = match (point.as_str(), scope.as_str()) {
+      ("before", "all") => (ferridriver_test::HookPhase::Before, ferridriver_test::HookScope::Suite),
+      ("after", "all") => (ferridriver_test::HookPhase::After, ferridriver_test::HookScope::Suite),
+      ("before", "scenario") => (
+        ferridriver_test::HookPhase::Before,
+        ferridriver_test::HookScope::Scenario,
+      ),
+      ("after", "scenario") => (
+        ferridriver_test::HookPhase::After,
+        ferridriver_test::HookScope::Scenario,
+      ),
+      ("before", "step") => (ferridriver_test::HookPhase::Before, ferridriver_test::HookScope::Step),
+      ("after", "step") => (ferridriver_test::HookPhase::After, ferridriver_test::HookScope::Step),
+      _ => {
+        return Err(napi::Error::from_reason(format!(
+          "unknown BDD hook point/scope: {point}/{scope}"
+        )));
+      },
+    };
+
+    let mut hooks = self
+      .hooks
+      .try_lock()
+      .map_err(|_| napi::Error::from_reason("hooks lock contended"))?;
+    hooks.push(RegisteredHook {
+      meta: ferridriver_test::HookRegistration {
+        phase,
+        scope,
+        owner: ferridriver_test::HookOwner::Root,
+        tags,
+        requested_fixtures: Vec::new(),
+      },
+      callback: Arc::new(tsfn),
+    });
+    Ok(())
   }
 
   /// Register a custom parameter type for Cucumber expressions.
@@ -684,34 +753,39 @@ impl TestRunner {
 
     // Register hooks — NAPI wraps JS callbacks into Rust hook fns, core handles association.
     let hooks_reg = self.hooks.lock().await;
-    for h in hooks_reg.iter() {
+    let registered_hooks = hooks_reg.clone();
+    for h in &registered_hooks {
       let cb = Arc::clone(&h.callback);
       let bcfg = browser_config.clone();
-      let requested_fixtures = h.meta.requested_fixtures.clone().unwrap_or_default();
-      let kind = match h.meta.kind.as_str() {
-        "beforeAll" => {
-          ferridriver_test::HookKind::BeforeAll(Arc::new(move |_pool| {
-            let cb = Arc::clone(&cb);
-            Box::pin(async move {
-              // TODO: proper suite-scoped fixtures for beforeAll/afterAll
-              let _ = cb;
-              Ok(())
-            })
-          }))
-        },
-        "afterAll" => ferridriver_test::HookKind::AfterAll(Arc::new(move |_pool| {
-          let cb = Arc::clone(&cb);
-          Box::pin(async move {
-            let _ = cb;
-            Ok(())
-          })
-        })),
-        "beforeEach" => ferridriver_test::HookKind::BeforeEach(make_each_hook(cb, requested_fixtures.clone(), bcfg)),
-        "afterEach" => ferridriver_test::HookKind::AfterEach(make_each_hook(cb, requested_fixtures, bcfg)),
+      let requested_fixtures = h.meta.requested_fixtures.clone();
+      let kind = match (h.meta.phase, h.meta.scope, &h.meta.owner) {
+        (
+          ferridriver_test::HookPhase::Before,
+          ferridriver_test::HookScope::Suite,
+          ferridriver_test::HookOwner::Suite(_),
+        ) => ferridriver_test::HookKind::BeforeAll(make_suite_hook(cb, requested_fixtures.clone(), bcfg.clone())),
+        (
+          ferridriver_test::HookPhase::After,
+          ferridriver_test::HookScope::Suite,
+          ferridriver_test::HookOwner::Suite(_),
+        ) => ferridriver_test::HookKind::AfterAll(make_suite_hook(cb, requested_fixtures, bcfg)),
+        (
+          ferridriver_test::HookPhase::Before,
+          ferridriver_test::HookScope::Scenario,
+          ferridriver_test::HookOwner::Suite(_),
+        ) => ferridriver_test::HookKind::BeforeEach(make_each_hook(cb, requested_fixtures.clone(), bcfg)),
+        (
+          ferridriver_test::HookPhase::After,
+          ferridriver_test::HookScope::Scenario,
+          ferridriver_test::HookOwner::Suite(_),
+        ) => ferridriver_test::HookKind::AfterEach(make_each_hook(cb, requested_fixtures, bcfg)),
         _ => continue,
       };
       builder.add_hook(ferridriver_test::HookDef {
-        suite_id: h.meta.suite_id.clone(),
+        suite_id: match &h.meta.owner {
+          ferridriver_test::HookOwner::Suite(suite_id) => suite_id.clone(),
+          ferridriver_test::HookOwner::Root => String::new(),
+        },
         kind,
       });
     }
@@ -728,7 +802,8 @@ impl TestRunner {
 
     let mut has_bdd = false;
     if let Some(patterns) = features {
-      let registry = self.bdd.build_step_registry()?;
+      let mut registry = self.bdd.build_step_registry()?;
+      register_bdd_hooks(&mut registry, &registered_hooks)?;
 
       let files = ferridriver_bdd::feature::FeatureSet::discover(&patterns, &self.config.test_ignore)
         .map_err(|e| napi::Error::from_reason(format!("feature discovery: {e}")))?;
@@ -737,7 +812,7 @@ impl TestRunner {
           .map_err(|e| napi::Error::from_reason(format!("feature parse: {e}")))?;
 
       if !feature_set.features.is_empty() {
-        let bdd_plan = ferridriver_bdd::translate::translate_features(&feature_set, registry, &self.config);
+        let bdd_plan = ferridriver_bdd::translate::translate_features(&feature_set, Arc::new(registry), &self.config);
         for suite in bdd_plan.suites {
           for test in suite.tests {
             builder.add_test(test);
@@ -930,6 +1005,149 @@ fn make_each_hook(
         })
     })
   })
+}
+
+fn make_suite_hook(
+  cb: Arc<TestCallbackFn>,
+  requested_fixtures: Vec<String>,
+  browser_config: ferridriver_test::config::BrowserConfig,
+) -> ferridriver_test::model::SuiteHookFn {
+  Arc::new(move |pool| {
+    let cb = Arc::clone(&cb);
+    let requested_fixtures = requested_fixtures.clone();
+    let bcfg = browser_config.clone();
+    Box::pin(async move {
+      resolve_requested_fixtures(&pool, &requested_fixtures)
+        .await
+        .map_err(ferridriver_test::TestFailure::from)?;
+
+      let test_info = pool
+        .get::<ferridriver_test::model::TestInfo>("test_info")
+        .await
+        .map_err(ferridriver_test::TestFailure::from)?;
+      let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
+      let fixtures = crate::test_fixtures::TestFixtures::from_pool(pool.clone(), test_info, modifiers, bcfg.clone());
+      call_js_test(&cb, fixtures)
+        .await
+        .map_err(|e| ferridriver_test::TestFailure {
+          message: e,
+          stack: None,
+          diff: None,
+          screenshot: None,
+        })
+    })
+  })
+}
+
+fn register_bdd_hooks(registry: &mut ferridriver_bdd::registry::StepRegistry, hooks: &[RegisteredHook]) -> Result<()> {
+  for hook in hooks {
+    if hook.meta.owner != ferridriver_test::HookOwner::Root {
+      continue;
+    }
+
+    let Some(point) = ferridriver_bdd::hook::runtime_hook_point(&hook.meta) else {
+      continue;
+    };
+
+    let (handler, tags) = match hook.meta.scope {
+      ferridriver_test::HookScope::Suite | ferridriver_test::HookScope::Scenario => (
+        ferridriver_bdd::hook::HookHandler::Scenario(make_bdd_scenario_hook(Arc::clone(&hook.callback))),
+        hook.meta.tags.as_deref(),
+      ),
+      ferridriver_test::HookScope::Step => (
+        ferridriver_bdd::hook::HookHandler::Step(make_bdd_step_hook(Arc::clone(&hook.callback))),
+        hook.meta.tags.as_deref(),
+      ),
+    };
+
+    let tag_filter = tags.and_then(|t| ferridriver_bdd::filter::TagExpression::parse(t).ok());
+
+    registry.hooks_mut().register(ferridriver_bdd::hook::Hook {
+      point,
+      tag_filter,
+      order: 0,
+      handler,
+      location: ferridriver_bdd::step::StepLocation {
+        file: "<typescript>",
+        line: 0,
+      },
+    });
+  }
+
+  Ok(())
+}
+
+fn make_bdd_scenario_hook(
+  cb: Arc<TestCallbackFn>,
+) -> Arc<
+  dyn for<'a> Fn(
+      &'a mut ferridriver_bdd::world::BrowserWorld,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send + 'a>>
+    + Send
+    + Sync,
+> {
+  Arc::new(move |world| {
+    let cb = Arc::clone(&cb);
+    let fixtures = fixtures_with_bdd_params(world, None, None, None);
+    Box::pin(async move {
+      let napi_fixtures = crate::test_fixtures::TestFixtures::from_resolved(fixtures);
+      cb.call_async(napi_fixtures)
+        .await
+        .map_err(|e| format!("{e}"))?
+        .await
+        .map_err(|e| format!("{e}"))
+    })
+  })
+}
+
+fn make_bdd_step_hook(
+  cb: Arc<TestCallbackFn>,
+) -> Arc<
+  dyn for<'a> Fn(
+      &'a mut ferridriver_bdd::world::BrowserWorld,
+      &'a str,
+    ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send + 'a>>
+    + Send
+    + Sync,
+> {
+  Arc::new(move |world, _step_text| {
+    let cb = Arc::clone(&cb);
+    let fixtures = fixtures_with_bdd_params(world, None, None, None);
+    Box::pin(async move {
+      let napi_fixtures = crate::test_fixtures::TestFixtures::from_resolved(fixtures);
+      cb.call_async(napi_fixtures)
+        .await
+        .map_err(|e| format!("{e}"))?
+        .await
+        .map_err(|e| format!("{e}"))
+    })
+  })
+}
+
+pub(crate) fn fixtures_with_bdd_params(
+  world: &ferridriver_bdd::world::BrowserWorld,
+  params: Option<&[ferridriver_bdd::step::StepParam]>,
+  table: Option<&ferridriver_bdd::step::DataTable>,
+  docstring: Option<&str>,
+) -> ferridriver_test::model::TestFixtures {
+  use ferridriver_bdd::step::StepParam;
+
+  let mut fixtures = world.fixtures().clone();
+
+  fixtures.bdd_args = params.map(|p| {
+    p.iter()
+      .map(|param| match param {
+        StepParam::Int(i) => serde_json::Value::Number((*i).into()),
+        StepParam::Float(f) => serde_json::json!(f),
+        StepParam::String(s) | StepParam::Word(s) => serde_json::Value::String(s.clone()),
+        StepParam::Custom { value, .. } => serde_json::Value::String(value.clone()),
+      })
+      .collect()
+  });
+  fixtures.bdd_data_table = table.map(|t| t.iter().map(|r| r.clone()).collect());
+  fixtures.bdd_doc_string = docstring.map(|s| s.to_string());
+
+  fixtures
 }
 
 async fn resolve_requested_fixtures(

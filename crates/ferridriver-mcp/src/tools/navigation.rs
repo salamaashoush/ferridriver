@@ -15,12 +15,17 @@ impl McpServer {
     description = "Connect to a running Chrome browser. Provide a WebSocket/HTTP URL, or use auto_discover to find a running instance by reading DevToolsActivePort."
   )]
   async fn connect(&self, Parameters(p): Parameters<ConnectParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
+    // Parse the composite session key to get the instance name.
+    // "staging:admin" -> instance="staging", context="admin"
+    // The connect operation targets the browser instance, not the context.
+    let key = ferridriver::state::SessionKey::parse(s);
+    let instance = &*key.instance;
 
     if let Some(url) = &p.url {
       let page_count = {
         let mut state = self.state.write().await;
-        let count = Box::pin(state.connect_to_url(s, url)).await.map_err(Self::err)?;
+        let count = Box::pin(state.connect_to_url(instance, url)).await.map_err(Self::err)?;
         drop(state);
         self.state.invalidate_context(s);
         count
@@ -34,7 +39,7 @@ impl McpServer {
       let channel = p.channel.as_deref().unwrap_or("stable");
       let page_count = {
         let mut state = self.state.write().await;
-        let count = Box::pin(state.connect_auto(s, channel, p.user_data_dir.as_deref()))
+        let count = Box::pin(state.connect_auto(instance, channel, p.user_data_dir.as_deref()))
           .await
           .map_err(Self::err)?;
         drop(state);
@@ -58,7 +63,7 @@ impl McpServer {
     description = "Navigate the browser to a URL and wait for the page to load. Returns an accessibility snapshot of the loaded page. After navigation, all previous element refs are invalidated -- use the new snapshot's refs."
   )]
   async fn navigate(&self, Parameters(p): Parameters<NavigateParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     let opts = ferridriver::options::GotoOptions {
@@ -76,28 +81,28 @@ impl McpServer {
   async fn page_manage(&self, Parameters(p): Parameters<PageParams>) -> Result<CallToolResult, ErrorData> {
     match p.action.as_str() {
       "back" => {
-        let s = sess(p.session.as_ref());
+        let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.go_back(None).await.map_err(Self::err)?;
         self.action_ok(&page, s, "Navigated back.").await
       },
       "forward" => {
-        let s = sess(p.session.as_ref());
+        let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.go_forward(None).await.map_err(Self::err)?;
         self.action_ok(&page, s, "Navigated forward.").await
       },
       "reload" => {
-        let s = sess(p.session.as_ref());
+        let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.reload(None).await.map_err(Self::err)?;
         self.action_ok(&page, s, "Page reloaded.").await
       },
       "new" => {
-        let s = sess(p.session.as_ref());
+        let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let url = p.url.as_deref().unwrap_or("about:blank");
         let mut state = self.state.write().await;
@@ -111,7 +116,7 @@ impl McpServer {
         ))]))
       },
       "close" => {
-        let s = sess(p.session.as_ref());
+        let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let idx = p
           .page_index
@@ -125,7 +130,7 @@ impl McpServer {
         ))]))
       },
       "select" => {
-        let s = sess(p.session.as_ref());
+        let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let idx = p
           .page_index

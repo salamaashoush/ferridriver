@@ -248,6 +248,36 @@ pub fn type_text(context: &str, text: &str) -> serde_json::Value {
   })
 }
 
+/// Build a single keyDown action (does NOT release the key).
+pub fn key_down(context: &str, key: &str) -> serde_json::Value {
+  let bidi_key = key_to_bidi(key);
+  json!({
+    "context": context,
+    "actions": [{
+      "type": "key",
+      "id": "keyboard",
+      "actions": [
+        {"type": "keyDown", "value": bidi_key}
+      ]
+    }]
+  })
+}
+
+/// Build a single keyUp action.
+pub fn key_up(context: &str, key: &str) -> serde_json::Value {
+  let bidi_key = key_to_bidi(key);
+  json!({
+    "context": context,
+    "actions": [{
+      "type": "key",
+      "id": "keyboard",
+      "actions": [
+        {"type": "keyUp", "value": bidi_key}
+      ]
+    }]
+  })
+}
+
 /// Build a key press action (keyDown + keyUp).
 pub fn press_key(context: &str, key: &str) -> serde_json::Value {
   // Handle modifier+key combos like "Control+a", "Shift+Enter"

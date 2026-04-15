@@ -8,7 +8,8 @@ use ferridriver_bdd_macros::when;
 async fn press_key(world: &mut BrowserWorld, key: String) {
   world
     .page()
-    .press_key(&key)
+    .keyboard()
+    .press(&key)
     .await
     .map_err(|e| StepError::from(format!("press \"{key}\": {e}")))?;
 }
@@ -38,7 +39,8 @@ async fn press_with_modifier(world: &mut BrowserWorld, key: String, modifier: St
   let combo = format!("{modifier}+{key}");
   world
     .page()
-    .press_key(&combo)
+    .keyboard()
+    .press(&combo)
     .await
     .map_err(|e| StepError::from(format!("press \"{combo}\": {e}")))?;
 }

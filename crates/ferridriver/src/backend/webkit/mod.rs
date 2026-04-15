@@ -748,6 +748,22 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the key press IPC call fails.
+  pub async fn key_down(&self, key: &str) -> Result<(), String> {
+    let mut p = Vec::new();
+    ipc::str_encode(&mut p, key);
+    p.extend_from_slice(&self.vid().to_le_bytes());
+    let r = self.client.send(Op::KeyDown, &p).await?;
+    Self::ok(r)
+  }
+
+  pub async fn key_up(&self, key: &str) -> Result<(), String> {
+    let mut p = Vec::new();
+    ipc::str_encode(&mut p, key);
+    p.extend_from_slice(&self.vid().to_le_bytes());
+    let r = self.client.send(Op::KeyUp, &p).await?;
+    Self::ok(r)
+  }
+
   pub async fn press_key(&self, key: &str) -> Result<(), String> {
     let mut p = Vec::new();
     ipc::str_encode(&mut p, key);

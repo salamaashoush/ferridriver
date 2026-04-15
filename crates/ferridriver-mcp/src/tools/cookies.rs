@@ -15,7 +15,7 @@ impl McpServer {
     description = "Manage cookies. Actions: get (list all), set (create/update), delete (remove by name), clear (remove all)."
   )]
   async fn cookies(&self, Parameters(p): Parameters<CookiesParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_ref());
+    let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
     match p.action.as_str() {

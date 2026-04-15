@@ -504,6 +504,21 @@ impl AnyPage {
     page_dispatch!(self, type_str(text))
   }
 
+  /// Insert text without emitting keyboard events (only `input` event).
+  /// This is Playwright's `keyboard.insertText()` semantic.
+  pub async fn insert_text(&self, text: &str) -> Result<(), String> {
+    // type_str on all backends uses Input.insertText / equivalent
+    self.type_str(text).await
+  }
+
+  pub async fn key_down(&self, key: &str) -> Result<(), String> {
+    page_dispatch!(self, key_down(key))
+  }
+
+  pub async fn key_up(&self, key: &str) -> Result<(), String> {
+    page_dispatch!(self, key_up(key))
+  }
+
   pub async fn press_key(&self, key: &str) -> Result<(), String> {
     page_dispatch!(self, press_key(key))
   }

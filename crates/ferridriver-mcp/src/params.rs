@@ -1,6 +1,26 @@
 //! MCP tool parameter types. Each struct maps to one tool's input schema.
+//!
+//! All tool params include a `session` field via `#[serde(flatten)]` on `SessionParam`.
 
 use serde::Deserialize;
+
+/// Shared session parameter flattened into every tool's input schema.
+/// Defines the `instance:context` key format in one place.
+#[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
+pub struct SessionParam {
+  #[schemars(description = "Session key. Format: 'instance:context' (e.g. 'staging:admin'). \
+    Instance selects the browser process (each can have its own DNS/proxy/flags). \
+    Context isolates cookies/storage within that browser. \
+    Plain name without ':' uses the default instance. Omit for 'default:default'.")]
+  pub session: Option<String>,
+}
+
+impl SessionParam {
+  /// Get the session string as `Option<&String>` for backward compat with `sess()`.
+  pub fn as_opt(&self) -> Option<&String> {
+    self.session.as_ref()
+  }
+}
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NavigateParams {
@@ -10,32 +30,32 @@ pub struct NavigateParams {
     description = "Navigation wait: `commit` (default, earliest navigation commit), `load`, `domcontentloaded`, `networkidle`, or `none`."
   )]
   pub wait_until: Option<String>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NewPageParams {
   #[schemars(description = "URL to open.")]
   pub url: Option<String>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct ClosePageParams {
   #[schemars(description = "Page index to close.")]
   pub page_index: usize,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SelectPageParams {
   #[schemars(description = "Page index.")]
   pub page_index: usize,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -46,8 +66,8 @@ pub struct ClickParams {
   pub selector: Option<String>,
   #[schemars(description = "Double click.")]
   pub double_click: Option<bool>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -56,8 +76,8 @@ pub struct ClickAtParams {
   pub x: f64,
   #[schemars(description = "Y coordinate in viewport pixels.")]
   pub y: f64,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -66,8 +86,8 @@ pub struct HoverParams {
   pub r#ref: Option<String>,
   #[schemars(description = "CSS selector.")]
   pub selector: Option<String>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -78,8 +98,8 @@ pub struct FillParams {
   pub selector: Option<String>,
   #[schemars(description = "Value to fill.")]
   pub value: String,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -88,8 +108,8 @@ pub struct TypeTextParams {
     description = "Text to send as keyboard input. Types into whichever element is focused—use click(ref=...) on the field first."
   )]
   pub text: String,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -98,8 +118,8 @@ pub struct PressKeyParams {
     description = "Key or shortcut. Examples: Enter, Tab, ArrowDown, Escape, Control+a, Meta+v, Control+Shift+t (Playwright-style)."
   )]
   pub key: String,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -112,8 +132,8 @@ pub struct DragParams {
   pub to_x: f64,
   #[schemars(description = "End Y coordinate in viewport pixels.")]
   pub to_y: f64,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -128,8 +148,8 @@ pub struct ScrollParams {
     description = "CSS selector to scroll into view. When provided, delta_x/delta_y are ignored and the element is scrolled into the viewport."
   )]
   pub selector: Option<String>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -142,22 +162,22 @@ pub struct ScreenshotParams_ {
   pub full_page: Option<bool>,
   #[schemars(description = "CSS selector to screenshot a specific element instead of the full page.")]
   pub selector: Option<String>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct EvaluateParams {
   #[schemars(description = "JS expression.")]
   pub expression: String,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SnapshotParams {
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
   #[schemars(description = "Accessibility tree depth limit. -1 or omit for unlimited. 0 = root only.")]
   pub depth: Option<i32>,
   #[schemars(
@@ -176,14 +196,14 @@ pub struct WaitForParams {
   pub text: Option<String>,
   #[schemars(description = "Timeout ms.")]
   pub timeout: Option<u64>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SessionOnlyParams {
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -195,16 +215,16 @@ pub struct SetCookieParams {
   pub secure: Option<bool>,
   pub http_only: Option<bool>,
   pub expires: Option<f64>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct DeleteCookieParams_ {
   pub name: String,
   pub domain: Option<String>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -214,8 +234,8 @@ pub struct EmulateDeviceParams {
   pub device_scale_factor: Option<f64>,
   pub mobile: Option<bool>,
   pub user_agent: Option<String>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -223,8 +243,8 @@ pub struct SetGeolocationParams {
   pub latitude: f64,
   pub longitude: f64,
   pub accuracy: Option<f64>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -234,30 +254,30 @@ pub struct SetNetworkStateParams {
   pub download_throughput: Option<f64>,
   pub upload_throughput: Option<f64>,
   pub latency: Option<f64>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LocalStorageKeyParams {
   pub key: String,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct LocalStorageSetParams {
   pub key: String,
   pub value: String,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SetContentParams {
   pub html: String,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -266,16 +286,16 @@ pub struct ConsoleMessagesParams {
   pub level: Option<String>,
   #[schemars(description = "Max messages to return.")]
   pub limit: Option<usize>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct NetworkRequestsParams {
   #[schemars(description = "Max requests to return.")]
   pub limit: Option<usize>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -292,8 +312,8 @@ pub struct FormField {
 pub struct FillFormParams {
   #[schemars(description = "Array of {ref, selector, value} fields.")]
   pub fields: Vec<FormField>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -310,8 +330,8 @@ pub struct SearchPageParams {
   pub selector: Option<String>,
   #[schemars(description = "Maximum matches to return. Default: 25.")]
   pub max_results: Option<usize>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -324,8 +344,8 @@ pub struct FindElementsParams {
   pub max_results: Option<usize>,
   #[schemars(description = "Include text content of each element. Default: true.")]
   pub include_text: Option<bool>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -338,8 +358,8 @@ pub struct SelectOptionParams {
   pub value: Option<String>,
   #[schemars(description = "Option text/label to select.")]
   pub label: Option<String>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -348,8 +368,8 @@ pub struct GetDropdownOptionsParams {
   pub r#ref: Option<String>,
   #[schemars(description = "CSS selector.")]
   pub selector: Option<String>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -360,8 +380,8 @@ pub struct UploadFileParams {
   pub selector: Option<String>,
   #[schemars(description = "Absolute path to the file to upload.")]
   pub path: String,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 // ── Consolidated param types (used by refactored tool modules) ─────────────
@@ -374,8 +394,8 @@ pub struct PageParams {
   pub url: Option<String>,
   #[schemars(description = "Page index for close/select actions.")]
   pub page_index: Option<usize>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -396,8 +416,8 @@ pub struct CookiesParams {
   pub http_only: Option<bool>,
   #[schemars(description = "Cookie expiry as Unix timestamp in seconds. Omit for session cookie.")]
   pub expires: Option<f64>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -408,8 +428,8 @@ pub struct StorageParams {
   pub key: Option<String>,
   #[schemars(description = "Storage value (required for set).")]
   pub value: Option<String>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -438,8 +458,8 @@ pub struct EmulateParams {
   pub download_throughput: Option<f64>,
   #[schemars(description = "Upload speed limit in bytes/sec. -1 = unlimited.")]
   pub upload_throughput: Option<f64>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -450,8 +470,8 @@ pub struct DiagnosticsParams {
   pub level: Option<String>,
   #[schemars(description = "Max entries to return.")]
   pub limit: Option<usize>,
-  #[schemars(description = "Session name. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
@@ -468,6 +488,6 @@ pub struct ConnectParams {
   pub channel: Option<String>,
   #[schemars(description = "Custom Chrome user data directory for auto-discovery.")]
   pub user_data_dir: Option<String>,
-  #[schemars(description = "Session name for the connected browser. Defaults to 'default'.")]
-  pub session: Option<String>,
+  #[serde(flatten)]
+  pub session: SessionParam,
 }

@@ -139,7 +139,7 @@ step!(TypeText {
     example: "When I type \"hello world\"",
     execute(page, caps, _table, _vars) {
         let text = q(&caps[1]);
-        page.type_str(&text).await.map_err(|e| e.clone())?;
+        page.keyboard().r#type(&text).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
@@ -151,7 +151,7 @@ step!(PressKey {
     example: "When I press \"Enter\"",
     execute(page, caps, _table, _vars) {
         let key = q(&caps[1]);
-        page.press_key(&key).await.map_err(|e| e.clone())?;
+        page.keyboard().press(&key).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
@@ -228,7 +228,7 @@ step!(ScrollDown {
     example: "When I scroll down by 300",
     execute(page, caps, _table, _vars) {
         let px = caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(300.0);
-        page.mouse_wheel(0.0, px).await.map_err(|e| e.clone())?;
+        page.mouse().wheel(0.0, px).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });
@@ -240,7 +240,7 @@ step!(ScrollUp {
     example: "When I scroll up by 300",
     execute(page, caps, _table, _vars) {
         let px = caps.get(1).and_then(|m| m.as_str().parse::<f64>().ok()).unwrap_or(300.0);
-        page.mouse_wheel(0.0, -px).await.map_err(|e| e.clone())?;
+        page.mouse().wheel(0.0, -px).await.map_err(|e| e.clone())?;
         Ok(None)
     }
 });

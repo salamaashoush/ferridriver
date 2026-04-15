@@ -63,3 +63,35 @@ pub async fn serve_stdio_with(server: McpServer) -> anyhow::Result<()> {
   svc.waiting().await?;
   Ok(())
 }
+
+/// Serve a custom `McpServer` (with config/extensions) over HTTP.
+///
+/// # Errors
+///
+/// Returns an error if the TCP listener cannot bind to the requested port,
+/// or if the HTTP server encounters a fatal error.
+pub async fn serve_http_with(server: McpServer, port: u16) -> anyhow::Result<()> {
+  use rmcp::transport::streamable_http_server::{
+    StreamableHttpServerConfig, StreamableHttpService, session::local::LocalSessionManager,
+  };
+
+  let ct = tokio_util::sync::CancellationToken::new();
+  let config = StreamableHttpServerConfig::default()
+    .with_cancellation_token(ct.child_token())
+    .with_stateful_mode(true);
+
+  let svc = StreamableHttpService::new(
+    move || Ok(server.clone()),
+    Arc::new(LocalSessionManager::default()),
+    config,
+  );
+
+  let listener = tokio::net::TcpListener::bind(("0.0.0.0", port)).await?;
+  eprintln!("ferridriver listening on http://0.0.0.0:{port}/mcp");
+
+  axum::serve(listener, axum::Router::new().nest_service("/mcp", svc))
+    .with_graceful_shutdown(async move { ct.cancelled_owned().await })
+    .await?;
+
+  Ok(())
+}
