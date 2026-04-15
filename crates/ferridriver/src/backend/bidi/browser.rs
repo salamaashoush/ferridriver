@@ -1,4 +1,4 @@
-//! BiDi browser -- manages contexts, pages, and browser lifecycle.
+//! `BiDi` browser -- manages contexts, pages, and browser lifecycle.
 
 use serde_json::json;
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use super::session::BidiSession;
 use crate::backend::{AnyPage, NavLifecycle};
 
 #[derive(Clone)]
-/// Browser instance using the WebDriver BiDi protocol.
+/// Browser instance using the `WebDriver` `BiDi` protocol.
 pub struct BidiBrowser {
   pub(crate) session: Arc<BidiSession>,
   child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
@@ -59,19 +59,19 @@ impl BidiBrowser {
     )
   }
 
-  /// Launch a browser with BiDi support.
+  /// Launch a browser with `BiDi` support.
   /// Auto-detects Firefox vs Chrome from the binary path.
   pub async fn launch_with_flags(browser_path: &str, flags: &[String]) -> Result<Self, String> {
     // Determine if headless from flags
     let headless = flags.iter().any(|f| f == "--headless");
-    let (session, child) = BidiSession::launch(browser_path, flags, headless).await?;
+    let (session, child) = Box::pin(BidiSession::launch(browser_path, flags, headless)).await?;
     Ok(Self {
       session: Arc::new(session),
       child: Arc::new(tokio::sync::Mutex::new(Some(child))),
     })
   }
 
-  /// Connect to an existing BiDi endpoint via WebSocket.
+  /// Connect to an existing `BiDi` endpoint via WebSocket.
   pub async fn connect(ws_url: &str) -> Result<Self, String> {
     let session = BidiSession::connect(ws_url).await?;
     Ok(Self {
@@ -140,7 +140,7 @@ impl BidiBrowser {
       pages.push(AnyPage::Bidi(BidiPage::create(
         self.session.clone(),
         context_id.to_string(),
-      )?));
+      )));
     }
     Ok(pages)
   }
@@ -182,7 +182,7 @@ impl BidiBrowser {
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), wait_for_created).await;
 
     debug!("BiDi new page: context={context_id}");
-    let page = BidiPage::create(self.session.clone(), context_id)?;
+    let page = BidiPage::create(self.session.clone(), context_id);
     page.wait_until_ready().await?;
 
     if let Some(viewport) = viewport {

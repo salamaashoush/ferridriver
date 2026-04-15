@@ -71,7 +71,7 @@ impl McpServer {
       timeout: None,
     };
     page.goto(&p.url, Some(opts)).await.map_err(Self::err)?;
-    self.action_ok(&page, s, "Navigation complete.").await
+    Box::pin(self.action_ok(&page, s, "Navigation complete.")).await
   }
 
   #[tool(
@@ -85,21 +85,21 @@ impl McpServer {
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.go_back(None).await.map_err(Self::err)?;
-        self.action_ok(&page, s, "Navigated back.").await
+        Box::pin(self.action_ok(&page, s, "Navigated back.")).await
       },
       "forward" => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.go_forward(None).await.map_err(Self::err)?;
-        self.action_ok(&page, s, "Navigated forward.").await
+        Box::pin(self.action_ok(&page, s, "Navigated forward.")).await
       },
       "reload" => {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let page = Box::pin(self.page(s)).await?;
         page.reload(None).await.map_err(Self::err)?;
-        self.action_ok(&page, s, "Page reloaded.").await
+        Box::pin(self.action_ok(&page, s, "Page reloaded.")).await
       },
       "new" => {
         let s = sess(p.session.as_opt());
@@ -140,7 +140,7 @@ impl McpServer {
         let any_page = state.active_page(s).map_err(Self::err)?.clone();
         drop(state);
         let page = ferridriver::Page::new(any_page);
-        self.action_ok(&page, s, &format!("Switched to page {idx}.")).await
+        Box::pin(self.action_ok(&page, s, &format!("Switched to page {idx}."))).await
       },
       "list" => {
         let state = self.state.read().await;

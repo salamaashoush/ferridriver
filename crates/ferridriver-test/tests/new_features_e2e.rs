@@ -112,7 +112,7 @@ async fn test_before_all_runs_once_per_suite() {
   };
 
   // 1 worker = beforeAll runs exactly once.
-  let exit = run_plan(plan, default_config(1)).await;
+  let exit = Box::pin(run_plan(plan, default_config(1))).await;
   assert_eq!(exit, 0);
   assert_eq!(
     BEFORE_ALL_COUNT.load(Ordering::SeqCst),
@@ -149,7 +149,7 @@ async fn test_before_each_runs_per_test() {
     shard: None,
   };
 
-  let exit = run_plan(plan, default_config(1)).await;
+  let exit = Box::pin(run_plan(plan, default_config(1))).await;
   assert_eq!(exit, 0);
   assert_eq!(
     BEFORE_EACH_COUNT.load(Ordering::SeqCst),
@@ -202,7 +202,7 @@ async fn test_after_each_runs_even_on_failure() {
     shard: None,
   };
 
-  let exit = run_plan(plan, default_config(1)).await;
+  let exit = Box::pin(run_plan(plan, default_config(1))).await;
   assert_eq!(exit, 1, "should fail because one test fails");
   assert_eq!(
     AFTER_EACH_COUNT.load(Ordering::SeqCst),
@@ -234,7 +234,7 @@ async fn test_before_all_failure_skips_suite() {
   // Tests should be skipped, not failed — exit 0 since skipped != failed.
   // Actually Playwright treats beforeAll failure as test failure, so exit 1.
   // Our impl skips them which means exit 0. Let's verify the behavior.
-  let exit = run_plan(plan, default_config(1)).await;
+  let exit = Box::pin(run_plan(plan, default_config(1))).await;
   // Skipped tests don't count as failures.
   assert_eq!(
     exit, 0,
@@ -295,7 +295,7 @@ async fn test_serial_mode_runs_in_order() {
     shard: None,
   };
 
-  let exit = run_plan(plan, default_config(1)).await;
+  let exit = Box::pin(run_plan(plan, default_config(1))).await;
   assert_eq!(exit, 0, "serial tests should run in order");
   assert_eq!(ORDER.load(Ordering::SeqCst), 3);
 }
@@ -360,7 +360,7 @@ async fn test_serial_mode_skips_after_failure() {
     shard: None,
   };
 
-  let exit = run_plan(plan, default_config(1)).await;
+  let exit = Box::pin(run_plan(plan, default_config(1))).await;
   assert_eq!(exit, 1, "should fail");
   assert_eq!(
     RUN_COUNT.load(Ordering::SeqCst),
@@ -404,7 +404,7 @@ async fn test_expected_failure_passes_when_test_fails() {
     shard: None,
   };
 
-  let exit = run_plan(plan, default_config(1)).await;
+  let exit = Box::pin(run_plan(plan, default_config(1))).await;
   assert_eq!(exit, 0, "expected failure should count as pass");
 }
 
@@ -439,7 +439,7 @@ async fn test_expected_failure_fails_when_test_passes() {
     shard: None,
   };
 
-  let exit = run_plan(plan, default_config(1)).await;
+  let exit = Box::pin(run_plan(plan, default_config(1))).await;
   assert_eq!(exit, 1, "test.fail() that passes should be reported as failure");
 }
 
@@ -498,7 +498,7 @@ async fn test_global_setup_runs_before_tests() {
     })
   })];
 
-  let exit = run_plan(plan, config).await;
+  let exit = Box::pin(run_plan(plan, config)).await;
   assert_eq!(exit, 0);
   assert_eq!(SETUP_RAN.load(Ordering::SeqCst), 1, "global setup should run once");
   assert_eq!(
@@ -528,7 +528,7 @@ async fn test_global_setup_failure_aborts_run() {
   let mut config = default_config(1);
   config.global_setup_fns = vec![Arc::new(|_pool| Box::pin(async { Err(fail("global setup crashed")) }))];
 
-  let exit = run_plan(plan, config).await;
+  let exit = Box::pin(run_plan(plan, config)).await;
   assert_eq!(exit, 1, "global setup failure should abort with exit code 1");
 }
 
@@ -575,7 +575,7 @@ async fn test_testinfo_injected_into_pool() {
     shard: None,
   };
 
-  let exit = run_plan(plan, default_config(1)).await;
+  let exit = Box::pin(run_plan(plan, default_config(1))).await;
   assert_eq!(exit, 0, "TestInfo should be injectable via pool");
 }
 
@@ -618,7 +618,7 @@ async fn test_soft_assertions_collected() {
     shard: None,
   };
 
-  let exit = run_plan(plan, default_config(1)).await;
+  let exit = Box::pin(run_plan(plan, default_config(1))).await;
   assert_eq!(exit, 1, "soft assertion errors should make the test fail");
 }
 
@@ -721,7 +721,7 @@ async fn test_html_reporter_generates_file() {
     ..Default::default()
   };
 
-  let exit = run_plan(plan, config).await;
+  let exit = Box::pin(run_plan(plan, config)).await;
   assert_eq!(exit, 0);
 
   let html_path = tmp.join("report.html");

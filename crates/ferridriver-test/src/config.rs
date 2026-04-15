@@ -994,10 +994,10 @@ impl TestConfig {
 
     // Test discovery overrides.
     if let Some(ref patterns) = project.test_match {
-      merged.test_match = patterns.clone();
+      merged.test_match.clone_from(patterns);
     }
     if let Some(ref patterns) = project.test_ignore {
-      merged.test_ignore = patterns.clone();
+      merged.test_ignore.clone_from(patterns);
     }
     if let Some(ref dir) = project.test_dir {
       merged.test_dir = Some(dir.clone());
@@ -1050,7 +1050,7 @@ impl TestConfig {
         merged.browser.executable_path = Some(ep.clone());
       }
       if !pb.args.is_empty() {
-        merged.browser.args = pb.args.clone();
+        merged.browser.args.clone_from(&pb.args);
       }
       if let Some(ref vp) = pb.viewport {
         merged.browser.viewport = Some(vp.clone());

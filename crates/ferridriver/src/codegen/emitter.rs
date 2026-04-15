@@ -103,10 +103,10 @@ impl CodeEmitter for TypeScriptEmitter {
         format!("  await page.goto('{}');\n", escape_js(url))
       },
       Action::Click { locator, .. } => {
-        format!("  await page.{}.click();\n", locator)
+        format!("  await page.{locator}.click();\n")
       },
       Action::Dblclick { locator, .. } => {
-        format!("  await page.{}.dblclick();\n", locator)
+        format!("  await page.{locator}.dblclick();\n")
       },
       Action::Fill { locator, value, .. } => {
         format!("  await page.{}.fill('{}');\n", locator, escape_js(value))
@@ -118,10 +118,10 @@ impl CodeEmitter for TypeScriptEmitter {
         format!("  await page.{}.selectOption('{}');\n", locator, escape_js(value))
       },
       Action::Check { locator, .. } => {
-        format!("  await page.{}.check();\n", locator)
+        format!("  await page.{locator}.check();\n")
       },
       Action::Uncheck { locator, .. } => {
-        format!("  await page.{}.uncheck();\n", locator)
+        format!("  await page.{locator}.uncheck();\n")
       },
     }
   }
@@ -137,7 +137,14 @@ pub struct GherkinEmitter {
   action_count: std::sync::atomic::AtomicU32,
 }
 
+impl Default for GherkinEmitter {
+  fn default() -> Self {
+    Self::new()
+  }
+}
+
 impl GherkinEmitter {
+  #[must_use]
   pub fn new() -> Self {
     Self {
       action_count: std::sync::atomic::AtomicU32::new(0),

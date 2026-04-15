@@ -36,7 +36,7 @@ use ferridriver::backend::BackendKind;
 use ferridriver::state::ConnectMode;
 use serde::Deserialize;
 
-use crate::server::{DEFAULT_INSTRUCTIONS, McpServerConfig};
+use crate::server::{DEFAULT_INSTRUCTIONS, DEFAULT_SERVER_NAME, McpServerConfig};
 
 /// Default TTL for cached command outputs (5 minutes).
 const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -115,7 +115,7 @@ pub struct InstanceConfig {
   pub chrome_args: Vec<String>,
   /// Explicit WebSocket URL to connect to (skip launch).
   pub connect_url: Option<String>,
-  /// Path to Chrome profile directory for DevToolsActivePort discovery.
+  /// Path to Chrome profile directory for `DevToolsActivePort` discovery.
   /// `${INSTANCE}` is replaced with the instance name. Supports `~` expansion.
   pub discover_profile: Option<String>,
 }
@@ -251,8 +251,10 @@ impl McpServerConfig for FileConfig {
       }
       // 2. Profile-based discovery (built-in DevToolsActivePort reader)
       if let Some(ref profile_template) = ic.discover_profile {
-        if let Some(mode) = discover_from_profile(profile_template, instance) {
-          return mode;
+        match discover_from_profile(profile_template, instance) {
+          ProfileDiscovery::Found(mode) => return Some(mode),
+          ProfileDiscovery::Stale => return None,
+          ProfileDiscovery::NotFound => {},
         }
       }
     }
@@ -260,8 +262,10 @@ impl McpServerConfig for FileConfig {
     // 3. Default instance profile discovery
     if let Some(ref default) = self.browser.default_instance {
       if let Some(ref profile_template) = default.discover_profile {
-        if let Some(mode) = discover_from_profile(profile_template, instance) {
-          return mode;
+        match discover_from_profile(profile_template, instance) {
+          ProfileDiscovery::Found(mode) => return Some(mode),
+          ProfileDiscovery::Stale => return None,
+          ProfileDiscovery::NotFound => {},
         }
       }
     }
@@ -286,7 +290,7 @@ impl McpServerConfig for FileConfig {
   }
 
   fn server_name(&self) -> &str {
-    self.server.name.as_deref().unwrap_or("ferridriver")
+    self.server.name.as_deref().unwrap_or(DEFAULT_SERVER_NAME)
   }
 
   fn server_instructions(&self) -> &str {
@@ -304,32 +308,43 @@ impl McpServerConfig for FileConfig {
 
 // ── Profile discovery ───────────────────────────────────────────────────────
 
+/// Result of attempting to discover a browser via a Chrome profile directory.
+enum ProfileDiscovery {
+  /// Browser found and responding at the given connect mode.
+  Found(ConnectMode),
+  /// Profile directory exists but browser is not responding (stale port file).
+  Stale,
+  /// Profile directory or port file does not exist.
+  NotFound,
+}
+
 /// Read `DevToolsActivePort` from a Chrome profile directory and return
 /// a `ConnectMode` if the browser is responding.
-///
-/// Returns `Some(Some(ConnectMode))` if discovered, `Some(None)` if profile
-/// exists but browser is not responding, `None` if profile doesn't exist.
-fn discover_from_profile(profile_template: &str, instance: &str) -> Option<Option<ConnectMode>> {
+fn discover_from_profile(profile_template: &str, instance: &str) -> ProfileDiscovery {
   let template = profile_template.replace("${INSTANCE}", instance);
   let expanded = shellexpand::tilde(&template);
   let profile_dir = Path::new(expanded.as_ref());
 
   let port_file = profile_dir.join("DevToolsActivePort");
-  let content = std::fs::read_to_string(&port_file).ok()?;
+  let Ok(content) = std::fs::read_to_string(&port_file) else {
+    return ProfileDiscovery::NotFound;
+  };
   let mut lines = content.lines();
-  let port: u16 = lines.next()?.parse().ok()?;
+  let Some(port) = lines.next().and_then(|l| l.parse::<u16>().ok()) else {
+    return ProfileDiscovery::NotFound;
+  };
   let path = lines.next().unwrap_or("/");
 
   // Verify browser is actually responding
   let addr = format!("127.0.0.1:{port}");
   if let Ok(sock_addr) = addr.parse() {
     if TcpStream::connect_timeout(&sock_addr, DISCOVER_TCP_TIMEOUT).is_ok() {
-      return Some(Some(ConnectMode::ConnectUrl(format!("ws://127.0.0.1:{port}{path}"))));
+      return ProfileDiscovery::Found(ConnectMode::ConnectUrl(format!("ws://127.0.0.1:{port}{path}")));
     }
   }
 
   // Profile exists but browser not responding -- stale port file
-  Some(None)
+  ProfileDiscovery::Stale
 }
 
 // ── Command cache ───────────────────────────────────────────────────────────
@@ -519,7 +534,7 @@ mod tests {
     let result1 = cache.get_or_exec("echo hello", Duration::from_secs(60));
     assert!(result1.is_ok());
     assert_eq!(
-      result1.as_ref().map(|v| v.as_slice()),
+      result1.as_ref().map(Vec::as_slice),
       Ok(["hello".to_string()].as_slice())
     );
 
@@ -539,7 +554,7 @@ mod tests {
     let result = exec_command("echo 'flag1\nflag2'");
     assert!(result.is_ok());
     let lines = result.unwrap();
-    assert!(lines.len() >= 1); // At least the echo output
+    assert!(!lines.is_empty()); // At least the echo output
     // Test multi-line with explicit newlines via bash $'...' syntax
     let result2 = exec_command("echo flag1 && echo flag2");
     assert_eq!(result2, Ok(vec!["flag1".to_string(), "flag2".to_string()]));
@@ -588,7 +603,7 @@ mod tests {
   fn instance_args_command_json_output() {
     let mut config = FileConfig::default();
     config.browser.instance_args_command =
-      Some(r#"echo '["--dns-prefetch-disable","--instance=${INSTANCE}"]'"#.replace("${INSTANCE}", "dev").into());
+      Some(r#"echo '["--dns-prefetch-disable","--instance=${INSTANCE}"]'"#.replace("${INSTANCE}", "dev"));
     // Use a direct command that produces JSON
     config.browser.instance_args_command = Some(r#"printf '["--dns-prefetch-disable","--tag=dev"]'"#.into());
     let args = config.chrome_args_for_instance("dev");
@@ -1048,7 +1063,7 @@ connect_url = "ws://prod-browser:9222/devtools"
   #[test]
   fn discover_profile_nonexistent_path_returns_none() {
     let result = discover_from_profile("/nonexistent/path/${INSTANCE}/profile", "dev");
-    assert!(result.is_none());
+    assert!(matches!(result, ProfileDiscovery::NotFound));
   }
 
   #[test]
@@ -1061,8 +1076,8 @@ connect_url = "ws://prod-browser:9222/devtools"
     let result = discover_from_profile(dir.to_str().unwrap(), "dev");
     let _ = std::fs::remove_dir_all(&dir);
 
-    // Profile exists but port 59999 isn't listening -> Some(None)
-    assert!(matches!(result, Some(None)));
+    // Profile exists but port 59999 isn't listening -> Stale
+    assert!(matches!(result, ProfileDiscovery::Stale));
   }
 
   #[test]
@@ -1077,7 +1092,7 @@ connect_url = "ws://prod-browser:9222/devtools"
     let result = discover_from_profile(&template, "staging");
     let _ = std::fs::remove_dir_all(&dir);
 
-    // Port 59998 isn't listening -> Some(None), but proves path substitution worked
-    assert!(matches!(result, Some(None)));
+    // Port 59998 isn't listening -> Stale, but proves path substitution worked
+    assert!(matches!(result, ProfileDiscovery::Stale));
   }
 }

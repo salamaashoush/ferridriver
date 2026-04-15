@@ -333,7 +333,7 @@ impl WatchTui {
     if delta < 0 {
       self.scroll_offset = self.scroll_offset.saturating_sub(delta.unsigned_abs());
     } else {
-      self.scroll_offset = (self.scroll_offset + delta as usize).min(max);
+      self.scroll_offset = (self.scroll_offset + delta.unsigned_abs()).min(max);
     }
   }
 
@@ -530,8 +530,8 @@ impl WatchTui {
             match key.code {
               KeyCode::Up | KeyCode::Char('k') => { self.scroll_by(-1, body_height); self.render(); }
               KeyCode::Down | KeyCode::Char('j') => { self.scroll_by(1, body_height); self.render(); }
-              KeyCode::PageUp => { self.scroll_by(-(body_height as isize), body_height); self.render(); }
-              KeyCode::PageDown => { self.scroll_by(body_height as isize, body_height); self.render(); }
+              KeyCode::PageUp => { self.scroll_by(-isize::try_from(body_height).unwrap_or(isize::MAX), body_height); self.render(); }
+              KeyCode::PageDown => { self.scroll_by(isize::try_from(body_height).unwrap_or(isize::MAX), body_height); self.render(); }
               _ => {}
             }
           } else if let Event::Resize(_, _) = event {
@@ -598,8 +598,8 @@ impl WatchTui {
             match key.code {
               KeyCode::Up | KeyCode::Char('k') => { self.scroll_by(-1, body_height); self.render(); continue; }
               KeyCode::Down | KeyCode::Char('j') => { self.scroll_by(1, body_height); self.render(); continue; }
-              KeyCode::PageUp => { self.scroll_by(-(body_height as isize), body_height); self.render(); continue; }
-              KeyCode::PageDown => { self.scroll_by(body_height as isize, body_height); self.render(); continue; }
+              KeyCode::PageUp => { self.scroll_by(-isize::try_from(body_height).unwrap_or(isize::MAX), body_height); self.render(); continue; }
+              KeyCode::PageDown => { self.scroll_by(isize::try_from(body_height).unwrap_or(isize::MAX), body_height); self.render(); continue; }
               _ => {}
             }
 
@@ -763,8 +763,8 @@ fn render_status_line(status: &WatchStatus, width: usize) -> Line<'static> {
       } else {
         0.0
       };
-      let bar_w = (width / 3).max(10).min(40);
-      let filled = (pct / 100.0 * bar_w as f64) as usize;
+      let bar_w = (width / 3).clamp(10, 40);
+      let filled = (*completed * bar_w) / (*total).max(1);
       let empty = bar_w - filled;
       Line::from(vec![
         Span::raw(" "),

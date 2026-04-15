@@ -48,21 +48,19 @@ async fn connect_and_select_pages() {
 
   // --- Connect ---
   eprintln!("[test] {:?} CdpBrowser::<WsTransport>::connect()...", t.elapsed());
-  let browser = CdpBrowser::<WsTransport>::connect(&ws_url)
+  let browser = Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url))
     .await
     .expect("connect failed");
   eprintln!("[test] {:?} connected!", t.elapsed());
 
   // --- Create extra pages via CDP to simulate multiple tabs ---
   eprintln!("[test] {:?} creating extra pages...", t.elapsed());
-  let _ = browser
-    .new_page("data:text/html,<title>Page2</title><body>Hello2</body>", None, None)
-    .await;
+  let _ = Box::pin(browser.new_page("data:text/html,<title>Page2</title><body>Hello2</body>", None, None)).await;
   eprintln!("[test] {:?} created extra page", t.elapsed());
 
   // --- List pages ---
   eprintln!("[test] {:?} browser.pages()...", t.elapsed());
-  let pages = browser.pages().await.expect("pages() failed");
+  let pages = Box::pin(browser.pages()).await.expect("pages() failed");
   eprintln!("[test] {:?} got {} pages", t.elapsed(), pages.len());
 
   // --- Test ops on each page ---
@@ -70,15 +68,13 @@ async fn connect_and_select_pages() {
     eprintln!("\n[test] {:?} === Page {i} ===", t.elapsed());
 
     let t1 = Instant::now();
-    match tokio::time::timeout(std::time::Duration::from_secs(3), page.url()).await {
-      Ok(Ok(Some(url))) => eprintln!("[test]   url = {url} ({:?})", t1.elapsed()),
-      _ => {},
+    if let Ok(Ok(Some(url))) = tokio::time::timeout(std::time::Duration::from_secs(3), page.url()).await {
+      eprintln!("[test]   url = {url} ({:?})", t1.elapsed())
     }
 
     let t2 = Instant::now();
-    match tokio::time::timeout(std::time::Duration::from_secs(3), page.title()).await {
-      Ok(Ok(Some(title))) => eprintln!("[test]   title = {title} ({:?})", t2.elapsed()),
-      _ => {},
+    if let Ok(Ok(Some(title))) = tokio::time::timeout(std::time::Duration::from_secs(3), page.title()).await {
+      eprintln!("[test]   title = {title} ({:?})", t2.elapsed())
     }
   }
 
@@ -86,13 +82,13 @@ async fn connect_and_select_pages() {
   drop(browser);
   eprintln!("\n[test] {:?} === RECONNECT (simulates MCP connect) ===", t.elapsed());
   let t7 = Instant::now();
-  let browser2 = CdpBrowser::<WsTransport>::connect(&ws_url)
+  let browser2 = Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url))
     .await
     .expect("reconnect failed");
   eprintln!("[test] {:?} reconnected ({:?})", t.elapsed(), t7.elapsed());
 
   let t8 = Instant::now();
-  let pages2 = browser2.pages().await.expect("pages() failed");
+  let pages2 = Box::pin(browser2.pages()).await.expect("pages() failed");
   eprintln!(
     "[test] {:?} got {} pages ({:?})",
     t.elapsed(),

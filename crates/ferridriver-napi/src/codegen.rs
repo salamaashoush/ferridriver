@@ -39,7 +39,7 @@ impl Codegen {
 
     let options = ferridriver::codegen::recorder::RecorderOptions {
       url: config.url,
-      language: ferridriver::codegen::OutputLanguage::from_str(config.language.as_deref().unwrap_or("rust")),
+      language: ferridriver::codegen::OutputLanguage::parse_cli(config.language.as_deref().unwrap_or("rust")),
       output_file: config.output_file,
       viewport,
     };

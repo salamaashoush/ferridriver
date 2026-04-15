@@ -182,13 +182,13 @@ async fn bench_parallel_scaling() {
   println!("============================================================\n");
 
   // Warm up: single test to launch browser.
-  run_bench("warmup (browser launch)", 1, 1).await;
+  Box::pin(run_bench("warmup (browser launch)", 1, 1)).await;
   println!();
 
   // Worker scaling: 20 tests.
-  let t1 = run_bench("20 tests, 1 worker", 20, 1).await;
-  let t2 = run_bench("20 tests, 2 workers", 20, 2).await;
-  let t4 = run_bench("20 tests, 4 workers", 20, 4).await;
+  let t1 = Box::pin(run_bench("20 tests, 1 worker", 20, 1)).await;
+  let t2 = Box::pin(run_bench("20 tests, 2 workers", 20, 2)).await;
+  let t4 = Box::pin(run_bench("20 tests, 4 workers", 20, 4)).await;
 
   println!();
   println!("  Speedup 1→2: {:.2}x", t1.as_secs_f64() / t2.as_secs_f64());
@@ -196,8 +196,8 @@ async fn bench_parallel_scaling() {
   println!();
 
   // Throughput: 50 tests (matches Playwright bench).
-  let t50_4 = run_bench("50 tests, 4 workers", 50, 4).await;
-  let t50_6 = run_bench("50 tests, 6 workers", 50, 6).await;
+  let t50_4 = Box::pin(run_bench("50 tests, 4 workers", 50, 4)).await;
+  let t50_6 = Box::pin(run_bench("50 tests, 6 workers", 50, 6)).await;
 
   println!();
   println!("  Playwright comparison (50 tests): ~2200ms (self-reported)");
@@ -214,8 +214,8 @@ async fn bench_parallel_scaling() {
   println!();
 
   // Large scale: 100 tests.
-  run_bench("100 tests, 4 workers", 100, 4).await;
-  run_bench("100 tests, 6 workers", 100, 6).await;
+  Box::pin(run_bench("100 tests, 4 workers", 100, 4)).await;
+  Box::pin(run_bench("100 tests, 6 workers", 100, 6)).await;
 
   println!("\n============================================================\n");
 }

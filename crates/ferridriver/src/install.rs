@@ -1004,7 +1004,7 @@ fn arch_chromium_packages() -> Vec<&'static str> {
 // Firefox platform helpers
 // ---------------------------------------------------------------------------
 
-/// Return (platform_dir, archive_filename, archive_extension) for Firefox downloads.
+/// Return (`platform_dir`, `archive_filename`, `archive_extension`) for Firefox downloads.
 /// Matches Puppeteer's `archive()` and `platformName()` for stable channel.
 fn firefox_archive_info(version: &str) -> Result<(String, String, String), String> {
   let os = std::env::consts::OS;

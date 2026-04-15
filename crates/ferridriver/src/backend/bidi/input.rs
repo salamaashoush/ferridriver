@@ -1,15 +1,28 @@
-//! Input action builders for WebDriver BiDi `input.performActions`.
+//! Input action builders for `WebDriver` `BiDi` `input.performActions`.
 //!
 //! Provides ergonomic builders for composing mouse, keyboard, and wheel actions
-//! into the BiDi action chain format. All convenience methods return ready-to-send
+//! into the `BiDi` action chain format. All convenience methods return ready-to-send
 //! `serde_json::Value` params.
 
 use serde_json::json;
 
+/// Convert f64 pixel coordinate to a JSON integer for the `BiDi` protocol.
+/// Rounds to nearest integer and produces a `serde_json::Value::Number` without
+/// any `as` cast between float and integer types.
+fn coord(v: f64) -> serde_json::Value {
+  let rounded = v.round();
+  if rounded.is_finite() {
+    serde_json::from_str(&format!("{rounded:.0}")).unwrap_or_else(|_| serde_json::Value::from(0))
+  } else {
+    serde_json::Value::from(0)
+  }
+}
+
 // ── Key Mapping ────────────────────────────────────────────────────────────
 
-/// Map Playwright-style key names to WebDriver Unicode PUA values.
+/// Map Playwright-style key names to `WebDriver` Unicode PUA values.
 /// Single characters pass through unchanged.
+#[must_use]
 pub fn key_to_bidi(key: &str) -> String {
   match key {
     // Navigation keys
@@ -75,12 +88,13 @@ pub fn key_to_bidi(key: &str) -> String {
   }
 }
 
-/// Map Playwright button name to BiDi button number.
+/// Map Playwright button name to `BiDi` button number.
+#[must_use]
 pub fn button_name_to_id(name: &str) -> u32 {
   match name {
-    "left" => 0,
     "middle" => 1,
     "right" => 2,
+    // "left" and anything unrecognized default to button 0 (primary).
     _ => 0,
   }
 }
@@ -88,6 +102,7 @@ pub fn button_name_to_id(name: &str) -> u32 {
 // ── Action Builders ────────────────────────────────────────────────────────
 
 /// Build a click action at coordinates.
+#[must_use]
 pub fn click(context: &str, x: f64, y: f64) -> serde_json::Value {
   json!({
     "context": context,
@@ -96,7 +111,7 @@ pub fn click(context: &str, x: f64, y: f64) -> serde_json::Value {
       "id": "mouse",
       "parameters": {"pointerType": "mouse"},
       "actions": [
-        {"type": "pointerMove", "x": x as i64, "y": y as i64, "duration": 0},
+        {"type": "pointerMove", "x": coord(x), "y": coord(y), "duration": 0},
         {"type": "pointerDown", "button": 0},
         {"type": "pointerUp", "button": 0}
       ]
@@ -105,8 +120,9 @@ pub fn click(context: &str, x: f64, y: f64) -> serde_json::Value {
 }
 
 /// Build a click with specific button and click count.
+#[must_use]
 pub fn click_button(context: &str, x: f64, y: f64, button: u32, count: u32) -> serde_json::Value {
-  let mut actions = vec![json!({"type": "pointerMove", "x": x as i64, "y": y as i64, "duration": 0})];
+  let mut actions = vec![json!({"type": "pointerMove", "x": coord(x), "y": coord(y), "duration": 0})];
   for _ in 0..count {
     actions.push(json!({"type": "pointerDown", "button": button}));
     actions.push(json!({"type": "pointerUp", "button": button}));
@@ -123,6 +139,7 @@ pub fn click_button(context: &str, x: f64, y: f64, button: u32, count: u32) -> s
 }
 
 /// Build a pointer move action.
+#[must_use]
 pub fn pointer_move(context: &str, x: f64, y: f64) -> serde_json::Value {
   json!({
     "context": context,
@@ -131,13 +148,14 @@ pub fn pointer_move(context: &str, x: f64, y: f64) -> serde_json::Value {
       "id": "mouse",
       "parameters": {"pointerType": "mouse"},
       "actions": [
-        {"type": "pointerMove", "x": x as i64, "y": y as i64, "duration": 0}
+        {"type": "pointerMove", "x": coord(x), "y": coord(y), "duration": 0}
       ]
     }]
   })
 }
 
 /// Build a smooth mouse move with multiple interpolated steps.
+#[must_use]
 pub fn pointer_move_smooth(
   context: &str,
   from_x: f64,
@@ -147,13 +165,13 @@ pub fn pointer_move_smooth(
   steps: u32,
 ) -> serde_json::Value {
   let mut actions = Vec::with_capacity(steps as usize + 1);
-  actions.push(json!({"type": "pointerMove", "x": from_x as i64, "y": from_y as i64, "duration": 0}));
+  actions.push(json!({"type": "pointerMove", "x": coord(from_x), "y": coord(from_y), "duration": 0}));
   for i in 1..=steps {
     let t = f64::from(i) / f64::from(steps);
     let x = from_x + (to_x - from_x) * t;
     let y = from_y + (to_y - from_y) * t;
     let duration = if steps > 1 { 100 / steps } else { 0 };
-    actions.push(json!({"type": "pointerMove", "x": x as i64, "y": y as i64, "duration": duration}));
+    actions.push(json!({"type": "pointerMove", "x": coord(x), "y": coord(y), "duration": duration}));
   }
   json!({
     "context": context,
@@ -167,6 +185,7 @@ pub fn pointer_move_smooth(
 }
 
 /// Build a mouse down action.
+#[must_use]
 pub fn mouse_down(context: &str, x: f64, y: f64, button: u32) -> serde_json::Value {
   json!({
     "context": context,
@@ -175,7 +194,7 @@ pub fn mouse_down(context: &str, x: f64, y: f64, button: u32) -> serde_json::Val
       "id": "mouse",
       "parameters": {"pointerType": "mouse"},
       "actions": [
-        {"type": "pointerMove", "x": x as i64, "y": y as i64, "duration": 0},
+        {"type": "pointerMove", "x": coord(x), "y": coord(y), "duration": 0},
         {"type": "pointerDown", "button": button}
       ]
     }]
@@ -183,6 +202,7 @@ pub fn mouse_down(context: &str, x: f64, y: f64, button: u32) -> serde_json::Val
 }
 
 /// Build a mouse up action.
+#[must_use]
 pub fn mouse_up(context: &str, x: f64, y: f64, button: u32) -> serde_json::Value {
   json!({
     "context": context,
@@ -191,7 +211,7 @@ pub fn mouse_up(context: &str, x: f64, y: f64, button: u32) -> serde_json::Value
       "id": "mouse",
       "parameters": {"pointerType": "mouse"},
       "actions": [
-        {"type": "pointerMove", "x": x as i64, "y": y as i64, "duration": 0},
+        {"type": "pointerMove", "x": coord(x), "y": coord(y), "duration": 0},
         {"type": "pointerUp", "button": button}
       ]
     }]
@@ -199,6 +219,7 @@ pub fn mouse_up(context: &str, x: f64, y: f64, button: u32) -> serde_json::Value
 }
 
 /// Build a click-and-drag action.
+#[must_use]
 pub fn click_and_drag(context: &str, from: (f64, f64), to: (f64, f64)) -> serde_json::Value {
   json!({
     "context": context,
@@ -207,9 +228,9 @@ pub fn click_and_drag(context: &str, from: (f64, f64), to: (f64, f64)) -> serde_
       "id": "mouse",
       "parameters": {"pointerType": "mouse"},
       "actions": [
-        {"type": "pointerMove", "x": from.0 as i64, "y": from.1 as i64, "duration": 0},
+        {"type": "pointerMove", "x": coord(from.0), "y": coord(from.1), "duration": 0},
         {"type": "pointerDown", "button": 0},
-        {"type": "pointerMove", "x": to.0 as i64, "y": to.1 as i64, "duration": 250},
+        {"type": "pointerMove", "x": coord(to.0), "y": coord(to.1), "duration": 250},
         {"type": "pointerUp", "button": 0}
       ]
     }]
@@ -217,6 +238,7 @@ pub fn click_and_drag(context: &str, from: (f64, f64), to: (f64, f64)) -> serde_
 }
 
 /// Build a wheel scroll action.
+#[must_use]
 pub fn wheel_scroll(context: &str, delta_x: f64, delta_y: f64) -> serde_json::Value {
   json!({
     "context": context,
@@ -224,13 +246,14 @@ pub fn wheel_scroll(context: &str, delta_x: f64, delta_y: f64) -> serde_json::Va
       "type": "wheel",
       "id": "wheel",
       "actions": [
-        {"type": "scroll", "x": 0, "y": 0, "deltaX": delta_x as i64, "deltaY": delta_y as i64, "duration": 0}
+        {"type": "scroll", "x": 0, "y": 0, "deltaX": coord(delta_x), "deltaY": coord(delta_y), "duration": 0}
       ]
     }]
   })
 }
 
 /// Build a type-text action (sequence of keyDown+keyUp for each character).
+#[must_use]
 pub fn type_text(context: &str, text: &str) -> serde_json::Value {
   let mut actions = Vec::with_capacity(text.len() * 2);
   for ch in text.chars() {
@@ -249,6 +272,7 @@ pub fn type_text(context: &str, text: &str) -> serde_json::Value {
 }
 
 /// Build a single keyDown action (does NOT release the key).
+#[must_use]
 pub fn key_down(context: &str, key: &str) -> serde_json::Value {
   let bidi_key = key_to_bidi(key);
   json!({
@@ -264,6 +288,7 @@ pub fn key_down(context: &str, key: &str) -> serde_json::Value {
 }
 
 /// Build a single keyUp action.
+#[must_use]
 pub fn key_up(context: &str, key: &str) -> serde_json::Value {
   let bidi_key = key_to_bidi(key);
   json!({
@@ -279,6 +304,7 @@ pub fn key_up(context: &str, key: &str) -> serde_json::Value {
 }
 
 /// Build a key press action (keyDown + keyUp).
+#[must_use]
 pub fn press_key(context: &str, key: &str) -> serde_json::Value {
   // Handle modifier+key combos like "Control+a", "Shift+Enter"
   let parts: Vec<&str> = key.split('+').collect();

@@ -64,8 +64,8 @@ impl Recorder {
 
     // Launch headed browser.
     let viewport = self.options.viewport.map(|(w, h)| crate::options::ViewportConfig {
-      width: w as i64,
-      height: h as i64,
+      width: i64::from(w),
+      height: i64::from(h),
       ..Default::default()
     });
     let browser = Browser::launch(LaunchOptions {
@@ -76,7 +76,7 @@ impl Recorder {
     .await?;
 
     let ctx = browser.new_context();
-    let page = ctx.new_page().await?;
+    let page = Box::pin(ctx.new_page()).await?;
     page.goto(&self.options.url, None).await?;
 
     // Expose the action callback: JS -> Rust bridge.

@@ -1,6 +1,6 @@
-//! BiDi page -- implements the full ferridriver page API over the BiDi protocol.
+//! `BiDi` page -- implements the full ferridriver page API over the `BiDi` protocol.
 //!
-//! Each method maps to one or more BiDi commands. Navigation uses BiDi's built-in
+//! Each method maps to one or more `BiDi` commands. Navigation uses `BiDi`'s built-in
 //! `wait` parameter for lifecycle synchronization (no register-before-navigate race).
 
 use std::sync::Arc;
@@ -21,7 +21,7 @@ use crate::backend::{
 use crate::events::{EventEmitter, NetResponse, PageEvent};
 use crate::state::{ConsoleMsg, DialogEvent, NetRequest};
 
-/// Page handle for the BiDi backend. Cheaply cloneable (Arc-based).
+/// Page handle for the `BiDi` backend. Cheaply cloneable (Arc-based).
 #[derive(Clone)]
 pub struct BidiPage {
   pub(crate) session: Arc<BidiSession>,
@@ -72,10 +72,12 @@ impl InjectedScriptManager {
   }
 }
 impl BidiPage {
-  /// Create a new BidiPage and enable required domains (inject engine, etc.).
-  /// This is the BiDi equivalent of CDP's `enable_domains()`.
-  pub(crate) fn create(session: Arc<BidiSession>, context_id: String) -> Result<Self, String> {
-    let page = Self {
+  /// Create a new `BidiPage` and enable required domains (inject engine, etc.).
+  /// This is the `BiDi` equivalent of CDP's `enable_domains()`.
+  pub(crate) fn create(session: Arc<BidiSession>, context_id: String) -> Self {
+    // BiDi handles navigation-aware injection via script.addPreloadScript.
+    // Domain enables are deferred (lazy injection), unlike CDP's upfront enable_domains().
+    Self {
       session,
       context_id: Arc::from(context_id),
       events: EventEmitter::new(),
@@ -86,23 +88,10 @@ impl BidiPage {
       exposed_fns: Arc::new(RwLock::new(FxHashMap::default())),
       dialog_handler: Arc::new(RwLock::new(crate::events::default_dialog_handler())),
       injected_script: Arc::new(InjectedScriptManager::new()),
-    };
-
-    page.enable_domains()?;
-    Ok(page)
+    }
   }
 
-  /// Enable required BiDi domains on this page context.
-  /// Injects the ferridriver engine JS (selector helpers, click guards, actionability).
-  /// This mirrors CDP's `enable_domains()` which fires `Page.addScriptToEvaluateOnNewDocument`
-  /// + domain enables in parallel.
-  fn enable_domains(&self) -> Result<(), String> {
-    // BiDi handles navigation-aware injection via script.addPreloadScript.
-    // However, we want lazy injection, so we skip upfront injection here.
-    Ok(())
-  }
-
-  /// Helper: send a BiDi command.
+  /// Helper: send a `BiDi` command.
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
     self.session.transport.send_command(method, params).await
   }
@@ -139,7 +128,7 @@ impl BidiPage {
     }
   }
 
-  /// Map NavLifecycle to BiDi readiness state.
+  /// Map `NavLifecycle` to `BiDi` readiness state.
   fn lifecycle_to_wait(lifecycle: NavLifecycle) -> &'static str {
     match lifecycle {
       NavLifecycle::Commit => "none",
@@ -328,14 +317,14 @@ impl BidiPage {
 
   pub async fn url(&self) -> Result<Option<String>, String> {
     self
-      .eval_internal("location.href", &&*self.context_id)
+      .eval_internal("location.href", &self.context_id)
       .await
       .map(|v| v.and_then(|val| val.as_str().map(String::from)))
   }
 
   pub async fn title(&self) -> Result<Option<String>, String> {
     self
-      .eval_internal("document.title", &&*self.context_id)
+      .eval_internal("document.title", &self.context_id)
       .await
       .map(|v| v.and_then(|val| val.as_str().map(String::from)))
   }
@@ -354,7 +343,7 @@ impl BidiPage {
   }
 
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
-    self.eval_internal(expression, &&*self.context_id).await
+    self.eval_internal(expression, &self.context_id).await
   }
 
   // ── Elements ────────────────────────────────────────────────────────────
@@ -371,7 +360,7 @@ impl BidiPage {
   pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
     // The JS can be either an expression or a function.
     // Use script.evaluate for expressions, script.callFunction for functions.
-    let is_function = js.trim_start().starts_with("function") || js.trim_start().starts_with("(");
+    let is_function = js.trim_start().starts_with("function") || js.trim_start().starts_with('(');
 
     let result = if is_function {
       self
@@ -423,7 +412,7 @@ impl BidiPage {
 
   pub async fn content(&self) -> Result<String, String> {
     let result = self
-      .eval_internal("document.documentElement.outerHTML", &&*self.context_id)
+      .eval_internal("document.documentElement.outerHTML", &self.context_id)
       .await?;
     Ok(result.and_then(|v| v.as_str().map(String::from)).unwrap_or_default())
   }
@@ -452,7 +441,10 @@ impl BidiPage {
       ImageFormat::Jpeg => "image/jpeg",
       ImageFormat::Webp => "image/webp",
     };
-    let quality = opts.quality.map(|q| q as f64 / 100.0);
+    let quality = opts.quality.map(|q| {
+      // Quality is 0-100; narrow to i32 for lossless f64 conversion.
+      f64::from(i32::try_from(q.clamp(0, 100)).unwrap_or(100)) / 100.0
+    });
     let origin = if opts.full_page { "document" } else { "viewport" };
 
     let mut params = json!({
@@ -524,7 +516,7 @@ impl BidiPage {
     let result = self
       .eval_internal(
         &format!("JSON.stringify({fd}.accessibilityTree({max_depth}))"),
-        &&*self.context_id,
+        &self.context_id,
       )
       .await?;
 
@@ -546,19 +538,27 @@ impl BidiPage {
           });
         }
       }
-      if item.get("disabled").and_then(|v| v.as_bool()).unwrap_or(false) {
+      if item
+        .get("disabled")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+      {
         properties.push(AxProperty {
           name: "disabled".into(),
           value: Some(serde_json::Value::Bool(true)),
         });
       }
-      if item.get("readonly").and_then(|v| v.as_bool()).unwrap_or(false) {
+      if item
+        .get("readonly")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+      {
         properties.push(AxProperty {
           name: "readonly".into(),
           value: Some(serde_json::Value::Bool(true)),
         });
       }
-      let level = item.get("level").and_then(|v| v.as_i64()).unwrap_or(0);
+      let level = item.get("level").and_then(serde_json::Value::as_i64).unwrap_or(0);
       if level > 0 {
         properties.push(AxProperty {
           name: "level".into(),
@@ -573,7 +573,11 @@ impl BidiPage {
           });
         }
       }
-      if item.get("required").and_then(|v| v.as_bool()).unwrap_or(false) {
+      if item
+        .get("required")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+      {
         properties.push(AxProperty {
           name: "required".into(),
           value: Some(serde_json::Value::Bool(true)),
@@ -591,8 +595,11 @@ impl BidiPage {
       nodes.push(AxNodeData {
         node_id: item.get("nodeId").and_then(|v| v.as_str()).unwrap_or("").to_string(),
         parent_id: item.get("parentId").and_then(|v| v.as_str()).map(String::from),
-        backend_dom_node_id: item.get("backendId").and_then(|v| v.as_i64()),
-        ignored: item.get("ignored").and_then(|v| v.as_bool()).unwrap_or(false),
+        backend_dom_node_id: item.get("backendId").and_then(serde_json::Value::as_i64),
+        ignored: item
+          .get("ignored")
+          .and_then(serde_json::Value::as_bool)
+          .unwrap_or(false),
         role: item.get("role").and_then(|v| v.as_str()).map(String::from),
         name: item.get("name").and_then(|v| v.as_str()).map(String::from),
         description: item.get("description").and_then(|v| v.as_str()).map(String::from),
@@ -606,7 +613,7 @@ impl BidiPage {
 
   pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
     self
-      .cmd("input.performActions", input::click(&&*self.context_id, x, y))
+      .cmd("input.performActions", input::click(&self.context_id, x, y))
       .await?;
     Ok(())
   }
@@ -616,7 +623,7 @@ impl BidiPage {
     self
       .cmd(
         "input.performActions",
-        input::click_button(&&*self.context_id, x, y, btn, click_count),
+        input::click_button(&self.context_id, x, y, btn, click_count),
       )
       .await?;
     Ok(())
@@ -624,7 +631,7 @@ impl BidiPage {
 
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
     self
-      .cmd("input.performActions", input::pointer_move(&&*self.context_id, x, y))
+      .cmd("input.performActions", input::pointer_move(&self.context_id, x, y))
       .await?;
     Ok(())
   }
@@ -640,7 +647,7 @@ impl BidiPage {
     self
       .cmd(
         "input.performActions",
-        input::pointer_move_smooth(&&*self.context_id, from_x, from_y, to_x, to_y, steps),
+        input::pointer_move_smooth(&self.context_id, from_x, from_y, to_x, to_y, steps),
       )
       .await?;
     Ok(())
@@ -650,7 +657,7 @@ impl BidiPage {
     self
       .cmd(
         "input.performActions",
-        input::wheel_scroll(&&*self.context_id, delta_x, delta_y),
+        input::wheel_scroll(&self.context_id, delta_x, delta_y),
       )
       .await?;
     Ok(())
@@ -659,7 +666,7 @@ impl BidiPage {
   pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
     let btn = input::button_name_to_id(button);
     self
-      .cmd("input.performActions", input::mouse_down(&&*self.context_id, x, y, btn))
+      .cmd("input.performActions", input::mouse_down(&self.context_id, x, y, btn))
       .await?;
     Ok(())
   }
@@ -667,7 +674,7 @@ impl BidiPage {
   pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
     let btn = input::button_name_to_id(button);
     self
-      .cmd("input.performActions", input::mouse_up(&&*self.context_id, x, y, btn))
+      .cmd("input.performActions", input::mouse_up(&self.context_id, x, y, btn))
       .await?;
     Ok(())
   }
@@ -676,7 +683,7 @@ impl BidiPage {
     self
       .cmd(
         "input.performActions",
-        input::click_and_drag(&&*self.context_id, from, to),
+        input::click_and_drag(&self.context_id, from, to),
       )
       .await?;
     Ok(())
@@ -684,7 +691,7 @@ impl BidiPage {
 
   pub async fn type_str(&self, text: &str) -> Result<(), String> {
     self
-      .cmd("input.performActions", input::type_text(&&*self.context_id, text))
+      .cmd("input.performActions", input::type_text(&self.context_id, text))
       .await?;
     Ok(())
   }
@@ -748,7 +755,14 @@ impl BidiPage {
       cookie_obj["httpOnly"] = json!(true);
     }
     if let Some(expires) = cookie.expires {
-      cookie_obj["expiry"] = json!(expires as u64);
+      // Cookie expiry is a Unix timestamp (seconds). Convert to a JSON integer
+      // without a direct float-to-int cast by formatting and re-parsing.
+      let rounded = expires.round();
+      if rounded.is_finite() && rounded >= 0.0 {
+        if let Ok(v) = serde_json::from_str::<serde_json::Value>(&format!("{rounded:.0}")) {
+          cookie_obj["expiry"] = v;
+        }
+      }
     }
     if let Some(ref ss) = cookie.same_site {
       cookie_obj["sameSite"] = json!(ss.as_str().to_lowercase());
@@ -891,12 +905,12 @@ impl BidiPage {
     // Media type requires JS workaround (no direct BiDi command)
     if let Some(ref media) = opts.media {
       let js = format!(
-        r#"() => {{
+        r"() => {{
           const style = document.createElement('style');
           style.setAttribute('media', '{media}');
           style.textContent = '/* emulate media */';
           document.head.appendChild(style);
-        }}"#
+        }}"
       );
       let _ = self
         .cmd(
@@ -926,29 +940,37 @@ impl BidiPage {
     Ok(())
   }
 
-  pub async fn set_bypass_csp(&self, _enabled: bool) -> Result<(), String> {
-    // BiDi does not have a direct equivalent. Stubbed.
-    Ok(())
+  pub fn set_bypass_csp(&self, _enabled: bool) -> impl std::future::Future<Output = Result<(), String>> {
+    let _ = &self.context_id;
+    std::future::ready(Ok(()))
   }
 
-  pub async fn set_ignore_certificate_errors(&self, _ignore: bool) -> Result<(), String> {
-    // BiDi: acceptInsecureCerts is set at session level, not per-page. Stubbed.
-    Ok(())
+  pub fn set_ignore_certificate_errors(&self, _ignore: bool) -> impl std::future::Future<Output = Result<(), String>> {
+    let _ = &self.context_id;
+    std::future::ready(Ok(()))
   }
 
-  pub async fn set_download_behavior(&self, _behavior: &str, _download_path: &str) -> Result<(), String> {
-    // BiDi download behavior is not standardized yet. Stubbed.
-    Ok(())
+  pub fn set_download_behavior(
+    &self,
+    _behavior: &str,
+    _download_path: &str,
+  ) -> impl std::future::Future<Output = Result<(), String>> {
+    let _ = &self.context_id;
+    std::future::ready(Ok(()))
   }
 
-  pub async fn set_http_credentials(&self, _username: &str, _password: &str) -> Result<(), String> {
-    // BiDi: use network.addIntercept for auth. Stubbed.
-    Ok(())
+  pub fn set_http_credentials(
+    &self,
+    _username: &str,
+    _password: &str,
+  ) -> impl std::future::Future<Output = Result<(), String>> {
+    let _ = &self.context_id;
+    std::future::ready(Ok(()))
   }
 
-  pub async fn set_service_workers_blocked(&self, _blocked: bool) -> Result<(), String> {
-    // BiDi does not have service worker control yet. Stubbed.
-    Ok(())
+  pub fn set_service_workers_blocked(&self, _blocked: bool) -> impl std::future::Future<Output = Result<(), String>> {
+    let _ = &self.context_id;
+    std::future::ready(Ok(()))
   }
 
   pub async fn set_extra_http_headers(&self, headers: &FxHashMap<String, String>) -> Result<(), String> {
@@ -974,13 +996,18 @@ impl BidiPage {
     Ok(())
   }
 
-  pub async fn grant_permissions(&self, _permissions: &[String], _origin: Option<&str>) -> Result<(), String> {
-    // BiDi has no permissions API -- use JS Permissions API as best-effort
-    Err("Permissions API not available in BiDi backend".into())
+  pub fn grant_permissions(
+    &self,
+    _permissions: &[String],
+    _origin: Option<&str>,
+  ) -> impl std::future::Future<Output = Result<(), String>> {
+    let _ = &self.context_id;
+    std::future::ready(Err("Permissions API not available in BiDi backend".into()))
   }
 
-  pub async fn reset_permissions(&self) -> Result<(), String> {
-    Err("Permissions API not available in BiDi backend".into())
+  pub fn reset_permissions(&self) -> impl std::future::Future<Output = Result<(), String>> {
+    let _ = &self.context_id;
+    std::future::ready(Err("Permissions API not available in BiDi backend".into()))
   }
 
   pub async fn set_focus_emulation_enabled(&self, _enabled: bool) -> Result<(), String> {
@@ -1011,16 +1038,19 @@ impl BidiPage {
 
   // ── Tracing ─────────────────────────────────────────────────────────────
 
-  pub async fn start_tracing(&self) -> Result<(), String> {
-    Err("Tracing not supported on BiDi backend".into())
+  pub fn start_tracing(&self) -> impl std::future::Future<Output = Result<(), String>> {
+    let _ = &self.context_id;
+    std::future::ready(Err("Tracing not supported on BiDi backend".into()))
   }
 
-  pub async fn stop_tracing(&self) -> Result<(), String> {
-    Err("Tracing not supported on BiDi backend".into())
+  pub fn stop_tracing(&self) -> impl std::future::Future<Output = Result<(), String>> {
+    let _ = &self.context_id;
+    std::future::ready(Err("Tracing not supported on BiDi backend".into()))
   }
 
-  pub async fn metrics(&self) -> Result<Vec<MetricData>, String> {
-    Err("Performance metrics not supported on BiDi backend".into())
+  pub fn metrics(&self) -> impl std::future::Future<Output = Result<Vec<MetricData>, String>> {
+    let _ = &self.context_id;
+    std::future::ready(Err("Performance metrics not supported on BiDi backend".into()))
   }
 
   // ── Ref resolution ──────────────────────────────────────────────────────
@@ -1072,93 +1102,10 @@ impl BidiPage {
             emitter.emit(PageEvent::Console(msg));
           },
           "network.beforeRequestSent" => {
-            if let Some(req) = event.params.get("request") {
-              let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-              let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string();
-              let id = req.get("request").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-              // Defer header parsing — only parse when there are active event subscribers.
-              // Most requests don't need full header parsing on the hot path.
-              let has_listeners = emitter.receiver_count() > 0;
-              let headers = if has_listeners {
-                req.get("headers").map(parse_bidi_headers)
-              } else {
-                None
-              };
-
-              let resource_type = event
-                .params
-                .get("initiator")
-                .and_then(|i| i.get("type"))
-                .and_then(|v| v.as_str())
-                .map(|t| match t {
-                  "parser" => "Document",
-                  "script" => "Script",
-                  "preflight" => "Preflight",
-                  other => other,
-                })
-                .unwrap_or("")
-                .to_string();
-
-              let post_data = req
-                .get("body")
-                .and_then(|b| b.get("value"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-
-              let mime_type = headers
-                .as_ref()
-                .and_then(|h| h.get("content-type").or_else(|| h.get("Content-Type")).cloned());
-
-              let net_request = NetRequest {
-                id,
-                url,
-                method,
-                status: None,
-                resource_type,
-                mime_type,
-                headers,
-                post_data,
-              };
-              if has_listeners {
-                emitter.emit(PageEvent::Request(net_request.clone()));
-              }
-              network_log.write().await.push(net_request);
-            }
+            handle_request_sent(&event.params, &emitter, &network_log).await;
           },
           "network.responseCompleted" => {
-            let response = &event.params.get("response");
-            let request = &event.params.get("request");
-            if let (Some(resp), Some(req)) = (response, request) {
-              let request_id = req.get("request").and_then(|v| v.as_str()).unwrap_or("");
-              let status = resp.get("status").and_then(|v| v.as_i64());
-              let status_text = resp
-                .get("statusText")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-              let mime_type = resp.get("mimeType").and_then(|v| v.as_str()).unwrap_or("").to_string();
-              let url = resp.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-              // Extract response headers from BiDi format
-              let headers = resp.get("headers").map(parse_bidi_headers);
-
-              // Update existing network log entry
-              let mut log = network_log.write().await;
-              if let Some(entry) = log.iter_mut().find(|e| e.id == request_id) {
-                entry.status = status;
-                entry.mime_type = Some(mime_type.clone());
-              }
-
-              emitter.emit(PageEvent::Response(NetResponse {
-                request_id: request_id.to_string(),
-                url,
-                status: status.unwrap_or(0),
-                status_text,
-                mime_type,
-                headers,
-              }));
-            }
+            handle_response_completed(&event.params, &emitter, &network_log).await;
           },
           "browsingContext.userPromptOpened" => {
             let prompt_type = event.params.get("type").and_then(|v| v.as_str()).unwrap_or("alert");
@@ -1237,15 +1184,15 @@ impl BidiPage {
   // ── Screencast (not supported) ──────────────────────────────────────────
 
   /// Start screencast via repeated screenshots + event-driven captures.
-  /// BiDi has no native screencast API. We combine polling at ~15 fps with
+  /// `BiDi` has no native screencast API. We combine polling at ~15 fps with
   /// captures on navigation/load events to ensure key visual transitions
   /// are recorded even for fast tests.
-  pub async fn start_screencast(
+  pub fn start_screencast(
     &self,
     quality: u8,
     _max_width: u32,
     _max_height: u32,
-  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>, String> {
+  ) -> impl std::future::Future<Output = Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>, String>> {
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
     let session = self.session.clone();
     let ctx_id = self.context_id.clone();
@@ -1312,7 +1259,7 @@ impl BidiPage {
         // navigation events to capture content transitions.
         let elapsed = frame_start.elapsed();
         if elapsed < target_interval {
-          let remaining = target_interval - elapsed;
+          let remaining = target_interval.checked_sub(elapsed).unwrap_or_default();
           tokio::select! {
             () = tokio::time::sleep(remaining) => {},
             () = event_notify.notified() => {},
@@ -1321,11 +1268,12 @@ impl BidiPage {
       }
     });
 
-    Ok(rx)
+    std::future::ready(Ok(rx))
   }
 
-  pub async fn stop_screencast(&self) -> Result<(), String> {
-    Ok(())
+  pub fn stop_screencast(&self) -> impl std::future::Future<Output = Result<(), String>> {
+    let _ = &self.context_id;
+    std::future::ready(Ok(()))
   }
 
   // ── File upload ─────────────────────────────────────────────────────────
@@ -1394,7 +1342,11 @@ impl BidiPage {
           if event_ctx != &*ctx {
             continue;
           }
-          let is_blocked = event.params.get("isBlocked").and_then(|v| v.as_bool()).unwrap_or(false);
+          let is_blocked = event
+            .params
+            .get("isBlocked")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false);
           if !is_blocked {
             continue;
           }
@@ -1487,6 +1439,7 @@ impl BidiPage {
     Ok(())
   }
 
+  #[must_use]
   pub fn is_closed(&self) -> bool {
     self.closed.load(Ordering::Relaxed)
   }
@@ -1537,7 +1490,7 @@ impl BidiPage {
   pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<(), String> {
     // Inject a global function that sends messages via BiDi channel
     let js = format!(
-      r#"() => {{
+      r"() => {{
         window['{name}'] = (...args) => {{
           return new Promise((resolve) => {{
             const id = Math.random().toString(36);
@@ -1546,7 +1499,7 @@ impl BidiPage {
             console.log(JSON.stringify({{__ferri_call: '{name}', id, args}}));
           }});
         }};
-      }}"#
+      }}"
     );
 
     self
@@ -1605,6 +1558,101 @@ fn collect_frames(ctx: &serde_json::Value, parent_id: Option<&str>, frames: &mut
   }
 }
 
+/// Handle a `network.beforeRequestSent` event: parse the request, log it, emit it.
+async fn handle_request_sent(
+  params: &serde_json::Value,
+  emitter: &EventEmitter,
+  network_log: &Arc<RwLock<Vec<NetRequest>>>,
+) {
+  let Some(req) = params.get("request") else { return };
+  let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+  let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string();
+  let id = req.get("request").and_then(|v| v.as_str()).unwrap_or("").to_string();
+
+  let has_listeners = emitter.receiver_count() > 0;
+  let headers = if has_listeners {
+    req.get("headers").map(parse_bidi_headers)
+  } else {
+    None
+  };
+
+  let resource_type = params
+    .get("initiator")
+    .and_then(|i| i.get("type"))
+    .and_then(|v| v.as_str())
+    .map_or("", |t| match t {
+      "parser" => "Document",
+      "script" => "Script",
+      "preflight" => "Preflight",
+      other => other,
+    })
+    .to_string();
+
+  let post_data = req
+    .get("body")
+    .and_then(|b| b.get("value"))
+    .and_then(|v| v.as_str())
+    .map(std::string::ToString::to_string);
+
+  let mime_type = headers
+    .as_ref()
+    .and_then(|h| h.get("content-type").or_else(|| h.get("Content-Type")).cloned());
+
+  let net_request = NetRequest {
+    id,
+    url,
+    method,
+    status: None,
+    resource_type,
+    mime_type,
+    headers,
+    post_data,
+  };
+  if has_listeners {
+    emitter.emit(PageEvent::Request(net_request.clone()));
+  }
+  network_log.write().await.push(net_request);
+}
+
+/// Handle a `network.responseCompleted` event: update log entry, emit response.
+async fn handle_response_completed(
+  params: &serde_json::Value,
+  emitter: &EventEmitter,
+  network_log: &Arc<RwLock<Vec<NetRequest>>>,
+) {
+  let response = params.get("response");
+  let request = params.get("request");
+  let (Some(resp), Some(req)) = (response, request) else {
+    return;
+  };
+
+  let request_id = req.get("request").and_then(|v| v.as_str()).unwrap_or("");
+  let status = resp.get("status").and_then(serde_json::Value::as_i64);
+  let status_text = resp
+    .get("statusText")
+    .and_then(|v| v.as_str())
+    .unwrap_or("")
+    .to_string();
+  let mime_type = resp.get("mimeType").and_then(|v| v.as_str()).unwrap_or("").to_string();
+  let url = resp.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+  let headers = resp.get("headers").map(parse_bidi_headers);
+
+  let mut log = network_log.write().await;
+  if let Some(entry) = log.iter_mut().find(|e| e.id == request_id) {
+    entry.status = status;
+    entry.mime_type = Some(mime_type.clone());
+  }
+
+  emitter.emit(PageEvent::Response(NetResponse {
+    request_id: request_id.to_string(),
+    url,
+    status: status.unwrap_or(0),
+    status_text,
+    mime_type,
+    headers,
+  }));
+}
+
 /// Parse BiDi-format headers `[{name, value: {type, value}}]` into a `FxHashMap`.
 fn parse_bidi_headers(headers_val: &serde_json::Value) -> FxHashMap<String, String> {
   headers_val
@@ -1626,7 +1674,7 @@ fn parse_bidi_headers(headers_val: &serde_json::Value) -> FxHashMap<String, Stri
     .unwrap_or_default()
 }
 
-/// Execute a route action via BiDi network commands.
+/// Execute a route action via `BiDi` network commands.
 async fn execute_bidi_route_action(
   transport: &super::transport::BidiTransport,
   request_id: &str,
@@ -1690,7 +1738,7 @@ async fn execute_bidi_route_action(
   }
 }
 
-/// Parse a BiDi network cookie into our CookieData.
+/// Parse a `BiDi` network cookie into our `CookieData`.
 fn parse_bidi_cookie(c: &serde_json::Value) -> CookieData {
   let name = c.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
   let value = c
@@ -1703,9 +1751,9 @@ fn parse_bidi_cookie(c: &serde_json::Value) -> CookieData {
     .to_string();
   let domain = c.get("domain").and_then(|v| v.as_str()).unwrap_or("").to_string();
   let path = c.get("path").and_then(|v| v.as_str()).unwrap_or("/").to_string();
-  let secure = c.get("secure").and_then(|v| v.as_bool()).unwrap_or(false);
-  let http_only = c.get("httpOnly").and_then(|v| v.as_bool()).unwrap_or(false);
-  let expires = c.get("expiry").and_then(|v| v.as_f64());
+  let secure = c.get("secure").and_then(serde_json::Value::as_bool).unwrap_or(false);
+  let http_only = c.get("httpOnly").and_then(serde_json::Value::as_bool).unwrap_or(false);
+  let expires = c.get("expiry").and_then(serde_json::Value::as_f64);
   let same_site = c.get("sameSite").and_then(|v| v.as_str()).and_then(|s| match s {
     "strict" => Some(crate::backend::SameSite::Strict),
     "lax" => Some(crate::backend::SameSite::Lax),

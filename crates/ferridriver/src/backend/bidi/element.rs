@@ -1,4 +1,4 @@
-//! BiDi element -- implements element interactions via SharedReferences.
+//! `BiDi` element -- implements element interactions via `SharedReferences`.
 //!
 //! Uses `script.callFunction` with element as argument for JS operations,
 //! and `input.performActions` for user input simulation.
@@ -13,7 +13,7 @@ use super::session::BidiSession;
 use super::types::EvaluateResult;
 use crate::backend::ImageFormat;
 
-/// Element handle for the BiDi backend.
+/// Element handle for the `BiDi` backend.
 pub struct BidiElement {
   pub(crate) session: Arc<BidiSession>,
   pub(crate) context_id: Arc<str>,
@@ -76,10 +76,10 @@ impl BidiElement {
 
     tracing::debug!(target: "ferridriver::bidi", bbox_json = %result, "BiDi bounding box result");
 
-    let x = result.get("x").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let y = result.get("y").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let w = result.get("w").and_then(|v| v.as_f64()).unwrap_or(0.0);
-    let h = result.get("h").and_then(|v| v.as_f64()).unwrap_or(0.0);
+    let x = result.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    let y = result.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    let w = result.get("w").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+    let h = result.get("h").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
 
     Ok((x, y, w, h))
   }

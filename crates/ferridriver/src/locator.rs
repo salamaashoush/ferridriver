@@ -19,7 +19,7 @@ use crate::selectors;
 
 /// Zero-cost retry macro that resolves an element with backoff, then runs an
 /// action body inline. Provides `$el: AnyElement` and `$page: &AnyPage` to the
-/// body without any AnyPage cloning — the page reference is borrowed from `self`
+/// body without any `AnyPage` cloning — the page reference is borrowed from `self`
 /// for the entire retry loop.
 ///
 /// The body must be an `async move { ... }` block returning `Result<R, String>`.

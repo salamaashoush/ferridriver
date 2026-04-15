@@ -187,7 +187,7 @@ pub trait McpServerConfig: Send + Sync + 'static {
 
   /// Server name for MCP `get_info`.
   fn server_name(&self) -> &str {
-    "ferridriver"
+    DEFAULT_SERVER_NAME
   }
 
   /// Server instructions for MCP `get_info`.
@@ -195,6 +195,9 @@ pub trait McpServerConfig: Send + Sync + 'static {
     DEFAULT_INSTRUCTIONS
   }
 }
+
+/// Default server name for MCP `get_info`.
+pub const DEFAULT_SERVER_NAME: &str = "ferridriver";
 
 /// Default instructions embedded in the MCP server.
 pub const DEFAULT_INSTRUCTIONS: &str = "\
@@ -428,10 +431,15 @@ impl McpServer {
 
   /// Build unified `TestFixtures` for a session — provides full browser/page/context/request
   /// so BDD steps and hooks have the same fixture set as the test runner path.
+  ///
+  /// # Errors
+  ///
+  /// Returns `ErrorData` if the page or browser context cannot be resolved for the session.
   pub async fn fixtures_for_session(&self, context: &str) -> Result<ferridriver_test::model::TestFixtures, ErrorData> {
     let (page, ctx_ref) = Box::pin(self.page_and_context(context)).await?;
     let browser = ferridriver::Browser::from_shared_state(self.state.state_arc(), self.backend_kind);
-    let request = ferridriver::api_request::APIRequestContext::new(Default::default());
+    let request =
+      ferridriver::api_request::APIRequestContext::new(ferridriver::api_request::RequestContextOptions::default());
     Ok(ferridriver_test::model::TestFixtures {
       browser: std::sync::Arc::new(browser),
       page,

@@ -711,7 +711,10 @@ impl Page {
   /// Returns an error if the click dispatch fails.
   pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
     self.inner.click_at(x, y).await?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self
+      .mouse_position
+      .lock()
+      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (x, y);
     Ok(())
   }
 
@@ -722,7 +725,10 @@ impl Page {
   /// Returns an error if the click dispatch fails.
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
     self.inner.click_at_opts(x, y, button, click_count).await?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self
+      .mouse_position
+      .lock()
+      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (x, y);
     Ok(())
   }
 
@@ -733,7 +739,10 @@ impl Page {
   /// Returns an error if the mouse move dispatch fails.
   pub(crate) async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
     self.inner.move_mouse(x, y).await?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self
+      .mouse_position
+      .lock()
+      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (x, y);
     Ok(())
   }
 
@@ -751,7 +760,10 @@ impl Page {
     steps: u32,
   ) -> Result<(), String> {
     self.inner.move_mouse_smooth(from_x, from_y, to_x, to_y, steps).await?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (to_x, to_y);
+    *self
+      .mouse_position
+      .lock()
+      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (to_x, to_y);
     Ok(())
   }
 
@@ -1041,9 +1053,9 @@ impl Page {
       .unwrap_or_default();
 
     // Dump localStorage as array of { name, value } pairs (Playwright format).
-    let storage_js = r#"JSON.stringify(
+    let storage_js = r"JSON.stringify(
       Object.keys(localStorage).map(k => ({ name: k, value: localStorage.getItem(k) }))
-    )"#;
+    )";
     let storage_r = self.inner.evaluate(storage_js).await.ok().flatten();
     let local_storage: Vec<serde_json::Value> = storage_r
       .and_then(|v| v.as_str().and_then(|s| serde_json::from_str(s).ok()))
@@ -1233,7 +1245,10 @@ impl Page {
   /// Returns an error if the mouse down dispatch fails.
   pub(crate) async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
     self.inner.mouse_down(x, y, button).await?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self
+      .mouse_position
+      .lock()
+      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (x, y);
     Ok(())
   }
 
@@ -1244,7 +1259,10 @@ impl Page {
   /// Returns an error if the mouse up dispatch fails.
   pub(crate) async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
     self.inner.mouse_up(x, y, button).await?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
+    *self
+      .mouse_position
+      .lock()
+      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (x, y);
     Ok(())
   }
 
@@ -1770,6 +1788,10 @@ impl Page {
 
   /// Start CDP screencast. Returns a channel of `(jpeg_bytes, timestamp_secs)` pairs.
   /// Timestamp is Chrome's `metadata.timestamp` from the screencastFrame event.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if screencast cannot be started on the backend.
   pub async fn start_screencast(
     &self,
     quality: u8,
@@ -1780,6 +1802,10 @@ impl Page {
   }
 
   /// Stop CDP screencast.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if screencast cannot be stopped on the backend.
   pub async fn stop_screencast(&self) -> Result<(), String> {
     self.inner.stop_screencast().await
   }

@@ -10,10 +10,7 @@ use ferridriver::install::BrowserInstaller;
 #[napi]
 pub async fn install_chromium() -> Result<String> {
   let installer = BrowserInstaller::new();
-  installer
-    .install_chromium(|_| {})
-    .await
-    .map_err(|e| Error::from_reason(e))
+  installer.install_chromium(|_| {}).await.map_err(Error::from_reason)
 }
 
 /// Install system dependencies required for Chromium (Linux only).
@@ -22,10 +19,7 @@ pub async fn install_chromium() -> Result<String> {
 #[napi]
 pub async fn install_system_deps() -> Result<()> {
   let installer = BrowserInstaller::new();
-  installer
-    .install_system_deps(|_| {})
-    .await
-    .map_err(|e| Error::from_reason(e))
+  installer.install_system_deps(|_| {}).await.map_err(Error::from_reason)
 }
 
 /// Install Chromium with system dependencies (convenience: install + install-deps).
@@ -36,11 +30,8 @@ pub async fn install_chromium_with_deps() -> Result<String> {
   installer
     .install_system_deps(|_| {})
     .await
-    .map_err(|e| Error::from_reason(e))?;
-  installer
-    .install_chromium(|_| {})
-    .await
-    .map_err(|e| Error::from_reason(e))
+    .map_err(Error::from_reason)?;
+  installer.install_chromium(|_| {}).await.map_err(Error::from_reason)
 }
 
 /// Install the latest stable Chrome Headless Shell.
@@ -52,7 +43,7 @@ pub async fn install_chromium_headless_shell() -> Result<String> {
   installer
     .install_chromium_headless_shell(|_| {})
     .await
-    .map_err(|e| Error::from_reason(e))
+    .map_err(Error::from_reason)
 }
 
 /// Find an installed Chromium in the ferridriver cache.

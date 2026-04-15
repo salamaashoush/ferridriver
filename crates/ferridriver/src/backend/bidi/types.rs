@@ -1,14 +1,14 @@
-//! WebDriver BiDi protocol types.
+//! `WebDriver` `BiDi` protocol types.
 //!
-//! Covers the full BiDi type system: remote/local values, element references,
+//! Covers the full `BiDi` type system: remote/local values, element references,
 //! locators, evaluate results, screenshot options, and input action types.
 
 use serde::{Deserialize, Serialize};
 
 // ── Element References ─────────────────────────────────────────────────────
 
-/// BiDi element reference -- the fundamental element handle.
-/// Unlike CDP's numeric nodeId, BiDi uses string-based SharedReferences.
+/// `BiDi` element reference -- the fundamental element handle.
+/// Unlike CDP's numeric nodeId, `BiDi` uses string-based `SharedReferences`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct SharedReference {
   #[serde(rename = "sharedId")]
@@ -30,7 +30,7 @@ pub enum ScriptTarget {
 // ── Remote Values (received from browser) ──────────────────────────────────
 
 /// Serialized JavaScript value returned by `script.evaluate` / `script.callFunction`.
-/// Covers the full BiDi RemoteValue type hierarchy.
+/// Covers the full `BiDi` `RemoteValue` type hierarchy.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(tag = "type")]
 pub enum RemoteValue {
@@ -56,7 +56,7 @@ pub enum RemoteValue {
   #[serde(rename = "object")]
   Object {
     /// Object entries: each entry is a 2-element array [key, value].
-    /// Key can be a bare string OR a RemoteValue, value is always a RemoteValue.
+    /// Key can be a bare string OR a `RemoteValue`, value is always a `RemoteValue`.
     /// We use raw JSON to handle both formats.
     value: Option<Vec<serde_json::Value>>,
     handle: Option<String>,
@@ -156,12 +156,57 @@ pub struct NodeProperties {
   pub namespace_uri: Option<String>,
 }
 
+/// Convert `BiDi` key-value entries (used by Object and Map) to a JSON Map.
+fn entries_to_json_map(entries: Option<&Vec<serde_json::Value>>) -> serde_json::Map<String, serde_json::Value> {
+  let mut map = serde_json::Map::new();
+  let Some(entries) = entries else { return map };
+  for entry in entries {
+    let Some(arr) = entry.as_array() else { continue };
+    if arr.len() != 2 {
+      continue;
+    }
+    // Key can be a bare string or a RemoteValue
+    let key = if let Some(s) = arr[0].as_str() {
+      s.to_string()
+    } else if let Ok(rv) = serde_json::from_value::<RemoteValue>(arr[0].clone()) {
+      rv.to_json()
+        .and_then(|v| v.as_str().map(String::from))
+        .unwrap_or_default()
+    } else {
+      continue;
+    };
+    // Value is always a RemoteValue
+    let val = if let Ok(rv) = serde_json::from_value::<RemoteValue>(arr[1].clone()) {
+      rv.to_json().unwrap_or(serde_json::Value::Null)
+    } else {
+      arr[1].clone()
+    };
+    map.insert(key, val);
+  }
+  map
+}
+
 impl RemoteValue {
-  /// Convert a BiDi `RemoteValue` to a `serde_json::Value` for API compatibility.
+  /// Convert a `BiDi` `RemoteValue` to a `serde_json::Value` for API compatibility.
   /// This matches the CDP backend's evaluate return type.
+  #[must_use]
   pub fn to_json(&self) -> Option<serde_json::Value> {
     match self {
-      Self::Undefined | Self::Null => None,
+      // Undefined/Null and non-serializable types all map to None
+      Self::Undefined
+      | Self::Null
+      | Self::Function { .. }
+      | Self::Symbol { .. }
+      | Self::Error { .. }
+      | Self::Promise { .. }
+      | Self::TypedArray { .. }
+      | Self::ArrayBuffer { .. }
+      | Self::WeakMap { .. }
+      | Self::WeakSet { .. }
+      | Self::Generator { .. }
+      | Self::Proxy { .. }
+      | Self::Iterator { .. }
+      | Self::WeakRef { .. } => None,
       Self::String { value } => {
         // value can be a JSON string like "hello" or the raw string
         if let Some(s) = value.as_str() {
@@ -201,62 +246,8 @@ impl RemoteValue {
           .unwrap_or_default();
         Some(serde_json::Value::Array(arr))
       },
-      Self::Object { value, .. } => {
-        let mut map = serde_json::Map::new();
-        if let Some(entries) = value {
-          for entry in entries {
-            if let Some(arr) = entry.as_array() {
-              if arr.len() == 2 {
-                // Key can be a bare string or a RemoteValue
-                let key = if let Some(s) = arr[0].as_str() {
-                  s.to_string()
-                } else if let Ok(rv) = serde_json::from_value::<RemoteValue>(arr[0].clone()) {
-                  rv.to_json()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_default()
-                } else {
-                  continue;
-                };
-                // Value is always a RemoteValue
-                let val = if let Ok(rv) = serde_json::from_value::<RemoteValue>(arr[1].clone()) {
-                  rv.to_json().unwrap_or(serde_json::Value::Null)
-                } else {
-                  arr[1].clone()
-                };
-                map.insert(key, val);
-              }
-            }
-          }
-        }
-        Some(serde_json::Value::Object(map))
-      },
-      Self::Map { value, .. } => {
-        // Convert Map to JSON object (same format as Object entries)
-        let mut map = serde_json::Map::new();
-        if let Some(entries) = value {
-          for entry in entries {
-            if let Some(arr) = entry.as_array() {
-              if arr.len() == 2 {
-                let key = if let Some(s) = arr[0].as_str() {
-                  s.to_string()
-                } else if let Ok(rv) = serde_json::from_value::<RemoteValue>(arr[0].clone()) {
-                  rv.to_json()
-                    .and_then(|v| v.as_str().map(String::from))
-                    .unwrap_or_default()
-                } else {
-                  continue;
-                };
-                let val = if let Ok(rv) = serde_json::from_value::<RemoteValue>(arr[1].clone()) {
-                  rv.to_json().unwrap_or(serde_json::Value::Null)
-                } else {
-                  arr[1].clone()
-                };
-                map.insert(key, val);
-              }
-            }
-          }
-        }
-        Some(serde_json::Value::Object(map))
+      Self::Object { value, .. } | Self::Map { value, .. } => {
+        Some(serde_json::Value::Object(entries_to_json_map(value.as_ref())))
       },
       Self::Set { value, .. } | Self::NodeList { value, .. } | Self::HtmlCollection { value, .. } => {
         let arr = value
@@ -293,23 +284,11 @@ impl RemoteValue {
         Some(serde_json::Value::Object(map))
       },
       Self::Window { value, .. } => Some(serde_json::json!({"context": value.context})),
-      // Handle types we can't really serialize -- return null or a type marker
-      Self::Function { .. }
-      | Self::Symbol { .. }
-      | Self::Error { .. }
-      | Self::Promise { .. }
-      | Self::TypedArray { .. }
-      | Self::ArrayBuffer { .. }
-      | Self::WeakMap { .. }
-      | Self::WeakSet { .. }
-      | Self::Generator { .. }
-      | Self::Proxy { .. }
-      | Self::Iterator { .. }
-      | Self::WeakRef { .. } => None,
     }
   }
 
-  /// Extract a SharedReference from a Node result.
+  /// Extract a `SharedReference` from a Node result.
+  #[must_use]
   pub fn as_shared_reference(&self) -> Option<SharedReference> {
     match self {
       Self::Node { shared_id, handle, .. } => shared_id.as_ref().map(|sid| SharedReference {
@@ -345,7 +324,7 @@ pub enum LocalValue {
   Object { value: Vec<Vec<LocalValue>> },
 }
 
-/// Channel reference for BiDi message passing.
+/// Channel reference for `BiDi` message passing.
 #[derive(Debug, Clone, Serialize)]
 pub struct ChannelValue {
   #[serde(rename = "type")]
@@ -361,7 +340,7 @@ pub struct ChannelProperties {
 }
 
 impl LocalValue {
-  /// Convert a `serde_json::Value` to a BiDi `LocalValue`.
+  /// Convert a `serde_json::Value` to a `BiDi` `LocalValue`.
   pub fn from_json(v: &serde_json::Value) -> Self {
     match v {
       serde_json::Value::Null => Self::Null,
@@ -467,7 +446,7 @@ pub enum ClipRectangle {
   Element { element: SharedReference },
 }
 
-/// Image format for BiDi screenshots.
+/// Image format for `BiDi` screenshots.
 #[derive(Debug, Clone, Serialize)]
 pub struct BidiImageFormat {
   #[serde(rename = "type")]

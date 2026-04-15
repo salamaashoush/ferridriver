@@ -25,7 +25,7 @@ async fn add_single_todo(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Buy milk")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   expect(&page.locator(".todo-list li")).to_have_count(1).await?;
   expect(&page.locator(".todo-list li label"))
     .to_have_text("Buy milk")
@@ -38,13 +38,13 @@ async fn add_multiple_todos(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Buy milk")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   add_todo(&page, "Walk the dog")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   add_todo(&page, "Write tests")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   expect(&page.locator(".todo-list li")).to_have_count(3).await?;
 }
 
@@ -64,7 +64,7 @@ async fn toggle_todo_complete(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Buy milk")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   page.locator(".todo-list li:nth-child(1) .toggle").click().await?;
   expect(&page.locator(".todo-list li.completed"))
     .to_have_count(1)
@@ -79,10 +79,10 @@ async fn delete_todo(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Delete me")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   add_todo(&page, "Keep me")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   page.locator(".todo-list li:nth-child(1) .destroy").click().await?;
   expect(&page.locator(".todo-list li")).to_have_count(1).await?;
   expect(&page.locator(".todo-list li label"))
@@ -98,10 +98,10 @@ async fn filter_active(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Active todo")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   add_todo(&page, "Completed todo")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   page.locator(".todo-list li:nth-child(2) .toggle").click().await?;
   page.locator("#filter-active").click().await?;
   expect(&page.locator(".todo-list li")).to_have_count(1).await?;
@@ -118,10 +118,10 @@ async fn clear_completed(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Keep")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   add_todo(&page, "Remove")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   page.locator(".todo-list li:nth-child(2) .toggle").click().await?;
   page.locator("#clear-completed").click().await?;
   expect(&page.locator(".todo-list li")).to_have_count(1).await?;
@@ -138,13 +138,13 @@ async fn toggle_all_completes_all(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "One")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   add_todo(&page, "Two")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   add_todo(&page, "Three")
     .await
-    .map_err(|e| ferridriver_test::model::TestFailure::from(e))?;
+    .map_err(ferridriver_test::model::TestFailure::from)?;
   page.locator("#toggle-all").click().await?;
   expect(&page.locator("#todo-count"))
     .to_have_text("0 items left")

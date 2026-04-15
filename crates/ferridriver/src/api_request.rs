@@ -133,7 +133,9 @@ impl APIResponse {
   }
 
   /// Consume the response (Playwright compat, no-op in Rust since we own the bytes).
-  pub fn dispose(self) {}
+  pub fn dispose(self) {
+    drop(self);
+  }
 }
 
 /// Playwright-compatible HTTP client for API testing.
@@ -150,6 +152,7 @@ pub struct APIRequestContext {
 
 impl APIRequestContext {
   /// Create a new API request context.
+  #[must_use]
   pub fn new(options: RequestContextOptions) -> Self {
     let mut builder = reqwest::Client::builder().cookie_store(true);
 
@@ -187,6 +190,10 @@ impl APIRequestContext {
   }
 
   /// Send a GET request.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the request fails or status-code validation fails.
   pub async fn get(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
     self
       .fetch(
@@ -200,6 +207,10 @@ impl APIRequestContext {
   }
 
   /// Send a POST request.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the request fails or status-code validation fails.
   pub async fn post(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
     self
       .fetch(
@@ -213,6 +224,10 @@ impl APIRequestContext {
   }
 
   /// Send a PUT request.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the request fails or status-code validation fails.
   pub async fn put(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
     self
       .fetch(
@@ -226,6 +241,10 @@ impl APIRequestContext {
   }
 
   /// Send a DELETE request.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the request fails or status-code validation fails.
   pub async fn delete(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
     self
       .fetch(
@@ -239,6 +258,10 @@ impl APIRequestContext {
   }
 
   /// Send a PATCH request.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the request fails or status-code validation fails.
   pub async fn patch(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
     self
       .fetch(
@@ -252,6 +275,10 @@ impl APIRequestContext {
   }
 
   /// Send a HEAD request.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the request fails or status-code validation fails.
   pub async fn head(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
     self
       .fetch(
@@ -356,6 +383,6 @@ impl APIRequestContext {
 
   /// Dispose the request context (Playwright compat).
   pub fn dispose(self) {
-    // reqwest::Client drops cleanly.
+    drop(self);
   }
 }

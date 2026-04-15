@@ -500,7 +500,7 @@ impl TestRunner {
             },
           }
         };
-        worker.run(browser, custom_pool, rx, tx).await;
+        Box::pin(worker.run(browser, custom_pool, rx, tx)).await;
       });
       worker_handles.push(handle);
     }
@@ -802,9 +802,8 @@ impl TestRunner {
               if let Some(ref pattern) = grep_filter {
                 crate::discovery::filter_by_grep(&mut plan, pattern, false);
               }
-              if plan.total_tests > 0 {
-                if self.run_with_tui_drain(plan, tui).await { break; }
-              }
+              if plan.total_tests > 0
+                && self.run_with_tui_drain(plan, tui).await { break; }
               tui.set_status(crate::tui::WatchStatus::Idle);
             }
             WatchCommand::Rerun => {

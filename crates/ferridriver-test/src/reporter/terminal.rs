@@ -217,16 +217,14 @@ impl Reporter for TerminalReporter {
         let bdd = is_bdd_test(&outcome.steps);
 
         // BDD: print Feature header when suite changes.
-        if bdd {
-          if self.current_suite.as_ref() != test_id.suite.as_ref() {
-            if self.current_suite.is_some() {
-              println!();
-            }
-            if let Some(suite) = &test_id.suite {
-              println!("  {} {}", s_feature().apply_to("Feature:"), s_bold().apply_to(suite));
-            }
-            self.current_suite = test_id.suite.clone();
+        if bdd && self.current_suite.as_ref() != test_id.suite.as_ref() {
+          if self.current_suite.is_some() {
+            println!();
           }
+          if let Some(suite) = &test_id.suite {
+            println!("  {} {}", s_feature().apply_to("Feature:"), s_bold().apply_to(suite));
+          }
+          self.current_suite = test_id.suite.clone();
         }
 
         let (icon, icon_style) = status_icon(&outcome.status);

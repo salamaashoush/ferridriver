@@ -223,7 +223,7 @@ pub enum BackendKind {
   /// Native WebKit/WKWebView (macOS only)
   #[cfg(target_os = "macos")]
   WebKit,
-  /// WebDriver BiDi protocol (cross-browser: Chrome, Firefox, future Safari)
+  /// `WebDriver` `BiDi` protocol (cross-browser: Chrome, Firefox, future Safari)
   Bidi,
 }
 
@@ -248,12 +248,12 @@ impl AnyBrowser {
   /// Returns an error if the backend fails to enumerate targets or pages.
   pub async fn pages(&self) -> Result<Vec<AnyPage>, String> {
     match self {
-      Self::CdpPipe(b) => b.pages().await,
-      Self::CdpRaw(b) => b.pages().await,
+      Self::CdpPipe(b) => Box::pin(b.pages()).await,
+      Self::CdpRaw(b) => Box::pin(b.pages()).await,
       #[cfg(target_os = "macos")]
-      Self::WebKit(b) => b.pages().await,
+      Self::WebKit(b) => Box::pin(b.pages()).await,
 
-      Self::Bidi(b) => b.pages().await,
+      Self::Bidi(b) => Box::pin(b.pages()).await,
     }
   }
 
@@ -299,11 +299,11 @@ impl AnyBrowser {
     viewport: Option<&crate::options::ViewportConfig>,
   ) -> Result<AnyPage, String> {
     match self {
-      Self::CdpPipe(b) => b.new_page(url, browser_context_id, viewport).await,
-      Self::CdpRaw(b) => b.new_page(url, browser_context_id, viewport).await,
+      Self::CdpPipe(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
+      Self::CdpRaw(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
       #[cfg(target_os = "macos")]
-      Self::WebKit(b) => b.new_page(url).await,
-      Self::Bidi(b) => b.new_page(url, browser_context_id, viewport).await,
+      Self::WebKit(b) => Box::pin(b.new_page(url)).await,
+      Self::Bidi(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
     }
   }
 
