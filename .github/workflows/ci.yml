@@ -137,6 +137,7 @@ jobs:
         with:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - uses: taiki-e/install-action@nextest
+      - uses: oven-sh/setup-bun@v2
 
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
@@ -148,13 +149,16 @@ jobs:
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install ffmpeg pkg-config
+        run: brew install ffmpeg pkg-config llvm
 
       - name: Build ferridriver binary
         run: cargo build --bin ferridriver
 
+      - name: Install JS deps
+        run: bun install
+
       - name: Install Chromium with system deps
-        run: ./target/debug/ferridriver install --with-deps chromium
+        run: bun run packages/ferridriver-test/src/cli.ts install --with-deps chromium
 
       - name: Run unit + integration tests
         env:
@@ -204,10 +208,10 @@ jobs:
             libclang-dev pkg-config
       - name: Build ferridriver binary
         run: cargo build --bin ferridriver
-      - name: Install Chromium with system deps
-        run: ./target/debug/ferridriver install --with-deps chromium
       - name: Install dependencies
         run: bun install
+      - name: Install Chromium with system deps
+        run: bun run packages/ferridriver-test/src/cli.ts install --with-deps chromium
       - name: Build NAPI debug
         working-directory: crates/ferridriver-napi
         run: bun run build:debug
