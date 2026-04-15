@@ -34,8 +34,17 @@ struct McpClient {
 
 impl McpClient {
   fn new(backend: &str) -> Self {
-    let binary = std::env::var("FERRIDRIVER_BIN")
-      .unwrap_or_else(|_| format!("{}/../../target/release/ferridriver", env!("CARGO_MANIFEST_DIR")));
+    let binary = std::env::var("FERRIDRIVER_BIN").unwrap_or_else(|_| {
+      let base = format!("{}/../../target", env!("CARGO_MANIFEST_DIR"));
+      // Prefer debug binary (built by `cargo build`), fall back to release
+      let debug = format!("{base}/debug/ferridriver");
+      let release = format!("{base}/release/ferridriver");
+      if std::path::Path::new(&debug).exists() {
+        debug
+      } else {
+        release
+      }
+    });
     let mut cmd = Command::new(&binary);
     cmd.arg("--backend").arg(backend);
     if std::env::var("FERRIDRIVER_HEADED").is_err() {
