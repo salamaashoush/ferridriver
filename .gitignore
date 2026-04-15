@@ -21,6 +21,12 @@ __ferri_ct_*
 # Dioxus build output (in workspace target)
 target/dx/
 
+# Build artifacts
+packages/*/dist/
+bench/results/
+rust_out
+trace-*.json
+
 # Claude Code worktrees
 .claude/worktrees/
 .DS_Store
