@@ -46,7 +46,7 @@ for (const backend of CDP_BACKENDS) {
     beforeAll(async () => {
       browser = await Browser.launch({ backend });
       page = await browser.newPage();
-    });
+    }, 30_000);
 
     afterAll(async () => {
       await browser?.close();
@@ -160,7 +160,7 @@ for (const backend of CDP_BACKENDS) {
     beforeAll(async () => {
       browser = await Browser.launch({ backend });
       page = await browser.newPage();
-    });
+    }, 30_000);
 
     afterAll(async () => {
       await browser?.close();
