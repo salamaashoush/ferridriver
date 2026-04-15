@@ -49,7 +49,7 @@ for (const backend of CDP_BACKENDS) {
     });
 
     afterAll(async () => {
-      await browser.close();
+      await browser?.close();
     });
 
     it("gets the main frame", async () => {
@@ -163,7 +163,7 @@ for (const backend of CDP_BACKENDS) {
     });
 
     afterAll(async () => {
-      await browser.close();
+      await browser?.close();
     });
 
     it("waitForResponse catches network response", async () => {
@@ -203,7 +203,7 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
   });
 
   afterAll(async () => {
-    await browser.close();
+    await browser?.close();
   });
 
   it("page.on('console') receives console.log messages", async () => {
