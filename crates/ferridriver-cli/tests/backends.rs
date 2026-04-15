@@ -65,9 +65,18 @@ impl McpClient {
   }
 
   fn read_response(&mut self) -> Value {
-    let mut line = String::new();
-    self.reader.read_line(&mut line).expect("read stdout");
-    serde_json::from_str(line.trim()).unwrap_or_else(|e| panic!("JSON parse: {e}\nRaw: {line}"))
+    loop {
+      let mut line = String::new();
+      self.reader.read_line(&mut line).expect("read stdout");
+      let trimmed = line.trim();
+      if trimmed.is_empty() {
+        continue;
+      }
+      // Skip non-JSON lines (e.g. tracing log output from rmcp)
+      if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
+        return val;
+      }
+    }
   }
 
   fn send_request(&mut self, method: &str, params: Value) -> Value {
