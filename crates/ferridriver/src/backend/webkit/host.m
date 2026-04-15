@@ -794,15 +794,20 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
 
             uint32_t captured_rid = req_id;
 
-            // callAsyncJavaScript wraps the body in an async function, so we can use
-            // `return`. We use eval() to handle both expressions and multi-statement code.
-            // eval() returns the last expression value for expressions, and runs
-            // multi-statement code correctly. JSON.stringify captures the result.
-            NSString *escaped = [expr stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
-            escaped = [escaped stringByReplacingOccurrencesOfString:@"`" withString:@"\\`"];
-            NSString *body = [NSString stringWithFormat:@"return JSON.stringify(await eval(`%@`))", escaped];
+            // callAsyncJavaScript wraps the body in an async function with named
+            // parameters from the arguments dictionary. We pass the expression as
+            // a string argument to avoid template literal escaping issues (the
+            // engine JS contains ${} which breaks when embedded in backticks).
+            // Always return a string to avoid NSNumber/NSNull serialization quirks
+            // in the callAsyncJavaScript completion handler. The try/catch around
+            // JSON.stringify handles DOM elements and other cyclic structures.
+            NSString *body = @"var __fd_r = await eval(__fd_expr);"
+                              "if (__fd_r === undefined || __fd_r === null) return null;"
+                              "try { return JSON.stringify(__fd_r); }"
+                              "catch(e) { return String(__fd_r); }";
+            NSDictionary *args = @{@"__fd_expr": expr};
             [v->webview callAsyncJavaScript:body
-                                 arguments:nil
+                                 arguments:args
                                    inFrame:nil
                             inContentWorld:[WKContentWorld pageWorld]
                          completionHandler:^(id result, NSError *error) {
@@ -827,9 +832,18 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                         // The string IS JSON — pass it through directly
                         write_frame_str(captured_rid, REP_VALUE, s);
                     }
+                } else if ([result isKindOfClass:[NSNumber class]]) {
+                    // Numbers/booleans: convert to JSON representation
+                    NSNumber *num = (NSNumber *)result;
+                    // Check for boolean (NSNumber wraps both)
+                    if (strcmp([num objCType], @encode(BOOL)) == 0 || strcmp([num objCType], "c") == 0) {
+                        write_frame_str(captured_rid, REP_VALUE, [num boolValue] ? @"true" : @"false");
+                    } else {
+                        write_frame_str(captured_rid, REP_VALUE, [num stringValue]);
+                    }
                 } else {
-                    // Shouldn't happen with JSON.stringify, but handle gracefully
-                    write_frame_str(captured_rid, REP_VALUE, @"null");
+                    // Unexpected type: convert to string
+                    write_frame_str(captured_rid, REP_VALUE, [NSString stringWithFormat:@"\"%@\"", result]);
                 }
             }];
             // Async — completion fires via CFRunLoop
@@ -1426,16 +1440,26 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 windowNumber:winNum context:nil
                 eventNumber:0 clickCount:(NSInteger)click_count pressure:(mouse_type == 1 ? 1.0 : 0.0)];
 
-            // Temporarily allow mouse events so sendEvent: works
-            BOOL wasIgnoring = [v->window ignoresMouseEvents];
-            if (wasIgnoring) [v->window setIgnoresMouseEvents:NO];
+            // Dispatch directly to WKWebView (not window sendEvent:) for reliable
+            // delivery in headless/borderless windows with ignoresMouseEvents=YES.
+            // This matches the proven OP_CLICK dispatch path.
+            if (mouse_type == 0) {
+                [v->webview mouseMoved:ev];
+            } else if (mouse_type == 1) {
+                switch (mouse_button) {
+                    case 1: [v->webview rightMouseDown:ev]; break;
+                    case 2: [v->webview otherMouseDown:ev]; break;
+                    default: [v->webview mouseDown:ev]; break;
+                }
+            } else {
+                switch (mouse_button) {
+                    case 1: [v->webview rightMouseUp:ev]; break;
+                    case 2: [v->webview otherMouseUp:ev]; break;
+                    default: [v->webview mouseUp:ev]; break;
+                }
+            }
 
-            // Use sendEvent: for proper event pipeline propagation to web content
-            [v->window sendEvent:ev];
-
-            if (wasIgnoring) [v->window setIgnoresMouseEvents:YES];
-
-            // Completion barrier for mouse up events
+            // Completion barrier for mouse up events -- waits for mouseEventQueue to drain
             if (mouse_type == 2) {
                 SEL barrierSel = NSSelectorFromString(@"_doAfterProcessingAllPendingMouseEvents:");
                 if ([v->webview respondsToSelector:barrierSel]) {

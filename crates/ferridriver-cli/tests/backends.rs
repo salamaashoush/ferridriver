@@ -825,6 +825,7 @@ fn test_run_scenario_multi_step(c: &mut McpClient) {
   let feature = r#"Feature: Multi step
   Scenario: Fill and check
     Given I navigate to "https://demo.playwright.dev/todomvc/#/"
+    Then ".new-todo" should be visible
     When I fill ".new-todo" with "Buy milk"
     And I press "Enter"
     Then ".todo-list" should be visible"#;

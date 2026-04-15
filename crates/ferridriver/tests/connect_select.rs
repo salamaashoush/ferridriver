@@ -69,12 +69,12 @@ async fn connect_and_select_pages() {
 
     let t1 = Instant::now();
     if let Ok(Ok(Some(url))) = tokio::time::timeout(std::time::Duration::from_secs(3), page.url()).await {
-      eprintln!("[test]   url = {url} ({:?})", t1.elapsed())
+      eprintln!("[test]   url = {url} ({:?})", t1.elapsed());
     }
 
     let t2 = Instant::now();
     if let Ok(Ok(Some(title))) = tokio::time::timeout(std::time::Duration::from_secs(3), page.title()).await {
-      eprintln!("[test]   title = {title} ({:?})", t2.elapsed())
+      eprintln!("[test]   title = {title} ({:?})", t2.elapsed());
     }
   }
 
