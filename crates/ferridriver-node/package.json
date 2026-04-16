@@ -29,25 +29,29 @@
     "fd_webkit_host",
     "postinstall.js"
   ],
+  "publishConfig": {
+    "access": "public"
+  },
   "napi": {
     "binaryName": "ferridriver-node",
     "targets": [
-      "x86_64-apple-darwin",
       "aarch64-apple-darwin",
       "x86_64-unknown-linux-gnu",
       "aarch64-unknown-linux-gnu",
       "x86_64-pc-windows-msvc"
-    ]
+    ],
+    "packageConfig": {
+      "access": "public"
+    }
   },
   "engines": {
     "node": ">= 16.0.0"
   },
   "optionalDependencies": {
-    "@ferridriver/node-darwin-x64": "0.2.0",
-    "@ferridriver/node-darwin-arm64": "0.2.0",
-    "@ferridriver/node-linux-x64-gnu": "0.2.0",
-    "@ferridriver/node-linux-arm64-gnu": "0.2.0",
-    "@ferridriver/node-win32-x64-msvc": "0.2.0"
+    "@ferridriver/node-darwin-arm64": "0.1.0",
+    "@ferridriver/node-linux-x64-gnu": "0.1.0",
+    "@ferridriver/node-linux-arm64-gnu": "0.1.0",
+    "@ferridriver/node-win32-x64-msvc": "0.1.0"
   },
   "scripts": {
     "build": "napi build --platform --release",

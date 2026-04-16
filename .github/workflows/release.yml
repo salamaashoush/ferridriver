@@ -149,6 +149,8 @@ jobs:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
             use-napi-cross: true
+          - target: aarch64-unknown-linux-gnu
+            os: ubuntu-24.04-arm
           - target: x86_64-pc-windows-msvc
             os: windows-latest
     steps:
@@ -232,12 +234,22 @@ jobs:
         run: |
           cp ../../artifacts/napi-aarch64-apple-darwin/*.node npm/darwin-arm64/
           cp ../../artifacts/napi-x86_64-unknown-linux-gnu/*.node npm/linux-x64-gnu/
+          cp ../../artifacts/napi-aarch64-unknown-linux-gnu/*.node npm/linux-arm64-gnu/
           cp ../../artifacts/napi-x86_64-pc-windows-msvc/*.node npm/win32-x64-msvc/
           # Include fd_webkit_host in macOS platform package
           cp ../../artifacts/napi-aarch64-apple-darwin/fd_webkit_host npm/darwin-arm64/ 2>/dev/null || true
 
       - name: List npm packages
         run: ls -R crates/ferridriver-node/npm/
+
+      - name: Inject publishConfig into platform packages
+        working-directory: crates/ferridriver-node
+        run: |
+          for dir in npm/*/; do
+            if [ -f "$dir/package.json" ]; then
+              node -e "const f='${dir}package.json';const p=JSON.parse(require('fs').readFileSync(f));p.publishConfig={access:'public'};require('fs').writeFileSync(f,JSON.stringify(p,null,2)+'\n')"
+            fi
+          done
 
       - name: Publish @ferridriver/node
         working-directory: crates/ferridriver-node
