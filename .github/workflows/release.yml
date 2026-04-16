@@ -144,8 +144,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - target: x86_64-apple-darwin
-            os: macos-latest
           - target: aarch64-apple-darwin
             os: macos-latest
           - target: x86_64-unknown-linux-gnu
@@ -235,14 +233,12 @@ jobs:
       - name: Move artifacts to npm dirs
         working-directory: crates/ferridriver-node
         run: |
-          cp ../../artifacts/napi-x86_64-apple-darwin/*.node npm/darwin-x64/
           cp ../../artifacts/napi-aarch64-apple-darwin/*.node npm/darwin-arm64/
           cp ../../artifacts/napi-x86_64-unknown-linux-gnu/*.node npm/linux-x64-gnu/
           cp ../../artifacts/napi-aarch64-unknown-linux-gnu/*.node npm/linux-arm64-gnu/
           cp ../../artifacts/napi-x86_64-pc-windows-msvc/*.node npm/win32-x64-msvc/
-          # Include fd_webkit_host in macOS platform packages
+          # Include fd_webkit_host in macOS platform package
           cp ../../artifacts/napi-aarch64-apple-darwin/fd_webkit_host npm/darwin-arm64/ 2>/dev/null || true
-          cp ../../artifacts/napi-x86_64-apple-darwin/fd_webkit_host npm/darwin-x64/ 2>/dev/null || true
 
       - name: List npm packages
         run: ls -R crates/ferridriver-node/npm/
