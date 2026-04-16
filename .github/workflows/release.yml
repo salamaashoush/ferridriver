@@ -247,11 +247,48 @@ jobs:
       - name: List npm packages
         run: ls -R crates/ferridriver-node/npm/
 
-      - name: Publish
+      - name: Publish @ferridriver/node
         working-directory: crates/ferridriver-node
         run: npm publish --access public
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      # Publish pure JS/TS packages (dependency order: ct-core first, then adapters + test)
+      - name: Publish @ferridriver/ct-core
+        working-directory: packages/ct-core
+        run: npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @ferridriver/ct-react
+        working-directory: packages/ct-react
+        run: npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @ferridriver/ct-vue
+        working-directory: packages/ct-vue
+        run: npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @ferridriver/ct-svelte
+        working-directory: packages/ct-svelte
+        run: npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @ferridriver/ct-solid
+        working-directory: packages/ct-solid
+        run: npm publish --access public
+        env:
+          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Publish @ferridriver/test
+        working-directory: packages/ferridriver-test
+        run: npm publish --access public
+        env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
   # ---------------------------------------------------------------------------
