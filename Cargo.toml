@@ -31,12 +31,12 @@ todo = "warn"
 dbg_macro = "warn"
 
 [workspace.dependencies]
-ferridriver = { path = "crates/ferridriver" }
-ferridriver-mcp = { path = "crates/ferridriver-mcp" }
-ferridriver-test = { path = "crates/ferridriver-test" }
-ferridriver-test-macros = { path = "crates/ferridriver-test-macros" }
-ferridriver-bdd = { path = "crates/ferridriver-bdd" }
-ferridriver-bdd-macros = { path = "crates/ferridriver-bdd-macros" }
+ferridriver = { path = "crates/ferridriver", version = "0.1.0" }
+ferridriver-mcp = { path = "crates/ferridriver-mcp", version = "0.1.0" }
+ferridriver-test = { path = "crates/ferridriver-test", version = "0.1.0" }
+ferridriver-test-macros = { path = "crates/ferridriver-test-macros", version = "0.1.0" }
+ferridriver-bdd = { path = "crates/ferridriver-bdd", version = "0.1.0" }
+ferridriver-bdd-macros = { path = "crates/ferridriver-bdd-macros", version = "0.1.0" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
