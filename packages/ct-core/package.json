@@ -1,6 +1,6 @@
 {
   "name": "@ferridriver/ct-core",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Ferridriver component testing core -- Vite build, mount fixture, import transform, browser runtime",
   "type": "module",
   "license": "MIT OR Apache-2.0",
