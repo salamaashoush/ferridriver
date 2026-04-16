@@ -241,21 +241,25 @@ jobs:
       - name: List npm packages
         run: ls -R crates/ferridriver-node/npm/
 
-      - name: Inject publishConfig into platform packages
+      - name: Publish @ferridriver/node (platform packages + main)
         working-directory: crates/ferridriver-node
-        run: |
-          for dir in npm/*/; do
-            if [ -f "$dir/package.json" ]; then
-              node -e "const f='${dir}package.json';const p=JSON.parse(require('fs').readFileSync(f));p.publishConfig={access:'public'};require('fs').writeFileSync(f,JSON.stringify(p,null,2)+'\n')"
-            fi
-          done
-
-      - name: Publish @ferridriver/node
-        working-directory: crates/ferridriver-node
-        run: npm publish --access public
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+        run: |
+          # Run prepublish to generate platform package.json files
+          napi prepublish -t npm
+          # Publish each platform package with --access public
+          for dir in npm/*/; do
+            if [ -f "${dir}package.json" ]; then
+              echo "Publishing ${dir}..."
+              cd "$dir"
+              npm publish --access public || true
+              cd ../..
+            fi
+          done
+          # Publish the main package (skip prepublishOnly since we already ran it)
+          npm publish --access public --ignore-scripts
 
       # Publish pure JS/TS packages (dependency order: ct-core first, then adapters + test)
       - name: Publish @ferridriver/ct-core
