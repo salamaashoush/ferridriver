@@ -36,7 +36,7 @@ Cargo aliases: `cargo ck`, `cargo lint`, `cargo lintfix`, `cargo release`, `carg
 ferridriver              Core library: Browser, Page, Locator, Frame, backends
 ferridriver-mcp          MCP server library (rmcp-based, stdio + HTTP transports)
 ferridriver-cli          CLI binary (MCP server only: stdio + HTTP transports)
-ferridriver-napi         Node.js/Bun native addon via NAPI-RS (thin target over core)
+ferridriver-node         Node.js/Bun native addon via NAPI-RS (thin target over core)
 ferridriver-test         E2E test runner: parallel workers, fixtures, reporters, retries
 ferridriver-test-macros  Proc macros: #[ferritest], #[ferritest_each]
 ferridriver-bdd          BDD/Cucumber framework: step registry, Gherkin parser, translators
@@ -49,7 +49,7 @@ TS packages in `packages/`:
 packages/ferridriver-test    TS CLI + test API (test.each, describe, expect, BDD steps)
 ```
 
-Dependency flow: `ferridriver-cli` -> `ferridriver-mcp` -> `ferridriver` <- `ferridriver-napi`
+Dependency flow: `ferridriver-cli` -> `ferridriver-mcp` -> `ferridriver` <- `ferridriver-node`
 
 Test framework flow: `ferridriver-cli` -> `ferridriver-bdd` -> `ferridriver-test` -> `ferridriver`
 
@@ -136,7 +136,7 @@ if the env var is not set.
 
 To run BDD features manually: `cd packages/ferridriver-test && bun run src/cli.ts bdd -- ../../tests/features/*.feature`
 
-To build NAPI .node binary manually: `cd crates/ferridriver-napi && bun run build:debug`
+To build NAPI .node binary manually: `cd crates/ferridriver-node && bun run build:debug`
 
 ## Git Commits
 

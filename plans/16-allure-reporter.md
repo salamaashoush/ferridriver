@@ -75,7 +75,7 @@ Allure is the de facto standard enterprise test reporting framework used by QA t
 - Scenario tags -> Allure tags.
 - `@severity(critical)` -> severity label.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - Config: `reporter: [['allure', { outputDir: 'allure-results' }]]`.
 - Options:
   - `outputDir`: directory for results (default: `allure-results`).

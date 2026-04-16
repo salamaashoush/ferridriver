@@ -60,7 +60,7 @@ Many tests need to set up data via API calls before browser interaction, or veri
   - `Then the response JSON at {string} should equal {string}` (JSON path).
 - `World` gets an `api_response: Option<APIResponse>` field.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - Add `request` to `TestFixtures` interface.
 - NAPI: expose `APIRequestContext` as a JS class with async methods.
 - Usage: `test('api', async ({ request }) => { const res = await request.get('/api/users'); })`.
@@ -89,7 +89,7 @@ Many tests need to set up data via API calls before browser interaction, or veri
 | `crates/ferridriver/src/lib.rs` | Modify — export `api_request` module |
 | `crates/ferridriver-test/src/fixture.rs` | Modify — register `request` fixture |
 | `crates/ferridriver-bdd/src/steps/api.rs` | Create |
-| `crates/ferridriver-napi/src/lib.rs` | Modify — expose `APIRequestContext` |
+| `crates/ferridriver-node/src/lib.rs` | Modify — expose `APIRequestContext` |
 | `packages/ferridriver-test/src/test.ts` | Modify — add `request` to fixtures |
 
 ## Verification

@@ -57,7 +57,7 @@ When tests fail in unexpected ways, developers need to see what's happening unde
   - Format: `[target] message` with colors for terminal, plain for CI.
   - Timestamps only at trace level.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - `FERRIDRIVER_DEBUG` env var works the same (read by Rust code).
 - `--verbose` flag on TS CLI forwarded to Rust process.
 

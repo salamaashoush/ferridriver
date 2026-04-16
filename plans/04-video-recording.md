@@ -41,7 +41,7 @@ Video recordings of test execution are invaluable for debugging failures, especi
 - Video attached to scenario result, shown in HTML/JSON report.
 - No BDD-specific config; uses `TestConfig::video`.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - Config: `video: 'on' | 'off' | 'retain-on-failure'` in `ferridriver.config.ts`.
 - NAPI maps string to `VideoMode` enum.
 

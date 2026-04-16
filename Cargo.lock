@@ -2002,7 +2002,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "ferridriver-napi"
+name = "ferridriver-node"
 version = "0.2.0"
 dependencies = [
  "async-channel",

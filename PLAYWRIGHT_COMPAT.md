@@ -6,7 +6,7 @@ Known incompatibilities between ferridriver and Playwright's API that need to be
 
 - [ ] **Move cookie methods from Page to Context only** -- Playwright has cookies on `BrowserContext` only (`context.cookies()`, `context.addCookies()`, `context.clearCookies()`). ferridriver currently has them on both Page and Context. Page cookie methods should be removed and callers migrated to `page.context().cookies()` etc.
   - Affected files: `page.rs` (remove `cookies()`, `set_cookie()`, `delete_cookie()`, `clear_cookies()`, `add_cookies()`, `clear_cookies_filtered()`)
-  - Callers to migrate: `ferridriver-mcp/src/tools/cookies.rs`, `ferridriver-mcp/src/server.rs`, `ferridriver/src/steps/cookie.rs`, `ferridriver-napi/src/page.rs`
+  - Callers to migrate: `ferridriver-mcp/src/tools/cookies.rs`, `ferridriver-mcp/src/server.rs`, `ferridriver/src/steps/cookie.rs`, `ferridriver-node/src/page.rs`
   - `page.context()` was added -- use it to access cookie API from page
 
 - [ ] **`cookies(urls?)` URL filtering** -- Playwright's `context.cookies(urls?)` accepts optional URL strings to filter cookies by. ferridriver's `cookies()` returns all cookies with no filtering.

@@ -115,7 +115,7 @@ Built a complete BDD/Cucumber/Gherkin framework for ferridriver across 3 new cra
 - `crates/ferridriver-bdd/src/reporter/json.rs`
 - `crates/ferridriver-bdd/src/reporter/junit.rs`
 - `crates/ferridriver-bdd/src/reporter/cucumber_json.rs`
-- `crates/ferridriver-napi/src/bdd_runner.rs`
+- `crates/ferridriver-node/src/bdd_runner.rs`
 - `packages/ferridriver-test/src/bdd.ts`
 - `examples/bdd-example/Cargo.toml`
 - `examples/bdd-example/tests/bdd.rs`
@@ -157,9 +157,9 @@ Built a complete BDD/Cucumber/Gherkin framework for ferridriver across 3 new cra
 - `crates/ferridriver-cli/Cargo.toml` (ferridriver-bdd dep)
 - `crates/ferridriver-cli/src/cli.rs` (Bdd subcommand + BddArgs)
 - `crates/ferridriver-cli/src/main.rs` (run_bdd handler)
-- `crates/ferridriver-napi/Cargo.toml` (ferridriver-bdd dep)
-- `crates/ferridriver-napi/src/lib.rs` (mod bdd_runner)
-- `crates/ferridriver-napi/src/types.rs` (CookieData.same_site)
+- `crates/ferridriver-node/Cargo.toml` (ferridriver-bdd dep)
+- `crates/ferridriver-node/src/lib.rs` (mod bdd_runner)
+- `crates/ferridriver-node/src/types.rs` (CookieData.same_site)
 - `crates/ferridriver-mcp/src/tools/cookies.rs` (same_site: None)
 - `packages/ferridriver-test/package.json` (bdd export)
 - `packages/ferridriver-test/src/index.ts` (BDD re-exports)

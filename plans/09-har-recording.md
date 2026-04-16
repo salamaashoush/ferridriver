@@ -57,7 +57,7 @@ HAR (HTTP Archive) recording captures all network traffic during a test, enablin
   - `Given I replay network from {string}` — sets up HAR routing.
   - `Given I record network to {string}` — starts HAR recording.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - Config: `recordHar: { path: 'network.har', urlFilter: /api/ }`.
 - API: `page.routeFromHAR('recording.har', { url: /api/ })`.
 

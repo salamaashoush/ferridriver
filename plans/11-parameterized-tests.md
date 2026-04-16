@@ -31,7 +31,7 @@ Data-driven testing is one of the most common patterns: run the same test logic 
 - The proc macro expands into N `inventory::submit!` calls, one per data row.
 - Name format: `login (admin, admin@example.com)`, `login (guest, guest@example.com)`.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - `test.each()` API:
   ```ts
   test.each([

@@ -12,7 +12,7 @@ Developers expect instant feedback when editing tests or source files. Watch mod
 | `ferridriver-bdd` | `.feature` + step file change detection, scenario-level invalidation |
 | `ferridriver-cli` | `--watch` flag on `test` and `bdd` subcommands |
 | `packages/ferridriver-test` | `--watch` flag forwarded to Rust CLI |
-| `ferridriver-napi` | Expose `runWatch()` binding |
+| `ferridriver-node` | Expose `runWatch()` binding |
 
 ### Core Changes (ferridriver-test)
 - New module `crates/ferridriver-test/src/watch.rs`:
@@ -36,8 +36,8 @@ Developers expect instant feedback when editing tests or source files. Watch mod
 - Watch step definition files (Rust source in `steps/` dir): on change, re-run all scenarios (step registry may have changed).
 - The BDD runner already builds a `TestPlan` from features — the watcher just needs to re-invoke discovery for changed files.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
-- `ferridriver-napi`: expose `runWatch(config: TestConfig)` that enters the watch loop.
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
+- `ferridriver-node`: expose `runWatch(config: TestConfig)` that enters the watch loop.
 - `packages/ferridriver-test`: CLI passes `--watch` through to the NAPI binary.
 - TS test files: on change, re-evaluate the file (Bun's module cache must be invalidated).
 

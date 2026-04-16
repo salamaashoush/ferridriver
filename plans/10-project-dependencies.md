@@ -47,7 +47,7 @@ Real test suites often need ordered project execution: a "setup" project runs fi
 - BDD projects work the same way. A "setup" project can be a BDD feature that logs in.
 - Project config can mix BDD and E2E: `setup` project has `features: [...]`, test projects have `test_match: [...]`.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - Config:
   ```ts
   projects: [

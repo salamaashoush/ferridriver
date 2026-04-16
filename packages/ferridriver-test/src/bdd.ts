@@ -18,7 +18,7 @@
  *   });
  */
 
-import { TestRunner, type Page, type RunSummary, type TestFixtures } from '@ferridriver/core';
+import { TestRunner, type Page, type RunSummary, type TestFixtures } from '@ferridriver/node';
 
 // ── Cucumber Expression Type Inference ────────────────────────────────────
 

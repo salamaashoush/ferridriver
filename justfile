@@ -24,21 +24,21 @@ check:
 # Run all tests: build binary + NAPI, all Rust crates (incl. all backends), TS tests, BDD features
 test:
   cargo build --bin ferridriver
-  cd crates/ferridriver-napi && bun run build:debug
+  cd crates/ferridriver-node && bun run build:debug
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace
-  cd crates/ferridriver-napi && bun test
+  cd crates/ferridriver-node && bun test
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" bun run packages/ferridriver-test/src/cli.ts test
 
 # Run all tests with maximum parallelism
 test-fast:
   cargo build --bin ferridriver
-  cd crates/ferridriver-napi && bun run build:debug
+  cd crates/ferridriver-node && bun run build:debug
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace --exclude ferridriver-cli & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_pipe" & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_raw" & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_bidi" & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_webkit" & \
-  cd crates/ferridriver-napi && bun test & \
+  cd crates/ferridriver-node && bun test & \
   wait
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" bun run packages/ferridriver-test/src/cli.ts test
 
@@ -49,11 +49,11 @@ test-backend backend:
 
 # Run NAPI/TypeScript tests with parallel backends
 test-ts:
-  cd crates/ferridriver-napi && bun test
+  cd crates/ferridriver-node && bun test
 
 # Run all NAPI tests per backend in parallel processes
 test-ts-fast:
-  cd crates/ferridriver-napi && \
+  cd crates/ferridriver-node && \
   FERRIDRIVER_BACKEND=cdp-pipe bun test & \
   FERRIDRIVER_BACKEND=cdp-raw bun test & \
   wait

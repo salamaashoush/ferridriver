@@ -1,19 +1,19 @@
-# ferridriver-napi
+# ferridriver-node
 
 Node.js/Bun bindings for the ferridriver browser automation library. NAPI-RS native addon.
 
 ## Installation
 
 ```bash
-bun add ferridriver-napi
+bun add ferridriver-node
 # or
-npm install ferridriver-napi
+npm install ferridriver-node
 ```
 
 ## Usage
 
 ```typescript
-import { Browser } from 'ferridriver-napi';
+import { Browser } from 'ferridriver-node';
 
 const browser = await Browser.launch();
 const page = await browser.page();

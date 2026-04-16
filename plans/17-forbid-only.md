@@ -58,7 +58,7 @@ Note: This feature overlaps with plan 02 (test.only). This plan covers the stand
 - `@only` tag on a Feature or Scenario -> `TestAnnotation::Only`.
 - Error message includes `.feature` file path and scenario name.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - Config: `forbidOnly: true` in `ferridriver.config.ts`.
 - The TS `hasOnly` flag is already tracked in the registry.
 - NAPI passes `forbid_only` config to Rust.

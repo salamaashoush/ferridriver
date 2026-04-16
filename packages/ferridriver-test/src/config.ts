@@ -13,7 +13,7 @@
  *   });
  */
 
-import type { TestRunnerConfig } from '@ferridriver/core';
+import type { TestRunnerConfig } from '@ferridriver/node';
 
 /** Context / fixture options — matches Playwright's `use` block. */
 export interface UseOptions {

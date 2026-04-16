@@ -11,7 +11,7 @@ Some assertions depend on asynchronous state changes that don't have a clear loc
 | `ferridriver-test` | `expect_to_pass()` function with retry logic |
 | `ferridriver-bdd` | BDD step for polling assertions |
 | `packages/ferridriver-test` | `expect(fn).toPass()` TS API |
-| `ferridriver-napi` | Expose retry logic to TS |
+| `ferridriver-node` | Expose retry logic to TS |
 
 ### Core Changes (ferridriver-test)
 - New function in `crates/ferridriver-test/src/expect/mod.rs` (or new file `expect/to_pass.rs`):
@@ -46,7 +46,7 @@ Some assertions depend on asynchronous state changes that don't have a clear loc
 - Alternative: `Then the following should pass within {int} seconds:` with doc string of steps.
 - Implementation: parse inner step, retry with `expect_to_pass`.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - API on the expect chain:
   ```ts
   await expect(async () => {

@@ -1,5 +1,5 @@
 {
-  "name": "@ferridriver/core",
+  "name": "@ferridriver/node",
   "version": "0.2.0",
   "description": "High-performance browser automation library with Playwright-compatible API",
   "main": "index.js",
@@ -30,7 +30,7 @@
     "postinstall.js"
   ],
   "napi": {
-    "binaryName": "ferridriver-napi",
+    "binaryName": "ferridriver-node",
     "targets": [
       "x86_64-apple-darwin",
       "aarch64-apple-darwin",
@@ -43,11 +43,11 @@
     "node": ">= 16.0.0"
   },
   "optionalDependencies": {
-    "@ferridriver/core-darwin-x64": "0.2.0",
-    "@ferridriver/core-darwin-arm64": "0.2.0",
-    "@ferridriver/core-linux-x64-gnu": "0.2.0",
-    "@ferridriver/core-linux-arm64-gnu": "0.2.0",
-    "@ferridriver/core-win32-x64-msvc": "0.2.0"
+    "@ferridriver/node-darwin-x64": "0.2.0",
+    "@ferridriver/node-darwin-arm64": "0.2.0",
+    "@ferridriver/node-linux-x64-gnu": "0.2.0",
+    "@ferridriver/node-linux-arm64-gnu": "0.2.0",
+    "@ferridriver/node-win32-x64-msvc": "0.2.0"
   },
   "scripts": {
     "build": "napi build --platform --release",
