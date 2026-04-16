@@ -881,7 +881,7 @@ const installCommand = defineCommand({
 const root = defineCommand({
   meta: {
     name: 'ferridriver-test',
-    version: '0.2.0',
+    version: '0.1.0',
     description: 'High-performance E2E, component, and BDD test runner',
     about: 'Runs tests using the ferridriver Rust engine with Playwright-compatible API',
     afterHelp:
