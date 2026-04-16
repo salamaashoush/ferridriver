@@ -8,18 +8,18 @@
         "@ferridriver/test": "workspace:*",
       },
     },
-    "crates/ferridriver-napi": {
-      "name": "@ferridriver/core",
+    "crates/ferridriver-node": {
+      "name": "@ferridriver/node",
       "version": "0.2.0",
       "devDependencies": {
         "@napi-rs/cli": "^3.2.0",
       },
       "optionalDependencies": {
-        "@ferridriver/core-darwin-arm64": "0.2.0",
-        "@ferridriver/core-darwin-x64": "0.2.0",
-        "@ferridriver/core-linux-arm64-gnu": "0.2.0",
-        "@ferridriver/core-linux-x64-gnu": "0.2.0",
-        "@ferridriver/core-win32-x64-msvc": "0.2.0",
+        "@ferridriver/node-darwin-arm64": "0.2.0",
+        "@ferridriver/node-darwin-x64": "0.2.0",
+        "@ferridriver/node-linux-arm64-gnu": "0.2.0",
+        "@ferridriver/node-linux-x64-gnu": "0.2.0",
+        "@ferridriver/node-win32-x64-msvc": "0.2.0",
       },
     },
     "examples/ct-react": {
@@ -130,8 +130,8 @@
         "ferridriver-test": "dist/cli.js",
       },
       "dependencies": {
-        "@ferridriver/core": "workspace:*",
         "@ferridriver/ct-core": "workspace:*",
+        "@ferridriver/node": "workspace:*",
         "clap-ts": "^0.2.1",
         "jiti": "^2.6.1",
       },
@@ -236,8 +236,6 @@
 
     "@esbuild/win32-x64": ["@esbuild/win32-x64@0.25.12", "", { "os": "win32", "cpu": "x64" }, "sha512-alJC0uCZpTFrSL0CCDjcgleBXPnCrEAhTBILpeAp7M/OFgoqtAetfBzX0xM00MUsVVPpVjlPuMbREqnZCXaTnA=="],
 
-    "@ferridriver/core": ["@ferridriver/core@workspace:crates/ferridriver-napi"],
-
     "@ferridriver/ct-core": ["@ferridriver/ct-core@workspace:packages/ct-core"],
 
     "@ferridriver/ct-react": ["@ferridriver/ct-react@workspace:packages/ct-react"],
@@ -247,6 +245,8 @@
     "@ferridriver/ct-svelte": ["@ferridriver/ct-svelte@workspace:packages/ct-svelte"],
 
     "@ferridriver/ct-vue": ["@ferridriver/ct-vue@workspace:packages/ct-vue"],
+
+    "@ferridriver/node": ["@ferridriver/node@workspace:crates/ferridriver-node"],
 
     "@ferridriver/test": ["@ferridriver/test@workspace:packages/ferridriver-test"],
 
