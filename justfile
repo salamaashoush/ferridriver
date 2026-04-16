@@ -108,8 +108,9 @@ release version:
     echo "Usage: just release X.Y.Z" >&2; exit 1
   fi
   echo "Bumping to $VERSION..."
-  # Rust: workspace version (single source of truth for all crates)
+  # Rust: workspace version + workspace dependency versions
   sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+  sed -i '' "s/\(ferridriver[a-z-]* = { path = \"[^\"]*\", version = \)\"[^\"]*\"/\1\"$VERSION\"/" Cargo.toml
   cargo generate-lockfile 2>/dev/null || true
   # npm: all package.json files -- replace any version string on a "version" line
   for f in crates/ferridriver-node/package.json \
