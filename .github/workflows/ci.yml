@@ -237,6 +237,7 @@ jobs:
       - uses: rustsec/audit-check@v2
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
+          createIssues: false
 
   # ---------------------------------------------------------------------------
   # Lockfile: ensure Cargo.lock is committed and up to date
