@@ -98,6 +98,43 @@ bdd *args:
 test-bdd *args:
   bun run packages/ferridriver-test/src/cli.ts test {{args}} tests/features/
 
+# Bump version everywhere, commit, and tag for release.
+# Usage: just release 0.3.0
+release version:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  VERSION="{{version}}"
+  if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+    echo "Usage: just release X.Y.Z" >&2; exit 1
+  fi
+  echo "Bumping to $VERSION..."
+  # Rust: workspace version (single source of truth for all crates)
+  sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+  cargo generate-lockfile 2>/dev/null || true
+  # npm: all package.json files (first "version" line only)
+  for f in crates/ferridriver-node/package.json \
+           packages/ferridriver-test/package.json \
+           packages/ct-core/package.json \
+           packages/ct-react/package.json \
+           packages/ct-solid/package.json \
+           packages/ct-svelte/package.json \
+           packages/ct-vue/package.json; do
+    sed -i '' "0,/\"version\": \"[^\"]*\"/s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$f"
+  done
+  # TS CLI hardcoded version
+  sed -i '' "s/version: '[^']*'/version: '$VERSION'/" packages/ferridriver-test/src/cli.ts
+  # Verify
+  echo "Rust:  $(grep '^version' Cargo.toml)"
+  echo "NAPI:  $(grep '\"version\"' crates/ferridriver-node/package.json | head -1 | xargs)"
+  echo "Test:  $(grep '\"version\"' packages/ferridriver-test/package.json | head -1 | xargs)"
+  echo "CLI:   $(grep "version:" packages/ferridriver-test/src/cli.ts | head -1 | xargs)"
+  # Commit and tag
+  git add -A
+  git commit -m "release: v$VERSION"
+  git tag "v$VERSION"
+  echo ""
+  echo "Tagged v$VERSION. Push with: git push && git push --tags"
+
 # Generate docs
 doc:
   cargo doc --workspace --no-deps --open
