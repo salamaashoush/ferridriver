@@ -98,7 +98,7 @@ bdd *args:
 test-bdd *args:
   bun run packages/ferridriver-test/src/cli.ts test {{args}} tests/features/
 
-# Bump version everywhere, commit, and tag for release.
+# Bump version everywhere, commit, tag, and push to trigger release CI.
 # Usage: just release 0.3.0
 release version:
   #!/usr/bin/env bash
@@ -128,12 +128,31 @@ release version:
   echo "NAPI:  $(grep '\"version\"' crates/ferridriver-node/package.json | head -1 | xargs)"
   echo "Test:  $(grep '\"version\"' packages/ferridriver-test/package.json | head -1 | xargs)"
   echo "CLI:   $(grep "version:" packages/ferridriver-test/src/cli.ts | head -1 | xargs)"
-  # Commit and tag
+  # Commit, tag, push
   git add -A
   git commit -m "release: v$VERSION"
   git tag "v$VERSION"
+  git push && git push --tags
   echo ""
-  echo "Tagged v$VERSION. Push with: git push && git push --tags"
+  echo "Pushed v$VERSION -- release CI triggered."
+
+# Re-trigger a failed release by deleting and re-pushing the tag.
+# Usage: just release-retry 0.3.0
+release-retry version:
+  #!/usr/bin/env bash
+  set -euo pipefail
+  VERSION="{{version}}"
+  TAG="v$VERSION"
+  echo "Deleting tag $TAG (local + remote)..."
+  git tag -d "$TAG" 2>/dev/null || true
+  git push origin ":refs/tags/$TAG" 2>/dev/null || true
+  # Also delete the draft GitHub release if it exists
+  gh release delete "$TAG" --yes 2>/dev/null || true
+  echo "Re-tagging $TAG at HEAD..."
+  git tag "$TAG"
+  git push --tags
+  echo ""
+  echo "Re-pushed $TAG -- release CI re-triggered."
 
 # Generate docs
 doc:
