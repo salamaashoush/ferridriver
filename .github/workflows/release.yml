@@ -245,53 +245,55 @@ jobs:
         working-directory: crates/ferridriver-node
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
         run: |
+          echo "//registry.npmjs.org/:_authToken=${NPM_TOKEN}" > ~/.npmrc
           # Generate platform package.json files without publishing them
           napi prepublish -t npm --skip-optional-publish --no-gh-release
-          # Publish each platform package ourselves with --access public
+          # Publish each platform package with --access public
           for dir in npm/*/; do
             if [ -f "${dir}package.json" ]; then
               echo "Publishing ${dir}..."
-              (cd "$dir" && npm publish --access public) || true
+              (cd "$dir" && npm publish --access public --registry https://registry.npmjs.org) || true
             fi
           done
-          # Publish the main package (skip scripts to avoid re-running prepublish)
-          npm publish --access public --ignore-scripts
+          # Publish the main package
+          npm publish --access public --ignore-scripts --registry https://registry.npmjs.org
 
       # Publish pure JS/TS packages (dependency order: ct-core first, then adapters + test)
       - name: Publish @ferridriver/ct-core
         working-directory: packages/ct-core
-        run: npm publish --access public
+        run: npm publish --access public --registry https://registry.npmjs.org
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @ferridriver/ct-react
         working-directory: packages/ct-react
-        run: npm publish --access public
+        run: npm publish --access public --registry https://registry.npmjs.org
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @ferridriver/ct-vue
         working-directory: packages/ct-vue
-        run: npm publish --access public
+        run: npm publish --access public --registry https://registry.npmjs.org
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @ferridriver/ct-svelte
         working-directory: packages/ct-svelte
-        run: npm publish --access public
+        run: npm publish --access public --registry https://registry.npmjs.org
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @ferridriver/ct-solid
         working-directory: packages/ct-solid
-        run: npm publish --access public
+        run: npm publish --access public --registry https://registry.npmjs.org
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
       - name: Publish @ferridriver/test
         working-directory: packages/ferridriver-test
-        run: npm publish --access public
+        run: npm publish --access public --registry https://registry.npmjs.org
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
 
