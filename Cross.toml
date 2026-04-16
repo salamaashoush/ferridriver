@@ -1,10 +1,9 @@
 [target.x86_64-unknown-linux-musl]
 pre-build = [
-  "apt-get update && apt-get install -y libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev pkg-config libclang-dev"
+  "apt-get update && apt-get install -y pkg-config libclang-dev"
 ]
 
 [target.aarch64-unknown-linux-musl]
 pre-build = [
-  "dpkg --add-architecture arm64",
-  "apt-get update && apt-get install -y libavutil-dev:arm64 libavformat-dev:arm64 libavfilter-dev:arm64 libavdevice-dev:arm64 pkg-config libclang-dev"
+  "apt-get update && apt-get install -y pkg-config libclang-dev"
 ]

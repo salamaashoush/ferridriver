@@ -82,13 +82,11 @@ jobs:
         if: runner.os == 'Linux' && !matrix.cross
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
-            libclang-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libclang-dev pkg-config
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install ffmpeg pkg-config llvm
+        run: brew install pkg-config llvm
 
       - name: Install cross
         if: matrix.cross
@@ -169,15 +167,13 @@ jobs:
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install ffmpeg pkg-config llvm
+        run: brew install pkg-config llvm
 
       - name: Install system deps (Linux native)
         if: runner.os == 'Linux' && !matrix.use-napi-cross
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
-            libclang-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libclang-dev pkg-config
 
       - name: Install napi-rs CLI
         run: bun install -g @napi-rs/cli@3
@@ -272,9 +268,7 @@ jobs:
       - name: Install system deps
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
-            libclang-dev pkg-config
+          sudo apt-get install -y --no-install-recommends libclang-dev pkg-config
 
       # Layer 1: proc-macro crates (no internal deps)
       - name: Publish ferridriver-test-macros
