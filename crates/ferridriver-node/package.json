@@ -57,7 +57,7 @@
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
     "artifacts": "napi artifacts",
-    "prepublishOnly": "napi prepublish -t npm",
+    "prepublish": "napi prepublish -t npm",
     "version": "napi version",
     "postinstall": "node postinstall.js"
   },
