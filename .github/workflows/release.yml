@@ -241,25 +241,16 @@ jobs:
       - name: List npm packages
         run: ls -R crates/ferridriver-node/npm/
 
-      - name: Publish @ferridriver/node (platform packages + main)
+      - name: Publish @ferridriver/node
         working-directory: crates/ferridriver-node
         env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          # Run prepublish to generate platform package.json files
-          napi prepublish -t npm
-          # Publish each platform package with --access public
+          napi prepublish -t npm --no-gh-release
           for dir in npm/*/; do
-            if [ -f "${dir}package.json" ]; then
-              echo "Publishing ${dir}..."
-              cd "$dir"
-              npm publish --access public || true
-              cd ../..
-            fi
+            [ -f "${dir}package.json" ] && (cd "$dir" && npm publish --access public --provenance) || true
           done
-          # Publish the main package (skip prepublishOnly since we already ran it)
-          npm publish --access public --ignore-scripts
+          npm publish --access public --provenance --ignore-scripts
 
       # Publish pure JS/TS packages (dependency order: ct-core first, then adapters + test)
       - name: Publish @ferridriver/ct-core
