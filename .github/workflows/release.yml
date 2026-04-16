@@ -246,11 +246,17 @@ jobs:
         env:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
         run: |
-          napi prepublish -t npm --no-gh-release
+          # Generate platform package.json files without publishing them
+          napi prepublish -t npm --skip-optional-publish --no-gh-release
+          # Publish each platform package ourselves with --access public
           for dir in npm/*/; do
-            [ -f "${dir}package.json" ] && (cd "$dir" && npm publish --access public --provenance) || true
+            if [ -f "${dir}package.json" ]; then
+              echo "Publishing ${dir}..."
+              (cd "$dir" && npm publish --access public) || true
+            fi
           done
-          npm publish --access public --provenance --ignore-scripts
+          # Publish the main package (skip scripts to avoid re-running prepublish)
+          npm publish --access public --ignore-scripts
 
       # Publish pure JS/TS packages (dependency order: ct-core first, then adapters + test)
       - name: Publish @ferridriver/ct-core
