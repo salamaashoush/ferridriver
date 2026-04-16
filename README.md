@@ -10,7 +10,7 @@ ferridriver (core library)
   ├── CdpRaw backend        Chrome via WebSocket — connect to running browser
   ├── WebKit backend         macOS WKWebView — native accessibility
   │
-  ├── ferridriver-cli        CLI: MCP server + test runner (Rust)
+  ├── ferridriver-cli        CLI: MCP server (stdio + HTTP)
   ├── ferridriver-napi       Node.js/Bun bindings (NAPI-RS)
   ├── @ferridriver/test      CLI: test runner + component testing (TypeScript)
   │
@@ -37,28 +37,18 @@ This installs system dependencies, the `ferridriver` binary, and downloads Chrom
 
 #### 1. System dependencies
 
-ferridriver requires **ffmpeg** libraries for video recording.
+No system library dependencies for building. Video recording (`--video`) requires `ffmpeg` on PATH at runtime.
 
 **Ubuntu/Debian:**
 ```bash
-sudo apt-get install -y ffmpeg libavutil-dev libavformat-dev libavfilter-dev \
-  libavdevice-dev libswscale-dev libswresample-dev libavcodec-dev \
-  pkg-config libclang-dev
-```
-
-**Arch Linux:**
-```bash
-sudo pacman -S ffmpeg pkgconf clang
+sudo apt-get install -y pkg-config libclang-dev
+# Optional, for --video: sudo apt-get install -y ffmpeg
 ```
 
 **macOS (Homebrew):**
 ```bash
-brew install ffmpeg pkg-config
-```
-
-**Fedora/RHEL:**
-```bash
-sudo dnf install ffmpeg-devel clang-devel pkgconfig
+brew install pkg-config
+# Optional, for --video: brew install ffmpeg
 ```
 
 #### 2. Install the CLI
@@ -77,8 +67,9 @@ cargo install ferridriver-cli
 #### 3. Install a browser
 
 ```bash
-ferridriver install chromium                # download Chrome for Testing
-ferridriver install --with-deps chromium    # also install Chromium system deps (fonts, libs)
+# Via the TS CLI
+npx @ferridriver/test install chromium
+npx @ferridriver/test install --with-deps chromium  # also install system deps (fonts, libs)
 ```
 
 ### npm (Node.js/Bun)
@@ -160,7 +151,7 @@ test('login flow', async ({ page }) => {
 ```
 
 ```bash
-ferridriver-test tests/login.spec.ts --workers 4
+npx @ferridriver/test test tests/login.spec.ts --workers 4
 ```
 
 ### E2E Project Setup (Rust)
@@ -338,13 +329,13 @@ test('counter increments', async ({ page }) => {
 ```
 
 ```bash
-ferridriver-test --ct --framework react src/todomvc.ct.ts
-ferridriver-test --ct --framework vue src/todomvc.ct.ts
-ferridriver-test --ct --framework svelte src/todomvc.ct.ts
-ferridriver-test --ct --framework solid src/todomvc.ct.ts
+npx @ferridriver/test ct --framework react src/todomvc.ct.ts
+npx @ferridriver/test ct --framework vue src/todomvc.ct.ts
+npx @ferridriver/test ct --framework svelte src/todomvc.ct.ts
+npx @ferridriver/test ct --framework solid src/todomvc.ct.ts
 
 # With options
-ferridriver-test --ct --framework react --headed --backend webkit --workers 1 src/app.ct.ts
+npx @ferridriver/test ct --framework react --headed --backend webkit --workers 1 src/app.ct.ts
 ```
 
 The `--ct` flag starts the Vite dev server, pre-warms it, navigates each test page to the app, and provides a `mount()` fixture.
@@ -373,21 +364,21 @@ The `--ct` flag starts the Vite dev server, pre-warms it, navigates each test pa
 25 tools for AI agent browser automation. Works with Claude, Cursor, or any MCP client.
 
 ```bash
-# stdio (for Claude Code) -- headed by default
-ferridriver mcp
+# stdio (for Claude Code, Cursor, etc.)
+ferridriver
 
 # headless mode
-ferridriver mcp --headless
+ferridriver --headless
 
-# HTTP (for remote clients)
-ferridriver mcp --transport http --port 8080
+# HTTP transport (for remote clients)
+ferridriver --transport http --port 8080
 
 # WebKit backend (macOS, no Chrome needed)
-ferridriver mcp --backend webkit
+ferridriver --backend webkit
 
 # Connect to running Chrome
-ferridriver mcp --auto-connect
-ferridriver mcp --connect ws://localhost:9222/devtools/browser/...
+ferridriver --auto-connect
+ferridriver --connect ws://localhost:9222/devtools/browser/...
 ```
 
 Tools: `connect`, `navigate`, `page`, `click`, `click_at`, `hover`, `fill`, `fill_form`, `type_text`, `press_key`, `drag`, `scroll`, `select_option`, `upload_file`, `snapshot`, `screenshot`, `evaluate`, `wait_for`, `search_page`, `find_elements`, `get_markdown`, `cookies`, `storage`, `emulate`, `diagnostics`
@@ -470,7 +461,7 @@ All Playwright selector engines are supported:
 ```
 crates/
   ferridriver               Core: Browser, Page, Locator, 3 backends
-  ferridriver-cli            CLI binary (MCP server + Rust test runner)
+  ferridriver-cli            CLI binary (MCP server: stdio + HTTP)
   ferridriver-mcp            MCP server library (25 tools, rmcp)
   ferridriver-napi           Node.js/Bun bindings (NAPI-RS)
   ferridriver-test           Test runner: parallel, hooks, expect, reporters
@@ -512,30 +503,17 @@ examples/
 - 3 CT infrastructure tests
 - **397+ total tests**
 
-## Building
+## Building and Testing
 
 ```bash
-# Core library
-cargo build -p ferridriver
+# Run everything: build binary + NAPI, all Rust tests (4 backends), TS tests, BDD features
+just test
 
-# MCP server
-cargo build -p ferridriver-cli
-
-# NAPI addon
-cd crates/ferridriver-napi && bun run build && bun test
-
-# Rust WASM E2E tests (requires trunk / dioxus-cli + trunk build / dx build first)
-cargo test -p ct-leptos-todomvc --test todomvc
-cargo test -p ct-dioxus-todomvc --test todomvc
-
-# JS component tests
-cd examples/ct-react && bun install && bun run test:ct
-cd examples/ct-vue && bun install && bun run test:ct
-cd examples/ct-svelte && bun install && bun run test:ct
-cd examples/ct-solid && bun install && bun run test:ct
-
-# Or from workspace root
-bun install && cd examples/ct-react && bun run test:ct
+# Or step by step:
+cargo build --bin ferridriver                     # MCP server binary
+cd crates/ferridriver-napi && bun run build:debug  # NAPI .node addon
+cargo test --workspace                             # Rust tests
+cd crates/ferridriver-napi && bun test             # NAPI/TS tests
 ```
 
 ## Requirements
@@ -544,6 +522,7 @@ bun install && cd examples/ct-react && bun run test:ct
 - Chrome/Chromium (auto-detected, or set `CHROMIUM_PATH`)
 - macOS 11+ for WebKit backend
 - Bun 1.0+ or Node.js 18+ for NAPI and TS test runner
+- `ffmpeg` on PATH for `--video` recording (optional, runtime only)
 - `trunk` for Leptos CT (`cargo install trunk`)
 - `dx` for Dioxus CT (`cargo install dioxus-cli`)
 
