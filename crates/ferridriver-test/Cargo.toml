@@ -20,7 +20,7 @@ tokio-console = ["dep:console-subscriber", "tokio/tracing"]
 
 [dependencies]
 ferridriver = { workspace = true }
-ferridriver-test-macros = { path = "../ferridriver-test-macros" }
+ferridriver-test-macros = { path = "../ferridriver-test-macros", version = "0.1.0" }
 tokio = { workspace = true }
 futures = { workspace = true }
 serde = { workspace = true }

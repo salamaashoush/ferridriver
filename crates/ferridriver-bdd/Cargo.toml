@@ -13,7 +13,7 @@ categories.workspace = true
 [dependencies]
 ferridriver = { workspace = true }
 ferridriver-test = { workspace = true }
-ferridriver-bdd-macros = { path = "../ferridriver-bdd-macros" }
+ferridriver-bdd-macros = { path = "../ferridriver-bdd-macros", version = "0.1.0" }
 
 tokio = { workspace = true }
 futures = { workspace = true }
