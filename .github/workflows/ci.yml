@@ -67,7 +67,6 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
       - run: |
           cargo clippy --workspace --all-targets \
@@ -91,7 +90,6 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
       - run: |
           cargo doc --workspace --no-deps \
@@ -144,12 +142,11 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install ffmpeg pkg-config llvm
+        run: brew install pkg-config llvm
 
       - name: Build ferridriver binary
         run: cargo build --bin ferridriver
@@ -208,7 +205,6 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
       - name: Build ferridriver binary
         run: cargo build --bin ferridriver
@@ -255,7 +251,6 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libavutil-dev libavformat-dev libavfilter-dev libavdevice-dev \
             libclang-dev pkg-config
       - run: cargo check --locked --workspace
 
