@@ -1,6 +1,6 @@
 {
   "name": "@ferridriver/node",
-  "version": "0.2.0",
+  "version": "0.1.0",
   "description": "High-performance browser automation library with Playwright-compatible API",
   "main": "index.js",
   "types": "index.d.ts",

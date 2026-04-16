@@ -111,7 +111,7 @@ release version:
   # Rust: workspace version (single source of truth for all crates)
   sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
   cargo generate-lockfile 2>/dev/null || true
-  # npm: all package.json files (first "version" line only)
+  # npm: all package.json files -- replace any version string on a "version" line
   for f in crates/ferridriver-node/package.json \
            packages/ferridriver-test/package.json \
            packages/ct-core/package.json \
@@ -119,7 +119,8 @@ release version:
            packages/ct-solid/package.json \
            packages/ct-svelte/package.json \
            packages/ct-vue/package.json; do
-    sed -i '' "0,/\"version\": \"[^\"]*\"/s/\"version\": \"[^\"]*\"/\"version\": \"$VERSION\"/" "$f"
+    # Use node for reliable cross-platform JSON version update
+    node -e "const f='$f';const p=JSON.parse(require('fs').readFileSync(f));p.version='$VERSION';require('fs').writeFileSync(f,JSON.stringify(p,null,2)+'\n')"
   done
   # TS CLI hardcoded version
   sed -i '' "s/version: '[^']*'/version: '$VERSION'/" packages/ferridriver-test/src/cli.ts
