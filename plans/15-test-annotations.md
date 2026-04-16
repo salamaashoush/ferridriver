@@ -52,7 +52,7 @@ Tests need metadata beyond pass/fail: links to issue trackers, environment-speci
 - `@issue(JIRA-1234)` tag: parsed into `Info { type_name: "issue", description: "JIRA-1234" }`.
 - Tag syntax: `@key(value)` pattern parsed into `Info` annotations.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - `test.info()` returns `TestInfo` with annotation methods:
   ```ts
   test('example', async ({ page }) => {

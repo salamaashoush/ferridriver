@@ -10,8 +10,8 @@
 import { defineCommand, defineArgs, runMain, withCompletions } from 'clap-ts';
 import type { CommandDef } from 'clap-ts';
 
-import { TestRunner } from '@ferridriver/core';
-import type { Page } from '@ferridriver/core';
+import { TestRunner } from '@ferridriver/node';
+import type { Page } from '@ferridriver/node';
 import { _setCurrentFile, _runWithFile, _drainTests, _hasOnly, _setCtMountFactory, _setRunner, _drainWorkerFixtures } from './test.js';
 import type { MountFunction } from './test.js';
 import { isAbsolute, join, relative, resolve } from 'path';
@@ -854,7 +854,7 @@ const installCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const { installChromium, installChromiumHeadlessShell, installSystemDeps, getBrowserCacheDir } = await import('@ferridriver/core');
+    const { installChromium, installChromiumHeadlessShell, installSystemDeps, getBrowserCacheDir } = await import('@ferridriver/node');
     const browser = (args.browser as string) || 'chromium';
     if (!['chromium', 'chrome', 'chromium-headless-shell', 'firefox'].includes(browser)) {
       console.error(`Unsupported browser: ${browser}. Supported: chromium, chromium-headless-shell, firefox.`);

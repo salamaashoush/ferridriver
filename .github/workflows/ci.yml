@@ -155,7 +155,7 @@ jobs:
         run: bun install
 
       - name: Build NAPI debug
-        working-directory: crates/ferridriver-napi
+        working-directory: crates/ferridriver-node
         run: bun run build:debug
 
       - name: Install Chromium with system deps
@@ -211,12 +211,12 @@ jobs:
       - name: Install dependencies
         run: bun install
       - name: Build NAPI debug
-        working-directory: crates/ferridriver-napi
+        working-directory: crates/ferridriver-node
         run: bun run build:debug
       - name: Install Chromium with system deps
         run: bun run packages/ferridriver-test/src/cli.ts install --with-deps chromium
       - name: Run TypeScript tests
-        working-directory: crates/ferridriver-napi
+        working-directory: crates/ferridriver-node
         run: bun test
 
   # ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ During development, you need to focus on a single test without commenting out ot
 - `@only` on a `Feature:` line applies to all scenarios in that feature.
 - Combine with existing tag filter: `@only` is processed first, then other tag filters apply on top.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - `test.only()` already exists in `packages/ferridriver-test/src/test.ts` — it sets `modifier: 'only'`.
 - NAPI side: when receiving test metadata with `modifier: 'only'`, set `TestAnnotation::Only`.
 - The `hasOnly` flag in TS registry triggers plan-level filtering on the Rust side.

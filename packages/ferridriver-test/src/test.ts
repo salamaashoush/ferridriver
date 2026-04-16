@@ -12,7 +12,7 @@
  */
 
 import { AsyncLocalStorage } from 'node:async_hooks';
-import type { TestMeta, TestRunner, TestFixtures } from '@ferridriver/core';
+import type { TestMeta, TestRunner, TestFixtures } from '@ferridriver/node';
 
 // ── Types ──
 

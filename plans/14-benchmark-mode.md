@@ -60,7 +60,7 @@ Browser automation libraries need performance measurement: how fast does a page 
   ```
 - Collected via `inventory` like tests.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - `bench()` API:
   ```ts
   import { bench } from '@ferridriver/test';

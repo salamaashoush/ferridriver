@@ -57,7 +57,7 @@ Most web apps require authentication. Without storage state, every test must log
   - `Given I save the storage state to {string}`
   - `Given I load the storage state from {string}`
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - Config: `storageState: './auth.json'` in `ferridriver.config.ts`.
 - API: `page.context().storageState()` returns JS object or saves to file.
 - Global setup: `globalSetup: './global-setup.ts'` that logs in and saves state.

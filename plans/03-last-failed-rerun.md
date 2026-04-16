@@ -29,7 +29,7 @@ After a test run with failures, developers want to re-run only the failed tests 
 - The rerun file contains `features/login.feature:15` — matches `TestId::file_location()`.
 - No BDD-specific code needed; the core `filter_by_rerun` works for both E2E and BDD.
 
-### NAPI + TypeScript (ferridriver-napi, packages/ferridriver-test)
+### NAPI + TypeScript (ferridriver-node, packages/ferridriver-test)
 - NAPI: accept `lastFailed: boolean` in config/overrides, pass to Rust `CliOverrides`.
 - TS CLI: `--last-failed` flag, forwarded through.
 

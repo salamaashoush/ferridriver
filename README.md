@@ -11,7 +11,7 @@ ferridriver (core library)
   ├── WebKit backend         macOS WKWebView — native accessibility
   │
   ├── ferridriver-cli        CLI: MCP server (stdio + HTTP)
-  ├── ferridriver-napi       Node.js/Bun bindings (NAPI-RS)
+  ├── ferridriver-node       Node.js/Bun bindings (NAPI-RS)
   ├── @ferridriver/test      CLI: test runner + component testing (TypeScript)
   │
   ├── ferridriver-test       Test runner core: parallel, hooks, expect, reporters
@@ -80,7 +80,7 @@ npm install @ferridriver/test
 bun add @ferridriver/test
 ```
 
-This installs the test runner CLI (`ferridriver-test`) and the `@ferridriver/core` native addon as a dependency. On macOS, it also ships the WebKit host binary.
+This installs the test runner CLI (`ferridriver-test`) and the `@ferridriver/node` native addon as a dependency. On macOS, it also ships the WebKit host binary.
 
 ## Quick Start (Rust)
 
@@ -109,7 +109,7 @@ async fn main() -> Result<(), String> {
 ## Quick Start (Node.js/Bun)
 
 ```typescript
-import { Browser } from '@ferridriver/core';
+import { Browser } from '@ferridriver/node';
 
 const browser = await Browser.launch();
 const page = await browser.newPageWithUrl('https://example.com');
@@ -463,7 +463,7 @@ crates/
   ferridriver               Core: Browser, Page, Locator, 3 backends
   ferridriver-cli            CLI binary (MCP server: stdio + HTTP)
   ferridriver-mcp            MCP server library (25 tools, rmcp)
-  ferridriver-napi           Node.js/Bun bindings (NAPI-RS)
+  ferridriver-node           Node.js/Bun bindings (NAPI-RS)
   ferridriver-test           Test runner: parallel, hooks, expect, reporters
   ferridriver-test-macros    #[ferritest] proc macro
 packages/
@@ -511,9 +511,9 @@ just test
 
 # Or step by step:
 cargo build --bin ferridriver                     # MCP server binary
-cd crates/ferridriver-napi && bun run build:debug  # NAPI .node addon
+cd crates/ferridriver-node && bun run build:debug  # NAPI .node addon
 cargo test --workspace                             # Rust tests
-cd crates/ferridriver-napi && bun test             # NAPI/TS tests
+cd crates/ferridriver-node && bun test             # NAPI/TS tests
 ```
 
 ## Requirements

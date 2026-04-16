@@ -32,10 +32,10 @@
     "ferridriver-test": "dist/cli.js"
   },
   "scripts": {
-    "build:cli": "bun build src/cli.ts --target=node --outdir=dist --external @ferridriver/core --external @ferridriver/ct-core --external clap-ts --external jiti --external ./test.js --external ./config.js --external ./bdd.js --external ./expect.js --external '*.node'"
+    "build:cli": "bun build src/cli.ts --target=node --outdir=dist --external @ferridriver/node --external @ferridriver/ct-core --external clap-ts --external jiti --external ./test.js --external ./config.js --external ./bdd.js --external ./expect.js --external '*.node'"
   },
   "dependencies": {
-    "@ferridriver/core": "workspace:*",
+    "@ferridriver/node": "workspace:*",
     "@ferridriver/ct-core": "workspace:*",
     "clap-ts": "^0.2.1",
     "jiti": "^2.6.1"

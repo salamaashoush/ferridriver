@@ -25,7 +25,7 @@ export type { MountFunction } from './test.js';
 export { expect } from './expect.js';
 export { defineConfig } from './config.js';
 export type { FerridriverTestConfig, UseOptions, ProjectConfig, WebServerConfig, ExpectConfig } from './config.js';
-export type { TestRunnerConfig, TestFixtures, TestInfo } from '@ferridriver/core';
+export type { TestRunnerConfig, TestFixtures, TestInfo } from '@ferridriver/node';
 
 // BDD exports — matches @cucumber/cucumber API surface
 export {

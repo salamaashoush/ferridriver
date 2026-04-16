@@ -1,5 +1,5 @@
 [package]
-name = "ferridriver-napi"
+name = "ferridriver-node"
 description = "NAPI-RS native addon exposing ferridriver browser automation to Node.js"
 version.workspace = true
 edition.workspace = true

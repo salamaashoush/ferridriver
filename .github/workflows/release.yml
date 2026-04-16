@@ -182,7 +182,7 @@ jobs:
         run: bun install
 
       - name: Build native
-        working-directory: crates/ferridriver-napi
+        working-directory: crates/ferridriver-node
         shell: bash
         run: |
           if [ "${{ matrix.use-napi-cross }}" = "true" ]; then
@@ -196,8 +196,8 @@ jobs:
         with:
           name: napi-${{ matrix.target }}
           path: |
-            crates/ferridriver-napi/*.node
-            crates/ferridriver-napi/fd_webkit_host
+            crates/ferridriver-node/*.node
+            crates/ferridriver-node/fd_webkit_host
           if-no-files-found: error
 
   # ---------------------------------------------------------------------------
@@ -229,11 +229,11 @@ jobs:
           path: artifacts
 
       - name: Create npm dirs
-        working-directory: crates/ferridriver-napi
+        working-directory: crates/ferridriver-node
         run: napi create-npm-dirs
 
       - name: Move artifacts to npm dirs
-        working-directory: crates/ferridriver-napi
+        working-directory: crates/ferridriver-node
         run: |
           cp ../../artifacts/napi-x86_64-apple-darwin/*.node npm/darwin-x64/
           cp ../../artifacts/napi-aarch64-apple-darwin/*.node npm/darwin-arm64/
@@ -245,10 +245,10 @@ jobs:
           cp ../../artifacts/napi-x86_64-apple-darwin/fd_webkit_host npm/darwin-x64/ 2>/dev/null || true
 
       - name: List npm packages
-        run: ls -R crates/ferridriver-napi/npm/
+        run: ls -R crates/ferridriver-node/npm/
 
       - name: Publish
-        working-directory: crates/ferridriver-napi
+        working-directory: crates/ferridriver-node
         run: npm publish --access public
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

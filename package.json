@@ -3,7 +3,7 @@
   "private": true,
   "workspaces": [
     "packages/*",
-    "crates/ferridriver-napi",
+    "crates/ferridriver-node",
     "examples/ct-react",
     "examples/ct-vue",
     "examples/ct-svelte",
