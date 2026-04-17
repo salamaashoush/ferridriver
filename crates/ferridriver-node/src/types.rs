@@ -249,25 +249,46 @@ impl From<BrowserCloseOptions> for ferridriver::options::BrowserCloseOptions {
   }
 }
 
-/// Emulate media options.
+/// Playwright-parity `page.emulateMedia` options per
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2580`.
+///
+/// Every field is `Option<Either<String, Null>>` so we can surface all
+/// three states Playwright's TS signature requires: absent (field not
+/// present on the object → don't change), JS `null` (reset the override),
+/// or a string value (apply it). Plain `Option<String>` would conflate
+/// undefined and null — napi-rs would either reject null or silently fold
+/// it into None, breaking the contract.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct EmulateMediaOptions {
-  pub media: Option<String>,
-  pub color_scheme: Option<String>,
-  pub reduced_motion: Option<String>,
-  pub forced_colors: Option<String>,
-  pub contrast: Option<String>,
+  #[napi(ts_type = "null | 'screen' | 'print'")]
+  pub media: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
+  #[napi(ts_type = "null | 'light' | 'dark' | 'no-preference'")]
+  pub color_scheme: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
+  #[napi(ts_type = "null | 'reduce' | 'no-preference'")]
+  pub reduced_motion: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
+  #[napi(ts_type = "null | 'active' | 'none'")]
+  pub forced_colors: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
+  #[napi(ts_type = "null | 'no-preference' | 'more'")]
+  pub contrast: Option<napi::Either<String, napi::bindgen_prelude::Null>>,
+}
+
+fn lower_override(v: Option<napi::Either<String, napi::bindgen_prelude::Null>>) -> ferridriver::options::MediaOverride {
+  match v {
+    None => ferridriver::options::MediaOverride::Unchanged,
+    Some(napi::Either::A(s)) => ferridriver::options::MediaOverride::Set(s),
+    Some(napi::Either::B(_)) => ferridriver::options::MediaOverride::Disabled,
+  }
 }
 
 impl From<EmulateMediaOptions> for ferridriver::options::EmulateMediaOptions {
   fn from(o: EmulateMediaOptions) -> Self {
     Self {
-      media: o.media,
-      color_scheme: o.color_scheme,
-      reduced_motion: o.reduced_motion,
-      forced_colors: o.forced_colors,
-      contrast: o.contrast,
+      media: lower_override(o.media),
+      color_scheme: lower_override(o.color_scheme),
+      reduced_motion: lower_override(o.reduced_motion),
+      forced_colors: lower_override(o.forced_colors),
+      contrast: lower_override(o.contrast),
     }
   }
 }

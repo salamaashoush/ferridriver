@@ -283,22 +283,141 @@ for (const backend of BACKENDS) {
       expect(tz).toBe("America/New_York");
     });
 
+    // Helper to restore the page to a clean emulation state after each
+    // emulateMedia test so state doesn't leak into unrelated tests (a
+    // lingering `forcedColors: "active"` in particular masks foreground
+    // colors in later `getComputedStyle` assertions).
+    async function resetEmulation() {
+      await page.emulateMedia({
+        media: null,
+        colorScheme: null,
+        reducedMotion: null,
+        forcedColors: null,
+        contrast: null,
+      });
+    }
+
     it("emulates dark color scheme", async () => {
-      await page.emulateMedia(undefined, "dark");
+      await page.emulateMedia({ colorScheme: "dark" });
       await page.goto(testUrl);
       const isDark = await page.evaluate(
         "window.matchMedia('(prefers-color-scheme: dark)').matches"
       );
       expect(isDark).toBe(true);
+      await resetEmulation();
     });
 
     it("emulates reduced motion", async () => {
-      await page.emulateMedia(undefined, undefined, "reduce");
+      await page.emulateMedia({ reducedMotion: "reduce" });
       await page.goto(testUrl);
       const isReduced = await page.evaluate(
         "window.matchMedia('(prefers-reduced-motion: reduce)').matches"
       );
       expect(isReduced).toBe(true);
+      await resetEmulation();
+    });
+
+    it("emulates print media type", async () => {
+      // Firefox/BiDi has no protocol for media-type emulation (Playwright's
+      // own BiDi backend leaves it as an empty stub). Skip there — we'd be
+      // asserting a fiction otherwise.
+      if (backend === "bidi") return;
+      await page.emulateMedia({ media: "print" });
+      await page.goto(testUrl);
+      const isPrint = await page.evaluate(
+        "window.matchMedia('print').matches"
+      );
+      expect(isPrint).toBe(true);
+      // Reset only `media` — verify null disables just that field.
+      await page.emulateMedia({ media: null });
+      const isPrintAfter = await page.evaluate(
+        "window.matchMedia('print').matches"
+      );
+      expect(isPrintAfter).toBe(false);
+      await resetEmulation();
+    });
+
+    it("emulates forced-colors active", async () => {
+      // BiDi/Firefox: no forced-colors override available.
+      if (backend === "bidi") return;
+      await page.emulateMedia({ forcedColors: "active" });
+      await page.goto(testUrl);
+      const active = await page.evaluate(
+        "window.matchMedia('(forced-colors: active)').matches"
+      );
+      expect(active).toBe(true);
+      await resetEmulation();
+    });
+
+    it("emulates prefers-contrast more", async () => {
+      // BiDi/Firefox: no prefers-contrast override available.
+      if (backend === "bidi") return;
+      await page.emulateMedia({ contrast: "more" });
+      await page.goto(testUrl);
+      const more = await page.evaluate(
+        "window.matchMedia('(prefers-contrast: more)').matches"
+      );
+      expect(more).toBe(true);
+      await resetEmulation();
+    });
+
+    it("emulateMedia composes all five fields in one call", async () => {
+      // CDP / WebKit accept the full bag in one call; assert every field
+      // lands in matchMedia. BiDi only supports colorScheme reliably.
+      if (backend === "bidi") return;
+      await page.emulateMedia({
+        media: "print",
+        colorScheme: "dark",
+        reducedMotion: "reduce",
+        forcedColors: "active",
+        contrast: "more",
+      });
+      await page.goto(testUrl);
+      const result = JSON.parse(
+        (await page.evaluate(`JSON.stringify({
+          print: matchMedia('print').matches,
+          screen: matchMedia('screen').matches,
+          dark: matchMedia('(prefers-color-scheme: dark)').matches,
+          reduced: matchMedia('(prefers-reduced-motion: reduce)').matches,
+          forced: matchMedia('(forced-colors: active)').matches,
+          contrast: matchMedia('(prefers-contrast: more)').matches,
+        })`)) as string
+      );
+      expect(result.print).toBe(true);
+      expect(result.screen).toBe(false);
+      expect(result.dark).toBe(true);
+      expect(result.reduced).toBe(true);
+      expect(result.forced).toBe(true);
+      expect(result.contrast).toBe(true);
+      await resetEmulation();
+    });
+
+    it("emulateMedia({}) is a no-op — does not disable prior emulation", async () => {
+      if (backend === "bidi") return;
+      await page.emulateMedia({ colorScheme: "dark" });
+      await page.emulateMedia({});
+      await page.goto(testUrl);
+      const stillDark = await page.evaluate(
+        "window.matchMedia('(prefers-color-scheme: dark)').matches"
+      );
+      expect(stillDark).toBe(true);
+      await resetEmulation();
+    });
+
+    it("emulateMedia({colorScheme: null}) disables only that override", async () => {
+      if (backend === "bidi") return;
+      await page.emulateMedia({ colorScheme: "dark", reducedMotion: "reduce" });
+      await page.goto(testUrl);
+      await page.emulateMedia({ colorScheme: null });
+      const dark = await page.evaluate(
+        "window.matchMedia('(prefers-color-scheme: dark)').matches"
+      );
+      const reduced = await page.evaluate(
+        "window.matchMedia('(prefers-reduced-motion: reduce)').matches"
+      );
+      expect(dark).toBe(false); // reset
+      expect(reduced).toBe(true); // preserved
+      await resetEmulation();
     });
 
     // ── Cookies (Playwright API: cookies live on BrowserContext) ───────

@@ -199,19 +199,65 @@ pub struct ViewportConfig {
   pub is_landscape: bool,
 }
 
-/// Media emulation options -- matches Playwright's `page.emulateMedia()`.
+/// Three-state override for a single media-emulation field. Mirrors the
+/// Playwright TS shape `T | null | undefined`:
+///
+/// * [`MediaOverride::Unchanged`] — the caller omitted this field; leave
+///   the page's existing override (if any) in place.
+/// * [`MediaOverride::Disabled`] — the caller passed `null`; clear this
+///   specific override so the page falls back to the platform default.
+/// * [`MediaOverride::Set`] — the caller passed a value; apply it.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum MediaOverride {
+  /// Field absent from the caller's options bag.
+  #[default]
+  Unchanged,
+  /// Field explicitly set to `null` — disables the override.
+  Disabled,
+  /// Field set to a concrete value.
+  Set(String),
+}
+
+impl MediaOverride {
+  /// Borrow the set value, or `None` for `Unchanged` / `Disabled`.
+  #[must_use]
+  pub fn as_value(&self) -> Option<&str> {
+    match self {
+      Self::Set(v) => Some(v.as_str()),
+      _ => None,
+    }
+  }
+
+  /// `true` when the caller is overriding the field (set-or-disable).
+  #[must_use]
+  pub fn is_specified(&self) -> bool {
+    !matches!(self, Self::Unchanged)
+  }
+}
+
+impl From<Option<String>> for MediaOverride {
+  fn from(o: Option<String>) -> Self {
+    o.map_or(Self::Unchanged, Self::Set)
+  }
+}
+
+/// Media emulation options — matches Playwright's `page.emulateMedia()` per
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2580`.
+/// Each field uses [`MediaOverride`] to distinguish *unspecified* (leave
+/// current state alone) from *null* (clear any existing override) from a
+/// *concrete value*.
 #[derive(Debug, Clone, Default)]
 pub struct EmulateMediaOptions {
-  /// "screen", "print", or null to reset
-  pub media: Option<String>,
-  /// "light", "dark", "no-preference"
-  pub color_scheme: Option<String>,
-  /// "reduce", "no-preference"
-  pub reduced_motion: Option<String>,
-  /// "active", "none"
-  pub forced_colors: Option<String>,
-  /// "more", "less", "no-preference"
-  pub contrast: Option<String>,
+  /// CSS media type: `"screen"` or `"print"`.
+  pub media: MediaOverride,
+  /// Prefers-color-scheme: `"light"`, `"dark"`, or `"no-preference"`.
+  pub color_scheme: MediaOverride,
+  /// Prefers-reduced-motion: `"reduce"` or `"no-preference"`.
+  pub reduced_motion: MediaOverride,
+  /// Forced-colors: `"active"` or `"none"`.
+  pub forced_colors: MediaOverride,
+  /// Prefers-contrast: `"more"`, `"less"`, or `"no-preference"`.
+  pub contrast: MediaOverride,
 }
 
 /// PDF page-size dimension as accepted by Playwright's `PDFOptions.width`,
@@ -592,6 +638,51 @@ mod pdf_option_tests {
     assert!(opts.prefer_css_page_size.is_none());
     assert!(opts.outline.is_none());
     assert!(opts.tagged.is_none());
+  }
+}
+
+#[cfg(test)]
+mod media_override_tests {
+  use super::*;
+
+  #[test]
+  fn default_is_unchanged() {
+    let o: MediaOverride = MediaOverride::default();
+    assert_eq!(o, MediaOverride::Unchanged);
+    assert!(!o.is_specified());
+    assert_eq!(o.as_value(), None);
+  }
+
+  #[test]
+  fn set_reports_value() {
+    let o = MediaOverride::Set("dark".into());
+    assert!(o.is_specified());
+    assert_eq!(o.as_value(), Some("dark"));
+  }
+
+  #[test]
+  fn disabled_is_specified_without_value() {
+    let o = MediaOverride::Disabled;
+    assert!(o.is_specified());
+    assert_eq!(o.as_value(), None);
+  }
+
+  #[test]
+  fn from_option_string_maps_some_to_set_and_none_to_unchanged() {
+    let set: MediaOverride = Some("dark".to_string()).into();
+    assert_eq!(set, MediaOverride::Set("dark".into()));
+    let unch: MediaOverride = None.into();
+    assert_eq!(unch, MediaOverride::Unchanged);
+  }
+
+  #[test]
+  fn default_emulate_media_is_all_unchanged() {
+    let o = EmulateMediaOptions::default();
+    assert_eq!(o.media, MediaOverride::Unchanged);
+    assert_eq!(o.color_scheme, MediaOverride::Unchanged);
+    assert_eq!(o.reduced_motion, MediaOverride::Unchanged);
+    assert_eq!(o.forced_colors, MediaOverride::Unchanged);
+    assert_eq!(o.contrast, MediaOverride::Unchanged);
   }
 }
 

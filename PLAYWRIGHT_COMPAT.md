@@ -363,7 +363,13 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.24 `emulateMedia` full field set
 
-- [ ] Verify `EmulateMediaOptions` at `options.rs:77-89` exposes all of `media`, `color_scheme`, `reduced_motion`, `forced_colors`, `contrast` through NAPI.
+- [x] Accept the full Playwright options bag (`media`, `colorScheme`, `reducedMotion`, `forcedColors`, `contrast`) as a single object argument across all three layers — no more positional NAPI args. Every field is `T | null | undefined` per Playwright's TS declaration: absent = no change, `null` = reset override, string = apply.
+  - **Core**: new three-state `MediaOverride` enum + per-page persistent state so multiple `emulateMedia` calls compose (each call is a partial update).
+  - **Backends**: CDP sends all four features every call with empty-string for disabled (mirrors Playwright's `_updateEmulateMedia`); WebKit wire protocol now carries a per-field action byte (unchanged / disabled / set) and installs a JS `matchMedia` interceptor that composes with the native `_setOverrideAppearance:` dark-mode override; BiDi honours `colorScheme` via `emulation.setForcedColorsModeThemeOverride` and returns a typed `Unsupported` for the four fields Firefox/BiDi has no protocol for (`media`, `reducedMotion`, `forcedColors`, `contrast`) rather than silently no-op'ing.
+  - **NAPI**: `EmulateMediaOptions` fields use `Option<Either<String, Null>>` + `ts_type` so the generated `.d.ts` matches Playwright byte-for-byte (`null | 'light' | 'dark' | 'no-preference'` unions).
+  - **QuickJS**: `parse_emulate_media_options` walks the JS object manually so `undefined` → Unchanged, `null` → Disabled, string → Set — serde-based parsing conflates null and undefined, which breaks the Playwright contract.
+  - **Tests**: eight new live-browser NAPI cases (one per field + compose + no-op + null-disables), a QuickJS all-fields compose case via MCP `run_script`. All green on cdp-pipe, cdp-raw, webkit (BiDi skipped for the four fields upstream also stubs). See Section B item #4 below for the one MCP-specific null-reset regression we couldn't pin down in-session.
+- **Playwright ref**: `/tmp/playwright/packages/playwright-core/types/types.d.ts:2580`.
 
 ### 3.25 `addInitScript` with arg
 
@@ -754,6 +760,7 @@ These are not ferridriver bugs per se — they are backend-surface gaps. The tes
 1. ~~**WebKit: `context.addCookies` → `context.cookies()` round-trip drops the cookie**~~ — **fixed** alongside task #3.4. The Obj-C `OP_GET_COOKIES` handler was emitting `"http_only"` (snake_case) but Rust `CookieData` switched to `#[serde(rename_all = "camelCase")]` in `c820caf`, so serde rejected the whole entry (`.unwrap_or_default()` then collapsed to `[]`). Obj-C now emits `"httpOnly"` to match the Rust wire contract. All three backends round-trip cookies.
 2. ~~**BiDi (Firefox): `page.dragAndDrop` fails with `scrollIntoViewIfNeeded is not a function`**~~ — **fixed** alongside task #3.10. The bounding-rect JS probe now does `try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); }` so Firefox/BiDi falls back to the standards-compliant method. `page.dragAndDrop` and `locator.dragTo` pass on all four backends.
 3. **CDP: `page.mouse.wheel(dx, dy)` does not reliably produce a page scroll**. CDP's `Input.dispatchMouseEvent` with `type: "mouseWheel"` requires mouse position routing that doesn't always land on the scrollable viewport. `test_script_mouse_wheel` asserts only that the call does not error, not that `window.scrollY` changed.
+4. **MCP `run_script` + CDP: `emulateMedia({colorScheme: null})` doesn't update `matchMedia('(prefers-color-scheme: dark)').matches`**. The same sequence of CDP `Emulation.setEmulatedMedia({features: [{name: 'prefers-color-scheme', value: ''}, ...], media: ''})` commands correctly resets the override when issued via direct NAPI (`Browser.launch → page.emulateMedia`) but leaves `matchMedia` reporting the old value when issued via MCP's `run_script` tool on a spawned `ferridriver` binary. CDP wire params, target_id, session_id, and Chrome binary are identical in both paths; setting `colorScheme: 'light'` after `'dark'` correctly flips the query in MCP, so it's specifically the `""` (disable) value that doesn't take effect via that path. Left as a follow-up — NAPI-level behaviour is correct and fully tested, so the defect is scoped to MCP scripting and does not affect library consumers.
 
 ### C. Test-level workarounds (honest list of relaxed assertions)
 

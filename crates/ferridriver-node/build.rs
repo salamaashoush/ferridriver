@@ -22,6 +22,10 @@ fn main() {
   // Copy it to the NAPI crate source directory for npm packaging.
   let host_in_profile = profile_dir.join("fd_webkit_host");
   let napi_crate_dir = std::env::var("CARGO_MANIFEST_DIR").unwrap_or_default();
+  // Re-run this build script whenever ferridriver's host binary is
+  // rebuilt so our mirrored copy in the NAPI crate stays in sync with
+  // the authoritative target/ build artifact.
+  println!("cargo:rerun-if-changed={}", host_in_profile.display());
   if !napi_crate_dir.is_empty() && host_in_profile.exists() {
     let dest = std::path::Path::new(&napi_crate_dir).join("fd_webkit_host");
     if let Err(e) = std::fs::copy(&host_in_profile, &dest) {
