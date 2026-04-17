@@ -211,6 +211,16 @@ impl From<&str> for FerriError {
   }
 }
 
+/// Transitional — lets unmigrated modules (BDD step macros, backend glue)
+/// continue to use `Result<_, String>`. Lossy: the variant is discarded and
+/// only the `Display` output is preserved. This impl will be removed once
+/// every caller uses `FerriError` natively.
+impl From<FerriError> for String {
+  fn from(e: FerriError) -> Self {
+    e.to_string()
+  }
+}
+
 /// Convenience alias. Every new public API function should return this.
 pub type Result<T> = std::result::Result<T, FerriError>;
 

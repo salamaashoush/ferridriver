@@ -14,6 +14,7 @@ use std::sync::Arc;
 
 use crate::actions;
 use crate::backend::AnyElement;
+use crate::error::Result;
 use crate::options::{BoundingBox, FilterOptions, RoleOptions, TextOptions, WaitOptions};
 use crate::selectors;
 
@@ -22,15 +23,21 @@ use crate::selectors;
 /// body without any `AnyPage` cloning — the page reference is borrowed from `self`
 /// for the entire retry loop.
 ///
-/// The body must be an `async move { ... }` block returning `Result<R, String>`.
+/// The body must be an `async move { ... }` block returning `Result<R, String>`
+/// (the underlying backend error type). The macro converts every error into
+/// [`crate::error::FerriError`] so call sites declare `-> crate::error::Result<R>`.
 /// References to outer variables (parameters, locals) are captured by copy for
 /// `Copy` types (like `&str`, `&Arc<Page>`) or by move for owned types.
 macro_rules! retry_resolve {
   ($self:expr, |$el:ident, $page:ident| $body:expr) => {{
     let $page: &$crate::backend::AnyPage = $self.page.inner();
-    $page.ensure_engine_injected().await?;
+    $page
+      .ensure_engine_injected()
+      .await
+      .map_err($crate::error::FerriError::from)?;
     let __fd = "window.__fd";
-    let __sel_js = $crate::selectors::build_selone_js(&$self.selector, &__fd)?;
+    let __sel_js =
+      $crate::selectors::build_selone_js(&$self.selector, &__fd).map_err($crate::error::FerriError::from)?;
 
     for (__i, &__delay_ms) in Locator::RETRY_BACKOFFS_MS.iter().enumerate() {
       if __delay_ms > 0 {
@@ -43,16 +50,19 @@ macro_rules! retry_resolve {
             if e.contains("not connected") || e.contains("not found") || e.contains("detached") =>
           {
             if __i >= Locator::RETRY_BACKOFFS_MS.len() - 1 {
-              return ::std::result::Result::Err(e);
+              return ::std::result::Result::Err($crate::error::FerriError::from(e));
             }
           },
-          ::std::result::Result::Err(e) => return ::std::result::Result::Err(e),
+          ::std::result::Result::Err(e) => return ::std::result::Result::Err($crate::error::FerriError::from(e)),
         },
         ::std::result::Result::Err(_) if __i < Locator::RETRY_BACKOFFS_MS.len() - 1 => {},
-        ::std::result::Result::Err(e) => return ::std::result::Result::Err(e),
+        ::std::result::Result::Err(e) => return ::std::result::Result::Err($crate::error::FerriError::from(e)),
       }
     }
-    ::std::result::Result::Err(format!("No element found for selector: {}", $self.selector))
+    ::std::result::Result::Err($crate::error::FerriError::invalid_selector(
+      $self.selector.clone(),
+      "no element found",
+    ))
   }};
 }
 
@@ -183,7 +193,7 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found, is not actionable
   /// (e.g. a `<select>` or file input), or the click fails.
-  pub async fn click(&self) -> Result<(), String> {
+  pub async fn click(&self) -> Result<()> {
     retry_resolve!(self, |el, page| async move {
       actions::check_click_guard(&el, page).await.map_err(|e| e.to_string())?;
       actions::wait_for_actionable(&el, page).await.ok();
@@ -196,7 +206,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the double-click fails.
-  pub async fn dblclick(&self) -> Result<(), String> {
+  pub async fn dblclick(&self) -> Result<()> {
     retry_resolve!(self, |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
       el.dblclick().await
@@ -209,7 +219,7 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found, its bounding box
   /// cannot be computed, or the right-click dispatch fails.
-  pub async fn right_click(&self) -> Result<(), String> {
+  pub async fn right_click(&self) -> Result<()> {
     retry_resolve!(self, |el, page| async move {
       let center = el.call_js_fn_value(
         "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
@@ -228,7 +238,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not a fillable element.
-  pub async fn fill(&self, value: &str) -> Result<(), String> {
+  pub async fn fill(&self, value: &str) -> Result<()> {
     retry_resolve!(self, |el, _page| async move { actions::fill(&el, value).await })
   }
 
@@ -237,7 +247,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found.
-  pub async fn clear(&self) -> Result<(), String> {
+  pub async fn clear(&self) -> Result<()> {
     retry_resolve!(self, |el, _page| async move {
       el.call_js_fn(
         "function() { \
@@ -255,7 +265,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or key dispatch fails.
-  pub async fn r#type(&self, text: &str) -> Result<(), String> {
+  pub async fn r#type(&self, text: &str) -> Result<()> {
     retry_resolve!(self, |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
       el.type_str(text).await
@@ -267,7 +277,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the key press fails.
-  pub async fn press(&self, key: &str) -> Result<(), String> {
+  pub async fn press(&self, key: &str) -> Result<()> {
     retry_resolve!(self, |_el, page| async move { page.press_key(key).await })
   }
 
@@ -276,7 +286,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the hover action fails.
-  pub async fn hover(&self) -> Result<(), String> {
+  pub async fn hover(&self) -> Result<()> {
     retry_resolve!(self, |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
       el.hover().await
@@ -288,7 +298,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found.
-  pub async fn focus(&self) -> Result<(), String> {
+  pub async fn focus(&self) -> Result<()> {
     retry_resolve!(self, |el, _page| async move {
       el.call_js_fn("function() { this.focus(); }").await?;
       Ok::<(), String>(())
@@ -300,7 +310,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not actionable.
-  pub async fn check(&self) -> Result<(), String> {
+  pub async fn check(&self) -> Result<()> {
     retry_resolve!(self, |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
       el.call_js_fn("function() { if (!this.checked) this.click(); }").await?;
@@ -313,7 +323,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not actionable.
-  pub async fn uncheck(&self) -> Result<(), String> {
+  pub async fn uncheck(&self) -> Result<()> {
     retry_resolve!(self, |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
       el.call_js_fn("function() { if (this.checked) this.click(); }").await?;
@@ -327,7 +337,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not actionable.
-  pub async fn set_checked(&self, checked: bool) -> Result<(), String> {
+  pub async fn set_checked(&self, checked: bool) -> Result<()> {
     if checked {
       self.check().await
     } else {
@@ -342,7 +352,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the tap event dispatch fails.
-  pub async fn tap(&self) -> Result<(), String> {
+  pub async fn tap(&self) -> Result<()> {
     let el = self.resolve().await?;
     actions::wait_for_actionable(&el, self.page.inner()).await.ok();
     el.call_js_fn("function() { \
@@ -358,7 +368,7 @@ impl Locator {
         this.dispatchEvent(new PointerEvent('pointerup',{clientX:cx,clientY:cy,bubbles:true,isPrimary:true,pointerType:'touch'})); \
         this.click(); \
       } \
-    }").await
+    }").await.map_err(Into::into)
   }
 
   /// Select all text in an input or textarea element.
@@ -366,7 +376,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the selection fails.
-  pub async fn select_text(&self) -> Result<(), String> {
+  pub async fn select_text(&self) -> Result<()> {
     let el = self.resolve().await?;
     el.call_js_fn(
       "function() { \
@@ -376,6 +386,7 @@ impl Locator {
     }",
     )
     .await
+    .map_err(Into::into)
   }
 
   /// Select an `<option>` by value within a `<select>` element.
@@ -383,19 +394,23 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not a `<select>`.
-  pub async fn select_option(&self, value: &str) -> Result<Vec<String>, String> {
+  pub async fn select_option(&self, value: &str) -> Result<Vec<String>> {
     let el = self.resolve().await?;
     let result = actions::select_option(&el, self.page.inner(), value).await?;
     Ok(vec![result.selected_value])
   }
+
+  // (select_option reserved for future ElementHandle / SelectOption array overloads per task #5.)
 
   /// Set file paths on a file input element.
   ///
   /// # Errors
   ///
   /// Returns an error if the element is not a file input or the upload fails.
-  pub async fn set_input_files(&self, paths: &[String]) -> Result<(), String> {
-    actions::upload_file(self.page.inner(), &self.selector, paths).await
+  pub async fn set_input_files(&self, paths: &[String]) -> Result<()> {
+    actions::upload_file(self.page.inner(), &self.selector, paths)
+      .await
+      .map_err(Into::into)
   }
 
   /// Scroll the element into the visible area of the viewport.
@@ -403,9 +418,9 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or scroll fails.
-  pub async fn scroll_into_view_if_needed(&self) -> Result<(), String> {
+  pub async fn scroll_into_view_if_needed(&self) -> Result<()> {
     let el = self.resolve().await?;
-    el.scroll_into_view().await
+    el.scroll_into_view().await.map_err(Into::into)
   }
 
   /// Dispatch a DOM event of the given type on the element.
@@ -413,7 +428,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found.
-  pub async fn dispatch_event(&self, event_type: &str) -> Result<(), String> {
+  pub async fn dispatch_event(&self, event_type: &str) -> Result<()> {
     let el = self.resolve().await?;
     let _ = el
       .call_js_fn(&format!(
@@ -430,7 +445,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn text_content(&self) -> Result<Option<String>, String> {
+  pub async fn text_content(&self) -> Result<Option<String>> {
     self.eval_prop("textContent").await
   }
 
@@ -439,7 +454,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn inner_text(&self) -> Result<String, String> {
+  pub async fn inner_text(&self) -> Result<String> {
     self
       .eval_prop("innerText")
       .await
@@ -451,7 +466,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn inner_html(&self) -> Result<String, String> {
+  pub async fn inner_html(&self) -> Result<String> {
     self
       .eval_prop("innerHTML")
       .await
@@ -463,7 +478,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn get_attribute(&self, name: &str) -> Result<Option<String>, String> {
+  pub async fn get_attribute(&self, name: &str) -> Result<Option<String>> {
     let escaped = name.replace('\\', "\\\\").replace('\'', "\\'");
     let val = self
       .eval_on_element(&format!("return el.getAttribute('{escaped}');"))
@@ -480,7 +495,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or JS evaluation fails.
-  pub async fn input_value(&self) -> Result<String, String> {
+  pub async fn input_value(&self) -> Result<String> {
     self
       .eval_prop("value")
       .await
@@ -493,7 +508,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn is_visible(&self) -> Result<bool, String> {
+  pub async fn is_visible(&self) -> Result<bool> {
     // Single evaluate: find element + check visibility. Returns false if not found.
     let val = self
       .eval_on_element(
@@ -510,7 +525,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn is_hidden(&self) -> Result<bool, String> {
+  pub async fn is_hidden(&self) -> Result<bool> {
     self.is_visible().await.map(|v| !v)
   }
 
@@ -519,7 +534,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or JS evaluation fails.
-  pub async fn is_enabled(&self) -> Result<bool, String> {
+  pub async fn is_enabled(&self) -> Result<bool> {
     self.eval_bool("function() { return !this.disabled; }").await
   }
 
@@ -528,7 +543,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or JS evaluation fails.
-  pub async fn is_disabled(&self) -> Result<bool, String> {
+  pub async fn is_disabled(&self) -> Result<bool> {
     self.eval_bool("function() { return !!this.disabled; }").await
   }
 
@@ -537,7 +552,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or JS evaluation fails.
-  pub async fn is_checked(&self) -> Result<bool, String> {
+  pub async fn is_checked(&self) -> Result<bool> {
     self.eval_bool("function() { return !!this.checked; }").await
   }
 
@@ -546,7 +561,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing fails.
-  pub async fn is_attached(&self) -> Result<bool, String> {
+  pub async fn is_attached(&self) -> Result<bool> {
     Ok(self.resolve().await.is_ok())
   }
 
@@ -555,7 +570,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn count(&self) -> Result<usize, String> {
+  pub async fn count(&self) -> Result<usize> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
     let fd = self.page.inner().injected_script().await?;
@@ -575,7 +590,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn bounding_box(&self) -> Result<Option<BoundingBox>, String> {
+  pub async fn bounding_box(&self) -> Result<Option<BoundingBox>> {
     let val = self
       .eval_on_element("var r = el.getBoundingClientRect(); return {x:r.x,y:r.y,width:r.width,height:r.height};")
       .await?;
@@ -599,14 +614,17 @@ impl Locator {
   ///
   /// Returns an error if the timeout expires before the element reaches
   /// the desired state, or if an unknown state is specified.
-  pub async fn wait_for(&self, opts: WaitOptions) -> Result<(), String> {
+  pub async fn wait_for(&self, opts: WaitOptions) -> Result<()> {
     let timeout = opts.timeout.unwrap_or(30000);
     let state = opts.state.as_deref().unwrap_or("visible");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
 
     loop {
       if tokio::time::Instant::now() >= deadline {
-        return Err(format!("Timeout waiting for '{}' to be {state}", self.selector));
+        return Err(crate::error::FerriError::timeout(
+          format!("waiting for '{}' to be {state}", self.selector),
+          timeout,
+        ));
       }
       match state {
         "attached" | "visible" => {
@@ -627,7 +645,12 @@ impl Locator {
           }
           selectors::cleanup_tags(self.page.inner()).await;
         },
-        _ => return Err(format!("Unknown wait state: {state}")),
+        _ => {
+          return Err(crate::error::FerriError::invalid_argument(
+            "state",
+            format!("unknown wait state: {state}"),
+          ));
+        },
       }
       tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
@@ -640,9 +663,11 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or screenshot capture fails.
-  pub async fn screenshot(&self) -> Result<Vec<u8>, String> {
+  pub async fn screenshot(&self) -> Result<Vec<u8>> {
     let el = self.resolve().await?;
-    el.screenshot(crate::backend::ImageFormat::Png).await
+    el.screenshot(crate::backend::ImageFormat::Png)
+      .await
+      .map_err(Into::into)
   }
 
   // ── Editable check ───────────────────────────────────────────────────────
@@ -652,7 +677,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or JS evaluation fails.
-  pub async fn is_editable(&self) -> Result<bool, String> {
+  pub async fn is_editable(&self) -> Result<bool> {
     self
       .eval_bool("function() { return !this.disabled && !this.readOnly; }")
       .await
@@ -665,7 +690,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found.
-  pub async fn blur(&self) -> Result<(), String> {
+  pub async fn blur(&self) -> Result<()> {
     let el = self.resolve().await?;
     let _ = el.call_js_fn("function() { this.blur(); }").await;
     Ok(())
@@ -678,7 +703,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or any key press fails.
-  pub async fn press_sequentially(&self, text: &str, delay_ms: Option<u64>) -> Result<(), String> {
+  pub async fn press_sequentially(&self, text: &str, delay_ms: Option<u64>) -> Result<()> {
     let el = self.resolve().await?;
     actions::wait_for_actionable(&el, self.page.inner()).await.ok();
     let delay = delay_ms.unwrap_or(50);
@@ -699,7 +724,7 @@ impl Locator {
   ///
   /// Returns an error if either element cannot be found, bounding box
   /// coordinates cannot be read, or the drag operation fails.
-  pub async fn drag_to(&self, target: &Locator) -> Result<(), String> {
+  pub async fn drag_to(&self, target: &Locator) -> Result<()> {
     // Get both source and target center coordinates via call_js_fn_value (1 CDP each)
     let source_el = self.resolve().await?;
     let target_el = target.resolve().await?;
@@ -714,8 +739,8 @@ impl Locator {
       ),
     );
 
-    let src = src_result?.ok_or("No source bounding box")?;
-    let tgt = tgt_result?.ok_or("No target bounding box")?;
+    let src = src_result?.ok_or_else(|| crate::error::FerriError::Other("no source bounding box".into()))?;
+    let tgt = tgt_result?.ok_or_else(|| crate::error::FerriError::Other("no target bounding box".into()))?;
 
     let from = (
       src.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
@@ -725,7 +750,7 @@ impl Locator {
       tgt.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
       tgt.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
     );
-    self.page.inner().click_and_drag(from, to).await
+    self.page.inner().click_and_drag(from, to).await.map_err(Into::into)
   }
 
   // ── Combinators ─────────────────────────────────────────────────────────
@@ -773,7 +798,7 @@ impl Locator {
   ///
   /// Returns an error if the count query fails due to selector parsing
   /// or JS evaluation errors.
-  pub async fn all(&self) -> Result<Vec<Locator>, String> {
+  pub async fn all(&self) -> Result<Vec<Locator>> {
     let count = self.count().await?;
     let mut locators = Vec::with_capacity(count);
     let base = &self.selector;
@@ -798,7 +823,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn all_text_contents(&self) -> Result<Vec<String>, String> {
+  pub async fn all_text_contents(&self) -> Result<Vec<String>> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
     self.page.inner().ensure_engine_injected().await?;
@@ -824,7 +849,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn all_inner_texts(&self) -> Result<Vec<String>, String> {
+  pub async fn all_inner_texts(&self) -> Result<Vec<String>> {
     // Same as all_text_contents for our implementation
     self.all_text_contents().await
   }
@@ -841,7 +866,7 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     self.eval_on_element(&format!("return ({expression});")).await
   }
 
@@ -856,16 +881,16 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn evaluate_all(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn evaluate_all(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
     self.page.inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
     let js = format!("(function() {{ var elements = {fd}.selAll({parts_json}); return ({expression}); }})()");
     if let Some(fid) = &self.frame_id {
-      self.page.inner().evaluate_in_frame(&js, fid).await
+      self.page.inner().evaluate_in_frame(&js, fid).await.map_err(Into::into)
     } else {
-      self.page.inner().evaluate(&js).await
+      self.page.inner().evaluate(&js).await.map_err(Into::into)
     }
   }
 
@@ -924,7 +949,7 @@ impl Locator {
   /// Resolve element + run JS callback in ONE CDP call, with retry.
   /// Used by: innerText, textContent, innerHTML, getAttribute, inputValue, isVisible, etc.
   /// Matches Playwright's `_callOnElementOnceMatches`.
-  async fn retry_eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>, String> {
+  async fn retry_eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
     self.page.inner().ensure_engine_injected().await?;
@@ -935,7 +960,7 @@ impl Locator {
       if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
       }
-      let result = if let Some(fid) = &self.frame_id {
+      let result: std::result::Result<Option<serde_json::Value>, String> = if let Some(fid) = &self.frame_id {
         self.page.inner().evaluate_in_frame(&js, fid).await
       } else {
         self.page.inner().evaluate(&js).await
@@ -944,7 +969,7 @@ impl Locator {
         // Element not found or evaluation failed -- retry if attempts remain.
         Ok(Some(serde_json::Value::Null) | None) | Err(_) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => {},
         Ok(val) => return Ok(val),
-        Err(e) => return Err(e),
+        Err(e) => return Err(e.into()),
       }
     }
     Ok(None)
@@ -957,11 +982,13 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the selector engine cannot be injected or the element is not found.
-  pub async fn resolve(&self) -> Result<AnyElement, String> {
+  pub async fn resolve(&self) -> Result<AnyElement> {
     self.page.inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
     let sel_js = selectors::build_selone_js(&self.selector, fd)?;
-    selectors::query_one_prebuilt(self.page.inner(), &sel_js, &self.selector).await
+    selectors::query_one_prebuilt(self.page.inner(), &sel_js, &self.selector)
+      .await
+      .map_err(Into::into)
   }
 
   fn chain(&self, sub: &str) -> Locator {
@@ -977,7 +1004,7 @@ impl Locator {
     }
   }
 
-  async fn eval_prop(&self, prop: &str) -> Result<Option<String>, String> {
+  async fn eval_prop(&self, prop: &str) -> Result<Option<String>> {
     let val = self
       .retry_eval_on_element(&format!("var v = el.{prop}; return v == null ? null : String(v);"))
       .await?;
@@ -988,7 +1015,7 @@ impl Locator {
     }))
   }
 
-  async fn eval_bool(&self, func: &str) -> Result<bool, String> {
+  async fn eval_bool(&self, func: &str) -> Result<bool> {
     let val = self
       .retry_eval_on_element(&format!("return !!({func}).call(el);"))
       .await?;
@@ -996,16 +1023,16 @@ impl Locator {
   }
 
   /// Legacy: non-retrying eval for callers that handle retry themselves.
-  async fn eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>, String> {
+  async fn eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
     self.page.inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
     let js = format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
     if let Some(fid) = &self.frame_id {
-      self.page.inner().evaluate_in_frame(&js, fid).await
+      self.page.inner().evaluate_in_frame(&js, fid).await.map_err(Into::into)
     } else {
-      self.page.inner().evaluate(&js).await
+      self.page.inner().evaluate(&js).await.map_err(Into::into)
     }
   }
 }
@@ -1042,7 +1069,7 @@ impl FrameLocator {
   /// # Errors
   ///
   /// Returns an error if the iframe cannot be found.
-  pub async fn locator(&self, selector: &str) -> Result<Locator, String> {
+  pub async fn locator(&self, selector: &str) -> Result<Locator> {
     let frame_id = self.resolve_frame_id().await?;
     Ok(Locator {
       page: Arc::clone(&self.page),
@@ -1056,7 +1083,7 @@ impl FrameLocator {
   /// # Errors
   ///
   /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Result<Locator, String> {
+  pub async fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Result<Locator> {
     self.locator(&build_role_selector(role, opts)).await
   }
 
@@ -1065,7 +1092,7 @@ impl FrameLocator {
   /// # Errors
   ///
   /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_text(&self, text: &str, opts: &TextOptions) -> Result<Locator, String> {
+  pub async fn get_by_text(&self, text: &str, opts: &TextOptions) -> Result<Locator> {
     self.locator(&build_text_selector("text", text, opts)).await
   }
 
@@ -1074,7 +1101,7 @@ impl FrameLocator {
   /// # Errors
   ///
   /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_test_id(&self, test_id: &str) -> Result<Locator, String> {
+  pub async fn get_by_test_id(&self, test_id: &str) -> Result<Locator> {
     self.locator(&format!("testid={test_id}")).await
   }
 
@@ -1083,7 +1110,7 @@ impl FrameLocator {
   /// # Errors
   ///
   /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_label(&self, text: &str, opts: &TextOptions) -> Result<Locator, String> {
+  pub async fn get_by_label(&self, text: &str, opts: &TextOptions) -> Result<Locator> {
     self.locator(&build_text_selector("label", text, opts)).await
   }
 
@@ -1092,7 +1119,7 @@ impl FrameLocator {
   /// # Errors
   ///
   /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Result<Locator, String> {
+  pub async fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Result<Locator> {
     self.locator(&build_text_selector("placeholder", text, opts)).await
   }
 
@@ -1101,7 +1128,7 @@ impl FrameLocator {
   /// # Errors
   ///
   /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Result<Locator, String> {
+  pub async fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Result<Locator> {
     self.locator(&build_text_selector("alt", text, opts)).await
   }
 
@@ -1110,7 +1137,7 @@ impl FrameLocator {
   /// # Errors
   ///
   /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_title(&self, text: &str, opts: &TextOptions) -> Result<Locator, String> {
+  pub async fn get_by_title(&self, text: &str, opts: &TextOptions) -> Result<Locator> {
     self.locator(&build_text_selector("title", text, opts)).await
   }
 
@@ -1134,7 +1161,7 @@ impl FrameLocator {
   }
 
   /// Resolve the iframe element to a frame ID.
-  async fn resolve_frame_id(&self) -> Result<Arc<str>, String> {
+  async fn resolve_frame_id(&self) -> Result<Arc<str>> {
     // Find the iframe element and match it to a frame in the tree
     let page_inner = self.page.inner();
     page_inner.ensure_engine_injected().await?;
@@ -1174,10 +1201,9 @@ impl FrameLocator {
       return Ok(Arc::from(child_frames[0].frame_id.as_str()));
     }
 
-    Err(format!(
-      "Could not resolve iframe for selector '{}'. Found {} child frames.",
-      self.iframe_selector,
-      child_frames.len()
+    Err(crate::error::FerriError::invalid_selector(
+      self.iframe_selector.clone(),
+      format!("could not resolve iframe; found {} child frames", child_frames.len()),
     ))
   }
 }

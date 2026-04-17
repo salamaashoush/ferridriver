@@ -932,6 +932,20 @@ impl From<&str> for TestFailure {
   }
 }
 
+/// Enables `?` on any `Result<T, FerriError>` inside test functions after
+/// the migration to structured errors (task #1). Preserves `Display` output;
+/// diff / screenshot are populated by the matcher layer, not here.
+impl From<ferridriver::FerriError> for TestFailure {
+  fn from(err: ferridriver::FerriError) -> Self {
+    Self {
+      message: err.to_string(),
+      stack: None,
+      diff: None,
+      screenshot: None,
+    }
+  }
+}
+
 /// An artifact attached to a test result.
 #[derive(Debug, Clone)]
 pub struct Attachment {
