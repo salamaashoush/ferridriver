@@ -75,6 +75,56 @@ struct JsPageCloseOptions {
   reason: Option<String>,
 }
 
+/// Shape of `page.dragAndDrop` / `locator.dragTo` options. Mirrors
+/// Playwright's `FrameDragAndDropOptions & TimeoutOptions` per
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2486`.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+pub(crate) struct JsDragAndDropOptions {
+  force: Option<bool>,
+  no_wait_after: Option<bool>,
+  source_position: Option<JsPoint>,
+  target_position: Option<JsPoint>,
+  steps: Option<u32>,
+  strict: Option<bool>,
+  timeout: Option<u64>,
+  trial: Option<bool>,
+}
+
+#[derive(serde::Deserialize, Debug, Default, Clone, Copy)]
+pub(crate) struct JsPoint {
+  x: f64,
+  y: f64,
+}
+
+impl From<JsPoint> for ferridriver::options::Point {
+  fn from(p: JsPoint) -> Self {
+    Self { x: p.x, y: p.y }
+  }
+}
+
+pub(crate) fn parse_drag_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  value: Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::DragAndDropOptions>> {
+  match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => {
+      let js: JsDragAndDropOptions = serde_from_js(ctx, v)?;
+      Ok(Some(ferridriver::options::DragAndDropOptions {
+        force: js.force,
+        no_wait_after: js.no_wait_after,
+        source_position: js.source_position.map(Into::into),
+        target_position: js.target_position.map(Into::into),
+        steps: js.steps,
+        strict: js.strict,
+        timeout: js.timeout,
+        trial: js.trial,
+      }))
+    },
+    _ => Ok(None),
+  }
+}
+
 fn parse_page_close_options<'js>(
   ctx: &rquickjs::Ctx<'js>,
   value: Opt<rquickjs::Value<'js>>,
@@ -469,10 +519,19 @@ impl PageJs {
       .into_js()
   }
 
-  /// Drag from the source selector to the target selector.
+  /// Drag from the source selector to the target selector. Accepts
+  /// Playwright's `FrameDragAndDropOptions & TimeoutOptions` bag:
+  /// `{ force?, noWaitAfter?, sourcePosition?, targetPosition?, steps?, strict?, timeout?, trial? }`.
   #[qjs(rename = "dragAndDrop")]
-  pub async fn drag_and_drop(&self, source: String, target: String) -> rquickjs::Result<()> {
-    self.inner.drag_and_drop(&source, &target).await.into_js()
+  pub async fn drag_and_drop<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    source: String,
+    target: String,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = parse_drag_options(&ctx, options)?;
+    self.inner.drag_and_drop(&source, &target, opts).await.into_js()
   }
 
   // ── File input ────────────────────────────────────────────────────────────

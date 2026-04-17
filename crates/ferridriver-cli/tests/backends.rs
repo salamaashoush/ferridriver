@@ -625,6 +625,104 @@ fn test_script_drag_and_drop(c: &mut McpClient) {
   assert_eq!(v, json!("1"), "dragAndDrop should trigger mousedown on source");
 }
 
+fn test_script_drag_and_drop_options(c: &mut McpClient) {
+  // Navigate to a clean page so prior tests don't leave the browser in a
+  // weird mouse state (e.g. held button from a previous drag leaking
+  // into this test).
+  c.nav(
+    "<style>html,body{margin:0;padding:0}</style>\
+     <div id='src' style='width:80px;height:80px;background:#f00;position:absolute;left:20px;top:20px'></div>\
+     <div id='tgt' style='width:80px;height:80px;background:#0f0;position:absolute;left:200px;top:200px'></div>\
+     <div id='out' style='position:fixed;top:0;right:0'>idle</div>\
+     <script>\
+       var o=document.getElementById('out');\
+       var moves=0;\
+       window.addEventListener('mousedown',function(e){o.dataset.down=JSON.stringify({x:e.clientX,y:e.clientY});},true);\
+       window.addEventListener('mouseup',function(e){o.dataset.up=JSON.stringify({x:e.clientX,y:e.clientY});},true);\
+       window.addEventListener('mousemove',function(){moves+=1;o.dataset.moves=String(moves);},true);\
+       window.addEventListener('pointermove',function(e){\
+         var c=typeof e.getCoalescedEvents==='function'?e.getCoalescedEvents():[];\
+         if(c.length>1){moves+=c.length-1;o.dataset.moves=String(moves);}\
+       },true);\
+     </script>",
+  );
+  // QuickJS `page.evaluate` returns a JSON-stringified result, so we parse
+  // once to unwrap the outer string and once more to reach the object.
+  let v = c.script_value(
+    "await page.dragAndDrop('#src', '#tgt', { sourcePosition: {x:5, y:5}, targetPosition: {x:10, y:10}, steps: 6 }); \
+       const raw = await page.evaluate(\"JSON.stringify({d: document.getElementById('out').dataset.down || null, u: document.getElementById('out').dataset.up || null, m: parseInt(document.getElementById('out').dataset.moves || '0', 10)})\"); \
+       const outer = JSON.parse(raw); \
+       const state = JSON.parse(outer); \
+       return { d: state.d ? JSON.parse(state.d) : null, u: state.u ? JSON.parse(state.u) : null, m: state.m };",
+  );
+  let dx = v["d"]["x"].as_f64().unwrap_or(-1.0);
+  let dy = v["d"]["y"].as_f64().unwrap_or(-1.0);
+  let ux = v["u"]["x"].as_f64().unwrap_or(-1.0);
+  let uy = v["u"]["y"].as_f64().unwrap_or(-1.0);
+  let moves = v["m"].as_u64().unwrap_or(0);
+  assert!(
+    (24.0..=26.0).contains(&dx),
+    "mousedown x should be ~25 (source padding-box + sourcePosition): got {dx} (v={v})"
+  );
+  assert!(
+    (24.0..=26.0).contains(&dy),
+    "mousedown y should be ~25: got {dy} (v={v})"
+  );
+  assert!(
+    (209.0..=211.0).contains(&ux),
+    "mouseup x should be ~210 (target padding-box + targetPosition): got {ux} (v={v})"
+  );
+  assert!(
+    (209.0..=211.0).contains(&uy),
+    "mouseup y should be ~210: got {uy} (v={v})"
+  );
+  assert!(
+    moves >= 6,
+    "steps=6 should produce at least 6 mousemove dispatches: got {moves} (v={v})"
+  );
+}
+
+fn test_script_locator_drag_to_options(c: &mut McpClient) {
+  c.nav(
+    "<style>html,body{margin:0;padding:0}</style>\
+     <div id='src' style='width:80px;height:80px;background:#f00;position:absolute;left:20px;top:20px'></div>\
+     <div id='tgt' style='width:80px;height:80px;background:#0f0;position:absolute;left:200px;top:200px'></div>\
+     <div id='out' style='position:fixed;top:0;right:0'></div>\
+     <script>\
+       var o=document.getElementById('out');\
+       window.addEventListener('mouseup',function(e){o.dataset.up=JSON.stringify({x:e.clientX,y:e.clientY});},true);\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#src').dragTo(page.locator('#tgt'), { targetPosition: {x:15, y:15} }); \
+       const raw = await page.evaluate(\"document.getElementById('out').dataset.up || ''\"); \
+       const inner = JSON.parse(raw); \
+       return inner ? JSON.parse(inner) : null;",
+  );
+  let ux = v["x"].as_f64().unwrap_or(-1.0);
+  let uy = v["y"].as_f64().unwrap_or(-1.0);
+  assert!((214.0..=216.0).contains(&ux), "drop x should be ~215: got {ux} (v={v})");
+  assert!((214.0..=216.0).contains(&uy), "drop y should be ~215: got {uy} (v={v})");
+}
+
+fn test_script_drag_and_drop_trial(c: &mut McpClient) {
+  c.nav(
+    "<style>html,body{margin:0;padding:0}</style>\
+     <div id='src' style='width:60px;height:60px;background:#f00;position:absolute;left:20px;top:20px'></div>\
+     <div id='tgt' style='width:60px;height:60px;background:#0f0;position:absolute;left:200px;top:200px'></div>\
+     <div id='log' data-fired='0'></div>\
+     <script>\
+       window.addEventListener('mousedown',function(){document.getElementById('log').dataset.fired='1';},true);\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.dragAndDrop('#src', '#tgt', { trial: true }); \
+       const raw = await page.evaluate(\"document.getElementById('log').dataset.fired\"); \
+       return JSON.parse(raw);",
+  );
+  assert_eq!(v, json!("0"), "trial=true must not dispatch mousedown: got {v}");
+}
+
 fn test_script_mouse_wheel(c: &mut McpClient) {
   c.nav("<body style='height:3000px'></body>");
   // Verify the binding dispatches the wheel event without error. Whether the
@@ -981,6 +1079,9 @@ fn run_all_tests(backend: &str) {
   run!(test_script_mouse_click_coords);
   run!(test_script_drag_coords);
   run!(test_script_drag_and_drop);
+  run!(test_script_drag_and_drop_options);
+  run!(test_script_locator_drag_to_options);
+  run!(test_script_drag_and_drop_trial);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
 

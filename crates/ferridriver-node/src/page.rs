@@ -3,7 +3,8 @@
 use crate::error::IntoNapi;
 use crate::locator::Locator;
 use crate::types::{
-  GotoOptions, MetricData, ResponseData, RoleOptions, ScreenshotOptions, TextOptions, ViewportConfig, WaitOptions,
+  DragAndDropOptions, GotoOptions, MetricData, ResponseData, RoleOptions, ScreenshotOptions, TextOptions,
+  ViewportConfig, WaitOptions,
 };
 use napi::Result;
 use napi::bindgen_prelude::Buffer;
@@ -641,18 +642,14 @@ impl Page {
     Ok(())
   }
 
+  /// Drag the element matching `source` onto the element matching
+  /// `target`. Mirrors Playwright's
+  /// `page.dragAndDrop(source, target, options?)` per
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2486`.
   #[napi]
-  pub async fn drag_and_drop(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64) -> Result<()> {
-    let mouse = self.inner.mouse();
-    mouse
-      .r#move(from_x, from_y, None)
-      .await
-      .map_err(napi::Error::from_reason)?;
-    mouse.down(None).await.map_err(napi::Error::from_reason)?;
-    mouse.r#move(to_x, to_y, None).await.map_err(napi::Error::from_reason)?;
-    mouse.up(None).await.map_err(napi::Error::from_reason)?;
-    *self.mouse_position.lock().expect("mouse position lock poisoned") = (to_x, to_y);
-    Ok(())
+  pub async fn drag_and_drop(&self, source: String, target: String, options: Option<DragAndDropOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.drag_and_drop(&source, &target, opts).await.into_napi()
   }
 
   #[napi]

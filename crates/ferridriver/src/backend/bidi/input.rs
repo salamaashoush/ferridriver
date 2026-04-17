@@ -219,20 +219,36 @@ pub fn mouse_up(context: &str, x: f64, y: f64, button: u32) -> serde_json::Value
 }
 
 /// Build a click-and-drag action.
+///
+/// Emits `steps` interpolated `pointerMove` events between the press and
+/// release, matching Playwright's `FrameDragAndDropOptions.steps` semantics
+/// (default `1` = single move at the destination).
 #[must_use]
-pub fn click_and_drag(context: &str, from: (f64, f64), to: (f64, f64)) -> serde_json::Value {
+pub fn click_and_drag(context: &str, from: (f64, f64), to: (f64, f64), steps: u32) -> serde_json::Value {
+  let steps = steps.max(1);
+  let mut actions = Vec::with_capacity((steps as usize) + 3);
+  actions.push(json!({"type": "pointerMove", "x": coord(from.0), "y": coord(from.1), "duration": 0}));
+  actions.push(json!({"type": "pointerDown", "button": 0}));
+  // Per-step duration budget mirrors Playwright's total 250ms move envelope.
+  let per_step_duration = 250_u32 / steps.max(1);
+  for i in 1..=steps {
+    let (x, y) = if steps == 1 {
+      (to.0, to.1)
+    } else {
+      let t = f64::from(i) / f64::from(steps);
+      let ease = t * t * (3.0 - 2.0 * t);
+      (from.0 + (to.0 - from.0) * ease, from.1 + (to.1 - from.1) * ease)
+    };
+    actions.push(json!({"type": "pointerMove", "x": coord(x), "y": coord(y), "duration": per_step_duration}));
+  }
+  actions.push(json!({"type": "pointerUp", "button": 0}));
   json!({
     "context": context,
     "actions": [{
       "type": "pointer",
       "id": "mouse",
       "parameters": {"pointerType": "mouse"},
-      "actions": [
-        {"type": "pointerMove", "x": coord(from.0), "y": coord(from.1), "duration": 0},
-        {"type": "pointerDown", "button": 0},
-        {"type": "pointerMove", "x": coord(to.0), "y": coord(to.1), "duration": 250},
-        {"type": "pointerUp", "button": 0}
-      ]
+      "actions": actions
     }]
   })
 }

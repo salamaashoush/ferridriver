@@ -534,7 +534,8 @@ for (const backend of BACKENDS) {
     it("drag and drop fires mousedown and mouseup", async () => {
       await page.setContent(`
         <div id="area" style="width:400px;height:400px;background:#eee;position:relative">
-          <div id="draggable" style="width:50px;height:50px;background:orange;position:absolute;left:10px;top:10px"></div>
+          <div id="source" style="width:50px;height:50px;background:orange;position:absolute;left:10px;top:10px"></div>
+          <div id="target" style="width:50px;height:50px;background:limegreen;position:absolute;left:200px;top:200px"></div>
         </div>
         <div id="result"></div>
         <script>
@@ -544,11 +545,111 @@ for (const backend of BACKENDS) {
           document.addEventListener('mousemove', () => { if (!r.textContent.includes('move')) r.textContent += 'move,'; });
         </script>
       `);
-      await page.waitForSelector("#draggable");
-      await page.dragAndDrop(35, 35, 200, 200);
+      await page.waitForSelector("#source");
+      await page.dragAndDrop("#source", "#target");
       const text = await page.locator("#result").innerText();
       expect(text).toContain("down");
       expect(text).toContain("up");
+    });
+
+    it("dragAndDrop honors sourcePosition, targetPosition and steps", async () => {
+      // Navigate to a clean page first to ensure any lingering mouse state
+      // from a previous test is reset.
+      await page.goto("about:blank");
+      await page.setContent(`
+        <!DOCTYPE html>
+        <html><head>
+          <style>html,body{margin:0;padding:0}</style>
+        </head><body>
+        <div id="source" style="width:80px;height:80px;background:orange;position:absolute;left:20px;top:20px"></div>
+        <div id="target" style="width:80px;height:80px;background:limegreen;position:absolute;left:200px;top:200px"></div>
+        <div id="result" style="position:fixed;top:0;right:0">idle</div>
+        <script>
+          const r = document.getElementById('result');
+          // Count both direct mousemove events and coalesced pointermove
+          // sub-events. WebKit's AppKit-backed pipeline and Chromium's CDP
+          // pipeline disagree on coalescing — summing both gives a
+          // backend-agnostic tally of the dispatched steps.
+          let moveCount = 0;
+          window.addEventListener('mousedown', (e) => { r.dataset.down = JSON.stringify({x:e.clientX, y:e.clientY}); }, true);
+          window.addEventListener('mouseup',   (e) => { r.dataset.up   = JSON.stringify({x:e.clientX, y:e.clientY}); }, true);
+          window.addEventListener('mousemove', () => { moveCount += 1; r.dataset.moves = String(moveCount); }, true);
+          window.addEventListener('pointermove', (e) => {
+            const coalesced = typeof e.getCoalescedEvents === 'function' ? e.getCoalescedEvents() : [];
+            if (coalesced.length > 1) {
+              moveCount += coalesced.length - 1;
+              r.dataset.moves = String(moveCount);
+            }
+          }, true);
+        </script>
+        </body></html>
+      `);
+      await page.waitForSelector("#source");
+      await page.dragAndDrop("#source", "#target", {
+        sourcePosition: { x: 5, y: 5 },
+        targetPosition: { x: 10, y: 10 },
+        steps: 6,
+      });
+      const state = JSON.parse(
+        (await page.evaluate(
+          "JSON.stringify({ down: document.getElementById('result').dataset.down || null, up: document.getElementById('result').dataset.up || null, moves: document.getElementById('result').dataset.moves || null })"
+        )) as string,
+      );
+      const down = state.down;
+      const up = state.up;
+      const moves = state.moves;
+      const downJson = JSON.parse(down as string);
+      const upJson = JSON.parse(up as string);
+      // sourcePosition = (5,5) relative to source at (20,20) → (25,25)
+      expect(downJson.x).toBeGreaterThanOrEqual(24);
+      expect(downJson.x).toBeLessThanOrEqual(26);
+      expect(downJson.y).toBeGreaterThanOrEqual(24);
+      expect(downJson.y).toBeLessThanOrEqual(26);
+      // targetPosition = (10,10) relative to target at (200,200) → (210,210)
+      expect(upJson.x).toBeGreaterThanOrEqual(209);
+      expect(upJson.x).toBeLessThanOrEqual(211);
+      expect(upJson.y).toBeGreaterThanOrEqual(209);
+      expect(upJson.y).toBeLessThanOrEqual(211);
+      expect(parseInt(moves as string, 10)).toBeGreaterThanOrEqual(6);
+    });
+
+    it("dragAndDrop trial does not dispatch mouse events", async () => {
+      await page.setContent(`
+        <div id="source" style="width:50px;height:50px;background:orange;position:absolute;left:10px;top:10px"></div>
+        <div id="target" style="width:50px;height:50px;background:limegreen;position:absolute;left:200px;top:200px"></div>
+        <div id="log"></div>
+        <script>
+          const l = document.getElementById('log');
+          document.addEventListener('mousedown', () => l.textContent += 'down,');
+          document.addEventListener('mouseup',   () => l.textContent += 'up,');
+        </script>
+      `);
+      await page.waitForSelector("#source");
+      await page.dragAndDrop("#source", "#target", { trial: true });
+      const text = await page.locator("#log").innerText();
+      expect(text).not.toContain("down");
+      expect(text).not.toContain("up");
+    });
+
+    it("locator.dragTo forwards options and drops at targetPosition", async () => {
+      await page.setContent(`
+        <div id="source" style="width:80px;height:80px;background:orange;position:absolute;left:20px;top:20px"></div>
+        <div id="target" style="width:80px;height:80px;background:limegreen;position:absolute;left:200px;top:200px"></div>
+        <div id="tracker"></div>
+        <script>
+          const t = document.getElementById('tracker');
+          document.addEventListener('mouseup', (e) => { t.dataset.up = JSON.stringify({x: e.clientX, y: e.clientY}); });
+        </script>
+      `);
+      await page.waitForSelector("#source");
+      await page.locator("#source").dragTo(page.locator("#target"), {
+        targetPosition: { x: 15, y: 15 },
+      });
+      const up = JSON.parse((await page.evaluate("document.getElementById('tracker').dataset.up")) as string);
+      expect(up.x).toBeGreaterThanOrEqual(214);
+      expect(up.x).toBeLessThanOrEqual(216);
+      expect(up.y).toBeGreaterThanOrEqual(214);
+      expect(up.y).toBeLessThanOrEqual(216);
     });
 
     // ══════════════════════════════════════════════════════════════════

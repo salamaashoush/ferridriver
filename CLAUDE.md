@@ -221,7 +221,34 @@ Per task, in order:
 10. Tick the `PLAYWRIGHT_COMPAT.md` checkbox in the same commit.
 11. Descriptive commit message referencing the task IDs and the Playwright source file used.
 
-### 9. No escape hatches anywhere
+### 9. Signatures alone are not parity — prove it works end-to-end on every backend
+
+Accepting an option bag in Rust core + NAPI + QuickJS without a test that
+dispatches through the whole stack and observes the expected user-visible
+effect is a false completion. For every Playwright option you wire through,
+there must be an integration test that:
+
+1. Exercises the option via the public JS API (NAPI via `bun test`, QuickJS
+   via `run_script` in `crates/ferridriver-cli/tests/backends.rs`).
+2. Observes a DOM-side or protocol-side effect that ONLY occurs when the
+   option took effect (e.g. mousedown firing at `sourcePosition` rather than
+   the element center, `trial: true` suppressing all mouse events, `steps`
+   producing N `mousemove` samples — not just that the call didn't error).
+3. Passes on every backend the API is claimed to support (`cdp-pipe`,
+   `cdp-raw`, `bidi`, `webkit`). If a backend fails, FIX THE BACKEND — do
+   not write `if (backend !== 'webkit')` or similar guards in the test.
+   Backend-specific NSEvent coalescing, protocol timing, IPC buffering are
+   all real problems and all have fixes. Skipping the assertion is a
+   shortcut that hides the bug.
+4. Is deterministic across runs (5×/10× loops shouldn't show flake). State
+   leaking between tests (mouse-button-down, unresolved listeners,
+   lingering timers) is your problem to clean up.
+
+If you can't make it work on all backends, file the gap under Section B of
+`PLAYWRIGHT_COMPAT.md` with the concrete symptom — never paper over it with
+a conditional skip.
+
+### 10. No escape hatches anywhere
 
 - No `unwrap_used` / `expect_used` / `todo` / `unsafe` in non-test code without explicit justification.
 - No `#[allow(clippy::...)]` suppressions — fix the underlying issue.
