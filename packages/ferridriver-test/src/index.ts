@@ -20,6 +20,15 @@
  *   });
  */
 
+export {
+  TimeoutError,
+  TargetClosedError,
+  isTimeoutError,
+  isTargetClosedError,
+  promoteError,
+  withPromotedErrors,
+  errors,
+} from './errors.js';
 export { test, describe } from './test.js';
 export type { MountFunction } from './test.js';
 export { expect } from './expect.js';

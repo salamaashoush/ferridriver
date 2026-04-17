@@ -19,6 +19,7 @@
 
 use crate::backend::BackendKind;
 use crate::context::ContextRef;
+use crate::error::Result;
 use crate::options::LaunchOptions;
 use crate::page::Page;
 use crate::state::{BrowserState, ConnectMode};
@@ -41,7 +42,7 @@ impl Browser {
   /// # Errors
   ///
   /// Returns an error if the browser process fails to start or connection fails.
-  pub async fn launch(options: LaunchOptions) -> Result<Self, String> {
+  pub async fn launch(options: LaunchOptions) -> Result<Self> {
     let mode = if let Some(url) = &options.ws_endpoint {
       ConnectMode::ConnectUrl(url.clone())
     } else if let Some(ac) = &options.auto_connect {
@@ -67,7 +68,7 @@ impl Browser {
   /// # Errors
   ///
   /// Returns an error if the WebSocket connection fails.
-  pub async fn connect(url: &str) -> Result<Self, String> {
+  pub async fn connect(url: &str) -> Result<Self> {
     Box::pin(Self::launch(LaunchOptions {
       ws_endpoint: Some(url.to_string()),
       ..Default::default()
@@ -102,8 +103,8 @@ impl Browser {
   /// # Errors
   ///
   /// Returns an error if page creation fails.
-  pub async fn new_page(&self) -> Result<Arc<Page>, String> {
-    Box::pin(self.default_context().new_page()).await
+  pub async fn new_page(&self) -> Result<Arc<Page>> {
+    Ok(Box::pin(self.default_context().new_page()).await?)
   }
 
   /// Shorthand: create a new page and navigate to URL.
@@ -111,7 +112,7 @@ impl Browser {
   /// # Errors
   ///
   /// Returns an error if page creation or navigation fails.
-  pub async fn new_page_with_url(&self, url: &str) -> Result<Arc<Page>, String> {
+  pub async fn new_page_with_url(&self, url: &str) -> Result<Arc<Page>> {
     let page = Box::pin(self.new_page()).await?;
     page.goto(url, None).await?;
     Ok(page)
@@ -124,11 +125,11 @@ impl Browser {
   ///
   /// Returns an error if page creation or retrieval fails.
   ///
-  pub async fn page(&self) -> Result<Arc<Page>, String> {
+  pub async fn page(&self) -> Result<Arc<Page>> {
     let ctx = self.default_context();
     let mut pages = ctx.pages().await.unwrap_or_default();
     if pages.is_empty() {
-      Box::pin(ctx.new_page()).await
+      Ok(Box::pin(ctx.new_page()).await?)
     } else {
       Ok(pages.swap_remove(0))
     }
@@ -139,7 +140,7 @@ impl Browser {
   /// # Errors
   ///
   /// Returns an error if the browser cannot be closed cleanly.
-  pub async fn close(&self) -> Result<(), String> {
+  pub async fn close(&self) -> Result<()> {
     let mut state = self.state.write().await;
     state.shutdown().await;
     Ok(())
