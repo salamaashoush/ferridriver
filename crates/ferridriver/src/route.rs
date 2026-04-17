@@ -153,46 +153,16 @@ impl Drop for Route {
 /// Must be Send + Sync since it's called from async tasks.
 pub type RouteHandler = std::sync::Arc<dyn Fn(Route) + Send + Sync>;
 
-/// A registered route with URL pattern and handler.
+/// A registered route: URL matcher + handler.
+///
+/// Matching delegates to [`crate::url_matcher::UrlMatcher::matches`]; equality
+/// for `unroute` uses [`crate::url_matcher::UrlMatcher::equivalent`] so a
+/// caller passing the same glob string later can retire the registration.
 pub struct RegisteredRoute {
-  /// URL pattern (glob converted to regex).
-  pub pattern: regex::Regex,
-  /// Original pattern string (for display/unroute matching).
-  pub pattern_str: String,
+  /// Matcher that decides which URLs this route intercepts.
+  pub matcher: crate::url_matcher::UrlMatcher,
   /// The handler function.
   pub handler: RouteHandler,
-}
-
-/// Convert a glob URL pattern to a regex.
-/// Supports: `*` (any chars except /), `**` (any chars including /), `?` (single char).
-///
-/// # Errors
-///
-/// Returns an error if the resulting regex pattern is invalid.
-pub fn glob_to_regex(glob: &str) -> Result<regex::Regex, String> {
-  let mut regex = String::with_capacity(glob.len() * 2);
-  regex.push('^');
-  let mut chars = glob.chars().peekable();
-  while let Some(c) = chars.next() {
-    match c {
-      '*' => {
-        if chars.peek() == Some(&'*') {
-          chars.next();
-          regex.push_str(".*"); // ** = match everything including /
-        } else {
-          regex.push_str("[^/]*"); // * = match everything except /
-        }
-      },
-      '?' => regex.push('.'),
-      '.' | '+' | '^' | '$' | '|' | '(' | ')' | '[' | ']' | '{' | '}' | '\\' => {
-        regex.push('\\');
-        regex.push(c);
-      },
-      _ => regex.push(c),
-    }
-  }
-  regex.push('$');
-  regex::Regex::new(&regex).map_err(|e| format!("Invalid route pattern '{glob}': {e}"))
 }
 
 /// HTTP status text for common status codes.

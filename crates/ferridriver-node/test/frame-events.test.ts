@@ -168,7 +168,7 @@ for (const backend of CDP_BACKENDS) {
 
     it("waitForResponse catches network response", async () => {
       const [response] = await Promise.all([
-        page.waitForResponse("127.0.0.1", 10000),
+        page.waitForResponse(/127\.0\.0\.1/, 10000),
         page.goto(testUrl),
       ]);
       expect(response).toBeDefined();
@@ -178,7 +178,7 @@ for (const backend of CDP_BACKENDS) {
 
     it("waitForResponse with navigation", async () => {
       const [response] = await Promise.all([
-        page.waitForResponse("127.0.0.1", 10000),
+        page.waitForResponse(/127\.0\.0\.1/, 10000),
         page.goto(testUrl),
       ]);
       expect(response.url).toContain("127.0.0.1");
@@ -248,7 +248,7 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
 
     it("page.waitForResponse matches URL pattern", async () => {
       const [response] = await Promise.all([
-        page.waitForResponse("127.0.0.1", 10000),
+        page.waitForResponse(/127\.0\.0\.1/, 10000),
         page.goto(testUrl),
       ]);
       expect(response.status).toBe(200);

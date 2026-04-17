@@ -734,12 +734,16 @@ impl AnyPage {
 
   // ── Network Interception ──
 
-  pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<(), String> {
-    page_dispatch!(self, route(pattern, handler))
+  pub async fn route(
+    &self,
+    matcher: crate::url_matcher::UrlMatcher,
+    handler: crate::route::RouteHandler,
+  ) -> Result<(), String> {
+    page_dispatch!(self, route(matcher, handler))
   }
 
-  pub async fn unroute(&self, pattern: &str) -> Result<(), String> {
-    page_dispatch!(self, unroute(pattern))
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<(), String> {
+    page_dispatch!(self, unroute(matcher))
   }
 
   // ── Lifecycle ──

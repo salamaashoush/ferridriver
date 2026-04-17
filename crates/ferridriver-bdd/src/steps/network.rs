@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex};
 use crate::step::StepError;
 use crate::world::BrowserWorld;
 use ferridriver::route::{ContinueOverrides, FulfillResponse, InterceptedRequest};
+use ferridriver::url_matcher::UrlMatcher;
 use ferridriver_bdd_macros::{given, then, when};
 
 /// Thread-safe log of intercepted requests stored in world state.
@@ -43,10 +44,12 @@ fn intercepted_requests(world: &mut BrowserWorld) -> InterceptedRequests {
 async fn mock_with_status_and_body(world: &mut BrowserWorld, pattern: String, status: i64, body: String) {
   let status = i32::try_from(status).map_err(|_| StepError::from(format!("invalid status code: {status}")))?;
   let body_bytes = body.into_bytes();
+  let matcher =
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::from(format!("invalid url pattern \"{pattern}\": {e}")))?;
   world
     .page()
     .route(
-      &pattern,
+      matcher,
       Arc::new(move |route| {
         route.fulfill(FulfillResponse {
           status,
@@ -62,10 +65,12 @@ async fn mock_with_status_and_body(world: &mut BrowserWorld, pattern: String, st
 #[given("I mock requests to {string} with JSON {string}")]
 async fn mock_with_json(world: &mut BrowserWorld, pattern: String, json_body: String) {
   let body_bytes = json_body.into_bytes();
+  let matcher =
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::from(format!("invalid url pattern \"{pattern}\": {e}")))?;
   world
     .page()
     .route(
-      &pattern,
+      matcher,
       Arc::new(move |route| {
         route.fulfill(FulfillResponse {
           status: 200,
@@ -96,10 +101,12 @@ async fn mock_with_fixture(world: &mut BrowserWorld, pattern: String, fixture_pa
   }
   .to_string();
 
+  let matcher =
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::from(format!("invalid url pattern \"{pattern}\": {e}")))?;
   world
     .page()
     .route(
-      &pattern,
+      matcher,
       Arc::new(move |route| {
         route.fulfill(FulfillResponse {
           status: 200,
@@ -130,10 +137,12 @@ async fn mock_with_fixture_and_status(world: &mut BrowserWorld, pattern: String,
   }
   .to_string();
 
+  let matcher =
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::from(format!("invalid url pattern \"{pattern}\": {e}")))?;
   world
     .page()
     .route(
-      &pattern,
+      matcher,
       Arc::new(move |route| {
         route.fulfill(FulfillResponse {
           status,
@@ -149,10 +158,12 @@ async fn mock_with_fixture_and_status(world: &mut BrowserWorld, pattern: String,
 
 #[given("I block requests to {string}")]
 async fn block_requests(world: &mut BrowserWorld, pattern: String) {
+  let matcher =
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::from(format!("invalid url pattern \"{pattern}\": {e}")))?;
   world
     .page()
     .route(
-      &pattern,
+      matcher,
       Arc::new(|route| {
         route.abort("BlockedByClient");
       }),
@@ -164,10 +175,12 @@ async fn block_requests(world: &mut BrowserWorld, pattern: String) {
 #[given("I intercept requests to {string}")]
 async fn intercept_requests(world: &mut BrowserWorld, pattern: String) {
   let tracker = intercepted_requests(world);
+  let matcher =
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::from(format!("invalid url pattern \"{pattern}\": {e}")))?;
   world
     .page()
     .route(
-      &pattern,
+      matcher,
       Arc::new(move |route| {
         tracker.push(route.request().clone());
         route.continue_route(ContinueOverrides::default());
@@ -179,9 +192,11 @@ async fn intercept_requests(world: &mut BrowserWorld, pattern: String) {
 
 #[when("I remove route for {string}")]
 async fn remove_route(world: &mut BrowserWorld, pattern: String) {
+  let matcher =
+    UrlMatcher::glob(&pattern).map_err(|e| StepError::from(format!("invalid url pattern \"{pattern}\": {e}")))?;
   world
     .page()
-    .unroute(&pattern)
+    .unroute(&matcher)
     .await
     .map_err(|e| StepError::from(format!("remove route for \"{pattern}\": {e}")))?;
 }

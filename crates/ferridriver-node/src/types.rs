@@ -298,3 +298,47 @@ pub struct ResponseData {
   pub status: i32,
   pub status_text: String,
 }
+
+/// Shape of a JS `RegExp` as seen across NAPI.
+///
+/// `RegExp.prototype.source` and `RegExp.prototype.flags` are accessor
+/// properties on the prototype chain, but `napi_get_named_property`
+/// (which napi-rs's `#[napi(object)]` deserializer uses per field) calls
+/// V8's `[[Get]]` operation — that walks the prototype chain and invokes
+/// accessors. So `source` is available on any real `RegExp` instance the
+/// caller passes in, and this struct binds to a bare `/pattern/flags`
+/// literal without any client-side serialization step.
+///
+/// Plain user objects that happen to carry a `source` string also match
+/// (intentional — Playwright itself treats any object with these fields
+/// as regex-shaped; see `isRegExp` in
+/// `/tmp/playwright/packages/isomorphic/urlMatch.ts`).
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct JsRegExpLike {
+  /// `RegExp.prototype.source` — the pattern between the slashes, without
+  /// the enclosing slashes or flags.
+  pub source: String,
+  /// `RegExp.prototype.flags` — the flag letters (e.g. `"i"`, `"gs"`).
+  /// Absent on bare regex literals with no flags, which expose `flags` as
+  /// an empty string; `Option` tolerates both shapes.
+  pub flags: Option<String>,
+}
+
+/// Lower a user-passed URL matcher to a Rust [`ferridriver::UrlMatcher`].
+///
+/// NAPI accepts `string | RegExp` directly — exactly the Playwright
+/// surface `URLMatch = string | RegExp | ((url) => boolean) | URLPattern`
+/// minus the predicate/URLPattern branches, which ride on separate NAPI
+/// methods (predicate needs a `ThreadsafeFunction`; URLPattern is Node
+/// 24+). No client-side serialization: a literal `/foo/i` flows through
+/// unchanged.
+pub(crate) fn string_or_regex_to_rust(
+  input: napi::Either<String, JsRegExpLike>,
+) -> napi::Result<ferridriver::UrlMatcher> {
+  match input {
+    napi::Either::A(glob) => ferridriver::UrlMatcher::glob(glob).map_err(|e| napi::Error::from_reason(e.to_string())),
+    napi::Either::B(re) => ferridriver::UrlMatcher::regex_from_source(&re.source, re.flags.as_deref().unwrap_or(""))
+      .map_err(|e| napi::Error::from_reason(e.to_string())),
+  }
+}
