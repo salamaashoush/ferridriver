@@ -7,7 +7,8 @@
     "examples/ct-react",
     "examples/ct-vue",
     "examples/ct-svelte",
-    "examples/ct-solid"
+    "examples/ct-solid",
+    "site"
   ],
   "devDependencies": {
     "@ferridriver/test": "workspace:*"

@@ -1,24 +1,35 @@
-# ferridriver-node
+# @ferridriver/node
 
-Node.js/Bun bindings for the ferridriver browser automation library. NAPI-RS native addon.
+Node.js / Bun bindings for the ferridriver browser automation library. NAPI-RS native addon with a Playwright-compatible API.
 
-## Installation
+Most users want the higher-level test runner at [`@ferridriver/test`](https://www.npmjs.com/package/@ferridriver/test). Pull this package in directly when you need the raw `Browser` / `Page` / `Locator` primitives.
+
+## Install
 
 ```bash
-bun add ferridriver-node
+npm install @ferridriver/node
 # or
-npm install ferridriver-node
+bun add @ferridriver/node
 ```
+
+The right platform binary is pulled in via `optionalDependencies`:
+
+| Platform | Package |
+|---|---|
+| macOS arm64 | `@ferridriver/node-darwin-arm64` |
+| Linux x64 (glibc) | `@ferridriver/node-linux-x64-gnu` |
+| Linux arm64 (glibc) | `@ferridriver/node-linux-arm64-gnu` |
+| Windows x64 | `@ferridriver/node-win32-x64-msvc` |
+
+On macOS, the tarball also ships `fd_webkit_host` — the Objective-C subprocess used by the WebKit backend.
 
 ## Usage
 
-```typescript
-import { Browser } from 'ferridriver-node';
+```ts
+import { Browser } from '@ferridriver/node';
 
 const browser = await Browser.launch();
-const page = await browser.page();
-
-await page.goto('https://example.com');
+const page = await browser.newPageWithUrl('https://example.com');
 
 // Playwright-style locators
 const heading = page.locator('h1');
@@ -32,7 +43,7 @@ await page.locator('button[type=submit]').click();
 // Wait for navigation
 await page.waitForUrl('/dashboard');
 
-// Events
+// Events: page.on returns a numeric listener id; page.off(id) removes it
 const listenerId = page.on('response', (data) => {
   console.log(`${data.status} ${data.url}`);
 });
@@ -41,49 +52,60 @@ page.off(listenerId);
 // Screenshot
 const png = await page.screenshot({ fullPage: true });
 
-// Accessibility snapshot
-const state = await page.storageState();
-
 await browser.close();
 ```
 
 ## Backends
 
-```typescript
-// Default: CdpPipe (fastest)
-const browser = await Browser.launch();
+```ts
+// Default: CdpPipe (Chrome via fd 3/4 pipes — fastest)
+const a = await Browser.launch();
 
-// WebSocket (connect to running Chrome)
-const browser = await Browser.launch({ backend: 'cdp-raw' });
+// CDP over WebSocket
+const b = await Browser.launch({ backend: 'cdp-raw' });
 
-// Connect to existing browser
-const browser = await Browser.connect('ws://localhost:9222/...');
+// Connect to a running Chrome
+const c = await Browser.connect('ws://localhost:9222/devtools/browser/...');
 
-// WebKit (macOS only)
-const browser = await Browser.launch({ backend: 'webkit' });
+// WebKit via WKWebView (macOS only — ships with the darwin-arm64 package)
+const d = await Browser.launch({ backend: 'webkit' });
+
+// Firefox via WebDriver BiDi
+const e = await Browser.launch({ backend: 'bidi' });
 ```
+
+## Public API surface
+
+Classes exported from `index.d.ts`: `ApiRequestContext`, `ApiResponse`, `Browser`, `BrowserContext`, `Codegen`, `Frame`, `Keyboard`, `Locator`, `Mouse`, `Page`, `Route`, `StepHandle`, `TestFixtures`, `TestInfo`, `TestRunner`.
+
+Helper functions: `findInstalledChromium()`, `findInstalledHeadlessShell()`, `getBrowserCacheDir()`, `installChromium()`, `installChromiumHeadlessShell()`, `installChromiumWithDeps()`, `installSystemDeps()`.
+
+See [Page API section in the workspace README](../../README.md#page-api) for the full method list (navigation, selectors, actions, queries, screenshots, network, events, emulation, cookies/storage, input devices).
+
+## Differences from Playwright
+
+- `page.on()` returns a numeric listener id; use `page.off(id)` to remove.
+- `goto()` accepts optional `{ waitUntil, timeout }` as the second argument.
+- `locator.orLocator(other)` / `locator.andLocator(other)` instead of `.or()` / `.and()` (Rust keyword conflict).
+- `evaluateAll()` on a `Locator` takes a JavaScript expression string with `elements` in scope.
 
 ## Building
 
 ```bash
-bun run build       # Release build
-bun run build:debug # Debug build
-bun test            # Run tests (250 tests across 3 backends)
+bun install
+bun run build        # release build for host target
+bun run build:debug  # debug build
+bun test             # run NAPI test suite
 ```
 
-## API
-
-See the [workspace README](../../README.md) for the complete API reference. The NAPI bindings expose the same API as the Rust library with JavaScript-native types.
-
-### Key differences from Playwright
-
-- `page.on()` returns a numeric listener ID (use `page.off(id)` to remove)
-- `goto()` accepts optional `{ waitUntil, timeout }` as second argument
-- `locator.orLocator(other)` / `locator.andLocator(other)` instead of `locator.or(other)` / `locator.and(other)` (Rust keyword conflict)
-- `evaluateAll()` on Locator takes a JS expression string with `elements` in scope
+The release pipeline builds all four platform targets in parallel in GitHub Actions.
 
 ## Requirements
 
-- Node.js 18+ or Bun 1.0+
-- Chrome/Chromium (auto-detected)
-- macOS 11+ for WebKit backend
+- Node.js 16+ or Bun 1.0+
+- Chrome / Chromium (auto-detected, or install via `npx @ferridriver/test install`)
+- macOS 11+ for the WebKit backend
+
+## License
+
+MIT OR Apache-2.0

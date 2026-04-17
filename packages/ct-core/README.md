@@ -2,6 +2,18 @@
 
 Core infrastructure for JavaScript framework component testing. Handles the pipeline from test file scanning to component mounting in a real browser.
 
+Most users don't depend on this package directly — it's pulled in transitively through `@ferridriver/test` and the framework adapters (`@ferridriver/ct-react`, `ct-vue`, `ct-svelte`, `ct-solid`). Use it directly only when embedding the CT pipeline into a custom runner.
+
+## Install
+
+```bash
+npm install -D @ferridriver/ct-core vite
+# or
+bun add -d @ferridriver/ct-core vite
+```
+
+`vite >= 5.0.0` is a peer dependency.
+
 ## Architecture
 
 ```
@@ -110,9 +122,26 @@ await runner.stop();
 
 ## Exports
 
-```javascript
+Top-level (`@ferridriver/ct-core`):
+
+```js
 export { mount, unmount, update, wrapObject, createComponent } from './mount.mjs';
 export { createCtRunner } from './runner.mjs';
 export { ferridriverCtPlugin } from './vitePlugin.mjs';
 export { transformTestFile, scanTestFiles } from './importTransform.mjs';
 ```
+
+Subpath exports (for deeper integration):
+
+| Subpath | Purpose |
+|---|---|
+| `@ferridriver/ct-core/mount` | `mount` / `unmount` / `update` and serializer helpers |
+| `@ferridriver/ct-core/runner` | `createCtRunner` (starts the Vite dev server) |
+| `@ferridriver/ct-core/vitePlugin` | `ferridriverCtPlugin` (the Vite plugin factory) |
+| `@ferridriver/ct-core/importTransform` | `transformTestFile`, `scanTestFiles` |
+| `@ferridriver/ct-core/jsx-runtime` | JSX pragma for test files |
+| `@ferridriver/ct-core/injected` | Browser-side runtime (`ImportRegistry`, `unwrapObject`) |
+
+## License
+
+MIT OR Apache-2.0

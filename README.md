@@ -6,21 +6,27 @@ High-performance browser automation library in Rust with a Playwright-compatible
 
 ```
 ferridriver (core library)
-  ├── CdpPipe backend       Chrome via fd 3/4 pipes — fastest, default
-  ├── CdpRaw backend        Chrome via WebSocket — connect to running browser
+  ├── CdpPipe backend        Chrome via fd 3/4 pipes — fastest, default
+  ├── CdpRaw backend         Chrome via WebSocket — connect to running browser
   ├── WebKit backend         macOS WKWebView — native accessibility
+  ├── Bidi backend           Firefox via WebDriver BiDi
   │
-  ├── ferridriver-cli        CLI: MCP server (stdio + HTTP)
-  ├── ferridriver-node       Node.js/Bun bindings (NAPI-RS)
-  ├── @ferridriver/test      CLI: test runner + component testing (TypeScript)
+  ├── ferridriver-cli         CLI binary (MCP server: stdio + HTTP)
+  ├── ferridriver-mcp         MCP server library (28 tools, rmcp)
+  ├── ferridriver-node        Node.js/Bun bindings (NAPI-RS) → @ferridriver/node
   │
-  ├── ferridriver-test       Test runner core: parallel, hooks, expect, reporters
+  ├── ferridriver-test        Test runner core: parallel, hooks, expect, reporters
+  ├── ferridriver-test-macros Proc macros: #[ferritest], #[ferritest_each], hooks
   │
-  ├── @ferridriver/ct-core   JS CT core: Vite plugin, import transform, browser runtime
-  ├── @ferridriver/ct-react  React adapter (createRoot/render)
-  ├── @ferridriver/ct-vue    Vue adapter (createApp/mount)
-  ├── @ferridriver/ct-svelte Svelte adapter (mount, Svelte 4+5)
-  └── @ferridriver/ct-solid  Solid adapter (render/dispose)
+  ├── ferridriver-bdd         BDD framework: Gherkin parser, 144 steps, translator
+  ├── ferridriver-bdd-macros  Proc macros: #[given], #[when], #[then], #[step]
+  │
+  ├── @ferridriver/test       TS CLI + test API (wraps @ferridriver/node)
+  ├── @ferridriver/ct-core    JS CT core: Vite plugin, import transform, browser runtime
+  ├── @ferridriver/ct-react   React adapter (createRoot/render)
+  ├── @ferridriver/ct-vue     Vue adapter (createApp/mount)
+  ├── @ferridriver/ct-svelte  Svelte adapter (Svelte 4 + 5)
+  └── @ferridriver/ct-solid   Solid adapter (render/dispose)
 ```
 
 ## Installation
@@ -196,7 +202,7 @@ path = "tests/harness.rs"
 harness = false
 
 [dev-dependencies]
-ferridriver-test = { version = "0.2" }
+ferridriver-test = "0.1"
 ```
 
 **Run:**
@@ -230,18 +236,22 @@ height = 720
 3. Environment variables (`FERRIDRIVER_BACKEND`, `FERRIDRIVER_WORKERS`, `FERRIDRIVER_TIMEOUT`, `FERRIDRIVER_RETRIES`)
 4. CLI flags (`--headed`, `--backend`, `--workers`, `--timeout`)
 
-**CLI flags** (after `--` for `cargo test`, direct for `ferridriver-test`):
+**CLI flags** (after `--` for `cargo test`, direct for the TS CLI):
 | Flag | Description |
 |---|---|
 | `--headed` | Show browser window |
-| `--backend <name>` | `cdp-pipe`, `cdp-raw`, `webkit` |
+| `--backend <name>` | `cdp-pipe`, `cdp-raw`, `webkit`, `bidi` |
+| `--browser <name>` | `chromium`, `firefox`, `webkit` (sets default backend) |
 | `--workers <n>` / `-j <n>` | Parallel workers |
 | `--retries <n>` | Retry failed tests |
 | `--timeout <ms>` | Per-test timeout |
 | `--grep <pattern>` / `-g` | Filter tests by name |
 | `--tag <name>` | Filter by tag |
+| `--shard <cur>/<total>` | Shard selection for CI |
 | `--list` | List tests without running |
-| `--update-snapshots` / `-u` | Update snapshot files |
+| `--update-snapshots` | Update snapshot files |
+| `--last-failed` | Re-run only previously failed tests |
+| `--forbid-only` | Fail if any `test.only()` is present |
 
 **Per-test options** (via `#[ferritest]`):
 ```rust
@@ -258,10 +268,11 @@ async fn flaky_test(page: Page) -> Result<(), TestFailure> { ... }
 | Backend | Flag | Description |
 |---|---|---|
 | CDP Pipe | `cdp-pipe` | Chrome via fd 3/4 pipes. Fastest. Default. |
-| CDP Raw | `cdp-raw` | Chrome via WebSocket. Connect to running browser. |
+| CDP Raw | `cdp-raw` | Chrome via WebSocket. Connect to a running browser. |
 | WebKit | `webkit` | Native WKWebView (macOS only). No Chrome needed. |
+| Bidi | `bidi` | Firefox via WebDriver BiDi. |
 
-WebKit uses the system WKWebView -- no browser download, instant startup, native accessibility tree. Headless only (headful mode pending).
+WebKit uses the system WKWebView — no browser download, instant startup, native accessibility tree. Headless only (headful mode pending).
 
 ### Features
 
@@ -276,19 +287,27 @@ WebKit uses the system WKWebView -- no browser download, instant startup, native
 - **Visual snapshots**: pixel-level PNG diff with threshold and diff image
 - **CDP tracing**: Playwright-compatible format
 
-### 32 Expect Matchers
+### Expect Matchers
 
-Visibility: `toBeVisible`, `toBeHidden`, `toBeAttached`, `toBeInViewport`
-State: `toBeEnabled`, `toBeDisabled`, `toBeChecked`, `toBeEditable`, `toBeFocused`, `toBeEmpty`
-Text: `toHaveText`, `toContainText`, `toHaveTexts`, `toContainTexts`
-Value: `toHaveValue`, `toHaveValues`
-Attributes: `toHaveAttribute`, `toHaveClass`, `toContainClass`, `toHaveCSS`, `toHaveId`, `toHaveRole`
-A11y: `toHaveAccessibleName`, `toHaveAccessibleDescription`, `toMatchAriaSnapshot`
-Snapshots: `toMatchSnapshot`, `toHaveScreenshot`
-Other: `toHaveJSProperty`, `toHaveCount`
-Page: `toHaveTitle`, `toHaveURL`
-Modifiers: `.not()`, `.withTimeout()`, `.soft()`, `.withMessage()`
-Utilities: `expect.poll()`, `toPass()`
+The Rust core ships **38 matchers** with auto-retry. The TypeScript wrapper currently exposes **13** of them (common Playwright patterns). All polling happens in Rust regardless.
+
+**Rust (38, snake_case):**
+
+Visibility: `to_be_visible`, `to_be_hidden`, `to_be_attached`, `to_be_in_viewport`
+State: `to_be_enabled`, `to_be_disabled`, `to_be_checked`, `to_be_editable`, `to_be_focused`, `to_be_empty`
+Text: `to_have_text`, `to_contain_text`, `to_have_texts`, `to_contain_texts`
+Value: `to_have_value`, `to_have_values`
+Attributes: `to_have_attribute`, `to_have_class`, `to_contain_class`, `to_have_css`, `to_have_id`, `to_have_role`
+A11y: `to_have_accessible_name`, `to_have_accessible_description`, `to_have_accessible_error_message`, `to_match_aria_snapshot`
+Snapshots: `to_match_snapshot`, `to_have_screenshot`
+Other: `to_have_js_property`, `to_have_count`
+Page: `to_have_title`, `to_contain_title`, `to_have_url`, `to_contain_url`
+Poll / satisfy: `expect_poll`, `to_equal`, `to_satisfy`, `to_pass`, `to_pass_with_options`
+Modifiers: `.not()`, `.with_timeout()`, `.soft()`, `.with_message()`
+
+**TypeScript (13, camelCase):**
+
+`toHaveTitle`, `toHaveURL`, `toBeVisible`, `toBeHidden`, `toBeEnabled`, `toBeDisabled`, `toBeChecked`, `toHaveText`, `toContainText`, `toHaveValue`, `toHaveAttribute`, `toHaveCount`, `toPass`. All take `string` arguments; regex is Rust-only today.
 
 ## Component Testing
 
@@ -361,7 +380,7 @@ The `--ct` flag starts the Vite dev server, pre-warms it, navigates each test pa
 
 ## MCP Server
 
-25 tools for AI agent browser automation. Works with Claude, Cursor, or any MCP client.
+28 tools for AI agent browser automation. Works with Claude, Cursor, Claude Code, or any MCP client.
 
 ```bash
 # stdio (for Claude Code, Cursor, etc.)
@@ -381,11 +400,11 @@ ferridriver --auto-connect
 ferridriver --connect ws://localhost:9222/devtools/browser/...
 ```
 
-Tools: `connect`, `navigate`, `page`, `click`, `click_at`, `hover`, `fill`, `fill_form`, `type_text`, `press_key`, `drag`, `scroll`, `select_option`, `upload_file`, `snapshot`, `screenshot`, `evaluate`, `wait_for`, `search_page`, `find_elements`, `get_markdown`, `cookies`, `storage`, `emulate`, `diagnostics`
+Tools: `connect`, `navigate`, `page`, `click`, `click_at`, `hover`, `fill`, `fill_form`, `type_text`, `press_key`, `drag`, `scroll`, `select_option`, `upload_file`, `snapshot`, `screenshot`, `evaluate`, `wait_for`, `search_page`, `find_elements`, `get_markdown`, `cookies`, `storage`, `emulate`, `diagnostics`, `list_steps`, `run_step`, `run_scenario`
 
 ## BDD Framework
 
-58 Gherkin step definitions backed by the Page/Locator API (not raw JS evaluate). All selectors support Playwright engine syntax (`role=`, `text=`, `label=`, etc).
+144 Gherkin step definitions backed by the Page/Locator API (not raw JS `evaluate`). All selectors support Playwright engine syntax (`role=`, `text=`, `label=`, etc).
 
 ```gherkin
 Feature: Login
@@ -398,7 +417,7 @@ Feature: Login
     And "role=heading" should have text "Welcome"
 ```
 
-Available step categories: Navigation, Interaction (click, fill, type, hover, check, focus, blur, scroll), Wait (selector, text, timeout), Assertion (text, visibility, value, attribute, class, state, count), Variable, Cookie, Storage, Screenshot.
+Available step categories: Navigation, Interaction (click, fill, type, hover, check, focus, blur, scroll), Wait, Assertion (text, visibility, value, attribute, class, state, count, aria), Keyboard, Mouse, Screenshot, Variable, Storage, Cookie, JavaScript, Dialog, Frame, Window, File, Network (route / fulfill / continue / abort), API request, Emulation.
 
 ## Page API
 
@@ -460,26 +479,29 @@ All Playwright selector engines are supported:
 
 ```
 crates/
-  ferridriver               Core: Browser, Page, Locator, 3 backends
-  ferridriver-cli            CLI binary (MCP server: stdio + HTTP)
-  ferridriver-mcp            MCP server library (25 tools, rmcp)
-  ferridriver-node           Node.js/Bun bindings (NAPI-RS)
-  ferridriver-test           Test runner: parallel, hooks, expect, reporters
-  ferridriver-test-macros    #[ferritest] proc macro
+  ferridriver                 Core: Browser, Page, Locator, 4 backends
+  ferridriver-cli             CLI binary (MCP server: stdio + HTTP)
+  ferridriver-mcp             MCP server library (28 tools, rmcp)
+  ferridriver-node            Node.js/Bun bindings (NAPI-RS) → @ferridriver/node
+  ferridriver-test            Test runner: parallel, hooks, expect, reporters
+  ferridriver-test-macros     #[ferritest], #[ferritest_each], hook macros
+  ferridriver-bdd             BDD framework: Gherkin parser, 144 steps, translator
+  ferridriver-bdd-macros      #[given], #[when], #[then], #[step], #[before], #[after]
 packages/
-  ferridriver-test           @ferridriver/test — TS CLI + test API
-  ct-core                    @ferridriver/ct-core — Vite plugin, import transform, browser runtime
-  ct-react                   @ferridriver/ct-react — React registerSource
-  ct-vue                     @ferridriver/ct-vue — Vue registerSource
-  ct-svelte                  @ferridriver/ct-svelte — Svelte registerSource
-  ct-solid                   @ferridriver/ct-solid — Solid registerSource
+  ferridriver-test            @ferridriver/test — TS CLI + test API
+  ct-core                     @ferridriver/ct-core — Vite plugin, import transform, browser runtime
+  ct-react                    @ferridriver/ct-react — React registerSource
+  ct-vue                      @ferridriver/ct-vue — Vue registerSource
+  ct-svelte                   @ferridriver/ct-svelte — Svelte registerSource (Svelte 4 + 5)
+  ct-solid                    @ferridriver/ct-solid — Solid registerSource
 examples/
-  ct-leptos-todomvc          Leptos TodoMVC E2E (#[ferritest] + trunk)
-  ct-dioxus-todomvc          Dioxus TodoMVC E2E (#[ferritest] + dx)
-  ct-react                   React TodoMVC (15 tests)
-  ct-vue                     Vue TodoMVC (15 tests)
-  ct-svelte                  Svelte TodoMVC (15 tests)
-  ct-solid                   Solid TodoMVC (15 tests)
+  bdd-example                 Rust BDD test suite (bdd_main!() + feature files)
+  ct-leptos-todomvc           Leptos TodoMVC E2E (#[ferritest] + trunk)
+  ct-dioxus-todomvc           Dioxus TodoMVC E2E (#[ferritest] + dx)
+  ct-react                    React TodoMVC (15 tests)
+  ct-vue                      Vue TodoMVC (15 tests)
+  ct-svelte                   Svelte TodoMVC (15 tests)
+  ct-solid                    Solid TodoMVC (15 tests)
 ```
 
 ## Performance
@@ -495,13 +517,11 @@ examples/
 
 ## Test Coverage
 
-- 67 Rust integration tests (53 BDD + 14 Page API)
-- 250 NAPI tests (Bun, across 3 backends)
-- 14 test runner feature tests
-- 3 visual screenshot diff tests
-- 60 JS component tests (15 each: React, Vue, Svelte, Solid TodoMVC)
-- 3 CT infrastructure tests
-- **397+ total tests**
+- ~94 Rust workspace tests (unit + integration, across 4 backends)
+- ~337 NAPI / TypeScript tests (Bun)
+- 83 BDD feature scenarios (81 pass, 2 skip)
+- 60 JS component tests (15 each for React, Vue, Svelte, Solid TodoMVC)
+- **~430 total tests**
 
 ## Building and Testing
 
@@ -518,10 +538,11 @@ cd crates/ferridriver-node && bun test             # NAPI/TS tests
 
 ## Requirements
 
-- Rust nightly (edition 2024)
-- Chrome/Chromium (auto-detected, or set `CHROMIUM_PATH`)
-- macOS 11+ for WebKit backend
-- Bun 1.0+ or Node.js 18+ for NAPI and TS test runner
+- Rust stable 1.91+ (edition 2024) — see `rust-toolchain.toml`
+- Chrome / Chromium (auto-detected, or set `CHROMIUM_PATH`)
+- macOS 11+ for the WebKit backend
+- Firefox with WebDriver BiDi for the `bidi` backend
+- Bun 1.0+ or Node.js 18+ for the NAPI addon and TS test runner
 - `ffmpeg` on PATH for `--video` recording (optional, runtime only)
 - `trunk` for Leptos CT (`cargo install trunk`)
 - `dx` for Dioxus CT (`cargo install dioxus-cli`)

@@ -156,9 +156,21 @@ release-retry version:
   echo ""
   echo "Re-pushed $TAG -- release CI re-triggered."
 
-# Generate docs
+# Generate rustdoc
 doc:
   cargo doc --workspace --no-deps --open
+
+# Run the docs site dev server
+docs:
+  cd site && bun run dev
+
+# Build the static docs site (output: site/doc_build)
+docs-build:
+  cd site && bun run build
+
+# Preview the built static docs site
+docs-preview:
+  cd site && bun run preview
 
 # Clean build artifacts
 clean:

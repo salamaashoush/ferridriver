@@ -1,23 +1,29 @@
 # @ferridriver/ct-react
 
-React component testing adapter for ferridriver. Mount React components in a real browser, interact with them using the full Page/Locator API, and assert with auto-retrying matchers.
+React component testing adapter for ferridriver. Provides the framework glue (Vite plugin + browser-side mount/update/unmount bindings). The test API itself (`test`, `expect`, `mount` fixture) is exported from `@ferridriver/test`.
+
+Mount React components in a real browser, interact with them using the full Page/Locator API, and assert with auto-retrying matchers.
+
+## Install
+
+```bash
+npm install -D @ferridriver/test @ferridriver/ct-react react react-dom
+# or
+bun add -d @ferridriver/test @ferridriver/ct-react react react-dom
+```
 
 ## Usage
 
-```typescript
-import { test, expect } from '@ferridriver/ct-react';
+```tsx
+// counter.ct.tsx
+import { test, expect } from '@ferridriver/test';
 import Counter from './Counter';
 
-test('increments', async ({ mount, page }) => {
+test('increments', async ({ mount }) => {
   const component = await mount(<Counter initial={5} />);
   await expect(component.locator('#count')).toHaveText('5');
   await component.locator('#inc').click();
   await expect(component.locator('#count')).toHaveText('6');
-});
-
-test('renders with props', async ({ mount }) => {
-  const component = await mount(<Counter initial={100} />);
-  await expect(component.locator('#count')).toHaveText('100');
 });
 
 test.describe('reset button', () => {
@@ -28,6 +34,10 @@ test.describe('reset button', () => {
     await expect(component.locator('#count')).toHaveText('0');
   });
 });
+```
+
+```bash
+npx @ferridriver/test ct --framework react counter.ct.tsx
 ```
 
 ## How It Works
