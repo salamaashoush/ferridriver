@@ -98,7 +98,7 @@ impl Frame {
   /// Returns an error if JS evaluation fails.
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     if self.is_main_frame() {
-      self.page.evaluate(expression).await.map_err(Into::into)
+      self.page.evaluate(expression).await
     } else {
       self
         .page
@@ -237,7 +237,7 @@ impl Frame {
   /// Returns an error if navigation fails.
   pub async fn goto(&self, url: &str) -> Result<()> {
     if self.is_main_frame() {
-      self.page.goto(url, None).await.map_err(Into::into)
+      self.page.goto(url, None).await
     } else {
       // For child frames, set location via JS
       self
@@ -255,7 +255,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found within the timeout.
   pub async fn wait_for_selector(&self, selector: &str, opts: WaitOptions) -> Result<()> {
-    self.locator(selector).wait_for(opts).await.map_err(Into::into)
+    self.locator(selector).wait_for(opts).await
   }
 
   /// Check if this frame has been detached from the page.
@@ -344,7 +344,7 @@ impl Frame {
   /// Returns an error if the frame does not reach load state within the timeout.
   pub async fn wait_for_load_state(&self) -> Result<()> {
     if self.is_main_frame() {
-      self.page.wait_for_load_state(None).await.map_err(Into::into)
+      self.page.wait_for_load_state(None).await
     } else {
       // For iframes, check document.readyState via JS
       let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);

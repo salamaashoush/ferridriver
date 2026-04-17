@@ -68,7 +68,7 @@ fn is_retryable_bidi_page_error(err: &str) -> bool {
 }
 
 async fn ensure_page_alive(page: &Arc<ferridriver::Page>) -> Result<(), String> {
-  page.evaluate("1").await.map(|_| ())
+  page.evaluate("1").await.map(|_| ()).map_err(ferri_err_to_string)
 }
 
 async fn create_ready_page(ctx: &ferridriver::ContextRef) -> Result<Arc<ferridriver::Page>, String> {

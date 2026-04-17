@@ -5,6 +5,7 @@
 
 use crate::actions;
 use crate::backend::{AnyPage, CookieData, ImageFormat, ScreenshotOpts};
+use crate::error::Result;
 use crate::events::{EventEmitter, PageEvent};
 use crate::frame::Frame;
 use crate::locator::Locator;
@@ -79,7 +80,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails.
-  pub async fn viewport_size(&self) -> Result<(i64, i64), String> {
+  pub async fn viewport_size(&self) -> Result<(i64, i64)> {
     let r = self
       .inner
       .evaluate("JSON.stringify({w:window.innerWidth,h:window.innerHeight})")
@@ -101,10 +102,10 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   #[tracing::instrument(skip(self, opts), fields(url))]
-  pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<(), String> {
+  pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "goto", url, "page.goto");
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
-    self.inner.goto(url, lifecycle, timeout).await
+    self.inner.goto(url, lifecycle, timeout).await.map_err(Into::into)
   }
 
   /// Navigate back in history.
@@ -112,9 +113,9 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
-  pub async fn go_back(&self, opts: Option<GotoOptions>) -> Result<(), String> {
+  pub async fn go_back(&self, opts: Option<GotoOptions>) -> Result<()> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
-    self.inner.go_back(lifecycle, timeout).await
+    self.inner.go_back(lifecycle, timeout).await.map_err(Into::into)
   }
 
   /// Navigate forward in history.
@@ -122,9 +123,9 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
-  pub async fn go_forward(&self, opts: Option<GotoOptions>) -> Result<(), String> {
+  pub async fn go_forward(&self, opts: Option<GotoOptions>) -> Result<()> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
-    self.inner.go_forward(lifecycle, timeout).await
+    self.inner.go_forward(lifecycle, timeout).await.map_err(Into::into)
   }
 
   /// Reload the current page.
@@ -132,9 +133,9 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the reload fails or the wait condition times out.
-  pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<(), String> {
+  pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<()> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
-    self.inner.reload(lifecycle, timeout).await
+    self.inner.reload(lifecycle, timeout).await.map_err(Into::into)
   }
 
   /// Parse `GotoOptions` into backend `NavLifecycle` + timeout.
@@ -149,8 +150,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the URL cannot be retrieved from the backend.
-  pub async fn url(&self) -> Result<String, String> {
-    self.inner.url().await.map(std::option::Option::unwrap_or_default)
+  pub async fn url(&self) -> Result<String> {
+    self
+      .inner
+      .url()
+      .await
+      .map(std::option::Option::unwrap_or_default)
+      .map_err(Into::into)
   }
 
   /// Get the current page title.
@@ -158,8 +164,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the title cannot be retrieved from the backend.
-  pub async fn title(&self) -> Result<String, String> {
-    self.inner.title().await.map(std::option::Option::unwrap_or_default)
+  pub async fn title(&self) -> Result<String> {
+    self
+      .inner
+      .title()
+      .await
+      .map(std::option::Option::unwrap_or_default)
+      .map_err(Into::into)
   }
 
   // ── Locators (lazy) ─────────────────────────────────────────────────────
@@ -276,17 +287,20 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the click fails.
-  pub async fn click(self: &Arc<Self>, selector: &str) -> Result<(), String> {
+  pub async fn click(self: &Arc<Self>, selector: &str) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "click", selector, "page.click");
     self.locator(selector).click().await
   }
+
+  // (Locator actions already return crate::error::Result, so trailing
+  // `.await` is typed correctly — no bridging needed.)
 
   /// Double-click an element matching the selector.
   ///
   /// # Errors
   ///
   /// Returns an error if the element is not found or the double-click fails.
-  pub async fn dblclick(self: &Arc<Self>, selector: &str) -> Result<(), String> {
+  pub async fn dblclick(self: &Arc<Self>, selector: &str) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "dblclick", selector, "page.dblclick");
     self.locator(selector).dblclick().await
   }
@@ -296,7 +310,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not fillable.
-  pub async fn fill(self: &Arc<Self>, selector: &str, value: &str) -> Result<(), String> {
+  pub async fn fill(self: &Arc<Self>, selector: &str, value: &str) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "fill", selector, "page.fill");
     self.locator(selector).fill(value).await
   }
@@ -306,7 +320,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or typing fails.
-  pub async fn r#type(self: &Arc<Self>, selector: &str, text: &str) -> Result<(), String> {
+  pub async fn r#type(self: &Arc<Self>, selector: &str, text: &str) -> Result<()> {
     self.locator(selector).r#type(text).await
   }
 
@@ -315,7 +329,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the key press fails.
-  pub async fn press(self: &Arc<Self>, selector: &str, key: &str) -> Result<(), String> {
+  pub async fn press(self: &Arc<Self>, selector: &str, key: &str) -> Result<()> {
     self.locator(selector).press(key).await
   }
 
@@ -324,7 +338,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the hover fails.
-  pub async fn hover(self: &Arc<Self>, selector: &str) -> Result<(), String> {
+  pub async fn hover(self: &Arc<Self>, selector: &str) -> Result<()> {
     self.locator(selector).hover().await
   }
 
@@ -333,7 +347,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the option cannot be selected.
-  pub async fn select_option(self: &Arc<Self>, selector: &str, value: &str) -> Result<Vec<String>, String> {
+  pub async fn select_option(self: &Arc<Self>, selector: &str, value: &str) -> Result<Vec<String>> {
     self.locator(selector).select_option(value).await
   }
 
@@ -342,7 +356,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or file setting fails.
-  pub async fn set_input_files(self: &Arc<Self>, selector: &str, paths: &[String]) -> Result<(), String> {
+  pub async fn set_input_files(self: &Arc<Self>, selector: &str, paths: &[String]) -> Result<()> {
     self.locator(selector).set_input_files(paths).await
   }
 
@@ -351,7 +365,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
-  pub async fn check(self: &Arc<Self>, selector: &str) -> Result<(), String> {
+  pub async fn check(self: &Arc<Self>, selector: &str) -> Result<()> {
     self.locator(selector).check().await
   }
 
@@ -360,7 +374,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not uncheckable.
-  pub async fn uncheck(self: &Arc<Self>, selector: &str) -> Result<(), String> {
+  pub async fn uncheck(self: &Arc<Self>, selector: &str) -> Result<()> {
     self.locator(selector).uncheck().await
   }
 
@@ -371,8 +385,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the content cannot be retrieved.
-  pub async fn content(&self) -> Result<String, String> {
-    self.inner.content().await
+  pub async fn content(&self) -> Result<String> {
+    self.inner.content().await.map_err(Into::into)
   }
 
   /// Set the page's HTML content.
@@ -380,8 +394,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the content cannot be set.
-  pub async fn set_content(&self, html: &str) -> Result<(), String> {
-    self.inner.set_content(html).await
+  pub async fn set_content(&self, html: &str) -> Result<()> {
+    self.inner.set_content(html).await.map_err(Into::into)
   }
 
   /// Extract the page content as markdown.
@@ -389,8 +403,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the markdown extraction fails.
-  pub async fn markdown(&self) -> Result<String, String> {
-    actions::extract_markdown(&self.inner).await
+  pub async fn markdown(&self) -> Result<String> {
+    actions::extract_markdown(&self.inner).await.map_err(Into::into)
   }
 
   /// Get the text content of an element matching the selector.
@@ -398,7 +412,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn text_content(self: &Arc<Self>, selector: &str) -> Result<Option<String>, String> {
+  pub async fn text_content(self: &Arc<Self>, selector: &str) -> Result<Option<String>> {
     self.locator(selector).text_content().await
   }
 
@@ -407,7 +421,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn inner_text(self: &Arc<Self>, selector: &str) -> Result<String, String> {
+  pub async fn inner_text(self: &Arc<Self>, selector: &str) -> Result<String> {
     self.locator(selector).inner_text().await
   }
 
@@ -416,7 +430,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn inner_html(self: &Arc<Self>, selector: &str) -> Result<String, String> {
+  pub async fn inner_html(self: &Arc<Self>, selector: &str) -> Result<String> {
     self.locator(selector).inner_html().await
   }
 
@@ -425,7 +439,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn get_attribute(self: &Arc<Self>, selector: &str, name: &str) -> Result<Option<String>, String> {
+  pub async fn get_attribute(self: &Arc<Self>, selector: &str, name: &str) -> Result<Option<String>> {
     self.locator(selector).get_attribute(name).await
   }
 
@@ -434,7 +448,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn input_value(self: &Arc<Self>, selector: &str) -> Result<String, String> {
+  pub async fn input_value(self: &Arc<Self>, selector: &str) -> Result<String> {
     self.locator(selector).input_value().await
   }
 
@@ -445,7 +459,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_visible(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
+  pub async fn is_visible(self: &Arc<Self>, selector: &str) -> Result<bool> {
     self.locator(selector).is_visible().await
   }
 
@@ -454,7 +468,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_hidden(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
+  pub async fn is_hidden(self: &Arc<Self>, selector: &str) -> Result<bool> {
     self.locator(selector).is_hidden().await
   }
 
@@ -463,7 +477,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_enabled(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
+  pub async fn is_enabled(self: &Arc<Self>, selector: &str) -> Result<bool> {
     self.locator(selector).is_enabled().await
   }
 
@@ -472,7 +486,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_disabled(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
+  pub async fn is_disabled(self: &Arc<Self>, selector: &str) -> Result<bool> {
     self.locator(selector).is_disabled().await
   }
 
@@ -481,7 +495,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_checked(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
+  pub async fn is_checked(self: &Arc<Self>, selector: &str) -> Result<bool> {
     self.locator(selector).is_checked().await
   }
 
@@ -492,8 +506,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails.
-  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
-    self.inner.evaluate(expression).await
+  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
+    self.inner.evaluate(expression).await.map_err(Into::into)
   }
 
   /// Evaluate a JavaScript expression and return the result as a string.
@@ -501,17 +515,22 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails.
-  pub async fn evaluate_str(&self, expression: &str) -> Result<String, String> {
-    self.inner.evaluate(expression).await.map(|v| {
-      v.map(|val| {
-        if let Some(s) = val.as_str() {
-          s.to_string()
-        } else {
-          val.to_string()
-        }
+  pub async fn evaluate_str(&self, expression: &str) -> Result<String> {
+    self
+      .inner
+      .evaluate(expression)
+      .await
+      .map(|v| {
+        v.map(|val| {
+          if let Some(s) = val.as_str() {
+            s.to_string()
+          } else {
+            val.to_string()
+          }
+        })
+        .unwrap_or_default()
       })
-      .unwrap_or_default()
-    })
+      .map_err(Into::into)
   }
 
   // ── Waiting ─────────────────────────────────────────────────────────────
@@ -521,7 +540,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out.
-  pub async fn wait_for_selector(self: &Arc<Self>, selector: &str, opts: WaitOptions) -> Result<(), String> {
+  pub async fn wait_for_selector(self: &Arc<Self>, selector: &str, opts: WaitOptions) -> Result<()> {
     self.locator(selector).wait_for(opts).await
   }
 
@@ -530,11 +549,15 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out.
-  pub async fn wait_for_url(&self, url_pattern: &str) -> Result<(), String> {
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(self.default_timeout());
+  pub async fn wait_for_url(&self, url_pattern: &str) -> Result<()> {
+    let timeout_ms = self.default_timeout();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
       if tokio::time::Instant::now() >= deadline {
-        return Err(format!("Timeout waiting for URL matching '{url_pattern}'"));
+        return Err(crate::error::FerriError::timeout(
+          format!("waiting for URL matching {url_pattern:?}"),
+          timeout_ms,
+        ));
       }
       let current = self.url().await.unwrap_or_default();
       if current.contains(url_pattern) {
@@ -556,7 +579,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out before the load state is reached.
-  pub async fn wait_for_load_state(&self, state: Option<&str>) -> Result<(), String> {
+  pub async fn wait_for_load_state(&self, state: Option<&str>) -> Result<()> {
     let state = state.unwrap_or("load");
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(self.default_timeout());
 
@@ -625,7 +648,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the screenshot capture fails.
-  pub async fn screenshot(&self, opts: ScreenshotOptions) -> Result<Vec<u8>, String> {
+  pub async fn screenshot(&self, opts: ScreenshotOptions) -> Result<Vec<u8>> {
     let format = match opts.format.as_deref() {
       Some("jpeg" | "jpg") => ImageFormat::Jpeg,
       Some("webp") => ImageFormat::Webp,
@@ -639,6 +662,7 @@ impl Page {
         full_page: opts.full_page.unwrap_or(false),
       })
       .await
+      .map_err(Into::into)
   }
 
   /// Take a screenshot of a specific element matching the selector.
@@ -646,7 +670,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or screenshot capture fails.
-  pub async fn screenshot_element(self: &Arc<Self>, selector: &str) -> Result<Vec<u8>, String> {
+  pub async fn screenshot_element(self: &Arc<Self>, selector: &str) -> Result<Vec<u8>> {
     self.locator(selector).screenshot().await
   }
 
@@ -657,8 +681,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if PDF generation fails or is not supported by the backend.
-  pub async fn pdf(&self, landscape: bool, print_background: bool) -> Result<Vec<u8>, String> {
-    self.inner.pdf(landscape, print_background).await
+  pub async fn pdf(&self, landscape: bool, print_background: bool) -> Result<Vec<u8>> {
+    self.inner.pdf(landscape, print_background).await.map_err(Into::into)
   }
 
   // ── Snapshot ────────────────────────────────────────────────────────────
@@ -679,9 +703,11 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the accessibility snapshot cannot be built.
-  pub async fn snapshot_for_ai(&self, opts: snapshot::SnapshotOptions) -> Result<snapshot::SnapshotForAI, String> {
+  pub async fn snapshot_for_ai(&self, opts: snapshot::SnapshotOptions) -> Result<snapshot::SnapshotForAI> {
     let mut tracker = self.snapshot_tracker.lock().await;
-    snapshot::build_snapshot_for_ai(&self.inner, &opts, &mut tracker).await
+    snapshot::build_snapshot_for_ai(&self.inner, &opts, &mut tracker)
+      .await
+      .map_err(Into::into)
   }
 
   // ── Viewport ────────────────────────────────────────────────────────────
@@ -691,7 +717,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the viewport emulation fails.
-  pub async fn set_viewport_size(&self, width: i64, height: i64) -> Result<(), String> {
+  pub async fn set_viewport_size(&self, width: i64, height: i64) -> Result<()> {
     self
       .inner
       .emulate_viewport(&crate::options::ViewportConfig {
@@ -700,6 +726,7 @@ impl Page {
         ..Default::default()
       })
       .await
+      .map_err(Into::into)
   }
 
   // ── Input devices ───────────────────────────────────────────────────────
@@ -709,7 +736,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the click dispatch fails.
-  pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
+  pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     self.inner.click_at(x, y).await?;
     *self
       .mouse_position
@@ -723,7 +750,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the click dispatch fails.
-  pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
+  pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     self.inner.click_at_opts(x, y, button, click_count).await?;
     *self
       .mouse_position
@@ -737,7 +764,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the mouse move dispatch fails.
-  pub(crate) async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
+  pub(crate) async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     self.inner.move_mouse(x, y).await?;
     *self
       .mouse_position
@@ -751,14 +778,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the mouse move dispatch fails.
-  pub async fn move_mouse_smooth(
-    &self,
-    from_x: f64,
-    from_y: f64,
-    to_x: f64,
-    to_y: f64,
-    steps: u32,
-  ) -> Result<(), String> {
+  pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     self.inner.move_mouse_smooth(from_x, from_y, to_x, to_y, steps).await?;
     *self
       .mouse_position
@@ -772,7 +792,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if either element cannot be found or the drag-and-drop operation fails.
-  pub async fn drag_and_drop(self: &Arc<Self>, source_selector: &str, target_selector: &str) -> Result<(), String> {
+  pub async fn drag_and_drop(self: &Arc<Self>, source_selector: &str, target_selector: &str) -> Result<()> {
     self
       .locator(source_selector)
       .drag_to(&self.locator(target_selector))
@@ -784,8 +804,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the key down dispatch fails.
-  pub(crate) async fn key_down(&self, key: &str) -> Result<(), String> {
-    self.inner.key_down(key).await
+  pub(crate) async fn key_down(&self, key: &str) -> Result<()> {
+    self.inner.key_down(key).await.map_err(Into::into)
   }
 
   /// Dispatch a keyUp event for a single key.
@@ -793,8 +813,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the key up dispatch fails.
-  pub(crate) async fn key_up(&self, key: &str) -> Result<(), String> {
-    self.inner.key_up(key).await
+  pub(crate) async fn key_up(&self, key: &str) -> Result<()> {
+    self.inner.key_up(key).await.map_err(Into::into)
   }
 
   /// Press a key or combo (e.g., "Enter", "Control+a").
@@ -802,8 +822,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the key press dispatch fails.
-  pub(crate) async fn press_key(&self, key: &str) -> Result<(), String> {
-    self.inner.press_key(key).await
+  pub(crate) async fn press_key(&self, key: &str) -> Result<()> {
+    self.inner.press_key(key).await.map_err(Into::into)
   }
 
   /// Find element by CSS selector (raw backend access).
@@ -811,8 +831,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn find_element(&self, selector: &str) -> Result<crate::backend::AnyElement, String> {
-    self.inner.find_element(selector).await
+  pub async fn find_element(&self, selector: &str) -> Result<crate::backend::AnyElement> {
+    self.inner.find_element(selector).await.map_err(Into::into)
   }
 
   // ── Emulation ───────────────────────────────────────────────────────────
@@ -822,8 +842,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the viewport emulation fails.
-  pub async fn set_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
-    self.inner.emulate_viewport(config).await
+  pub async fn set_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
+    self.inner.emulate_viewport(config).await.map_err(Into::into)
   }
 
   /// Set the user agent string.
@@ -831,8 +851,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend rejects the user agent change.
-  pub async fn set_user_agent(&self, ua: &str) -> Result<(), String> {
-    self.inner.set_user_agent(ua).await
+  pub async fn set_user_agent(&self, ua: &str) -> Result<()> {
+    self.inner.set_user_agent(ua).await.map_err(Into::into)
   }
 
   /// Set the geolocation override.
@@ -840,8 +860,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the geolocation emulation fails.
-  pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<(), String> {
-    self.inner.set_geolocation(lat, lng, accuracy).await
+  pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<()> {
+    self.inner.set_geolocation(lat, lng, accuracy).await.map_err(Into::into)
   }
 
   /// Set network conditions (offline, latency, throughput).
@@ -849,8 +869,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the network emulation fails.
-  pub async fn set_network_state(&self, offline: bool, latency: f64, download: f64, upload: f64) -> Result<(), String> {
-    self.inner.set_network_state(offline, latency, download, upload).await
+  pub async fn set_network_state(&self, offline: bool, latency: f64, download: f64, upload: f64) -> Result<()> {
+    self
+      .inner
+      .set_network_state(offline, latency, download, upload)
+      .await
+      .map_err(Into::into)
   }
 
   /// Set the browser locale (affects navigator.language and Intl APIs).
@@ -858,8 +882,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the locale emulation fails.
-  pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
-    self.inner.set_locale(locale).await
+  pub async fn set_locale(&self, locale: &str) -> Result<()> {
+    self.inner.set_locale(locale).await.map_err(Into::into)
   }
 
   /// Set the browser timezone (affects Date and Intl.DateTimeFormat).
@@ -867,8 +891,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the timezone emulation fails.
-  pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
-    self.inner.set_timezone(timezone_id).await
+  pub async fn set_timezone(&self, timezone_id: &str) -> Result<()> {
+    self.inner.set_timezone(timezone_id).await.map_err(Into::into)
   }
 
   /// Emulate media features (color scheme, reduced motion, media type, etc.).
@@ -877,8 +901,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the media emulation fails.
-  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
-    self.inner.emulate_media(opts).await
+  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
+    self.inner.emulate_media(opts).await.map_err(Into::into)
   }
 
   /// Enable or disable JavaScript execution.
@@ -886,8 +910,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend rejects the change.
-  pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
-    self.inner.set_javascript_enabled(enabled).await
+  pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<()> {
+    self.inner.set_javascript_enabled(enabled).await.map_err(Into::into)
   }
 
   /// Set extra HTTP headers that will be sent with every request.
@@ -895,8 +919,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the headers cannot be set.
-  pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
-    self.inner.set_extra_http_headers(headers).await
+  pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
+    self.inner.set_extra_http_headers(headers).await.map_err(Into::into)
   }
 
   /// Grant browser permissions (geolocation, notifications, camera, etc.).
@@ -904,8 +928,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the permission grant fails.
-  pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<(), String> {
-    self.inner.grant_permissions(permissions, origin).await
+  pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<()> {
+    self
+      .inner
+      .grant_permissions(permissions, origin)
+      .await
+      .map_err(Into::into)
   }
 
   /// Reset all granted permissions.
@@ -913,8 +941,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the permission reset fails.
-  pub async fn reset_permissions(&self) -> Result<(), String> {
-    self.inner.reset_permissions().await
+  pub async fn reset_permissions(&self) -> Result<()> {
+    self.inner.reset_permissions().await.map_err(Into::into)
   }
 
   /// Bypass Content Security Policy. Must be called before any navigation.
@@ -923,8 +951,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend rejects the change.
-  pub async fn set_bypass_csp(&self, enabled: bool) -> Result<(), String> {
-    self.inner.set_bypass_csp(enabled).await
+  pub async fn set_bypass_csp(&self, enabled: bool) -> Result<()> {
+    self.inner.set_bypass_csp(enabled).await.map_err(Into::into)
   }
 
   /// Ignore HTTPS certificate errors for this page.
@@ -933,8 +961,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend rejects the change.
-  pub async fn set_ignore_certificate_errors(&self, ignore: bool) -> Result<(), String> {
-    self.inner.set_ignore_certificate_errors(ignore).await
+  pub async fn set_ignore_certificate_errors(&self, ignore: bool) -> Result<()> {
+    self
+      .inner
+      .set_ignore_certificate_errors(ignore)
+      .await
+      .map_err(Into::into)
   }
 
   /// Configure download behavior (allow/deny, download directory).
@@ -943,8 +975,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend rejects the change.
-  pub async fn set_download_behavior(&self, behavior: &str, download_path: &str) -> Result<(), String> {
-    self.inner.set_download_behavior(behavior, download_path).await
+  pub async fn set_download_behavior(&self, behavior: &str, download_path: &str) -> Result<()> {
+    self
+      .inner
+      .set_download_behavior(behavior, download_path)
+      .await
+      .map_err(Into::into)
   }
 
   /// Set HTTP credentials for basic/digest auth.
@@ -953,8 +989,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend rejects the change.
-  pub async fn set_http_credentials(&self, username: &str, password: &str) -> Result<(), String> {
-    self.inner.set_http_credentials(username, password).await
+  pub async fn set_http_credentials(&self, username: &str, password: &str) -> Result<()> {
+    self
+      .inner
+      .set_http_credentials(username, password)
+      .await
+      .map_err(Into::into)
   }
 
   /// Block service worker registration.
@@ -963,8 +1003,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the backend rejects the change.
-  pub async fn set_service_workers_blocked(&self, blocked: bool) -> Result<(), String> {
-    self.inner.set_service_workers_blocked(blocked).await
+  pub async fn set_service_workers_blocked(&self, blocked: bool) -> Result<()> {
+    self
+      .inner
+      .set_service_workers_blocked(blocked)
+      .await
+      .map_err(Into::into)
   }
 
   /// Emulate focus state (page always appears focused even when not).
@@ -972,8 +1016,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the focus emulation fails.
-  pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
-    self.inner.set_focus_emulation_enabled(enabled).await
+  pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<()> {
+    self
+      .inner
+      .set_focus_emulation_enabled(enabled)
+      .await
+      .map_err(Into::into)
   }
 
   // ── Tracing ─────────────────────────────────────────────────────────────
@@ -983,8 +1031,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if tracing cannot be started.
-  pub async fn start_tracing(&self) -> Result<(), String> {
-    self.inner.start_tracing().await
+  pub async fn start_tracing(&self) -> Result<()> {
+    self.inner.start_tracing().await.map_err(Into::into)
   }
 
   /// Stop performance tracing.
@@ -992,8 +1040,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if tracing cannot be stopped.
-  pub async fn stop_tracing(&self) -> Result<(), String> {
-    self.inner.stop_tracing().await
+  pub async fn stop_tracing(&self) -> Result<()> {
+    self.inner.stop_tracing().await.map_err(Into::into)
   }
 
   /// Get performance metrics from the page.
@@ -1001,8 +1049,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if metrics cannot be retrieved.
-  pub async fn metrics(&self) -> Result<Vec<crate::backend::MetricData>, String> {
-    self.inner.metrics().await
+  pub async fn metrics(&self) -> Result<Vec<crate::backend::MetricData>> {
+    self.inner.metrics().await.map_err(Into::into)
   }
 
   // ── Storage State ──────────────────────────────────────────────────────
@@ -1023,7 +1071,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if cookies or localStorage cannot be retrieved.
-  pub async fn storage_state(&self) -> Result<serde_json::Value, String> {
+  pub async fn storage_state(&self) -> Result<serde_json::Value> {
     let cookies = self.inner.get_cookies().await?;
     let cookies_json: Vec<serde_json::Value> = cookies
       .iter()
@@ -1082,7 +1130,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if cookies or localStorage cannot be restored.
-  pub async fn set_storage_state(&self, state: &serde_json::Value) -> Result<(), String> {
+  pub async fn set_storage_state(&self, state: &serde_json::Value) -> Result<()> {
     // Restore cookies.
     if let Some(cookies) = state.get("cookies").and_then(|v| v.as_array()) {
       for c in cookies {
@@ -1150,7 +1198,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn focus(self: &Arc<Self>, selector: &str) -> Result<(), String> {
+  pub async fn focus(self: &Arc<Self>, selector: &str) -> Result<()> {
     self.locator(selector).focus().await
   }
 
@@ -1159,7 +1207,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the event dispatch fails.
-  pub async fn dispatch_event(self: &Arc<Self>, selector: &str, event_type: &str) -> Result<(), String> {
+  pub async fn dispatch_event(self: &Arc<Self>, selector: &str, event_type: &str) -> Result<()> {
     self.locator(selector).dispatch_event(event_type).await
   }
 
@@ -1168,7 +1216,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found.
-  pub async fn is_editable(self: &Arc<Self>, selector: &str) -> Result<bool, String> {
+  pub async fn is_editable(self: &Arc<Self>, selector: &str) -> Result<bool> {
     self.locator(selector).is_editable().await
   }
 
@@ -1179,16 +1227,15 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out.
-  pub async fn wait_for_function(
-    &self,
-    expression: &str,
-    timeout_ms: Option<u64>,
-  ) -> Result<serde_json::Value, String> {
+  pub async fn wait_for_function(&self, expression: &str, timeout_ms: Option<u64>) -> Result<serde_json::Value> {
     let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
     loop {
       if tokio::time::Instant::now() >= deadline {
-        return Err(format!("Timeout waiting for function: {expression}"));
+        return Err(crate::error::FerriError::timeout(
+          format!("waiting for function: {expression}"),
+          timeout,
+        ));
       }
       if let Ok(Some(val)) = self.inner.evaluate(expression).await {
         let truthy = match &val {
@@ -1211,7 +1258,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wait times out.
-  pub async fn wait_for_navigation(&self, timeout_ms: Option<u64>) -> Result<(), String> {
+  pub async fn wait_for_navigation(&self, timeout_ms: Option<u64>) -> Result<()> {
     let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let current = self.url().await.unwrap_or_default();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
@@ -1234,8 +1281,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the wheel event dispatch fails.
-  pub(crate) async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
-    self.inner.mouse_wheel(delta_x, delta_y).await
+  pub(crate) async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
+    self.inner.mouse_wheel(delta_x, delta_y).await.map_err(Into::into)
   }
 
   /// Mouse button down (without up). For custom drag sequences.
@@ -1243,7 +1290,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the mouse down dispatch fails.
-  pub(crate) async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+  pub(crate) async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
     self.inner.mouse_down(x, y, button).await?;
     *self
       .mouse_position
@@ -1257,7 +1304,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the mouse up dispatch fails.
-  pub(crate) async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+  pub(crate) async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
     self.inner.mouse_up(x, y, button).await?;
     *self
       .mouse_position
@@ -1271,7 +1318,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the page cannot be focused.
-  pub async fn bring_to_front(&self) -> Result<(), String> {
+  pub async fn bring_to_front(&self) -> Result<()> {
     let _ = self.inner.evaluate("window.focus()").await;
     Ok(())
   }
@@ -1283,7 +1330,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the frame tree cannot be retrieved or no main frame exists.
-  pub async fn main_frame(self: &Arc<Self>) -> Result<Frame, String> {
+  pub async fn main_frame(self: &Arc<Self>) -> Result<Frame> {
     let frames = self.inner.get_frame_tree().await?;
     let main = frames
       .into_iter()
@@ -1297,7 +1344,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn frames(self: &Arc<Self>) -> Result<Vec<Frame>, String> {
+  pub async fn frames(self: &Arc<Self>) -> Result<Vec<Frame>> {
     let infos = self.inner.get_frame_tree().await?;
     Ok(
       infos
@@ -1312,7 +1359,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn frame(self: &Arc<Self>, name_or_url: &str) -> Result<Option<Frame>, String> {
+  pub async fn frame(self: &Arc<Self>, name_or_url: &str) -> Result<Option<Frame>> {
     let frames = self.frames().await?;
     Ok(
       frames
@@ -1370,10 +1417,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the navigation event does not occur within the timeout.
-  pub fn expect_navigation(
-    &self,
-    timeout_ms: Option<u64>,
-  ) -> impl std::future::Future<Output = Result<(), String>> + '_ {
+  pub fn expect_navigation(&self, timeout_ms: Option<u64>) -> impl std::future::Future<Output = Result<()>> + '_ {
     let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let events = self.inner.events().clone();
     async move {
@@ -1394,7 +1438,7 @@ impl Page {
     &self,
     url_pattern: &str,
     timeout_ms: Option<u64>,
-  ) -> impl std::future::Future<Output = Result<crate::events::NetResponse, String>> + '_ {
+  ) -> impl std::future::Future<Output = Result<crate::events::NetResponse>> + '_ {
     let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let events = self.inner.events().clone();
     let pattern = url_pattern.to_string();
@@ -1422,7 +1466,7 @@ impl Page {
     &self,
     url_pattern: &str,
     timeout_ms: Option<u64>,
-  ) -> impl std::future::Future<Output = Result<crate::context::NetRequest, String>> + '_ {
+  ) -> impl std::future::Future<Output = Result<crate::context::NetRequest>> + '_ {
     let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let events = self.inner.events().clone();
     let pattern = url_pattern.to_string();
@@ -1449,7 +1493,7 @@ impl Page {
   pub fn expect_download(
     &self,
     timeout_ms: Option<u64>,
-  ) -> impl std::future::Future<Output = Result<crate::events::DownloadInfo, String>> + '_ {
+  ) -> impl std::future::Future<Output = Result<crate::events::DownloadInfo>> + '_ {
     let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let events = self.inner.events().clone();
     async move {
@@ -1469,13 +1513,12 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the event does not occur within the timeout.
-  pub async fn wait_for_event(&self, event_name: &str, timeout_ms: Option<u64>) -> Result<PageEvent, String> {
+  pub async fn wait_for_event(&self, event_name: &str, timeout_ms: Option<u64>) -> Result<PageEvent> {
     self
       .inner
       .events()
       .wait_for_event(event_name, timeout_ms.unwrap_or(self.default_timeout()))
       .await
-      .map_err(|e| e.to_string())
   }
 
   /// Wait for a download to start, matching an optional URL pattern.
@@ -1487,7 +1530,7 @@ impl Page {
     &self,
     url_pattern: Option<&str>,
     timeout_ms: Option<u64>,
-  ) -> Result<crate::events::DownloadInfo, String> {
+  ) -> Result<crate::events::DownloadInfo> {
     let pattern = url_pattern.map(std::string::ToString::to_string);
     let event = self
       .inner
@@ -1513,7 +1556,7 @@ impl Page {
     &self,
     url_pattern: &str,
     timeout_ms: Option<u64>,
-  ) -> Result<crate::context::NetRequest, String> {
+  ) -> Result<crate::context::NetRequest> {
     let pattern = url_pattern.to_string();
     let event = self
       .inner
@@ -1539,7 +1582,7 @@ impl Page {
     &self,
     url_pattern: &str,
     timeout_ms: Option<u64>,
-  ) -> Result<crate::events::NetResponse, String> {
+  ) -> Result<crate::events::NetResponse> {
     let pattern = url_pattern.to_string();
     let event = self
       .inner
@@ -1585,8 +1628,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the route interception cannot be set up.
-  pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<(), String> {
-    self.inner.route(pattern, handler).await
+  pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<()> {
+    self.inner.route(pattern, handler).await.map_err(Into::into)
   }
 
   /// Remove all route handlers matching the glob pattern.
@@ -1594,8 +1637,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the route handlers cannot be removed.
-  pub async fn unroute(&self, pattern: &str) -> Result<(), String> {
-    self.inner.unroute(pattern).await
+  pub async fn unroute(&self, pattern: &str) -> Result<()> {
+    self.inner.unroute(pattern).await.map_err(Into::into)
   }
 
   // ── Exposed Functions ───────────────────────────────────────────────────
@@ -1619,8 +1662,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the function cannot be exposed to the page.
-  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<(), String> {
-    self.inner.expose_function(name, func).await
+  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
+    self.inner.expose_function(name, func).await.map_err(Into::into)
   }
 
   /// Remove a previously exposed function.
@@ -1628,8 +1671,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the function cannot be removed.
-  pub async fn remove_exposed_function(&self, name: &str) -> Result<(), String> {
-    self.inner.remove_exposed_function(name).await
+  pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
+    self.inner.remove_exposed_function(name).await.map_err(Into::into)
   }
 
   // ── Script / Style injection ────────────────────────────────────────────
@@ -1645,7 +1688,7 @@ impl Page {
     url: Option<&str>,
     content: Option<&str>,
     script_type: Option<&str>,
-  ) -> Result<(), String> {
+  ) -> Result<()> {
     let t = script_type.unwrap_or("text/javascript");
     if let Some(url) = url {
       self.inner.evaluate(&format!(
@@ -1671,7 +1714,7 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if neither `url` nor `content` is provided, or if injection fails.
-  pub async fn add_style_tag(&self, url: Option<&str>, content: Option<&str>) -> Result<(), String> {
+  pub async fn add_style_tag(&self, url: Option<&str>, content: Option<&str>) -> Result<()> {
     if let Some(url) = url {
       self.inner.evaluate(&format!(
         "(function(){{return new Promise(function(r,j){{var l=document.createElement('link');\
@@ -1728,8 +1771,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the init script cannot be injected.
-  pub async fn add_init_script(&self, source: &str) -> Result<String, String> {
-    self.inner.add_init_script(source).await
+  pub async fn add_init_script(&self, source: &str) -> Result<String> {
+    self.inner.add_init_script(source).await.map_err(Into::into)
   }
 
   /// Remove a previously injected init script by identifier.
@@ -1737,8 +1780,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the init script cannot be removed.
-  pub async fn remove_init_script(&self, identifier: &str) -> Result<(), String> {
-    self.inner.remove_init_script(identifier).await
+  pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
+    self.inner.remove_init_script(identifier).await.map_err(Into::into)
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -1749,7 +1792,7 @@ impl Page {
   ///
   /// Returns an error if the page cannot be closed.
   #[tracing::instrument(skip(self))]
-  pub async fn close(&self) -> Result<(), String> {
+  pub async fn close(&self) -> Result<()> {
     self.inner.close_page().await?;
 
     // Remove closed page from context's page list so context.pages() stays accurate.
@@ -1805,8 +1848,12 @@ impl Page {
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>, String> {
-    self.inner.start_screencast(quality, max_width, max_height).await
+  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>> {
+    self
+      .inner
+      .start_screencast(quality, max_width, max_height)
+      .await
+      .map_err(Into::into)
   }
 
   /// Stop CDP screencast.
@@ -1814,8 +1861,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if screencast cannot be stopped on the backend.
-  pub async fn stop_screencast(&self) -> Result<(), String> {
-    self.inner.stop_screencast().await
+  pub async fn stop_screencast(&self) -> Result<()> {
+    self.inner.stop_screencast().await.map_err(Into::into)
   }
 }
 
@@ -1841,7 +1888,7 @@ impl Keyboard<'_> {
   /// # Errors
   ///
   /// Returns an error if the key down dispatch fails.
-  pub async fn down(&self, key: &str) -> Result<(), String> {
+  pub async fn down(&self, key: &str) -> Result<()> {
     self.page.key_down(key).await
   }
 
@@ -1850,7 +1897,7 @@ impl Keyboard<'_> {
   /// # Errors
   ///
   /// Returns an error if the key up dispatch fails.
-  pub async fn up(&self, key: &str) -> Result<(), String> {
+  pub async fn up(&self, key: &str) -> Result<()> {
     self.page.key_up(key).await
   }
 
@@ -1862,7 +1909,7 @@ impl Keyboard<'_> {
   /// # Errors
   ///
   /// Returns an error if the key press dispatch fails.
-  pub async fn press(&self, key: &str) -> Result<(), String> {
+  pub async fn press(&self, key: &str) -> Result<()> {
     self.page.press_key(key).await
   }
 
@@ -1875,7 +1922,7 @@ impl Keyboard<'_> {
   /// # Errors
   ///
   /// Returns an error if the typing dispatch fails.
-  pub async fn r#type(&self, text: &str) -> Result<(), String> {
+  pub async fn r#type(&self, text: &str) -> Result<()> {
     for ch in text.chars() {
       let s = ch.to_string();
       // Single printable ASCII characters and common keys get full key events
@@ -1892,8 +1939,8 @@ impl Keyboard<'_> {
   /// # Errors
   ///
   /// Returns an error if the text insertion fails.
-  pub async fn insert_text(&self, text: &str) -> Result<(), String> {
-    self.page.inner.insert_text(text).await
+  pub async fn insert_text(&self, text: &str) -> Result<()> {
+    self.page.inner.insert_text(text).await.map_err(Into::into)
   }
 }
 
@@ -1910,7 +1957,7 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the click dispatch fails.
-  pub async fn click(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<(), String> {
+  pub async fn click(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
     let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
     let count = opts.as_ref().and_then(|o| o.click_count).unwrap_or(1);
     self.page.click_at_opts(x, y, button, count).await
@@ -1921,7 +1968,7 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the mouse move dispatch fails.
-  pub async fn r#move(&self, x: f64, y: f64, steps: Option<u32>) -> Result<(), String> {
+  pub async fn r#move(&self, x: f64, y: f64, steps: Option<u32>) -> Result<()> {
     match steps {
       Some(step_count) => {
         let (from_x, from_y) = *self
@@ -1940,7 +1987,7 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the click dispatch fails.
-  pub async fn dblclick(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<(), String> {
+  pub async fn dblclick(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
     let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
     self.page.move_mouse(x, y).await?;
     self.page.mouse_down(x, y, button).await?;
@@ -1955,7 +2002,7 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the mouse down dispatch fails.
-  pub async fn down(&self, opts: Option<MouseDownOptions>) -> Result<(), String> {
+  pub async fn down(&self, opts: Option<MouseDownOptions>) -> Result<()> {
     let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
     let (x, y) = *self
       .page
@@ -1970,7 +2017,7 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the mouse up dispatch fails.
-  pub async fn up(&self, opts: Option<MouseUpOptions>) -> Result<(), String> {
+  pub async fn up(&self, opts: Option<MouseUpOptions>) -> Result<()> {
     let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
     let (x, y) = *self
       .page
@@ -1985,7 +2032,7 @@ impl Mouse<'_> {
   /// # Errors
   ///
   /// Returns an error if the wheel event dispatch fails.
-  pub async fn wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
+  pub async fn wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
     self.page.mouse_wheel(delta_x, delta_y).await
   }
 }
@@ -2031,7 +2078,7 @@ impl Touchscreen<'_> {
   /// # Errors
   ///
   /// Returns an error if the tap event dispatch fails.
-  pub async fn tap(&self, x: f64, y: f64) -> Result<(), String> {
+  pub async fn tap(&self, x: f64, y: f64) -> Result<()> {
     self.page.inner.evaluate(&format!(
       "(function(){{var el=document.elementFromPoint({x},{y})||document.body;\
        if(typeof Touch!=='undefined'&&typeof TouchEvent!=='undefined'){{\
