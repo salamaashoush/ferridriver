@@ -13,7 +13,7 @@ async fn set_variable(world: &mut BrowserWorld, name: String, value: String) {
 async fn store_text(world: &mut BrowserWorld, selector: String, var_name: String) {
   let text = world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .text_content()
     .await
     .map_err(|e| StepError::from(format!("get text of \"{selector}\": {e}")))?
@@ -26,7 +26,7 @@ async fn store_text(world: &mut BrowserWorld, selector: String, var_name: String
 async fn store_value(world: &mut BrowserWorld, selector: String, var_name: String) {
   let value = world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .input_value()
     .await
     .map_err(|e| StepError::from(format!("get value of \"{selector}\": {e}")))?;

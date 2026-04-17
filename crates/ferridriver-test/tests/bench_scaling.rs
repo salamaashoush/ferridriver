@@ -63,8 +63,8 @@ async fn diagnose_scaling() {
       let url =
         format!("data:text/html,<title>T{i}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>");
       page.goto(&url, None).await.unwrap();
-      page.locator("#b").click().await.unwrap();
-      let _ = page.locator("#b").text_content().await.unwrap();
+      page.locator("#b", None).click().await.unwrap();
+      let _ = page.locator("#b", None).text_content().await.unwrap();
       ctx.close().await.ok();
     }
     let per_test = t.elapsed().as_millis() as f64 / iters as f64;
@@ -103,8 +103,8 @@ async fn diagnose_scaling() {
           let url =
             format!("data:text/html,<title>T{i}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>");
           page.goto(&url, None).await.unwrap();
-          page.locator("#b").click().await.unwrap();
-          let _ = page.locator("#b").text_content().await.unwrap();
+          page.locator("#b", None).click().await.unwrap();
+          let _ = page.locator("#b", None).text_content().await.unwrap();
           ctx.close().await.ok();
           times.push(t.elapsed());
         }

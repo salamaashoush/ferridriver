@@ -32,7 +32,7 @@ async fn navigate_example(world: &mut BrowserWorld) {
 
 #[then("I should see the example heading")]
 async fn check_heading(world: &mut BrowserWorld) {
-  let locator = world.page().locator("h1");
+  let locator = world.page().locator("h1", None);
   ferridriver_test::expect::expect(&locator)
     .to_have_text("Example Domain")
     .await

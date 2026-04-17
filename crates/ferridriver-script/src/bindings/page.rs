@@ -210,10 +210,29 @@ impl PageJs {
 
   // ── Locators ──────────────────────────────────────────────────────────────
 
-  /// Return a new `Locator` rooted at `selector`.
+  /// Playwright: `page.locator(selector, options?: LocatorOptions): Locator`.
+  /// Thin delegator to Rust core's `Page::locator`.
   #[qjs(rename = "locator")]
-  pub fn locator(&self, selector: String) -> LocatorJs {
-    LocatorJs::new(self.inner.locator(&selector))
+  pub fn locator<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let parsed = crate::bindings::locator::parse_locator_options_public(&ctx, options, true)?;
+    let opts = ferridriver::options::FilterOptions {
+      has_text: parsed.has_text,
+      has_not_text: parsed.has_not_text,
+      has: parsed.has,
+      has_not: parsed.has_not,
+      visible: parsed.visible,
+    };
+    let filter = if crate::bindings::locator::is_empty_filter(&opts) {
+      None
+    } else {
+      Some(opts)
+    };
+    Ok(LocatorJs::new(self.inner.locator(&selector, filter)))
   }
 
   /// Locate elements by ARIA role.

@@ -20,13 +20,88 @@ pub struct TextOptions {
   pub exact: Option<bool>,
 }
 
-/// Options for filtering locators.
+/// Inner-locator reference for [`FilterOptions::has`] / [`FilterOptions::has_not`].
+///
+/// Accepts either a full [`crate::locator::Locator`] (Rust callers
+/// constructing options programmatically) or a raw selector string
+/// (NAPI/BDD callers that have already extracted the inner selector). Both
+/// variants produce the same encoded `internal:has=` clause —
+/// [`Locator`] additionally enables frame-equality checking at filter
+/// construction time.
+#[derive(Debug, Clone)]
+pub enum LocatorLike {
+  /// Full locator — preferred form for Rust callers. Enables same-page
+  /// checks in [`crate::locator::Locator::filter`].
+  Locator(crate::locator::Locator),
+  /// Inner selector string verbatim. Used by NAPI/BDD where a full
+  /// [`Locator`] cannot be materialized across the binding boundary.
+  Selector(String),
+}
+
+impl LocatorLike {
+  /// The selector string the filter encoder embeds into `internal:has=...`.
+  #[must_use]
+  pub fn as_selector(&self) -> &str {
+    match self {
+      Self::Locator(l) => l.selector(),
+      Self::Selector(s) => s.as_str(),
+    }
+  }
+
+  /// Full [`crate::locator::Locator`] if the caller supplied one, for
+  /// frame-equality checks. Returns `None` for the `Selector` variant.
+  #[must_use]
+  pub fn as_locator(&self) -> Option<&crate::locator::Locator> {
+    match self {
+      Self::Locator(l) => Some(l),
+      Self::Selector(_) => None,
+    }
+  }
+}
+
+impl From<crate::locator::Locator> for LocatorLike {
+  fn from(l: crate::locator::Locator) -> Self {
+    Self::Locator(l)
+  }
+}
+
+impl From<String> for LocatorLike {
+  fn from(s: String) -> Self {
+    Self::Selector(s)
+  }
+}
+
+impl From<&str> for LocatorLike {
+  fn from(s: &str) -> Self {
+    Self::Selector(s.to_string())
+  }
+}
+
+impl From<&String> for LocatorLike {
+  fn from(s: &String) -> Self {
+    Self::Selector(s.clone())
+  }
+}
+
+/// Options for filtering locators — mirrors Playwright's `LocatorOptions`
+/// used by both `Locator::filter(options)` and the `Locator` constructor.
+/// Every field maps directly to a corresponding injected-selector clause
+/// per `/tmp/playwright/packages/playwright-core/src/client/locator.ts`:
+///
+/// * `has_text` → ` >> internal:has-text=<escaped>`
+/// * `has_not_text` → ` >> internal:has-not-text=<escaped>`
+/// * `has` → ` >> internal:has=<JSON-encoded inner selector>`
+/// * `has_not` → ` >> internal:has-not=<JSON-encoded inner selector>`
+/// * `visible` → ` >> visible=true|false`
 #[derive(Debug, Clone, Default)]
 pub struct FilterOptions {
   pub has_text: Option<String>,
   pub has_not_text: Option<String>,
-  pub has: Option<String>,
-  pub has_not: Option<String>,
+  pub has: Option<LocatorLike>,
+  pub has_not: Option<LocatorLike>,
+  /// When `Some(true)`, narrow to visible elements only. When `Some(false)`,
+  /// narrow to non-visible elements. `None` means no visibility filter.
+  pub visible: Option<bool>,
 }
 
 /// Options for waiting operations.

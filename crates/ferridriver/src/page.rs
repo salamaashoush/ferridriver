@@ -213,9 +213,19 @@ impl Page {
 
   // ── Locators (lazy) ─────────────────────────────────────────────────────
 
+  /// Playwright: `page.locator(selector, options?: LocatorOptions): Locator`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:324`).
+  /// Page-level `.locator` only accepts a selector string — the
+  /// `string | Locator` overload lives on [`Locator::locator`]. The full
+  /// `LocatorOptions` bag (`hasText`, `hasNotText`, `has`, `hasNot`,
+  /// `visible`) is honored by routing through [`Locator::filter`].
   #[must_use]
-  pub fn locator(self: &Arc<Self>, selector: &str) -> Locator {
-    Locator::new(Arc::clone(self), selector.to_string(), None)
+  pub fn locator(self: &Arc<Self>, selector: &str, options: Option<crate::options::FilterOptions>) -> Locator {
+    let base = Locator::new(Arc::clone(self), selector.to_string(), None);
+    match options {
+      Some(opts) => base.filter(&opts),
+      None => base,
+    }
   }
 
   #[must_use]
@@ -283,7 +293,7 @@ impl Page {
   /// Equivalent to Playwright's `page.frameLocator(selector)`.
   #[must_use]
   pub fn frame_locator(self: &Arc<Self>, selector: &str) -> crate::locator::FrameLocator {
-    self.locator(selector).content_frame()
+    self.locator(selector, None).content_frame()
   }
 
   // ── Page-level actions (convenience, delegate to locator) ───────────────
@@ -295,7 +305,7 @@ impl Page {
   /// Returns an error if the element is not found or the click fails.
   pub async fn click(self: &Arc<Self>, selector: &str) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "click", selector, "page.click");
-    self.locator(selector).click().await
+    self.locator(selector, None).click().await
   }
 
   // (Locator actions already return crate::error::Result, so trailing
@@ -308,7 +318,7 @@ impl Page {
   /// Returns an error if the element is not found or the double-click fails.
   pub async fn dblclick(self: &Arc<Self>, selector: &str) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "dblclick", selector, "page.dblclick");
-    self.locator(selector).dblclick().await
+    self.locator(selector, None).dblclick().await
   }
 
   /// Fill an input element matching the selector with a value.
@@ -318,7 +328,7 @@ impl Page {
   /// Returns an error if the element is not found or is not fillable.
   pub async fn fill(self: &Arc<Self>, selector: &str, value: &str) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "fill", selector, "page.fill");
-    self.locator(selector).fill(value).await
+    self.locator(selector, None).fill(value).await
   }
 
   /// Type text character-by-character into an element matching the selector.
@@ -327,7 +337,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or typing fails.
   pub async fn r#type(self: &Arc<Self>, selector: &str, text: &str) -> Result<()> {
-    self.locator(selector).r#type(text).await
+    self.locator(selector, None).r#type(text).await
   }
 
   /// Press a key on an element matching the selector.
@@ -336,7 +346,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or the key press fails.
   pub async fn press(self: &Arc<Self>, selector: &str, key: &str) -> Result<()> {
-    self.locator(selector).press(key).await
+    self.locator(selector, None).press(key).await
   }
 
   /// Hover over an element matching the selector.
@@ -345,7 +355,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or the hover fails.
   pub async fn hover(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.locator(selector).hover().await
+    self.locator(selector, None).hover().await
   }
 
   /// Select an option in a `<select>` element matching the selector.
@@ -354,7 +364,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or the option cannot be selected.
   pub async fn select_option(self: &Arc<Self>, selector: &str, value: &str) -> Result<Vec<String>> {
-    self.locator(selector).select_option(value).await
+    self.locator(selector, None).select_option(value).await
   }
 
   /// Set input files on a file input element matching the selector.
@@ -363,7 +373,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or file setting fails.
   pub async fn set_input_files(self: &Arc<Self>, selector: &str, paths: &[String]) -> Result<()> {
-    self.locator(selector).set_input_files(paths).await
+    self.locator(selector, None).set_input_files(paths).await
   }
 
   /// Check a checkbox or radio button matching the selector.
@@ -372,7 +382,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or is not checkable.
   pub async fn check(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.locator(selector).check().await
+    self.locator(selector, None).check().await
   }
 
   /// Uncheck a checkbox matching the selector.
@@ -381,7 +391,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or is not uncheckable.
   pub async fn uncheck(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.locator(selector).uncheck().await
+    self.locator(selector, None).uncheck().await
   }
 
   // ── Content ─────────────────────────────────────────────────────────────
@@ -419,7 +429,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn text_content(self: &Arc<Self>, selector: &str) -> Result<Option<String>> {
-    self.locator(selector).text_content().await
+    self.locator(selector, None).text_content().await
   }
 
   /// Get the inner text of an element matching the selector.
@@ -428,7 +438,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn inner_text(self: &Arc<Self>, selector: &str) -> Result<String> {
-    self.locator(selector).inner_text().await
+    self.locator(selector, None).inner_text().await
   }
 
   /// Get the inner HTML of an element matching the selector.
@@ -437,7 +447,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn inner_html(self: &Arc<Self>, selector: &str) -> Result<String> {
-    self.locator(selector).inner_html().await
+    self.locator(selector, None).inner_html().await
   }
 
   /// Get an attribute value from an element matching the selector.
@@ -446,7 +456,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn get_attribute(self: &Arc<Self>, selector: &str, name: &str) -> Result<Option<String>> {
-    self.locator(selector).get_attribute(name).await
+    self.locator(selector, None).get_attribute(name).await
   }
 
   /// Get the input value of a form element matching the selector.
@@ -455,7 +465,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn input_value(self: &Arc<Self>, selector: &str) -> Result<String> {
-    self.locator(selector).input_value().await
+    self.locator(selector, None).input_value().await
   }
 
   // ── State checks ────────────────────────────────────────────────────────
@@ -466,7 +476,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_visible(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector).is_visible().await
+    self.locator(selector, None).is_visible().await
   }
 
   /// Check if an element matching the selector is hidden.
@@ -475,7 +485,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_hidden(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector).is_hidden().await
+    self.locator(selector, None).is_hidden().await
   }
 
   /// Check if an element matching the selector is enabled.
@@ -484,7 +494,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_enabled(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector).is_enabled().await
+    self.locator(selector, None).is_enabled().await
   }
 
   /// Check if an element matching the selector is disabled.
@@ -493,7 +503,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_disabled(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector).is_disabled().await
+    self.locator(selector, None).is_disabled().await
   }
 
   /// Check if a checkbox or radio button matching the selector is checked.
@@ -502,7 +512,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_checked(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector).is_checked().await
+    self.locator(selector, None).is_checked().await
   }
 
   // ── Evaluation ──────────────────────────────────────────────────────────
@@ -547,7 +557,7 @@ impl Page {
   ///
   /// Returns an error if the wait times out.
   pub async fn wait_for_selector(self: &Arc<Self>, selector: &str, opts: WaitOptions) -> Result<()> {
-    self.locator(selector).wait_for(opts).await
+    self.locator(selector, None).wait_for(opts).await
   }
 
   /// Wait for the page URL to match the given matcher.
@@ -680,7 +690,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or screenshot capture fails.
   pub async fn screenshot_element(self: &Arc<Self>, selector: &str) -> Result<Vec<u8>> {
-    self.locator(selector).screenshot().await
+    self.locator(selector, None).screenshot().await
   }
 
   // ── PDF ─────────────────────────────────────────────────────────────────
@@ -820,8 +830,8 @@ impl Page {
   /// Returns an error if either element cannot be found or the drag-and-drop operation fails.
   pub async fn drag_and_drop(self: &Arc<Self>, source_selector: &str, target_selector: &str) -> Result<()> {
     self
-      .locator(source_selector)
-      .drag_to(&self.locator(target_selector))
+      .locator(source_selector, None)
+      .drag_to(&self.locator(target_selector, None))
       .await
   }
 
@@ -1225,7 +1235,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn focus(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.locator(selector).focus().await
+    self.locator(selector, None).focus().await
   }
 
   /// Dispatch an event on an element by selector.
@@ -1234,7 +1244,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or the event dispatch fails.
   pub async fn dispatch_event(self: &Arc<Self>, selector: &str, event_type: &str) -> Result<()> {
-    self.locator(selector).dispatch_event(event_type).await
+    self.locator(selector, None).dispatch_event(event_type).await
   }
 
   /// Check if an element is editable (not disabled, not readonly).
@@ -1243,7 +1253,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_editable(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector).is_editable().await
+    self.locator(selector, None).is_editable().await
   }
 
   // ── Waiting (additional) ────────────────────────────────────────────────

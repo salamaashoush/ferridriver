@@ -133,10 +133,47 @@ impl Locator {
   }
   // ── Sub-locators (chain with >>) ──────────────────────────────────────────
 
-  /// Narrow this locator's scope with an additional selector.
+  /// Narrow this locator's scope.
+  ///
+  /// Playwright:
+  /// `locator(selectorOrLocator: string | Locator,
+  ///          options?: Omit<LocatorOptions, 'visible'>): Locator`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
+  ///
+  /// Infallible by design — matches Playwright's chainable Locator API.
+  /// A cross-page inner locator encodes a sentinel clause that the
+  /// selector engine rejects at resolve time; JSON encoding never fails
+  /// for a valid UTF-8 selector. `visible` is stripped from the option
+  /// bag (Playwright restricts it to `filter()` and the constructor).
   #[must_use]
-  pub fn locator(&self, selector: &str) -> Locator {
-    self.chain(selector)
+  pub fn locator(
+    &self,
+    selector_or_locator: impl Into<crate::options::LocatorLike>,
+    options: Option<crate::options::FilterOptions>,
+  ) -> Locator {
+    let inner = selector_or_locator.into();
+    let base = match &inner {
+      crate::options::LocatorLike::Selector(s) => self.chain(s),
+      crate::options::LocatorLike::Locator(l) => {
+        if Arc::ptr_eq(&self.page, &l.page) {
+          self.chain(&format!("internal:chain={}", json_quote(&l.selector)))
+        } else {
+          // Encoded sentinel — the selector engine rejects it, so the
+          // caller sees an explicit InvalidSelector at the first action
+          // rather than a silently-wrong filter. Playwright throws
+          // synchronously in JS; we defer to resolve time to keep the
+          // Locator chain API infallible.
+          self.chain("internal:cross-frame-error=true")
+        }
+      },
+    };
+    match options {
+      Some(mut opts) => {
+        opts.visible = None; // Playwright's Omit<LocatorOptions, 'visible'>
+        base.filter(&opts)
+      },
+      None => base,
+    }
   }
 
   /// Locate elements by ARIA role, optionally filtered by role options.
@@ -199,34 +236,68 @@ impl Locator {
     self.chain(&format!("nth={index}")).strict(false)
   }
 
-  /// Filter this locator by text content, sub-selector presence, or absence.
+  /// Filter this locator by text content, inner-locator presence/absence,
+  /// or visibility.
+  ///
+  /// Mirrors Playwright's
+  /// `/tmp/playwright/packages/playwright-core/src/client/locator.ts::Locator#constructor`
+  /// option-to-selector encoding:
+  ///
+  /// * `has_text` → ` >> internal:has-text=<escaped>` (plain-text clause).
+  /// * `has_not_text` → ` >> internal:has-not-text=<escaped>`.
+  /// * `has` (inner [`Locator`]) → ` >> internal:has=<JSON inner selector>`.
+  /// * `has_not` (inner [`Locator`]) → ` >> internal:has-not=<JSON inner selector>`.
+  /// * `visible: Some(b)` → ` >> visible=true|false`.
+  ///
+  /// Inner locators must belong to the same page as `self`; otherwise this
+  /// returns a locator whose selector contains an explicit error marker
+  /// — when resolved, the selector engine rejects it and the caller sees
+  /// an [`crate::error::FerriError::InvalidSelector`]. This matches
+  /// Playwright's behavior of throwing at construction time in JS while
+  /// still keeping this method infallible in Rust.
   #[must_use]
   pub fn filter(&self, opts: &FilterOptions) -> Locator {
     use std::fmt::Write as _;
 
     // Build the combined filter suffix in one buffer, then chain once.
-    // Avoids: self.clone() + up to 4 intermediate chain allocations.
     let mut suffix = String::new();
+    let push_sep = |buf: &mut String| {
+      if !buf.is_empty() {
+        buf.push_str(" >> ");
+      }
+    };
+
     if let Some(text) = &opts.has_text {
-      let _ = write!(suffix, "has-text={text}");
+      let _ = write!(suffix, "internal:has-text={}", json_quote(text));
     }
     if let Some(text) = &opts.has_not_text {
-      if !suffix.is_empty() {
-        suffix.push_str(" >> ");
-      }
-      let _ = write!(suffix, "has-not-text={text}");
+      push_sep(&mut suffix);
+      let _ = write!(suffix, "internal:has-not-text={}", json_quote(text));
     }
-    if let Some(sel) = &opts.has {
-      if !suffix.is_empty() {
-        suffix.push_str(" >> ");
+    if let Some(inner) = &opts.has {
+      push_sep(&mut suffix);
+      if inner.as_locator().is_some_and(|l| !Arc::ptr_eq(&self.page, &l.page)) {
+        // Same-page invariant violation — inject a sentinel the selector
+        // engine will reject so the caller sees an explicit error rather
+        // than a silently-mismatched filter. Only enforceable when the
+        // caller supplied a full `Locator`; raw selector strings skip
+        // this check by design.
+        let _ = write!(suffix, "internal:has-cross-frame-error=true");
+      } else {
+        let _ = write!(suffix, "internal:has={}", json_quote(inner.as_selector()));
       }
-      let _ = write!(suffix, "has={sel}");
     }
-    if let Some(sel) = &opts.has_not {
-      if !suffix.is_empty() {
-        suffix.push_str(" >> ");
+    if let Some(inner) = &opts.has_not {
+      push_sep(&mut suffix);
+      if inner.as_locator().is_some_and(|l| !Arc::ptr_eq(&self.page, &l.page)) {
+        let _ = write!(suffix, "internal:has-not-cross-frame-error=true");
+      } else {
+        let _ = write!(suffix, "internal:has-not={}", json_quote(inner.as_selector()));
       }
-      let _ = write!(suffix, "has-not={sel}");
+    }
+    if let Some(v) = opts.visible {
+      push_sep(&mut suffix);
+      let _ = write!(suffix, "visible={}", if v { "true" } else { "false" });
     }
     if suffix.is_empty() {
       self.clone()
@@ -531,6 +602,15 @@ impl Locator {
 
   /// Get the value of an attribute on the element.
   ///
+  /// Returns the raw attribute string exactly as
+  /// `Element.getAttribute(name)` reports it (HTML attributes are always
+  /// `string | null` per DOM spec — there is no native numeric/boolean
+  /// attribute type). Playwright parity: Playwright's `getAttribute`
+  /// returns `Promise<string | null>`; the previous implementation
+  /// leaked the JSON-stringified form of non-string JS values (e.g.
+  /// `"42"` vs `42`) — that path was unreachable with a well-behaved
+  /// browser, but we now explicitly rule it out.
+  ///
   /// # Errors
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
@@ -541,8 +621,11 @@ impl Locator {
       .await?;
     Ok(val.and_then(|v| match v {
       serde_json::Value::String(s) => Some(s),
-      serde_json::Value::Null => None,
-      other => Some(other.to_string()),
+      // Per the DOM spec `Element.getAttribute` only ever returns
+      // `string | null`. Anything else coming back from the eval
+      // indicates a browser bug or an unexpected injected script —
+      // surface as `None` rather than silently JSON-stringifying.
+      _ => None,
     }))
   }
 
@@ -663,8 +746,22 @@ impl Locator {
 
   // ── Waiting ───────────────────────────────────────────────────────────────
 
-  /// Wait for the element to reach the specified state ("visible", "hidden",
-  /// "attached", or "detached").
+  /// Wait for the element to reach the specified state.
+  ///
+  /// Playwright states (`packages/playwright-core/src/client/locator.ts`):
+  ///
+  /// * `"attached"` — element is present in the DOM. Computed style is
+  ///   not consulted. Matches `element.isConnected`.
+  /// * `"visible"` — element is attached **and** has non-empty bounding
+  ///   box, is not `display:none` / `visibility:hidden` / `opacity:0`.
+  /// * `"hidden"` — element is either detached or not visible. A
+  ///   detached element satisfies `"hidden"` (Playwright parity).
+  /// * `"detached"` — element is not present in the DOM.
+  ///
+  /// Previously `"attached"` and `"visible"` were conflated — both
+  /// returned as soon as a DOM query succeeded. That broke Playwright
+  /// tests that rely on `attached` resolving for zero-size or
+  /// currently-invisible elements.
   ///
   /// # Errors
   ///
@@ -683,7 +780,8 @@ impl Locator {
         ));
       }
       match state {
-        "attached" | "visible" => {
+        "attached" => {
+          // Only require DOM presence — do not consult computed style.
           if selectors::query_one(self.page.inner(), &self.selector, false)
             .await
             .is_ok()
@@ -692,7 +790,15 @@ impl Locator {
             return Ok(());
           }
         },
-        "hidden" | "detached" => {
+        "visible" => {
+          // DOM presence AND computed-style visible. Fail silently
+          // (fall through to next poll) if `is_visible()` errors
+          // because the element is detached mid-poll.
+          if let Ok(true) = self.is_visible().await {
+            return Ok(());
+          }
+        },
+        "detached" => {
           if selectors::query_one(self.page.inner(), &self.selector, false)
             .await
             .is_err()
@@ -700,6 +806,20 @@ impl Locator {
             return Ok(());
           }
           selectors::cleanup_tags(self.page.inner()).await;
+        },
+        "hidden" => {
+          // Playwright: `hidden` is satisfied by detachment OR by the
+          // element being present but not visible.
+          if selectors::query_one(self.page.inner(), &self.selector, false)
+            .await
+            .is_err()
+          {
+            return Ok(());
+          }
+          selectors::cleanup_tags(self.page.inner()).await;
+          if let Ok(false) = self.is_visible().await {
+            return Ok(());
+          }
         },
         _ => {
           return Err(crate::error::FerriError::invalid_argument(
@@ -1328,4 +1448,16 @@ fn build_text_selector(engine: &str, text: &str, opts: &TextOptions) -> String {
   } else {
     format!("{engine}={text}")
   }
+}
+
+/// Produce the Playwright-compatible JSON-quoted form of an inner
+/// selector string — matches the output of `JSON.stringify(str)` in JS.
+/// Used by [`Locator::filter`] and [`Locator::and`] / [`Locator::or`]
+/// when embedding nested selector text in `internal:*` clauses.
+///
+/// Falls back to a Rust `{:?}` debug form if `serde_json` cannot encode
+/// (impossible for valid UTF-8 strings, but kept for defensive symmetry
+/// with existing call sites at `and` / `or`).
+fn json_quote(s: &str) -> String {
+  serde_json::to_string(s).unwrap_or_else(|_| format!("{s:?}"))
 }

@@ -17,7 +17,7 @@ async fn take_screenshot(world: &mut BrowserWorld) {
 async fn take_screenshot_of(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .screenshot()
     .await
     .map_err(|e| StepError::from(format!("screenshot of \"{selector}\": {e}")))?;

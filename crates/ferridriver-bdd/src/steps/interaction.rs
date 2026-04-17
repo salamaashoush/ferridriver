@@ -8,7 +8,7 @@ use ferridriver_bdd_macros::{step, when};
 async fn click(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .click()
     .await
     .map_err(|e| StepError::from(format!("click \"{selector}\": {e}")))?;
@@ -18,7 +18,7 @@ async fn click(world: &mut BrowserWorld, selector: String) {
 async fn double_click(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .dblclick()
     .await
     .map_err(|e| StepError::from(format!("double click \"{selector}\": {e}")))?;
@@ -28,7 +28,7 @@ async fn double_click(world: &mut BrowserWorld, selector: String) {
 async fn right_click(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .right_click()
     .await
     .map_err(|e| StepError::from(format!("right click \"{selector}\": {e}")))?;
@@ -38,7 +38,7 @@ async fn right_click(world: &mut BrowserWorld, selector: String) {
 async fn fill(world: &mut BrowserWorld, selector: String, value: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .fill(&value)
     .await
     .map_err(|e| StepError::from(format!("fill \"{selector}\" with \"{value}\": {e}")))?;
@@ -48,7 +48,7 @@ async fn fill(world: &mut BrowserWorld, selector: String, value: String) {
 async fn clear(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .clear()
     .await
     .map_err(|e| StepError::from(format!("clear \"{selector}\": {e}")))?;
@@ -58,7 +58,7 @@ async fn clear(world: &mut BrowserWorld, selector: String) {
 async fn type_into(world: &mut BrowserWorld, text: String, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .r#type(&text)
     .await
     .map_err(|e| StepError::from(format!("type \"{text}\" into \"{selector}\": {e}")))?;
@@ -68,7 +68,7 @@ async fn type_into(world: &mut BrowserWorld, text: String, selector: String) {
 async fn hover(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .hover()
     .await
     .map_err(|e| StepError::from(format!("hover \"{selector}\": {e}")))?;
@@ -78,7 +78,7 @@ async fn hover(world: &mut BrowserWorld, selector: String) {
 async fn focus(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .focus()
     .await
     .map_err(|e| StepError::from(format!("focus \"{selector}\": {e}")))?;
@@ -88,7 +88,7 @@ async fn focus(world: &mut BrowserWorld, selector: String) {
 async fn select_option(world: &mut BrowserWorld, value: String, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .select_option(&value)
     .await
     .map_err(|e| StepError::from(format!("select \"{value}\" from \"{selector}\": {e}")))?;
@@ -98,7 +98,7 @@ async fn select_option(world: &mut BrowserWorld, value: String, selector: String
 async fn check(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .check()
     .await
     .map_err(|e| StepError::from(format!("check \"{selector}\": {e}")))?;
@@ -108,7 +108,7 @@ async fn check(world: &mut BrowserWorld, selector: String) {
 async fn uncheck(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .uncheck()
     .await
     .map_err(|e| StepError::from(format!("uncheck \"{selector}\": {e}")))?;
@@ -136,7 +136,7 @@ async fn scroll_up(world: &mut BrowserWorld) {
 async fn scroll_to(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .scroll_into_view_if_needed()
     .await
     .map_err(|e| StepError::from(format!("scroll to \"{selector}\": {e}")))?;
@@ -144,10 +144,10 @@ async fn scroll_to(world: &mut BrowserWorld, selector: String) {
 
 #[when("I drag {string} to {string}")]
 async fn drag(world: &mut BrowserWorld, source: String, target: String) {
-  let target_locator = world.page().locator(&target);
+  let target_locator = world.page().locator(&target, None);
   world
     .page()
-    .locator(&source)
+    .locator(&source, None)
     .drag_to(&target_locator)
     .await
     .map_err(|e| StepError::from(format!("drag \"{source}\" to \"{target}\": {e}")))?;
@@ -157,7 +157,7 @@ async fn drag(world: &mut BrowserWorld, source: String, target: String) {
 async fn click_first(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .first()
     .click()
     .await
@@ -168,7 +168,7 @@ async fn click_first(world: &mut BrowserWorld, selector: String) {
 async fn click_last(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .last()
     .click()
     .await
@@ -179,7 +179,7 @@ async fn click_last(world: &mut BrowserWorld, selector: String) {
 async fn click_nth(world: &mut BrowserWorld, n: i64, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .nth(n as i32)
     .click()
     .await
@@ -190,7 +190,7 @@ async fn click_nth(world: &mut BrowserWorld, n: i64, selector: String) {
 async fn tap_element(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .tap()
     .await
     .map_err(|e| StepError::from(format!("tap \"{selector}\": {e}")))?;
@@ -200,7 +200,7 @@ async fn tap_element(world: &mut BrowserWorld, selector: String) {
 async fn blur(world: &mut BrowserWorld, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .blur()
     .await
     .map_err(|e| StepError::from(format!("blur \"{selector}\": {e}")))?;

@@ -62,7 +62,7 @@ async fn page_api_tests() {
     )
     .await
     .unwrap();
-  page.locator("#b").click().await.unwrap();
+  page.locator("#b", None).click().await.unwrap();
   let t = page
     .evaluate_str("document.getElementById('b').textContent")
     .await
@@ -71,8 +71,8 @@ async fn page_api_tests() {
 
   // ── Locator fill + input_value ──
   page.goto(&data_url("<input id='i' type='text'>"), None).await.unwrap();
-  page.locator("#i").fill("hello").await.unwrap();
-  let v = page.locator("#i").input_value().await.unwrap();
+  page.locator("#i", None).fill("hello").await.unwrap();
+  let v = page.locator("#i", None).input_value().await.unwrap();
   assert!(v.contains("hello"), "fill + input_value: {v}");
 
   // ── get_by_role ──
@@ -131,7 +131,12 @@ async fn page_api_tests() {
     )
     .await
     .unwrap();
-  let t = page.locator("css=.a").locator("css=span").text_content().await.unwrap();
+  let t = page
+    .locator("css=.a", None)
+    .locator("css=span", None)
+    .text_content()
+    .await
+    .unwrap();
   assert!(t.unwrap_or_default().contains("Inside A"), "chain");
 
   // ── first / last / nth ──
@@ -139,11 +144,11 @@ async fn page_api_tests() {
     .goto(&data_url("<ul><li>A</li><li>B</li><li>C</li></ul>"), None)
     .await
     .unwrap();
-  let first = page.locator("css=li").first().text_content().await.unwrap();
+  let first = page.locator("css=li", None).first().text_content().await.unwrap();
   assert!(first.unwrap_or_default().contains("A"), "first");
-  let last = page.locator("css=li").last().text_content().await.unwrap();
+  let last = page.locator("css=li", None).last().text_content().await.unwrap();
   assert!(last.unwrap_or_default().contains("C"), "last");
-  let second = page.locator("css=li").nth(1).text_content().await.unwrap();
+  let second = page.locator("css=li", None).nth(1).text_content().await.unwrap();
   assert!(second.unwrap_or_default().contains("B"), "nth(1)");
 
   // ── Visibility ──
@@ -154,36 +159,36 @@ async fn page_api_tests() {
     )
     .await
     .unwrap();
-  assert!(page.locator("#v").is_visible().await.unwrap(), "visible");
-  assert!(page.locator("#h").is_hidden().await.unwrap(), "hidden");
+  assert!(page.locator("#v", None).is_visible().await.unwrap(), "visible");
+  assert!(page.locator("#h", None).is_hidden().await.unwrap(), "hidden");
 
   // ── Enabled / disabled ──
   page
     .goto(&data_url("<input id='e'><input id='d' disabled>"), None)
     .await
     .unwrap();
-  assert!(page.locator("#e").is_enabled().await.unwrap(), "enabled");
-  assert!(page.locator("#d").is_disabled().await.unwrap(), "disabled");
+  assert!(page.locator("#e", None).is_enabled().await.unwrap(), "enabled");
+  assert!(page.locator("#d", None).is_disabled().await.unwrap(), "disabled");
 
   // ── Checked ──
   page
     .goto(&data_url("<input type='checkbox' id='c'>"), None)
     .await
     .unwrap();
-  assert!(!page.locator("#c").is_checked().await.unwrap(), "unchecked");
-  page.locator("#c").check().await.unwrap();
-  assert!(page.locator("#c").is_checked().await.unwrap(), "checked");
-  page.locator("#c").uncheck().await.unwrap();
-  assert!(!page.locator("#c").is_checked().await.unwrap(), "unchecked again");
+  assert!(!page.locator("#c", None).is_checked().await.unwrap(), "unchecked");
+  page.locator("#c", None).check().await.unwrap();
+  assert!(page.locator("#c", None).is_checked().await.unwrap(), "checked");
+  page.locator("#c", None).uncheck().await.unwrap();
+  assert!(!page.locator("#c", None).is_checked().await.unwrap(), "unchecked again");
 
   // ── Editable ──
   page
     .goto(&data_url("<input id='e'><input id='d' disabled>"), None)
     .await
     .unwrap();
-  assert!(page.locator("#e").is_editable().await.unwrap(), "editable");
+  assert!(page.locator("#e", None).is_editable().await.unwrap(), "editable");
   assert!(
-    !page.locator("#d").is_editable().await.unwrap(),
+    !page.locator("#d", None).is_editable().await.unwrap(),
     "disabled not editable"
   );
 
@@ -192,9 +197,9 @@ async fn page_api_tests() {
     .goto(&data_url("<div id='d'><b>Bold</b> text</div>"), None)
     .await
     .unwrap();
-  let inner = page.locator("#d").inner_html().await.unwrap();
+  let inner = page.locator("#d", None).inner_html().await.unwrap();
   assert!(inner.contains("<b>"), "innerHTML: {inner}");
-  let text = page.locator("#d").inner_text().await.unwrap();
+  let text = page.locator("#d", None).inner_text().await.unwrap();
   assert!(text.contains("Bold"), "innerText: {text}");
 
   // ── Content + markdown ──
@@ -212,13 +217,13 @@ async fn page_api_tests() {
     .goto(&data_url("<ul><li>Alpha</li><li>Beta</li><li>Gamma</li></ul>"), None)
     .await
     .unwrap();
-  let texts = page.locator("css=li").all_text_contents().await.unwrap();
+  let texts = page.locator("css=li", None).all_text_contents().await.unwrap();
   assert_eq!(texts.len(), 3);
   assert!(texts[0].contains("Alpha"));
   assert!(texts[2].contains("Gamma"));
 
   // ── count ──
-  let count = page.locator("css=li").count().await.unwrap();
+  let count = page.locator("css=li", None).count().await.unwrap();
   assert_eq!(count, 3, "count");
 
   // ── wait_for_selector ──
@@ -253,7 +258,7 @@ async fn page_api_tests() {
 
   // ── dblclick ──
   page.goto(&data_url("<h1 id='h'>0</h1><button id='b' onclick=\"document.getElementById('h').textContent=Number(document.getElementById('h').textContent)+1\">+</button>"), None).await.unwrap();
-  page.locator("#b").dblclick().await.unwrap();
+  page.locator("#b", None).dblclick().await.unwrap();
   let t = page
     .evaluate_str("document.getElementById('h').textContent")
     .await
@@ -262,10 +267,10 @@ async fn page_api_tests() {
 
   // ── focus + blur ──
   page.goto(&data_url("<input id='i'>"), None).await.unwrap();
-  page.locator("#i").focus().await.unwrap();
+  page.locator("#i", None).focus().await.unwrap();
   let active = page.evaluate_str("document.activeElement?.id||''").await.unwrap();
   assert!(active.contains("i"), "focus: {active}");
-  page.locator("#i").blur().await.unwrap();
+  page.locator("#i", None).blur().await.unwrap();
   let active = page.evaluate_str("document.activeElement?.tagName||''").await.unwrap();
   assert!(!active.contains("INPUT"), "blur: {active}");
 
@@ -277,12 +282,12 @@ async fn page_api_tests() {
     )
     .await
     .unwrap();
-  page.locator("#s").select_option("Banana").await.unwrap();
+  page.locator("#s", None).select_option("Banana").await.unwrap();
   let v = page.evaluate_str("document.getElementById('s').value").await.unwrap();
   assert!(v.contains("b"), "select_option: {v}");
 
   // ── Click guard on <select> ──
-  let r = page.locator("#s").click().await;
+  let r = page.locator("#s", None).click().await;
   assert!(r.is_err(), "clicking select should error");
 
   // ── filter ──
@@ -291,7 +296,7 @@ async fn page_api_tests() {
     .await
     .unwrap();
   let count = page
-    .locator("css=div")
+    .locator("css=div", None)
     .filter(&FilterOptions {
       has_text: Some("Keep".into()),
       ..Default::default()
@@ -809,18 +814,22 @@ async fn locator_evaluate_tests() {
   page.goto(&data_url("<ul><li class='item'>Alpha</li><li class='item'>Beta</li><li class='item'>Gamma</li></ul><h1 id='title'>Hello</h1>"), None).await.unwrap();
 
   // evaluate on single element
-  let tag = page.locator("#title").evaluate("el.tagName").await.unwrap();
+  let tag = page.locator("#title", None).evaluate("el.tagName").await.unwrap();
   assert_eq!(tag, Some(serde_json::json!("H1")));
 
-  let text = page.locator("#title").evaluate("el.textContent").await.unwrap();
+  let text = page.locator("#title", None).evaluate("el.textContent").await.unwrap();
   assert_eq!(text, Some(serde_json::json!("Hello")));
 
   // evaluate_all on multiple elements
-  let count = page.locator("css=.item").evaluate_all("elements.length").await.unwrap();
+  let count = page
+    .locator("css=.item", None)
+    .evaluate_all("elements.length")
+    .await
+    .unwrap();
   assert_eq!(count, Some(serde_json::json!(3)));
 
   let texts = page
-    .locator("css=.item")
+    .locator("css=.item", None)
     .evaluate_all("elements.map(function(e){return e.textContent})")
     .await
     .unwrap();
@@ -828,7 +837,7 @@ async fn locator_evaluate_tests() {
 
   // evaluate with computed values
   let rect = page
-    .locator("#title")
+    .locator("#title", None)
     .evaluate("({w: el.offsetWidth, h: el.offsetHeight})")
     .await
     .unwrap();
@@ -860,33 +869,33 @@ async fn locator_set_checked_tap_select_text() {
     )
     .await
     .unwrap();
-  assert!(!page.locator("#cb").is_checked().await.unwrap());
-  page.locator("#cb").set_checked(true).await.unwrap();
+  assert!(!page.locator("#cb", None).is_checked().await.unwrap());
+  page.locator("#cb", None).set_checked(true).await.unwrap();
   assert!(
-    page.locator("#cb").is_checked().await.unwrap(),
+    page.locator("#cb", None).is_checked().await.unwrap(),
     "should be checked after set_checked(true)"
   );
-  page.locator("#cb").set_checked(false).await.unwrap();
+  page.locator("#cb", None).set_checked(false).await.unwrap();
   assert!(
-    !page.locator("#cb").is_checked().await.unwrap(),
+    !page.locator("#cb", None).is_checked().await.unwrap(),
     "should be unchecked after set_checked(false)"
   );
-  page.locator("#cb").set_checked(true).await.unwrap();
-  page.locator("#cb").set_checked(true).await.unwrap(); // idempotent
+  page.locator("#cb", None).set_checked(true).await.unwrap();
+  page.locator("#cb", None).set_checked(true).await.unwrap(); // idempotent
   assert!(
-    page.locator("#cb").is_checked().await.unwrap(),
+    page.locator("#cb", None).is_checked().await.unwrap(),
     "double set_checked(true) should still be checked"
   );
 
   // select_text
-  page.locator("#inp").select_text().await.unwrap();
+  page.locator("#inp", None).select_text().await.unwrap();
   let selected = page.evaluate_str("window.getSelection().toString()").await.unwrap();
   assert_eq!(selected, "select me", "select_text should select all text in input");
 
   // tap -- listens for both touchend (Chrome) and pointerup with touch type (WebKit fallback)
   page.goto(&data_url("<button id='btn'>tap me</button><script>var b=document.getElementById('btn');b.addEventListener('touchend',function(){this.textContent='tapped'});b.addEventListener('pointerup',function(e){if(e.pointerType==='touch')this.textContent='tapped'})</script>"), None).await.unwrap();
-  page.locator("#btn").tap().await.unwrap();
-  let text = page.locator("#btn").text_content().await.unwrap();
+  page.locator("#btn", None).tap().await.unwrap();
+  let text = page.locator("#btn", None).text_content().await.unwrap();
   assert_eq!(
     text.unwrap_or_default(),
     "tapped",
@@ -975,7 +984,7 @@ async fn locator_or_and_tests() {
     .unwrap();
 
   // or() with CSS selectors -- should find elements from either selector
-  let combined = page.locator("#a").or(&page.locator("#b"));
+  let combined = page.locator("#a", None).or(&page.locator("#b", None));
   let count = combined.count().await.unwrap();
   assert_eq!(count, 2, "or() should match both selectors: count={count}");
 
@@ -985,7 +994,7 @@ async fn locator_or_and_tests() {
 
   // and() -- intersection (chained selector, narrows scope)
   page.goto(&data_url("<div class='box'><span class='text'>Inside</span></div><div class='other'><span class='text'>Outside</span></div>"), None).await.unwrap();
-  let and_loc = page.locator("css=.box").and(&page.locator("css=.text"));
+  let and_loc = page.locator("css=.box", None).and(&page.locator("css=.text", None));
   let text = and_loc.text_content().await.unwrap();
   assert_eq!(text, Some("Inside".into()), "and() should find .text inside .box");
 
@@ -1103,18 +1112,18 @@ async fn quick_wins_tests() {
 
   // ── locator.right_click ──
   page.goto(&data_url("<div id='target' oncontextmenu=\"document.title='context_menu';return false\" style='padding:20px'>Right click me</div>"), None).await.unwrap();
-  page.locator("#target").right_click().await.unwrap();
+  page.locator("#target", None).right_click().await.unwrap();
   let title = page.title().await.unwrap();
   assert_eq!(title, "context_menu", "right_click should fire contextmenu: {title}");
 
   // ── locator.is_attached ──
   page.goto(&data_url("<div id='exists'>here</div>"), None).await.unwrap();
   assert!(
-    page.locator("#exists").is_attached().await.unwrap(),
+    page.locator("#exists", None).is_attached().await.unwrap(),
     "existing element should be attached"
   );
   assert!(
-    !page.locator("#gone").is_attached().await.unwrap(),
+    !page.locator("#gone", None).is_attached().await.unwrap(),
     "missing element should not be attached"
   );
 

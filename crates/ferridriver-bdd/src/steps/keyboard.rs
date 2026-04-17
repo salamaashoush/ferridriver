@@ -18,7 +18,7 @@ async fn press_key(world: &mut BrowserWorld, key: String) {
 async fn press_key_on(world: &mut BrowserWorld, key: String, selector: String) {
   world
     .page()
-    .locator(&selector)
+    .locator(&selector, None)
     .press(&key)
     .await
     .map_err(|e| StepError::from(format!("press \"{key}\" on \"{selector}\": {e}")))?;

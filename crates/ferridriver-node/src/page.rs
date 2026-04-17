@@ -112,9 +112,16 @@ impl Page {
 
   // ── Locators (lazy) ─────────────────────────────────────────────────────
 
+  /// Playwright: `page.locator(selector, options?: LocatorOptions): Locator`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:324`).
+  /// Thin delegator — Rust core's `Page::locator(selector, Option<FilterOptions>)`
+  /// owns the filter-application logic. Page/Frame `.locator` accepts
+  /// only selector strings; the `string | Locator` overload is on
+  /// `Locator.locator`.
   #[napi]
-  pub fn locator(&self, selector: String) -> Locator {
-    Locator::wrap(self.inner.locator(&selector))
+  pub fn locator(&self, selector: String, options: Option<crate::types::FilterOptions>) -> Locator {
+    let opts = options.map(ferridriver::options::FilterOptions::from);
+    Locator::wrap(self.inner.locator(&selector, opts))
   }
 
   #[napi]
