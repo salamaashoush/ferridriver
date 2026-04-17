@@ -327,6 +327,28 @@ impl AnyBrowser {
       Self::Bidi(b) => b.close().await,
     }
   }
+
+  /// Real product version string for the running browser, captured at
+  /// handshake/session-open time. Every backend surfaces a genuine value
+  /// — no placeholders:
+  ///
+  /// * `cdp-pipe` / `cdp-raw` → CDP `Browser.getVersion().product`
+  ///   (e.g. `"HeadlessChrome/120.0.6099.109"`).
+  /// * `webkit` → `Op::GetWebKitVersion` IPC → `CFBundleShortVersionString`
+  ///   from the running `WebKit.framework` (e.g. `"WebKit/617.1.2 (17618)"`).
+  /// * `bidi` → `BiDi` `session.new` response capabilities, formatted as
+  ///   `"{browserName}/{browserVersion}"` (e.g. `"firefox/135.0.1"`).
+  #[must_use]
+  pub fn version(&self) -> String {
+    match self {
+      Self::CdpPipe(b) => b.version().to_string(),
+      Self::CdpRaw(b) => b.version().to_string(),
+      #[cfg(target_os = "macos")]
+      Self::WebKit(b) => b.version().to_string(),
+
+      Self::Bidi(b) => b.version(),
+    }
+  }
 }
 
 // ─── AnyPage ────────────────────────────────────────────────────────────────
@@ -384,8 +406,14 @@ impl AnyPage {
 
   // ── Navigation ──
 
-  pub async fn goto(&self, url: &str, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
-    page_dispatch!(self, goto(url, lifecycle, timeout_ms))
+  pub async fn goto(
+    &self,
+    url: &str,
+    lifecycle: NavLifecycle,
+    timeout_ms: u64,
+    referer: Option<&str>,
+  ) -> Result<(), String> {
+    page_dispatch!(self, goto(url, lifecycle, timeout_ms, referer))
   }
 
   pub async fn wait_for_navigation(&self) -> Result<(), String> {
@@ -753,8 +781,8 @@ impl AnyPage {
 
   // ── Lifecycle ──
 
-  pub async fn close_page(&self) -> Result<(), String> {
-    page_dispatch!(self, close_page())
+  pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<(), String> {
+    page_dispatch!(self, close_page(opts))
   }
 
   #[must_use]

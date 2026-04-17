@@ -40,5 +40,5 @@ async fn test_react_counter_live() {
   let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
   assert_eq!(count, "2", "after decrement");
 
-  let _ = browser.close().await;
+  let _ = browser.close(None).await;
 }

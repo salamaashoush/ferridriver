@@ -59,6 +59,11 @@ pub enum Op {
   /// fetch/XHR matches a route. Payload: str url + str method + str `headers_json` + str body.
   /// Parent responds with `REP_VALUE` containing the serialized `RouteAction` JSON.
   RouteRequest = 71,
+  /// Query the running WebKit.framework version. No payload. Response:
+  /// `REP_VALUE` with a string like `"WebKit/617.1.2 (17618)"` — the same
+  /// shape CDP's `Browser.getVersion().product` returns for Chromium, so
+  /// `browser.version()` surfaces a real product version on every backend.
+  GetWebKitVersion = 72,
   Shutdown = 255,
 }
 

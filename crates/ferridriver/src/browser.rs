@@ -17,7 +17,6 @@
 //! let browser = Browser::connect("ws://localhost:9222/...").await?;
 //! ```
 
-use crate::backend::BackendKind;
 use crate::context::ContextRef;
 use crate::error::Result;
 use crate::options::LaunchOptions;
@@ -33,7 +32,10 @@ use tokio::sync::RwLock;
 #[derive(Clone)]
 pub struct Browser {
   state: Arc<RwLock<BrowserState>>,
-  backend_kind: BackendKind,
+  /// Product version captured once at launch from CDP
+  /// `Browser.getVersion().product`. Cached here so `version()` stays
+  /// synchronous and `Arc`-shared across cheap `Browser::clone`s.
+  version: Arc<str>,
 }
 
 impl Browser {
@@ -54,12 +56,15 @@ impl Browser {
       ConnectMode::Launch
     };
 
-    let backend_kind = options.backend;
     let mut state = BrowserState::with_options(mode, options);
     Box::pin(state.ensure_browser()).await?;
+    let version: Arc<str> = state
+      .default_browser()
+      .map(crate::backend::AnyBrowser::version)
+      .map_or_else(|| Arc::from("Unknown"), Arc::from);
     Ok(Self {
       state: Arc::new(RwLock::new(state)),
-      backend_kind,
+      version,
     })
   }
 
@@ -78,8 +83,17 @@ impl Browser {
 
   /// Wrap an existing shared state as a Browser handle.
   /// Used by MCP server and other contexts that already manage browser state.
-  pub fn from_shared_state(state: Arc<RwLock<BrowserState>>, backend_kind: BackendKind) -> Self {
-    Self { state, backend_kind }
+  ///
+  /// The version string is read once from the state's default instance; if
+  /// the instance has not been launched yet, `version()` returns
+  /// `"Unknown"` until a subsequent `ensure_browser` fills it in.
+  pub fn from_shared_state(state: Arc<RwLock<BrowserState>>) -> Self {
+    let version: Arc<str> = state
+      .try_read()
+      .ok()
+      .and_then(|s| s.default_browser().map(crate::backend::AnyBrowser::version))
+      .map_or_else(|| Arc::from("Unknown"), Arc::from);
+    Self { state, version }
   }
 
   /// Create a new isolated browser context.
@@ -137,11 +151,20 @@ impl Browser {
 
   /// Close the browser.
   ///
+  /// Close the browser. Accepts `Option<`[`crate::options::BrowserCloseOptions`]`>`
+  /// — mirrors Playwright's `browser.close({ reason })`. The reason, if
+  /// set, is surfaced on `TargetClosed` errors emitted to any in-flight
+  /// operation on pages/contexts from this browser. Pass `None` for the
+  /// common no-options case.
+  ///
   /// # Errors
   ///
   /// Returns an error if the browser cannot be closed cleanly.
-  pub async fn close(&self) -> Result<()> {
+  pub async fn close(&self, opts: Option<crate::options::BrowserCloseOptions>) -> Result<()> {
     let mut state = self.state.write().await;
+    if let Some(reason) = opts.and_then(|o| o.reason) {
+      state.set_close_reason(reason);
+    }
     state.shutdown().await;
     Ok(())
   }
@@ -163,16 +186,18 @@ impl Browser {
       .collect()
   }
 
-  /// Get the browser engine name.
+  /// Real product version string for the running browser — mirrors
+  /// Playwright's synchronous `browser.version()`.
+  ///
+  /// Captured once from CDP `Browser.getVersion().product` at handshake
+  /// (e.g. `"HeadlessChrome/120.0.6099.109"` or `"Chrome/120.0.6099.109"`).
+  /// For `WebKit` returns `"WebKit"` until we plumb `WKWebView`'s version
+  /// through the IPC; for `BiDi` returns `"Firefox"`. Returns `"Unknown"`
+  /// if the handshake did not complete before the `Browser` handle was
+  /// constructed.
   #[must_use]
-  pub fn version(&self) -> &'static str {
-    match self.backend_kind {
-      BackendKind::CdpPipe | BackendKind::CdpRaw => "Chromium",
-      #[cfg(target_os = "macos")]
-      BackendKind::WebKit => "WebKit",
-
-      BackendKind::Bidi => "BiDi",
-    }
+  pub fn version(&self) -> &str {
+    &self.version
   }
 
   /// Check if the browser is connected and alive.

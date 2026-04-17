@@ -248,7 +248,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.2 `goto` accepts `referer`
 
-- [ ] Add `referer: Option<String>` to `GotoOptions`.
+- [x] Add `referer: Option<String>` to `GotoOptions`.
 - **Files**: `crates/ferridriver/src/options.rs`; CDP `Page.navigate` call site in `page.rs`.
 
 ### 3.3 ScreenshotOptions complete
@@ -338,16 +338,16 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.19 `Browser.version` returns real version
 
-- [ ] Currently returns engine name; must return CDP `Browser.getVersion().product`.
+- [x] Currently returns engine name; must return CDP `Browser.getVersion().product`.
 - **Files**: `browser.rs:167`.
 
 ### 3.20 `Browser.close({reason})`
 
-- [ ] Accept reason string; forward to CDP `Browser.close` with reason persisted on downstream `TargetClosedError`.
+- [x] Accept reason string; forward to CDP `Browser.close` with reason persisted on downstream `TargetClosedError`.
 
 ### 3.21 `Page.close({runBeforeUnload, reason})`
 
-- [ ] Add options.
+- [x] Add options.
 - **Files**: `page.rs`.
 
 ### 3.22 `Page.opener` / `page.on('popup')`
@@ -357,7 +357,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.23 `Page.setDefaultNavigationTimeout`
 
-- [ ] Split from `set_default_timeout`.
+- [x] Split from `set_default_timeout`.
 - **Files**: `page.rs`, `context.rs`.
 
 ### 3.24 `emulateMedia` full field set

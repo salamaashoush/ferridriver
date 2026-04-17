@@ -263,7 +263,7 @@ pub async fn fill(element: &AnyElement, value: &str) -> Result<(), String> {
 ///
 /// Returns an error if navigation fails or the page DOM remains empty after retries.
 pub async fn navigate_with_health_check(page: &AnyPage, url: &str) -> Result<(), String> {
-  page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await?;
+  page.goto(url, crate::backend::NavLifecycle::Load, 30_000, None).await?;
 
   let url_lower = url.to_lowercase();
   if url_lower.starts_with("http://") || url_lower.starts_with("https://") {

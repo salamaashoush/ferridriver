@@ -343,7 +343,7 @@ async fn page_api_tests() {
   // Restore
   page.set_viewport_size(initial_w, initial_h).await.unwrap();
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -486,7 +486,7 @@ async fn snapshot_for_ai_tests() {
     assert!(*node_id > 0, "backend node ID should be positive: {node_id}");
   }
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -552,7 +552,7 @@ async fn add_init_script_tests() {
   let title = page.title().await.unwrap();
   assert_eq!(title, "gone:second", "removed init script should no longer run");
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -635,7 +635,7 @@ async fn dialog_handling_tests() {
   let title = page.title().await.unwrap();
   assert_eq!(title, "custom_answer", "prompt should get custom answer from handler");
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -666,7 +666,7 @@ async fn add_script_style_tag_tests() {
     .unwrap();
   assert_eq!(color, "rgb(255, 0, 0)", "inline style tag should apply: {color}");
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -754,7 +754,7 @@ async fn expose_function_tests() {
   let result = page.evaluate_str("typeof window.double").await.unwrap();
   assert_eq!(result, "undefined", "removed function should be gone");
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -793,7 +793,7 @@ async fn wait_for_load_state_tests() {
   page.wait_for_load_state(Some("networkidle")).await.unwrap();
   // If we get here without timeout, networkidle worked
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -839,7 +839,7 @@ async fn locator_evaluate_tests() {
     "should have width"
   );
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -893,7 +893,7 @@ async fn locator_set_checked_tap_select_text() {
     "tap should fire touch/pointer events"
   );
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -929,7 +929,7 @@ async fn storage_state_tests() {
   assert!(state2.get("cookies").unwrap().is_array());
   assert!(state2.get("origins").unwrap().is_array());
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -946,14 +946,14 @@ async fn page_close_is_closed_tests() {
   assert!(!page.is_closed(), "new page should not be closed");
 
   // Close it
-  page.close().await.unwrap();
+  page.close(None).await.unwrap();
   assert!(page.is_closed(), "page should be closed after close()");
 
   // Closing again should be idempotent
-  page.close().await.unwrap();
+  page.close(None).await.unwrap();
   assert!(page.is_closed());
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -989,7 +989,7 @@ async fn locator_or_and_tests() {
   let text = and_loc.text_content().await.unwrap();
   assert_eq!(text, Some("Inside".into()), "and() should find .text inside .box");
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1082,7 +1082,7 @@ async fn network_interception_tests() {
     .await
     .unwrap();
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1125,6 +1125,7 @@ async fn quick_wins_tests() {
       Some(GotoOptions {
         wait_until: Some("domcontentloaded".into()),
         timeout: Some(10000),
+        referer: None,
       }),
     )
     .await
@@ -1139,10 +1140,10 @@ async fn quick_wins_tests() {
   // ── page.is_closed after close ──
   let page2 = browser.new_page_with_url("about:blank").await.unwrap();
   assert!(!page2.is_closed());
-  page2.close().await.unwrap();
+  page2.close(None).await.unwrap();
   assert!(page2.is_closed());
 
-  browser.close().await.unwrap();
+  browser.close(None).await.unwrap();
   assert!(
     !browser.is_connected().await,
     "browser should be disconnected after close"

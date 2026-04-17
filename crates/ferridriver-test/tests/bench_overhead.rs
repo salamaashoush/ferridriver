@@ -101,7 +101,7 @@ async fn measure_operation_costs() {
 
   // 8. Browser close
   let start = Instant::now();
-  browser.close().await.ok();
+  browser.close(None).await.ok();
   println!("  Browser close:         {:>6}ms", start.elapsed().as_millis());
 
   println!();

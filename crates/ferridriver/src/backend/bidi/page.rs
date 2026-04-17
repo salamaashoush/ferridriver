@@ -208,8 +208,35 @@ impl BidiPage {
 
   // ── Navigation ──────────────────────────────────────────────────────────
 
-  pub async fn goto(&self, url: &str, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+  pub async fn goto(
+    &self,
+    url: &str,
+    lifecycle: NavLifecycle,
+    timeout_ms: u64,
+    referer: Option<&str>,
+  ) -> Result<(), String> {
     self.injected_script.reset();
+
+    // WebDriver BiDi `browsingContext.navigate` has no `referrer` param —
+    // Playwright's own BiDi backend drops it too
+    // (`/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPage.ts::navigateFrame`
+    // takes a `referrer` arg and never uses it). The honest BiDi analogue
+    // is `network.setExtraHeaders` which we set for the duration of this
+    // navigation and reset afterwards so it doesn't leak into subsequent
+    // requests on the same context.
+    let had_referer = referer.is_some();
+    if let Some(r) = referer {
+      let _ = self
+        .cmd(
+          "network.setExtraHeaders",
+          json!({
+            "headers": [{ "name": "Referer", "value": { "type": "string", "value": r } }],
+            "contexts": [&*self.context_id],
+          }),
+        )
+        .await;
+    }
+
     let wait = Self::lifecycle_to_wait(lifecycle);
     let result = tokio::time::timeout(
       std::time::Duration::from_millis(timeout_ms),
@@ -223,6 +250,15 @@ impl BidiPage {
       ),
     )
     .await;
+
+    if had_referer {
+      let _ = self
+        .cmd(
+          "network.setExtraHeaders",
+          json!({ "headers": [], "contexts": [&*self.context_id] }),
+        )
+        .await;
+    }
 
     match result {
       Ok(Ok(_)) => Ok(()),
@@ -1475,9 +1511,18 @@ impl BidiPage {
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
-  pub async fn close_page(&self) -> Result<(), String> {
+  pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<(), String> {
+    // BiDi's `browsingContext.close` takes an optional `promptUnload` flag
+    // — true fires `beforeunload` handlers before unloading the context.
+    // Mirrors Playwright's `bidiPage.ts:_closePage` param naming.
     self
-      .cmd("browsingContext.close", json!({"context": &*self.context_id}))
+      .cmd(
+        "browsingContext.close",
+        json!({
+          "context": &*self.context_id,
+          "promptUnload": opts.run_before_unload.unwrap_or(false),
+        }),
+      )
       .await?;
     self.closed.store(true, Ordering::Relaxed);
     Ok(())

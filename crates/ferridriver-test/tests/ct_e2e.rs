@@ -70,7 +70,7 @@ window.__ferriMount({ id: 'Counter' }, document.getElementById('app'), { props: 
   let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
   assert_eq!(count, "2", "count should be 2 after decrement");
 
-  let _ = browser.close().await;
+  let _ = browser.close(None).await;
   server.stop().await;
   let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -136,7 +136,7 @@ window.__ferriMount = function(componentRef, rootEl, options) {
     "mounted component should contain ID: {text}"
   );
 
-  let _ = browser.close().await;
+  let _ = browser.close(None).await;
   server.stop().await;
   let _ = std::fs::remove_dir_all(&tmp);
 }

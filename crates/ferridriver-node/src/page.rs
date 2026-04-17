@@ -64,6 +64,16 @@ impl Page {
     self.inner.set_default_timeout(crate::types::f64_to_u64(ms));
   }
 
+  /// Set the default timeout for navigation-family operations
+  /// (`goto`, `reload`, `goBack`, `goForward`, `waitForUrl`). Mirrors
+  /// Playwright's `page.setDefaultNavigationTimeout(timeout)` — distinct
+  /// from `setDefaultTimeout`, which applies to non-navigation actions.
+  /// `0` = no timeout.
+  #[napi]
+  pub fn set_default_navigation_timeout(&self, ms: f64) {
+    self.inner.set_default_navigation_timeout(crate::types::f64_to_u64(ms));
+  }
+
   // ── Navigation ──────────────────────────────────────────────────────────
 
   #[napi]
@@ -773,9 +783,16 @@ impl Page {
     self.inner.bring_to_front().await.map_err(napi::Error::from_reason)
   }
 
+  /// Close the page. Accepts the Playwright-identical
+  /// `{ runBeforeUnload?, reason? }` options shape.
   #[napi]
-  pub async fn close(&self) -> Result<()> {
-    self.inner.close().await.map_err(napi::Error::from_reason)
+  pub async fn close(&self, options: Option<crate::types::PageCloseOptions>) -> Result<()> {
+    let opts: Option<ferridriver::options::PageCloseOptions> = options.map(Into::into);
+    self
+      .inner
+      .close(opts)
+      .await
+      .map_err(|e| napi::Error::from_reason(e.to_string()))
   }
 
   #[napi]

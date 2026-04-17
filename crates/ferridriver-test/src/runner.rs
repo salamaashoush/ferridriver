@@ -684,7 +684,7 @@ impl TestRunner {
 
     // Cleanup.
     self.shared_browser = None;
-    let _ = browser.close().await;
+    let _ = browser.close(None).await;
 
     0
   }
