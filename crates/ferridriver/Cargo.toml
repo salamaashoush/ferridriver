@@ -1,6 +1,6 @@
 [package]
 name = "ferridriver"
-description = "High-performance browser automation library with pluggable backends"
+description = "Browser automation in Rust with a Playwright-compatible API. Four pluggable backends: CDP pipe, CDP WebSocket, WKWebView, Firefox BiDi."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

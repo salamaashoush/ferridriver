@@ -13,10 +13,17 @@ Dependency-injected fixtures with three scopes and automatic LIFO teardown. Hook
 
 ## Scope hierarchy
 
-```
-Global pool              shared across all workers
-  └── Worker pool        one per worker, inherits global
-       └── Test pool     one per test, inherits worker
+```mermaid
+flowchart TB
+  G["Global pool\nshared across all workers"] --> W["Worker pool\none per worker"]
+  W --> T["Test pool\none per test"]
+
+  classDef global fill:#ede9fe,stroke:#6d28d9,color:#1e1b4b
+  classDef worker fill:#fef3c7,stroke:#b45309,color:#1c1917
+  classDef test fill:#dcfce7,stroke:#15803d,color:#052e16
+  class G global
+  class W worker
+  class T test
 ```
 
 `pool.get::<T>("name")` walks the scope chain, resolves dependencies recursively, caches values, and registers teardown. The DAG is validated at startup.
@@ -53,14 +60,25 @@ async fn dump_logs(ctx: TestContext) {
 
 ## Per-test lifecycle
 
-```
-beforeAll        once per suite per worker (no test context)
-  ├─ create BrowserContext + Page (isolated per test)
-  ├─ inject fixtures: browser, context, page, test_info
-  ├─ beforeEach   receives FixturePool + Arc<TestInfo>
-  ├─ test body    with timeout (3x for slow)
-  ├─ afterEach    always runs, even on failure
-  ├─ screenshot on failure (if configured)
-  └─ close context + teardown fixtures (LIFO)
-afterAll         on worker shutdown
+```mermaid
+sequenceDiagram
+  autonumber
+  participant W as Worker
+  participant S as Suite hooks
+  participant T as Test body
+  participant F as Fixtures
+
+  S->>W: beforeAll (once per worker per suite)
+  loop each test
+    W->>F: create fresh context + page
+    W->>F: inject browser, context, page, test_info
+    W->>T: beforeEach
+    W->>T: run body (timeout; 3x for @slow)
+    W->>T: afterEach (runs even on failure)
+    alt test failed
+      W->>W: screenshot
+    end
+    W->>F: close context + teardown fixtures (LIFO)
+  end
+  W->>S: afterAll (on worker shutdown)
 ```

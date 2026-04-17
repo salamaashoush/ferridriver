@@ -882,7 +882,7 @@ const root = defineCommand({
   meta: {
     name: 'ferridriver-test',
     version: '0.1.0',
-    description: 'High-performance E2E, component, and BDD test runner',
+    description: 'E2E, component, and BDD test runner — Playwright-compatible, Rust-powered',
     about: 'Runs tests using the ferridriver Rust engine with Playwright-compatible API',
     afterHelp:
       'Examples:\n' +
