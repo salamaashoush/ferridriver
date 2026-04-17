@@ -770,15 +770,25 @@ for (const backend of BACKENDS) {
       expect(count).toBe(2);
     });
 
-    it("locator.andLocator narrows scope", async () => {
+    it("locator.andLocator narrows to elements satisfying BOTH selectors (intersection)", async () => {
+      // Playwright `.and()` is intersection: an element must match every
+      // combined locator on its own. Fixture:
+      //   - #submit — a <button> that ALSO has .primary    → matches
+      //   - #cancel — a <button> with only .action         → no match
+      //   - #label  — a <span>  with only .primary         → no match
+      // See crates/ferridriver-node/test/locator-and-or.test.ts for the
+      // canonical task-#10 semantics tests.
       await page.setContent(
-        '<div class="box"><span class="text">Inside</span></div><div class="other"><span class="text">Outside</span></div>'
+        '<button id="submit" class="primary action">Submit</button>' +
+        '<button id="cancel" class="action">Cancel</button>' +
+        '<span id="label" class="primary">Label</span>'
       );
       const loc = page
-        .locator("css=.box")
-        .andLocator(page.locator("css=.text"));
-      const text = await loc.textContent();
-      expect(text).toBe("Inside");
+        .locator("css=button")
+        .andLocator(page.locator("css=.primary"));
+      expect(await loc.count()).toBe(1);
+      expect(await loc.textContent()).toBe("Submit");
+      expect(await loc.getAttribute("id")).toBe("submit");
     });
 
     // ── Locator.all ──────────────────────────────────────────────────
