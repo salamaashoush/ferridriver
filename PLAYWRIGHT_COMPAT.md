@@ -719,3 +719,21 @@ Every checklist item must satisfy, before ticking `[x]`:
 - **Electron / Android** clients (`packages/playwright-core/src/client/electron.ts`, `android.ts`) — out of scope unless explicitly requested.
 - **Playwright Inspector** desktop app — `--ui` mode (7.7) replaces it.
 - **Pyright / pytest integration** — ferridriver is TS + Rust only.
+
+---
+
+## Gaps surfaced by scripting bindings (`ferridriver-script`)
+
+The `ferridriver-script` crate exposes core Rust types to QuickJS via a proc macro that mirrors core's signatures **strictly** — no JS-side shims, no accept-and-drop of unsupported args. This means LLM-authored scripts written in Playwright style will hit the gaps below directly. They are already tracked as Tier 1 / Tier 3 items; this section exists so future work knows which ones are highest-priority for the scripting surface.
+
+1. **`evaluate(fn, arg?)` function argument** — see **1.3 JSHandle**. Core's `evaluate(&str)` accepts strings only; scripts must pass a literal string. The single most-used Playwright idiom (`page.evaluate(() => document.title)`) does not work until core accepts a serialized function.
+2. **Action-method options (`click`/`fill`/`hover`/`press`/`type`/`dblclick`/`check`/`uncheck`/`tap`/`selectOption`/`dispatchEvent`/`dragTo`/`setInputFiles`)** — see **1.5 Action option bags**. Scripts passing `{ timeout, force, noWaitAfter, position, trial, modifiers, button, clickCount, delay }` will fail type-checking; QuickJS bindings refuse the extra arg rather than silently dropping it.
+3. **`screenshot` / `pdf` option coverage** — see **3.3 ScreenshotOptions complete** and **3.4 PDFOptions complete**. Core accepts partial option sets today.
+4. **`selectOption` value shape** — see **1.5**. Core takes a single string; Playwright accepts `string | { value, label, index } | ElementHandle` plus arrays.
+5. **`setInputFiles` payload shape** — see **1.5**. Core takes paths only; Playwright accepts `FilePayload { name, mimeType, buffer }`.
+6. **`dispatchEvent` `eventInit`** — see **1.5**. Core takes event type only; no `eventInit` dict.
+7. **`addInitScript` with `arg`** — see **3.25**.
+8. **`Locator.evaluate` / `evaluateAll` function + arg** — see **3.14**. Same shape as the Page-level gap above.
+9. **Context-level features scripts commonly reach for** — `context.route` / `unroute` exist in core but are missing from NAPI; they will be exposed natively in QuickJS bindings. `context.storageState({ path, indexedDB })`, `clearCookies(options)` regex filters, and `cookies(urls?)` URL filter are all core-level gaps — see **4.7**, **4.14**, **4.15**, **3.2**, **4.2**.
+
+**Principle**: resolving these gaps is a core concern, not a scripting concern. The `ferridriver-script` proc macro regenerates bindings automatically when core signatures change, so closing a Tier 1.5 item simultaneously closes the corresponding QuickJS gap.

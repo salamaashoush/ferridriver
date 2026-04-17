@@ -37,6 +37,7 @@ ferridriver-test = { path = "crates/ferridriver-test", version = "0.1.0" }
 ferridriver-test-macros = { path = "crates/ferridriver-test-macros", version = "0.1.0" }
 ferridriver-bdd = { path = "crates/ferridriver-bdd", version = "0.1.0" }
 ferridriver-bdd-macros = { path = "crates/ferridriver-bdd-macros", version = "0.1.0" }
+ferridriver-script = { path = "crates/ferridriver-script", version = "0.1.0" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

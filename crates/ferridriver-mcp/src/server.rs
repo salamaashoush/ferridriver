@@ -150,6 +150,20 @@ pub use self::ctx as sess;
 /// any domain-specific concepts (environments, auth, etc.) belong in the
 /// consumer's own `ServerHandler` wrapper.
 pub trait McpServerConfig: Send + Sync + 'static {
+  /// Root directory for the scripting sandbox used by `run_script`.
+  ///
+  /// All `fs` operations inside scripts are constrained to this directory.
+  /// The directory is created at server startup if it does not exist.
+  /// Default: `./scripts` relative to cwd.
+  fn script_root(&self) -> std::path::PathBuf {
+    std::path::PathBuf::from("scripts")
+  }
+
+  /// Engine-level defaults (timeout, memory, console limits) for `run_script`.
+  fn script_engine_config(&self) -> ferridriver_script::ScriptEngineConfig {
+    ferridriver_script::ScriptEngineConfig::default()
+  }
+
   /// Base Chrome arguments applied to ALL browser instances.
   ///
   /// Called once at server construction. Override to inject flags that
@@ -254,6 +268,14 @@ pub struct McpServer {
   pub(crate) bdd_executor: ferridriver_bdd::executor::ScenarioExecutor,
   /// Backend kind — needed to construct Browser handles for BDD fixtures.
   pub(crate) backend_kind: BackendKind,
+  /// `QuickJS` scripting engine -- fresh context per `run_script` invocation.
+  pub(crate) script_engine: Arc<ferridriver_script::ScriptEngine>,
+  /// Filesystem sandbox for scripts (`None` if the configured root could not
+  /// be created or canonicalised; `run_script` will return an error).
+  pub(crate) script_sandbox: Option<Arc<ferridriver_script::PathSandbox>>,
+  /// Per-session variable stores exposed to scripts via the `vars` global.
+  /// Lazily created on first `run_script` for a given session name.
+  pub(crate) session_vars: Arc<DashMap<String, Arc<ferridriver_script::InMemoryVars>>>,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -309,6 +331,27 @@ impl McpServer {
       false, // not strict -- pending steps don't fail
       true,  // screenshot on failure
     );
+
+    // Scripting engine + sandbox. The sandbox needs an existing canonical
+    // directory; we create the configured root up front and log (not panic)
+    // if initialisation fails so the rest of the server still works.
+    let script_engine = Arc::new(ferridriver_script::ScriptEngine::new(config.script_engine_config()));
+    let script_root = config.script_root();
+    let script_sandbox = match std::fs::create_dir_all(&script_root)
+      .map_err(|e| format!("{e}"))
+      .and_then(|()| ferridriver_script::PathSandbox::new(&script_root).map_err(|e| e.message.clone()))
+    {
+      Ok(sb) => Some(Arc::new(sb)),
+      Err(msg) => {
+        tracing::warn!(
+          script_root = %script_root.display(),
+          error = %msg,
+          "scripting disabled: failed to prepare script_root; run_script will return an error"
+        );
+        None
+      },
+    };
+
     Self {
       state,
       tool_router: Self::tool_router(),
@@ -317,7 +360,23 @@ impl McpServer {
       step_registry,
       bdd_executor,
       backend_kind: backend,
+      script_engine,
+      script_sandbox,
+      session_vars: Arc::new(DashMap::new()),
     }
+  }
+
+  /// Get-or-create the `InMemoryVars` store for a given session name.
+  ///
+  /// Called from `run_script` so each session sees a stable vars namespace
+  /// across tool invocations (matching the "fresh context per call, but
+  /// session-level vars persist" design choice).
+  pub(crate) fn session_vars(&self, session: &str) -> Arc<ferridriver_script::InMemoryVars> {
+    self
+      .session_vars
+      .entry(session.to_string())
+      .or_insert_with(|| Arc::new(ferridriver_script::InMemoryVars::new()))
+      .clone()
   }
 
   /// Add extra tool routers (merges with built-in browser tools).

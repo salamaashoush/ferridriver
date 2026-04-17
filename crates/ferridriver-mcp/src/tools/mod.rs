@@ -10,6 +10,7 @@ pub mod emulation;
 pub mod input;
 pub mod navigation;
 pub mod network;
+pub mod script;
 pub mod storage;
 
 use crate::server::McpServer;
@@ -31,5 +32,6 @@ impl McpServer {
       + Self::emulation_router()
       + Self::network_router()
       + Self::bdd_router()
+      + Self::script_router()
   }
 }
