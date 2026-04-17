@@ -2532,7 +2532,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         let routes_guard = routes.read().await;
         routes_guard
           .iter()
-          .find(|r| r.pattern.is_match(url))
+          .find(|r| r.matcher.matches(url))
           .map(|r| std::sync::Arc::clone(&r.handler))
       };
 
@@ -2679,19 +2679,22 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     }
   }
 
-  pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<(), String> {
-    let regex = crate::route::glob_to_regex(pattern)?;
-    self.routes.write().await.push(crate::route::RegisteredRoute {
-      pattern: regex,
-      pattern_str: pattern.to_string(),
-      handler,
-    });
+  pub async fn route(
+    &self,
+    matcher: crate::url_matcher::UrlMatcher,
+    handler: crate::route::RouteHandler,
+  ) -> Result<(), String> {
+    self
+      .routes
+      .write()
+      .await
+      .push(crate::route::RegisteredRoute { matcher, handler });
     self.ensure_fetch_enabled().await
   }
 
-  pub async fn unroute(&self, pattern: &str) -> Result<(), String> {
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<(), String> {
     let mut routes = self.routes.write().await;
-    routes.retain(|r| r.pattern_str != pattern);
+    routes.retain(|r| !r.matcher.equivalent(matcher));
     if routes.is_empty() && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
       self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
       let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;

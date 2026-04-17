@@ -1301,9 +1301,11 @@ impl BidiPage {
 
   // ── Network Interception ────────────────────────────────────────────────
 
-  pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<(), String> {
-    let regex = crate::route::glob_to_regex(pattern)?;
-
+  pub async fn route(
+    &self,
+    matcher: crate::url_matcher::UrlMatcher,
+    handler: crate::route::RouteHandler,
+  ) -> Result<(), String> {
     let needs_intercept = self.intercept_ids.read().await.is_empty();
     if needs_intercept {
       // Register a single intercept for ALL requests on this context (no urlPatterns).
@@ -1365,7 +1367,7 @@ impl BidiPage {
             let routes_guard = routes.read().await;
             routes_guard
               .iter()
-              .find(|r| r.pattern.is_match(url))
+              .find(|r| r.matcher.matches(url))
               .map(|r| std::sync::Arc::clone(&r.handler))
           };
 
@@ -1405,18 +1407,18 @@ impl BidiPage {
       });
     }
 
-    self.routes.write().await.push(crate::route::RegisteredRoute {
-      pattern: regex,
-      pattern_str: pattern.to_string(),
-      handler,
-    });
+    self
+      .routes
+      .write()
+      .await
+      .push(crate::route::RegisteredRoute { matcher, handler });
 
     Ok(())
   }
 
-  pub async fn unroute(&self, pattern: &str) -> Result<(), String> {
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<(), String> {
     let mut routes = self.routes.write().await;
-    routes.retain(|r| r.pattern_str != pattern);
+    routes.retain(|r| !r.matcher.equivalent(matcher));
 
     // If no routes left, remove the intercept entirely
     if routes.is_empty() {

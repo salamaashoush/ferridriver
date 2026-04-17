@@ -512,23 +512,26 @@ impl Page {
     self.locator(selector).wait_for(opts).await
   }
 
-  /// Wait for the page URL to contain the given pattern.
+  /// Wait for the page URL to match the given matcher.
+  ///
+  /// Accepts glob, regex, or predicate via [`crate::url_matcher::UrlMatcher`].
+  /// Mirrors Playwright's `page.waitForURL(url | RegExp | predicate)` semantic.
   ///
   /// # Errors
   ///
   /// Returns an error if the wait times out.
-  pub async fn wait_for_url(&self, url_pattern: &str) -> Result<()> {
+  pub async fn wait_for_url(&self, matcher: crate::url_matcher::UrlMatcher) -> Result<()> {
     let timeout_ms = self.default_timeout();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
       if tokio::time::Instant::now() >= deadline {
         return Err(crate::error::FerriError::timeout(
-          format!("waiting for URL matching {url_pattern:?}"),
+          format!("waiting for URL matching {:?}", matcher.identifier()),
           timeout_ms,
         ));
       }
       let current = self.url().await.unwrap_or_default();
-      if current.contains(url_pattern) {
+      if matcher.matches(&current) {
         return Ok(());
       }
       tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -1522,15 +1525,14 @@ impl Page {
   /// Returns an error if no matching request occurs within the timeout.
   pub async fn wait_for_request(
     &self,
-    url_pattern: &str,
+    matcher: crate::url_matcher::UrlMatcher,
     timeout_ms: Option<u64>,
   ) -> Result<crate::context::NetRequest> {
-    let pattern = url_pattern.to_string();
     let event = self
       .inner
       .events()
       .wait_for(
-        move |e| matches!(e, PageEvent::Request(r) if r.url.contains(&pattern)),
+        move |e| matches!(e, PageEvent::Request(r) if matcher.matches(&r.url)),
         timeout_ms.unwrap_or(self.default_timeout()),
       )
       .await
@@ -1548,15 +1550,14 @@ impl Page {
   /// Returns an error if no matching response occurs within the timeout.
   pub async fn wait_for_response(
     &self,
-    url_pattern: &str,
+    matcher: crate::url_matcher::UrlMatcher,
     timeout_ms: Option<u64>,
   ) -> Result<crate::events::NetResponse> {
-    let pattern = url_pattern.to_string();
     let event = self
       .inner
       .events()
       .wait_for(
-        move |e| matches!(e, PageEvent::Response(r) if r.url.contains(&pattern)),
+        move |e| matches!(e, PageEvent::Response(r) if matcher.matches(&r.url)),
         timeout_ms.unwrap_or(self.default_timeout()),
       )
       .await
@@ -1596,17 +1597,22 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the route interception cannot be set up.
-  pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<()> {
-    self.inner.route(pattern, handler).await.map_err(Into::into)
+  pub async fn route(
+    &self,
+    matcher: crate::url_matcher::UrlMatcher,
+    handler: crate::route::RouteHandler,
+  ) -> Result<()> {
+    self.inner.route(matcher, handler).await.map_err(Into::into)
   }
 
-  /// Remove all route handlers matching the glob pattern.
+  /// Remove all route handlers whose matcher is
+  /// [`crate::url_matcher::UrlMatcher::equivalent`] to the given matcher.
   ///
   /// # Errors
   ///
   /// Returns an error if the route handlers cannot be removed.
-  pub async fn unroute(&self, pattern: &str) -> Result<()> {
-    self.inner.unroute(pattern).await.map_err(Into::into)
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
+    self.inner.unroute(matcher).await.map_err(Into::into)
   }
 
   // ── Exposed Functions ───────────────────────────────────────────────────

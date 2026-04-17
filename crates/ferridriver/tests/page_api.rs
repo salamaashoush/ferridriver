@@ -1009,7 +1009,7 @@ async fn network_interception_tests() {
   // Intercept navigations to a test URL and return custom HTML
   page
     .route(
-      "**/mock-page",
+      ferridriver::UrlMatcher::glob("**/mock-page").unwrap(),
       Arc::new(|route| {
         route.fulfill(FulfillResponse {
           status: 200,
@@ -1035,7 +1035,7 @@ async fn network_interception_tests() {
   // 2. Fulfill with JSON -- mock an API on the now-mocked origin
   page
     .route(
-      "**/api/data",
+      ferridriver::UrlMatcher::glob("**/api/data").unwrap(),
       Arc::new(|route| {
         route.fulfill(FulfillResponse {
           status: 200,
@@ -1060,7 +1060,7 @@ async fn network_interception_tests() {
   // 3. Abort -- block specific requests
   page
     .route(
-      "**/blocked",
+      ferridriver::UrlMatcher::glob("**/blocked").unwrap(),
       Arc::new(|route| {
         route.abort("blockedbyclient");
       }),
@@ -1077,7 +1077,10 @@ async fn network_interception_tests() {
   assert!(result.starts_with("error:"), "blocked request should throw: {result}");
 
   // 4. Unroute
-  page.unroute("**/api/data").await.unwrap();
+  page
+    .unroute(&ferridriver::UrlMatcher::glob("**/api/data").unwrap())
+    .await
+    .unwrap();
 
   browser.close().await.unwrap();
 }

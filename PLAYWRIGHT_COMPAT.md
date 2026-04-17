@@ -11,6 +11,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 5. **Every Playwright matcher has a Rust implementation** — the TS expect wrapper calls into Rust via NAPI for all polling/assertions.
 6. **Auto-waiting and polling logic lives in Rust**, with progress + deadline parity against Playwright's `_wrapApiCall`.
 7. **Every new public method has**: (a) a core Rust unit/integration test, (b) a NAPI test in `crates/ferridriver-node/__test__/`, (c) a TS-side test, (d) a BDD step if the action is user-facing.
+8. **Always verify against the cloned Playwright source** at `/tmp/playwright/` before implementing any parity feature. Read `packages/playwright-core/src/client/*.ts`, `packages/playwright/types/test.d.ts`, and `packages/playwright-core/src/utils/` to confirm exact API shapes, option fields, protocol encoding, and semantics. Never guess or infer from docs — the source is the only authority.
 
 ## Status legend
 
@@ -24,7 +25,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 1.1 Structured error taxonomy
 
-- [ ] Replace `Result<T, String>` across public API with `thiserror` enums.
+- [x] Replace `Result<T, String>` across public API with `thiserror` enums.
 - **Playwright ref**: `packages/playwright-core/src/client/errors.ts` (`TimeoutError`, `TargetClosedError`, `parseError`).
 - **Files**: new `crates/ferridriver/src/error.rs`; touches every `pub` signature in `page.rs`, `locator.rs`, `frame.rs`, `context.rs`, `browser.rs`, `route.rs`, `api_request.rs`.
 - **Design**:
@@ -263,20 +264,20 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.5 URL matching unification
 
-- [ ] Introduce `UrlMatcher = Glob | Regex | Predicate`.
+- [x] Introduce `UrlMatcher = Glob | Regex | Predicate`.
 - Used by: `page.route`, `context.route`, `page.wait_for_url`, `page.wait_for_request`, `page.wait_for_response`, `route_from_har.url`.
 - **Files**: new `crates/ferridriver/src/url_matcher.rs`; call sites in `page.rs`, `context.rs`, `route.rs`.
 - **NAPI**: accept `string | RegExp | (url: string) => boolean`.
 
 ### 3.6 Selector `and` semantic fix
 
-- [ ] `Locator::and` is currently implemented as `>>` (descendant chain) at `locator.rs:763` — must be `internal:and=<json>`.
+- [x] `Locator::and` is currently implemented as `>>` (descendant chain) at `locator.rs:763` — must be `internal:and=<json>`.
 - **Files**: `locator.rs`.
 - **Tests**: `locator.locator('button').and(locator.locator(':visible'))` matches elements that are both.
 
 ### 3.7 Strict mode
 
-- [ ] Locator actions default to strict (error on multi-match); add `LocatorOptions { strict: bool }` override.
+- [x] Locator actions default to strict (error on multi-match); add `LocatorOptions { strict: bool }` override.
 - **Files**: `locator.rs`.
 - **Blocks on**: 1.1 (needs `StrictModeViolation`).
 - **Tests**: multi-match click throws strict error.
@@ -332,7 +333,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.18 `Locator.or` semantics
 
-- [ ] Current impl uses CSS `:is()` — must use `internal:or=<json>`.
+- [x] Current impl uses CSS `:is()` — must use `internal:or=<json>`.
 - **Files**: `locator.rs`.
 
 ### 3.19 `Browser.version` returns real version

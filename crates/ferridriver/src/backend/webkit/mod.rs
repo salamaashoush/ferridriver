@@ -1328,25 +1328,30 @@ impl WebKitPage {
     std::future::ready(result)
   }
 
-  /// Register a route handler to intercept network requests matching the given glob pattern.
+  /// Register a route handler to intercept network requests matching the given matcher.
+  ///
+  /// The matcher's JS-side pre-filter regex (see
+  /// [`crate::url_matcher::UrlMatcher::regex_source_for_prefilter`]) is injected
+  /// into the page-side interceptor so only matching URLs incur an IPC
+  /// round-trip. Predicate matchers route every URL through Rust.
   ///
   /// # Errors
   ///
-  /// Returns an error if the glob pattern is invalid, the route lock is poisoned,
-  /// or the JavaScript injection to register the route pattern fails.
-  pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<(), String> {
-    let regex = crate::route::glob_to_regex(pattern)?;
+  /// Returns an error if the route lock is poisoned or the JavaScript
+  /// injection to register the route pattern fails.
+  pub async fn route(
+    &self,
+    matcher: crate::url_matcher::UrlMatcher,
+    handler: crate::route::RouteHandler,
+  ) -> Result<(), String> {
+    let prefilter_regex_src = matcher.regex_source_for_prefilter();
 
     // Add route to Rust-side list (write lock -- cold path)
     self
       .routes
       .write()
       .map_err(|e| format!("routes write lock poisoned: {e}"))?
-      .push(crate::route::RegisteredRoute {
-        pattern: regex.clone(),
-        pattern_str: pattern.to_string(),
-        handler,
-      });
+      .push(crate::route::RegisteredRoute { matcher, handler });
 
     // Set up the IPC route callback (once) to dispatch to our routes list
     {
@@ -1363,7 +1368,7 @@ impl WebKitPage {
               return r#"{"action":"continue"}"#.to_string();
             }; // read lock -- hot path
             for route in routes.iter() {
-              if route.pattern.is_match(url) {
+              if route.matcher.matches(url) {
                 let headers: rustc_hash::FxHashMap<String, String> =
                   serde_json::from_str(headers_json).unwrap_or_default();
                 let intercepted = crate::route::InterceptedRequest {
@@ -1415,7 +1420,7 @@ impl WebKitPage {
     }
 
     // Add the JS regex pattern so the page interceptor knows to call fdRoute for this URL
-    let regex_str = regex.as_str().replace('\\', "\\\\").replace('\'', "\\'");
+    let regex_str = prefilter_regex_src.replace('\\', "\\\\").replace('\'', "\\'");
     let js = format!(
       "(function(){{window.__fd_routes=window.__fd_routes||[];window.__fd_routes.push(new RegExp('{regex_str}'))}})();"
     );
@@ -1425,27 +1430,27 @@ impl WebKitPage {
     Ok(())
   }
 
-  /// Remove a previously registered route handler by its glob pattern.
+  /// Remove a previously registered route handler matching the given matcher.
   ///
   /// # Errors
   ///
   /// Returns an error if the route lock is poisoned or the JavaScript cleanup fails.
-  pub async fn unroute(&self, pattern: &str) -> Result<(), String> {
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<(), String> {
+    let prefilter_regex_src = matcher.regex_source_for_prefilter();
+
     // Remove from Rust-side list (write lock -- cold path)
     self
       .routes
       .write()
       .map_err(|e| format!("routes write lock poisoned: {e}"))?
-      .retain(|r| r.pattern_str != pattern);
+      .retain(|r| !r.matcher.equivalent(matcher));
 
     // Remove from JS-side pattern list
-    if let Ok(regex) = crate::route::glob_to_regex(pattern) {
-      let regex_str = regex.as_str().replace('\\', "\\\\").replace('\'', "\\'");
-      let js = format!(
-        "(function(){{window.__fd_routes=(window.__fd_routes||[]).filter(function(r){{return r.source!=='{regex_str}'}})}})()"
-      );
-      self.evaluate(&js).await?;
-    }
+    let regex_str = prefilter_regex_src.replace('\\', "\\\\").replace('\'', "\\'");
+    let js = format!(
+      "(function(){{window.__fd_routes=(window.__fd_routes||[]).filter(function(r){{return r.source!=='{regex_str}'}})}})()"
+    );
+    self.evaluate(&js).await?;
     Ok(())
   }
 

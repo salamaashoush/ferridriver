@@ -500,25 +500,29 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or route registration fails.
-  pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<()> {
+  pub async fn route(
+    &self,
+    matcher: crate::url_matcher::UrlMatcher,
+    handler: crate::route::RouteHandler,
+  ) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
-      page.route(pattern, handler.clone()).await?;
+      page.route(matcher.clone(), handler.clone()).await?;
     }
     Ok(())
   }
 
-  /// Remove route handlers matching pattern from all pages.
+  /// Remove route handlers matching the given matcher from all pages.
   ///
   /// # Errors
   ///
   /// Returns an error if the context does not exist or route removal fails.
-  pub async fn unroute(&self, pattern: &str) -> Result<()> {
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
-      page.unroute(pattern).await?;
+      page.unroute(matcher).await?;
     }
     Ok(())
   }

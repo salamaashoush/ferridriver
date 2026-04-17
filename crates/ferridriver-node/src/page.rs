@@ -267,11 +267,17 @@ impl Page {
 
   /// Wait for a network response matching a URL pattern.
   /// Playwright API: `page.waitForResponse(urlOrPredicate)`.
-  #[napi]
-  pub async fn wait_for_response(&self, url_pattern: String, timeout_ms: Option<f64>) -> Result<ResponseData> {
+  /// `url` accepts a glob string or a native JS `RegExp`.
+  #[napi(ts_args_type = "url: string | RegExp, timeoutMs?: number")]
+  pub async fn wait_for_response(
+    &self,
+    url: napi::Either<String, crate::types::JsRegExpLike>,
+    timeout_ms: Option<f64>,
+  ) -> Result<ResponseData> {
+    let matcher = crate::types::string_or_regex_to_rust(url)?;
     let r = self
       .inner
-      .wait_for_response(&url_pattern, timeout_ms.map(crate::types::f64_to_u64))
+      .wait_for_response(matcher, timeout_ms.map(crate::types::f64_to_u64))
       .await
       .map_err(napi::Error::from_reason)?;
     Ok(ResponseData {
@@ -466,13 +472,12 @@ impl Page {
       .map_err(napi::Error::from_reason)
   }
 
-  #[napi]
-  pub async fn wait_for_url(&self, url_pattern: String) -> Result<()> {
-    self
-      .inner
-      .wait_for_url(&url_pattern)
-      .await
-      .map_err(napi::Error::from_reason)
+  /// Wait for the page URL to match. Accepts a glob string or a native JS `RegExp`.
+  /// Playwright API: `page.waitForURL(url)`.
+  #[napi(ts_args_type = "url: string | RegExp")]
+  pub async fn wait_for_url(&self, url: napi::Either<String, crate::types::JsRegExpLike>) -> Result<()> {
+    let matcher = crate::types::string_or_regex_to_rust(url)?;
+    self.inner.wait_for_url(matcher).await.map_err(napi::Error::from_reason)
   }
 
   #[napi]
@@ -921,11 +926,19 @@ impl Page {
       .map_err(napi::Error::from_reason)
   }
 
-  #[napi]
-  pub async fn wait_for_request(&self, url_pattern: String, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+  /// Wait for a network request matching a URL pattern.
+  /// Playwright API: `page.waitForRequest(urlOrPredicate)`.
+  /// `url` accepts a glob string or a native JS `RegExp`.
+  #[napi(ts_args_type = "url: string | RegExp, timeoutMs?: number")]
+  pub async fn wait_for_request(
+    &self,
+    url: napi::Either<String, crate::types::JsRegExpLike>,
+    timeout_ms: Option<f64>,
+  ) -> Result<serde_json::Value> {
+    let matcher = crate::types::string_or_regex_to_rust(url)?;
     let req = self
       .inner
-      .wait_for_request(&url_pattern, timeout_ms.map(crate::types::f64_to_u64))
+      .wait_for_request(matcher, timeout_ms.map(crate::types::f64_to_u64))
       .await
       .map_err(napi::Error::from_reason)?;
     Ok(serde_json::json!({"url": req.url, "method": req.method, "resourceType": req.resource_type}))
@@ -983,10 +996,10 @@ impl Page {
   ///   }
   /// });
   /// ```
-  #[napi(ts_args_type = "pattern: string, handler: (route: Route) => void")]
+  #[napi(ts_args_type = "url: string | RegExp, handler: (route: Route) => void")]
   pub async fn route(
     &self,
-    pattern: String,
+    url: napi::Either<String, crate::types::JsRegExpLike>,
     handler: napi::threadsafe_function::ThreadsafeFunction<
       crate::route::Route,
       (),
@@ -997,6 +1010,7 @@ impl Page {
       0,
     >,
   ) -> Result<()> {
+    let matcher = crate::types::string_or_regex_to_rust(url)?;
     let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
       let napi_route = crate::route::Route::wrap(route);
       handler.call(
@@ -1007,15 +1021,17 @@ impl Page {
 
     self
       .inner
-      .route(&pattern, rust_handler)
+      .route(matcher, rust_handler)
       .await
       .map_err(napi::Error::from_reason)
   }
 
-  /// Remove all route handlers matching the glob pattern.
-  #[napi]
-  pub async fn unroute(&self, pattern: String) -> Result<()> {
-    self.inner.unroute(&pattern).await.map_err(napi::Error::from_reason)
+  /// Remove all route handlers matching the given URL matcher.
+  /// Accepts the same shape as `route()` — a glob string or a native JS `RegExp`.
+  #[napi(ts_args_type = "url: string | RegExp")]
+  pub async fn unroute(&self, url: napi::Either<String, crate::types::JsRegExpLike>) -> Result<()> {
+    let matcher = crate::types::string_or_regex_to_rust(url)?;
+    self.inner.unroute(&matcher).await.map_err(napi::Error::from_reason)
   }
 
   // ── Expect assertions (delegates to Rust core, all polling in Rust) ──
