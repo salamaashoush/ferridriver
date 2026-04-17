@@ -10,8 +10,35 @@ use ferridriver::Page;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
-use crate::bindings::convert::FerriResultExt;
+use ferridriver::options::WaitOptions;
+use serde::Deserialize;
+
+use crate::bindings::convert::{FerriResultExt, serde_from_js};
 use crate::bindings::locator::LocatorJs;
+
+/// Shape of `waitForSelector` options accepted from JS.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default)]
+struct JsWaitOptions {
+  state: Option<String>,
+  timeout: Option<u64>,
+}
+
+fn parse_wait_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  value: Option<rquickjs::Value<'js>>,
+) -> rquickjs::Result<WaitOptions> {
+  match value {
+    Some(v) if !v.is_undefined() && !v.is_null() => {
+      let js: JsWaitOptions = serde_from_js(ctx, v)?;
+      Ok(WaitOptions {
+        state: js.state,
+        timeout: js.timeout,
+      })
+    },
+    _ => Ok(WaitOptions::default()),
+  }
+}
 
 /// JS-visible wrapper around [`ferridriver::Page`].
 ///
@@ -89,6 +116,27 @@ impl PageJs {
   #[qjs(rename = "setContent")]
   pub async fn set_content(&self, html: String) -> rquickjs::Result<()> {
     self.inner.set_content(&html).await.into_js()
+  }
+
+  /// Full page rendered as clean Markdown (headings, lists, links, tables
+  /// preserved; chrome and boilerplate stripped).
+  #[qjs(rename = "markdown")]
+  pub async fn markdown(&self) -> rquickjs::Result<String> {
+    self.inner.markdown().await.into_js()
+  }
+
+  /// Wait for an element matching `selector`. Optional `options` object
+  /// accepts `{ state?: 'visible'|'hidden'|'attached'|'stable', timeout?: ms }`.
+  /// Resolves when the condition is met; throws on timeout.
+  #[qjs(rename = "waitForSelector")]
+  pub async fn wait_for_selector<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    options: Option<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = parse_wait_options(&ctx, options)?;
+    self.inner.wait_for_selector(&selector, opts).await.into_js()
   }
 
   // ── Locators ──────────────────────────────────────────────────────────────

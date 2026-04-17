@@ -188,20 +188,6 @@ pub struct SnapshotParams {
 }
 
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct WaitForParams {
-  #[schemars(
-    description = "CSS selector to wait for. Resolves when at least one matching element appears in the DOM."
-  )]
-  pub selector: Option<String>,
-  #[schemars(description = "Text substring to wait for in the page body. Case-sensitive.")]
-  pub text: Option<String>,
-  #[schemars(description = "Timeout ms.")]
-  pub timeout: Option<u64>,
-  #[serde(flatten)]
-  pub session: SessionParam,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct SessionOnlyParams {
   #[serde(flatten)]
   pub session: SessionParam,
@@ -331,20 +317,6 @@ pub struct SearchPageParams {
   pub selector: Option<String>,
   #[schemars(description = "Maximum matches to return. Default: 25.")]
   pub max_results: Option<usize>,
-  #[serde(flatten)]
-  pub session: SessionParam,
-}
-
-#[derive(Debug, Deserialize, schemars::JsonSchema)]
-pub struct FindElementsParams {
-  #[schemars(description = "CSS selector to query elements.")]
-  pub selector: String,
-  #[schemars(description = "Specific attributes to extract (e.g. [\"href\", \"src\"]).")]
-  pub attributes: Option<Vec<String>>,
-  #[schemars(description = "Maximum elements to return. Default: 50.")]
-  pub max_results: Option<usize>,
-  #[schemars(description = "Include text content of each element. Default: true.")]
-  pub include_text: Option<bool>,
   #[serde(flatten)]
   pub session: SessionParam,
 }
