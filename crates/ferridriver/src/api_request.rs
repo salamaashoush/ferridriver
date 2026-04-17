@@ -105,8 +105,9 @@ impl APIResponse {
   /// # Errors
   ///
   /// Returns an error if the body is not valid UTF-8.
-  pub fn text(&self) -> Result<String, String> {
-    String::from_utf8(self.body_bytes.to_vec()).map_err(|e| format!("response body is not UTF-8: {e}"))
+  pub fn text(&self) -> crate::error::Result<String> {
+    String::from_utf8(self.body_bytes.to_vec())
+      .map_err(|e| crate::error::FerriError::evaluation(format!("response body is not UTF-8: {e}")))
   }
 
   /// Parse response body as JSON.
@@ -114,8 +115,8 @@ impl APIResponse {
   /// # Errors
   ///
   /// Returns an error if the body cannot be deserialized.
-  pub fn json<T: serde::de::DeserializeOwned>(&self) -> Result<T, String> {
-    serde_json::from_slice(&self.body_bytes).map_err(|e| format!("JSON parse error: {e}"))
+  pub fn json<T: serde::de::DeserializeOwned>(&self) -> crate::error::Result<T> {
+    serde_json::from_slice(&self.body_bytes).map_err(Into::into)
   }
 
   /// Response body as a JSON value.
@@ -123,7 +124,7 @@ impl APIResponse {
   /// # Errors
   ///
   /// Returns an error if the body is not valid JSON.
-  pub fn json_value(&self) -> Result<serde_json::Value, String> {
+  pub fn json_value(&self) -> crate::error::Result<serde_json::Value> {
     self.json()
   }
 
@@ -194,7 +195,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn get(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
+  pub async fn get(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
     self
       .fetch(
         url,
@@ -211,7 +212,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn post(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
+  pub async fn post(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
     self
       .fetch(
         url,
@@ -228,7 +229,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn put(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
+  pub async fn put(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
     self
       .fetch(
         url,
@@ -245,7 +246,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn delete(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
+  pub async fn delete(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
     self
       .fetch(
         url,
@@ -262,7 +263,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn patch(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
+  pub async fn patch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
     self
       .fetch(
         url,
@@ -279,7 +280,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn head(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
+  pub async fn head(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
     self
       .fetch(
         url,
@@ -296,7 +297,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or `fail_on_status_code` is set and the response is 4xx/5xx.
-  pub async fn fetch(&self, url: &str, options: Option<RequestOptions>) -> Result<APIResponse, String> {
+  pub async fn fetch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
     let opts = options.unwrap_or_default();
     let method_str = opts.method.as_deref().unwrap_or("GET");
     let method: reqwest::Method = method_str
@@ -370,12 +371,12 @@ impl APIRequestContext {
 
     // Fail on status code if requested.
     if opts.fail_on_status_code.unwrap_or(false) && !api_response.ok() {
-      return Err(format!(
+      return Err(crate::error::FerriError::Other(format!(
         "{} {resolved_url} failed: {} {}",
         method_str,
         api_response.status(),
         api_response.status_text()
-      ));
+      )));
     }
 
     Ok(api_response)

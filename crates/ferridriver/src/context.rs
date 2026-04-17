@@ -8,6 +8,7 @@
 //! - Pages are created by `context.new_page()`
 
 use crate::backend::{AnyPage, CookieData};
+use crate::error::Result;
 use crate::page::Page;
 use crate::state::SessionKey;
 use arc_swap::ArcSwap;
@@ -105,9 +106,9 @@ impl BrowserContext {
   /// # Errors
   ///
   /// Returns an error if cookies cannot be retrieved from the active page.
-  pub async fn cookies(&self) -> Result<Vec<CookieData>, String> {
+  pub async fn cookies(&self) -> Result<Vec<CookieData>> {
     if let Some(page) = self.active_page() {
-      page.get_cookies().await
+      page.get_cookies().await.map_err(Into::into)
     } else {
       Ok(Vec::new())
     }
@@ -118,7 +119,7 @@ impl BrowserContext {
   /// # Errors
   ///
   /// Returns an error if no page exists or if setting a cookie fails.
-  pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<(), String> {
+  pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<()> {
     let page = self.active_page().ok_or("No page in context")?;
     for cookie in cookies {
       page.set_cookie(cookie).await?;
@@ -131,7 +132,7 @@ impl BrowserContext {
   /// # Errors
   ///
   /// Returns an error if clearing cookies fails on the active page.
-  pub async fn clear_cookies(&self) -> Result<(), String> {
+  pub async fn clear_cookies(&self) -> Result<()> {
     if let Some(page) = self.active_page() {
       page.clear_cookies().await?;
     }
@@ -143,7 +144,7 @@ impl BrowserContext {
   /// # Errors
   ///
   /// Returns an error if reading or re-setting cookies fails.
-  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
+  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
     let cookies = self.cookies().await?;
     if let Some(page) = self.active_page() {
       page.clear_cookies().await?;
@@ -238,7 +239,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if page creation fails.
-  pub async fn new_page(&self) -> Result<Arc<Page>, String> {
+  pub async fn new_page(&self) -> Result<Arc<Page>> {
     {
       let mut state = self.state.write().await;
       Box::pin(state.ensure_instance(&self.key.instance)).await?;
@@ -293,7 +294,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist.
-  pub async fn pages(&self) -> Result<Vec<Arc<Page>>, String> {
+  pub async fn pages(&self) -> Result<Vec<Arc<Page>>> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     Ok(
@@ -310,7 +311,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or cookie retrieval fails.
-  pub async fn cookies(&self) -> Result<Vec<CookieData>, String> {
+  pub async fn cookies(&self) -> Result<Vec<CookieData>> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     ctx.cookies().await
@@ -321,7 +322,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or setting cookies fails.
-  pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<(), String> {
+  pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     ctx.add_cookies(cookies).await
@@ -332,7 +333,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or clearing cookies fails.
-  pub async fn clear_cookies(&self) -> Result<(), String> {
+  pub async fn clear_cookies(&self) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     ctx.clear_cookies().await
@@ -344,7 +345,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or clearing cookies fails.
-  pub async fn clear_cookies_filtered(&self, options: &crate::backend::ClearCookieOptions) -> Result<(), String> {
+  pub async fn clear_cookies_filtered(&self, options: &crate::backend::ClearCookieOptions) -> Result<()> {
     if options.name.is_none() && options.domain.is_none() && options.path.is_none() {
       return self.clear_cookies().await;
     }
@@ -371,7 +372,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or deleting fails.
-  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
+  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     ctx.delete_cookie(name, domain).await
@@ -392,13 +393,13 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context or page does not exist, or granting fails.
-  pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<(), String> {
+  pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     if let Some(page) = ctx.active_page() {
-      page.grant_permissions(permissions, origin).await
+      page.grant_permissions(permissions, origin).await.map_err(Into::into)
     } else {
-      Err("No page in context".into())
+      Err(crate::error::FerriError::Other("No page in context".into()))
     }
   }
 
@@ -407,11 +408,11 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if resetting permissions fails.
-  pub async fn clear_permissions(&self) -> Result<(), String> {
+  pub async fn clear_permissions(&self) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     if let Some(page) = ctx.active_page() {
-      page.reset_permissions().await
+      page.reset_permissions().await.map_err(Into::into)
     } else {
       Ok(())
     }
@@ -422,7 +423,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if state lock acquisition fails.
-  pub async fn close(&self) -> Result<(), String> {
+  pub async fn close(&self) -> Result<()> {
     let mut state = self.state.write().await;
     state.remove_context(&self.name).await;
     Ok(())
@@ -442,7 +443,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or script injection fails.
-  pub async fn add_init_script(&self, source: &str) -> Result<Vec<String>, String> {
+  pub async fn add_init_script(&self, source: &str) -> Result<Vec<String>> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     let mut ids = Vec::new();
@@ -457,7 +458,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or geolocation emulation fails.
-  pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<(), String> {
+  pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
@@ -471,7 +472,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or setting headers fails.
-  pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
+  pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
@@ -485,7 +486,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or network state change fails.
-  pub async fn set_offline(&self, offline: bool) -> Result<(), String> {
+  pub async fn set_offline(&self, offline: bool) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
@@ -499,7 +500,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or route registration fails.
-  pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<(), String> {
+  pub async fn route(&self, pattern: &str, handler: crate::route::RouteHandler) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {
@@ -513,7 +514,7 @@ impl ContextRef {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or route removal fails.
-  pub async fn unroute(&self, pattern: &str) -> Result<(), String> {
+  pub async fn unroute(&self, pattern: &str) -> Result<()> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     for page in &ctx.pages {

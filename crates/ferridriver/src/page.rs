@@ -1379,7 +1379,8 @@ impl Page {
     async move {
       events
         .wait_for(|e| matches!(e, PageEvent::Load | PageEvent::DomContentLoaded), timeout)
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
       Ok(())
     }
   }
@@ -1403,7 +1404,8 @@ impl Page {
           move |e| matches!(e, PageEvent::Response(r) if r.url.contains(&pattern)),
           timeout,
         )
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
       match event {
         PageEvent::Response(r) => Ok(r),
         _ => Err("Unexpected event type".into()),
@@ -1430,7 +1432,8 @@ impl Page {
           move |e| matches!(e, PageEvent::Request(r) if r.url.contains(&pattern)),
           timeout,
         )
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
       match event {
         PageEvent::Request(r) => Ok(r),
         _ => Err("Unexpected event type".into()),
@@ -1452,7 +1455,8 @@ impl Page {
     async move {
       let event = events
         .wait_for(|e| matches!(e, PageEvent::Download(_)), timeout)
-        .await?;
+        .await
+        .map_err(|e| e.to_string())?;
       match event {
         PageEvent::Download(d) => Ok(d),
         _ => Err("Unexpected event type".into()),
@@ -1471,6 +1475,7 @@ impl Page {
       .events()
       .wait_for_event(event_name, timeout_ms.unwrap_or(self.default_timeout()))
       .await
+      .map_err(|e| e.to_string())
   }
 
   /// Wait for a download to start, matching an optional URL pattern.
@@ -1491,7 +1496,8 @@ impl Page {
         move |e| matches!(e, PageEvent::Download(d) if pattern.as_ref().is_none_or(|p| d.url.contains(p))),
         timeout_ms.unwrap_or(self.default_timeout()),
       )
-      .await?;
+      .await
+      .map_err(|e| e.to_string())?;
     match event {
       PageEvent::Download(d) => Ok(d),
       _ => Err("Unexpected event type".into()),
@@ -1516,7 +1522,8 @@ impl Page {
         move |e| matches!(e, PageEvent::Request(r) if r.url.contains(&pattern)),
         timeout_ms.unwrap_or(self.default_timeout()),
       )
-      .await?;
+      .await
+      .map_err(|e| e.to_string())?;
     match event {
       PageEvent::Request(r) => Ok(r),
       _ => Err("Unexpected event type".into()),
@@ -1541,7 +1548,8 @@ impl Page {
         move |e| matches!(e, PageEvent::Response(r) if r.url.contains(&pattern)),
         timeout_ms.unwrap_or(self.default_timeout()),
       )
-      .await?;
+      .await
+      .map_err(|e| e.to_string())?;
     match event {
       PageEvent::Response(r) => Ok(r),
       _ => Err("Unexpected event type".into()),

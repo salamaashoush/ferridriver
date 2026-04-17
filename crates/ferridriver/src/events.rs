@@ -214,7 +214,7 @@ impl EventEmitter {
   /// ```ignore
   /// let response = emitter.wait_for(|e| matches!(e, PageEvent::Response(r) if r.url.contains("/api")), 5000).await?;
   /// ```
-  pub async fn wait_for<F>(&self, predicate: F, timeout_ms: u64) -> Result<PageEvent, String>
+  pub async fn wait_for<F>(&self, predicate: F, timeout_ms: u64) -> crate::error::Result<PageEvent>
   where
     F: Fn(&PageEvent) -> bool,
   {
@@ -224,13 +224,17 @@ impl EventEmitter {
     loop {
       let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
       if remaining.is_zero() {
-        return Err("Timeout waiting for event".into());
+        return Err(crate::error::FerriError::timeout("waiting for event", timeout_ms));
       }
       match tokio::time::timeout(remaining, rx.recv()).await {
         Ok(Ok(event)) if predicate(&event) => return Ok(event),
         Ok(Ok(_)) => {},
-        Ok(Err(_)) => return Err("Event channel closed".into()),
-        Err(_) => return Err("Timeout waiting for event".into()),
+        Ok(Err(_)) => {
+          return Err(crate::error::FerriError::target_closed(Some(
+            "event channel closed".into(),
+          )));
+        },
+        Err(_) => return Err(crate::error::FerriError::timeout("waiting for event", timeout_ms)),
       }
     }
   }
@@ -240,7 +244,7 @@ impl EventEmitter {
   /// # Errors
   ///
   /// Returns an error if the timeout elapses or the event channel is closed.
-  pub async fn wait_for_event(&self, event_name: &str, timeout_ms: u64) -> Result<PageEvent, String> {
+  pub async fn wait_for_event(&self, event_name: &str, timeout_ms: u64) -> crate::error::Result<PageEvent> {
     let name = event_name.to_string();
     self.wait_for(move |e| event_name_matches(&name, e), timeout_ms).await
   }

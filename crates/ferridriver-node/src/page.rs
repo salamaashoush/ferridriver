@@ -1,5 +1,6 @@
 //! Page class -- NAPI binding for `ferridriver::Page`.
 
+use crate::error::IntoNapi;
 use crate::locator::Locator;
 use crate::types::{
   GotoOptions, MetricData, ResponseData, RoleOptions, ScreenshotOptions, TextOptions, ViewportConfig, WaitOptions,
@@ -260,12 +261,7 @@ impl Page {
   )]
   pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
-    let ev = self
-      .inner
-      .events()
-      .wait_for_event(&event, timeout)
-      .await
-      .map_err(napi::Error::from_reason)?;
+    let ev = self.inner.events().wait_for_event(&event, timeout).await.into_napi()?;
     Ok(page_event_to_value(&ev))
   }
 

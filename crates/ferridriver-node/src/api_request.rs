@@ -1,5 +1,6 @@
 //! NAPI bindings for the API request context (Playwright's `request` fixture).
 
+use crate::error::IntoNapi;
 use napi::Result;
 use napi_derive::napi;
 
@@ -130,13 +131,13 @@ impl ApiResponse {
   /// Response body as string.
   #[napi]
   pub fn text(&self) -> Result<String> {
-    self.inner.text().map_err(napi::Error::from_reason)
+    self.inner.text().into_napi()
   }
 
   /// Response body parsed as JSON.
   #[napi]
   pub fn json(&self) -> Result<serde_json::Value> {
-    self.inner.json_value().map_err(napi::Error::from_reason)
+    self.inner.json_value().into_napi()
   }
 
   /// Raw response body as Buffer.
@@ -193,7 +194,7 @@ impl ApiRequestContext {
   #[napi]
   pub async fn get(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
     let opts = options.map(|o| o.to_core());
-    let resp = self.inner.get(&url, opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.get(&url, opts).await.into_napi()?;
     Ok(ApiResponse { inner: resp })
   }
 
@@ -201,7 +202,7 @@ impl ApiRequestContext {
   #[napi]
   pub async fn post(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
     let opts = options.map(|o| o.to_core());
-    let resp = self.inner.post(&url, opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.post(&url, opts).await.into_napi()?;
     Ok(ApiResponse { inner: resp })
   }
 
@@ -209,7 +210,7 @@ impl ApiRequestContext {
   #[napi]
   pub async fn put(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
     let opts = options.map(|o| o.to_core());
-    let resp = self.inner.put(&url, opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.put(&url, opts).await.into_napi()?;
     Ok(ApiResponse { inner: resp })
   }
 
@@ -217,7 +218,7 @@ impl ApiRequestContext {
   #[napi]
   pub async fn delete(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
     let opts = options.map(|o| o.to_core());
-    let resp = self.inner.delete(&url, opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.delete(&url, opts).await.into_napi()?;
     Ok(ApiResponse { inner: resp })
   }
 
@@ -225,7 +226,7 @@ impl ApiRequestContext {
   #[napi]
   pub async fn patch(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
     let opts = options.map(|o| o.to_core());
-    let resp = self.inner.patch(&url, opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.patch(&url, opts).await.into_napi()?;
     Ok(ApiResponse { inner: resp })
   }
 
@@ -233,7 +234,7 @@ impl ApiRequestContext {
   #[napi]
   pub async fn head(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
     let opts = options.map(|o| o.to_core());
-    let resp = self.inner.head(&url, opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.head(&url, opts).await.into_napi()?;
     Ok(ApiResponse { inner: resp })
   }
 
@@ -241,7 +242,7 @@ impl ApiRequestContext {
   #[napi]
   pub async fn fetch(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
     let opts = options.map(|o| o.to_core());
-    let resp = self.inner.fetch(&url, opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.fetch(&url, opts).await.into_napi()?;
     Ok(ApiResponse { inner: resp })
   }
 

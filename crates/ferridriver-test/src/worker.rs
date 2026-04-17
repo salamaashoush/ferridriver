@@ -29,6 +29,12 @@ struct PreparedPage {
   page_result: Result<Arc<ferridriver::Page>, String>,
 }
 
+/// Bridge from the core's typed [`FerriError`] to the runner's legacy String
+/// error channel. Removed when tasks migrate the runner.
+fn ferri_err_to_string(e: ferridriver::FerriError) -> String {
+  e.to_string()
+}
+
 #[derive(Clone)]
 struct EffectiveContextConfig {
   context: ContextConfig,
@@ -66,7 +72,7 @@ async fn ensure_page_alive(page: &Arc<ferridriver::Page>) -> Result<(), String> 
 }
 
 async fn create_ready_page(ctx: &ferridriver::ContextRef) -> Result<Arc<ferridriver::Page>, String> {
-  let page = ctx.new_page().await?;
+  let page = ctx.new_page().await.map_err(ferri_err_to_string)?;
   ensure_page_alive(&page).await?;
   Ok(page)
 }
@@ -124,12 +130,12 @@ impl TestBrowserResources {
             prepared
           } else {
             let ctx = self.browser.new_context();
-            let page_result = ctx.new_page().await;
+            let page_result = ctx.new_page().await.map_err(ferri_err_to_string);
             PreparedPage { ctx, page_result }
           }
         } else {
           let ctx = self.browser.new_context();
-          let page_result = ctx.new_page().await;
+          let page_result = ctx.new_page().await.map_err(ferri_err_to_string);
           PreparedPage { ctx, page_result }
         };
 
