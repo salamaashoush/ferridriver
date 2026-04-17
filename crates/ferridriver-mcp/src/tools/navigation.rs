@@ -69,6 +69,7 @@ impl McpServer {
     let opts = ferridriver::options::GotoOptions {
       wait_until: Some(p.wait_until.unwrap_or_else(|| "commit".into())),
       timeout: None,
+      referer: None,
     };
     page.goto(&p.url, Some(opts)).await.map_err(Self::err)?;
     Box::pin(self.action_ok(&page, s, "Navigation complete.")).await

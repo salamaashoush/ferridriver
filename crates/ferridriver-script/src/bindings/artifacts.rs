@@ -142,9 +142,8 @@ impl ArtifactsJs {
   #[qjs(rename = "remove")]
   pub async fn remove(&self, name: String) -> rquickjs::Result<bool> {
     let sb = self.sandbox.clone();
-    let resolved = match sb.resolve_read(&name) {
-      Ok(p) => p,
-      Err(_) => return Ok(false),
+    let Ok(resolved) = sb.resolve_read(&name) else {
+      return Ok(false);
     };
     match tokio::fs::remove_file(&resolved).await {
       Ok(()) => Ok(true),

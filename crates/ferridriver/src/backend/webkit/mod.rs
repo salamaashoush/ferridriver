@@ -20,6 +20,11 @@ use ipc::{IpcClient, IpcResponse, Op};
 pub struct WebKitBrowser {
   client: Arc<IpcClient>,
   child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+  /// Running `WebKit.framework` product version captured at launch via
+  /// `Op::GetWebKitVersion`. Shape mirrors the CDP
+  /// `Browser.getVersion().product` string, e.g. `"WebKit/617.1.2 (17618)"`.
+  /// Surfaced through `Browser::version()`.
+  version: Arc<str>,
 }
 
 impl WebKitBrowser {
@@ -41,10 +46,24 @@ impl WebKitBrowser {
   /// fails to start or become ready.
   pub async fn launch_with_options(headless: bool) -> Result<Self, String> {
     let (client, child) = IpcClient::spawn(headless).await?;
+    let client = Arc::new(client);
+    // Handshake: query the real WebKit framework version so
+    // `Browser::version()` doesn't return a placeholder string.
+    let version: Arc<str> = match client.send_empty(Op::GetWebKitVersion).await {
+      Ok(IpcResponse::Value(v)) => v.as_str().map_or_else(|| Arc::from("WebKit/unknown"), Arc::from),
+      _ => Arc::from("WebKit/unknown"),
+    };
     Ok(Self {
-      client: Arc::new(client),
+      client,
       child: Arc::new(std::sync::Mutex::new(Some(child))),
+      version,
     })
+  }
+
+  /// Real `WebKit` framework version captured at launch.
+  #[must_use]
+  pub fn version(&self) -> &str {
+    &self.version
   }
 
   /// List all open pages (views) in this browser instance.
@@ -197,11 +216,19 @@ impl WebKitPage {
     url: &str,
     _lifecycle: crate::backend::NavLifecycle,
     _timeout_ms: u64,
+    referer: Option<&str>,
   ) -> Result<(), String> {
     // WebKit backend: WKWebView navigation delegate fires on load complete.
     // Lifecycle granularity (commit vs domcontentloaded vs load) is not
     // distinguishable via the native API — all waits resolve on load.
-    let r = self.client.send_str_vid(Op::Navigate, url, self.vid()).await?;
+    //
+    // Referer is attached as a `Referer` HTTP header on the
+    // `NSMutableURLRequest` by the Obj-C side when present.
+    let mut p = Vec::new();
+    ipc::str_encode(&mut p, url);
+    p.extend_from_slice(&self.vid().to_le_bytes());
+    ipc::str_encode(&mut p, referer.unwrap_or(""));
+    let r = self.client.send(Op::Navigate, &p).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
     Self::ok(r2)
@@ -1452,10 +1479,29 @@ impl WebKitPage {
 
   /// Close this page (view) via the IPC close command.
   ///
+  /// Honors `run_before_unload`: when `true`, synchronously dispatches a
+  /// `BeforeUnloadEvent` on the page's window before issuing the close IPC.
+  /// That's the best macOS `WKWebView` can do without a first-class CDP
+  /// `Page.close` analogue — any `addEventListener('beforeunload', ...)`
+  /// handlers installed by the page will fire and can do cleanup work.
+  /// (`WKWebView`'s native dialog-style beforeunload prompt requires a
+  /// `WKNavigationDelegate` decision handler flow we don't currently
+  /// surface.)
+  ///
   /// # Errors
   ///
   /// Returns an error if the close IPC call fails.
-  pub async fn close_page(&self) -> Result<(), String> {
+  pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<(), String> {
+    if opts.run_before_unload.unwrap_or(false) {
+      // Best-effort: dispatch the event so page-registered handlers run.
+      // We intentionally ignore the return — page code may legitimately
+      // throw inside its own handler and we still need to proceed to close.
+      let _ = self
+        .evaluate(
+          "(() => { try { window.dispatchEvent(new Event('beforeunload', { cancelable: true })); } catch (_) {} })()",
+        )
+        .await;
+    }
     let r = self.client.send_vid(ipc::Op::Close, self.vid()).await?;
     Self::ok(r)?;
     self.closed.store(true, std::sync::atomic::Ordering::Release);

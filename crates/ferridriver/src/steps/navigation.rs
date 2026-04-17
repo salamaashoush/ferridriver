@@ -15,7 +15,11 @@ step!(NavigateNoWait {
     example: "When I navigate to \"https://example.com\" without waiting",
     execute(page, caps, _table, _vars) {
         let url = q(&caps[1]);
-        let opts = crate::options::GotoOptions { wait_until: Some("commit".into()), timeout: None };
+        let opts = crate::options::GotoOptions {
+          wait_until: Some("commit".into()),
+          timeout: None,
+          referer: None,
+        };
         page.goto(&url, Some(opts)).await.map_err(|e| format!("Navigate: {e}"))?;
         Ok(None)
     }

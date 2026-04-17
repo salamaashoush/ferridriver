@@ -119,10 +119,13 @@ impl Browser {
     crate::context::BrowserContext::wrap(self.inner.default_context())
   }
 
-  /// Close the browser.
+  /// Close the browser. Accepts Playwright's `{ reason? }` options shape;
+  /// the reason is surfaced on `TargetClosed` errors emitted to
+  /// in-flight operations on this browser's pages/contexts.
   #[napi]
-  pub async fn close(&self) -> Result<()> {
-    self.inner.close().await.into_napi()
+  pub async fn close(&self, options: Option<crate::types::BrowserCloseOptions>) -> Result<()> {
+    let opts: Option<ferridriver::options::BrowserCloseOptions> = options.map(Into::into);
+    self.inner.close(opts).await.into_napi()
   }
 
   /// List all browser contexts.

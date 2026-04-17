@@ -114,7 +114,7 @@ pub struct BoundingBox {
   pub height: f64,
 }
 
-/// Navigation options (waitUntil, timeout).
+/// Navigation options (waitUntil, timeout, referer).
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct GotoOptions {
@@ -122,6 +122,9 @@ pub struct GotoOptions {
   pub wait_until: Option<String>,
   /// Maximum navigation timeout in milliseconds.
   pub timeout: Option<f64>,
+  /// HTTP `Referer` header to send with the navigation request. Mirrors
+  /// Playwright's `page.goto(url, { referer })`.
+  pub referer: Option<String>,
 }
 
 impl From<GotoOptions> for ferridriver::options::GotoOptions {
@@ -129,7 +132,46 @@ impl From<GotoOptions> for ferridriver::options::GotoOptions {
     Self {
       wait_until: o.wait_until,
       timeout: o.timeout.map(f64_to_u64),
+      referer: o.referer,
     }
+  }
+}
+
+/// Options for `page.close({ runBeforeUnload?, reason? })`. Playwright parity.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct PageCloseOptions {
+  /// When `true`, fires the page's `beforeunload` handlers before
+  /// unloading. CDP switches from `Target.closeTarget` (force) to
+  /// `Page.close`; BiDi passes `promptUnload: true`; WebKit dispatches
+  /// a synthetic `BeforeUnloadEvent` on the window.
+  pub run_before_unload: Option<bool>,
+  /// Human-readable reason surfaced on subsequent `TargetClosed` errors
+  /// emitted to in-flight operations on this page.
+  pub reason: Option<String>,
+}
+
+impl From<PageCloseOptions> for ferridriver::options::PageCloseOptions {
+  fn from(o: PageCloseOptions) -> Self {
+    Self {
+      run_before_unload: o.run_before_unload,
+      reason: o.reason,
+    }
+  }
+}
+
+/// Options for `browser.close({ reason? })`. Playwright parity.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct BrowserCloseOptions {
+  /// Human-readable reason surfaced on `TargetClosed` errors emitted to
+  /// in-flight operations on this browser's pages/contexts.
+  pub reason: Option<String>,
+}
+
+impl From<BrowserCloseOptions> for ferridriver::options::BrowserCloseOptions {
+  fn from(o: BrowserCloseOptions) -> Self {
+    Self { reason: o.reason }
   }
 }
 

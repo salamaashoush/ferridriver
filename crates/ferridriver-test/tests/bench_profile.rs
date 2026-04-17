@@ -67,9 +67,9 @@ async fn deep_profile() {
     t.elapsed().as_secs_f64() * 1000.0,
     t.elapsed().as_secs_f64() * 1000.0 / 3.0
   );
-  b2.close().await.ok();
-  b3.close().await.ok();
-  b4.close().await.ok();
+  b2.close(None).await.ok();
+  b3.close(None).await.ok();
+  b4.close(None).await.ok();
   println!();
 
   // ── 2. Context creation breakdown ──
@@ -276,7 +276,7 @@ async fn deep_profile() {
   );
   println!();
 
-  b1.close().await.ok();
+  b1.close(None).await.ok();
   println!("======================================================================\n");
 }
 

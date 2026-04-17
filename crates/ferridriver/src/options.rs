@@ -236,6 +236,28 @@ pub fn pdf_paper_format_size(format: &str) -> Option<(f64, f64)> {
   }
 }
 
+/// Options for [`crate::page::Page::close`]. Mirrors Playwright's
+/// `page.close({ runBeforeUnload, reason })`.
+#[derive(Debug, Clone, Default)]
+pub struct PageCloseOptions {
+  /// When `true`, the page's `beforeunload` handlers fire before close.
+  /// Chromium mapping: switches the CDP method from `Target.closeTarget`
+  /// (force-close) to `Page.close` (fires `beforeunload`).
+  pub run_before_unload: Option<bool>,
+  /// Human-readable reason attached to the resulting `TargetClosed` error
+  /// that any in-flight operation on this page will receive.
+  pub reason: Option<String>,
+}
+
+/// Options for [`crate::browser::Browser::close`]. Mirrors Playwright's
+/// `browser.close({ reason })`.
+#[derive(Debug, Clone, Default)]
+pub struct BrowserCloseOptions {
+  /// Human-readable reason surfaced to `TargetClosed` errors emitted by any
+  /// in-flight operation on pages/contexts from this browser.
+  pub reason: Option<String>,
+}
+
 /// Navigation options for goto/reload/goBack/goForward.
 #[derive(Debug, Clone, Default)]
 pub struct GotoOptions {
@@ -244,6 +266,10 @@ pub struct GotoOptions {
   pub wait_until: Option<String>,
   /// Maximum navigation timeout in milliseconds.
   pub timeout: Option<u64>,
+  /// HTTP `Referer` header to send with the navigation request. Mirrors
+  /// Playwright's `page.goto(url, { referer })`. If both this and
+  /// `extraHTTPHeaders.referer` are set, this wins.
+  pub referer: Option<String>,
 }
 
 /// Which browser to use.

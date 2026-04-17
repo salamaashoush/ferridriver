@@ -62,6 +62,7 @@ enum Op {
     OP_EMULATE_MEDIA = 69,
     OP_ACCESSIBILITY_TREE = 70,
     OP_ROUTE_REQUEST = 71,
+    OP_GET_WEBKIT_VERSION = 72,
     OP_SHUTDOWN = 255,
 };
 
@@ -695,14 +696,24 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
         }
 
         case OP_NAVIGATE: {
+            // Payload: str url + u64 vid + str referer (optional — empty
+            // string when caller did not provide one). The Rust side
+            // always emits the third field now that Page.goto accepts
+            // `referer` (task 3.2 parity). If the referer is non-empty,
+            // attach it as the `Referer` HTTP header on the NSMutableURLRequest.
             uint32_t off = 0;
             NSString *url = read_str(payload, payload_len, &off);
             uint64_t vid = read_u64(payload, payload_len, &off);
+            NSString *referer = (off < payload_len) ? read_str(payload, payload_len, &off) : @"";
             ViewEntry *v = get_view(vid);
             if (v) {
                 NSURL *nsurl = [NSURL URLWithString:url];
                 if (nsurl) {
-                    [v->webview loadRequest:[NSURLRequest requestWithURL:nsurl]];
+                    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:nsurl];
+                    if (referer.length > 0) {
+                        [req setValue:referer forHTTPHeaderField:@"Referer"];
+                    }
+                    [v->webview loadRequest:req];
                     write_frame(req_id, REP_OK, NULL, 0);
                 } else {
                     write_frame_str(req_id, REP_ERROR, @"bad URL");
@@ -1227,6 +1238,31 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 [v->webview evaluateJavaScript:screenJS completionHandler:nil];
             }
             write_frame(req_id, REP_OK, NULL, 0);
+            break;
+        }
+
+        case OP_GET_WEBKIT_VERSION: {
+            // Payload: empty (version is process-global, not per-view).
+            //
+            // Reports the real running WebKit.framework version read from
+            // its bundle info plist — same source Safari's
+            // `about:version` page reads. Format
+            // `"WebKit/{CFBundleShortVersionString} ({CFBundleVersion})"`
+            // e.g. `"WebKit/617.1.2 (17618)"`. Gives ferridriver's
+            // `browser.version()` a real product version on the WebKit
+            // backend instead of a hardcoded placeholder.
+            NSBundle *webkitBundle = [NSBundle bundleWithIdentifier:@"com.apple.WebKit"];
+            NSString *shortVersion = [webkitBundle objectForInfoDictionaryKey:@"CFBundleShortVersionString"];
+            NSString *bundleVersion = [webkitBundle objectForInfoDictionaryKey:@"CFBundleVersion"];
+            NSString *result;
+            if (shortVersion.length > 0 && bundleVersion.length > 0) {
+                result = [NSString stringWithFormat:@"WebKit/%@ (%@)", shortVersion, bundleVersion];
+            } else if (shortVersion.length > 0) {
+                result = [NSString stringWithFormat:@"WebKit/%@", shortVersion];
+            } else {
+                result = @"WebKit/unknown";
+            }
+            write_frame_str(req_id, REP_VALUE, result);
             break;
         }
 
@@ -1920,6 +1956,35 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 NSDictionary *action = [NSJSONSerialization JSONObjectWithData:jsonData options:0 error:nil];
                 handler(action ?: @{@"action": @"continue"}, nil);
             }
+            break;
+        }
+
+        case OP_CLOSE: {
+            // Payload: u64 vid. Closes the WKWebView and removes it from
+            // the live-view table. Previously fell through to the
+            // `unknown op 5` default handler — a pre-existing gap surfaced
+            // by the task-3.21 Page.close test on WebKit.
+            uint32_t off = 0;
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) {
+                write_frame(req_id, REP_OK, NULL, 0); // idempotent close
+                break;
+            }
+            // Remove from global view table BEFORE invalidating the webview —
+            // avoids a race where the delegate fires on the half-closed view.
+            [g_views removeObjectForKey:@(vid)];
+            // Stop loading and detach delegates so any in-flight navigations
+            // cannot complete against a destroyed view.
+            [v->webview stopLoading];
+            v->webview.navigationDelegate = nil;
+            v->webview.UIDelegate = nil;
+            [v->webview removeFromSuperview];
+            if (v->window) {
+                [v->window close];
+                v->window = nil;
+            }
+            write_frame(req_id, REP_OK, NULL, 0);
             break;
         }
 

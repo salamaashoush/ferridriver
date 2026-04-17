@@ -22,9 +22,17 @@ use tokio::sync::Mutex as AsyncMutex;
 pub struct Page {
   pub(crate) inner: AnyPage,
   default_timeout: AtomicU64,
+  /// Per Playwright: split from `default_timeout`. Navigation-family APIs
+  /// (`goto`, `reload`, `go_back`, `go_forward`, `wait_for_url`) use this
+  /// when explicitly set. The `u64::MAX` sentinel means "not set — fall
+  /// back to `default_timeout`"; `0` means "infinite" (Playwright parity).
+  default_navigation_timeout: AtomicU64,
   snapshot_tracker: Arc<AsyncMutex<snapshot::SnapshotTracker>>,
   mouse_position: Mutex<(f64, f64)>,
   context_ref: Option<crate::context::ContextRef>,
+  /// Human-readable `reason` passed to the last `close({ reason })` call,
+  /// surfaced on subsequent `TargetClosed` errors — Playwright parity.
+  close_reason: Mutex<Option<String>>,
 }
 
 impl Page {
@@ -34,9 +42,11 @@ impl Page {
     Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(30000),
+      default_navigation_timeout: AtomicU64::new(u64::MAX),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       mouse_position: Mutex::new((0.0, 0.0)),
       context_ref: None,
+      close_reason: Mutex::new(None),
     })
   }
 
@@ -46,9 +56,11 @@ impl Page {
     Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(30000),
+      default_navigation_timeout: AtomicU64::new(u64::MAX),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       mouse_position: Mutex::new((0.0, 0.0)),
       context_ref: Some(context),
+      close_reason: Mutex::new(None),
     })
   }
 
@@ -73,6 +85,27 @@ impl Page {
   #[must_use]
   pub fn default_timeout(&self) -> u64 {
     self.default_timeout.load(Ordering::Relaxed)
+  }
+
+  /// Set the default timeout for navigation-family operations
+  /// (`goto`, `reload`, `go_back`, `go_forward`, `wait_for_url`). Mirrors
+  /// Playwright's `page.setDefaultNavigationTimeout(timeout)`. Overrides
+  /// the non-navigation default returned by [`Self::default_timeout`] for
+  /// navigation calls only. Passing `0` means "no timeout" (Playwright
+  /// parity).
+  pub fn set_default_navigation_timeout(&self, ms: u64) {
+    self.default_navigation_timeout.store(ms, Ordering::Relaxed);
+  }
+
+  /// Current effective navigation timeout (milliseconds). If
+  /// [`Self::set_default_navigation_timeout`] was not called, returns the
+  /// same value as [`Self::default_timeout`].
+  #[must_use]
+  pub fn default_navigation_timeout(&self) -> u64 {
+    match self.default_navigation_timeout.load(Ordering::Relaxed) {
+      u64::MAX => self.default_timeout(),
+      v => v,
+    }
   }
 
   /// Get the current viewport size by querying the browser.
@@ -104,8 +137,13 @@ impl Page {
   #[tracing::instrument(skip(self, opts), fields(url))]
   pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "goto", url, "page.goto");
-    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
-    self.inner.goto(url, lifecycle, timeout).await.map_err(Into::into)
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
+    let referer = opts.as_ref().and_then(|o| o.referer.as_deref());
+    self
+      .inner
+      .goto(url, lifecycle, timeout, referer)
+      .await
+      .map_err(Into::into)
   }
 
   /// Navigate back in history.
@@ -114,7 +152,7 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn go_back(&self, opts: Option<GotoOptions>) -> Result<()> {
-    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     self.inner.go_back(lifecycle, timeout).await.map_err(Into::into)
   }
 
@@ -124,7 +162,7 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn go_forward(&self, opts: Option<GotoOptions>) -> Result<()> {
-    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     self.inner.go_forward(lifecycle, timeout).await.map_err(Into::into)
   }
 
@@ -134,7 +172,7 @@ impl Page {
   ///
   /// Returns an error if the reload fails or the wait condition times out.
   pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<()> {
-    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_timeout());
+    let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     self.inner.reload(lifecycle, timeout).await.map_err(Into::into)
   }
 
@@ -521,7 +559,7 @@ impl Page {
   ///
   /// Returns an error if the wait times out.
   pub async fn wait_for_url(&self, matcher: crate::url_matcher::UrlMatcher) -> Result<()> {
-    let timeout_ms = self.default_timeout();
+    let timeout_ms = self.default_navigation_timeout();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
       if tokio::time::Instant::now() >= deadline {
@@ -1157,7 +1195,7 @@ impl Page {
           if !origin.is_empty() && current_origin != origin {
             let _ = self
               .inner
-              .goto(origin, crate::backend::NavLifecycle::Load, 10_000)
+              .goto(origin, crate::backend::NavLifecycle::Load, 10_000, None)
               .await;
           }
           for item in items {
@@ -1779,12 +1817,28 @@ impl Page {
 
   /// Close this page. After closing, most operations will fail.
   ///
+  /// Accepts `Option<`[`crate::options::PageCloseOptions`]`>` — mirrors
+  /// Playwright's `page.close({ runBeforeUnload, reason } = {})`.
+  /// `runBeforeUnload=true` fires the page's `beforeunload` handlers
+  /// before unloading. `reason`, if set, is stored on the `Page` and
+  /// surfaces through any `TargetClosed` error returned to in-flight
+  /// operations on this page. Pass `None` for the common no-options case.
+  ///
   /// # Errors
   ///
   /// Returns an error if the page cannot be closed.
-  #[tracing::instrument(skip(self))]
-  pub async fn close(&self) -> Result<()> {
-    self.inner.close_page().await?;
+  #[tracing::instrument(skip(self, opts))]
+  pub async fn close(&self, opts: Option<crate::options::PageCloseOptions>) -> Result<()> {
+    let opts = opts.unwrap_or_default();
+    if let Some(reason) = opts.reason.clone() {
+      // Poisoned mutex is recoverable here — the stored reason is just
+      // metadata for downstream `TargetClosed` errors, not a correctness-
+      // critical invariant.
+      if let Ok(mut guard) = self.close_reason.lock() {
+        *guard = Some(reason);
+      }
+    }
+    self.inner.close_page(opts).await?;
 
     // Remove closed page from context's page list so context.pages() stays accurate.
     if let Some(ctx) = &self.context_ref {
@@ -1798,6 +1852,14 @@ impl Page {
     }
 
     Ok(())
+  }
+
+  /// Reason passed to the most recent [`Page::close`] call, if any. Used by
+  /// error-surfacing code to attach a human-readable explanation to
+  /// `TargetClosed` errors emitted after close.
+  #[must_use]
+  pub fn close_reason(&self) -> Option<String> {
+    self.close_reason.lock().ok().and_then(|g| g.clone())
   }
 
   /// Check if this page has been closed.

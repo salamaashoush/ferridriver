@@ -43,6 +43,54 @@ fn parse_wait_options<'js>(
   }
 }
 
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsGotoOptions {
+  wait_until: Option<String>,
+  timeout: Option<u64>,
+  referer: Option<String>,
+}
+
+fn parse_goto_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  value: Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::GotoOptions>> {
+  match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => {
+      let js: JsGotoOptions = serde_from_js(ctx, v)?;
+      Ok(Some(ferridriver::options::GotoOptions {
+        wait_until: js.wait_until,
+        timeout: js.timeout,
+        referer: js.referer,
+      }))
+    },
+    _ => Ok(None),
+  }
+}
+
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsPageCloseOptions {
+  run_before_unload: Option<bool>,
+  reason: Option<String>,
+}
+
+fn parse_page_close_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  value: Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::PageCloseOptions>> {
+  match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => {
+      let js: JsPageCloseOptions = serde_from_js(ctx, v)?;
+      Ok(Some(ferridriver::options::PageCloseOptions {
+        run_before_unload: js.run_before_unload,
+        reason: js.reason,
+      }))
+    },
+    _ => Ok(None),
+  }
+}
+
 /// JS-visible wrapper around [`ferridriver::Page`].
 ///
 /// Held as `Arc<Page>` so the same page can be shared with the MCP session
@@ -73,28 +121,46 @@ impl PageJs {
 impl PageJs {
   // ── Navigation ────────────────────────────────────────────────────────────
 
-  /// Navigate to `url`. Mirrors `page.goto(url)` in Playwright.
+  /// Navigate to `url`. Accepts `{ waitUntil?, timeout?, referer? }` to
+  /// mirror Playwright's `page.goto(url, options?)`.
   #[qjs(rename = "goto")]
-  pub async fn goto(&self, url: String) -> rquickjs::Result<()> {
-    self.inner.goto(&url, None).await.into_js()
+  pub async fn goto<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    url: String,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = parse_goto_options(&ctx, options)?;
+    self.inner.goto(&url, opts).await.into_js()
   }
 
-  /// Reload the current page.
+  /// Reload the current page. Accepts the same option bag as `goto`.
   #[qjs(rename = "reload")]
-  pub async fn reload(&self) -> rquickjs::Result<()> {
-    self.inner.reload(None).await.into_js()
+  pub async fn reload<'js>(&self, ctx: rquickjs::Ctx<'js>, options: Opt<rquickjs::Value<'js>>) -> rquickjs::Result<()> {
+    let opts = parse_goto_options(&ctx, options)?;
+    self.inner.reload(opts).await.into_js()
   }
 
-  /// Navigate back in history.
+  /// Navigate back in history. Accepts the same option bag as `goto`.
   #[qjs(rename = "goBack")]
-  pub async fn go_back(&self) -> rquickjs::Result<()> {
-    self.inner.go_back(None).await.into_js()
+  pub async fn go_back<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = parse_goto_options(&ctx, options)?;
+    self.inner.go_back(opts).await.into_js()
   }
 
-  /// Navigate forward in history.
+  /// Navigate forward in history. Accepts the same option bag as `goto`.
   #[qjs(rename = "goForward")]
-  pub async fn go_forward(&self) -> rquickjs::Result<()> {
-    self.inner.go_forward(None).await.into_js()
+  pub async fn go_forward<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = parse_goto_options(&ctx, options)?;
+    self.inner.go_forward(opts).await.into_js()
   }
 
   /// Current URL of the page.
@@ -449,10 +515,27 @@ impl PageJs {
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
-  /// Close the page.
+  /// Close the page. Accepts `{ runBeforeUnload?, reason? }` to mirror
+  /// Playwright's `page.close(options?)`.
   #[qjs(rename = "close")]
-  pub async fn close(&self) -> rquickjs::Result<()> {
-    self.inner.close().await.into_js()
+  pub async fn close<'js>(&self, ctx: rquickjs::Ctx<'js>, options: Opt<rquickjs::Value<'js>>) -> rquickjs::Result<()> {
+    let opts = parse_page_close_options(&ctx, options)?;
+    self.inner.close(opts).await.into_js()
+  }
+
+  /// Set the default timeout for all non-navigation operations
+  /// (milliseconds). Mirrors Playwright's `page.setDefaultTimeout(timeout)`.
+  #[qjs(rename = "setDefaultTimeout")]
+  pub fn set_default_timeout(&self, ms: u64) {
+    self.inner.set_default_timeout(ms);
+  }
+
+  /// Set the default timeout for navigation-family operations
+  /// (`goto`, `reload`, `goBack`, `goForward`, `waitForUrl`). Mirrors
+  /// Playwright's `page.setDefaultNavigationTimeout(timeout)`.
+  #[qjs(rename = "setDefaultNavigationTimeout")]
+  pub fn set_default_navigation_timeout(&self, ms: u64) {
+    self.inner.set_default_navigation_timeout(ms);
   }
 
   /// Whether the page has been closed.

@@ -60,7 +60,7 @@ async fn screenshot_creates_baseline_then_matches() {
   unsafe {
     std::env::remove_var("SNAPSHOT_DIR");
   }
-  let _ = browser.close().await;
+  let _ = browser.close(None).await;
   server.stop().await;
   let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -133,7 +133,7 @@ async fn screenshot_detects_visual_change() {
   unsafe {
     std::env::remove_var("SNAPSHOT_DIR");
   }
-  let _ = browser.close().await;
+  let _ = browser.close(None).await;
   server.stop().await;
   let _ = std::fs::remove_dir_all(&tmp);
 }
@@ -195,7 +195,7 @@ async fn screenshot_size_mismatch_detected() {
   unsafe {
     std::env::remove_var("SNAPSHOT_DIR");
   }
-  let _ = browser.close().await;
+  let _ = browser.close(None).await;
   server.stop().await;
   let _ = std::fs::remove_dir_all(&tmp);
 }

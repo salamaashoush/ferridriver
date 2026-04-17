@@ -449,7 +449,7 @@ async fn artifacts_write_read_list_remove() {
   let (engine, _scripts_tmp, artifacts_tmp, ctx) = make_engine_with_artifacts();
   let result = engine
     .run(
-      r#"
+      "
       await artifacts.write('note.txt', 'hello');
       await artifacts.writeBytes('bin.dat', [1, 2, 3, 255]);
       const got = await artifacts.read('note.txt');
@@ -458,7 +458,7 @@ async fn artifacts_write_read_list_remove() {
       const removed = await artifacts.remove('note.txt');
       const afterRemove = await artifacts.exists('note.txt');
       return { got, bytes: Array.from(bytes), entries, removed, afterRemove };
-      "#,
+      ",
       &[],
       RunOptions::default(),
       ctx,

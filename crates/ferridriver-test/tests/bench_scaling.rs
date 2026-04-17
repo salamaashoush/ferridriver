@@ -34,7 +34,7 @@ async fn diagnose_scaling() {
     let launch_ms = t.elapsed().as_millis();
     // Close all
     for b in &browsers {
-      b.close().await.ok();
+      b.close(None).await.ok();
     }
     println!(
       "      {n} browser(s) parallel: {launch_ms}ms (amortized: {:.1}ms each)",
@@ -71,7 +71,7 @@ async fn diagnose_scaling() {
     println!("      {n} Chrome process(es): {per_test:.1}ms/test");
 
     for b in &browsers {
-      b.close().await.ok();
+      b.close(None).await.ok();
     }
   }
   println!();
@@ -127,7 +127,7 @@ async fn diagnose_scaling() {
     );
 
     for b in &browsers {
-      b.close().await.ok();
+      b.close(None).await.ok();
     }
   }
   println!();
@@ -183,7 +183,7 @@ async fn diagnose_scaling() {
     for task in cpu_tasks {
       task.abort();
     }
-    browser.close().await.ok();
+    browser.close(None).await.ok();
 
     println!("      Without CPU load: {baseline:.1}ms/test");
     println!("      With CPU load:    {with_load:.1}ms/test");

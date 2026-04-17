@@ -149,6 +149,9 @@ pub struct BrowserState {
   pub user_data_dir: Option<String>,
   /// Default viewport for new pages.
   pub default_viewport: Option<crate::options::ViewportConfig>,
+  /// Reason passed to the most recent `Browser::close({ reason })` call,
+  /// surfaced on `TargetClosed` errors emitted after shutdown.
+  close_reason: Option<String>,
 }
 
 #[derive(Clone)]
@@ -184,6 +187,7 @@ impl BrowserState {
       headless: false,
       user_data_dir: None,
       default_viewport: Some(crate::options::ViewportConfig::default()),
+      close_reason: None,
     }
   }
 
@@ -218,7 +222,20 @@ impl BrowserState {
       headless: opts.headless,
       user_data_dir: opts.user_data_dir,
       default_viewport: opts.viewport,
+      close_reason: None,
     }
+  }
+
+  /// Record the reason given to `Browser::close({ reason })` so downstream
+  /// `TargetClosed` errors can carry it through to consumers.
+  pub fn set_close_reason(&mut self, reason: String) {
+    self.close_reason = Some(reason);
+  }
+
+  /// Current close reason, if any.
+  #[must_use]
+  pub fn close_reason(&self) -> Option<&str> {
+    self.close_reason.as_deref()
   }
 
   /// Set a callback for per-instance additional chrome args.
@@ -461,6 +478,12 @@ impl BrowserState {
       .instances
       .get(name)
       .ok_or_else(|| format!("Browser instance '{name}' not found. It will be created on first use."))
+  }
+
+  /// Access the default instance's backend browser handle. Used by
+  /// `Browser::version()` to read the cached CDP `Browser.getVersion().product`.
+  pub(crate) fn default_browser(&self) -> Option<&AnyBrowser> {
+    self.instances.get("default").map(|i| &i.browser)
   }
 
   fn instance_mut(&mut self, name: &str) -> Result<&mut BrowserInstance, String> {

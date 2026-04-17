@@ -62,6 +62,6 @@ async fn main() {
   );
 
   for b in &browsers {
-    b.close().await.ok();
+    b.close(None).await.ok();
   }
 }

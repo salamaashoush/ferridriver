@@ -55,6 +55,18 @@ pub struct CdpBrowser<T: CdpTransport> {
   child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
   /// Track targetId -> sessionId for already-attached targets.
   attached_targets: std::sync::Mutex<FxHashMap<String, Option<String>>>,
+  /// Product version string captured from CDP `Browser.getVersion().product`
+  /// at handshake time. Matches what Playwright surfaces via `browser.version()`
+  /// (its initializer stores the same value and returns it synchronously).
+  /// Example: `"HeadlessChrome/120.0.6099.109"`.
+  version: Arc<str>,
+}
+
+impl<T: CdpTransport> CdpBrowser<T> {
+  /// Product version string captured at handshake.
+  pub fn version(&self) -> &str {
+    &self.version
+  }
 }
 
 impl<T: CdpTransport> Clone for CdpBrowser<T> {
@@ -69,6 +81,7 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
           .unwrap_or_else(std::sync::PoisonError::into_inner)
           .clone(),
       ),
+      version: Arc::clone(&self.version),
     }
   }
 }
@@ -170,9 +183,15 @@ impl<T: CdpWrap> CdpBrowser<T> {
   ///
   /// No page creation here — pages are created on demand via `new_page()`.
   async fn init(transport: Arc<T>, child: Option<tokio::process::Child>) -> Result<Self, String> {
-    transport
+    let version_resp = transport
       .send_command(None, "Browser.getVersion", super::empty_params())
       .await?;
+    // `product` is a string like "HeadlessChrome/120.0.6099.109" — mirrors
+    // what Playwright surfaces via `browser.version()`.
+    let version: Arc<str> = version_resp
+      .get("product")
+      .and_then(|v| v.as_str())
+      .map_or_else(|| Arc::from("Unknown"), Arc::from);
 
     transport
       .send_command(
@@ -190,6 +209,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       transport,
       child: Arc::new(tokio::sync::Mutex::new(child)),
       attached_targets: std::sync::Mutex::new(FxHashMap::default()),
+      version,
     })
   }
 
@@ -406,7 +426,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     );
 
     if url != "about:blank" && !url.is_empty() {
-      page.goto(url, crate::backend::NavLifecycle::Load, 30_000).await?;
+      page.goto(url, crate::backend::NavLifecycle::Load, 30_000, None).await?;
     }
 
     Ok(T::wrap_page(page))
@@ -469,6 +489,16 @@ impl CdpBrowser<ws::WsTransport> {
   /// Connect to a running Chrome instance via WebSocket URL.
   pub async fn connect(ws_url: &str) -> Result<Self, String> {
     let transport = Arc::new(Box::pin(ws::WsTransport::connect(ws_url)).await?);
+
+    // Capture product version for `browser.version()` — same handshake
+    // Playwright's CRBrowser.connect does.
+    let version_resp = transport
+      .send_command(None, "Browser.getVersion", super::empty_params())
+      .await?;
+    let version: Arc<str> = version_resp
+      .get("product")
+      .and_then(|v| v.as_str())
+      .map_or_else(|| Arc::from("Unknown"), Arc::from);
 
     transport
       .send_command(None, "Target.setDiscoverTargets", serde_json::json!({"discover": true}))
@@ -538,6 +568,7 @@ impl CdpBrowser<ws::WsTransport> {
       transport,
       child: Arc::new(tokio::sync::Mutex::new(None)),
       attached_targets: std::sync::Mutex::new(attached),
+      version,
     })
   }
 }
@@ -687,7 +718,13 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Navigation ----
 
-  pub async fn goto(&self, url: &str, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+  pub async fn goto(
+    &self,
+    url: &str,
+    lifecycle: crate::backend::NavLifecycle,
+    timeout_ms: u64,
+    referer: Option<&str>,
+  ) -> Result<(), String> {
     self.injected_script.reset();
     let target_event = match lifecycle {
       crate::backend::NavLifecycle::Commit => "commit",
@@ -701,7 +738,14 @@ impl<T: CdpWrap> CdpPage<T> {
       .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
 
     // Send navigation command. Response includes loaderId for this navigation.
-    let nav_result = self.cmd("Page.navigate", serde_json::json!({"url": url})).await?;
+    // `referrer` mirrors the CDP `Page.navigate` param (note the CDP
+    // spelling uses two r's — we keep Playwright's single-r public spelling
+    // `referer` and translate here).
+    let mut nav_params = serde_json::json!({ "url": url });
+    if let Some(r) = referer {
+      nav_params["referrer"] = serde_json::Value::String(r.to_string());
+    }
+    let nav_result = self.cmd("Page.navigate", nav_params).await?;
 
     if let Some(error_text) = nav_result.get("errorText").and_then(|v| v.as_str()) {
       if !error_text.is_empty() {
@@ -2451,21 +2495,32 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
   // ---- Lifecycle ----
 
-  pub async fn close_page(&self) -> Result<(), String> {
+  pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<(), String> {
     if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
       return Ok(());
     }
-    // Just close the target. Context disposal is handled by context.close() →
-    // BrowserState::remove_context() → Target.disposeBrowserContext (one CDP call
-    // kills the context + all its pages, matching Playwright's doClose).
-    let _ = self
-      .transport
-      .send_command(
-        None,
-        "Target.closeTarget",
-        serde_json::json!({"targetId": &*self.target_id}),
-      )
-      .await;
+    // Two CDP paths, matching Playwright's crPage.ts:
+    // * runBeforeUnload=true  → `Page.close` — fires beforeunload handlers.
+    // * runBeforeUnload=false → `Target.closeTarget` — force-close.
+    //
+    // Context disposal is still handled by context.close() →
+    // BrowserState::remove_context() → Target.disposeBrowserContext (one CDP
+    // call kills the context + all its pages, matching Playwright's doClose).
+    if opts.run_before_unload.unwrap_or(false) {
+      let _ = self
+        .transport
+        .send_command(self.session_id.as_deref(), "Page.close", super::empty_params())
+        .await;
+    } else {
+      let _ = self
+        .transport
+        .send_command(
+          None,
+          "Target.closeTarget",
+          serde_json::json!({"targetId": &*self.target_id}),
+        )
+        .await;
+    }
     self.events.emit(crate::events::PageEvent::Close);
     Ok(())
   }

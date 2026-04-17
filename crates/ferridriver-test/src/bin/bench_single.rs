@@ -29,5 +29,5 @@ async fn main() {
   }
 
   eprintln!("=== DONE ===");
-  browser.close().await.ok();
+  browser.close(None).await.ok();
 }

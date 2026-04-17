@@ -380,7 +380,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
       teardown: Some(Arc::new(|val| {
         Box::pin(async move {
           if let Ok(browser) = val.downcast::<Browser>() {
-            let _ = browser.close().await;
+            let _ = browser.close(None).await;
           }
         })
       })),

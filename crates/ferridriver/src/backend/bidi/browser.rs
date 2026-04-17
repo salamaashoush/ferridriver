@@ -16,6 +16,15 @@ pub struct BidiBrowser {
 }
 
 impl BidiBrowser {
+  /// Real browser version reported in the `BiDi` session capabilities at
+  /// `session.new` time. Format is `"{browserName}/{browserVersion}"` to
+  /// match the CDP `Browser.getVersion().product` shape (e.g.
+  /// `"firefox/135.0.1"`).
+  #[must_use]
+  pub fn version(&self) -> String {
+    format!("{}/{}", self.session.browser_name, self.session.browser_version)
+  }
+
   async fn wait_for_context_event(
     &self,
     method: &str,
@@ -190,7 +199,7 @@ impl BidiBrowser {
     }
 
     if !url.is_empty() && url != "about:blank" {
-      page.goto(url, NavLifecycle::Load, 30_000).await?;
+      page.goto(url, NavLifecycle::Load, 30_000, None).await?;
     }
 
     Ok(AnyPage::Bidi(page))
