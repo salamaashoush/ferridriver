@@ -1,0 +1,8 @@
+[
+  "selectors",
+  "auto-waiting",
+  "parallelism-and-isolation",
+  "backends",
+  "fixtures",
+  "migrating-from-playwright"
+]
