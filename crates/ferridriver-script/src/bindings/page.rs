@@ -413,6 +413,40 @@ impl PageJs {
     self.inner.set_viewport_size(width, height).await.into_js()
   }
 
+  // ── Screenshots / PDF (return raw bytes; pair with `artifacts.writeBytes`) ─
+
+  /// Capture the page as a PNG (raw bytes — Uint8Array in JS). Pair with
+  /// `await artifacts.writeBytes('page.png', bytes)` to save to disk.
+  /// Optional `options` accept `{ fullPage?: boolean, format?: 'png'|'jpeg'|'webp', quality?: number }`.
+  #[qjs(rename = "screenshot")]
+  pub async fn screenshot<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Vec<u8>> {
+    let opts = parse_screenshot_options(&ctx, options)?;
+    self.inner.screenshot(opts).await.into_js()
+  }
+
+  /// Capture a single element as PNG bytes.
+  #[qjs(rename = "screenshotElement")]
+  pub async fn screenshot_element(&self, selector: String) -> rquickjs::Result<Vec<u8>> {
+    self.inner.screenshot_element(&selector).await.into_js()
+  }
+
+  /// Render the current page as a PDF (raw bytes). Accepts a Playwright-shape
+  /// options object: `{ format?, landscape?, printBackground?, scale?, ... }`.
+  /// Pair with `await artifacts.writeBytes('page.pdf', bytes)` to save.
+  #[qjs(rename = "pdf")]
+  pub async fn pdf<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Vec<u8>> {
+    let opts = parse_pdf_options(&ctx, options)?;
+    self.inner.pdf(opts).await.into_js()
+  }
+
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
   /// Close the page.
@@ -425,5 +459,79 @@ impl PageJs {
   #[qjs(rename = "isClosed")]
   pub fn is_closed(&self) -> bool {
     self.inner.is_closed()
+  }
+}
+
+/// Shape of `page.screenshot` options accepted from JS.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct JsScreenshotOptions {
+  full_page: Option<bool>,
+  format: Option<String>,
+  quality: Option<i64>,
+}
+
+fn parse_screenshot_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  value: Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<ferridriver::options::ScreenshotOptions> {
+  match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => {
+      let js: JsScreenshotOptions = serde_from_js(ctx, v)?;
+      Ok(ferridriver::options::ScreenshotOptions {
+        full_page: js.full_page,
+        format: js.format,
+        quality: js.quality,
+      })
+    },
+    _ => Ok(ferridriver::options::ScreenshotOptions::default()),
+  }
+}
+
+/// Subset of Playwright's `PDFOptions` exposed to scripts. Path fields and
+/// advanced page-range/margin controls are not wired yet; users who need
+/// those can use `page.evaluate` with `window.print` or extend here.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct JsPdfOptions {
+  format: Option<String>,
+  landscape: Option<bool>,
+  print_background: Option<bool>,
+  scale: Option<f64>,
+  display_header_footer: Option<bool>,
+  header_template: Option<String>,
+  footer_template: Option<String>,
+  page_ranges: Option<String>,
+  prefer_css_page_size: Option<bool>,
+  outline: Option<bool>,
+  tagged: Option<bool>,
+}
+
+fn parse_pdf_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  value: Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<ferridriver::options::PdfOptions> {
+  match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => {
+      let js: JsPdfOptions = serde_from_js(ctx, v)?;
+      Ok(ferridriver::options::PdfOptions {
+        format: js.format,
+        path: None,
+        scale: js.scale,
+        display_header_footer: js.display_header_footer,
+        header_template: js.header_template,
+        footer_template: js.footer_template,
+        print_background: js.print_background,
+        landscape: js.landscape,
+        page_ranges: js.page_ranges,
+        width: None,
+        height: None,
+        margin: None,
+        prefer_css_page_size: js.prefer_css_page_size,
+        outline: js.outline,
+        tagged: js.tagged,
+      })
+    },
+    _ => Ok(ferridriver::options::PdfOptions::default()),
   }
 }

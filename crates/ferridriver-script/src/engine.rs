@@ -60,13 +60,17 @@ pub struct RunOptions {
 }
 
 /// Per-call execution context holding session-level state the script reaches
-/// via globals (`vars`, `fs`, and the optional browser bindings `page`,
-/// `context`, `request`). A `None` entry skips installation of the matching
-/// global so pure-compute scripts don't need browser infrastructure.
+/// via globals (`vars`, `fs`, `artifacts`, and the optional browser bindings
+/// `page` / `context` / `request`). A `None` entry skips installation of
+/// the matching global so pure-compute scripts don't need the extra
+/// infrastructure.
 #[derive(Clone)]
 pub struct RunContext {
   pub vars: Arc<dyn VarsStore>,
   pub sandbox: Arc<PathSandbox>,
+  /// Optional dedicated output directory, exposed to scripts as `artifacts`.
+  /// Typically `.ferridriver/artifacts/` alongside `script_root`.
+  pub artifacts: Option<Arc<PathSandbox>>,
   pub page: Option<Arc<ferridriver::Page>>,
   pub browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   pub request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
@@ -182,6 +186,7 @@ impl ScriptEngine {
       console: console.clone(),
       vars: context.vars.clone(),
       sandbox: context.sandbox.clone(),
+      artifacts: context.artifacts.clone(),
       page: context.page.clone(),
       browser_context: context.browser_context.clone(),
       request: context.request.clone(),
@@ -237,13 +242,14 @@ struct GlobalsInstall {
   console: Arc<ConsoleCapture>,
   vars: Arc<dyn VarsStore>,
   sandbox: Arc<PathSandbox>,
+  artifacts: Option<Arc<PathSandbox>>,
   page: Option<Arc<ferridriver::Page>>,
   browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
 }
 
 /// Install the sandbox globals: `args`, `console`, `vars`, `fs`, and any of
-/// `page` / `context` / `request` that the run context carries.
+/// `artifacts` / `page` / `context` / `request` that the run context carries.
 fn install_globals(ctx: &Ctx<'_>, args_json: &str, inst: GlobalsInstall) -> rquickjs::Result<()> {
   let globals = ctx.globals();
 
@@ -257,6 +263,9 @@ fn install_globals(ctx: &Ctx<'_>, args_json: &str, inst: GlobalsInstall) -> rqui
   install_vars(ctx, inst.vars)?;
   install_fs(ctx, inst.sandbox)?;
 
+  if let Some(artifacts) = inst.artifacts {
+    crate::bindings::install_artifacts(ctx, artifacts)?;
+  }
   if let Some(page) = inst.page {
     crate::bindings::install_page(ctx, page)?;
   }

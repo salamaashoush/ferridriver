@@ -149,6 +149,18 @@ pub trait McpServerConfig: Send + Sync + 'static {
     std::path::PathBuf::from(".ferridriver/scripts")
   }
 
+  /// Root directory for script output artifacts (screenshots, PDFs, traces,
+  /// downloaded bodies). Exposed to scripts as the `artifacts` global.
+  ///
+  /// Kept separate from `script_root` so outputs don't pollute the source
+  /// tree. Same sandbox rules apply. The directory is created at server
+  /// startup if it does not exist.
+  ///
+  /// Default: `./.ferridriver/artifacts` relative to cwd.
+  fn artifacts_root(&self) -> std::path::PathBuf {
+    std::path::PathBuf::from(".ferridriver/artifacts")
+  }
+
   /// Engine-level defaults (timeout, memory, console limits) for `run_script`.
   fn script_engine_config(&self) -> ferridriver_script::ScriptEngineConfig {
     ferridriver_script::ScriptEngineConfig::default()
@@ -227,6 +239,10 @@ Browser interaction flows through `run_script` bindings:\n\
 `await context.setGeolocation(...)`.\n\
 - Waits → `await page.waitForSelector(sel, { state, timeout })`.\n\
 - API calls → `await request.get(url)`, `await request.post(url, { json: {...} })`.\n\
+- Saving outputs (screenshots, PDFs, traces) → `await artifacts.writeBytes('page.png', \
+await page.screenshot())`. The `artifacts` global is rooted at the server's configured \
+artifacts_root (default `.ferridriver/artifacts/`) — separate from script source so outputs \
+don't pollute your tree.\n\
 \n\
 == SESSION KEYS ==\n\
 All tools accept an optional 'session' parameter. Format: 'instance:context'.\n\
@@ -255,11 +271,11 @@ only exposed via the `page` tool.\n\
 \n\
 == SCRIPTING SAFETY ==\n\
 `run_script` runs in a sandboxed QuickJS runtime: no raw filesystem access (only \
-`fs.readFile`/`writeFile`/`readdir`/`exists` scoped to the configured script_root), \
-no runner-side network except via `request.*` (APIRequestContext), no `process` / \
-`require` / bare `import`. Caller-controlled data MUST be passed via the `args` array, \
-never interpolated into the `source` string — the engine does not protect against \
-source-level injection.";
+`fs.*` scoped to script_root for source files + `artifacts.*` scoped to artifacts_root \
+for outputs), no runner-side network except via `request.*` (APIRequestContext), no \
+`process` / `require` / bare `import`. Caller-controlled data MUST be passed via the \
+`args` array, never interpolated into the `source` string — the engine does not protect \
+against source-level injection.";
 
 /// Default config for standalone ferridriver (no customization).
 pub struct DefaultConfig;
@@ -281,6 +297,11 @@ pub struct McpServer {
   /// Filesystem sandbox for scripts (`None` if the configured root could not
   /// be created or canonicalised; `run_script` will return an error).
   pub(crate) script_sandbox: Option<Arc<ferridriver_script::PathSandbox>>,
+  /// Filesystem sandbox for script outputs, exposed as the `artifacts`
+  /// global. `None` if the configured artifacts root could not be prepared;
+  /// in that case scripts just don't get an `artifacts` binding and must
+  /// use `fs` for output (which pollutes the script source directory).
+  pub(crate) artifacts_sandbox: Option<Arc<ferridriver_script::PathSandbox>>,
   /// Per-session variable stores exposed to scripts via the `vars` global.
   /// Lazily created on first `run_script` for a given session name.
   pub(crate) session_vars: Arc<DashMap<String, Arc<ferridriver_script::InMemoryVars>>>,
@@ -353,6 +374,25 @@ impl McpServer {
       },
     };
 
+    // Artifacts sandbox — separate directory for script outputs. If it
+    // fails to prepare we log and disable the `artifacts` global only;
+    // `run_script` itself keeps working.
+    let artifacts_root = config.artifacts_root();
+    let artifacts_sandbox = match std::fs::create_dir_all(&artifacts_root)
+      .map_err(|e| format!("{e}"))
+      .and_then(|()| ferridriver_script::PathSandbox::new(&artifacts_root).map_err(|e| e.message.clone()))
+    {
+      Ok(sb) => Some(Arc::new(sb)),
+      Err(msg) => {
+        tracing::warn!(
+          artifacts_root = %artifacts_root.display(),
+          error = %msg,
+          "artifacts binding disabled: failed to prepare artifacts_root; scripts can still write via fs into script_root"
+        );
+        None
+      },
+    };
+
     Self {
       state,
       tool_router: Self::tool_router(),
@@ -360,6 +400,7 @@ impl McpServer {
       extensions: Arc::new(NoExtensions),
       script_engine,
       script_sandbox,
+      artifacts_sandbox,
       session_vars: Arc::new(DashMap::new()),
     }
   }
