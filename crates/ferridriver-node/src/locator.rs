@@ -108,6 +108,20 @@ impl Locator {
     Self::wrap(self.inner.filter(&ferridriver::options::FilterOptions::from(options)))
   }
 
+  /// Intersection: matches the same element that both locators match.
+  /// Mirrors Playwright's `locator.and(other)`.
+  #[napi]
+  pub fn and(&self, other: &Locator) -> Locator {
+    Self::wrap(self.inner.and(&other.inner))
+  }
+
+  /// Union: matches elements resolved by either locator. Mirrors
+  /// Playwright's `locator.or(other)`.
+  #[napi]
+  pub fn or(&self, other: &Locator) -> Locator {
+    Self::wrap(self.inner.or(&other.inner))
+  }
+
   // ── Actions ─────────────────────────────────────────────────────────────
 
   #[napi]
