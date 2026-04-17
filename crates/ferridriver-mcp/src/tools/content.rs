@@ -1,7 +1,4 @@
-use crate::params::{
-  EvaluateParams, FindElementsParams, ScreenshotParams_, SearchPageParams, SessionOnlyParams, SnapshotParams,
-  WaitForParams,
-};
+use crate::params::{EvaluateParams, ScreenshotParams_, SearchPageParams, SnapshotParams};
 use crate::server::{McpServer, sess};
 use base64::Engine;
 use ferridriver::options::ScreenshotOptions;
@@ -16,7 +13,12 @@ use rmcp::{
 impl McpServer {
   #[tool(
     name = "snapshot",
-    description = "Take an accessibility snapshot of the page. Supports depth limiting and incremental tracking."
+    description = "PRIMARY grounding tool — call this FIRST before deciding on any selectors or actions. \
+    Returns the page as an accessibility tree: every interactable role/name, visible text, and \
+    [ref=eN] handles. Cheap, fast, token-efficient, and deterministic — much better than screenshot \
+    for picking what to click/fill. Supports depth limiting and incremental tracking (shows only \
+    what changed since the last snapshot). Re-snapshot after any navigate/click/fill/run_script; \
+    refs are invalidated by DOM mutations."
   )]
   async fn snapshot(&self, Parameters(p): Parameters<SnapshotParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_opt());
@@ -49,7 +51,10 @@ impl McpServer {
 
   #[tool(
     name = "screenshot",
-    description = "Take a visual screenshot of the page as a base64-encoded image. Use 'selector' to capture a specific element, or 'full_page' for the entire scrollable page. Prefer snapshot for structured page content -- screenshot is for visual verification only."
+    description = "Capture the page (or a single element via `selector`, or the full scrollable page \
+    via `full_page`) as a base64-encoded image. USE SPARINGLY — it is much more token-expensive \
+    than `snapshot`. Reach for it only when the a11y tree is ambiguous (icons without labels, \
+    canvas, complex layout), or when the caller explicitly needs visual verification."
   )]
   async fn screenshot(&self, Parameters(p): Parameters<ScreenshotParams_>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_opt());
@@ -74,7 +79,14 @@ impl McpServer {
     Ok(CallToolResult::success(vec![Content::image(b64, mime)]))
   }
 
-  #[tool(name = "evaluate", description = "Evaluate JavaScript on the page.")]
+  #[tool(
+    name = "evaluate",
+    description = "Evaluate a single JavaScript expression IN the page (DOM context) and return its \
+    JSON-serialized value. Use for quick one-liners: `document.title`, \
+    `document.querySelectorAll('.row').length`, feature-detection. For multi-step imperative \
+    logic — loops, conditionals, try/catch, chained navigations — use `run_script` instead. \
+    The expression runs with the page's globals (`document`, `window`, `fetch`, etc.)."
+  )]
   async fn evaluate(&self, Parameters(p): Parameters<EvaluateParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
@@ -88,44 +100,10 @@ impl McpServer {
   }
 
   #[tool(
-    name = "wait_for",
-    description = "Wait until a CSS selector matches or body text contains a substring. Provide at least one of `selector` or `text`."
-  )]
-  async fn wait_for(&self, Parameters(p): Parameters<WaitForParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_opt());
-    let _guard = self.session_guard(s).await;
-    let page = Box::pin(self.page(s)).await?;
-    if p.selector.is_none() && p.text.is_none() {
-      return Err(Self::err("Provide `selector` and/or `text` to wait for."));
-    }
-    let timeout_ms = p.timeout.unwrap_or(30000);
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-    loop {
-      if tokio::time::Instant::now() >= deadline {
-        return Err(Self::err("Timeout waiting for condition"));
-      }
-      if let Some(sel) = &p.selector {
-        if page.find_element(sel).await.is_ok() {
-          return Box::pin(self.action_ok(&page, s, &format!("Found '{sel}'."))).await;
-        }
-      }
-      if let Some(text) = &p.text {
-        let needle = serde_json::to_string(text).map_err(|e| Self::err(format!("Invalid text for wait: {e}")))?;
-        let js =
-          format!("(() => {{ const body = document.body?.innerText ?? ''; return body.includes({needle}); }})()");
-        if let Ok(r) = page.evaluate(&js).await {
-          if r == Some(serde_json::Value::Bool(true)) {
-            return Box::pin(self.action_ok(&page, s, &format!("Found text '{text}'."))).await;
-          }
-        }
-      }
-      tokio::time::sleep(std::time::Duration::from_millis(16)).await;
-    }
-  }
-
-  #[tool(
     name = "search_page",
-    description = "Search page text for a pattern (like grep). Zero cost, instant. Returns matches with surrounding context."
+    description = "Grep the page's rendered text for a pattern (literal or regex), returning matches \
+    with surrounding context. Fast and token-cheap; use to locate content without re-reading the \
+    whole snapshot. Supports `regex`, `case_sensitive`, and `selector` for scoped search."
   )]
   async fn search_page(&self, Parameters(p): Parameters<SearchPageParams>) -> Result<CallToolResult, ErrorData> {
     let s = sess(p.session.as_opt());
@@ -145,39 +123,5 @@ impl McpServer {
     Ok(CallToolResult::success(vec![Content::text(
       ferridriver::actions::format_search_results(&result, &p.pattern),
     )]))
-  }
-
-  #[tool(
-    name = "find_elements",
-    description = "List DOM nodes matching a CSS or ferridriver rich selector. Use snapshot+ref to interact with one element; use this to discover many links/rows at once."
-  )]
-  async fn find_elements(&self, Parameters(p): Parameters<FindElementsParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_opt());
-    let _guard = self.session_guard(s).await;
-    let page = Box::pin(self.page(s)).await?;
-    let opts = ferridriver::actions::FindElementsOptions {
-      selector: p.selector.clone(),
-      attributes: p.attributes.clone(),
-      max_results: p.max_results.unwrap_or(50),
-      include_text: p.include_text.unwrap_or(true),
-    };
-    let result = ferridriver::actions::find_elements(page.inner(), &opts)
-      .await
-      .map_err(Self::err)?;
-    Ok(CallToolResult::success(vec![Content::text(
-      ferridriver::actions::format_find_results(&result, &p.selector),
-    )]))
-  }
-
-  #[tool(
-    name = "get_markdown",
-    description = "Extract page content as clean markdown. More useful than raw HTML for reading and analysis."
-  )]
-  async fn get_markdown(&self, Parameters(p): Parameters<SessionOnlyParams>) -> Result<CallToolResult, ErrorData> {
-    let s = sess(p.session.as_opt());
-    let _guard = self.session_guard(s).await;
-    let page = Box::pin(self.page(s)).await?;
-    let md = page.markdown().await.map_err(Self::err)?;
-    Ok(CallToolResult::success(vec![Content::text(md)]))
   }
 }

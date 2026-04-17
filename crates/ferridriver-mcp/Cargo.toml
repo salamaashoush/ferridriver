@@ -15,9 +15,7 @@ workspace = true
 
 [dependencies]
 ferridriver = { workspace = true }
-ferridriver-bdd = { workspace = true }
 ferridriver-script = { workspace = true }
-ferridriver-test = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
 tokio = { workspace = true }

@@ -69,24 +69,6 @@ impl SharedState {
     self.inner.read().await
   }
 
-  /// Get the `ref_map` for a context as a cloned `FxHashMap` (wait-free via cached `ArcSwap`).
-  pub(crate) async fn ref_map_for(&self, context: &str) -> FxHashMap<String, i64> {
-    // Fast path: cached handle exists
-    if let Some(entry) = self.ref_maps.get(context) {
-      return (**entry.value().load()).clone();
-    }
-    // Slow path: read-lock state, extract handle, cache it
-    let state = self.inner.read().await;
-    if let Some(handle) = state.ref_map_handle(context) {
-      let cloned = (**handle.load()).clone();
-      drop(state);
-      self.ref_maps.insert(context.to_string(), handle);
-      cloned
-    } else {
-      FxHashMap::default()
-    }
-  }
-
   /// Get a cached `ArcSwap` handle for storing `ref_map`s (wait-free store).
   pub(crate) async fn ref_map_handle(&self, context: &str) -> Option<RefMapHandle> {
     if let Some(entry) = self.ref_maps.get(context) {
@@ -217,35 +199,61 @@ pub const DEFAULT_SERVER_NAME: &str = "ferridriver";
 pub const DEFAULT_INSTRUCTIONS: &str = "\
 Browser automation via Chrome DevTools Protocol.\n\
 \n\
+== RECOMMENDED WORKFLOW ==\n\
+1. `navigate` or `connect` to bring up a session.\n\
+2. `snapshot` to see the page as an accessibility tree (ref=eN handles, text, roles) \
+BEFORE deciding on selectors. Cheap, fast, low token cost — always your first action.\n\
+3. Act via one of:\n\
+   a. `run_script` — sandboxed JS with full `page`, `context`, `request` globals for \
+imperative logic (loops, conditionals, try/catch, computed values, HTTP calls). \
+Pair with args to avoid string interpolation. THIS IS THE PRIMARY ACTION TOOL.\n\
+   b. `evaluate` — single-line JS executed IN the page (DOM context). Use for \
+quick reads; use `run_script` for anything multi-step.\n\
+4. `wait_for` between actions when something is loading; `snapshot` again to verify.\n\
+\n\
+This server is scripting-focused and intentionally does NOT expose low-level \
+click/fill/hover/press/type/drag tools, state-setter tools (cookies/storage/emulation), \
+or BDD/Gherkin tools. All browser interaction flows through `run_script`:\n\
+- Clicks, fills, hovers → `await page.click(sel)`, `await page.fill(sel, val)`, \
+`await page.locator(sel).hover()`.\n\
+- Locators with Playwright-style chains → `page.getByRole('button', ...).first().click()`.\n\
+- Cookies, storage, geolocation → `await context.addCookies([...])`, \
+`await context.setGeolocation(...)`.\n\
+- API calls → `await request.get(url)`, `.post(url, { json: {...} })`.\n\
+BDD/Gherkin authoring lives in the test-runner path (`bun test`), not here.\n\
+\n\
 == SESSION KEYS ==\n\
 All tools accept an optional 'session' parameter. Format: 'instance:context'.\n\
-- Instance (before ':') selects which browser process to use. Each instance can have \
-its own Chrome flags, DNS rules, and profile. Examples: 'staging', 'dev', 'prod'.\n\
+- Instance (before ':') selects which browser process. Each instance can have its own \
+Chrome flags, DNS rules, and profile. Examples: 'staging', 'dev', 'prod'.\n\
 - Context (after ':') isolates cookies/storage within that browser. Use for multi-user \
 testing. Examples: 'admin', 'user1', 'tester'.\n\
 - Combined: 'staging:admin' = staging browser, admin context.\n\
 - Plain name without ':' uses the default instance: 'mytest' = 'default:mytest'.\n\
 - Omitted entirely: uses 'default:default'.\n\
-\n\
-When the server is configured with instance_args_command or per-instance chrome_args, \
-each instance name maps to a separate Chrome process with its own configuration \
-(DNS resolution, proxy settings, certificates, etc.).\n\
+- `run_script` `vars` persist per session: values set via `vars.set(...)` in one call \
+are visible to the next `run_script` with the same session. The `vars` global is a \
+plain string key/value store (use JSON.stringify for complex values).\n\
 \n\
 == SNAPSHOTS AND REFS ==\n\
-Actions return an accessibility snapshot with [ref=eN] identifiers. \
-Use these refs with click/hover/fill. Prefer snapshot over screenshot.\n\
-IMPORTANT: Refs are tied to the current page snapshot. After page(select) or navigate, \
-old refs are invalid -- use the new snapshot's refs. Always prefer 'ref' over CSS selectors \
-in click/fill/hover since refs are resolved from the snapshot and work reliably across frames.\n\
+`snapshot` returns an accessibility tree with [ref=eN] identifiers. Refs are tied to \
+that specific snapshot — after `navigate`, `page(select)`, or any DOM mutation, old \
+refs are invalid. Re-snapshot before acting. When scripting, prefer Playwright-style \
+locators (`page.getByRole`, `page.getByText`, `page.locator(selector)`) over refs \
+— they survive re-snapshots.\n\
 \n\
 == TAB MANAGEMENT ==\n\
-To switch between browser tabs, use page(action='list') then page(action='select', page_index=N). \
-Do NOT use evaluate to list or switch tabs.\n\
+`page(action='list')` lists tabs, `page(action='select', page_index=N)` switches. Do \
+not use `evaluate` or `run_script` to enumerate tabs — CDP page-target mapping is \
+only exposed via the `page` tool.\n\
 \n\
-== BDD/GHERKIN ==\n\
-Use run_step for natural-language browser actions (e.g. 'I click \"Submit\"'), \
-run_scenario to execute full .feature files or inline Gherkin, and list_steps to discover \
-available step patterns. BDD steps run on the same live session as other tools.";
+== SCRIPTING SAFETY ==\n\
+`run_script` runs in a sandboxed QuickJS runtime: no raw filesystem access (only \
+`fs.readFile`/`writeFile`/`readdir`/`exists` scoped to the configured script_root), \
+no runner-side network except via `request.*` (APIRequestContext), no `process` / \
+`require` / bare `import`. Caller-controlled data MUST be passed via the `args` array, \
+never interpolated into the `source` string — the engine does not protect against \
+source-level injection.";
 
 /// Default config for standalone ferridriver (no customization).
 pub struct DefaultConfig;
@@ -262,12 +270,6 @@ pub struct McpServer {
   pub config: Arc<dyn McpServerConfig>,
   /// Typed extension slot for consumer-specific state (e.g. Jira clients).
   extensions: Arc<dyn std::any::Any + Send + Sync>,
-  /// BDD step registry -- built once at startup from `inventory`-collected step definitions.
-  pub(crate) step_registry: Arc<ferridriver_bdd::registry::StepRegistry>,
-  /// Cached BDD executor -- avoids re-creating per tool call.
-  pub(crate) bdd_executor: ferridriver_bdd::executor::ScenarioExecutor,
-  /// Backend kind — needed to construct Browser handles for BDD fixtures.
-  pub(crate) backend_kind: BackendKind,
   /// `QuickJS` scripting engine -- fresh context per `run_script` invocation.
   pub(crate) script_engine: Arc<ferridriver_script::ScriptEngine>,
   /// Filesystem sandbox for scripts (`None` if the configured root could not
@@ -324,13 +326,6 @@ impl McpServer {
     let config_clone = Arc::clone(&config);
     browser_state.set_instance_resolver_fn(Box::new(move |instance| config_clone.resolve_instance(instance)));
     let state = SharedState::new(browser_state);
-    let step_registry = Arc::new(ferridriver_bdd::registry::StepRegistry::build());
-    let bdd_executor = ferridriver_bdd::executor::ScenarioExecutor::new(
-      Arc::clone(&step_registry),
-      std::time::Duration::from_secs(30),
-      false, // not strict -- pending steps don't fail
-      true,  // screenshot on failure
-    );
 
     // Scripting engine + sandbox. The sandbox needs an existing canonical
     // directory; we create the configured root up front and log (not panic)
@@ -357,9 +352,6 @@ impl McpServer {
       tool_router: Self::tool_router(),
       config,
       extensions: Arc::new(NoExtensions),
-      step_registry,
-      bdd_executor,
-      backend_kind: backend,
       script_engine,
       script_sandbox,
       session_vars: Arc::new(DashMap::new()),
@@ -486,31 +478,6 @@ impl McpServer {
     let page = Page::new(any_page);
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
     Ok((page, ctx_ref))
-  }
-
-  /// Build unified `TestFixtures` for a session — provides full browser/page/context/request
-  /// so BDD steps and hooks have the same fixture set as the test runner path.
-  ///
-  /// # Errors
-  ///
-  /// Returns `ErrorData` if the page or browser context cannot be resolved for the session.
-  pub async fn fixtures_for_session(&self, context: &str) -> Result<ferridriver_test::model::TestFixtures, ErrorData> {
-    let (page, ctx_ref) = Box::pin(self.page_and_context(context)).await?;
-    let browser = ferridriver::Browser::from_shared_state(self.state.state_arc(), self.backend_kind);
-    let request =
-      ferridriver::api_request::APIRequestContext::new(ferridriver::api_request::RequestContextOptions::default());
-    Ok(ferridriver_test::model::TestFixtures {
-      browser: std::sync::Arc::new(browser),
-      page,
-      context: std::sync::Arc::new(ctx_ref),
-      request: std::sync::Arc::new(request),
-      test_info: std::sync::Arc::new(ferridriver_test::model::TestInfo::new_anonymous()),
-      modifiers: std::sync::Arc::new(ferridriver_test::model::TestModifiers::default()),
-      browser_config: ferridriver_test::config::BrowserConfig::default(),
-      bdd_args: None,
-      bdd_data_table: None,
-      bdd_doc_string: None,
-    })
   }
 
   /// Resolve ref to element -- delegates to `actions::resolve_element`.
