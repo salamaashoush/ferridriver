@@ -1,0 +1,42 @@
+[
+  {
+    "text": "Guide",
+    "link": "/guide/introduction",
+    "activeMatch": "/guide/"
+  },
+  {
+    "text": "Concepts",
+    "link": "/concepts/selectors",
+    "activeMatch": "/concepts/"
+  },
+  {
+    "text": "Test Runner",
+    "link": "/test-runner/overview",
+    "activeMatch": "/test-runner/"
+  },
+  {
+    "text": "Component Testing",
+    "link": "/component-testing/overview",
+    "activeMatch": "/component-testing/"
+  },
+  {
+    "text": "BDD",
+    "link": "/bdd/overview",
+    "activeMatch": "/bdd/"
+  },
+  {
+    "text": "MCP",
+    "link": "/mcp/overview",
+    "activeMatch": "/mcp/"
+  },
+  {
+    "text": "CLI",
+    "link": "/cli/ferridriver",
+    "activeMatch": "/cli/"
+  },
+  {
+    "text": "API",
+    "link": "/api/rust",
+    "activeMatch": "/api/"
+  }
+]
