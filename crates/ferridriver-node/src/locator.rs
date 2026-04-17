@@ -25,6 +25,21 @@ impl Locator {
     self.inner.selector().to_string()
   }
 
+  /// Whether this locator runs under strict mode (Playwright default). Use
+  /// [`Locator::setStrict`] to opt out on a per-locator basis, or `first()` /
+  /// `last()` / `nth(i)` which drop strictness implicitly.
+  #[napi(getter)]
+  pub fn is_strict(&self) -> bool {
+    self.inner.is_strict()
+  }
+
+  /// Returns a copy of this locator with strict-mode toggled. Mirrors
+  /// Playwright's strict-selectors context option on a per-locator basis.
+  #[napi]
+  pub fn set_strict(&self, strict: bool) -> Locator {
+    Self::wrap(self.inner.strict(strict))
+  }
+
   // ── Sub-locators ────────────────────────────────────────────────────────
 
   #[napi]

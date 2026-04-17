@@ -136,6 +136,7 @@ impl Frame {
       page: Arc::clone(&self.page),
       selector: selector.to_string(),
       frame_id: Some(self.id.clone()),
+      strict: true,
     }
   }
 
@@ -146,6 +147,7 @@ impl Frame {
       page: Arc::clone(&self.page),
       selector: sel,
       frame_id: Some(self.id.clone()),
+      strict: true,
     }
   }
 
@@ -160,16 +162,17 @@ impl Frame {
       page: Arc::clone(&self.page),
       selector: sel,
       frame_id: Some(self.id.clone()),
+      strict: true,
     }
   }
 
   #[must_use]
   pub fn get_by_test_id(&self, test_id: &str) -> Locator {
-    Locator {
-      page: Arc::clone(&self.page),
-      selector: format!("testid={test_id}"),
-      frame_id: Some(self.id.clone()),
-    }
+    Locator::new(
+      Arc::clone(&self.page),
+      format!("testid={test_id}"),
+      Some(self.id.clone()),
+    )
   }
 
   #[must_use]
@@ -183,6 +186,7 @@ impl Frame {
       page: Arc::clone(&self.page),
       selector: sel,
       frame_id: Some(self.id.clone()),
+      strict: true,
     }
   }
 
@@ -197,6 +201,7 @@ impl Frame {
       page: Arc::clone(&self.page),
       selector: sel,
       frame_id: Some(self.id.clone()),
+      strict: true,
     }
   }
 

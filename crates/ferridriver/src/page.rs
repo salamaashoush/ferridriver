@@ -177,20 +177,12 @@ impl Page {
 
   #[must_use]
   pub fn locator(self: &Arc<Self>, selector: &str) -> Locator {
-    Locator {
-      page: Arc::clone(self),
-      frame_id: None,
-      selector: selector.to_string(),
-    }
+    Locator::new(Arc::clone(self), selector.to_string(), None)
   }
 
   #[must_use]
   pub fn get_by_role(self: &Arc<Self>, role: &str, opts: &RoleOptions) -> Locator {
-    Locator {
-      page: Arc::clone(self),
-      frame_id: None,
-      selector: crate::locator::build_role_selector(role, opts),
-    }
+    Locator::new(Arc::clone(self), crate::locator::build_role_selector(role, opts), None)
   }
 
   #[must_use]
@@ -200,11 +192,7 @@ impl Page {
     } else {
       format!("text={text}")
     };
-    Locator {
-      page: Arc::clone(self),
-      frame_id: None,
-      selector: sel,
-    }
+    Locator::new(Arc::clone(self), sel, None)
   }
 
   #[must_use]
@@ -214,11 +202,7 @@ impl Page {
     } else {
       format!("label={text}")
     };
-    Locator {
-      page: Arc::clone(self),
-      frame_id: None,
-      selector: sel,
-    }
+    Locator::new(Arc::clone(self), sel, None)
   }
 
   #[must_use]
@@ -228,11 +212,7 @@ impl Page {
     } else {
       format!("placeholder={text}")
     };
-    Locator {
-      page: Arc::clone(self),
-      frame_id: None,
-      selector: sel,
-    }
+    Locator::new(Arc::clone(self), sel, None)
   }
 
   #[must_use]
@@ -242,11 +222,7 @@ impl Page {
     } else {
       format!("alt={text}")
     };
-    Locator {
-      page: Arc::clone(self),
-      frame_id: None,
-      selector: sel,
-    }
+    Locator::new(Arc::clone(self), sel, None)
   }
 
   #[must_use]
@@ -256,20 +232,12 @@ impl Page {
     } else {
       format!("title={text}")
     };
-    Locator {
-      page: Arc::clone(self),
-      frame_id: None,
-      selector: sel,
-    }
+    Locator::new(Arc::clone(self), sel, None)
   }
 
   #[must_use]
   pub fn get_by_test_id(self: &Arc<Self>, test_id: &str) -> Locator {
-    Locator {
-      page: Arc::clone(self),
-      frame_id: None,
-      selector: format!("testid={test_id}"),
-    }
+    Locator::new(Arc::clone(self), format!("testid={test_id}"), None)
   }
 
   /// Create a `FrameLocator` for an `<iframe>` matching the selector.
