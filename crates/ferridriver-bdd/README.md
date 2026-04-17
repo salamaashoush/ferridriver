@@ -45,10 +45,16 @@ Feature: Login
 ferridriver_bdd::bdd_main!();
 ```
 
+```toml
+# Cargo.toml
+[[test]]
+name = "bdd"
+path = "tests/bdd.rs"
+harness = false
+```
+
 ```sh
 cargo test --test bdd
-# or
-ferridriver bdd -- features/
 ```
 
 ## Quick Start (TypeScript)
@@ -67,7 +73,8 @@ When('I click {string}', async (page, selector) => {
 ```
 
 ```sh
-ferridriver-test --bdd --features features/ --steps steps/
+# .feature files are picked up automatically alongside .spec.ts files.
+npx @ferridriver/test test tests/features/ --steps 'steps/**/*.ts'
 ```
 
 ## Architecture
@@ -251,85 +258,32 @@ Registration via `inventory::submit!(StepRegistration { ... })`.
 #[after(all)]                                // after all scenarios
 ```
 
-## Built-in Steps (109)
+## Built-in steps (144)
 
-### Navigation (6)
-- I navigate to {string}
-- I go back / I go forward / I reload the page
-- the URL should contain {string} / the URL should be {string}
+Grouped by source module in `src/steps/`. Counts reflect the actual number of `#[given]` / `#[when]` / `#[then]` / `#[step]` attributes registered.
 
-### Interaction (14)
-- I click/double-click/right-click {string}
-- I fill {string} with {string}
-- I clear {string} / I type {string} into {string}
-- I hover over {string} / I focus {string}
-- I drag {string} to {string}
-- I scroll to {string} / I scroll down/up {int} pixels
-- I select {string} in {string} / I check/uncheck {string}
+| Module | Count | Coverage |
+|---|---|---|
+| `assertion` | 34 | text, visibility, value, attribute, class, state, count, role, aria |
+| `interaction` | 20 | click / double-click / right-click, fill, clear, type, hover, focus, blur, drag, scroll, select, check / uncheck |
+| `network` | 14 | route, fulfill, continue, abort, request / response waits, HAR capture |
+| `api` | 11 | API request context: GET / POST / PUT / DELETE / PATCH, headers, body, status / JSON assertions |
+| `storage` | 8 | localStorage / sessionStorage get / set / clear / remove |
+| `wait` | 7 | wait for selector / text / navigation / seconds / load state |
+| `navigation` | 6 | navigate, back, forward, reload, URL assertions |
+| `frame` | 6 | switch to frame by name / index, main frame, frame element queries |
+| `dialog` | 5 | accept / dismiss, provide prompt text, assert message |
+| `emulation` | 5 | viewport, user agent, geolocation, color scheme, network conditions |
+| `mouse` | 5 | move to coordinates, scroll by delta, wheel events, button holds |
+| `window` | 5 | window size, maximize / minimize, tab / window switching |
+| `keyboard` | 4 | press key, press on selector, repeat N times, type slowly |
+| `javascript` | 3 | execute, evaluate, inject script |
+| `cookie` | 3 | add, delete, clear all |
+| `screenshot` | 3 | full page, named file, element-scoped |
+| `variable` | 3 | set variable, store text / attribute / property / count of selector as variable |
+| `file` | 2 | upload to input, assert download |
 
-### Assertion (20)
-- {string} should be visible/hidden/enabled/disabled/checked/unchecked
-- {string} should have text/value {string}
-- {string} should contain text {string}
-- {string} should have attribute {string} with value {string}
-- {string} should have class/role {string}
-- the page should contain text {string}
-- there should be {int} {string} elements
-
-### Keyboard (4)
-- I press {string} / I press {string} on {string}
-- I press {string} {int} times
-- I type slowly {string} into {string}
-
-### Mouse (2)
-- I move mouse to coordinates {int},{int}
-- I scroll within {string} by {int},{int}
-
-### Wait (4)
-- I wait for {string} to appear/disappear
-- I wait for navigation
-- I wait {int} seconds
-
-### Screenshot (2)
-- I take a screenshot / I take a screenshot named {string}
-
-### Variable (6)
-- I set variable {string} to {string}
-- I store the text of {string} as {string}
-- I store the attribute {string} of {string} as {string}
-- I store the property {string} of {string} as {string}
-- I store the count of {string} as {string}
-
-### Storage (8)
-- I set localStorage/sessionStorage {string} to {string}
-- I get localStorage/sessionStorage {string}
-- I clear localStorage/sessionStorage
-- I remove localStorage/sessionStorage item {string}
-
-### Cookie (3)
-- I add a cookie {string} with value {string}
-- I delete cookie {string} / I clear all cookies
-
-### JavaScript (3)
-- I execute {string} / I evaluate {string}
-- I inject script {string}
-
-### Dialog (3)
-- I accept/dismiss the dialog
-- the dialog message should be {string}
-
-### Frame (3)
-- I switch to frame {string} / I switch to frame {int}
-- I switch to the main frame
-
-### Window (5)
-- I set window size to {int}x{int}
-- I maximize/minimize the window
-- I switch to tab {int} / I switch to window {string}
-
-### File (2)
-- I upload {string} to {string}
-- I should have downloaded {string}
+Source: `crates/ferridriver-bdd/src/steps/`. Call the MCP `list_steps` tool for the full expression strings with their parameter types.
 
 ## Reporters
 
@@ -342,30 +296,26 @@ Registration via `inventory::submit!(StepRegistration { ... })`.
 
 All implement `ferridriver_test::reporter::Reporter` and receive the same event stream as E2E reporters. BDD step events carry metadata (`bdd_keyword`, `bdd_text`, `bdd_line`) for Gherkin-aware rendering.
 
-## CLI
+## Running
+
+There is no standalone `ferridriver bdd` command. Features run through one of three paths:
+
+**Rust / `cargo test`** — use `bdd_main!()` and the standard runner flags:
 
 ```sh
-ferridriver bdd [OPTIONS] -- [FEATURES...]
-
-Options:
-  -t, --tags <EXPR>        Tag filter expression (@smoke and not @wip)
-  -j, --workers <N>        Parallel workers (0 = auto)
-      --retries <N>        Retry failed scenarios
-      --reporter <NAME>    Reporter (terminal, json, junit, cucumber-json)
-  -g, --grep <PATTERN>     Filter scenarios by name
-      --grep-invert <PAT>  Exclude matching scenarios
-      --dry-run            Validate steps without executing
-      --list               List scenarios without running
-      --headed             Show browser window
-      --fail-fast          Stop after first failure
-      --step-timeout <MS>  Per-step timeout in milliseconds
-      --shard <CUR/TOTAL>  Shard for distributed runs
-  -c, --config <PATH>      Config file path
+cargo test --test bdd -- --headed --workers 4 --tags "@smoke and not @wip"
 ```
 
-Environment variables:
-- `FERRIDRIVER_FEATURES`: Comma-separated glob patterns (default: `features/**/*.feature`)
-- `FERRIDRIVER_TAGS`: Tag filter expression
+**TypeScript / `@ferridriver/test`** — mixed `.feature` + `.spec.ts` in one run, with shared config:
+
+```sh
+npx @ferridriver/test test tests/features/ --steps 'steps/**/*.ts' \
+    -t "@smoke and not @wip" -j 4 --reporter junit
+```
+
+See `@ferridriver/test test --help` for the full flag list (`-t`/`--tags`, `--strict`, `--order defined|random[:SEED]`, `--language`, plus all shared runner flags).
+
+**MCP** — use `list_steps`, `run_step`, `run_scenario` on the `ferridriver` MCP server for AI-driven BDD exploration.
 
 ## Design Decisions
 

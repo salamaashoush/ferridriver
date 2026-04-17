@@ -67,29 +67,31 @@ Benchmarked against Playwright Test on the same 50-test workload (navigate + cli
 
 ~3.7x faster than Playwright. Overlapped browser launch saves ~80-100ms. Per-test overhead is dominated by CDP round-trips, not runner dispatch.
 
-## Expect Matchers (32)
+## Expect Matchers (38)
 
-### Page (2)
+### Page (4)
 | Matcher | Description |
 |---|---|
 | `to_have_title` | Page title matches string or regex |
+| `to_contain_title` | Page title contains substring |
 | `to_have_url` | Page URL matches string or regex |
+| `to_contain_url` | Page URL contains substring |
 
-### Locator -- Visibility/State (10)
+### Locator — Visibility / State (10)
 | Matcher | Description |
 |---|---|
 | `to_be_visible` | Element is visible |
 | `to_be_hidden` | Element is hidden |
 | `to_be_enabled` | Element is enabled |
 | `to_be_disabled` | Element is disabled |
-| `to_be_checked` | Checkbox/radio is checked |
+| `to_be_checked` | Checkbox / radio is checked |
 | `to_be_editable` | Element is editable |
 | `to_be_attached` | Element is in the DOM |
 | `to_be_empty` | Element has no text content |
 | `to_be_focused` | Element has focus |
 | `to_be_in_viewport` | Element is within the viewport |
 
-### Locator -- Text/Value (6)
+### Locator — Text / Value (6)
 | Matcher | Description |
 |---|---|
 | `to_have_text` | Text content matches exactly |
@@ -99,19 +101,20 @@ Benchmarked against Playwright Test on the same 50-test workload (navigate + cli
 | `to_have_texts` | Multiple elements' text matches array |
 | `to_contain_texts` | Multiple elements contain substrings |
 
-### Locator -- Attributes (8)
+### Locator — Attributes (9)
 | Matcher | Description |
 |---|---|
 | `to_have_attribute` | Attribute value matches |
 | `to_have_class` | Class attribute matches |
 | `to_contain_class` | Class list contains name |
 | `to_have_css` | Computed CSS property matches |
-| `to_have_id` | id attribute matches |
+| `to_have_id` | `id` attribute matches |
 | `to_have_role` | ARIA role matches |
 | `to_have_accessible_name` | Accessible name matches |
 | `to_have_accessible_description` | Accessible description matches |
+| `to_have_accessible_error_message` | Accessible error message matches |
 
-### Locator -- Other (6)
+### Locator — Other (5)
 | Matcher | Description |
 |---|---|
 | `to_have_js_property` | JS property matches JSON value |
@@ -119,7 +122,14 @@ Benchmarked against Playwright Test on the same 50-test workload (navigate + cli
 | `to_match_snapshot` | Text matches stored `.snap` file |
 | `to_have_screenshot` | Screenshot matches stored PNG (pixel diff) |
 | `to_match_aria_snapshot` | Accessibility tree matches YAML |
-| `expect_poll().to_equal` | Poll async value until it equals expected |
+
+### Poll / satisfy (4)
+| Matcher | Description |
+|---|---|
+| `to_equal` | Polled value equals expected |
+| `to_satisfy` | Polled value passes a user predicate |
+| `to_pass` | Run an async closure until it succeeds |
+| `to_pass_with_options` | `to_pass` with custom `intervals` / `timeout` |
 
 All matchers support `.not()`, `.with_timeout()`, `.with_message()`, and `.soft()`.
 

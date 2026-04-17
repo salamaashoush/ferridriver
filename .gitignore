@@ -27,6 +27,6 @@ bench/results/
 rust_out
 trace-*.json
 
-# Claude Code worktrees
-.claude/worktrees/
+# Claude Code local state
+.claude/
 .DS_Store
