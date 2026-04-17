@@ -1789,23 +1789,31 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
-    let mut features = Vec::new();
-    if let Some(cs) = &opts.color_scheme {
-      features.push(serde_json::json!({"name": "prefers-color-scheme", "value": cs}));
+    use crate::options::MediaOverride;
+    // CDP's `Emulation.setEmulatedMedia` replaces all emulation state per
+    // call — any feature not included in the `features` array is cleared.
+    // Mirror Playwright's `_updateEmulateMedia` at
+    // `/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:975`:
+    // always send all four features with an empty-string value for the
+    // "no override" case. `Unchanged` and `Disabled` both map to empty
+    // string — the Page layer has already merged the caller's partial
+    // update with its persistent state, so an `Unchanged` reaching this
+    // layer truly means "never configured".
+    fn feature_value(o: &MediaOverride) -> &str {
+      match o {
+        MediaOverride::Set(v) => v.as_str(),
+        MediaOverride::Disabled | MediaOverride::Unchanged => "",
+      }
     }
-    if let Some(rm) = &opts.reduced_motion {
-      features.push(serde_json::json!({"name": "prefers-reduced-motion", "value": rm}));
-    }
-    if let Some(fc) = &opts.forced_colors {
-      features.push(serde_json::json!({"name": "forced-colors", "value": fc}));
-    }
-    if let Some(c) = &opts.contrast {
-      features.push(serde_json::json!({"name": "prefers-contrast", "value": c}));
-    }
-    let mut params = serde_json::json!({"features": features});
-    if let Some(media) = &opts.media {
-      params["media"] = serde_json::json!(media);
-    }
+    let features = serde_json::json!([
+      { "name": "prefers-color-scheme", "value": feature_value(&opts.color_scheme) },
+      { "name": "prefers-reduced-motion", "value": feature_value(&opts.reduced_motion) },
+      { "name": "forced-colors", "value": feature_value(&opts.forced_colors) },
+      { "name": "prefers-contrast", "value": feature_value(&opts.contrast) },
+    ]);
+    // Media type: empty string disables, "screen"/"print" sets.
+    let media = feature_value(&opts.media);
+    let params = serde_json::json!({"features": features, "media": media});
     self.cmd("Emulation.setEmulatedMedia", params).await?;
     Ok(())
   }

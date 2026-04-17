@@ -357,7 +357,7 @@ async fn apply_page_config(
   if ctx_config.color_scheme.is_some() {
     page
       .emulate_media(&ferridriver::options::EmulateMediaOptions {
-        color_scheme: ctx_config.color_scheme.clone(),
+        color_scheme: ctx_config.color_scheme.clone().into(),
         ..Default::default()
       })
       .await?;
@@ -396,9 +396,8 @@ async fn apply_page_config(
   if ctx_config.reduced_motion.is_some() || ctx_config.forced_colors.is_some() {
     page
       .emulate_media(&ferridriver::options::EmulateMediaOptions {
-        color_scheme: None,
-        reduced_motion: ctx_config.reduced_motion.clone(),
-        forced_colors: ctx_config.forced_colors.clone(),
+        reduced_motion: ctx_config.reduced_motion.clone().into(),
+        forced_colors: ctx_config.forced_colors.clone().into(),
         ..Default::default()
       })
       .await?;

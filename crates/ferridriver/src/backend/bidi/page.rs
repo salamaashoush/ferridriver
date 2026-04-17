@@ -919,46 +919,54 @@ impl BidiPage {
   }
 
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
-    if let Some(ref color_scheme) = opts.color_scheme {
-      // BiDi spec: emulation.setForcedColorsModeThemeOverride
-      // theme: "light" | "dark" | null (null = reset/no-preference)
-      // Not yet supported by all Firefox versions — returns error if unavailable.
-      let theme: serde_json::Value = match color_scheme.as_str() {
-        "dark" => json!("dark"),
-        "light" => json!("light"),
-        _ => serde_json::Value::Null,
-      };
-      self
-        .cmd(
-          "emulation.setForcedColorsModeThemeOverride",
-          json!({
-            "contexts": [&*self.context_id],
-            "theme": theme
-          }),
-        )
-        .await?;
+    use crate::options::MediaOverride;
+    // Firefox/BiDi only exposes `emulation.setForcedColorsModeThemeOverride`
+    // (per /tmp/playwright/packages/playwright-core/src/server/bidi/third_party/bidiProtocolCore.ts:1069).
+    // Playwright's own BiDi `updateEmulateMedia` is an empty stub — media,
+    // reducedMotion, forcedColors and contrast have no BiDi equivalent yet.
+    // Rather than silently pretending they worked, we error out with a
+    // typed Unsupported so the caller knows Firefox can't honor that knob.
+    if opts.media.is_specified() {
+      return Err("BiDi/Firefox does not support `media` emulation — no BiDi protocol command exists for it".into());
     }
-    // Media type requires JS workaround (no direct BiDi command)
-    if let Some(ref media) = opts.media {
-      let js = format!(
-        r"() => {{
-          const style = document.createElement('style');
-          style.setAttribute('media', '{media}');
-          style.textContent = '/* emulate media */';
-          document.head.appendChild(style);
-        }}"
+    if opts.reduced_motion.is_specified() {
+      return Err(
+        "BiDi/Firefox does not support `reducedMotion` emulation — no BiDi protocol command exists for it".into(),
       );
-      let _ = self
-        .cmd(
-          "script.callFunction",
-          json!({
-            "functionDeclaration": js,
-            "target": {"context": &*self.context_id},
-            "awaitPromise": false,
-            "resultOwnership": "none"
-          }),
-        )
-        .await;
+    }
+    if opts.forced_colors.is_specified() {
+      return Err(
+        "BiDi/Firefox does not support `forcedColors` emulation — no BiDi protocol command exists for it".into(),
+      );
+    }
+    if opts.contrast.is_specified() {
+      return Err("BiDi/Firefox does not support `contrast` emulation — no BiDi protocol command exists for it".into());
+    }
+    // Color scheme: `emulation.setForcedColorsModeThemeOverride` accepts
+    // `{ theme: 'light' | 'dark' | null }`. Treat Disabled as null.
+    match &opts.color_scheme {
+      MediaOverride::Unchanged => {},
+      MediaOverride::Disabled => {
+        self
+          .cmd(
+            "emulation.setForcedColorsModeThemeOverride",
+            json!({ "contexts": [&*self.context_id], "theme": serde_json::Value::Null }),
+          )
+          .await?;
+      },
+      MediaOverride::Set(cs) => {
+        let theme: serde_json::Value = match cs.as_str() {
+          "dark" => json!("dark"),
+          "light" => json!("light"),
+          _ => serde_json::Value::Null,
+        };
+        self
+          .cmd(
+            "emulation.setForcedColorsModeThemeOverride",
+            json!({ "contexts": [&*self.context_id], "theme": theme }),
+          )
+          .await?;
+      },
     }
     Ok(())
   }

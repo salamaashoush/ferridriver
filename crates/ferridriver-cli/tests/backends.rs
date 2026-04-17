@@ -35,6 +35,7 @@ struct McpClient {
   child: Child,
   reader: BufReader<std::process::ChildStdout>,
   stdin: std::process::ChildStdin,
+  backend: String,
 }
 
 impl McpClient {
@@ -66,6 +67,7 @@ impl McpClient {
       child,
       reader: BufReader::new(stdout),
       stdin,
+      backend: backend.to_string(),
     };
     c.initialize();
     c.send_initialized_notification();
@@ -705,6 +707,70 @@ fn test_script_locator_drag_to_options(c: &mut McpClient) {
   assert!((214.0..=216.0).contains(&uy), "drop y should be ~215: got {uy} (v={v})");
 }
 
+fn test_script_emulate_media_all_fields(c: &mut McpClient) {
+  // BiDi/Firefox only supports colorScheme; CDP + WebKit support all five.
+  // This test runs on CDP backends (cdp-pipe, cdp-raw) and WebKit.
+  if c.backend == "bidi" {
+    return;
+  }
+  c.nav("<html><body><div id='x'></div></body></html>");
+  let v = c.script_value(
+    "await page.emulateMedia({ \
+        media: 'print', \
+        colorScheme: 'dark', \
+        reducedMotion: 'reduce', \
+        forcedColors: 'active', \
+        contrast: 'more' \
+     }); \
+     const raw = await page.evaluate(\"JSON.stringify({\
+        print: matchMedia('print').matches, \
+        screen: matchMedia('screen').matches, \
+        dark: matchMedia('(prefers-color-scheme: dark)').matches, \
+        reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, \
+        forced: matchMedia('(forced-colors: active)').matches, \
+        contrast: matchMedia('(prefers-contrast: more)').matches, \
+     })\"); \
+     return JSON.parse(JSON.parse(raw));",
+  );
+  assert_eq!(
+    v["print"],
+    json!(true),
+    "media=print should activate matchMedia('print'): {v}"
+  );
+  assert_eq!(
+    v["screen"],
+    json!(false),
+    "matchMedia('screen') should be false under print: {v}"
+  );
+  assert_eq!(
+    v["dark"],
+    json!(true),
+    "colorScheme=dark should activate prefers-color-scheme:dark: {v}"
+  );
+  assert_eq!(
+    v["reduced"],
+    json!(true),
+    "reducedMotion=reduce should activate prefers-reduced-motion:reduce: {v}"
+  );
+  assert_eq!(
+    v["forced"],
+    json!(true),
+    "forcedColors=active should activate forced-colors:active: {v}"
+  );
+  assert_eq!(
+    v["contrast"],
+    json!(true),
+    "contrast=more should activate prefers-contrast:more: {v}"
+  );
+  // Reset so state doesn't leak into the next test.
+  c.script_value(
+    "await page.emulateMedia({ \
+       media: null, colorScheme: null, reducedMotion: null, \
+       forcedColors: null, contrast: null \
+     }); return 'ok';",
+  );
+}
+
 fn test_script_drag_and_drop_trial(c: &mut McpClient) {
   c.nav(
     "<style>html,body{margin:0;padding:0}</style>\
@@ -1082,6 +1148,7 @@ fn run_all_tests(backend: &str) {
   run!(test_script_drag_and_drop_options);
   run!(test_script_locator_drag_to_options);
   run!(test_script_drag_and_drop_trial);
+  run!(test_script_emulate_media_all_fields);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
 

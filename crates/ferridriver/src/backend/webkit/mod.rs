@@ -976,13 +976,35 @@ impl WebKitPage {
   ///
   /// Returns an error if the emulate media IPC call fails.
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
+    use crate::options::MediaOverride;
+    // Wire format: per-field pair of (action-byte, value-string). The
+    // action byte is `0` = unchanged (host leaves this override alone),
+    // `1` = disabled (clear any prior override), `2` = set (apply value).
+    // This lets a single OP_EMULATE_MEDIA call carry any mix of unchanged
+    // / reset / set fields, matching Playwright's three-state semantic.
+    fn enc(p: &mut Vec<u8>, o: &MediaOverride) {
+      match o {
+        MediaOverride::Unchanged => {
+          p.push(0);
+          ipc::str_encode(p, "");
+        },
+        MediaOverride::Disabled => {
+          p.push(1);
+          ipc::str_encode(p, "");
+        },
+        MediaOverride::Set(v) => {
+          p.push(2);
+          ipc::str_encode(p, v.as_str());
+        },
+      }
+    }
     let mut p = Vec::new();
     p.extend_from_slice(&self.vid().to_le_bytes());
-    ipc::str_encode(&mut p, opts.color_scheme.as_deref().unwrap_or(""));
-    ipc::str_encode(&mut p, opts.reduced_motion.as_deref().unwrap_or(""));
-    ipc::str_encode(&mut p, opts.forced_colors.as_deref().unwrap_or(""));
-    ipc::str_encode(&mut p, opts.media.as_deref().unwrap_or(""));
-    ipc::str_encode(&mut p, opts.contrast.as_deref().unwrap_or(""));
+    enc(&mut p, &opts.color_scheme);
+    enc(&mut p, &opts.reduced_motion);
+    enc(&mut p, &opts.forced_colors);
+    enc(&mut p, &opts.media);
+    enc(&mut p, &opts.contrast);
     let r = self.client.send(ipc::Op::EmulateMedia, &p).await?;
     Self::ok(r)
   }

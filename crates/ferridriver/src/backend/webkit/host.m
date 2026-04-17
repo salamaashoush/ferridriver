@@ -1615,91 +1615,142 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
         }
 
         case OP_EMULATE_MEDIA: {
-            // Emulate media features. Uses WKWebView's _setForcedAppearance for dark mode
-            // (native rendering pipeline), WKUserScript for other features.
+            // Emulate media features. Wire format per field: u8 action +
+            // str value. action: 0=unchanged, 1=disabled (reset), 2=set.
+            // Uses WKWebView's _setOverrideAppearance: for dark mode (native
+            // rendering pipeline) and WKUserScript matchMedia interception
+            // for reducedMotion / forcedColors / contrast. media uses the
+            // native setMediaType: API.
             uint32_t off = 0;
             uint64_t vid = read_u64(payload, payload_len, &off);
             ViewEntry *v = get_view(vid);
             if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
 
+            uint8_t csAct = (off < payload_len) ? payload[off++] : 0;
             NSString *colorScheme = read_str(payload, payload_len, &off);
+            uint8_t rmAct = (off < payload_len) ? payload[off++] : 0;
             NSString *reducedMotion = read_str(payload, payload_len, &off);
+            uint8_t fcAct = (off < payload_len) ? payload[off++] : 0;
             NSString *forcedColors = read_str(payload, payload_len, &off);
+            uint8_t mdAct = (off < payload_len) ? payload[off++] : 0;
             NSString *media = read_str(payload, payload_len, &off);
+            uint8_t ctAct = (off < payload_len) ? payload[off++] : 0;
             NSString *contrast = read_str(payload, payload_len, &off);
 
-            // Use private API for dark mode if available (affects CSS media queries natively)
-            if (colorScheme.length > 0) {
+            // Native setMediaType: for media type; empty string clears.
+            // Applied BEFORE colorScheme because `setMediaType:` on WKWebView
+            // resets the appearance override, so we must re-apply dark/light
+            // mode afterwards to avoid losing it in composed calls.
+            if (mdAct != 0) {
+                NSString *val = (mdAct == 2) ? media : @"";
+                [v->webview setMediaType:val];
+            }
+
+            // colorScheme: private `_setOverrideAppearance:` affects CSS
+            // `prefers-color-scheme` natively AND updates native form
+            // controls (date/color pickers, scrollbars, etc.) to match.
+            // It's the most accurate way to emulate dark mode, but it
+            // gets silently reset when `setMediaType:` is subsequently
+            // called on the same view — a WebKit quirk we can't avoid
+            // via reordering. To keep prefers-color-scheme working when
+            // composed with `media`, we additionally install a
+            // matchMedia patch below (the same mechanism used for
+            // reducedMotion/forcedColors/contrast). The native
+            // appearance override still fires for the single-field
+            // case and for form controls; the JS patch guarantees the
+            // matchMedia result is correct regardless of setMediaType
+            // ordering.
+            NSString *csWant = nil;
+            if (csAct != 0) {
                 SEL appearanceSel = NSSelectorFromString(@"_setOverrideAppearance:");
                 if ([v->webview respondsToSelector:appearanceSel]) {
                     NSAppearance *appearance = nil;
-                    if ([colorScheme isEqualToString:@"dark"]) {
-                        appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-                    } else if ([colorScheme isEqualToString:@"light"]) {
-                        appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+                    if (csAct == 2) {
+                        if ([colorScheme isEqualToString:@"dark"]) {
+                            appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
+                        } else if ([colorScheme isEqualToString:@"light"]) {
+                            appearance = [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+                        }
                     }
                     ((void(*)(id,SEL,id))objc_msgSend)(v->webview, appearanceSel, appearance);
                 }
+                // JS-side companion: patches matchMedia so
+                // `(prefers-color-scheme: ...)` queries report the override
+                // even after setMediaType: resets the native appearance.
+                if (csAct == 2) {
+                    csWant = colorScheme;  // "dark", "light", or "no-preference"
+                } else {
+                    csWant = @"no-preference";  // Disabled → fall back to default
+                }
             }
 
-            // Use native setMediaType: for media type emulation (screen/print)
-            if (media.length > 0) {
-                [v->webview setMediaType:media];
+            // Helper to install a matchMedia interceptor for a specific
+            // media feature. When `active` is 1, the feature reports true;
+            // when 0 it reports false (reset) — caller passes the desired
+            // matches value directly so we don't re-parse inside JS.
+            // WKUserScripts persist across navigations, so we rebuild the
+            // entire interceptor stack each call to reflect current state.
+            NSString *rmWant = nil; // nil = don't touch, @"true"/@"false" = patch.
+            NSString *fcWant = nil;
+            NSString *ctWant = nil;
+            // Track the *desired* boolean for each JS-intercepted feature.
+            // Action 0 (unchanged) means caller didn't pass this knob this
+            // call, but the host script stack is rebuilt from scratch per
+            // OP_EMULATE_MEDIA, so unchanged means "re-read persistent
+            // state" — but we don't have persistent state in host.m. The
+            // Rust `Page` layer merges state and forwards the full set on
+            // every call, so action 0 here always means "caller left it
+            // truly unchanged on first call" → no script needed. Action 1
+            // means disable (report the feature's default false), action
+            // 2 means set to the value's boolean equivalent.
+            if (rmAct == 2) {
+                rmWant = [reducedMotion isEqualToString:@"reduce"] ? @"true" : @"false";
+            } else if (rmAct == 1) {
+                rmWant = @"false";
             }
-            if (reducedMotion.length > 0) {
-                // Intercept matchMedia to override prefers-reduced-motion.
-                // The native MediaQueryList.matches is read-only, so we wrap matchMedia.
-                NSString *val = [reducedMotion isEqualToString:@"reduce"] ? @"reduce" : @"no-preference";
-                NSString *js = [NSString stringWithFormat:
-                    @"(function(){"
-                    "var _mm=window.matchMedia;"
-                    "window.matchMedia=function(q){"
-                    "var r=_mm.call(window,q);"
-                    "if(q.indexOf('prefers-reduced-motion')!==-1){"
-                    "var m=q.indexOf('reduce')!==-1;"
-                    "var want=%@;"
-                    "return Object.create(r,{matches:{get:function(){return want}}})}"
-                    "return r}})()",
-                    [val isEqualToString:@"reduce"] ? @"true" : @"false"];
-                WKUserScript *script = [[WKUserScript alloc]
-                    initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
-                [v->webview.configuration.userContentController addUserScript:script];
-                [v->webview evaluateJavaScript:js completionHandler:nil];
+            if (fcAct == 2) {
+                fcWant = [forcedColors isEqualToString:@"active"] ? @"true" : @"false";
+            } else if (fcAct == 1) {
+                fcWant = @"false";
+            }
+            if (ctAct == 2) {
+                ctWant = [contrast isEqualToString:@"more"] ? @"true" : @"false";
+            } else if (ctAct == 1) {
+                ctWant = @"false";
             }
 
-            // forced-colors: intercept matchMedia('(forced-colors: active)')
-            if (forcedColors.length > 0) {
-                BOOL isActive = [forcedColors isEqualToString:@"active"];
-                NSString *js = [NSString stringWithFormat:
+            // Build a single matchMedia interceptor JS that handles every
+            // feature in one shot. Injecting one user-script per call and
+            // running matchMedia patches fresh ensures they compose without
+            // leaking state across OP_EMULATE_MEDIA invocations.
+            if (csWant || rmWant || fcWant || ctWant) {
+                NSMutableString *js = [NSMutableString stringWithString:
                     @"(function(){"
                     "if(!window.__fd_mm)window.__fd_mm=window.matchMedia;"
                     "var _mm=window.__fd_mm;"
                     "window.matchMedia=function(q){"
-                    "var r=_mm.call(window,q);"
-                    "if(q.indexOf('forced-colors')!==-1){"
-                    "return Object.create(r,{matches:{get:function(){return %@}}})}"
-                    "return r}})()",
-                    isActive ? @"true" : @"false"];
-                WKUserScript *script = [[WKUserScript alloc]
-                    initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
-                [v->webview.configuration.userContentController addUserScript:script];
-                [v->webview evaluateJavaScript:js completionHandler:nil];
-            }
-
-            // contrast: intercept matchMedia('(prefers-contrast: more)')
-            if (contrast.length > 0) {
-                BOOL isMore = [contrast isEqualToString:@"more"];
-                NSString *js = [NSString stringWithFormat:
-                    @"(function(){"
-                    "if(!window.__fd_mm)window.__fd_mm=window.matchMedia;"
-                    "var _mm=window.__fd_mm;"
-                    "window.matchMedia=function(q){"
-                    "var r=_mm.call(window,q);"
-                    "if(q.indexOf('prefers-contrast')!==-1){"
-                    "var m=q.indexOf('more')!==-1;"
-                    "return Object.create(r,{matches:{get:function(){return %@}}})}"
-                    "return r}})()",
-                    isMore ? @"true" : @"false"];
+                    "var r=_mm.call(window,q);"];
+                if (csWant) {
+                    // `matches` is true when the query's requested value
+                    // equals the override. e.g. override=dark → query
+                    // `(prefers-color-scheme: dark)` returns true, query
+                    // `(prefers-color-scheme: light)` returns false.
+                    [js appendFormat:@"if(q.indexOf('prefers-color-scheme')!==-1)return Object.create(r,{matches:{get:function(){return q.indexOf('%@')!==-1}}});",
+                        csWant];
+                }
+                if (rmWant) {
+                    [js appendFormat:@"if(q.indexOf('prefers-reduced-motion')!==-1)return Object.create(r,{matches:{get:function(){return %@}}});",
+                        rmWant];
+                }
+                if (fcWant) {
+                    [js appendFormat:@"if(q.indexOf('forced-colors')!==-1)return Object.create(r,{matches:{get:function(){return %@}}});",
+                        fcWant];
+                }
+                if (ctWant) {
+                    [js appendFormat:@"if(q.indexOf('prefers-contrast')!==-1)return Object.create(r,{matches:{get:function(){return %@}}});",
+                        ctWant];
+                }
+                [js appendString:@"return r}})()"];
                 WKUserScript *script = [[WKUserScript alloc]
                     initWithSource:js injectionTime:WKUserScriptInjectionTimeAtDocumentStart forMainFrameOnly:NO];
                 [v->webview.configuration.userContentController addUserScript:script];

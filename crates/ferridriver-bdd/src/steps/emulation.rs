@@ -25,7 +25,7 @@ async fn set_locale(world: &mut BrowserWorld, locale: String) {
 #[given("I emulate color scheme {string}")]
 async fn emulate_color_scheme(world: &mut BrowserWorld, scheme: String) {
   let opts = ferridriver::options::EmulateMediaOptions {
-    color_scheme: Some(scheme),
+    color_scheme: ferridriver::options::MediaOverride::Set(scheme),
     ..Default::default()
   };
   world

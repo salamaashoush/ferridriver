@@ -713,27 +713,17 @@ impl Page {
       .map_err(napi::Error::from_reason)
   }
 
-  /// Emulate media features (color scheme, reduced motion, media type, etc.).
+  /// Emulate media features. Mirrors Playwright's
+  /// `page.emulateMedia(options?: { media, colorScheme, reducedMotion, forcedColors, contrast })`
+  /// per `/tmp/playwright/packages/playwright-core/types/types.d.ts:2580`.
+  ///
+  /// Every field accepts the enum values documented by Playwright, plus
+  /// `null` to disable that specific emulation (mirrored in the JS binding
+  /// via the option being absent or explicitly `null`).
   #[napi]
-  pub async fn emulate_media(
-    &self,
-    media_type: Option<String>,
-    color_scheme: Option<String>,
-    reduced_motion: Option<String>,
-    forced_colors: Option<String>,
-    contrast: Option<String>,
-  ) -> Result<()> {
-    self
-      .inner
-      .emulate_media(&ferridriver::options::EmulateMediaOptions {
-        media: media_type,
-        color_scheme,
-        reduced_motion,
-        forced_colors,
-        contrast,
-      })
-      .await
-      .map_err(napi::Error::from_reason)
+  pub async fn emulate_media(&self, options: Option<crate::types::EmulateMediaOptions>) -> Result<()> {
+    let opts: ferridriver::options::EmulateMediaOptions = options.map(Into::into).unwrap_or_default();
+    self.inner.emulate_media(&opts).await.map_err(napi::Error::from_reason)
   }
 
   /// Enable or disable JavaScript execution.

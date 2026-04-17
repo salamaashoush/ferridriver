@@ -103,6 +103,61 @@ impl From<JsPoint> for ferridriver::options::Point {
   }
 }
 
+/// Parse the Playwright-shaped `emulateMedia` options bag from a
+/// `rquickjs::Value`. Unlike `serde_from_js`, this walks the JS object
+/// manually so we can distinguish three states for every field:
+///
+/// * absent → [`MediaOverride::Unchanged`]
+/// * explicit `null` → [`MediaOverride::Disabled`]
+/// * string value → [`MediaOverride::Set`]
+///
+/// serde-based deserialization conflates `undefined` and `null` into a
+/// single `Option::None`, which breaks the Playwright null-disables-the-
+/// override contract. See `/tmp/playwright/packages/playwright-core/types/types.d.ts:2580`
+/// for the `T | null | undefined` shape we're mirroring.
+fn parse_emulate_media_field<'js>(
+  obj: &rquickjs::Object<'js>,
+  key: &str,
+) -> rquickjs::Result<ferridriver::options::MediaOverride> {
+  use ferridriver::options::MediaOverride;
+  if !obj.contains_key(key)? {
+    return Ok(MediaOverride::Unchanged);
+  }
+  let val: rquickjs::Value<'js> = obj.get(key)?;
+  if val.is_undefined() {
+    Ok(MediaOverride::Unchanged)
+  } else if val.is_null() {
+    Ok(MediaOverride::Disabled)
+  } else if let Some(s) = val.as_string() {
+    Ok(MediaOverride::Set(s.to_string()?))
+  } else {
+    Err(rquickjs::Error::new_from_js_message(
+      "emulateMedia options",
+      "field",
+      format!("{key}: expected null, undefined, or string"),
+    ))
+  }
+}
+
+pub(crate) fn parse_emulate_media_options<'js>(
+  _ctx: &rquickjs::Ctx<'js>,
+  value: Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<ferridriver::options::EmulateMediaOptions> {
+  let Some(v) = value.0.filter(|v| !v.is_undefined() && !v.is_null()) else {
+    return Ok(ferridriver::options::EmulateMediaOptions::default());
+  };
+  let Some(obj) = v.as_object() else {
+    return Ok(ferridriver::options::EmulateMediaOptions::default());
+  };
+  Ok(ferridriver::options::EmulateMediaOptions {
+    media: parse_emulate_media_field(obj, "media")?,
+    color_scheme: parse_emulate_media_field(obj, "colorScheme")?,
+    reduced_motion: parse_emulate_media_field(obj, "reducedMotion")?,
+    forced_colors: parse_emulate_media_field(obj, "forcedColors")?,
+    contrast: parse_emulate_media_field(obj, "contrast")?,
+  })
+}
+
 pub(crate) fn parse_drag_options<'js>(
   ctx: &rquickjs::Ctx<'js>,
   value: Opt<rquickjs::Value<'js>>,
@@ -555,6 +610,20 @@ impl PageJs {
   #[qjs(rename = "setViewportSize")]
   pub async fn set_viewport_size(&self, width: i64, height: i64) -> rquickjs::Result<()> {
     self.inner.set_viewport_size(width, height).await.into_js()
+  }
+
+  /// Emulate media features. Accepts Playwright's
+  /// `{ media?, colorScheme?, reducedMotion?, forcedColors?, contrast? }`
+  /// option bag — each call is a partial update layered on top of the
+  /// page's persistent emulated-media state.
+  #[qjs(rename = "emulateMedia")]
+  pub async fn emulate_media<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = parse_emulate_media_options(&ctx, options)?;
+    self.inner.emulate_media(&opts).await.into_js()
   }
 
   // ── Screenshots / PDF (return raw bytes; pair with `artifacts.writeBytes`) ─
