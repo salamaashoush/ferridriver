@@ -823,16 +823,35 @@ impl Page {
     Ok(())
   }
 
-  /// Drag an element matching `source_selector` onto an element matching `target_selector`.
+  /// Drag an element matching `source_selector` onto an element matching
+  /// `target_selector`. Mirrors Playwright's
+  /// `page.dragAndDrop(source, target, options)` per
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2486`.
+  ///
+  /// The [`crate::options::DragAndDropOptions::strict`] field, when set,
+  /// overrides the default strict-mode of the source/target locators —
+  /// `Some(true)` errors on multi-match, `Some(false)` allows the first
+  /// match, `None` keeps the default (`strict = true`). All other fields
+  /// are forwarded to [`crate::locator::Locator::drag_to`].
   ///
   /// # Errors
   ///
-  /// Returns an error if either element cannot be found or the drag-and-drop operation fails.
-  pub async fn drag_and_drop(self: &Arc<Self>, source_selector: &str, target_selector: &str) -> Result<()> {
-    self
-      .locator(source_selector, None)
-      .drag_to(&self.locator(target_selector, None))
-      .await
+  /// Returns an error if either element cannot be found or the
+  /// drag-and-drop operation fails.
+  pub async fn drag_and_drop(
+    self: &Arc<Self>,
+    source_selector: &str,
+    target_selector: &str,
+    options: Option<crate::options::DragAndDropOptions>,
+  ) -> Result<()> {
+    let opts = options.unwrap_or_default();
+    let source = self.locator(source_selector, None);
+    let target = self.locator(target_selector, None);
+    let (source, target) = match opts.strict {
+      Some(s) => (source.strict(s), target.strict(s)),
+      None => (source, target),
+    };
+    source.drag_to(&target, Some(opts)).await
   }
 
   /// Dispatch a keyDown event for a single key (does NOT release it).

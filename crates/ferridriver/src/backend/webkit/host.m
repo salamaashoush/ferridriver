@@ -413,6 +413,14 @@ static NSMutableDictionary<NSNumber*, void(^)(id, NSString*)> *g_pending_routes 
 typedef struct {
     WKWebView *webview;
     FDHostWindow *window;
+    // Bitmask of currently-pressed mouse buttons (bit 0 = left, 1 = right,
+    // 2 = other). A non-zero value means a drag is in progress, so
+    // subsequent OP_MOUSE_EVENT moves dispatch as `mouseDragged:` /
+    // `rightMouseDragged:` / `otherMouseDragged:` rather than the
+    // button-less `mouseMoved:`. This is required for the WKWebView to
+    // surface DOM `mousemove` events during a drag — AppKit only delivers
+    // mouseMoved when no button is held.
+    uint8_t pressed_buttons;
 } ViewEntry;
 
 static NSMutableDictionary<NSNumber*, NSValue*> *g_views;
@@ -1455,24 +1463,38 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             NSTimeInterval ts = [NSProcessInfo processInfo].systemUptime;
             NSInteger winNum = [v->window windowNumber];
 
-            // Map button + type to NSEventType
+            // Decide NSEventType based on phase (move/down/up), button, AND
+            // the view's current `pressed_buttons` mask. During a drag (any
+            // button held) the move event must be a `*MouseDragged` event —
+            // AppKit only delivers `mouseMoved:` when no button is down, and
+            // WKWebView only forwards DOM `mousemove` for dragged events
+            // while a drag is in progress.
             NSEventType evType;
+            uint8_t held_mask = v->pressed_buttons;
             if (mouse_type == 0) {
                 // Move
-                evType = (mouse_button == 0) ? NSEventTypeMouseMoved : NSEventTypeMouseMoved;
+                if (held_mask & 0x1) {
+                    evType = NSEventTypeLeftMouseDragged;
+                } else if (held_mask & 0x2) {
+                    evType = NSEventTypeRightMouseDragged;
+                } else if (held_mask & 0x4) {
+                    evType = NSEventTypeOtherMouseDragged;
+                } else {
+                    evType = NSEventTypeMouseMoved;
+                }
             } else if (mouse_type == 1) {
                 // Down
                 switch (mouse_button) {
-                    case 1: evType = NSEventTypeRightMouseDown; break;
-                    case 2: evType = NSEventTypeOtherMouseDown; break;
-                    default: evType = NSEventTypeLeftMouseDown; break;
+                    case 1: evType = NSEventTypeRightMouseDown; v->pressed_buttons |= 0x2; break;
+                    case 2: evType = NSEventTypeOtherMouseDown; v->pressed_buttons |= 0x4; break;
+                    default: evType = NSEventTypeLeftMouseDown; v->pressed_buttons |= 0x1; break;
                 }
             } else {
                 // Up
                 switch (mouse_button) {
-                    case 1: evType = NSEventTypeRightMouseUp; break;
-                    case 2: evType = NSEventTypeOtherMouseUp; break;
-                    default: evType = NSEventTypeLeftMouseUp; break;
+                    case 1: evType = NSEventTypeRightMouseUp; v->pressed_buttons &= ~0x2; break;
+                    case 2: evType = NSEventTypeOtherMouseUp; v->pressed_buttons &= ~0x4; break;
+                    default: evType = NSEventTypeLeftMouseUp; v->pressed_buttons &= ~0x1; break;
                 }
             }
 
@@ -1486,7 +1508,15 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             // delivery in headless/borderless windows with ignoresMouseEvents=YES.
             // This matches the proven OP_CLICK dispatch path.
             if (mouse_type == 0) {
-                [v->webview mouseMoved:ev];
+                if (held_mask & 0x1) {
+                    [v->webview mouseDragged:ev];
+                } else if (held_mask & 0x2) {
+                    [v->webview rightMouseDragged:ev];
+                } else if (held_mask & 0x4) {
+                    [v->webview otherMouseDragged:ev];
+                } else {
+                    [v->webview mouseMoved:ev];
+                }
             } else if (mouse_type == 1) {
                 switch (mouse_button) {
                     case 1: [v->webview rightMouseDown:ev]; break;
@@ -1501,8 +1531,17 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 }
             }
 
-            // Completion barrier for mouse up events -- waits for mouseEventQueue to drain
-            if (mouse_type == 2) {
+            // Completion barrier: for both mouse-up AND drag-move events we
+            // wait for the mouseEventQueue to drain before replying. The
+            // barrier on up keeps `mouseup` ordering with subsequent ops;
+            // the barrier on every move (when a button is held) prevents
+            // WebKit's intra-drag event coalescer from merging rapid
+            // NSEventTypeLeftMouseDragged injections into a single
+            // `mousemove` — a sequence of awaited barrier calls forces
+            // WebCore to process each drag event individually so that
+            // `steps` produces the same JS-visible event count as CDP.
+            BOOL drain_now = (mouse_type == 2) || (mouse_type == 0 && held_mask != 0);
+            if (drain_now) {
                 SEL barrierSel = NSSelectorFromString(@"_doAfterProcessingAllPendingMouseEvents:");
                 if ([v->webview respondsToSelector:barrierSel]) {
                     uint32_t captured_rid = req_id;

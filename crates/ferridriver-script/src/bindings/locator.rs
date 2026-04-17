@@ -386,6 +386,28 @@ impl LocatorJs {
     self.inner.is_attached().await.into_js()
   }
 
+  // ── Drag ──────────────────────────────────────────────────────────────────
+
+  /// Drag this element to `target`. Mirrors Playwright's
+  /// `locator.dragTo(target, options?)` per
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13293`.
+  ///
+  /// Accepts `{ force?, noWaitAfter?, sourcePosition?, targetPosition?,
+  /// steps?, timeout?, trial? }`. `strict` is omitted here (present on
+  /// Playwright's `page.dragAndDrop` options but not `locator.dragTo`,
+  /// because the locator already carries its own strict flag).
+  #[qjs(rename = "dragTo")]
+  pub async fn drag_to<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    target: rquickjs::Class<'js, LocatorJs>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let target_inner = target.borrow().inner.clone();
+    let opts = crate::bindings::page::parse_drag_options(&ctx, options)?;
+    self.inner.drag_to(&target_inner, opts).await.into_js()
+  }
+
   // ── All variants ──────────────────────────────────────────────────────────
 
   #[qjs(rename = "allTextContents")]

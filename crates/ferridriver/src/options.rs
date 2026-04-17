@@ -130,6 +130,57 @@ pub struct BoundingBox {
   pub height: f64,
 }
 
+/// A 2D point, relative to the top-left corner of an element's padding box
+/// (when used as [`DragAndDropOptions::source_position`] or
+/// [`DragAndDropOptions::target_position`]), or in viewport coordinates in
+/// other contexts. Mirrors Playwright's `{ x: number; y: number }` point
+/// object used by `sourcePosition`, `targetPosition`, and click `position`.
+#[derive(Debug, Clone, Copy, Default, PartialEq)]
+pub struct Point {
+  pub x: f64,
+  pub y: f64,
+}
+
+/// Options for [`crate::page::Page::drag_and_drop`] and
+/// [`crate::locator::Locator::drag_to`]. Mirrors Playwright's
+/// `FrameDragAndDropOptions & TimeoutOptions` surface per
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` (public
+/// `page.dragAndDrop` / `locator.dragTo` signatures) and the internal
+/// `FrameDragAndDropOptions` type at
+/// `/tmp/playwright/packages/protocol/src/channels.d.ts:3012`.
+///
+/// `strict` is meaningful only on [`crate::page::Page::drag_and_drop`] (which
+/// accepts bare selectors); [`crate::locator::Locator::drag_to`] ignores it
+/// because the source locator already carries its own strict flag.
+///
+/// `no_wait_after` is accepted for Playwright signature parity but has no
+/// effect (deprecated in upstream, tagged `@deprecated This option has no
+/// effect.`).
+#[derive(Debug, Clone, Default)]
+pub struct DragAndDropOptions {
+  /// Bypass actionability checks.
+  pub force: Option<bool>,
+  /// Deprecated — no effect. Accepted for signature parity.
+  pub no_wait_after: Option<bool>,
+  /// Press point relative to the source element's padding-box top-left.
+  /// When absent, the source element's center is used.
+  pub source_position: Option<Point>,
+  /// Release point relative to the target element's padding-box top-left.
+  /// When absent, the target element's center is used.
+  pub target_position: Option<Point>,
+  /// Number of interpolated `mousemove` events between press and release.
+  /// Playwright default is `1` (a single move at the destination).
+  pub steps: Option<u32>,
+  /// Strict-mode override for resolving the source/target selector.
+  /// Meaningful only on `page.drag_and_drop`; ignored by `locator.drag_to`.
+  pub strict: Option<bool>,
+  /// Maximum time in ms. `0` means no timeout. Default is inherited from
+  /// the context's default action timeout.
+  pub timeout: Option<u64>,
+  /// Perform actionability checks only; skip the actual mouse press/move/release.
+  pub trial: Option<bool>,
+}
+
 /// Viewport configuration -- consistent across all backends.
 /// Matches Playwright's viewport options.
 #[derive(Debug, Clone)]
@@ -541,5 +592,50 @@ mod pdf_option_tests {
     assert!(opts.prefer_css_page_size.is_none());
     assert!(opts.outline.is_none());
     assert!(opts.tagged.is_none());
+  }
+}
+
+#[cfg(test)]
+mod drag_option_tests {
+  use super::*;
+
+  #[test]
+  fn default_drag_options_has_no_overrides() {
+    let opts = DragAndDropOptions::default();
+    assert!(opts.force.is_none());
+    assert!(opts.no_wait_after.is_none());
+    assert!(opts.source_position.is_none());
+    assert!(opts.target_position.is_none());
+    assert!(opts.steps.is_none());
+    assert!(opts.strict.is_none());
+    assert!(opts.timeout.is_none());
+    assert!(opts.trial.is_none());
+  }
+
+  #[test]
+  fn drag_options_carry_every_field() {
+    let opts = DragAndDropOptions {
+      force: Some(true),
+      no_wait_after: Some(false),
+      source_position: Some(Point { x: 10.0, y: 20.0 }),
+      target_position: Some(Point { x: 30.0, y: 40.0 }),
+      steps: Some(5),
+      strict: Some(true),
+      timeout: Some(2_000),
+      trial: Some(true),
+    };
+    assert_eq!(opts.force, Some(true));
+    assert_eq!(opts.no_wait_after, Some(false));
+    assert_eq!(opts.source_position, Some(Point { x: 10.0, y: 20.0 }));
+    assert_eq!(opts.target_position, Some(Point { x: 30.0, y: 40.0 }));
+    assert_eq!(opts.steps, Some(5));
+    assert_eq!(opts.strict, Some(true));
+    assert_eq!(opts.timeout, Some(2_000));
+    assert_eq!(opts.trial, Some(true));
+  }
+
+  #[test]
+  fn point_default_is_origin() {
+    assert_eq!(Point::default(), Point { x: 0.0, y: 0.0 });
   }
 }

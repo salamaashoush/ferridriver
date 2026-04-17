@@ -1,5 +1,6 @@
 //! Locator class -- NAPI binding for `ferridriver::Locator`.
 
+use crate::error::IntoNapi;
 use crate::types::{BoundingBox, FilterOptions, RoleOptions, TextOptions, WaitOptions};
 use napi::Result;
 use napi::bindgen_prelude::Buffer;
@@ -313,13 +314,13 @@ impl Locator {
     }))
   }
 
+  /// Drag this element to `target`. Mirrors Playwright's
+  /// `locator.dragTo(target, options?)` per
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13293`.
   #[napi(js_name = "dragTo")]
-  pub async fn drag_to(&self, target: &Locator) -> Result<()> {
-    self
-      .inner
-      .drag_to(&target.inner)
-      .await
-      .map_err(napi::Error::from_reason)
+  pub async fn drag_to(&self, target: &Locator, options: Option<crate::types::DragAndDropOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.drag_to(&target.inner, opts).await.into_napi()
   }
 
   // ── Waiting ─────────────────────────────────────────────────────────────

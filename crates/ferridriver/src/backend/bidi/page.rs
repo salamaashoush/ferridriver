@@ -715,11 +715,11 @@ impl BidiPage {
     Ok(())
   }
 
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
+  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<(), String> {
     self
       .cmd(
         "input.performActions",
-        input::click_and_drag(&self.context_id, from, to),
+        input::click_and_drag(&self.context_id, from, to, steps),
       )
       .await?;
     Ok(())

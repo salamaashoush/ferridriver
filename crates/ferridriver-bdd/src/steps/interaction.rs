@@ -148,7 +148,7 @@ async fn drag(world: &mut BrowserWorld, source: String, target: String) {
   world
     .page()
     .locator(&source, None)
-    .drag_to(&target_locator)
+    .drag_to(&target_locator, None)
     .await
     .map_err(|e| StepError::from(format!("drag \"{source}\" to \"{target}\": {e}")))?;
 }

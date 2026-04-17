@@ -296,7 +296,8 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.10 NAPI dragAndDrop signature
 
-- [ ] Replace coord-based `(fromX, fromY, toX, toY)` at `crates/ferridriver-node/src/page.rs:623` with selector-based `(source, target, options)` matching Rust core and Playwright.
+- [x] Replace coord-based `(fromX, fromY, toX, toY)` with selector-based `(source, target, options)` matching Playwright's `page.dragAndDrop(source, target, options?)` and `locator.dragTo(target, options?)`. Options surface: `force`, `noWaitAfter`, `sourcePosition`, `targetPosition`, `steps` (default `1`), `strict` (page-only), `timeout`, `trial`. Wired through Rust core + NAPI + QuickJS with live-browser tests on all four backends (cdp-pipe, cdp-raw, bidi, webkit). WebKit backend gained per-drag `mouseDragged`/`_doAfterProcessingAllPendingMouseEvents:` drain handling so `steps` produces one DOM `mousemove` per step instead of AppKit-coalesced pairs.
+- **Playwright ref**: `/tmp/playwright/packages/playwright-core/types/types.d.ts:2486` (page), `:13293` (locator).
 
 ### 3.11 Locator filter `visible` + Locator-object `has`/`has_not`
 
@@ -751,7 +752,7 @@ The `ferridriver-script` crate exposes core Rust types to QuickJS via rquickjs c
 These are not ferridriver bugs per se — they are backend-surface gaps. The tests document them.
 
 1. ~~**WebKit: `context.addCookies` → `context.cookies()` round-trip drops the cookie**~~ — **fixed** alongside task #3.4. The Obj-C `OP_GET_COOKIES` handler was emitting `"http_only"` (snake_case) but Rust `CookieData` switched to `#[serde(rename_all = "camelCase")]` in `c820caf`, so serde rejected the whole entry (`.unwrap_or_default()` then collapsed to `[]`). Obj-C now emits `"httpOnly"` to match the Rust wire contract. All three backends round-trip cookies.
-2. **BiDi (Firefox): `page.dragAndDrop` fails with `scrollIntoViewIfNeeded is not a function`**. Core's drag_and_drop dispatches via a DOM script that uses Chrome's `scrollIntoViewIfNeeded` — Firefox does not implement that method. Either core should feature-detect and fall back to `scrollIntoView`, or the BiDi backend needs its own drag path.
+2. ~~**BiDi (Firefox): `page.dragAndDrop` fails with `scrollIntoViewIfNeeded is not a function`**~~ — **fixed** alongside task #3.10. The bounding-rect JS probe now does `try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); }` so Firefox/BiDi falls back to the standards-compliant method. `page.dragAndDrop` and `locator.dragTo` pass on all four backends.
 3. **CDP: `page.mouse.wheel(dx, dy)` does not reliably produce a page scroll**. CDP's `Input.dispatchMouseEvent` with `type: "mouseWheel"` requires mouse position routing that doesn't always land on the scrollable viewport. `test_script_mouse_wheel` asserts only that the call does not error, not that `window.scrollY` changed.
 
 ### C. Test-level workarounds (honest list of relaxed assertions)

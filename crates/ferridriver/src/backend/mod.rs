@@ -529,8 +529,8 @@ impl AnyPage {
     page_dispatch!(self, mouse_up(x, y, button))
   }
 
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
-    page_dispatch!(self, click_and_drag(from, to))
+  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<(), String> {
+    page_dispatch!(self, click_and_drag(from, to, steps))
   }
 
   pub async fn type_str(&self, text: &str) -> Result<(), String> {

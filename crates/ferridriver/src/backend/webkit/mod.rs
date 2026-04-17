@@ -739,14 +739,19 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if any of the mouse down/move/up IPC calls fail.
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64)) -> Result<(), String> {
+  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<(), String> {
     self.send_mouse_event(1, 0, 1, from.0, from.1).await?; // down
-    let steps = 10u32;
+    // Playwright default is `1` — a single `mousemove` at the destination.
+    // For steps > 1, interpolate with a cubic ease between press and release.
+    let steps = steps.max(1);
     for i in 1..=steps {
-      let t = f64::from(i) / f64::from(steps);
-      let ease = t * t * (3.0 - 2.0 * t);
-      let x = from.0 + (to.0 - from.0) * ease;
-      let y = from.1 + (to.1 - from.1) * ease;
+      let (x, y) = if steps == 1 {
+        (to.0, to.1)
+      } else {
+        let t = f64::from(i) / f64::from(steps);
+        let ease = t * t * (3.0 - 2.0 * t);
+        (from.0 + (to.0 - from.0) * ease, from.1 + (to.1 - from.1) * ease)
+      };
       self.send_mouse_event(0, 0, 0, x, y).await?; // move
     }
     self.send_mouse_event(2, 0, 1, to.0, to.1).await // up

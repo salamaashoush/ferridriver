@@ -131,6 +131,63 @@ pub struct BoundingBox {
   pub height: f64,
 }
 
+/// 2-D point, in CSS pixels. Used for drag-and-drop `sourcePosition` /
+/// `targetPosition` relative to an element's padding-box top-left.
+#[napi(object)]
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Point {
+  pub x: f64,
+  pub y: f64,
+}
+
+impl From<Point> for ferridriver::options::Point {
+  fn from(p: Point) -> Self {
+    Self { x: p.x, y: p.y }
+  }
+}
+
+/// Playwright-parity options for `page.dragAndDrop` and `locator.dragTo`.
+/// Mirrors `FrameDragAndDropOptions & TimeoutOptions` at
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2486` (for
+/// `page.dragAndDrop`) and `:13293` (for `locator.dragTo`). `strict` has
+/// no effect on `locator.dragTo` (the locator already carries strict);
+/// it is meaningful only on `page.dragAndDrop`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct DragAndDropOptions {
+  /// Bypass actionability checks.
+  pub force: Option<bool>,
+  /// Deprecated — has no effect. Accepted for signature parity.
+  pub no_wait_after: Option<bool>,
+  /// Press point relative to the source element's padding-box top-left.
+  pub source_position: Option<Point>,
+  /// Release point relative to the target element's padding-box top-left.
+  pub target_position: Option<Point>,
+  /// Interpolated `mousemove` events between press and release. Default `1`.
+  pub steps: Option<u32>,
+  /// Strict-mode override (only meaningful on `page.dragAndDrop`).
+  pub strict: Option<bool>,
+  /// Maximum time in ms. `0` disables the timeout.
+  pub timeout: Option<f64>,
+  /// Perform actionability checks only; skip the actual mouse action.
+  pub trial: Option<bool>,
+}
+
+impl From<DragAndDropOptions> for ferridriver::options::DragAndDropOptions {
+  fn from(o: DragAndDropOptions) -> Self {
+    Self {
+      force: o.force,
+      no_wait_after: o.no_wait_after,
+      source_position: o.source_position.map(Into::into),
+      target_position: o.target_position.map(Into::into),
+      steps: o.steps,
+      strict: o.strict,
+      timeout: o.timeout.map(f64_to_u64),
+      trial: o.trial,
+    }
+  }
+}
+
 /// Navigation options (waitUntil, timeout, referer).
 #[napi(object)]
 #[derive(Debug, Clone, Default)]

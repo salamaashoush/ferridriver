@@ -894,39 +894,63 @@ impl Locator {
 
   // ── Drag to another locator ─────────────────────────────────────────────
 
-  /// Drag this element to the target locator's element.
+  /// Drag this element to `target`. Mirrors Playwright's
+  /// `Locator.dragTo(target, options)` signature per
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13293`.
+  ///
+  /// When [`DragAndDropOptions::source_position`] is set, the press point is
+  /// the source element's padding-box origin offset by that point; otherwise
+  /// the source element's center is used. Same for `target_position` on the
+  /// release point. [`DragAndDropOptions::steps`] controls how many
+  /// interpolated `mousemove` events are emitted between press and release
+  /// (Playwright default: `1`). [`DragAndDropOptions::trial`] skips the
+  /// actual mouse action, returning after both elements resolve.
+  /// [`DragAndDropOptions::strict`] is ignored here (per Playwright) because
+  /// this locator already carries its own strict flag.
   ///
   /// # Errors
   ///
   /// Returns an error if either element cannot be found, bounding box
   /// coordinates cannot be read, or the drag operation fails.
-  pub async fn drag_to(&self, target: &Locator) -> Result<()> {
-    // Get both source and target center coordinates via call_js_fn_value (1 CDP each)
+  pub async fn drag_to(&self, target: &Locator, options: Option<crate::options::DragAndDropOptions>) -> Result<()> {
+    let opts = options.unwrap_or_default();
+
+    // Get source + target geometry via call_js_fn_value (1 CDP each).
     let source_el = self.resolve().await?;
     let target_el = target.resolve().await?;
 
-    // Parallel: get both centers simultaneously
+    // Parallel: get both bounding rects simultaneously — we need the full
+    // rect (x, y, width, height) so that sourcePosition / targetPosition can
+    // be offset from the padding-box origin as Playwright does.
     let (src_result, tgt_result) = tokio::join!(
       source_el.call_js_fn_value(
-        "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
+        "function() { try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); } var r = this.getBoundingClientRect(); return {x: r.x, y: r.y, width: r.width, height: r.height}; }"
       ),
       target_el.call_js_fn_value(
-        "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
+        "function() { try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); } var r = this.getBoundingClientRect(); return {x: r.x, y: r.y, width: r.width, height: r.height}; }"
       ),
     );
 
     let src = src_result?.ok_or_else(|| crate::error::FerriError::Other("no source bounding box".into()))?;
     let tgt = tgt_result?.ok_or_else(|| crate::error::FerriError::Other("no target bounding box".into()))?;
 
-    let from = (
-      src.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-      src.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-    );
-    let to = (
-      tgt.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-      tgt.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0),
-    );
-    self.page.inner().click_and_drag(from, to).await.map_err(Into::into)
+    let from = rect_point(&src, opts.source_position);
+    let to = rect_point(&tgt, opts.target_position);
+
+    // Playwright's `trial: true` performs actionability checks (resolve) and
+    // skips the actual action. We've already resolved both elements above,
+    // so simply return without dispatching mouse events.
+    if opts.trial.unwrap_or(false) {
+      return Ok(());
+    }
+
+    let steps = opts.steps.unwrap_or(1);
+    self
+      .page
+      .inner()
+      .click_and_drag(from, to, steps)
+      .await
+      .map_err(Into::into)
   }
 
   // ── Combinators ─────────────────────────────────────────────────────────
@@ -1400,6 +1424,22 @@ impl std::fmt::Debug for FrameLocator {
 }
 
 // ── Selector builders ───────────────────────────────────────────────────────
+
+/// Compute the drag press/release point from an element's bounding rect and
+/// an optional `position`. When `position` is `Some`, the point is the
+/// element's padding-box top-left offset by `(position.x, position.y)` —
+/// matching Playwright's `sourcePosition` / `targetPosition` semantics. When
+/// `position` is `None`, the element's center is used.
+fn rect_point(rect: &serde_json::Value, position: Option<crate::options::Point>) -> (f64, f64) {
+  let x = rect.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+  let y = rect.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+  let width = rect.get("width").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+  let height = rect.get("height").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+  match position {
+    Some(p) => (x + p.x, y + p.y),
+    None => (x + width / 2.0, y + height / 2.0),
+  }
+}
 
 pub(crate) fn build_role_selector(role: &str, opts: &RoleOptions) -> String {
   let mut sel = format!("role={role}");
