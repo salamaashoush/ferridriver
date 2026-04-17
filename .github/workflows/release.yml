@@ -254,61 +254,58 @@ jobs:
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org
         run: |
+          set -euo pipefail
+          # Skip if name@version already on registry; publish otherwise.
+          # Any failure except "already published" exits non-zero.
+          publish_if_new() {
+            local dir="$1"; shift
+            local name version existing
+            name=$(node -p "require('${dir}/package.json').name")
+            version=$(node -p "require('${dir}/package.json').version")
+            existing=$(npm view "${name}@${version}" version --registry=https://registry.npmjs.org 2>/dev/null || true)
+            if [ "${existing}" = "${version}" ]; then
+              echo "SKIP ${name}@${version} — already on registry"
+              return 0
+            fi
+            echo "PUBLISH ${name}@${version}"
+            (cd "${dir}" && npm publish --access public --registry=https://registry.npmjs.org "$@")
+          }
           # Generate platform package.json files without publishing them
           napi prepublish -t npm --skip-optional-publish --no-gh-release
-          # Publish each platform package with --access public.
-          # No `|| true` — real failures must surface.
           for dir in npm/*/; do
-            if [ -f "${dir}package.json" ]; then
-              echo "Publishing ${dir}..."
-              (cd "$dir" && npm publish --access public --registry https://registry.npmjs.org)
-            fi
+            [ -f "${dir}package.json" ] || continue
+            publish_if_new "${dir%/}"
           done
-          # Publish the main package
-          npm publish --access public --ignore-scripts --registry https://registry.npmjs.org
+          publish_if_new . --ignore-scripts
 
       # Publish pure JS/TS packages (dependency order: ct-core first, then adapters + test)
-      - name: Publish @ferridriver/ct-core
-        working-directory: packages/ct-core
-        run: npm publish --access public --registry https://registry.npmjs.org
+      - name: Publish JS/TS packages
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @ferridriver/ct-react
-        working-directory: packages/ct-react
-        run: npm publish --access public --registry https://registry.npmjs.org
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @ferridriver/ct-vue
-        working-directory: packages/ct-vue
-        run: npm publish --access public --registry https://registry.npmjs.org
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @ferridriver/ct-svelte
-        working-directory: packages/ct-svelte
-        run: npm publish --access public --registry https://registry.npmjs.org
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @ferridriver/ct-solid
-        working-directory: packages/ct-solid
-        run: npm publish --access public --registry https://registry.npmjs.org
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish @ferridriver/test
-        working-directory: packages/ferridriver-test
-        run: npm publish --access public --registry https://registry.npmjs.org
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+        run: |
+          set -euo pipefail
+          publish_if_new() {
+            local dir="$1"
+            local name version existing
+            name=$(node -p "require('./${dir}/package.json').name")
+            version=$(node -p "require('./${dir}/package.json').version")
+            existing=$(npm view "${name}@${version}" version --registry=https://registry.npmjs.org 2>/dev/null || true)
+            if [ "${existing}" = "${version}" ]; then
+              echo "SKIP ${name}@${version} — already on registry"
+              return 0
+            fi
+            echo "PUBLISH ${name}@${version}"
+            (cd "${dir}" && npm publish --access public --registry=https://registry.npmjs.org)
+          }
+          # ct-core must come first; others are independent
+          publish_if_new packages/ct-core
+          publish_if_new packages/ct-react
+          publish_if_new packages/ct-vue
+          publish_if_new packages/ct-svelte
+          publish_if_new packages/ct-solid
+          publish_if_new packages/ferridriver-test
 
   # ---------------------------------------------------------------------------
   # Publish to crates.io (ordered by dependency graph)
