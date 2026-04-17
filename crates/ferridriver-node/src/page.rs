@@ -531,14 +531,18 @@ impl Page {
     Ok(bytes.into())
   }
 
-  /// Generate PDF from the page (headless Chrome only).
+  /// Generate a PDF of the page (Chrome-family backends only).
+  /// Playwright API: `page.pdf(options?)` — accepts the full `PDFOptions`
+  /// shape (`format`, `path`, `scale`, `width`/`height` as `string|number`,
+  /// `margin`, `headerTemplate`, `footerTemplate`, `pageRanges`, etc.).
   #[napi]
-  pub async fn pdf(&self, landscape: Option<bool>, print_background: Option<bool>) -> Result<Buffer> {
+  pub async fn pdf(&self, options: Option<crate::types::PdfOptions>) -> Result<Buffer> {
+    let rust_opts: ferridriver::options::PdfOptions = options.unwrap_or_default().try_into()?;
     let bytes = self
       .inner
-      .pdf(landscape.unwrap_or(false), print_background.unwrap_or(false))
+      .pdf(rust_opts)
       .await
-      .map_err(napi::Error::from_reason)?;
+      .map_err(|e| napi::Error::from_reason(e.to_string()))?;
     Ok(bytes.into())
   }
 

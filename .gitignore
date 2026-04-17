@@ -27,6 +27,9 @@ bench/results/
 rust_out
 trace-*.json
 
+# ferridriver MCP runtime state (script sandbox root, future artifact/cache siblings)
+.ferridriver/
+
 # Claude Code local state
 .claude/
 .DS_Store
