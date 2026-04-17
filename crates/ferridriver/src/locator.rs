@@ -43,6 +43,27 @@ macro_rules! retry_resolve {
       if __delay_ms > 0 {
         ::tokio::time::sleep(::std::time::Duration::from_millis(__delay_ms)).await;
       }
+
+      // Strict mode (Playwright default): resolve via `query_all` and bail
+      // with [`crate::error::FerriError::StrictModeViolation`] if the
+      // selector matches more than one element. We do the strict check on
+      // every attempt so transient duplicates (e.g. during SSR rehydration)
+      // still trigger the retry loop rather than failing immediately.
+      if $self.strict {
+        match $crate::selectors::query_all($page, &$self.selector).await {
+          ::std::result::Result::Ok(ref __matches) if __matches.len() > 1 => {
+            $crate::selectors::cleanup_tags($page).await;
+            return ::std::result::Result::Err($crate::error::FerriError::strict(
+              $self.selector.clone(),
+              __matches.len(),
+            ));
+          },
+          ::std::result::Result::Ok(_) | ::std::result::Result::Err(_) => {
+            $crate::selectors::cleanup_tags($page).await;
+          },
+        }
+      }
+
       match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector).await {
         ::std::result::Result::Ok($el) => match ($body).await {
           ::std::result::Result::Ok(val) => return ::std::result::Result::Ok(val),
@@ -76,9 +97,40 @@ pub struct Locator {
   /// If set, evaluate in this frame instead of the main frame.
   /// Uses `Arc<str>` so that chaining locators only bumps a refcount.
   pub(crate) frame_id: Option<Arc<str>>,
+  /// Strict mode: error with [`crate::error::FerriError::StrictModeViolation`]
+  /// if the selector resolves to multiple elements. Playwright enables strict
+  /// mode on every Locator action by default; `first()` / `last()` / `nth()` /
+  /// `strict(false)` opt out.
+  pub(crate) strict: bool,
 }
 
 impl Locator {
+  /// Construct a Locator with Playwright-default strict mode enabled.
+  #[must_use]
+  pub(crate) fn new(page: Arc<crate::page::Page>, selector: String, frame_id: Option<Arc<str>>) -> Self {
+    Self {
+      page,
+      selector,
+      frame_id,
+      strict: true,
+    }
+  }
+
+  /// Returns a copy of this locator with strict-mode toggled.
+  ///
+  /// In strict mode (default), any action on a locator that matches more than
+  /// one element raises [`crate::error::FerriError::StrictModeViolation`].
+  /// Pass `false` to explicitly allow multi-match (Playwright's behaviour
+  /// under `locator.first()` / `.last()` / `.nth()`).
+  #[must_use]
+  pub fn strict(&self, strict: bool) -> Locator {
+    Locator {
+      page: Arc::clone(&self.page),
+      selector: self.selector.clone(),
+      frame_id: self.frame_id.clone(),
+      strict,
+    }
+  }
   // ── Sub-locators (chain with >>) ──────────────────────────────────────────
 
   /// Narrow this locator's scope with an additional selector.
@@ -128,19 +180,23 @@ impl Locator {
     self.chain(&format!("testid={test_id}"))
   }
 
+  /// First element. Opts out of strict mode because the selector explicitly
+  /// narrows to a single match.
   #[must_use]
   pub fn first(&self) -> Locator {
-    self.chain("nth=0")
+    self.chain("nth=0").strict(false)
   }
 
+  /// Last element. Opts out of strict mode (explicit single match).
   #[must_use]
   pub fn last(&self) -> Locator {
-    self.chain("nth=-1")
+    self.chain("nth=-1").strict(false)
   }
 
+  /// nth element. Opts out of strict mode (explicit single match).
   #[must_use]
   pub fn nth(&self, index: i32) -> Locator {
-    self.chain(&format!("nth={index}"))
+    self.chain(&format!("nth={index}")).strict(false)
   }
 
   /// Filter this locator by text content, sub-selector presence, or absence.
@@ -780,6 +836,7 @@ impl Locator {
       page: self.page.clone(),
       selector: combined,
       frame_id: self.frame_id.clone(),
+      strict: true,
     }
   }
 
@@ -813,6 +870,7 @@ impl Locator {
         page: Arc::clone(&self.page),
         selector,
         frame_id: self.frame_id.clone(),
+        strict: true,
       });
     }
     Ok(locators)
@@ -937,6 +995,13 @@ impl Locator {
     &self.selector
   }
 
+  /// Whether this locator runs action methods under strict mode (multi-match
+  /// is an error). Mirrors Playwright's default.
+  #[must_use]
+  pub fn is_strict(&self) -> bool {
+    self.strict
+  }
+
   // ── Core retry system ─────────────────────────────────────────────────────
   //
   // Matches Playwright's retryWithProgressAndTimeouts + _retryWithProgressIfNotConnected
@@ -1001,6 +1066,7 @@ impl Locator {
       page: Arc::clone(&self.page),
       selector,
       frame_id: self.frame_id.clone(),
+      strict: self.strict,
     }
   }
 
@@ -1075,6 +1141,7 @@ impl FrameLocator {
       page: Arc::clone(&self.page),
       selector: selector.to_string(),
       frame_id: Some(frame_id),
+      strict: true,
     })
   }
 
@@ -1148,6 +1215,7 @@ impl FrameLocator {
       page: Arc::clone(&self.page),
       selector: self.iframe_selector.clone(),
       frame_id: None,
+      strict: true,
     }
   }
 
