@@ -21,12 +21,16 @@
 pub mod api_request;
 pub mod context;
 pub mod convert;
+pub mod keyboard;
 pub mod locator;
+pub mod mouse;
 pub mod page;
 
 pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use context::BrowserContextJs;
+pub use keyboard::KeyboardJs;
 pub use locator::LocatorJs;
+pub use mouse::MouseJs;
 pub use page::PageJs;
 
 use rquickjs::{Ctx, class::Class};
@@ -42,6 +46,8 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<BrowserContextJs>::define(&g)?;
   Class::<APIRequestContextJs>::define(&g)?;
   Class::<APIResponseJs>::define(&g)?;
+  Class::<KeyboardJs>::define(&g)?;
+  Class::<MouseJs>::define(&g)?;
   Ok(())
 }
 

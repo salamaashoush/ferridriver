@@ -6,16 +6,13 @@
 //! # Surface by category
 //!
 //! - **navigation** — session bootstrap: `connect`, `navigate`, `page`
-//! - **content** — observation + light JS: `snapshot`, `screenshot`, `evaluate`,
-//!   `wait_for`, `search_page`, `find_elements`, `get_markdown`
+//! - **content** — observation + light JS: `snapshot`, `screenshot`,
+//!   `evaluate`, `search_page`
 //! - **network** — session diagnostics: `diagnostics`
 //! - **script** — imperative scripting: `run_script` (the action path)
 //!
-//! Low-level action tools (click/fill/hover/type/press/etc.), state-setter
-//! tools (cookies/storage/emulation), and BDD/Gherkin tools are intentionally
-//! not exposed here. Scripts drive browser interaction via the `page`,
-//! `context`, and `request` globals inside `run_script`; BDD/Gherkin lives in
-//! the test-runner path (`bun test` through ferridriver-test), not in MCP.
+//! Browser interaction flows through `run_script`, which exposes `page`,
+//! `context`, and `request` globals over the ferridriver core.
 
 pub mod content;
 pub mod navigation;

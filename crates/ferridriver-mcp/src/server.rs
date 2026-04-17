@@ -206,21 +206,19 @@ BEFORE deciding on selectors. Cheap, fast, low token cost — always your first 
 3. Act via one of:\n\
    a. `run_script` — sandboxed JS with full `page`, `context`, `request` globals for \
 imperative logic (loops, conditionals, try/catch, computed values, HTTP calls). \
-Pair with args to avoid string interpolation. THIS IS THE PRIMARY ACTION TOOL.\n\
+Pair with `args` to avoid string interpolation. This is the primary action tool.\n\
    b. `evaluate` — single-line JS executed IN the page (DOM context). Use for \
 quick reads; use `run_script` for anything multi-step.\n\
-4. `wait_for` between actions when something is loading; `snapshot` again to verify.\n\
+4. `snapshot` again to verify.\n\
 \n\
-This server is scripting-focused and intentionally does NOT expose low-level \
-click/fill/hover/press/type/drag tools, state-setter tools (cookies/storage/emulation), \
-or BDD/Gherkin tools. All browser interaction flows through `run_script`:\n\
+Browser interaction flows through `run_script` bindings:\n\
 - Clicks, fills, hovers → `await page.click(sel)`, `await page.fill(sel, val)`, \
 `await page.locator(sel).hover()`.\n\
-- Locators with Playwright-style chains → `page.getByRole('button', ...).first().click()`.\n\
+- Locator chains → `page.getByRole('button', ...).first().click()`.\n\
 - Cookies, storage, geolocation → `await context.addCookies([...])`, \
 `await context.setGeolocation(...)`.\n\
-- API calls → `await request.get(url)`, `.post(url, { json: {...} })`.\n\
-BDD/Gherkin authoring lives in the test-runner path (`bun test`), not here.\n\
+- Waits → `await page.waitForSelector(sel, { state, timeout })`.\n\
+- API calls → `await request.get(url)`, `await request.post(url, { json: {...} })`.\n\
 \n\
 == SESSION KEYS ==\n\
 All tools accept an optional 'session' parameter. Format: 'instance:context'.\n\

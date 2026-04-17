@@ -5,6 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver::api_request::{APIRequestContext, APIResponse, RequestOptions};
+use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use serde::Deserialize;
 
@@ -45,8 +46,8 @@ impl JsRequestOptions {
   }
 }
 
-fn parse_options<'js>(ctx: &Ctx<'js>, value: Option<Value<'js>>) -> rquickjs::Result<Option<RequestOptions>> {
-  match value {
+fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Result<Option<RequestOptions>> {
+  match value.0 {
     Some(v) if !v.is_undefined() && !v.is_null() => {
       let parsed: JsRequestOptions = serde_from_js(ctx, v)?;
       Ok(Some(parsed.into_core()))
@@ -78,7 +79,7 @@ impl APIRequestContextJs {
     &self,
     ctx: Ctx<'js>,
     url: String,
-    options: Option<Value<'js>>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.get(&url, opts).await.into_js()?;
@@ -90,7 +91,7 @@ impl APIRequestContextJs {
     &self,
     ctx: Ctx<'js>,
     url: String,
-    options: Option<Value<'js>>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.post(&url, opts).await.into_js()?;
@@ -102,7 +103,7 @@ impl APIRequestContextJs {
     &self,
     ctx: Ctx<'js>,
     url: String,
-    options: Option<Value<'js>>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.put(&url, opts).await.into_js()?;
@@ -114,7 +115,7 @@ impl APIRequestContextJs {
     &self,
     ctx: Ctx<'js>,
     url: String,
-    options: Option<Value<'js>>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.delete(&url, opts).await.into_js()?;
@@ -126,7 +127,7 @@ impl APIRequestContextJs {
     &self,
     ctx: Ctx<'js>,
     url: String,
-    options: Option<Value<'js>>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.patch(&url, opts).await.into_js()?;
@@ -138,7 +139,7 @@ impl APIRequestContextJs {
     &self,
     ctx: Ctx<'js>,
     url: String,
-    options: Option<Value<'js>>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.head(&url, opts).await.into_js()?;
@@ -153,7 +154,7 @@ impl APIRequestContextJs {
     &self,
     ctx: Ctx<'js>,
     url: String,
-    options: Option<Value<'js>>,
+    options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.fetch(&url, opts).await.into_js()?;

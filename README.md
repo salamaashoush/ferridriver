@@ -12,7 +12,8 @@ ferridriver (core library)
   ├── Bidi backend           Firefox via WebDriver BiDi
   │
   ├── ferridriver-cli         CLI binary (MCP server: stdio + HTTP)
-  ├── ferridriver-mcp         MCP server library (28 tools, rmcp)
+  ├── ferridriver-mcp         MCP server library (scripting-focused, 9 tools, rmcp)
+  ├── ferridriver-script      Sandboxed QuickJS engine behind run_script
   ├── ferridriver-node        Node.js/Bun bindings (NAPI-RS) → @ferridriver/node
   │
   ├── ferridriver-test        Test runner core: parallel, hooks, expect, reporters
@@ -380,7 +381,7 @@ The `--ct` flag starts the Vite dev server, pre-warms it, navigates each test pa
 
 ## MCP Server
 
-28 tools for AI agent browser automation. Works with Claude, Cursor, Claude Code, or any MCP client.
+Scripting-focused MCP server for AI agent browser automation. Works with Claude, Cursor, Claude Code, or any MCP client.
 
 ```bash
 # stdio (for Claude Code, Cursor, etc.)
@@ -400,7 +401,23 @@ ferridriver --auto-connect
 ferridriver --connect ws://localhost:9222/devtools/browser/...
 ```
 
-Tools: `connect`, `navigate`, `page`, `click`, `click_at`, `hover`, `fill`, `fill_form`, `type_text`, `press_key`, `drag`, `scroll`, `select_option`, `upload_file`, `snapshot`, `screenshot`, `evaluate`, `wait_for`, `search_page`, `find_elements`, `get_markdown`, `cookies`, `storage`, `emulate`, `diagnostics`, `list_steps`, `run_step`, `run_scenario`
+**Nine tools:** `connect`, `navigate`, `page` (session bootstrap) · `snapshot`, `screenshot`, `evaluate`, `search_page`, `diagnostics` (observation) · `run_script` (action).
+
+`run_script` runs sandboxed JavaScript against the live session with full Page / Locator / BrowserContext / APIRequestContext bindings over the ferridriver core. One script can navigate, fill forms, click, assert, and make HTTP calls in a single LLM turn — no per-action round-trips.
+
+```js
+// Example run_script payload
+await page.goto(args[0]);
+await page.getByLabel('Email').fill(args[1]);
+await page.getByLabel('Password').fill(args[2]);
+await page.getByRole('button', { name: 'Sign in' }).click();
+await page.waitForSelector('[data-testid="dashboard"]');
+return { title: await page.title(), cookies: await context.cookies() };
+```
+
+Globals available inside a script: `page`, `context`, `request`, `args` (bound, not interpolated — prompt-injection safe), `vars` (session-level key/value store), `console.*` (captured with size limits), `fs` (scoped read/write under a configured `script_root`). Error responses include stack, line, column, and a source snippet so the model can self-correct.
+
+See [`site/docs/mcp/tools.md`](./site/docs/mcp/tools.md) for the full script API.
 
 ## BDD Framework
 
@@ -481,7 +498,8 @@ All Playwright selector engines are supported:
 crates/
   ferridriver                 Core: Browser, Page, Locator, 4 backends
   ferridriver-cli             CLI binary (MCP server: stdio + HTTP)
-  ferridriver-mcp             MCP server library (28 tools, rmcp)
+  ferridriver-mcp             MCP server library (scripting-focused, 9 tools, rmcp)
+  ferridriver-script          Sandboxed QuickJS engine behind run_script
   ferridriver-node            Node.js/Bun bindings (NAPI-RS) → @ferridriver/node
   ferridriver-test            Test runner: parallel, hooks, expect, reporters
   ferridriver-test-macros     #[ferritest], #[ferritest_each], hook macros

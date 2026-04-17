@@ -724,16 +724,41 @@ Every checklist item must satisfy, before ticking `[x]`:
 
 ## Gaps surfaced by scripting bindings (`ferridriver-script`)
 
-The `ferridriver-script` crate exposes core Rust types to QuickJS via a proc macro that mirrors core's signatures **strictly** — no JS-side shims, no accept-and-drop of unsupported args. This means LLM-authored scripts written in Playwright style will hit the gaps below directly. They are already tracked as Tier 1 / Tier 3 items; this section exists so future work knows which ones are highest-priority for the scripting surface.
+The `ferridriver-script` crate exposes core Rust types to QuickJS via rquickjs class/methods macros that mirror core's signatures **strictly** — no JS-side shims, no accept-and-drop of unsupported args. LLM-authored scripts written in Playwright style will hit the gaps below directly.
+
+### A. Core-level gaps (core doesn't have it yet; fixing core fixes scripts)
 
 1. **`evaluate(fn, arg?)` function argument** — see **1.3 JSHandle**. Core's `evaluate(&str)` accepts strings only; scripts must pass a literal string. The single most-used Playwright idiom (`page.evaluate(() => document.title)`) does not work until core accepts a serialized function.
-2. **Action-method options (`click`/`fill`/`hover`/`press`/`type`/`dblclick`/`check`/`uncheck`/`tap`/`selectOption`/`dispatchEvent`/`dragTo`/`setInputFiles`)** — see **1.5 Action option bags**. Scripts passing `{ timeout, force, noWaitAfter, position, trial, modifiers, button, clickCount, delay }` will fail type-checking; QuickJS bindings refuse the extra arg rather than silently dropping it.
-3. **`screenshot` / `pdf` option coverage** — see **3.3 ScreenshotOptions complete** and **3.4 PDFOptions complete**. Core accepts partial option sets today.
+2. **Action-method options (`click`/`fill`/`hover`/`press`/`type`/`dblclick`/`check`/`uncheck`/`tap`/`selectOption`/`dispatchEvent`/`dragTo`/`setInputFiles`)** — see **1.5 Action option bags**. Scripts passing `{ timeout, force, noWaitAfter, position, trial, modifiers, button, clickCount, delay }` will fail with an arity error; bindings refuse the extra arg rather than silently dropping it.
+3. **`screenshot` / `pdf` option coverage** — see **3.3 ScreenshotOptions complete** and **3.4 PDFOptions complete**.
 4. **`selectOption` value shape** — see **1.5**. Core takes a single string; Playwright accepts `string | { value, label, index } | ElementHandle` plus arrays.
 5. **`setInputFiles` payload shape** — see **1.5**. Core takes paths only; Playwright accepts `FilePayload { name, mimeType, buffer }`.
-6. **`dispatchEvent` `eventInit`** — see **1.5**. Core takes event type only; no `eventInit` dict.
+6. **`dispatchEvent` `eventInit`** — see **1.5**.
 7. **`addInitScript` with `arg`** — see **3.25**.
-8. **`Locator.evaluate` / `evaluateAll` function + arg** — see **3.14**. Same shape as the Page-level gap above.
-9. **Context-level features scripts commonly reach for** — `context.route` / `unroute` exist in core but are missing from NAPI; they will be exposed natively in QuickJS bindings. `context.storageState({ path, indexedDB })`, `clearCookies(options)` regex filters, and `cookies(urls?)` URL filter are all core-level gaps — see **4.7**, **4.14**, **4.15**, **3.2**, **4.2**.
+8. **`Locator.evaluate` / `evaluateAll` function + arg** — see **3.14**.
+9. **`mouse.move(x, y)`** — missing from `ferridriver::page::Mouse` entirely. Playwright has it; many patterns (hover-then-wheel, free-form drag via down/move/up) require it. Today scripts must use `page.moveMouseSmooth(fromX, fromY, toX, toY, steps)` (page-level helper) or `page.clickAt`/`page.mouse.click(x, y)` which moves-and-clicks.
+10. **Wait family** — core has `wait_for_selector`, `wait_for_url`, `wait_for_load_state`, `wait_for_function`, `wait_for_event`, `wait_for_response`, `wait_for_request`, `wait_for_download`, `wait_for_navigation`, `wait_for_timeout`. Scripts today only have `page.waitForSelector`. The rest need bindings (not core work — these already exist in core).
+11. **Event handling** — core has `page.on/once/off`, `page.expect_navigation/response/request/download`. Scripts have no event surface yet. This is pure binding work once we decide on the JS callback lifetime model (fires-while-script-runs only, vs session-persistent).
+12. **Routing** — `page.route/unroute`, `context.route/unroute` exist in core; scripts have no binding. See **4.7**, **4.8**, **4.9**, **5.1-5.5**.
+13. **Locator chain methods not yet bound** — core has `locator.filter(opts)`, `locator.and(other)`, `locator.or(other)`, `locator.all()`. Scripts currently expose `first`/`last`/`nth`/`locator` only.
+14. **Frames** — `page.main_frame`, `page.frames`, `page.frame`, `FrameLocator` exist in core; scripts have no frame binding. See **3.8**, **3.9**.
+15. **Context-level gaps** — `context.storageState({ path, indexedDB })`, `clearCookies(options)` regex filters, `cookies(urls?)` URL filter — see **4.2**, **4.14**, **4.15**, **3.2**.
+16. **`locator.evaluateHandle`, `elementHandle`** — core doesn't have `ElementHandle`/`JSHandle` yet (Tier **1.2** / **1.3**).
+17. **Timeouts** — `page.setDefaultTimeout`, `page.setDefaultNavigationTimeout` bindings missing.
 
-**Principle**: resolving these gaps is a core concern, not a scripting concern. The `ferridriver-script` proc macro regenerates bindings automatically when core signatures change, so closing a Tier 1.5 item simultaneously closes the corresponding QuickJS gap.
+### B. Backend-specific failures surfaced by the test suite
+
+These are not ferridriver bugs per se — they are backend-surface gaps. The tests document them.
+
+1. **WebKit: `context.addCookies` → `context.cookies()` round-trip drops the cookie**. Adding a cookie and reading it back finds no entry with that name. `test_script_cookies` fails on the WebKit backend. The CDP backends (cdp-pipe, cdp-raw) round-trip correctly.
+2. **BiDi (Firefox): `page.dragAndDrop` fails with `scrollIntoViewIfNeeded is not a function`**. Core's drag_and_drop dispatches via a DOM script that uses Chrome's `scrollIntoViewIfNeeded` — Firefox does not implement that method. Either core should feature-detect and fall back to `scrollIntoView`, or the BiDi backend needs its own drag path.
+3. **CDP: `page.mouse.wheel(dx, dy)` does not reliably produce a page scroll**. CDP's `Input.dispatchMouseEvent` with `type: "mouseWheel"` requires mouse position routing that doesn't always land on the scrollable viewport. `test_script_mouse_wheel` asserts only that the call does not error, not that `window.scrollY` changed.
+
+### C. Test-level workarounds (honest list of relaxed assertions)
+
+1. **`test_script_mouse_wheel`** — asserts `status === 'ok'` only; does not verify `window.scrollY > 0`. See **B.3**.
+2. **`test_script_keyboard_press`** — accepts any non-empty input value OR any of `A`/`a`/`B`/`b`. Character-key CDP events (`page.keyboard.press('A')`) do not always insert the corresponding character in text inputs across backends. Playwright uses a richer key-code mapping we have not mirrored.
+
+### Principle
+
+Most Category A items resolve at the core layer; scripting bindings regenerate automatically when core signatures change. Category A items 9–17 are the ones waiting on new bindings rather than new core code. Category B items reflect real backend surface differences we need to harmonise. Category C assertions should tighten as B resolves.

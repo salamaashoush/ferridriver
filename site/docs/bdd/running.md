@@ -37,10 +37,6 @@ npx @ferridriver/test test tests/features/ \
 
 BDD-only flags on the `test` subcommand: `--steps <GLOB>` (append), `-t, --tags "<EXPR>"`, `--strict`, `--order defined|random[:SEED]`, `--language <LANG>` (Gherkin keyword language).
 
-## MCP
-
-The `ferridriver` MCP server exposes three BDD tools — `list_steps`, `run_step`, `run_scenario` — for AI-driven exploration and generation. See [MCP tools](/mcp/tools).
-
 ## Environment variables
 
 - `FERRIDRIVER_FEATURES` — comma-separated glob patterns (default: `features/**/*.feature`)

@@ -3,6 +3,7 @@
 use std::sync::Arc;
 
 use ferridriver::context::ContextRef;
+use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use rustc_hash::FxHashMap;
 
@@ -53,8 +54,8 @@ impl BrowserContextJs {
 
   /// Delete a cookie by name (optionally scoped to a domain).
   #[qjs(rename = "deleteCookie")]
-  pub async fn delete_cookie(&self, name: String, domain: Option<String>) -> rquickjs::Result<()> {
-    self.inner.delete_cookie(&name, domain.as_deref()).await.into_js()
+  pub async fn delete_cookie(&self, name: String, domain: Opt<String>) -> rquickjs::Result<()> {
+    self.inner.delete_cookie(&name, domain.0.as_deref()).await.into_js()
   }
 
   // ── Permissions ───────────────────────────────────────────────────────────
@@ -62,10 +63,10 @@ impl BrowserContextJs {
   /// Grant a set of permissions (e.g. `['geolocation', 'notifications']`),
   /// optionally scoped to `origin`.
   #[qjs(rename = "grantPermissions")]
-  pub async fn grant_permissions(&self, permissions: Vec<String>, origin: Option<String>) -> rquickjs::Result<()> {
+  pub async fn grant_permissions(&self, permissions: Vec<String>, origin: Opt<String>) -> rquickjs::Result<()> {
     self
       .inner
-      .grant_permissions(&permissions, origin.as_deref())
+      .grant_permissions(&permissions, origin.0.as_deref())
       .await
       .into_js()
   }

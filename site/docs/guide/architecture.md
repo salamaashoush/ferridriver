@@ -17,7 +17,7 @@ flowchart TB
     C["ferridriver-cli (MCP)"]
     D["ferridriver-test"]
     E["ferridriver-bdd"]
-    F["ferridriver-mcp (28 tools)"]
+    F["ferridriver-mcp (9 tools, script-focused)"]
   end
 
   Core["ferridriver (core)\nBrowser · Page · Locator · Frame · Context"]
