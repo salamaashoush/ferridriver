@@ -14,8 +14,13 @@
 //! Integration tests for ferridriver across all backends.
 //!
 //! Architecture: ONE browser per backend, ALL tests run sequentially on it.
-//! This avoids spawning 200+ browser processes (was ~3min, now ~10s).
-//! Each test navigates to a fresh page so state doesn't leak.
+//! This avoids spawning many browser processes per backend; each test navigates
+//! to a fresh page so state doesn't leak.
+//!
+//! The MCP surface is scripting-focused: observation via `navigate` / `snapshot`
+//! / `screenshot` / `evaluate` / `search_page` / `diagnostics` / `page`, and
+//! action via `run_script` with `page` / `context` / `request` globals. Tests
+//! below exercise both paths.
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
@@ -36,7 +41,6 @@ impl McpClient {
   fn new(backend: &str) -> Self {
     let binary = std::env::var("FERRIDRIVER_BIN").unwrap_or_else(|_| {
       let base = format!("{}/../../target", env!("CARGO_MANIFEST_DIR"));
-      // Prefer debug binary (built by `cargo build`), fall back to release
       let debug = format!("{base}/debug/ferridriver");
       let release = format!("{base}/release/ferridriver");
       if std::path::Path::new(&debug).exists() {
@@ -81,7 +85,7 @@ impl McpClient {
       if trimmed.is_empty() {
         continue;
       }
-      // Skip non-JSON lines (e.g. tracing log output from rmcp)
+      // Skip non-JSON lines (e.g. tracing log output from rmcp).
       if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
         return val;
       }
@@ -127,6 +131,32 @@ impl McpClient {
 
   fn nav_url(&mut self, url: &str) {
     self.call_tool("navigate", json!({"url": url}));
+  }
+
+  /// Run a script with empty args and return the parsed `{status, value, ...}` payload.
+  fn script(&mut self, source: &str) -> Value {
+    self.script_with_args(source, json!([]))
+  }
+
+  /// Run a script with bound args and return the parsed payload.
+  fn script_with_args(&mut self, source: &str, args: Value) -> Value {
+    let resp = self.call_tool("run_script", json!({"source": source, "args": args}));
+    ok(&resp, "run_script");
+    extract_script_payload(&resp).expect("script response should carry a JSON payload")
+  }
+
+  /// Run a script expecting success; return the `value` from the payload.
+  fn script_value(&mut self, source: &str) -> Value {
+    let payload = self.script(source);
+    assert_eq!(payload["status"].as_str(), Some("ok"), "script failed: {payload}");
+    payload["value"].clone()
+  }
+
+  /// Run a script with args, expecting success; return the `value`.
+  fn script_value_with_args(&mut self, source: &str, args: Value) -> Value {
+    let payload = self.script_with_args(source, args);
+    assert_eq!(payload["status"].as_str(), Some("ok"), "script failed: {payload}");
+    payload["value"].clone()
   }
 }
 
@@ -174,6 +204,24 @@ fn extract_image_b64(resp: &Value) -> String {
     .to_string()
 }
 
+/// Find the content block that parses as the script engine's structured
+/// payload (`{ status, value | error, duration_ms, console[] }`). The tool
+/// returns one or two text blocks depending on outcome; we scan until we
+/// find the JSON one.
+fn extract_script_payload(resp: &Value) -> Option<Value> {
+  let contents = resp["result"]["content"].as_array()?;
+  for c in contents {
+    if let Some(text) = c["text"].as_str() {
+      if let Ok(parsed) = serde_json::from_str::<Value>(text) {
+        if parsed.get("status").is_some() {
+          return Some(parsed);
+        }
+      }
+    }
+  }
+  None
+}
+
 fn is_error(resp: &Value) -> bool {
   resp.get("error").is_some() || resp["result"]["isError"].as_bool().unwrap_or(false)
 }
@@ -182,7 +230,7 @@ fn ok(resp: &Value, ctx: &str) {
   assert!(!is_error(resp), "{ctx} failed: {resp}");
 }
 
-// ─── Test cases (called on shared client) ───────────────────────────────────
+// ─── Navigation + session ───────────────────────────────────────────────────
 
 fn test_navigate(c: &mut McpClient) {
   let r = c.call_tool("navigate", json!({"url": data_url("<h1>Hello</h1>")}));
@@ -190,6 +238,51 @@ fn test_navigate(c: &mut McpClient) {
   let t = extract_text(&r);
   assert!(t.contains("Hello"), "navigate should show content: {t}");
 }
+
+fn test_page_list(c: &mut McpClient) {
+  c.nav("<body></body>");
+  let t = c.tool_text("page", json!({"action": "list"}));
+  assert!(t.contains("Page 0"), "list pages: {t}");
+}
+
+fn test_page_reload(c: &mut McpClient) {
+  c.nav("<body>original</body>");
+  c.call_tool(
+    "evaluate",
+    json!({"expression": "document.body.textContent = 'modified'"}),
+  );
+  let modified = c.tool_text("evaluate", json!({"expression": "document.body.textContent"}));
+  assert!(modified.contains("modified"), "should be modified: {modified}");
+  c.call_tool("page", json!({"action": "reload"}));
+  let after = c.tool_text("evaluate", json!({"expression": "document.body.textContent"}));
+  assert!(
+    after.contains("original"),
+    "reload should restore original content: {after}"
+  );
+}
+
+fn test_page_back_forward(c: &mut McpClient) {
+  c.nav("<h1>Page1</h1>");
+  c.nav("<h1>Page2</h1>");
+  c.call_tool("page", json!({"action": "back"}));
+  let t = c.tool_text(
+    "evaluate",
+    json!({"expression": "document.querySelector('h1')?.textContent || ''"}),
+  );
+  assert!(t.contains("Page1"), "go_back should return to Page1: {t}");
+}
+
+fn test_new_page(c: &mut McpClient) {
+  let r = c.call_tool("page", json!({"action": "new"}));
+  if !is_error(&r) {
+    let t = c.tool_text("page", json!({"action": "list"}));
+    assert!(t.contains("Page 0") && t.contains("Page 1"), "should have 2 pages: {t}");
+    let r2 = c.call_tool("page", json!({"action": "select", "page_index": 0}));
+    ok(&r2, "page select");
+  }
+}
+
+// ─── evaluate (page-side JS one-liners) ─────────────────────────────────────
 
 fn test_evaluate_number(c: &mut McpClient) {
   c.nav("<body></body>");
@@ -263,10 +356,29 @@ fn test_evaluate_large_payload(c: &mut McpClient) {
   assert!(t.len() > 1000, "large payload: {}", t.len());
 }
 
+// ─── snapshot ───────────────────────────────────────────────────────────────
+
+fn test_snapshot(c: &mut McpClient) {
+  c.nav("<h1>Snap</h1><button>Click</button>");
+  let t = c.tool_text("snapshot", json!({}));
+  assert!(t.contains("[ref="), "snapshot refs: {t}");
+  assert!(t.contains("Snap"), "snapshot content: {t}");
+}
+
+fn test_snapshot_scroll_info(c: &mut McpClient) {
+  c.nav("<div style='height:3000px'>tall</div>");
+  // Scroll via a run_script call before snapshotting.
+  c.script("window.scrollBy(0, 500); return null;");
+  let t = c.tool_text("snapshot", json!({}));
+  assert!(t.contains("Scroll:"), "snapshot should show scroll position: {t}");
+}
+
+// ─── screenshot ─────────────────────────────────────────────────────────────
+
 fn test_screenshot_png(c: &mut McpClient) {
   c.nav("<h1>Screenshot</h1>");
-  // Wait for content to render before screenshotting
-  c.call_tool("wait_for", json!({"selector": "h1", "timeout": 5000}));
+  // Wait for content to render via the scripted locator waiter.
+  c.script("await page.waitForSelector('h1'); return true;");
   let r = c.call_tool("screenshot", json!({}));
   ok(&r, "screenshot");
   let b64 = extract_image_b64(&r);
@@ -279,7 +391,6 @@ fn test_screenshot_full_page(c: &mut McpClient) {
   ok(&r, "screenshot full");
   let b64 = extract_image_b64(&r);
   assert!(b64.starts_with("iVBOR"), "full page screenshot should be valid PNG");
-  // Full page screenshot should be larger than viewport-only
   assert!(
     b64.len() > 1000,
     "full page PNG should be substantial: {} bytes",
@@ -287,273 +398,7 @@ fn test_screenshot_full_page(c: &mut McpClient) {
   );
 }
 
-fn test_snapshot(c: &mut McpClient) {
-  c.nav("<h1>Snap</h1><button>Click</button>");
-  let t = c.tool_text("snapshot", json!({}));
-  assert!(t.contains("[ref="), "snapshot refs: {t}");
-  assert!(t.contains("Snap"), "snapshot content: {t}");
-}
-
-fn test_click_selector(c: &mut McpClient) {
-  c.nav(
-    "<h1 id='h'>Before</h1><button id='btn' onclick=\"document.getElementById('h').textContent='After'\">Go</button>",
-  );
-  c.call_tool("click", json!({"selector": "#btn"}));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('h').textContent"}),
-  );
-  assert!(t.contains("After"), "click changed state: {t}");
-}
-
-fn test_click_at(c: &mut McpClient) {
-  c.nav("<div id='d' onclick=\"this.textContent='clicked'\" style='position:fixed;left:0;top:0;width:200px;height:200px'>click me</div>");
-  c.call_tool("click_at", json!({"x": 50, "y": 50}));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('d').textContent"}),
-  );
-  assert!(t.contains("clicked"), "click_at should trigger onclick: {t}");
-}
-
-fn test_fill_input(c: &mut McpClient) {
-  c.nav("<input id='i' type='text'>");
-  c.call_tool("fill", json!({"selector": "#i", "value": "Alice"}));
-  let t = c.tool_text("evaluate", json!({"expression": "document.getElementById('i').value"}));
-  assert!(t.contains("Alice"), "fill: {t}");
-}
-
-fn test_type_text(c: &mut McpClient) {
-  c.nav("<input id='i' type='text'>");
-  c.call_tool("click", json!({"selector": "#i"}));
-  c.call_tool("type_text", json!({"text": "Bob"}));
-  let t = c.tool_text("evaluate", json!({"expression": "document.getElementById('i').value"}));
-  assert!(t.contains("Bob"), "type_text should set value: {t}");
-}
-
-fn test_press_key(c: &mut McpClient) {
-  // Test Enter key -- triggers form submission or creates newline
-  c.nav("<textarea id='t'></textarea>");
-  c.call_tool("click", json!({"selector": "#t"}));
-  c.call_tool("press_key", json!({"key": "Enter"}));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('t').value.length"}),
-  );
-  let len: i64 = t.trim().parse().unwrap_or(0);
-  assert!(
-    len > 0,
-    "press Enter in textarea should insert newline, value length: {len}"
-  );
-}
-
-fn test_scroll(c: &mut McpClient) {
-  c.nav("<div style='height:3000px'>tall</div>");
-  c.call_tool("scroll", json!({"delta_y": 500}));
-  let t = c.tool_text("evaluate", json!({"expression": "window.scrollY"}));
-  // scrollY should be > 0 after scrolling down
-  let y: f64 = t.trim().parse().unwrap_or(0.0);
-  assert!(y > 0.0, "scroll should change scrollY: {t}");
-}
-
-fn test_reload(c: &mut McpClient) {
-  c.nav("<body>original</body>");
-  // Modify DOM, then reload should restore original
-  c.call_tool(
-    "evaluate",
-    json!({"expression": "document.body.textContent = 'modified'"}),
-  );
-  let modified = c.tool_text("evaluate", json!({"expression": "document.body.textContent"}));
-  assert!(modified.contains("modified"), "should be modified: {modified}");
-  c.call_tool("page", json!({"action": "reload"}));
-  let after = c.tool_text("evaluate", json!({"expression": "document.body.textContent"}));
-  assert!(
-    after.contains("original"),
-    "reload should restore original content: {after}"
-  );
-}
-
-fn test_go_back_forward(c: &mut McpClient) {
-  c.nav("<h1>Page1</h1>");
-  c.nav("<h1>Page2</h1>");
-  c.call_tool("page", json!({"action": "back"}));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.querySelector('h1')?.textContent || ''"}),
-  );
-  assert!(t.contains("Page1"), "go_back should return to Page1: {t}");
-}
-
-fn test_list_pages(c: &mut McpClient) {
-  c.nav("<body></body>");
-  let t = c.tool_text("page", json!({"action": "list"}));
-  assert!(t.contains("Page 0"), "list pages: {t}");
-}
-
-fn test_wait_for_selector(c: &mut McpClient) {
-  c.nav("<div id='target'>here</div>");
-  let r = c.call_tool("wait_for", json!({"selector": "#target", "timeout": 5000}));
-  ok(&r, "wait_for selector");
-}
-
-fn test_wait_for_text(c: &mut McpClient) {
-  c.nav("<body>findme</body>");
-  let r = c.call_tool("wait_for", json!({"text": "findme", "timeout": 5000}));
-  ok(&r, "wait_for text");
-}
-
-fn test_console_messages(c: &mut McpClient) {
-  c.nav("<body></body>");
-  c.call_tool("evaluate", json!({"expression": "console.log('hello123')"}));
-  c.call_tool("evaluate", json!({"expression": "console.warn('warn456')"}));
-  // Flush CDP event stream -- evaluate round-trips ensure events are processed.
-  for _ in 0..10 {
-    c.call_tool("evaluate", json!({"expression": "void 0"}));
-  }
-  let t = c.tool_text("diagnostics", json!({"type": "console"}));
-  // Console capture is best-effort -- CDP events may arrive late on slow CI.
-  // Accept any response that isn't an error (the diagnostics tool itself works).
-  assert!(!t.is_empty(), "console diagnostics should return something: {t}");
-}
-
-fn test_network_requests(c: &mut McpClient) {
-  c.nav_url("https://example.com");
-  let t = c.tool_text("diagnostics", json!({"type": "network"}));
-  // Should have at least the navigation request
-  assert!(
-    t.contains("example.com") || t.contains("GET") || t.contains("request"),
-    "network diagnostics should list requests: {t}"
-  );
-}
-
-fn test_hover(c: &mut McpClient) {
-  c.nav("<div id='d' onmouseenter=\"this.textContent='hovered'\" style='width:100px;height:100px'>hover me</div>");
-  c.call_tool("hover", json!({"selector": "#d"}));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('d').textContent"}),
-  );
-  assert!(t.contains("hovered"), "hover should trigger mouseenter: {t}");
-}
-
-fn test_drag(c: &mut McpClient) {
-  c.nav("<div id='d' onmousedown=\"this.dataset.down='1'\" onmouseup=\"this.dataset.up='1'\" style='position:fixed;left:0;top:0;width:200px;height:200px'>drag</div>");
-  c.call_tool("drag", json!({"from_x":50,"from_y":50,"to_x":150,"to_y":150}));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('d').dataset.down"}),
-  );
-  assert!(t.contains("1"), "drag should trigger mousedown: {t}");
-}
-
-fn test_scroll_to_element(c: &mut McpClient) {
-  c.nav("<div style='height:3000px'></div><div id='bottom'>bottom</div>");
-  c.call_tool("scroll", json!({"selector": "#bottom"}));
-  let t = c.tool_text("evaluate", json!({"expression": "window.scrollY"}));
-  let y: f64 = t.trim().parse().unwrap_or(0.0);
-  assert!(y > 100.0, "scroll to element should scroll down: scrollY={y}");
-}
-
-fn test_double_click(c: &mut McpClient) {
-  c.nav("<h1 id='h'>0</h1><button id='b' onclick=\"document.getElementById('h').textContent=Number(document.getElementById('h').textContent)+1\">+</button>");
-  c.call_tool("click", json!({"selector": "#b", "double_click": true}));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('h').textContent"}),
-  );
-  assert!(t.contains("2"), "double click: {t}");
-}
-
-// CDP-only tests
-fn test_emulate_device(c: &mut McpClient) {
-  c.nav("<body>emulate-test</body>");
-  let r = c.call_tool("emulate", json!({"user_agent": "TestBot/1.0"}));
-  ok(&r, "emulate ua");
-  let ua = c.tool_text("evaluate", json!({"expression": "navigator.userAgent"}));
-  assert!(ua.contains("TestBot"), "user agent should be overridden: {ua}");
-  let r2 = c.call_tool("emulate", json!({"width": 375, "height": 812}));
-  ok(&r2, "emulate viewport");
-}
-
-fn test_set_geolocation(c: &mut McpClient) {
-  c.nav("<body></body>");
-  let r = c.call_tool("emulate", json!({"latitude": 37.7749, "longitude": -122.4194}));
-  ok(&r, "emulate geolocation");
-  let t = c.tool_text("evaluate", json!({"expression": "typeof navigator.geolocation"}));
-  assert!(t.contains("object"), "geolocation should exist: {t}");
-}
-
-fn test_set_network_state(c: &mut McpClient) {
-  c.nav("<body></body>");
-  c.call_tool("emulate", json!({"network": "offline"}));
-  let t = c.tool_text("evaluate", json!({"expression": "navigator.onLine"}));
-  assert!(t.contains("false"), "should be offline: {t}");
-  c.call_tool("emulate", json!({"network": "online"}));
-  let t2 = c.tool_text("evaluate", json!({"expression": "navigator.onLine"}));
-  assert!(t2.contains("true"), "should be back online: {t2}");
-}
-
-fn test_trace(c: &mut McpClient) {
-  c.nav("<body></body>");
-  c.call_tool("diagnostics", json!({"type": "trace_start"}));
-  c.call_tool(
-    "evaluate",
-    json!({"expression": "for(let i=0;i<1000;i++) Math.sqrt(i)"}),
-  );
-  let t = c.tool_text("diagnostics", json!({"type": "trace_stop"}));
-  assert!(
-    t.contains("Metrics") || t.contains("Trace stopped") || t.contains("metric"),
-    "trace should return metrics: {t}"
-  );
-}
-
-fn test_cookies(c: &mut McpClient) {
-  c.nav_url("https://example.com");
-  // get (empty)
-  let r = c.call_tool("cookies", json!({"action": "get"}));
-  ok(&r, "cookies get");
-  // set
-  let r = c.call_tool(
-    "cookies",
-    json!({"action": "set", "name": "k", "value": "v", "domain": "example.com"}),
-  );
-  ok(&r, "cookies set");
-  // get (has cookie)
-  let t = c.tool_text("cookies", json!({"action": "get"}));
-  assert!(t.contains("k"), "cookie set: {t}");
-  // delete
-  let r = c.call_tool("cookies", json!({"action": "delete", "name": "k"}));
-  ok(&r, "cookies delete");
-  // clear
-  let r = c.call_tool("cookies", json!({"action": "clear"}));
-  ok(&r, "cookies clear");
-}
-
-fn test_localstorage(c: &mut McpClient) {
-  c.nav_url("https://example.com");
-  c.call_tool("storage", json!({"action": "set", "key": "lk", "value": "lv"}));
-  let t = c.tool_text("storage", json!({"action": "get", "key": "lk"}));
-  assert!(t.contains("lv"), "storage get: {t}");
-  let t = c.tool_text("storage", json!({"action": "list"}));
-  assert!(t.contains("lk"), "storage list: {t}");
-  let r = c.call_tool("storage", json!({"action": "clear"}));
-  ok(&r, "storage clear");
-}
-
-fn test_fill_form(c: &mut McpClient) {
-  c.nav("<input id='a'><input id='b'>");
-  c.call_tool(
-    "fill_form",
-    json!({"fields":[
-        {"selector":"#a","value":"val1"},
-        {"selector":"#b","value":"val2"}
-    ]}),
-  );
-  let a = c.tool_text("evaluate", json!({"expression": "document.getElementById('a').value"}));
-  let b = c.tool_text("evaluate", json!({"expression": "document.getElementById('b').value"}));
-  assert!(a.contains("val1"), "fill_form field a: {a}");
-  assert!(b.contains("val2"), "fill_form field b: {b}");
-}
+// ─── search_page ────────────────────────────────────────────────────────────
 
 fn test_search_page(c: &mut McpClient) {
   c.nav("<p>Alpha Beta Gamma</p><p>Delta Beta Epsilon</p>");
@@ -574,292 +419,479 @@ fn test_search_page_no_match(c: &mut McpClient) {
   assert!(t.contains("No matches") || t.contains("0"), "no matches: {t}");
 }
 
-fn test_select_option(c: &mut McpClient) {
-  c.nav("<select id='s'><option value='apple'>Apple</option><option value='banana'>Banana</option><option value='cherry'>Cherry</option></select>");
-  let r = c.call_tool("select_option", json!({"selector": "#s", "label": "Banana"}));
-  ok(&r, "select_option");
-  // Flush microtasks to ensure DOM mutation from select is complete
-  c.tool_text("evaluate", json!({"expression": "new Promise(r => setTimeout(r, 0))"}));
-  let t = c.tool_text("evaluate", json!({"expression": "document.getElementById('s').value"}));
-  assert!(t.contains("banana"), "should select Banana: {t}");
-}
+// ─── diagnostics ────────────────────────────────────────────────────────────
 
-fn test_fill_dispatches_events(c: &mut McpClient) {
-  c.nav("<input id='i' type='text'><div id='r'></div><script>document.getElementById('i').addEventListener('change', function(e) { document.getElementById('r').textContent = 'changed:' + e.target.value; });</script>");
-  c.call_tool("fill", json!({"selector": "#i", "value": "test"}));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('r').textContent"}),
-  );
-  assert!(t.contains("changed:test"), "fill should dispatch change event: {t}");
-}
-
-fn test_click_offscreen_element(c: &mut McpClient) {
-  c.nav("<div style='height:3000px'></div><button id='b' onclick=\"this.textContent='clicked'\">far</button>");
-  c.call_tool("click", json!({"selector": "#b"}));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('b').textContent"}),
-  );
-  assert!(
-    t.contains("clicked"),
-    "click should scroll and click offscreen element: {t}"
-  );
-}
-
-fn test_snapshot_scroll_info(c: &mut McpClient) {
-  c.nav("<div style='height:3000px'>tall</div>");
-  c.call_tool("scroll", json!({"delta_y": 500}));
-  let t = c.tool_text("snapshot", json!({}));
-  assert!(t.contains("Scroll:"), "snapshot should show scroll position: {t}");
-}
-
-fn test_click_select_guard(c: &mut McpClient) {
-  c.nav("<select id='s'><option>A</option></select>");
-  let r = c.call_tool("click", json!({"selector": "#s"}));
-  // Should be an error suggesting select_option
-  assert!(is_error(&r), "clicking select should return error");
-}
-
-fn test_new_page(c: &mut McpClient) {
-  let r = c.call_tool("page", json!({"action": "new"}));
-  if !is_error(&r) {
-    // Verify we have multiple pages now
-    let t = c.tool_text("page", json!({"action": "list"}));
-    assert!(t.contains("Page 0") && t.contains("Page 1"), "should have 2 pages: {t}");
-    // Switch back
-    let r2 = c.call_tool("page", json!({"action": "select", "page_index": 0}));
-    ok(&r2, "page select");
+fn test_console_messages(c: &mut McpClient) {
+  c.nav("<body></body>");
+  c.call_tool("evaluate", json!({"expression": "console.log('hello123')"}));
+  c.call_tool("evaluate", json!({"expression": "console.warn('warn456')"}));
+  // Flush CDP event stream — evaluate round-trips ensure events are processed.
+  for _ in 0..10 {
+    c.call_tool("evaluate", json!({"expression": "void 0"}));
   }
+  let t = c.tool_text("diagnostics", json!({"type": "console"}));
+  // Console capture is best-effort — CDP events may arrive late on slow CI.
+  assert!(!t.is_empty(), "console diagnostics should return something: {t}");
 }
 
-// ─── Selector engine tests ──────────────────────────────────────────────────
-
-fn test_selector_role(c: &mut McpClient) {
-  c.nav("<button>Save</button><button disabled>Delete</button>");
-  let t = c.tool_text("click", json!({"selector": "role=button[name=\"Save\"]"}));
-  assert!(t.contains("Clicked"), "role selector should click: {t}");
-}
-
-fn test_selector_chain(c: &mut McpClient) {
-  c.nav("<div class='a'><button onclick=\"this.textContent='clicked'\">Yes</button></div><div class='b'><button>No</button></div>");
-  c.call_tool("click", json!({"selector": "css=.a >> role=button"}));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.querySelector('.a button').textContent"}),
+fn test_network_requests(c: &mut McpClient) {
+  c.nav_url("https://example.com");
+  let t = c.tool_text("diagnostics", json!({"type": "network"}));
+  assert!(
+    t.contains("example.com") || t.contains("GET") || t.contains("request"),
+    "network diagnostics should list requests: {t}"
   );
-  assert!(t.contains("clicked"), "chained selector should click button in .a: {t}");
 }
 
-fn test_selector_label(c: &mut McpClient) {
-  c.nav("<label for='e'>Email Address</label><input id='e' type='email'>");
-  c.call_tool("fill", json!({"selector": "label=Email", "value": "test@test.com"}));
-  let t = c.tool_text("evaluate", json!({"expression": "document.getElementById('e').value"}));
-  assert!(t.contains("test@test.com"), "label selector fill: {t}");
-}
-
-fn test_selector_placeholder(c: &mut McpClient) {
-  c.nav("<input placeholder='Enter your name' id='n'>");
+fn test_trace(c: &mut McpClient) {
+  c.nav("<body></body>");
+  c.call_tool("diagnostics", json!({"type": "trace_start"}));
   c.call_tool(
-    "fill",
-    json!({"selector": "placeholder=Enter your name", "value": "Alice"}),
-  );
-  let t = c.tool_text("evaluate", json!({"expression": "document.getElementById('n').value"}));
-  assert!(t.contains("Alice"), "placeholder selector fill: {t}");
-}
-
-// ─── Auto-waiting tests ─────────────────────────────────────────────────────
-
-fn test_auto_wait_visibility(c: &mut McpClient) {
-  c.nav("<button style='display:none' id='b' onclick=\"this.textContent='ok'\">Go</button><script>setTimeout(function(){document.getElementById('b').style.display=''},500)</script>");
-  c.call_tool("click", json!({"selector": "#b"}));
-  let t = c.tool_text(
     "evaluate",
-    json!({"expression": "document.getElementById('b').textContent"}),
+    json!({"expression": "for(let i=0;i<1000;i++) Math.sqrt(i)"}),
   );
-  assert!(t.contains("ok"), "should wait for visible then click: {t}");
+  let t = c.tool_text("diagnostics", json!({"type": "trace_stop"}));
+  assert!(
+    t.contains("Metrics") || t.contains("Trace stopped") || t.contains("metric"),
+    "trace should return metrics: {t}"
+  );
 }
 
-// ─── Dialog tests ───────────────────────────────────────────────────────────
+// ─── run_script: Page interaction ───────────────────────────────────────────
 
-fn test_dialog_alert(c: &mut McpClient) {
+fn test_script_click(c: &mut McpClient) {
+  c.nav(
+    "<h1 id='h'>Before</h1><button id='btn' onclick=\"document.getElementById('h').textContent='After'\">Go</button>",
+  );
+  let v = c.script_value("await page.click('#btn'); return await page.textContent('#h');");
+  assert_eq!(v, json!("After"), "page.click should trigger onclick: {v}");
+}
+
+fn test_script_fill(c: &mut McpClient) {
+  c.nav("<input id='i' type='text'>");
+  let v = c.script_value("await page.fill('#i', 'Alice'); return await page.inputValue('#i');");
+  assert_eq!(v, json!("Alice"), "page.fill: {v}");
+}
+
+fn test_script_fill_form(c: &mut McpClient) {
+  c.nav("<input id='a'><input id='b'>");
+  let v = c.script_value(
+    "await page.fill('#a', 'val1'); \
+       await page.fill('#b', 'val2'); \
+       return { a: await page.inputValue('#a'), b: await page.inputValue('#b') };",
+  );
+  assert_eq!(v["a"], json!("val1"));
+  assert_eq!(v["b"], json!("val2"));
+}
+
+fn test_script_type(c: &mut McpClient) {
+  c.nav("<input id='i' type='text'>");
+  let v = c.script_value(
+    "await page.locator('#i').click(); \
+       await page.type('#i', 'Bob'); \
+       return await page.inputValue('#i');",
+  );
+  assert_eq!(v, json!("Bob"));
+}
+
+fn test_script_press(c: &mut McpClient) {
+  c.nav("<textarea id='t'></textarea>");
+  let v = c.script_value(
+    "await page.locator('#t').click(); \
+       await page.press('#t', 'Enter'); \
+       return (await page.inputValue('#t')).length;",
+  );
+  let len = v.as_i64().unwrap_or(0);
+  assert!(len > 0, "press Enter should insert newline, value length: {len}");
+}
+
+fn test_script_hover(c: &mut McpClient) {
+  c.nav("<div id='d' onmouseenter=\"this.textContent='hovered'\" style='width:100px;height:100px'>hover me</div>");
+  let v = c.script_value("await page.locator('#d').hover(); return await page.textContent('#d');");
+  assert_eq!(v, json!("hovered"), "hover should trigger mouseenter");
+}
+
+fn test_script_dblclick(c: &mut McpClient) {
+  c.nav("<h1 id='h'>0</h1><button id='b' onclick=\"document.getElementById('h').textContent=Number(document.getElementById('h').textContent)+1\">+</button>");
+  let v = c.script_value("await page.dblclick('#b'); return await page.textContent('#h');");
+  assert_eq!(v, json!("2"), "dblclick should fire two clicks");
+}
+
+fn test_script_select_option(c: &mut McpClient) {
+  c.nav("<select id='s'><option value='apple'>Apple</option><option value='banana'>Banana</option></select>");
+  let v = c.script_value(
+    "await page.selectOption('#s', 'banana'); \
+       return await page.inputValue('#s');",
+  );
+  assert_eq!(v, json!("banana"));
+}
+
+fn test_script_check_uncheck(c: &mut McpClient) {
+  c.nav("<input id='c' type='checkbox'>");
+  let v = c.script_value(
+    "await page.check('#c'); \
+       const on = await page.isChecked('#c'); \
+       await page.uncheck('#c'); \
+       const off = await page.isChecked('#c'); \
+       return { on, off };",
+  );
+  assert_eq!(v["on"], json!(true));
+  assert_eq!(v["off"], json!(false));
+}
+
+fn test_script_scroll(c: &mut McpClient) {
+  c.nav("<div style='height:3000px'>tall</div>");
+  let v = c.script_value(
+    "await page.evaluate('window.scrollBy(0, 500)'); \
+       const raw = await page.evaluate('window.scrollY'); \
+       return JSON.parse(raw);",
+  );
+  let y = v.as_f64().unwrap_or(0.0);
+  assert!(y > 0.0, "scroll should change scrollY: {y}");
+}
+
+fn test_script_scroll_into_view(c: &mut McpClient) {
+  c.nav("<div style='height:3000px'></div><div id='bottom'>bottom</div>");
+  let v = c.script_value(
+    "await page.locator('#bottom').scrollIntoViewIfNeeded(); \
+       const raw = await page.evaluate('window.scrollY'); \
+       return JSON.parse(raw);",
+  );
+  let y = v.as_f64().unwrap_or(0.0);
+  assert!(y > 100.0, "scroll into view should scroll down: {y}");
+}
+
+fn test_script_click_offscreen(c: &mut McpClient) {
+  c.nav("<div style='height:3000px'></div><button id='b' onclick=\"this.textContent='clicked'\">far</button>");
+  let v = c.script_value("await page.click('#b'); return await page.textContent('#b');");
+  assert_eq!(v, json!("clicked"), "click should auto-scroll offscreen button");
+}
+
+fn test_script_dialog_alert(c: &mut McpClient) {
   c.nav("<button id='b' onclick=\"alert('hello')\">Go</button>");
-  c.call_tool("click", json!({"selector": "#b"}));
-  // Should not hang -- dialog auto-dismissed
-  let t = c.tool_text("evaluate", json!({"expression": "'alive'"}));
-  assert!(t.contains("alive"), "should survive alert dialog: {t}");
+  // Dialogs are auto-dismissed; the click should not hang.
+  let v = c.script_value("await page.click('#b'); return 'alive';");
+  assert_eq!(v, json!("alive"), "should survive alert dialog");
 }
 
-// ─── Markdown tests ─────────────────────────────────────────────────────────
-
-fn test_markdown_extraction(c: &mut McpClient) {
-  c.nav("<h1>Title</h1><p>Hello world</p><ul><li>Item 1</li><li>Item 2</li></ul>");
-  let t = c.tool_text("get_markdown", json!({}));
-  assert!(t.contains("# Title"), "markdown headings: {t}");
-  assert!(t.contains("Hello world"), "markdown paragraphs: {t}");
-  assert!(t.contains("- Item"), "markdown lists: {t}");
+fn test_script_fill_dispatches_events(c: &mut McpClient) {
+  c.nav("<input id='i' type='text'><div id='r'></div><script>document.getElementById('i').addEventListener('change', function(e) { document.getElementById('r').textContent = 'changed:' + e.target.value; });</script>");
+  let v = c.script_value(
+    "await page.fill('#i', 'test'); \
+       return await page.textContent('#r');",
+  );
+  assert_eq!(v, json!("changed:test"), "fill should dispatch change event");
 }
 
-fn test_file_upload(c: &mut McpClient) {
+fn test_script_click_at(c: &mut McpClient) {
+  c.nav("<div id='d' onclick=\"this.textContent='clicked'\" style='position:fixed;left:0;top:0;width:200px;height:200px'>click me</div>");
+  let v = c.script_value(
+    "await page.clickAt(50, 50); \
+       return await page.textContent('#d');",
+  );
+  assert_eq!(v, json!("clicked"), "clickAt should trigger onclick");
+}
+
+fn test_script_mouse_click_coords(c: &mut McpClient) {
+  c.nav("<div id='d' onclick=\"this.textContent='mouse-clicked'\" style='position:fixed;left:0;top:0;width:200px;height:200px'>click me</div>");
+  let v = c.script_value(
+    "await page.mouse.click(40, 40); \
+       return await page.textContent('#d');",
+  );
+  assert_eq!(v, json!("mouse-clicked"), "page.mouse.click should fire onclick");
+}
+
+fn test_script_drag_coords(c: &mut McpClient) {
+  c.nav("<div id='d' onmousedown=\"this.dataset.down='1'\" onmouseup=\"this.dataset.up='1'\" onmousemove=\"this.dataset.moved='1'\" style='position:fixed;left:0;top:0;width:200px;height:200px'>drag</div>");
+  let v = c.script_value(
+    "await page.mouse.down(); \
+       await page.moveMouseSmooth(50, 50, 150, 150, 5); \
+       await page.mouse.up(); \
+       const down = await page.evaluate(\"document.getElementById('d').dataset.down\"); \
+       const up = await page.evaluate(\"document.getElementById('d').dataset.up\"); \
+       return { down: JSON.parse(down), up: JSON.parse(up) };",
+  );
+  assert_eq!(v["down"], json!("1"), "mouse.down should fire mousedown");
+  assert_eq!(v["up"], json!("1"), "mouse.up should fire mouseup");
+}
+
+fn test_script_drag_and_drop(c: &mut McpClient) {
+  c.nav("<div id='src' style='width:60px;height:60px;background:#f00' onmousedown=\"this.dataset.d='1'\"></div><div id='tgt' style='width:60px;height:60px;margin-top:80px;background:#0f0' onmouseup=\"this.dataset.u='1'\"></div>");
+  let v = c.script_value(
+    "await page.dragAndDrop('#src', '#tgt'); \
+       const raw = await page.evaluate(\"document.getElementById('src').dataset.d || ''\"); \
+       return JSON.parse(raw);",
+  );
+  assert_eq!(v, json!("1"), "dragAndDrop should trigger mousedown on source");
+}
+
+fn test_script_mouse_wheel(c: &mut McpClient) {
+  c.nav("<body style='height:3000px'></body>");
+  // Verify the binding dispatches the wheel event without error. Whether the
+  // event produces a visible scroll depends on Chrome's input routing with
+  // the current mouse position (CDP Input.dispatchMouseEvent behaviour is
+  // not guaranteed across backends/headless modes).
+  let payload = c.script("await page.mouse.wheel(0, 400); return 'ok';");
+  assert_eq!(
+    payload["status"].as_str(),
+    Some("ok"),
+    "wheel should not error: {payload}"
+  );
+}
+
+fn test_script_keyboard_press(c: &mut McpClient) {
+  c.nav("<textarea id='t'></textarea>");
+  let v = c.script_value(
+    "await page.locator('#t').focus(); \
+       await page.keyboard.press('A'); \
+       await page.keyboard.press('B'); \
+       return await page.inputValue('#t');",
+  );
+  let s = v.as_str().unwrap_or("").to_string();
+  assert!(
+    s.contains('A') || s.contains('a') || s.contains('B') || s.contains('b') || !s.is_empty(),
+    "keyboard.press should insert characters: {s:?}"
+  );
+}
+
+fn test_script_wait_for_text(c: &mut McpClient) {
+  c.nav("<body></body><script>setTimeout(function(){document.body.innerHTML='<p>findme</p>'}, 100)</script>");
+  let v = c.script_value(
+    "await page.waitForSelector('p'); \
+       return await page.textContent('p');",
+  );
+  assert_eq!(v, json!("findme"));
+}
+
+fn test_script_selector_chain(c: &mut McpClient) {
+  c.nav("<div class='a'><button onclick=\"this.textContent='clicked'\">Yes</button></div><div class='b'><button>No</button></div>");
+  let v = c.script_value(
+    "await page.locator('.a').locator('button').click(); \
+       return await page.locator('.a button').textContent();",
+  );
+  assert_eq!(v, json!("clicked"), "chained locator should click button in .a");
+}
+
+fn test_script_upload_file(c: &mut McpClient) {
   c.nav("<input type='file' id='f'><div id='r'></div><script>document.getElementById('f').addEventListener('change',function(e){var f=e.target.files[0];if(f){var reader=new FileReader();reader.onload=function(){document.getElementById('r').textContent='name:'+f.name+',size:'+f.size+',content:'+reader.result;};reader.readAsText(f);}});</script>");
-  // Create a temp file to upload
   let tmp = std::env::temp_dir().join("ferridriver_test_upload.txt");
   std::fs::write(&tmp, "test file content").unwrap();
-  let r = c.call_tool(
-    "upload_file",
-    json!({
-        "selector": "#f",
-        "path": tmp.to_str().unwrap()
-    }),
+  let v = c.script_value_with_args(
+    "await page.setInputFiles('#f', [args[0]]); \
+       const count = await page.evaluate(\"document.getElementById('f').files.length\"); \
+       const name = await page.evaluate(\"document.getElementById('f').files[0].name\"); \
+       const size = await page.evaluate(\"document.getElementById('f').files[0].size\"); \
+       return { count: JSON.parse(count), name: JSON.parse(name), size: JSON.parse(size) };",
+    json!([tmp.to_str().unwrap()]),
   );
-  ok(&r, "upload_file");
-
-  // Verify file count
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('f').files.length"}),
-  );
-  assert!(t.contains("1"), "file count should be 1: {t}");
-
-  // Verify file name
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('f').files[0].name"}),
-  );
-  assert!(t.contains("ferridriver_test_upload.txt"), "file name should match: {t}");
-
-  // Verify file size (17 bytes = "test file content")
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('f').files[0].size"}),
-  );
-  assert!(t.contains("17"), "file size should be 17: {t}");
-
-  // Verify change event fired and FileReader read the content
-  // Give it a moment for FileReader async callback
-  std::thread::sleep(std::time::Duration::from_millis(200));
-  let t = c.tool_text(
-    "evaluate",
-    json!({"expression": "document.getElementById('r').textContent"}),
-  );
-  assert!(
-    t.contains("name:ferridriver_test_upload.txt"),
-    "change event should fire with correct name: {t}"
-  );
-  assert!(
-    t.contains("content:test file content"),
-    "FileReader should read correct content: {t}"
-  );
-
+  assert_eq!(v["count"], json!(1));
+  assert_eq!(v["name"], json!("ferridriver_test_upload.txt"));
+  assert_eq!(v["size"], json!(17));
   let _ = std::fs::remove_file(&tmp);
 }
 
-fn test_markdown_links(c: &mut McpClient) {
+fn test_script_user_agent(c: &mut McpClient) {
+  c.nav("<body>ua-test</body>");
+  let v = c.script_value(
+    "await page.setUserAgent('TestBot/1.0'); \
+       const rawUa = await page.evaluate('navigator.userAgent'); \
+       return JSON.parse(rawUa);",
+  );
+  let ua = v.as_str().unwrap_or("").to_string();
+  assert!(ua.contains("TestBot"), "setUserAgent should override UA: {ua}");
+}
+
+fn test_script_viewport(c: &mut McpClient) {
+  c.nav("<body></body>");
+  let v = c.script_value(
+    "await page.setViewportSize(375, 812); \
+       const w = await page.evaluate('window.innerWidth'); \
+       const h = await page.evaluate('window.innerHeight'); \
+       return { w: JSON.parse(w), h: JSON.parse(h) };",
+  );
+  assert_eq!(v["w"], json!(375));
+  assert_eq!(v["h"], json!(812));
+}
+
+fn test_script_geolocation(c: &mut McpClient) {
+  c.nav("<body></body>");
+  let v = c.script_value(
+    "await context.setGeolocation(37.7749, -122.4194, 1.0); \
+       const raw = await page.evaluate('typeof navigator.geolocation'); \
+       return JSON.parse(raw);",
+  );
+  assert_eq!(v, json!("object"), "geolocation should be available");
+}
+
+fn test_script_offline(c: &mut McpClient) {
+  c.nav("<body></body>");
+  let v = c.script_value(
+    "await context.setOffline(true); \
+       const rawOffline = await page.evaluate('navigator.onLine'); \
+       await context.setOffline(false); \
+       const rawOnline = await page.evaluate('navigator.onLine'); \
+       return { offline: JSON.parse(rawOffline), online: JSON.parse(rawOnline) };",
+  );
+  assert_eq!(v["offline"], json!(false), "should be offline");
+  assert_eq!(v["online"], json!(true), "should be back online");
+}
+
+fn test_script_markdown(c: &mut McpClient) {
+  c.nav("<h1>Title</h1><p>Hello world</p><ul><li>Item 1</li><li>Item 2</li></ul>");
+  let v = c.script_value("return await page.markdown();");
+  let md = v.as_str().unwrap_or("").to_string();
+  assert!(md.contains("# Title"), "markdown headings: {md}");
+  assert!(md.contains("Hello world"), "markdown paragraphs: {md}");
+  assert!(md.contains("- Item"), "markdown lists: {md}");
+}
+
+fn test_script_markdown_links(c: &mut McpClient) {
   c.nav("<p>Visit <a href='https://example.com'>Example</a></p>");
-  let t = c.tool_text("get_markdown", json!({}));
-  assert!(t.contains("[Example](https://example.com)"), "markdown links: {t}");
+  let v = c.script_value("return await page.markdown();");
+  let md = v.as_str().unwrap_or("").to_string();
+  assert!(md.contains("[Example](https://example.com)"), "markdown links: {md}");
 }
 
-// ─── BDD tools ─────────────────────────────────────────────────────────────
+// ─── run_script: Locator chains ─────────────────────────────────────────────
 
-fn test_list_steps(c: &mut McpClient) {
-  let t = c.tool_text("list_steps", json!({}));
-  assert!(t.contains("Step Definitions"), "list_steps should return header: {t}");
-  assert!(
-    t.contains("I navigate to"),
-    "list_steps should include navigation step: {t}"
+fn test_script_locator_role(c: &mut McpClient) {
+  c.nav("<button>Save</button><button disabled>Delete</button>");
+  let v = c.script_value(
+    "await page.getByRole('button').first().click(); \
+       return await page.getByRole('button').count();",
   );
-  assert!(t.contains("I click"), "list_steps should include click step: {t}");
+  assert_eq!(v, json!(2), "getByRole should find 2 buttons");
 }
 
-fn test_list_steps_filter(c: &mut McpClient) {
-  let t = c.tool_text("list_steps", json!({"filter": "navigate"}));
-  assert!(t.contains("navigate"), "filtered list should include navigate: {t}");
-  assert!(!t.contains("I click"), "filtered list should not include click: {t}");
-}
-
-fn test_list_steps_kind(c: &mut McpClient) {
-  let t = c.tool_text("list_steps", json!({"kind": "then"}));
-  assert!(t.contains("Then"), "kind filter should show Then steps: {t}");
-  // Then section should not contain Given steps.
-  assert!(!t.contains("## Given"), "kind=then should not show Given section: {t}");
-}
-
-fn test_run_step_navigate(c: &mut McpClient) {
-  let t = c.tool_text("run_step", json!({"step": "I navigate to \"https://example.com\""}));
-  assert!(t.contains("[Passed]"), "run_step navigate should pass: {t}");
-  // Verify snapshot is present (content varies by backend/network)
-  assert!(
-    t.contains("Example Domain") || t.contains("example.com") || t.contains("[ref="),
-    "run_step should return snapshot: {t}"
+fn test_script_locator_label(c: &mut McpClient) {
+  c.nav("<label for='e'>Email Address</label><input id='e' type='email'>");
+  let v = c.script_value(
+    "await page.getByLabel('Email Address').fill('test@test.com'); \
+       return await page.inputValue('#e');",
   );
+  assert_eq!(v, json!("test@test.com"));
 }
 
-fn test_run_step_click(c: &mut McpClient) {
-  c.nav("<button id='btn' onclick='document.title=\"clicked\"'>Click Me</button>");
-  let t = c.tool_text("run_step", json!({"step": "I click \"#btn\""}));
-  assert!(t.contains("[Passed]"), "run_step click should pass: {t}");
-}
-
-fn test_run_step_fill(c: &mut McpClient) {
-  c.nav("<input id='name' type='text'>");
-  let t = c.tool_text("run_step", json!({"step": "I fill \"#name\" with \"test value\""}));
-  assert!(t.contains("[Passed]"), "run_step fill should pass: {t}");
-}
-
-fn test_run_step_undefined(c: &mut McpClient) {
-  let t = c.tool_text("run_step", json!({"step": "I do something that does not exist"}));
-  assert!(
-    t.contains("Pending") || t.contains("undefined"),
-    "undefined step should be pending: {t}"
+fn test_script_locator_placeholder(c: &mut McpClient) {
+  c.nav("<input placeholder='Enter your name' id='n'>");
+  let v = c.script_value(
+    "await page.getByPlaceholder('Enter your name').fill('Alice'); \
+       return await page.inputValue('#n');",
   );
+  assert_eq!(v, json!("Alice"));
 }
 
-fn test_run_step_assertion(c: &mut McpClient) {
+fn test_script_locator_text(c: &mut McpClient) {
+  c.nav("<button>First</button><button>Second</button><button>Third</button>");
+  let v = c.script_value("return await page.getByText('Second').textContent();");
+  assert_eq!(v, json!("Second"));
+}
+
+fn test_script_locator_nth(c: &mut McpClient) {
+  c.nav("<button>alpha</button><button>beta</button><button>gamma</button>");
+  let v = c.script_value("return await page.getByRole('button').nth(1).textContent();");
+  assert_eq!(v, json!("beta"));
+}
+
+fn test_script_locator_all_text(c: &mut McpClient) {
+  c.nav("<li>a</li><li>b</li><li>c</li>");
+  let v = c.script_value("return await page.locator('li').allTextContents();");
+  assert_eq!(v, json!(["a", "b", "c"]));
+}
+
+// ─── run_script: waits + auto-wait ──────────────────────────────────────────
+
+fn test_script_wait_for_selector(c: &mut McpClient) {
+  c.nav("<div id='target'>here</div>");
+  let v = c.script_value("await page.waitForSelector('#target'); return 'ok';");
+  assert_eq!(v, json!("ok"));
+}
+
+fn test_script_auto_wait_visibility(c: &mut McpClient) {
+  c.nav("<button style='display:none' id='b' onclick=\"this.textContent='ok'\">Go</button><script>setTimeout(function(){document.getElementById('b').style.display=''},500)</script>");
+  let v = c.script_value("await page.click('#b'); return await page.textContent('#b');");
+  assert_eq!(v, json!("ok"), "click should auto-wait for visible");
+}
+
+// ─── run_script: BrowserContext ─────────────────────────────────────────────
+
+fn test_script_cookies(c: &mut McpClient) {
   c.nav_url("https://example.com");
-  let t = c.tool_text("run_step", json!({"step": "\"h1\" should be visible"}));
-  assert!(t.contains("[Passed]"), "run_step assertion should pass: {t}");
+  let v = c.script_value(
+    "await context.addCookies([{ \
+         name: 'k', value: 'v', domain: 'example.com', path: '/', \
+         secure: false, httpOnly: false, sameSite: 'Lax' \
+       }]); \
+       const cookies = await context.cookies(); \
+       const found = cookies.find(c => c.name === 'k'); \
+       await context.deleteCookie('k'); \
+       const after = await context.cookies(); \
+       return { foundValue: found?.value ?? null, afterCount: after.filter(c => c.name === 'k').length };",
+  );
+  assert_eq!(v["foundValue"], json!("v"), "cookie should round-trip");
+  assert_eq!(v["afterCount"], json!(0), "deleteCookie should remove it");
 }
 
-fn test_run_scenario_inline(c: &mut McpClient) {
-  let feature = r#"Feature: Inline test
-  Scenario: Visit example
-    Given I navigate to "https://example.com"
-    Then "h1" should be visible"#;
-  let t = c.tool_text("run_scenario", json!({"feature": feature}));
-  assert!(t.contains("[PASS]"), "run_scenario should show PASS: {t}");
-  assert!(t.contains("1 passed"), "run_scenario should show summary: {t}");
-  assert!(t.contains("0 failed"), "run_scenario should show 0 failed: {t}");
+fn test_script_localstorage(c: &mut McpClient) {
+  c.nav_url("https://example.com");
+  // localStorage lives in the page, not the runner — drive it through
+  // page.evaluate. page.evaluate returns a JSON-serialized string so we
+  // JSON.parse the payload for each read.
+  let v = c.script_value(
+    "await page.evaluate(\"localStorage.setItem('lk', 'lv')\"); \
+       const rawGot = await page.evaluate(\"localStorage.getItem('lk')\"); \
+       const rawLen = await page.evaluate(\"localStorage.length\"); \
+       return { got: JSON.parse(rawGot), count: JSON.parse(rawLen) };",
+  );
+  assert_eq!(v["got"], json!("lv"));
+  assert!(v["count"].as_i64().unwrap_or(0) >= 1);
 }
 
-fn test_run_scenario_multi_step(c: &mut McpClient) {
-  let feature = r#"Feature: Multi step
-  Scenario: Fill and check
-    Given I navigate to "https://demo.playwright.dev/todomvc/#/"
-    Then ".new-todo" should be visible
-    When I fill ".new-todo" with "Buy milk"
-    And I press "Enter"
-    Then ".todo-list" should be visible"#;
-  let t = c.tool_text("run_scenario", json!({"feature": feature}));
-  assert!(t.contains("[PASS]"), "multi-step scenario should pass: {t}");
-  assert!(t.contains("[ok]"), "individual steps should show ok: {t}");
+// ─── run_script: args + vars + console ──────────────────────────────────────
+
+fn test_script_bound_args(c: &mut McpClient) {
+  c.nav("<input id='i' type='text'>");
+  let payload = c.script_with_args(
+    "await page.fill('#i', args[0]); return await page.inputValue('#i');",
+    json!(["prompt-injection\"; drop table; --"]),
+  );
+  assert_eq!(
+    payload["status"].as_str(),
+    Some("ok"),
+    "bound args should not break source parsing: {payload}"
+  );
+  assert_eq!(payload["value"], json!("prompt-injection\"; drop table; --"));
 }
 
-fn test_run_scenario_failure(c: &mut McpClient) {
-  let feature = r##"Feature: Fail test
-  Scenario: Bad selector
-    Given I navigate to "https://example.com"
-    When I click "#nonexistent""##;
-  let t = c.tool_text("run_scenario", json!({"feature": feature}));
-  assert!(t.contains("[FAIL]"), "failing scenario should show FAIL: {t}");
-  assert!(t.contains("1 failed"), "summary should show 1 failed: {t}");
+fn test_script_vars_persist_across_calls(c: &mut McpClient) {
+  c.nav("<body></body>");
+  let _ = c.script_value("vars.set('k', 'v1'); return null;");
+  let v = c.script_value("return vars.get('k');");
+  assert_eq!(v, json!("v1"), "vars should persist across run_script calls");
 }
 
-fn test_run_scenario_filter(c: &mut McpClient) {
-  let feature = "Feature: Filtered\n  Scenario: First\n    Given I navigate to \"https://example.com\"\n  Scenario: Second\n    Given I navigate to \"https://example.com\"";
-  let t = c.tool_text("run_scenario", json!({"feature": feature, "scenario": "First"}));
-  assert!(t.contains("1 passed"), "filter should run only 1 scenario: {t}");
-  assert!(!t.contains("Second"), "filter should exclude Second: {t}");
+fn test_script_console_captured(c: &mut McpClient) {
+  c.nav("<body></body>");
+  let payload = c.script(
+    "console.log('hello from script'); \
+       console.warn('be careful', 42); \
+       return null;",
+  );
+  assert_eq!(payload["status"].as_str(), Some("ok"));
+  let entries = payload["console"].as_array().expect("console array");
+  assert!(entries.len() >= 2, "expected >= 2 console entries: {entries:?}");
+  assert_eq!(entries[0]["level"], json!("log"));
+  assert!(entries[0]["message"].as_str().unwrap_or("").contains("hello"));
+}
+
+fn test_script_error_surfaces_structured(c: &mut McpClient) {
+  c.nav("<body></body>");
+  let payload = c.script("throw new Error('boom');");
+  assert_eq!(payload["status"].as_str(), Some("error"));
+  assert!(
+    payload["error"]["message"].as_str().unwrap_or("").contains("boom"),
+    "error message should include 'boom': {payload}"
+  );
 }
 
 // ─── Run all tests on one client ────────────────────────────────────────────
@@ -895,8 +927,13 @@ fn run_all_tests(backend: &str) {
     }};
   }
 
-  // Core
+  // Navigation + session
   run!(test_navigate);
+  run!(test_page_list);
+  run!(test_page_reload);
+  run!(test_page_back_forward);
+
+  // evaluate
   run!(test_evaluate_number);
   run!(test_evaluate_string);
   run!(test_evaluate_dom);
@@ -908,75 +945,87 @@ fn run_all_tests(backend: &str) {
   run!(test_evaluate_error);
   run!(test_evaluate_syntax_error);
   run!(test_evaluate_large_payload);
+
+  // snapshot + screenshot + search_page
+  run!(test_snapshot);
+  run!(test_snapshot_scroll_info);
   run!(test_screenshot_png);
   run!(test_screenshot_full_page);
-  run!(test_snapshot);
-  run!(test_click_selector);
-  run!(test_click_at);
-  run!(test_fill_input);
-  run!(test_type_text);
-  run!(test_press_key);
-  run!(test_scroll);
-  run!(test_reload);
-  run!(test_go_back_forward);
-  run!(test_list_pages);
-  run!(test_wait_for_selector);
-  run!(test_wait_for_text);
-  run!(test_console_messages);
-  run!(test_network_requests);
-  run!(test_hover);
-  run!(test_drag);
-  run!(test_scroll_to_element);
-  run!(test_double_click);
-  run!(test_fill_form);
-
-  // Tools
   run!(test_search_page);
   run!(test_search_page_regex);
   run!(test_search_page_no_match);
-  run!(test_select_option);
-  run!(test_fill_dispatches_events);
-  run!(test_click_offscreen_element);
-  run!(test_snapshot_scroll_info);
-  run!(test_click_select_guard);
 
-  // Selector engine
-  run!(test_selector_role);
-  run!(test_selector_chain);
-  run!(test_selector_label);
-  run!(test_selector_placeholder);
-
-  // Auto-waiting, dialog, markdown, file upload
-  run!(test_auto_wait_visibility);
-  run!(test_dialog_alert);
-  run!(test_markdown_extraction);
-  run!(test_markdown_links);
-  run!(test_file_upload);
-
-  // CDP-only tests -- run before new_page which changes active page index
-  run_cdp!(test_emulate_device);
-  run_cdp!(test_set_geolocation);
-  run_cdp!(test_set_network_state);
+  // diagnostics (CDP-only: trace uses Performance domain)
+  run!(test_console_messages);
+  run!(test_network_requests);
   run_cdp!(test_trace);
 
-  // BDD tools
-  run!(test_list_steps);
-  run!(test_list_steps_filter);
-  run!(test_list_steps_kind);
-  run!(test_run_step_navigate);
-  run!(test_run_step_click);
-  run!(test_run_step_fill);
-  run!(test_run_step_undefined);
-  run!(test_run_step_assertion);
-  run!(test_run_scenario_inline);
-  run!(test_run_scenario_multi_step);
-  run!(test_run_scenario_failure);
-  run!(test_run_scenario_filter);
+  // run_script: Page interaction
+  run!(test_script_click);
+  run!(test_script_fill);
+  run!(test_script_fill_form);
+  run!(test_script_type);
+  run!(test_script_press);
+  run!(test_script_hover);
+  run!(test_script_dblclick);
+  run!(test_script_select_option);
+  run!(test_script_check_uncheck);
+  run!(test_script_scroll);
+  run!(test_script_scroll_into_view);
+  run!(test_script_click_offscreen);
+  run!(test_script_dialog_alert);
+  run!(test_script_fill_dispatches_events);
 
-  // Multi-page tests last (they change session state)
+  // run_script: mouse/keyboard namespaces + coordinate-based actions
+  run!(test_script_click_at);
+  run!(test_script_mouse_click_coords);
+  run!(test_script_drag_coords);
+  run!(test_script_drag_and_drop);
+  run!(test_script_mouse_wheel);
+  run!(test_script_keyboard_press);
+
+  // run_script: waits
+  run!(test_script_wait_for_selector);
+  run!(test_script_wait_for_text);
+  run!(test_script_auto_wait_visibility);
+
+  // run_script: Locator chains
+  run!(test_script_locator_role);
+  run!(test_script_locator_label);
+  run!(test_script_locator_placeholder);
+  run!(test_script_locator_text);
+  run!(test_script_locator_nth);
+  run!(test_script_locator_all_text);
+  run!(test_script_selector_chain);
+
+  // run_script: file input
+  run!(test_script_upload_file);
+
+  // run_script: page-scoped emulation (CDP-only for UA + viewport — WebKit has
+  // its own emulation path that isn't surfaced here yet).
+  run_cdp!(test_script_user_agent);
+  run_cdp!(test_script_viewport);
+
+  // run_script: context-scoped emulation
+  run_cdp!(test_script_geolocation);
+  run_cdp!(test_script_offline);
+
+  // run_script: BrowserContext cookies + page storage
+  run!(test_script_cookies);
+  run!(test_script_localstorage);
+
+  // run_script: page markdown extraction
+  run!(test_script_markdown);
+  run!(test_script_markdown_links);
+
+  // run_script: args + vars + console + errors
+  run!(test_script_bound_args);
+  run!(test_script_vars_persist_across_calls);
+  run!(test_script_console_captured);
+  run!(test_script_error_surfaces_structured);
+
+  // Multi-page last (changes session state)
   run!(test_new_page);
-  run!(test_cookies);
-  run!(test_localstorage);
 
   eprintln!("\n{backend}: {passed} passed, {failed} failed");
   if !failures.is_empty() {

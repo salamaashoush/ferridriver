@@ -283,7 +283,7 @@ Grouped by source module in `src/steps/`. Counts reflect the actual number of `#
 | `variable` | 3 | set variable, store text / attribute / property / count of selector as variable |
 | `file` | 2 | upload to input, assert download |
 
-Source: `crates/ferridriver-bdd/src/steps/`. Call the MCP `list_steps` tool for the full expression strings with their parameter types.
+Source: `crates/ferridriver-bdd/src/steps/`. Call `StepRegistry::reference()` from a `bdd_main!()` binary for the full expression strings with their parameter types.
 
 ## Reporters
 
@@ -298,7 +298,7 @@ All implement `ferridriver_test::reporter::Reporter` and receive the same event 
 
 ## Running
 
-There is no standalone `ferridriver bdd` command. Features run through one of three paths:
+There is no standalone `ferridriver bdd` command. Features run through one of two paths:
 
 **Rust / `cargo test`** — use `bdd_main!()` and the standard runner flags:
 
@@ -314,8 +314,6 @@ npx @ferridriver/test test tests/features/ --steps 'steps/**/*.ts' \
 ```
 
 See `@ferridriver/test test --help` for the full flag list (`-t`/`--tags`, `--strict`, `--order defined|random[:SEED]`, `--language`, plus all shared runner flags).
-
-**MCP** — use `list_steps`, `run_step`, `run_scenario` on the `ferridriver` MCP server for AI-driven BDD exploration.
 
 ## Design Decisions
 

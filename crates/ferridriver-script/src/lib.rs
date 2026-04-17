@@ -29,9 +29,8 @@
 //! - Event listeners registered inside a script are scoped to that script's
 //!   runtime and cleaned up on completion.
 //!
-//! This crate intentionally does not integrate with the BDD step registry.
-//! Step invocation from scripts and script-based step registration are
-//! deferred to later phases.
+//! Scripting is independent of the BDD step registry — scripts drive the
+//! browser through the `page` / `context` / `request` bindings directly.
 
 pub mod bindings;
 pub mod console;
@@ -42,7 +41,7 @@ pub mod modules;
 pub mod result;
 pub mod vars;
 
-pub use bindings::{APIRequestContextJs, APIResponseJs, BrowserContextJs, LocatorJs, PageJs};
+pub use bindings::{APIRequestContextJs, APIResponseJs, BrowserContextJs, KeyboardJs, LocatorJs, MouseJs, PageJs};
 pub use console::ConsoleCapture;
 pub use engine::{RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
 pub use error::{ScriptError, ScriptErrorKind};

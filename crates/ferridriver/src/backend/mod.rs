@@ -90,7 +90,11 @@ impl std::str::FromStr for SameSite {
 }
 
 /// Cookie data (backend-agnostic, matches Playwright's `NetworkCookie`).
+///
+/// Wire format is camelCase (`httpOnly`, `sameSite`) to match Playwright /
+/// CDP / Web Cookies RFC; Rust field names stay `snake_case` per convention.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct CookieData {
   pub name: String,
   pub value: String,
@@ -107,6 +111,7 @@ pub struct CookieData {
 /// Options for setting a cookie (matches Playwright's `SetNetworkCookieParam`).
 /// Use `url` to derive domain/path automatically, or set `domain`/`path` directly.
 #[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
 pub struct SetCookieParams {
   pub name: String,
   pub value: String,

@@ -30,6 +30,6 @@ features:
     details: Mount React, Vue, Svelte, or Solid components in a real browser and drive them with the full Page/Locator API.
     link: /component-testing/overview
   - title: BDD and MCP in the box
-    details: 144 built-in Gherkin steps backed by the Page API. 28 MCP tools for AI agents. Mix .feature + .spec.ts + MCP in one run.
+    details: 144 built-in Gherkin steps backed by the Page API. Scripting-focused MCP server with 9 tools and full Page/Context/APIRequest bindings via `run_script`. Mix .feature + .spec.ts + MCP in one run.
     link: /bdd/overview
 ---

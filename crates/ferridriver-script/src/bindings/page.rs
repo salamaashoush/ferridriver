@@ -11,10 +11,13 @@ use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
 use ferridriver::options::WaitOptions;
+use rquickjs::function::Opt;
 use serde::Deserialize;
 
 use crate::bindings::convert::{FerriResultExt, serde_from_js};
+use crate::bindings::keyboard::KeyboardJs;
 use crate::bindings::locator::LocatorJs;
+use crate::bindings::mouse::MouseJs;
 
 /// Shape of `waitForSelector` options accepted from JS.
 #[derive(Debug, Default, Deserialize)]
@@ -26,9 +29,9 @@ struct JsWaitOptions {
 
 fn parse_wait_options<'js>(
   ctx: &rquickjs::Ctx<'js>,
-  value: Option<rquickjs::Value<'js>>,
+  value: Opt<rquickjs::Value<'js>>,
 ) -> rquickjs::Result<WaitOptions> {
-  match value {
+  match value.0 {
     Some(v) if !v.is_undefined() && !v.is_null() => {
       let js: JsWaitOptions = serde_from_js(ctx, v)?;
       Ok(WaitOptions {
@@ -133,7 +136,7 @@ impl PageJs {
     &self,
     ctx: rquickjs::Ctx<'js>,
     selector: String,
-    options: Option<rquickjs::Value<'js>>,
+    options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let opts = parse_wait_options(&ctx, options)?;
     self.inner.wait_for_selector(&selector, opts).await.into_js()
@@ -338,6 +341,76 @@ impl PageJs {
   pub async fn evaluate(&self, expression: String) -> rquickjs::Result<Option<String>> {
     let value = self.inner.evaluate(&expression).await.into_js()?;
     Ok(value.map(|v| serde_json::to_string(&v).unwrap_or_default()))
+  }
+
+  // ── Mouse / keyboard namespaces (Playwright parity) ──────────────────────
+
+  /// `page.mouse.*` namespace: `click`, `dblclick`, `down`, `up`, `wheel`.
+  /// Exposed as a JS property, matching Playwright.
+  #[qjs(get, rename = "mouse")]
+  pub fn mouse(&self) -> MouseJs {
+    MouseJs::new(self.inner.clone())
+  }
+
+  /// `page.keyboard.*` namespace: `down`, `up`, `press` (no selector; acts on
+  /// the currently focused element). Exposed as a JS property.
+  #[qjs(get, rename = "keyboard")]
+  pub fn keyboard(&self) -> KeyboardJs {
+    KeyboardJs::new(self.inner.clone())
+  }
+
+  /// Click at viewport coordinates without a selector.
+  #[qjs(rename = "clickAt")]
+  pub async fn click_at(&self, x: f64, y: f64) -> rquickjs::Result<()> {
+    self.inner.click_at(x, y).await.into_js()
+  }
+
+  /// Interpolated mouse move from `(fromX, fromY)` to `(toX, toY)` in `steps`
+  /// intermediate points. Used for coordinate-based drag: `mouse.down()` →
+  /// `moveMouseSmooth(...)` → `mouse.up()`.
+  #[qjs(rename = "moveMouseSmooth")]
+  pub async fn move_mouse_smooth(
+    &self,
+    from_x: f64,
+    from_y: f64,
+    to_x: f64,
+    to_y: f64,
+    steps: u32,
+  ) -> rquickjs::Result<()> {
+    self
+      .inner
+      .move_mouse_smooth(from_x, from_y, to_x, to_y, steps)
+      .await
+      .into_js()
+  }
+
+  /// Drag from the source selector to the target selector.
+  #[qjs(rename = "dragAndDrop")]
+  pub async fn drag_and_drop(&self, source: String, target: String) -> rquickjs::Result<()> {
+    self.inner.drag_and_drop(&source, &target).await.into_js()
+  }
+
+  // ── File input ────────────────────────────────────────────────────────────
+
+  /// Attach files to a `<input type="file">` selector. `paths` is a list of
+  /// absolute file paths.
+  #[qjs(rename = "setInputFiles")]
+  pub async fn set_input_files(&self, selector: String, paths: Vec<String>) -> rquickjs::Result<()> {
+    self.inner.set_input_files(&selector, &paths).await.into_js()
+  }
+
+  // ── Emulation (page-scoped) ──────────────────────────────────────────────
+
+  /// Override the User-Agent string for this page.
+  #[qjs(rename = "setUserAgent")]
+  pub async fn set_user_agent(&self, user_agent: String) -> rquickjs::Result<()> {
+    self.inner.set_user_agent(&user_agent).await.into_js()
+  }
+
+  /// Override the viewport size for this page.
+  #[qjs(rename = "setViewportSize")]
+  pub async fn set_viewport_size(&self, width: i64, height: i64) -> rquickjs::Result<()> {
+    self.inner.set_viewport_size(width, height).await.into_js()
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────

@@ -23,4 +23,4 @@ Grouped by source module in [`crates/ferridriver-bdd/src/steps/`](https://github
 | `variable` | 3 | set variable, store text / attribute / property / count of selector as variable |
 | `file` | 2 | upload to input, assert download |
 
-To enumerate the concrete expression strings at runtime, call the [MCP server's `list_steps` tool](/mcp/tools).
+To enumerate the concrete expression strings at runtime, call `StepRegistry::reference()` from a `bdd_main!()` binary or dump the registry from a test-runner setup.
