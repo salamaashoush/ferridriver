@@ -1,6 +1,6 @@
 [package]
 name = "ferridriver-bdd"
-description = "High-performance BDD/Cucumber test framework for ferridriver"
+description = "BDD/Cucumber test framework for ferridriver. 144 built-in Gherkin steps backed by the Page API."
 version.workspace = true
 edition.workspace = true
 license.workspace = true

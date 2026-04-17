@@ -1,7 +1,7 @@
 {
   "name": "@ferridriver/test",
   "version": "0.1.0",
-  "description": "High-performance E2E and component test runner (Playwright-compatible API, Rust engine)",
+  "description": "E2E, BDD, and component test runner for Node and Bun. Playwright-compatible API, Rust engine.",
   "type": "module",
   "main": "src/index.ts",
   "types": "src/index.ts",

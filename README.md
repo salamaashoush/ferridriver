@@ -1,6 +1,6 @@
 # ferridriver
 
-High-performance browser automation library in Rust with a Playwright-compatible API. Multiple CDP backends, native WebKit, MCP server for AI agents, Node.js/Bun bindings, and a full test runner with component testing for 6 frameworks.
+Browser automation for Rust projects. Playwright-compatible API, native Rust engine, and first-class bindings for Node and Bun — so you don't have to switch runtimes to write end-to-end tests. Ships with a parallel test runner, a BDD framework, component testing for React / Vue / Svelte / Solid / Leptos / Dioxus, and an MCP server for AI agents. Four backends (CDP pipe / CDP WebSocket / WKWebView / Firefox via BiDi), one API.
 
 ## Architecture
 

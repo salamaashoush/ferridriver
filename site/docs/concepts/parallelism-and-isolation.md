@@ -9,22 +9,38 @@ Everything else in the execution model follows from those two rules.
 
 ## Worker model
 
-```
- run start
-    │
-    ├── Dispatcher (MPMC work-stealing channel)
-    │
-    ┌────────┬────────┬────────┬────────┐
-    │   W0   │   W1   │   W2   │   W3   │      workers = 4
-    │        │        │        │        │
-    │ Browser│ Browser│ Browser│ Browser│      one per worker
-    │   │    │   │    │   │    │   │    │
-    │ ┌─▼─┐  │ ┌─▼─┐  │ ┌─▼─┐  │ ┌─▼─┐  │
-    │ │Ctx│  │ │Ctx│  │ │Ctx│  │ │Ctx│  │      fresh per test
-    │ │ │ │  │ │ │ │  │ │ │ │  │ │ │ │  │
-    │ │Pg │  │ │Pg │  │ │Pg │  │ │Pg │  │
-    │ └───┘  │ └───┘  │ └───┘  │ └───┘  │
-    └────────┴────────┴────────┴────────┘
+```mermaid
+flowchart TB
+  start([run start]) --> disp(["Dispatcher\nMPMC work-stealing channel"])
+
+  disp --> W0["Worker 0"]
+  disp --> W1["Worker 1"]
+  disp --> W2["Worker 2"]
+  disp --> W3["Worker 3"]
+
+  W0 --> B0["Browser\n(per-worker, long-lived)"]
+  W1 --> B1["Browser"]
+  W2 --> B2["Browser"]
+  W3 --> B3["Browser"]
+
+  B0 --> C0["Context\n(per-test, fresh)"]
+  B1 --> C1["Context"]
+  B2 --> C2["Context"]
+  B3 --> C3["Context"]
+
+  C0 --> P0["Page"]
+  C1 --> P1["Page"]
+  C2 --> P2["Page"]
+  C3 --> P3["Page"]
+
+  classDef dispatcher fill:#ede9fe,stroke:#6d28d9,color:#1e1b4b
+  classDef worker fill:#fef3c7,stroke:#b45309,color:#1c1917
+  classDef browser fill:#dbeafe,stroke:#1e40af,color:#0f172a
+  classDef context fill:#dcfce7,stroke:#15803d,color:#052e16
+  class disp dispatcher
+  class W0,W1,W2,W3 worker
+  class B0,B1,B2,B3 browser
+  class C0,C1,C2,C3,P0,P1,P2,P3 context
 ```
 
 **Worker boot.** All N workers launch their browsers **concurrently** using `tokio::join!`, not sequentially. On a warm machine this saves 80–100 ms per additional worker because browser startup overlaps.

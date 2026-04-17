@@ -1,6 +1,6 @@
 # ferridriver
 
-High-performance browser automation library in Rust. Playwright-compatible API with four backends:
+Browser automation written in Rust, with a Playwright-compatible API. Four backends behind one surface:
 
 - **CdpPipe** — Chrome DevTools Protocol over Unix pipes (fastest, default)
 - **CdpRaw** — Chrome DevTools Protocol over WebSocket (can attach to a running Chrome)

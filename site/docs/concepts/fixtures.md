@@ -6,10 +6,17 @@ If you've used Playwright's fixture model, most of this will look familiar. If y
 
 ## Three scopes
 
-```
-Global pool              shared across all workers
-  └── Worker pool        one per worker, inherits from global
-       └── Test pool     one per test, inherits from worker
+```mermaid
+flowchart TB
+  G["Global pool\nshared across all workers"] --> W["Worker pool\none per worker, inherits Global"]
+  W --> T["Test pool\none per test, inherits Worker"]
+
+  classDef global fill:#ede9fe,stroke:#6d28d9,color:#1e1b4b
+  classDef worker fill:#fef3c7,stroke:#b45309,color:#1c1917
+  classDef test fill:#dcfce7,stroke:#15803d,color:#052e16
+  class G global
+  class W worker
+  class T test
 ```
 
 Lookup walks *up* the chain. When your test calls `ctx.browser()`, the test pool asks its worker parent; the worker caches it and reuses it across tests. When the run ends, teardowns fire in LIFO order.
@@ -82,16 +89,26 @@ A fixture can depend on other fixtures — request them from `ctx` inside the bo
 
 Fixtures that implement `Drop` (or that you explicitly register with a teardown closure) are torn down at the end of their scope, in **LIFO** order. No `afterEach` noise to remember.
 
-```
-test body starts
-  ├ fixture A requested (setup)
-  ├ fixture B requested (setup, depends on A)
-  ├ fixture C requested (setup, depends on B)
-  │ ... test runs ...
-  ├ teardown C
-  ├ teardown B
-  └ teardown A
-test body ends
+```mermaid
+sequenceDiagram
+  autonumber
+  participant T as Test body
+  participant A as Fixture A
+  participant B as Fixture B (needs A)
+  participant C as Fixture C (needs B)
+
+  T->>A: request
+  A-->>T: value
+  T->>B: request
+  B->>A: reuse cached value
+  B-->>T: value
+  T->>C: request
+  C->>B: reuse cached value
+  C-->>T: value
+  Note over T: test body runs
+  T->>C: teardown (LIFO)
+  T->>B: teardown
+  T->>A: teardown
 ```
 
 ## Hooks vs fixtures
