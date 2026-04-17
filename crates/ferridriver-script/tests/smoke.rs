@@ -16,12 +16,31 @@ fn make_engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
   let context = RunContext {
     vars: vars.clone(),
     sandbox: Arc::new(sandbox),
+    artifacts: None,
     page: None,
     browser_context: None,
     request: None,
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
   (engine, tmp, context)
+}
+
+fn make_engine_with_artifacts() -> (ScriptEngine, tempfile::TempDir, tempfile::TempDir, RunContext) {
+  let scripts_tmp = tempfile::tempdir().expect("scripts tempdir");
+  let artifacts_tmp = tempfile::tempdir().expect("artifacts tempdir");
+  let sandbox = PathSandbox::new(scripts_tmp.path()).expect("scripts sandbox");
+  let artifacts_sandbox = PathSandbox::new(artifacts_tmp.path()).expect("artifacts sandbox");
+  let vars = Arc::new(InMemoryVars::new());
+  let context = RunContext {
+    vars: vars.clone(),
+    sandbox: Arc::new(sandbox),
+    artifacts: Some(Arc::new(artifacts_sandbox)),
+    page: None,
+    browser_context: None,
+    request: None,
+  };
+  let engine = ScriptEngine::new(ScriptEngineConfig::default());
+  (engine, scripts_tmp, artifacts_tmp, context)
 }
 
 #[tokio::test]
@@ -422,6 +441,71 @@ async fn rejects_bare_module_import() {
       assert!(s.starts_with("rejected"), "got: {s}");
     },
     Outcome::Error { error } => panic!("unexpected engine error: {error:?}"),
+  }
+}
+
+#[tokio::test]
+async fn artifacts_write_read_list_remove() {
+  let (engine, _scripts_tmp, artifacts_tmp, ctx) = make_engine_with_artifacts();
+  let result = engine
+    .run(
+      r#"
+      await artifacts.write('note.txt', 'hello');
+      await artifacts.writeBytes('bin.dat', [1, 2, 3, 255]);
+      const got = await artifacts.read('note.txt');
+      const bytes = await artifacts.readBytes('bin.dat');
+      const entries = (await artifacts.list()).sort();
+      const removed = await artifacts.remove('note.txt');
+      const afterRemove = await artifacts.exists('note.txt');
+      return { got, bytes: Array.from(bytes), entries, removed, afterRemove };
+      "#,
+      &[],
+      RunOptions::default(),
+      ctx,
+    )
+    .await;
+  match result.outcome {
+    Outcome::Ok { success } => {
+      assert_eq!(success.value["got"], serde_json::json!("hello"));
+      assert_eq!(success.value["bytes"], serde_json::json!([1, 2, 3, 255]));
+      assert_eq!(success.value["entries"], serde_json::json!(["bin.dat", "note.txt"]));
+      assert_eq!(success.value["removed"], serde_json::json!(true));
+      assert_eq!(success.value["afterRemove"], serde_json::json!(false));
+    },
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
+  }
+  // Files that survived the test should actually be on disk in artifacts_tmp.
+  assert!(artifacts_tmp.path().join("bin.dat").exists());
+}
+
+#[tokio::test]
+async fn artifacts_rejects_traversal() {
+  let (engine, _scripts_tmp, _artifacts_tmp, ctx) = make_engine_with_artifacts();
+  let result = engine
+    .run(
+      "try { await artifacts.write('../escape.txt', 'x'); return 'no-error'; } \
+       catch (e) { return String(e).includes('traversal') ? 'rejected' : String(e); }",
+      &[],
+      RunOptions::default(),
+      ctx,
+    )
+    .await;
+  match result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("rejected")),
+    Outcome::Error { error } => panic!("unexpected engine error: {error:?}"),
+  }
+}
+
+#[tokio::test]
+async fn artifacts_absent_when_not_provided() {
+  let (engine, _tmp, ctx) = make_engine();
+  // No artifacts binding installed; the global is undefined.
+  let result = engine
+    .run("return typeof artifacts;", &[], RunOptions::default(), ctx)
+    .await;
+  match result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("undefined")),
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
   }
 }
 

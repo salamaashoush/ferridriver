@@ -41,7 +41,9 @@ pub mod modules;
 pub mod result;
 pub mod vars;
 
-pub use bindings::{APIRequestContextJs, APIResponseJs, BrowserContextJs, KeyboardJs, LocatorJs, MouseJs, PageJs};
+pub use bindings::{
+  APIRequestContextJs, APIResponseJs, ArtifactsJs, BrowserContextJs, KeyboardJs, LocatorJs, MouseJs, PageJs,
+};
 pub use console::ConsoleCapture;
 pub use engine::{RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
 pub use error::{ScriptError, ScriptErrorKind};

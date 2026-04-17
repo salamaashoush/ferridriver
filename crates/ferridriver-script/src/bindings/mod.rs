@@ -19,6 +19,7 @@
 //! Playwright's convention (`TimeoutError`, `TargetClosedError`).
 
 pub mod api_request;
+pub mod artifacts;
 pub mod context;
 pub mod convert;
 pub mod keyboard;
@@ -27,6 +28,7 @@ pub mod mouse;
 pub mod page;
 
 pub use api_request::{APIRequestContextJs, APIResponseJs};
+pub use artifacts::ArtifactsJs;
 pub use context::BrowserContextJs;
 pub use keyboard::KeyboardJs;
 pub use locator::LocatorJs;
@@ -48,6 +50,7 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<APIResponseJs>::define(&g)?;
   Class::<KeyboardJs>::define(&g)?;
   Class::<MouseJs>::define(&g)?;
+  Class::<ArtifactsJs>::define(&g)?;
   Ok(())
 }
 
@@ -75,5 +78,14 @@ pub fn install_request(ctx: &Ctx<'_>, req: Arc<ferridriver::api_request::APIRequ
   define_classes(ctx)?;
   let js_req = Class::instance(ctx.clone(), APIRequestContextJs::new(req))?;
   ctx.globals().set("request", js_req)?;
+  Ok(())
+}
+
+/// Install the `artifacts` global — a dedicated sandboxed directory for
+/// script outputs (screenshots, PDFs, traces, downloaded bodies).
+pub fn install_artifacts(ctx: &Ctx<'_>, sandbox: Arc<crate::fs::PathSandbox>) -> rquickjs::Result<()> {
+  define_classes(ctx)?;
+  let js_art = Class::instance(ctx.clone(), ArtifactsJs::new(sandbox))?;
+  ctx.globals().set("artifacts", js_art)?;
   Ok(())
 }

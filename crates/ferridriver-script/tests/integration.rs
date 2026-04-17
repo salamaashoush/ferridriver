@@ -57,6 +57,7 @@ async fn harness() -> Harness {
   let ctx = RunContext {
     vars,
     sandbox,
+    artifacts: None,
     page: Some(page),
     browser_context: None,
     request: None,

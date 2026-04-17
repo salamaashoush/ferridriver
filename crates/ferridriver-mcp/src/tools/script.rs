@@ -33,6 +33,8 @@ pub struct RunScriptParams {
     `vars` (session-level string store: get/set/has/delete/keys), \
     `console` (log/info/warn/error/debug — captured and returned), \
     `fs` (readFile/readFileBytes/writeFile/readdir/exists — scoped to the configured script_root), \
+    `artifacts` (write/writeBytes/read/readBytes/list/exists/remove — dedicated output dir for \
+    screenshots, PDFs, traces; scoped to the configured artifacts_root), \
     `page` / `context` / `request` (live browser bindings). \
     Do NOT interpolate caller-controlled data into this string; pass it via `args` instead."
   )]
@@ -84,6 +86,8 @@ impl McpServer {
     Globals available: `args` (bound parameters, never interpolated into source — prompt-injection safe), \
     `vars` (session-level get/set/has/delete), `console.*` (captured with limits), \
     `fs` (readFile/writeFile/readdir/exists, scoped to script_root, rejects path traversal), \
+    `artifacts` (write/writeBytes/read/readBytes/list/exists/remove, dedicated output dir for \
+    screenshots / PDFs / traces; pair with `page.screenshot()` or `page.pdf()` to save bytes), \
     `page` / `context` / `request` (live browser bindings). \
     Fresh QuickJS context per call — no state bleeds between invocations except through `vars`. \
     Returns structured JSON: { status: 'ok'|'error', value?, error?, duration_ms, console[] }. \
@@ -151,6 +155,7 @@ impl McpServer {
     let context = RunContext {
       vars,
       sandbox,
+      artifacts: self.artifacts_sandbox.clone(),
       page: Some(page),
       browser_context: Some(std::sync::Arc::new(ctx_ref)),
       request: Some(request),
