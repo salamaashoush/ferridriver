@@ -25,19 +25,34 @@ async fn test_react_counter_live() {
   tokio::time::sleep(std::time::Duration::from_millis(500)).await;
 
   // Initial state.
-  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
+  let count = page
+    .locator("#count", None)
+    .text_content()
+    .await
+    .unwrap()
+    .unwrap_or_default();
   assert_eq!(count, "0", "initial count");
 
   // Click + three times.
   for _ in 0..3 {
-    page.locator("#inc").click().await.unwrap();
+    page.locator("#inc", None).click().await.unwrap();
   }
-  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
+  let count = page
+    .locator("#count", None)
+    .text_content()
+    .await
+    .unwrap()
+    .unwrap_or_default();
   assert_eq!(count, "3", "after 3 increments");
 
   // Click - once.
-  page.locator("#dec").click().await.unwrap();
-  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
+  page.locator("#dec", None).click().await.unwrap();
+  let count = page
+    .locator("#count", None)
+    .text_content()
+    .await
+    .unwrap()
+    .unwrap_or_default();
   assert_eq!(count, "2", "after decrement");
 
   let _ = browser.close(None).await;

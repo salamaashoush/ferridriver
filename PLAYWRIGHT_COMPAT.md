@@ -300,7 +300,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.11 Locator filter `visible` + Locator-object `has`/`has_not`
 
-- [ ] `FilterOptions { visible: Option<bool>, has: Option<Locator>, has_not: Option<Locator> }` — current strings-only `has`/`hasNot` must accept `Locator`.
+- [x] `FilterOptions { visible: Option<bool>, has: Option<Locator>, has_not: Option<Locator> }` — current strings-only `has`/`hasNot` must accept `Locator`.
 - **Files**: `options.rs`, `locator.rs`.
 
 ### 3.12 Locator / getBy regex args
@@ -311,7 +311,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.13 Locator-as-argument to `.locator()`
 
-- [ ] `locator.locator(selector_or_locator, options)` where the arg can be another Locator — Playwright encodes as `internal:chain=<json>`.
+- [x] `locator.locator(selector_or_locator, options)` where the arg can be another Locator — Playwright encodes as `internal:chain=<json>`.
 - **Files**: `locator.rs`.
 
 ### 3.14 Locator `evaluate` with arg
@@ -321,11 +321,11 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.15 `getAttribute` return type
 
-- [ ] Return raw attribute string (not JSON-stringified). Current `locator.rs:473` JSON-stringifies non-string values.
+- [x] Return raw attribute string (not JSON-stringified). Current `locator.rs:473` JSON-stringifies non-string values.
 
 ### 3.16 `Locator.waitFor` `attached` state
 
-- [ ] Treat `attached` distinctly from `visible` (current code at `locator.rs:612` conflates them).
+- [x] Treat `attached` distinctly from `visible` (current code at `locator.rs:612` conflates them).
 
 ### 3.17 Auto-waiting deadline parity
 

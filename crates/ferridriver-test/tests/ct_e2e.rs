@@ -55,19 +55,34 @@ window.__ferriMount({ id: 'Counter' }, document.getElementById('app'), { props: 
   let page = browser.new_page_with_url(&url).await.unwrap();
 
   // Verify initial state.
-  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
+  let count = page
+    .locator("#count", None)
+    .text_content()
+    .await
+    .unwrap()
+    .unwrap_or_default();
   assert_eq!(count, "0", "initial count should be 0");
 
   // Click + three times.
   for _ in 0..3 {
-    page.locator("#inc").click().await.unwrap();
+    page.locator("#inc", None).click().await.unwrap();
   }
-  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
+  let count = page
+    .locator("#count", None)
+    .text_content()
+    .await
+    .unwrap()
+    .unwrap_or_default();
   assert_eq!(count, "3", "count should be 3 after 3 clicks");
 
   // Click - once.
-  page.locator("#dec").click().await.unwrap();
-  let count = page.locator("#count").text_content().await.unwrap().unwrap_or_default();
+  page.locator("#dec", None).click().await.unwrap();
+  let count = page
+    .locator("#count", None)
+    .text_content()
+    .await
+    .unwrap()
+    .unwrap_or_default();
   assert_eq!(count, "2", "count should be 2 after decrement");
 
   let _ = browser.close(None).await;
@@ -106,7 +121,12 @@ window.__ferriMount = function(componentRef, rootEl, options) {
   let page = browser.new_page_with_url(&server.url()).await.unwrap();
 
   // Verify initial state.
-  let initial = page.locator("#app").text_content().await.unwrap().unwrap_or_default();
+  let initial = page
+    .locator("#app", None)
+    .text_content()
+    .await
+    .unwrap()
+    .unwrap_or_default();
   assert_eq!(initial, "INITIAL", "page should show initial content");
 
   // Use ct::mount() to mount a component.
@@ -126,7 +146,7 @@ window.__ferriMount = function(componentRef, rootEl, options) {
 
   // Verify the component was mounted.
   let text = page
-    .locator("#mounted")
+    .locator("#mounted", None)
     .text_content()
     .await
     .unwrap()

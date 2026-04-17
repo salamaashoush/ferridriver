@@ -130,13 +130,22 @@ impl Frame {
   // ── Locators (frame-scoped) ──────────────────────────────────────────
 
   /// Create a locator scoped to this frame.
+  ///
+  /// Playwright: `frame.locator(selector, options?: LocatorOptions): Locator`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:324`).
+  /// Frame-level `.locator` only accepts a selector string and honors
+  /// the full `LocatorOptions` bag (including `visible`).
   #[must_use]
-  pub fn locator(&self, selector: &str) -> Locator {
-    Locator {
+  pub fn locator(&self, selector: &str, options: Option<crate::options::FilterOptions>) -> Locator {
+    let base = Locator {
       page: Arc::clone(&self.page),
       selector: selector.to_string(),
       frame_id: Some(self.id.clone()),
       strict: true,
+    };
+    match options {
+      Some(opts) => base.filter(&opts),
+      None => base,
     }
   }
 
@@ -260,7 +269,7 @@ impl Frame {
   ///
   /// Returns an error if the element is not found within the timeout.
   pub async fn wait_for_selector(&self, selector: &str, opts: WaitOptions) -> Result<()> {
-    self.locator(selector).wait_for(opts).await
+    self.locator(selector, None).wait_for(opts).await
   }
 
   /// Check if this frame has been detached from the page.

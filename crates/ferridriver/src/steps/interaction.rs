@@ -27,7 +27,7 @@ step!(Click {
     example: "When I click \"#submit\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         loc.click().await?;
         Ok(None)
     }
@@ -40,7 +40,7 @@ step!(DoubleClick {
     example: "When I double-click \"#item\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         loc.dblclick().await?;
         Ok(None)
     }
@@ -66,7 +66,7 @@ step!(Hover {
     example: "When I hover over \"#menu\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         loc.hover().await?;
         Ok(None)
     }
@@ -80,7 +80,7 @@ step!(Fill {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let val = q(&caps[2]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         loc.fill(&val).await?;
         Ok(None)
     }
@@ -97,7 +97,7 @@ step!(FillForm {
             if row.len() >= 2 {
                 let sel = &row[0];
                 let val = &row[1];
-                let loc = page.locator(sel);
+                let loc = page.locator(sel, None);
                 loc.fill(val).await?;
             }
         }
@@ -112,7 +112,7 @@ step!(Clear {
     example: "When I clear \"#search\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         loc.fill("").await?;
         Ok(None)
     }
@@ -163,7 +163,7 @@ step!(Focus {
     example: "When I focus \"#input\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         loc.focus().await?;
         Ok(None)
     }
@@ -176,7 +176,7 @@ step!(Blur {
     example: "When I blur \"#input\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         loc.blur().await?;
         Ok(None)
     }
@@ -189,7 +189,7 @@ step!(Check {
     example: "When I check \"#agree\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         loc.check().await?;
         Ok(None)
     }
@@ -202,7 +202,7 @@ step!(Uncheck {
     example: "When I uncheck \"#agree\"",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         loc.uncheck().await?;
         Ok(None)
     }

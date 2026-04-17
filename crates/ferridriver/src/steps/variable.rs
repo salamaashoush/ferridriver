@@ -18,7 +18,7 @@ step!(StoreText {
     execute(page, caps, _table, vars) {
         let sel = q(&caps[1]);
         let var = caps[2].to_string();
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let val = loc.inner_text().await.unwrap_or_default();
         vars.insert(var, val);
         Ok(None)
@@ -33,7 +33,7 @@ step!(StoreValue {
     execute(page, caps, _table, vars) {
         let sel = q(&caps[1]);
         let var = caps[2].to_string();
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let val = loc.input_value().await.unwrap_or_default();
         vars.insert(var, val);
         Ok(None)
@@ -49,7 +49,7 @@ step!(StoreAttr {
         let attr = q(&caps[1]);
         let sel = q(&caps[2]);
         let var = caps[3].to_string();
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let val = loc.get_attribute(&attr).await?.unwrap_or_default();
         vars.insert(var, val);
         Ok(None)

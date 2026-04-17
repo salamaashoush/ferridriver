@@ -208,8 +208,11 @@ for (const backend of BACKENDS) {
     });
 
     it("filters locators", () => {
+      // Playwright encoding: filter({hasText}) → ` >> internal:has-text="..."`
+      // (see /tmp/playwright/packages/playwright-core/src/client/locator.ts:51).
       const loc = page.locator("p").filter({ hasText: "information" });
-      expect(loc.selector).toContain("has-text=information");
+      expect(loc.selector).toContain("internal:has-text=");
+      expect(loc.selector).toContain("information");
     });
 
     // ── Screenshots ───────────────────────────────────────────────────

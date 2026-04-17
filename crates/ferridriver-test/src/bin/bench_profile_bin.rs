@@ -42,8 +42,8 @@ async fn main() {
           wid * iters + i
         );
         page.goto(&url, None).await.unwrap();
-        page.locator("#b").click().await.unwrap();
-        let _ = page.locator("#b").text_content().await.unwrap();
+        page.locator("#b", None).click().await.unwrap();
+        let _ = page.locator("#b", None).text_content().await.unwrap();
         ctx.close().await.ok();
       }
     }));

@@ -42,9 +42,22 @@ impl Locator {
 
   // ── Sub-locators ────────────────────────────────────────────────────────
 
-  #[napi]
-  pub fn locator(&self, selector: String) -> Locator {
-    Self::wrap(self.inner.locator(&selector))
+  /// Playwright: `locator.locator(selectorOrLocator, options?: Omit<LocatorOptions, 'visible'>): Locator`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
+  /// Thin delegator to Rust core's `Locator::locator` — core does all
+  /// encoding and option application; this binding only lowers JS types.
+  #[napi(ts_args_type = "selectorOrLocator: string | Locator, options?: FilterOptions")]
+  pub fn locator(
+    &self,
+    selector_or_locator: napi::Either<String, crate::types::LocatorRef>,
+    options: Option<crate::types::FilterOptions>,
+  ) -> Locator {
+    let like = match selector_or_locator {
+      napi::Either::A(selector) => ferridriver::options::LocatorLike::Selector(selector),
+      napi::Either::B(inner) => ferridriver::options::LocatorLike::Selector(inner.selector),
+    };
+    let opts = options.map(ferridriver::options::FilterOptions::from);
+    Self::wrap(self.inner.locator(like, opts))
   }
 
   #[napi]

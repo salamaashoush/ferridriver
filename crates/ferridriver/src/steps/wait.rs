@@ -104,7 +104,7 @@ async fn wait_for_selector(
 
 async fn wait_for_text(page: &std::sync::Arc<crate::page::Page>, text: &str, timeout_ms: u64) -> Result<(), String> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-  let loc = page.locator("body");
+  let loc = page.locator("body", None);
   loop {
     if tokio::time::Instant::now() >= deadline {
       return Err(format!("Timeout ({timeout_ms}ms) waiting for text '{text}'"));

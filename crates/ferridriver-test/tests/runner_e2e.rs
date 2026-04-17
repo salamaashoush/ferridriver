@@ -101,14 +101,14 @@ fn make_click_test() -> TestCase {
           diff: None,
           screenshot: None,
         })?;
-        page.locator("#btn").click().await.map_err(|e| TestFailure {
+        page.locator("#btn", None).click().await.map_err(|e| TestFailure {
           message: format!("click failed: {e}"),
           stack: None,
           diff: None,
           screenshot: None,
         })?;
         let text = page
-          .locator("#btn")
+          .locator("#btn", None)
           .text_content()
           .await
           .map_err(|e| TestFailure {
@@ -163,7 +163,7 @@ fn make_fill_test() -> TestCase {
           screenshot: None,
         })?;
         page
-          .locator("#inp")
+          .locator("#inp", None)
           .fill("hello world")
           .await
           .map_err(|e| TestFailure {
@@ -172,12 +172,16 @@ fn make_fill_test() -> TestCase {
             diff: None,
             screenshot: None,
           })?;
-        let val = page.locator("#inp").input_value().await.map_err(|e| TestFailure {
-          message: format!("input_value failed: {e}"),
-          stack: None,
-          diff: None,
-          screenshot: None,
-        })?;
+        let val = page
+          .locator("#inp", None)
+          .input_value()
+          .await
+          .map_err(|e| TestFailure {
+            message: format!("input_value failed: {e}"),
+            stack: None,
+            diff: None,
+            screenshot: None,
+          })?;
         if val != "hello world" {
           return Err(TestFailure {
             message: format!("expected input value 'hello world', got '{val}'"),
@@ -233,7 +237,7 @@ fn make_expect_test() -> TestCase {
           .await?;
 
         // Click button that updates text after 200ms delay.
-        page.locator("#btn").click().await.map_err(|e| TestFailure {
+        page.locator("#btn", None).click().await.map_err(|e| TestFailure {
           message: format!("click failed: {e}"),
           stack: None,
           diff: None,
@@ -241,12 +245,12 @@ fn make_expect_test() -> TestCase {
         })?;
 
         // Auto-retry assertion: should poll until text changes.
-        ferridriver_test::expect::expect(&page.locator("#msg"))
+        ferridriver_test::expect::expect(&page.locator("#msg", None))
           .to_have_text("Updated")
           .await?;
 
         // Test negation: should NOT have old text.
-        ferridriver_test::expect::expect(&page.locator("#msg"))
+        ferridriver_test::expect::expect(&page.locator("#msg", None))
           .not()
           .to_have_text("Initial")
           .await?;

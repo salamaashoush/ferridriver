@@ -50,12 +50,12 @@ async fn multi_page_automation() {
   page3.goto(&url3, None).await.unwrap();
 
   // Act on each page -- each has independent state
-  page1.locator("#i").fill("multi-page").await.unwrap();
-  page2.locator("#b").click().await.unwrap();
-  let count = page3.locator("css=li").count().await.unwrap();
+  page1.locator("#i", None).fill("multi-page").await.unwrap();
+  page2.locator("#b", None).click().await.unwrap();
+  let count = page3.locator("css=li", None).count().await.unwrap();
 
   // Verify each page has independent state
-  let v1 = page1.locator("#i").input_value().await.unwrap();
+  let v1 = page1.locator("#i", None).input_value().await.unwrap();
   let v2 = page2
     .evaluate_str("document.getElementById('b').textContent")
     .await

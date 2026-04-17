@@ -74,9 +74,12 @@ impl Frame {
 
   // ── Locators ──────────────────────────────────────────────────────────
 
+  /// Playwright: `frame.locator(selector, options?: LocatorOptions): Locator`.
+  /// Thin delegator to Rust core's `Frame::locator`.
   #[napi]
-  pub fn locator(&self, selector: String) -> Locator {
-    Locator::wrap(self.inner.locator(&selector))
+  pub fn locator(&self, selector: String, options: Option<crate::types::FilterOptions>) -> Locator {
+    let opts = options.map(ferridriver::options::FilterOptions::from);
+    Locator::wrap(self.inner.locator(&selector, opts))
   }
 
   #[napi]

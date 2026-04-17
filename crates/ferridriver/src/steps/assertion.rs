@@ -42,7 +42,7 @@ step!(PageHasText {
     example: "Then the page should contain text \"Welcome\"",
     execute(page, caps, _table, _vars) {
         let text = q(&caps[1]);
-        let loc = page.locator("body");
+        let loc = page.locator("body", None);
         let content = loc.text_content().await?.unwrap_or_default();
         if !content.contains(&text) {
             return Err(format!("Page does not contain text '{text}'"));
@@ -58,7 +58,7 @@ step!(PageNotHasText {
     example: "Then the page should not contain text \"Error\"",
     execute(page, caps, _table, _vars) {
         let text = q(&caps[1]);
-        let loc = page.locator("body");
+        let loc = page.locator("body", None);
         let content = loc.text_content().await?.unwrap_or_default();
         if content.contains(&text) {
             return Err(format!("Page contains text '{text}' but should not"));
@@ -138,7 +138,7 @@ step!(Visible {
     example: "Then \"#dialog\" should be visible",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let visible = loc.is_visible().await.unwrap_or(false);
         if !visible {
             return Err(format!("'{sel}' is not visible"));
@@ -154,7 +154,7 @@ step!(NotVisible {
     example: "Then \"#spinner\" should not be visible",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let hidden = loc.is_hidden().await.unwrap_or(true);
         if !hidden {
             return Err(format!("'{sel}' is visible but should not be"));
@@ -173,7 +173,7 @@ step!(ContainsText {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let expected = q(&caps[2]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let text = loc.inner_text().await.map_err(|_| format!("'{sel}' not found"))?;
         if !text.contains(&expected) {
             return Err(format!("'{sel}' text is '{text}', does not contain '{expected}'"));
@@ -190,7 +190,7 @@ step!(NotContainsText {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let expected = q(&caps[2]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let text = loc.inner_text().await.map_err(|_| format!("'{sel}' not found"))?;
         if text.contains(&expected) {
             return Err(format!("'{sel}' text '{text}' contains '{expected}' but should not"));
@@ -207,7 +207,7 @@ step!(TextExact {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let expected = q(&caps[2]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let text = loc.inner_text().await.map_err(|_| format!("'{sel}' not found"))?;
         if text.trim() != expected.trim() {
             return Err(format!("'{sel}' text is '{text}', expected '{expected}'"));
@@ -224,7 +224,7 @@ step!(ValueExact {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let expected = q(&caps[2]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let val = loc.input_value().await.map_err(|_| format!("'{sel}' not found"))?;
         if val != expected {
             return Err(format!("'{sel}' value is '{val}', expected '{expected}'"));
@@ -244,7 +244,7 @@ step!(HasAttrValue {
         let sel = q(&caps[1]);
         let attr = q(&caps[2]);
         let expected = q(&caps[3]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let val = loc.get_attribute(&attr).await
             .map_err(|_| format!("'{sel}' not found"))?
             .unwrap_or_default();
@@ -263,7 +263,7 @@ step!(HasAttr {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let attr = q(&caps[2]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let val = loc.get_attribute(&attr).await
             .map_err(|_| format!("'{sel}' not found"))?;
         if val.is_none() {
@@ -281,7 +281,7 @@ step!(NotHasAttr {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let attr = q(&caps[2]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let val = loc.get_attribute(&attr).await
             .map_err(|_| format!("'{sel}' not found"))?;
         if val.is_some() {
@@ -299,7 +299,7 @@ step!(HasClass {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let cls = q(&caps[2]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let classes = loc.get_attribute("class").await
             .map_err(|_| format!("'{sel}' not found"))?
             .unwrap_or_default();
@@ -318,7 +318,7 @@ step!(NotHasClass {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let cls = q(&caps[2]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let classes = loc.get_attribute("class").await
             .map_err(|_| format!("'{sel}' not found"))?
             .unwrap_or_default();
@@ -338,7 +338,7 @@ step!(Enabled {
     example: "Then \"#submit\" should be enabled",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let enabled = loc.is_enabled().await.map_err(|_| format!("'{sel}' not found"))?;
         if !enabled {
             return Err(format!("'{sel}' is disabled"));
@@ -354,7 +354,7 @@ step!(Disabled {
     example: "Then \"#submit\" should be disabled",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let disabled = loc.is_disabled().await.map_err(|_| format!("'{sel}' not found"))?;
         if !disabled {
             return Err(format!("'{sel}' is not disabled"));
@@ -370,7 +370,7 @@ step!(Checked {
     example: "Then \"#agree\" should be checked",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let checked = loc.is_checked().await.map_err(|_| format!("'{sel}' not found"))?;
         if !checked {
             return Err(format!("'{sel}' is not checked"));
@@ -386,7 +386,7 @@ step!(NotChecked {
     example: "Then \"#agree\" should not be checked",
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let checked = loc.is_checked().await.map_err(|_| format!("'{sel}' not found"))?;
         if checked {
             return Err(format!("'{sel}' is checked but should not be"));
@@ -403,7 +403,7 @@ step!(ElementCount {
     execute(page, caps, _table, _vars) {
         let expected: usize = caps[1].parse().map_err(|_| "Invalid count")?;
         let sel = q(&caps[2]);
-        let loc = page.locator(&sel);
+        let loc = page.locator(&sel, None);
         let actual = loc.count().await?;
         if actual != expected {
             return Err(format!("Found {actual} '{sel}', expected {expected}"));

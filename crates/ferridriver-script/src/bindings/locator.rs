@@ -1,10 +1,132 @@
 //! `LocatorJs`: JS wrapper around `ferridriver::locator::Locator`.
 
 use ferridriver::locator::Locator;
+use ferridriver::options::{FilterOptions, LocatorLike};
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
+use rquickjs::function::Opt;
 
 use crate::bindings::convert::FerriResultExt;
+
+/// Shape of filter options read out of a JS object via prototype-aware
+/// property lookup. `has`/`hasNot` may be either a selector string or a
+/// `LocatorJs` class instance — we accept both because Playwright's own
+/// JS API does (`has: Locator` officially, but users commonly pass
+/// plain `{ selector: '...' }` shapes in tests).
+pub(crate) struct ParsedLocatorOptions {
+  pub has_text: Option<String>,
+  pub has_not_text: Option<String>,
+  pub has: Option<LocatorLike>,
+  pub has_not: Option<LocatorLike>,
+  pub visible: Option<bool>,
+}
+
+/// Pull a string value from a JS object property, ignoring missing/null.
+fn get_string<'js>(obj: &rquickjs::Object<'js>, key: &str) -> rquickjs::Result<Option<String>> {
+  let v: rquickjs::Value<'js> = obj.get(key)?;
+  if v.is_undefined() || v.is_null() {
+    return Ok(None);
+  }
+  match v.as_string() {
+    Some(s) => Ok(Some(s.to_string()?)),
+    None => Err(rquickjs::Error::new_from_js_message(
+      "filter options",
+      "field",
+      format!("{key}: expected string"),
+    )),
+  }
+}
+
+/// Pull a `LocatorLike` from a JS object property. Accepts either a
+/// `LocatorJs` class instance (we read its `inner.selector()` directly
+/// and wrap as [`LocatorLike::Locator`] for same-page checks) or any
+/// object exposing a string `.selector` property.
+fn get_locator_like<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  obj: &rquickjs::Object<'js>,
+  key: &str,
+) -> rquickjs::Result<Option<LocatorLike>> {
+  let v: rquickjs::Value<'js> = obj.get(key)?;
+  if v.is_undefined() || v.is_null() {
+    return Ok(None);
+  }
+  // Preferred path: a real `LocatorJs` class instance — gives us the
+  // full `ferridriver::Locator` so `FilterOptions::has` can enforce
+  // same-page equality in the Rust core.
+  if let Ok(class) = rquickjs::Class::<LocatorJs>::from_value(&v) {
+    let inner = class.borrow();
+    return Ok(Some(LocatorLike::Locator(inner.inner.clone())));
+  }
+  // Fallback: a plain `{ selector: '...' }` object — works but skips
+  // the same-page check (no `Page` reference available).
+  let _ = ctx;
+  if let Some(obj) = v.as_object() {
+    if let Some(sel) = get_string(obj, "selector")? {
+      return Ok(Some(LocatorLike::Selector(sel)));
+    }
+  }
+  Err(rquickjs::Error::new_from_js_message(
+    "filter options",
+    "field",
+    format!("{key}: expected Locator instance or {{ selector: string }}"),
+  ))
+}
+
+fn get_bool<'js>(obj: &rquickjs::Object<'js>, key: &str) -> rquickjs::Result<Option<bool>> {
+  let v: rquickjs::Value<'js> = obj.get(key)?;
+  if v.is_undefined() || v.is_null() {
+    return Ok(None);
+  }
+  v.as_bool()
+    .map(Some)
+    .ok_or_else(|| rquickjs::Error::new_from_js_message("filter options", "field", format!("{key}: expected boolean")))
+}
+
+pub(crate) fn parse_locator_options_public<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  value: Opt<rquickjs::Value<'js>>,
+  allow_visible: bool,
+) -> rquickjs::Result<ParsedLocatorOptions> {
+  let Some(val) = value.0 else {
+    return Ok(ParsedLocatorOptions {
+      has_text: None,
+      has_not_text: None,
+      has: None,
+      has_not: None,
+      visible: None,
+    });
+  };
+  if val.is_undefined() || val.is_null() {
+    return Ok(ParsedLocatorOptions {
+      has_text: None,
+      has_not_text: None,
+      has: None,
+      has_not: None,
+      visible: None,
+    });
+  }
+  let obj = val
+    .as_object()
+    .ok_or_else(|| rquickjs::Error::new_from_js_message("locator options", "", "expected an options object"))?;
+  Ok(ParsedLocatorOptions {
+    has_text: get_string(obj, "hasText")?,
+    has_not_text: get_string(obj, "hasNotText")?,
+    has: get_locator_like(ctx, obj, "has")?,
+    has_not: get_locator_like(ctx, obj, "hasNot")?,
+    visible: if allow_visible { get_bool(obj, "visible")? } else { None },
+  })
+}
+
+/// Whether `opts` has no fields set — used by bindings to skip the
+/// redundant `Some(default)` case before forwarding to Rust core's
+/// `locator(sel, Option<FilterOptions>)`.
+pub(crate) fn is_empty_filter(opts: &FilterOptions) -> bool {
+  opts.has_text.is_none()
+    && opts.has_not_text.is_none()
+    && opts.has.is_none()
+    && opts.has_not.is_none()
+    && opts.visible.is_none()
+}
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "Locator")]
@@ -24,9 +146,85 @@ impl LocatorJs {
 impl LocatorJs {
   // ── Chain/refine (return new Locator) ─────────────────────────────────────
 
+  /// Narrow this locator's scope.
+  ///
+  /// Full Playwright signature:
+  /// `locator(selectorOrLocator: string | Locator, options?: { has?, hasNot?, hasText?, hasNotText? }): Locator`.
+  /// The `visible` flag is the one `LocatorOptions` field NOT accepted
+  /// here — Playwright restricts it to `filter()` and the `Locator`
+  /// constructor (see
+  /// `/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
   #[qjs(rename = "locator")]
-  pub fn locator(&self, selector: String) -> LocatorJs {
-    LocatorJs::new(self.inner.locator(&selector))
+  pub fn locator<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector_or_locator: rquickjs::Value<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    // Lower the JS argument to a `LocatorLike`: real `LocatorJs` class →
+    // `LocatorLike::Locator` (enables same-page check); string or plain
+    // `{ selector }` object → `LocatorLike::Selector`.
+    let like: ferridriver::options::LocatorLike = if let Some(s) = selector_or_locator.as_string() {
+      ferridriver::options::LocatorLike::Selector(s.to_string()?)
+    } else if let Ok(class) = rquickjs::Class::<LocatorJs>::from_value(&selector_or_locator) {
+      ferridriver::options::LocatorLike::Locator(class.borrow().inner.clone())
+    } else if let Some(obj) = selector_or_locator.as_object() {
+      match get_string(obj, "selector")? {
+        Some(sel) => ferridriver::options::LocatorLike::Selector(sel),
+        None => {
+          return Err(rquickjs::Error::new_from_js_message(
+            "Locator",
+            "locator",
+            "expected a selector string or Locator instance",
+          ));
+        },
+      }
+    } else {
+      return Err(rquickjs::Error::new_from_js_message(
+        "Locator",
+        "locator",
+        "expected a selector string or Locator instance",
+      ));
+    };
+
+    // Rust core `Locator::locator(selOrLoc, options?)` handles the
+    // `internal:chain` encoding, cross-frame sentinel, and option
+    // application in one infallible call — script binding is a thin
+    // delegator.
+    let opts = parse_locator_options_public(&ctx, options, false)?;
+    let filter_opts = ferridriver::options::FilterOptions {
+      has_text: opts.has_text,
+      has_not_text: opts.has_not_text,
+      has: opts.has,
+      has_not: opts.has_not,
+      visible: opts.visible,
+    };
+    let filter = if is_empty_filter(&filter_opts) {
+      None
+    } else {
+      Some(filter_opts)
+    };
+    Ok(LocatorJs::new(self.inner.locator(like, filter)))
+  }
+
+  /// Playwright: `locator.filter(options?: LocatorOptions): Locator`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:204`).
+  /// Thin delegator to Rust core's `Locator::filter`.
+  #[qjs(rename = "filter")]
+  pub fn filter<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let parsed = parse_locator_options_public(&ctx, options, true)?;
+    let opts = FilterOptions {
+      has_text: parsed.has_text,
+      has_not_text: parsed.has_not_text,
+      has: parsed.has,
+      has_not: parsed.has_not,
+      visible: parsed.visible,
+    };
+    Ok(LocatorJs::new(self.inner.filter(&opts)))
   }
 
   #[qjs(rename = "first")]

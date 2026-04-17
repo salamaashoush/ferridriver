@@ -40,14 +40,31 @@ pub struct TextOptions {
   pub exact: Option<bool>,
 }
 
-/// Options for filtering locators.
+/// Locator-shaped input: anything with a `.selector` string accessor.
+///
+/// Same prototype-chain trick as [`JsRegExpLike`] — `napi_get_named_property`
+/// walks the prototype chain and fires getters, so a real NAPI `Locator`
+/// class instance (which exposes `.selector` via `#[napi(getter)]`)
+/// deserializes cleanly into this struct without any client-side
+/// unwrapping. Callers can also pass a plain `{ selector: '...' }`
+/// object if they already have the raw selector string.
+#[napi(object)]
+#[derive(Debug, Clone)]
+pub struct LocatorRef {
+  pub selector: String,
+}
+
+/// Options for filtering locators. Mirrors Playwright's `LocatorOptions`:
+/// `hasText`, `hasNotText`, `has` (inner `Locator`), `hasNot` (inner
+/// `Locator`), `visible` (boolean).
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct FilterOptions {
   pub has_text: Option<String>,
   pub has_not_text: Option<String>,
-  pub has: Option<String>,
-  pub has_not: Option<String>,
+  pub has: Option<LocatorRef>,
+  pub has_not: Option<LocatorRef>,
+  pub visible: Option<bool>,
 }
 
 /// Options for waiting operations.
@@ -250,8 +267,11 @@ impl From<FilterOptions> for ferridriver::options::FilterOptions {
     Self {
       has_text: o.has_text,
       has_not_text: o.has_not_text,
-      has: o.has,
-      has_not: o.has_not,
+      has: o.has.map(|r| ferridriver::options::LocatorLike::Selector(r.selector)),
+      has_not: o
+        .has_not
+        .map(|r| ferridriver::options::LocatorLike::Selector(r.selector)),
+      visible: o.visible,
     }
   }
 }

@@ -74,7 +74,7 @@ async fn measure_operation_costs() {
   let mut click_total = std::time::Duration::ZERO;
   for _ in 0..n {
     let start = Instant::now();
-    page.locator("#b").click().await.unwrap();
+    page.locator("#b", None).click().await.unwrap();
     click_total += start.elapsed();
   }
   println!(
@@ -86,7 +86,7 @@ async fn measure_operation_costs() {
   let mut text_total = std::time::Duration::ZERO;
   for _ in 0..n {
     let start = Instant::now();
-    let _ = page.locator("#b").text_content().await.unwrap();
+    let _ = page.locator("#b", None).text_content().await.unwrap();
     text_total += start.elapsed();
   }
   println!(
