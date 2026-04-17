@@ -49,6 +49,13 @@ pub enum Engine {
   HasText,
   HasNot,
   HasNotText,
+  /// Playwright-compatible `internal:and` engine. Intersects the current
+  /// scope with another locator's selector; both must match the same
+  /// element. The body is the JSON-encoded inner selector string.
+  InternalAnd,
+  /// Playwright-compatible `internal:or` engine. Union of two locators;
+  /// matches elements resolved by either selector.
+  InternalOr,
 }
 
 /// Bootstrap JS script to be evaluated on new document.
@@ -114,6 +121,8 @@ pub fn is_rich_selector(s: &str) -> bool {
     "has-text=",
     "has-not=",
     "has-not-text=",
+    "internal:and=",
+    "internal:or=",
   ];
   let trimmed = s.trim();
   // Has explicit engine prefix
@@ -233,6 +242,8 @@ fn parse_part(s: &str) -> SelectorPart {
     ("has-text=", Engine::HasText),
     ("has-not=", Engine::HasNot),
     ("has-not-text=", Engine::HasNotText),
+    ("internal:and=", Engine::InternalAnd),
+    ("internal:or=", Engine::InternalOr),
   ];
 
   for (prefix, engine) in &engines {
@@ -309,6 +320,8 @@ fn engine_str(engine: &Engine) -> &'static str {
     Engine::HasText => "has-text",
     Engine::HasNot => "has-not",
     Engine::HasNotText => "has-not-text",
+    Engine::InternalAnd => "internal:and",
+    Engine::InternalOr => "internal:or",
   }
 }
 

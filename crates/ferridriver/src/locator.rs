@@ -812,39 +812,34 @@ impl Locator {
   // ── Combinators ─────────────────────────────────────────────────────────
 
   /// Union: matches elements from either this or the other locator.
-  /// Creates a new locator that matches elements found by either selector.
-  /// For CSS selectors, uses `:is(a, b)`. For rich selectors, falls back to
-  /// trying both selectors in order.
+  /// Creates a new locator that matches elements matched by **either**
+  /// selector. Mirrors Playwright's `Locator.or(locator)` exactly: emits
+  /// `>> internal:or=<json>` where the injected selector engine handles the
+  /// union.
+  ///
+  /// Unlike CSS `:is()`, this works for every selector engine including
+  /// `text=`, `role=`, `label=`, `testid=`, and chained rich selectors.
   #[must_use]
   pub fn or(&self, other: &Locator) -> Locator {
-    let is_css_a = !selectors::is_rich_selector(&self.selector);
-    let is_css_b = !selectors::is_rich_selector(&other.selector);
-
-    let combined = if is_css_a && is_css_b {
-      // Both are CSS -- use :is() for a proper CSS OR
-      format!(
-        "css=:is({}, {})",
-        self.selector.strip_prefix("css=").unwrap_or(&self.selector),
-        other.selector.strip_prefix("css=").unwrap_or(&other.selector)
-      )
-    } else {
-      // At least one is a rich selector -- combine with | operator
-      // This is handled by the selector engine's _exec
-      format!("{} | {}", self.selector, other.selector)
-    };
-    Locator {
-      page: self.page.clone(),
-      selector: combined,
-      frame_id: self.frame_id.clone(),
-      strict: true,
-    }
+    self.chain(&format!(
+      "internal:or={}",
+      serde_json::to_string(&other.selector).unwrap_or_else(|_| format!("{:?}", other.selector))
+    ))
   }
 
-  /// Intersection: matches elements that match both locators.
+  /// Creates a new locator that matches elements matched by **both** this
+  /// locator and `other` on the same element. Mirrors Playwright's
+  /// `Locator.and(locator)` — emits `>> internal:and=<json>`.
+  ///
+  /// This is a fundamentally different operation from `locator.locator(...)`
+  /// which narrows scope to descendants; `and` requires the same element to
+  /// satisfy both selectors.
   #[must_use]
   pub fn and(&self, other: &Locator) -> Locator {
-    // Chain with >> which narrows scope
-    self.chain(&other.selector)
+    self.chain(&format!(
+      "internal:and={}",
+      serde_json::to_string(&other.selector).unwrap_or_else(|_| format!("{:?}", other.selector))
+    ))
   }
 
   // ── All matches ─────────────────────────────────────────────────────────
