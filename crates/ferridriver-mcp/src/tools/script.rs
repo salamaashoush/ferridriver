@@ -26,15 +26,26 @@ use crate::server::{McpServer, sess};
 #[derive(Debug, Deserialize, schemars::JsonSchema)]
 pub struct RunScriptParams {
   #[schemars(
-    description = "JavaScript source to execute. Runs inside an async IIFE so top-level `await` works. \
-    Use `return <value>` to return a result. The script has access to these globals: \
+    description = "Inline JavaScript source to execute. Mutually exclusive with `path`. \
+    Runs inside an async IIFE so top-level `await` works; use `return <value>` to return a result. \
+    The script has access to these globals: \
     `args` (array of bound parameters), \
     `vars` (session-level string store: get/set/has/delete/keys), \
     `console` (log/info/warn/error/debug — captured and returned), \
-    `fs` (readFile/readFileBytes/writeFile/readdir/exists — scoped to the configured script_root). \
+    `fs` (readFile/readFileBytes/writeFile/readdir/exists — scoped to the configured script_root), \
+    `page` / `context` / `request` (live browser bindings). \
     Do NOT interpolate caller-controlled data into this string; pass it via `args` instead."
   )]
-  pub source: String,
+  pub source: Option<String>,
+
+  #[schemars(
+    description = "Path to a `.js` or `.mjs` file to execute, relative to the configured \
+    script_root. Mutually exclusive with `source`. Lets the LLM iterate on a saved script by \
+    editing the file and re-invoking `run_script` without re-sending the full source each call. \
+    The path is validated against script_root: absolute paths, `..` components, and symlinks \
+    escaping the root are rejected. Error line numbers in the script result are file-relative."
+  )]
+  pub path: Option<String>,
 
   #[schemars(
     description = "Positional arguments made available inside the script as the `args` array. \
@@ -66,11 +77,14 @@ impl McpServer {
   #[tool(
     name = "run_script",
     description = "Execute JavaScript in a sandboxed QuickJS runtime against the current session. \
+    Provide `source` (inline JS) or `path` (a .js/.mjs file under script_root) — exactly one. \
+    Use `path` to iterate on a saved script: edit the file, re-invoke, no need to resend the body. \
     Use this for imperative browser-automation logic that needs loops, conditionals, try/catch, \
-    or computed values — where natural-language BDD steps are too rigid. \
+    or computed values. \
     Globals available: `args` (bound parameters, never interpolated into source — prompt-injection safe), \
     `vars` (session-level get/set/has/delete), `console.*` (captured with limits), \
-    `fs` (readFile/writeFile/readdir/exists, scoped to the configured script_root, rejects path traversal). \
+    `fs` (readFile/writeFile/readdir/exists, scoped to script_root, rejects path traversal), \
+    `page` / `context` / `request` (live browser bindings). \
     Fresh QuickJS context per call — no state bleeds between invocations except through `vars`. \
     Returns structured JSON: { status: 'ok'|'error', value?, error?, duration_ms, console[] }. \
     On `error`, the payload includes message, stack, line, column, and a source snippet around the failure. \
@@ -96,6 +110,35 @@ impl McpServer {
 
     let args = p.args.unwrap_or_default();
 
+    // Resolve the script source from either `source` (inline) or `path`
+    // (file under script_root). Exactly one must be provided.
+    let source = match (p.source.as_deref(), p.path.as_deref()) {
+      (Some(_), Some(_)) => {
+        return Err(McpServer::err("run_script accepts `source` OR `path`, not both"));
+      },
+      (None, None) => {
+        return Err(McpServer::err(
+          "run_script requires either `source` (inline JS) or `path` (file under script_root)",
+        ));
+      },
+      (Some(src), None) => src.to_string(),
+      (None, Some(rel)) => {
+        let resolved = sandbox
+          .resolve_read(rel)
+          .map_err(|e| McpServer::err(format!("run_script path: {}", e.message)))?;
+        match resolved.extension().and_then(|e| e.to_str()) {
+          Some("js" | "mjs") => {},
+          _ => {
+            return Err(McpServer::err(
+              "run_script `path` must point at a .js or .mjs file under script_root",
+            ));
+          },
+        }
+        std::fs::read_to_string(&resolved)
+          .map_err(|e| McpServer::err(format!("run_script read {}: {e}", resolved.display())))?
+      },
+    };
+
     // Resolve the session's active page so scripts can call `page.click/etc`.
     // We launch/attach eagerly (same as other tools) — pure-compute scripts
     // that don't touch `page` still work; they just pay the launch cost
@@ -113,7 +156,7 @@ impl McpServer {
       request: Some(request),
     };
 
-    let result = self.script_engine.run(&p.source, &args, options, context).await;
+    let result = self.script_engine.run(&source, &args, options, context).await;
 
     let json = serde_json::to_string_pretty(&result).map_err(|e| McpServer::err(format!("serialize result: {e}")))?;
 

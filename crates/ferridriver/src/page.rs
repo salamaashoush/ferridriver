@@ -647,13 +647,30 @@ impl Page {
 
   // ── PDF ─────────────────────────────────────────────────────────────────
 
-  /// Generate PDF from the page (headless Chrome only).
+  /// Generate a PDF of the current page (Chrome-family backends only).
+  ///
+  /// Accepts the full Playwright `PDFOptions` surface via
+  /// [`crate::options::PdfOptions`]. If `opts.path` is set, the rendered
+  /// bytes are additionally written to that path (creating parent directories
+  /// as needed) — mirroring Playwright's `page.pdf({ path })` behavior.
   ///
   /// # Errors
   ///
-  /// Returns an error if PDF generation fails or is not supported by the backend.
-  pub async fn pdf(&self, landscape: bool, print_background: bool) -> Result<Vec<u8>> {
-    self.inner.pdf(landscape, print_background).await.map_err(Into::into)
+  /// Returns an error if PDF generation is not supported by the active
+  /// backend (`WebKit` has no printToPDF analogue), if the paper format is
+  /// unknown, if CDP rejects the parameters, or if writing to `path` fails.
+  pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
+    let path = opts.path.clone();
+    let bytes = self.inner.pdf(opts).await.map_err(crate::error::FerriError::from)?;
+    if let Some(path) = path {
+      if let Some(parent) = path.parent() {
+        if !parent.as_os_str().is_empty() {
+          tokio::fs::create_dir_all(parent).await?;
+        }
+      }
+      tokio::fs::write(&path, &bytes).await?;
+    }
+    Ok(bytes)
   }
 
   // ── Snapshot ────────────────────────────────────────────────────────────

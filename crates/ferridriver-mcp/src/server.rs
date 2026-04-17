@@ -134,11 +134,19 @@ pub use self::ctx as sess;
 pub trait McpServerConfig: Send + Sync + 'static {
   /// Root directory for the scripting sandbox used by `run_script`.
   ///
-  /// All `fs` operations inside scripts are constrained to this directory.
-  /// The directory is created at server startup if it does not exist.
-  /// Default: `./scripts` relative to cwd.
+  /// All `fs` operations inside scripts (`readFile`, `writeFile`, `readdir`,
+  /// `exists`) and all dynamic `import(...)` calls are constrained to this
+  /// directory — traversal (`..`), absolute paths, and symlink escapes are
+  /// rejected. The directory is created at server startup if it does not
+  /// exist.
+  ///
+  /// Default: `./.ferridriver/scripts` relative to cwd. The dotfolder
+  /// convention avoids colliding with the common `scripts/` directory most
+  /// projects already use for build/CI tooling, and leaves room for sibling
+  /// subdirectories (`.ferridriver/artifacts`, `.ferridriver/cache`, ...)
+  /// without further namespace pollution.
   fn script_root(&self) -> std::path::PathBuf {
-    std::path::PathBuf::from("scripts")
+    std::path::PathBuf::from(".ferridriver/scripts")
   }
 
   /// Engine-level defaults (timeout, memory, console limits) for `run_script`.

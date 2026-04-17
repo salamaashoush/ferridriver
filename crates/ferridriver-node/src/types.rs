@@ -299,6 +299,90 @@ pub struct ResponseData {
   pub status_text: String,
 }
 
+/// Per-side PDF margin. Each side is a `string | number`. Playwright parity:
+/// bare number → CSS pixels, string takes a unit suffix (`"10cm"`, `"2in"`,
+/// `"5mm"`, `"100px"`).
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct PdfMarginOptions {
+  pub top: Option<napi::Either<f64, String>>,
+  pub right: Option<napi::Either<f64, String>>,
+  pub bottom: Option<napi::Either<f64, String>>,
+  pub left: Option<napi::Either<f64, String>>,
+}
+
+/// Full Playwright `PDFOptions` surface (all 15 fields). Mirrors
+/// `/tmp/playwright/packages/playwright-core/src/client/page.ts::PDFOptions`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct PdfOptions {
+  pub scale: Option<f64>,
+  pub display_header_footer: Option<bool>,
+  pub header_template: Option<String>,
+  pub footer_template: Option<String>,
+  pub print_background: Option<bool>,
+  pub landscape: Option<bool>,
+  pub page_ranges: Option<String>,
+  /// Paper format keyword: `Letter`, `Legal`, `Tabloid`, `Ledger`,
+  /// `A0`..`A6`. Case-insensitive. When set, overrides `width`/`height`.
+  pub format: Option<String>,
+  pub width: Option<napi::Either<f64, String>>,
+  pub height: Option<napi::Either<f64, String>>,
+  pub margin: Option<PdfMarginOptions>,
+  pub path: Option<String>,
+  /// Playwright capitalizes this as `preferCSSPageSize` (CSS upper-case).
+  /// napi-rs would auto-lowercase to `preferCssPageSize`; override the
+  /// emitted JS name explicitly so the TS surface matches Playwright.
+  #[napi(js_name = "preferCSSPageSize")]
+  pub prefer_css_page_size: Option<bool>,
+  pub tagged: Option<bool>,
+  pub outline: Option<bool>,
+}
+
+fn js_size_to_rust(v: napi::Either<f64, String>) -> napi::Result<ferridriver::options::PdfSize> {
+  match v {
+    napi::Either::A(px) => Ok(ferridriver::options::PdfSize::Pixels(px)),
+    napi::Either::B(s) => ferridriver::options::PdfSize::parse(&s).map_err(|e| napi::Error::from_reason(e.to_string())),
+  }
+}
+
+impl TryFrom<PdfOptions> for ferridriver::options::PdfOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: PdfOptions) -> napi::Result<Self> {
+    let width = o.width.map(js_size_to_rust).transpose()?;
+    let height = o.height.map(js_size_to_rust).transpose()?;
+    let margin = o
+      .margin
+      .map(|m| -> napi::Result<ferridriver::options::PdfMargin> {
+        Ok(ferridriver::options::PdfMargin {
+          top: m.top.map(js_size_to_rust).transpose()?,
+          right: m.right.map(js_size_to_rust).transpose()?,
+          bottom: m.bottom.map(js_size_to_rust).transpose()?,
+          left: m.left.map(js_size_to_rust).transpose()?,
+        })
+      })
+      .transpose()?;
+    Ok(Self {
+      format: o.format,
+      path: o.path.map(std::path::PathBuf::from),
+      scale: o.scale,
+      display_header_footer: o.display_header_footer,
+      header_template: o.header_template,
+      footer_template: o.footer_template,
+      print_background: o.print_background,
+      landscape: o.landscape,
+      page_ranges: o.page_ranges,
+      width,
+      height,
+      margin,
+      prefer_css_page_size: o.prefer_css_page_size,
+      outline: o.outline,
+      tagged: o.tagged,
+    })
+  }
+}
+
 /// Shape of a JS `RegExp` as seen across NAPI.
 ///
 /// `RegExp.prototype.source` and `RegExp.prototype.flags` are accessor

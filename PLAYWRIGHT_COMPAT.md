@@ -259,7 +259,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.4 PDFOptions complete
 
-- [ ] Full 15-field struct: `format, path, scale, display_header_footer, header_template, footer_template, print_background, landscape, page_ranges, width, height, margin { top, right, bottom, left }, prefer_css_page_size, outline, tagged`.
+- [x] Full 15-field struct: `format, path, scale, display_header_footer, header_template, footer_template, print_background, landscape, page_ranges, width, height, margin { top, right, bottom, left }, prefer_css_page_size, outline, tagged`.
 - **Files**: `options.rs`, `page.rs:pdf`.
 
 ### 3.5 URL matching unification
@@ -750,7 +750,7 @@ The `ferridriver-script` crate exposes core Rust types to QuickJS via rquickjs c
 
 These are not ferridriver bugs per se — they are backend-surface gaps. The tests document them.
 
-1. **WebKit: `context.addCookies` → `context.cookies()` round-trip drops the cookie**. Adding a cookie and reading it back finds no entry with that name. `test_script_cookies` fails on the WebKit backend. The CDP backends (cdp-pipe, cdp-raw) round-trip correctly.
+1. ~~**WebKit: `context.addCookies` → `context.cookies()` round-trip drops the cookie**~~ — **fixed** alongside task #3.4. The Obj-C `OP_GET_COOKIES` handler was emitting `"http_only"` (snake_case) but Rust `CookieData` switched to `#[serde(rename_all = "camelCase")]` in `c820caf`, so serde rejected the whole entry (`.unwrap_or_default()` then collapsed to `[]`). Obj-C now emits `"httpOnly"` to match the Rust wire contract. All three backends round-trip cookies.
 2. **BiDi (Firefox): `page.dragAndDrop` fails with `scrollIntoViewIfNeeded is not a function`**. Core's drag_and_drop dispatches via a DOM script that uses Chrome's `scrollIntoViewIfNeeded` — Firefox does not implement that method. Either core should feature-detect and fall back to `scrollIntoView`, or the BiDi backend needs its own drag path.
 3. **CDP: `page.mouse.wheel(dx, dy)` does not reliably produce a page scroll**. CDP's `Input.dispatchMouseEvent` with `type: "mouseWheel"` requires mouse position routing that doesn't always land on the scrollable viewport. `test_script_mouse_wheel` asserts only that the call does not error, not that `window.scrollY` changed.
 

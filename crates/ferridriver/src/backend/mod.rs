@@ -682,8 +682,8 @@ impl AnyPage {
 
   // ── PDF generation ──
 
-  pub async fn pdf(&self, landscape: bool, print_background: bool) -> Result<Vec<u8>, String> {
-    page_dispatch!(self, pdf(landscape, print_background))
+  pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>, String> {
+    page_dispatch!(self, pdf(opts))
   }
 
   // ── Screencast (video recording) ──

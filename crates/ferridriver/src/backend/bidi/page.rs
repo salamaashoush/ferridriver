@@ -1163,17 +1163,59 @@ impl BidiPage {
 
   // ── PDF ─────────────────────────────────────────────────────────────────
 
-  pub async fn pdf(&self, landscape: bool, print_background: bool) -> Result<Vec<u8>, String> {
-    let result = self
-      .cmd(
-        "browsingContext.print",
-        json!({
-          "context": &*self.context_id,
-          "landscape": landscape,
-          "background": print_background
-        }),
-      )
-      .await?;
+  /// Generate a PDF of the current page via `WebDriver` `BiDi`
+  /// `browsingContext.print`.
+  ///
+  /// `BiDi`'s `PrintParameters` shape is narrower than CDP's — no header /
+  /// footer template, no tagged/outline, no `preferCSSPageSize`. The
+  /// canonical mapping is at
+  /// `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPdf.ts`;
+  /// fields unsupported by `BiDi` are silently dropped here (Playwright does
+  /// the same). Unit conversion mirrors the CDP backend.
+  pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>, String> {
+    let mut paper_width = 8.5_f64;
+    let mut paper_height = 11.0_f64;
+    if let Some(ref format) = opts.format {
+      if let Some((w, h)) = crate::options::pdf_paper_format_size(format) {
+        paper_width = w;
+        paper_height = h;
+      } else {
+        return Err(format!("Unknown paper format: {format}"));
+      }
+    } else {
+      if let Some(ref w) = opts.width {
+        paper_width = w.to_inches();
+      }
+      if let Some(ref h) = opts.height {
+        paper_height = h.to_inches();
+      }
+    }
+
+    let margin = opts.margin.unwrap_or_default();
+    let page_ranges: Option<Vec<String>> = opts
+      .page_ranges
+      .as_deref()
+      .filter(|s| !s.is_empty())
+      .map(|s| s.split(',').map(|r| r.trim().to_string()).collect());
+
+    let mut params = json!({
+      "context": &*self.context_id,
+      "background": opts.print_background.unwrap_or(false),
+      "margin": {
+        "bottom": margin.bottom.as_ref().map_or(0.0, crate::options::PdfSize::to_inches),
+        "left": margin.left.as_ref().map_or(0.0, crate::options::PdfSize::to_inches),
+        "right": margin.right.as_ref().map_or(0.0, crate::options::PdfSize::to_inches),
+        "top": margin.top.as_ref().map_or(0.0, crate::options::PdfSize::to_inches),
+      },
+      "orientation": if opts.landscape.unwrap_or(false) { "landscape" } else { "portrait" },
+      "page": { "width": paper_width, "height": paper_height },
+      "scale": opts.scale.unwrap_or(1.0),
+    });
+    if let Some(ranges) = page_ranges {
+      params["pageRanges"] = serde_json::Value::Array(ranges.into_iter().map(serde_json::Value::String).collect());
+    }
+
+    let result = self.cmd("browsingContext.print", params).await?;
 
     let data_str = result.get("data").and_then(|v| v.as_str()).ok_or("PDF: missing data")?;
     base64::engine::general_purpose::STANDARD

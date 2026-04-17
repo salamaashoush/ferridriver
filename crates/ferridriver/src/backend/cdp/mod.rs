@@ -1225,17 +1225,60 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- PDF ----
 
-  pub async fn pdf(&self, landscape: bool, print_background: bool) -> Result<Vec<u8>, String> {
-    let result = self
-      .cmd(
-        "Page.printToPDF",
-        serde_json::json!({
-            "landscape": landscape,
-            "printBackground": print_background,
-            "preferCSSPageSize": true,
-        }),
-      )
-      .await?;
+  /// Generate a PDF of the current page using CDP `Page.printToPDF`.
+  ///
+  /// Param mapping mirrors
+  /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crPdf.ts::CRPDF.generate`
+  /// 1:1. When `format` is set, its canonical inch dimensions override
+  /// `width`/`height`. Otherwise `width`/`height` (if present) are converted
+  /// to inches via [`crate::options::PdfSize::to_inches`]. Margins default
+  /// to `0` per side and are converted the same way. Every optional field
+  /// falls back to Playwright's default when `None`.
+  pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>, String> {
+    let mut paper_width = 8.5_f64;
+    let mut paper_height = 11.0_f64;
+    if let Some(ref format) = opts.format {
+      if let Some((w, h)) = crate::options::pdf_paper_format_size(format) {
+        paper_width = w;
+        paper_height = h;
+      } else {
+        return Err(format!("Unknown paper format: {format}"));
+      }
+    } else {
+      if let Some(ref w) = opts.width {
+        paper_width = w.to_inches();
+      }
+      if let Some(ref h) = opts.height {
+        paper_height = h.to_inches();
+      }
+    }
+
+    let margin = opts.margin.unwrap_or_default();
+    let margin_top = margin.top.as_ref().map_or(0.0, crate::options::PdfSize::to_inches);
+    let margin_right = margin.right.as_ref().map_or(0.0, crate::options::PdfSize::to_inches);
+    let margin_bottom = margin.bottom.as_ref().map_or(0.0, crate::options::PdfSize::to_inches);
+    let margin_left = margin.left.as_ref().map_or(0.0, crate::options::PdfSize::to_inches);
+
+    let params = serde_json::json!({
+      "landscape": opts.landscape.unwrap_or(false),
+      "displayHeaderFooter": opts.display_header_footer.unwrap_or(false),
+      "headerTemplate": opts.header_template.unwrap_or_default(),
+      "footerTemplate": opts.footer_template.unwrap_or_default(),
+      "printBackground": opts.print_background.unwrap_or(false),
+      "scale": opts.scale.unwrap_or(1.0),
+      "paperWidth": paper_width,
+      "paperHeight": paper_height,
+      "marginTop": margin_top,
+      "marginBottom": margin_bottom,
+      "marginLeft": margin_left,
+      "marginRight": margin_right,
+      "pageRanges": opts.page_ranges.unwrap_or_default(),
+      "preferCSSPageSize": opts.prefer_css_page_size.unwrap_or(false),
+      "generateTaggedPDF": opts.tagged.unwrap_or(false),
+      "generateDocumentOutline": opts.outline.unwrap_or(false),
+    });
+
+    let result = self.cmd("Page.printToPDF", params).await?;
     let data = result.get("data").and_then(|v| v.as_str()).ok_or("No PDF data")?;
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).map_err(|e| format!("Decode PDF: {e}"))
   }

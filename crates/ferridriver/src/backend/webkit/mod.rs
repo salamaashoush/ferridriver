@@ -483,11 +483,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Always returns an error because PDF generation requires a CDP backend.
-  pub fn pdf(
-    &self,
-    _landscape: bool,
-    _print_background: bool,
-  ) -> impl std::future::Future<Output = Result<Vec<u8>, String>> {
+  pub fn pdf(&self, _opts: crate::options::PdfOptions) -> impl std::future::Future<Output = Result<Vec<u8>, String>> {
     let result = if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
       Err("Page is closed".into())
     } else {

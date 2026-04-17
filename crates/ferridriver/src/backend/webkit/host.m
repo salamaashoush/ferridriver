@@ -1241,13 +1241,19 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             [store getAllCookies:^(NSArray<NSHTTPCookie *> *cookies) {
                 NSMutableArray *arr = [NSMutableArray new];
                 for (NSHTTPCookie *c in cookies) {
+                    // Wire keys MUST match Rust `CookieData` which uses
+                    // `#[serde(rename_all = "camelCase")]` — so `httpOnly`,
+                    // not `http_only`. Mismatch here makes serde reject the
+                    // whole entry (http_only is a required field) and
+                    // `.unwrap_or_default()` collapses the entire vector to
+                    // empty, silently dropping every cookie on read-back.
                     [arr addObject:@{
                         @"name": c.name ?: @"",
                         @"value": c.value ?: @"",
                         @"domain": c.domain ?: @"",
                         @"path": c.path ?: @"/",
                         @"secure": @(c.isSecure),
-                        @"http_only": @(c.isHTTPOnly),
+                        @"httpOnly": @(c.isHTTPOnly),
                         @"expires": c.expiresDate ? @([c.expiresDate timeIntervalSince1970]) : [NSNull null],
                     }];
                 }
