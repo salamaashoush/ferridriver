@@ -104,7 +104,7 @@ impl Browser {
   ///
   /// Returns an error if page creation fails.
   pub async fn new_page(&self) -> Result<Arc<Page>> {
-    Ok(Box::pin(self.default_context().new_page()).await?)
+    Box::pin(self.default_context().new_page()).await
   }
 
   /// Shorthand: create a new page and navigate to URL.
@@ -129,7 +129,7 @@ impl Browser {
     let ctx = self.default_context();
     let mut pages = ctx.pages().await.unwrap_or_default();
     if pages.is_empty() {
-      Ok(Box::pin(ctx.new_page()).await?)
+      Box::pin(ctx.new_page()).await
     } else {
       Ok(pages.swap_remove(0))
     }

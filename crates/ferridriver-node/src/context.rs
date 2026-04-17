@@ -1,5 +1,6 @@
 //! `BrowserContext` class -- NAPI binding for `ferridriver::ContextRef`.
 
+use crate::error::IntoNapi;
 use crate::page::Page;
 use crate::types::CookieData;
 use napi::Result;
@@ -30,16 +31,14 @@ impl BrowserContext {
   /// Create a new page in this context.
   #[napi]
   pub async fn new_page(&self) -> Result<Page> {
-    let page = Box::pin(self.inner.new_page())
-      .await
-      .map_err(napi::Error::from_reason)?;
+    let page = Box::pin(self.inner.new_page()).await.into_napi()?;
     Ok(Page::wrap(page))
   }
 
   /// Get all pages in this context.
   #[napi]
   pub async fn pages(&self) -> Result<Vec<Page>> {
-    let pages = self.inner.pages().await.map_err(napi::Error::from_reason)?;
+    let pages = self.inner.pages().await.into_napi()?;
     Ok(pages.into_iter().map(Page::wrap).collect())
   }
 
@@ -47,7 +46,7 @@ impl BrowserContext {
 
   #[napi]
   pub async fn cookies(&self) -> Result<Vec<CookieData>> {
-    let cookies = self.inner.cookies().await.map_err(napi::Error::from_reason)?;
+    let cookies = self.inner.cookies().await.into_napi()?;
     Ok(cookies.iter().map(CookieData::from).collect())
   }
 
@@ -55,22 +54,19 @@ impl BrowserContext {
   pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<()> {
     let native: Vec<ferridriver::backend::CookieData> =
       cookies.iter().map(ferridriver::backend::CookieData::from).collect();
-    self.inner.add_cookies(native).await.map_err(napi::Error::from_reason)
+    self.inner.add_cookies(native).await.into_napi()
   }
 
   #[napi]
   pub async fn clear_cookies(&self) -> Result<()> {
-    self.inner.clear_cookies().await.map_err(napi::Error::from_reason)
+    self.inner.clear_cookies().await.into_napi()
   }
 
   #[napi]
   pub async fn delete_cookie(&self, name: String, domain: Option<String>) -> Result<()> {
     let state = self.inner.state().read().await;
     let ctx = state.context(self.inner.name()).map_err(napi::Error::from_reason)?;
-    ctx
-      .delete_cookie(&name, domain.as_deref())
-      .await
-      .map_err(napi::Error::from_reason)
+    ctx.delete_cookie(&name, domain.as_deref()).await.into_napi()
   }
 
   // ── Timeouts ──
@@ -93,12 +89,12 @@ impl BrowserContext {
       .inner
       .grant_permissions(&permissions, origin.as_deref())
       .await
-      .map_err(napi::Error::from_reason)
+      .into_napi()
   }
 
   #[napi]
   pub async fn clear_permissions(&self) -> Result<()> {
-    self.inner.clear_permissions().await.map_err(napi::Error::from_reason)
+    self.inner.clear_permissions().await.into_napi()
   }
 
   // ── Context-level emulation ──
@@ -109,7 +105,7 @@ impl BrowserContext {
       .inner
       .set_geolocation(latitude, longitude, accuracy.unwrap_or(1.0))
       .await
-      .map_err(napi::Error::from_reason)
+      .into_napi()
   }
 
   #[napi]
@@ -118,33 +114,25 @@ impl BrowserContext {
     for (k, v) in headers {
       fx.insert(k, v);
     }
-    self
-      .inner
-      .set_extra_http_headers(&fx)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.set_extra_http_headers(&fx).await.into_napi()
   }
 
   #[napi]
   pub async fn set_offline(&self, offline: bool) -> Result<()> {
-    self.inner.set_offline(offline).await.map_err(napi::Error::from_reason)
+    self.inner.set_offline(offline).await.into_napi()
   }
 
   // ── Context-level init scripts ──
 
   #[napi]
   pub async fn add_init_script(&self, source: String) -> Result<Vec<String>> {
-    self
-      .inner
-      .add_init_script(&source)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.add_init_script(&source).await.into_napi()
   }
 
   // ── Lifecycle ──
 
   #[napi]
   pub async fn close(&self) -> Result<()> {
-    self.inner.close().await.map_err(napi::Error::from_reason)
+    self.inner.close().await.into_napi()
   }
 }

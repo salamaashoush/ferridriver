@@ -10,6 +10,7 @@
 use std::sync::Arc;
 
 use crate::backend::FrameInfo;
+use crate::error::Result;
 use crate::locator::Locator;
 use crate::options::{RoleOptions, TextOptions, WaitOptions};
 use crate::page::Page;
@@ -64,7 +65,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn parent_frame(&self) -> Result<Option<Frame>, String> {
+  pub async fn parent_frame(&self) -> Result<Option<Frame>> {
     if let Some(pid) = &self.parent_id {
       let frames = self.page.frames().await?;
       Ok(frames.into_iter().find(|f| &*f.id == pid.as_str()))
@@ -78,7 +79,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn child_frames(&self) -> Result<Vec<Frame>, String> {
+  pub async fn child_frames(&self) -> Result<Vec<Frame>> {
     let frames = self.page.frames().await?;
     Ok(
       frames
@@ -95,11 +96,16 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if JS evaluation fails.
-  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     if self.is_main_frame() {
-      self.page.evaluate(expression).await
+      self.page.evaluate(expression).await.map_err(Into::into)
     } else {
-      self.page.inner.evaluate_in_frame(expression, &self.id).await
+      self
+        .page
+        .inner
+        .evaluate_in_frame(expression, &self.id)
+        .await
+        .map_err(Into::into)
     }
   }
 
@@ -108,7 +114,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if JS evaluation fails.
-  pub async fn evaluate_str(&self, expression: &str) -> Result<String, String> {
+  pub async fn evaluate_str(&self, expression: &str) -> Result<String> {
     self.evaluate(expression).await.map(|v| {
       v.map(|val| {
         if let Some(s) = val.as_str() {
@@ -201,7 +207,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if JS evaluation fails.
-  pub async fn content(&self) -> Result<String, String> {
+  pub async fn content(&self) -> Result<String> {
     let r = self.evaluate("document.documentElement.outerHTML").await?;
     Ok(
       r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
@@ -214,7 +220,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if JS evaluation fails.
-  pub async fn title(&self) -> Result<String, String> {
+  pub async fn title(&self) -> Result<String> {
     let r = self.evaluate("document.title").await?;
     Ok(
       r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
@@ -229,9 +235,9 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if navigation fails.
-  pub async fn goto(&self, url: &str) -> Result<(), String> {
+  pub async fn goto(&self, url: &str) -> Result<()> {
     if self.is_main_frame() {
-      self.page.goto(url, None).await
+      self.page.goto(url, None).await.map_err(Into::into)
     } else {
       // For child frames, set location via JS
       self
@@ -248,8 +254,8 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found within the timeout.
-  pub async fn wait_for_selector(&self, selector: &str, opts: WaitOptions) -> Result<(), String> {
-    self.locator(selector).wait_for(opts).await
+  pub async fn wait_for_selector(&self, selector: &str, opts: WaitOptions) -> Result<()> {
+    self.locator(selector).wait_for(opts).await.map_err(Into::into)
   }
 
   /// Check if this frame has been detached from the page.
@@ -257,7 +263,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn is_detached(&self) -> Result<bool, String> {
+  pub async fn is_detached(&self) -> Result<bool> {
     let frames = self.page.inner().get_frame_tree().await?;
     Ok(!frames.iter().any(|f| f.frame_id.as_str() == &*self.id))
   }
@@ -273,7 +279,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if JS evaluation fails.
-  pub async fn set_content(&self, html: &str) -> Result<(), String> {
+  pub async fn set_content(&self, html: &str) -> Result<()> {
     let escaped = crate::steps::js_escape(html);
     self
       .evaluate(&format!("document.documentElement.innerHTML = '{escaped}'"))
@@ -291,7 +297,7 @@ impl Frame {
     url: Option<&str>,
     content: Option<&str>,
     script_type: Option<&str>,
-  ) -> Result<(), String> {
+  ) -> Result<()> {
     let t = script_type.unwrap_or("text/javascript");
     if let Some(url) = url {
       self.evaluate(&format!(
@@ -313,7 +319,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if style injection fails.
-  pub async fn add_style_tag(&self, url: Option<&str>, content: Option<&str>) -> Result<(), String> {
+  pub async fn add_style_tag(&self, url: Option<&str>, content: Option<&str>) -> Result<()> {
     if let Some(url) = url {
       self.evaluate(&format!(
                 "(function(){{return new Promise(function(r,j){{var l=document.createElement('link');\
@@ -336,9 +342,9 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the frame does not reach load state within the timeout.
-  pub async fn wait_for_load_state(&self) -> Result<(), String> {
+  pub async fn wait_for_load_state(&self) -> Result<()> {
     if self.is_main_frame() {
-      self.page.wait_for_load_state(None).await
+      self.page.wait_for_load_state(None).await.map_err(Into::into)
     } else {
       // For iframes, check document.readyState via JS
       let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);

@@ -1,5 +1,6 @@
 //! Frame class -- NAPI binding for `ferridriver::Frame`.
 
+use crate::error::IntoNapi;
 use crate::locator::Locator;
 use napi::Result;
 use napi_derive::napi;
@@ -45,7 +46,7 @@ impl Frame {
       .parent_frame()
       .await
       .map(|opt| opt.map(Frame::wrap))
-      .map_err(napi::Error::from_reason)
+      .into_napi()
   }
 
   /// Get child frames of this frame.
@@ -56,23 +57,19 @@ impl Frame {
       .child_frames()
       .await
       .map(|frames| frames.into_iter().map(Frame::wrap).collect())
-      .map_err(napi::Error::from_reason)
+      .into_napi()
   }
 
   // ── Evaluation ────────────────────────────────────────────────────────
 
   #[napi]
   pub async fn evaluate(&self, expression: String) -> Result<Option<serde_json::Value>> {
-    self.inner.evaluate(&expression).await.map_err(napi::Error::from_reason)
+    self.inner.evaluate(&expression).await.into_napi()
   }
 
   #[napi]
   pub async fn evaluate_str(&self, expression: String) -> Result<String> {
-    self
-      .inner
-      .evaluate_str(&expression)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.evaluate_str(&expression).await.into_napi()
   }
 
   // ── Locators ──────────────────────────────────────────────────────────
@@ -103,43 +100,39 @@ impl Frame {
 
   #[napi]
   pub async fn content(&self) -> Result<String> {
-    self.inner.content().await.map_err(napi::Error::from_reason)
+    self.inner.content().await.into_napi()
   }
 
   #[napi]
   pub async fn title(&self) -> Result<String> {
-    self.inner.title().await.map_err(napi::Error::from_reason)
+    self.inner.title().await.into_napi()
   }
 
   // ── Navigation ────────────────────────────────────────────────────────
 
   #[napi]
   pub async fn goto(&self, url: String) -> Result<()> {
-    self.inner.goto(&url).await.map_err(napi::Error::from_reason)
+    self.inner.goto(&url).await.into_napi()
   }
 
   // ── Waiting ───────────────────────────────────────────────────────────
 
   #[napi]
   pub async fn wait_for_load_state(&self) -> Result<()> {
-    self.inner.wait_for_load_state().await.map_err(napi::Error::from_reason)
+    self.inner.wait_for_load_state().await.into_napi()
   }
 
   #[napi]
   pub async fn wait_for_selector(&self, selector: String, options: Option<crate::types::WaitOptions>) -> Result<()> {
     let opts: ferridriver::options::WaitOptions = options.map_or_else(Default::default, Into::into);
-    self
-      .inner
-      .wait_for_selector(&selector, opts)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.wait_for_selector(&selector, opts).await.into_napi()
   }
 
   // ── Additional content methods ───────────────────────────────────────
 
   #[napi]
   pub async fn set_content(&self, html: String) -> Result<()> {
-    self.inner.set_content(&html).await.map_err(napi::Error::from_reason)
+    self.inner.set_content(&html).await.into_napi()
   }
 
   #[napi]
@@ -153,7 +146,7 @@ impl Frame {
       .inner
       .add_script_tag(url.as_deref(), content.as_deref(), script_type.as_deref())
       .await
-      .map_err(napi::Error::from_reason)
+      .into_napi()
   }
 
   #[napi]
@@ -162,12 +155,12 @@ impl Frame {
       .inner
       .add_style_tag(url.as_deref(), content.as_deref())
       .await
-      .map_err(napi::Error::from_reason)
+      .into_napi()
   }
 
   #[napi]
   pub async fn is_detached(&self) -> Result<bool> {
-    self.inner.is_detached().await.map_err(napi::Error::from_reason)
+    self.inner.is_detached().await.into_napi()
   }
 
   // ── Additional locators ──────────────────────────────────────────────
