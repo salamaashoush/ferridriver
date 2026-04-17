@@ -1,5 +1,6 @@
 //! Browser class -- NAPI binding for `ferridriver::Browser`.
 
+use crate::error::IntoNapi;
 use crate::page::Page;
 use crate::types::LaunchOptions;
 use ferridriver::backend::BackendKind;
@@ -70,9 +71,7 @@ impl Browser {
       args: opts.args.clone().unwrap_or_default(),
       ..Default::default()
     };
-    let inner = Box::pin(ferridriver::Browser::launch(launch_opts))
-      .await
-      .map_err(napi::Error::from_reason)?;
+    let inner = Box::pin(ferridriver::Browser::launch(launch_opts)).await.into_napi()?;
 
     Ok(Self { inner })
   }
@@ -82,32 +81,28 @@ impl Browser {
   pub async fn connect(ws_endpoint: String) -> Result<Self> {
     let inner = Box::pin(ferridriver::Browser::connect(&ws_endpoint))
       .await
-      .map_err(napi::Error::from_reason)?;
+      .into_napi()?;
     Ok(Self { inner })
   }
 
   /// Create a new page (tab).
   #[napi]
   pub async fn new_page(&self) -> Result<Page> {
-    let page = Box::pin(self.inner.new_page())
-      .await
-      .map_err(napi::Error::from_reason)?;
+    let page = Box::pin(self.inner.new_page()).await.into_napi()?;
     Ok(Page::wrap(page))
   }
 
   /// Create a new page and navigate to URL.
   #[napi]
   pub async fn new_page_with_url(&self, url: String) -> Result<Page> {
-    let page = Box::pin(self.inner.new_page_with_url(&url))
-      .await
-      .map_err(napi::Error::from_reason)?;
+    let page = Box::pin(self.inner.new_page_with_url(&url)).await.into_napi()?;
     Ok(Page::wrap(page))
   }
 
   /// Get the active page for the default context.
   #[napi]
   pub async fn page(&self) -> Result<Page> {
-    let page = Box::pin(self.inner.page()).await.map_err(napi::Error::from_reason)?;
+    let page = Box::pin(self.inner.page()).await.into_napi()?;
     Ok(Page::wrap(page))
   }
 
@@ -127,7 +122,7 @@ impl Browser {
   /// Close the browser.
   #[napi]
   pub async fn close(&self) -> Result<()> {
-    self.inner.close().await.map_err(napi::Error::from_reason)
+    self.inner.close().await.into_napi()
   }
 
   /// List all browser contexts.

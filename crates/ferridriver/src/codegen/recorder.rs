@@ -6,6 +6,7 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 
 use crate::Browser;
+use crate::error::Result;
 use crate::events::ExposedFn;
 use crate::options::LaunchOptions;
 
@@ -39,7 +40,7 @@ impl Recorder {
   /// # Errors
   ///
   /// Returns an error if browser launch or navigation fails.
-  pub async fn start(&self) -> Result<(), String> {
+  pub async fn start(&self) -> Result<()> {
     let emitter: Arc<dyn CodeEmitter> = match self.options.language {
       OutputLanguage::Rust => Arc::new(RustEmitter),
       OutputLanguage::TypeScript => Arc::new(TypeScriptEmitter),

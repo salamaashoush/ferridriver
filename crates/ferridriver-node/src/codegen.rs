@@ -1,5 +1,6 @@
 //! NAPI binding for the interactive code recorder (codegen).
 
+use crate::error::IntoNapi;
 use napi::Result;
 use napi_derive::napi;
 
@@ -47,6 +48,6 @@ impl Codegen {
     ferridriver::codegen::recorder::Recorder::new(options)
       .start()
       .await
-      .map_err(napi::Error::from_reason)
+      .into_napi()
   }
 }

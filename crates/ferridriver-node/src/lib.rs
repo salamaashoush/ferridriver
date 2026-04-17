@@ -56,6 +56,7 @@ mod bdd_registry;
 mod browser;
 mod codegen;
 mod context;
+mod error;
 mod frame;
 #[allow(dead_code)]
 mod install;

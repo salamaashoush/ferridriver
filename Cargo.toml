@@ -50,6 +50,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 tracing-chrome = "0.7"
 console-subscriber = "0.5"
 anyhow = "1"
+thiserror = "2"
 clap = { version = "4", features = ["derive"] }
 rmcp = { version = "1.4", features = ["server", "transport-io", "transport-streamable-http-server", "tower"] }
 schemars = "1"

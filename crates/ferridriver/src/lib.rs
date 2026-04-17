@@ -24,6 +24,7 @@
 // ── Public API (Playwright-compatible) ──
 pub mod browser;
 pub mod context;
+pub mod error;
 pub mod events;
 pub mod frame;
 pub mod locator;
@@ -32,6 +33,7 @@ pub mod page;
 
 pub use browser::Browser;
 pub use context::{BrowserContext, ContextRef};
+pub use error::{FerriError, Result};
 pub use events::{EventEmitter, PageEvent};
 pub use frame::Frame;
 pub use locator::{FrameLocator, Locator};
