@@ -260,8 +260,8 @@ jobs:
           publish_if_new() {
             local dir="$1"; shift
             local name version existing
-            name=$(node -p "require('${dir}/package.json').name")
-            version=$(node -p "require('${dir}/package.json').version")
+            name=$(node -p "require('./${dir}/package.json').name")
+            version=$(node -p "require('./${dir}/package.json').version")
             existing=$(npm view "${name}@${version}" version --registry=https://registry.npmjs.org 2>/dev/null || true)
             if [ "${existing}" = "${version}" ]; then
               echo "SKIP ${name}@${version} — already on registry"
@@ -276,7 +276,17 @@ jobs:
             [ -f "${dir}package.json" ] || continue
             publish_if_new "${dir%/}"
           done
-          publish_if_new . --ignore-scripts
+          # Main package lives in the current dir; '.' would become './.' which
+          # node handles fine, but keep the function happy with '' as sentinel.
+          name=$(node -p "require('./package.json').name")
+          version=$(node -p "require('./package.json').version")
+          existing=$(npm view "${name}@${version}" version --registry=https://registry.npmjs.org 2>/dev/null || true)
+          if [ "${existing}" = "${version}" ]; then
+            echo "SKIP ${name}@${version} — already on registry"
+          else
+            echo "PUBLISH ${name}@${version}"
+            npm publish --access public --ignore-scripts --registry=https://registry.npmjs.org
+          fi
 
       # Publish pure JS/TS packages (dependency order: ct-core first, then adapters + test)
       - name: Publish JS/TS packages
