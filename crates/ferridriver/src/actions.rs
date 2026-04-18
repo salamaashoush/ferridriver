@@ -770,7 +770,7 @@ pub async fn hover_with_opts(
       Ok((x, y)) => {
         let args = crate::backend::BackendHoverArgs {
           modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
-          steps: opts.resolved_steps(),
+          steps: 1,
         };
         page.hover_at_with(x, y, &args).await
       },
