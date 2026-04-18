@@ -168,12 +168,12 @@ impl Page {
 
   // ── Frames (sync, Playwright parity — task 3.8) ─────────────────────
 
-  /// Main frame of this page. Playwright: `page.mainFrame(): Frame`.
-  /// Sync — reads from the page-owned frame cache seeded at page
-  /// construction and kept fresh by the frame-event listener.
+  /// Main frame of this page. Playwright: `page.mainFrame(): Frame`
+  /// (non-null). The frame cache is seeded inside `Page::new` /
+  /// `Page::with_context` before the Page is handed out.
   #[napi]
-  pub fn main_frame(&self) -> Option<crate::frame::Frame> {
-    self.inner.main_frame().map(crate::frame::Frame::wrap)
+  pub fn main_frame(&self) -> crate::frame::Frame {
+    crate::frame::Frame::wrap(self.inner.main_frame())
   }
 
   /// All frames in the page (main frame + all iframes).
@@ -364,6 +364,24 @@ impl Page {
   #[napi]
   pub async fn uncheck(&self, selector: String) -> Result<()> {
     self.inner.uncheck(&selector).await.map_err(napi::Error::from_reason)
+  }
+
+  /// Set the checked state of a checkbox or radio matching `selector`.
+  /// Mirrors Playwright's `page.setChecked(selector, checked, options?)`.
+  #[napi]
+  pub async fn set_checked(&self, selector: String, checked: bool) -> Result<()> {
+    self
+      .inner
+      .set_checked(&selector, checked)
+      .await
+      .map_err(napi::Error::from_reason)
+  }
+
+  /// Tap (touch) the element matched by `selector`. Mirrors Playwright's
+  /// `page.tap(selector, options?)`.
+  #[napi]
+  pub async fn tap(&self, selector: String) -> Result<()> {
+    self.inner.tap(&selector).await.map_err(napi::Error::from_reason)
   }
 
   // ── Content ─────────────────────────────────────────────────────────────

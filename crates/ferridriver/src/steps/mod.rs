@@ -97,7 +97,8 @@ pub fn js_escape(s: &str) -> String {
 pub async fn find(page: &Arc<Page>, selector: &str) -> Result<crate::backend::AnyElement, String> {
   let inner = page.inner();
   if crate::selectors::is_rich_selector(selector) {
-    crate::selectors::query_one(inner, selector, false).await
+    // BDD step `find` is page-level: always main frame.
+    crate::selectors::query_one(inner, selector, false, None).await
   } else {
     inner.find_element(selector).await
   }

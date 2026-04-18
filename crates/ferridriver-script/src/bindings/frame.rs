@@ -108,9 +108,148 @@ impl FrameJs {
 
   // ── Locator (frame-scoped) ─────────────────────────────────────────
 
-  /// Create a locator scoped to this frame. Options come in **3.9**.
+  /// Create a locator scoped to this frame.
   #[qjs(rename = "locator")]
   pub fn locator(&self, selector: String) -> LocatorJs {
     LocatorJs::new(self.inner.locator(&selector, None))
+  }
+
+  // ── Action methods (Playwright parity — task 3.9) ──────────────────
+  //
+  // Mirror the surface from
+  // `/tmp/playwright/packages/playwright-core/src/client/frame.ts:296-447`.
+  // Each delegates to the Rust core's `Frame::<action>`, which scopes
+  // to this frame's execution context via `Frame::locator`.
+
+  #[qjs(rename = "click")]
+  pub async fn click(&self, selector: String) -> rquickjs::Result<()> {
+    self.inner.click(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "dblclick")]
+  pub async fn dblclick(&self, selector: String) -> rquickjs::Result<()> {
+    self.inner.dblclick(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "hover")]
+  pub async fn hover(&self, selector: String) -> rquickjs::Result<()> {
+    self.inner.hover(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "tap")]
+  pub async fn tap(&self, selector: String) -> rquickjs::Result<()> {
+    self.inner.tap(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "focus")]
+  pub async fn focus(&self, selector: String) -> rquickjs::Result<()> {
+    self.inner.focus(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "fill")]
+  pub async fn fill(&self, selector: String, value: String) -> rquickjs::Result<()> {
+    self.inner.fill(&selector, &value).await.into_js()
+  }
+
+  #[qjs(rename = "type")]
+  pub async fn type_text(&self, selector: String, text: String) -> rquickjs::Result<()> {
+    self.inner.r#type(&selector, &text).await.into_js()
+  }
+
+  #[qjs(rename = "press")]
+  pub async fn press(&self, selector: String, key: String) -> rquickjs::Result<()> {
+    self.inner.press(&selector, &key).await.into_js()
+  }
+
+  #[qjs(rename = "check")]
+  pub async fn check(&self, selector: String) -> rquickjs::Result<()> {
+    self.inner.check(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "uncheck")]
+  pub async fn uncheck(&self, selector: String) -> rquickjs::Result<()> {
+    self.inner.uncheck(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "setChecked")]
+  pub async fn set_checked(&self, selector: String, checked: bool) -> rquickjs::Result<()> {
+    self.inner.set_checked(&selector, checked).await.into_js()
+  }
+
+  #[qjs(rename = "selectOption")]
+  pub async fn select_option(&self, selector: String, value: String) -> rquickjs::Result<Vec<String>> {
+    self.inner.select_option(&selector, &value).await.into_js()
+  }
+
+  #[qjs(rename = "setInputFiles")]
+  pub async fn set_input_files(&self, selector: String, paths: Vec<String>) -> rquickjs::Result<()> {
+    self.inner.set_input_files(&selector, &paths).await.into_js()
+  }
+
+  /// Drag from `source` to `target` selectors within this frame.
+  /// Options ride on Locator's drag option bag.
+  #[qjs(rename = "dragAndDrop")]
+  pub async fn drag_and_drop(&self, source: String, target: String) -> rquickjs::Result<()> {
+    self.inner.drag_and_drop(&source, &target, None).await.into_js()
+  }
+
+  #[qjs(rename = "dispatchEvent")]
+  pub async fn dispatch_event(&self, selector: String, event_type: String) -> rquickjs::Result<()> {
+    self.inner.dispatch_event(&selector, &event_type).await.into_js()
+  }
+
+  #[qjs(rename = "textContent")]
+  pub async fn text_content(&self, selector: String) -> rquickjs::Result<Option<String>> {
+    self.inner.text_content(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "innerText")]
+  pub async fn inner_text(&self, selector: String) -> rquickjs::Result<String> {
+    self.inner.inner_text(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "innerHTML")]
+  pub async fn inner_html(&self, selector: String) -> rquickjs::Result<String> {
+    self.inner.inner_html(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "getAttribute")]
+  pub async fn get_attribute(&self, selector: String, name: String) -> rquickjs::Result<Option<String>> {
+    self.inner.get_attribute(&selector, &name).await.into_js()
+  }
+
+  #[qjs(rename = "inputValue")]
+  pub async fn input_value(&self, selector: String) -> rquickjs::Result<String> {
+    self.inner.input_value(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "isVisible")]
+  pub async fn is_visible(&self, selector: String) -> rquickjs::Result<bool> {
+    self.inner.is_visible(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "isHidden")]
+  pub async fn is_hidden(&self, selector: String) -> rquickjs::Result<bool> {
+    self.inner.is_hidden(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "isEnabled")]
+  pub async fn is_enabled(&self, selector: String) -> rquickjs::Result<bool> {
+    self.inner.is_enabled(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "isDisabled")]
+  pub async fn is_disabled(&self, selector: String) -> rquickjs::Result<bool> {
+    self.inner.is_disabled(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "isEditable")]
+  pub async fn is_editable(&self, selector: String) -> rquickjs::Result<bool> {
+    self.inner.is_editable(&selector).await.into_js()
+  }
+
+  #[qjs(rename = "isChecked")]
+  pub async fn is_checked(&self, selector: String) -> rquickjs::Result<bool> {
+    self.inner.is_checked(&selector).await.into_js()
   }
 }

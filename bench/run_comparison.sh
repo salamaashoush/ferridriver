@@ -36,7 +36,7 @@ fi
 
 # Ensure ferridriver NAPI is built
 echo "Building ferridriver..."
-(cd "$ROOT_DIR/crates/ferridriver-napi" && bun run build:debug 2>/dev/null)
+(cd "$ROOT_DIR/crates/ferridriver-node" && bun run build:debug 2>/dev/null)
 
 # Detect the regular Chrome binary from Playwright's CfT install
 REGULAR_CHROME=""

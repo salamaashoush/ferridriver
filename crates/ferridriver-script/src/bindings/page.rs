@@ -698,9 +698,11 @@ impl PageJs {
   // from the page-owned [`ferridriver::frame_cache::FrameCache`].
 
   /// Main frame of this page. Playwright: `page.mainFrame(): Frame`.
+  /// Always returns a Frame — the cache is seeded inside `Page::new` /
+  /// `Page::with_context` before the Page is handed out.
   #[qjs(rename = "mainFrame")]
-  pub fn main_frame(&self) -> Option<crate::bindings::frame::FrameJs> {
-    self.inner.main_frame().map(crate::bindings::frame::FrameJs::new)
+  pub fn main_frame(&self) -> crate::bindings::frame::FrameJs {
+    crate::bindings::frame::FrameJs::new(self.inner.main_frame())
   }
 
   /// All non-detached frames on the page. Playwright:

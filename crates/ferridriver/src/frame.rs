@@ -133,12 +133,7 @@ impl Frame {
   /// the full `LocatorOptions` bag (including `visible`).
   #[must_use]
   pub fn locator(&self, selector: &str, options: Option<crate::options::FilterOptions>) -> Locator {
-    let base = Locator {
-      page: Arc::clone(&self.page),
-      selector: selector.to_string(),
-      frame_id: Some(self.id.clone()),
-      strict: true,
-    };
+    let base = Locator::new(self.clone(), selector.to_string());
     match options {
       Some(opts) => base.filter(&opts),
       None => base,
@@ -147,13 +142,7 @@ impl Frame {
 
   #[must_use]
   pub fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Locator {
-    let sel = crate::locator::build_role_selector(role, opts);
-    Locator {
-      page: Arc::clone(&self.page),
-      selector: sel,
-      frame_id: Some(self.id.clone()),
-      strict: true,
-    }
+    Locator::new(self.clone(), crate::locator::build_role_selector(role, opts))
   }
 
   #[must_use]
@@ -163,21 +152,12 @@ impl Frame {
     } else {
       format!("text={text}")
     };
-    Locator {
-      page: Arc::clone(&self.page),
-      selector: sel,
-      frame_id: Some(self.id.clone()),
-      strict: true,
-    }
+    Locator::new(self.clone(), sel)
   }
 
   #[must_use]
   pub fn get_by_test_id(&self, test_id: &str) -> Locator {
-    Locator::new(
-      Arc::clone(&self.page),
-      format!("testid={test_id}"),
-      Some(self.id.clone()),
-    )
+    Locator::new(self.clone(), format!("testid={test_id}"))
   }
 
   #[must_use]
@@ -187,12 +167,7 @@ impl Frame {
     } else {
       format!("label={text}")
     };
-    Locator {
-      page: Arc::clone(&self.page),
-      selector: sel,
-      frame_id: Some(self.id.clone()),
-      strict: true,
-    }
+    Locator::new(self.clone(), sel)
   }
 
   #[must_use]
@@ -202,12 +177,40 @@ impl Frame {
     } else {
       format!("placeholder={text}")
     };
-    Locator {
-      page: Arc::clone(&self.page),
-      selector: sel,
-      frame_id: Some(self.id.clone()),
-      strict: true,
-    }
+    Locator::new(self.clone(), sel)
+  }
+
+  /// Locate elements by `alt` attribute. Mirrors Playwright's
+  /// `frame.getByAltText(text, options?)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts`).
+  #[must_use]
+  pub fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Locator {
+    let sel = if opts.exact == Some(true) {
+      format!("alt=\"{text}\"")
+    } else {
+      format!("alt={text}")
+    };
+    Locator::new(self.clone(), sel)
+  }
+
+  /// Locate elements by `title` attribute. Mirrors Playwright's
+  /// `frame.getByTitle(text, options?)`.
+  #[must_use]
+  pub fn get_by_title(&self, text: &str, opts: &TextOptions) -> Locator {
+    let sel = if opts.exact == Some(true) {
+      format!("title=\"{text}\"")
+    } else {
+      format!("title={text}")
+    };
+    Locator::new(self.clone(), sel)
+  }
+
+  /// Create a `FrameLocator` for an `<iframe>` matching `selector`
+  /// inside this frame's document. Mirrors Playwright's
+  /// `frame.frameLocator(selector)`.
+  #[must_use]
+  pub fn frame_locator(&self, selector: &str) -> crate::locator::FrameLocator {
+    crate::locator::FrameLocator::for_iframe_in(self.clone(), selector.to_string())
   }
 
   // ── Content (frame-scoped) ───────────────────────────────────────────
@@ -283,6 +286,20 @@ impl Frame {
   #[must_use]
   pub fn page(&self) -> &Page {
     &self.page
+  }
+
+  /// Reference to the owning `Arc<Page>`. Locators hold a `Frame` and
+  /// reach the backend through `frame.page_arc()`.
+  #[must_use]
+  pub fn page_arc(&self) -> &Arc<Page> {
+    &self.page
+  }
+
+  /// Backend frame id (CDP/BiDi). Stable through navigations; used to
+  /// scope evaluation to this frame's execution context.
+  #[must_use]
+  pub fn id(&self) -> &Arc<str> {
+    &self.id
   }
 
   /// Set the HTML content of this frame.
@@ -371,6 +388,281 @@ impl Frame {
         tokio::time::sleep(std::time::Duration::from_millis(50)).await;
       }
     }
+  }
+
+  // ── Action methods (Playwright parity — task 3.9) ──────────────────────
+  //
+  // Mirrors Playwright's frame action surface from
+  // `/tmp/playwright/packages/playwright-core/src/client/frame.ts:296-447`.
+  // Each method delegates to `self.locator(selector, None).<action>()` —
+  // Frame's locator already scopes by `frame_id`, so the action runs in
+  // the iframe's execution context (CDP) or against the synthesized
+  // iframe (WebKit). Option bags are intentionally minimal here; they
+  // ride on top of the existing Locator surface and pick up extensions
+  // (timeout/force/etc.) when those land on Locator itself.
+
+  // -- Mouse / pointer ---------------------------------------------------
+
+  /// Click the element matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or the click fails.
+  pub async fn click(&self, selector: &str) -> Result<()> {
+    self.locator(selector, None).click().await
+  }
+
+  /// Double-click the element matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or the dblclick fails.
+  pub async fn dblclick(&self, selector: &str) -> Result<()> {
+    self.locator(selector, None).dblclick().await
+  }
+
+  /// Hover the element matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or the hover fails.
+  pub async fn hover(&self, selector: &str) -> Result<()> {
+    self.locator(selector, None).hover().await
+  }
+
+  /// Tap (touch) the element matched by `selector`. Mirrors
+  /// `frame.tap(selector, options?)` per
+  /// `/tmp/playwright/packages/playwright-core/src/client/frame.ts:308`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or the tap fails.
+  pub async fn tap(&self, selector: &str) -> Result<()> {
+    self.locator(selector, None).tap().await
+  }
+
+  /// Focus the element matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or focus fails.
+  pub async fn focus(&self, selector: &str) -> Result<()> {
+    self.locator(selector, None).focus().await
+  }
+
+  // -- Form input --------------------------------------------------------
+
+  /// Fill an input matching `selector` with `value`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or is not fillable.
+  pub async fn fill(&self, selector: &str, value: &str) -> Result<()> {
+    self.locator(selector, None).fill(value).await
+  }
+
+  /// Type characters into an element matching `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or typing fails.
+  pub async fn r#type(&self, selector: &str, text: &str) -> Result<()> {
+    self.locator(selector, None).r#type(text).await
+  }
+
+  /// Press a key on an element matching `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or the key press fails.
+  pub async fn press(&self, selector: &str, key: &str) -> Result<()> {
+    self.locator(selector, None).press(key).await
+  }
+
+  /// Check a checkbox/radio matching `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or is not checkable.
+  pub async fn check(&self, selector: &str) -> Result<()> {
+    self.locator(selector, None).check().await
+  }
+
+  /// Uncheck a checkbox matching `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or is not uncheckable.
+  pub async fn uncheck(&self, selector: &str) -> Result<()> {
+    self.locator(selector, None).uncheck().await
+  }
+
+  /// Set the checked state of a checkbox/radio matching `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or is not checkable.
+  pub async fn set_checked(&self, selector: &str, checked: bool) -> Result<()> {
+    self.locator(selector, None).set_checked(checked).await
+  }
+
+  /// Select a `<select>` option in the element matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or the option cannot
+  /// be selected.
+  pub async fn select_option(&self, selector: &str, value: &str) -> Result<Vec<String>> {
+    self.locator(selector, None).select_option(value).await
+  }
+
+  /// Set input files on a `<input type=file>` matching `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or file setting fails.
+  pub async fn set_input_files(&self, selector: &str, paths: &[String]) -> Result<()> {
+    self.locator(selector, None).set_input_files(paths).await
+  }
+
+  // -- Drag and drop -----------------------------------------------------
+
+  /// Drag from `source` to `target` selectors within this frame. Mirrors
+  /// `frame.dragAndDrop(source, target, options?)` per
+  /// `/tmp/playwright/packages/playwright-core/src/client/frame.ts:304`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if either element cannot be found or the
+  /// drag-and-drop operation fails.
+  pub async fn drag_and_drop(
+    &self,
+    source: &str,
+    target: &str,
+    options: Option<crate::options::DragAndDropOptions>,
+  ) -> Result<()> {
+    let opts = options.unwrap_or_default();
+    let src = self.locator(source, None);
+    let tgt = self.locator(target, None);
+    let (src, tgt) = match opts.strict {
+      Some(s) => (src.strict(s), tgt.strict(s)),
+      None => (src, tgt),
+    };
+    src.drag_to(&tgt, Some(opts)).await
+  }
+
+  // -- Synthetic events --------------------------------------------------
+
+  /// Dispatch a DOM event on the element matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or the dispatch fails.
+  pub async fn dispatch_event(&self, selector: &str, event_type: &str) -> Result<()> {
+    self.locator(selector, None).dispatch_event(event_type).await
+  }
+
+  // -- Content / attribute reads ----------------------------------------
+
+  /// Get the text content of the element matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn text_content(&self, selector: &str) -> Result<Option<String>> {
+    self.locator(selector, None).text_content().await
+  }
+
+  /// Get `innerText` of the element matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn inner_text(&self, selector: &str) -> Result<String> {
+    self.locator(selector, None).inner_text().await
+  }
+
+  /// Get `innerHTML` of the element matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn inner_html(&self, selector: &str) -> Result<String> {
+    self.locator(selector, None).inner_html().await
+  }
+
+  /// Get an attribute on the element matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn get_attribute(&self, selector: &str, name: &str) -> Result<Option<String>> {
+    self.locator(selector, None).get_attribute(name).await
+  }
+
+  /// Get `value` from a form control matched by `selector`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn input_value(&self, selector: &str) -> Result<String> {
+    self.locator(selector, None).input_value().await
+  }
+
+  // -- State checks ------------------------------------------------------
+
+  /// True if the element matched by `selector` is visible.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn is_visible(&self, selector: &str) -> Result<bool> {
+    self.locator(selector, None).is_visible().await
+  }
+
+  /// True if the element matched by `selector` is hidden.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn is_hidden(&self, selector: &str) -> Result<bool> {
+    self.locator(selector, None).is_hidden().await
+  }
+
+  /// True if the element matched by `selector` is enabled.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn is_enabled(&self, selector: &str) -> Result<bool> {
+    self.locator(selector, None).is_enabled().await
+  }
+
+  /// True if the element matched by `selector` is disabled.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn is_disabled(&self, selector: &str) -> Result<bool> {
+    self.locator(selector, None).is_disabled().await
+  }
+
+  /// True if the element matched by `selector` is editable.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn is_editable(&self, selector: &str) -> Result<bool> {
+    self.locator(selector, None).is_editable().await
+  }
+
+  /// True if a checkbox/radio matched by `selector` is checked.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found.
+  pub async fn is_checked(&self, selector: &str) -> Result<bool> {
+    self.locator(selector, None).is_checked().await
   }
 }
 

@@ -41,10 +41,7 @@ async fn switch_to_frame(world: &mut BrowserWorld, name_or_url: String) {
 
 #[when("I switch to main frame")]
 async fn switch_to_main_frame(world: &mut BrowserWorld) {
-  let frame = world
-    .page()
-    .main_frame()
-    .ok_or_else(|| StepError::from("no main frame in cache — page may not be initialized"))?;
+  let frame = world.page().main_frame();
   world.set_state(ActiveFrame(frame));
 }
 

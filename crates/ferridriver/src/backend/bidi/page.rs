@@ -388,15 +388,21 @@ impl BidiPage {
     self.ensure_engine_injected().await?;
     let sel_js = crate::selectors::build_selone_js(selector, "window.__fd")?;
     self
-      .evaluate_to_element(&sel_js)
+      .evaluate_to_element(&sel_js, None)
       .await
       .map_err(|_| format!("No element found for selector: {selector}"))
   }
 
-  pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
+  /// `BiDi`: a "frame" is a browsing context. When `frame_id` is `Some`
+  /// it overrides the page's default `context_id` so element resolution
+  /// runs inside the iframe's realm. Mirrors Playwright's `BiDi` backend
+  /// (`/tmp/playwright/packages/playwright-core/src/server/bidi/bidiFrame.ts`).
+  pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement, String> {
     // The JS can be either an expression or a function.
     // Use script.evaluate for expressions, script.callFunction for functions.
     let is_function = js.trim_start().starts_with("function") || js.trim_start().starts_with('(');
+
+    let target_ctx: &str = frame_id.unwrap_or(&self.context_id);
 
     let result = if is_function {
       self
@@ -404,7 +410,7 @@ impl BidiPage {
           "script.callFunction",
           json!({
             "functionDeclaration": js,
-            "target": {"context": &*self.context_id},
+            "target": {"context": target_ctx},
             "awaitPromise": true,
             "resultOwnership": "root"
           }),
@@ -416,7 +422,7 @@ impl BidiPage {
           "script.evaluate",
           json!({
             "expression": js,
-            "target": {"context": &*self.context_id},
+            "target": {"context": target_ctx},
             "awaitPromise": true,
             "resultOwnership": "root"
           }),
@@ -432,9 +438,14 @@ impl BidiPage {
         let shared_ref = remote_val
           .as_shared_reference()
           .ok_or("evaluate_to_element: result is not a DOM node")?;
+        // Element belongs to the realm we evaluated in.
+        let owning_ctx: Arc<str> = match frame_id {
+          Some(fid) => Arc::from(fid),
+          None => self.context_id.clone(),
+        };
         Ok(AnyElement::Bidi(BidiElement::new(
           self.session.clone(),
-          self.context_id.clone(),
+          owning_ctx,
           shared_ref.shared_id,
         )))
       },

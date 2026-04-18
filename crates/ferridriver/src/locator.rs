@@ -30,7 +30,7 @@ use crate::selectors;
 /// `Copy` types (like `&str`, `&Arc<Page>`) or by move for owned types.
 macro_rules! retry_resolve {
   ($self:expr, |$el:ident, $page:ident| $body:expr) => {{
-    let $page: &$crate::backend::AnyPage = $self.page.inner();
+    let $page: &$crate::backend::AnyPage = $self.frame.page_arc().inner();
     $page
       .ensure_engine_injected()
       .await
@@ -38,6 +38,13 @@ macro_rules! retry_resolve {
     let __fd = "window.__fd";
     let __sel_js =
       $crate::selectors::build_selone_js(&$self.selector, &__fd).map_err($crate::error::FerriError::from)?;
+    // Pass `None` for main-frame locators so the backend skips a
+    // `frame_contexts` lookup; child frames thread their cached id.
+    let __frame_id: ::std::option::Option<&str> = if $self.frame.is_main_frame() {
+      ::std::option::Option::None
+    } else {
+      ::std::option::Option::Some($self.frame.id())
+    };
 
     for (__i, &__delay_ms) in Locator::RETRY_BACKOFFS_MS.iter().enumerate() {
       if __delay_ms > 0 {
@@ -50,7 +57,7 @@ macro_rules! retry_resolve {
       // every attempt so transient duplicates (e.g. during SSR rehydration)
       // still trigger the retry loop rather than failing immediately.
       if $self.strict {
-        match $crate::selectors::query_all($page, &$self.selector).await {
+        match $crate::selectors::query_all($page, &$self.selector, __frame_id).await {
           ::std::result::Result::Ok(ref __matches) if __matches.len() > 1 => {
             $crate::selectors::cleanup_tags($page).await;
             return ::std::result::Result::Err($crate::error::FerriError::strict(
@@ -64,7 +71,7 @@ macro_rules! retry_resolve {
         }
       }
 
-      match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector).await {
+      match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
         ::std::result::Result::Ok($el) => match ($body).await {
           ::std::result::Result::Ok(val) => return ::std::result::Result::Ok(val),
           ::std::result::Result::Err(e)
@@ -87,16 +94,18 @@ macro_rules! retry_resolve {
   }};
 }
 
-/// A lazy element locator. Does not query the DOM until an action is called.
-/// Holds `Arc<Page>` instead of owned Page — locator chains are just atomic
-/// refcount bumps, not full Page clones.
+/// A lazy element locator bound to a [`crate::Frame`]. Mirrors
+/// Playwright's `client/locator.ts::Locator` — every Locator carries a
+/// Frame reference, and all DOM resolution and action dispatch happens
+/// in that frame's execution context. Chaining (`.locator()`,
+/// `.filter()`, `.first()`, etc.) returns a new Locator on the same
+/// Frame; the Frame itself is cheap to clone (two `Arc`s).
 #[derive(Clone)]
 pub struct Locator {
-  pub(crate) page: Arc<crate::page::Page>,
+  /// Owning frame. Provides the page back-reference (`frame.page_arc()`)
+  /// and the execution-context id (`frame.id()`) used by every action.
+  pub(crate) frame: crate::frame::Frame,
   pub(crate) selector: String,
-  /// If set, evaluate in this frame instead of the main frame.
-  /// Uses `Arc<str>` so that chaining locators only bumps a refcount.
-  pub(crate) frame_id: Option<Arc<str>>,
   /// Strict mode: error with [`crate::error::FerriError::StrictModeViolation`]
   /// if the selector resolves to multiple elements. Playwright enables strict
   /// mode on every Locator action by default; `first()` / `last()` / `nth()` /
@@ -107,11 +116,10 @@ pub struct Locator {
 impl Locator {
   /// Construct a Locator with Playwright-default strict mode enabled.
   #[must_use]
-  pub(crate) fn new(page: Arc<crate::page::Page>, selector: String, frame_id: Option<Arc<str>>) -> Self {
+  pub(crate) fn new(frame: crate::frame::Frame, selector: String) -> Self {
     Self {
-      page,
+      frame,
       selector,
-      frame_id,
       strict: true,
     }
   }
@@ -125,9 +133,8 @@ impl Locator {
   #[must_use]
   pub fn strict(&self, strict: bool) -> Locator {
     Locator {
-      page: Arc::clone(&self.page),
+      frame: self.frame.clone(),
       selector: self.selector.clone(),
-      frame_id: self.frame_id.clone(),
       strict,
     }
   }
@@ -155,7 +162,7 @@ impl Locator {
     let base = match &inner {
       crate::options::LocatorLike::Selector(s) => self.chain(s),
       crate::options::LocatorLike::Locator(l) => {
-        if Arc::ptr_eq(&self.page, &l.page) {
+        if Arc::ptr_eq(self.frame.page_arc(), l.frame.page_arc()) {
           self.chain(&format!("internal:chain={}", json_quote(&l.selector)))
         } else {
           // Encoded sentinel — the selector engine rejects it, so the
@@ -276,7 +283,10 @@ impl Locator {
     }
     if let Some(inner) = &opts.has {
       push_sep(&mut suffix);
-      if inner.as_locator().is_some_and(|l| !Arc::ptr_eq(&self.page, &l.page)) {
+      if inner
+        .as_locator()
+        .is_some_and(|l| !Arc::ptr_eq(self.frame.page_arc(), l.frame.page_arc()))
+      {
         // Same-page invariant violation — inject a sentinel the selector
         // engine will reject so the caller sees an explicit error rather
         // than a silently-mismatched filter. Only enforceable when the
@@ -289,7 +299,10 @@ impl Locator {
     }
     if let Some(inner) = &opts.has_not {
       push_sep(&mut suffix);
-      if inner.as_locator().is_some_and(|l| !Arc::ptr_eq(&self.page, &l.page)) {
+      if inner
+        .as_locator()
+        .is_some_and(|l| !Arc::ptr_eq(self.frame.page_arc(), l.frame.page_arc()))
+      {
         let _ = write!(suffix, "internal:has-not-cross-frame-error=true");
       } else {
         let _ = write!(suffix, "internal:has-not={}", json_quote(inner.as_selector()));
@@ -481,7 +494,9 @@ impl Locator {
   /// Returns an error if the element cannot be found or the tap event dispatch fails.
   pub async fn tap(&self) -> Result<()> {
     let el = self.resolve().await?;
-    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
+    actions::wait_for_actionable(&el, self.frame.page_arc().inner())
+      .await
+      .ok();
     el.call_js_fn("function() { \
       this.scrollIntoViewIfNeeded && this.scrollIntoViewIfNeeded(); \
       var r = this.getBoundingClientRect(); \
@@ -523,7 +538,7 @@ impl Locator {
   /// Returns an error if the element cannot be found or is not a `<select>`.
   pub async fn select_option(&self, value: &str) -> Result<Vec<String>> {
     let el = self.resolve().await?;
-    let result = actions::select_option(&el, self.page.inner(), value).await?;
+    let result = actions::select_option(&el, self.frame.page_arc().inner(), value).await?;
     Ok(vec![result.selected_value])
   }
 
@@ -535,7 +550,7 @@ impl Locator {
   ///
   /// Returns an error if the element is not a file input or the upload fails.
   pub async fn set_input_files(&self, paths: &[String]) -> Result<()> {
-    actions::upload_file(self.page.inner(), &self.selector, paths)
+    actions::upload_file(self.frame.page_arc().inner(), &self.selector, paths)
       .await
       .map_err(Into::into)
   }
@@ -712,12 +727,10 @@ impl Locator {
   pub async fn count(&self) -> Result<usize> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    let fd = self.page.inner().injected_script().await?;
+    let fd = self.frame.page_arc().inner().injected_script().await?;
     let js = format!("{fd}.selCount({parts_json})");
     let val = self
-      .page
-      .inner()
-      .evaluate(&js)
+      .evaluate_in_frame_js(&js)
       .await?
       .and_then(|v| v.as_u64())
       .unwrap_or(0);
@@ -782,11 +795,20 @@ impl Locator {
       match state {
         "attached" => {
           // Only require DOM presence — do not consult computed style.
-          if selectors::query_one(self.page.inner(), &self.selector, false)
-            .await
-            .is_ok()
+          if selectors::query_one(
+            self.frame.page_arc().inner(),
+            &self.selector,
+            false,
+            if self.frame.is_main_frame() {
+              None
+            } else {
+              Some(self.frame.id())
+            },
+          )
+          .await
+          .is_ok()
           {
-            selectors::cleanup_tags(self.page.inner()).await;
+            selectors::cleanup_tags(self.frame.page_arc().inner()).await;
             return Ok(());
           }
         },
@@ -799,24 +821,42 @@ impl Locator {
           }
         },
         "detached" => {
-          if selectors::query_one(self.page.inner(), &self.selector, false)
-            .await
-            .is_err()
+          if selectors::query_one(
+            self.frame.page_arc().inner(),
+            &self.selector,
+            false,
+            if self.frame.is_main_frame() {
+              None
+            } else {
+              Some(self.frame.id())
+            },
+          )
+          .await
+          .is_err()
           {
             return Ok(());
           }
-          selectors::cleanup_tags(self.page.inner()).await;
+          selectors::cleanup_tags(self.frame.page_arc().inner()).await;
         },
         "hidden" => {
           // Playwright: `hidden` is satisfied by detachment OR by the
           // element being present but not visible.
-          if selectors::query_one(self.page.inner(), &self.selector, false)
-            .await
-            .is_err()
+          if selectors::query_one(
+            self.frame.page_arc().inner(),
+            &self.selector,
+            false,
+            if self.frame.is_main_frame() {
+              None
+            } else {
+              Some(self.frame.id())
+            },
+          )
+          .await
+          .is_err()
           {
             return Ok(());
           }
-          selectors::cleanup_tags(self.page.inner()).await;
+          selectors::cleanup_tags(self.frame.page_arc().inner()).await;
           if let Ok(false) = self.is_visible().await {
             return Ok(());
           }
@@ -881,10 +921,12 @@ impl Locator {
   /// Returns an error if the element cannot be found or any key press fails.
   pub async fn press_sequentially(&self, text: &str, delay_ms: Option<u64>) -> Result<()> {
     let el = self.resolve().await?;
-    actions::wait_for_actionable(&el, self.page.inner()).await.ok();
+    actions::wait_for_actionable(&el, self.frame.page_arc().inner())
+      .await
+      .ok();
     let delay = delay_ms.unwrap_or(50);
     for ch in text.chars() {
-      self.page.inner().press_key(&ch.to_string()).await?;
+      self.frame.page_arc().inner().press_key(&ch.to_string()).await?;
       if delay > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
       }
@@ -946,7 +988,8 @@ impl Locator {
 
     let steps = opts.steps.unwrap_or(1);
     self
-      .page
+      .frame
+      .page_arc()
       .inner()
       .click_and_drag(from, to, steps)
       .await
@@ -1006,9 +1049,8 @@ impl Locator {
         format!("{base} >> nth={idx}")
       };
       locators.push(Locator {
-        page: Arc::clone(&self.page),
+        frame: self.frame.clone(),
         selector,
-        frame_id: self.frame_id.clone(),
         strict: true,
       });
     }
@@ -1023,13 +1065,13 @@ impl Locator {
   pub async fn all_text_contents(&self) -> Result<Vec<String>> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    self.page.inner().ensure_engine_injected().await?;
+    self.frame.page_arc().inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
     let js = format!(
       "(function() {{ var r = {fd}._exec({parts_json}, document); \
        return r.map(function(e) {{ return (e.textContent || '').trim(); }}); }})()"
     );
-    let val = self.page.inner().evaluate(&js).await?;
+    let val = self.frame.page_arc().inner().evaluate(&js).await?;
     match val {
       Some(serde_json::Value::Array(arr)) => Ok(
         arr
@@ -1081,13 +1123,22 @@ impl Locator {
   pub async fn evaluate_all(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    self.page.inner().ensure_engine_injected().await?;
+    self.frame.page_arc().inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
     let js = format!("(function() {{ var elements = {fd}.selAll({parts_json}); return ({expression}); }})()");
-    if let Some(fid) = &self.frame_id {
-      self.page.inner().evaluate_in_frame(&js, fid).await.map_err(Into::into)
+    self.evaluate_in_frame_js(&js).await
+  }
+
+  /// Run a value-returning JS expression in this locator's frame.
+  /// Uses `evaluate_in_frame` for non-main frames (CDP `contextId`,
+  /// `BiDi` realm) and the no-context default for the main frame so we
+  /// avoid an extra `frame_contexts` lookup on the hot path.
+  async fn evaluate_in_frame_js(&self, js: &str) -> Result<Option<serde_json::Value>> {
+    let inner = self.frame.page_arc().inner();
+    if self.frame.is_main_frame() {
+      inner.evaluate(js).await.map_err(Into::into)
     } else {
-      self.page.inner().evaluate(&js).await.map_err(Into::into)
+      inner.evaluate_in_frame(js, self.frame.id()).await.map_err(Into::into)
     }
   }
 
@@ -1096,7 +1147,15 @@ impl Locator {
   /// Get the page this locator belongs to.
   #[must_use]
   pub fn page(&self) -> &Arc<crate::page::Page> {
-    &self.page
+    self.frame.page_arc()
+  }
+
+  /// The frame this locator resolves in. Mirrors Playwright's
+  /// `locator._frame` — actions and queries always run in this frame's
+  /// execution context.
+  #[must_use]
+  pub fn frame(&self) -> &crate::frame::Frame {
+    &self.frame
   }
 
   /// Treat this locator as an `<iframe>` and return a `FrameLocator` for its content.
@@ -1105,10 +1164,7 @@ impl Locator {
   /// `FrameLocator` creates locators scoped to the iframe's content document.
   #[must_use]
   pub fn content_frame(&self) -> FrameLocator {
-    FrameLocator {
-      page: Arc::clone(&self.page),
-      iframe_selector: self.selector.clone(),
-    }
+    FrameLocator::for_iframe_in(self.frame.clone(), self.selector.clone())
   }
 
   /// Create a `FrameLocator` targeting an `<iframe>` matched by `selector` within
@@ -1117,14 +1173,12 @@ impl Locator {
   /// Equivalent to Playwright's `locator.frameLocator(selector)`.
   #[must_use]
   pub fn frame_locator(&self, selector: &str) -> FrameLocator {
-    FrameLocator {
-      page: Arc::clone(&self.page),
-      iframe_selector: if self.selector.is_empty() {
-        selector.to_string()
-      } else {
-        format!("{} >> {selector}", self.selector)
-      },
-    }
+    let frame_selector = if self.selector.is_empty() {
+      selector.to_string()
+    } else {
+      format!("{} >> {selector}", self.selector)
+    };
+    FrameLocator::for_iframe_in(self.frame.clone(), frame_selector)
   }
 
   // ── Selector access ───────────────────────────────────────────────────────
@@ -1156,7 +1210,7 @@ impl Locator {
   async fn retry_eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    self.page.inner().ensure_engine_injected().await?;
+    self.frame.page_arc().inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
     let js = format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
 
@@ -1164,16 +1218,12 @@ impl Locator {
       if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
       }
-      let result: std::result::Result<Option<serde_json::Value>, String> = if let Some(fid) = &self.frame_id {
-        self.page.inner().evaluate_in_frame(&js, fid).await
-      } else {
-        self.page.inner().evaluate(&js).await
-      };
+      let result = self.evaluate_in_frame_js(&js).await;
       match result {
         // Element not found or evaluation failed -- retry if attempts remain.
         Ok(Some(serde_json::Value::Null) | None) | Err(_) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => {},
         Ok(val) => return Ok(val),
-        Err(e) => return Err(e.into()),
+        Err(e) => return Err(e),
       }
     }
     Ok(None)
@@ -1187,10 +1237,15 @@ impl Locator {
   ///
   /// Returns an error if the selector engine cannot be injected or the element is not found.
   pub async fn resolve(&self) -> Result<AnyElement> {
-    self.page.inner().ensure_engine_injected().await?;
+    self.frame.page_arc().inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
     let sel_js = selectors::build_selone_js(&self.selector, fd)?;
-    selectors::query_one_prebuilt(self.page.inner(), &sel_js, &self.selector)
+    let frame_id: Option<&str> = if self.frame.is_main_frame() {
+      None
+    } else {
+      Some(self.frame.id())
+    };
+    selectors::query_one_prebuilt(self.frame.page_arc().inner(), &sel_js, &self.selector, frame_id)
       .await
       .map_err(Into::into)
   }
@@ -1202,9 +1257,8 @@ impl Locator {
       format!("{} >> {sub}", self.selector)
     };
     Locator {
-      page: Arc::clone(&self.page),
+      frame: self.frame.clone(),
       selector,
-      frame_id: self.frame_id.clone(),
       strict: self.strict,
     }
   }
@@ -1231,14 +1285,10 @@ impl Locator {
   async fn eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    self.page.inner().ensure_engine_injected().await?;
+    self.frame.page_arc().inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
     let js = format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
-    if let Some(fid) = &self.frame_id {
-      self.page.inner().evaluate_in_frame(&js, fid).await.map_err(Into::into)
-    } else {
-      self.page.inner().evaluate(&js).await.map_err(Into::into)
-    }
+    self.evaluate_in_frame_js(&js).await
   }
 }
 
@@ -1246,180 +1296,165 @@ impl std::fmt::Debug for Locator {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("Locator")
       .field("selector", &self.selector)
-      .field("frame_id", &self.frame_id)
-      .finish_non_exhaustive()
+      .field("frame", &self.frame)
+      .field("strict", &self.strict)
+      .finish()
   }
 }
 
 // ── FrameLocator ──────────────────────────────────────────────────────────────
 
-/// A locator for content inside an `<iframe>`. Mirrors Playwright's `FrameLocator`.
+/// A selector-builder that produces parent-frame [`Locator`]s targeting
+/// content inside an `<iframe>`. Mirrors Playwright's `FrameLocator`
+/// exactly:
 ///
-/// Created via `page.frame_locator(selector)`, `locator.frame_locator(selector)`,
-/// or `locator.content_frame()`. The `FrameLocator` resolves the iframe element
-/// lazily when creating child locators, which then operate in the iframe's context.
+/// `/tmp/playwright/packages/playwright-core/src/client/locator.ts::FrameLocatorImpl`
+///
+/// Holds the parent [`Frame`] (the one whose document contains the
+/// `<iframe>` element) and the iframe's CSS-selector chain. Every
+/// builder method composes a Locator selector with
+/// `>> internal:control=enter-frame >>` so the iframe traversal is
+/// performed by the selector engine at action time — not eagerly at
+/// construction. The resulting `Locator` is the same `Locator` type
+/// used everywhere else (no separate iframe-aware locator).
+///
+/// All methods are synchronous; `internal:control=enter-frame` is the
+/// engine-side directive that switches root from the iframe element to
+/// its `contentDocument` when a subsequent selector part runs.
 #[derive(Clone)]
 pub struct FrameLocator {
-  page: Arc<crate::page::Page>,
-  iframe_selector: String,
+  /// Parent frame whose document contains the `<iframe>` element.
+  /// For top-level `page.frame_locator(sel)` this is the main frame;
+  /// nested `frame_locator.frame_locator(sel)` keeps the same parent
+  /// frame and just appends to the selector chain.
+  frame: crate::frame::Frame,
+  /// CSS-selector chain ending at the `<iframe>` element. Composed with
+  /// `>> internal:control=enter-frame >>` whenever we step further in.
+  frame_selector: String,
 }
 
 impl FrameLocator {
-  /// Create a locator inside this iframe's content document.
-  ///
-  /// The returned locator resolves elements within the iframe. It first
-  /// resolves the iframe element from `iframe_selector`, finds the corresponding
-  /// frame ID, then evaluates the inner selector in that frame's context.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the iframe cannot be found.
-  pub async fn locator(&self, selector: &str) -> Result<Locator> {
-    let frame_id = self.resolve_frame_id().await?;
-    Ok(Locator {
-      page: Arc::clone(&self.page),
-      selector: selector.to_string(),
-      frame_id: Some(frame_id),
-      strict: true,
-    })
-  }
-
-  /// Locate by ARIA role inside this iframe.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Result<Locator> {
-    self.locator(&build_role_selector(role, opts)).await
-  }
-
-  /// Locate by visible text inside this iframe.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_text(&self, text: &str, opts: &TextOptions) -> Result<Locator> {
-    self.locator(&build_text_selector("text", text, opts)).await
-  }
-
-  /// Locate by test ID inside this iframe.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_test_id(&self, test_id: &str) -> Result<Locator> {
-    self.locator(&format!("testid={test_id}")).await
-  }
-
-  /// Locate by label text inside this iframe.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_label(&self, text: &str, opts: &TextOptions) -> Result<Locator> {
-    self.locator(&build_text_selector("label", text, opts)).await
-  }
-
-  /// Locate by placeholder text inside this iframe.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Result<Locator> {
-    self.locator(&build_text_selector("placeholder", text, opts)).await
-  }
-
-  /// Locate by alt text inside this iframe.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Result<Locator> {
-    self.locator(&build_text_selector("alt", text, opts)).await
-  }
-
-  /// Locate by title attribute inside this iframe.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the iframe cannot be resolved.
-  pub async fn get_by_title(&self, text: &str, opts: &TextOptions) -> Result<Locator> {
-    self.locator(&build_text_selector("title", text, opts)).await
-  }
-
-  /// Get the locator that owns the iframe element (the `<iframe>` itself).
+  /// Construct a `FrameLocator` for an `<iframe>` matched by
+  /// `iframe_selector` inside `parent_frame`'s document. Sync.
   #[must_use]
-  pub fn owner(&self) -> Locator {
-    Locator {
-      page: Arc::clone(&self.page),
-      selector: self.iframe_selector.clone(),
-      frame_id: None,
-      strict: true,
+  pub fn for_iframe_in(parent_frame: crate::frame::Frame, iframe_selector: String) -> Self {
+    Self {
+      frame: parent_frame,
+      frame_selector: iframe_selector,
     }
   }
 
-  /// Target a nested iframe inside this iframe's content.
+  fn enter(&self, selector: &str) -> String {
+    format!("{} >> internal:control=enter-frame >> {selector}", self.frame_selector)
+  }
+
+  /// Locator inside this iframe. Mirrors Playwright's
+  /// `frameLocator.locator(selector, options?)` — sync, returns a
+  /// `Locator` bound to the parent frame with an `enter-frame`
+  /// selector chain.
+  #[must_use]
+  pub fn locator(&self, selector: &str, options: Option<crate::options::FilterOptions>) -> Locator {
+    let base = Locator::new(self.frame.clone(), self.enter(selector));
+    match options {
+      Some(opts) => base.filter(&opts),
+      None => base,
+    }
+  }
+
+  /// `getByRole` inside this iframe.
+  #[must_use]
+  pub fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Locator {
+    self.locator(&build_role_selector(role, opts), None)
+  }
+
+  /// `getByText` inside this iframe.
+  #[must_use]
+  pub fn get_by_text(&self, text: &str, opts: &TextOptions) -> Locator {
+    self.locator(&build_text_selector("text", text, opts), None)
+  }
+
+  /// `getByTestId` inside this iframe.
+  #[must_use]
+  pub fn get_by_test_id(&self, test_id: &str) -> Locator {
+    self.locator(&format!("testid={test_id}"), None)
+  }
+
+  /// `getByLabel` inside this iframe.
+  #[must_use]
+  pub fn get_by_label(&self, text: &str, opts: &TextOptions) -> Locator {
+    self.locator(&build_text_selector("label", text, opts), None)
+  }
+
+  /// `getByPlaceholder` inside this iframe.
+  #[must_use]
+  pub fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Locator {
+    self.locator(&build_text_selector("placeholder", text, opts), None)
+  }
+
+  /// `getByAltText` inside this iframe.
+  #[must_use]
+  pub fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Locator {
+    self.locator(&build_text_selector("alt", text, opts), None)
+  }
+
+  /// `getByTitle` inside this iframe.
+  #[must_use]
+  pub fn get_by_title(&self, text: &str, opts: &TextOptions) -> Locator {
+    self.locator(&build_text_selector("title", text, opts), None)
+  }
+
+  /// The locator pointing at the `<iframe>` element itself, in the
+  /// parent frame's context. Mirrors Playwright's `frameLocator.owner()`.
+  #[must_use]
+  pub fn owner(&self) -> Locator {
+    Locator::new(self.frame.clone(), self.frame_selector.clone())
+  }
+
+  /// `frameLocator` for a nested `<iframe>`. Mirrors Playwright's
+  /// `frameLocator.frameLocator(selector)` — appends an enter-frame
+  /// step plus the next iframe selector.
   #[must_use]
   pub fn frame_locator(&self, selector: &str) -> FrameLocator {
     FrameLocator {
-      page: Arc::clone(&self.page),
-      iframe_selector: format!("{} >> frame >> {selector}", self.iframe_selector),
+      frame: self.frame.clone(),
+      frame_selector: self.enter(selector),
     }
   }
 
-  /// Resolve the iframe element to a frame ID.
-  async fn resolve_frame_id(&self) -> Result<Arc<str>> {
-    // Find the iframe element and match it to a frame in the tree
-    let page_inner = self.page.inner();
-    page_inner.ensure_engine_injected().await?;
-    let fd = "window.__fd";
-    let parsed = selectors::parse(&self.iframe_selector)?;
-    let parts_json = selectors::build_parts_json(&parsed);
-    let js = format!(
-      "(function() {{ \
-         var el = {fd}.selOne({parts_json}); \
-         if (!el || el.tagName !== 'IFRAME') return null; \
-         return el.getAttribute('name') || el.src || null; \
-       }})()"
-    );
-    let result = page_inner.evaluate(&js).await?;
-
-    // Get the frame tree and match by name or URL
-    let frames = page_inner.get_frame_tree().await?;
-    let frame_hint = result
-      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .unwrap_or_default();
-
-    // Try matching by name first, then by URL
-    for frame in &frames {
-      if !frame.name.is_empty() && frame.name == frame_hint {
-        return Ok(Arc::from(frame.frame_id.as_str()));
-      }
+  /// First matching iframe (`nth=0`).
+  #[must_use]
+  pub fn first(&self) -> FrameLocator {
+    FrameLocator {
+      frame: self.frame.clone(),
+      frame_selector: format!("{} >> nth=0", self.frame_selector),
     }
-    for frame in &frames {
-      if !frame.url.is_empty() && frame.url == frame_hint {
-        return Ok(Arc::from(frame.frame_id.as_str()));
-      }
-    }
+  }
 
-    // Fallback: if there's only one child frame, use it
-    let child_frames: Vec<_> = frames.iter().filter(|f| f.parent_frame_id.is_some()).collect();
-    if child_frames.len() == 1 {
-      return Ok(Arc::from(child_frames[0].frame_id.as_str()));
+  /// Last matching iframe (`nth=-1`).
+  #[must_use]
+  pub fn last(&self) -> FrameLocator {
+    FrameLocator {
+      frame: self.frame.clone(),
+      frame_selector: format!("{} >> nth=-1", self.frame_selector),
     }
+  }
 
-    Err(crate::error::FerriError::invalid_selector(
-      self.iframe_selector.clone(),
-      format!("could not resolve iframe; found {} child frames", child_frames.len()),
-    ))
+  /// Nth matching iframe.
+  #[must_use]
+  pub fn nth(&self, index: i32) -> FrameLocator {
+    FrameLocator {
+      frame: self.frame.clone(),
+      frame_selector: format!("{} >> nth={index}", self.frame_selector),
+    }
   }
 }
 
 impl std::fmt::Debug for FrameLocator {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("FrameLocator")
-      .field("iframe_selector", &self.iframe_selector)
-      .finish_non_exhaustive()
+      .field("frame_selector", &self.frame_selector)
+      .field("frame", &self.frame)
+      .finish()
   }
 }
 

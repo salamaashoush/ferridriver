@@ -174,4 +174,150 @@ impl Frame {
     let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
     Locator::wrap(self.inner.get_by_placeholder(&text, &opts))
   }
+
+  // ── Action methods (Playwright parity — task 3.9) ────────────────────
+  //
+  // Mirror the surface from
+  // `/tmp/playwright/packages/playwright-core/src/client/frame.ts:296-447`.
+  // Each method delegates to the Rust core's `Frame::<action>`, which
+  // in turn delegates to the frame-scoped Locator. Option bags pick up
+  // future extensions on the Locator surface.
+
+  #[napi]
+  pub async fn click(&self, selector: String) -> Result<()> {
+    self.inner.click(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn dblclick(&self, selector: String) -> Result<()> {
+    self.inner.dblclick(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn hover(&self, selector: String) -> Result<()> {
+    self.inner.hover(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn tap(&self, selector: String) -> Result<()> {
+    self.inner.tap(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn focus(&self, selector: String) -> Result<()> {
+    self.inner.focus(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn fill(&self, selector: String, value: String) -> Result<()> {
+    self.inner.fill(&selector, &value).await.into_napi()
+  }
+
+  #[napi(js_name = "type")]
+  pub async fn type_text(&self, selector: String, text: String) -> Result<()> {
+    self.inner.r#type(&selector, &text).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn press(&self, selector: String, key: String) -> Result<()> {
+    self.inner.press(&selector, &key).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn check(&self, selector: String) -> Result<()> {
+    self.inner.check(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn uncheck(&self, selector: String) -> Result<()> {
+    self.inner.uncheck(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn set_checked(&self, selector: String, checked: bool) -> Result<()> {
+    self.inner.set_checked(&selector, checked).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn select_option(&self, selector: String, value: String) -> Result<Vec<String>> {
+    self.inner.select_option(&selector, &value).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn set_input_files(&self, selector: String, paths: Vec<String>) -> Result<()> {
+    self.inner.set_input_files(&selector, &paths).await.into_napi()
+  }
+
+  /// Drag from `source` to `target` selectors within this frame.
+  /// Mirrors `frame.dragAndDrop(source, target, options?)`.
+  #[napi]
+  pub async fn drag_and_drop(
+    &self,
+    source: String,
+    target: String,
+    options: Option<crate::types::DragAndDropOptions>,
+  ) -> Result<()> {
+    let opts = options.map(ferridriver::options::DragAndDropOptions::from);
+    self.inner.drag_and_drop(&source, &target, opts).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn dispatch_event(&self, selector: String, event_type: String) -> Result<()> {
+    self.inner.dispatch_event(&selector, &event_type).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn text_content(&self, selector: String) -> Result<Option<String>> {
+    self.inner.text_content(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn inner_text(&self, selector: String) -> Result<String> {
+    self.inner.inner_text(&selector).await.into_napi()
+  }
+
+  #[napi(js_name = "innerHTML")]
+  pub async fn inner_html(&self, selector: String) -> Result<String> {
+    self.inner.inner_html(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn get_attribute(&self, selector: String, name: String) -> Result<Option<String>> {
+    self.inner.get_attribute(&selector, &name).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn input_value(&self, selector: String) -> Result<String> {
+    self.inner.input_value(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_visible(&self, selector: String) -> Result<bool> {
+    self.inner.is_visible(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_hidden(&self, selector: String) -> Result<bool> {
+    self.inner.is_hidden(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_enabled(&self, selector: String) -> Result<bool> {
+    self.inner.is_enabled(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_disabled(&self, selector: String) -> Result<bool> {
+    self.inner.is_disabled(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_editable(&self, selector: String) -> Result<bool> {
+    self.inner.is_editable(&selector).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_checked(&self, selector: String) -> Result<bool> {
+    self.inner.is_checked(&selector).await.into_napi()
+  }
 }

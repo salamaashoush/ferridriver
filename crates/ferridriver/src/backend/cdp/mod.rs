@@ -665,20 +665,31 @@ impl InjectedScriptManager {
   }
 
   async fn ensure<T: CdpWrap>(&self, page: &CdpPage<T>) -> Result<(), String> {
-    if !self.injected.load(std::sync::atomic::Ordering::Relaxed) {
-      let full_check_js = crate::selectors::build_lazy_inject_js();
-      let _ = page
-        .cmd(
-          "Runtime.evaluate",
-          serde_json::json!({
-              "expression": full_check_js,
-              "returnByValue": false,
-              "awaitPromise": true,
-          }),
-        )
-        .await?;
-      self.injected.store(true, std::sync::atomic::Ordering::Relaxed);
+    if self.injected.load(std::sync::atomic::Ordering::Relaxed) {
+      return Ok(());
     }
+    // Register the selector engine via `Page.addScriptToEvaluateOnNewDocument`
+    // with `runImmediately: true` so CDP injects `window.__fd` into:
+    //   1. every future document (page navigations, new iframes), and
+    //   2. all currently-loaded documents (main frame + already-attached
+    //      same-origin iframes).
+    // Without this, `Locator`s bound to an iframe `Frame` would
+    // `evaluate_to_element(js, Some(iframe_id))` against an execution
+    // context where `window.__fd` is undefined, and every action would
+    // fail to resolve. Mirrors Playwright's
+    // `/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts`
+    // injection pattern.
+    let full_inject_js = crate::selectors::build_lazy_inject_js();
+    let _ = page
+      .cmd(
+        "Page.addScriptToEvaluateOnNewDocument",
+        serde_json::json!({
+            "source": full_inject_js,
+            "runImmediately": true,
+        }),
+      )
+      .await?;
+    self.injected.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
   }
 }
@@ -1002,18 +1013,39 @@ impl<T: CdpWrap> CdpPage<T> {
     }))
   }
 
-  pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
+  /// Evaluate `js` in the execution context of `frame_id` (or the main
+  /// page when `frame_id` is `None`) and return the resulting DOM
+  /// element. Used by `Locator` to scope action-method resolution to
+  /// the locator's bound `Frame` — Playwright parity.
+  pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement, String> {
     let _ = self.cmd("DOM.getDocument", serde_json::json!({"depth": 0})).await;
 
-    let result = self
-      .cmd(
-        "Runtime.evaluate",
-        serde_json::json!({
-            "expression": js,
-            "returnByValue": false,
-        }),
-      )
-      .await?;
+    // Resolve the frame's execution context id (None → main page).
+    let context_id = match frame_id {
+      Some(fid) => {
+        let contexts = self.frame_contexts.read().await;
+        contexts.get(fid).copied()
+      },
+      None => None,
+    };
+
+    let mut params = serde_json::json!({
+      "expression": js,
+      "returnByValue": false,
+    });
+    if let Some(ctx_id) = context_id {
+      params["contextId"] = serde_json::json!(ctx_id);
+    }
+
+    let result = self.cmd("Runtime.evaluate", params).await?;
+
+    if let Some(exception) = result.get("exceptionDetails") {
+      let text = exception
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Evaluation error");
+      return Err(text.to_string());
+    }
 
     let object_id = result
       .get("result")
@@ -3037,9 +3069,30 @@ impl<T: CdpTransport> CdpElement<T> {
   }
 
   pub async fn click(&self) -> Result<(), String> {
-    let center = self.call_js_fn_value(
-            "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
-        ).await?;
+    // `Input.dispatchMouseEvent` uses top-level page coordinates. Walk
+    // up the frame chain (`window.frameElement.getBoundingClientRect()`)
+    // and accumulate per-iframe offsets so a button inside an iframe
+    // lands at the right page-level coords. Playwright achieves this by
+    // having a per-frame CDP session — we have a single session, so
+    // we do the offset math in JS instead.
+    let center = self
+      .call_js_fn_value(
+        "function() {
+          this.scrollIntoViewIfNeeded();
+          var r = this.getBoundingClientRect();
+          var x = r.x + r.width / 2;
+          var y = r.y + r.height / 2;
+          var win = this.ownerDocument.defaultView;
+          while (win && win !== win.parent && win.frameElement) {
+            var fr = win.frameElement.getBoundingClientRect();
+            x += fr.x;
+            y += fr.y;
+            win = win.parent;
+          }
+          return { x: x, y: y };
+        }",
+      )
+      .await?;
 
     if let Some(c) = center {
       let x = c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);

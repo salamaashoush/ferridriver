@@ -168,8 +168,10 @@ pub async fn resolve_element<S: std::hash::BuildHasher>(
 
   let sel = selector.ok_or("Provide 'ref' (from snapshot) or 'selector'.")?;
 
-  // ALL selectors go through the engine (treats bare CSS as default)
-  selectors::query_one(page, sel, false).await
+  // ALL selectors go through the engine (treats bare CSS as default).
+  // `actions::resolve_element` is the page-level escape hatch used by
+  // MCP's snapshot-ref bridge — it always queries the main frame.
+  selectors::query_one(page, sel, false, None).await
 }
 
 /// Suggest available selectors on the page.
@@ -389,7 +391,7 @@ pub fn format_search_results(result: &SearchResult, pattern: &str) -> String {
 pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result<FindResult, String> {
   // Rich selectors go through the selector engine
   if selectors::is_rich_selector(&opts.selector) {
-    let matched = selectors::query_all(page, &opts.selector).await?;
+    let matched = selectors::query_all(page, &opts.selector, None).await?;
     selectors::cleanup_tags(page).await;
     let total = matched.len();
     let elements = matched
