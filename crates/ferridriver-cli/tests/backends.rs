@@ -952,6 +952,48 @@ fn test_script_click_options(c: &mut McpClient) {
   assert!(msg.contains("Unknown modifier"), "bad modifier errors: {v}");
 }
 
+// Task 1.5 phase 4a: `fill.force` must actually bypass Playwright's
+// `['visible','enabled','editable']` pre-check. Proves on every backend:
+//   - Without force on a `readonly` input: the pre-check returns
+//     `error:noteditable` and the retry loop polls until timeout.
+//   - With force:true on the same input: the pre-check is skipped and
+//     the JS `.value = 'x'` assignment goes through regardless of the
+//     `readonly` attribute, letting the caller override it explicitly.
+fn test_script_fill_force(c: &mut McpClient) {
+  c.nav("<input id='ro' readonly value=''><div id='out'></div>");
+
+  // 1. force: false (default) on readonly input → times out (retry
+  //    loop sees `error:noteditable` as a retriable marker).
+  let v = c.script_value(
+    "const t0 = Date.now();\
+     try { await page.locator('#ro').fill('hello', { timeout: 250 }); return { msg: 'no-throw', elapsed: Date.now() - t0 }; }\
+     catch (e) { return { msg: String(e.message || e), elapsed: Date.now() - t0 }; }",
+  );
+  let msg = v["msg"].as_str().unwrap_or("");
+  let elapsed = v["elapsed"].as_i64().unwrap_or(9_999);
+  assert!(
+    msg.contains("Timeout"),
+    "fill without force on readonly should Timeout, got: {v}"
+  );
+  assert!(
+    elapsed < 1500,
+    "fill timeout should fire within 1.5s, got {elapsed}ms: {v}"
+  );
+  // Value stays empty — confirms no write happened.
+  let post = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"ro\").value'));");
+  assert_eq!(post, json!(""), "readonly input should still be empty: {post}");
+
+  // 2. force: true on the same readonly input → writes successfully.
+  c.nav("<input id='ro' readonly value=''>");
+  c.script_value("await page.locator('#ro').fill('bypass', { force: true });");
+  let after = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"ro\").value'));");
+  assert_eq!(
+    after,
+    json!("bypass"),
+    "fill with force:true should set value on readonly: {after}"
+  );
+}
+
 // Task 1.5 phase 3 (Rule 4): `locator.tap` must use the backend's native
 // touch primitive on every backend that supports it, not a JS `TouchEvent`
 // shim. CDP dispatches via `Input.dispatchTouchEvent` producing
@@ -1600,6 +1642,7 @@ fn run_all_tests(backend: &str) {
   run!(test_script_click_options);
   run!(test_script_action_timeout);
   run!(test_script_tap_native);
+  run!(test_script_fill_force);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
 
