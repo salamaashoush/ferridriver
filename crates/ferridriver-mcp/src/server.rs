@@ -341,8 +341,7 @@ impl McpServer {
     headless: bool,
     config: Arc<dyn McpServerConfig>,
   ) -> Self {
-    let mut browser_state = BrowserState::new(mode, backend);
-    browser_state.headless = headless;
+    let mut browser_state = BrowserState::new_with_headless(mode, backend, headless);
     browser_state.extra_args = config.chrome_args();
     // Wire per-instance args callback from config trait.
     let config_clone = Arc::clone(&config);
