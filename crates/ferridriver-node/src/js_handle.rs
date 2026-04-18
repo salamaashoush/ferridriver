@@ -56,15 +56,52 @@ impl JSHandle {
     self.inner.dispose().await.into_napi()
   }
 
-  /// Return this handle as an `ElementHandle` if its remote object is a
-  /// DOM element, else `null`. Phase-C always returns `null` at the
-  /// `JSHandle` layer; `ElementHandle` exposes its own
-  /// [`crate::element_handle::ElementHandle::asJsHandle`] for the
-  /// opposite direction. Playwright:
-  /// `jsHandle.asElement(): ElementHandle | null`.
+  /// Playwright: `jsHandle.asElement(): ElementHandle | null`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:65`).
+  /// Inspects the remote value; returns a fresh `ElementHandle`
+  /// (sharing this handle's dispose flag) when the value is a DOM
+  /// Node, otherwise `null`.
   #[napi]
-  pub fn as_element(&self) -> Option<crate::element_handle::ElementHandle> {
-    self.inner.as_element().map(crate::element_handle::ElementHandle::wrap)
+  pub async fn as_element(&self) -> Result<Option<crate::element_handle::ElementHandle>> {
+    let maybe = self.inner.as_element().await.into_napi()?;
+    Ok(maybe.map(crate::element_handle::ElementHandle::wrap))
+  }
+
+  /// Playwright: `jsHandle.jsonValue(): Promise<T>`. Projects the
+  /// remote value to its JSON-like form. Rich types that have no
+  /// native JSON shape (`Date`, `RegExp`, `BigInt`, typed arrays,
+  /// `NaN`/`Infinity`) surface as `null`; use
+  /// [`Self::jsonValueWire`] for the full isomorphic wire shape.
+  #[napi]
+  pub async fn json_value(&self) -> Result<Option<serde_json::Value>> {
+    let v = self.inner.json_value().await.into_napi()?;
+    Ok(v.to_json_like())
+  }
+
+  /// Raw isomorphic wire shape of [`Self::jsonValue`] — keeps rich
+  /// types (`Date`, `RegExp`, `BigInt`, typed arrays, `NaN`,
+  /// `Infinity`, `undefined`) intact as their tagged wire form.
+  #[napi]
+  pub async fn json_value_wire(&self) -> Result<serde_json::Value> {
+    let v = self.inner.json_value().await.into_napi()?;
+    serde_json::to_value(&v).map_err(|e| napi::Error::from_reason(e.to_string()))
+  }
+
+  /// Playwright: `jsHandle.getProperty(propertyName): Promise<JSHandle>`.
+  #[napi]
+  pub async fn get_property(&self, name: String) -> Result<JSHandle> {
+    let h = self.inner.get_property(&name).await.into_napi()?;
+    Ok(JSHandle::wrap(h))
+  }
+
+  /// Playwright: `jsHandle.getProperties(): Promise<Map<string, JSHandle>>`.
+  /// NAPI returns a plain object `{ [key]: JSHandle }` — keeps the
+  /// shape ergonomic on the JS side while preserving the per-key
+  /// handle identity.
+  #[napi(ts_return_type = "Record<string, JSHandle>")]
+  pub async fn get_properties(&self) -> Result<std::collections::HashMap<String, JSHandle>> {
+    let pairs = self.inner.get_properties().await.into_napi()?;
+    Ok(pairs.into_iter().map(|(k, h)| (k, JSHandle::wrap(h))).collect())
   }
 
   /// Playwright: `jsHandle.evaluate(pageFunction, arg?)`. Runs

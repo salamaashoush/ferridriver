@@ -240,8 +240,9 @@ impl ElementHandle {
   }
 
   /// Playwright: `elementHandle.screenshot(opts?): Promise<Buffer>`.
-  /// Phase-E MVP only supports format selection; the full option bag
-  /// (`path`, `omitBackground`, `animations`, ...) lands with Phase F.
+  /// Accepts a subset of the full option bag today (`format`); the
+  /// remaining fields are carried at the core layer until the shared
+  /// locator-level screenshot gets the full surface.
   #[napi]
   pub async fn screenshot(&self, format: Option<String>) -> Result<Buffer> {
     let fmt = match format.as_deref().unwrap_or("png") {
@@ -252,5 +253,168 @@ impl ElementHandle {
     };
     let bytes = self.inner.screenshot(fmt).await.into_napi()?;
     Ok(bytes.into())
+  }
+
+  // ── $eval / $$eval (Playwright parity) ───────────────────────────────
+
+  /// Playwright: `elementHandle.$eval(selector, pageFunction, arg?): Promise<R>`.
+  #[napi(ts_args_type = "selector: string, fnSource: string, arg?: unknown")]
+  pub async fn eval_on_selector(
+    &self,
+    selector: String,
+    fn_source: String,
+    arg: Option<serde_json::Value>,
+  ) -> Result<Option<serde_json::Value>> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let result = self
+      .inner
+      .eval_on_selector(&selector, &fn_source, serialized)
+      .await
+      .into_napi()?;
+    Ok(result.to_json_like())
+  }
+
+  /// Playwright: `elementHandle.$$eval(selector, pageFunction, arg?): Promise<R>`.
+  #[napi(ts_args_type = "selector: string, fnSource: string, arg?: unknown")]
+  pub async fn eval_on_selector_all(
+    &self,
+    selector: String,
+    fn_source: String,
+    arg: Option<serde_json::Value>,
+  ) -> Result<Option<serde_json::Value>> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let result = self
+      .inner
+      .eval_on_selector_all(&selector, &fn_source, serialized)
+      .await
+      .into_napi()?;
+    Ok(result.to_json_like())
+  }
+
+  // ── Frame accessors ──────────────────────────────────────────────────
+
+  /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`.
+  #[napi]
+  pub async fn owner_frame(&self) -> Result<Option<crate::frame::Frame>> {
+    let maybe = self.inner.owner_frame().await.into_napi()?;
+    Ok(maybe.map(crate::frame::Frame::wrap))
+  }
+
+  /// Playwright: `elementHandle.contentFrame(): Promise<Frame | null>`.
+  #[napi]
+  pub async fn content_frame(&self) -> Result<Option<crate::frame::Frame>> {
+    let maybe = self.inner.content_frame().await.into_napi()?;
+    Ok(maybe.map(crate::frame::Frame::wrap))
+  }
+
+  // ── wait_for_* helpers ───────────────────────────────────────────────
+
+  /// Playwright: `elementHandle.waitForElementState(state, options?)`.
+  #[napi]
+  pub async fn wait_for_element_state(&self, state: String, timeout: Option<u32>) -> Result<()> {
+    let st = ferridriver::ElementState::parse(&state).into_napi()?;
+    self
+      .inner
+      .wait_for_element_state(st, timeout.map(u64::from))
+      .await
+      .into_napi()
+  }
+
+  /// Playwright: `elementHandle.waitForSelector(selector, options?)`.
+  #[napi]
+  pub async fn wait_for_selector(&self, selector: String, timeout: Option<u32>) -> Result<Option<ElementHandle>> {
+    let maybe = self
+      .inner
+      .wait_for_selector(&selector, timeout.map(u64::from))
+      .await
+      .into_napi()?;
+    Ok(maybe.map(ElementHandle::wrap))
+  }
+
+  // ── Action methods (temp-tag bridge — Playwright parity) ─────────────
+
+  /// Playwright: `elementHandle.fill(value, options?)`.
+  #[napi]
+  pub async fn fill(&self, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.fill(&value, opts).await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.check(options?)`.
+  #[napi]
+  pub async fn check(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.check(opts).await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.uncheck(options?)`.
+  #[napi]
+  pub async fn uncheck(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.uncheck(opts).await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.setChecked(checked, options?)`.
+  #[napi]
+  pub async fn set_checked(&self, checked: bool, options: Option<crate::types::CheckOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.set_checked(checked, opts).await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.tap(options?)`.
+  #[napi]
+  pub async fn tap(&self, options: Option<crate::types::TapOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.tap(opts).await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.press(key, options?)`.
+  #[napi]
+  pub async fn press(&self, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.press(&key, opts).await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.dispatchEvent(type, eventInit?)`.
+  #[napi]
+  pub async fn dispatch_event(
+    &self,
+    event_type: String,
+    event_init: Option<serde_json::Value>,
+    options: Option<crate::types::DispatchEventOptions>,
+  ) -> Result<()> {
+    self
+      .inner
+      .dispatch_event(&event_type, event_init, options.map(Into::into))
+      .await
+      .into_napi()
+  }
+
+  /// Playwright: `elementHandle.selectOption(values, options?)`.
+  #[napi]
+  pub async fn select_option(
+    &self,
+    values: crate::types::NapiSelectOptionInput,
+    options: Option<crate::types::SelectOptionOptions>,
+  ) -> Result<Vec<String>> {
+    let opts = options.map(Into::into);
+    self.inner.select_option(values.0, opts).await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.selectText(options?)`.
+  #[napi]
+  pub async fn select_text(&self) -> Result<()> {
+    self.inner.select_text().await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.setInputFiles(files, options?)`.
+  #[napi]
+  pub async fn set_input_files(
+    &self,
+    files: crate::types::NapiInputFiles,
+    options: Option<crate::types::SetInputFilesOptions>,
+  ) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.set_input_files(files.0, opts).await.into_napi()
   }
 }
