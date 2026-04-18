@@ -1727,6 +1727,36 @@ impl BidiPage {
     Ok(())
   }
 
+  // ── Handle lifecycle ────────────────────────────────────────────────────
+
+  /// Release the remote handle identified by `shared_id` via
+  /// `script.disown`. Used by `AnyPage::release_handle` when disposing a
+  /// `JSHandle` / `ElementHandle` on a `BiDi` backend.
+  ///
+  /// `BiDi`'s `script.disown` takes an array of handle strings scoped to
+  /// one target; we always pass a single `sharedId`. If `handle` is
+  /// `Some(_)`, it is used verbatim — some browsers supply an
+  /// implementation-specific `handle` alongside `sharedId` that
+  /// `script.disown` accepts; the `sharedId` form is universally
+  /// supported and is what Playwright's own `bidiSession.ts` uses.
+  ///
+  /// # Errors
+  ///
+  /// Returns the transport error if the `BiDi` command fails.
+  pub async fn release_handle(&self, shared_id: &str, handle: Option<&str>) -> Result<(), String> {
+    let handle_str = handle.unwrap_or(shared_id);
+    self
+      .cmd(
+        "script.disown",
+        json!({
+          "handles": [handle_str],
+          "target": {"context": &*self.context_id},
+        }),
+      )
+      .await
+      .map(|_| ())
+  }
+
   // ── Exposed Functions ───────────────────────────────────────────────────
 
   pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<(), String> {

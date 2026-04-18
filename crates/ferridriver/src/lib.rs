@@ -24,10 +24,12 @@
 // ── Public API (Playwright-compatible) ──
 pub mod browser;
 pub mod context;
+pub mod element_handle;
 pub mod error;
 pub mod events;
 pub mod frame;
 pub(crate) mod frame_cache;
+pub mod js_handle;
 pub mod locator;
 pub mod options;
 pub mod page;
@@ -36,9 +38,11 @@ pub mod url_matcher;
 
 pub use browser::Browser;
 pub use context::{BrowserContext, ContextRef};
+pub use element_handle::ElementHandle;
 pub use error::{FerriError, Result};
 pub use events::{EventEmitter, PageEvent};
 pub use frame::Frame;
+pub use js_handle::{HandleRemote, JSHandle};
 pub use locator::{FrameLocator, Locator};
 pub use page::Page;
 pub use url_matcher::{UrlMatcher, UrlPredicate};

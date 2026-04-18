@@ -3112,6 +3112,27 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     }
     Ok(())
   }
+
+  // ── Handle lifecycle ──
+
+  /// Release the CDP `RemoteObject` identified by `object_id` via
+  /// `Runtime.releaseObject`. Used by `AnyPage::release_handle` when
+  /// disposing a `JSHandle` / `ElementHandle` on a CDP backend.
+  ///
+  /// # Errors
+  ///
+  /// Returns the CDP transport error if the call fails. Already-released
+  /// objects surface a protocol error containing `No object with id`
+  /// which callers (typically `JSHandle::dispose`) may choose to treat
+  /// as success — the dispose path here forwards the error as-is so
+  /// idempotence is handled client-side by the `disposed` flag, not by
+  /// swallowing protocol failures.
+  pub async fn release_object(&self, object_id: &str) -> Result<(), String> {
+    self
+      .cmd("Runtime.releaseObject", serde_json::json!({"objectId": object_id}))
+      .await
+      .map(|_| ())
+  }
 }
 
 // ---- CdpElement<T> ---------------------------------------------------------
@@ -3205,6 +3226,22 @@ impl<T: CdpTransport> CdpElement<T> {
     let mut handles = self.handles.lock().await;
     handles.object_id = Some(object_id.clone());
     Ok(object_id)
+  }
+
+  /// Public accessor for the element's cached `RemoteObjectId`. Resolves
+  /// and caches via `DOM.resolveNode` on first call. Used by
+  /// [`crate::backend::element_handle_remote`] to hand an
+  /// [`crate::js_handle::HandleRemote::Cdp`] payload back to
+  /// [`crate::js_handle::JSHandle`] / [`crate::element_handle::ElementHandle`]
+  /// at handle-materialization time.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element carries neither a cached `node_id`
+  /// nor an `object_id` — should not happen for elements freshly
+  /// returned from `find_element` / `evaluate_to_element`.
+  pub async fn ensure_object_id(&self) -> Result<Arc<str>, String> {
+    self.object_id().await
   }
 
   /// Get element center coordinates for clicking.

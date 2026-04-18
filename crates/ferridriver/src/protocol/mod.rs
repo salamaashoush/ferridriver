@@ -10,6 +10,6 @@
 pub mod serializers;
 
 pub use serializers::{
-  ErrorValue, PropertyEntry, RegExpValue, SerializedArgument, SerializedValue, SpecialValue, TypedArrayKind,
+  ErrorValue, HandleId, PropertyEntry, RegExpValue, SerializedArgument, SerializedValue, SpecialValue, TypedArrayKind,
   TypedArrayValue,
 };

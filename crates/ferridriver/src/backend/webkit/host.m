@@ -63,6 +63,7 @@ enum Op {
     OP_ACCESSIBILITY_TREE = 70,
     OP_ROUTE_REQUEST = 71,
     OP_GET_WEBKIT_VERSION = 72,
+    OP_RELEASE_REF = 73,
     OP_SHUTDOWN = 255,
 };
 
@@ -1290,6 +1291,47 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 result = @"WebKit/unknown";
             }
             write_frame_str(req_id, REP_VALUE, result);
+            break;
+        }
+
+        case OP_RELEASE_REF: {
+            // Payload: u64 ref_id + u64 vid.
+            //
+            // Deletes `window.__wr[ref_id]` so the handle's remote-object
+            // reference is released and its DOM element (or other value)
+            // becomes GC-eligible. Mirror of CDP's
+            // `Runtime.releaseObject` and BiDi's `script.disown`.
+            // Idempotent: deleting an absent key is a no-op — we always
+            // reply REP_OK so `JSHandle::dispose` can hit the page
+            // before/after a navigation without spurious errors.
+            uint32_t off = 0;
+            uint64_t ref_id = read_u64(payload, payload_len, &off);
+            uint64_t vid = read_u64(payload, payload_len, &off);
+            ViewEntry *v = get_view(vid);
+            if (!v) { write_frame_str(req_id, REP_ERROR, @"no view"); break; }
+
+            uint32_t captured_rid = req_id;
+            NSString *body = @"if (window.__wr && typeof window.__wr.delete === 'function') {"
+                              "  window.__wr.delete(__fd_ref_id);"
+                              "}"
+                              "return null;";
+            NSDictionary *args = @{@"__fd_ref_id": @(ref_id)};
+            [v->webview callAsyncJavaScript:body
+                                 arguments:args
+                                   inFrame:nil
+                            inContentWorld:[WKContentWorld pageWorld]
+                         completionHandler:^(id result, NSError *error) {
+                (void)result;
+                // Release is best-effort. If the page is navigating or
+                // the execution context has changed, callAsyncJavaScript
+                // surfaces an error — we still reply REP_OK so the
+                // dispose path on the Rust side can remain idempotent.
+                // Error is logged at stderr so real bugs aren't silent.
+                if (error) {
+                    NSLog(@"[fd_webkit_host] OP_RELEASE_REF soft-fail: %@", error.localizedDescription);
+                }
+                write_frame(captured_rid, REP_OK, NULL, 0);
+            }];
             break;
         }
 
