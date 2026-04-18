@@ -1072,13 +1072,34 @@ impl<T: CdpWrap> CdpPage<T> {
         other => serde_json::from_value(other).map_err(|e| format!("call_utility_evaluate: parse result: {e}"))?,
       };
       Ok(crate::js_handle::EvaluateResult::Value(parsed))
-    } else {
-      let obj_id = result_obj
-        .get("objectId")
-        .and_then(|v| v.as_str())
-        .ok_or("call_utility_evaluate: result has no objectId in evaluateHandle mode")?;
+    } else if let Some(obj_id) = result_obj.get("objectId").and_then(|v| v.as_str()) {
       Ok(crate::js_handle::EvaluateResult::Handle(
-        crate::js_handle::HandleRemote::Cdp(Arc::from(obj_id)),
+        crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Cdp(Arc::from(obj_id))),
+      ))
+    } else {
+      // No objectId — the CDP result is a primitive (number, string,
+      // boolean, null, undefined). Playwright's `createHandle`
+      // (`/tmp/playwright/packages/playwright-core/src/server/chromium/crProtocolHelper.ts`)
+      // produces a value-backed JSHandle here. Parse the inline
+      // `value` into our wire shape and ride it back through
+      // `JSHandleBacking::Value`.
+      let value = result_obj.get("value").cloned().unwrap_or(serde_json::Value::Null);
+      let mut ctx = crate::protocol::SerializationContext::default();
+      let serialized = if value.is_null() {
+        // CDP encodes `null` literally but encodes `undefined` as a
+        // missing `value` field with `type: "undefined"`. Distinguish
+        // the two via `type` so jsonValue round-trips faithfully.
+        let ty = result_obj.get("type").and_then(|v| v.as_str()).unwrap_or("");
+        if ty == "undefined" {
+          crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+        } else {
+          crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Null)
+        }
+      } else {
+        crate::protocol::SerializedValue::from_json(&value, &mut ctx)
+      };
+      Ok(crate::js_handle::EvaluateResult::Handle(
+        crate::js_handle::JSHandleBacking::Value(serialized),
       ))
     }
   }

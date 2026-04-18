@@ -547,12 +547,12 @@ impl napi::bindgen_prelude::FromNapiValue for NapiEvaluateArg {
     if let Ok(jh) = unsafe {
       <napi::bindgen_prelude::ClassInstance<'_, crate::js_handle::JSHandle> as napi::bindgen_prelude::FromNapiValue>::from_napi_value(env, napi_val)
     } {
-      return Ok(Self(jh.inner_ref().remote().to_serialized_argument()));
+      return Ok(Self(jh.inner_ref().backing().to_serialized_argument()));
     }
     if let Ok(eh) = unsafe {
       <napi::bindgen_prelude::ClassInstance<'_, crate::element_handle::ElementHandle> as napi::bindgen_prelude::FromNapiValue>::from_napi_value(env, napi_val)
     } {
-      return Ok(Self(eh.inner_ref().remote().to_serialized_argument()));
+      return Ok(Self(eh.inner_ref().as_js_handle().backing().to_serialized_argument()));
     }
 
     // Quick `undefined` check via the C API to avoid importing `JsValue`

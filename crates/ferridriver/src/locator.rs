@@ -517,10 +517,16 @@ impl Locator {
     let timeout_ms = opts.timeout;
     retry_resolve!(self, timeout_ms, "press", |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
+      // Playwright's server-side press focuses the element before
+      // dispatching keys so the event lands at the intended target
+      // (`/tmp/playwright/packages/playwright-core/src/server/dom.ts`
+      // `_press` → `_focus` → `keyboard.press`). Without this the
+      // key dispatches to whatever's currently focused, usually the
+      // body, and the element under the locator never sees it.
+      el.call_js_fn("function() { this.focus(); }").await?;
       if delay_ms > 0 {
-        // Playwright: when delay is set, press is equivalent to
-        // keyDown + sleep(delay) + keyUp so the page observes the
-        // held-key interval.
+        // With a delay, press is equivalent to keyDown + sleep(delay)
+        // + keyUp so the page observes the held-key interval.
         page.key_down(key).await?;
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
         page.key_up(key).await

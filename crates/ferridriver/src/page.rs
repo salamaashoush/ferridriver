@@ -539,7 +539,9 @@ impl Page {
       .call_utility_evaluate(fn_source, args_slice, &arg.handles, None, is_function, false)
       .await?;
     match result {
-      crate::js_handle::EvaluateResult::Handle(remote) => Ok(crate::js_handle::JSHandle::new(Arc::clone(self), remote)),
+      crate::js_handle::EvaluateResult::Handle(backing) => {
+        Ok(crate::js_handle::JSHandle::from_backing(Arc::clone(self), backing))
+      },
       crate::js_handle::EvaluateResult::Value(_) => Err(crate::error::FerriError::Evaluation(
         "evaluate_handle_with_arg: backend returned value but returnByValue=false was requested".into(),
       )),
