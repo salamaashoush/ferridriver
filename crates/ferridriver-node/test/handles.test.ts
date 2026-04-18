@@ -122,16 +122,20 @@ for (const backend of BACKENDS) {
       await jh.dispose();
     });
 
-    it("JSHandle.asElement returns null in phase C (placeholder)", async () => {
+    it("JSHandle.asElement returns an ElementHandle for DOM-node remotes", async () => {
       const eh = await page.querySelector("button#primary");
       expect(eh).not.toBeNull();
       const jh = eh!.asJsHandle();
-      // Phase C: the JSHandle layer can't yet distinguish DOM from
-      // non-DOM remotes without the phase-D remote-type inspection.
-      // Phase D changes this test to expect a non-null result for
-      // element-typed remotes.
-      expect(jh.asElement()).toBeNull();
+      const promoted = await jh.asElement();
+      expect(promoted).not.toBeNull();
       await eh!.dispose();
+    });
+
+    it("JSHandle.asElement returns null for non-DOM remotes", async () => {
+      const jh = await page.evaluateHandleWithArg("() => ({ not: 'a dom node' })", null);
+      const promoted = await jh.asElement();
+      expect(promoted).toBeNull();
+      await jh.dispose();
     });
 
     // ── Phase D: evaluate(fn, arg) + evaluateHandle ──
