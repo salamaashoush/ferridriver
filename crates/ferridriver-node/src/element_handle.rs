@@ -89,7 +89,7 @@ impl ElementHandle {
   pub async fn evaluate_with_arg(
     &self,
     fn_source: String,
-    arg: Option<serde_json::Value>,
+    arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<Option<serde_json::Value>> {
     let serialized = crate::page::build_serialized_argument(arg);
     let result = self
@@ -106,7 +106,7 @@ impl ElementHandle {
   pub async fn evaluate_with_arg_wire(
     &self,
     fn_source: String,
-    arg: Option<serde_json::Value>,
+    arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<serde_json::Value> {
     let serialized = crate::page::build_serialized_argument(arg);
     let result = self
@@ -123,7 +123,7 @@ impl ElementHandle {
   pub async fn evaluate_handle_with_arg(
     &self,
     fn_source: String,
-    arg: Option<serde_json::Value>,
+    arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::js_handle::JSHandle> {
     let serialized = crate::page::build_serialized_argument(arg);
     let handle = self
@@ -263,7 +263,7 @@ impl ElementHandle {
     &self,
     selector: String,
     fn_source: String,
-    arg: Option<serde_json::Value>,
+    arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<Option<serde_json::Value>> {
     let serialized = crate::page::build_serialized_argument(arg);
     let result = self
@@ -280,7 +280,7 @@ impl ElementHandle {
     &self,
     selector: String,
     fn_source: String,
-    arg: Option<serde_json::Value>,
+    arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<Option<serde_json::Value>> {
     let serialized = crate::page::build_serialized_argument(arg);
     let result = self

@@ -6,36 +6,21 @@ use crate::types::{
   DragAndDropOptions, GotoOptions, MetricData, ResponseData, RoleOptions, ScreenshotOptions, TextOptions,
   ViewportConfig, WaitOptions,
 };
-use ferridriver::protocol::{SerializationContext, SerializedArgument, SerializedValue, SpecialValue};
+use ferridriver::protocol::SerializedArgument;
 use napi::Result;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::sync::{Arc, Mutex};
 
-/// Lower a JSON-expressible NAPI argument into a
-/// [`SerializedArgument`] ready for the core's `evaluate_with_arg` /
-/// `evaluate_handle_with_arg` path. `None` becomes an `undefined`
-/// sentinel with empty handles; any other JSON value is walked through
-/// [`SerializedValue::from_json`].
-///
-/// Phase-D MVP: rich types (`Date`, `RegExp`, `BigInt`, typed arrays,
-/// `JSHandle` references) are not detected yet — callers pass those
-/// through their Playwright-typed counterparts once the detection
-/// layer is bolted on.
-pub(crate) fn build_serialized_argument(arg: Option<serde_json::Value>) -> SerializedArgument {
-  match arg {
-    None => SerializedArgument {
-      value: SerializedValue::Special(SpecialValue::Undefined),
-      handles: Vec::new(),
-    },
-    Some(v) => {
-      let mut ctx = SerializationContext::default();
-      SerializedArgument {
-        value: SerializedValue::from_json(&v, &mut ctx),
-        handles: Vec::new(),
-      }
-    },
-  }
+/// Lower an optional [`crate::types::NapiEvaluateArg`] into a
+/// [`SerializedArgument`]. `None` maps to the `undefined` sentinel so
+/// the utility script sees the user function called with zero
+/// positional args; `Some(NapiEvaluateArg(_))` returns the wrapped
+/// argument directly. The class-instance detection for `JSHandle` /
+/// `ElementHandle` happens inside [`crate::types::NapiEvaluateArg`]'s
+/// `FromNapiValue` impl — this helper just unwraps.
+pub(crate) fn build_serialized_argument(arg: Option<crate::types::NapiEvaluateArg>) -> SerializedArgument {
+  arg.map(|a| a.0).unwrap_or_default()
 }
 
 /// High-level page API, mirrors Playwright's Page interface.
@@ -637,7 +622,7 @@ impl Page {
   pub async fn evaluate_with_arg(
     &self,
     fn_source: String,
-    arg: Option<serde_json::Value>,
+    arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<Option<serde_json::Value>> {
     let serialized = build_serialized_argument(arg);
     let result = self
@@ -657,7 +642,7 @@ impl Page {
   pub async fn evaluate_with_arg_wire(
     &self,
     fn_source: String,
-    arg: Option<serde_json::Value>,
+    arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<serde_json::Value> {
     let serialized = build_serialized_argument(arg);
     let result = self
@@ -675,7 +660,7 @@ impl Page {
   pub async fn evaluate_handle_with_arg(
     &self,
     fn_source: String,
-    arg: Option<serde_json::Value>,
+    arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::js_handle::JSHandle> {
     let serialized = build_serialized_argument(arg);
     let handle = self

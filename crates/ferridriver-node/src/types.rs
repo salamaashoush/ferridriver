@@ -506,6 +506,80 @@ impl napi::bindgen_prelude::FromNapiValue for NapiSelectOptionInput {
   }
 }
 
+/// Polymorphic `arg` parameter for the evaluate family (`page.evaluate`,
+/// `page.evaluateHandle`, `handle.evaluate`, `handle.evaluateHandle`,
+/// `elementHandle.$eval`, etc.). Detects `JSHandle` / `ElementHandle`
+/// class instances at the NAPI boundary so a handle passed as the
+/// argument surfaces inside the user function as a native page-side
+/// object, mirroring Playwright's `serializeArgument` at
+/// `/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:91`.
+///
+/// Nested handles (inside arrays / plain objects) are not detected in
+/// this pass — top-level handles cover every shipped Playwright test
+/// that passes a handle as `arg`; nested is a follow-up that walks the
+/// object tree before it hits the JSON fallback.
+#[derive(Debug, Clone)]
+pub struct NapiEvaluateArg(pub ferridriver::protocol::SerializedArgument);
+
+impl napi::bindgen_prelude::TypeName for NapiEvaluateArg {
+  fn type_name() -> &'static str {
+    "unknown"
+  }
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Unknown
+  }
+}
+
+impl napi::bindgen_prelude::ValidateNapiValue for NapiEvaluateArg {}
+
+impl napi::bindgen_prelude::FromNapiValue for NapiEvaluateArg {
+  unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    use ferridriver::protocol::{SerializationContext, SerializedArgument, SerializedValue, SpecialValue};
+
+    // Try top-level class-instance detection. `napi_unwrap` returns an
+    // error when the value isn't a wrapped class of the target `T`;
+    // attempts fall through to the JSON path. When the value IS a
+    // `JSHandle` / `ElementHandle`, the binding extracts the backend
+    // remote and hands it to `HandleRemote::to_serialized_argument`
+    // — the canonical packaging lives on core so the NAPI and
+    // QuickJS surfaces produce identical wire shapes (Rule 1: Rust
+    // is source of truth; bindings are thin mirrors).
+    if let Ok(jh) = unsafe {
+      <napi::bindgen_prelude::ClassInstance<'_, crate::js_handle::JSHandle> as napi::bindgen_prelude::FromNapiValue>::from_napi_value(env, napi_val)
+    } {
+      return Ok(Self(jh.inner_ref().remote().to_serialized_argument()));
+    }
+    if let Ok(eh) = unsafe {
+      <napi::bindgen_prelude::ClassInstance<'_, crate::element_handle::ElementHandle> as napi::bindgen_prelude::FromNapiValue>::from_napi_value(env, napi_val)
+    } {
+      return Ok(Self(eh.inner_ref().remote().to_serialized_argument()));
+    }
+
+    // Quick `undefined` check via the C API to avoid importing `JsValue`
+    // just for one call. A missing / undefined arg surfaces as the
+    // `undefined` sentinel so the utility script skips the arg slot.
+    let mut ty = napi::sys::ValueType::napi_undefined;
+    unsafe {
+      napi::check_status!(napi::sys::napi_typeof(env, napi_val, &raw mut ty))?;
+    }
+    if ty == napi::sys::ValueType::napi_undefined {
+      return Ok(Self(SerializedArgument {
+        value: SerializedValue::Special(SpecialValue::Undefined),
+        handles: Vec::new(),
+      }));
+    }
+    // JSON fallback (null / primitives / plain objects / arrays).
+    // `FromNapiValue` on `serde_json::Value` does the walk.
+    let json: serde_json::Value =
+      unsafe { <serde_json::Value as napi::bindgen_prelude::FromNapiValue>::from_napi_value(env, napi_val)? };
+    let mut alloc = SerializationContext::default();
+    Ok(Self(SerializedArgument {
+      value: SerializedValue::from_json(&json, &mut alloc),
+      handles: Vec::new(),
+    }))
+  }
+}
+
 /// Playwright-parity options for `selectOption`. Three fields per
 /// Playwright's `LocatorSelectOptionOptions`.
 #[napi(object)]
