@@ -413,6 +413,20 @@ impl BackendClickArgs {
   }
 }
 
+/// Backend-ready hover arguments. Produced by
+/// [`crate::actions::hover_with_opts`] from the user's
+/// [`crate::options::HoverOptions`]. Shape is the subset of
+/// [`BackendClickArgs`] a hover needs — modifiers bitmask + `steps`
+/// interpolated `mousemove` events.
+#[derive(Debug, Clone, Copy)]
+pub struct BackendHoverArgs {
+  /// CDP modifier bitmask carried on each synthesised mouse event.
+  pub modifiers_bitmask: u32,
+  /// Interpolated `mousemove` events between the current cursor and
+  /// `(x, y)`. `1` = single move at destination.
+  pub steps: u32,
+}
+
 /// Navigation lifecycle target — which CDP event to wait for after Page.navigate.
 /// Matches Playwright's `waitUntil` semantics exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -741,6 +755,13 @@ impl AnyPage {
   /// `!args.modifiers.is_empty()`.
   pub async fn click_at_with(&self, x: f64, y: f64, args: &BackendClickArgs) -> Result<(), String> {
     page_dispatch!(self, click_at_with(x, y, args))
+  }
+
+  /// Dispatch a hover (no press/release) at `(x, y)` with `steps`
+  /// interpolated `mousemove` events and the caller's modifier bitmask
+  /// on each. Modifier keydown/keyup is the caller's responsibility.
+  pub async fn hover_at_with(&self, x: f64, y: f64, args: &BackendHoverArgs) -> Result<(), String> {
+    page_dispatch!(self, hover_at_with(x, y, args))
   }
 
   /// Press all modifiers in `mods` via the backend's keyboard input

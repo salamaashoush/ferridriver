@@ -742,6 +742,172 @@ pub async fn click_with_opts(
   result
 }
 
+/// Dispatch a hover with the full [`crate::options::HoverOptions`]
+/// surface. Mirrors Playwright's `server/dom.ts::ElementHandle._hover`:
+/// scroll-into-view, actionability (unless `force`), press modifiers,
+/// then emit `steps` interpolated `mousemove` events ending at the
+/// element's centre (or the `position` offset). No `mousedown` /
+/// `mouseup` is fired — hover is the bare pointer move. Modifiers are
+/// released on every exit path so page state doesn't leak.
+///
+/// # Errors
+///
+/// Returns an error from actionability, point resolution, or the
+/// per-backend mouse-move dispatch.
+pub async fn hover_with_opts(
+  element: &AnyElement,
+  page: &AnyPage,
+  opts: &crate::options::HoverOptions,
+) -> Result<(), String> {
+  if !opts.is_force() {
+    wait_for_actionable(element, page).await.ok();
+  }
+  page.press_modifiers(&opts.modifiers).await?;
+  let result: Result<(), String> = if opts.is_trial() {
+    Ok(())
+  } else {
+    match resolve_click_point(element, opts.position).await {
+      Ok((x, y)) => {
+        let args = crate::backend::BackendHoverArgs {
+          modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
+          steps: opts.resolved_steps(),
+        };
+        page.hover_at_with(x, y, &args).await
+      },
+      Err(e) => Err(e),
+    }
+  };
+  let _ = page.release_modifiers(&opts.modifiers).await;
+  result
+}
+
+/// Dispatch a tap (touch event) with the full Playwright
+/// [`crate::options::TapOptions`] surface. Mirrors
+/// `server/dom.ts::ElementHandle._tap`: scroll-into-view, actionability
+/// (unless `force`), press modifiers, then fire a touch-event sequence
+/// at the element's centre (or `position` offset). Touch events include
+/// the modifier flags in their event init dict so the page's
+/// `event.shiftKey` etc. are true when the caller requested them.
+///
+/// Modifiers are released on every exit path.
+///
+/// Uses JS dispatch rather than native touch input because all three
+/// backends lack a standard cross-platform touch primitive — CDP's
+/// `Input.dispatchTouchEvent` is Chromium-only, `BiDi` has no touch
+/// pointer type equivalent in stable, and `WKWebView` has no public
+/// touch injection API. The JS path matches the existing `tap` impl
+/// behavior on all three backends and produces `isTrusted:false`
+/// events, which suffices for everything bar click-jacking defenses.
+///
+/// # Errors
+///
+/// Returns an error from actionability, point resolution, or the JS
+/// dispatch itself.
+pub async fn tap_with_opts(
+  element: &AnyElement,
+  page: &AnyPage,
+  opts: &crate::options::TapOptions,
+) -> Result<(), String> {
+  if !opts.is_force() {
+    wait_for_actionable(element, page).await.ok();
+  }
+  page.press_modifiers(&opts.modifiers).await?;
+  let result: Result<(), String> = if opts.is_trial() {
+    Ok(())
+  } else {
+    let shift = opts.modifiers.contains(&crate::options::Modifier::Shift);
+    let alt = opts.modifiers.contains(&crate::options::Modifier::Alt);
+    let ctrl_raw = opts.modifiers.contains(&crate::options::Modifier::Control);
+    let meta_raw = opts.modifiers.contains(&crate::options::Modifier::Meta);
+    let com = opts.modifiers.contains(&crate::options::Modifier::ControlOrMeta);
+    let (ctrl, meta) = if cfg!(target_os = "macos") {
+      (ctrl_raw, meta_raw || com)
+    } else {
+      (ctrl_raw || com, meta_raw)
+    };
+    let position_js = match opts.position {
+      Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
+      None => "null".to_string(),
+    };
+    let js = format!(
+      "function() {{ \
+        if (typeof this.scrollIntoViewIfNeeded === 'function') {{ \
+          this.scrollIntoViewIfNeeded(); \
+        }} else {{ \
+          this.scrollIntoView({{ block: 'center', inline: 'center' }}); \
+        }} \
+        var r = this.getBoundingClientRect(); \
+        var pos = {position_js}; \
+        var cx = pos ? (r.left + pos.x) : (r.left + r.width / 2); \
+        var cy = pos ? (r.top + pos.y) : (r.top + r.height / 2); \
+        var init = {{ clientX: cx, clientY: cy, bubbles: true, \
+          shiftKey: {shift}, altKey: {alt}, ctrlKey: {ctrl}, metaKey: {meta} }}; \
+        if (typeof Touch !== 'undefined' && typeof TouchEvent !== 'undefined') {{ \
+          var t = new Touch({{ identifier: 1, target: this, clientX: cx, clientY: cy }}); \
+          this.dispatchEvent(new TouchEvent('touchstart', Object.assign({{ touches: [t], changedTouches: [t] }}, init))); \
+          this.dispatchEvent(new TouchEvent('touchend', Object.assign({{ touches: [], changedTouches: [t] }}, init))); \
+        }} else {{ \
+          this.dispatchEvent(new PointerEvent('pointerdown', Object.assign({{ isPrimary: true, pointerType: 'touch' }}, init))); \
+          this.dispatchEvent(new PointerEvent('pointerup', Object.assign({{ isPrimary: true, pointerType: 'touch' }}, init))); \
+          this.click(); \
+        }} \
+      }}"
+    );
+    element.call_js_fn(&js).await
+  };
+  let _ = page.release_modifiers(&opts.modifiers).await;
+  result
+}
+
+/// Select options on a `<select>` element. Each
+/// [`crate::options::SelectOptionValue`] descriptor matches options by
+/// `value`, `label`, or `index` per Playwright's
+/// `injected/selectOptions` (see
+/// `/tmp/playwright/packages/injected/src/injectedScript.ts`); arrays
+/// select every matching option for multi-selects.
+///
+/// Returns the final list of selected `option.value`s, matching
+/// Playwright's `selectOption` return shape.
+///
+/// # Errors
+///
+/// Returns an error if the element is not a `<select>`, or no option
+/// matches any of the provided descriptors.
+pub async fn select_options(
+  element: &AnyElement,
+  page: &AnyPage,
+  values: &[crate::options::SelectOptionValue],
+) -> Result<Vec<String>, String> {
+  let fd = page.injected_script().await?;
+  let values_json = serde_json::to_string(values).map_err(|e| format!("select_option serialize: {e}"))?;
+  // The injected `selectOptions` wrapper takes `(el, ...descriptors)`
+  // via rest args — spread the descriptor array into positional args.
+  let js = format!(
+    "function() {{ \
+      var descriptors = {values_json}; \
+      var result = {fd}.selectOptions.apply(null, [this].concat(descriptors)); \
+      if (typeof result === 'string') return JSON.stringify({{ error: result }}); \
+      return JSON.stringify({{ selected: result }}); \
+    }}"
+  );
+  let raw = element
+    .call_js_fn_value(&js)
+    .await?
+    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+    .unwrap_or_default();
+  let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+  if let Some(err) = parsed.get("error").and_then(|v| v.as_str()) {
+    return Err(err.to_string());
+  }
+  Ok(
+    parsed
+      .get("selected")
+      .and_then(|v| v.as_array())
+      .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+      .unwrap_or_default(),
+  )
+}
+
 /// Wait for an element to be actionable (visible, enabled, stable).
 /// Polls from the Rust side with short sleeps — no blocking JS promises
 /// — so parallel pages can make progress concurrently.

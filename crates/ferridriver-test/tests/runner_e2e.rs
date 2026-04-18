@@ -164,7 +164,7 @@ fn make_fill_test() -> TestCase {
         })?;
         page
           .locator("#inp", None)
-          .fill("hello world")
+          .fill("hello world", None)
           .await
           .map_err(|e| TestFailure {
             message: format!("fill failed: {e}"),

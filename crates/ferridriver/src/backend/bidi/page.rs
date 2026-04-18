@@ -765,6 +765,16 @@ impl BidiPage {
     Ok(())
   }
 
+  pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::super::BackendHoverArgs) -> Result<(), String> {
+    self
+      .cmd(
+        "input.performActions",
+        input::hover_with_args(&self.context_id, x, y, *args),
+      )
+      .await?;
+    Ok(())
+  }
+
   pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
     if mods.is_empty() {
       return Ok(());

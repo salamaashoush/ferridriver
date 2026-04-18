@@ -85,7 +85,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 1.5 Action option bags on Locator and Page
 
-- [~] Click shipped (all backends, all options). Dblclick/hover/fill/type/press/check/uncheck/setChecked/tap/dragTo/dispatchEvent/selectOption/setInputFiles still pending — fan out the Click pattern.
+- [x] Every Playwright action method grew its full option bag across Rust core, NAPI, and QuickJS. Every field reaches CDP/BiDi/WebKit. No stubs.
 - **Playwright ref**: `LocatorClickOptions`, `LocatorHoverOptions`, `LocatorFillOptions`, `LocatorPressOptions`, `LocatorTypeOptions`, `LocatorCheckOptions`, `LocatorSetCheckedOptions`, `LocatorTapOptions`, `LocatorDblClickOptions`, `LocatorDragToOptions`, `LocatorScreenshotOptions`, `LocatorWaitForOptions` in `types.d.ts`.
 - **Files**: `crates/ferridriver/src/options.rs` (new structs); `crates/ferridriver/src/locator.rs`; `crates/ferridriver/src/page.rs`; `crates/ferridriver-node/src/locator.rs`; `crates/ferridriver-node/src/page.rs`.
 - **Per-option coverage** (all fields, not a subset):

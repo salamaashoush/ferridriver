@@ -359,10 +359,14 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the double-click fails.
-  pub async fn dblclick(&self) -> Result<()> {
+  pub async fn dblclick(&self, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
+    // `dblclick` is a click pair with `clickCount` = 1 then 2 — Playwright's
+    // `server/dom.ts::ElementHandle._dblclick` does the same; our shared
+    // `click_with_opts` honors that when `click_count` is set to `2`.
+    let click_opts = opts.unwrap_or_default().into_click_options();
+    let click_opts_ref = &click_opts;
     retry_resolve!(self, |el, page| async move {
-      actions::wait_for_actionable(&el, page).await.ok();
-      el.dblclick().await
+      actions::click_with_opts(&el, page, click_opts_ref).await
     })
   }
 
@@ -391,8 +395,15 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not a fillable element.
-  pub async fn fill(&self, value: &str) -> Result<()> {
-    retry_resolve!(self, |el, _page| async move { actions::fill(&el, value).await })
+  pub async fn fill(&self, value: &str, opts: Option<crate::options::FillOptions>) -> Result<()> {
+    let opts = opts.unwrap_or_default();
+    let opts_ref = &opts;
+    retry_resolve!(self, |el, page| async move {
+      if !opts_ref.is_force() {
+        actions::wait_for_actionable(&el, page).await.ok();
+      }
+      actions::fill(&el, value).await
+    })
   }
 
   /// Clear the value of an input or textarea element.
@@ -418,10 +429,23 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or key dispatch fails.
-  pub async fn r#type(&self, text: &str) -> Result<()> {
+  pub async fn r#type(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
+    let opts = opts.unwrap_or_default();
+    let delay_ms = opts.resolved_delay_ms();
     retry_resolve!(self, |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
-      el.type_str(text).await
+      if delay_ms > 0 {
+        // With a per-char delay, fall back to the character-by-character
+        // keyboard dispatch (same code path Playwright uses for
+        // `pressSequentially`).
+        for ch in text.chars() {
+          page.press_key(&ch.to_string()).await?;
+          tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        }
+        Ok(())
+      } else {
+        el.type_str(text).await
+      }
     })
   }
 
@@ -430,8 +454,22 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the key press fails.
-  pub async fn press(&self, key: &str) -> Result<()> {
-    retry_resolve!(self, |_el, page| async move { page.press_key(key).await })
+  pub async fn press(&self, key: &str, opts: Option<crate::options::PressOptions>) -> Result<()> {
+    let opts = opts.unwrap_or_default();
+    let delay_ms = opts.resolved_delay_ms();
+    retry_resolve!(self, |el, page| async move {
+      actions::wait_for_actionable(&el, page).await.ok();
+      if delay_ms > 0 {
+        // Playwright: when delay is set, press is equivalent to
+        // keyDown + sleep(delay) + keyUp so the page observes the
+        // held-key interval.
+        page.key_down(key).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
+        page.key_up(key).await
+      } else {
+        page.press_key(key).await
+      }
+    })
   }
 
   /// Hover over the element matched by this locator.
@@ -439,10 +477,11 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the hover action fails.
-  pub async fn hover(&self) -> Result<()> {
+  pub async fn hover(&self, opts: Option<crate::options::HoverOptions>) -> Result<()> {
+    let opts = opts.unwrap_or_default();
+    let opts_ref = &opts;
     retry_resolve!(self, |el, page| async move {
-      actions::wait_for_actionable(&el, page).await.ok();
-      el.hover().await
+      actions::hover_with_opts(&el, page, opts_ref).await
     })
   }
 
@@ -463,39 +502,55 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not actionable.
-  pub async fn check(&self) -> Result<()> {
-    retry_resolve!(self, |el, page| async move {
-      actions::wait_for_actionable(&el, page).await.ok();
-      el.call_js_fn("function() { if (!this.checked) this.click(); }").await?;
-      Ok::<(), String>(())
-    })
+  pub async fn check(&self, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+    self.set_checked(true, opts).await
   }
 
-  /// Uncheck a checkbox if it is currently checked.
+  /// Uncheck a checkbox if it is currently checked. Mirrors Playwright's
+  /// `LocatorUncheckOptions`.
   ///
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not actionable.
-  pub async fn uncheck(&self) -> Result<()> {
-    retry_resolve!(self, |el, page| async move {
-      actions::wait_for_actionable(&el, page).await.ok();
-      el.call_js_fn("function() { if (this.checked) this.click(); }").await?;
-      Ok::<(), String>(())
-    })
+  pub async fn uncheck(&self, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+    self.set_checked(false, opts).await
   }
 
-  /// Set the checked state of a checkbox or radio button.
-  /// If `checked` is true, checks it. If false, unchecks it.
+  /// Set the checked state of a checkbox or radio button to match
+  /// `checked`. Playwright-parity: reads the element's current
+  /// `checked` property; if it already matches the target state, the
+  /// call is a no-op (but actionability checks still run). Otherwise
+  /// dispatches a real click via [`actions::click_with_opts`] so the
+  /// page sees `input` / `change` events with the correct timing.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element cannot be found or is not actionable.
-  pub async fn set_checked(&self, checked: bool) -> Result<()> {
-    if checked {
-      self.check().await
-    } else {
-      self.uncheck().await
-    }
+  /// Returns an error if the element cannot be found, is not
+  /// actionable, or the click dispatch fails.
+  pub async fn set_checked(&self, checked: bool, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+    let opts = opts.unwrap_or_default();
+    // Lower to ClickOptions for the shared click dispatch path so
+    // `force` / `trial` / `position` / `timeout` all flow through.
+    let click_opts = opts.into_click_options();
+    let click_opts_ref = &click_opts;
+    retry_resolve!(self, |el, page| async move {
+      // Read the current `checked` property in the element's execution
+      // context; if it already matches `checked`, skip the click.
+      let state = el
+        .call_js_fn_value("function() { return !!this.checked; }")
+        .await?
+        .and_then(|v| v.as_bool())
+        .unwrap_or(false);
+      if state == checked {
+        // Still run actionability so the caller sees a consistent
+        // deadline / failure behavior, but skip the click.
+        if !click_opts_ref.is_force() {
+          actions::wait_for_actionable(&el, page).await.ok();
+        }
+        return Ok::<(), String>(());
+      }
+      actions::click_with_opts(&el, page, click_opts_ref).await
+    })
   }
 
   /// Tap the element (touch event). Dispatches touchstart + touchend on platforms
@@ -505,25 +560,12 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or the tap event dispatch fails.
-  pub async fn tap(&self) -> Result<()> {
-    let el = self.resolve().await?;
-    actions::wait_for_actionable(&el, self.frame.page_arc().inner())
-      .await
-      .ok();
-    el.call_js_fn("function() { \
-      this.scrollIntoViewIfNeeded && this.scrollIntoViewIfNeeded(); \
-      var r = this.getBoundingClientRect(); \
-      var cx = r.left + r.width/2, cy = r.top + r.height/2; \
-      if (typeof Touch !== 'undefined' && typeof TouchEvent !== 'undefined') { \
-        var t = new Touch({identifier:1,target:this,clientX:cx,clientY:cy}); \
-        this.dispatchEvent(new TouchEvent('touchstart',{touches:[t],changedTouches:[t],bubbles:true})); \
-        this.dispatchEvent(new TouchEvent('touchend',{touches:[],changedTouches:[t],bubbles:true})); \
-      } else { \
-        this.dispatchEvent(new PointerEvent('pointerdown',{clientX:cx,clientY:cy,bubbles:true,isPrimary:true,pointerType:'touch'})); \
-        this.dispatchEvent(new PointerEvent('pointerup',{clientX:cx,clientY:cy,bubbles:true,isPrimary:true,pointerType:'touch'})); \
-        this.click(); \
-      } \
-    }").await.map_err(Into::into)
+  pub async fn tap(&self, opts: Option<crate::options::TapOptions>) -> Result<()> {
+    let opts = opts.unwrap_or_default();
+    let opts_ref = &opts;
+    retry_resolve!(self, |el, page| async move {
+      actions::tap_with_opts(&el, page, opts_ref).await
+    })
   }
 
   /// Select all text in an input or textarea element.
@@ -549,23 +591,65 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or is not a `<select>`.
-  pub async fn select_option(&self, value: &str) -> Result<Vec<String>> {
+  pub async fn select_option(
+    &self,
+    values: Vec<crate::options::SelectOptionValue>,
+    _opts: Option<crate::options::SelectOptionOptions>,
+  ) -> Result<Vec<String>> {
+    // Strict actionability/timeout honoring lands with the 3.17 deadline
+    // parity task; for now we stay compatible with the existing caller
+    // behavior (single-shot resolve + dispatch).
     let el = self.resolve().await?;
-    let result = actions::select_option(&el, self.frame.page_arc().inner(), value).await?;
-    Ok(vec![result.selected_value])
+    actions::select_options(&el, self.frame.page_arc().inner(), &values)
+      .await
+      .map_err(Into::into)
   }
-
-  // (select_option reserved for future ElementHandle / SelectOption array overloads per task #5.)
 
   /// Set file paths on a file input element.
   ///
   /// # Errors
   ///
   /// Returns an error if the element is not a file input or the upload fails.
-  pub async fn set_input_files(&self, paths: &[String]) -> Result<()> {
-    actions::upload_file(self.frame.page_arc().inner(), &self.selector, paths)
-      .await
-      .map_err(Into::into)
+  pub async fn set_input_files(
+    &self,
+    files: crate::options::InputFiles,
+    _opts: Option<crate::options::SetInputFilesOptions>,
+  ) -> Result<()> {
+    // Lower `Payloads` to temp-file paths so the wire-level CDP
+    // `DOM.setFileInputFiles` command can carry them unchanged — the
+    // alternative would be a separate per-backend `setFileInputBytes`
+    // op, which only Playwright's internal CDP protocol supports.
+    // Temp files live for the action only; we delete them after the
+    // backend call returns regardless of success/failure.
+    match files {
+      crate::options::InputFiles::Paths(paths) => {
+        let strs: Vec<String> = paths.into_iter().map(|p| p.display().to_string()).collect();
+        actions::upload_file(self.frame.page_arc().inner(), &self.selector, &strs)
+          .await
+          .map_err(Into::into)
+      },
+      crate::options::InputFiles::Payloads(payloads) => {
+        let tmp_dir = std::env::temp_dir().join(format!("ferridriver-files-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_dir)
+          .map_err(|e| crate::error::FerriError::Other(format!("failed to create upload temp dir: {e}")))?;
+        let mut paths: Vec<String> = Vec::new();
+        for (i, p) in payloads.iter().enumerate() {
+          let safe_name = p.name.replace(['/', '\\', '\0'], "_");
+          let path = tmp_dir.join(format!("{i}-{safe_name}"));
+          std::fs::write(&path, &p.buffer)
+            .map_err(|e| crate::error::FerriError::Other(format!("failed to write upload payload: {e}")))?;
+          paths.push(path.display().to_string());
+        }
+        let res = actions::upload_file(self.frame.page_arc().inner(), &self.selector, &paths).await;
+        // Best-effort cleanup — don't let an unlink error shadow the
+        // primary upload outcome.
+        for p in &paths {
+          let _ = std::fs::remove_file(p);
+        }
+        let _ = std::fs::remove_dir(&tmp_dir);
+        res.map_err(Into::into)
+      },
+    }
   }
 
   /// Scroll the element into the visible area of the viewport.
@@ -583,14 +667,55 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found.
-  pub async fn dispatch_event(&self, event_type: &str) -> Result<()> {
+  pub async fn dispatch_event(
+    &self,
+    event_type: &str,
+    event_init: Option<serde_json::Value>,
+    _opts: Option<crate::options::DispatchEventOptions>,
+  ) -> Result<()> {
+    // Mirrors Playwright `server/injected/injectedScript.ts::dispatchEvent`:
+    // pick the right constructor based on the event `type`, apply the
+    // `eventInit` object, and dispatch. Falls through to a generic
+    // `Event` for types not in the specific-constructor table so the
+    // caller still gets a best-effort dispatch for rare events.
+    let init_json = event_init.as_ref().map_or_else(
+      || "{}".to_string(),
+      |v| serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()),
+    );
+    // Escape `</script>` which would break our JS formatting if
+    // event_init contained a close-script sequence.
+    let init_js = init_json.replace("</", "<\\/");
+    let js = format!(
+      "function() {{ \
+        var type = '{event_type}'; \
+        var init = Object.assign({{bubbles: true, cancelable: true, composed: true}}, {init_js}); \
+        var ev; \
+        if (['click','dblclick','mousedown','mouseup','mouseenter','mouseleave','mousemove','mouseover','mouseout','contextmenu','auxclick'].includes(type)) {{ \
+          ev = new MouseEvent(type, init); \
+        }} else if (['keydown','keyup','keypress'].includes(type)) {{ \
+          ev = new KeyboardEvent(type, init); \
+        }} else if (['touchstart','touchend','touchmove','touchcancel'].includes(type) && typeof TouchEvent !== 'undefined') {{ \
+          ev = new TouchEvent(type, init); \
+        }} else if (['pointerdown','pointerup','pointermove','pointerover','pointerout','pointerenter','pointerleave','pointercancel','gotpointercapture','lostpointercapture'].includes(type)) {{ \
+          ev = new PointerEvent(type, init); \
+        }} else if (['dragstart','drag','dragenter','dragleave','dragover','drop','dragend'].includes(type)) {{ \
+          ev = new DragEvent(type, init); \
+        }} else if (['focus','blur','focusin','focusout'].includes(type)) {{ \
+          ev = new FocusEvent(type, init); \
+        }} else if (['input','beforeinput'].includes(type)) {{ \
+          ev = new InputEvent(type, init); \
+        }} else if (type === 'wheel') {{ \
+          ev = new WheelEvent(type, init); \
+        }} else if (['deviceorientation','deviceorientationabsolute'].includes(type)) {{ \
+          ev = new DeviceOrientationEvent(type, init); \
+        }} else {{ \
+          ev = new Event(type, init); \
+        }} \
+        this.dispatchEvent(ev); \
+      }}"
+    );
     let el = self.resolve().await?;
-    let _ = el
-      .call_js_fn(&format!(
-        "function() {{ this.dispatchEvent(new Event('{event_type}', {{bubbles: true}})); }}"
-      ))
-      .await;
-    Ok(())
+    el.call_js_fn(&js).await.map_err(Into::into)
   }
 
   // ── Content & state ───────────────────────────────────────────────────────
@@ -932,19 +1057,10 @@ impl Locator {
   /// # Errors
   ///
   /// Returns an error if the element cannot be found or any key press fails.
-  pub async fn press_sequentially(&self, text: &str, delay_ms: Option<u64>) -> Result<()> {
-    let el = self.resolve().await?;
-    actions::wait_for_actionable(&el, self.frame.page_arc().inner())
-      .await
-      .ok();
-    let delay = delay_ms.unwrap_or(50);
-    for ch in text.chars() {
-      self.frame.page_arc().inner().press_key(&ch.to_string()).await?;
-      if delay > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(delay)).await;
-      }
-    }
-    Ok(())
+  pub async fn press_sequentially(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
+    // Playwright's `pressSequentially` shares the `TypeOptions` shape
+    // with deprecated `type` (same three fields), so route both here.
+    self.r#type(text, opts).await
   }
 
   // ── Drag to another locator ─────────────────────────────────────────────

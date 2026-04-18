@@ -789,6 +789,52 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// Dispatch a hover at `(x, y)`: `steps` interpolated `mouseMoved`
+  /// `NSEvent`s ending at `(x, y)` exactly. The host already carries any
+  /// previously-held modifier flags (see `host.m` `held_modifier_flags`)
+  /// on each synthesised `NSEvent`, so no additional wiring is needed for
+  /// `args.modifiers_bitmask`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if any IPC call fails.
+  pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::BackendHoverArgs) -> Result<(), String> {
+    let steps = args.steps.max(1);
+    for i in 1..=steps {
+      let t = f64::from(i) / f64::from(steps);
+      let sx = if i == steps { x } else { x * t };
+      let sy = if i == steps { y } else { y * t };
+      // mouse_type=0 (move), button=0 ignored during mouseMoved, click_count=0
+      self.send_mouse_event(0, 0, 0, sx, sy).await?;
+      // Follow the existing `move_mouse` JS belt-and-suspenders: offscreen
+      // `WKWebView` sometimes doesn't forward `mouseMoved:` to WebCore's
+      // DOM event generator. Dispatching `mousemove` for intermediate
+      // steps plus `mouseover`/`mouseenter` at the destination ensures
+      // DOM listeners see the hover consistently in headless.
+      let final_step = i == steps;
+      let js = if final_step {
+        format!(
+          "(function(){{\
+             var opts={{clientX:{sx},clientY:{sy},bubbles:true,view:window}};\
+             var el=document.elementFromPoint({sx},{sy});\
+             if(el){{\
+               el.dispatchEvent(new MouseEvent('mousemove',opts));\
+               el.dispatchEvent(new MouseEvent('mouseover',opts));\
+               el.dispatchEvent(new MouseEvent('mouseenter',opts));\
+             }}\
+           }})()"
+        )
+      } else {
+        format!(
+          "document.elementFromPoint({sx},{sy})?.dispatchEvent(\
+             new MouseEvent('mousemove',{{clientX:{sx},clientY:{sy},bubbles:true,view:window}}))"
+        )
+      };
+      let _ = self.evaluate(&js).await;
+    }
+    Ok(())
+  }
+
   /// Press each modifier key via `OP_KEY_DOWN` — the host tracks which
   /// `NSEventModifierFlag` bits are held so subsequent mouse events
   /// carry them (see `host.m` `held_modifier_flags`).

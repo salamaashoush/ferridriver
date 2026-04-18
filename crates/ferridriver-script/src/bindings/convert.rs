@@ -83,6 +83,422 @@ struct JsClickOptions {
   trial: Option<bool>,
 }
 
+/// Raw JS shape of Playwright's `DispatchEventOptions` — single field.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsDispatchEventOptions {
+  timeout: Option<u64>,
+}
+
+/// Parse Playwright's `DispatchEventOptions` JS bag into the core struct.
+pub fn parse_dispatch_event_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::DispatchEventOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsDispatchEventOptions = serde_from_js(ctx, raw)?;
+  Ok(Some(ferridriver::options::DispatchEventOptions { timeout: js.timeout }))
+}
+
+/// Raw JS shape of Playwright's `FilePayload`.
+#[derive(serde::Deserialize, Debug)]
+#[serde(rename_all = "camelCase")]
+struct JsFilePayload {
+  name: String,
+  mime_type: String,
+  /// JS `Buffer`/`Uint8Array`/array-of-numbers all deserialize to a
+  /// `Vec<u8>` via serde_json::from_js. rquickjs `Buffer` types round
+  /// through JSON as arrays of small numbers, which serde handles.
+  buffer: Vec<u8>,
+}
+
+impl From<JsFilePayload> for ferridriver::options::FilePayload {
+  fn from(p: JsFilePayload) -> Self {
+    Self {
+      name: p.name,
+      mime_type: p.mime_type,
+      buffer: p.buffer,
+    }
+  }
+}
+
+/// Raw JS shape of Playwright's `SetInputFilesOptions` — two fields.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsSetInputFilesOptions {
+  no_wait_after: Option<bool>,
+  timeout: Option<u64>,
+}
+
+/// Parse the polymorphic `files` arg for `setInputFiles`:
+/// `string | string[] | FilePayload | FilePayload[]`.
+pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<ferridriver::options::InputFiles> {
+  if value.is_string() {
+    let s: String = value.get()?;
+    return Ok(ferridriver::options::InputFiles::Paths(vec![s.into()]));
+  }
+  if value.is_array() {
+    let arr: Vec<serde_json::Value> = serde_from_js(ctx, value)?;
+    if arr.is_empty() {
+      return Ok(ferridriver::options::InputFiles::Paths(Vec::new()));
+    }
+    if arr[0].is_string() {
+      let mut paths = Vec::with_capacity(arr.len());
+      for el in arr {
+        let s = el.as_str().ok_or_else(|| {
+          rquickjs::Error::new_from_js_message("ferridriver", "setInputFiles", "array elements must be strings")
+        })?;
+        paths.push(std::path::PathBuf::from(s));
+      }
+      return Ok(ferridriver::options::InputFiles::Paths(paths));
+    }
+    let mut payloads = Vec::with_capacity(arr.len());
+    for el in arr {
+      let p: JsFilePayload = serde_json::from_value(el).map_err(|e| {
+        rquickjs::Error::new_from_js_message("ferridriver", "setInputFiles", format!("FilePayload parse: {e}"))
+      })?;
+      payloads.push(p.into());
+    }
+    return Ok(ferridriver::options::InputFiles::Payloads(payloads));
+  }
+  if value.is_object() {
+    let p: JsFilePayload = serde_from_js(ctx, value)?;
+    return Ok(ferridriver::options::InputFiles::Payloads(vec![p.into()]));
+  }
+  Err(rquickjs::Error::new_from_js_message(
+    "ferridriver",
+    "setInputFiles",
+    "files must be string | string[] | FilePayload | FilePayload[]",
+  ))
+}
+
+/// Parse Playwright's `SetInputFilesOptions` JS bag into the core struct.
+pub fn parse_set_input_files_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::SetInputFilesOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsSetInputFilesOptions = serde_from_js(ctx, raw)?;
+  Ok(Some(ferridriver::options::SetInputFilesOptions {
+    no_wait_after: js.no_wait_after,
+    timeout: js.timeout,
+  }))
+}
+
+/// Raw JS shape of a `selectOption` descriptor — mirrors Playwright's
+/// `{ value?, label?, index? }`.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsSelectOptionValue {
+  value: Option<String>,
+  label: Option<String>,
+  index: Option<u32>,
+}
+
+impl From<JsSelectOptionValue> for ferridriver::options::SelectOptionValue {
+  fn from(v: JsSelectOptionValue) -> Self {
+    Self {
+      value: v.value,
+      label: v.label,
+      index: v.index,
+    }
+  }
+}
+
+/// Raw JS shape of Playwright's `SelectOptionOptions` — three fields.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsSelectOptionOptions {
+  force: Option<bool>,
+  no_wait_after: Option<bool>,
+  timeout: Option<u64>,
+}
+
+/// Parse a polymorphic `selectOption` `values` JS argument:
+/// `string | string[] | { value?, label?, index? } | Array<...>`.
+pub fn parse_select_option_values<'js>(
+  ctx: &Ctx<'js>,
+  value: Value<'js>,
+) -> rquickjs::Result<Vec<ferridriver::options::SelectOptionValue>> {
+  if value.is_string() {
+    let s: String = value.get()?;
+    return Ok(vec![ferridriver::options::SelectOptionValue::by_value(s)]);
+  }
+  if value.is_array() {
+    let arr: Vec<serde_json::Value> = serde_from_js(ctx, value)?;
+    let mut out = Vec::new();
+    for el in arr {
+      match el {
+        serde_json::Value::String(s) => out.push(ferridriver::options::SelectOptionValue::by_value(s)),
+        serde_json::Value::Object(_) => {
+          let desc: JsSelectOptionValue = serde_json::from_value(el).map_err(|e| {
+            rquickjs::Error::new_from_js_message("ferridriver", "selectOption", format!("descriptor parse: {e}"))
+          })?;
+          out.push(desc.into());
+        },
+        _ => {
+          return Err(rquickjs::Error::new_from_js_message(
+            "ferridriver",
+            "selectOption",
+            "array entries must be string or { value?, label?, index? } object",
+          ));
+        },
+      }
+    }
+    return Ok(out);
+  }
+  if value.is_object() {
+    let desc: JsSelectOptionValue = serde_from_js(ctx, value)?;
+    return Ok(vec![desc.into()]);
+  }
+  Err(rquickjs::Error::new_from_js_message(
+    "ferridriver",
+    "selectOption",
+    "values must be string | string[] | object | object[]",
+  ))
+}
+
+/// Parse Playwright's `SelectOptionOptions` JS bag into the core struct.
+pub fn parse_select_option_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::SelectOptionOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsSelectOptionOptions = serde_from_js(ctx, raw)?;
+  Ok(Some(ferridriver::options::SelectOptionOptions {
+    force: js.force,
+    no_wait_after: js.no_wait_after,
+    timeout: js.timeout,
+  }))
+}
+
+/// Raw JS shape of Playwright's `FillOptions` — three fields.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsFillOptions {
+  force: Option<bool>,
+  no_wait_after: Option<bool>,
+  timeout: Option<u64>,
+}
+
+/// Parse Playwright's `FillOptions` JS bag into the core struct.
+pub fn parse_fill_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::FillOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsFillOptions = serde_from_js(ctx, raw)?;
+  Ok(Some(ferridriver::options::FillOptions {
+    force: js.force,
+    no_wait_after: js.no_wait_after,
+    timeout: js.timeout,
+  }))
+}
+
+/// Raw JS shape of Playwright's `PressOptions` / `TypeOptions` — same shape.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsPressOptions {
+  delay: Option<u64>,
+  no_wait_after: Option<bool>,
+  timeout: Option<u64>,
+}
+
+/// Parse Playwright's `PressOptions` JS bag into the core struct.
+pub fn parse_press_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::PressOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsPressOptions = serde_from_js(ctx, raw)?;
+  Ok(Some(ferridriver::options::PressOptions {
+    delay: js.delay,
+    no_wait_after: js.no_wait_after,
+    timeout: js.timeout,
+  }))
+}
+
+/// Parse Playwright's `TypeOptions` JS bag — same shape as `PressOptions`.
+pub fn parse_type_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::TypeOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsPressOptions = serde_from_js(ctx, raw)?;
+  Ok(Some(ferridriver::options::TypeOptions {
+    delay: js.delay,
+    no_wait_after: js.no_wait_after,
+    timeout: js.timeout,
+  }))
+}
+
+/// Raw JS shape of Playwright's `CheckOptions` / `UncheckOptions` /
+/// `SetCheckedOptions` — five fields (force, noWaitAfter, position,
+/// timeout, trial).
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsCheckOptions {
+  force: Option<bool>,
+  no_wait_after: Option<bool>,
+  position: Option<JsClickPosition>,
+  timeout: Option<u64>,
+  trial: Option<bool>,
+}
+
+/// Parse Playwright's `CheckOptions` / `UncheckOptions` /
+/// `SetCheckedOptions` JS bag into the core struct.
+pub fn parse_check_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::CheckOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsCheckOptions = serde_from_js(ctx, raw)?;
+  Ok(Some(ferridriver::options::CheckOptions {
+    force: js.force,
+    no_wait_after: js.no_wait_after,
+    position: js.position.map(Into::into),
+    timeout: js.timeout,
+    trial: js.trial,
+  }))
+}
+
+/// Raw JS shape of Playwright's `HoverOptions` — `ClickOptions` minus
+/// `button`, `click_count`, `delay`. Also used for `TapOptions` (same
+/// shape per Playwright).
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsHoverOptions {
+  force: Option<bool>,
+  modifiers: Option<Vec<String>>,
+  no_wait_after: Option<bool>,
+  position: Option<JsClickPosition>,
+  steps: Option<u32>,
+  timeout: Option<u64>,
+  trial: Option<bool>,
+}
+
+fn hover_options_from_raw<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+  label: &'static str,
+) -> rquickjs::Result<Option<ferridriver::options::HoverOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsHoverOptions = serde_from_js(ctx, raw)?;
+  let mut modifiers = Vec::new();
+  if let Some(list) = js.modifiers {
+    for name in list {
+      let m = ferridriver::options::Modifier::parse(&name).ok_or_else(|| {
+        rquickjs::Error::new_from_js_message("ferridriver", label, format!("Unknown modifier: {name}"))
+      })?;
+      modifiers.push(m);
+    }
+  }
+  Ok(Some(ferridriver::options::HoverOptions {
+    force: js.force,
+    modifiers,
+    no_wait_after: js.no_wait_after,
+    position: js.position.map(Into::into),
+    steps: js.steps,
+    timeout: js.timeout,
+    trial: js.trial,
+  }))
+}
+
+/// Parse Playwright's `HoverOptions` JS bag into the core struct.
+pub fn parse_hover_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::HoverOptions>> {
+  hover_options_from_raw(ctx, value, "hover")
+}
+
+/// Parse Playwright's `TapOptions` JS bag — same shape as `HoverOptions`.
+pub fn parse_tap_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::TapOptions>> {
+  hover_options_from_raw(ctx, value, "tap")
+}
+
+/// Raw JS shape of Playwright's `DblClickOptions` — same fields as
+/// `ClickOptions` minus `click_count`. See
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13116`.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsDblClickOptions {
+  button: Option<String>,
+  delay: Option<u64>,
+  force: Option<bool>,
+  modifiers: Option<Vec<String>>,
+  no_wait_after: Option<bool>,
+  position: Option<JsClickPosition>,
+  steps: Option<u32>,
+  timeout: Option<u64>,
+  trial: Option<bool>,
+}
+
+/// Parse Playwright's `DblClickOptions` JS bag into the core struct.
+pub fn parse_dblclick_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::DblClickOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsDblClickOptions = serde_from_js(ctx, raw)?;
+  let button = match js.button.as_deref() {
+    None => None,
+    Some(s) => Some(ferridriver::options::MouseButton::parse(s).ok_or_else(|| {
+      rquickjs::Error::new_from_js_message("ferridriver", "dblclick", format!("Unknown mouse button: {s}"))
+    })?),
+  };
+  let mut modifiers = Vec::new();
+  if let Some(list) = js.modifiers {
+    for name in list {
+      let m = ferridriver::options::Modifier::parse(&name).ok_or_else(|| {
+        rquickjs::Error::new_from_js_message("ferridriver", "dblclick", format!("Unknown modifier: {name}"))
+      })?;
+      modifiers.push(m);
+    }
+  }
+  Ok(Some(ferridriver::options::DblClickOptions {
+    button,
+    delay: js.delay,
+    force: js.force,
+    modifiers,
+    no_wait_after: js.no_wait_after,
+    position: js.position.map(Into::into),
+    steps: js.steps,
+    timeout: js.timeout,
+    trial: js.trial,
+  }))
+}
+
 /// Parse Playwright's `ClickOptions` JS bag into the core struct.
 /// Accepts `Opt<Value>` so callers pass `Opt(options)` verbatim; `None`,
 /// `undefined`, or `null` → `Ok(None)`. Unknown `button` / `modifier`

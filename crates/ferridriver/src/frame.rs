@@ -418,8 +418,8 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the dblclick fails.
-  pub async fn dblclick(&self, selector: &str) -> Result<()> {
-    self.locator(selector, None).dblclick().await
+  pub async fn dblclick(&self, selector: &str, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
+    self.locator(selector, None).dblclick(opts).await
   }
 
   /// Hover the element matched by `selector`.
@@ -427,8 +427,8 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the hover fails.
-  pub async fn hover(&self, selector: &str) -> Result<()> {
-    self.locator(selector, None).hover().await
+  pub async fn hover(&self, selector: &str, opts: Option<crate::options::HoverOptions>) -> Result<()> {
+    self.locator(selector, None).hover(opts).await
   }
 
   /// Tap (touch) the element matched by `selector`. Mirrors
@@ -438,8 +438,8 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the tap fails.
-  pub async fn tap(&self, selector: &str) -> Result<()> {
-    self.locator(selector, None).tap().await
+  pub async fn tap(&self, selector: &str, opts: Option<crate::options::TapOptions>) -> Result<()> {
+    self.locator(selector, None).tap(opts).await
   }
 
   /// Focus the element matched by `selector`.
@@ -458,8 +458,8 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not fillable.
-  pub async fn fill(&self, selector: &str, value: &str) -> Result<()> {
-    self.locator(selector, None).fill(value).await
+  pub async fn fill(&self, selector: &str, value: &str, opts: Option<crate::options::FillOptions>) -> Result<()> {
+    self.locator(selector, None).fill(value, opts).await
   }
 
   /// Type characters into an element matching `selector`.
@@ -467,8 +467,8 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or typing fails.
-  pub async fn r#type(&self, selector: &str, text: &str) -> Result<()> {
-    self.locator(selector, None).r#type(text).await
+  pub async fn r#type(&self, selector: &str, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
+    self.locator(selector, None).r#type(text, opts).await
   }
 
   /// Press a key on an element matching `selector`.
@@ -476,8 +476,8 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the key press fails.
-  pub async fn press(&self, selector: &str, key: &str) -> Result<()> {
-    self.locator(selector, None).press(key).await
+  pub async fn press(&self, selector: &str, key: &str, opts: Option<crate::options::PressOptions>) -> Result<()> {
+    self.locator(selector, None).press(key, opts).await
   }
 
   /// Check a checkbox/radio matching `selector`.
@@ -485,8 +485,8 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
-  pub async fn check(&self, selector: &str) -> Result<()> {
-    self.locator(selector, None).check().await
+  pub async fn check(&self, selector: &str, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+    self.locator(selector, None).check(opts).await
   }
 
   /// Uncheck a checkbox matching `selector`.
@@ -494,8 +494,8 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not uncheckable.
-  pub async fn uncheck(&self, selector: &str) -> Result<()> {
-    self.locator(selector, None).uncheck().await
+  pub async fn uncheck(&self, selector: &str, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+    self.locator(selector, None).uncheck(opts).await
   }
 
   /// Set the checked state of a checkbox/radio matching `selector`.
@@ -503,8 +503,13 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
-  pub async fn set_checked(&self, selector: &str, checked: bool) -> Result<()> {
-    self.locator(selector, None).set_checked(checked).await
+  pub async fn set_checked(
+    &self,
+    selector: &str,
+    checked: bool,
+    opts: Option<crate::options::CheckOptions>,
+  ) -> Result<()> {
+    self.locator(selector, None).set_checked(checked, opts).await
   }
 
   /// Select a `<select>` option in the element matched by `selector`.
@@ -513,8 +518,13 @@ impl Frame {
   ///
   /// Returns an error if the element is not found or the option cannot
   /// be selected.
-  pub async fn select_option(&self, selector: &str, value: &str) -> Result<Vec<String>> {
-    self.locator(selector, None).select_option(value).await
+  pub async fn select_option(
+    &self,
+    selector: &str,
+    values: Vec<crate::options::SelectOptionValue>,
+    opts: Option<crate::options::SelectOptionOptions>,
+  ) -> Result<Vec<String>> {
+    self.locator(selector, None).select_option(values, opts).await
   }
 
   /// Set input files on a `<input type=file>` matching `selector`.
@@ -522,8 +532,13 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or file setting fails.
-  pub async fn set_input_files(&self, selector: &str, paths: &[String]) -> Result<()> {
-    self.locator(selector, None).set_input_files(paths).await
+  pub async fn set_input_files(
+    &self,
+    selector: &str,
+    files: crate::options::InputFiles,
+    opts: Option<crate::options::SetInputFilesOptions>,
+  ) -> Result<()> {
+    self.locator(selector, None).set_input_files(files, opts).await
   }
 
   // -- Drag and drop -----------------------------------------------------
@@ -559,8 +574,17 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the dispatch fails.
-  pub async fn dispatch_event(&self, selector: &str, event_type: &str) -> Result<()> {
-    self.locator(selector, None).dispatch_event(event_type).await
+  pub async fn dispatch_event(
+    &self,
+    selector: &str,
+    event_type: &str,
+    event_init: Option<serde_json::Value>,
+    opts: Option<crate::options::DispatchEventOptions>,
+  ) -> Result<()> {
+    self
+      .locator(selector, None)
+      .dispatch_event(event_type, event_init, opts)
+      .await
   }
 
   // -- Content / attribute reads ----------------------------------------

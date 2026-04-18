@@ -414,9 +414,9 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the double-click fails.
-  pub async fn dblclick(self: &Arc<Self>, selector: &str) -> Result<()> {
+  pub async fn dblclick(self: &Arc<Self>, selector: &str, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "dblclick", selector, "page.dblclick");
-    self.main_frame().dblclick(selector).await
+    self.main_frame().dblclick(selector, opts).await
   }
 
   /// Fill an input element matching the selector with a value.
@@ -424,9 +424,14 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not fillable.
-  pub async fn fill(self: &Arc<Self>, selector: &str, value: &str) -> Result<()> {
+  pub async fn fill(
+    self: &Arc<Self>,
+    selector: &str,
+    value: &str,
+    opts: Option<crate::options::FillOptions>,
+  ) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "fill", selector, "page.fill");
-    self.main_frame().fill(selector, value).await
+    self.main_frame().fill(selector, value, opts).await
   }
 
   /// Type text character-by-character into an element matching the selector.
@@ -434,8 +439,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or typing fails.
-  pub async fn r#type(self: &Arc<Self>, selector: &str, text: &str) -> Result<()> {
-    self.main_frame().r#type(selector, text).await
+  pub async fn r#type(
+    self: &Arc<Self>,
+    selector: &str,
+    text: &str,
+    opts: Option<crate::options::TypeOptions>,
+  ) -> Result<()> {
+    self.main_frame().r#type(selector, text, opts).await
   }
 
   /// Press a key on an element matching the selector.
@@ -443,8 +453,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the key press fails.
-  pub async fn press(self: &Arc<Self>, selector: &str, key: &str) -> Result<()> {
-    self.main_frame().press(selector, key).await
+  pub async fn press(
+    self: &Arc<Self>,
+    selector: &str,
+    key: &str,
+    opts: Option<crate::options::PressOptions>,
+  ) -> Result<()> {
+    self.main_frame().press(selector, key, opts).await
   }
 
   /// Hover over an element matching the selector.
@@ -452,8 +467,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the hover fails.
-  pub async fn hover(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.main_frame().hover(selector).await
+  pub async fn hover(self: &Arc<Self>, selector: &str, opts: Option<crate::options::HoverOptions>) -> Result<()> {
+    self.main_frame().hover(selector, opts).await
   }
 
   /// Select an option in a `<select>` element matching the selector.
@@ -461,8 +476,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the option cannot be selected.
-  pub async fn select_option(self: &Arc<Self>, selector: &str, value: &str) -> Result<Vec<String>> {
-    self.main_frame().select_option(selector, value).await
+  pub async fn select_option(
+    self: &Arc<Self>,
+    selector: &str,
+    values: Vec<crate::options::SelectOptionValue>,
+    opts: Option<crate::options::SelectOptionOptions>,
+  ) -> Result<Vec<String>> {
+    self.main_frame().select_option(selector, values, opts).await
   }
 
   /// Set input files on a file input element matching the selector.
@@ -470,8 +490,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or file setting fails.
-  pub async fn set_input_files(self: &Arc<Self>, selector: &str, paths: &[String]) -> Result<()> {
-    self.main_frame().set_input_files(selector, paths).await
+  pub async fn set_input_files(
+    self: &Arc<Self>,
+    selector: &str,
+    files: crate::options::InputFiles,
+    opts: Option<crate::options::SetInputFilesOptions>,
+  ) -> Result<()> {
+    self.main_frame().set_input_files(selector, files, opts).await
   }
 
   /// Check a checkbox or radio button matching the selector.
@@ -479,8 +504,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
-  pub async fn check(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.main_frame().check(selector).await
+  pub async fn check(self: &Arc<Self>, selector: &str, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+    self.main_frame().check(selector, opts).await
   }
 
   /// Uncheck a checkbox matching the selector.
@@ -488,8 +513,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not uncheckable.
-  pub async fn uncheck(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.main_frame().uncheck(selector).await
+  pub async fn uncheck(self: &Arc<Self>, selector: &str, opts: Option<crate::options::CheckOptions>) -> Result<()> {
+    self.main_frame().uncheck(selector, opts).await
   }
 
   /// Set a checkbox or radio matching `selector` to `checked`. Mirrors
@@ -499,8 +524,13 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or is not checkable.
-  pub async fn set_checked(self: &Arc<Self>, selector: &str, checked: bool) -> Result<()> {
-    self.main_frame().set_checked(selector, checked).await
+  pub async fn set_checked(
+    self: &Arc<Self>,
+    selector: &str,
+    checked: bool,
+    opts: Option<crate::options::CheckOptions>,
+  ) -> Result<()> {
+    self.main_frame().set_checked(selector, checked, opts).await
   }
 
   /// Tap (touch) the element matched by `selector`. Mirrors Playwright's
@@ -512,8 +542,8 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the tap fails.
-  pub async fn tap(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.main_frame().tap(selector).await
+  pub async fn tap(self: &Arc<Self>, selector: &str, opts: Option<crate::options::TapOptions>) -> Result<()> {
+    self.main_frame().tap(selector, opts).await
   }
 
   // ── Content ─────────────────────────────────────────────────────────────
@@ -1468,8 +1498,17 @@ impl Page {
   /// # Errors
   ///
   /// Returns an error if the element is not found or the event dispatch fails.
-  pub async fn dispatch_event(self: &Arc<Self>, selector: &str, event_type: &str) -> Result<()> {
-    self.locator(selector, None).dispatch_event(event_type).await
+  pub async fn dispatch_event(
+    self: &Arc<Self>,
+    selector: &str,
+    event_type: &str,
+    event_init: Option<serde_json::Value>,
+    opts: Option<crate::options::DispatchEventOptions>,
+  ) -> Result<()> {
+    self
+      .locator(selector, None)
+      .dispatch_event(event_type, event_init, opts)
+      .await
   }
 
   /// Check if an element is editable (not disabled, not readonly).

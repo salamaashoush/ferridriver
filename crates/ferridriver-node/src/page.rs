@@ -318,78 +318,135 @@ impl Page {
       .map_err(napi::Error::from_reason)
   }
 
+  /// Double-click the first element matching `selector`. Accepts
+  /// Playwright's full `PageDblClickOptions` bag.
   #[napi]
-  pub async fn dblclick(&self, selector: String) -> Result<()> {
-    self.inner.dblclick(&selector).await.map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn fill(&self, selector: String, value: String) -> Result<()> {
+  pub async fn dblclick(&self, selector: String, options: Option<crate::types::DblClickOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
     self
       .inner
-      .fill(&selector, &value)
+      .dblclick(&selector, opts)
       .await
       .map_err(napi::Error::from_reason)
   }
 
+  /// Fill the first element matching `selector`. Accepts Playwright's
+  /// full `PageFillOptions` bag.
   #[napi]
-  pub async fn type_text(&self, selector: String, text: String) -> Result<()> {
+  pub async fn fill(&self, selector: String, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
     self
       .inner
-      .r#type(&selector, &text)
+      .fill(&selector, &value, opts)
       .await
       .map_err(napi::Error::from_reason)
   }
 
+  /// Type `text` into the first element matching `selector`. Accepts
+  /// Playwright's full `PageTypeOptions` bag.
   #[napi]
-  pub async fn press(&self, selector: String, key: String) -> Result<()> {
+  pub async fn type_text(
+    &self,
+    selector: String,
+    text: String,
+    options: Option<crate::types::TypeOptions>,
+  ) -> Result<()> {
+    let opts = options.map(Into::into);
     self
       .inner
-      .press(&selector, &key)
+      .r#type(&selector, &text, opts)
       .await
       .map_err(napi::Error::from_reason)
   }
 
+  /// Press `key` on the first element matching `selector`. Accepts
+  /// Playwright's full `PagePressOptions` bag.
   #[napi]
-  pub async fn hover(&self, selector: String) -> Result<()> {
-    self.inner.hover(&selector).await.map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn select_option(&self, selector: String, value: String) -> Result<Vec<String>> {
+  pub async fn press(&self, selector: String, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
     self
       .inner
-      .select_option(&selector, &value)
+      .press(&selector, &key, opts)
       .await
       .map_err(napi::Error::from_reason)
   }
 
+  /// Hover the first element matching `selector`. Accepts Playwright's
+  /// full `PageHoverOptions` bag.
   #[napi]
-  pub async fn check(&self, selector: String) -> Result<()> {
-    self.inner.check(&selector).await.map_err(napi::Error::from_reason)
+  pub async fn hover(&self, selector: String, options: Option<crate::types::HoverOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self
+      .inner
+      .hover(&selector, opts)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
+  /// Select options on the `<select>` matching `selector`. Accepts
+  /// Playwright's full value union plus the `PageSelectOptionOptions` bag.
   #[napi]
-  pub async fn uncheck(&self, selector: String) -> Result<()> {
-    self.inner.uncheck(&selector).await.map_err(napi::Error::from_reason)
+  pub async fn select_option(
+    &self,
+    selector: String,
+    values: crate::types::NapiSelectOptionInput,
+    options: Option<crate::types::SelectOptionOptions>,
+  ) -> Result<Vec<String>> {
+    let opts = options.map(Into::into);
+    self
+      .inner
+      .select_option(&selector, values.0, opts)
+      .await
+      .map_err(napi::Error::from_reason)
+  }
+
+  /// Check a checkbox matching `selector`. Accepts Playwright's full
+  /// `PageCheckOptions` bag.
+  #[napi]
+  pub async fn check(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self
+      .inner
+      .check(&selector, opts)
+      .await
+      .map_err(napi::Error::from_reason)
+  }
+
+  /// Uncheck a checkbox matching `selector`. Accepts Playwright's full
+  /// `PageUncheckOptions` bag.
+  #[napi]
+  pub async fn uncheck(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self
+      .inner
+      .uncheck(&selector, opts)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   /// Set the checked state of a checkbox or radio matching `selector`.
   /// Mirrors Playwright's `page.setChecked(selector, checked, options?)`.
   #[napi]
-  pub async fn set_checked(&self, selector: String, checked: bool) -> Result<()> {
+  pub async fn set_checked(
+    &self,
+    selector: String,
+    checked: bool,
+    options: Option<crate::types::CheckOptions>,
+  ) -> Result<()> {
+    let opts = options.map(Into::into);
     self
       .inner
-      .set_checked(&selector, checked)
+      .set_checked(&selector, checked, opts)
       .await
       .map_err(napi::Error::from_reason)
   }
 
   /// Tap (touch) the element matched by `selector`. Mirrors Playwright's
-  /// `page.tap(selector, options?)`.
+  /// `page.tap(selector, options?)`. Accepts the full `PageTapOptions` bag.
   #[napi]
-  pub async fn tap(&self, selector: String) -> Result<()> {
-    self.inner.tap(&selector).await.map_err(napi::Error::from_reason)
+  pub async fn tap(&self, selector: String, options: Option<crate::types::TapOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.tap(&selector, opts).await.map_err(napi::Error::from_reason)
   }
 
   // ── Content ─────────────────────────────────────────────────────────────
@@ -767,11 +824,19 @@ impl Page {
     self.inner.focus(&selector).await.map_err(napi::Error::from_reason)
   }
 
+  /// Dispatch a DOM event of `type` on the element matching `selector`.
+  /// Mirrors Playwright's `page.dispatchEvent(selector, type, eventInit?, options?)`.
   #[napi]
-  pub async fn dispatch_event(&self, selector: String, event_type: String) -> Result<()> {
+  pub async fn dispatch_event(
+    &self,
+    selector: String,
+    event_type: String,
+    event_init: Option<serde_json::Value>,
+    options: Option<crate::types::DispatchEventOptions>,
+  ) -> Result<()> {
     self
       .inner
-      .dispatch_event(&selector, &event_type)
+      .dispatch_event(&selector, &event_type, event_init, options.map(Into::into))
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -976,11 +1041,19 @@ impl Page {
     Ok(())
   }
 
+  /// Set files on the `<input type=file>` matching `selector`.
+  /// Accepts Playwright's full value union + `PageSetInputFilesOptions`.
   #[napi]
-  pub async fn set_input_files(&self, selector: String, paths: Vec<String>) -> Result<()> {
+  pub async fn set_input_files(
+    &self,
+    selector: String,
+    files: crate::types::NapiInputFiles,
+    options: Option<crate::types::SetInputFilesOptions>,
+  ) -> Result<()> {
+    let opts = options.map(Into::into);
     self
       .inner
-      .set_input_files(&selector, &paths)
+      .set_input_files(&selector, files.0, opts)
       .await
       .map_err(napi::Error::from_reason)
   }

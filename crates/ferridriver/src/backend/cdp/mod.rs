@@ -1641,6 +1641,31 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// Dispatch a hover at `(x, y)`: `steps` interpolated `mouseMoved`
+  /// events with the caller's CDP `modifiers` bitmask on each, ending
+  /// at `(x, y)` exactly. No `mousePressed` / `mouseReleased`.
+  pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::BackendHoverArgs) -> Result<(), String> {
+    let mods = args.modifiers_bitmask;
+    let steps = args.steps.max(1);
+    for i in 1..=steps {
+      let t = f64::from(i) / f64::from(steps);
+      let sx = if i == steps { x } else { x * t };
+      let sy = if i == steps { y } else { y * t };
+      self
+        .cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mouseMoved",
+            "x": sx,
+            "y": sy,
+            "modifiers": mods,
+          }),
+        )
+        .await?;
+    }
+    Ok(())
+  }
+
   /// Press each modifier in `mods` via CDP
   /// `Input.dispatchKeyEvent { type: "keyDown" }`. `key` is the
   /// platform-resolved key name (e.g. `"Meta"` on macOS for
