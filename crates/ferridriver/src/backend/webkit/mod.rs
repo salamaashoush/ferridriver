@@ -346,7 +346,13 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the expression does not return a valid DOM element.
-  pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
+  /// Frame-scoped element resolution. `WebKit` has no per-frame
+  /// execution context wired through IPC yet, so when `frame_id` is
+  /// `Some(_)`, we still evaluate in the main page. The resulting
+  /// element points at the main-frame DOM — frame-scoped element
+  /// actions on `WebKit` are tracked as a known gap in Section B of
+  /// `PLAYWRIGHT_COMPAT.md` until `WKFrameInfo`-based evaluation lands.
+  pub async fn evaluate_to_element(&self, js: &str, _frame_id: Option<&str>) -> Result<AnyElement, String> {
     let wrap = format!(
       r"(function(){{var e=({js});if(!e)return null;if(!window.__wr)window.__wr={{}};var id=Object.keys(window.__wr).length+1;window.__wr[id]=e;return id}})()"
     );

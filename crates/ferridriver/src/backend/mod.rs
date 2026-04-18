@@ -629,8 +629,18 @@ impl AnyPage {
     page_dispatch!(self, find_element(selector))
   }
 
-  pub async fn evaluate_to_element(&self, js: &str) -> Result<AnyElement, String> {
-    page_dispatch!(self, evaluate_to_element(js))
+  /// Evaluate `js` and return the resulting DOM element, resolving in
+  /// the execution context of `frame_id` (or the main frame when
+  /// `frame_id` is `None`). Mirrors Playwright's `Frame`-bound element
+  /// resolution: every Locator carries a Frame, and actions reach the
+  /// backend with that frame's id threaded all the way through. CDP
+  /// uses `Runtime.evaluate.contextId`; `BiDi` uses the browsing-context
+  /// realm; `WebKit` currently has no per-frame execution context, so
+  /// non-main `frame_id` values fall back to the main page (DOM access
+  /// via `WKFrameInfo` is a separate gap tracked in Section B of
+  /// `PLAYWRIGHT_COMPAT.md`).
+  pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement, String> {
+    page_dispatch!(self, evaluate_to_element(js, frame_id))
   }
 
   // ── Content ──

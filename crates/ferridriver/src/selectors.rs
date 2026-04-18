@@ -370,22 +370,24 @@ const ENGINE_JS: &str = include_str!("injected/dist/engine.min.js");
 
 // ─── Query functions ────────────────────────────────────────────────────────
 
-/// Query all elements matching a rich selector. Returns lightweight info.
-/// Injects the engine JS on first use, then subsequent calls are lightweight.
+/// Query all elements matching a rich selector inside the execution
+/// context of `frame_id` (or the main frame when `None`). Returns
+/// lightweight info; injects the engine JS on first use.
 ///
 /// # Errors
 ///
 /// Returns an error if selector parsing or JS evaluation fails.
-pub async fn query_all(page: &AnyPage, selector: &str) -> Result<Vec<MatchedElement>, String> {
+pub async fn query_all(page: &AnyPage, selector: &str, frame_id: Option<&str>) -> Result<Vec<MatchedElement>, String> {
   let parsed = parse(selector)?;
   page.ensure_engine_injected().await?;
   let fd = "window.__fd";
   let js = build_query_js(&parsed, fd);
-  let result_str = page
-    .evaluate(&js)
-    .await?
-    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-    .unwrap_or_else(|| "[]".into());
+  let result_str = match frame_id {
+    Some(fid) => page.evaluate_in_frame(&js, fid).await,
+    None => page.evaluate(&js).await,
+  }?
+  .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+  .unwrap_or_else(|| "[]".into());
 
   // Check for error
   if let Ok(val) = serde_json::from_str::<serde_json::Value>(&result_str) {
@@ -399,18 +401,24 @@ pub async fn query_all(page: &AnyPage, selector: &str) -> Result<Vec<MatchedElem
   Ok(elements)
 }
 
-/// Query a single element. If strict=true, errors when 0 or >1 matches.
+/// Query a single element in `frame_id`'s execution context. If
+/// `strict=true`, errors when 0 or >1 matches.
 ///
 /// # Errors
 ///
 /// Returns an error if selector parsing fails, no element is found, or (in strict mode)
 /// multiple elements match.
-pub async fn query_one(page: &AnyPage, selector: &str, strict: bool) -> Result<AnyElement, String> {
+pub async fn query_one(
+  page: &AnyPage,
+  selector: &str,
+  strict: bool,
+  frame_id: Option<&str>,
+) -> Result<AnyElement, String> {
   let parsed = parse(selector)?;
   let parts_json = build_parts_json(&parsed);
 
   if strict {
-    let matches = query_all(page, selector).await?;
+    let matches = query_all(page, selector, frame_id).await?;
     if matches.is_empty() {
       return Err(format!("No element found for selector: {selector}"));
     }
@@ -421,8 +429,13 @@ pub async fn query_one(page: &AnyPage, selector: &str, strict: bool) -> Result<A
         matches.len()
       ));
     }
+    // The query_all JS tags the match with `data-fd-sel='0'`; we resolve
+    // that tag in the SAME frame so we get an element bound to the right
+    // execution context.
+    let fd = "window.__fd";
+    let tagged_js = format!("{fd}.selOne([{{\"engine\":\"css\",\"body\":\"[data-fd-sel='0']\"}}])");
     let el = page
-      .find_element("[data-fd-sel='0']")
+      .evaluate_to_element(&tagged_js, frame_id)
       .await
       .map_err(|_| format!("Could not resolve matched element for: {selector}"))?;
     cleanup_tags(page).await;
@@ -433,20 +446,28 @@ pub async fn query_one(page: &AnyPage, selector: &str, strict: bool) -> Result<A
   let fd = "window.__fd";
   let js = format!("{fd}.selOne({parts_json})");
   page
-    .evaluate_to_element(&js)
+    .evaluate_to_element(&js, frame_id)
     .await
     .map_err(|_| format!("No element found for selector: {selector}"))
 }
 
 /// Query a single element using pre-built JS (avoids re-parsing the selector).
-/// The `sel_js` should be the output of `build_selone_js()`.
+/// The `sel_js` should be the output of `build_selone_js()`. Element
+/// resolution always runs in a frame's execution context — `frame_id`
+/// is `None` for the main frame, `Some(id)` for an iframe. Mirrors
+/// Playwright's frame-bound resolution model.
 ///
 /// # Errors
 ///
 /// Returns an error if no element is found or JS evaluation fails.
-pub async fn query_one_prebuilt(page: &AnyPage, sel_js: &str, selector_display: &str) -> Result<AnyElement, String> {
+pub async fn query_one_prebuilt(
+  page: &AnyPage,
+  sel_js: &str,
+  selector_display: &str,
+  frame_id: Option<&str>,
+) -> Result<AnyElement, String> {
   page
-    .evaluate_to_element(sel_js)
+    .evaluate_to_element(sel_js, frame_id)
     .await
     .map_err(|_| format!("No element found for selector: {selector_display}"))
 }

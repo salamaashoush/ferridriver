@@ -66,10 +66,18 @@ impl Drop for Page {
 }
 
 impl Page {
-  /// Create a new Page behind Arc. The only construction path.
-  #[must_use]
-  pub fn new(inner: AnyPage) -> Arc<Self> {
-    Arc::new(Self {
+  /// Construct a Page (no `BrowserContext`). Always async because the
+  /// frame-tree cache is seeded before the Page is handed out — that
+  /// invariant is what lets `main_frame()` return `Frame` (not
+  /// `Option<Frame>`) and removes the need for any `expect`/panic at
+  /// the action API.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend's `get_frame_tree()` call fails
+  /// while seeding the frame cache.
+  pub async fn new(inner: AnyPage) -> Result<Arc<Self>> {
+    let page = Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(30000),
       default_navigation_timeout: AtomicU64::new(u64::MAX),
@@ -80,13 +88,20 @@ impl Page {
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
       frame_cache: Arc::new(Mutex::new(FrameCache::default())),
       frame_listener: Mutex::new(None),
-    })
+    });
+    page.seed_frame_cache().await?;
+    Ok(page)
   }
 
-  /// Create a new Page with context reference, behind Arc.
-  #[must_use]
-  pub fn with_context(inner: AnyPage, context: crate::context::ContextRef) -> Arc<Self> {
-    Arc::new(Self {
+  /// Construct a Page bound to a `BrowserContext`. Same async-init
+  /// contract as [`Self::new`].
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend's `get_frame_tree()` call fails
+  /// while seeding the frame cache.
+  pub async fn with_context(inner: AnyPage, context: crate::context::ContextRef) -> Result<Arc<Self>> {
+    let page = Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(30000),
       default_navigation_timeout: AtomicU64::new(u64::MAX),
@@ -97,7 +112,9 @@ impl Page {
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
       frame_cache: Arc::new(Mutex::new(FrameCache::default())),
       frame_listener: Mutex::new(None),
-    })
+    });
+    page.seed_frame_cache().await?;
+    Ok(page)
   }
 
   // ── Frame cache plumbing (Playwright-parity sync frame accessors) ─────
@@ -110,15 +127,11 @@ impl Page {
     }
   }
 
-  /// Seed the frame cache from the backend and spawn the frame-event
-  /// listener. Idempotent — calling twice on the same Page replaces the
-  /// seed and restarts the listener. Safe to call from any async context
-  /// with a tokio runtime.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend's `get_frame_tree()` call fails.
-  pub async fn init_frame_cache(self: &Arc<Self>) -> Result<()> {
+  /// Internal: seed the frame cache from the backend and spawn the
+  /// `FrameAttached`/`FrameDetached`/`FrameNavigated` listener. Called
+  /// from the constructors so every Page is fully initialized before
+  /// any sync accessor can run.
+  async fn seed_frame_cache(self: &Arc<Self>) -> Result<()> {
     let infos = self.inner.get_frame_tree().await?;
     {
       let mut guard = match self.frame_cache.lock() {
@@ -126,13 +139,6 @@ impl Page {
         Err(p) => p.into_inner(),
       };
       guard.seed(infos);
-    }
-
-    // Replace any previous listener.
-    if let Ok(mut guard) = self.frame_listener.lock() {
-      if let Some(h) = guard.take() {
-        h.abort();
-      }
     }
 
     let cache = Arc::clone(&self.frame_cache);
@@ -328,81 +334,52 @@ impl Page {
       .map_err(Into::into)
   }
 
-  // ── Locators (lazy) ─────────────────────────────────────────────────────
+  // ── Locators (delegate to mainFrame — Playwright parity) ───────────
+  //
+  // `Page` is a facade over `mainFrame` for ergonomics. Mirrors
+  // `/tmp/playwright/packages/playwright-core/src/client/page.ts:307+`,
+  // where every locator-construction and action method does
+  // `this._mainFrame.<method>(...)`. The Frame is the unit of execution
+  // context; Page never constructs Locators directly.
 
-  /// Playwright: `page.locator(selector, options?: LocatorOptions): Locator`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:324`).
-  /// Page-level `.locator` only accepts a selector string — the
-  /// `string | Locator` overload lives on [`Locator::locator`]. The full
-  /// `LocatorOptions` bag (`hasText`, `hasNotText`, `has`, `hasNot`,
-  /// `visible`) is honored by routing through [`Locator::filter`].
   #[must_use]
   pub fn locator(self: &Arc<Self>, selector: &str, options: Option<crate::options::FilterOptions>) -> Locator {
-    let base = Locator::new(Arc::clone(self), selector.to_string(), None);
-    match options {
-      Some(opts) => base.filter(&opts),
-      None => base,
-    }
+    self.main_frame().locator(selector, options)
   }
 
   #[must_use]
   pub fn get_by_role(self: &Arc<Self>, role: &str, opts: &RoleOptions) -> Locator {
-    Locator::new(Arc::clone(self), crate::locator::build_role_selector(role, opts), None)
+    self.main_frame().get_by_role(role, opts)
   }
 
   #[must_use]
   pub fn get_by_text(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) {
-      format!("text=\"{text}\"")
-    } else {
-      format!("text={text}")
-    };
-    Locator::new(Arc::clone(self), sel, None)
+    self.main_frame().get_by_text(text, opts)
   }
 
   #[must_use]
   pub fn get_by_label(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) {
-      format!("label=\"{text}\"")
-    } else {
-      format!("label={text}")
-    };
-    Locator::new(Arc::clone(self), sel, None)
+    self.main_frame().get_by_label(text, opts)
   }
 
   #[must_use]
   pub fn get_by_placeholder(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) {
-      format!("placeholder=\"{text}\"")
-    } else {
-      format!("placeholder={text}")
-    };
-    Locator::new(Arc::clone(self), sel, None)
+    self.main_frame().get_by_placeholder(text, opts)
   }
 
   #[must_use]
   pub fn get_by_alt_text(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) {
-      format!("alt=\"{text}\"")
-    } else {
-      format!("alt={text}")
-    };
-    Locator::new(Arc::clone(self), sel, None)
+    self.main_frame().get_by_alt_text(text, opts)
   }
 
   #[must_use]
   pub fn get_by_title(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) {
-      format!("title=\"{text}\"")
-    } else {
-      format!("title={text}")
-    };
-    Locator::new(Arc::clone(self), sel, None)
+    self.main_frame().get_by_title(text, opts)
   }
 
   #[must_use]
   pub fn get_by_test_id(self: &Arc<Self>, test_id: &str) -> Locator {
-    Locator::new(Arc::clone(self), format!("testid={test_id}"), None)
+    self.main_frame().get_by_test_id(test_id)
   }
 
   /// Create a `FrameLocator` for an `<iframe>` matching the selector.
@@ -410,10 +387,15 @@ impl Page {
   /// Equivalent to Playwright's `page.frameLocator(selector)`.
   #[must_use]
   pub fn frame_locator(self: &Arc<Self>, selector: &str) -> crate::locator::FrameLocator {
-    self.locator(selector, None).content_frame()
+    self.main_frame().frame_locator(selector)
   }
 
-  // ── Page-level actions (convenience, delegate to locator) ───────────────
+  // ── Action methods (delegate to mainFrame — Playwright parity) ─────
+  //
+  // Mirrors `/tmp/playwright/packages/playwright-core/src/client/page.ts:658+`:
+  // every action delegates to `this._mainFrame.<method>(...)`. The
+  // `tracing::debug!` events stay at this layer so logs identify the
+  // top-level entry point.
 
   /// Click on an element matching the selector.
   ///
@@ -422,11 +404,8 @@ impl Page {
   /// Returns an error if the element is not found or the click fails.
   pub async fn click(self: &Arc<Self>, selector: &str) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "click", selector, "page.click");
-    self.locator(selector, None).click().await
+    self.main_frame().click(selector).await
   }
-
-  // (Locator actions already return crate::error::Result, so trailing
-  // `.await` is typed correctly — no bridging needed.)
 
   /// Double-click an element matching the selector.
   ///
@@ -435,7 +414,7 @@ impl Page {
   /// Returns an error if the element is not found or the double-click fails.
   pub async fn dblclick(self: &Arc<Self>, selector: &str) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "dblclick", selector, "page.dblclick");
-    self.locator(selector, None).dblclick().await
+    self.main_frame().dblclick(selector).await
   }
 
   /// Fill an input element matching the selector with a value.
@@ -445,7 +424,7 @@ impl Page {
   /// Returns an error if the element is not found or is not fillable.
   pub async fn fill(self: &Arc<Self>, selector: &str, value: &str) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "fill", selector, "page.fill");
-    self.locator(selector, None).fill(value).await
+    self.main_frame().fill(selector, value).await
   }
 
   /// Type text character-by-character into an element matching the selector.
@@ -454,7 +433,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or typing fails.
   pub async fn r#type(self: &Arc<Self>, selector: &str, text: &str) -> Result<()> {
-    self.locator(selector, None).r#type(text).await
+    self.main_frame().r#type(selector, text).await
   }
 
   /// Press a key on an element matching the selector.
@@ -463,7 +442,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or the key press fails.
   pub async fn press(self: &Arc<Self>, selector: &str, key: &str) -> Result<()> {
-    self.locator(selector, None).press(key).await
+    self.main_frame().press(selector, key).await
   }
 
   /// Hover over an element matching the selector.
@@ -472,7 +451,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or the hover fails.
   pub async fn hover(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.locator(selector, None).hover().await
+    self.main_frame().hover(selector).await
   }
 
   /// Select an option in a `<select>` element matching the selector.
@@ -481,7 +460,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or the option cannot be selected.
   pub async fn select_option(self: &Arc<Self>, selector: &str, value: &str) -> Result<Vec<String>> {
-    self.locator(selector, None).select_option(value).await
+    self.main_frame().select_option(selector, value).await
   }
 
   /// Set input files on a file input element matching the selector.
@@ -490,7 +469,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or file setting fails.
   pub async fn set_input_files(self: &Arc<Self>, selector: &str, paths: &[String]) -> Result<()> {
-    self.locator(selector, None).set_input_files(paths).await
+    self.main_frame().set_input_files(selector, paths).await
   }
 
   /// Check a checkbox or radio button matching the selector.
@@ -499,7 +478,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found or is not checkable.
   pub async fn check(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.locator(selector, None).check().await
+    self.main_frame().check(selector).await
   }
 
   /// Uncheck a checkbox matching the selector.
@@ -508,7 +487,31 @@ impl Page {
   ///
   /// Returns an error if the element is not found or is not uncheckable.
   pub async fn uncheck(self: &Arc<Self>, selector: &str) -> Result<()> {
-    self.locator(selector, None).uncheck().await
+    self.main_frame().uncheck(selector).await
+  }
+
+  /// Set a checkbox or radio matching `selector` to `checked`. Mirrors
+  /// Playwright's `page.setChecked(selector, checked, options?)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:439`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or is not checkable.
+  pub async fn set_checked(self: &Arc<Self>, selector: &str, checked: bool) -> Result<()> {
+    self.main_frame().set_checked(selector, checked).await
+  }
+
+  /// Tap (touch) the element matched by `selector`. Mirrors Playwright's
+  /// `page.tap(selector, options?)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:308`).
+  /// Distinct from `Touchscreen::tap(x, y)` which is the lower-level
+  /// coordinate-based touch primitive.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element is not found or the tap fails.
+  pub async fn tap(self: &Arc<Self>, selector: &str) -> Result<()> {
+    self.main_frame().tap(selector).await
   }
 
   // ── Content ─────────────────────────────────────────────────────────────
@@ -546,7 +549,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn text_content(self: &Arc<Self>, selector: &str) -> Result<Option<String>> {
-    self.locator(selector, None).text_content().await
+    self.main_frame().text_content(selector).await
   }
 
   /// Get the inner text of an element matching the selector.
@@ -555,7 +558,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn inner_text(self: &Arc<Self>, selector: &str) -> Result<String> {
-    self.locator(selector, None).inner_text().await
+    self.main_frame().inner_text(selector).await
   }
 
   /// Get the inner HTML of an element matching the selector.
@@ -564,7 +567,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn inner_html(self: &Arc<Self>, selector: &str) -> Result<String> {
-    self.locator(selector, None).inner_html().await
+    self.main_frame().inner_html(selector).await
   }
 
   /// Get an attribute value from an element matching the selector.
@@ -573,7 +576,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn get_attribute(self: &Arc<Self>, selector: &str, name: &str) -> Result<Option<String>> {
-    self.locator(selector, None).get_attribute(name).await
+    self.main_frame().get_attribute(selector, name).await
   }
 
   /// Get the input value of a form element matching the selector.
@@ -582,10 +585,10 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn input_value(self: &Arc<Self>, selector: &str) -> Result<String> {
-    self.locator(selector, None).input_value().await
+    self.main_frame().input_value(selector).await
   }
 
-  // ── State checks ────────────────────────────────────────────────────────
+  // ── State checks (delegate to mainFrame) ────────────────────────────
 
   /// Check if an element matching the selector is visible.
   ///
@@ -593,7 +596,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_visible(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector, None).is_visible().await
+    self.main_frame().is_visible(selector).await
   }
 
   /// Check if an element matching the selector is hidden.
@@ -602,7 +605,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_hidden(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector, None).is_hidden().await
+    self.main_frame().is_hidden(selector).await
   }
 
   /// Check if an element matching the selector is enabled.
@@ -611,7 +614,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_enabled(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector, None).is_enabled().await
+    self.main_frame().is_enabled(selector).await
   }
 
   /// Check if an element matching the selector is disabled.
@@ -620,7 +623,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_disabled(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector, None).is_disabled().await
+    self.main_frame().is_disabled(selector).await
   }
 
   /// Check if a checkbox or radio button matching the selector is checked.
@@ -629,7 +632,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn is_checked(self: &Arc<Self>, selector: &str) -> Result<bool> {
-    self.locator(selector, None).is_checked().await
+    self.main_frame().is_checked(selector).await
   }
 
   // ── Evaluation ──────────────────────────────────────────────────────────
@@ -1585,14 +1588,26 @@ impl Page {
   // :262 (frame). All read from the page-owned `FrameCache` seeded by
   // [`Page::init_frame_cache`] and kept fresh by the listener task.
 
-  /// Main frame of this page. Sync — reads the cached main-frame id.
-  /// Returns `None` only before [`Page::init_frame_cache`] has seeded
-  /// the cache (which the context's `new_page` always does before
-  /// handing the Page out).
+  /// Main frame of this page. Mirrors Playwright's `page.mainFrame():
+  /// Frame` (non-null) — every Page's frame cache is seeded inside
+  /// [`Self::new`] / [`Self::with_context`] before the Page is handed
+  /// out, so the main frame id is always present.
+  ///
+  /// # Panics
+  ///
+  /// Panics only if the construction-path invariant is broken (cache
+  /// empty after `Self::new`); not reachable through public API.
   #[must_use]
-  pub fn main_frame(self: &Arc<Self>) -> Option<Frame> {
-    let id = self.with_frame_cache(crate::frame_cache::FrameCache::main_frame_id)?;
-    Some(Frame::new(Arc::clone(self), id))
+  pub fn main_frame(self: &Arc<Self>) -> Frame {
+    let id = self
+      .with_frame_cache(crate::frame_cache::FrameCache::main_frame_id)
+      .unwrap_or_else(|| {
+        // Constructor invariant: seed_frame_cache always populates the
+        // main frame id. Reaching this branch means the constructor was
+        // bypassed.
+        unreachable!("Page::main_frame called before seed_frame_cache populated the cache")
+      });
+    Frame::new(Arc::clone(self), id)
   }
 
   /// All non-detached frames attached to the page, main-frame first.

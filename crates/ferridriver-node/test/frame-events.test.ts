@@ -208,6 +208,73 @@ for (const backend of CDP_BACKENDS) {
       const empty = page.frame({});
       expect(empty).toBeNull();
     });
+
+    // ── 3.9 Frame action methods ───────────────────────────────────────────
+    // Verify the action surface scoped to a child iframe — actions that
+    // modify state inside the iframe must be visible only to that frame's
+    // evaluate(), not the parent's.
+
+    it("frame.fill + frame.inputValue write/read inside iframe", async () => {
+      await page.setContent(`
+        <iframe name="form" srcdoc="<input id='i' type='text'>"></iframe>
+      `);
+      await page.waitForSelector('iframe[name="form"]');
+      const frame = page.frame("form")!;
+      expect(frame).not.toBeNull();
+      // Wait for iframe document to be ready.
+      await frame.waitForLoadState();
+      await frame.fill("#i", "hello");
+      const v = await frame.inputValue("#i");
+      expect(v).toBe("hello");
+    });
+
+    it("frame.click + frame.textContent affect iframe DOM only", async () => {
+      // Use a `<script>` block inside the iframe srcdoc to wire up the
+      // click via addEventListener — avoids the inline-handler escape
+      // dance for double-quoted strings in attributes.
+      const srcdoc =
+        "<button id='b'>Go</button>" +
+        "<script>document.getElementById('b').addEventListener('click', function(e) { e.target.textContent = 'clicked'; });</script>";
+      await page.setContent(`
+        <h1 id="parent">Parent</h1>
+        <iframe name="ui" srcdoc="${srcdoc.replace(/"/g, "&quot;")}"></iframe>
+      `);
+      await page.waitForSelector('iframe[name="ui"]');
+      const frame = page.frame("ui")!;
+      await frame.waitForLoadState();
+      await frame.click("#b");
+      const inner = await frame.textContent("#b");
+      expect(inner).toBe("clicked");
+      // Parent DOM was untouched.
+      const parentText = await page.textContent("#parent");
+      expect(parentText).toBe("Parent");
+    });
+
+    it("frame.check + frame.isChecked toggle a checkbox in the iframe", async () => {
+      await page.setContent(`
+        <iframe name="cb" srcdoc="<input id='c' type='checkbox'>"></iframe>
+      `);
+      await page.waitForSelector('iframe[name="cb"]');
+      const frame = page.frame("cb")!;
+      await frame.waitForLoadState();
+      expect(await frame.isChecked("#c")).toBe(false);
+      await frame.check("#c");
+      expect(await frame.isChecked("#c")).toBe(true);
+      await frame.setChecked("#c", false);
+      expect(await frame.isChecked("#c")).toBe(false);
+    });
+
+    it("frame.getAttribute + frame.isVisible read iframe DOM", async () => {
+      await page.setContent(`
+        <iframe name="meta" srcdoc="<a id='l' href='/x' data-id='42'>Link</a>"></iframe>
+      `);
+      await page.waitForSelector('iframe[name="meta"]');
+      const frame = page.frame("meta")!;
+      await frame.waitForLoadState();
+      expect(await frame.getAttribute("#l", "data-id")).toBe("42");
+      expect(await frame.isVisible("#l")).toBe(true);
+      expect(await frame.isHidden("#l")).toBe(false);
+    });
   });
 
   describe(`[${backend}] Events`, () => {
