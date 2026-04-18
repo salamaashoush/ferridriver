@@ -31,6 +31,7 @@ pub(crate) mod frame_cache;
 pub mod locator;
 pub mod options;
 pub mod page;
+pub mod protocol;
 pub mod url_matcher;
 
 pub use browser::Browser;
