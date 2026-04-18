@@ -138,6 +138,85 @@ pub fn click_button(context: &str, x: f64, y: f64, button: u32, count: u32) -> s
   })
 }
 
+/// Build a click honoring the full `BackendClickArgs` surface:
+/// `button`, `click_count`, delay between press/release, and `steps`
+/// interpolated `pointerMove` actions before press. Mirrors Playwright's
+/// `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiInput.ts`.
+#[must_use]
+pub fn click_with_args(context: &str, x: f64, y: f64, args: &crate::backend::BackendClickArgs) -> serde_json::Value {
+  let button = u32::from(args.button.as_bidi());
+  let steps = args.steps.max(1);
+  let mut actions: Vec<serde_json::Value> = Vec::new();
+  // BiDi pointer moves use `duration` in ms. Even with steps=1 we emit
+  // a final move at the destination (duration=0) so the browser's
+  // pointer state is positioned before `pointerDown`.
+  for i in 1..=steps {
+    let t = f64::from(i) / f64::from(steps);
+    let sx = if i == steps { x } else { x * t };
+    let sy = if i == steps { y } else { y * t };
+    let duration: u64 = if steps > 1 { 100 / u64::from(steps) } else { 0 };
+    actions.push(json!({"type": "pointerMove", "x": coord(sx), "y": coord(sy), "duration": duration}));
+  }
+  for n in 1..=args.click_count {
+    actions.push(json!({"type": "pointerDown", "button": button}));
+    if args.delay_ms > 0 {
+      actions.push(json!({"type": "pause", "duration": args.delay_ms}));
+    }
+    actions.push(json!({"type": "pointerUp", "button": button}));
+    // Second click in a dblclick sequence — BiDi's W3C spec expects a
+    // short pause so the click_count matches. `n` used for symmetry
+    // with CDP but has no additional wire effect here.
+    let _ = n;
+  }
+  json!({
+    "context": context,
+    "actions": [{
+      "type": "pointer",
+      "id": "mouse",
+      "parameters": {"pointerType": "mouse"},
+      "actions": actions
+    }]
+  })
+}
+
+/// Press a list of modifier keys via a single `key` input source.
+/// Each modifier fires `keyDown` with its Playwright key-name (e.g.
+/// `"Meta"` on macOS for `ControlOrMeta`).
+#[must_use]
+pub fn modifiers_down(context: &str, mods: &[crate::options::Modifier]) -> serde_json::Value {
+  let actions: Vec<serde_json::Value> = mods
+    .iter()
+    .map(|m| json!({"type": "keyDown", "value": key_to_bidi(m.key_name())}))
+    .collect();
+  json!({
+    "context": context,
+    "actions": [{
+      "type": "key",
+      "id": "keyboard",
+      "actions": actions
+    }]
+  })
+}
+
+/// Release a list of modifier keys (reverse order — matches
+/// Playwright's unwind behavior in `server/input.ts`).
+#[must_use]
+pub fn modifiers_up(context: &str, mods: &[crate::options::Modifier]) -> serde_json::Value {
+  let actions: Vec<serde_json::Value> = mods
+    .iter()
+    .rev()
+    .map(|m| json!({"type": "keyUp", "value": key_to_bidi(m.key_name())}))
+    .collect();
+  json!({
+    "context": context,
+    "actions": [{
+      "type": "key",
+      "id": "keyboard",
+      "actions": actions
+    }]
+  })
+}
+
 /// Build a pointer move action.
 #[must_use]
 pub fn pointer_move(context: &str, x: f64, y: f64) -> serde_json::Value {

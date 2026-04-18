@@ -28,7 +28,7 @@ step!(Click {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let loc = page.locator(&sel, None);
-        loc.click().await?;
+        loc.click(None).await?;
         Ok(None)
     }
 });

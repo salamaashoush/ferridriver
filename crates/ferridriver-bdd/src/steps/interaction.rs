@@ -9,7 +9,7 @@ async fn click(world: &mut BrowserWorld, selector: String) {
   world
     .page()
     .locator(&selector, None)
-    .click()
+    .click(None)
     .await
     .map_err(|e| StepError::from(format!("click \"{selector}\": {e}")))?;
 }
@@ -159,7 +159,7 @@ async fn click_first(world: &mut BrowserWorld, selector: String) {
     .page()
     .locator(&selector, None)
     .first()
-    .click()
+    .click(None)
     .await
     .map_err(|e| StepError::from(format!("click first \"{selector}\": {e}")))?;
 }
@@ -170,7 +170,7 @@ async fn click_last(world: &mut BrowserWorld, selector: String) {
     .page()
     .locator(&selector, None)
     .last()
-    .click()
+    .click(None)
     .await
     .map_err(|e| StepError::from(format!("click last \"{selector}\": {e}")))?;
 }
@@ -181,7 +181,7 @@ async fn click_nth(world: &mut BrowserWorld, n: i64, selector: String) {
     .page()
     .locator(&selector, None)
     .nth(n as i32)
-    .click()
+    .click(None)
     .await
     .map_err(|e| StepError::from(format!("click {n}th \"{selector}\": {e}")))?;
 }

@@ -360,6 +360,59 @@ pub struct MetricData {
   pub value: f64,
 }
 
+/// Backend-ready click arguments. Produced by
+/// [`crate::actions::resolve_click_args`] from the user's
+/// [`crate::options::ClickOptions`]. Every per-backend `click_at_with`
+/// receives this struct — keeps the wire-level per-backend impls free
+/// of `ClickOptions` parsing and defaulting logic.
+///
+/// Modifiers are carried as the raw Playwright enum slice so each
+/// backend can compute its own bitmask / key-name / wire format; the
+/// CDP bitmask (`u32`) is cached in [`Self::modifiers_bitmask`] so the
+/// hot mouse-dispatch paths don't recompute it.
+#[derive(Debug, Clone)]
+pub struct BackendClickArgs {
+  pub button: crate::options::MouseButton,
+  pub click_count: u32,
+  /// Milliseconds to sleep between `mousedown` and `mouseup`.
+  pub delay_ms: u64,
+  /// CDP modifier bitmask (cached from [`Self::modifiers`]).
+  pub modifiers_bitmask: u32,
+  /// Full modifier list (for backends that need key-name strings).
+  pub modifiers: Vec<crate::options::Modifier>,
+  /// Interpolated `mousemove` events between the current cursor and
+  /// `(x, y)`. `1` = single move at destination.
+  pub steps: u32,
+}
+
+impl BackendClickArgs {
+  #[must_use]
+  pub fn from_options(opts: &crate::options::ClickOptions) -> Self {
+    Self {
+      button: opts.resolved_button(),
+      click_count: opts.resolved_click_count(),
+      delay_ms: opts.resolved_delay_ms(),
+      modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
+      modifiers: opts.modifiers.clone(),
+      steps: opts.resolved_steps(),
+    }
+  }
+
+  /// Convenience factory for the "no options, just click once with left"
+  /// default path — wire for existing `click_at` call sites.
+  #[must_use]
+  pub fn default_left() -> Self {
+    Self {
+      button: crate::options::MouseButton::Left,
+      click_count: 1,
+      delay_ms: 0,
+      modifiers_bitmask: 0,
+      modifiers: Vec::new(),
+      steps: 1,
+    }
+  }
+}
+
 /// Navigation lifecycle target — which CDP event to wait for after Page.navigate.
 /// Matches Playwright's `waitUntil` semantics exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -677,6 +730,30 @@ impl AnyPage {
 
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
     page_dispatch!(self, click_at_opts(x, y, button, click_count))
+  }
+
+  /// Dispatch a click at page-level coordinates `(x, y)` with the full
+  /// Playwright option bag: `button`, `click_count`, modifiers, delay
+  /// between press/release, and `steps` interpolated `mousemove` events
+  /// between the current cursor and the target. Modifier keydown/keyup
+  /// is the caller's responsibility — use [`Self::press_modifiers`] /
+  /// [`Self::release_modifiers`] around this call when
+  /// `!args.modifiers.is_empty()`.
+  pub async fn click_at_with(&self, x: f64, y: f64, args: &BackendClickArgs) -> Result<(), String> {
+    page_dispatch!(self, click_at_with(x, y, args))
+  }
+
+  /// Press all modifiers in `mods` via the backend's keyboard input
+  /// protocol (CDP `Input.dispatchKeyEvent { type: "keyDown" }`, `BiDi`
+  /// `input.performActions`, or `WebKit` host IPC). Idempotent for empty
+  /// lists. Callers pair this with [`Self::release_modifiers`].
+  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+    page_dispatch!(self, press_modifiers(mods))
+  }
+
+  /// Release all modifiers in `mods`. See [`Self::press_modifiers`].
+  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+    page_dispatch!(self, release_modifiers(mods))
   }
 
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {

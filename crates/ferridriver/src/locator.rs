@@ -327,17 +327,30 @@ impl Locator {
   //   3. Borrows `&str` parameters directly — zero String clones
   //   4. Expands inline — no closure/future type-erasure overhead
 
-  /// Click the element matched by this locator.
+  /// Click the element matched by this locator with the full Playwright
+  /// [`crate::options::ClickOptions`] surface. Mirrors
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
+  ///
+  /// All options (`button`, `click_count`, `delay`, `force`, `modifiers`,
+  /// `position`, `steps`, `trial`, `timeout`) are honored across all
+  /// four backends; `no_wait_after` is accepted for signature parity
+  /// but has no effect (ferridriver does not implicitly wait for
+  /// navigation after click).
+  ///
+  /// Pass `None` for the common no-options path.
   ///
   /// # Errors
   ///
   /// Returns an error if the element cannot be found, is not actionable
-  /// (e.g. a `<select>` or file input), or the click fails.
-  pub async fn click(&self) -> Result<()> {
+  /// (unless `force=true`), or the click dispatch fails.
+  pub async fn click(&self, opts: Option<crate::options::ClickOptions>) -> Result<()> {
+    let opts = opts.unwrap_or_default();
+    // Borrow `opts` across retry iterations — references are `Copy`, so
+    // each `async move` closure captures a fresh ref instead of moving
+    // the owned `ClickOptions` (which contains a non-Copy `Vec<Modifier>`).
+    let opts_ref = &opts;
     retry_resolve!(self, |el, page| async move {
-      actions::check_click_guard(&el, page).await.map_err(|e| e.to_string())?;
-      actions::wait_for_actionable(&el, page).await.ok();
-      el.click().await
+      actions::click_with_opts(&el, page, opts_ref).await
     })
   }
 

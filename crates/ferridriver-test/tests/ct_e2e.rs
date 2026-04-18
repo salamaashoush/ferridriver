@@ -65,7 +65,7 @@ window.__ferriMount({ id: 'Counter' }, document.getElementById('app'), { props: 
 
   // Click + three times.
   for _ in 0..3 {
-    page.locator("#inc", None).click().await.unwrap();
+    page.locator("#inc", None).click(None).await.unwrap();
   }
   let count = page
     .locator("#count", None)
@@ -76,7 +76,7 @@ window.__ferriMount({ id: 'Counter' }, document.getElementById('app'), { props: 
   assert_eq!(count, "3", "count should be 3 after 3 clicks");
 
   // Click - once.
-  page.locator("#dec", None).click().await.unwrap();
+  page.locator("#dec", None).click(None).await.unwrap();
   let count = page
     .locator("#count", None)
     .text_content()

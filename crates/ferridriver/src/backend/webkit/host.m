@@ -421,6 +421,13 @@ typedef struct {
     // surface DOM `mousemove` events during a drag — AppKit only delivers
     // mouseMoved when no button is held.
     uint8_t pressed_buttons;
+    // Bitmask of currently-held modifier keys (NSEventModifierFlagShift
+    // | NSEventModifierFlagControl | NSEventModifierFlagOption |
+    // NSEventModifierFlagCommand). Updated by OP_KEY_DOWN / OP_KEY_UP
+    // when the pressed key is Shift/Control/Alt/Meta; read by
+    // OP_MOUSE_EVENT so that click events synthesised after a modifier
+    // keydown surface `event.shiftKey` etc. as `true` in the page.
+    NSEventModifierFlags held_modifier_flags;
 } ViewEntry;
 
 static NSMutableDictionary<NSNumber*, NSValue*> *g_views;
@@ -1087,8 +1094,13 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 else if (key.length == 1) { chars = key; }
 
                 if (op != OP_KEY_UP) {
+                    // Track held modifier so subsequent mouse events carry
+                    // the flag (so `event.shiftKey` etc. show as true).
+                    if (modFlags) {
+                        v->held_modifier_flags |= modFlags;
+                    }
                     NSEvent *down = [NSEvent keyEventWithType:NSEventTypeKeyDown
-                        location:NSZeroPoint modifierFlags:modFlags
+                        location:NSZeroPoint modifierFlags:v->held_modifier_flags
                         timestamp:ts windowNumber:winNum
                         context:nil characters:chars
                         charactersIgnoringModifiers:chars
@@ -1096,8 +1108,15 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                     [v->webview keyDown:down];
                 }
                 if (op != OP_KEY_DOWN) {
+                    // For PRESS_KEY (combined down+up) we release the
+                    // modifier after the paired keyDown. For KEY_UP alone
+                    // clear the bit before synthesising so the keyUp NSEvent
+                    // reflects post-release state.
+                    if (modFlags) {
+                        v->held_modifier_flags &= ~modFlags;
+                    }
                     NSEvent *up = [NSEvent keyEventWithType:NSEventTypeKeyUp
-                        location:NSZeroPoint modifierFlags:modFlags
+                        location:NSZeroPoint modifierFlags:v->held_modifier_flags
                         timestamp:ts windowNumber:winNum
                         context:nil characters:chars
                         charactersIgnoringModifiers:chars
@@ -1498,11 +1517,34 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 }
             }
 
-            NSEvent *ev = [NSEvent mouseEventWithType:evType
-                location:NSMakePoint(x, wy)
-                modifierFlags:0 timestamp:ts
-                windowNumber:winNum context:nil
-                eventNumber:0 clickCount:(NSInteger)click_count pressure:(mouse_type == 1 ? 1.0 : 0.0)];
+            NSEvent *ev = nil;
+            // Middle-button (`otherMouseDown:` / `otherMouseUp:`) events
+            // fired via the NSEvent factory arrive with `buttonNumber
+            // == 0`, which WKWebView then hands to the renderer as DOM
+            // button 0 (left) — swallowing the `auxclick` event the
+            // page is actually listening for. Build the event through
+            // CGEvent where we can set `kCGMouseEventButtonNumber`
+            // explicitly so DOM `auxclick` fires with `button === 1`.
+            if (mouse_button == 2) {
+                CGEventType cgType = (mouse_type == 0)
+                    ? kCGEventOtherMouseDragged
+                    : (mouse_type == 1 ? kCGEventOtherMouseDown : kCGEventOtherMouseUp);
+                // AppKit / CGEvent "middle" = button number 2.
+                CGEventRef cg = CGEventCreateMouseEvent(NULL, cgType, CGPointMake(x, y), kCGMouseButtonCenter);
+                if (cg) {
+                    CGEventSetIntegerValueField(cg, kCGMouseEventButtonNumber, 2);
+                    CGEventSetIntegerValueField(cg, kCGMouseEventClickState, (int64_t)click_count);
+                    ev = [NSEvent eventWithCGEvent:cg];
+                    CFRelease(cg);
+                }
+            }
+            if (!ev) {
+                ev = [NSEvent mouseEventWithType:evType
+                    location:NSMakePoint(x, wy)
+                    modifierFlags:v->held_modifier_flags timestamp:ts
+                    windowNumber:winNum context:nil
+                    eventNumber:0 clickCount:(NSInteger)click_count pressure:(mouse_type == 1 ? 1.0 : 0.0)];
+            }
 
             // Dispatch directly to WKWebView (not window sendEvent:) for reliable
             // delivery in headless/borderless windows with ignoresMouseEvents=YES.

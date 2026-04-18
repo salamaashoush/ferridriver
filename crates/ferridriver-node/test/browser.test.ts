@@ -606,6 +606,158 @@ for (const backend of BACKENDS) {
       expect(text).toBe("clicked");
     });
 
+    // ── ClickOptions (task 1.5, full Playwright surface) ──────────────
+
+    it("click with button:'right' fires contextmenu", async () => {
+      await page.setContent(`
+        <button id="b" oncontextmenu="document.getElementById('out').textContent = 'right'; return false;">b</button>
+        <div id="out"></div>
+      `);
+      await page.waitForSelector("#b");
+      await page.locator("#b").click({ button: "right" });
+      const text = await page.locator("#out").innerText();
+      expect(text).toBe("right");
+    });
+
+    it("click with button:'middle' fires auxclick", async () => {
+      await page.setContent(`
+        <button id="b">b</button>
+        <div id="out"></div>
+        <script>
+          document.getElementById('b').addEventListener('auxclick', e => {
+            if (e.button === 1) document.getElementById('out').textContent = 'middle';
+          });
+        </script>
+      `);
+      await page.waitForSelector("#b");
+      await page.locator("#b").click({ button: "middle" });
+      await new Promise((r) => setTimeout(r, 30));
+      const text = await page.locator("#out").innerText();
+      expect(text).toBe("middle");
+    });
+
+    it("click with clickCount:2 triggers dblclick handler", async () => {
+      await page.setContent(`
+        <button id="b">b</button>
+        <div id="out"></div>
+        <script>
+          document.getElementById('b').addEventListener('dblclick', () => {
+            document.getElementById('out').textContent = 'dbl';
+          });
+        </script>
+      `);
+      await page.waitForSelector("#b");
+      await page.locator("#b").click({ clickCount: 2 });
+      const text = await page.locator("#out").innerText();
+      expect(text).toBe("dbl");
+    });
+
+    it("click with delay holds mousedown before mouseup", async () => {
+      await page.setContent(`
+        <button id="b">b</button>
+        <div id="out"></div>
+        <script>
+          let downAt = 0;
+          const b = document.getElementById('b');
+          b.addEventListener('mousedown', () => { downAt = Date.now(); });
+          b.addEventListener('mouseup', () => {
+            const ms = Date.now() - downAt;
+            document.getElementById('out').textContent = String(ms);
+          });
+        </script>
+      `);
+      await page.waitForSelector("#b");
+      await page.locator("#b").click({ delay: 150 });
+      const ms = Number(await page.locator("#out").innerText());
+      // Allow slack for timer resolution + dispatch overhead, but ensure
+      // we held for at least most of the requested 150ms.
+      expect(ms).toBeGreaterThanOrEqual(120);
+    });
+
+    it("click with modifiers:['Shift'] sets shiftKey on the mouse event", async () => {
+      await page.setContent(`
+        <button id="b">b</button>
+        <div id="out"></div>
+        <script>
+          document.getElementById('b').addEventListener('click', e => {
+            document.getElementById('out').textContent = e.shiftKey ? 'shift' : 'none';
+          });
+        </script>
+      `);
+      await page.waitForSelector("#b");
+      await page.locator("#b").click({ modifiers: ["Shift"] });
+      const text = await page.locator("#out").innerText();
+      expect(text).toBe("shift");
+    });
+
+    it("click with position offsets the mouse coordinates", async () => {
+      await page.setContent(`
+        <div id="b" style="width:200px;height:100px;background:#ccc;"></div>
+        <div id="out"></div>
+        <script>
+          document.getElementById('b').addEventListener('click', e => {
+            const r = e.currentTarget.getBoundingClientRect();
+            const lx = Math.round(e.clientX - r.left);
+            const ly = Math.round(e.clientY - r.top);
+            document.getElementById('out').textContent = lx + ',' + ly;
+          });
+        </script>
+      `);
+      await page.waitForSelector("#b");
+      await page.locator("#b").click({ position: { x: 10, y: 20 } });
+      const text = await page.locator("#out").innerText();
+      expect(text).toBe("10,20");
+    });
+
+    it("click with trial:true skips the click handler but presses modifiers", async () => {
+      await page.setContent(`
+        <button id="b">b</button>
+        <div id="clicked">no</div>
+        <div id="kd">none</div>
+        <script>
+          document.getElementById('b').addEventListener('click', () => {
+            document.getElementById('clicked').textContent = 'yes';
+          });
+          document.addEventListener('keydown', e => {
+            if (e.key === 'Shift') document.getElementById('kd').textContent = 'shift';
+          });
+        </script>
+      `);
+      await page.waitForSelector("#b");
+      await page.locator("#b").click({ trial: true, modifiers: ["Shift"] });
+      expect(await page.locator("#clicked").innerText()).toBe("no");
+      // Per Playwright: modifiers are pressed regardless of trial.
+      expect(await page.locator("#kd").innerText()).toBe("shift");
+    });
+
+    it("click rejects unknown button string", async () => {
+      await page.setContent('<button id="b">b</button>');
+      await page.waitForSelector("#b");
+      let caught: unknown = null;
+      try {
+        // @ts-expect-error — intentionally bad button value.
+        await page.locator("#b").click({ button: "garbage" });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).not.toBeNull();
+      expect(String((caught as Error).message)).toContain("Unknown mouse button");
+    });
+
+    it("click rejects unknown modifier string", async () => {
+      await page.setContent('<button id="b">b</button>');
+      await page.waitForSelector("#b");
+      let caught: unknown = null;
+      try {
+        // @ts-expect-error — intentionally bad modifier value.
+        await page.locator("#b").click({ modifiers: ["Hyper"] });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).not.toBeNull();
+      expect(String((caught as Error).message)).toContain("Unknown modifier");
+    });
+
     it("fills an input via locator", async () => {
       await page.setContent('<input id="input" type="text" />');
       await page.waitForSelector("#input");

@@ -134,7 +134,7 @@ async fn deep_profile() {
     page.title().await.unwrap();
     title_times.push(t.elapsed());
     let t = Instant::now();
-    page.locator("#b", None).click().await.unwrap();
+    page.locator("#b", None).click(None).await.unwrap();
     click_times.push(t.elapsed());
     let t = Instant::now();
     page.locator("#b", None).text_content().await.unwrap();
@@ -180,7 +180,7 @@ async fn deep_profile() {
       "<button id='b' onclick=\"this.textContent='done'\">Click {i}</button>"
     ));
     page.goto(&url, None).await.unwrap();
-    page.locator("#b", None).click().await.unwrap();
+    page.locator("#b", None).click(None).await.unwrap();
     let _ = page.locator("#b", None).text_content().await.unwrap();
     ctx.close().await.ok();
     cycle_times.push(t.elapsed());

@@ -245,8 +245,13 @@ impl LocatorJs {
   // ── Interaction ───────────────────────────────────────────────────────────
 
   #[qjs(rename = "click")]
-  pub async fn click(&self) -> rquickjs::Result<()> {
-    self.inner.click().await.into_js()
+  pub async fn click<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
+    self.inner.click(opts).await.into_js()
   }
 
   #[qjs(rename = "dblclick")]

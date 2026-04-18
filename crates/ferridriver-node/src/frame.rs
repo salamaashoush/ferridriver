@@ -183,9 +183,12 @@ impl Frame {
   // in turn delegates to the frame-scoped Locator. Option bags pick up
   // future extensions on the Locator surface.
 
+  /// Click the first element matching `selector` in this frame. Accepts
+  /// Playwright's full `FrameClickOptions` bag.
   #[napi]
-  pub async fn click(&self, selector: String) -> Result<()> {
-    self.inner.click(&selector).await.into_napi()
+  pub async fn click(&self, selector: String, options: Option<crate::types::ClickOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.click(&selector, opts).await.into_napi()
   }
 
   #[napi]

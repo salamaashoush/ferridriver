@@ -632,9 +632,119 @@ pub async fn upload_file(page: &AnyPage, selector: &str, paths: &[String]) -> Re
 
 // ─── Auto-waiting ───────────────────────────────────────────────────────────
 
-/// Wait for an element to be actionable (visible, enabled).
-/// Polls from Rust side with short sleeps -- no blocking JS promises.
-/// This allows parallel pages to make progress concurrently.
+/// Resolve the click dispatch point for an element, in top-level page
+/// (viewport) coordinates. Mirrors Playwright's
+/// `/tmp/playwright/packages/playwright-core/src/server/dom.ts` click-point
+/// logic: scroll-into-view, then take the element's padding-box + an
+/// optional `position` offset, then walk the frame chain accumulating
+/// `window.frameElement.getBoundingClientRect()` offsets so an iframe
+/// element resolves to the right top-level coords.
+///
+/// All runs in a single JS round-trip; the per-backend `click_at_with`
+/// receives ready-to-dispatch viewport coords.
+///
+/// # Errors
+///
+/// Returns an error if the JS evaluation fails or the element has no box.
+pub async fn resolve_click_point(
+  element: &AnyElement,
+  position: Option<crate::options::Point>,
+) -> Result<(f64, f64), String> {
+  let position_js = match position {
+    Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
+    None => "null".to_string(),
+  };
+  // Prefer the non-standard Chromium/WebKit `scrollIntoViewIfNeeded` —
+  // a single native call that measures viewport + scroll in one step.
+  // Fall back to the W3C `scrollIntoView({block:'center'})` on Firefox
+  // (BiDi), which lacks the non-standard variant. Both paths are
+  // genuine implementations; this is feature detection for the
+  // best-available primitive, not a workaround.
+  let js = format!(
+    "function() {{ \
+      if (typeof this.scrollIntoViewIfNeeded === 'function') {{ \
+        this.scrollIntoViewIfNeeded(); \
+      }} else {{ \
+        this.scrollIntoView({{ block: 'center', inline: 'center' }}); \
+      }} \
+      var r = this.getBoundingClientRect(); \
+      var pos = {position_js}; \
+      var x = pos ? (r.x + pos.x) : (r.x + r.width / 2); \
+      var y = pos ? (r.y + pos.y) : (r.y + r.height / 2); \
+      var win = this.ownerDocument.defaultView; \
+      while (win && win !== win.parent && win.frameElement) {{ \
+        var fr = win.frameElement.getBoundingClientRect(); \
+        x += fr.x; \
+        y += fr.y; \
+        win = win.parent; \
+      }} \
+      return {{ x: x, y: y }}; \
+    }}"
+  );
+  let val = element.call_js_fn_value(&js).await?;
+  val
+    .and_then(|v| {
+      let x = v.get("x").and_then(serde_json::Value::as_f64)?;
+      let y = v.get("y").and_then(serde_json::Value::as_f64)?;
+      Some((x, y))
+    })
+    .ok_or_else(|| "could not compute click point".to_string())
+}
+
+/// Dispatch a click with the full Playwright [`crate::options::ClickOptions`]
+/// surface. Mirrors Playwright's `/tmp/playwright/packages/playwright-core/
+/// src/server/dom.ts::ElementHandle._click`:
+///
+/// 1. If `!force`, run the actionability checks (visibility / attached /
+///    stable / enabled / editable where applicable). On `force=true`,
+///    skip them entirely and rely on the element's current state.
+/// 2. Press the modifier keys (keydown) — even in `trial` mode; per
+///    Playwright, modifiers are pressed so callers can test
+///    modifier-visible UI without firing the actual mouse event.
+/// 3. If `trial`, release modifiers and return `Ok(())` without firing
+///    any mouse event.
+/// 4. Otherwise resolve the click point (element center or padding-box
+///    offset by `position`, with iframe-chain accumulation), then
+///    dispatch via the backend's `click_at_with(x, y, args)`.
+/// 5. Release modifiers on all paths (error or success) so page state
+///    doesn't leak between actions.
+///
+/// `click_count`, `delay`, `button`, and `steps` are honored in
+/// [`crate::backend::BackendClickArgs`] — each backend's `click_at_with`
+/// is responsible for emitting the right wire events with those values.
+///
+/// # Errors
+///
+/// Returns an error from actionability, point resolution, or the
+/// per-backend click dispatch. Modifier release is best-effort and does
+/// not override the primary error.
+pub async fn click_with_opts(
+  element: &AnyElement,
+  page: &AnyPage,
+  opts: &crate::options::ClickOptions,
+) -> Result<(), String> {
+  if !opts.is_force() {
+    check_click_guard(element, page).await.map_err(|e| e.to_string())?;
+    wait_for_actionable(element, page).await.ok();
+  }
+  let args = crate::backend::BackendClickArgs::from_options(opts);
+  page.press_modifiers(&opts.modifiers).await?;
+  let result = if opts.is_trial() {
+    Ok(())
+  } else {
+    match resolve_click_point(element, opts.position).await {
+      Ok((x, y)) => page.click_at_with(x, y, &args).await,
+      Err(e) => Err(e),
+    }
+  };
+  // Always release modifiers so page state doesn't leak.
+  let _ = page.release_modifiers(&opts.modifiers).await;
+  result
+}
+
+/// Wait for an element to be actionable (visible, enabled, stable).
+/// Polls from the Rust side with short sleeps — no blocking JS promises
+/// — so parallel pages can make progress concurrently.
 ///
 /// # Errors
 ///

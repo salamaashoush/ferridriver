@@ -138,9 +138,13 @@ impl Locator {
 
   // ── Actions ─────────────────────────────────────────────────────────────
 
+  /// Click the element matched by this locator. Accepts Playwright's
+  /// full `LocatorClickOptions` bag — see
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
   #[napi]
-  pub async fn click(&self) -> Result<()> {
-    self.inner.click().await.map_err(napi::Error::from_reason)
+  pub async fn click(&self, options: Option<crate::types::ClickOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.click(opts).await.map_err(napi::Error::from_reason)
   }
 
   #[napi]

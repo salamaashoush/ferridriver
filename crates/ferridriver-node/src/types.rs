@@ -194,6 +194,63 @@ impl From<Point> for ferridriver::options::Point {
   }
 }
 
+/// Playwright-parity options for `page.click` / `locator.click` /
+/// `frame.click`. Mirrors `LocatorClickOptions` at
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
+/// All fields are the Playwright public surface; `noWaitAfter` is
+/// accepted for signature parity but has no effect in ferridriver.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct ClickOptions {
+  #[napi(ts_type = "'left' | 'right' | 'middle'")]
+  pub button: Option<String>,
+  pub click_count: Option<u32>,
+  /// Wait in ms between `mousedown` and `mouseup`. Default `0`.
+  pub delay: Option<f64>,
+  pub force: Option<bool>,
+  #[napi(ts_type = "Array<'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift'>")]
+  pub modifiers: Option<Vec<String>>,
+  pub no_wait_after: Option<bool>,
+  pub position: Option<Point>,
+  pub steps: Option<u32>,
+  pub timeout: Option<f64>,
+  pub trial: Option<bool>,
+}
+
+impl TryFrom<ClickOptions> for ferridriver::options::ClickOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: ClickOptions) -> std::result::Result<Self, Self::Error> {
+    let button = match o.button.as_deref() {
+      None => None,
+      Some(s) => Some(
+        ferridriver::options::MouseButton::parse(s)
+          .ok_or_else(|| napi::Error::from_reason(format!("Unknown mouse button: {s}")))?,
+      ),
+    };
+    let mut modifiers = Vec::new();
+    if let Some(list) = o.modifiers {
+      for name in list {
+        let m = ferridriver::options::Modifier::parse(&name)
+          .ok_or_else(|| napi::Error::from_reason(format!("Unknown modifier: {name}")))?;
+        modifiers.push(m);
+      }
+    }
+    Ok(Self {
+      button,
+      click_count: o.click_count,
+      delay: o.delay.map(f64_to_u64),
+      force: o.force,
+      modifiers,
+      no_wait_after: o.no_wait_after,
+      position: o.position.map(Into::into),
+      steps: o.steps,
+      timeout: o.timeout.map(f64_to_u64),
+      trial: o.trial,
+    })
+  }
+}
+
 /// Playwright-parity options for `page.dragAndDrop` and `locator.dragTo`.
 /// Mirrors `FrameDragAndDropOptions & TimeoutOptions` at
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2486` (for

@@ -736,6 +736,86 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// Click at `(x, y)` honoring the full Playwright option bag.
+  /// Modifier key press/release is the caller's responsibility — the
+  /// host tracks held modifier flags (see `host.m` `held_modifier_flags`)
+  /// so the synthesised `NSEvent` carries them.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if any IPC call fails.
+  pub async fn click_at_with(&self, x: f64, y: f64, args: &super::BackendClickArgs) -> Result<(), String> {
+    let btn: u8 = args.button.as_webkit();
+    let steps = args.steps.max(1);
+    // Interpolated mousemoves. Conservative start-from-origin (we don't
+    // currently track the prior cursor on WebKit); last step lands at
+    // `(x, y)` exactly.
+    for i in 1..=steps {
+      let t = f64::from(i) / f64::from(steps);
+      let sx = if i == steps { x } else { x * t };
+      let sy = if i == steps { y } else { y * t };
+      self.send_mouse_event(0, btn, 0, sx, sy).await?;
+    }
+    for i in 1..=args.click_count {
+      self.send_mouse_event(1, btn, i, x, y).await?;
+      if args.delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(args.delay_ms)).await;
+      }
+      self.send_mouse_event(2, btn, i, x, y).await?;
+    }
+    // Middle-button DOM dispatch workaround: in an offscreen / borderless
+    // `WKWebView`, `-[WKWebView otherMouseDown:]` + `otherMouseUp:` don't
+    // reach WebCore's DOM-event generator, so `mousedown` / `mouseup` /
+    // `auxclick` never fire on the page. Follow the same pattern
+    // [`Self::move_mouse`] uses for `mousemove`: fire JS `MouseEvent`s
+    // on `document.elementFromPoint(x, y)` as a reliability belt so DOM
+    // listeners see the click. Left (0) and right (1) native dispatch
+    // already reaches WebCore, so this only applies to middle (2).
+    if args.button == crate::options::MouseButton::Middle {
+      for _ in 0..args.click_count {
+        let js = format!(
+          "(function(){{\
+            var el = document.elementFromPoint({x},{y});\
+            if (!el) return;\
+            var opts = {{button:1,buttons:4,clientX:{x},clientY:{y},bubbles:true,cancelable:true,view:window}};\
+            el.dispatchEvent(new MouseEvent('mousedown', opts));\
+            el.dispatchEvent(new MouseEvent('mouseup', opts));\
+            el.dispatchEvent(new MouseEvent('auxclick', opts));\
+          }})()"
+        );
+        let _ = self.evaluate(&js).await;
+      }
+    }
+    Ok(())
+  }
+
+  /// Press each modifier key via `OP_KEY_DOWN` — the host tracks which
+  /// `NSEventModifierFlag` bits are held so subsequent mouse events
+  /// carry them (see `host.m` `held_modifier_flags`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if any IPC call fails.
+  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+    for md in mods {
+      self.key_down(md.key_name()).await?;
+    }
+    Ok(())
+  }
+
+  /// Release each modifier key (reverse order — matches Playwright's
+  /// unwind behavior).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if any IPC call fails.
+  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+    for md in mods.iter().rev() {
+      self.key_up(md.key_name()).await?;
+    }
+    Ok(())
+  }
+
   /// Move the mouse to the given coordinates.
   /// Sends native `NSEvent` for CSS `:hover` state, plus a JS `mousemove`
   /// event for DOM listeners (native `mouseMoved:` doesn't reliably fire

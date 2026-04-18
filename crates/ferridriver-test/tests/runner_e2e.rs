@@ -101,7 +101,7 @@ fn make_click_test() -> TestCase {
           diff: None,
           screenshot: None,
         })?;
-        page.locator("#btn", None).click().await.map_err(|e| TestFailure {
+        page.locator("#btn", None).click(None).await.map_err(|e| TestFailure {
           message: format!("click failed: {e}"),
           stack: None,
           diff: None,
@@ -237,7 +237,7 @@ fn make_expect_test() -> TestCase {
           .await?;
 
         // Click button that updates text after 200ms delay.
-        page.locator("#btn", None).click().await.map_err(|e| TestFailure {
+        page.locator("#btn", None).click(None).await.map_err(|e| TestFailure {
           message: format!("click failed: {e}"),
           stack: None,
           diff: None,

@@ -301,6 +301,250 @@ pub struct Point {
   pub y: f64,
 }
 
+/// Mouse button for click/dblclick/mousedown/mouseup. Mirrors Playwright's
+/// `"left" | "right" | "middle"` union per
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12990`.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum MouseButton {
+  /// Primary button (default).
+  #[default]
+  Left,
+  /// Context-menu button.
+  Right,
+  /// Scroll wheel button.
+  Middle,
+}
+
+impl MouseButton {
+  /// CDP `Input.dispatchMouseEvent.button` wire value.
+  #[must_use]
+  pub fn as_cdp(self) -> &'static str {
+    match self {
+      Self::Left => "left",
+      Self::Right => "right",
+      Self::Middle => "middle",
+    }
+  }
+
+  /// `BiDi` `input.performActions.pointerDown.button` integer: `0=left`,
+  /// `1=middle`, `2=right` (per W3C `WebDriver BiDi` pointer input spec).
+  #[must_use]
+  pub fn as_bidi(self) -> u8 {
+    match self {
+      Self::Left => 0,
+      Self::Middle => 1,
+      Self::Right => 2,
+    }
+  }
+
+  /// `WebKit` host IPC `OP_MOUSE_EVENT.button` byte: `0=left, 1=right,
+  /// 2=middle` — the order `host.m`'s `NSEventType*Mouse*` switches on
+  /// (see `rightMouseDown:` vs `otherMouseDown:` dispatch). This is a
+  /// different ordering than the CDP / `BiDi` pointer spec, so we keep a
+  /// dedicated accessor to make the mapping explicit at every call site.
+  #[must_use]
+  pub fn as_webkit(self) -> u8 {
+    match self {
+      Self::Left => 0,
+      Self::Right => 1,
+      Self::Middle => 2,
+    }
+  }
+
+  /// Parse from Playwright's string form. Returns `None` on unknown input
+  /// so callers can raise a typed `FerriError::InvalidArgument` at the
+  /// binding boundary.
+  #[must_use]
+  pub fn parse(s: &str) -> Option<Self> {
+    match s {
+      "left" => Some(Self::Left),
+      "right" => Some(Self::Right),
+      "middle" => Some(Self::Middle),
+      _ => None,
+    }
+  }
+}
+
+/// Single keyboard modifier. Mirrors Playwright's `Alt | Control |
+/// ControlOrMeta | Meta | Shift` union per
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13012`.
+/// `ControlOrMeta` resolves at call time — see [`Self::cdp_bit`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Modifier {
+  Alt,
+  Control,
+  ControlOrMeta,
+  Meta,
+  Shift,
+}
+
+impl Modifier {
+  /// Parse from Playwright's string form. Returns `None` on unknown input.
+  #[must_use]
+  pub fn parse(s: &str) -> Option<Self> {
+    match s {
+      "Alt" => Some(Self::Alt),
+      "Control" => Some(Self::Control),
+      "ControlOrMeta" => Some(Self::ControlOrMeta),
+      "Meta" => Some(Self::Meta),
+      "Shift" => Some(Self::Shift),
+      _ => None,
+    }
+  }
+
+  /// CDP `Input.dispatchMouseEvent.modifiers` bitmask bit.
+  /// `Alt=1`, `Control=2`, `Meta=4`, `Shift=8` (per CDP docs and
+  /// `/tmp/playwright/packages/playwright-core/src/server/input.ts`).
+  /// `ControlOrMeta` collapses to `Meta` on macOS, `Control` elsewhere.
+  #[must_use]
+  pub fn cdp_bit(self) -> u8 {
+    match self {
+      Self::Alt => 1,
+      Self::Control => 2,
+      Self::Meta => 4,
+      Self::Shift => 8,
+      Self::ControlOrMeta => {
+        if cfg!(target_os = "macos") {
+          4
+        } else {
+          2
+        }
+      },
+    }
+  }
+
+  /// Platform-resolved key name for keydown/keyup events when pressing
+  /// modifiers around an action. `ControlOrMeta` collapses to `Meta` on
+  /// macOS, `Control` elsewhere.
+  #[must_use]
+  pub fn key_name(self) -> &'static str {
+    match self {
+      Self::Alt => "Alt",
+      Self::Control => "Control",
+      Self::Meta => "Meta",
+      Self::Shift => "Shift",
+      Self::ControlOrMeta => {
+        if cfg!(target_os = "macos") {
+          "Meta"
+        } else {
+          "Control"
+        }
+      },
+    }
+  }
+
+  /// DOM `KeyboardEvent.code` for this modifier's left variant — used
+  /// when we synthesize `Input.dispatchKeyEvent` in CDP to satisfy the
+  /// `code` parameter. Right variants have different codes but the
+  /// outward JS observability is identical.
+  #[must_use]
+  pub fn key_code(self) -> &'static str {
+    match self {
+      Self::Alt => "AltLeft",
+      Self::Control => "ControlLeft",
+      Self::Shift => "ShiftLeft",
+      Self::Meta => "MetaLeft",
+      Self::ControlOrMeta => {
+        if cfg!(target_os = "macos") {
+          "MetaLeft"
+        } else {
+          "ControlLeft"
+        }
+      },
+    }
+  }
+}
+
+/// Fold a list of modifiers into the CDP bitmask expected by
+/// `Input.dispatchMouseEvent.modifiers`.
+#[must_use]
+pub fn modifiers_bitmask(mods: &[Modifier]) -> u32 {
+  let mut m = 0u32;
+  for md in mods {
+    m |= u32::from(md.cdp_bit());
+  }
+  m
+}
+
+/// Full click option bag shared by Page/Locator/Frame click methods.
+/// Mirrors Playwright's `LocatorClickOptions` /
+/// `PageClickOptions` / `FrameClickOptions` — all three expose the same
+/// 10-field surface per
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
+///
+/// Every option is `Option<T>`: callers omit fields and the backend
+/// applies Playwright's documented defaults (`button: Left`,
+/// `click_count: 1`, `delay: 0`, `steps: 1`, etc.).
+#[derive(Debug, Clone, Default)]
+pub struct ClickOptions {
+  /// Mouse button. Default: [`MouseButton::Left`].
+  pub button: Option<MouseButton>,
+  /// Number of consecutive clicks (`UIEvent.detail`). Default: `1`.
+  pub click_count: Option<u32>,
+  /// Wait in ms between `mousedown` and `mouseup`. Default: `0`.
+  pub delay: Option<u64>,
+  /// Bypass actionability (visibility/attached/enabled/stable) checks.
+  /// Default: `false`.
+  pub force: Option<bool>,
+  /// Modifier keys held during the click. Pressed before the mouse
+  /// events and released after, regardless of `trial`.
+  pub modifiers: Vec<Modifier>,
+  /// Deprecated per Playwright — accepted for signature parity; no
+  /// effect in ferridriver (we don't implicitly wait for navigation
+  /// after click).
+  pub no_wait_after: Option<bool>,
+  /// Click position relative to the element's padding-box top-left.
+  /// `None` → element's visible center.
+  pub position: Option<Point>,
+  /// Interpolated `mousemove` events between the current cursor and
+  /// the click point. Playwright default: `1` (single move at dest).
+  pub steps: Option<u32>,
+  /// Maximum time in ms for the operation (actionability + click).
+  /// `0` means "no timeout". `None` means "use page/context default".
+  pub timeout: Option<u64>,
+  /// Run actionability checks only; skip the mouse events. Modifiers
+  /// are still pressed/released around the no-op per Playwright.
+  pub trial: Option<bool>,
+}
+
+impl ClickOptions {
+  /// [`Self::button`] with the `Left` default applied.
+  #[must_use]
+  pub fn resolved_button(&self) -> MouseButton {
+    self.button.unwrap_or(MouseButton::Left)
+  }
+
+  /// [`Self::click_count`] with the `1` default applied.
+  #[must_use]
+  pub fn resolved_click_count(&self) -> u32 {
+    self.click_count.unwrap_or(1)
+  }
+
+  /// [`Self::delay`] with the `0ms` default applied.
+  #[must_use]
+  pub fn resolved_delay_ms(&self) -> u64 {
+    self.delay.unwrap_or(0)
+  }
+
+  /// [`Self::steps`] with the `1` default applied.
+  #[must_use]
+  pub fn resolved_steps(&self) -> u32 {
+    self.steps.unwrap_or(1).max(1)
+  }
+
+  /// `true` when the caller asked to bypass actionability checks.
+  #[must_use]
+  pub fn is_force(&self) -> bool {
+    self.force.unwrap_or(false)
+  }
+
+  /// `true` when the caller asked to run checks only (no click).
+  #[must_use]
+  pub fn is_trial(&self) -> bool {
+    self.trial.unwrap_or(false)
+  }
+}
+
 /// Options for [`crate::page::Page::drag_and_drop`] and
 /// [`crate::locator::Locator::drag_to`]. Mirrors Playwright's
 /// `FrameDragAndDropOptions & TimeoutOptions` surface per
@@ -1054,5 +1298,113 @@ mod init_script_tests {
   fn content_passes_through_verbatim() {
     let src = evaluation_script(InitScriptSource::Content("let z = 2;".into()), None).unwrap();
     assert_eq!(src, "let z = 2;");
+  }
+}
+
+#[cfg(test)]
+mod click_option_tests {
+  use super::*;
+
+  #[test]
+  fn mouse_button_parse_round_trip() {
+    assert_eq!(MouseButton::parse("left"), Some(MouseButton::Left));
+    assert_eq!(MouseButton::parse("right"), Some(MouseButton::Right));
+    assert_eq!(MouseButton::parse("middle"), Some(MouseButton::Middle));
+    assert_eq!(MouseButton::parse("garbage"), None);
+    assert_eq!(MouseButton::Left.as_cdp(), "left");
+    assert_eq!(MouseButton::Right.as_cdp(), "right");
+    assert_eq!(MouseButton::Middle.as_cdp(), "middle");
+    assert_eq!(MouseButton::Left.as_bidi(), 0);
+    assert_eq!(MouseButton::Middle.as_bidi(), 1);
+    assert_eq!(MouseButton::Right.as_bidi(), 2);
+    // WebKit host.m uses a different ordering than CDP/BiDi: 0=left,
+    // 1=right, 2=middle (matches its NSEventType*Mouse* switch).
+    assert_eq!(MouseButton::Left.as_webkit(), 0);
+    assert_eq!(MouseButton::Right.as_webkit(), 1);
+    assert_eq!(MouseButton::Middle.as_webkit(), 2);
+  }
+
+  #[test]
+  fn modifier_parse_and_bits() {
+    assert_eq!(Modifier::parse("Alt"), Some(Modifier::Alt));
+    assert_eq!(Modifier::parse("Control"), Some(Modifier::Control));
+    assert_eq!(Modifier::parse("Meta"), Some(Modifier::Meta));
+    assert_eq!(Modifier::parse("Shift"), Some(Modifier::Shift));
+    assert_eq!(Modifier::parse("ControlOrMeta"), Some(Modifier::ControlOrMeta));
+    assert_eq!(Modifier::parse("garbage"), None);
+
+    assert_eq!(Modifier::Alt.cdp_bit(), 1);
+    assert_eq!(Modifier::Control.cdp_bit(), 2);
+    assert_eq!(Modifier::Meta.cdp_bit(), 4);
+    assert_eq!(Modifier::Shift.cdp_bit(), 8);
+
+    // Platform-aware ControlOrMeta
+    if cfg!(target_os = "macos") {
+      assert_eq!(Modifier::ControlOrMeta.cdp_bit(), 4);
+      assert_eq!(Modifier::ControlOrMeta.key_name(), "Meta");
+      assert_eq!(Modifier::ControlOrMeta.key_code(), "MetaLeft");
+    } else {
+      assert_eq!(Modifier::ControlOrMeta.cdp_bit(), 2);
+      assert_eq!(Modifier::ControlOrMeta.key_name(), "Control");
+      assert_eq!(Modifier::ControlOrMeta.key_code(), "ControlLeft");
+    }
+  }
+
+  #[test]
+  fn modifiers_bitmask_folds_multiple() {
+    assert_eq!(modifiers_bitmask(&[]), 0);
+    assert_eq!(modifiers_bitmask(&[Modifier::Shift]), 8);
+    // Alt|Control|Meta|Shift = 1|2|4|8 = 15
+    assert_eq!(
+      modifiers_bitmask(&[Modifier::Alt, Modifier::Control, Modifier::Meta, Modifier::Shift]),
+      15
+    );
+    // Dedup via bitwise OR — duplicates don't double-count.
+    assert_eq!(modifiers_bitmask(&[Modifier::Shift, Modifier::Shift]), 8);
+  }
+
+  #[test]
+  fn click_options_default_values() {
+    let opts = ClickOptions::default();
+    assert_eq!(opts.resolved_button(), MouseButton::Left);
+    assert_eq!(opts.resolved_click_count(), 1);
+    assert_eq!(opts.resolved_delay_ms(), 0);
+    assert_eq!(opts.resolved_steps(), 1);
+    assert!(!opts.is_force());
+    assert!(!opts.is_trial());
+    assert!(opts.modifiers.is_empty());
+    assert!(opts.position.is_none());
+    assert!(opts.timeout.is_none());
+    assert!(opts.no_wait_after.is_none());
+  }
+
+  #[test]
+  fn click_options_resolved_helpers_use_overrides() {
+    let opts = ClickOptions {
+      button: Some(MouseButton::Right),
+      click_count: Some(2),
+      delay: Some(150),
+      steps: Some(5),
+      force: Some(true),
+      trial: Some(true),
+      ..Default::default()
+    };
+    assert_eq!(opts.resolved_button(), MouseButton::Right);
+    assert_eq!(opts.resolved_click_count(), 2);
+    assert_eq!(opts.resolved_delay_ms(), 150);
+    assert_eq!(opts.resolved_steps(), 5);
+    assert!(opts.is_force());
+    assert!(opts.is_trial());
+  }
+
+  #[test]
+  fn click_options_steps_coerces_zero_to_one() {
+    // Playwright defaults to 1 and uses `Math.max(1, steps)`; mirror
+    // the clamp so callers passing `0` still emit one mousemove.
+    let opts = ClickOptions {
+      steps: Some(0),
+      ..Default::default()
+    };
+    assert_eq!(opts.resolved_steps(), 1);
   }
 }

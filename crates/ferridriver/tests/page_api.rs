@@ -62,7 +62,7 @@ async fn page_api_tests() {
     )
     .await
     .unwrap();
-  page.locator("#b", None).click().await.unwrap();
+  page.locator("#b", None).click(None).await.unwrap();
   let t = page
     .evaluate_str("document.getElementById('b').textContent")
     .await
@@ -287,7 +287,7 @@ async fn page_api_tests() {
   assert!(v.contains("b"), "select_option: {v}");
 
   // ── Click guard on <select> ──
-  let r = page.locator("#s", None).click().await;
+  let r = page.locator("#s", None).click(None).await;
   assert!(r.is_err(), "clicking select should error");
 
   // ── filter ──

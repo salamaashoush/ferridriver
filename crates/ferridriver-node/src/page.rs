@@ -305,9 +305,17 @@ impl Page {
 
   // ── Page-level actions ──────────────────────────────────────────────────
 
+  /// Click the first element matching `selector`. Accepts Playwright's
+  /// full `PageClickOptions` bag — see
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
   #[napi]
-  pub async fn click(&self, selector: String) -> Result<()> {
-    self.inner.click(&selector).await.map_err(napi::Error::from_reason)
+  pub async fn click(&self, selector: String, options: Option<crate::types::ClickOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self
+      .inner
+      .click(&selector, opts)
+      .await
+      .map_err(napi::Error::from_reason)
   }
 
   #[napi]

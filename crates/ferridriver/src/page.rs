@@ -397,14 +397,16 @@ impl Page {
   // `tracing::debug!` events stay at this layer so logs identify the
   // top-level entry point.
 
-  /// Click on an element matching the selector.
+  /// Click on an element matching the selector. Accepts Playwright's
+  /// full `PageClickOptions` bag (see [`crate::options::ClickOptions`]).
+  /// Delegates to `mainFrame().click(selector, opts)`.
   ///
   /// # Errors
   ///
   /// Returns an error if the element is not found or the click fails.
-  pub async fn click(self: &Arc<Self>, selector: &str) -> Result<()> {
+  pub async fn click(self: &Arc<Self>, selector: &str, opts: Option<crate::options::ClickOptions>) -> Result<()> {
     tracing::debug!(target: "ferridriver::action", action = "click", selector, "page.click");
-    self.main_frame().click(selector).await
+    self.main_frame().click(selector, opts).await
   }
 
   /// Double-click an element matching the selector.
