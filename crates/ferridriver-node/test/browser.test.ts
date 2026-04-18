@@ -758,6 +758,48 @@ for (const backend of BACKENDS) {
       expect(String((caught as Error).message)).toContain("Unknown modifier");
     });
 
+    // Task 1.5 phase 2: `opts.timeout` wins over the page default for every
+    // action that accepts it. Previously accepted-but-ignored; now threaded
+    // into the retry_resolve! macro's deadline.
+    it("action timeout fires before the page default (click/fill/hover/tap)", async () => {
+      await page.setContent('<button id="b">b</button>');
+      await page.waitForSelector("#b");
+      const cases: Array<[string, () => Promise<unknown>]> = [
+        ["click", () => page.locator("#nope").click({ timeout: 200 })],
+        ["fill", () => page.locator("#nope").fill("x", { timeout: 200 })],
+        ["hover", () => page.locator("#nope").hover({ timeout: 200 })],
+        ["tap", () => page.locator("#nope").tap({ timeout: 200 })],
+        ["press", () => page.locator("#nope").press("A", { timeout: 200 })],
+        ["type", () => page.locator("#nope").type("x", { timeout: 200 })],
+        ["dblclick", () => page.locator("#nope").dblclick({ timeout: 200 })],
+        ["check", () => page.locator("#nope").check({ timeout: 200 })],
+        ["uncheck", () => page.locator("#nope").uncheck({ timeout: 200 })],
+      ];
+      for (const [name, call] of cases) {
+        const t0 = Date.now();
+        let msg = "";
+        try {
+          await call();
+          msg = "no-throw";
+        } catch (e) {
+          msg = String((e as Error).message || e);
+        }
+        const elapsed = Date.now() - t0;
+        expect(msg, `${name} should throw TimeoutError, got: ${msg}`).toContain(
+          "Timeout"
+        );
+        expect(msg, `${name} should mention 200ms, got: ${msg}`).toContain(
+          "200ms"
+        );
+        // Allow generous slack for CI / slow backends; the point is that the
+        // call does NOT wait out the 30s page default.
+        expect(
+          elapsed,
+          `${name} should fail within 1.5s of the 200ms timeout; got ${elapsed}ms`
+        ).toBeLessThan(1500);
+      }
+    });
+
     it("fills an input via locator", async () => {
       await page.setContent('<input id="input" type="text" />');
       await page.waitForSelector("#input");
