@@ -952,6 +952,77 @@ fn test_script_click_options(c: &mut McpClient) {
   assert!(msg.contains("Unknown modifier"), "bad modifier errors: {v}");
 }
 
+// Task 1.5 phase 4b: `check`/`uncheck`/`setChecked` must verify the
+// final state matches the target AND reject uncheck-of-radio, matching
+// Playwright's `server/dom.ts::_setChecked`. Proves on every backend:
+//   - A custom checkbox with an `onclick` preventDefault doesn't change
+//     state → call throws "Clicking the checkbox did not change its state".
+//   - `uncheck` on a checked radio → throws the exact Playwright error
+//     naming radio groups.
+//   - `trial: true` skips verification (caller asserting actionability,
+//     not state change).
+//   - `check` on a plain checkbox flips the state and returns ok.
+fn test_script_check_behavior(c: &mut McpClient) {
+  // 1. Plain checkbox: check() toggles to checked.
+  c.nav("<input id='cb' type='checkbox'>");
+  c.script_value("await page.locator('#cb').check();");
+  let v = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"cb\").checked'));");
+  assert_eq!(v, json!(true), "check() should toggle checkbox on: {v}");
+
+  // 2. Checkbox that intercepts the click → state does not change →
+  //    check() throws the Playwright-exact "did not change its state".
+  c.nav("<input id='cb' type='checkbox' onclick='event.preventDefault()'>");
+  let v = c.script_value(
+    "try { await page.locator('#cb').check({ timeout: 500 }); return 'no-throw'; } \
+     catch (e) { return String(e.message || e); }",
+  );
+  let msg = v.as_str().unwrap_or("");
+  assert!(
+    msg.contains("did not change its state"),
+    "preventDefault checkbox should throw Playwright 'did not change its state', got: {v}"
+  );
+
+  // 3. Uncheck a checked radio → typed Playwright radio-group error.
+  c.nav("<input id='r' type='radio' name='g' checked><input type='radio' name='g'>");
+  let v = c.script_value(
+    "try { await page.locator('#r').uncheck(); return 'no-throw'; } \
+     catch (e) { return String(e.message || e); }",
+  );
+  let msg = v.as_str().unwrap_or("");
+  assert!(
+    msg.contains("Cannot uncheck radio button"),
+    "uncheck radio should throw 'Cannot uncheck radio button', got: {v}"
+  );
+
+  // 4. trial: true skips the post-click verification AND the click —
+  //    preventDefault checkbox that would normally throw returns ok.
+  c.nav("<input id='cb' type='checkbox' onclick='event.preventDefault()'>");
+  c.script_value("await page.locator('#cb').check({ trial: true });");
+  let v = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"cb\").checked'));");
+  assert_eq!(
+    v,
+    json!(false),
+    "trial:true should NOT actually toggle the checkbox state: {v}"
+  );
+
+  // 5. check() on an already-checked checkbox is a no-op (no click, no
+  //    verification error). Prove by attaching an `onclick` listener and
+  //    asserting it never fires.
+  c.nav(
+    "<input id='cb' type='checkbox' checked>\
+     <div id='count'>0</div>\
+     <script>\
+       document.getElementById('cb').addEventListener('click', () => {\
+         const el = document.getElementById('count');\
+         el.textContent = String(parseInt(el.textContent, 10) + 1);\
+       });\
+     </script>",
+  );
+  c.script_value("await page.locator('#cb').check();");
+  let v = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"count\").textContent'));");
+  assert_eq!(v, json!("0"), "already-checked check() must skip the click: {v}");
+}
+
 // Task 1.5 phase 4a: `fill.force` must actually bypass Playwright's
 // `['visible','enabled','editable']` pre-check. Proves on every backend:
 //   - Without force on a `readonly` input: the pre-check returns
@@ -1643,6 +1714,7 @@ fn run_all_tests(backend: &str) {
   run!(test_script_action_timeout);
   run!(test_script_tap_native);
   run!(test_script_fill_force);
+  run!(test_script_check_behavior);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
 
