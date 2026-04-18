@@ -703,15 +703,34 @@ impl Locator {
   pub async fn select_option(
     &self,
     values: Vec<crate::options::SelectOptionValue>,
-    _opts: Option<crate::options::SelectOptionOptions>,
+    opts: Option<crate::options::SelectOptionOptions>,
   ) -> Result<Vec<String>> {
-    // Strict actionability/timeout honoring lands with the 3.17 deadline
-    // parity task; for now we stay compatible with the existing caller
-    // behavior (single-shot resolve + dispatch).
-    let el = self.resolve().await?;
-    actions::select_options(&el, self.frame.page_arc().inner(), &values)
-      .await
-      .map_err(Into::into)
+    let opts = opts.unwrap_or_default();
+    let timeout_ms = opts.timeout;
+    let force = opts.force.unwrap_or(false);
+    let values_ref = &values;
+    // Mirrors Playwright's `server/dom.ts::_selectOption`: when not
+    // `force`, gate the dispatch on `checkElementStates(['visible',
+    // 'enabled'])` so a hidden or disabled `<select>` returns the
+    // `error:not<state>` retriable marker until the deadline fires.
+    // `force: true` skips the pre-check and goes straight to the
+    // injected `selectOptions` call.
+    retry_resolve!(self, timeout_ms, "selectOption", |el, page| async move {
+      if !force {
+        let fd = page.injected_script().await?;
+        let state_raw = el
+          .call_js_fn_value(&format!(
+            "function() {{ return {fd}.checkElementStates(this, ['visible', 'enabled']); }}"
+          ))
+          .await?
+          .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+          .unwrap_or_else(|| "error:notconnected".to_string());
+        if state_raw != "done" {
+          return Err(state_raw);
+        }
+      }
+      actions::select_options(&el, page, values_ref).await
+    })
   }
 
   /// Set file paths on a file input element.
@@ -771,22 +790,25 @@ impl Locator {
     el.scroll_into_view().await.map_err(Into::into)
   }
 
-  /// Dispatch a DOM event of the given type on the element.
+  /// Dispatch a DOM event of the given type on the element. Mirrors
+  /// Playwright's `frames.ts::dispatchEvent` (see
+  /// `/tmp/playwright/packages/playwright-core/src/server/frames.ts:847`):
+  /// resolve the element under the retry loop (Playwright does NOT run
+  /// actionability for dispatchEvent — it's a programmatic dispatch),
+  /// then invoke `injectedScript.dispatchEvent` with the matching
+  /// constructor. `opts.timeout` flows through to the retry deadline.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element cannot be found.
+  /// Returns `FerriError::Timeout` if the element does not appear
+  /// before the deadline.
   pub async fn dispatch_event(
     &self,
     event_type: &str,
     event_init: Option<serde_json::Value>,
-    _opts: Option<crate::options::DispatchEventOptions>,
+    opts: Option<crate::options::DispatchEventOptions>,
   ) -> Result<()> {
-    // Mirrors Playwright `server/injected/injectedScript.ts::dispatchEvent`:
-    // pick the right constructor based on the event `type`, apply the
-    // `eventInit` object, and dispatch. Falls through to a generic
-    // `Event` for types not in the specific-constructor table so the
-    // caller still gets a best-effort dispatch for rare events.
+    let timeout_ms = opts.and_then(|o| o.timeout);
     let init_json = event_init.as_ref().map_or_else(
       || "{}".to_string(),
       |v| serde_json::to_string(v).unwrap_or_else(|_| "{}".to_string()),
@@ -823,8 +845,10 @@ impl Locator {
         this.dispatchEvent(ev); \
       }}"
     );
-    let el = self.resolve().await?;
-    el.call_js_fn(&js).await.map_err(Into::into)
+    let js_ref = js.as_str();
+    retry_resolve!(self, timeout_ms, "dispatchEvent", |el, _page| async move {
+      el.call_js_fn(js_ref).await
+    })
   }
 
   // ── Content & state ───────────────────────────────────────────────────────
