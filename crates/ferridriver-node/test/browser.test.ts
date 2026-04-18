@@ -758,6 +758,33 @@ for (const backend of BACKENDS) {
       expect(String((caught as Error).message)).toContain("Unknown modifier");
     });
 
+    // Task 1.5 phase 4a: `fill.force` bypasses Playwright's
+    // ['visible','enabled','editable'] pre-check. Without force, fill
+    // on a `readonly` input surfaces `error:noteditable` → retry loop
+    // keeps polling → deadline fires. With force:true, the pre-check
+    // is skipped and `.value = 'x'` sticks.
+    it("fill with force:true writes through a readonly input", async () => {
+      await page.setContent('<input id="ro" readonly value="" />');
+      await page.waitForSelector("#ro");
+
+      // Without force → times out against a short deadline.
+      let msg = "";
+      const t0 = Date.now();
+      try {
+        await page.locator("#ro").fill("hello", { timeout: 250 });
+      } catch (e) {
+        msg = String((e as Error).message || e);
+      }
+      const elapsed = Date.now() - t0;
+      expect(msg, `fill without force on readonly should Timeout; got: ${msg}`).toContain("Timeout");
+      expect(elapsed, `fill should fail fast; got ${elapsed}ms`).toBeLessThan(1500);
+      expect(await page.locator("#ro").inputValue()).toBe("");
+
+      // With force:true → succeeds, value is written.
+      await page.locator("#ro").fill("bypass", { force: true });
+      expect(await page.locator("#ro").inputValue()).toBe("bypass");
+    });
+
     // Task 1.5 phase 3 (Rule 4): tap uses the backend's native touch
     // input on CDP (Input.dispatchTouchEvent → isTrusted === true) and
     // surfaces a typed Unsupported error on backends that can't do

@@ -117,10 +117,15 @@ macro_rules! retry_resolve {
         ::std::result::Result::Ok($el) => match ($body).await {
           ::std::result::Result::Ok(val) => return ::std::result::Result::Ok(val),
           ::std::result::Result::Err(e)
-            if e.contains("not connected") || e.contains("not found") || e.contains("detached") =>
+            if e.contains("not connected")
+              || e.contains("not found")
+              || e.contains("detached")
+              || e.starts_with("error:not") =>
           {
-            // Retriable — fall through to next iteration; deadline (if any)
-            // decides when we give up.
+            // Retriable — matches Playwright's `_retryAction` contract
+            // where `checkElementStates` returns `error:notvisible` /
+            // `error:notenabled` / `error:noteditable` etc. as signals to
+            // keep polling until the deadline.
           },
           ::std::result::Result::Err(e) => return ::std::result::Result::Err($crate::error::FerriError::from(e)),
         },
@@ -440,12 +445,15 @@ impl Locator {
   /// Returns an error if the element cannot be found or is not a fillable element.
   pub async fn fill(&self, value: &str, opts: Option<crate::options::FillOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
+    let force = opts.is_force();
     let opts_ref = &opts;
     retry_resolve!(self, opts_ref.timeout, "fill", |el, page| async move {
-      if !opts_ref.is_force() {
-        actions::wait_for_actionable(&el, page).await.ok();
-      }
-      actions::fill(&el, value).await
+      // `actions::fill(..., force)` runs Playwright's
+      // `checkElementStates(['visible','enabled','editable'])` internally
+      // when `force` is false and returns the `error:not<state>` marker
+      // the retry loop knows to keep polling on. `force=true` jumps
+      // straight to the DOM write, matching Playwright's `_fill(force)`.
+      actions::fill(&el, page, value, force).await
     })
   }
 

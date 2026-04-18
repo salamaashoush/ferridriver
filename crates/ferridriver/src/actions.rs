@@ -228,14 +228,39 @@ pub async fn check_click_guard(element: &AnyElement, page: &AnyPage) -> Result<(
 
 // ─── Fill ───────────────────────────────────────────────────────────────────
 
-/// Fill an input element: auto-wait for actionable, click to focus, clear with events, type value, dispatch events.
+/// Fill an input element: when `force` is `false`, run Playwright's
+/// `['visible', 'enabled', 'editable']` pre-check via the injected
+/// `checkElementStates` helper and propagate the `error:not<state>`
+/// signal back to the retry loop so callers keep polling. With
+/// `force = true` both checks are skipped and the value is set
+/// immediately, matching Playwright's `_fill(force)` short-circuit in
+/// `/tmp/playwright/packages/playwright-core/src/server/dom.ts:615`.
+///
+/// Handles both regular inputs (`.value`) and contenteditable elements
+/// (`.textContent`) with the accompanying `input` / `change` events.
 ///
 /// # Errors
 ///
-/// Returns an error if the element cannot be focused or the value cannot be set.
-pub async fn fill(element: &AnyElement, value: &str) -> Result<(), String> {
-  // Single JS call: focus + set value + dispatch events.
-  // Handles both regular inputs (.value) and contenteditable elements (.textContent).
+/// Returns `error:not<state>` when the non-force pre-check fails (the
+/// retry loop treats it as retriable), or a generic fill error when
+/// the JS `.value` / `.textContent` assignment fails.
+pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool) -> Result<(), String> {
+  if !force {
+    let fd = page.injected_script().await?;
+    let state_raw = element
+      .call_js_fn_value(&format!(
+        "function() {{ return {fd}.checkElementStates(this, ['visible', 'enabled', 'editable']); }}"
+      ))
+      .await?
+      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .unwrap_or_else(|| "error:notconnected".to_string());
+    if state_raw != "done" {
+      // Playwright-style retriable marker: `error:notvisible`,
+      // `error:notenabled`, `error:noteditable`, or `error:notconnected`.
+      // `retry_resolve!` treats `error:not*` as retry-until-deadline.
+      return Err(state_raw);
+    }
+  }
   let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
   element
     .call_js_fn(&format!(
