@@ -952,6 +952,125 @@ fn test_script_click_options(c: &mut McpClient) {
   assert!(msg.contains("Unknown modifier"), "bad modifier errors: {v}");
 }
 
+// Task 1.5 phase 3 (Rule 4): `locator.tap` must use the backend's native
+// touch primitive on every backend that supports it, not a JS `TouchEvent`
+// shim. CDP dispatches via `Input.dispatchTouchEvent` producing
+// `isTrusted === true` events. BiDi (no pointerType='touch' in stable) and
+// WebKit (no public NSTouchEvent synthesis) surface a typed Unsupported
+// error instead.
+fn test_script_tap_native(c: &mut McpClient) {
+  if c.backend == "bidi" || c.backend == "webkit" {
+    // On these backends, tap must return Unsupported. Install a button,
+    // call tap(), and assert the error message identifies the backend
+    // and explains the protocol gap — not a silent JS fallback.
+    c.nav(
+      "<button id='b' ontouchstart=\"document.getElementById('out').textContent='fired'\">b</button>\
+       <div id='out'>no</div>",
+    );
+    let v = c.script_value(
+      "try { await page.locator('#b').tap({ timeout: 2000 }); return { msg: 'no-throw' }; } \
+       catch (e) { return { msg: String(e.message || e) }; }",
+    );
+    let msg = v["msg"].as_str().unwrap_or("");
+    assert!(
+      msg.contains("unsupported") || msg.contains("Unsupported"),
+      "{}: tap should throw Unsupported, got: {v}",
+      c.backend
+    );
+    assert!(
+      msg.contains("tap"),
+      "{}: Unsupported message should mention tap, got: {v}",
+      c.backend
+    );
+    // The page's DOM event handler must NOT have fired — proof there's
+    // no JS-fallback dispatch happening behind the typed error.
+    let after =
+      c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));");
+    assert_eq!(
+      after,
+      json!("no"),
+      "{}: no JS-fallback tap should have fired; got {after}",
+      c.backend
+    );
+    return;
+  }
+
+  // CDP native path: Input.dispatchTouchEvent emits a trusted touchstart
+  // + touchend pair. Record event.isTrusted and whether the touch point
+  // lands inside the button rect; read each field back as a separate
+  // `textContent` so we stay inside the single-level JSON.parse pattern
+  // (QuickJS `page.evaluate` returns a JSON-stringified result).
+  c.nav(
+    "<button id='b' style='width:100px;height:50px'>b</button>\
+     <div id='trusted'>n</div><div id='inrect'>n</div>\
+     <script>\
+       const b = document.getElementById('b');\
+       b.addEventListener('touchstart', e => {\
+         const t = e.changedTouches[0];\
+         const r = b.getBoundingClientRect();\
+         document.getElementById('trusted').textContent = String(e.isTrusted);\
+         document.getElementById('inrect').textContent = String(\
+           t.clientX >= r.left && t.clientX <= r.right && t.clientY >= r.top && t.clientY <= r.bottom\
+         );\
+       }, { passive: true });\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#b').tap();\
+     return {\
+       trusted: JSON.parse(await page.evaluate('document.getElementById(\"trusted\").textContent')),\
+       inRect: JSON.parse(await page.evaluate('document.getElementById(\"inrect\").textContent')),\
+     };",
+  );
+  assert_eq!(
+    v["trusted"],
+    json!("true"),
+    "CDP tap should emit isTrusted=true touchstart; got: {v}"
+  );
+  assert_eq!(
+    v["inRect"],
+    json!("true"),
+    "CDP tap should land inside button rect; got: {v}"
+  );
+
+  // Modifiers propagate to the touch event: tap + Shift → event.shiftKey.
+  c.nav(
+    "<button id='b'>b</button><div id='out'>no</div>\
+     <script>\
+       document.getElementById('b').addEventListener('touchstart', e => {\
+         document.getElementById('out').textContent = e.shiftKey ? 'shift' : 'none';\
+       }, { passive: true });\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#b').tap({ modifiers: ['Shift'] });\
+     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+  );
+  assert_eq!(
+    v,
+    json!("shift"),
+    "tap modifiers:['Shift'] must set event.shiftKey on touchstart: {v}"
+  );
+
+  // trial:true skips the touch dispatch but still presses modifiers.
+  c.nav(
+    "<button id='b'>b</button><div id='tap'>no</div><div id='kd'>no</div>\
+     <script>\
+       document.getElementById('b').addEventListener('touchstart', () => { document.getElementById('tap').textContent = 'yes'; }, { passive: true });\
+       document.addEventListener('keydown', e => { if (e.key === 'Shift') document.getElementById('kd').textContent = 'shift'; });\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#b').tap({ trial: true, modifiers: ['Shift'] });\
+     return {\
+       t: JSON.parse(await page.evaluate('document.getElementById(\"tap\").textContent')),\
+       k: JSON.parse(await page.evaluate('document.getElementById(\"kd\").textContent')),\
+     };",
+  );
+  assert_eq!(v["t"], json!("no"), "trial:true skips touchstart dispatch: {v}");
+  assert_eq!(v["k"], json!("shift"), "trial:true still presses modifier: {v}");
+}
+
 // Task 1.5 phase 2: `opts.timeout` must honor the user's deadline on every
 // action method — previously accepted and silently ignored. For each action
 // we call on a selector that doesn't exist with `timeout: 200`; the call
@@ -1480,6 +1599,7 @@ fn run_all_tests(backend: &str) {
   run!(test_script_add_init_script);
   run!(test_script_click_options);
   run!(test_script_action_timeout);
+  run!(test_script_tap_native);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
 

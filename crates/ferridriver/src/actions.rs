@@ -783,26 +783,28 @@ pub async fn hover_with_opts(
 
 /// Dispatch a tap (touch event) with the full Playwright
 /// [`crate::options::TapOptions`] surface. Mirrors
-/// `server/dom.ts::ElementHandle._tap`: scroll-into-view, actionability
-/// (unless `force`), press modifiers, then fire a touch-event sequence
-/// at the element's centre (or `position` offset). Touch events include
-/// the modifier flags in their event init dict so the page's
-/// `event.shiftKey` etc. are true when the caller requested them.
+/// `server/dom.ts::ElementHandle._tap` + `input.ts::Touchscreen::tap`:
+/// scroll-into-view, actionability (unless `force`), press modifiers,
+/// then emit a real `Input.dispatchTouchEvent { touchStart; touchEnd }`
+/// pair at the element's centre (or `position` offset).
 ///
-/// Modifiers are released on every exit path.
+/// CDP (`cdp-pipe`, `cdp-raw`) uses the native
+/// `Input.dispatchTouchEvent` protocol command so dispatched touch
+/// events have `isTrusted === true` and fire through the full
+/// hit-testing + pointer event pipeline. `BiDi` and `WebKit` have no
+/// public touch-injection primitive; both emit a backend-level
+/// `unsupported:` error that the Locator layer surfaces as
+/// [`crate::error::FerriError::Unsupported`]. Matches Playwright's
+/// `server/chromium/crInput.ts::RawTouchscreenImpl::tap` (CDP) plus
+/// the explicit absence of `Touchscreen` in the `BiDi` backend.
 ///
-/// Uses JS dispatch rather than native touch input because all three
-/// backends lack a standard cross-platform touch primitive — CDP's
-/// `Input.dispatchTouchEvent` is Chromium-only, `BiDi` has no touch
-/// pointer type equivalent in stable, and `WKWebView` has no public
-/// touch injection API. The JS path matches the existing `tap` impl
-/// behavior on all three backends and produces `isTrusted:false`
-/// events, which suffices for everything bar click-jacking defenses.
+/// Modifiers are pressed before dispatch and released on every exit
+/// path so page state never leaks.
 ///
 /// # Errors
 ///
-/// Returns an error from actionability, point resolution, or the JS
-/// dispatch itself.
+/// Returns an error from actionability, point resolution, or the
+/// backend's native `tap_at_with` dispatch.
 pub async fn tap_with_opts(
   element: &AnyElement,
   page: &AnyPage,
@@ -815,45 +817,15 @@ pub async fn tap_with_opts(
   let result: Result<(), String> = if opts.is_trial() {
     Ok(())
   } else {
-    let shift = opts.modifiers.contains(&crate::options::Modifier::Shift);
-    let alt = opts.modifiers.contains(&crate::options::Modifier::Alt);
-    let ctrl_raw = opts.modifiers.contains(&crate::options::Modifier::Control);
-    let meta_raw = opts.modifiers.contains(&crate::options::Modifier::Meta);
-    let com = opts.modifiers.contains(&crate::options::Modifier::ControlOrMeta);
-    let (ctrl, meta) = if cfg!(target_os = "macos") {
-      (ctrl_raw, meta_raw || com)
-    } else {
-      (ctrl_raw || com, meta_raw)
-    };
-    let position_js = match opts.position {
-      Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
-      None => "null".to_string(),
-    };
-    let js = format!(
-      "function() {{ \
-        if (typeof this.scrollIntoViewIfNeeded === 'function') {{ \
-          this.scrollIntoViewIfNeeded(); \
-        }} else {{ \
-          this.scrollIntoView({{ block: 'center', inline: 'center' }}); \
-        }} \
-        var r = this.getBoundingClientRect(); \
-        var pos = {position_js}; \
-        var cx = pos ? (r.left + pos.x) : (r.left + r.width / 2); \
-        var cy = pos ? (r.top + pos.y) : (r.top + r.height / 2); \
-        var init = {{ clientX: cx, clientY: cy, bubbles: true, \
-          shiftKey: {shift}, altKey: {alt}, ctrlKey: {ctrl}, metaKey: {meta} }}; \
-        if (typeof Touch !== 'undefined' && typeof TouchEvent !== 'undefined') {{ \
-          var t = new Touch({{ identifier: 1, target: this, clientX: cx, clientY: cy }}); \
-          this.dispatchEvent(new TouchEvent('touchstart', Object.assign({{ touches: [t], changedTouches: [t] }}, init))); \
-          this.dispatchEvent(new TouchEvent('touchend', Object.assign({{ touches: [], changedTouches: [t] }}, init))); \
-        }} else {{ \
-          this.dispatchEvent(new PointerEvent('pointerdown', Object.assign({{ isPrimary: true, pointerType: 'touch' }}, init))); \
-          this.dispatchEvent(new PointerEvent('pointerup', Object.assign({{ isPrimary: true, pointerType: 'touch' }}, init))); \
-          this.click(); \
-        }} \
-      }}"
-    );
-    element.call_js_fn(&js).await
+    match resolve_click_point(element, opts.position).await {
+      Ok((x, y)) => {
+        let args = crate::backend::BackendTapArgs {
+          modifiers_bitmask: crate::options::modifiers_bitmask(&opts.modifiers),
+        };
+        page.tap_at_with(x, y, &args).await
+      },
+      Err(e) => Err(e),
+    }
   };
   let _ = page.release_modifiers(&opts.modifiers).await;
   result

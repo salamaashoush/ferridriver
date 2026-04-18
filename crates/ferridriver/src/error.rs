@@ -201,12 +201,23 @@ impl FerriError {
 /// be removed once task #1 closes out.
 impl From<String> for FerriError {
   fn from(s: String) -> Self {
+    // Backend-level String errors carrying the `unsupported:` prefix are
+    // upgraded to a typed [`FerriError::Unsupported`] so callers can
+    // `is_unsupported()`-dispatch without string-sniffing. Matches Rule 4
+    // in CLAUDE.md: "return a typed FerriError::Unsupported { reason }
+    // with a clear explanation".
+    if let Some(reason) = s.strip_prefix("unsupported:") {
+      return Self::Unsupported(reason.trim().to_string());
+    }
     Self::Other(s)
   }
 }
 
 impl From<&str> for FerriError {
   fn from(s: &str) -> Self {
+    if let Some(reason) = s.strip_prefix("unsupported:") {
+      return Self::Unsupported(reason.trim().to_string());
+    }
     Self::Other(s.to_string())
   }
 }

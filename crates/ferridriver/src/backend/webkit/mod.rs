@@ -835,6 +835,22 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// `WebKit` (`WKWebView`) exposes no public touch-injection API —
+  /// `AppKit` has no `NSTouchEvent` synthesis primitive comparable to
+  /// CDP's `Input.dispatchTouchEvent`, and the private
+  /// `_sendTouchDownAtLocation:` SPI is marked unavailable on macOS.
+  /// Returns a typed `unsupported:` error for the caller to surface as
+  /// [`crate::error::FerriError::Unsupported`].
+  #[allow(clippy::unused_async, clippy::unused_self)]
+  pub async fn tap_at_with(&self, _x: f64, _y: f64, _args: &super::BackendTapArgs) -> Result<(), String> {
+    Err(
+      "unsupported: tap is not available on the WebKit backend — WKWebView has no public touch-input \
+         synthesis API (AppKit lacks NSTouchEvent synthesis and the private _sendTouchDownAtLocation: \
+         SPI is marked unavailable on macOS). Use the cdp-pipe or cdp-raw backend for tap."
+        .to_string(),
+    )
+  }
+
   /// Press each modifier key via `OP_KEY_DOWN` — the host tracks which
   /// `NSEventModifierFlag` bits are held so subsequent mouse events
   /// carry them (see `host.m` `held_modifier_flags`).

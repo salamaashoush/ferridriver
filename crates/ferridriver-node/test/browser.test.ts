@@ -758,6 +758,73 @@ for (const backend of BACKENDS) {
       expect(String((caught as Error).message)).toContain("Unknown modifier");
     });
 
+    // Task 1.5 phase 3 (Rule 4): tap uses the backend's native touch
+    // input on CDP (Input.dispatchTouchEvent → isTrusted === true) and
+    // surfaces a typed Unsupported error on backends that can't do
+    // native touch (BiDi's pointerType has no 'touch'; WKWebView lacks
+    // NSTouchEvent synthesis).
+    it("tap: CDP dispatches trusted native touch event; WebKit reports Unsupported", async () => {
+      if (backend === "webkit") {
+        const dataUrl =
+          "data:text/html," +
+          encodeURIComponent(
+            '<button id="b" ontouchstart="document.getElementById(\'out\').textContent=\'fired\'">b</button><div id="out">no</div>'
+          );
+        await page.goto(dataUrl);
+        await page.waitForSelector("#b");
+        let msg = "";
+        try {
+          await page.locator("#b").tap({ timeout: 2000 });
+          msg = "no-throw";
+        } catch (e) {
+          msg = String((e as Error).message || e);
+        }
+        expect(msg.toLowerCase(), `webkit tap must be Unsupported, got: ${msg}`).toContain("unsupported");
+        expect(msg, `Unsupported message should mention tap: ${msg}`).toContain("tap");
+        // Prove no JS-fallback dispatch ran while the error was being assembled.
+        const after = await page.locator("#out").innerText();
+        expect(after).toBe("no");
+        return;
+      }
+      // CDP backends: the native path fires a trusted touchstart inside
+      // the element rect. We goto() a data: URL (rather than setContent,
+      // which uses innerHTML and doesn't always re-run touch-handler
+      // scripts in-order) so the HTML parser runs the addEventListener
+      // script deterministically before we dispatch the touch.
+      const trustedPageHtml =
+        '<button id="b" style="width:120px;height:50px">b</button>' +
+        '<div id="trusted">n</div><div id="inrect">n</div>' +
+        "<script>" +
+        "const b = document.getElementById('b');" +
+        "b.addEventListener('touchstart', function(e) {" +
+        "const t = e.changedTouches[0];" +
+        "const r = b.getBoundingClientRect();" +
+        "document.getElementById('trusted').textContent = String(e.isTrusted);" +
+        "document.getElementById('inrect').textContent = String(" +
+        "t.clientX >= r.left && t.clientX <= r.right && t.clientY >= r.top && t.clientY <= r.bottom" +
+        ");" +
+        "}, { passive: true });" +
+        "</script>";
+      await page.goto("data:text/html," + encodeURIComponent(trustedPageHtml));
+      await page.waitForSelector("#b");
+      await page.locator("#b").tap();
+      expect(await page.locator("#trusted").innerText()).toBe("true");
+      expect(await page.locator("#inrect").innerText()).toBe("true");
+
+      // Modifiers: tap + Shift → event.shiftKey === true on the native event.
+      const shiftPageHtml =
+        '<button id="b">b</button><div id="out">none</div>' +
+        "<script>" +
+        "document.getElementById('b').addEventListener('touchstart', function(e) {" +
+        "document.getElementById('out').textContent = e.shiftKey ? 'shift' : 'none';" +
+        "}, { passive: true });" +
+        "</script>";
+      await page.goto("data:text/html," + encodeURIComponent(shiftPageHtml));
+      await page.waitForSelector("#b");
+      await page.locator("#b").tap({ modifiers: ["Shift"] });
+      expect(await page.locator("#out").innerText()).toBe("shift");
+    });
+
     // Task 1.5 phase 2: `opts.timeout` wins over the page default for every
     // action that accepts it. Previously accepted-but-ignored; now threaded
     // into the retry_resolve! macro's deadline.
@@ -1396,9 +1463,15 @@ for (const backend of BACKENDS) {
 
     // ── Locator.tap ──────────────────────────────────────────────────
 
-    // tap() uses Touch/TouchEvent on platforms that support them,
-    // falls back to PointerEvent + click on desktop WKWebView
+    // tap() now uses the backend's native touch input — CDP's
+    // Input.dispatchTouchEvent (touchend DOES fire). WebKit has no
+    // public touch-injection API so tap throws Unsupported; the fuller
+    // coverage is in the earlier "tap: CDP dispatches trusted native
+    // touch event" test.
     it("locator.tap fires tap events", async () => {
+      if (backend === "webkit") {
+        return;
+      }
       await page.setContent(`
         <button id="btn">tap me</button>
         <script>
