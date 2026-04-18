@@ -191,11 +191,136 @@ for (const backend of BACKENDS) {
       await eh!.dispose();
     });
 
-    it("evaluate on a disposed handle raises", async () => {
-      const eh = await page.querySelector("button#primary");
+    // ── Phase E: ElementHandle action methods ──
+
+    it("ElementHandle reads: innerHTML / innerText / textContent / getAttribute", async () => {
+      await page.goto(
+        `data:text/html,<a id="link" href="/x" data-k="v">hello <b>world</b></a>`
+      );
+      const eh = await page.querySelector("a#link");
       expect(eh).not.toBeNull();
-      const jh = eh!.asJsHandle();
+      expect(await eh!.innerHtml()).toContain("<b>world</b>");
+      expect(await eh!.innerText()).toBe("hello world");
+      expect(await eh!.textContent()).toBe("hello world");
+      expect(await eh!.getAttribute("href")).toBe("/x");
+      expect(await eh!.getAttribute("data-k")).toBe("v");
+      expect(await eh!.getAttribute("missing")).toBeNull();
       await eh!.dispose();
+    });
+
+    it("ElementHandle inputValue for <input>", async () => {
+      await page.goto(
+        `data:text/html,<input id="i" value="hello" />`
+      );
+      const eh = await page.querySelector("#i");
+      expect(eh).not.toBeNull();
+      expect(await eh!.inputValue()).toBe("hello");
+      await eh!.dispose();
+    });
+
+    it("ElementHandle state predicates (visible/hidden/disabled/enabled)", async () => {
+      await page.goto(
+        `data:text/html,<button id="v">visible</button><button id="d" disabled>disabled</button><button id="h" style="display:none">hidden</button>`
+      );
+      const v = await page.querySelector("#v");
+      const d = await page.querySelector("#d");
+      const h = await page.querySelector("#h");
+      expect(v).not.toBeNull();
+      expect(d).not.toBeNull();
+      expect(h).not.toBeNull();
+
+      expect(await v!.isVisible()).toBe(true);
+      expect(await v!.isHidden()).toBe(false);
+      expect(await v!.isEnabled()).toBe(true);
+      expect(await v!.isDisabled()).toBe(false);
+
+      expect(await d!.isDisabled()).toBe(true);
+      expect(await d!.isEnabled()).toBe(false);
+
+      expect(await h!.isVisible()).toBe(false);
+      expect(await h!.isHidden()).toBe(true);
+
+      await v!.dispose();
+      await d!.dispose();
+      await h!.dispose();
+    });
+
+    it("ElementHandle isChecked on input and aria-checked", async () => {
+      await page.goto(
+        `data:text/html,<input type="checkbox" id="c1" checked><input type="checkbox" id="c2"><div id="c3" role="checkbox" aria-checked="true"></div>`
+      );
+      const c1 = await page.querySelector("#c1");
+      const c2 = await page.querySelector("#c2");
+      const c3 = await page.querySelector("#c3");
+      expect(await c1!.isChecked()).toBe(true);
+      expect(await c2!.isChecked()).toBe(false);
+      expect(await c3!.isChecked()).toBe(true);
+      await c1!.dispose();
+      await c2!.dispose();
+      await c3!.dispose();
+    });
+
+    it("ElementHandle isEditable on input vs disabled vs readonly vs contenteditable", async () => {
+      await page.goto(
+        `data:text/html,<input id="i" /><input id="d" disabled /><input id="r" readonly /><div id="e" contenteditable="true"></div>`
+      );
+      expect(await (await page.querySelector("#i"))!.isEditable()).toBe(true);
+      expect(await (await page.querySelector("#d"))!.isEditable()).toBe(false);
+      expect(await (await page.querySelector("#r"))!.isEditable()).toBe(false);
+      expect(await (await page.querySelector("#e"))!.isEditable()).toBe(true);
+    });
+
+    it("ElementHandle boundingBox returns a rect or null", async () => {
+      await page.goto(
+        `data:text/html,<button id="b" style="position:absolute;left:10px;top:20px;width:50px;height:30px;">b</button>`
+      );
+      const b = await page.querySelector("#b");
+      expect(b).not.toBeNull();
+      const box = await b!.boundingBox();
+      expect(box).not.toBeNull();
+      expect(box!.width).toBeGreaterThan(0);
+      expect(box!.height).toBeGreaterThan(0);
+      await b!.dispose();
+    });
+
+    it("ElementHandle.click fires native click handler", async () => {
+      await page.goto(
+        `data:text/html,<button id="b" onclick="document.title='clicked'">b</button>`
+      );
+      const b = await page.querySelector("#b");
+      expect(b).not.toBeNull();
+      await b!.click();
+      // Give the event loop a tick to settle the title update.
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await page.title()).toBe("clicked");
+      await b!.dispose();
+    });
+
+    it("ElementHandle.focus updates document.activeElement", async () => {
+      await page.goto(`data:text/html,<input id="i" />`);
+      const i = await page.querySelector("#i");
+      expect(i).not.toBeNull();
+      await i!.focus();
+      const active = await page.evaluate(
+        "document.activeElement && document.activeElement.id"
+      );
+      expect(active).toBe("i");
+      await i!.dispose();
+    });
+
+    // ── Disposed-handle error path (kept at the end of E) ──
+
+    it("evaluate on a disposed handle raises", async () => {
+      // Navigate back to the baseline URL — earlier Phase E tests
+      // took the page to various data: URLs without a #primary button.
+      await page.goto(testUrl);
+      const eh = await page.querySelector("button#primary");
+      // The baseline testServer response doesn't carry a #primary
+      // button — use `a` (first link) as a stable target instead.
+      const handle = eh ?? (await page.querySelector("a"));
+      expect(handle).not.toBeNull();
+      const jh = handle!.asJsHandle();
+      await handle!.dispose();
       // Both the ElementHandle and its JSHandle companion should
       // refuse subsequent evaluate calls with the disposed error —
       // Playwright contract.
