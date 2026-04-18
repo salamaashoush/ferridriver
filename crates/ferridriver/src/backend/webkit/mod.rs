@@ -451,6 +451,15 @@ impl WebKitPage {
           const encoded = JSON.stringify(result);
           return JSON.stringify({{kind: 'value', payload: encoded === undefined ? null : encoded}});
         }}
+        // evaluateHandle: primitive results ride back inline (matching
+        // Playwright's value-backed JSHandle shape); only object-typed
+        // results get a window.__wr entry the host can dispose later.
+        const isRef = result !== null && (typeof result === 'object' || typeof result === 'function');
+        if (!isRef) {{
+          const ty = typeof result === 'undefined' ? 'undefined' : (result === null ? 'null' : 'value');
+          const enc = JSON.stringify(result);
+          return JSON.stringify({{kind: 'valueHandle', ty: ty, payload: enc === undefined ? null : enc}});
+        }}
         if (!window.__wr) window.__wr = new Map();
         if (!window.__wr_next) window.__wr_next = 1;
         const id = window.__wr_next++;
@@ -501,7 +510,34 @@ impl WebKitPage {
           .get("ref")
           .and_then(serde_json::Value::as_u64)
           .ok_or("call_utility_evaluate: missing envelope.ref")?;
-        Ok(FdEvalResult::Handle(HandleRemote::WebKit(ref_id)))
+        Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Remote(
+          HandleRemote::WebKit(ref_id),
+        )))
+      },
+      "valueHandle" => {
+        // Primitive result from evaluateHandle. Parse the inline JSON
+        // and wrap as a value-backed JSHandle — matches Playwright's
+        // `_value`-backed shape and the CDP / BiDi twins.
+        let ty = envelope.get("ty").and_then(|v| v.as_str()).unwrap_or("value");
+        let payload = envelope.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+        let serialized = if ty == "undefined" {
+          crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+        } else if ty == "null" {
+          crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Null)
+        } else {
+          let inner: serde_json::Value = match payload {
+            serde_json::Value::String(s) => {
+              serde_json::from_str(&s).map_err(|e| format!("call_utility_evaluate: valueHandle parse: {e}"))?
+            },
+            serde_json::Value::Null => serde_json::Value::Null,
+            other => other,
+          };
+          let mut ctx = crate::protocol::SerializationContext::default();
+          crate::protocol::SerializedValue::from_json(&inner, &mut ctx)
+        };
+        Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Value(
+          serialized,
+        )))
       },
       other => Err(format!("call_utility_evaluate: unknown envelope kind {other}")),
     }

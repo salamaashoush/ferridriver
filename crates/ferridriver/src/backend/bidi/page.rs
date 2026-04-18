@@ -1863,18 +1863,18 @@ impl BidiPage {
             serde_json::from_value(inner_json).map_err(|e| format!("BiDi parse SerializedValue: {e}"))?;
           Ok(FdEvalResult::Value(parsed))
         } else {
-          // Returning a handle: extract sharedId. BiDi represents a
-          // DOM node as {type: "node"} and other objects as
-          // {type: "object" | "array" | ...} with a `handle` field.
+          // Returning a handle: the result is either a DOM node
+          // (sharedReference), a non-node object (handle field), or
+          // a primitive (inline value — no page-side retention).
+          // Playwright's `JSHandle` has both shapes; mirror that here.
           if let Some(shared) = result.as_shared_reference() {
-            Ok(FdEvalResult::Handle(HandleRemote::Bidi {
-              shared_id: shared.shared_id,
-              handle: shared.handle,
-            }))
+            Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Remote(
+              HandleRemote::Bidi {
+                shared_id: shared.shared_id,
+                handle: shared.handle,
+              },
+            )))
           } else {
-            // Non-node objects: surface via the `handle` field BiDi
-            // attaches to Array / Object / Map / Set / Function / ...
-            // when `resultOwnership: "root"` is requested.
             let non_node_handle = match &result {
               super::types::RemoteValue::Array { handle, .. }
               | super::types::RemoteValue::Object { handle, .. }
@@ -1896,14 +1896,42 @@ impl BidiPage {
               // sharedId}` (the old mistake) causes BiDi to reject
               // with "no such node" because the handle-string was
               // never registered as a node sharedId.
-              Ok(FdEvalResult::Handle(HandleRemote::Bidi {
-                shared_id: String::new(),
-                handle: Some(h),
-              }))
+              Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Remote(
+                HandleRemote::Bidi {
+                  shared_id: String::new(),
+                  handle: Some(h),
+                },
+              )))
             } else {
-              Err(format!(
-                "BiDi call_utility_evaluate: returnByValue=false but result has no handle: {result:?}"
-              ))
+              // Primitive result from evaluateHandle — wrap the
+              // inline value as a value-backed JSHandle. BiDi maps
+              // `Undefined`, `Null`, `Boolean`, `Number`, `String`,
+              // `BigInt` to native JSON (plus a BigInt decimal
+              // string) via `RemoteValue::to_json`. The one BiDi
+              // shape that has no JSON projection (Symbol without a
+              // handle) already falls into the non-node branch above.
+              let as_json = result.to_json().unwrap_or(serde_json::Value::Null);
+              let serialized = match &result {
+                super::types::RemoteValue::Undefined => {
+                  crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+                },
+                super::types::RemoteValue::Null => {
+                  crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Null)
+                },
+                super::types::RemoteValue::BigInt { value } => {
+                  let s = value
+                    .as_str()
+                    .map_or_else(|| value.to_string(), std::string::ToString::to_string);
+                  crate::protocol::SerializedValue::BigInt(s)
+                },
+                _ => {
+                  let mut ctx = crate::protocol::SerializationContext::default();
+                  crate::protocol::SerializedValue::from_json(&as_json, &mut ctx)
+                },
+              };
+              Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Value(
+                serialized,
+              )))
             }
           }
         }

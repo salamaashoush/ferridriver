@@ -97,11 +97,11 @@ pub fn quickjs_arg_to_serialized<'js>(
   // produce identical wire shapes for the same remote (Rule 1).
   if let Ok(class) = rquickjs::Class::<crate::bindings::js_handle::JSHandleJs>::from_value(&v) {
     let inner = class.borrow();
-    return Ok(inner.inner().remote().to_serialized_argument());
+    return Ok(inner.inner().backing().to_serialized_argument());
   }
   if let Ok(class) = rquickjs::Class::<crate::bindings::element_handle::ElementHandleJs>::from_value(&v) {
     let inner = class.borrow();
-    return Ok(inner.inner().remote().to_serialized_argument());
+    return Ok(inner.inner().as_js_handle().backing().to_serialized_argument());
   }
 
   let json: serde_json::Value = serde_from_js(ctx, v)?;

@@ -161,10 +161,24 @@ impl ElementHandle {
     &self.js_handle
   }
 
-  /// Backend-specific remote reference.
+  /// Backend-specific remote reference. `ElementHandle` always wraps
+  /// a page-side DOM element, so the underlying `JSHandle` is always
+  /// remote-backed. Callers that only need to probe the backing's
+  /// remote can go directly to `self.as_js_handle().remote()`; this
+  /// helper exists for the common case where the DOM-element
+  /// invariant is relied upon.
   #[must_use]
   pub fn remote(&self) -> &HandleRemote {
-    self.js_handle.remote()
+    match self.js_handle.backing() {
+      crate::js_handle::JSHandleBacking::Remote(r) => r,
+      // ElementHandle is only constructed via `from_any_element` and
+      // `from_js_handle_and_element`, both of which feed a
+      // remote-backed JSHandle. A value-backed ElementHandle is
+      // structurally impossible.
+      crate::js_handle::JSHandleBacking::Value(_) => {
+        unreachable!("ElementHandle invariant: always wraps a remote-backed JSHandle")
+      },
+    }
   }
 
   /// Owning page.

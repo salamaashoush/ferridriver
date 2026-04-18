@@ -19,218 +19,20 @@
 //!
 //! The MCP surface is scripting-focused: observation via `navigate` / `snapshot`
 //! / `screenshot` / `evaluate` / `search_page` / `diagnostics` / `page`, and
-//! action via `run_script` with `page` / `context` / `request` globals. Tests
-//! below exercise both paths.
+//! action via `run_script` with `page` / `context` / `request` globals.
+//!
+//! NOTE for next sessions: **do not extend this file further**. The
+//! shared MCP client and payload-extraction helpers live in
+//! `backends_support::client`. When you add a new group of tests,
+//! create a new file under `tests/backends_support/` named by the
+//! behaviour it exercises (not by session-local labels like phase /
+//! task / rule numbers) and register its functions in
+//! `run_all_tests` below.
 
-use serde_json::{Value, json};
-use std::io::{BufRead, BufReader, Write};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicU64, Ordering};
+mod backends_support;
 
-// ─── MCP Client ─────────────────────────────────────────────────────────────
-
-static GLOBAL_ID: AtomicU64 = AtomicU64::new(1);
-
-struct McpClient {
-  child: Child,
-  reader: BufReader<std::process::ChildStdout>,
-  stdin: std::process::ChildStdin,
-  backend: String,
-}
-
-impl McpClient {
-  fn new(backend: &str) -> Self {
-    let binary = std::env::var("FERRIDRIVER_BIN").unwrap_or_else(|_| {
-      let base = format!("{}/../../target", env!("CARGO_MANIFEST_DIR"));
-      let debug = format!("{base}/debug/ferridriver");
-      let release = format!("{base}/release/ferridriver");
-      if std::path::Path::new(&debug).exists() {
-        debug
-      } else {
-        release
-      }
-    });
-    let mut cmd = Command::new(&binary);
-    cmd.arg("--backend").arg(backend);
-    if std::env::var("FERRIDRIVER_HEADED").is_err() {
-      cmd.arg("--headless");
-    }
-    let mut child = cmd
-      .stdin(Stdio::piped())
-      .stdout(Stdio::piped())
-      .stderr(Stdio::null())
-      .spawn()
-      .unwrap_or_else(|e| panic!("Failed to start: {binary}: {e}"));
-    let stdout = child.stdout.take().unwrap();
-    let stdin = child.stdin.take().unwrap();
-    let mut c = McpClient {
-      child,
-      reader: BufReader::new(stdout),
-      stdin,
-      backend: backend.to_string(),
-    };
-    c.initialize();
-    c.send_initialized_notification();
-    c
-  }
-
-  fn send_raw(&mut self, msg: &Value) {
-    writeln!(self.stdin, "{}", serde_json::to_string(msg).unwrap()).unwrap();
-    self.stdin.flush().unwrap();
-  }
-
-  fn read_response(&mut self) -> Value {
-    loop {
-      let mut line = String::new();
-      self.reader.read_line(&mut line).expect("read stdout");
-      let trimmed = line.trim();
-      if trimmed.is_empty() {
-        continue;
-      }
-      // Skip non-JSON lines (e.g. tracing log output from rmcp).
-      if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
-        return val;
-      }
-    }
-  }
-
-  fn send_request(&mut self, method: &str, params: Value) -> Value {
-    let id = GLOBAL_ID.fetch_add(1, Ordering::SeqCst);
-    self.send_raw(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
-    loop {
-      let resp = self.read_response();
-      if resp.get("id").and_then(|v| v.as_u64()) == Some(id) {
-        return resp;
-      }
-    }
-  }
-
-  fn initialize(&mut self) -> Value {
-    self.send_request(
-      "initialize",
-      json!({
-          "protocolVersion":"2024-11-05","capabilities":{},
-          "clientInfo":{"name":"test","version":"1.0.0"}
-      }),
-    )
-  }
-
-  fn send_initialized_notification(&mut self) {
-    self.send_raw(&json!({"jsonrpc":"2.0","method":"notifications/initialized"}));
-  }
-
-  fn call_tool(&mut self, name: &str, args: Value) -> Value {
-    self.send_request("tools/call", json!({"name":name,"arguments":args}))
-  }
-
-  fn tool_text(&mut self, name: &str, args: Value) -> String {
-    extract_text(&self.call_tool(name, args))
-  }
-
-  fn nav(&mut self, html: &str) {
-    self.call_tool("navigate", json!({"url": data_url(html)}));
-  }
-
-  fn nav_url(&mut self, url: &str) {
-    self.call_tool("navigate", json!({"url": url}));
-  }
-
-  /// Run a script with empty args and return the parsed `{status, value, ...}` payload.
-  fn script(&mut self, source: &str) -> Value {
-    self.script_with_args(source, json!([]))
-  }
-
-  /// Run a script with bound args and return the parsed payload.
-  fn script_with_args(&mut self, source: &str, args: Value) -> Value {
-    let resp = self.call_tool("run_script", json!({"source": source, "args": args}));
-    ok(&resp, "run_script");
-    extract_script_payload(&resp).expect("script response should carry a JSON payload")
-  }
-
-  /// Run a script expecting success; return the `value` from the payload.
-  fn script_value(&mut self, source: &str) -> Value {
-    let payload = self.script(source);
-    assert_eq!(payload["status"].as_str(), Some("ok"), "script failed: {payload}");
-    payload["value"].clone()
-  }
-
-  /// Run a script with args, expecting success; return the `value`.
-  fn script_value_with_args(&mut self, source: &str, args: Value) -> Value {
-    let payload = self.script_with_args(source, args);
-    assert_eq!(payload["status"].as_str(), Some("ok"), "script failed: {payload}");
-    payload["value"].clone()
-  }
-}
-
-impl Drop for McpClient {
-  fn drop(&mut self) {
-    let _ = self.child.kill();
-    let _ = self.child.wait();
-  }
-}
-
-// ─── Helpers ────────────────────────────────────────────────────────────────
-
-fn data_url(html: &str) -> String {
-  format!("data:text/html,{}", urlenc(html))
-}
-
-fn urlenc(s: &str) -> String {
-  let mut out = String::with_capacity(s.len() * 3);
-  for b in s.bytes() {
-    match b {
-      b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' | b'!' | b'\'' | b'(' | b')' | b'*' => {
-        out.push(b as char)
-      },
-      _ => out.push_str(&format!("%{:02X}", b)),
-    }
-  }
-  out
-}
-
-fn extract_text(resp: &Value) -> String {
-  resp["result"]["content"]
-    .as_array()
-    .and_then(|a| a.first())
-    .and_then(|c| c["text"].as_str())
-    .unwrap_or("")
-    .to_string()
-}
-
-fn extract_image_b64(resp: &Value) -> String {
-  resp["result"]["content"]
-    .as_array()
-    .and_then(|a| a.iter().find(|c| c["type"].as_str() == Some("image")))
-    .and_then(|c| c["data"].as_str())
-    .unwrap_or("")
-    .to_string()
-}
-
-/// Find the content block that parses as the script engine's structured
-/// payload (`{ status, value | error, duration_ms, console[] }`). The tool
-/// returns one or two text blocks depending on outcome; we scan until we
-/// find the JSON one.
-fn extract_script_payload(resp: &Value) -> Option<Value> {
-  let contents = resp["result"]["content"].as_array()?;
-  for c in contents {
-    if let Some(text) = c["text"].as_str() {
-      if let Ok(parsed) = serde_json::from_str::<Value>(text) {
-        if parsed.get("status").is_some() {
-          return Some(parsed);
-        }
-      }
-    }
-  }
-  None
-}
-
-fn is_error(resp: &Value) -> bool {
-  resp.get("error").is_some() || resp["result"]["isError"].as_bool().unwrap_or(false)
-}
-
-fn ok(resp: &Value, ctx: &str) {
-  assert!(!is_error(resp), "{ctx} failed: {resp}");
-}
+use backends_support::client::{McpClient, data_url, extract_image_b64, extract_text, is_error, ok};
+use serde_json::json;
 
 // ─── Navigation + session ───────────────────────────────────────────────────
 
@@ -1837,11 +1639,10 @@ fn test_script_handle_materialisation(c: &mut McpClient) {
   assert_eq!(v["texts"], json!(["x", "y"]));
 }
 
-// WebKit-specific Rule-9 probe: proves Op::ReleaseRef actually reached
-// the host and deleted from `window.__wr`. CDP's Runtime.releaseObject
-// and BiDi's script.disown are not observable from page-side JS without
-// the phase-D use-after-dispose path; this probe covers WebKit's
-// page-side registry shrink which IS observable.
+// WebKit-specific probe: proves `Op::ReleaseRef` actually reached the
+// host and deleted from `window.__wr`. CDP's `Runtime.releaseObject`
+// and BiDi's `script.disown` are not observable from page-side JS; this
+// probe covers WebKit's page-side registry shrink which IS observable.
 fn test_script_handle_lifecycle_webkit_observable(c: &mut McpClient) {
   c.nav("<button id='primary'>ok</button>");
 
@@ -2282,7 +2083,7 @@ fn run_all_tests(backend: &str) {
   let mut failures: Vec<String> = Vec::new();
 
   macro_rules! run {
-    ($name:ident) => {{
+    ($name:path) => {{
       let name = stringify!($name);
       match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $name(&mut c))) {
         Ok(()) => {
@@ -2298,7 +2099,7 @@ fn run_all_tests(backend: &str) {
   }
 
   macro_rules! run_cdp {
-    ($name:ident) => {{
+    ($name:path) => {{
       if is_cdp {
         run!($name);
       }
@@ -2306,7 +2107,7 @@ fn run_all_tests(backend: &str) {
   }
 
   macro_rules! run_webkit {
-    ($name:ident) => {{
+    ($name:path) => {{
       if backend == "webkit" {
         run!($name);
       }
@@ -2382,18 +2183,21 @@ fn run_all_tests(backend: &str) {
   // successful `dispose()` call but have no page-observable side
   // effect until phase D's use-after-dispose test).
   run_webkit!(test_script_handle_lifecycle_webkit_observable);
-  // Task 1.3 phase D — page.evaluate(fn, arg) + evaluateHandle + rich
-  // type round-trip. Rule 9 covers all 4 backends.
   run!(test_script_evaluate_fn_and_handle);
   run!(test_script_evaluate_rich_types);
-  // Task 1.2 phase E — ElementHandle DOM methods (reads, state,
-  // bounding box, click / focus / scroll). Rule 9 covers all 4
-  // backends.
   run!(test_script_element_handle_methods);
-  // Task 1.2 + 1.3 phase F — handle materialisation
-  // (querySelectorAll, locator.elementHandle{,s}). Rule 9 on all 4
-  // backends.
   run!(test_script_handle_materialisation);
+  // Handle surface — JSHandle value/property/multi-arg evaluate,
+  // ElementHandle $eval/$$eval, frame accessors, wait helpers,
+  // temp-tag actions, selectText. All on four backends.
+  run!(backends_support::handle_surface::test_handle_json_value);
+  run!(backends_support::handle_surface::test_handle_properties);
+  run!(backends_support::handle_surface::test_handle_multi_arg_evaluate);
+  run!(backends_support::handle_surface::test_element_handle_eval);
+  run!(backends_support::handle_surface::test_element_handle_frames);
+  run!(backends_support::handle_surface::test_element_handle_waits);
+  run!(backends_support::handle_surface::test_element_handle_temp_tag_actions);
+  run!(backends_support::handle_surface::test_element_handle_select_text);
   run!(test_script_click_options);
   run!(test_script_action_timeout);
   run!(test_script_tap_native);

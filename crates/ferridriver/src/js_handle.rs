@@ -52,14 +52,37 @@ pub enum HandleRemote {
   WebKit(u64),
 }
 
+/// Backing of a [`JSHandle`] returned from `evaluateHandle`. Mirrors
+/// Playwright's two-shape `JSHandle` constructor
+/// (`/tmp/playwright/packages/playwright-core/src/server/javascript.ts:120-139`):
+/// a retained remote reference OR a primitive `_value` for non-object
+/// results.
+///
+/// Remote-backed handles live on the page and need `dispose()` to
+/// release them; value-backed handles carry an inline
+/// [`crate::protocol::SerializedValue`] and their `dispose()` is a
+/// no-op because nothing is retained page-side.
+#[derive(Debug, Clone)]
+pub enum JSHandleBacking {
+  /// Remote reference — `Runtime.RemoteObjectId`, `BiDi` shared-id /
+  /// handle, `WebKit` `window.__wr` index.
+  Remote(HandleRemote),
+  /// Primitive value — mirrors Playwright's `JSHandle._value`. Returned
+  /// when the backend's evaluateHandle path observes a non-object
+  /// result (number / string / boolean / null / undefined); the value
+  /// rides inline through the handle rather than requiring a page-side
+  /// retained reference.
+  Value(crate::protocol::SerializedValue),
+}
+
 /// Outcome of calling the utility script's `evaluate()` method through
 /// one of the backends. When the caller requested `returnByValue=true`
 /// (or Playwright parity's `page.evaluate(fn, arg)`), the backend parses
 /// the returned `RemoteObject.value` into a [`Value`] variant.
 /// When `returnByValue=false` (Playwright's `page.evaluateHandle`), the
-/// remote object is retained and a [`Handle`] variant surfaces the
-/// backend ref. Either way, handles owned by the page are the caller's
-/// to dispose.
+/// result wraps in a [`Handle`] variant whose backing is either a
+/// retained remote reference or an inline primitive value — matching
+/// Playwright's dual `JSHandle` shape.
 #[derive(Debug, Clone)]
 pub enum EvaluateResult {
   /// The utility script ran with `returnByValue=true`; the page-side
@@ -68,10 +91,13 @@ pub enum EvaluateResult {
   /// surface as [`crate::error::FerriError::Evaluation`] from the
   /// enclosing backend call.
   Value(crate::protocol::SerializedValue),
-  /// The utility script ran with `returnByValue=false`; the result is a
-  /// retained remote object addressable via [`HandleRemote`]. Callers
-  /// typically wrap this in a [`JSHandle`] / [`crate::element_handle::ElementHandle`].
-  Handle(HandleRemote),
+  /// The utility script ran with `returnByValue=false`; the result is
+  /// either a retained remote object addressable via
+  /// [`JSHandleBacking::Remote`] or a primitive
+  /// [`JSHandleBacking::Value`] when the result has no object identity.
+  /// Callers typically wrap this in a [`JSHandle`] /
+  /// [`crate::element_handle::ElementHandle`].
+  Handle(JSHandleBacking),
 }
 
 impl HandleRemote {
@@ -92,25 +118,6 @@ impl HandleRemote {
     }
   }
 
-  /// Package this remote as a single-slot [`crate::protocol::SerializedArgument`]
-  /// with `value` pointing at `{h: 0}` and `handles[0]` carrying the
-  /// remote's [`HandleId`]. Matches Playwright's `serializeArgument`
-  /// behaviour in
-  /// `/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:91-102`
-  /// when the top-level arg is a single `JSHandle`.
-  ///
-  /// The canonical packaging lives on core so NAPI and `QuickJS`
-  /// bindings produce identical wire shapes for the same remote —
-  /// per the Rule-1 "Rust is source of truth; bindings are thin
-  /// mirrors" invariant.
-  #[must_use]
-  pub fn to_serialized_argument(&self) -> crate::protocol::SerializedArgument {
-    crate::protocol::SerializedArgument {
-      value: crate::protocol::SerializedValue::Handle(0),
-      handles: vec![self.to_handle_id()],
-    }
-  }
-
   /// Inverse of [`Self::to_handle_id`]. Returns a [`HandleRemote`] ready
   /// to dispatch against an `AnyPage`. The conversion is lossless.
   #[must_use]
@@ -123,26 +130,64 @@ impl HandleRemote {
   }
 }
 
-/// Handle to a JavaScript value living in a page.
+impl JSHandleBacking {
+  /// Package this backing as a single-slot [`crate::protocol::SerializedArgument`].
+  /// Remote-backed handles ride through as `{h: 0}` with their
+  /// [`HandleId`] in `handles[0]`; value-backed handles inline their
+  /// primitive as the wire `value` with no entry in `handles`. Matches
+  /// Playwright's `serializeArgument` behaviour in
+  /// `/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:91-102`
+  /// where `JSHandle._value` bypasses the handle table.
+  ///
+  /// The canonical packaging lives on core so NAPI and `QuickJS`
+  /// bindings produce identical wire shapes for the same handle —
+  /// per the Rule-1 "Rust is source of truth; bindings are thin
+  /// mirrors" invariant.
+  #[must_use]
+  pub fn to_serialized_argument(&self) -> crate::protocol::SerializedArgument {
+    match self {
+      Self::Remote(remote) => crate::protocol::SerializedArgument {
+        value: crate::protocol::SerializedValue::Handle(0),
+        handles: vec![remote.to_handle_id()],
+      },
+      Self::Value(v) => crate::protocol::SerializedArgument {
+        value: v.clone(),
+        handles: Vec::new(),
+      },
+    }
+  }
+}
+
+/// Handle to a JavaScript value living in a page, or a primitive held
+/// inline. Mirrors Playwright's dual `JSHandle` shape — remote-backed
+/// when the value has page-side identity (objects, arrays, DOM nodes)
+/// and value-backed when the result is a primitive.
 ///
-/// Cheaply cloneable — every clone shares the same `disposed` flag so the
-/// first `dispose()` wins. The remote object is released exactly once; later
-/// calls through any clone return `Ok(())` without talking to the backend.
+/// Cheaply cloneable — every clone shares the same `disposed` flag so
+/// the first `dispose()` wins. Remote-backed handles release on first
+/// dispose; value-backed handles treat dispose as a no-op.
 #[derive(Clone)]
 pub struct JSHandle {
   page: Arc<Page>,
-  remote: HandleRemote,
+  backing: JSHandleBacking,
   disposed: Arc<AtomicBool>,
 }
 
 impl JSHandle {
-  /// Construct a new handle. Internal — callers go through page factories
-  /// like `Page::query_selector` (`ElementHandle`) or
+  /// Construct a remote-backed handle. Internal — callers go through
+  /// page factories like `Page::query_selector` (`ElementHandle`) or
   /// `Page::evaluate_handle` (`JSHandle`).
   pub(crate) fn new(page: Arc<Page>, remote: HandleRemote) -> Self {
+    Self::from_backing(page, JSHandleBacking::Remote(remote))
+  }
+
+  /// Construct directly from an already-built [`JSHandleBacking`] —
+  /// the shape produced by `EvaluateResult::Handle(..)`. Callers that
+  /// need a value-backed handle pass `JSHandleBacking::Value(..)` here.
+  pub(crate) fn from_backing(page: Arc<Page>, backing: JSHandleBacking) -> Self {
     Self {
       page,
-      remote,
+      backing,
       disposed: Arc::new(AtomicBool::new(false)),
     }
   }
@@ -153,11 +198,31 @@ impl JSHandle {
     &self.page
   }
 
-  /// Raw backend reference. Internal — used by evaluate-family calls to
-  /// thread the remote through the protocol.
+  /// Raw backend reference — `Some(..)` for remote-backed handles,
+  /// `None` for value-backed ones (Playwright's `_value` shape).
   #[must_use]
-  pub fn remote(&self) -> &HandleRemote {
-    &self.remote
+  pub fn remote(&self) -> Option<&HandleRemote> {
+    match &self.backing {
+      JSHandleBacking::Remote(r) => Some(r),
+      JSHandleBacking::Value(_) => None,
+    }
+  }
+
+  /// Inline primitive — `Some(..)` for value-backed handles, `None`
+  /// for remote-backed ones.
+  #[must_use]
+  pub fn value(&self) -> Option<&crate::protocol::SerializedValue> {
+    match &self.backing {
+      JSHandleBacking::Value(v) => Some(v),
+      JSHandleBacking::Remote(_) => None,
+    }
+  }
+
+  /// Full backing — lets callers pattern-match over remote vs value
+  /// without going through two `Option` accessors.
+  #[must_use]
+  pub fn backing(&self) -> &JSHandleBacking {
+    &self.backing
   }
 
   /// `true` once [`Self::dispose`] has run for any clone of this handle.
@@ -182,7 +247,9 @@ impl JSHandle {
       .is_ok()
   }
 
-  /// Release the underlying remote object on the backend.
+  /// Release the underlying remote object on the backend, when there
+  /// is one. Value-backed handles have nothing to release — dispose
+  /// latches the flag but makes no backend call.
   ///
   /// - CDP: `Runtime.releaseObject { objectId }`.
   /// - `BiDi`: `script.disown { handles, target }`.
@@ -202,7 +269,12 @@ impl JSHandle {
     if !self.claim_dispose() {
       return Ok(());
     }
-    let result = self.any_page().release_handle(&self.remote).await;
+    let JSHandleBacking::Remote(remote) = &self.backing else {
+      // Value-backed handle: no page-side reference to release. The
+      // disposed flag is latched so subsequent calls short-circuit.
+      return Ok(());
+    };
+    let result = self.any_page().release_handle(remote).await;
     if result.is_err() {
       // Roll back the flag so the caller can retry the failed release.
       // Idempotence is preserved on success because the flag stays
@@ -233,7 +305,7 @@ impl JSHandle {
     if self.is_disposed() {
       return Err(disposed_error());
     }
-    let (args, handles) = build_handle_evaluate_args(&self.remote, user_arg);
+    let (args, handles) = build_handle_evaluate_args(&self.backing, user_arg);
     let result = self
       .any_page()
       .call_utility_evaluate(fn_source, &args, &handles, None, is_function, true)
@@ -248,7 +320,8 @@ impl JSHandle {
 
   /// Playwright: `jsHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
   /// Same wire path as [`Self::evaluate_with_arg`] but retains the
-  /// result on the page and hands back a fresh [`JSHandle`].
+  /// result on the page (or inlines primitives as `JSHandleBacking::Value`)
+  /// and hands back a fresh [`JSHandle`].
   ///
   /// # Errors
   ///
@@ -262,13 +335,13 @@ impl JSHandle {
     if self.is_disposed() {
       return Err(disposed_error());
     }
-    let (args, handles) = build_handle_evaluate_args(&self.remote, user_arg);
+    let (args, handles) = build_handle_evaluate_args(&self.backing, user_arg);
     let result = self
       .any_page()
       .call_utility_evaluate(fn_source, &args, &handles, None, is_function, false)
       .await?;
     match result {
-      EvaluateResult::Handle(remote) => Ok(JSHandle::new(Arc::clone(&self.page), remote)),
+      EvaluateResult::Handle(backing) => Ok(JSHandle::from_backing(Arc::clone(&self.page), backing)),
       EvaluateResult::Value(_) => Err(crate::error::FerriError::Evaluation(
         "JSHandle::evaluate_handle_with_arg: backend returned value in returnByValue=false mode".into(),
       )),
@@ -278,11 +351,9 @@ impl JSHandle {
   /// Playwright: `jsHandle.jsonValue(): Promise<T>`
   /// (`/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:61`).
   /// Returns a JSON-like projection of the remote value — matches
-  /// Playwright's server-side `_jsonValue` which runs
-  /// `utilityScript.jsonValue(true, value)` on the page and round-trips
-  /// through the isomorphic serializer so rich types (`Date`, `RegExp`,
-  /// `NaN`, `Infinity`, `BigInt`, typed arrays) project to their wire
-  /// representations.
+  /// Playwright's server-side `_jsonValue` which short-circuits to the
+  /// inline `_value` for primitive-backed handles and runs
+  /// `utilityScript.jsonValue` page-side for remote-backed ones.
   ///
   /// # Errors
   ///
@@ -290,6 +361,14 @@ impl JSHandle {
   /// and [`crate::error::FerriError::TargetClosed`] when this handle
   /// is already disposed.
   pub async fn json_value(&self) -> Result<crate::protocol::SerializedValue> {
+    // Playwright's `_jsonValue` short-circuits to the inline value
+    // when the handle lacks an objectId
+    // (`/tmp/playwright/packages/playwright-core/src/server/javascript.ts:199-204`).
+    // We mirror that — value-backed handles return the stored value
+    // without a page round-trip.
+    if let Some(v) = self.value() {
+      return Ok(v.clone());
+    }
     self
       .evaluate_with_arg("h => h", crate::protocol::SerializedArgument::default(), Some(true))
       .await
@@ -374,6 +453,12 @@ impl JSHandle {
     if self.is_disposed() {
       return Ok(None);
     }
+    // Value-backed handles are primitive — never DOM nodes. Short-circuit
+    // without a page round-trip, matching Playwright's `asElement`
+    // which returns `null` at the base `JSHandle` layer.
+    let Some(remote) = self.remote() else {
+      return Ok(None);
+    };
     let is_node = self
       .evaluate_with_arg(
         "h => h instanceof Node",
@@ -385,7 +470,7 @@ impl JSHandle {
     if !is_element {
       return Ok(None);
     }
-    let any_element = crate::backend::element_from_remote(self.any_page(), &self.remote)?;
+    let any_element = crate::backend::element_from_remote(self.any_page(), remote)?;
     Ok(Some(ElementHandle::from_js_handle_and_element(
       self.clone(),
       any_element,
@@ -396,14 +481,15 @@ impl JSHandle {
 impl std::fmt::Debug for JSHandle {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     f.debug_struct("JSHandle")
-      .field("remote", &self.remote)
+      .field("backing", &self.backing)
       .field("disposed", &self.is_disposed())
       .finish_non_exhaustive()
   }
 }
 
 /// Pack `handle.evaluate(fn, userArg)` as two positional args — the
-/// handle at index 0 (`{h: 0}` → `handles[0]`) and the user arg at
+/// handle at index 0 (as `{h: 0}` for remote-backed receivers, or as
+/// the inline value for value-backed receivers) and the user arg at
 /// index 1 with its `{h: i}` references relocated to `{h: i+1}` to
 /// sit alongside the prepended handle. Mirrors Playwright's
 /// `JSHandle.evaluate`'s call site at
@@ -411,7 +497,7 @@ impl std::fmt::Debug for JSHandle {
 /// where the handle and user arg are passed as the first two variadic
 /// arguments.
 fn build_handle_evaluate_args(
-  receiver: &HandleRemote,
+  receiver: &JSHandleBacking,
   user_arg: crate::protocol::SerializedArgument,
 ) -> (Vec<crate::protocol::SerializedValue>, Vec<crate::protocol::HandleId>) {
   let crate::protocol::SerializedArgument {
@@ -419,13 +505,24 @@ fn build_handle_evaluate_args(
     handles: user_handles,
   } = user_arg;
 
+  if let JSHandleBacking::Value(inline) = receiver {
+    // Value-backed receiver: no page-side reference to ship. Pass the
+    // primitive inline as arg[0]; user arg keeps its own handle table
+    // unshifted because no receiver handle was prepended.
+    let args = vec![inline.clone(), user_value];
+    return (args, user_handles);
+  }
+  let JSHandleBacking::Remote(remote) = receiver else {
+    unreachable!("JSHandleBacking has only Remote and Value variants");
+  };
+
   // Relocate `{h: i}` refs inside the user value by +1 so they index
   // into the combined handle table where `handles[0]` is the receiver.
   let shifted_user_value = shift_handle_indices(user_value, 1);
 
   let args = vec![crate::protocol::SerializedValue::handle(0), shifted_user_value];
   let mut handles = Vec::with_capacity(1 + user_handles.len());
-  handles.push(receiver.to_handle_id());
+  handles.push(remote.to_handle_id());
   handles.extend(user_handles);
   (args, handles)
 }
