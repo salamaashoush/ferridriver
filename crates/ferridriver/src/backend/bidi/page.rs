@@ -1746,15 +1746,34 @@ impl BidiPage {
   ///
   /// Returns a String on transport failure, page-side exception, or
   /// handle/backend mismatch.
+  /// Construct a [`super::BidiElement`] directly from a shared-reference
+  /// id without re-resolving through the DOM. Used by
+  /// [`crate::backend::element_from_remote`] when a
+  /// [`crate::js_handle::JSHandle`] turns out to wrap a DOM node and
+  /// needs to be re-packaged as an
+  /// [`crate::element_handle::ElementHandle`].
+  pub(crate) fn element_from_shared_id(&self, shared_id: String) -> super::BidiElement {
+    super::BidiElement::new(self.session.clone(), self.context_id.clone(), shared_id)
+  }
+
+  /// ferridriver's equivalent of Playwright's
+  /// `evaluateExpression(context, expr, opts, ...args)` — see the CDP
+  /// twin for the shared contract. Sends variadic `args` + shared
+  /// `handles` through `script.callFunction`.
+  ///
+  /// # Errors
+  ///
+  /// Returns a String on transport failure, page-side exception, or
+  /// handle/backend mismatch.
   #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
   pub async fn call_utility_evaluate(
     &self,
     fn_source: &str,
-    arg: &crate::protocol::SerializedArgument,
+    args: &[crate::protocol::SerializedValue],
+    handles: &[crate::protocol::HandleId],
     frame_id: Option<&str>,
     is_function: Option<bool>,
     return_by_value: bool,
-    receiver: Option<&crate::js_handle::HandleRemote>,
   ) -> Result<crate::js_handle::EvaluateResult, String> {
     use crate::js_handle::{EvaluateResult as FdEvalResult, HandleRemote};
     use crate::protocol::HandleId;
@@ -1764,19 +1783,8 @@ impl BidiPage {
 
     let target_ctx: &str = frame_id.unwrap_or(&self.context_id);
 
-    let this_arg = match receiver {
-      Some(HandleRemote::Bidi { shared_id, .. }) => Some(json!({"type": "sharedReference", "sharedId": shared_id})),
-      Some(_) => return Err("call_utility_evaluate: non-BiDi receiver handle on BiDi backend".into()),
-      None => None,
-    };
-
-    let arg_json = serde_json::to_string(&arg.value).map_err(|e| e.to_string())?;
-    let count = usize::from(
-      !(matches!(
-        arg.value,
-        crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
-      ) && arg.handles.is_empty()),
-    );
+    let args_json = serde_json::to_string(args).map_err(|e| e.to_string())?;
+    let count = args.len();
 
     let is_fn_local = match is_function {
       Some(true) => json!({"type": "boolean", "value": true}),
@@ -1789,9 +1797,9 @@ impl BidiPage {
       json!({"type": "boolean", "value": return_by_value}),
       json!({"type": "string", "value": fn_source}),
       json!({"type": "number", "value": count}),
-      json!({"type": "string", "value": arg_json}),
+      json!({"type": "string", "value": args_json}),
     ];
-    for handle in &arg.handles {
+    for handle in handles {
       match handle {
         HandleId::Bidi { shared_id, .. } => {
           arguments.push(json!({"type": "sharedReference", "sharedId": shared_id}));
@@ -1800,16 +1808,13 @@ impl BidiPage {
       }
     }
 
-    let mut params = json!({
+    let params = json!({
       "functionDeclaration": crate::backend::cdp::UTILITY_EVAL_WRAPPER,
       "target": {"context": target_ctx},
       "arguments": arguments,
       "awaitPromise": true,
       "resultOwnership": if return_by_value { "none" } else { "root" },
     });
-    if let Some(t) = this_arg {
-      params["this"] = t;
-    }
 
     let response = self.cmd("script.callFunction", params).await?;
     let eval_result: super::types::EvaluateResult =

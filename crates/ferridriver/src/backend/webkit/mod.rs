@@ -360,37 +360,49 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns a String on IPC failure or page-side exception.
+  /// Construct a [`WebKitElement`] directly from a `window.__wr`
+  /// registry index without re-resolving through the DOM. Used by
+  /// [`crate::backend::element_from_remote`] when a
+  /// [`crate::js_handle::JSHandle`] turns out to wrap a DOM node and
+  /// needs to be re-packaged as an
+  /// [`crate::element_handle::ElementHandle`].
+  pub(crate) fn element_from_ref_id(&self, ref_id: u64) -> WebKitElement {
+    WebKitElement {
+      client: self.client.clone(),
+      view_id: self.view_id,
+      ref_id,
+    }
+  }
+
+  /// ferridriver's equivalent of Playwright's
+  /// `evaluateExpression(context, expr, opts, ...args)` — see the CDP
+  /// twin for the shared contract. `WebKit`'s IPC exposes only one
+  /// evaluate primitive, so the wrapper + meta-args are inlined into
+  /// a single expression and dispatched through [`Self::evaluate`].
+  ///
+  /// # Errors
+  ///
+  /// Returns a String on IPC failure or page-side exception.
   #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
   pub async fn call_utility_evaluate(
     &self,
     fn_source: &str,
-    arg: &crate::protocol::SerializedArgument,
+    args: &[crate::protocol::SerializedValue],
+    handles: &[crate::protocol::HandleId],
     _frame_id: Option<&str>,
     is_function: Option<bool>,
     return_by_value: bool,
-    receiver: Option<&crate::js_handle::HandleRemote>,
   ) -> Result<crate::js_handle::EvaluateResult, String> {
     use crate::js_handle::{EvaluateResult as FdEvalResult, HandleRemote};
     use crate::protocol::HandleId;
 
     self.ensure_engine_injected().await?;
 
-    let receiver_ref: Option<u64> = match receiver {
-      Some(HandleRemote::WebKit(r)) => Some(*r),
-      Some(_) => return Err("call_utility_evaluate: non-WebKit receiver handle on WebKit backend".into()),
-      None => None,
-    };
+    let args_json = serde_json::to_string(args).map_err(|e| e.to_string())?;
+    let count = args.len();
 
-    let arg_json = serde_json::to_string(&arg.value).map_err(|e| e.to_string())?;
-    let count = usize::from(
-      !(matches!(
-        arg.value,
-        crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
-      ) && arg.handles.is_empty()),
-    );
-
-    let mut handle_refs = Vec::with_capacity(arg.handles.len());
-    for handle in &arg.handles {
+    let mut handle_refs = Vec::with_capacity(handles.len());
+    for handle in handles {
       match handle {
         HandleId::WebKit(r) => handle_refs.push(*r),
         _ => return Err("call_utility_evaluate: non-WebKit handle in arg.handles on WebKit backend".into()),
@@ -403,10 +415,6 @@ impl WebKitPage {
       None => "undefined",
     };
     let return_by_value_js = if return_by_value { "true" } else { "false" };
-    let this_js = match receiver_ref {
-      Some(r) => format!("window.__wr.get({r})"),
-      None => "globalThis".to_string(),
-    };
     let handle_list_js = if handle_refs.is_empty() {
       String::from("[]")
     } else {
@@ -417,10 +425,11 @@ impl WebKitPage {
         .join(",");
       format!("[{inner}]")
     };
-    // `__fd_arg_literal` is baked into the JS as a single-quoted
-    // string after escaping — the utility-script wrapper JSON.parses
-    // it back on the page.
-    let arg_literal = serde_json::to_string(&arg_json).map_err(|e| e.to_string())?;
+    // `serializedArgs` is baked into the JS as a double-escaped
+    // string literal — the utility-script wrapper JSON.parses it
+    // back on the page, then spreads the resulting array into the
+    // utility script's variadic argsAndHandles slot.
+    let args_literal = serde_json::to_string(&args_json).map_err(|e| e.to_string())?;
     let fn_source_literal = serde_json::to_string(fn_source).map_err(|e| e.to_string())?;
 
     // When returning a handle, we need ref_id allocation. Include the
@@ -434,15 +443,10 @@ impl WebKitPage {
         const retVal = {return_by_value_js};
         const expr = {fn_source_literal};
         const count = {count};
-        const serializedArg = {arg_literal};
-        const parsed = count > 0 ? [JSON.parse(serializedArg)] : [];
+        const serializedArgs = {args_literal};
+        const parsed = count > 0 ? JSON.parse(serializedArgs) : [];
         const handles = {handle_list_js};
-        const recv = {this_js};
-        const invoke = us.evaluate.bind(us);
-        const fn = function(){{
-          return invoke(isFn, retVal, expr, count, ...parsed, ...handles);
-        }}.bind(recv);
-        const result = fn();
+        const result = us.evaluate(isFn, retVal, expr, count, ...parsed, ...handles);
         if (retVal) {{
           const encoded = JSON.stringify(result);
           return JSON.stringify({{kind: 'value', payload: encoded === undefined ? null : encoded}});

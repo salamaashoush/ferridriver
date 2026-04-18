@@ -1150,17 +1150,20 @@ impl AnyPage {
   /// allows it (CDP raises an error only on structural issues like an
   /// invalid session id; `BiDi` returns `invalid argument` for an unknown
   /// `sharedId` which we surface).
-  /// Call the page-side `UtilityScript.evaluate` — dispatches to each
-  /// backend's native impl (`CdpPage::call_utility_evaluate`,
-  /// `BidiPage::call_utility_evaluate`, `WebKitPage::call_utility_evaluate`).
-  /// The three implementations all follow Playwright's isomorphic
-  /// serializer contract: handles ride through as native remote
-  /// references, rich types round-trip via the wrapper function's
-  /// `JSON.parse` / `JSON.stringify`.
+  /// ferridriver's equivalent of Playwright's
+  /// `evaluateExpression(context, expr, { returnByValue, isFunction }, ...args)`
+  /// (`/tmp/playwright/packages/playwright-core/src/server/javascript.ts:248`).
+  /// Dispatches to each backend's native `call_utility_evaluate`.
   ///
-  /// `receiver` is the `this` of the user function — when the caller
-  /// invokes `handle.evaluate(fn, arg)` we pass the handle's remote
-  /// here; for `page.evaluate(fn, arg)` it is `None`.
+  /// `args` are the variadic user-function arguments after isomorphic
+  /// serialization; `handles` is the shared handle table every
+  /// `{h: idx}` reference inside `args` indexes into. For
+  /// `page.evaluate(fn, arg)` that's `args = [arg], handles = [...]`;
+  /// for `handle.evaluate(fn, arg)` it's `args = [handle, arg]`,
+  /// `handles = [self, ...]` — matching Playwright's
+  /// `JSHandle.evaluate`'s `evaluate(ctx, ..., this, arg)` shape at
+  /// `javascript.ts:161-163`. There is no separate receiver / `this`
+  /// binding; Playwright doesn't have one either.
   ///
   /// # Errors
   ///
@@ -1170,28 +1173,28 @@ impl AnyPage {
   pub async fn call_utility_evaluate(
     &self,
     fn_source: &str,
-    arg: &crate::protocol::SerializedArgument,
+    args: &[crate::protocol::SerializedValue],
+    handles: &[crate::protocol::HandleId],
     frame_id: Option<&str>,
     is_function: Option<bool>,
     return_by_value: bool,
-    receiver: Option<&crate::js_handle::HandleRemote>,
   ) -> crate::error::Result<crate::js_handle::EvaluateResult> {
     match self {
       Self::CdpPipe(p) => p
-        .call_utility_evaluate(fn_source, arg, frame_id, is_function, return_by_value, receiver)
+        .call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
         .await
         .map_err(Into::into),
       Self::CdpRaw(p) => p
-        .call_utility_evaluate(fn_source, arg, frame_id, is_function, return_by_value, receiver)
+        .call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
         .await
         .map_err(Into::into),
       #[cfg(target_os = "macos")]
       Self::WebKit(p) => p
-        .call_utility_evaluate(fn_source, arg, frame_id, is_function, return_by_value, receiver)
+        .call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
         .await
         .map_err(Into::into),
       Self::Bidi(p) => p
-        .call_utility_evaluate(fn_source, arg, frame_id, is_function, return_by_value, receiver)
+        .call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
         .await
         .map_err(Into::into),
     }
@@ -1233,6 +1236,44 @@ impl AnyPage {
 /// happen for elements freshly returned from `find_element` /
 /// `evaluate_to_element` / `DOM.resolveNode`, which always produce at
 /// least one of the two.
+/// Re-wrap a [`crate::js_handle::HandleRemote`] as a backend
+/// [`AnyElement`]. Inverse of [`element_handle_remote`] — used by
+/// [`crate::js_handle::JSHandle::as_element`] when a
+/// [`crate::js_handle::JSHandle`] turns out to reference a DOM node
+/// and needs to be re-packaged as an
+/// [`crate::element_handle::ElementHandle`].
+///
+/// The remote reference must match the backend the page is running on
+/// (CDP remote on CDP page, etc.) — this is an invariant guaranteed
+/// by [`crate::js_handle::JSHandle`]'s construction site, so a
+/// mismatch is a programming error and surfaces as
+/// [`crate::error::FerriError::Backend`].
+///
+/// # Errors
+///
+/// Returns a backend-mismatch error when the remote's variant doesn't
+/// line up with the page's backend kind.
+pub fn element_from_remote(
+  page: &AnyPage,
+  remote: &crate::js_handle::HandleRemote,
+) -> crate::error::Result<AnyElement> {
+  use crate::js_handle::HandleRemote;
+  match (page, remote) {
+    (AnyPage::CdpPipe(p), HandleRemote::Cdp(obj)) => Ok(AnyElement::CdpPipe(p.element_from_object_id(obj.clone()))),
+    (AnyPage::CdpRaw(p), HandleRemote::Cdp(obj)) => Ok(AnyElement::CdpRaw(p.element_from_object_id(obj.clone()))),
+    #[cfg(target_os = "macos")]
+    (AnyPage::WebKit(p), HandleRemote::WebKit(ref_id)) => Ok(AnyElement::WebKit(p.element_from_ref_id(*ref_id))),
+    (AnyPage::Bidi(p), HandleRemote::Bidi { shared_id, .. }) => {
+      Ok(AnyElement::Bidi(p.element_from_shared_id(shared_id.clone())))
+    },
+    (page, remote) => Err(crate::error::FerriError::Backend(format!(
+      "element_from_remote: backend mismatch — {:?} remote on {:?} backend",
+      remote,
+      page.kind()
+    ))),
+  }
+}
+
 pub async fn element_handle_remote(element: &AnyElement) -> crate::error::Result<crate::js_handle::HandleRemote> {
   use crate::js_handle::HandleRemote;
   match element {
