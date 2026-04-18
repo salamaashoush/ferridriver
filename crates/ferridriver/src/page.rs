@@ -426,6 +426,45 @@ impl Page {
     }
   }
 
+  /// Playwright: `page.querySelectorAll(selector): Promise<ElementHandle[]>`.
+  /// Returns one [`crate::element_handle::ElementHandle`] per match in
+  /// document order. Each element is pinned individually — disposing
+  /// one does not affect the others.
+  ///
+  /// Implementation uses the selector engine's `query_all` which
+  /// tags every match with `data-fd-sel='<i>'`; we then evaluate a
+  /// lookup by tag for each index and wrap the result. Tags are
+  /// cleaned up on completion.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error on selector parse failure, protocol error, or
+  /// if a match cannot be resolved (e.g. the DOM changed mid-iteration).
+  pub async fn query_selector_all(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> Result<Vec<crate::element_handle::ElementHandle>> {
+    let matches = crate::selectors::query_all(&self.inner, selector, None)
+      .await
+      .map_err(crate::error::FerriError::from)?;
+    let count = matches.len();
+    let mut handles = Vec::with_capacity(count);
+    for i in 0..count {
+      let tagged = format!("window.__fd.selOne([{{\"engine\":\"css\",\"body\":\"[data-fd-sel='{i}']\"}}])");
+      match self.inner.evaluate_to_element(&tagged, None).await {
+        Ok(element) => {
+          handles.push(crate::element_handle::ElementHandle::from_any_element(Arc::clone(self), element).await?);
+        },
+        Err(err) => {
+          crate::selectors::cleanup_tags(&self.inner).await;
+          return Err(crate::error::FerriError::from(err));
+        },
+      }
+    }
+    crate::selectors::cleanup_tags(&self.inner).await;
+    Ok(handles)
+  }
+
   // ── evaluate(fn, arg) (Playwright parity — task 1.3 phase D) ─────
 
   /// Playwright's `page.evaluate(pageFunction, arg?)` — runs a JS

@@ -41,6 +41,28 @@ impl Locator {
     Self::wrap(self.inner.strict(strict))
   }
 
+  // ── Handle materialisation (Playwright `locator.elementHandle`) ───────
+
+  /// Playwright: `locator.elementHandle(): Promise<ElementHandle>`.
+  /// Resolves the locator and returns a pinned ElementHandle.
+  #[napi]
+  pub async fn element_handle(&self) -> Result<crate::element_handle::ElementHandle> {
+    let inner = self.inner.element_handle().await.map_err(crate::error::to_napi)?;
+    Ok(crate::element_handle::ElementHandle::wrap(inner))
+  }
+
+  /// Playwright: `locator.elementHandles(): Promise<ElementHandle[]>`.
+  #[napi]
+  pub async fn element_handles(&self) -> Result<Vec<crate::element_handle::ElementHandle>> {
+    let inner = self.inner.element_handles().await.map_err(crate::error::to_napi)?;
+    Ok(
+      inner
+        .into_iter()
+        .map(crate::element_handle::ElementHandle::wrap)
+        .collect(),
+    )
+  }
+
   // ── Sub-locators ────────────────────────────────────────────────────────
 
   /// Playwright: `locator.locator(selectorOrLocator, options?: Omit<LocatorOptions, 'visible'>): Locator`
