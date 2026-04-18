@@ -7,242 +7,171 @@
 
 ## Branch state
 
-Branch: `main`, **40 commits ahead** of `origin/main`, working tree clean.
+Branch: `main`, **47 commits ahead** of `origin/main` (4 new this block),
+working tree clean except for this HANDOVER + `PLAYWRIGHT_COMPAT.md`.
 
-Recent commits (newest first):
+Recent commits this block (newest first):
 
 ```
-0591807 feat(injected): expose UtilityScript + isomorphic serializer on window.__fd (task 1.3 phase B)
-7a29ce5 refactor(core): pivot SerializedValue to isomorphic (utilityScript) format
-b355513 feat(core): tagged-union wire serializer for evaluate(fn, arg) + handles (task 1.3 phase A)
-682fb53 docs: 1.5 remediation progress — 7 of 11 sub-items proven, 4 pending Phase 5 tests
-cb0e8b9 fix(core): dispatchEvent timeout + selectOption force/timeout (task 1.5 phase 4c + 4d)
-6ffe86b fix(core): check/uncheck verify final state + reject radio uncheck (task 1.5 phase 4b)
-ea3da35 fix(core): fill.force actually bypasses [visible,enabled,editable] (task 1.5 phase 4a)
-170bc3d feat(core): CDP native tap via Input.dispatchTouchEvent (task 1.5 phase 3, Rule 4)
-e2bdc85 fix(core): honor opts.timeout on every Locator action (task 1.5 phase 2)
-b77b8c7 fix(core): drop steps from Hover/Tap options (task 1.5 phase 1)
+<this commit> docs: PLAYWRIGHT_COMPAT.md flip 1.2/1.3 to [~]; HANDOVER
+              for end-of-block (phases C → F shipped)
+<this commit> feat(core): page.querySelectorAll + locator.elementHandle{,s}
+              materialisation surface (task 1.2/1.3 phase F)
+badfe7b      feat(core): ElementHandle DOM methods — reads, state,
+              geometry, actions (task 1.2 phase E)
+20347f6      feat(core): page.evaluate(fn, arg) end-to-end across 4
+              backends (task 1.3 phase D)
+2c3f03f      feat(core): JSHandle + ElementHandle skeleton +
+              per-backend dispose (task 1.2/1.3 phase C)
+0591807      feat(injected): expose UtilityScript + isomorphic
+              serializer on window.__fd (task 1.3 phase B)
+7a29ce5      refactor(core): pivot SerializedValue to isomorphic
+              (utilityScript) format
+b355513      feat(core): tagged-union wire serializer for evaluate(fn,
+              arg) + handles (task 1.3 phase A)
 ```
 
 ## What's landed this block
 
-Two independent work streams completed:
+Tasks **1.2 (ElementHandle)** and **1.3 (JSHandle)** are now far enough
+along to be marked **[~]** in `PLAYWRIGHT_COMPAT.md` — the core
+lifecycle, the wire-level evaluate(fn, arg) path on every backend, the
+common DOM-method surface, and the materialisation primitives all
+ship. The remaining surface for [x] is mechanical follow-on work
+(multi-arg evaluate, ~10 more action methods, getProperties /
+getProperty, full screenshot option bag).
 
-### 1.5 remediation — done (save for phase-5 tests)
+### Phase C — Lifecycle + dispose (`2c3f03f`)
+- `JSHandle { page, remote, disposed: Arc<AtomicBool> }` and
+  `HandleRemote { Cdp(Arc<str>), Bidi{shared_id, handle}, WebKit(u64) }`
+  with infallible `to_handle_id` / `from_handle_id`.
+- `ElementHandle` composes `JSHandle` + `Arc<AnyElement>`.
+- `AnyPage::release_handle` dispatches to per-backend
+  `release_object` (CDP) / `release_handle` (BiDi) / `release_ref`
+  (WebKit) — new `Op::ReleaseRef = 73` IPC op + `host.m` handler.
+- WebKit `window.__wr` migrated from a plain object to a `Map` for
+  O(1) deletion; ref ids come from a monotonic `window.__wr_next`
+  counter.
+- `Page::query_selector(selector) -> Option<ElementHandle>` (the
+  minimum minting path needed to test dispose).
+- NAPI: `JSHandle` + `ElementHandle` classes; QuickJS: `JSHandleJs`
+  + `ElementHandleJs`. Page `querySelector` + `$` alias on both
+  binding layers.
+- 22 Rule-9 bun tests + per-backend QuickJS tests for the lifecycle.
 
-Phases 1 → 4d fixed the real semantic gaps the prior session's false
-completion claim missed. Details in commit messages; summary:
+### Phase D — page.evaluate(fn, arg) (`20347f6`)
+- New `EvaluateResult { Value, Handle }` in `js_handle.rs`.
+- `AnyPage::call_utility_evaluate` dispatches to each backend's
+  utility-script invocation.
+- Shared wrapper function `backend::cdp::UTILITY_EVAL_WRAPPER`
+  memoises `UtilityScript` on `window.__fd.__us`, JSON.parses the
+  serialized arg, JSON.stringifies the result so only flat strings
+  cross the backend boundary.
+- CDP: `Runtime.callFunctionOn` with `executionContextId` /
+  `objectId`. BiDi: `script.callFunction` with `target.context` and
+  `sharedReference` handles. WebKit: inlined expression via
+  `Op::Evaluate` (no new IPC op needed because `window.__wr` is
+  page-addressable).
+- `Page::evaluate_with_arg` / `evaluate_handle_with_arg`,
+  `JSHandle::evaluate_with_arg` (handle as arg[0]) / `evaluate_handle_with_arg`.
+- NAPI / QuickJS: `evaluateWithArg` (lossy JSON-like) +
+  `evaluateWithArgWire` (raw isomorphic wire) + `evaluateHandleWithArg`
+  on Page, JSHandle, ElementHandle.
+- Rule-9 tests: primitive / object / null arg round-trip,
+  evaluateHandle lifecycle, handle-as-arg `tagName` probe,
+  ElementHandle.evaluate delegation, disposed-handle use error,
+  rich-type round-trip via `evaluateWithArgWire` (Date / RegExp /
+  NaN / Infinity / BigInt / undefined).
 
-- `steps` spec divergence dropped from Hover/Tap.
-- `opts.timeout` threaded through every action's `retry_resolve!` deadline.
-- CDP native tap via `Input.dispatchTouchEvent`; BiDi/WebKit return typed
-  `Unsupported` per Rule 4.
-- `fill.force` bypasses `['visible','enabled','editable']`.
-- `check/uncheck/setChecked` verify post-click state via `fd.getChecked`
-  (ARIA-aware), reject uncheck-of-checked-radio with Playwright's exact
-  message.
-- `dispatchEvent` honors `opts.timeout` via retry (Playwright's own
-  dispatchEvent does not run actionability — we match).
-- `selectOption` honors `opts.timeout` + `opts.force`.
+### Phase E — ElementHandle DOM methods (`badfe7b`)
+- `BoundingBox` re-exported from `options::BoundingBox`;
+  `ElementState` enum for the future `wait_for_element_state`.
+- Reads via utility-script evaluate: `inner_html`, `inner_text`,
+  `text_content`, `get_attribute(name)`, `input_value`.
+- State predicates: `is_visible`, `is_hidden`, `is_disabled`,
+  `is_enabled`, `is_checked` (ARIA + input), `is_editable`.
+- Geometry: `bounding_box`.
+- Actions: `click`, `dblclick`, `hover`, `type_str`, `focus`,
+  `scroll_into_view_if_needed`, `screenshot(format)` — first six
+  delegate to the backend's `AnyElement`, `focus` runs through the
+  utility script.
+- NAPI + QuickJS bindings for every method (Playwright-camelCase).
+- 8 new bun tests + per-backend QuickJS test
+  (`test_script_element_handle_methods`).
+- BiDi's `data-fdref` attribute on referenced elements is
+  accommodated by substring-matching innerHTML rather than literal
+  comparison.
 
-Still owed for flipping the top-level 1.5 `[x]`: per-option integration
-tests on **dblclick, press, type, setInputFiles**. Each is a distinct
-backends.rs + NAPI test session, no code changes. The tracker's
-"Partial" bucket lists probe suggestions.
+### Phase F — Materialisation (this commit)
+- `Page::query_selector_all(selector)` — uses `selectors::query_all`
+  to tag matches with `data-fd-sel='<i>'`, then resolves each by
+  tag and wraps in `ElementHandle`. Tags cleaned up on completion.
+- `Locator::element_handle()` / `Locator::element_handles()` — both
+  reuse the same `selectors::query_one` / `query_all` plumbing the
+  retry loop uses.
+- NAPI + QuickJS: `Page.querySelectorAll` + `$$` alias,
+  `Locator.elementHandle`, `Locator.elementHandles`.
+- Rule-9 test (`test_script_handle_materialisation`):
+  querySelectorAll length+texts, $$ alias, empty-match returns
+  empty array, locator.elementHandle returns BUTTON, locator
+  elementHandles returns N matches.
 
-### 1.3 JSHandle + 1.2 ElementHandle — phases A + B landed
+## Still owed for flipping 1.2 / 1.3 to [x]
 
-Shared plumbing for `page.evaluate(fn, arg)` + JSHandle marshaling:
+See `PLAYWRIGHT_COMPAT.md` §1.2 + §1.3 for the full lists. Highlights:
 
-- **Phase A + pivot (b355513 → 7a29ce5)**: new `ferridriver::protocol`
-  module. The first cut implemented Playwright's *channels* wire format
-  (struct-of-optionals, `{n:42}` / `{b:true}` / `{s:"hi"}` wrapping of
-  primitives) — that's the one Playwright uses only on its
-  client↔server WebSocket RPC. For ferridriver there is no such RPC,
-  so we pivoted in 7a29ce5 to the *isomorphic* format
-  (`/tmp/playwright/packages/injected/src/utilityScriptSerializers.ts`)
-  where primitives pass through raw and only rich types ride inside
-  single-key tagged objects (`{v: ...}`, `{d: ...}`, `{h: ...}`, etc.).
-  That's the format the page's utility script parses over CDP
-  `Runtime.callFunctionOn.arguments[].value`. Every variant Playwright
-  supports has a builder + round-trip test: primitives, all 6
-  specials, Date, URL, BigInt, Error, RegExp, TypedArray (11 kinds),
-  ArrayBuffer, Array, Object, Handle, Reference. Custom `Serialize`
-  / `Deserialize` impls keep the exact Playwright byte-for-byte wire
-  shape. `SerializationContext` / `SerializedArgument` /
-  `HandleId { Cdp, Bidi, WebKit }` companions are in place.
+**1.2 ElementHandle:**
+- Action methods with Playwright option bags: `check`, `uncheck`,
+  `set_checked`, `tap`, `fill`, `press`, `dispatch_event`,
+  `select_option`, `select_text`, `set_input_files`. Most lower to
+  the existing `actions::*` Locator helpers — pattern: derive a
+  synthetic Locator from the handle (e.g. `internal:handle-ref=<id>`
+  selector engine) and dispatch through the existing pipeline.
+- `wait_for_element_state(state, opts)` — poll via
+  `fd.checkElementStates` like the Locator paths.
+- Handle-scoped `wait_for_selector(selector, opts)`.
+- Frame accessors: `owner_frame`, `content_frame`.
+- `eval_on_selector` / `eval_on_selector_all` — Playwright `$eval` /
+  `$$eval` shortcuts.
+- Full screenshot option bag: `path`, `omitBackground`, `animations`,
+  `mask`, `style`, `clip`.
 
-- **Phase B (0591807)**: exposed the already-imported `UtilityScript`
-  class + `parseEvaluationResultValue` + `serializeAsCallArgument` on
-  `window.__fd`. Added a `newUtilityScript()` factory — that's the
-  anchor the Rust side calls via `Runtime.evaluate` to mint a
-  per-execution-context JSHandle for the receiver of every subsequent
-  `Runtime.callFunctionOn`. Rebuilt the injected bundle.
-  `backends.rs::test_script_utility_script_exposed` proves the class
-  and every rich-type deserialization works end-to-end on all 4
-  backends (deserialize `{v: 'NaN'}` → `NaN`, `{d: ...}` → `Date`,
-  etc.; round-trip `{d: ...}` → `Date` → re-serialized wire shape).
+**1.3 JSHandle:**
+- `getProperties()` → `Map<string, JSHandle>`, `getProperty(name)` →
+  `JSHandle`.
+- User-facing `jsonValue()` (currently expressible via
+  `evaluate_with_arg("el => el", null)` but deserves its own method
+  with the right return shape).
+- Multi-arg evaluate: `handle.evaluate(fn, userArg)` currently
+  ignores `userArg`. Bump `argCount` to 2 and thread a second
+  serialized value through the utility-script wrapper.
+- Rich input arg detection at NAPI / QuickJS: spot `Date`, `RegExp`,
+  `BigInt`, typed arrays, AND `JSHandle` / `ElementHandle` class
+  instances; emit `{h: idx}` + push the backend `HandleId` into the
+  `handles` slot. Today only JSON-expressible values are supported.
+- `asElement()` actually inspects the remote (CDP
+  `RemoteObject.subtype === 'node'`, BiDi `RemoteValue::Node`,
+  WebKit value-type round-trip).
 
-## What's still owed for 1.3 + 1.2
+## Next Tier-1 task: 1.4 Request / Response lifecycle
 
-### Phase C — JSHandle + ElementHandle skeleton
-
-Brand-new public types. Rough scope:
-
-- `crates/ferridriver/src/js_handle.rs` — `JSHandle` struct wrapping a
-  backend-agnostic remote reference. Fields:
-  - `context: Arc<Page>` / frame reference so the handle knows which
-    execution context it lives in.
-  - `remote: HandleId` — reuse the `protocol::HandleId` enum
-    (`Cdp(String)` / `Bidi{shared_id, handle}` / `WebKit(u64)`).
-  - `disposed: AtomicBool` for idempotent dispose + stale-use error.
-- `crates/ferridriver/src/element_handle.rs` — `ElementHandle` wrapping
-  a `JSHandle` (composition, not inheritance — Rust analog of
-  Playwright's `ElementHandle extends JSHandle`).
-- **Dispose on every backend** (Rule 4):
-  - CDP: new `AnyPage::release_object(remote_object_id: &str)` →
-    `Runtime.releaseObject { objectId }`. The existing
-    `CdpElement::object_id()` caches the objectId but never releases;
-    fix that too by calling release_object from the handle's dispose.
-  - BiDi: `script.disown { handles: [sharedId], target: {context: ...} }`.
-  - WebKit: **new IPC op**. Today `window.__wr[ref_id]` lives forever
-    on the page. Add an `Op::ReleaseRef(view_id, ref_id)` in
-    `backend/webkit/host.m` + `ipc.rs` that executes
-    `window.__wr && window.__wr.delete({ref_id})` (or whatever shape
-    `__wr` uses — it may be an array, not a Map). If it's an array,
-    convert to a Map first so deletion is O(1).
-- NAPI: `ferridriver_node::JSHandle` + `ElementHandle` classes with
-  `dispose()` method and `[Symbol.asyncDispose]` for
-  `await using h = ...`.
-- QuickJS: parallel bindings.
-- **No `evaluate(fn, arg)` in phase C** — just the lifecycle + `jsonValue()`
-  (which calls `UtilityScript.jsonValue` via an existing CDP
-  evaluate, no arg-serialization needed).
-
-Tests (Rule 9, all 4 backends):
-
-- Handle survives an unrelated iframe navigation (still valid, still
-  resolves via its objectId).
-- `dispose()` actually releases the CDP reference — follow-up
-  `Runtime.callFunctionOn` with the stale objectId returns a protocol
-  error matching `No object with id ...`.
-- Double-dispose is idempotent.
-- Using a disposed handle raises `FerriError::Other("JSHandle is
-  disposed")` or a dedicated `FerriError::HandleDisposed` variant
-  (decide at the time — Playwright uses `JavaScriptErrorInEvaluate`).
-- BiDi's `script.disown` and WebKit's new `OP_RELEASE_REF` actually
-  release on their protocols.
-
-### Phase D — `page.evaluate(fn, arg)` end-to-end
-
-Once JSHandle lifecycles work:
-
-- Wire the Rust side of `evaluate(fn, arg)`:
-  - At the NAPI boundary, walk the incoming `napi::JsUnknown` arg tree
-    to produce a `protocol::SerializedArgument { value, handles }`.
-    Use the existing `SerializedValue` enum; for every JSHandle
-    encountered, push its `HandleId` into `handles` and emit
-    `SerializedValue::Handle(index)`.
-  - Same walker for QuickJS over `rquickjs::Value`.
-  - In Rust core, hand the `SerializedArgument` to a new
-    `Page::evaluate_with_args(expression, arg: SerializedArgument) ->
-    Result<SerializedValue>` that:
-    1. Mints (or reuses, via a per-context cache) a utility-script
-       handle via `Runtime.evaluate("window.__fd.newUtilityScript()")`.
-    2. Builds `Runtime.callFunctionOn` with `objectId =
-       utilityScriptHandle._objectId`, `functionDeclaration =
-       "(utilityScript, ...args) => utilityScript.evaluate(...args)"`,
-       `arguments = [{objectId}, ...values.map(v => ({value: v})),
-       ...handles.map(h => ({objectId: h}))]`.
-    3. Parses the returned `RemoteObject` — if `returnByValue`, parse
-       `.value` via `parseEvaluationResultValue`-equivalent on the
-       Rust side; if handle, wrap in a new `JSHandle`.
-- BiDi equivalent via `script.callFunction` with
-  `arguments: [{type: 'sharedReference', sharedId}]` for handles +
-  serialized primitives.
-- WebKit: new IPC op `Op::CallFunctionOn(receiver_ref_id, function,
-  args, handles) → result`.
-- `return returnByValue ? json : new JSHandle(...)` in both NAPI and
-  QuickJS bindings.
-
-Tests (Rule 9):
-
-- `page.evaluate(x => x + 1, 41)` returns `42`.
-- `page.evaluate(x => x.map(v => v * 2), [1, 2, 3])` returns
-  `[2, 4, 6]`.
-- Every rich type round-trips: Date, RegExp, Map, Set, typed arrays,
-  BigInt, NaN, ±Inf, undefined.
-- Handle arg: `const h = await page.evaluateHandle(() => document.body);
-  await page.evaluate(el => el.tagName, h)` returns `'BODY'`.
-- Disposed-handle arg raises the exact Playwright error.
-- All 4 backends.
-
-### Phase E — ElementHandle action methods (~25)
-
-Mostly mechanical — most actions already exist as `AnyElement` methods
-via Locator's resolve path. ElementHandle needs:
-
-- Delegating methods for `click`, `dblclick`, `hover`, `tap`, `fill`,
-  `press`, `type`, `check`, `uncheck`, `setChecked`, `focus`,
-  `dispatchEvent`, `scrollIntoViewIfNeeded`, `selectOption`,
-  `setInputFiles`, `selectText` — all route through the existing
-  `actions::*` helpers that Locator uses. The option bags are the
-  same (reuse `ClickOptions`, `FillOptions`, etc.).
-- State predicates routing through `objectId`, not a selector:
-  `isChecked`, `isDisabled`, `isEditable`, `isEnabled`, `isHidden`,
-  `isVisible`. Each evaluates a small JS on the element.
-- Content reads: `innerHTML`, `innerText`, `textContent`,
-  `getAttribute(name)`, `inputValue`.
-- Frame access: `ownerFrame()`, `contentFrame()`. Depends on how the
-  backend resolves an element's owning Frame — need to add a
-  `element.owner_frame_id()` to each backend if it's not already there.
-- `boundingBox()` (return a `{x, y, width, height}`).
-- `screenshot(opts)` — element-scoped version of `page.screenshot`.
-  Wire through existing `actions::screenshot_element`.
-- `waitForElementState(state, opts)` — `'visible' | 'hidden' |
-  'stable' | 'enabled' | 'disabled' | 'editable'`. Reuse
-  `fd.checkElementStates` polling.
-- `waitForSelector(selector, opts)` — scoped to this element.
-- NAPI + QuickJS bindings for all of the above.
-
-Tests (Rule 9): each method on all 4 backends. Because the action
-path is shared with Locator, many of these can cross-reference
-existing Locator tests — but we still need to prove the handle path
-works (different resolution, no re-query).
-
-### Phase F — `query_selector` + `element_handle()` materialization
-
-The materialization surface:
-
-- `page.query_selector(selector) -> Result<Option<ElementHandle>>`
-  — the first match or None.
-- `page.query_selector_all(selector) -> Result<Vec<ElementHandle>>`.
-- `locator.element_handle(opts) -> Result<ElementHandle>` — resolves
-  and returns a handle to whatever the locator currently points at.
-- `locator.element_handles() -> Result<Vec<ElementHandle>>`.
-- Frame-level equivalents.
-
-Tests:
-
-- Handle → interact via ElementHandle → still valid.
-- Handle → navigate another frame → original still valid (CDP
-  `Runtime.releaseObject` only releases on explicit dispose or
-  context destruction).
-- Cross-context handle error: resolve a handle in frame A, try to
-  use it from an evaluate scoped to frame B, assert the Playwright-
-  exact error (`JSHandles can be evaluated only in the context they
-  were created`).
+Largest remaining Tier-1 item. Today `events.rs` carries
+`NetRequest` / `NetResponse` DTOs over the event bus; Playwright
+exposes them as full lifecycle objects with `body()`, `redirected_*`,
+`headers_array()`, `post_data*`, etc. See `PLAYWRIGHT_COMPAT.md` §1.4.
 
 ## Ground rules (non-negotiable, unchanged)
 
 - **Rule 4**: Every public API must work on every backend, or return
   typed `FerriError::Unsupported { reason }` where the protocol
-  genuinely can't. Dispose of a CDP handle via `Runtime.releaseObject`,
-  BiDi via `script.disown`, WebKit via the new IPC op — all three.
+  genuinely can't.
 - **Rule 9**: Per-option integration test on every backend before
   flipping any `[x]`. Signatures alone are not parity.
 - **Rule 10**: No escape hatches. No `#[allow(clippy::...)]`, no
-  `eslint-disable`, no `--no-verify`.
+  `eslint-disable`, no `--no-verify`. **Exception** (per the
+  `feedback_keep_phase_scaffolding.md` memory): `#[allow(dead_code)]`
+  on phase-N+1 scaffolding fields/methods that the next phase will
+  consume, with a `consumed in phase X` justification.
 - Any new `opts.timeout` field that reaches a method MUST propagate
   to the retry loop deadline.
 - Never claim "complete" in a commit unless every phase for that
@@ -251,82 +180,84 @@ Tests:
 ## Tests that must stay green
 
 - `cargo clippy --workspace --all-targets -- -D warnings` — clean.
-- `cargo test --workspace` — all green.
+- `cargo test --workspace` — all green (118+ core, 4 cli backends,
+  657+ NAPI, 14 injected, 29 protocol).
 - `cd crates/ferridriver-node && bun run build:debug && bun test` —
-  all green (651+ at last count).
+  724 tests at last count (+27 phase-D, +8 phase-E this block).
 - `FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver
      cargo test -p ferridriver-cli --test backends -- --test-threads=1`
   — all 4 backends green.
 
-## Known flake (pre-existing)
+## Known flakes
 
 - `context.setOffline toggles network` on the WebKit bun test
   intermittently fails in the full suite, passes in isolation.
   Pre-existing state leak, orthogonal to 1.3/1.2 work.
 
-## Workflow for the remaining phases
+## Lessons logged this block — don't repeat
 
-1. Pick the next phase from the "What's still owed" list above.
-2. Read `PLAYWRIGHT_COMPAT.md` + `/tmp/playwright/...` for the
-   canonical signatures.
-3. Implement in Rust core — types, methods, unit tests.
-4. Update **all four backends** in the same commit. Typed Unsupported
-   where the protocol genuinely can't do it.
-5. Update NAPI (rebuild + diff `index.d.ts` against Playwright's
-   `types.d.ts`) and QuickJS bindings.
-6. Clippy, workspace tests, NAPI tests, all 4 backends green.
-7. Integration test proving the new surface works page-side on every
-   backend. No "accepts X but ignores it."
-8. `cargo fmt --all`.
-9. Tick `PLAYWRIGHT_COMPAT.md` only for sub-items whose integration
-   tests are green on all 4 backends.
-10. Commit message describes what landed AND what's still missing.
+1. **`#[allow(dead_code)]` on phase scaffolding is OK and saves
+   churn.** The user explicitly called this out mid-session
+   ("keep scaffolding and continue implementing don't remove
+   things") after I deleted an `element` field + `any_element()`
+   method that phase-E was about to consume. Saved as
+   `feedback_keep_phase_scaffolding.md`. Carry forward fields
+   the next phase will consume; suppress dead_code with
+   `#[allow(dead_code)]` + a `consumed in phase X` justification.
 
-## Lessons logged this session — don't repeat
+2. **rquickjs maps `Option::None` to `undefined`, not `null`.** The
+   first cut of `page.querySelector` tests in
+   `crates/ferridriver-cli/tests/backends.rs` used `=== null` and
+   failed because the returned value was `undefined`. Use loose
+   `== null` (matches both) or explicit
+   `(r === null || r === undefined)`.
 
-1. **Check which Playwright serializer you're mirroring.** First cut
-   of Phase A modeled the *channels* format (client↔server RPC,
-   struct-of-optionals). We have no such RPC, so it was wrong code.
-   Corrected in 7a29ce5 to the *isomorphic* format the injected
-   utility script actually parses. Before starting any new wire
-   protocol work, verify WHICH Playwright endpoint emits the bytes
-   you'll be reading.
-2. **`page.evaluate` in QuickJS already JSON-stringifies its result.**
-   So probe scripts should return a native value and then do ONE
-   `JSON.parse` in the outer script — not `JSON.stringify(x)` inside
-   and then `JSON.parse` outside (that double-stringifies and returns
-   a quoted string).
-3. **innerHTML-based setContent doesn't execute `<script>` tags** in
-   all browsers consistently. Use `goto("data:text/html,...")` when
-   the test needs the HTML parser to run a `<script>`.
-4. **CDP `Input.dispatchTouchEvent` needs `Emulation.setTouchEmulationEnabled`
-   first** or DOM touch listeners never fire. Not obvious from the
-   protocol page; only surfaced via test failure under
-   full-suite + isolated contrast.
+3. **QuickJS `page.evaluate` JSON-stringifies its result.** Numbers
+   come back as the string `"42"`. Either `Number(...)` inside JS
+   or parse the string in Rust via `.as_str().parse::<i64>()`.
+
+4. **BiDi injects `data-fdref="<id>"` attributes on DOM elements
+   it references.** Test innerHTML matchers must use `contains("<b")
+   && contains("world</b>")` rather than literal `<b>world</b>`,
+   which only matches CDP / WebKit. Tracked as a separate gap in
+   Section B (BiDi-specific quirks).
+
+5. **QuickJS doesn't have `setTimeout`.** `await new Promise(r =>
+   setTimeout(r, 50))` throws `setTimeout is not defined`. For
+   synchronous DOM updates, just observe the next page round-trip;
+   for async waits, use `page.waitForLoadState` or similar.
+
+6. **The CDP / BiDi utility-script `JSON.stringify` wrapper trick
+   keeps the wire format clean.** First cut returned the raw
+   isomorphic wire object; CDP / BiDi then re-serialised it via
+   their own RemoteValue format and corrupted the tags. Fix:
+   `JSON.stringify` the result inside the wrapper so the backend
+   only ships flat strings; Rust JSON.parses back. Same trick lets
+   WebKit's "envelope" pattern carry both `{kind: 'value', payload}`
+   and `{kind: 'handle', ref}`.
+
+7. **WebKit doesn't need a new `Op::CallFunctionOn`.** Because
+   every handle is reachable from page-side JS via
+   `window.__wr.get(ref_id)`, we synthesise an inline expression
+   and reuse the existing `Op::Evaluate`. Saves a host-side change.
 
 ## Key source locations
 
 | area | path |
 |---|---|
-| Option structs | `crates/ferridriver/src/options.rs` |
-| Shared actions helpers (click/hover/tap/fill/select) | `crates/ferridriver/src/actions.rs` |
-| Page (facade over mainFrame) | `crates/ferridriver/src/page.rs` |
-| Frame (resolution primitive) | `crates/ferridriver/src/frame.rs` |
-| Locator + `retry_resolve!` macro | `crates/ferridriver/src/locator.rs` |
-| **Wire serializer (isomorphic)** | `crates/ferridriver/src/protocol/serializers.rs` |
-| Backend wire structs + dispatch + `AnyPage::kind()` | `crates/ferridriver/src/backend/mod.rs` |
-| CDP backend (+ `tap_at_with` native) | `crates/ferridriver/src/backend/cdp/mod.rs` |
-| BiDi backend | `crates/ferridriver/src/backend/bidi/page.rs` |
-| WebKit Rust backend | `crates/ferridriver/src/backend/webkit/mod.rs` |
-| WebKit IPC host (Obj-C) | `crates/ferridriver/src/backend/webkit/host.m` |
-| Error type (`FerriError::Unsupported`, From<String> upgrade) | `crates/ferridriver/src/error.rs` |
-| NAPI option types | `crates/ferridriver-node/src/types.rs` |
-| NAPI Locator/Page/Frame | `crates/ferridriver-node/src/{locator,page,frame}.rs` |
-| QuickJS convert helpers | `crates/ferridriver-script/src/bindings/convert.rs` |
-| QuickJS bindings | `crates/ferridriver-script/src/bindings/{locator,page,frame}.rs` |
-| **Injected UtilityScript + serializer (TS)** | `crates/ferridriver/src/injected/{utilityScript,isomorphic/utilityScriptSerializers}.ts` |
-| **Injected `window.__fd` installer** | `crates/ferridriver/src/injected/index.ts` (install-on-window section) |
-| Tracker | `PLAYWRIGHT_COMPAT.md` |
+| **Lifecycle types** | `crates/ferridriver/src/{js_handle,element_handle}.rs` |
+| Wire serializer (isomorphic) | `crates/ferridriver/src/protocol/serializers.rs` |
+| Injected utility script | `crates/ferridriver/src/injected/{utilityScript,isomorphic/utilityScriptSerializers}.ts` |
+| Backend dispatch + `release_handle` + `call_utility_evaluate` + `element_handle_remote` | `crates/ferridriver/src/backend/mod.rs` |
+| **Shared utility-script wrapper** | `crates/ferridriver/src/backend/cdp/mod.rs::UTILITY_EVAL_WRAPPER` |
+| CDP per-page `call_utility_evaluate` + `release_object` | `crates/ferridriver/src/backend/cdp/mod.rs` |
+| BiDi per-page `call_utility_evaluate` + `release_handle` | `crates/ferridriver/src/backend/bidi/page.rs` |
+| WebKit per-page `call_utility_evaluate` + `release_ref` + `Op::ReleaseRef` | `crates/ferridriver/src/backend/webkit/{mod,ipc,host.m}.rs` |
+| Page-level `evaluate_with_arg` / `query_selector{,_all}` | `crates/ferridriver/src/page.rs` |
+| Locator `element_handle{,s}` | `crates/ferridriver/src/locator.rs` |
+| NAPI handle bindings | `crates/ferridriver-node/src/{js_handle,element_handle}.rs` |
+| QuickJS handle bindings | `crates/ferridriver-script/src/bindings/{js_handle,element_handle}.rs` |
+| Test plan | `PLAYWRIGHT_COMPAT.md` §1.2 + §1.3 |
 | Rules | `CLAUDE.md` (Playwright Parity Rules section) |
 
 ## Command cheat sheet
@@ -340,13 +271,12 @@ cargo build -p ferridriver-cli
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1
 cd crates/ferridriver/src/injected && bun build.ts   # re-bundle engine
-cp target/debug/fd_webkit_host crates/ferridriver-node/fd_webkit_host
-cd bench && bash run_comparison.sh
 ```
 
 ## State of memory
 
 Auto-memory under
 `/Users/sashoush/.claude/projects/-Users-sashoush-Workspace-Box-ferridriver/memory/`.
-The `feedback_never_claim_completion_without_rule9_tests.md` entry
-from the 1.5 session remains load-bearing.
+The new `feedback_keep_phase_scaffolding.md` entry from this block
+documents the "don't delete next-phase fields to silence dead_code"
+guidance.

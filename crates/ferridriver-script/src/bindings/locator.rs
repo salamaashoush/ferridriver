@@ -227,6 +227,26 @@ impl LocatorJs {
     Ok(LocatorJs::new(self.inner.filter(&opts)))
   }
 
+  /// Playwright: `locator.elementHandle(): Promise<ElementHandle>`.
+  /// Resolves and returns a pinned ElementHandle.
+  #[qjs(rename = "elementHandle")]
+  pub async fn element_handle(&self) -> rquickjs::Result<crate::bindings::element_handle::ElementHandleJs> {
+    let inner = self.inner.element_handle().await.into_js()?;
+    Ok(crate::bindings::element_handle::ElementHandleJs::new(inner))
+  }
+
+  /// Playwright: `locator.elementHandles(): Promise<ElementHandle[]>`.
+  #[qjs(rename = "elementHandles")]
+  pub async fn element_handles(&self) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
+    let inner = self.inner.element_handles().await.into_js()?;
+    Ok(
+      inner
+        .into_iter()
+        .map(crate::bindings::element_handle::ElementHandleJs::new)
+        .collect(),
+    )
+  }
+
   #[qjs(rename = "first")]
   pub fn first(&self) -> LocatorJs {
     LocatorJs::new(self.inner.first())

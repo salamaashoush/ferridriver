@@ -19,16 +19,7 @@ use crate::js_handle::{HandleRemote, JSHandle, disposed_error};
 use crate::page::Page;
 use crate::protocol::{SerializedArgument, SerializedValue, SpecialValue};
 
-/// Axis-aligned bounding rectangle in CSS pixels, relative to the
-/// top-left of the viewport. Mirrors Playwright's `BoundingBox`
-/// (`/tmp/playwright/packages/playwright-core/types/types.d.ts`).
-#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
-pub struct BoundingBox {
-  pub x: f64,
-  pub y: f64,
-  pub width: f64,
-  pub height: f64,
-}
+pub use crate::options::BoundingBox;
 
 /// Element-state query accepted by
 /// [`ElementHandle::wait_for_element_state`]. Mirrors Playwright's

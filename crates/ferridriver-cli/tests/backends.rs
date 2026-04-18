@@ -1762,6 +1762,67 @@ fn test_script_element_handle_methods(c: &mut McpClient) {
   );
 }
 
+// Task 1.2 + 1.3 phase F — handle materialisation surface.
+// querySelectorAll on Page + locator.elementHandle{,s}. Rule 9
+// covers all 4 backends.
+fn test_script_handle_materialisation(c: &mut McpClient) {
+  c.nav("<ul><li>a</li><li>b</li><li>c</li></ul>");
+
+  // page.querySelectorAll returns one handle per match in document
+  // order. Each handle's lifecycle is independent — disposing one
+  // doesn't affect the others.
+  let v = c.script_value(
+    "const items = await page.querySelectorAll('li');\
+     const texts = [];\
+     for (const it of items) texts.push(await it.textContent());\
+     for (const it of items) await it.dispose();\
+     return {len: items.length, texts};",
+  );
+  assert_eq!(v["len"], json!(3), "querySelectorAll length: {v}");
+  assert_eq!(v["texts"], json!(["a", "b", "c"]), "querySelectorAll texts: {v}");
+
+  // $$ alias
+  let v = c.script_value(
+    "const items = await page.$$('li');\
+     const len = items.length;\
+     for (const it of items) await it.dispose();\
+     return len;",
+  );
+  assert_eq!(v, json!(3), "$$ alias: {v}");
+
+  // Empty selector returns empty array (not error).
+  let v = c.script_value(
+    "const items = await page.querySelectorAll('li.does-not-exist');\
+     return items.length;",
+  );
+  assert_eq!(v, json!(0), "empty querySelectorAll: {v}");
+
+  // locator.elementHandle resolves the locator's selector to a
+  // single pinned ElementHandle.
+  c.nav("<button id='b'>click</button>");
+  let v = c.script_value(
+    "const loc = page.locator('#b');\
+     const eh = await loc.elementHandle();\
+     const tag = await eh.evaluateWithArg('el => el.tagName', null);\
+     await eh.dispose();\
+     return tag;",
+  );
+  assert_eq!(v, json!("BUTTON"), "locator.elementHandle: {v}");
+
+  // locator.elementHandles returns one handle per match.
+  c.nav("<ul><li class='it'>x</li><li class='it'>y</li></ul>");
+  let v = c.script_value(
+    "const loc = page.locator('li.it');\
+     const ehs = await loc.elementHandles();\
+     const texts = [];\
+     for (const eh of ehs) texts.push(await eh.textContent());\
+     for (const eh of ehs) await eh.dispose();\
+     return {len: ehs.length, texts};",
+  );
+  assert_eq!(v["len"], json!(2));
+  assert_eq!(v["texts"], json!(["x", "y"]));
+}
+
 // WebKit-specific Rule-9 probe: proves Op::ReleaseRef actually reached
 // the host and deleted from `window.__wr`. CDP's Runtime.releaseObject
 // and BiDi's script.disown are not observable from page-side JS without
@@ -2315,6 +2376,10 @@ fn run_all_tests(backend: &str) {
   // bounding box, click / focus / scroll). Rule 9 covers all 4
   // backends.
   run!(test_script_element_handle_methods);
+  // Task 1.2 + 1.3 phase F — handle materialisation
+  // (querySelectorAll, locator.elementHandle{,s}). Rule 9 on all 4
+  // backends.
+  run!(test_script_handle_materialisation);
   run!(test_script_click_options);
   run!(test_script_action_timeout);
   run!(test_script_tap_native);

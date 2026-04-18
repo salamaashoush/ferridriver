@@ -1450,6 +1450,81 @@ impl Locator {
     &self.selector
   }
 
+  // ── Handle materialisation (Playwright `locator.elementHandle`) ────
+
+  /// Playwright: `locator.elementHandle(opts?): Promise<ElementHandle>`.
+  /// Resolves this locator's selector once and returns a pinned
+  /// [`crate::element_handle::ElementHandle`]. Throws when the
+  /// selector matches no element — Playwright's behaviour (Playwright
+  /// returns `null` from `$` but `elementHandle()` errors on miss).
+  ///
+  /// Phase-F MVP: no auto-wait — calls into the selector engine
+  /// directly. Auto-wait + actionability are a phase-future addition
+  /// once the locator's `retry_resolve!` macro is generalised to
+  /// return an `ElementHandle` instead of running an action body.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError`] on selector parse failure,
+  /// missing match, or strict-mode violation.
+  pub async fn element_handle(&self) -> crate::error::Result<crate::element_handle::ElementHandle> {
+    let page = self.frame.page_arc();
+    page
+      .inner()
+      .ensure_engine_injected()
+      .await
+      .map_err(crate::error::FerriError::from)?;
+    let frame_id: Option<&str> = if self.frame.is_main_frame() {
+      None
+    } else {
+      Some(self.frame.id())
+    };
+    let element = crate::selectors::query_one(page.inner(), &self.selector, self.strict, frame_id)
+      .await
+      .map_err(crate::error::FerriError::from)?;
+    crate::element_handle::ElementHandle::from_any_element(Arc::clone(page), element).await
+  }
+
+  /// Playwright: `locator.elementHandles(): Promise<ElementHandle[]>`.
+  /// Returns one handle per match in document order.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError`] on selector parse / protocol
+  /// failure.
+  pub async fn element_handles(&self) -> crate::error::Result<Vec<crate::element_handle::ElementHandle>> {
+    let page = self.frame.page_arc();
+    page
+      .inner()
+      .ensure_engine_injected()
+      .await
+      .map_err(crate::error::FerriError::from)?;
+    let frame_id: Option<&str> = if self.frame.is_main_frame() {
+      None
+    } else {
+      Some(self.frame.id())
+    };
+    let matches = crate::selectors::query_all(page.inner(), &self.selector, frame_id)
+      .await
+      .map_err(crate::error::FerriError::from)?;
+    let count = matches.len();
+    let mut handles = Vec::with_capacity(count);
+    for i in 0..count {
+      let tagged = format!("window.__fd.selOne([{{\"engine\":\"css\",\"body\":\"[data-fd-sel='{i}']\"}}])");
+      match page.inner().evaluate_to_element(&tagged, frame_id).await {
+        Ok(element) => {
+          handles.push(crate::element_handle::ElementHandle::from_any_element(Arc::clone(page), element).await?);
+        },
+        Err(err) => {
+          crate::selectors::cleanup_tags(page.inner()).await;
+          return Err(crate::error::FerriError::from(err));
+        },
+      }
+    }
+    crate::selectors::cleanup_tags(page.inner()).await;
+    Ok(handles)
+  }
+
   /// Whether this locator runs action methods under strict mode (multi-match
   /// is an error). Mirrors Playwright's default.
   #[must_use]

@@ -173,6 +173,24 @@ impl Page {
     self.query_selector(selector).await
   }
 
+  /// Playwright: `page.querySelectorAll(selector): Promise<ElementHandle[]>`.
+  #[napi]
+  pub async fn query_selector_all(&self, selector: String) -> Result<Vec<crate::element_handle::ElementHandle>> {
+    let inner_handles = self.inner.query_selector_all(&selector).await.into_napi()?;
+    Ok(
+      inner_handles
+        .into_iter()
+        .map(crate::element_handle::ElementHandle::wrap)
+        .collect(),
+    )
+  }
+
+  /// Playwright `$$` shortcut for [`Self::query_selector_all`].
+  #[napi(js_name = "$$")]
+  pub async fn dollar_dollar(&self, selector: String) -> Result<Vec<crate::element_handle::ElementHandle>> {
+    self.query_selector_all(selector).await
+  }
+
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
     let opts: ferridriver::options::RoleOptions = options.map_or_else(Default::default, Into::into);

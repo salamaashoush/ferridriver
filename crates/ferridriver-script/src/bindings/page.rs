@@ -365,6 +365,30 @@ impl PageJs {
     self.query_selector(selector).await
   }
 
+  /// Playwright: `page.querySelectorAll(selector): Promise<ElementHandle[]>`.
+  #[qjs(rename = "querySelectorAll")]
+  pub async fn query_selector_all(
+    &self,
+    selector: String,
+  ) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
+    let inner_handles = self.inner.query_selector_all(&selector).await.into_js()?;
+    Ok(
+      inner_handles
+        .into_iter()
+        .map(crate::bindings::element_handle::ElementHandleJs::new)
+        .collect(),
+    )
+  }
+
+  /// Playwright `$$` shortcut for [`Self::query_selector_all`].
+  #[qjs(rename = "$$")]
+  pub async fn dollar_dollar(
+    &self,
+    selector: String,
+  ) -> rquickjs::Result<Vec<crate::bindings::element_handle::ElementHandleJs>> {
+    self.query_selector_all(selector).await
+  }
+
   /// Playwright: `page.evaluate(fn, arg?)` — function-call variant.
   /// Serialises `arg` through the isomorphic wire protocol and returns
   /// the function's result as a JSON-like value. Rich types that have
