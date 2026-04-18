@@ -26,10 +26,18 @@ use crate::selectors;
 /// The body must be an `async move { ... }` block returning `Result<R, String>`
 /// (the underlying backend error type). The macro converts every error into
 /// [`crate::error::FerriError`] so call sites declare `-> crate::error::Result<R>`.
-/// References to outer variables (parameters, locals) are captured by copy for
-/// `Copy` types (like `&str`, `&Arc<Page>`) or by move for owned types.
+///
+/// `$timeout_ms` is an `Option<u64>` — the per-call override from the action's
+/// option bag. `None` falls back to `page.default_timeout()` (set via
+/// `page.setDefaultTimeout`). A resolved value of `0` means "no timeout" and
+/// loops forever (matches Playwright's behavior). `$op` is a `&str` used in the
+/// timeout-error message (Playwright's `TimeoutError { while $op }`).
+///
+/// Polling schedule mirrors Playwright's `retryWithProgressAndTimeouts`:
+/// `[0, 0, 20, 50, 100, 100, 500]`, clamped at the last value on overflow. See
+/// `/tmp/playwright/packages/playwright-core/src/server/frames.ts:1102`.
 macro_rules! retry_resolve {
-  ($self:expr, |$el:ident, $page:ident| $body:expr) => {{
+  ($self:expr, $timeout_ms:expr, $op:expr, |$el:ident, $page:ident| $body:expr) => {{
     let $page: &$crate::backend::AnyPage = $self.frame.page_arc().inner();
     $page
       .ensure_engine_injected()
@@ -46,9 +54,43 @@ macro_rules! retry_resolve {
       ::std::option::Option::Some($self.frame.id())
     };
 
-    for (__i, &__delay_ms) in Locator::RETRY_BACKOFFS_MS.iter().enumerate() {
+    let __op_name: &str = $op;
+    let __resolved_timeout: u64 = $timeout_ms.unwrap_or_else(|| $self.frame.page_arc().default_timeout());
+    let __deadline: ::std::option::Option<::std::time::Instant> = if __resolved_timeout == 0 {
+      ::std::option::Option::None
+    } else {
+      ::std::option::Option::Some(::std::time::Instant::now() + ::std::time::Duration::from_millis(__resolved_timeout))
+    };
+
+    let mut __idx: usize = 0;
+    loop {
+      // Deadline check up-front so we never race into one more attempt after
+      // time has already run out.
+      if let ::std::option::Option::Some(__d) = __deadline {
+        if ::std::time::Instant::now() >= __d {
+          return ::std::result::Result::Err($crate::error::FerriError::timeout(
+            __op_name.to_string(),
+            __resolved_timeout,
+          ));
+        }
+      }
+
+      let __delay_ms = Locator::RETRY_BACKOFFS_MS[__idx.min(Locator::RETRY_BACKOFFS_MS.len() - 1)];
+      __idx = __idx.saturating_add(1);
       if __delay_ms > 0 {
-        ::tokio::time::sleep(::std::time::Duration::from_millis(__delay_ms)).await;
+        // Clamp the sleep to whatever's left on the deadline so the timeout
+        // error fires on time rather than after an overshoot sleep.
+        let __sleep_ms = match __deadline {
+          ::std::option::Option::Some(__d) => {
+            let __left = u64::try_from(__d.saturating_duration_since(::std::time::Instant::now()).as_millis())
+              .unwrap_or(__delay_ms);
+            __delay_ms.min(__left)
+          },
+          ::std::option::Option::None => __delay_ms,
+        };
+        if __sleep_ms > 0 {
+          ::tokio::time::sleep(::std::time::Duration::from_millis(__sleep_ms)).await;
+        }
       }
 
       // Strict mode (Playwright default): resolve via `query_all` and bail
@@ -77,20 +119,16 @@ macro_rules! retry_resolve {
           ::std::result::Result::Err(e)
             if e.contains("not connected") || e.contains("not found") || e.contains("detached") =>
           {
-            if __i >= Locator::RETRY_BACKOFFS_MS.len() - 1 {
-              return ::std::result::Result::Err($crate::error::FerriError::from(e));
-            }
+            // Retriable — fall through to next iteration; deadline (if any)
+            // decides when we give up.
           },
           ::std::result::Result::Err(e) => return ::std::result::Result::Err($crate::error::FerriError::from(e)),
         },
-        ::std::result::Result::Err(_) if __i < Locator::RETRY_BACKOFFS_MS.len() - 1 => {},
-        ::std::result::Result::Err(e) => return ::std::result::Result::Err($crate::error::FerriError::from(e)),
+        ::std::result::Result::Err(_) => {
+          // Element not found this iteration; retry until deadline.
+        },
       }
     }
-    ::std::result::Result::Err($crate::error::FerriError::invalid_selector(
-      $self.selector.clone(),
-      "no element found",
-    ))
   }};
 }
 
@@ -349,7 +387,7 @@ impl Locator {
     // each `async move` closure captures a fresh ref instead of moving
     // the owned `ClickOptions` (which contains a non-Copy `Vec<Modifier>`).
     let opts_ref = &opts;
-    retry_resolve!(self, |el, page| async move {
+    retry_resolve!(self, opts_ref.timeout, "click", |el, page| async move {
       actions::click_with_opts(&el, page, opts_ref).await
     })
   }
@@ -365,7 +403,7 @@ impl Locator {
     // `click_with_opts` honors that when `click_count` is set to `2`.
     let click_opts = opts.unwrap_or_default().into_click_options();
     let click_opts_ref = &click_opts;
-    retry_resolve!(self, |el, page| async move {
+    retry_resolve!(self, click_opts_ref.timeout, "dblclick", |el, page| async move {
       actions::click_with_opts(&el, page, click_opts_ref).await
     })
   }
@@ -377,17 +415,22 @@ impl Locator {
   /// Returns an error if the element cannot be found, its bounding box
   /// cannot be computed, or the right-click dispatch fails.
   pub async fn right_click(&self) -> Result<()> {
-    retry_resolve!(self, |el, page| async move {
-      let center = el.call_js_fn_value(
+    retry_resolve!(
+      self,
+      ::std::option::Option::<u64>::None,
+      "right_click",
+      |el, page| async move {
+        let center = el.call_js_fn_value(
         "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
       ).await?;
-      if let Some(c) = center {
-        let x = c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-        let y = c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
-        page.click_at_opts(x, y, "right", 1).await?;
+        if let Some(c) = center {
+          let x = c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+          let y = c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
+          page.click_at_opts(x, y, "right", 1).await?;
+        }
+        Ok::<(), String>(())
       }
-      Ok::<(), String>(())
-    })
+    )
   }
 
   /// Fill an input or textarea element with the given value.
@@ -398,7 +441,7 @@ impl Locator {
   pub async fn fill(&self, value: &str, opts: Option<crate::options::FillOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let opts_ref = &opts;
-    retry_resolve!(self, |el, page| async move {
+    retry_resolve!(self, opts_ref.timeout, "fill", |el, page| async move {
       if !opts_ref.is_force() {
         actions::wait_for_actionable(&el, page).await.ok();
       }
@@ -412,16 +455,21 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found.
   pub async fn clear(&self) -> Result<()> {
-    retry_resolve!(self, |el, _page| async move {
-      el.call_js_fn(
-        "function() { \
+    retry_resolve!(
+      self,
+      ::std::option::Option::<u64>::None,
+      "clear",
+      |el, _page| async move {
+        el.call_js_fn(
+          "function() { \
         if (window.__fd) window.__fd.clearAndDispatch(this); \
         else { this.value = ''; } \
       }",
-      )
-      .await?;
-      Ok::<(), String>(())
-    })
+        )
+        .await?;
+        Ok::<(), String>(())
+      }
+    )
   }
 
   /// Type text into the element character by character using keyboard events.
@@ -432,7 +480,8 @@ impl Locator {
   pub async fn r#type(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let delay_ms = opts.resolved_delay_ms();
-    retry_resolve!(self, |el, page| async move {
+    let timeout_ms = opts.timeout;
+    retry_resolve!(self, timeout_ms, "type", |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
       if delay_ms > 0 {
         // With a per-char delay, fall back to the character-by-character
@@ -457,7 +506,8 @@ impl Locator {
   pub async fn press(&self, key: &str, opts: Option<crate::options::PressOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let delay_ms = opts.resolved_delay_ms();
-    retry_resolve!(self, |el, page| async move {
+    let timeout_ms = opts.timeout;
+    retry_resolve!(self, timeout_ms, "press", |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
       if delay_ms > 0 {
         // Playwright: when delay is set, press is equivalent to
@@ -480,7 +530,7 @@ impl Locator {
   pub async fn hover(&self, opts: Option<crate::options::HoverOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let opts_ref = &opts;
-    retry_resolve!(self, |el, page| async move {
+    retry_resolve!(self, opts_ref.timeout, "hover", |el, page| async move {
       actions::hover_with_opts(&el, page, opts_ref).await
     })
   }
@@ -491,10 +541,15 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found.
   pub async fn focus(&self) -> Result<()> {
-    retry_resolve!(self, |el, _page| async move {
-      el.call_js_fn("function() { this.focus(); }").await?;
-      Ok::<(), String>(())
-    })
+    retry_resolve!(
+      self,
+      ::std::option::Option::<u64>::None,
+      "focus",
+      |el, _page| async move {
+        el.call_js_fn("function() { this.focus(); }").await?;
+        Ok::<(), String>(())
+      }
+    )
   }
 
   /// Check a checkbox or radio button if it is not already checked.
@@ -533,7 +588,7 @@ impl Locator {
     // `force` / `trial` / `position` / `timeout` all flow through.
     let click_opts = opts.into_click_options();
     let click_opts_ref = &click_opts;
-    retry_resolve!(self, |el, page| async move {
+    retry_resolve!(self, click_opts_ref.timeout, "check", |el, page| async move {
       // Read the current `checked` property in the element's execution
       // context; if it already matches `checked`, skip the click.
       let state = el
@@ -563,7 +618,7 @@ impl Locator {
   pub async fn tap(&self, opts: Option<crate::options::TapOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
     let opts_ref = &opts;
-    retry_resolve!(self, |el, page| async move {
+    retry_resolve!(self, opts_ref.timeout, "tap", |el, page| async move {
       actions::tap_with_opts(&el, page, opts_ref).await
     })
   }

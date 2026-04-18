@@ -952,6 +952,44 @@ fn test_script_click_options(c: &mut McpClient) {
   assert!(msg.contains("Unknown modifier"), "bad modifier errors: {v}");
 }
 
+// Task 1.5 phase 2: `opts.timeout` must honor the user's deadline on every
+// action method — previously accepted and silently ignored. For each action
+// we call on a selector that doesn't exist with `timeout: 200`; the call
+// must throw a TimeoutError within ~1.5s (wall clock) instead of waiting
+// out the page default (30s). Proves the deadline threaded through
+// `retry_resolve!` actually fires.
+fn test_script_action_timeout(c: &mut McpClient) {
+  c.nav("<button id='b'>b</button>");
+  for (name, call) in [
+    ("click", "await page.locator('#nope').click({ timeout: 200 })"),
+    ("fill", "await page.locator('#nope').fill('x', { timeout: 200 })"),
+    ("hover", "await page.locator('#nope').hover({ timeout: 200 })"),
+    ("tap", "await page.locator('#nope').tap({ timeout: 200 })"),
+    ("press", "await page.locator('#nope').press('A', { timeout: 200 })"),
+    ("type", "await page.locator('#nope').type('x', { timeout: 200 })"),
+    ("dblclick", "await page.locator('#nope').dblclick({ timeout: 200 })"),
+    ("check", "await page.locator('#nope').check({ timeout: 200 })"),
+    ("uncheck", "await page.locator('#nope').uncheck({ timeout: 200 })"),
+  ] {
+    let src = format!(
+      "const t0 = Date.now();\
+       try {{ {call}; return {{ elapsed: Date.now() - t0, msg: 'no-throw' }}; }}\
+       catch (e) {{ return {{ elapsed: Date.now() - t0, msg: String(e.message || e) }}; }}"
+    );
+    let v = c.script_value(&src);
+    let msg = v["msg"].as_str().unwrap_or("");
+    let elapsed = v["elapsed"].as_i64().unwrap_or(99_999);
+    assert!(
+      msg.contains("Timeout") && msg.contains("200ms"),
+      "{name}: expected TimeoutError w/ 200ms; got: {v}"
+    );
+    assert!(
+      elapsed < 1500,
+      "{name}: expected to fail within 1.5s of 200ms timeout; got {elapsed}ms: {v}"
+    );
+  }
+}
+
 // Task 3.25: `page.addInitScript(script, arg)` — exercise the full
 // Playwright surface (Function + arg, string, `{ content }`) from QuickJS
 // end-to-end, including the Rust-core-driven `Cannot evaluate a string with
@@ -1441,6 +1479,7 @@ fn run_all_tests(backend: &str) {
   run!(test_script_emulate_media_null_disables_single_field);
   run!(test_script_add_init_script);
   run!(test_script_click_options);
+  run!(test_script_action_timeout);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
 
