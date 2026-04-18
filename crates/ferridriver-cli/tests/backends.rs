@@ -844,6 +844,70 @@ fn test_script_mouse_wheel(c: &mut McpClient) {
   );
 }
 
+// Task 3.25: `page.addInitScript(script, arg)` — exercise the full
+// Playwright surface (Function + arg, string, `{ content }`) from QuickJS
+// end-to-end, including the Rust-core-driven `Cannot evaluate a string with
+// arguments` error for the string+arg form. Every assertion fires after a
+// `goto` so the init script really did run at document start.
+fn test_script_add_init_script(c: &mut McpClient) {
+  // Function + typed arg → init script runs before page JS with `arg`.
+  // `page.evaluate` in the QuickJS binding wraps the page value in
+  // JSON.stringify on the way out, so each probe is a single JSON.parse
+  // to unwrap back to a raw JS value.
+  let v = c.script_value(
+    "await page.addInitScript(\
+       (cfg) => { window.__fd_init_arg = cfg; },\
+       { answer: 42, label: 'hi' },\
+     );\
+     await page.goto('data:text/html,<title>x</title>');\
+     return {\
+       answer: JSON.parse(await page.evaluate('window.__fd_init_arg.answer')),\
+       label: JSON.parse(await page.evaluate('window.__fd_init_arg.label')),\
+     };",
+  );
+  assert_eq!(v["answer"], json!(42), "function arg answer: {v}");
+  assert_eq!(v["label"], json!("hi"), "function arg label: {v}");
+
+  // Function with no arg → rendered as `(fn)(undefined)`, so typeof is 'undefined'.
+  let v = c.script_value(
+    "await page.addInitScript((x) => { window.__fd_init_noarg = typeof x; });\
+     await page.goto('data:text/html,<title>y</title>');\
+     return JSON.parse(await page.evaluate('window.__fd_init_noarg'));",
+  );
+  assert_eq!(v, json!("undefined"), "function no-arg typeof: {v}");
+
+  // Function with explicit null → JSON.stringify(null) = 'null', arg is null.
+  let v = c.script_value(
+    "await page.addInitScript((x) => { window.__fd_init_null = x === null ? 'is-null' : typeof x; }, null);\
+     await page.goto('data:text/html,<title>z</title>');\
+     return JSON.parse(await page.evaluate('window.__fd_init_null'));",
+  );
+  assert_eq!(v, json!("is-null"), "function null arg: {v}");
+
+  // { content } → used verbatim.
+  let v = c.script_value(
+    "await page.addInitScript({ content: \"window.__fd_init_content = 'from-content';\" });\
+     await page.goto('data:text/html,<title>w</title>');\
+     return JSON.parse(await page.evaluate('window.__fd_init_content'));",
+  );
+  assert_eq!(v, json!("from-content"), "{{content}} form: {v}");
+
+  // String + arg → Rust core rejects with Playwright's exact message.
+  let v = c.script_value(
+    "try {\
+       await page.addInitScript('window.x = 1', { bad: true });\
+       return 'no-throw';\
+     } catch (e) {\
+       return String(e.message || e);\
+     }",
+  );
+  let msg = v.as_str().unwrap_or("");
+  assert!(
+    msg.contains("Cannot evaluate a string with arguments"),
+    "string+arg error message: {v}"
+  );
+}
+
 // Task 3.8: Playwright-parity sync frame accessors exposed via QuickJS.
 // Verifies the same FrameJs surface the NAPI tests cover — name/url/
 // isMainFrame/parentFrame/childFrames/isDetached are all sync (no await).
@@ -1267,6 +1331,7 @@ fn run_all_tests(backend: &str) {
   run!(test_script_drag_and_drop_trial);
   run!(test_script_emulate_media_all_fields);
   run!(test_script_emulate_media_null_disables_single_field);
+  run!(test_script_add_init_script);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
 

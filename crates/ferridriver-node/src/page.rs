@@ -835,11 +835,31 @@ impl Page {
       .map_err(napi::Error::from_reason)
   }
 
-  #[napi]
-  pub async fn add_init_script(&self, source: String) -> Result<String> {
+  /// Register a JS snippet to run on every new document (main frame and
+  /// iframes) before any page script executes. Mirrors Playwright's
+  /// `page.addInitScript(script, arg)` — see
+  /// `/tmp/playwright/packages/playwright-core/src/client/page.ts:520`.
+  ///
+  /// `script` is one of:
+  /// - a `Function` — `.toString()`'d and wrapped as `(fn)(arg)` where `arg`
+  ///   is `JSON.stringify`-serialised. `arg` defaults to `undefined`.
+  /// - a `string` — used verbatim; passing `arg` rejects with
+  ///   `"Cannot evaluate a string with arguments"`.
+  /// - a `{ path?, content? }` object — `content` used verbatim, otherwise
+  ///   `path` is read from disk; `arg` must be absent.
+  ///
+  /// All function/arg lowering lands in Rust core via
+  /// [`ferridriver::options::evaluation_script`]; this method is a thin
+  /// delegator.
+  #[napi(ts_args_type = "script: Function | string | { path?: string, content?: string }, arg?: any")]
+  pub async fn add_init_script(
+    &self,
+    script: crate::types::NapiInitScript,
+    arg: crate::types::NapiInitScriptArg,
+  ) -> Result<String> {
     self
       .inner
-      .add_init_script(&source)
+      .add_init_script(script.into(), arg.0)
       .await
       .map_err(napi::Error::from_reason)
   }

@@ -14,7 +14,7 @@ use ferridriver::options::WaitOptions;
 use rquickjs::function::Opt;
 use serde::Deserialize;
 
-use crate::bindings::convert::{FerriResultExt, serde_from_js};
+use crate::bindings::convert::{FerriResultExt, init_script_from_js, serde_from_js};
 use crate::bindings::keyboard::KeyboardJs;
 use crate::bindings::locator::LocatorJs;
 use crate::bindings::mouse::MouseJs;
@@ -290,6 +290,30 @@ impl PageJs {
   #[qjs(rename = "setContent")]
   pub async fn set_content(&self, html: String) -> rquickjs::Result<()> {
     self.inner.set_content(&html).await.into_js()
+  }
+
+  /// Register a JS snippet to run on every new document before any page
+  /// script executes. Mirrors Playwright's
+  /// `page.addInitScript(script, arg)` — see
+  /// `/tmp/playwright/packages/playwright-core/src/client/page.ts:520`.
+  /// Accepts `Function | string | { path?, content? }` + optional `arg`
+  /// exactly like the NAPI binding; all lowering runs in Rust core via
+  /// [`ferridriver::options::evaluation_script`].
+  #[qjs(rename = "addInitScript")]
+  pub async fn add_init_script<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    script: rquickjs::Value<'js>,
+    arg: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<String> {
+    let (init, arg_json) = init_script_from_js(&ctx, script, arg.0)?;
+    self.inner.add_init_script(init, arg_json).await.into_js()
+  }
+
+  /// Remove a previously-registered init script by identifier.
+  #[qjs(rename = "removeInitScript")]
+  pub async fn remove_init_script(&self, identifier: String) -> rquickjs::Result<()> {
+    self.inner.remove_init_script(&identifier).await.into_js()
   }
 
   /// Full page rendered as clean Markdown (headings, lists, links, tables

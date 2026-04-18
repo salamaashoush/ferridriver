@@ -7,7 +7,7 @@ use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use rustc_hash::FxHashMap;
 
-use crate::bindings::convert::{FerriResultExt, serde_from_js, serde_to_js};
+use crate::bindings::convert::{FerriResultExt, init_script_from_js, serde_from_js, serde_to_js};
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "BrowserContext")]
@@ -107,10 +107,20 @@ impl BrowserContextJs {
   // ── Init scripts ──────────────────────────────────────────────────────────
 
   /// Register a JS snippet to run on every new page in this context before
-  /// page scripts execute. Returns identifier tokens for the injected scripts.
+  /// page scripts execute. Mirrors Playwright's
+  /// `browserContext.addInitScript(script, arg)` — see
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:356`.
+  /// Accepts `Function | string | { path?, content? }` + optional `arg`
+  /// exactly like the NAPI binding.
   #[qjs(rename = "addInitScript")]
-  pub async fn add_init_script(&self, source: String) -> rquickjs::Result<Vec<String>> {
-    self.inner.add_init_script(&source).await.into_js()
+  pub async fn add_init_script<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    script: Value<'js>,
+    arg: Opt<Value<'js>>,
+  ) -> rquickjs::Result<Vec<String>> {
+    let (init, arg_json) = init_script_from_js(&ctx, script, arg.0)?;
+    self.inner.add_init_script(init, arg_json).await.into_js()
   }
 
   // ── Timeouts ──────────────────────────────────────────────────────────────

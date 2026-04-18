@@ -420,8 +420,11 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.25 `addInitScript` with arg
 
-- [ ] `add_init_script(script, arg)` — current signature is source-only.
-- **Files**: `context.rs:445`, `page.rs`.
+- [x] Full Playwright union at every layer: `Function | string | { path?, content? }` + optional `arg`. Wire stays source-only (per Playwright's client); all semantic lowering lives in Rust core:
+  - **Core**: new `options::InitScriptSource` enum (`Function { body } | Source | Content | Path`) + `options::evaluation_script(script, arg)` helper mirroring `/tmp/playwright/packages/playwright-core/src/client/clientHelper.ts:31` — composes `(body)(arg)` with `arg` JSON-stringified, renders absent `arg` as the literal `undefined`, preserves `null` (JSON `"null"`), reads `{ path }` from disk and appends `//# sourceURL=…`, and rejects `(source|content|path) + arg` with Playwright's exact `"Cannot evaluate a string with arguments"` error via `FerriError::InvalidArgument`. 10 unit tests cover every branch (undefined/null/object args on Function; string/content/path + arg rejection; path read + sourceURL; missing-path error).
+  - **NAPI**: `NapiInitScript` custom `FromNapiValue` synchronously turns `Function | string | object` into the `Send`-safe enum (function `.toString()` is called at unmarshal time, sidestepping the `!Send` `Unknown<'_>` across-await problem); `NapiInitScriptArg` custom `FromNapiValue` distinguishes JS `undefined` (→ `None` → renders as `undefined`) from explicit `null` (→ `Some(Value::Null)` → renders as `"null"`). `#[napi(ts_args_type = …)]` forces the generated `.d.ts` union byte-for-byte; six new `bun test` cases cover all forms + the string+arg error path.
+  - **QuickJS**: shared `bindings/convert::init_script_from_js` does the same lowering (reads `String(fn)` for function source, recognises `.is_null()`/`.is_undefined()`, `content` wins over `path`). `PageJs::addInitScript` and `PageJs::removeInitScript` added to the Page surface (previously Context-only); one backends test exercises Function+arg / Function+no-arg / Function+null / `{ content }` / string+arg error across all four backends.
+- **Playwright ref**: `/tmp/playwright/packages/playwright-core/src/client/page.ts:520`.
 
 ### 3.26 `exposeBinding`
 
