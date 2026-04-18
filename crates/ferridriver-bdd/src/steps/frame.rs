@@ -24,11 +24,17 @@ struct ActiveFrame(Frame);
 
 #[when("I switch to frame {string}")]
 async fn switch_to_frame(world: &mut BrowserWorld, name_or_url: String) {
+  // Frames arrive via FrameAttached/Navigated events — give the listener
+  // a beat to catch up when a step immediately follows an iframe insert.
+  world.page().sync_frames().await.ok();
   let frame = world
     .page()
-    .frame(&name_or_url)
-    .await
-    .map_err(|e| StepError::from(format!("switch to frame \"{name_or_url}\": {e}")))?
+    .frame(name_or_url.as_str())
+    .or_else(|| {
+      world
+        .page()
+        .frame(ferridriver::options::FrameSelector::by_url(name_or_url.clone()))
+    })
     .ok_or_else(|| StepError::from(format!("frame \"{name_or_url}\" not found")))?;
   world.set_state(ActiveFrame(frame));
 }
@@ -38,8 +44,7 @@ async fn switch_to_main_frame(world: &mut BrowserWorld) {
   let frame = world
     .page()
     .main_frame()
-    .await
-    .map_err(|e| StepError::from(format!("switch to main frame: {e}")))?;
+    .ok_or_else(|| StepError::from("no main frame in cache — page may not be initialized"))?;
   world.set_state(ActiveFrame(frame));
 }
 
@@ -50,7 +55,10 @@ async fn should_see_frame_count(world: &mut BrowserWorld, expected: i64) {
   expect_poll(
     || {
       let p = page.clone();
-      async move { p.frames().await.map(|f| f.len()).unwrap_or(0) }
+      async move {
+        p.sync_frames().await.ok();
+        p.frames().len()
+      }
     },
     DEFAULT_EXPECT_TIMEOUT,
   )
@@ -67,7 +75,10 @@ async fn frame_should_exist(world: &mut BrowserWorld, name_or_url: String) {
     || {
       let p = page.clone();
       let n = name.clone();
-      async move { p.frame(&n).await.map(|f| f.is_some()).unwrap_or(false) }
+      async move {
+        p.sync_frames().await.ok();
+        p.frame(n.as_str()).is_some() || p.frame(ferridriver::options::FrameSelector::by_url(n)).is_some()
+      }
     },
     DEFAULT_EXPECT_TIMEOUT,
   )

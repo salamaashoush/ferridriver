@@ -54,21 +54,21 @@ for (const backend of CDP_BACKENDS) {
 
     it("gets the main frame", async () => {
       await page.goto(testUrl);
-      const main = await page.mainFrame();
+      const main = page.mainFrame()!;
       expect(main).toBeDefined();
       expect(main.isMainFrame()).toBe(true);
-      expect(main.url).toContain("127.0.0.1");
+      expect(main.url()).toContain("127.0.0.1");
     });
 
     it("main frame has no parent", async () => {
-      const main = await page.mainFrame();
-      const parent = await main.parentFrame();
+      const main = page.mainFrame()!;
+      const parent = main.parentFrame();
       expect(parent).toBeNull();
     });
 
     it("gets all frames (no iframes = 1 frame)", async () => {
       await page.goto(testUrl);
-      const frames = await page.frames();
+      const frames = page.frames();
       expect(frames.length).toBe(1);
       expect(frames[0].isMainFrame()).toBe(true);
     });
@@ -80,7 +80,7 @@ for (const backend of CDP_BACKENDS) {
       `);
       // Wait for iframe to load
       await page.waitForTimeout(500);
-      const frames = await page.frames();
+      const frames = page.frames();
       expect(frames.length).toBeGreaterThanOrEqual(2);
     });
 
@@ -89,14 +89,14 @@ for (const backend of CDP_BACKENDS) {
         <iframe name="myframe" srcdoc="<h1>Named Frame</h1>"></iframe>
       `);
       await page.waitForTimeout(500);
-      const frame = await page.frame("myframe");
+      const frame = page.frame("myframe");
       expect(frame).not.toBeNull();
-      expect(frame!.name).toBe("myframe");
+      expect(frame!.name()).toBe("myframe");
     });
 
     it("evaluates JS in main frame", async () => {
       await page.setContent("<h1>Main</h1>");
-      const main = await page.mainFrame();
+      const main = page.mainFrame()!;
       const title = await main.evaluateStr("document.querySelector('h1').textContent");
       expect(title).toBe("Main");
     });
@@ -107,7 +107,7 @@ for (const backend of CDP_BACKENDS) {
         <iframe name="child" srcdoc="<h1>Child Content</h1>"></iframe>
       `);
       await page.waitForTimeout(500);
-      const frame = await page.frame("child");
+      const frame = page.frame("child");
       if (frame) {
         const text = await frame.evaluateStr("document.querySelector('h1')?.textContent || 'none'");
         expect(text).toBe("Child Content");
@@ -120,7 +120,7 @@ for (const backend of CDP_BACKENDS) {
         <iframe name="child" srcdoc="<h1>Child Title</h1>"></iframe>
       `);
       await page.waitForTimeout(500);
-      const frame = await page.frame("child");
+      const frame = page.frame("child");
       if (frame) {
         const loc = frame.locator("h1");
         expect(loc.selector).toBe("h1");
@@ -133,23 +133,80 @@ for (const backend of CDP_BACKENDS) {
         <iframe name="b" srcdoc="<p>B</p>"></iframe>
       `);
       await page.waitForTimeout(500);
-      const main = await page.mainFrame();
-      const children = await main.childFrames();
+      const main = page.mainFrame()!;
+      const children = main.childFrames();
       expect(children.length).toBeGreaterThanOrEqual(2);
     });
 
     it("frame content() returns HTML", async () => {
       await page.goto(testUrl);
-      const main = await page.mainFrame();
+      const main = page.mainFrame()!;
       const html = await main.content();
       expect(html).toContain("<h1>");
     });
 
     it("frame title() returns document title", async () => {
       await page.goto(testUrl);
-      const main = await page.mainFrame();
+      const main = page.mainFrame()!;
       const title = await main.title();
       expect(title).toBe("Test Page");
+    });
+
+    // ── 3.8 Sync accessor parity ──────────────────────────────────────────
+    // Playwright's mainFrame/frames/frame/parentFrame/childFrames/isDetached/
+    // name/url are sync. Verify the NAPI surface calls through without any
+    // Promise round-trip — every call below is `fn()`, no `await`.
+
+    it("sync accessors: mainFrame + parentFrame", async () => {
+      await page.goto(testUrl);
+      const main = page.mainFrame();
+      expect(main).not.toBeNull();
+      // `main` is returned synchronously (no await needed).
+      expect(main!.isMainFrame()).toBe(true);
+      expect(main!.parentFrame()).toBeNull();
+      expect(main!.name()).toBe("");
+      expect(main!.url()).toContain("127.0.0.1");
+      expect(main!.isDetached()).toBe(false);
+    });
+
+    it("sync accessors: frames + frame(name) + childFrames stay consistent", async () => {
+      await page.setContent(`
+        <iframe name="alpha" srcdoc="<p>A</p>"></iframe>
+        <iframe name="beta" srcdoc="<p>B</p>"></iframe>
+      `);
+      await page.waitForTimeout(500);
+
+      const all = page.frames();
+      expect(all.length).toBeGreaterThanOrEqual(3);
+
+      const byName = page.frame("alpha");
+      expect(byName).not.toBeNull();
+      expect(byName!.name()).toBe("alpha");
+      // parentFrame of a child must be the main frame.
+      const parent = byName!.parentFrame();
+      expect(parent).not.toBeNull();
+      expect(parent!.isMainFrame()).toBe(true);
+
+      // childFrames of main includes both iframes.
+      const main = page.mainFrame()!;
+      const kidNames = main.childFrames().map(f => f.name()).sort();
+      expect(kidNames).toContain("alpha");
+      expect(kidNames).toContain("beta");
+    });
+
+    it("sync accessors: frame({ name, url }) union — object form", async () => {
+      await page.setContent(`<iframe name="target" src="about:blank"></iframe>`);
+      await page.waitForTimeout(500);
+
+      const byObj = page.frame({ name: "target" });
+      expect(byObj).not.toBeNull();
+      expect(byObj!.name()).toBe("target");
+
+      // Missing both name/url returns null (Playwright would throw, but we
+      // return null to keep the binding safe — core function panics on
+      // empty selector in the Rust API, matching Playwright's assert).
+      const empty = page.frame({});
+      expect(empty).toBeNull();
     });
   });
 

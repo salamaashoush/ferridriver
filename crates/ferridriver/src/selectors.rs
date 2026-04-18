@@ -118,9 +118,13 @@ pub fn is_rich_selector(s: &str) -> bool {
     "nth=",
     "visible=",
     "has=",
+    "internal:has=",
     "has-text=",
+    "internal:has-text=",
     "has-not=",
+    "internal:has-not=",
     "has-not-text=",
+    "internal:has-not-text=",
     "internal:and=",
     "internal:or=",
   ];
@@ -224,7 +228,16 @@ fn split_by_chain(s: &str) -> Vec<String> {
 }
 
 fn parse_part(s: &str) -> SelectorPart {
-  // Try each engine prefix
+  // Try each engine prefix.
+  //
+  // `internal:has`, `internal:has-text`, `internal:has-not`,
+  // `internal:has-not-text` are aliases Playwright emits from
+  // `client/locator.ts` (`filter({ hasText, has, ... })`). They are the
+  // same semantics as the non-prefixed engines on the server side —
+  // see `/tmp/playwright/packages/playwright-core/src/server/selectors.ts:42-43`
+  // which lists `internal:has`, `internal:has-not`, `internal:has-text`,
+  // `internal:has-not-text` alongside the bare engines. Alias them here
+  // so ferridriver's filter() output is accepted unchanged.
   let engines = [
     ("role=", Engine::Role),
     ("text=", Engine::Text),
@@ -239,9 +252,13 @@ fn parse_part(s: &str) -> SelectorPart {
     ("nth=", Engine::Nth),
     ("visible=", Engine::Visible),
     ("has=", Engine::Has),
+    ("internal:has=", Engine::Has),
     ("has-text=", Engine::HasText),
+    ("internal:has-text=", Engine::HasText),
     ("has-not=", Engine::HasNot),
+    ("internal:has-not=", Engine::HasNot),
     ("has-not-text=", Engine::HasNotText),
+    ("internal:has-not-text=", Engine::HasNotText),
     ("internal:and=", Engine::InternalAnd),
     ("internal:or=", Engine::InternalOr),
   ];

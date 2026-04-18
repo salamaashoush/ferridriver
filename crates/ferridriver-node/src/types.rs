@@ -341,6 +341,31 @@ impl From<EmulateMediaOptions> for ferridriver::options::EmulateMediaOptions {
   }
 }
 
+/// Selector bag form of [`FrameSelectorArg`] — matches Playwright's
+/// object form `{ name?, url? }` (the `string` form is handled by
+/// [`FrameSelectorArg`]'s `Either::A`).
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct FrameSelectorBag {
+  pub name: Option<String>,
+  pub url: Option<String>,
+}
+
+/// Playwright's `page.frame(frameSelector)` union —
+/// `string | { name?, url? }`. napi-rs resolves the union at the JS
+/// boundary; the `ts_args_type` on the call site forces the generated
+/// `.d.ts` to the precise shape.
+pub type FrameSelectorArg = napi::Either<String, FrameSelectorBag>;
+
+impl From<FrameSelectorBag> for ferridriver::options::FrameSelector {
+  fn from(b: FrameSelectorBag) -> Self {
+    Self {
+      name: b.name.filter(|s| !s.is_empty()),
+      url: b.url.filter(|s| !s.is_empty()),
+    }
+  }
+}
+
 /// Launch options for the browser.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]

@@ -166,39 +166,37 @@ impl Page {
     Locator::wrap(self.inner.get_by_test_id(&test_id))
   }
 
-  // ── Frames ─────────────────────────────────────────────────────────────
+  // ── Frames (sync, Playwright parity — task 3.8) ─────────────────────
 
-  /// Get the main frame of this page.
+  /// Main frame of this page. Playwright: `page.mainFrame(): Frame`.
+  /// Sync — reads from the page-owned frame cache seeded at page
+  /// construction and kept fresh by the frame-event listener.
   #[napi]
-  pub async fn main_frame(&self) -> Result<crate::frame::Frame> {
-    self
-      .inner
-      .main_frame()
-      .await
-      .map(crate::frame::Frame::wrap)
-      .map_err(napi::Error::from_reason)
+  pub fn main_frame(&self) -> Option<crate::frame::Frame> {
+    self.inner.main_frame().map(crate::frame::Frame::wrap)
   }
 
-  /// Get all frames in the page (main frame + all iframes).
+  /// All frames in the page (main frame + all iframes).
+  /// Playwright: `page.frames(): Frame[]` (sync).
   #[napi]
-  pub async fn frames(&self) -> Result<Vec<crate::frame::Frame>> {
-    self
-      .inner
-      .frames()
-      .await
-      .map(|f| f.into_iter().map(crate::frame::Frame::wrap).collect())
-      .map_err(napi::Error::from_reason)
+  pub fn frames(&self) -> Vec<crate::frame::Frame> {
+    self.inner.frames().into_iter().map(crate::frame::Frame::wrap).collect()
   }
 
-  /// Find a frame by name or URL.
-  #[napi]
-  pub async fn frame(&self, name_or_url: String) -> Result<Option<crate::frame::Frame>> {
-    self
-      .inner
-      .frame(&name_or_url)
-      .await
-      .map(|opt| opt.map(crate::frame::Frame::wrap))
-      .map_err(napi::Error::from_reason)
+  /// Find a frame by name or URL. Mirrors Playwright's
+  /// `page.frame(string | { name?, url? }): Frame | null` (sync).
+  /// The URL field is an exact-match string for now; task 3.12 extends
+  /// it to the full `string | RegExp` union.
+  #[napi(ts_args_type = "selector: string | { name?: string | null | undefined; url?: string | null | undefined }")]
+  pub fn frame(&self, selector: crate::types::FrameSelectorArg) -> Option<crate::frame::Frame> {
+    let core_sel: ferridriver::options::FrameSelector = match selector {
+      napi::Either::A(name) => ferridriver::options::FrameSelector::by_name(name),
+      napi::Either::B(bag) => bag.into(),
+    };
+    if core_sel.is_empty() {
+      return None;
+    }
+    self.inner.frame(core_sel).map(crate::frame::Frame::wrap)
   }
 
   // ── Events (Playwright-compatible on/once/waitForEvent) ─────────────

@@ -1142,8 +1142,8 @@ for (const backend of BACKENDS) {
 
     it("frame.isDetached returns false for active frame", async () => {
       await page.goto(testUrl);
-      const main = await page.mainFrame();
-      expect(await main.isDetached()).toBe(false);
+      const main = page.mainFrame()!;
+      expect(main.isDetached()).toBe(false);
     });
 
     // ── Context methods ──────────────────────────────────────────────

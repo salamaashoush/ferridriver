@@ -27,6 +27,7 @@ pub mod context;
 pub mod error;
 pub mod events;
 pub mod frame;
+pub(crate) mod frame_cache;
 pub mod locator;
 pub mod options;
 pub mod page;

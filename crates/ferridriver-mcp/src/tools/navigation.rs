@@ -111,6 +111,7 @@ impl McpServer {
         drop(state);
         self.state.invalidate_context(s);
         let page = ferridriver::Page::new(any_page);
+        page.init_frame_cache().await.map_err(Self::err)?;
         let snap = self.snap(&page, s).await;
         Ok(CallToolResult::success(vec![Content::text(format!(
           "Opened new page in session '{s}'.\n\n{snap}"
@@ -141,6 +142,7 @@ impl McpServer {
         let any_page = state.active_page(s).map_err(Self::err)?.clone();
         drop(state);
         let page = ferridriver::Page::new(any_page);
+        page.init_frame_cache().await.map_err(Self::err)?;
         Box::pin(self.action_ok(&page, s, &format!("Switched to page {idx}."))).await
       },
       "list" => {

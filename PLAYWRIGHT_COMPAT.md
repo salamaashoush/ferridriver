@@ -291,9 +291,20 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.8 Frame async-vs-sync parity
 
-- [ ] Playwright's `mainFrame`, `frames`, `frame`, `parentFrame`, `childFrames`, `isDetached`, `name`, `url` are sync. Make them sync in ferridriver by caching in `Page`/`Frame` state.
-- **Files**: `page.rs`, `frame.rs`, NAPI bindings.
-- **Tests**: sync access after navigation mutates reflected state.
+- [x] Playwright's `mainFrame`, `frames`, `frame`, `parentFrame`, `childFrames`, `isDetached`, `name`, `url` are sync. Shipped as sync across Rust core, NAPI, and QuickJS.
+  - **Core**: new `crates/ferridriver/src/frame_cache.rs` is a Page-owned cache (`FxHashMap<Arc<str>, FrameRecord>` + insertion-order Vec + cached main-frame id). Seeded by `Page::init_frame_cache().await` (called from `BrowserContext::new_page`, `BrowserContext::pages`, and all three MCP page-creation paths in `ferridriver-mcp`), then kept fresh by a tokio task that consumes `FrameAttached` / `FrameDetached` / `FrameNavigated` from the page's own emitter. `Frame` now stores just `(Arc<Page>, Arc<str>)` — all accessors read live state from the cache. `Page::main_frame()`, `Page::frames()`, `Page::frame(selector)`, `Frame::name()`, `Frame::url()`, `Frame::parent_frame()`, `Frame::child_frames()`, `Frame::is_detached()`, `Frame::is_main_frame()` are all sync. New `FrameSelector { name, url }` lookup struct (`From<&str>` / `From<String>`) mirrors Playwright's `string | { name?, url? }` union; URL matcher stays string-equality for now — task 3.12 extends to `StringOrRegex`.
+  - **NAPI** (`crates/ferridriver-node/src/frame.rs`, `page.rs`, `types.rs`): `frame.name()`, `frame.url()`, `frame.isMainFrame()`, `frame.parentFrame()`, `frame.childFrames()`, `frame.isDetached()`, `page.mainFrame()`, `page.frames()` are all sync methods (no Promise). `page.frame(selector)` takes `string | { name?, url? }` via `napi::Either<String, FrameSelectorBag>` + `ts_args_type` forcing the exact union in the generated `.d.ts`. Verified against `crates/ferridriver-node/index.d.ts`.
+  - **QuickJS** (`crates/ferridriver-script/src/bindings/frame.rs` — new): `FrameJs` class with sync `name`/`url`/`isMainFrame`/`parentFrame`/`childFrames`/`isDetached` plus async `evaluate`/`evaluateStr`/`title`/`content`/`locator`. `PageJs` gains `mainFrame`, `frames`, `frame(selector)` — the `frame` union walks the JS object by hand so both `frame("alpha")` and `frame({ name: "alpha" })` reach the core `FrameSelector`. Registered in `bindings/mod.rs::define_classes`. Action methods (`click`/`fill`/`hover`/etc.) are deferred to task 3.9.
+  - **WebKit** (`crates/ferridriver/src/backend/webkit/mod.rs`): `get_frame_tree` previously returned only the main frame. Now also probes the DOM via JS for `<iframe>` elements and emits one `FrameInfo` per iframe (synthesized `iframe-<view>-<idx>` ids). Frame-scoped JS evaluation still falls back to the main frame — tracked separately.
+  - **Selector-engine fixes** (pre-existing failures surfaced while fixing this task): `crates/ferridriver/src/selectors.rs` now accepts `internal:has`, `internal:has-text`, `internal:has-not`, `internal:has-not-text` as aliases for the bare engines (Playwright's `client/locator.ts:51-67` emits the `internal:` prefix; `server/selectors.ts:42-43` accepts both). This unblocks `FilterOptions { has_text, has, has_not_text, has_not, visible }` at runtime — the signatures shipped in 3.11 but the engine dispatch was missing. Also fixed a stale test in `tests/page_api.rs` that expected `.box.and(.text)` to behave like `locator(inner)` (descendant) when Playwright's `.and()` is intersection on the same element.
+- **Playwright refs**:
+  - `/tmp/playwright/packages/playwright-core/src/client/frame.ts:258-276` (Frame sync accessors)
+  - `/tmp/playwright/packages/playwright-core/src/client/page.ts:258-275` (Page main-frame/frames/frame)
+  - `/tmp/playwright/packages/playwright-core/types/types.d.ts:2755-2765` (page.frame union)
+- **Tests**:
+  - NAPI: three new cases in `crates/ferridriver-node/test/frame-events.test.ts` (`sync accessors: mainFrame + parentFrame`, `sync accessors: frames + frame(name) + childFrames stay consistent`, `sync accessors: frame({ name, url }) union — object form`).
+  - QuickJS: `test_script_frame_sync_accessors` and `test_script_frame_selector_union` in `crates/ferridriver-cli/tests/backends.rs` — run on all four backends (cdp-pipe, cdp-raw, bidi, webkit).
+  - Unit: four `FrameCache` tests in the module itself (`seed`, `attach`, `detach`, `navigated` + `child_ids_filters_detached`).
 
 ### 3.9 Frame action methods
 
