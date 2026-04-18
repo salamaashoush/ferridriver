@@ -952,6 +952,72 @@ fn test_script_click_options(c: &mut McpClient) {
   assert!(msg.contains("Unknown modifier"), "bad modifier errors: {v}");
 }
 
+// Task 1.5 phase 4c: `locator.dispatchEvent` must honor `opts.timeout`
+// via the retry loop (previously did a one-shot `resolve()` that failed
+// immediately on missing elements). Playwright's dispatchEvent does NOT
+// run actionability — it's a programmatic event dispatch, polled only
+// for element presence.
+fn test_script_dispatch_event_timeout(c: &mut McpClient) {
+  c.nav("<button id='b'>b</button>");
+  let v = c.script_value(
+    "const t0 = Date.now();\
+     try { await page.locator('#nope').dispatchEvent('click', {}, { timeout: 200 }); return { msg: 'no-throw', elapsed: Date.now() - t0 }; }\
+     catch (e) { return { msg: String(e.message || e), elapsed: Date.now() - t0 }; }",
+  );
+  let msg = v["msg"].as_str().unwrap_or("");
+  let elapsed = v["elapsed"].as_i64().unwrap_or(9_999);
+  assert!(
+    msg.contains("Timeout") && msg.contains("200ms"),
+    "dispatchEvent on missing element with timeout:200 should Timeout: {v}"
+  );
+  assert!(
+    elapsed < 1500,
+    "dispatchEvent timeout should fire within 1.5s, got {elapsed}ms: {v}"
+  );
+}
+
+// Task 1.5 phase 4d: `selectOption` honors `opts.timeout` (via
+// retry_resolve) AND `opts.force` (skips the `['visible','enabled']`
+// pre-check that would otherwise return `error:notenabled`). Without
+// force on a disabled `<select>`, the retry loop polls until the
+// deadline. With force, the injected `selectOptions` runs immediately.
+fn test_script_select_option_force(c: &mut McpClient) {
+  // Disabled select — without force, fails fast via the timeout.
+  c.nav("<select id='s' disabled><option value='a'>A</option><option value='b'>B</option></select>");
+  let v = c.script_value(
+    "const t0 = Date.now();\
+     try { await page.locator('#s').selectOption('b', { timeout: 200 }); return { msg: 'no-throw', elapsed: Date.now() - t0 }; }\
+     catch (e) { return { msg: String(e.message || e), elapsed: Date.now() - t0 }; }",
+  );
+  let msg = v["msg"].as_str().unwrap_or("");
+  let elapsed = v["elapsed"].as_i64().unwrap_or(9_999);
+  assert!(
+    msg.contains("Timeout") && msg.contains("200ms"),
+    "selectOption on disabled select with timeout:200 should Timeout: {v}"
+  );
+  assert!(
+    elapsed < 1500,
+    "selectOption timeout should fire within 1.5s, got {elapsed}ms: {v}"
+  );
+  // Value unchanged.
+  let post = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"s\").value'));");
+  assert_eq!(
+    post,
+    json!("a"),
+    "disabled select value unchanged after timeout: {post}"
+  );
+
+  // force: true bypasses the pre-check and selects even when disabled.
+  c.nav("<select id='s' disabled><option value='a'>A</option><option value='b'>B</option></select>");
+  c.script_value("await page.locator('#s').selectOption('b', { force: true });");
+  let after = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"s\").value'));");
+  assert_eq!(
+    after,
+    json!("b"),
+    "selectOption with force:true should bypass disabled pre-check: {after}"
+  );
+}
+
 // Task 1.5 phase 4b: `check`/`uncheck`/`setChecked` must verify the
 // final state matches the target AND reject uncheck-of-radio, matching
 // Playwright's `server/dom.ts::_setChecked`. Proves on every backend:
@@ -1715,6 +1781,8 @@ fn run_all_tests(backend: &str) {
   run!(test_script_tap_native);
   run!(test_script_fill_force);
   run!(test_script_check_behavior);
+  run!(test_script_dispatch_event_timeout);
+  run!(test_script_select_option_force);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
 
