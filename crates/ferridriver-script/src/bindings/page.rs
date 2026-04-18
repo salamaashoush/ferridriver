@@ -690,6 +690,72 @@ impl PageJs {
   pub fn is_closed(&self) -> bool {
     self.inner.is_closed()
   }
+
+  // ── Frames (sync, Playwright parity — task 3.8) ─────────────────────
+  //
+  // Mirrors `/tmp/playwright/packages/playwright-core/src/client/page.ts:258-275`
+  // — `mainFrame`, `frames`, `frame(selector)` are all sync and read
+  // from the page-owned [`ferridriver::frame_cache::FrameCache`].
+
+  /// Main frame of this page. Playwright: `page.mainFrame(): Frame`.
+  #[qjs(rename = "mainFrame")]
+  pub fn main_frame(&self) -> Option<crate::bindings::frame::FrameJs> {
+    self.inner.main_frame().map(crate::bindings::frame::FrameJs::new)
+  }
+
+  /// All non-detached frames on the page. Playwright:
+  /// `page.frames(): Frame[]`.
+  #[qjs(rename = "frames")]
+  pub fn frames(&self) -> Vec<crate::bindings::frame::FrameJs> {
+    self
+      .inner
+      .frames()
+      .into_iter()
+      .map(crate::bindings::frame::FrameJs::new)
+      .collect()
+  }
+
+  /// Locate a frame by name or URL. Accepts Playwright's union:
+  /// `frame(string | { name?: string; url?: string })`.
+  ///
+  /// Distinct null/undefined handling (like emulateMedia in task 3.24)
+  /// is not required here — both absent and explicit-null mean "no
+  /// filter on this field", which matches Playwright's optional-field
+  /// semantics.
+  #[qjs(rename = "frame")]
+  pub fn frame<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: rquickjs::Value<'js>,
+  ) -> rquickjs::Result<Option<crate::bindings::frame::FrameJs>> {
+    let core_sel = if let Some(s) = selector.as_string() {
+      ferridriver::options::FrameSelector::by_name(s.to_string()?)
+    } else if let Some(obj) = selector.as_object() {
+      let read = |key: &str| -> rquickjs::Result<Option<String>> {
+        let v: rquickjs::Value<'_> = obj
+          .get(key)
+          .unwrap_or_else(|_| rquickjs::Value::new_undefined(ctx.clone()));
+        if v.is_undefined() || v.is_null() {
+          Ok(None)
+        } else if let Some(s) = v.as_string() {
+          Ok(Some(s.to_string()?))
+        } else {
+          Ok(None)
+        }
+      };
+      ferridriver::options::FrameSelector {
+        name: read("name")?,
+        url: read("url")?,
+      }
+    } else {
+      return Ok(None);
+    };
+
+    if core_sel.is_empty() {
+      return Ok(None);
+    }
+    Ok(self.inner.frame(core_sel).map(crate::bindings::frame::FrameJs::new))
+  }
 }
 
 /// Shape of `page.screenshot` options accepted from JS. Full Playwright

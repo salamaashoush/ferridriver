@@ -359,21 +359,62 @@ impl WebKitPage {
     }))
   }
 
-  /// Get the frame tree. Currently returns the main frame only on `WebKit`.
+  /// Get the frame tree. `WebKit`'s IPC doesn't expose `WKFrameInfo`
+  /// enumeration yet (requires a fork-and-patch path Playwright takes
+  /// via their own `WebKit` build). Instead, we probe the DOM from JS:
+  /// one [`super::FrameInfo`] for the main frame, plus one per
+  /// `<iframe>` element. Frame ids are synthesized (`iframe-<idx>`);
+  /// Frame-scoped JS evaluation still falls back to the main frame
+  /// (`evaluate_in_frame` below) — that's a separate gap tracked in
+  /// Section B of `PLAYWRIGHT_COMPAT.md`.
   ///
   /// # Errors
   ///
-  /// Returns an error if retrieving the current URL fails.
+  /// Returns an error if the DOM probe fails. The main-frame entry is
+  /// always included (never empty).
   pub async fn get_frame_tree(&self) -> Result<Vec<super::FrameInfo>, String> {
-    // WebKit doesn't expose frame tree via IPC yet.
-    // Return main frame only.
-    let url = self.url().await?.unwrap_or_default();
-    Ok(vec![super::FrameInfo {
-      frame_id: format!("main-{}", self.view_id),
+    let main_url = self.url().await?.unwrap_or_default();
+    let main_id = format!("main-{}", self.view_id);
+    let mut frames = vec![super::FrameInfo {
+      frame_id: main_id.clone(),
       parent_frame_id: None,
       name: String::new(),
-      url,
-    }])
+      url: main_url,
+    }];
+
+    // Probe the DOM for <iframe> elements.
+    let probe = "JSON.stringify(Array.from(document.querySelectorAll('iframe')).map((el, i) => ({\
+       i, \
+       name: el.getAttribute('name') || '', \
+       url: el.src || (el.contentDocument && el.contentDocument.URL) || '' \
+     })))";
+    if let Ok(Some(value)) = self.evaluate(probe).await {
+      if let Some(raw) = value.as_str() {
+        if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(raw) {
+          for entry in arr {
+            let idx = entry.get("i").and_then(serde_json::Value::as_u64).unwrap_or(0);
+            let name = entry
+              .get("name")
+              .and_then(serde_json::Value::as_str)
+              .unwrap_or_default()
+              .to_string();
+            let url = entry
+              .get("url")
+              .and_then(serde_json::Value::as_str)
+              .unwrap_or_default()
+              .to_string();
+            frames.push(super::FrameInfo {
+              frame_id: format!("iframe-{}-{idx}", self.view_id),
+              parent_frame_id: Some(main_id.clone()),
+              name,
+              url,
+            });
+          }
+        }
+      }
+    }
+
+    Ok(frames)
   }
 
   /// Evaluate JavaScript in a specific frame. Currently evaluates in the main frame only.

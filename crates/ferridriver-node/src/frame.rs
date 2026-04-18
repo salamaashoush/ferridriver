@@ -21,15 +21,16 @@ impl Frame {
 #[napi]
 impl Frame {
   /// Frame name (from the `name` attribute of the iframe element).
-  #[napi(getter)]
+  /// Playwright: `frame.name(): string` (sync).
+  #[napi]
   pub fn name(&self) -> String {
-    self.inner.name().to_string()
+    self.inner.name()
   }
 
-  /// Frame URL.
-  #[napi(getter)]
+  /// Frame URL. Playwright: `frame.url(): string` (sync).
+  #[napi]
   pub fn url(&self) -> String {
-    self.inner.url().to_string()
+    self.inner.url()
   }
 
   /// Whether this is the main (top-level) frame.
@@ -38,26 +39,18 @@ impl Frame {
     self.inner.is_main_frame()
   }
 
-  /// Get the parent frame. Returns null for the main frame.
+  /// Parent frame. Returns null for the main frame.
+  /// Playwright: `frame.parentFrame(): Frame | null` (sync).
   #[napi]
-  pub async fn parent_frame(&self) -> Result<Option<Frame>> {
-    self
-      .inner
-      .parent_frame()
-      .await
-      .map(|opt| opt.map(Frame::wrap))
-      .into_napi()
+  pub fn parent_frame(&self) -> Option<Frame> {
+    self.inner.parent_frame().map(Frame::wrap)
   }
 
-  /// Get child frames of this frame.
+  /// Child frames of this frame.
+  /// Playwright: `frame.childFrames(): Frame[]` (sync).
   #[napi]
-  pub async fn child_frames(&self) -> Result<Vec<Frame>> {
-    self
-      .inner
-      .child_frames()
-      .await
-      .map(|frames| frames.into_iter().map(Frame::wrap).collect())
-      .into_napi()
+  pub fn child_frames(&self) -> Vec<Frame> {
+    self.inner.child_frames().into_iter().map(Frame::wrap).collect()
   }
 
   // ── Evaluation ────────────────────────────────────────────────────────
@@ -161,9 +154,11 @@ impl Frame {
       .into_napi()
   }
 
+  /// Whether this frame has been detached from the page.
+  /// Playwright: `frame.isDetached(): boolean` (sync).
   #[napi]
-  pub async fn is_detached(&self) -> Result<bool> {
-    self.inner.is_detached().await.into_napi()
+  pub fn is_detached(&self) -> bool {
+    self.inner.is_detached()
   }
 
   // ── Additional locators ──────────────────────────────────────────────

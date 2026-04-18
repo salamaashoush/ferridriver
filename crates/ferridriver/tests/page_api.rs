@@ -992,11 +992,29 @@ async fn locator_or_and_tests() {
   let text = combined.first().text_content().await.unwrap();
   assert_eq!(text, Some("Alpha".into()), "first() of or() should be Alpha");
 
-  // and() -- intersection (chained selector, narrows scope)
-  page.goto(&data_url("<div class='box'><span class='text'>Inside</span></div><div class='other'><span class='text'>Outside</span></div>"), None).await.unwrap();
-  let and_loc = page.locator("css=.box", None).and(&page.locator("css=.text", None));
+  // and() -- intersection on the SAME element (Playwright semantics: the
+  // element must match both selectors). This is a different operation
+  // from `locator.locator(inner)` which scopes to descendants.
+  //
+  //   `<p class="a b">Both</p>`       -> matches `.a.and(.b)`
+  //   `<p class="a">A only</p>`       -> does NOT match
+  //   `<span>only text no class</span>` -> does NOT match
+  page
+    .goto(
+      &data_url("<p class='a b'>Both</p><p class='a'>A only</p><p class='b'>B only</p>"),
+      None,
+    )
+    .await
+    .unwrap();
+  let and_loc = page.locator("css=.a", None).and(&page.locator("css=.b", None));
+  let count = and_loc.count().await.unwrap();
+  assert_eq!(count, 1, "and() should match only the element with both classes");
   let text = and_loc.text_content().await.unwrap();
-  assert_eq!(text, Some("Inside".into()), "and() should find .text inside .box");
+  assert_eq!(
+    text,
+    Some("Both".into()),
+    "and() should return the intersection element"
+  );
 
   browser.close(None).await.unwrap();
 }

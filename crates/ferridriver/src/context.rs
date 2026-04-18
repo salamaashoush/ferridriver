@@ -286,7 +286,14 @@ impl ContextRef {
       state.register_opened_page(&self.key, any_page.clone(), browser_context_id)?;
     }
 
-    Ok(Page::with_context(any_page, self.clone()))
+    let page = Page::with_context(any_page, self.clone());
+    // Seed the frame cache + spawn the FrameAttached/Detached/Navigated
+    // listener so sync frame accessors (main_frame, frames, parentFrame,
+    // childFrames, isDetached, name, url) see live state from the very
+    // first call. Mirrors Playwright's client always receiving the main
+    // frame via the channel initializer.
+    page.init_frame_cache().await?;
+    Ok(page)
   }
 
   /// Get all pages in this context as Page handles.
@@ -295,15 +302,18 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist.
   pub async fn pages(&self) -> Result<Vec<Arc<Page>>> {
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    Ok(
-      ctx
-        .pages
-        .iter()
-        .map(|p| Page::with_context(p.clone(), self.clone()))
-        .collect(),
-    )
+    let inner_pages = {
+      let state = self.state.read().await;
+      let ctx = state.context(&self.name)?;
+      ctx.pages.clone()
+    };
+    let mut pages = Vec::with_capacity(inner_pages.len());
+    for inner in inner_pages {
+      let page = Page::with_context(inner, self.clone());
+      page.init_frame_cache().await?;
+      pages.push(page);
+    }
+    Ok(pages)
   }
 
   /// Get all cookies in this context.

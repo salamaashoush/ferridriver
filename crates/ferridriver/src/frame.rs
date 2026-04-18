@@ -9,84 +9,80 @@
 
 use std::sync::Arc;
 
-use crate::backend::FrameInfo;
 use crate::error::Result;
 use crate::locator::Locator;
 use crate::options::{RoleOptions, TextOptions, WaitOptions};
 use crate::page::Page;
 
-/// A frame within a page. Mirrors Playwright's Frame interface.
+/// A frame within a page. Mirrors Playwright's
+/// [Frame interface](https://playwright.dev/docs/api/class-frame).
+///
+/// Frame instances are thin handles — the authoritative name/url/parent
+/// state lives in [`crate::frame_cache::FrameCache`] on the owning Page.
+/// Cloning a Frame is cheap (`Arc<Page>` + `Arc<str>`) and multiple
+/// clones see the same live state.
 #[derive(Clone)]
 pub struct Frame {
   /// The page this frame belongs to (Arc for cheap cloning in locator chains).
   page: Arc<Page>,
   /// Frame ID (from CDP or backend). `Arc<str>` so locator chains are cheap.
   pub(crate) id: Arc<str>,
-  /// Parent frame ID (None for main frame).
-  pub(crate) parent_id: Option<String>,
-  /// Frame name (from `<iframe name="...">` attribute).
-  name_str: String,
-  /// Frame URL.
-  url_str: String,
 }
 
 impl Frame {
-  /// Create a frame from backend `FrameInfo`.
-  pub(crate) fn from_info(page: Arc<Page>, info: FrameInfo) -> Self {
-    Self {
-      page,
-      id: Arc::from(info.frame_id),
-      parent_id: info.parent_frame_id,
-      name_str: info.name,
-      url_str: info.url,
-    }
+  /// Create a frame handle pointing at an id present in the page's
+  /// frame cache. The cache is the source of truth for name/url/parent.
+  pub(crate) fn new(page: Arc<Page>, id: Arc<str>) -> Self {
+    Self { page, id }
   }
 
   /// Frame name (from the `name` attribute of the iframe element).
+  /// Playwright: [`frame.name()`](https://playwright.dev/docs/api/class-frame#frame-name)
+  /// -- `name(): string` sync, reads cached state.
   #[must_use]
-  pub fn name(&self) -> &str {
-    &self.name_str
+  pub fn name(&self) -> String {
+    self
+      .page
+      .with_frame_cache(|c| c.record(&self.id).map(|r| r.info.name.clone()).unwrap_or_default())
   }
 
   /// Frame URL.
+  /// Playwright: [`frame.url()`](https://playwright.dev/docs/api/class-frame#frame-url)
+  /// -- `url(): string` sync.
   #[must_use]
-  pub fn url(&self) -> &str {
-    &self.url_str
+  pub fn url(&self) -> String {
+    self
+      .page
+      .with_frame_cache(|c| c.record(&self.id).map(|r| r.info.url.clone()).unwrap_or_default())
   }
 
-  /// Whether this is the main (top-level) frame.
+  /// Whether this is the main (top-level) frame. Mirrors Playwright's
+  /// equivalent of `frame.parentFrame() === null`.
   #[must_use]
   pub fn is_main_frame(&self) -> bool {
-    self.parent_id.is_none()
+    self
+      .page
+      .with_frame_cache(|c| c.main_frame_id().as_deref() == Some(&*self.id))
   }
 
-  /// Get the parent frame. Returns None for the main frame.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn parent_frame(&self) -> Result<Option<Frame>> {
-    if let Some(pid) = &self.parent_id {
-      let frames = self.page.frames().await?;
-      Ok(frames.into_iter().find(|f| &*f.id == pid.as_str()))
-    } else {
-      Ok(None)
-    }
+  /// Parent frame. Returns `None` for the main frame. Sync — reads from
+  /// the page's frame cache (Playwright:
+  /// [`frame.parentFrame()`](https://playwright.dev/docs/api/class-frame#frame-parent-frame)).
+  #[must_use]
+  pub fn parent_frame(&self) -> Option<Frame> {
+    let pid = self.page.with_frame_cache(|c| c.parent_id(&self.id))?;
+    Some(Frame::new(Arc::clone(&self.page), pid))
   }
 
-  /// Get child frames of this frame.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn child_frames(&self) -> Result<Vec<Frame>> {
-    let frames = self.page.frames().await?;
-    Ok(
-      frames
-        .into_iter()
-        .filter(|f| f.parent_id.as_deref() == Some(&*self.id))
-        .collect(),
-    )
+  /// Child frames. Sync — reads from the page's frame cache.
+  /// Playwright: [`frame.childFrames()`](https://playwright.dev/docs/api/class-frame#frame-child-frames).
+  #[must_use]
+  pub fn child_frames(&self) -> Vec<Frame> {
+    let ids = self.page.with_frame_cache(|c| c.child_ids(&self.id));
+    ids
+      .into_iter()
+      .map(|id| Frame::new(Arc::clone(&self.page), id))
+      .collect()
   }
 
   // ── Evaluation (frame-scoped) ────────────────────────────────────────
@@ -272,14 +268,15 @@ impl Frame {
     self.locator(selector, None).wait_for(opts).await
   }
 
-  /// Check if this frame has been detached from the page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn is_detached(&self) -> Result<bool> {
-    let frames = self.page.inner().get_frame_tree().await?;
-    Ok(!frames.iter().any(|f| f.frame_id.as_str() == &*self.id))
+  /// Whether this frame has been detached from the page. Sync -- reads
+  /// the cached `detached` flag maintained by the page's frame event
+  /// listener. Playwright:
+  /// [`frame.isDetached()`](https://playwright.dev/docs/api/class-frame#frame-is-detached).
+  #[must_use]
+  pub fn is_detached(&self) -> bool {
+    self
+      .page
+      .with_frame_cache(|c| c.record(&self.id).is_none_or(|r| r.detached))
   }
 
   /// Get the page this frame belongs to.
@@ -379,11 +376,19 @@ impl Frame {
 
 impl std::fmt::Debug for Frame {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    let (name, url, main) = self.page.with_frame_cache(|c| {
+      let rec = c.record(&self.id);
+      (
+        rec.map(|r| r.info.name.clone()),
+        rec.map(|r| r.info.url.clone()),
+        c.main_frame_id().as_deref() == Some(&*self.id),
+      )
+    });
     f.debug_struct("Frame")
       .field("id", &self.id)
-      .field("parent_id", &self.parent_id)
-      .field("name", &self.name_str)
-      .field("url", &self.url_str)
+      .field("name", &name)
+      .field("url", &url)
+      .field("main", &main)
       .finish_non_exhaustive()
   }
 }

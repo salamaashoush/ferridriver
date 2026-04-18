@@ -844,6 +844,82 @@ fn test_script_mouse_wheel(c: &mut McpClient) {
   );
 }
 
+// Task 3.8: Playwright-parity sync frame accessors exposed via QuickJS.
+// Verifies the same FrameJs surface the NAPI tests cover — name/url/
+// isMainFrame/parentFrame/childFrames/isDetached are all sync (no await).
+fn test_script_frame_sync_accessors(c: &mut McpClient) {
+  c.nav(
+    "<h1>Parent</h1>\
+     <iframe name='alpha' srcdoc='<p>A</p>'></iframe>\
+     <iframe name='beta' srcdoc='<p>B</p>'></iframe>",
+  );
+  // Wait for both iframes to appear in the DOM — by the time
+  // waitForSelector resolves, FrameAttached/Navigated events have
+  // propagated to the page-owned frame cache.
+  // Use `== null` (loose equality) to accept both rquickjs `undefined` and
+  // explicit `null` — rquickjs maps `Option::None` returns to JS
+  // `undefined`, not `null`.
+  let v = c.script_value(
+    "await page.waitForSelector('iframe[name=\"alpha\"]'); \
+       await page.waitForSelector('iframe[name=\"beta\"]'); \
+       const main = page.mainFrame(); \
+       const kidNames = main.childFrames().map(f => f.name()).sort(); \
+       const alpha = page.frame('alpha'); \
+       const alphaParent = alpha ? alpha.parentFrame() : null; \
+       return { \
+         mainIsMain: main.isMainFrame(), \
+         mainParentNull: main.parentFrame() == null, \
+         mainDetached: main.isDetached(), \
+         kidNames, \
+         alphaName: alpha ? alpha.name() : null, \
+         alphaIsMain: alpha ? alpha.isMainFrame() : null, \
+         alphaParentIsMain: alphaParent ? alphaParent.isMainFrame() : null, \
+         frameCount: page.frames().length, \
+       };",
+  );
+  assert_eq!(v["mainIsMain"], json!(true), "mainFrame.isMainFrame(): {v}");
+  assert_eq!(
+    v["mainParentNull"],
+    json!(true),
+    "mainFrame.parentFrame() === null: {v}"
+  );
+  assert_eq!(v["mainDetached"], json!(false), "mainFrame.isDetached() === false: {v}");
+  assert_eq!(v["alphaName"], json!("alpha"), "frame('alpha').name(): {v}");
+  assert_eq!(v["alphaIsMain"], json!(false), "child frame is not main: {v}");
+  assert_eq!(v["alphaParentIsMain"], json!(true), "child.parentFrame() is main: {v}");
+  assert!(
+    v["frameCount"].as_i64().unwrap_or(0) >= 3,
+    "frames() includes main + 2 iframes: {v}"
+  );
+  let kids = v["kidNames"].as_array().cloned().unwrap_or_default();
+  assert!(
+    kids.iter().any(|n| n == &json!("alpha")),
+    "child names contain 'alpha': {v}"
+  );
+  assert!(
+    kids.iter().any(|n| n == &json!("beta")),
+    "child names contain 'beta': {v}"
+  );
+}
+
+fn test_script_frame_selector_union(c: &mut McpClient) {
+  c.nav("<iframe name='target' src='about:blank'></iframe>");
+  let v = c.script_value(
+    "await page.waitForSelector('iframe[name=\"target\"]'); \
+       const byName = page.frame('target'); \
+       const byObj = page.frame({ name: 'target' }); \
+       const empty = page.frame({}); \
+       return { \
+         byNameName: byName ? byName.name() : null, \
+         byObjName: byObj ? byObj.name() : null, \
+         emptyIsNull: empty == null, \
+       };",
+  );
+  assert_eq!(v["byNameName"], json!("target"), "frame(string) resolves: {v}");
+  assert_eq!(v["byObjName"], json!("target"), "frame({{name}}) resolves: {v}");
+  assert_eq!(v["emptyIsNull"], json!(true), "frame({{}}) returns null: {v}");
+}
+
 fn test_script_keyboard_press(c: &mut McpClient) {
   c.nav("<textarea id='t'></textarea>");
   let v = c.script_value(
@@ -1193,6 +1269,10 @@ fn run_all_tests(backend: &str) {
   run!(test_script_emulate_media_null_disables_single_field);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
+
+  // run_script: Frame sync accessors (Playwright parity — task 3.8)
+  run!(test_script_frame_sync_accessors);
+  run!(test_script_frame_selector_union);
 
   // run_script: waits
   run!(test_script_wait_for_selector);

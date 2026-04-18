@@ -8,8 +8,9 @@ use crate::backend::{AnyPage, CookieData, ImageFormat, ScreenshotOpts};
 use crate::error::Result;
 use crate::events::{EventEmitter, PageEvent};
 use crate::frame::Frame;
+use crate::frame_cache::FrameCache;
 use crate::locator::Locator;
-use crate::options::{GotoOptions, RoleOptions, ScreenshotOptions, TextOptions, WaitOptions};
+use crate::options::{FrameSelector, GotoOptions, RoleOptions, ScreenshotOptions, TextOptions, WaitOptions};
 use crate::snapshot;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -39,6 +40,29 @@ pub struct Page {
   /// partial update, not a replacement. See
   /// `/tmp/playwright/packages/playwright-core/src/server/page.ts:585`.
   emulated_media: Mutex<crate::options::EmulateMediaOptions>,
+  /// Client-side frame tree cache. Playwright keeps `Page._frames`,
+  /// `Frame._parentFrame`, `Frame._url`, `Frame._detached` etc. up to
+  /// date via wire-level `frameAttached`/`frameDetached`/`frameNavigated`
+  /// events so that sync accessors (`mainFrame`, `frames`, `frame`,
+  /// `parentFrame`, `childFrames`, `name`, `url`, `isDetached`) never
+  /// await. ferridriver does the same: the cache is seeded in
+  /// [`Page::init_frame_cache`] and kept fresh by the listener task
+  /// spawned there.
+  frame_cache: Arc<Mutex<FrameCache>>,
+  /// Abort handle for the frame-event listener task spawned by
+  /// [`Page::init_frame_cache`]. Aborted on [`Page::drop`] so no listener
+  /// outlives its Page.
+  frame_listener: Mutex<Option<tokio::task::AbortHandle>>,
+}
+
+impl Drop for Page {
+  fn drop(&mut self) {
+    if let Ok(mut guard) = self.frame_listener.lock() {
+      if let Some(h) = guard.take() {
+        h.abort();
+      }
+    }
+  }
 }
 
 impl Page {
@@ -54,6 +78,8 @@ impl Page {
       context_ref: None,
       close_reason: Mutex::new(None),
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
+      frame_cache: Arc::new(Mutex::new(FrameCache::default())),
+      frame_listener: Mutex::new(None),
     })
   }
 
@@ -69,7 +95,90 @@ impl Page {
       context_ref: Some(context),
       close_reason: Mutex::new(None),
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
+      frame_cache: Arc::new(Mutex::new(FrameCache::default())),
+      frame_listener: Mutex::new(None),
     })
+  }
+
+  // ── Frame cache plumbing (Playwright-parity sync frame accessors) ─────
+
+  /// Read from the Page's frame cache under the shared lock.
+  pub(crate) fn with_frame_cache<R>(&self, f: impl FnOnce(&FrameCache) -> R) -> R {
+    match self.frame_cache.lock() {
+      Ok(g) => f(&g),
+      Err(poisoned) => f(&poisoned.into_inner()),
+    }
+  }
+
+  /// Seed the frame cache from the backend and spawn the frame-event
+  /// listener. Idempotent — calling twice on the same Page replaces the
+  /// seed and restarts the listener. Safe to call from any async context
+  /// with a tokio runtime.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend's `get_frame_tree()` call fails.
+  pub async fn init_frame_cache(self: &Arc<Self>) -> Result<()> {
+    let infos = self.inner.get_frame_tree().await?;
+    {
+      let mut guard = match self.frame_cache.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+      };
+      guard.seed(infos);
+    }
+
+    // Replace any previous listener.
+    if let Ok(mut guard) = self.frame_listener.lock() {
+      if let Some(h) = guard.take() {
+        h.abort();
+      }
+    }
+
+    let cache = Arc::clone(&self.frame_cache);
+    let mut rx = self.inner.events().subscribe();
+    let handle = tokio::spawn(async move {
+      while let Ok(event) = rx.recv().await {
+        match event {
+          PageEvent::FrameAttached(info) => {
+            if let Ok(mut g) = cache.lock() {
+              g.attach(info);
+            }
+          },
+          PageEvent::FrameDetached { frame_id } => {
+            if let Ok(mut g) = cache.lock() {
+              g.detach(&frame_id);
+            }
+          },
+          PageEvent::FrameNavigated(info) => {
+            if let Ok(mut g) = cache.lock() {
+              g.navigated(info);
+            }
+          },
+          _ => {},
+        }
+      }
+    });
+    if let Ok(mut guard) = self.frame_listener.lock() {
+      *guard = Some(handle.abort_handle());
+    }
+    Ok(())
+  }
+
+  /// Refresh the frame cache from the backend without touching the
+  /// listener. Useful when a caller wants to guarantee freshness before
+  /// reading sync accessors (e.g. right after a navigation where event
+  /// delivery is racing with the caller).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend's `get_frame_tree()` call fails.
+  pub async fn sync_frames(self: &Arc<Self>) -> Result<()> {
+    let infos = self.inner.get_frame_tree().await?;
+    if let Ok(mut g) = self.frame_cache.lock() {
+      g.seed(infos);
+    }
+    Ok(())
   }
 
   /// Get the `BrowserContext` this page belongs to (matches Playwright's `page.context()`).
@@ -1470,49 +1579,59 @@ impl Page {
     Ok(())
   }
 
-  // ── Frames ─────────────────────────────────────────────────────────────
+  // ── Frames (sync, Playwright parity — task 3.8) ──────────────────────
+  //
+  // Mirrors Playwright client/page.ts:258 (mainFrame), :273 (frames),
+  // :262 (frame). All read from the page-owned `FrameCache` seeded by
+  // [`Page::init_frame_cache`] and kept fresh by the listener task.
 
-  /// Get the main frame of this page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the frame tree cannot be retrieved or no main frame exists.
-  pub async fn main_frame(self: &Arc<Self>) -> Result<Frame> {
-    let frames = self.inner.get_frame_tree().await?;
-    let main = frames
-      .into_iter()
-      .find(|f| f.parent_frame_id.is_none())
-      .ok_or("No main frame found")?;
-    Ok(Frame::from_info(Arc::clone(self), main))
+  /// Main frame of this page. Sync — reads the cached main-frame id.
+  /// Returns `None` only before [`Page::init_frame_cache`] has seeded
+  /// the cache (which the context's `new_page` always does before
+  /// handing the Page out).
+  #[must_use]
+  pub fn main_frame(self: &Arc<Self>) -> Option<Frame> {
+    let id = self.with_frame_cache(crate::frame_cache::FrameCache::main_frame_id)?;
+    Some(Frame::new(Arc::clone(self), id))
   }
 
-  /// Get all frames in the page (main frame + all iframes).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn frames(self: &Arc<Self>) -> Result<Vec<Frame>> {
-    let infos = self.inner.get_frame_tree().await?;
-    Ok(
-      infos
-        .into_iter()
-        .map(|info| Frame::from_info(Arc::clone(self), info))
-        .collect(),
-    )
+  /// All non-detached frames attached to the page, main-frame first.
+  /// Sync — reads the cache.
+  #[must_use]
+  pub fn frames(self: &Arc<Self>) -> Vec<Frame> {
+    let ids: Vec<_> = self.with_frame_cache(|c| c.live_ids().collect());
+    ids.into_iter().map(|id| Frame::new(Arc::clone(self), id)).collect()
   }
 
-  /// Find a frame by name or URL.
+  /// Locate a frame by name or URL. Sync — reads the cache.
+  /// Playwright: `page.frame(string | { name?, url? })` — see
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2755`.
   ///
-  /// # Errors
+  /// # Panics
   ///
-  /// Returns an error if the frame tree cannot be retrieved.
-  pub async fn frame(self: &Arc<Self>, name_or_url: &str) -> Result<Option<Frame>> {
-    let frames = self.frames().await?;
-    Ok(
-      frames
-        .into_iter()
-        .find(|f| f.name() == name_or_url || f.url() == name_or_url),
-    )
+  /// Panics if `selector` specifies neither `name` nor `url` — matches
+  /// Playwright's `assert(name || url, 'Either name or url matcher should be specified')`.
+  #[must_use]
+  pub fn frame(self: &Arc<Self>, selector: impl Into<FrameSelector>) -> Option<Frame> {
+    let sel = selector.into();
+    assert!(!sel.is_empty(), "Either name or url matcher should be specified");
+    self.with_frame_cache(|c| {
+      for id in c.live_ids() {
+        let Some(rec) = c.record(&id) else { continue };
+        if let Some(name) = &sel.name {
+          if rec.info.name != *name {
+            continue;
+          }
+        }
+        if let Some(url) = &sel.url {
+          if rec.info.url != *url {
+            continue;
+          }
+        }
+        return Some(Frame::new(Arc::clone(self), id));
+      }
+      None
+    })
   }
 
   // ── Events ────────────────────────────────────────────────────────────

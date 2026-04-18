@@ -573,6 +573,68 @@ impl Default for ViewportConfig {
   }
 }
 
+/// Selector for [`crate::Page::frame`]. Mirrors Playwright's
+/// `page.frame(frameSelector)` union type
+/// `string | { name?: string; url?: string|RegExp|URLPattern|(url => bool) }`
+/// (`/tmp/playwright/packages/playwright-core/types/types.d.ts:2755`).
+///
+/// For ferridriver 3.8 we accept the string form + `{ name, url }` with
+/// both fields being plain strings (exact match). Task **3.12** extends
+/// `url` to the full `StringOrRegex` matcher; matching rules will remain
+/// behind this struct so callers don't rebind.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct FrameSelector {
+  /// Match against the frame's `name` attribute (exact).
+  pub name: Option<String>,
+  /// Match against the frame's URL (exact).
+  pub url: Option<String>,
+}
+
+impl FrameSelector {
+  /// Convenience: selector that matches by frame name.
+  #[must_use]
+  pub fn by_name(name: impl Into<String>) -> Self {
+    Self {
+      name: Some(name.into()),
+      url: None,
+    }
+  }
+
+  /// Convenience: selector that matches by frame URL.
+  #[must_use]
+  pub fn by_url(url: impl Into<String>) -> Self {
+    Self {
+      name: None,
+      url: Some(url.into()),
+    }
+  }
+
+  /// Returns `true` when neither `name` nor `url` is set — Playwright's
+  /// `assert(name || url, 'Either name or url matcher should be specified')`.
+  #[must_use]
+  pub fn is_empty(&self) -> bool {
+    self.name.is_none() && self.url.is_none()
+  }
+}
+
+impl From<&str> for FrameSelector {
+  fn from(name: &str) -> Self {
+    Self::by_name(name)
+  }
+}
+
+impl From<String> for FrameSelector {
+  fn from(name: String) -> Self {
+    Self::by_name(name)
+  }
+}
+
+impl From<&String> for FrameSelector {
+  fn from(name: &String) -> Self {
+    Self::by_name(name.clone())
+  }
+}
+
 #[cfg(test)]
 mod pdf_option_tests {
   use super::*;
