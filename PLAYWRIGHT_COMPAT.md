@@ -361,6 +361,20 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 - [x] Split from `set_default_timeout`.
 - **Files**: `page.rs`, `context.rs`.
 
+### 3.x Unified launch surface
+
+- [x] `BrowserState` now has a single construction path —
+  `with_options(ConnectMode, LaunchOptions)`. The previous
+  `BrowserState::new(mode, backend)` shortcut that hard-coded
+  `headless = false` is deleted, eliminating the class of bugs that
+  surface when `headless` and chromium-binary selection drift (the
+  cause of the MCP `emulateMedia` null-reset regression). MCP's
+  `McpServer::with_options` constructs a `LaunchOptions`; the five
+  test callers in `state.rs` go through a shared `test_state()`
+  helper that also takes the bag. CLI `--headless` help text is
+  corrected (it defaults to `false` — MCP's canonical use case is
+  interactive).
+
 ### 3.24 `emulateMedia` full field set
 
 - [x] Accept the full Playwright options bag (`media`, `colorScheme`, `reducedMotion`, `forcedColors`, `contrast`) as a single object argument across all three layers — no more positional NAPI args. Every field is `T | null | undefined` per Playwright's TS declaration: absent = no change, `null` = reset override, string = apply.
