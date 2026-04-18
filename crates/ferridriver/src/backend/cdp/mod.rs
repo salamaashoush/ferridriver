@@ -1666,6 +1666,53 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// Dispatch a native tap at `(x, y)` via CDP `Input.dispatchTouchEvent`:
+  /// `touchStart` with a single `TouchPoint { x, y }` immediately followed
+  /// by `touchEnd` with an empty `touchPoints` array. Matches Playwright's
+  /// `server/chromium/crInput.ts::RawTouchscreenImpl::tap` (commit
+  /// reference: `/tmp/playwright/packages/playwright-core/src/server/chromium/crInput.ts:174`).
+  /// Modifier bitmask rides on each event so the page sees
+  /// `event.shiftKey` etc. as expected.
+  ///
+  /// Before the first dispatch we flip `Emulation.setTouchEmulationEnabled
+  /// { enabled: true, maxTouchPoints: 1 }`. Chromium needs the emulator
+  /// enabled for `Input.dispatchTouchEvent` to actually route the events
+  /// through the renderer's touch hit-tester — without it, the protocol
+  /// accepts the call but no DOM `touchstart` / `pointerup(touch)`
+  /// listener fires. Playwright's `BrowserContextOptions.hasTouch` wires
+  /// this on context creation; we opt in lazily on first tap so callers
+  /// who never tap pay nothing.
+  pub async fn tap_at_with(&self, x: f64, y: f64, args: &super::BackendTapArgs) -> Result<(), String> {
+    let mods = args.modifiers_bitmask;
+    self
+      .cmd(
+        "Emulation.setTouchEmulationEnabled",
+        serde_json::json!({ "enabled": true, "maxTouchPoints": 1 }),
+      )
+      .await?;
+    self
+      .cmd(
+        "Input.dispatchTouchEvent",
+        serde_json::json!({
+          "type": "touchStart",
+          "modifiers": mods,
+          "touchPoints": [{ "x": x, "y": y }],
+        }),
+      )
+      .await?;
+    self
+      .cmd(
+        "Input.dispatchTouchEvent",
+        serde_json::json!({
+          "type": "touchEnd",
+          "modifiers": mods,
+          "touchPoints": [],
+        }),
+      )
+      .await?;
+    Ok(())
+  }
+
   /// Press each modifier in `mods` via CDP
   /// `Input.dispatchKeyEvent { type: "keyDown" }`. `key` is the
   /// platform-resolved key name (e.g. `"Meta"` on macOS for

@@ -775,6 +775,21 @@ impl BidiPage {
     Ok(())
   }
 
+  /// `BiDi` has no public touch `pointerType` in the stable spec — the
+  /// `input.performActions` `pointerType` union is `'mouse' | 'pen'`
+  /// only. Playwright's own `BiDi` backend leaves `tap` unimplemented
+  /// for the same reason. Returns a typed `unsupported:` error that
+  /// the caller surfaces as [`crate::error::FerriError::Unsupported`].
+  #[allow(clippy::unused_async, clippy::unused_self)]
+  pub async fn tap_at_with(&self, _x: f64, _y: f64, _args: &super::super::BackendTapArgs) -> Result<(), String> {
+    Err(
+      "unsupported: tap is not available on the BiDi backend — WebDriver BiDi's input.performActions \
+         pointerType has no 'touch' value in the stable spec (Playwright's own BiDi backend leaves \
+         Touchscreen unimplemented for the same reason). Use the cdp-pipe or cdp-raw backend for tap."
+        .to_string(),
+    )
+  }
+
   pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
     if mods.is_empty() {
       return Ok(());

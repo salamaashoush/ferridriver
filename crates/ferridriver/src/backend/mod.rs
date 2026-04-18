@@ -427,6 +427,20 @@ pub struct BackendHoverArgs {
   pub steps: u32,
 }
 
+/// Backend-ready tap arguments. Produced by
+/// [`crate::actions::tap_with_opts`] from the user's
+/// [`crate::options::TapOptions`]. Only CDP implements this natively
+/// via `Input.dispatchTouchEvent`; `BiDi` and `WebKit` return
+/// `FerriError::Unsupported` because neither exposes a public touch
+/// injection primitive.
+#[derive(Debug, Clone, Copy)]
+pub struct BackendTapArgs {
+  /// CDP modifier bitmask (same scheme as mouse/key events) carried on
+  /// the dispatched touch events so `event.shiftKey` etc. are true when
+  /// the caller requested them.
+  pub modifiers_bitmask: u32,
+}
+
 /// Navigation lifecycle target — which CDP event to wait for after Page.navigate.
 /// Matches Playwright's `waitUntil` semantics exactly.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -628,6 +642,21 @@ impl AnyPage {
     }
   }
 
+  /// The backend kind this page lives on. Used by action paths that
+  /// branch per-backend (e.g. `tap` needs a CDP-only native touch API
+  /// and returns `FerriError::Unsupported` on `BiDi` / `WebKit` where
+  /// the protocol has no public touch injection primitive).
+  #[must_use]
+  pub fn kind(&self) -> BackendKind {
+    match self {
+      AnyPage::CdpPipe(_) => BackendKind::CdpPipe,
+      AnyPage::CdpRaw(_) => BackendKind::CdpRaw,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(_) => BackendKind::WebKit,
+      AnyPage::Bidi(_) => BackendKind::Bidi,
+    }
+  }
+
   // ── Frames ──
 
   pub async fn get_frame_tree(&self) -> Result<Vec<FrameInfo>, String> {
@@ -762,6 +791,16 @@ impl AnyPage {
   /// on each. Modifier keydown/keyup is the caller's responsibility.
   pub async fn hover_at_with(&self, x: f64, y: f64, args: &BackendHoverArgs) -> Result<(), String> {
     page_dispatch!(self, hover_at_with(x, y, args))
+  }
+
+  /// Dispatch a native tap at `(x, y)` — CDP `Input.dispatchTouchEvent`
+  /// (`touchStart` + `touchEnd`), matching Playwright's
+  /// `server/chromium/crInput.ts::RawTouchscreenImpl::tap`. `BiDi` and
+  /// `WebKit` do not expose a public touch injection primitive and
+  /// return a backend-level error with the `unsupported:` prefix;
+  /// callers should surface it as [`crate::error::FerriError::Unsupported`].
+  pub async fn tap_at_with(&self, x: f64, y: f64, args: &BackendTapArgs) -> Result<(), String> {
+    page_dispatch!(self, tap_at_with(x, y, args))
   }
 
   /// Press all modifiers in `mods` via the backend's keyboard input
