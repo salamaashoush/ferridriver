@@ -168,52 +168,17 @@ pub enum ConnectMode {
 }
 
 impl BrowserState {
-  /// Construct a `BrowserState` with `headless = false` and the
-  /// corresponding non-headless Chrome / Firefox binary resolved. See
-  /// [`BrowserState::new_with_headless`] when the caller knows the
-  /// headless flag up-front — that path keeps binary selection
-  /// consistent with it, so `headless = true` picks Chrome Headless
-  /// Shell rather than full Chrome.
-  #[must_use]
-  pub fn new(connect_mode: ConnectMode, backend_kind: BackendKind) -> Self {
-    Self::new_with_headless(connect_mode, backend_kind, false)
-  }
-
-  /// Construct a `BrowserState` with the headless flag applied
-  /// up-front, so binary resolution (Chrome Headless Shell vs full
-  /// Chrome; Firefox honours only `FIREFOX_PATH` either way) agrees
-  /// with the flag. This matters because launching headless Chrome
-  /// (the regular browser app) retains the user's macOS system
-  /// appearance — including `prefers-color-scheme: dark` when the OS
-  /// is in dark mode — whereas Chrome Headless Shell defaults to
-  /// light. Downstream CDP `Emulation.setEmulatedMedia` resets
-  /// correctly but can't un-pick the system's own preference, so
-  /// consumers that expect a clean light baseline must run on
-  /// headless-shell.
-  #[must_use]
-  pub fn new_with_headless(connect_mode: ConnectMode, backend_kind: BackendKind, headless: bool) -> Self {
-    let chromium_path = match backend_kind {
-      BackendKind::Bidi => std::env::var("FIREFOX_PATH")
-        .or_else(|_| detect_firefox().map_err(|_| std::env::VarError::NotPresent))
-        .unwrap_or_else(|_| resolve_chromium(headless)),
-      _ => resolve_chromium(headless),
-    };
-    Self {
-      instances: HashMap::default(),
-      chromium_path,
-      connect_mode,
-      backend_kind,
-      extra_args: Vec::new(),
-      instance_args_fn: None,
-      instance_resolver_fn: None,
-      headless,
-      user_data_dir: None,
-      default_viewport: Some(crate::options::ViewportConfig::default()),
-      close_reason: None,
-    }
-  }
-
-  /// Create state from `LaunchOptions`.
+  /// Construct a `BrowserState` from a Playwright-shaped
+  /// [`LaunchOptions`](crate::options::LaunchOptions) bag. This is the
+  /// single construction path — there used to be a parallel
+  /// `new(mode, backend)` shortcut that hard-coded `headless = false`,
+  /// which silently launched full Google Chrome for MCP servers even
+  /// when the CLI passed `--headless`. Full Chrome inherits the macOS
+  /// system appearance (including `prefers-color-scheme: dark` on
+  /// dark-mode hosts), which broke `emulateMedia` reset behaviour
+  /// tested via `run_script`. Funneling everyone through
+  /// `LaunchOptions` guarantees binary resolution stays aligned with
+  /// the caller's headless intent.
   #[must_use]
   pub fn with_options(connect_mode: ConnectMode, opts: crate::options::LaunchOptions) -> Self {
     let chromium_path = if let Some(path) = opts.executable_path {
@@ -1528,15 +1493,31 @@ mod tests {
   use super::*;
   use crate::backend::BackendKind;
 
+  /// Test helper: build a `BrowserState` with the minimum `LaunchOptions`
+  /// needed to exercise the resolver/args plumbing. Using
+  /// `LaunchOptions::default()` here keeps these tests in lock-step with
+  /// the single production construction path
+  /// ([`BrowserState::with_options`]).
+  fn test_state(backend: BackendKind) -> BrowserState {
+    BrowserState::with_options(
+      ConnectMode::Launch,
+      crate::options::LaunchOptions {
+        backend,
+        headless: false,
+        ..Default::default()
+      },
+    )
+  }
+
   #[test]
   fn test_instance_resolver_none_by_default() {
-    let state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpPipe);
+    let state = test_state(BackendKind::CdpPipe);
     assert!(state.instance_resolver_fn.is_none());
   }
 
   #[test]
   fn test_instance_resolver_returns_connect_url() {
-    let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpPipe);
+    let mut state = test_state(BackendKind::CdpPipe);
     state.set_instance_resolver_fn(Box::new(|instance| match instance {
       "staging" => Some(ConnectMode::ConnectUrl(
         "ws://127.0.0.1:9222/devtools/browser/abc".to_owned(),
@@ -1555,7 +1536,7 @@ mod tests {
 
   #[test]
   fn test_instance_args_fn_independent_of_resolver() {
-    let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpPipe);
+    let mut state = test_state(BackendKind::CdpPipe);
 
     state.set_instance_args_fn(Box::new(|instance| vec![format!("--window-name={instance}")]));
 
@@ -1578,7 +1559,7 @@ mod tests {
       // listener drops here, port is free
     };
 
-    let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpRaw);
+    let mut state = test_state(BackendKind::CdpRaw);
     state.set_instance_resolver_fn(Box::new(move |instance| {
       if instance == "test-resolved" {
         Some(ConnectMode::ConnectUrl(format!(
@@ -1610,7 +1591,7 @@ mod tests {
     let call_count = Arc::new(AtomicU32::new(0));
     let counter = Arc::clone(&call_count);
 
-    let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpPipe);
+    let mut state = test_state(BackendKind::CdpPipe);
     state.set_instance_resolver_fn(Box::new(move |_| {
       counter.fetch_add(1, Ordering::Relaxed);
       None // Fall through to default

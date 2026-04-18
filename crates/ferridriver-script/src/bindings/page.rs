@@ -712,6 +712,7 @@ fn parse_screenshot_options<'js>(
         full_page: js.full_page,
         format: js.format,
         quality: js.quality,
+        ..Default::default()
       })
     },
     _ => Ok(ferridriver::options::ScreenshotOptions::default()),

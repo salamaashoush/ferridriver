@@ -975,8 +975,15 @@ connect_url = "ws://prod-browser:9222/devtools"
     let config: Arc<dyn McpServerConfig> = Arc::new(config);
 
     // Simulate what McpServer::with_options does
-    let mut state = BrowserState::new(ConnectMode::Launch, BackendKind::CdpPipe);
-    state.extra_args = config.chrome_args();
+    let mut state = BrowserState::with_options(
+      ConnectMode::Launch,
+      ferridriver::options::LaunchOptions {
+        backend: BackendKind::CdpPipe,
+        headless: false,
+        args: config.chrome_args(),
+        ..Default::default()
+      },
+    );
 
     let config_clone = Arc::clone(&config);
     state.set_instance_args_fn(Box::new(move |instance| {

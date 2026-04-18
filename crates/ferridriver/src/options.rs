@@ -112,13 +112,66 @@ pub struct WaitOptions {
   pub timeout: Option<u64>,
 }
 
-/// Options for screenshots.
+/// Full Playwright `PageScreenshotOptions` surface — 13 fields. Mirrors
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280` plus
+/// the `LocatorScreenshotOptions` subset for `Locator.screenshot()` (which
+/// omits `full_page` and `clip` — the locator takes the screenshot of its
+/// own element, not a pixel rectangle).
+///
+/// Semantics per field:
+/// - `animations` — `"disabled"` pauses CSS/Web Animations during capture;
+///   `"allow"` (default) leaves them untouched. Finite animations are
+///   fast-forwarded to completion (fires `transitionend`); infinite ones
+///   revert to initial state.
+/// - `caret` — `"hide"` (default) hides the text caret; `"initial"`
+///   keeps it visible.
+/// - `clip` — pixel rectangle relative to the viewport (not full page).
+///   Only meaningful for `Page::screenshot`; ignored by `Locator`.
+/// - `full_page` — capture the entire scrollable page. Only meaningful
+///   for `Page::screenshot`.
+/// - `mask` — selectors (held as strings so NAPI/BDD can pass through
+///   without materialising a full `Locator`) whose matches are overlaid
+///   with `mask_color` before capture.
+/// - `mask_color` — CSS color for the mask overlay. Defaults to pink
+///   `#FF00FF`.
+/// - `omit_background` — transparent background when `true`. Ignored for
+///   `jpeg` / `jpg` (no alpha channel).
+/// - `path` — if set, the captured bytes are also written to disk.
+/// - `quality` — 0–100 for `jpeg` / `webp`. Ignored for `png`.
+/// - `scale` — `"css"` for 1 pixel per CSS pixel; `"device"` (default)
+///   for 1 pixel per device pixel (Retina captures are 2× bigger).
+/// - `style` — raw CSS injected via `addStyleTag` before capture and
+///   removed afterwards. Pierces shadow DOM and applies to subframes.
+/// - `timeout` — max ms for the capture. `0` = no timeout.
+/// - `format` — `"png"` (default), `"jpeg"`, or `"webp"`. Mirrors
+///   Playwright's `type` field (renamed because `type` is reserved in
+///   Rust). For CDP both `jpeg` and `webp` honour `quality`; `webp`
+///   additionally supports transparency.
 #[derive(Debug, Clone, Default)]
 pub struct ScreenshotOptions {
+  pub animations: Option<String>,
+  pub caret: Option<String>,
+  pub clip: Option<ClipRect>,
   pub full_page: Option<bool>,
-  /// "png", "jpeg", "webp"
   pub format: Option<String>,
+  pub mask: Vec<String>,
+  pub mask_color: Option<String>,
+  pub omit_background: Option<bool>,
+  pub path: Option<std::path::PathBuf>,
   pub quality: Option<i64>,
+  pub scale: Option<String>,
+  pub style: Option<String>,
+  pub timeout: Option<u64>,
+}
+
+/// Pixel-rectangle clip for [`ScreenshotOptions::clip`]. All values are in
+/// CSS pixels relative to the viewport's top-left corner.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ClipRect {
+  pub x: f64,
+  pub y: f64,
+  pub width: f64,
+  pub height: f64,
 }
 
 /// Element bounding box in viewport coordinates.
