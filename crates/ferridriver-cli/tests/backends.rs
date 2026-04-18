@@ -844,6 +844,114 @@ fn test_script_mouse_wheel(c: &mut McpClient) {
   );
 }
 
+// Task 1.5: full `ClickOptions` surface — exercise button, modifiers,
+// delay, position, clickCount, trial, and the error paths for unknown
+// button / modifier strings. Every sub-assertion is a distinct DOM
+// probe so per-option failures point at the exact wire bug.
+fn test_script_click_options(c: &mut McpClient) {
+  // button:'right' → contextmenu fires with event.button === 2.
+  c.nav(
+    "<button id='b' oncontextmenu=\"document.getElementById('out').textContent='right';return false\">b</button><div id='out'>n</div>",
+  );
+  let v = c.script_value(
+    "await page.locator('#b').click({ button: 'right' });\
+     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+  );
+  assert_eq!(v, json!("right"), "button=right fires contextmenu: {v}");
+
+  // clickCount:2 → dblclick handler fires.
+  c.nav(
+    "<button id='b'>b</button><div id='out'>n</div>\
+     <script>document.getElementById('b').addEventListener('dblclick',()=>document.getElementById('out').textContent='dbl')</script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#b').click({ clickCount: 2 });\
+     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+  );
+  assert_eq!(v, json!("dbl"), "clickCount=2 fires dblclick: {v}");
+
+  // modifiers:['Shift'] → click event has shiftKey === true.
+  c.nav(
+    "<button id='b'>b</button><div id='out'>n</div>\
+     <script>document.getElementById('b').addEventListener('click',e=>document.getElementById('out').textContent=e.shiftKey?'shift':'none')</script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#b').click({ modifiers: ['Shift'] });\
+     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+  );
+  assert_eq!(v, json!("shift"), "modifiers Shift sets event.shiftKey: {v}");
+
+  // position:{x:10,y:20} → event coords land at padding-box offset.
+  c.nav(
+    "<div id='b' style='width:200px;height:100px;background:#ccc'></div><div id='out'>n</div>\
+     <script>document.getElementById('b').addEventListener('click',e=>{var r=e.currentTarget.getBoundingClientRect();document.getElementById('out').textContent=(Math.round(e.clientX-r.left))+','+(Math.round(e.clientY-r.top))})</script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#b').click({ position: { x: 10, y: 20 } });\
+     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+  );
+  assert_eq!(v, json!("10,20"), "position offsets click coords: {v}");
+
+  // delay:100 → mousedown→mouseup gap is honored (allow slack for
+  // timer resolution; demand ≥ 80ms so flaky schedulers still pass).
+  c.nav(
+    "<button id='b'>b</button><div id='out'>0</div>\
+     <script>\
+       let down=0;\
+       const b=document.getElementById('b');\
+       b.addEventListener('mousedown',()=>{down=Date.now()});\
+       b.addEventListener('mouseup',()=>{document.getElementById('out').textContent=String(Date.now()-down)});\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#b').click({ delay: 120 });\
+     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+  );
+  let ms = v.as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
+  assert!(ms >= 80, "delay=120 held mousedown at least 80ms: got {ms} ({v})");
+
+  // trial:true → click handler doesn't fire, but modifier keydown does.
+  c.nav(
+    "<button id='b'>b</button><div id='clicked'>no</div><div id='kd'>none</div>\
+     <script>\
+       document.getElementById('b').addEventListener('click',()=>document.getElementById('clicked').textContent='yes');\
+       document.addEventListener('keydown',e=>{if(e.key==='Shift')document.getElementById('kd').textContent='shift'});\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#b').click({ trial: true, modifiers: ['Shift'] });\
+     return {\
+       clicked: JSON.parse(await page.evaluate('document.getElementById(\"clicked\").textContent')),\
+       kd: JSON.parse(await page.evaluate('document.getElementById(\"kd\").textContent')),\
+     };",
+  );
+  assert_eq!(v["clicked"], json!("no"), "trial=true skips click handler: {v}");
+  assert_eq!(v["kd"], json!("shift"), "trial=true still presses modifiers: {v}");
+
+  // Bad button string → typed error, not silent default.
+  let v = c.script_value(
+    "try {\
+       await page.locator('#b').click({ button: 'garbage' });\
+       return 'no-throw';\
+     } catch (e) { return String(e.message || e); }",
+  );
+  let msg = v.as_str().unwrap_or("");
+  assert!(
+    msg.contains("Unknown mouse button"),
+    "bad button errors with exact message: {v}"
+  );
+
+  // Bad modifier string → typed error.
+  let v = c.script_value(
+    "try {\
+       await page.locator('#b').click({ modifiers: ['Hyper'] });\
+       return 'no-throw';\
+     } catch (e) { return String(e.message || e); }",
+  );
+  let msg = v.as_str().unwrap_or("");
+  assert!(msg.contains("Unknown modifier"), "bad modifier errors: {v}");
+}
+
 // Task 3.25: `page.addInitScript(script, arg)` — exercise the full
 // Playwright surface (Function + arg, string, `{ content }`) from QuickJS
 // end-to-end, including the Rust-core-driven `Cannot evaluate a string with
@@ -1332,6 +1440,7 @@ fn run_all_tests(backend: &str) {
   run!(test_script_emulate_media_all_fields);
   run!(test_script_emulate_media_null_disables_single_field);
   run!(test_script_add_init_script);
+  run!(test_script_click_options);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
 

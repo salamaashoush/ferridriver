@@ -403,13 +403,14 @@ impl Frame {
 
   // -- Mouse / pointer ---------------------------------------------------
 
-  /// Click the element matched by `selector`.
+  /// Click the element matched by `selector`. Accepts Playwright's full
+  /// `FrameClickOptions` bag (see [`crate::options::ClickOptions`]).
   ///
   /// # Errors
   ///
   /// Returns an error if the element is not found or the click fails.
-  pub async fn click(&self, selector: &str) -> Result<()> {
-    self.locator(selector, None).click().await
+  pub async fn click(&self, selector: &str, opts: Option<crate::options::ClickOptions>) -> Result<()> {
+    self.locator(selector, None).click(opts).await
   }
 
   /// Double-click the element matched by `selector`.

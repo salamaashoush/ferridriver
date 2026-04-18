@@ -94,7 +94,7 @@ fn make_interaction_test(i: usize) -> TestCase {
           diff: None,
           screenshot: None,
         })?;
-        page.locator("#btn", None).click().await.map_err(|e| TestFailure {
+        page.locator("#btn", None).click(None).await.map_err(|e| TestFailure {
           message: e.to_string(),
           stack: None,
           diff: None,

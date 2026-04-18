@@ -122,8 +122,14 @@ impl FrameJs {
   // to this frame's execution context via `Frame::locator`.
 
   #[qjs(rename = "click")]
-  pub async fn click(&self, selector: String) -> rquickjs::Result<()> {
-    self.inner.click(&selector).await.into_js()
+  pub async fn click<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
+    self.inner.click(&selector, opts).await.into_js()
   }
 
   #[qjs(rename = "dblclick")]

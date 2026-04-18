@@ -22,7 +22,7 @@ async fn main() {
       .goto("data:text/html,<title>T</title><button id='b'>Go</button>", None)
       .await
       .unwrap();
-    page.locator("#b", None).click().await.unwrap();
+    page.locator("#b", None).click(None).await.unwrap();
     let _ = page.locator("#b", None).text_content().await.unwrap();
     ctx.close().await.ok();
     eprintln!("  cycle {i}: {}ms", t.elapsed().as_millis());

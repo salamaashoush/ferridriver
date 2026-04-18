@@ -42,7 +42,7 @@ async fn main() {
           wid * iters + i
         );
         page.goto(&url, None).await.unwrap();
-        page.locator("#b", None).click().await.unwrap();
+        page.locator("#b", None).click(None).await.unwrap();
         let _ = page.locator("#b", None).text_content().await.unwrap();
         ctx.close().await.ok();
       }

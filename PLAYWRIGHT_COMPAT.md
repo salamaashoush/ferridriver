@@ -85,11 +85,15 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 1.5 Action option bags on Locator and Page
 
-- [ ] Add full Playwright option bags to every action method.
+- [~] Click shipped (all backends, all options). Dblclick/hover/fill/type/press/check/uncheck/setChecked/tap/dragTo/dispatchEvent/selectOption/setInputFiles still pending — fan out the Click pattern.
 - **Playwright ref**: `LocatorClickOptions`, `LocatorHoverOptions`, `LocatorFillOptions`, `LocatorPressOptions`, `LocatorTypeOptions`, `LocatorCheckOptions`, `LocatorSetCheckedOptions`, `LocatorTapOptions`, `LocatorDblClickOptions`, `LocatorDragToOptions`, `LocatorScreenshotOptions`, `LocatorWaitForOptions` in `types.d.ts`.
 - **Files**: `crates/ferridriver/src/options.rs` (new structs); `crates/ferridriver/src/locator.rs`; `crates/ferridriver/src/page.rs`; `crates/ferridriver-node/src/locator.rs`; `crates/ferridriver-node/src/page.rs`.
 - **Per-option coverage** (all fields, not a subset):
-  - Click: `button`, `click_count`, `delay`, `force`, `modifiers`, `no_wait_after`, `position`, `timeout`, `trial`.
+  - [x] Click: `button`, `click_count`, `delay`, `force`, `modifiers`, `no_wait_after`, `position`, `steps`, `timeout`, `trial`.
+    - Core: new `MouseButton`, `Modifier`, `modifiers_bitmask`, `ClickOptions` (+ `resolved_*` helpers) in `options.rs`; shared `actions::click_with_opts(el, page, opts)` that scrolls-into-view, honors `force` (skip actionability), `trial` (skip click but still press/release modifiers), and delegates to `BackendClickArgs` for the wire dispatch.
+    - Backends: every backend grew `click_at_with(x, y, args)` + `press_modifiers(&mods)` + `release_modifiers(&mods)` in the same commit. CDP dispatches `Input.dispatchKeyEvent` for modifier keydown/keyup + `Input.dispatchMouseEvent` with the CDP modifier bitmask; BiDi uses `input.performActions` with separate `key` + `pointer` action sources + a `pause` action for `delay`; WebKit's IPC host grew a `held_modifier_flags` field on `ViewEntry` so `OP_KEY_DOWN` / `OP_KEY_UP` track Shift/Option/Command/Control and the next `OP_MOUSE_EVENT` carries them on the synthesised `NSEvent`. Middle-click takes a CGEvent path (since `NSEvent mouseEventWithType:` leaves `buttonNumber=0`, which WKWebView surfaces as DOM `button=0`) + a belt-and-suspenders JS `MouseEvent` dispatch for DOM `auxclick` reliability in offscreen WKWebView.
+    - NAPI: `ClickOptions` `#[napi(object)]` with `ts_type` unions for `button` and `modifiers`; `TryFrom<ClickOptions> for core::ClickOptions` raises `Unknown mouse button` / `Unknown modifier` as typed errors. Nine new `bun test` cases cover every field + the error paths.
+    - QuickJS: shared `bindings/convert::parse_click_options` lowers the JS bag into core; one backends live-browser test exercises button/clickCount/modifiers/position/delay/trial + the error paths across all four backends.
   - Hover: `force`, `modifiers`, `no_wait_after`, `position`, `timeout`, `trial`.
   - Fill: `force`, `no_wait_after`, `timeout`.
   - Type: `delay`, `no_wait_after`, `timeout`.

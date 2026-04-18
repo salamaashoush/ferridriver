@@ -755,6 +755,36 @@ impl BidiPage {
     Ok(())
   }
 
+  pub async fn click_at_with(&self, x: f64, y: f64, args: &super::super::BackendClickArgs) -> Result<(), String> {
+    self
+      .cmd(
+        "input.performActions",
+        input::click_with_args(&self.context_id, x, y, args),
+      )
+      .await?;
+    Ok(())
+  }
+
+  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+    if mods.is_empty() {
+      return Ok(());
+    }
+    self
+      .cmd("input.performActions", input::modifiers_down(&self.context_id, mods))
+      .await?;
+    Ok(())
+  }
+
+  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+    if mods.is_empty() {
+      return Ok(());
+    }
+    self
+      .cmd("input.performActions", input::modifiers_up(&self.context_id, mods))
+      .await?;
+    Ok(())
+  }
+
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
     self
       .cmd("input.performActions", input::pointer_move(&self.context_id, x, y))

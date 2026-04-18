@@ -48,6 +48,85 @@ pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>
   serde_json::from_str(&json).map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
 }
 
+/// Shape of a JS `{ x, y }` point passed as `position` in click-family
+/// options. Deserialised out of the raw `ClickOptions` JS object.
+#[derive(serde::Deserialize, Debug, Default, Clone, Copy)]
+struct JsClickPosition {
+  x: f64,
+  y: f64,
+}
+
+impl From<JsClickPosition> for ferridriver::options::Point {
+  fn from(p: JsClickPosition) -> Self {
+    Self { x: p.x, y: p.y }
+  }
+}
+
+/// Raw JS shape of Playwright's `ClickOptions` — deserialised via
+/// `serde_from_js` and then lowered to
+/// [`ferridriver::options::ClickOptions`] by [`parse_click_options`].
+/// Strings (`button`, `modifiers`) are validated at lowering time so
+/// typos surface as `FerriError::InvalidArgument` rather than silent
+/// defaults.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsClickOptions {
+  button: Option<String>,
+  click_count: Option<u32>,
+  delay: Option<u64>,
+  force: Option<bool>,
+  modifiers: Option<Vec<String>>,
+  no_wait_after: Option<bool>,
+  position: Option<JsClickPosition>,
+  steps: Option<u32>,
+  timeout: Option<u64>,
+  trial: Option<bool>,
+}
+
+/// Parse Playwright's `ClickOptions` JS bag into the core struct.
+/// Accepts `Opt<Value>` so callers pass `Opt(options)` verbatim; `None`,
+/// `undefined`, or `null` → `Ok(None)`. Unknown `button` / `modifier`
+/// strings raise a typed `rquickjs::Error` with the exact Playwright
+/// message so JS-side assertions see `/Unknown (button|modifier)/` for
+/// drift detection.
+pub fn parse_click_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::ClickOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsClickOptions = serde_from_js(ctx, raw)?;
+  let button = match js.button.as_deref() {
+    None => None,
+    Some(s) => Some(ferridriver::options::MouseButton::parse(s).ok_or_else(|| {
+      rquickjs::Error::new_from_js_message("ferridriver", "click", format!("Unknown mouse button: {s}"))
+    })?),
+  };
+  let mut modifiers = Vec::new();
+  if let Some(list) = js.modifiers {
+    for name in list {
+      let m = ferridriver::options::Modifier::parse(&name).ok_or_else(|| {
+        rquickjs::Error::new_from_js_message("ferridriver", "click", format!("Unknown modifier: {name}"))
+      })?;
+      modifiers.push(m);
+    }
+  }
+  Ok(Some(ferridriver::options::ClickOptions {
+    button,
+    click_count: js.click_count,
+    delay: js.delay,
+    force: js.force,
+    modifiers,
+    no_wait_after: js.no_wait_after,
+    position: js.position.map(Into::into),
+    steps: js.steps,
+    timeout: js.timeout,
+    trial: js.trial,
+  }))
+}
+
 /// Lower an `addInitScript`-style JS argument into
 /// [`ferridriver::options::InitScriptSource`] plus an optional JSON arg.
 /// Mirrors Playwright's

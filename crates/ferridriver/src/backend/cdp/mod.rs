@@ -1577,6 +1577,111 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// Dispatch a click at `(x, y)` honoring the full Playwright option
+  /// bag: `button`, `click_count`, modifiers bitmask, delay between
+  /// press/release, and `steps` interpolated mousemoves from the last
+  /// cursor position to the target. Modifier keydown/keyup is done by
+  /// the caller via [`Self::press_modifiers`] /
+  /// [`Self::release_modifiers`].
+  pub async fn click_at_with(&self, x: f64, y: f64, args: &super::BackendClickArgs) -> Result<(), String> {
+    let button = args.button.as_cdp();
+    let mods = args.modifiers_bitmask;
+    // Steps-1 intermediate mousemoves + one final at (x,y). Playwright
+    // default is `steps: 1` → single mousemove at dest. Mirror that by
+    // emitting a `mouseMoved` at the target before press so the page
+    // sees the move even when we can't track the prior cursor.
+    let steps = args.steps.max(1);
+    for i in 1..=steps {
+      let t = f64::from(i) / f64::from(steps);
+      let sx = x * t; // conservative: interpolate from (0,0) when we lack prior-pos state
+      let sy = y * t;
+      self
+        .cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mouseMoved",
+            "x": if i == steps { x } else { sx },
+            "y": if i == steps { y } else { sy },
+            "modifiers": mods,
+          }),
+        )
+        .await?;
+    }
+    for n in 1..=args.click_count {
+      self
+        .cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mousePressed",
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": n,
+            "modifiers": mods,
+          }),
+        )
+        .await?;
+      if args.delay_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(args.delay_ms)).await;
+      }
+      self
+        .cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mouseReleased",
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": n,
+            "modifiers": mods,
+          }),
+        )
+        .await?;
+    }
+    Ok(())
+  }
+
+  /// Press each modifier in `mods` via CDP
+  /// `Input.dispatchKeyEvent { type: "keyDown" }`. `key` is the
+  /// platform-resolved key name (e.g. `"Meta"` on macOS for
+  /// `ControlOrMeta`) and `code` is the DOM `KeyboardEvent.code`.
+  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+    for md in mods {
+      self
+        .cmd(
+          "Input.dispatchKeyEvent",
+          serde_json::json!({
+            "type": "keyDown",
+            "key": md.key_name(),
+            "code": md.key_code(),
+            "modifiers": u32::from(md.cdp_bit()),
+          }),
+        )
+        .await?;
+    }
+    Ok(())
+  }
+
+  /// Release each modifier in `mods` via CDP
+  /// `Input.dispatchKeyEvent { type: "keyUp" }`. Iterates in reverse
+  /// order to match Playwright's unwind behavior in
+  /// `/tmp/playwright/packages/playwright-core/src/server/input.ts`.
+  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+    for md in mods.iter().rev() {
+      self
+        .cmd(
+          "Input.dispatchKeyEvent",
+          serde_json::json!({
+            "type": "keyUp",
+            "key": md.key_name(),
+            "code": md.key_code(),
+          }),
+        )
+        .await?;
+    }
+    Ok(())
+  }
+
   pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
     self
       .cmd(
