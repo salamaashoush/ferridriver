@@ -191,19 +191,28 @@ impl Frame {
     self.inner.click(&selector, opts).await.into_napi()
   }
 
+  /// Double-click the first element matching `selector` in this frame.
+  /// Accepts Playwright's full `FrameDblClickOptions` bag.
   #[napi]
-  pub async fn dblclick(&self, selector: String) -> Result<()> {
-    self.inner.dblclick(&selector).await.into_napi()
+  pub async fn dblclick(&self, selector: String, options: Option<crate::types::DblClickOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.dblclick(&selector, opts).await.into_napi()
   }
 
+  /// Hover the first element matching `selector` in this frame.
+  /// Accepts Playwright's full `FrameHoverOptions` bag.
   #[napi]
-  pub async fn hover(&self, selector: String) -> Result<()> {
-    self.inner.hover(&selector).await.into_napi()
+  pub async fn hover(&self, selector: String, options: Option<crate::types::HoverOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.hover(&selector, opts).await.into_napi()
   }
 
+  /// Tap the first element matching `selector` in this frame. Accepts
+  /// Playwright's full `FrameTapOptions` bag.
   #[napi]
-  pub async fn tap(&self, selector: String) -> Result<()> {
-    self.inner.tap(&selector).await.into_napi()
+  pub async fn tap(&self, selector: String, options: Option<crate::types::TapOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.tap(&selector, opts).await.into_napi()
   }
 
   #[napi]
@@ -212,43 +221,71 @@ impl Frame {
   }
 
   #[napi]
-  pub async fn fill(&self, selector: String, value: String) -> Result<()> {
-    self.inner.fill(&selector, &value).await.into_napi()
+  pub async fn fill(&self, selector: String, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.fill(&selector, &value, opts).await.into_napi()
   }
 
   #[napi(js_name = "type")]
-  pub async fn type_text(&self, selector: String, text: String) -> Result<()> {
-    self.inner.r#type(&selector, &text).await.into_napi()
+  pub async fn type_text(
+    &self,
+    selector: String,
+    text: String,
+    options: Option<crate::types::TypeOptions>,
+  ) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.r#type(&selector, &text, opts).await.into_napi()
   }
 
   #[napi]
-  pub async fn press(&self, selector: String, key: String) -> Result<()> {
-    self.inner.press(&selector, &key).await.into_napi()
+  pub async fn press(&self, selector: String, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.press(&selector, &key, opts).await.into_napi()
   }
 
   #[napi]
-  pub async fn check(&self, selector: String) -> Result<()> {
-    self.inner.check(&selector).await.into_napi()
+  pub async fn check(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.check(&selector, opts).await.into_napi()
   }
 
   #[napi]
-  pub async fn uncheck(&self, selector: String) -> Result<()> {
-    self.inner.uncheck(&selector).await.into_napi()
+  pub async fn uncheck(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.uncheck(&selector, opts).await.into_napi()
   }
 
   #[napi]
-  pub async fn set_checked(&self, selector: String, checked: bool) -> Result<()> {
-    self.inner.set_checked(&selector, checked).await.into_napi()
+  pub async fn set_checked(
+    &self,
+    selector: String,
+    checked: bool,
+    options: Option<crate::types::CheckOptions>,
+  ) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.set_checked(&selector, checked, opts).await.into_napi()
   }
 
   #[napi]
-  pub async fn select_option(&self, selector: String, value: String) -> Result<Vec<String>> {
-    self.inner.select_option(&selector, &value).await.into_napi()
+  pub async fn select_option(
+    &self,
+    selector: String,
+    values: crate::types::NapiSelectOptionInput,
+    options: Option<crate::types::SelectOptionOptions>,
+  ) -> Result<Vec<String>> {
+    let opts = options.map(Into::into);
+    self.inner.select_option(&selector, values.0, opts).await.into_napi()
   }
 
   #[napi]
-  pub async fn set_input_files(&self, selector: String, paths: Vec<String>) -> Result<()> {
-    self.inner.set_input_files(&selector, &paths).await.into_napi()
+  pub async fn set_input_files(
+    &self,
+    selector: String,
+    files: crate::types::NapiInputFiles,
+    options: Option<crate::types::SetInputFilesOptions>,
+  ) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.set_input_files(&selector, files.0, opts).await.into_napi()
   }
 
   /// Drag from `source` to `target` selectors within this frame.
@@ -265,8 +302,18 @@ impl Frame {
   }
 
   #[napi]
-  pub async fn dispatch_event(&self, selector: String, event_type: String) -> Result<()> {
-    self.inner.dispatch_event(&selector, &event_type).await.into_napi()
+  pub async fn dispatch_event(
+    &self,
+    selector: String,
+    event_type: String,
+    event_init: Option<serde_json::Value>,
+    options: Option<crate::types::DispatchEventOptions>,
+  ) -> Result<()> {
+    self
+      .inner
+      .dispatch_event(&selector, &event_type, event_init, options.map(Into::into))
+      .await
+      .into_napi()
   }
 
   #[napi]

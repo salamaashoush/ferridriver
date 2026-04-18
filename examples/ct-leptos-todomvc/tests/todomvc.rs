@@ -13,8 +13,8 @@ use ferridriver_test_macros::ferritest;
 const APP_URL: &str = "http://127.0.0.1:8787";
 
 async fn add_todo(page: &std::sync::Arc<Page>, text: &str) -> Result<(), String> {
-  page.locator("#new-todo", None).fill(text).await?;
-  page.locator("#new-todo", None).press("Enter").await?;
+  page.locator("#new-todo", None).fill(text, None).await?;
+  page.locator("#new-todo", None).press("Enter", None).await?;
   Ok(())
 }
 
@@ -45,7 +45,7 @@ async fn add_multiple_todos(ctx: TestContext) {
 async fn empty_input_does_not_add(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  page.locator("#new-todo", None).press("Enter").await?;
+  page.locator("#new-todo", None).press("Enter", None).await?;
   expect(&page.locator(".todo-list li", None)).to_have_count(0).await?;
 }
 
@@ -189,11 +189,11 @@ async fn edit_todo_on_double_click(ctx: TestContext) {
   add_todo(&page, "Original text").await.map_err(TestFailure::from)?;
   page
     .locator(".todo-list li:nth-child(1) label", None)
-    .dblclick()
+    .dblclick(None)
     .await?;
   expect(&page.locator(".edit-input", None)).to_be_visible().await?;
-  page.locator(".edit-input", None).fill("Updated text").await?;
-  page.locator(".edit-input", None).press("Enter").await?;
+  page.locator(".edit-input", None).fill("Updated text", None).await?;
+  page.locator(".edit-input", None).press("Enter", None).await?;
   expect(&page.locator(".todo-list li:nth-child(1) label", None))
     .to_have_text("Updated text")
     .await?;

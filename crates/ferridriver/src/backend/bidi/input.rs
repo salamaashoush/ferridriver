@@ -179,6 +179,33 @@ pub fn click_with_args(context: &str, x: f64, y: f64, args: &crate::backend::Bac
   })
 }
 
+/// Build a hover action — `steps` interpolated `pointerMove`s ending
+/// at `(x, y)`. No `pointerDown` / `pointerUp`. Modifier state on
+/// Firefox `BiDi` is carried via a prior `modifiers_down` call on a
+/// separate `key` source; `BiDi` doesn't accept a per-action modifier
+/// bitmask like CDP does.
+#[must_use]
+pub fn hover_with_args(context: &str, x: f64, y: f64, args: crate::backend::BackendHoverArgs) -> serde_json::Value {
+  let steps = args.steps.max(1);
+  let mut actions: Vec<serde_json::Value> = Vec::new();
+  for i in 1..=steps {
+    let t = f64::from(i) / f64::from(steps);
+    let sx = if i == steps { x } else { x * t };
+    let sy = if i == steps { y } else { y * t };
+    let duration: u64 = if steps > 1 { 100 / u64::from(steps) } else { 0 };
+    actions.push(json!({"type": "pointerMove", "x": coord(sx), "y": coord(sy), "duration": duration}));
+  }
+  json!({
+    "context": context,
+    "actions": [{
+      "type": "pointer",
+      "id": "mouse",
+      "parameters": {"pointerType": "mouse"},
+      "actions": actions
+    }]
+  })
+}
+
 /// Press a list of modifier keys via a single `key` input source.
 /// Each modifier fires `keyDown` with its Playwright key-name (e.g.
 /// `"Meta"` on macOS for `ControlOrMeta`).

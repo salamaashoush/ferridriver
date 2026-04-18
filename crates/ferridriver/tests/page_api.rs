@@ -71,7 +71,7 @@ async fn page_api_tests() {
 
   // ── Locator fill + input_value ──
   page.goto(&data_url("<input id='i' type='text'>"), None).await.unwrap();
-  page.locator("#i", None).fill("hello").await.unwrap();
+  page.locator("#i", None).fill("hello", None).await.unwrap();
   let v = page.locator("#i", None).input_value().await.unwrap();
   assert!(v.contains("hello"), "fill + input_value: {v}");
 
@@ -109,7 +109,7 @@ async fn page_api_tests() {
     .unwrap();
   page
     .get_by_label("Email", &TextOptions::default())
-    .fill("a@b.com")
+    .fill("a@b.com", None)
     .await
     .unwrap();
   let v = page.evaluate_str("document.getElementById('e').value").await.unwrap();
@@ -176,9 +176,9 @@ async fn page_api_tests() {
     .await
     .unwrap();
   assert!(!page.locator("#c", None).is_checked().await.unwrap(), "unchecked");
-  page.locator("#c", None).check().await.unwrap();
+  page.locator("#c", None).check(None).await.unwrap();
   assert!(page.locator("#c", None).is_checked().await.unwrap(), "checked");
-  page.locator("#c", None).uncheck().await.unwrap();
+  page.locator("#c", None).uncheck(None).await.unwrap();
   assert!(!page.locator("#c", None).is_checked().await.unwrap(), "unchecked again");
 
   // ── Editable ──
@@ -258,7 +258,7 @@ async fn page_api_tests() {
 
   // ── dblclick ──
   page.goto(&data_url("<h1 id='h'>0</h1><button id='b' onclick=\"document.getElementById('h').textContent=Number(document.getElementById('h').textContent)+1\">+</button>"), None).await.unwrap();
-  page.locator("#b", None).dblclick().await.unwrap();
+  page.locator("#b", None).dblclick(None).await.unwrap();
   let t = page
     .evaluate_str("document.getElementById('h').textContent")
     .await
@@ -282,7 +282,13 @@ async fn page_api_tests() {
     )
     .await
     .unwrap();
-  page.locator("#s", None).select_option("Banana").await.unwrap();
+  // Select by label text — the original test passed "Banana" which is
+  // the option's visible text, not its `value` attribute ("b").
+  page
+    .locator("#s", None)
+    .select_option(vec![SelectOptionValue::by_label("Banana")], None)
+    .await
+    .unwrap();
   let v = page.evaluate_str("document.getElementById('s').value").await.unwrap();
   assert!(v.contains("b"), "select_option: {v}");
 
@@ -876,18 +882,18 @@ async fn locator_set_checked_tap_select_text() {
     .await
     .unwrap();
   assert!(!page.locator("#cb", None).is_checked().await.unwrap());
-  page.locator("#cb", None).set_checked(true).await.unwrap();
+  page.locator("#cb", None).set_checked(true, None).await.unwrap();
   assert!(
     page.locator("#cb", None).is_checked().await.unwrap(),
     "should be checked after set_checked(true)"
   );
-  page.locator("#cb", None).set_checked(false).await.unwrap();
+  page.locator("#cb", None).set_checked(false, None).await.unwrap();
   assert!(
     !page.locator("#cb", None).is_checked().await.unwrap(),
     "should be unchecked after set_checked(false)"
   );
-  page.locator("#cb", None).set_checked(true).await.unwrap();
-  page.locator("#cb", None).set_checked(true).await.unwrap(); // idempotent
+  page.locator("#cb", None).set_checked(true, None).await.unwrap();
+  page.locator("#cb", None).set_checked(true, None).await.unwrap(); // idempotent
   assert!(
     page.locator("#cb", None).is_checked().await.unwrap(),
     "double set_checked(true) should still be checked"
@@ -900,7 +906,7 @@ async fn locator_set_checked_tap_select_text() {
 
   // tap -- listens for both touchend (Chrome) and pointerup with touch type (WebKit fallback)
   page.goto(&data_url("<button id='btn'>tap me</button><script>var b=document.getElementById('btn');b.addEventListener('touchend',function(){this.textContent='tapped'});b.addEventListener('pointerup',function(e){if(e.pointerType==='touch')this.textContent='tapped'})</script>"), None).await.unwrap();
-  page.locator("#btn", None).tap().await.unwrap();
+  page.locator("#btn", None).tap(None).await.unwrap();
   let text = page.locator("#btn", None).text_content().await.unwrap();
   assert_eq!(
     text.unwrap_or_default(),

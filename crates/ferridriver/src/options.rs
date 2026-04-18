@@ -545,6 +545,276 @@ impl ClickOptions {
   }
 }
 
+/// Options for `fill` (set an input's value). Mirrors Playwright's
+/// `LocatorFillOptions` per `types.d.ts` — three fields.
+/// `no_wait_after` is accepted for signature parity; `force` skips the
+/// fillable / editable actionability check.
+#[derive(Debug, Clone, Default)]
+pub struct FillOptions {
+  pub force: Option<bool>,
+  pub no_wait_after: Option<bool>,
+  pub timeout: Option<u64>,
+}
+
+impl FillOptions {
+  #[must_use]
+  pub fn is_force(&self) -> bool {
+    self.force.unwrap_or(false)
+  }
+}
+
+/// Options for `press` (single key press). Mirrors Playwright's
+/// `LocatorPressOptions` — three fields.
+#[derive(Debug, Clone, Default)]
+pub struct PressOptions {
+  /// Milliseconds to hold the key down between `keydown` and `keyup`.
+  pub delay: Option<u64>,
+  pub no_wait_after: Option<bool>,
+  pub timeout: Option<u64>,
+}
+
+impl PressOptions {
+  #[must_use]
+  pub fn resolved_delay_ms(&self) -> u64 {
+    self.delay.unwrap_or(0)
+  }
+}
+
+/// Options for `type` / `press_sequentially` (type text character-by-
+/// character). Mirrors Playwright's `LocatorTypeOptions` — three fields.
+#[derive(Debug, Clone, Default)]
+pub struct TypeOptions {
+  /// Milliseconds between consecutive `keydown` + `keyup` pairs.
+  pub delay: Option<u64>,
+  pub no_wait_after: Option<bool>,
+  pub timeout: Option<u64>,
+}
+
+impl TypeOptions {
+  #[must_use]
+  pub fn resolved_delay_ms(&self) -> u64 {
+    self.delay.unwrap_or(0)
+  }
+}
+
+/// Options for `check` / `uncheck` / `setChecked`. Mirrors Playwright's
+/// `LocatorCheckOptions` / `LocatorSetCheckedOptions` — five fields.
+/// Internally a check is a click on a checkbox/radio; these options
+/// mirror [`ClickOptions`] minus `button`, `click_count`, `delay`,
+/// `modifiers`, `steps`.
+#[derive(Debug, Clone, Default)]
+pub struct CheckOptions {
+  pub force: Option<bool>,
+  pub no_wait_after: Option<bool>,
+  pub position: Option<Point>,
+  pub timeout: Option<u64>,
+  pub trial: Option<bool>,
+}
+
+impl CheckOptions {
+  #[must_use]
+  pub fn is_force(&self) -> bool {
+    self.force.unwrap_or(false)
+  }
+
+  #[must_use]
+  pub fn is_trial(&self) -> bool {
+    self.trial.unwrap_or(false)
+  }
+
+  /// Lower to [`ClickOptions`] for the shared click dispatch path.
+  /// Check/uncheck/setChecked all internally click the element; the
+  /// caller-facing options only cover the click-invariant subset.
+  #[must_use]
+  pub fn into_click_options(self) -> ClickOptions {
+    ClickOptions {
+      button: None,
+      click_count: None,
+      delay: None,
+      force: self.force,
+      modifiers: Vec::new(),
+      no_wait_after: self.no_wait_after,
+      position: self.position,
+      steps: None,
+      timeout: self.timeout,
+      trial: self.trial,
+    }
+  }
+}
+
+/// A single descriptor used by `selectOption`. Mirrors Playwright's
+/// `SelectOptionValues` element shape per
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` — at
+/// least one of `value`, `label`, or `index` must be set. An array of
+/// these descriptors selects every `<option>` matching any descriptor
+/// (multi-select).
+#[derive(Debug, Clone, Default, serde::Serialize)]
+pub struct SelectOptionValue {
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub value: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub label: Option<String>,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub index: Option<u32>,
+}
+
+impl SelectOptionValue {
+  /// Shortcut for `{ value: Some(s), ... }` — the most common form.
+  #[must_use]
+  pub fn by_value(s: impl Into<String>) -> Self {
+    Self {
+      value: Some(s.into()),
+      ..Self::default()
+    }
+  }
+
+  /// Shortcut for `{ label: Some(s), ... }` — selects by the option's
+  /// visible text.
+  #[must_use]
+  pub fn by_label(s: impl Into<String>) -> Self {
+    Self {
+      label: Some(s.into()),
+      ..Self::default()
+    }
+  }
+
+  /// Shortcut for `{ index: Some(i), ... }`.
+  #[must_use]
+  pub fn by_index(i: u32) -> Self {
+    Self {
+      index: Some(i),
+      ..Self::default()
+    }
+  }
+}
+
+/// Options for `selectOption`. Mirrors Playwright's
+/// `LocatorSelectOptionOptions` — three fields.
+#[derive(Debug, Clone, Default)]
+pub struct SelectOptionOptions {
+  pub force: Option<bool>,
+  pub no_wait_after: Option<bool>,
+  pub timeout: Option<u64>,
+}
+
+/// Options for `setInputFiles`. Mirrors Playwright's
+/// `LocatorSetInputFilesOptions` — two fields.
+#[derive(Debug, Clone, Default)]
+pub struct SetInputFilesOptions {
+  pub no_wait_after: Option<bool>,
+  pub timeout: Option<u64>,
+}
+
+/// File payload for `setInputFiles`. Mirrors Playwright's
+/// `FilePayload` — caller supplies raw bytes plus the filename and MIME
+/// type that the page should see, avoiding any on-disk write.
+#[derive(Debug, Clone)]
+pub struct FilePayload {
+  pub name: String,
+  pub mime_type: String,
+  pub buffer: Vec<u8>,
+}
+
+/// Input-file argument for [`setInputFiles`]. Mirrors Playwright's
+/// `string | string[] | FilePayload | FilePayload[]` union from
+/// `types.d.ts` under `setInputFiles`.
+#[derive(Debug, Clone)]
+pub enum InputFiles {
+  /// Paths on disk — read and uploaded as-is.
+  Paths(Vec<std::path::PathBuf>),
+  /// In-memory payloads — uploaded without touching disk.
+  Payloads(Vec<FilePayload>),
+}
+
+/// Options for `dispatchEvent`. Mirrors Playwright's
+/// `LocatorDispatchEventOptions` — single field (`timeout`).
+#[derive(Debug, Clone, Default)]
+pub struct DispatchEventOptions {
+  pub timeout: Option<u64>,
+}
+
+/// Options for hover actions. Mirrors Playwright's
+/// `LocatorHoverOptions` / `PageHoverOptions` / `FrameHoverOptions` —
+/// see `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
+/// `hover`. Shape is [`ClickOptions`] minus `button`, `click_count`,
+/// `delay` (no press/release — just a `mousemove` at the target).
+#[derive(Debug, Clone, Default)]
+pub struct HoverOptions {
+  pub force: Option<bool>,
+  pub modifiers: Vec<Modifier>,
+  pub no_wait_after: Option<bool>,
+  pub position: Option<Point>,
+  pub steps: Option<u32>,
+  pub timeout: Option<u64>,
+  pub trial: Option<bool>,
+}
+
+impl HoverOptions {
+  /// `true` when the caller asked to bypass actionability checks.
+  #[must_use]
+  pub fn is_force(&self) -> bool {
+    self.force.unwrap_or(false)
+  }
+
+  /// `true` when the caller asked to run checks only (no mousemove).
+  #[must_use]
+  pub fn is_trial(&self) -> bool {
+    self.trial.unwrap_or(false)
+  }
+
+  /// [`Self::steps`] with the default `1` applied (and clamped to ≥1).
+  #[must_use]
+  pub fn resolved_steps(&self) -> u32 {
+    self.steps.unwrap_or(1).max(1)
+  }
+}
+
+/// Options for tap actions (touch input). Mirrors Playwright's
+/// `LocatorTapOptions` / `PageTapOptions` / `FrameTapOptions` —
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
+/// `tap`. Same shape as [`HoverOptions`] (touch-based, no button).
+pub type TapOptions = HoverOptions;
+
+/// Options for double-click actions. Mirrors Playwright's
+/// `LocatorDblClickOptions` / `PageDblClickOptions` /
+/// `FrameDblClickOptions` — identical to [`ClickOptions`] minus
+/// `click_count` (which is forced to `2` at dispatch time).
+/// See `/tmp/playwright/packages/playwright-core/types/types.d.ts:13116`.
+#[derive(Debug, Clone, Default)]
+pub struct DblClickOptions {
+  pub button: Option<MouseButton>,
+  pub delay: Option<u64>,
+  pub force: Option<bool>,
+  pub modifiers: Vec<Modifier>,
+  pub no_wait_after: Option<bool>,
+  pub position: Option<Point>,
+  pub steps: Option<u32>,
+  pub timeout: Option<u64>,
+  pub trial: Option<bool>,
+}
+
+impl DblClickOptions {
+  /// Lower to [`ClickOptions`] with `click_count` forced to `2`. The
+  /// shared click dispatch path then emits two `mousedown`/`mouseup`
+  /// pairs with `clickCount=1` then `clickCount=2` (matches Playwright's
+  /// `server/dom.ts::ElementHandle._dblclick`).
+  #[must_use]
+  pub fn into_click_options(self) -> ClickOptions {
+    ClickOptions {
+      button: self.button,
+      click_count: Some(2),
+      delay: self.delay,
+      force: self.force,
+      modifiers: self.modifiers,
+      no_wait_after: self.no_wait_after,
+      position: self.position,
+      steps: self.steps,
+      timeout: self.timeout,
+      trial: self.trial,
+    }
+  }
+}
+
 /// Options for [`crate::page::Page::drag_and_drop`] and
 /// [`crate::locator::Locator::drag_to`]. Mirrors Playwright's
 /// `FrameDragAndDropOptions & TimeoutOptions` surface per

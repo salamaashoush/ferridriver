@@ -19,7 +19,7 @@ async fn double_click(world: &mut BrowserWorld, selector: String) {
   world
     .page()
     .locator(&selector, None)
-    .dblclick()
+    .dblclick(None)
     .await
     .map_err(|e| StepError::from(format!("double click \"{selector}\": {e}")))?;
 }
@@ -39,7 +39,7 @@ async fn fill(world: &mut BrowserWorld, selector: String, value: String) {
   world
     .page()
     .locator(&selector, None)
-    .fill(&value)
+    .fill(&value, None)
     .await
     .map_err(|e| StepError::from(format!("fill \"{selector}\" with \"{value}\": {e}")))?;
 }
@@ -59,7 +59,7 @@ async fn type_into(world: &mut BrowserWorld, text: String, selector: String) {
   world
     .page()
     .locator(&selector, None)
-    .r#type(&text)
+    .r#type(&text, None)
     .await
     .map_err(|e| StepError::from(format!("type \"{text}\" into \"{selector}\": {e}")))?;
 }
@@ -69,7 +69,7 @@ async fn hover(world: &mut BrowserWorld, selector: String) {
   world
     .page()
     .locator(&selector, None)
-    .hover()
+    .hover(None)
     .await
     .map_err(|e| StepError::from(format!("hover \"{selector}\": {e}")))?;
 }
@@ -89,7 +89,10 @@ async fn select_option(world: &mut BrowserWorld, value: String, selector: String
   world
     .page()
     .locator(&selector, None)
-    .select_option(&value)
+    .select_option(
+      vec![ferridriver::options::SelectOptionValue::by_value(value.clone())],
+      None,
+    )
     .await
     .map_err(|e| StepError::from(format!("select \"{value}\" from \"{selector}\": {e}")))?;
 }
@@ -99,7 +102,7 @@ async fn check(world: &mut BrowserWorld, selector: String) {
   world
     .page()
     .locator(&selector, None)
-    .check()
+    .check(None)
     .await
     .map_err(|e| StepError::from(format!("check \"{selector}\": {e}")))?;
 }
@@ -109,7 +112,7 @@ async fn uncheck(world: &mut BrowserWorld, selector: String) {
   world
     .page()
     .locator(&selector, None)
-    .uncheck()
+    .uncheck(None)
     .await
     .map_err(|e| StepError::from(format!("uncheck \"{selector}\": {e}")))?;
 }
@@ -191,7 +194,7 @@ async fn tap_element(world: &mut BrowserWorld, selector: String) {
   world
     .page()
     .locator(&selector, None)
-    .tap()
+    .tap(None)
     .await
     .map_err(|e| StepError::from(format!("tap \"{selector}\": {e}")))?;
 }

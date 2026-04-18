@@ -435,56 +435,169 @@ impl PageJs {
     self.inner.click(&selector, opts).await.into_js()
   }
 
-  /// Double-click the first element matching `selector`.
+  /// Double-click the first element matching `selector`. Accepts
+  /// Playwright's full `PageDblClickOptions` bag.
   #[qjs(rename = "dblclick")]
-  pub async fn dblclick(&self, selector: String) -> rquickjs::Result<()> {
-    self.inner.dblclick(&selector).await.into_js()
+  pub async fn dblclick<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
+    self.inner.dblclick(&selector, opts).await.into_js()
   }
 
-  /// Fill `value` into the input matching `selector`.
+  /// Fill `value` into the input matching `selector`. Accepts
+  /// Playwright's full `PageFillOptions` bag.
   #[qjs(rename = "fill")]
-  pub async fn fill(&self, selector: String, value: String) -> rquickjs::Result<()> {
-    self.inner.fill(&selector, &value).await.into_js()
+  pub async fn fill<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    value: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
+    self.inner.fill(&selector, &value, opts).await.into_js()
   }
 
-  /// Type `text` into the input matching `selector`.
+  /// Type `text` into the input matching `selector`. Accepts
+  /// Playwright's full `PageTypeOptions` bag.
   ///
   /// Exposed as `type` in JS (matches Playwright) — Rust renames to avoid
   /// the `type` keyword.
   #[qjs(rename = "type")]
-  pub async fn type_(&self, selector: String, text: String) -> rquickjs::Result<()> {
-    self.inner.r#type(&selector, &text).await.into_js()
+  pub async fn type_<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    text: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
+    self.inner.r#type(&selector, &text, opts).await.into_js()
   }
 
-  /// Press `key` on the element matching `selector`.
+  /// Press `key` on the element matching `selector`. Accepts Playwright's
+  /// full `PagePressOptions` bag.
   #[qjs(rename = "press")]
-  pub async fn press(&self, selector: String, key: String) -> rquickjs::Result<()> {
-    self.inner.press(&selector, &key).await.into_js()
+  pub async fn press<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    key: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
+    self.inner.press(&selector, &key, opts).await.into_js()
   }
 
-  /// Hover the first element matching `selector`.
+  /// Hover the first element matching `selector`. Accepts Playwright's
+  /// full `PageHoverOptions` bag.
   #[qjs(rename = "hover")]
-  pub async fn hover(&self, selector: String) -> rquickjs::Result<()> {
-    self.inner.hover(&selector).await.into_js()
+  pub async fn hover<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
+    self.inner.hover(&selector, opts).await.into_js()
   }
 
-  /// Check a checkbox matching `selector`.
+  /// Dispatch a DOM event on the first element matching `selector`.
+  /// Mirrors Playwright's `page.dispatchEvent(selector, type, eventInit?, options?)`.
+  #[qjs(rename = "dispatchEvent")]
+  pub async fn dispatch_event<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    event_type: String,
+    event_init: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let init_json = match event_init.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        Some(crate::bindings::convert::serde_from_js::<serde_json::Value>(&ctx, v)?)
+      },
+      _ => None,
+    };
+    let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
+    self
+      .inner
+      .dispatch_event(&selector, &event_type, init_json, opts)
+      .await
+      .into_js()
+  }
+
+  /// Tap (touch) the first element matching `selector`. Accepts
+  /// Playwright's full `PageTapOptions` bag.
+  #[qjs(rename = "tap")]
+  pub async fn tap<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
+    self.inner.tap(&selector, opts).await.into_js()
+  }
+
+  /// Check a checkbox matching `selector`. Accepts Playwright's full
+  /// `PageCheckOptions` bag.
   #[qjs(rename = "check")]
-  pub async fn check(&self, selector: String) -> rquickjs::Result<()> {
-    self.inner.check(&selector).await.into_js()
+  pub async fn check<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+    self.inner.check(&selector, opts).await.into_js()
   }
 
-  /// Uncheck a checkbox matching `selector`.
+  /// Uncheck a checkbox matching `selector`. Accepts Playwright's full
+  /// `PageUncheckOptions` bag.
   #[qjs(rename = "uncheck")]
-  pub async fn uncheck(&self, selector: String) -> rquickjs::Result<()> {
-    self.inner.uncheck(&selector).await.into_js()
+  pub async fn uncheck<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+    self.inner.uncheck(&selector, opts).await.into_js()
   }
 
-  /// Select an option by value on a `<select>` matching `selector`. Returns
-  /// the values of the selected options.
+  /// Set the checked state of a checkbox/radio matching `selector`.
+  /// Accepts Playwright's full `PageSetCheckedOptions` bag.
+  #[qjs(rename = "setChecked")]
+  pub async fn set_checked<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    checked: bool,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+    self.inner.set_checked(&selector, checked, opts).await.into_js()
+  }
+
+  /// Select options on the `<select>` matching `selector`. Returns the
+  /// values of the selected options. Accepts Playwright's full
+  /// `string | string[] | { value?, label?, index? } | Array<...>` union.
   #[qjs(rename = "selectOption")]
-  pub async fn select_option(&self, selector: String, value: String) -> rquickjs::Result<Vec<String>> {
-    self.inner.select_option(&selector, &value).await.into_js()
+  pub async fn select_option<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    values: rquickjs::Value<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Vec<String>> {
+    let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
+    let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
+    self.inner.select_option(&selector, values, opts).await.into_js()
   }
 
   // ── Info ──────────────────────────────────────────────────────────────────
@@ -622,11 +735,20 @@ impl PageJs {
 
   // ── File input ────────────────────────────────────────────────────────────
 
-  /// Attach files to a `<input type="file">` selector. `paths` is a list of
-  /// absolute file paths.
+  /// Attach files to a `<input type="file">` selector. Accepts
+  /// Playwright's full `string | string[] | FilePayload | FilePayload[]`
+  /// union plus the `PageSetInputFilesOptions` bag.
   #[qjs(rename = "setInputFiles")]
-  pub async fn set_input_files(&self, selector: String, paths: Vec<String>) -> rquickjs::Result<()> {
-    self.inner.set_input_files(&selector, &paths).await.into_js()
+  pub async fn set_input_files<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    files: rquickjs::Value<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
+    let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
+    self.inner.set_input_files(&selector, files, opts).await.into_js()
   }
 
   // ── Emulation (page-scoped) ──────────────────────────────────────────────

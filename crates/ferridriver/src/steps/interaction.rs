@@ -41,7 +41,7 @@ step!(DoubleClick {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let loc = page.locator(&sel, None);
-        loc.dblclick().await?;
+        loc.dblclick(None).await?;
         Ok(None)
     }
 });
@@ -67,7 +67,7 @@ step!(Hover {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let loc = page.locator(&sel, None);
-        loc.hover().await?;
+        loc.hover(None).await?;
         Ok(None)
     }
 });
@@ -81,7 +81,7 @@ step!(Fill {
         let sel = q(&caps[1]);
         let val = q(&caps[2]);
         let loc = page.locator(&sel, None);
-        loc.fill(&val).await?;
+        loc.fill(&val, None).await?;
         Ok(None)
     }
 });
@@ -98,7 +98,7 @@ step!(FillForm {
                 let sel = &row[0];
                 let val = &row[1];
                 let loc = page.locator(sel, None);
-                loc.fill(val).await?;
+                loc.fill(val, None).await?;
             }
         }
         Ok(None)
@@ -113,7 +113,7 @@ step!(Clear {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let loc = page.locator(&sel, None);
-        loc.fill("").await?;
+        loc.fill("", None).await?;
         Ok(None)
     }
 });
@@ -190,7 +190,7 @@ step!(Check {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let loc = page.locator(&sel, None);
-        loc.check().await?;
+        loc.check(None).await?;
         Ok(None)
     }
 });
@@ -203,7 +203,7 @@ step!(Uncheck {
     execute(page, caps, _table, _vars) {
         let sel = q(&caps[1]);
         let loc = page.locator(&sel, None);
-        loc.uncheck().await?;
+        loc.uncheck(None).await?;
         Ok(None)
     }
 });

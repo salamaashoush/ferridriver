@@ -255,13 +255,24 @@ impl LocatorJs {
   }
 
   #[qjs(rename = "dblclick")]
-  pub async fn dblclick(&self) -> rquickjs::Result<()> {
-    self.inner.dblclick().await.into_js()
+  pub async fn dblclick<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
+    self.inner.dblclick(opts).await.into_js()
   }
 
   #[qjs(rename = "fill")]
-  pub async fn fill(&self, value: String) -> rquickjs::Result<()> {
-    self.inner.fill(&value).await.into_js()
+  pub async fn fill<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    value: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
+    self.inner.fill(&value, opts).await.into_js()
   }
 
   #[qjs(rename = "clear")]
@@ -270,18 +281,56 @@ impl LocatorJs {
   }
 
   #[qjs(rename = "type")]
-  pub async fn type_(&self, text: String) -> rquickjs::Result<()> {
-    self.inner.r#type(&text).await.into_js()
+  pub async fn type_<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    text: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
+    self.inner.r#type(&text, opts).await.into_js()
+  }
+
+  #[qjs(rename = "pressSequentially")]
+  pub async fn press_sequentially<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    text: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
+    self.inner.press_sequentially(&text, opts).await.into_js()
   }
 
   #[qjs(rename = "press")]
-  pub async fn press(&self, key: String) -> rquickjs::Result<()> {
-    self.inner.press(&key).await.into_js()
+  pub async fn press<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    key: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
+    self.inner.press(&key, opts).await.into_js()
   }
 
   #[qjs(rename = "hover")]
-  pub async fn hover(&self) -> rquickjs::Result<()> {
-    self.inner.hover().await.into_js()
+  pub async fn hover<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
+    self.inner.hover(opts).await.into_js()
+  }
+
+  #[qjs(rename = "tap")]
+  pub async fn tap<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
+    self.inner.tap(opts).await.into_js()
   }
 
   #[qjs(rename = "focus")]
@@ -295,28 +344,86 @@ impl LocatorJs {
   }
 
   #[qjs(rename = "check")]
-  pub async fn check(&self) -> rquickjs::Result<()> {
-    self.inner.check().await.into_js()
+  pub async fn check<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+    self.inner.check(opts).await.into_js()
   }
 
   #[qjs(rename = "uncheck")]
-  pub async fn uncheck(&self) -> rquickjs::Result<()> {
-    self.inner.uncheck().await.into_js()
+  pub async fn uncheck<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+    self.inner.uncheck(opts).await.into_js()
   }
 
   #[qjs(rename = "setChecked")]
-  pub async fn set_checked(&self, checked: bool) -> rquickjs::Result<()> {
-    self.inner.set_checked(checked).await.into_js()
+  pub async fn set_checked<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    checked: bool,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+    self.inner.set_checked(checked, opts).await.into_js()
   }
 
   #[qjs(rename = "selectOption")]
-  pub async fn select_option(&self, value: String) -> rquickjs::Result<Vec<String>> {
-    self.inner.select_option(&value).await.into_js()
+  pub async fn select_option<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    values: rquickjs::Value<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Vec<String>> {
+    let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
+    let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
+    self.inner.select_option(values, opts).await.into_js()
+  }
+
+  /// Attach files to a `<input type=file>` this locator matches.
+  /// Accepts Playwright's full
+  /// `string | string[] | FilePayload | FilePayload[]` union.
+  #[qjs(rename = "setInputFiles")]
+  pub async fn set_input_files<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    files: rquickjs::Value<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
+    let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
+    self.inner.set_input_files(files, opts).await.into_js()
   }
 
   #[qjs(rename = "scrollIntoViewIfNeeded")]
   pub async fn scroll_into_view_if_needed(&self) -> rquickjs::Result<()> {
     self.inner.scroll_into_view_if_needed().await.into_js()
+  }
+
+  /// Dispatch a DOM event on the element. Mirrors Playwright's
+  /// `locator.dispatchEvent(type, eventInit?, options?)`.
+  #[qjs(rename = "dispatchEvent")]
+  pub async fn dispatch_event<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    event_type: String,
+    event_init: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let init_json = match event_init.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        Some(crate::bindings::convert::serde_from_js::<serde_json::Value>(&ctx, v)?)
+      },
+      _ => None,
+    };
+    let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
+    self.inner.dispatch_event(&event_type, init_json, opts).await.into_js()
   }
 
   // ── Info ──────────────────────────────────────────────────────────────────

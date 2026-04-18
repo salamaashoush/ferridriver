@@ -251,6 +251,427 @@ impl TryFrom<ClickOptions> for ferridriver::options::ClickOptions {
   }
 }
 
+/// Playwright-parity options for `page.dblclick` / `locator.dblclick` /
+/// `frame.dblclick`. Mirrors `LocatorDblClickOptions` at
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13116`.
+/// Identical shape to [`ClickOptions`] minus `clickCount` (forced to 2
+/// at dispatch).
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct DblClickOptions {
+  #[napi(ts_type = "'left' | 'right' | 'middle'")]
+  pub button: Option<String>,
+  pub delay: Option<f64>,
+  pub force: Option<bool>,
+  #[napi(ts_type = "Array<'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift'>")]
+  pub modifiers: Option<Vec<String>>,
+  pub no_wait_after: Option<bool>,
+  pub position: Option<Point>,
+  pub steps: Option<u32>,
+  pub timeout: Option<f64>,
+  pub trial: Option<bool>,
+}
+
+impl TryFrom<DblClickOptions> for ferridriver::options::DblClickOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: DblClickOptions) -> std::result::Result<Self, Self::Error> {
+    let button = match o.button.as_deref() {
+      None => None,
+      Some(s) => Some(
+        ferridriver::options::MouseButton::parse(s)
+          .ok_or_else(|| napi::Error::from_reason(format!("Unknown mouse button: {s}")))?,
+      ),
+    };
+    let mut modifiers = Vec::new();
+    if let Some(list) = o.modifiers {
+      for name in list {
+        let m = ferridriver::options::Modifier::parse(&name)
+          .ok_or_else(|| napi::Error::from_reason(format!("Unknown modifier: {name}")))?;
+        modifiers.push(m);
+      }
+    }
+    Ok(Self {
+      button,
+      delay: o.delay.map(f64_to_u64),
+      force: o.force,
+      modifiers,
+      no_wait_after: o.no_wait_after,
+      position: o.position.map(Into::into),
+      steps: o.steps,
+      timeout: o.timeout.map(f64_to_u64),
+      trial: o.trial,
+    })
+  }
+}
+
+/// Single descriptor for `selectOption`. Mirrors Playwright's
+/// `{ value?, label?, index? }` object shape. At least one field must
+/// be set for a descriptor to match anything.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct SelectOptionValue {
+  pub value: Option<String>,
+  pub label: Option<String>,
+  pub index: Option<u32>,
+}
+
+impl From<SelectOptionValue> for ferridriver::options::SelectOptionValue {
+  fn from(o: SelectOptionValue) -> Self {
+    Self {
+      value: o.value,
+      label: o.label,
+      index: o.index,
+    }
+  }
+}
+
+/// In-memory file payload for `setInputFiles`. Matches Playwright's
+/// `FilePayload` — callers supply name, mimeType, and raw bytes.
+/// `napi::bindgen_prelude::Buffer` doesn't implement `Clone`/`Debug`
+/// (it holds a non-cloneable JS handle), so this struct does the same
+/// — it's used as an in-out shuttle type only.
+#[napi(object)]
+pub struct FilePayload {
+  pub name: String,
+  pub mime_type: String,
+  pub buffer: napi::bindgen_prelude::Buffer,
+}
+
+impl From<FilePayload> for ferridriver::options::FilePayload {
+  fn from(o: FilePayload) -> Self {
+    Self {
+      name: o.name,
+      mime_type: o.mime_type,
+      buffer: o.buffer.to_vec(),
+    }
+  }
+}
+
+/// Playwright-parity options for `setInputFiles`. Two fields.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct SetInputFilesOptions {
+  pub no_wait_after: Option<bool>,
+  pub timeout: Option<f64>,
+}
+
+impl From<SetInputFilesOptions> for ferridriver::options::SetInputFilesOptions {
+  fn from(o: SetInputFilesOptions) -> Self {
+    Self {
+      no_wait_after: o.no_wait_after,
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
+/// Polymorphic `files` argument for `setInputFiles`. Mirrors
+/// Playwright's `string | string[] | FilePayload | FilePayload[]`
+/// union via a custom `FromNapiValue` impl.
+#[derive(Debug, Clone)]
+pub struct NapiInputFiles(pub ferridriver::options::InputFiles);
+
+impl napi::bindgen_prelude::TypeName for NapiInputFiles {
+  fn type_name() -> &'static str {
+    "string | string[] | FilePayload | FilePayload[]"
+  }
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Unknown
+  }
+}
+
+impl napi::bindgen_prelude::ValidateNapiValue for NapiInputFiles {}
+
+impl napi::bindgen_prelude::FromNapiValue for NapiInputFiles {
+  unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    use napi::JsValue;
+    use napi::bindgen_prelude::JsObjectValue;
+    let unknown = unsafe { napi::Unknown::from_raw_unchecked(env, napi_val) };
+    match unknown.get_type()? {
+      napi::ValueType::String => {
+        let s = unknown.coerce_to_string()?.into_utf8()?.into_owned()?;
+        Ok(Self(ferridriver::options::InputFiles::Paths(vec![s.into()])))
+      },
+      napi::ValueType::Object => {
+        let obj = napi::bindgen_prelude::Object::from_raw(env, napi_val);
+        let is_array = unsafe {
+          let mut is_arr = false;
+          napi::check_status!(napi::sys::napi_is_array(env, napi_val, &raw mut is_arr))?;
+          is_arr
+        };
+        if is_array {
+          let len: u32 = obj.get("length")?.unwrap_or(0);
+          // Peek first entry to decide whether this is string[] or FilePayload[].
+          if len == 0 {
+            return Ok(Self(ferridriver::options::InputFiles::Paths(Vec::new())));
+          }
+          let first: napi::Unknown<'_> = obj.get_element(0)?;
+          if first.get_type()? == napi::ValueType::String {
+            let mut paths = Vec::with_capacity(len as usize);
+            for i in 0..len {
+              let s: String = obj.get_element(i)?;
+              paths.push(std::path::PathBuf::from(s));
+            }
+            Ok(Self(ferridriver::options::InputFiles::Paths(paths)))
+          } else {
+            let mut payloads = Vec::with_capacity(len as usize);
+            for i in 0..len {
+              let p: FilePayload = obj.get_element(i)?;
+              payloads.push(p.into());
+            }
+            Ok(Self(ferridriver::options::InputFiles::Payloads(payloads)))
+          }
+        } else {
+          let p: FilePayload = unsafe { unknown.cast()? };
+          Ok(Self(ferridriver::options::InputFiles::Payloads(vec![p.into()])))
+        }
+      },
+      other => Err(napi::Error::from_reason(format!(
+        "setInputFiles expects string | string[] | FilePayload | FilePayload[], got {other}"
+      ))),
+    }
+  }
+}
+
+/// Polymorphic `values` argument for `selectOption`. Mirrors
+/// Playwright's
+/// `string | string[] | { value?, label?, index? } | Array<...>`
+/// union at the NAPI boundary via a single custom `FromNapiValue` impl
+/// (avoids dumping `any` into the generated `.d.ts`).
+#[derive(Debug, Clone)]
+pub struct NapiSelectOptionInput(pub Vec<ferridriver::options::SelectOptionValue>);
+
+impl napi::bindgen_prelude::TypeName for NapiSelectOptionInput {
+  fn type_name() -> &'static str {
+    "string | string[] | { value?, label?, index? } | Array<{ value?, label?, index? }>"
+  }
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Unknown
+  }
+}
+
+impl napi::bindgen_prelude::ValidateNapiValue for NapiSelectOptionInput {}
+
+impl napi::bindgen_prelude::FromNapiValue for NapiSelectOptionInput {
+  unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    use napi::JsValue;
+    use napi::bindgen_prelude::JsObjectValue;
+    let unknown = unsafe { napi::Unknown::from_raw_unchecked(env, napi_val) };
+    let mut out: Vec<ferridriver::options::SelectOptionValue> = Vec::new();
+    match unknown.get_type()? {
+      napi::ValueType::String => {
+        let s = unknown.coerce_to_string()?.into_utf8()?.into_owned()?;
+        out.push(ferridriver::options::SelectOptionValue::by_value(s));
+      },
+      napi::ValueType::Object => {
+        let obj = napi::bindgen_prelude::Object::from_raw(env, napi_val);
+        // Array path: iterate numeric keys.
+        let is_array = unsafe {
+          let mut is_arr = false;
+          napi::check_status!(napi::sys::napi_is_array(env, napi_val, &raw mut is_arr))?;
+          is_arr
+        };
+        if is_array {
+          let len: u32 = obj.get("length")?.unwrap_or(0);
+          for i in 0..len {
+            let el: napi::Unknown<'_> = obj.get_element(i)?;
+            match el.get_type()? {
+              napi::ValueType::String => {
+                let s = el.coerce_to_string()?.into_utf8()?.into_owned()?;
+                out.push(ferridriver::options::SelectOptionValue::by_value(s));
+              },
+              napi::ValueType::Object => {
+                let v: SelectOptionValue = unsafe { el.cast()? };
+                out.push(v.into());
+              },
+              other => {
+                return Err(napi::Error::from_reason(format!(
+                  "selectOption array element must be string or object, got {other}"
+                )));
+              },
+            }
+          }
+        } else {
+          let v: SelectOptionValue = unsafe { unknown.cast()? };
+          out.push(v.into());
+        }
+      },
+      other => {
+        return Err(napi::Error::from_reason(format!(
+          "selectOption expects string | string[] | object | object[], got {other}"
+        )));
+      },
+    }
+    Ok(Self(out))
+  }
+}
+
+/// Playwright-parity options for `selectOption`. Three fields per
+/// Playwright's `LocatorSelectOptionOptions`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct SelectOptionOptions {
+  pub force: Option<bool>,
+  pub no_wait_after: Option<bool>,
+  pub timeout: Option<f64>,
+}
+
+impl From<SelectOptionOptions> for ferridriver::options::SelectOptionOptions {
+  fn from(o: SelectOptionOptions) -> Self {
+    Self {
+      force: o.force,
+      no_wait_after: o.no_wait_after,
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
+/// Playwright-parity options for `page.fill` / `locator.fill` /
+/// `frame.fill`. Three fields per Playwright's `LocatorFillOptions`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct FillOptions {
+  pub force: Option<bool>,
+  pub no_wait_after: Option<bool>,
+  pub timeout: Option<f64>,
+}
+
+impl From<FillOptions> for ferridriver::options::FillOptions {
+  fn from(o: FillOptions) -> Self {
+    Self {
+      force: o.force,
+      no_wait_after: o.no_wait_after,
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
+/// Playwright-parity options for `page.press` / `locator.press` /
+/// `frame.press`. Three fields per Playwright's `LocatorPressOptions`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct PressOptions {
+  pub delay: Option<f64>,
+  pub no_wait_after: Option<bool>,
+  pub timeout: Option<f64>,
+}
+
+impl From<PressOptions> for ferridriver::options::PressOptions {
+  fn from(o: PressOptions) -> Self {
+    Self {
+      delay: o.delay.map(f64_to_u64),
+      no_wait_after: o.no_wait_after,
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
+/// Playwright-parity options for `page.type` / `locator.type` /
+/// `locator.pressSequentially`. Same shape as [`PressOptions`] per
+/// Playwright's `LocatorTypeOptions`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct TypeOptions {
+  pub delay: Option<f64>,
+  pub no_wait_after: Option<bool>,
+  pub timeout: Option<f64>,
+}
+
+impl From<TypeOptions> for ferridriver::options::TypeOptions {
+  fn from(o: TypeOptions) -> Self {
+    Self {
+      delay: o.delay.map(f64_to_u64),
+      no_wait_after: o.no_wait_after,
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
+/// Playwright-parity options for `check` / `uncheck` / `setChecked`.
+/// Five fields per Playwright's `LocatorCheckOptions`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct CheckOptions {
+  pub force: Option<bool>,
+  pub no_wait_after: Option<bool>,
+  pub position: Option<Point>,
+  pub timeout: Option<f64>,
+  pub trial: Option<bool>,
+}
+
+impl From<CheckOptions> for ferridriver::options::CheckOptions {
+  fn from(o: CheckOptions) -> Self {
+    Self {
+      force: o.force,
+      no_wait_after: o.no_wait_after,
+      position: o.position.map(Into::into),
+      timeout: o.timeout.map(f64_to_u64),
+      trial: o.trial,
+    }
+  }
+}
+
+/// Playwright-parity options for `page.dispatchEvent` /
+/// `locator.dispatchEvent` / `frame.dispatchEvent`. Single field.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct DispatchEventOptions {
+  pub timeout: Option<f64>,
+}
+
+impl From<DispatchEventOptions> for ferridriver::options::DispatchEventOptions {
+  fn from(o: DispatchEventOptions) -> Self {
+    Self {
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
+/// Playwright-parity options for `page.hover` / `locator.hover` /
+/// `frame.hover`. Same shape as `LocatorHoverOptions` at
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` — subset
+/// of [`ClickOptions`] (no button/click_count/delay).
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct HoverOptions {
+  pub force: Option<bool>,
+  #[napi(ts_type = "Array<'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift'>")]
+  pub modifiers: Option<Vec<String>>,
+  pub no_wait_after: Option<bool>,
+  pub position: Option<Point>,
+  pub steps: Option<u32>,
+  pub timeout: Option<f64>,
+  pub trial: Option<bool>,
+}
+
+impl TryFrom<HoverOptions> for ferridriver::options::HoverOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: HoverOptions) -> std::result::Result<Self, Self::Error> {
+    let mut modifiers = Vec::new();
+    if let Some(list) = o.modifiers {
+      for name in list {
+        let m = ferridriver::options::Modifier::parse(&name)
+          .ok_or_else(|| napi::Error::from_reason(format!("Unknown modifier: {name}")))?;
+        modifiers.push(m);
+      }
+    }
+    Ok(Self {
+      force: o.force,
+      modifiers,
+      no_wait_after: o.no_wait_after,
+      position: o.position.map(Into::into),
+      steps: o.steps,
+      timeout: o.timeout.map(f64_to_u64),
+      trial: o.trial,
+    })
+  }
+}
+
+/// Playwright-parity options for `page.tap` / `locator.tap` /
+/// `frame.tap` — same shape as `HoverOptions` per Playwright's TS.
+pub type TapOptions = HoverOptions;
+
 /// Playwright-parity options for `page.dragAndDrop` and `locator.dragTo`.
 /// Mirrors `FrameDragAndDropOptions & TimeoutOptions` at
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2486` (for

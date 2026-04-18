@@ -11,7 +11,10 @@ async fn attach_file(world: &mut BrowserWorld, file_path: String, selector: Stri
   world
     .page()
     .locator(&selector, None)
-    .set_input_files(std::slice::from_ref(&file_path))
+    .set_input_files(
+      ferridriver::options::InputFiles::Paths(vec![std::path::PathBuf::from(&file_path)]),
+      None,
+    )
     .await
     .map_err(|e| StepError::from(format!("attach file \"{file_path}\" to \"{selector}\": {e}")))?;
 }
@@ -20,10 +23,11 @@ async fn attach_file(world: &mut BrowserWorld, file_path: String, selector: Stri
 async fn attach_files(world: &mut BrowserWorld, selector: String, table: Option<&DataTable>) {
   let table = table.ok_or_else(|| StepError::from("attach files requires a data table of file paths"))?;
 
-  let paths: Vec<String> = table
+  let paths: Vec<std::path::PathBuf> = table
     .iter()
     .flat_map(|row| row.iter().cloned())
     .filter(|s| !s.is_empty())
+    .map(std::path::PathBuf::from)
     .collect();
 
   if paths.is_empty() {
@@ -33,7 +37,7 @@ async fn attach_files(world: &mut BrowserWorld, selector: String, table: Option<
   world
     .page()
     .locator(&selector, None)
-    .set_input_files(&paths)
+    .set_input_files(ferridriver::options::InputFiles::Paths(paths), None)
     .await
     .map_err(|e| StepError::from(format!("attach files to \"{selector}\": {e}")))?;
 }
