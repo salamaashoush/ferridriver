@@ -5,12 +5,43 @@
 //! Phase E bolts the ~25 Playwright DOM methods on top of this same class.
 
 use ferridriver::ElementHandle;
+use ferridriver::backend::ImageFormat;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
 use crate::bindings::convert::{
   FerriResultExt, json_value_to_quickjs, quickjs_arg_to_serialized, serialized_value_to_quickjs,
 };
+
+/// Extract `{ type?: 'png' | 'jpeg' | 'webp' }` from a user-supplied
+/// screenshot options bag. Defaults to PNG when the caller omits the
+/// bag or the `type` field. Matches Playwright's
+/// `elementHandle.screenshot(options?)` surface.
+fn parse_screenshot_format<'js>(
+  _ctx: &rquickjs::Ctx<'js>,
+  options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<ImageFormat> {
+  let Some(opts_val) = options.0 else {
+    return Ok(ImageFormat::Png);
+  };
+  if opts_val.is_undefined() || opts_val.is_null() {
+    return Ok(ImageFormat::Png);
+  }
+  let Some(obj) = opts_val.as_object() else {
+    return Ok(ImageFormat::Png);
+  };
+  let type_field: Option<String> = obj.get("type").ok();
+  match type_field.as_deref() {
+    None | Some("" | "png") => Ok(ImageFormat::Png),
+    Some("jpeg" | "jpg") => Ok(ImageFormat::Jpeg),
+    Some("webp") => Ok(ImageFormat::Webp),
+    Some(other) => Err(rquickjs::Error::new_from_js_message(
+      "screenshot",
+      "invalid format",
+      &format!("unsupported screenshot type {other:?}; expected 'png' | 'jpeg' | 'webp'"),
+    )),
+  }
+}
 
 /// QuickJS-visible wrapper around a core [`ElementHandle`].
 #[derive(JsLifetime, Trace)]
@@ -215,5 +246,222 @@ impl ElementHandleJs {
   #[qjs(rename = "scrollIntoViewIfNeeded")]
   pub async fn scroll_into_view_if_needed(&self) -> rquickjs::Result<()> {
     self.inner.scroll_into_view_if_needed().await.into_js()
+  }
+
+  /// Playwright: `elementHandle.screenshot(opts?)`. Today accepts
+  /// `{ type?: 'png'|'jpeg'|'webp' }` via the `opts.type` field;
+  /// additional `ScreenshotOpts` fields are carried at the core layer
+  /// and take effect once the locator-level screenshot gets the full
+  /// bag.
+  #[qjs(rename = "screenshot")]
+  pub async fn screenshot<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Vec<u8>> {
+    let format = parse_screenshot_format(&ctx, options)?;
+    self.inner.screenshot(format).await.into_js()
+  }
+
+  // ── $eval / $$eval (Playwright parity) ───────────────────────────────
+
+  /// Playwright: `elementHandle.$eval(selector, pageFunction, arg?)`.
+  #[qjs(rename = "evalOnSelector")]
+  pub async fn eval_on_selector<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    fn_source: String,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self
+      .inner
+      .eval_on_selector(&selector, &fn_source, serialized)
+      .await
+      .into_js()?;
+    serialized_value_to_quickjs(&ctx, &result)
+  }
+
+  /// Playwright: `elementHandle.$$eval(selector, pageFunction, arg?)`.
+  #[qjs(rename = "evalOnSelectorAll")]
+  pub async fn eval_on_selector_all<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    fn_source: String,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self
+      .inner
+      .eval_on_selector_all(&selector, &fn_source, serialized)
+      .await
+      .into_js()?;
+    serialized_value_to_quickjs(&ctx, &result)
+  }
+
+  // ── Frame accessors ──────────────────────────────────────────────────
+
+  /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`.
+  #[qjs(rename = "ownerFrame")]
+  pub async fn owner_frame(&self) -> rquickjs::Result<Option<crate::bindings::frame::FrameJs>> {
+    let maybe = self.inner.owner_frame().await.into_js()?;
+    Ok(maybe.map(crate::bindings::frame::FrameJs::new))
+  }
+
+  /// Playwright: `elementHandle.contentFrame(): Promise<Frame | null>`.
+  #[qjs(rename = "contentFrame")]
+  pub async fn content_frame(&self) -> rquickjs::Result<Option<crate::bindings::frame::FrameJs>> {
+    let maybe = self.inner.content_frame().await.into_js()?;
+    Ok(maybe.map(crate::bindings::frame::FrameJs::new))
+  }
+
+  // ── Wait helpers ─────────────────────────────────────────────────────
+
+  /// Playwright: `elementHandle.waitForElementState(state, options?)`.
+  #[qjs(rename = "waitForElementState")]
+  pub async fn wait_for_element_state(
+    &self,
+    state: String,
+    timeout: rquickjs::function::Opt<f64>,
+  ) -> rquickjs::Result<()> {
+    let st = ferridriver::ElementState::parse(&state).into_js()?;
+    let timeout_ms = timeout.0.map(|ms| ms as u64);
+    self.inner.wait_for_element_state(st, timeout_ms).await.into_js()
+  }
+
+  /// Playwright: `elementHandle.waitForSelector(selector, options?)`.
+  #[qjs(rename = "waitForSelector")]
+  pub async fn wait_for_selector(
+    &self,
+    selector: String,
+    timeout: rquickjs::function::Opt<f64>,
+  ) -> rquickjs::Result<Option<ElementHandleJs>> {
+    let timeout_ms = timeout.0.map(|ms| ms as u64);
+    let maybe = self.inner.wait_for_selector(&selector, timeout_ms).await.into_js()?;
+    Ok(maybe.map(ElementHandleJs::new))
+  }
+
+  // ── Action methods (temp-tag bridge) ─────────────────────────────────
+
+  /// Playwright: `elementHandle.fill(value, options?)`.
+  #[qjs(rename = "fill")]
+  pub async fn fill<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    value: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_fill_options(&ctx, options)?;
+    self.inner.fill(&value, opts).await.into_js()
+  }
+
+  /// Playwright: `elementHandle.check(options?)`.
+  #[qjs(rename = "check")]
+  pub async fn check<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+    self.inner.check(opts).await.into_js()
+  }
+
+  /// Playwright: `elementHandle.uncheck(options?)`.
+  #[qjs(rename = "uncheck")]
+  pub async fn uncheck<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+    self.inner.uncheck(opts).await.into_js()
+  }
+
+  /// Playwright: `elementHandle.setChecked(checked, options?)`.
+  #[qjs(rename = "setChecked")]
+  pub async fn set_checked<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    checked: bool,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_check_options(&ctx, options)?;
+    self.inner.set_checked(checked, opts).await.into_js()
+  }
+
+  /// Playwright: `elementHandle.tap(options?)`.
+  #[qjs(rename = "tap")]
+  pub async fn tap<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_tap_options(&ctx, options)?;
+    self.inner.tap(opts).await.into_js()
+  }
+
+  /// Playwright: `elementHandle.press(key, options?)`.
+  #[qjs(rename = "press")]
+  pub async fn press<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    key: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_press_options(&ctx, options)?;
+    self.inner.press(&key, opts).await.into_js()
+  }
+
+  /// Playwright: `elementHandle.dispatchEvent(type, eventInit?)`.
+  #[qjs(rename = "dispatchEvent")]
+  pub async fn dispatch_event<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    event_type: String,
+    event_init: rquickjs::function::Opt<rquickjs::Value<'js>>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let init_json = match event_init.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        Some(crate::bindings::convert::serde_from_js::<serde_json::Value>(&ctx, v)?)
+      },
+      _ => None,
+    };
+    let opts = crate::bindings::convert::parse_dispatch_event_options(&ctx, options)?;
+    self.inner.dispatch_event(&event_type, init_json, opts).await.into_js()
+  }
+
+  /// Playwright: `elementHandle.selectOption(values, options?)`.
+  #[qjs(rename = "selectOption")]
+  pub async fn select_option<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    values: rquickjs::Value<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Vec<String>> {
+    let values = crate::bindings::convert::parse_select_option_values(&ctx, values)?;
+    let opts = crate::bindings::convert::parse_select_option_options(&ctx, options)?;
+    self.inner.select_option(values, opts).await.into_js()
+  }
+
+  /// Playwright: `elementHandle.selectText(options?)`.
+  #[qjs(rename = "selectText")]
+  pub async fn select_text(&self) -> rquickjs::Result<()> {
+    self.inner.select_text().await.into_js()
+  }
+
+  /// Playwright: `elementHandle.setInputFiles(files, options?)`.
+  #[qjs(rename = "setInputFiles")]
+  pub async fn set_input_files<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    files: rquickjs::Value<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let files = crate::bindings::convert::parse_input_files(&ctx, files)?;
+    let opts = crate::bindings::convert::parse_set_input_files_options(&ctx, options)?;
+    self.inner.set_input_files(files, opts).await.into_js()
   }
 }

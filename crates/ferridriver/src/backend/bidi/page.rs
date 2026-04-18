@@ -1801,8 +1801,22 @@ impl BidiPage {
     ];
     for handle in handles {
       match handle {
-        HandleId::Bidi { shared_id, .. } => {
-          arguments.push(json!({"type": "sharedReference", "sharedId": shared_id}));
+        HandleId::Bidi { shared_id, handle } => {
+          // BiDi has two distinct handle shapes: `sharedReference`
+          // is DOM-node-only (cross-context node identity via UUID)
+          // and `handle` is any retained remote (Object, Array,
+          // Function, Map, Set, etc.) via the per-session handle
+          // registry. Prefer `handle` when present — it's the more
+          // general form that also works for nodes inside a single
+          // context. Only fall back to `sharedReference` when the
+          // remote is a node without a retained handle.
+          if let Some(h) = handle {
+            arguments.push(json!({"type": "handle", "handle": h}));
+          } else if !shared_id.is_empty() {
+            arguments.push(json!({"type": "sharedReference", "sharedId": shared_id}));
+          } else {
+            return Err("BiDi handle carries neither sharedId nor handle".into());
+          }
         },
         _ => return Err("call_utility_evaluate: non-BiDi handle in arg.handles on BiDi backend".into()),
       }
@@ -1873,8 +1887,17 @@ impl BidiPage {
               _ => None,
             };
             if let Some(h) = non_node_handle {
+              // Store the BiDi handle ONLY in the `handle` slot —
+              // `shared_id` is reserved for DOM-node cross-context
+              // references. A later argument-pass emits this remote
+              // as `{type: "handle", handle}`, which BiDi accepts
+              // for any retained Object / Array / Function / ...
+              // remote. Emitting it as `{type: "sharedReference",
+              // sharedId}` (the old mistake) causes BiDi to reject
+              // with "no such node" because the handle-string was
+              // never registered as a node sharedId.
               Ok(FdEvalResult::Handle(HandleRemote::Bidi {
-                shared_id: h.clone(),
+                shared_id: String::new(),
                 handle: Some(h),
               }))
             } else {

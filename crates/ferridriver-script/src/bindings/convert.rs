@@ -54,13 +54,19 @@ pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>
 /// [`ferridriver::protocol::SerializedArgument`] ready for
 /// `page.evaluate(fn, arg)` / `page.evaluateHandle(fn, arg)` etc.
 ///
-/// Phase-D MVP covers JSON-expressible values (primitives, plain
-/// arrays, plain objects). `undefined` / absent maps to the utility
-/// script's `{v: "undefined"}` sentinel; `null` maps to `{v: "null"}`.
+/// Covers JSON-expressible values (primitives, plain arrays, plain
+/// objects) plus top-level `JSHandle` / `ElementHandle` class
+/// instances. `undefined` / absent maps to the utility script's
+/// `{v: "undefined"}` sentinel; `null` maps to `{v: "null"}`.
 ///
-/// Future phases extend this to detect `JSHandle` / `ElementHandle`
-/// class instances and emit the `{h: idx}` reference + the backend
-/// [`ferridriver::protocol::HandleId`] into the `handles` slot.
+/// Class-instance detection: a top-level `JSHandleJs` or
+/// `ElementHandleJs` value is emitted as `SerializedValue::Handle(0)`
+/// with its backend [`ferridriver::protocol::HandleId`] pushed into
+/// `handles[0]`. Nested handles inside object / array user args are a
+/// follow-up; today a nested handle serialises as its JSON
+/// representation (usually an empty object), which is a behavior gap
+/// rather than a correctness bug — we detect it at the top level
+/// where every Playwright test actually passes handles.
 pub fn quickjs_arg_to_serialized<'js>(
   ctx: &Ctx<'js>,
   value: Option<Value<'js>>,
@@ -82,6 +88,20 @@ pub fn quickjs_arg_to_serialized<'js>(
       value: SerializedValue::Special(SpecialValue::Null),
       handles: Vec::new(),
     });
+  }
+
+  // Top-level class-instance detection. The detection itself is
+  // QuickJS-specific (`rquickjs::Class::from_value`), but the
+  // packaging of a handle-to-SerializedArgument lives on core
+  // (`HandleRemote::to_serialized_argument`) so NAPI and QuickJS
+  // produce identical wire shapes for the same remote (Rule 1).
+  if let Ok(class) = rquickjs::Class::<crate::bindings::js_handle::JSHandleJs>::from_value(&v) {
+    let inner = class.borrow();
+    return Ok(inner.inner().remote().to_serialized_argument());
+  }
+  if let Ok(class) = rquickjs::Class::<crate::bindings::element_handle::ElementHandleJs>::from_value(&v) {
+    let inner = class.borrow();
+    return Ok(inner.inner().remote().to_serialized_argument());
   }
 
   let json: serde_json::Value = serde_from_js(ctx, v)?;

@@ -92,6 +92,25 @@ impl HandleRemote {
     }
   }
 
+  /// Package this remote as a single-slot [`crate::protocol::SerializedArgument`]
+  /// with `value` pointing at `{h: 0}` and `handles[0]` carrying the
+  /// remote's [`HandleId`]. Matches Playwright's `serializeArgument`
+  /// behaviour in
+  /// `/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:91-102`
+  /// when the top-level arg is a single `JSHandle`.
+  ///
+  /// The canonical packaging lives on core so NAPI and `QuickJS`
+  /// bindings produce identical wire shapes for the same remote —
+  /// per the Rule-1 "Rust is source of truth; bindings are thin
+  /// mirrors" invariant.
+  #[must_use]
+  pub fn to_serialized_argument(&self) -> crate::protocol::SerializedArgument {
+    crate::protocol::SerializedArgument {
+      value: crate::protocol::SerializedValue::Handle(0),
+      handles: vec![self.to_handle_id()],
+    }
+  }
+
   /// Inverse of [`Self::to_handle_id`]. Returns a [`HandleRemote`] ready
   /// to dispatch against an `AnyPage`. The conversion is lossless.
   #[must_use]

@@ -1521,16 +1521,30 @@ fn test_script_handle_lifecycle(c: &mut McpClient) {
     "JSHandle sibling did not see the dispose: {v}"
   );
 
-  // JSHandle.asElement is a phase-C stub — always null/undefined until
-  // phase-D inspects the remote type.
+  // JSHandle.asElement is functional — probes `h instanceof Node` and
+  // re-wraps the remote as an ElementHandle when true.
   let v = c.script_value(
     "const eh = await page.querySelector('button#primary');\
      const jh = eh.asJSHandle();\
-     const asEl = jh.asElement();\
+     const asEl = await jh.asElement();\
+     const ok = asEl !== null && asEl !== undefined;\
      await eh.dispose();\
+     return ok;",
+  );
+  assert_eq!(v, json!(true), "asElement did not promote a DOM-node remote: {v}");
+
+  // Non-DOM remotes (plain objects, arrays, functions) yield null.
+  // BiDi refers to these via `{type: 'handle', handle}` — not the
+  // node-only `sharedReference` wire shape — so the evaluate path
+  // must emit the correct form when the handle rides through as an
+  // argument. This test exercises that end-to-end.
+  let v = c.script_value(
+    "const jh = await page.evaluateHandleWithArg(\"() => ({ not: 'a dom node' })\", null);\
+     const asEl = await jh.asElement();\
+     await jh.dispose();\
      return asEl === null || asEl === undefined;",
   );
-  assert_eq!(v, json!(true), "asElement was not null in phase C: {v}");
+  assert_eq!(v, json!(true), "asElement returned non-null for non-DOM remote: {v}");
 }
 
 // Task 1.3 phase D — page.evaluate(fn, arg) + evaluateHandle(fn) +

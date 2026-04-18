@@ -113,7 +113,7 @@ impl JSHandle {
   pub async fn evaluate_with_arg(
     &self,
     fn_source: String,
-    arg: Option<serde_json::Value>,
+    arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<Option<serde_json::Value>> {
     let serialized = crate::page::build_serialized_argument(arg);
     let result = self
@@ -129,7 +129,7 @@ impl JSHandle {
   pub async fn evaluate_with_arg_wire(
     &self,
     fn_source: String,
-    arg: Option<serde_json::Value>,
+    arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<serde_json::Value> {
     let serialized = crate::page::build_serialized_argument(arg);
     let result = self
@@ -142,7 +142,11 @@ impl JSHandle {
 
   /// Playwright: `jsHandle.evaluateHandle(pageFunction, arg?)`.
   #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
-  pub async fn evaluate_handle_with_arg(&self, fn_source: String, arg: Option<serde_json::Value>) -> Result<JSHandle> {
+  pub async fn evaluate_handle_with_arg(
+    &self,
+    fn_source: String,
+    arg: Option<crate::types::NapiEvaluateArg>,
+  ) -> Result<JSHandle> {
     let serialized = crate::page::build_serialized_argument(arg);
     let handle = self
       .inner
