@@ -670,26 +670,82 @@ impl Page {
 
   // ── Screenshots ─────────────────────────────────────────────────────────
 
-  /// Take a screenshot of the page.
+  /// Take a screenshot of the page. Mirrors Playwright's
+  /// `page.screenshot(options?: PageScreenshotOptions)` per
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`.
+  ///
+  /// Lowers the Playwright-shaped [`ScreenshotOptions`] bag into the
+  /// backend-level [`ScreenshotOpts`] wire struct. Handles Rust-side
+  /// concerns (writing `path` to disk, applying `timeout` via a
+  /// `tokio::time::timeout` race) that don't belong in the per-backend
+  /// dispatch path.
   ///
   /// # Errors
   ///
-  /// Returns an error if the screenshot capture fails.
+  /// Returns [`crate::error::FerriError::Timeout`] if the capture
+  /// exceeds `opts.timeout` milliseconds; otherwise propagates any
+  /// backend-specific failure.
   pub async fn screenshot(&self, opts: ScreenshotOptions) -> Result<Vec<u8>> {
     let format = match opts.format.as_deref() {
       Some("jpeg" | "jpg") => ImageFormat::Jpeg,
       Some("webp") => ImageFormat::Webp,
       _ => ImageFormat::Png,
     };
-    self
-      .inner
-      .screenshot(ScreenshotOpts {
-        format,
-        quality: opts.quality,
-        full_page: opts.full_page.unwrap_or(false),
-      })
-      .await
-      .map_err(Into::into)
+    let scale = match opts.scale.as_deref() {
+      Some("css") => Some(crate::backend::ScreenshotScale::Css),
+      Some("device") => Some(crate::backend::ScreenshotScale::Device),
+      _ => None,
+    };
+    let animations = match opts.animations.as_deref() {
+      Some("disabled") => Some(crate::backend::ScreenshotAnimations::Disabled),
+      Some("allow") => Some(crate::backend::ScreenshotAnimations::Allow),
+      _ => None,
+    };
+    let caret = match opts.caret.as_deref() {
+      Some("hide") => Some(crate::backend::ScreenshotCaret::Hide),
+      Some("initial") => Some(crate::backend::ScreenshotCaret::Initial),
+      _ => None,
+    };
+    let wire = ScreenshotOpts {
+      format,
+      quality: opts.quality,
+      full_page: opts.full_page.unwrap_or(false),
+      clip: opts.clip,
+      omit_background: opts.omit_background.unwrap_or(false),
+      scale,
+      animations,
+      caret,
+      mask: opts.mask.clone(),
+      mask_color: opts.mask_color.clone(),
+      style: opts.style.clone(),
+    };
+    let capture = async {
+      self
+        .inner
+        .screenshot(wire)
+        .await
+        .map_err(crate::error::FerriError::from)
+    };
+    let bytes = match opts.timeout {
+      Some(ms) if ms > 0 => {
+        let fut = tokio::time::timeout(std::time::Duration::from_millis(ms), capture);
+        match fut.await {
+          Ok(res) => res?,
+          Err(_) => {
+            return Err(crate::error::FerriError::timeout("screenshot", ms));
+          },
+        }
+      },
+      _ => capture.await?,
+    };
+    if let Some(ref path) = opts.path {
+      if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+      }
+      std::fs::write(path, &bytes)
+        .map_err(|e| crate::error::FerriError::Other(format!("screenshot write {}: {e}", path.display())))?;
+    }
+    Ok(bytes)
   }
 
   /// Take a screenshot of a specific element matching the selector.

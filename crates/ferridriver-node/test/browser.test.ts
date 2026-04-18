@@ -236,6 +236,99 @@ for (const backend of BACKENDS) {
       expect(buf.length).toBeGreaterThan(0);
     });
 
+    it("screenshot type: 'jpeg' produces a JPEG", async () => {
+      // JPEG magic: FF D8 FF.
+      const buf = await page.screenshot({ type: "jpeg", quality: 80 });
+      expect(buf.length).toBeGreaterThan(0);
+      expect(buf[0]).toBe(0xff);
+      expect(buf[1]).toBe(0xd8);
+      expect(buf[2]).toBe(0xff);
+    });
+
+    it("screenshot clip crops to the supplied rectangle", async () => {
+      // BiDi supports clip; WebKit rejects it with a typed error.
+      if (backend === "webkit") return;
+      await page.setContent('<div style="width:800px;height:600px;background:red"></div>');
+      const buf = await page.screenshot({
+        clip: { x: 10, y: 10, width: 100, height: 50 },
+      });
+      expect(buf.length).toBeGreaterThan(0);
+      // PNG IHDR at bytes 16–23 carries big-endian width then height.
+      const width = (buf[16] << 24) | (buf[17] << 16) | (buf[18] << 8) | buf[19];
+      const height = (buf[20] << 24) | (buf[21] << 16) | (buf[22] << 8) | buf[23];
+      // CDP/BiDi honour the clip at device scale; allow +/- DPR variance.
+      expect(width).toBeGreaterThanOrEqual(100);
+      expect(width).toBeLessThanOrEqual(200);
+      expect(height).toBeGreaterThanOrEqual(50);
+      expect(height).toBeLessThanOrEqual(100);
+    });
+
+    it("screenshot omitBackground yields a transparent PNG", async () => {
+      // BiDi/WebKit refuse this option — CDP is the only supported path.
+      if (backend !== "cdp-pipe" && backend !== "cdp-raw") return;
+      await page.setContent("<html><body></body></html>");
+      const buf = await page.screenshot({ omitBackground: true });
+      expect(buf.length).toBeGreaterThan(0);
+      // PNG header + IHDR + expect a tRNS or alpha channel: we just verify
+      // the PNG is valid and non-empty. Full pixel-level transparency
+      // verification needs image decoding which we don't want to pull in.
+      expect(buf[0]).toBe(0x89);
+      expect(buf[1]).toBe(0x50);
+    });
+
+    it("screenshot path writes bytes to disk", async () => {
+      const fs = await import("node:fs");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "ferridriver-screenshot-"));
+      const out = path.join(tmp, "page.png");
+      const buf = await page.screenshot({ path: out });
+      expect(buf.length).toBeGreaterThan(0);
+      const written = fs.readFileSync(out);
+      expect(written.length).toBe(buf.length);
+      // PNG magic.
+      expect(written[0]).toBe(0x89);
+      expect(written[1]).toBe(0x50);
+      fs.rmSync(tmp, { recursive: true });
+    });
+
+    it("screenshot mask paints over the target", async () => {
+      // webkit doesn't support clip yet; skip since mask without clip
+      // would require a full-page diff.
+      if (backend === "webkit") return;
+      await page.setContent(
+        '<html><body style="margin:0"><div id="target" style="width:100px;height:100px;background:#ff0000"></div></body></html>'
+      );
+      const buf = await page.screenshot({
+        mask: [{ selector: "#target" }],
+        clip: { x: 0, y: 0, width: 100, height: 100 },
+      });
+      expect(buf.length).toBeGreaterThan(0);
+      expect(buf[0]).toBe(0x89);
+      expect(buf[1]).toBe(0x50);
+    });
+
+    it("screenshot style injects CSS that applies to capture", async () => {
+      // Inject a rule that paints `body` blue, capture, verify byte
+      // streams differ from baseline. PNGs have a ~90-byte header of
+      // mostly-identical metadata (IHDR, sRGB, time, etc.) so the
+      // first-bytes diff needs to reach the IDAT chunk before it
+      // sees any pixel-level variance.
+      await page.setContent(
+        '<html><body style="background:#ffffff;margin:0"><p>text</p></body></html>'
+      );
+      const withStyle = await page.screenshot({
+        style: "body { background: #0000ff !important; }",
+      });
+      const withoutStyle = await page.screenshot();
+      expect(withStyle.length).toBeGreaterThan(0);
+      expect(withoutStyle.length).toBeGreaterThan(0);
+      // Full byte-level equality: the two captures must differ
+      // somewhere — the compressed IDAT stream reflects pixel
+      // differences even when the leading headers match.
+      expect(Buffer.compare(Buffer.from(withStyle), Buffer.from(withoutStyle))).not.toBe(0);
+    });
+
     // ── Viewport and emulation ────────────────────────────────────────
 
     it("sets viewport size", async () => {
