@@ -102,6 +102,13 @@ impl FrameCache {
     self.by_id.get(id)
   }
 
+  /// Snapshot every cached frame id — includes detached records so
+  /// [`crate::element_handle::ElementHandle::content_frame`] can still
+  /// attribute an iframe whose frame has just detached.
+  pub(crate) fn all_frame_ids(&self) -> Vec<Arc<str>> {
+    self.order.clone()
+  }
+
   /// Iterate non-detached frame ids in insertion order.
   pub(crate) fn live_ids(&self) -> impl Iterator<Item = Arc<str>> + '_ {
     self.order.iter().filter_map(|id| {
