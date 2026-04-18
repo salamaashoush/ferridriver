@@ -592,27 +592,73 @@ impl Locator {
   /// actionable, or the click dispatch fails.
   pub async fn set_checked(&self, checked: bool, opts: Option<crate::options::CheckOptions>) -> Result<()> {
     let opts = opts.unwrap_or_default();
+    let trial = opts.is_trial();
     // Lower to ClickOptions for the shared click dispatch path so
     // `force` / `trial` / `position` / `timeout` all flow through.
     let click_opts = opts.into_click_options();
     let click_opts_ref = &click_opts;
     retry_resolve!(self, click_opts_ref.timeout, "check", |el, page| async move {
-      // Read the current `checked` property in the element's execution
-      // context; if it already matches `checked`, skip the click.
-      let state = el
-        .call_js_fn_value("function() { return !!this.checked; }")
-        .await?
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-      if state == checked {
-        // Still run actionability so the caller sees a consistent
-        // deadline / failure behavior, but skip the click.
-        if !click_opts_ref.is_force() {
-          actions::wait_for_actionable(&el, page).await.ok();
-        }
+      // Playwright's `_setChecked` flow (server/dom.ts:758):
+      //   1. Read current checked state (via `fd.getChecked`, which
+      //      understands `input[type=checkbox|radio]` AND ARIA
+      //      `aria-checked` roles — `this.checked` alone misses the
+      //      latter).
+      //   2. If current already matches target → done, no click.
+      //   3. Uncheck of a checked radio → hard error (radios only
+      //      toggle off by selecting another in their group).
+      //   4. Dispatch the click with the caller's options.
+      //   5. If `trial` → done (skip verification).
+      //   6. Re-read state; if it still doesn't match the target →
+      //      `"Clicking the checkbox did not change its state"`.
+      let fd = page.injected_script().await?;
+      let state_js = format!(
+        "function() {{ \
+           var r = {fd}.getChecked(this); \
+           var isRadio = this.nodeName === 'INPUT' && this.type === 'radio'; \
+           return JSON.stringify({{ state: r, isRadio: isRadio }}); \
+         }}"
+      );
+      let read_state = async || -> ::std::result::Result<(Option<bool>, bool), String> {
+        let raw = el
+          .call_js_fn_value(&state_js)
+          .await?
+          .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+          .unwrap_or_default();
+        let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
+        let is_radio = parsed
+          .get("isRadio")
+          .and_then(serde_json::Value::as_bool)
+          .unwrap_or(false);
+        let state_val = match parsed.get("state") {
+          Some(v) if v.is_boolean() => Some(v.as_bool().unwrap_or(false)),
+          _ => None,
+        };
+        Ok((state_val, is_radio))
+      };
+
+      let (current, is_radio) = read_state().await?;
+      let Some(current) = current else {
+        return Err("Not a checkbox, radio button, or ARIA-checkable element — cannot check/uncheck".to_string());
+      };
+      if current == checked {
         return Ok::<(), String>(());
       }
-      actions::click_with_opts(&el, page, click_opts_ref).await
+      if !checked && is_radio {
+        return Err(
+          "Cannot uncheck radio button. Radio buttons can only be unchecked by selecting another \
+           radio button in the same group."
+            .to_string(),
+        );
+      }
+      actions::click_with_opts(&el, page, click_opts_ref).await?;
+      if trial {
+        return Ok::<(), String>(());
+      }
+      let (new_state, _) = read_state().await?;
+      if new_state != Some(checked) {
+        return Err("Clicking the checkbox did not change its state".to_string());
+      }
+      Ok::<(), String>(())
     })
   }
 

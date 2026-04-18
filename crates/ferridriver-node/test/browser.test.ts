@@ -758,6 +758,50 @@ for (const backend of BACKENDS) {
       expect(String((caught as Error).message)).toContain("Unknown modifier");
     });
 
+    // Task 1.5 phase 4b: check/uncheck/setChecked verify final state
+    // matches target + reject uncheck-of-checked-radio, matching
+    // Playwright's server/dom.ts::_setChecked.
+    it("check: plain checkbox toggles; preventDefault throws did-not-change", async () => {
+      await page.setContent('<input id="cb" type="checkbox" />');
+      await page.waitForSelector("#cb");
+      await page.locator("#cb").check();
+      expect(await page.locator("#cb").isChecked()).toBe(true);
+
+      await page.setContent('<input id="cb" type="checkbox" onclick="event.preventDefault()" />');
+      await page.waitForSelector("#cb");
+      let msg = "";
+      try {
+        await page.locator("#cb").check({ timeout: 500 });
+      } catch (e) {
+        msg = String((e as Error).message || e);
+      }
+      expect(msg, `preventDefault checkbox must throw, got: ${msg}`).toContain(
+        "did not change its state"
+      );
+    });
+
+    it("uncheck: checked radio throws Playwright's radio-group error", async () => {
+      await page.setContent(
+        '<input id="r" type="radio" name="g" checked /><input type="radio" name="g" />'
+      );
+      await page.waitForSelector("#r");
+      let msg = "";
+      try {
+        await page.locator("#r").uncheck();
+      } catch (e) {
+        msg = String((e as Error).message || e);
+      }
+      expect(msg).toContain("Cannot uncheck radio button");
+    });
+
+    it("check with trial:true skips toggle AND verification", async () => {
+      await page.setContent('<input id="cb" type="checkbox" onclick="event.preventDefault()" />');
+      await page.waitForSelector("#cb");
+      // Would normally throw because state doesn't change; with trial, returns ok.
+      await page.locator("#cb").check({ trial: true });
+      expect(await page.locator("#cb").isChecked()).toBe(false);
+    });
+
     // Task 1.5 phase 4a: `fill.force` bypasses Playwright's
     // ['visible','enabled','editable'] pre-check. Without force, fill
     // on a `readonly` input surfaces `error:noteditable` → retry loop
