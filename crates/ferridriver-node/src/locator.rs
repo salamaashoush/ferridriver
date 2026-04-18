@@ -474,18 +474,65 @@ impl Locator {
     self.inner.is_attached().await.map_err(napi::Error::from_reason)
   }
 
-  #[napi]
-  pub async fn evaluate(&self, expression: String) -> Result<Option<serde_json::Value>> {
-    self.inner.evaluate(&expression).await.map_err(napi::Error::from_reason)
+  /// Playwright: `locator.evaluate(pageFunction, arg?, options?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:129`).
+  #[napi(
+    ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number }",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn evaluate(
+    &self,
+    page_function: crate::types::NapiPageFunction,
+    arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::EvaluateOptions>,
+  ) -> Result<crate::serialize_out::Evaluated> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let opts = options.map(Into::into);
+    let result = self
+      .inner
+      .evaluate(&page_function.source, serialized, page_function.is_function, opts)
+      .await
+      .into_napi()?;
+    Ok(crate::serialize_out::Evaluated(result))
   }
 
-  #[napi]
-  pub async fn evaluate_all(&self, expression: String) -> Result<Option<serde_json::Value>> {
-    self
+  /// Playwright: `locator.evaluateHandle(pageFunction, arg?, options?): Promise<JSHandle>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:138`).
+  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown, options?: { timeout?: number }")]
+  pub async fn evaluate_handle(
+    &self,
+    page_function: crate::types::NapiPageFunction,
+    arg: Option<crate::types::NapiEvaluateArg>,
+    options: Option<crate::types::EvaluateOptions>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let opts = options.map(Into::into);
+    let handle = self
       .inner
-      .evaluate_all(&expression)
+      .evaluate_handle(&page_function.source, serialized, page_function.is_function, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .into_napi()?;
+    Ok(crate::js_handle::JSHandle::wrap(handle))
+  }
+
+  /// Playwright: `locator.evaluateAll(pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:133`).
+  #[napi(
+    ts_args_type = "pageFunction: string | Function, arg?: unknown",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn evaluate_all(
+    &self,
+    page_function: crate::types::NapiPageFunction,
+    arg: Option<crate::types::NapiEvaluateArg>,
+  ) -> Result<crate::serialize_out::Evaluated> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let result = self
+      .inner
+      .evaluate_all(&page_function.source, serialized, page_function.is_function)
+      .await
+      .into_napi()?;
+    Ok(crate::serialize_out::Evaluated(result))
   }
 
   #[napi]

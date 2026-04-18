@@ -238,7 +238,7 @@ impl ElementHandle {
     self.ensure_live()?;
     let result = self
       .js_handle
-      .evaluate_with_arg("el => el.innerHTML", empty_arg(), Some(true))
+      .evaluate("el => el.innerHTML", empty_arg(), Some(true))
       .await?;
     expect_string(&result, "innerHTML")
   }
@@ -252,7 +252,7 @@ impl ElementHandle {
     self.ensure_live()?;
     let result = self
       .js_handle
-      .evaluate_with_arg("el => el.innerText", empty_arg(), Some(true))
+      .evaluate("el => el.innerText", empty_arg(), Some(true))
       .await?;
     expect_string(&result, "innerText")
   }
@@ -266,7 +266,7 @@ impl ElementHandle {
     self.ensure_live()?;
     let result = self
       .js_handle
-      .evaluate_with_arg("el => el.textContent", empty_arg(), Some(true))
+      .evaluate("el => el.textContent", empty_arg(), Some(true))
       .await?;
     Ok(expect_optional_string(&result))
   }
@@ -285,7 +285,7 @@ impl ElementHandle {
     // we inline.
     let escaped = serde_json::to_string(name).unwrap_or_else(|_| "\"\"".into());
     let expr = format!("el => el.getAttribute({escaped})");
-    let result = self.js_handle.evaluate_with_arg(&expr, empty_arg(), Some(true)).await?;
+    let result = self.js_handle.evaluate(&expr, empty_arg(), Some(true)).await?;
     Ok(expect_optional_string(&result))
   }
 
@@ -301,7 +301,7 @@ impl ElementHandle {
     self.ensure_live()?;
     let result = self
       .js_handle
-      .evaluate_with_arg(
+      .evaluate(
         "el => {\
           if (el.nodeName === 'INPUT' || el.nodeName === 'TEXTAREA' || el.nodeName === 'SELECT') return el.value || '';\
           throw new Error('Node is not an HTMLInputElement or HTMLTextAreaElement or HTMLSelectElement');\
@@ -317,7 +317,7 @@ impl ElementHandle {
 
   async fn eval_bool(&self, expr: &str, what: &str) -> Result<bool> {
     self.ensure_live()?;
-    let result = self.js_handle.evaluate_with_arg(expr, empty_arg(), Some(true)).await?;
+    let result = self.js_handle.evaluate(expr, empty_arg(), Some(true)).await?;
     expect_bool(&result, what)
   }
 
@@ -441,7 +441,7 @@ impl ElementHandle {
     self.ensure_live()?;
     let result = self
       .js_handle
-      .evaluate_with_arg(
+      .evaluate(
         "el => {\
           const r = el.getBoundingClientRect();\
           if (r.width === 0 && r.height === 0 && r.x === 0 && r.y === 0) return null;\
@@ -539,7 +539,7 @@ impl ElementHandle {
     self.ensure_live()?;
     self
       .js_handle
-      .evaluate_with_arg("el => { el.focus(); }", empty_arg(), Some(true))
+      .evaluate("el => { el.focus(); }", empty_arg(), Some(true))
       .await
       .map(|_| ())
   }
@@ -598,9 +598,9 @@ impl ElementHandle {
     );
     let match_handle = self
       .js_handle
-      .evaluate_handle_with_arg(&probe, SerializedArgument::default(), Some(true))
+      .evaluate_handle(&probe, SerializedArgument::default(), Some(true))
       .await?;
-    let result = match_handle.evaluate_with_arg(fn_source, arg, None).await;
+    let result = match_handle.evaluate(fn_source, arg, None).await;
     // Best-effort intermediate cleanup — do not let a dispose error
     // mask the primary outcome.
     let _ = match_handle.dispose().await;
@@ -630,9 +630,9 @@ impl ElementHandle {
     let probe = format!("el => Array.from(el.querySelectorAll({sel_escaped}))");
     let array_handle = self
       .js_handle
-      .evaluate_handle_with_arg(&probe, SerializedArgument::default(), Some(true))
+      .evaluate_handle(&probe, SerializedArgument::default(), Some(true))
       .await?;
-    let result = array_handle.evaluate_with_arg(fn_source, arg, None).await;
+    let result = array_handle.evaluate(fn_source, arg, None).await;
     let _ = array_handle.dispose().await;
     result
   }
@@ -667,7 +667,7 @@ impl ElementHandle {
     // and matches Playwright's output for the top document.
     let owner_ok = self
       .js_handle
-      .evaluate_with_arg(
+      .evaluate(
         "el => !!(el && el.isConnected && el.ownerDocument)",
         SerializedArgument::default(),
         Some(true),
@@ -698,7 +698,7 @@ impl ElementHandle {
     self.ensure_live()?;
     let probe = self
       .js_handle
-      .evaluate_with_arg(
+      .evaluate(
         "el => { \
           if (!el) return null; \
           const tag = el.tagName; \
@@ -810,7 +810,7 @@ impl ElementHandle {
 
       let outcome = self
         .js_handle
-        .evaluate_with_arg(&probe_expr, SerializedArgument::default(), Some(true))
+        .evaluate(&probe_expr, SerializedArgument::default(), Some(true))
         .await?;
       if let SerializedValue::Str(s) = &outcome {
         if s == "done" {
@@ -883,7 +883,7 @@ impl ElementHandle {
       // trip. Dispose intermediates eagerly on null.
       let result = self
         .js_handle
-        .evaluate_handle_with_arg(&probe_expr, SerializedArgument::default(), Some(true))
+        .evaluate_handle(&probe_expr, SerializedArgument::default(), Some(true))
         .await?;
       if let Some(eh) = result.as_element().await? {
         return Ok(Some(eh));
@@ -906,7 +906,7 @@ impl ElementHandle {
     let expr = format!("el => {{ el.setAttribute('data-fd-eh', '{nonce}'); return '{nonce}'; }}");
     let _ = self
       .js_handle
-      .evaluate_with_arg(&expr, SerializedArgument::default(), Some(true))
+      .evaluate(&expr, SerializedArgument::default(), Some(true))
       .await?;
     Ok(nonce)
   }
@@ -917,7 +917,7 @@ impl ElementHandle {
   async fn temp_untag(&self) {
     let _ = self
       .js_handle
-      .evaluate_with_arg(
+      .evaluate(
         "el => { if (el && el.removeAttribute) el.removeAttribute('data-fd-eh'); }",
         SerializedArgument::default(),
         Some(true),
@@ -1076,7 +1076,7 @@ impl ElementHandle {
     self.ensure_live()?;
     self
       .js_handle
-      .evaluate_with_arg(
+      .evaluate(
         "el => { \
           if (!el) return; \
           el.focus(); \

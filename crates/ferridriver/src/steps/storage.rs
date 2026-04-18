@@ -14,7 +14,8 @@ step!(SetLocalStorage {
     execute(page, caps, _table, _vars) {
         let key = q(&caps[1]);
         let val = q(&caps[2]);
-        page.evaluate(&format!("localStorage.setItem('{}', '{}')", js_escape(&key), js_escape(&val)))
+        page.inner()
+            .evaluate(&format!("localStorage.setItem('{}', '{}')", js_escape(&key), js_escape(&val)))
             .await?;
         Ok(None)
     }
@@ -27,7 +28,8 @@ step!(RemoveLocalStorage {
     example: "When I remove localStorage \"key\"",
     execute(page, caps, _table, _vars) {
         let key = q(&caps[1]);
-        page.evaluate(&format!("localStorage.removeItem('{}')", js_escape(&key)))
+        page.inner()
+            .evaluate(&format!("localStorage.removeItem('{}')", js_escape(&key)))
             .await?;
         Ok(None)
     }
@@ -39,7 +41,7 @@ step!(ClearLocalStorage {
     description: "Clear all localStorage",
     example: "When I clear localStorage",
     execute(page, _caps, _table, _vars) {
-        page.evaluate("localStorage.clear()").await?;
+        page.inner().evaluate("localStorage.clear()").await?;
         Ok(None)
     }
 });

@@ -465,87 +465,38 @@ impl Page {
     Ok(handles)
   }
 
-  // ── evaluate(fn, arg) (Playwright parity — task 1.3 phase D) ─────
+  // ── evaluate (Playwright parity) ─────────────────────────────────────
 
-  /// Playwright's `page.evaluate(pageFunction, arg?)` — runs a JS
-  /// function in the page with `arg` serialised through the
-  /// isomorphic wire protocol. Returns the function's result as a
-  /// [`crate::protocol::SerializedValue`] so every rich type
-  /// (`NaN`, `Date`, `RegExp`, `BigInt`, typed arrays, …) round-trips
-  /// losslessly.
-  ///
-  /// The `is_function` hint mirrors Playwright's auto-detect: when
-  /// `None`, the page side decides from the evaluated expression —
-  /// if it evaluates to a function, the function is called with
-  /// `arg`; otherwise the expression's value is returned directly.
-  /// Pass `Some(true)` to force function-call semantics and `Some(false)`
-  /// to force expression-only.
-  ///
-  /// # Errors
-  ///
-  /// Returns a [`crate::error::FerriError`] on page-side exception,
-  /// protocol failure, or a disposed handle in `arg.handles`.
-  pub async fn evaluate_with_arg(
-    self: &Arc<Self>,
-    fn_source: &str,
-    arg: crate::protocol::SerializedArgument,
-    is_function: Option<bool>,
-  ) -> Result<crate::protocol::SerializedValue> {
-    // Playwright's `page.evaluate(fn, arg)` passes a single positional
-    // `arg` to the user function. We honour that by sending a
-    // single-element `args` slice containing the user value — except
-    // when the caller explicitly passed no arg (the `undefined`
-    // sentinel with no handles), in which case we send an empty slice
-    // so the utility script runs the user function with zero params.
-    let empty = matches!(
-      arg.value,
-      crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
-    ) && arg.handles.is_empty();
-    let args_slice: &[crate::protocol::SerializedValue] = if empty { &[] } else { std::slice::from_ref(&arg.value) };
-    let result = self
-      .inner
-      .call_utility_evaluate(fn_source, args_slice, &arg.handles, None, is_function, true)
-      .await?;
-    match result {
-      crate::js_handle::EvaluateResult::Value(v) => Ok(v),
-      crate::js_handle::EvaluateResult::Handle(_) => Err(crate::error::FerriError::Evaluation(
-        "evaluate_with_arg: backend returned handle but returnByValue=true was requested".into(),
-      )),
-    }
-  }
-
-  /// Playwright's `page.evaluateHandle(pageFunction, arg?)` — same
-  /// wire path as [`Self::evaluate_with_arg`] but the result is
-  /// retained on the page and returned as a [`crate::js_handle::JSHandle`]
-  /// that the caller owns.
+  /// Playwright: `page.evaluate(pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:515`).
+  /// Delegates to the main frame, same as Playwright's `this._mainFrame.evaluate(...)`.
   ///
   /// # Errors
   ///
   /// Returns a [`crate::error::FerriError`] on page-side exception or
   /// protocol failure.
-  pub async fn evaluate_handle_with_arg(
+  pub async fn evaluate(
+    self: &Arc<Self>,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::protocol::SerializedValue> {
+    self.main_frame().evaluate(fn_source, arg, is_function).await
+  }
+
+  /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  /// Delegates to the main frame.
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::evaluate`].
+  pub async fn evaluate_handle(
     self: &Arc<Self>,
     fn_source: &str,
     arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<crate::js_handle::JSHandle> {
-    let empty = matches!(
-      arg.value,
-      crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
-    ) && arg.handles.is_empty();
-    let args_slice: &[crate::protocol::SerializedValue] = if empty { &[] } else { std::slice::from_ref(&arg.value) };
-    let result = self
-      .inner
-      .call_utility_evaluate(fn_source, args_slice, &arg.handles, None, is_function, false)
-      .await?;
-    match result {
-      crate::js_handle::EvaluateResult::Handle(backing) => {
-        Ok(crate::js_handle::JSHandle::from_backing(Arc::clone(self), backing))
-      },
-      crate::js_handle::EvaluateResult::Value(_) => Err(crate::error::FerriError::Evaluation(
-        "evaluate_handle_with_arg: backend returned value but returnByValue=false was requested".into(),
-      )),
-    }
+    self.main_frame().evaluate_handle(fn_source, arg, is_function).await
   }
 
   // ── Action methods (delegate to mainFrame — Playwright parity) ─────
@@ -823,40 +774,6 @@ impl Page {
   /// Returns an error if the element is not found.
   pub async fn is_checked(self: &Arc<Self>, selector: &str) -> Result<bool> {
     self.main_frame().is_checked(selector).await
-  }
-
-  // ── Evaluation ──────────────────────────────────────────────────────────
-
-  /// Evaluate a JavaScript expression in the page context.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the JavaScript evaluation fails.
-  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
-    self.inner.evaluate(expression).await.map_err(Into::into)
-  }
-
-  /// Evaluate a JavaScript expression and return the result as a string.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the JavaScript evaluation fails.
-  pub async fn evaluate_str(&self, expression: &str) -> Result<String> {
-    self
-      .inner
-      .evaluate(expression)
-      .await
-      .map(|v| {
-        v.map(|val| {
-          if let Some(s) = val.as_str() {
-            s.to_string()
-          } else {
-            val.to_string()
-          }
-        })
-        .unwrap_or_default()
-      })
-      .map_err(Into::into)
   }
 
   // ── Waiting ─────────────────────────────────────────────────────────────

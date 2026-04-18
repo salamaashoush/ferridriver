@@ -57,9 +57,14 @@ async fn multi_page_automation() {
   // Verify each page has independent state
   let v1 = page1.locator("#i", None).input_value().await.unwrap();
   let v2 = page2
-    .evaluate_str("document.getElementById('b').textContent")
+    .evaluate(
+      "document.getElementById('b').textContent",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
-    .unwrap();
+    .unwrap()
+    .as_string_lossy();
 
   assert!(v1.contains("multi-page"), "page1: {v1}");
   assert!(v2.contains("clicked"), "page2: {v2}");

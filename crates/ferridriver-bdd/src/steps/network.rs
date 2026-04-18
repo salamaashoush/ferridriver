@@ -256,9 +256,10 @@ async fn fetch_url(world: &mut BrowserWorld, url: String) {
   );
   let result = world
     .page()
-    .evaluate_str(&js)
+    .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None)
     .await
     .map_err(|e| StepError::from(format!("fetch \"{url}\": {e}")))?;
+  let result = result.as_string_lossy();
 
   let parsed: serde_json::Value =
     serde_json::from_str(&result).map_err(|e| StepError::from(format!("parse fetch result: {e}")))?;

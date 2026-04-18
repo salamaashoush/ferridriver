@@ -314,14 +314,14 @@ for (const backend of BACKENDS) {
 
     test("searchPage() finds text matches", async () => {
       // searchPage returns a JSON string already, so use evaluateStr without extra JSON.stringify
-      const r = await page.evaluateStr('window.__fd.searchPage("Hello", false, false, 10, "", 10)');
+      const r = await page.evaluate('window.__fd.searchPage("Hello", false, false, 10, "", 10)');
       const parsed = JSON.parse(r);
       expect(parsed.total).toBeGreaterThanOrEqual(1);
       expect(parsed.matches[0].match_text).toBe("Hello");
     });
 
     test("searchPage() supports regex", async () => {
-      const r = await page.evaluateStr('window.__fd.searchPage("Item \\\\d+", true, false, 10, "", 10)');
+      const r = await page.evaluate('window.__fd.searchPage("Item \\\\d+", true, false, 10, "", 10)');
       const parsed = JSON.parse(r);
       expect(parsed.total).toBe(3);
     });

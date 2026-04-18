@@ -437,7 +437,7 @@ impl WebKitPage {
     // returning a value, JSON.stringify the isomorphic wire shape and
     // return `{kind: 'value', payload: <jsonString>}`.
     let body = format!(
-      r"(function(){{
+      r"(async function(){{
         const us = (window.__fd && window.__fd.__us) || (window.__fd.__us = window.__fd.newUtilityScript());
         const isFn = {is_fn_js};
         const retVal = {return_by_value_js};
@@ -446,7 +446,7 @@ impl WebKitPage {
         const serializedArgs = {args_literal};
         const parsed = count > 0 ? JSON.parse(serializedArgs) : [];
         const handles = {handle_list_js};
-        const result = us.evaluate(isFn, retVal, expr, count, ...parsed, ...handles);
+        const result = await us.evaluate(isFn, retVal, expr, count, ...parsed, ...handles);
         if (retVal) {{
           const encoded = JSON.stringify(result);
           return JSON.stringify({{kind: 'value', payload: encoded === undefined ? null : encoded}});

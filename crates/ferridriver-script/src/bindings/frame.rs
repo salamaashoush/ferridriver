@@ -19,7 +19,9 @@ use ferridriver::Frame;
 use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
-use crate::bindings::convert::FerriResultExt;
+use crate::bindings::convert::{
+  FerriResultExt, extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs,
+};
 use crate::bindings::locator::LocatorJs;
 
 /// JS-visible wrapper around [`ferridriver::Frame`]. Constructed only by
@@ -81,19 +83,32 @@ impl FrameJs {
 
   // ── Evaluation (frame-scoped) ──────────────────────────────────────
 
+  /// Playwright: `frame.evaluate(pageFunction, arg?): Promise<R>`.
   #[qjs(rename = "evaluate")]
-  pub async fn evaluate(&self, expression: String) -> rquickjs::Result<Option<String>> {
-    self
-      .inner
-      .evaluate(&expression)
-      .await
-      .map(|opt| opt.map(|v| v.to_string()))
-      .into_js()
+  pub async fn evaluate<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    page_function: rquickjs::Value<'js>,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self.inner.evaluate(&source, serialized, is_fn).await.into_js()?;
+    serialized_value_to_quickjs(&ctx, &result)
   }
 
-  #[qjs(rename = "evaluateStr")]
-  pub async fn evaluate_str(&self, expression: String) -> rquickjs::Result<String> {
-    self.inner.evaluate_str(&expression).await.into_js()
+  /// Playwright: `frame.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  #[qjs(rename = "evaluateHandle")]
+  pub async fn evaluate_handle<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    page_function: rquickjs::Value<'js>,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
+    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let handle = self.inner.evaluate_handle(&source, serialized, is_fn).await.into_js()?;
+    Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
   }
 
   #[qjs(rename = "title")]

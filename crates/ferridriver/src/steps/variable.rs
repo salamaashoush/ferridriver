@@ -90,7 +90,7 @@ step!(EvalAndStore {
     execute(page, caps, _table, vars) {
         let expr = q(&caps[1]);
         let var = caps[2].to_string();
-        let r = page.evaluate(expr.as_str()).await?;
+        let r = page.inner().evaluate(expr.as_str()).await?;
         let val = r
             .map(|v| v.to_string().trim_matches('"').to_string())
             .unwrap_or_default();

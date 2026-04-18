@@ -219,6 +219,14 @@ pub struct WaitOptions {
   pub timeout: Option<u64>,
 }
 
+/// Playwright `LocatorEvaluateOptions` — only the `timeout` field today.
+/// Mirrors `client/locator.ts::evaluate` / `evaluateHandle`'s
+/// `options?: TimeoutOptions`.
+#[derive(Debug, Clone, Default)]
+pub struct EvaluateOptions {
+  pub timeout: Option<u64>,
+}
+
 /// Full Playwright `PageScreenshotOptions` surface — 13 fields. Mirrors
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280` plus
 /// the `LocatorScreenshotOptions` subset for `Locator.screenshot()` (which

@@ -87,14 +87,88 @@ impl Frame {
 
   // ── Evaluation (frame-scoped) ────────────────────────────────────────
 
-  /// Evaluate JavaScript in this frame's context.
+  /// Playwright: `frame.evaluate(pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:196`).
+  ///
+  /// Runs `fn_source` in this frame's execution context with `arg`
+  /// serialised through the isomorphic wire protocol. Main-frame calls
+  /// pass `frame_id = None`; child-frame calls thread `self.id()` so
+  /// the utility script resolves the target frame's context.
   ///
   /// # Errors
   ///
-  /// Returns an error if JS evaluation fails.
-  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
+  /// Returns a [`crate::error::FerriError`] on page-side exception or
+  /// protocol failure.
+  pub async fn evaluate(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::protocol::SerializedValue> {
+    let frame_id = if self.is_main_frame() { None } else { Some(&*self.id) };
+    let empty = matches!(
+      arg.value,
+      crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+    ) && arg.handles.is_empty();
+    let args_slice: &[crate::protocol::SerializedValue] = if empty { &[] } else { std::slice::from_ref(&arg.value) };
+    let result = self
+      .page
+      .inner
+      .call_utility_evaluate(fn_source, args_slice, &arg.handles, frame_id, is_function, true)
+      .await?;
+    match result {
+      crate::js_handle::EvaluateResult::Value(v) => Ok(v),
+      crate::js_handle::EvaluateResult::Handle(_) => Err(crate::error::FerriError::Evaluation(
+        "Frame::evaluate: backend returned handle but returnByValue=true was requested".into(),
+      )),
+    }
+  }
+
+  /// Playwright: `frame.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:190`).
+  ///
+  /// Same wire path as [`Self::evaluate`] but retains the result on
+  /// the page and hands back a fresh [`crate::js_handle::JSHandle`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::evaluate`].
+  pub async fn evaluate_handle(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    let frame_id = if self.is_main_frame() { None } else { Some(&*self.id) };
+    let empty = matches!(
+      arg.value,
+      crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+    ) && arg.handles.is_empty();
+    let args_slice: &[crate::protocol::SerializedValue] = if empty { &[] } else { std::slice::from_ref(&arg.value) };
+    let result = self
+      .page
+      .inner
+      .call_utility_evaluate(fn_source, args_slice, &arg.handles, frame_id, is_function, false)
+      .await?;
+    match result {
+      crate::js_handle::EvaluateResult::Handle(backing) => Ok(crate::js_handle::JSHandle::from_backing(
+        Arc::clone(&self.page),
+        backing,
+      )),
+      crate::js_handle::EvaluateResult::Value(_) => Err(crate::error::FerriError::Evaluation(
+        "Frame::evaluate_handle: backend returned value but returnByValue=false was requested".into(),
+      )),
+    }
+  }
+
+  /// Backend-level expression evaluation used by the frame's internal
+  /// plumbing — dispatches to the right backend method (`evaluate` vs
+  /// `evaluate_in_frame`) depending on whether this is the main frame.
+  /// Not part of the public Playwright API; public callers use
+  /// [`Self::evaluate`] with a function literal.
+  async fn backend_eval_expr(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     if self.is_main_frame() {
-      self.page.evaluate(expression).await
+      self.page.inner.evaluate(expression).await.map_err(Into::into)
     } else {
       self
         .page
@@ -103,24 +177,6 @@ impl Frame {
         .await
         .map_err(Into::into)
     }
-  }
-
-  /// Evaluate JS and return as string.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if JS evaluation fails.
-  pub async fn evaluate_str(&self, expression: &str) -> Result<String> {
-    self.evaluate(expression).await.map(|v| {
-      v.map(|val| {
-        if let Some(s) = val.as_str() {
-          s.to_string()
-        } else {
-          val.to_string()
-        }
-      })
-      .unwrap_or_default()
-    })
   }
 
   // ── Locators (frame-scoped) ──────────────────────────────────────────
@@ -221,7 +277,7 @@ impl Frame {
   ///
   /// Returns an error if JS evaluation fails.
   pub async fn content(&self) -> Result<String> {
-    let r = self.evaluate("document.documentElement.outerHTML").await?;
+    let r = self.backend_eval_expr("document.documentElement.outerHTML").await?;
     Ok(
       r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
         .unwrap_or_default(),
@@ -234,7 +290,7 @@ impl Frame {
   ///
   /// Returns an error if JS evaluation fails.
   pub async fn title(&self) -> Result<String> {
-    let r = self.evaluate("document.title").await?;
+    let r = self.backend_eval_expr("document.title").await?;
     Ok(
       r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
         .unwrap_or_default(),
@@ -254,7 +310,7 @@ impl Frame {
     } else {
       // For child frames, set location via JS
       self
-        .evaluate(&format!("window.location.href = '{}'", url.replace('\'', "\\'")))
+        .backend_eval_expr(&format!("window.location.href = '{}'", url.replace('\'', "\\'")))
         .await?;
       Ok(())
     }
@@ -310,7 +366,7 @@ impl Frame {
   pub async fn set_content(&self, html: &str) -> Result<()> {
     let escaped = crate::steps::js_escape(html);
     self
-      .evaluate(&format!("document.documentElement.innerHTML = '{escaped}'"))
+      .backend_eval_expr(&format!("document.documentElement.innerHTML = '{escaped}'"))
       .await?;
     Ok(())
   }
@@ -328,13 +384,13 @@ impl Frame {
   ) -> Result<()> {
     let t = script_type.unwrap_or("text/javascript");
     if let Some(url) = url {
-      self.evaluate(&format!(
+      self.backend_eval_expr(&format!(
                 "(function(){{return new Promise(function(r,j){{var s=document.createElement('script');\
                  s.type='{}';s.src='{}';s.onload=r;s.onerror=function(){{j(new Error('Failed'))}};document.head.appendChild(s)}})}})();",
                 crate::steps::js_escape(t), crate::steps::js_escape(url)
             )).await?;
     } else if let Some(content) = content {
-      self.evaluate(&format!(
+      self.backend_eval_expr(&format!(
                 "(function(){{var s=document.createElement('script');s.type='{}';s.text='{}';document.head.appendChild(s)}})()",
                 crate::steps::js_escape(t), crate::steps::js_escape(content)
             )).await?;
@@ -349,14 +405,14 @@ impl Frame {
   /// Returns an error if style injection fails.
   pub async fn add_style_tag(&self, url: Option<&str>, content: Option<&str>) -> Result<()> {
     if let Some(url) = url {
-      self.evaluate(&format!(
+      self.backend_eval_expr(&format!(
                 "(function(){{return new Promise(function(r,j){{var l=document.createElement('link');\
                  l.rel='stylesheet';l.href='{}';l.onload=r;l.onerror=function(){{j(new Error('Failed'))}};document.head.appendChild(l)}})}})();",
                 crate::steps::js_escape(url)
             )).await?;
     } else if let Some(content) = content {
       self
-        .evaluate(&format!(
+        .backend_eval_expr(&format!(
           "(function(){{var s=document.createElement('style');s.textContent='{}';document.head.appendChild(s)}})()",
           crate::steps::js_escape(content)
         ))
@@ -380,7 +436,7 @@ impl Frame {
         if tokio::time::Instant::now() >= deadline {
           return Err("Timeout waiting for frame load state".into());
         }
-        if let Ok(Some(v)) = self.evaluate("document.readyState").await {
+        if let Ok(Some(v)) = self.backend_eval_expr("document.readyState").await {
           if v.as_str() == Some("complete") {
             return Ok(());
           }

@@ -76,6 +76,21 @@ pub struct WaitOptions {
   pub timeout: Option<f64>,
 }
 
+/// Playwright `LocatorEvaluateOptions` — matches `{ timeout?: number }`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct EvaluateOptions {
+  pub timeout: Option<f64>,
+}
+
+impl From<EvaluateOptions> for ferridriver::options::EvaluateOptions {
+  fn from(o: EvaluateOptions) -> Self {
+    Self {
+      timeout: o.timeout.map(f64_to_u64),
+    }
+  }
+}
+
 /// Pixel rectangle for [`ScreenshotOptions::clip`]. All values are in
 /// CSS pixels relative to the viewport (or the full-page bounds when
 /// `fullPage` is also set).
@@ -518,6 +533,38 @@ impl napi::bindgen_prelude::FromNapiValue for NapiSelectOptionInput {
 /// this pass — top-level handles cover every shipped Playwright test
 /// that passes a handle as `arg`; nested is a follow-up that walks the
 /// object tree before it hits the JSON fallback.
+/// User-visible `pageFunction` arg on every evaluate method. Accepts
+/// either a JS string or a JS function — matches Playwright's
+/// `String(pageFunction)` + `typeof pageFunction === 'function'` check
+/// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:196`).
+/// The binding extracts the function source via the engine's own
+/// `ToString` (`Function.prototype.toString` for functions), plus an
+/// `is_function` hint so the backend knows whether to invoke-or-evaluate.
+#[derive(Debug, Clone)]
+pub struct NapiPageFunction {
+  pub source: String,
+  pub is_function: Option<bool>,
+}
+
+impl napi::bindgen_prelude::TypeName for NapiPageFunction {
+  fn type_name() -> &'static str {
+    "unknown"
+  }
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Unknown
+  }
+}
+
+impl napi::bindgen_prelude::ValidateNapiValue for NapiPageFunction {}
+
+impl napi::bindgen_prelude::FromNapiValue for NapiPageFunction {
+  unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    let u = unsafe { napi::Unknown::from_raw_unchecked(env, napi_val) };
+    let (source, is_function) = crate::serialize_out::extract_fn_source(u)?;
+    Ok(Self { source, is_function })
+  }
+}
+
 #[derive(Debug, Clone)]
 pub struct NapiEvaluateArg(pub ferridriver::protocol::SerializedArgument);
 

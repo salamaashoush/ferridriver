@@ -348,7 +348,7 @@ fn test_script_scroll(c: &mut McpClient) {
   let v = c.script_value(
     "await page.evaluate('window.scrollBy(0, 500)'); \
        const raw = await page.evaluate('window.scrollY'); \
-       return JSON.parse(raw);",
+       return raw;",
   );
   let y = v.as_f64().unwrap_or(0.0);
   assert!(y > 0.0, "scroll should change scrollY: {y}");
@@ -359,7 +359,7 @@ fn test_script_scroll_into_view(c: &mut McpClient) {
   let v = c.script_value(
     "await page.locator('#bottom').scrollIntoViewIfNeeded(); \
        const raw = await page.evaluate('window.scrollY'); \
-       return JSON.parse(raw);",
+       return raw;",
   );
   let y = v.as_f64().unwrap_or(0.0);
   assert!(y > 100.0, "scroll into view should scroll down: {y}");
@@ -413,7 +413,7 @@ fn test_script_drag_coords(c: &mut McpClient) {
        await page.mouse.up(); \
        const down = await page.evaluate(\"document.getElementById('d').dataset.down\"); \
        const up = await page.evaluate(\"document.getElementById('d').dataset.up\"); \
-       return { down: JSON.parse(down), up: JSON.parse(up) };",
+       return { down: down, up: up };",
   );
   assert_eq!(v["down"], json!("1"), "mouse.down should fire mousedown");
   assert_eq!(v["up"], json!("1"), "mouse.up should fire mouseup");
@@ -424,7 +424,7 @@ fn test_script_drag_and_drop(c: &mut McpClient) {
   let v = c.script_value(
     "await page.dragAndDrop('#src', '#tgt'); \
        const raw = await page.evaluate(\"document.getElementById('src').dataset.d || ''\"); \
-       return JSON.parse(raw);",
+       return raw;",
   );
   assert_eq!(v, json!("1"), "dragAndDrop should trigger mousedown on source");
 }
@@ -450,13 +450,14 @@ fn test_script_drag_and_drop_options(c: &mut McpClient) {
        },true);\
      </script>",
   );
-  // QuickJS `page.evaluate` returns a JSON-stringified result, so we parse
-  // once to unwrap the outer string and once more to reach the object.
+  // page.evaluate returns the native JS object directly. The page-side
+  // expression here is a `JSON.stringify(...)` call so the outer result
+  // is a raw JSON string; we unwrap it with a single JSON.parse and
+  // decode each nested {x,y} payload the same way.
   let v = c.script_value(
     "await page.dragAndDrop('#src', '#tgt', { sourcePosition: {x:5, y:5}, targetPosition: {x:10, y:10}, steps: 6 }); \
        const raw = await page.evaluate(\"JSON.stringify({d: document.getElementById('out').dataset.down || null, u: document.getElementById('out').dataset.up || null, m: parseInt(document.getElementById('out').dataset.moves || '0', 10)})\"); \
-       const outer = JSON.parse(raw); \
-       const state = JSON.parse(outer); \
+       const state = JSON.parse(raw); \
        return { d: state.d ? JSON.parse(state.d) : null, u: state.u ? JSON.parse(state.u) : null, m: state.m };",
   );
   let dx = v["d"]["x"].as_f64().unwrap_or(-1.0);
@@ -500,8 +501,7 @@ fn test_script_locator_drag_to_options(c: &mut McpClient) {
   let v = c.script_value(
     "await page.locator('#src').dragTo(page.locator('#tgt'), { targetPosition: {x:15, y:15} }); \
        const raw = await page.evaluate(\"document.getElementById('out').dataset.up || ''\"); \
-       const inner = JSON.parse(raw); \
-       return inner ? JSON.parse(inner) : null;",
+       return raw ? JSON.parse(raw) : null;",
   );
   let ux = v["x"].as_f64().unwrap_or(-1.0);
   let uy = v["y"].as_f64().unwrap_or(-1.0);
@@ -532,7 +532,7 @@ fn test_script_emulate_media_all_fields(c: &mut McpClient) {
         forced: matchMedia('(forced-colors: active)').matches, \
         contrast: matchMedia('(prefers-contrast: more)').matches, \
      })\"); \
-     return JSON.parse(JSON.parse(raw));",
+     return JSON.parse(raw);",
   );
   assert_eq!(
     v["print"],
@@ -589,7 +589,7 @@ fn test_script_emulate_media_null_disables_single_field(c: &mut McpClient) {
         dark: matchMedia('(prefers-color-scheme: dark)').matches, \
         reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, \
      })\"); \
-     return { pre: JSON.parse(JSON.parse(pre)), post: JSON.parse(JSON.parse(post)) };",
+     return { pre: JSON.parse(pre), post: JSON.parse(post) };",
   );
   assert_eq!(
     v["pre"]["dark"],
@@ -627,7 +627,7 @@ fn test_script_drag_and_drop_trial(c: &mut McpClient) {
   let v = c.script_value(
     "await page.dragAndDrop('#src', '#tgt', { trial: true }); \
        const raw = await page.evaluate(\"document.getElementById('log').dataset.fired\"); \
-       return JSON.parse(raw);",
+       return raw;",
   );
   assert_eq!(v, json!("0"), "trial=true must not dispatch mousedown: got {v}");
 }
@@ -657,7 +657,7 @@ fn test_script_click_options(c: &mut McpClient) {
   );
   let v = c.script_value(
     "await page.locator('#b').click({ button: 'right' });\
-     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+     return await page.evaluate('document.getElementById(\"out\").textContent');",
   );
   assert_eq!(v, json!("right"), "button=right fires contextmenu: {v}");
 
@@ -668,7 +668,7 @@ fn test_script_click_options(c: &mut McpClient) {
   );
   let v = c.script_value(
     "await page.locator('#b').click({ clickCount: 2 });\
-     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+     return await page.evaluate('document.getElementById(\"out\").textContent');",
   );
   assert_eq!(v, json!("dbl"), "clickCount=2 fires dblclick: {v}");
 
@@ -679,7 +679,7 @@ fn test_script_click_options(c: &mut McpClient) {
   );
   let v = c.script_value(
     "await page.locator('#b').click({ modifiers: ['Shift'] });\
-     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+     return await page.evaluate('document.getElementById(\"out\").textContent');",
   );
   assert_eq!(v, json!("shift"), "modifiers Shift sets event.shiftKey: {v}");
 
@@ -690,7 +690,7 @@ fn test_script_click_options(c: &mut McpClient) {
   );
   let v = c.script_value(
     "await page.locator('#b').click({ position: { x: 10, y: 20 } });\
-     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+     return await page.evaluate('document.getElementById(\"out\").textContent');",
   );
   assert_eq!(v, json!("10,20"), "position offsets click coords: {v}");
 
@@ -707,7 +707,7 @@ fn test_script_click_options(c: &mut McpClient) {
   );
   let v = c.script_value(
     "await page.locator('#b').click({ delay: 120 });\
-     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+     return await page.evaluate('document.getElementById(\"out\").textContent');",
   );
   let ms = v.as_str().and_then(|s| s.parse::<i64>().ok()).unwrap_or(0);
   assert!(ms >= 80, "delay=120 held mousedown at least 80ms: got {ms} ({v})");
@@ -723,8 +723,8 @@ fn test_script_click_options(c: &mut McpClient) {
   let v = c.script_value(
     "await page.locator('#b').click({ trial: true, modifiers: ['Shift'] });\
      return {\
-       clicked: JSON.parse(await page.evaluate('document.getElementById(\"clicked\").textContent')),\
-       kd: JSON.parse(await page.evaluate('document.getElementById(\"kd\").textContent')),\
+       clicked: await page.evaluate('document.getElementById(\"clicked\").textContent'),\
+       kd: await page.evaluate('document.getElementById(\"kd\").textContent'),\
      };",
   );
   assert_eq!(v["clicked"], json!("no"), "trial=true skips click handler: {v}");
@@ -802,7 +802,7 @@ fn test_script_select_option_force(c: &mut McpClient) {
     "selectOption timeout should fire within 1.5s, got {elapsed}ms: {v}"
   );
   // Value unchanged.
-  let post = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"s\").value'));");
+  let post = c.script_value("return await page.evaluate('document.getElementById(\"s\").value');");
   assert_eq!(
     post,
     json!("a"),
@@ -812,7 +812,7 @@ fn test_script_select_option_force(c: &mut McpClient) {
   // force: true bypasses the pre-check and selects even when disabled.
   c.nav("<select id='s' disabled><option value='a'>A</option><option value='b'>B</option></select>");
   c.script_value("await page.locator('#s').selectOption('b', { force: true });");
-  let after = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"s\").value'));");
+  let after = c.script_value("return await page.evaluate('document.getElementById(\"s\").value');");
   assert_eq!(
     after,
     json!("b"),
@@ -834,7 +834,7 @@ fn test_script_check_behavior(c: &mut McpClient) {
   // 1. Plain checkbox: check() toggles to checked.
   c.nav("<input id='cb' type='checkbox'>");
   c.script_value("await page.locator('#cb').check();");
-  let v = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"cb\").checked'));");
+  let v = c.script_value("return await page.evaluate('document.getElementById(\"cb\").checked');");
   assert_eq!(v, json!(true), "check() should toggle checkbox on: {v}");
 
   // 2. Checkbox that intercepts the click → state does not change →
@@ -866,7 +866,7 @@ fn test_script_check_behavior(c: &mut McpClient) {
   //    preventDefault checkbox that would normally throw returns ok.
   c.nav("<input id='cb' type='checkbox' onclick='event.preventDefault()'>");
   c.script_value("await page.locator('#cb').check({ trial: true });");
-  let v = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"cb\").checked'));");
+  let v = c.script_value("return await page.evaluate('document.getElementById(\"cb\").checked');");
   assert_eq!(
     v,
     json!(false),
@@ -887,7 +887,7 @@ fn test_script_check_behavior(c: &mut McpClient) {
      </script>",
   );
   c.script_value("await page.locator('#cb').check();");
-  let v = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"count\").textContent'));");
+  let v = c.script_value("return await page.evaluate('document.getElementById(\"count\").textContent');");
   assert_eq!(v, json!("0"), "already-checked check() must skip the click: {v}");
 }
 
@@ -919,13 +919,13 @@ fn test_script_fill_force(c: &mut McpClient) {
     "fill timeout should fire within 1.5s, got {elapsed}ms: {v}"
   );
   // Value stays empty — confirms no write happened.
-  let post = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"ro\").value'));");
+  let post = c.script_value("return await page.evaluate('document.getElementById(\"ro\").value');");
   assert_eq!(post, json!(""), "readonly input should still be empty: {post}");
 
   // 2. force: true on the same readonly input → writes successfully.
   c.nav("<input id='ro' readonly value=''>");
   c.script_value("await page.locator('#ro').fill('bypass', { force: true });");
-  let after = c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"ro\").value'));");
+  let after = c.script_value("return await page.evaluate('document.getElementById(\"ro\").value');");
   assert_eq!(
     after,
     json!("bypass"),
@@ -965,8 +965,7 @@ fn test_script_tap_native(c: &mut McpClient) {
     );
     // The page's DOM event handler must NOT have fired — proof there's
     // no JS-fallback dispatch happening behind the typed error.
-    let after =
-      c.script_value("return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));");
+    let after = c.script_value("return await page.evaluate('document.getElementById(\"out\").textContent');");
     assert_eq!(
       after,
       json!("no"),
@@ -999,8 +998,8 @@ fn test_script_tap_native(c: &mut McpClient) {
   let v = c.script_value(
     "await page.locator('#b').tap();\
      return {\
-       trusted: JSON.parse(await page.evaluate('document.getElementById(\"trusted\").textContent')),\
-       inRect: JSON.parse(await page.evaluate('document.getElementById(\"inrect\").textContent')),\
+       trusted: await page.evaluate('document.getElementById(\"trusted\").textContent'),\
+       inRect: await page.evaluate('document.getElementById(\"inrect\").textContent'),\
      };",
   );
   assert_eq!(
@@ -1025,7 +1024,7 @@ fn test_script_tap_native(c: &mut McpClient) {
   );
   let v = c.script_value(
     "await page.locator('#b').tap({ modifiers: ['Shift'] });\
-     return JSON.parse(await page.evaluate('document.getElementById(\"out\").textContent'));",
+     return await page.evaluate('document.getElementById(\"out\").textContent');",
   );
   assert_eq!(
     v,
@@ -1044,8 +1043,8 @@ fn test_script_tap_native(c: &mut McpClient) {
   let v = c.script_value(
     "await page.locator('#b').tap({ trial: true, modifiers: ['Shift'] });\
      return {\
-       t: JSON.parse(await page.evaluate('document.getElementById(\"tap\").textContent')),\
-       k: JSON.parse(await page.evaluate('document.getElementById(\"kd\").textContent')),\
+       t: await page.evaluate('document.getElementById(\"tap\").textContent'),\
+       k: await page.evaluate('document.getElementById(\"kd\").textContent'),\
      };",
   );
   assert_eq!(v["t"], json!("no"), "trial:true skips touchstart dispatch: {v}");
@@ -1106,10 +1105,10 @@ fn test_script_utility_script_exposed(c: &mut McpClient) {
   //    so one JSON.parse unwraps the quote.
   let v = c.script_value(
     "return {\
-       hasClass: JSON.parse(await page.evaluate('typeof window.__fd.UtilityScript')),\
-       hasFactory: JSON.parse(await page.evaluate('typeof window.__fd.newUtilityScript')),\
-       hasParse: JSON.parse(await page.evaluate('typeof window.__fd.parseEvaluationResultValue')),\
-       hasSerialize: JSON.parse(await page.evaluate('typeof window.__fd.serializeAsCallArgument')),\
+       hasClass: await page.evaluate('typeof window.__fd.UtilityScript'),\
+       hasFactory: await page.evaluate('typeof window.__fd.newUtilityScript'),\
+       hasParse: await page.evaluate('typeof window.__fd.parseEvaluationResultValue'),\
+       hasSerialize: await page.evaluate('typeof window.__fd.serializeAsCallArgument'),\
      };",
   );
   assert_eq!(v["hasClass"], json!("function"), "UtilityScript class missing: {v}");
@@ -1133,8 +1132,8 @@ fn test_script_utility_script_exposed(c: &mut McpClient) {
   //    `jsonValue` methods are invokable.
   let v = c.script_value(
     "return {\
-       hasEvaluate: JSON.parse(await page.evaluate('typeof window.__fd.newUtilityScript().evaluate')),\
-       hasJsonValue: JSON.parse(await page.evaluate('typeof window.__fd.newUtilityScript().jsonValue')),\
+       hasEvaluate: await page.evaluate('typeof window.__fd.newUtilityScript().evaluate'),\
+       hasJsonValue: await page.evaluate('typeof window.__fd.newUtilityScript().jsonValue'),\
      };",
   );
   assert_eq!(
@@ -1226,7 +1225,7 @@ fn test_script_utility_script_exposed(c: &mut McpClient) {
     // before handing it back, so one `JSON.parse` is enough to unwrap.
     // The inline-script `{probe_expr}` must return a JSON-expressible
     // primitive (bool or typeof-string in our probes).
-    let script = format!("return JSON.parse(await page.evaluate({probe_expr:?}));");
+    let script = format!("return await page.evaluate({probe_expr:?});");
     let got = c.script_value(&script);
     assert_eq!(
       got, expected,
@@ -1240,11 +1239,11 @@ fn test_script_utility_script_exposed(c: &mut McpClient) {
   //    already JSON-stringifies the IIFE's return value, so one
   //    `JSON.parse` unwraps the object shape.
   let v = c.script_value(
-    "return JSON.parse(await page.evaluate(`(() => {\
+    "return await page.evaluate(`(() => {\
        const raw = {d: '2024-06-01T00:00:00.000Z'};\
        const dateObj = window.__fd.parseEvaluationResultValue(raw);\
        return window.__fd.serializeAsCallArgument(dateObj, v => ({fallThrough: v}));\
-     })()`));",
+     })()`);",
   );
   assert_eq!(
     v,
@@ -1341,7 +1340,7 @@ fn test_script_handle_lifecycle(c: &mut McpClient) {
   // must emit the correct form when the handle rides through as an
   // argument. This test exercises that end-to-end.
   let v = c.script_value(
-    "const jh = await page.evaluateHandleWithArg(\"() => ({ not: 'a dom node' })\", null);\
+    "const jh = await page.evaluateHandle(\"() => ({ not: 'a dom node' })\", null);\
      const asEl = await jh.asElement();\
      await jh.dispose();\
      return asEl === null || asEl === undefined;",
@@ -1349,29 +1348,33 @@ fn test_script_handle_lifecycle(c: &mut McpClient) {
   assert_eq!(v, json!(true), "asElement returned non-null for non-DOM remote: {v}");
 }
 
-// Task 1.3 phase D — page.evaluate(fn, arg) + evaluateHandle(fn) +
-// handle.evaluate(fn). Rule 9 covers all four backends via QuickJS
-// `run_script` (CDP + BiDi go through callFunctionOn / callFunction
-// with remote references; WebKit inlines the call via the shared
-// `window.__wr` registry).
+// page.evaluate(fn, arg) / evaluateHandle(fn) / handle.evaluate(fn) —
+// `fn` accepts either a string or a real JS function, matching
+// Playwright's `String(pageFunction)` + `typeof fn === 'function'`
+// at `/tmp/playwright/packages/playwright-core/src/client/frame.ts:196`.
+// Rule 9 covers all four backends via QuickJS `run_script`.
 fn test_script_evaluate_fn_and_handle(c: &mut McpClient) {
   c.nav("<button id='primary'>ok</button>");
 
-  // page.evaluateWithArg(fn, primitive) — function-call semantics.
-  let v = c.script_value("return await page.evaluateWithArg('x => x + 1', 41);");
+  // page.evaluate(fn, primitive) — function-call semantics.
+  let v = c.script_value("return await page.evaluate(x => x + 1, 41);");
   assert_eq!(v, json!(42), "primitive arg round-trip: {v}");
 
-  // page.evaluateWithArg(fn, object) — JSON round-trip.
-  let v = c.script_value("return await page.evaluateWithArg('o => o.a + o.b', {a: 2, b: 3});");
+  // page.evaluate(fn, object) — JSON round-trip.
+  let v = c.script_value("return await page.evaluate(o => o.a + o.b, {a: 2, b: 3});");
   assert_eq!(v, json!(5), "object arg round-trip: {v}");
 
-  // page.evaluateWithArg(fn, null) — no-arg function-call with null.
-  let v = c.script_value("return await page.evaluateWithArg('() => 7', null);");
+  // page.evaluate(fn, null) — no-arg function-call with null.
+  let v = c.script_value("return await page.evaluate(() => 7, null);");
   assert_eq!(v, json!(7), "null-arg call: {v}");
 
-  // page.evaluateHandleWithArg — returns a live JSHandle.
+  // String form also accepted (Playwright parity — `String(pageFunction)`).
+  let v = c.script_value("return await page.evaluate('1 + 1');");
+  assert_eq!(v, json!(2), "expression-as-string: {v}");
+
+  // page.evaluateHandle — returns a live JSHandle.
   let v = c.script_value(
-    "const h = await page.evaluateHandleWithArg('() => ({x: 42})', null);\
+    "const h = await page.evaluateHandle(() => ({x: 42}));\
      const disposed = h.isDisposed;\
      await h.dispose();\
      return {disposed_before: disposed, disposed_after: h.isDisposed};",
@@ -1379,19 +1382,19 @@ fn test_script_evaluate_fn_and_handle(c: &mut McpClient) {
   assert_eq!(v["disposed_before"], json!(false));
   assert_eq!(v["disposed_after"], json!(true));
 
-  // handle.evaluateWithArg passes the handle as arg[0].
+  // handle.evaluate passes the handle as arg[0].
   let v = c.script_value(
-    "const h = await page.evaluateHandleWithArg('() => document.body', null);\
-     const tag = await h.evaluateWithArg('el => el.tagName', null);\
+    "const h = await page.evaluateHandle(() => document.body);\
+     const tag = await h.evaluate(el => el.tagName);\
      await h.dispose();\
      return tag;",
   );
   assert_eq!(v, json!("BODY"), "handle.evaluate: {v}");
 
-  // ElementHandle.evaluateWithArg routes through its JSHandle.
+  // ElementHandle.evaluate routes through its JSHandle.
   let v = c.script_value(
     "const eh = await page.querySelector('button#primary');\
-     const tag = await eh.evaluateWithArg('el => el.tagName', null);\
+     const tag = await eh.evaluate(el => el.tagName);\
      await eh.dispose();\
      return tag;",
   );
@@ -1404,7 +1407,7 @@ fn test_script_evaluate_fn_and_handle(c: &mut McpClient) {
      await eh.dispose();\
      let threw = false;\
      let msg = '';\
-     try { await jh.evaluateWithArg('el => el.tagName', null); }\
+     try { await jh.evaluate(el => el.tagName); }\
      catch (e) { threw = true; msg = String(e.message || e); }\
      return {threw, hasDisposedWord: msg.indexOf('disposed') >= 0};",
   );
@@ -1416,38 +1419,54 @@ fn test_script_evaluate_fn_and_handle(c: &mut McpClient) {
   );
 }
 
-// Phase D — rich-type round-trip via the isomorphic wire. Exercised
-// through `evaluateWithArgWire` which bypasses the JSON-like
-// lowering and returns the raw tagged object. Proves Playwright's
-// serializer round-trips every wire variant end-to-end on every
-// backend.
+// Rich-type round-trip — Date / RegExp / NaN / Infinity / BigInt /
+// undefined arrive on the JS side as native values, matching
+// Playwright's `parseSerializedValue` at
+// `/tmp/playwright/packages/playwright-core/src/protocol/serializers.ts:19`.
+// Rule 9 across cdp-pipe / cdp-raw / bidi / webkit.
 fn test_script_evaluate_rich_types(c: &mut McpClient) {
   c.nav("<div></div>");
 
-  // Date → {d: '<iso>'}
-  let v =
-    c.script_value("return await page.evaluateWithArgWire(\"() => new Date('2024-06-01T00:00:00.000Z')\", null);");
-  assert_eq!(v, json!({"d": "2024-06-01T00:00:00.000Z"}), "Date wire round-trip: {v}");
+  // Date: rehydrates to `Date` instance.
+  let v = c.script_value(
+    "const d = await page.evaluate(() => new Date('2024-06-01T00:00:00.000Z'));\
+     return {is_date: d instanceof Date, iso: d.toISOString()};",
+  );
+  assert_eq!(v["is_date"], json!(true), "Date is native: {v}");
+  assert_eq!(v["iso"], json!("2024-06-01T00:00:00.000Z"), "Date round-trips: {v}");
 
-  // RegExp → {r: {p, f}}
-  let v = c.script_value("return await page.evaluateWithArgWire(\"() => /foo.*bar/gi\", null);");
-  assert_eq!(v, json!({"r": {"p": "foo.*bar", "f": "gi"}}), "RegExp wire: {v}");
+  // RegExp: rehydrates to `RegExp` instance.
+  let v = c.script_value(
+    "const r = await page.evaluate(() => /foo.*bar/gi);\
+     return {is_regexp: r instanceof RegExp, source: r.source, flags: r.flags};",
+  );
+  assert_eq!(v["is_regexp"], json!(true), "RegExp is native: {v}");
+  assert_eq!(v["source"], json!("foo.*bar"), "RegExp source: {v}");
+  assert_eq!(v["flags"], json!("gi"), "RegExp flags: {v}");
 
-  // NaN → {v: 'NaN'}
-  let v = c.script_value("return await page.evaluateWithArgWire('() => NaN', null);");
-  assert_eq!(v, json!({"v": "NaN"}), "NaN wire: {v}");
+  // NaN: rehydrates to literal NaN.
+  let v = c.script_value("return Number.isNaN(await page.evaluate(() => NaN));");
+  assert_eq!(v, json!(true), "NaN round-trip: {v}");
 
-  // Infinity → {v: 'Infinity'}
-  let v = c.script_value("return await page.evaluateWithArgWire('() => Infinity', null);");
-  assert_eq!(v, json!({"v": "Infinity"}), "Infinity wire: {v}");
+  // Infinity: literal +Infinity.
+  let v = c.script_value("return (await page.evaluate(() => Infinity)) === Infinity;");
+  assert_eq!(v, json!(true), "Infinity round-trip: {v}");
 
-  // BigInt → {bi: '<digits>'}
-  let v = c.script_value("return await page.evaluateWithArgWire('() => 9007199254740993n', null);");
-  assert_eq!(v, json!({"bi": "9007199254740993"}), "BigInt wire: {v}");
+  // BigInt: rehydrates to a `bigint`.
+  let v = c.script_value(
+    "const b = await page.evaluate(() => 9007199254740993n);\
+     return {type: typeof b, str: String(b)};",
+  );
+  assert_eq!(v["type"], json!("bigint"), "BigInt type: {v}");
+  assert_eq!(v["str"], json!("9007199254740993"), "BigInt value: {v}");
 
-  // undefined → {v: 'undefined'}
-  let v = c.script_value("return await page.evaluateWithArgWire('() => undefined', null);");
-  assert_eq!(v, json!({"v": "undefined"}), "undefined wire: {v}");
+  // undefined: rehydrates to literal undefined (== null, !== null).
+  let v = c.script_value(
+    "const u = await page.evaluate(() => undefined);\
+     return {is_undef: u === undefined, loose_null: u == null};",
+  );
+  assert_eq!(v["is_undef"], json!(true), "undefined round-trip: {v}");
+  assert_eq!(v["loose_null"], json!(true), "undefined == null: {v}");
 }
 
 // Task 1.2 phase E — ElementHandle DOM methods. Rule 9: verify reads,
@@ -1619,7 +1638,7 @@ fn test_script_handle_materialisation(c: &mut McpClient) {
   let v = c.script_value(
     "const loc = page.locator('#b');\
      const eh = await loc.elementHandle();\
-     const tag = await eh.evaluateWithArg('el => el.tagName', null);\
+     const tag = await eh.evaluate(el => el.tagName);\
      await eh.dispose();\
      return tag;",
   );
@@ -1695,8 +1714,8 @@ fn test_script_add_init_script(c: &mut McpClient) {
      );\
      await page.goto('data:text/html,<title>x</title>');\
      return {\
-       answer: JSON.parse(await page.evaluate('window.__fd_init_arg.answer')),\
-       label: JSON.parse(await page.evaluate('window.__fd_init_arg.label')),\
+       answer: await page.evaluate('window.__fd_init_arg.answer'),\
+       label: await page.evaluate('window.__fd_init_arg.label'),\
      };",
   );
   assert_eq!(v["answer"], json!(42), "function arg answer: {v}");
@@ -1706,7 +1725,7 @@ fn test_script_add_init_script(c: &mut McpClient) {
   let v = c.script_value(
     "await page.addInitScript((x) => { window.__fd_init_noarg = typeof x; });\
      await page.goto('data:text/html,<title>y</title>');\
-     return JSON.parse(await page.evaluate('window.__fd_init_noarg'));",
+     return await page.evaluate('window.__fd_init_noarg');",
   );
   assert_eq!(v, json!("undefined"), "function no-arg typeof: {v}");
 
@@ -1714,7 +1733,7 @@ fn test_script_add_init_script(c: &mut McpClient) {
   let v = c.script_value(
     "await page.addInitScript((x) => { window.__fd_init_null = x === null ? 'is-null' : typeof x; }, null);\
      await page.goto('data:text/html,<title>z</title>');\
-     return JSON.parse(await page.evaluate('window.__fd_init_null'));",
+     return await page.evaluate('window.__fd_init_null');",
   );
   assert_eq!(v, json!("is-null"), "function null arg: {v}");
 
@@ -1722,7 +1741,7 @@ fn test_script_add_init_script(c: &mut McpClient) {
   let v = c.script_value(
     "await page.addInitScript({ content: \"window.__fd_init_content = 'from-content';\" });\
      await page.goto('data:text/html,<title>w</title>');\
-     return JSON.parse(await page.evaluate('window.__fd_init_content'));",
+     return await page.evaluate('window.__fd_init_content');",
   );
   assert_eq!(v, json!("from-content"), "{{content}} form: {v}");
 
@@ -1860,7 +1879,7 @@ fn test_script_upload_file(c: &mut McpClient) {
        const count = await page.evaluate(\"document.getElementById('f').files.length\"); \
        const name = await page.evaluate(\"document.getElementById('f').files[0].name\"); \
        const size = await page.evaluate(\"document.getElementById('f').files[0].size\"); \
-       return { count: JSON.parse(count), name: JSON.parse(name), size: JSON.parse(size) };",
+       return { count: count, name: name, size: size };",
     json!([tmp.to_str().unwrap()]),
   );
   assert_eq!(v["count"], json!(1));
@@ -1874,7 +1893,7 @@ fn test_script_user_agent(c: &mut McpClient) {
   let v = c.script_value(
     "await page.setUserAgent('TestBot/1.0'); \
        const rawUa = await page.evaluate('navigator.userAgent'); \
-       return JSON.parse(rawUa);",
+       return rawUa;",
   );
   let ua = v.as_str().unwrap_or("").to_string();
   assert!(ua.contains("TestBot"), "setUserAgent should override UA: {ua}");
@@ -1886,7 +1905,7 @@ fn test_script_viewport(c: &mut McpClient) {
     "await page.setViewportSize(375, 812); \
        const w = await page.evaluate('window.innerWidth'); \
        const h = await page.evaluate('window.innerHeight'); \
-       return { w: JSON.parse(w), h: JSON.parse(h) };",
+       return { w: w, h: h };",
   );
   assert_eq!(v["w"], json!(375));
   assert_eq!(v["h"], json!(812));
@@ -1897,7 +1916,7 @@ fn test_script_geolocation(c: &mut McpClient) {
   let v = c.script_value(
     "await context.setGeolocation(37.7749, -122.4194, 1.0); \
        const raw = await page.evaluate('typeof navigator.geolocation'); \
-       return JSON.parse(raw);",
+       return raw;",
   );
   assert_eq!(v, json!("object"), "geolocation should be available");
 }
@@ -1909,7 +1928,7 @@ fn test_script_offline(c: &mut McpClient) {
        const rawOffline = await page.evaluate('navigator.onLine'); \
        await context.setOffline(false); \
        const rawOnline = await page.evaluate('navigator.onLine'); \
-       return { offline: JSON.parse(rawOffline), online: JSON.parse(rawOnline) };",
+       return { offline: rawOffline, online: rawOnline };",
   );
   assert_eq!(v["offline"], json!(false), "should be offline");
   assert_eq!(v["online"], json!(true), "should be back online");
@@ -2014,13 +2033,12 @@ fn test_script_cookies(c: &mut McpClient) {
 fn test_script_localstorage(c: &mut McpClient) {
   c.nav_url("https://example.com");
   // localStorage lives in the page, not the runner — drive it through
-  // page.evaluate. page.evaluate returns a JSON-serialized string so we
-  // JSON.parse the payload for each read.
+  // page.evaluate. page.evaluate rehydrates native JS values directly.
   let v = c.script_value(
     "await page.evaluate(\"localStorage.setItem('lk', 'lv')\"); \
-       const rawGot = await page.evaluate(\"localStorage.getItem('lk')\"); \
-       const rawLen = await page.evaluate(\"localStorage.length\"); \
-       return { got: JSON.parse(rawGot), count: JSON.parse(rawLen) };",
+       const got = await page.evaluate(\"localStorage.getItem('lk')\"); \
+       const count = await page.evaluate(\"localStorage.length\"); \
+       return { got, count };",
   );
   assert_eq!(v["got"], json!("lv"));
   assert!(v["count"].as_i64().unwrap_or(0) >= 1);

@@ -68,23 +68,14 @@ impl JSHandle {
   }
 
   /// Playwright: `jsHandle.jsonValue(): Promise<T>`. Projects the
-  /// remote value to its JSON-like form. Rich types that have no
-  /// native JSON shape (`Date`, `RegExp`, `BigInt`, typed arrays,
-  /// `NaN`/`Infinity`) surface as `null`; use
-  /// [`Self::jsonValueWire`] for the full isomorphic wire shape.
-  #[napi]
-  pub async fn json_value(&self) -> Result<Option<serde_json::Value>> {
+  /// remote value as a native JS value — `Date`, `RegExp`, `BigInt`,
+  /// typed arrays, `NaN` / `±Infinity` / `undefined` / `-0` are
+  /// rehydrated to their native forms, matching Playwright's
+  /// `parseResult` (`/tmp/playwright/packages/playwright-core/src/protocol/serializers.ts`).
+  #[napi(ts_return_type = "Promise<unknown>")]
+  pub async fn json_value(&self) -> Result<crate::serialize_out::Evaluated> {
     let v = self.inner.json_value().await.into_napi()?;
-    Ok(v.to_json_like())
-  }
-
-  /// Raw isomorphic wire shape of [`Self::jsonValue`] — keeps rich
-  /// types (`Date`, `RegExp`, `BigInt`, typed arrays, `NaN`,
-  /// `Infinity`, `undefined`) intact as their tagged wire form.
-  #[napi]
-  pub async fn json_value_wire(&self) -> Result<serde_json::Value> {
-    let v = self.inner.json_value().await.into_napi()?;
-    serde_json::to_value(&v).map_err(|e| napi::Error::from_reason(e.to_string()))
+    Ok(crate::serialize_out::Evaluated(v))
   }
 
   /// Playwright: `jsHandle.getProperty(propertyName): Promise<JSHandle>`.
@@ -104,53 +95,38 @@ impl JSHandle {
     Ok(pairs.into_iter().map(|(k, h)| (k, JSHandle::wrap(h))).collect())
   }
 
-  /// Playwright: `jsHandle.evaluate(pageFunction, arg?)`. Runs
-  /// `fnSource` with `this` bound to this handle's remote object.
-  /// Rich-type return values that have no native JSON form surface
-  /// as `null`; use [`Self::evaluateWithArgWire`] for the raw
-  /// isomorphic wire shape.
-  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
-  pub async fn evaluate_with_arg(
+  /// Playwright: `jsHandle.evaluate(pageFunction, arg?): Promise<R>`.
+  /// Runs the function with this handle's remote object as the first
+  /// positional argument. Rich types round-trip as native JS values.
+  #[napi(
+    ts_args_type = "pageFunction: string | Function, arg?: unknown",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn evaluate(
     &self,
-    fn_source: String,
+    page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
-  ) -> Result<Option<serde_json::Value>> {
+  ) -> Result<crate::serialize_out::Evaluated> {
     let serialized = crate::page::build_serialized_argument(arg);
     let result = self
       .inner
-      .evaluate_with_arg(&fn_source, serialized, Some(true))
+      .evaluate(&page_function.source, serialized, page_function.is_function)
       .await
       .into_napi()?;
-    Ok(result.to_json_like())
+    Ok(crate::serialize_out::Evaluated(result))
   }
 
-  /// Phase-D escape hatch: raw isomorphic wire shape.
-  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
-  pub async fn evaluate_with_arg_wire(
+  /// Playwright: `jsHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown")]
+  pub async fn evaluate_handle(
     &self,
-    fn_source: String,
-    arg: Option<crate::types::NapiEvaluateArg>,
-  ) -> Result<serde_json::Value> {
-    let serialized = crate::page::build_serialized_argument(arg);
-    let result = self
-      .inner
-      .evaluate_with_arg(&fn_source, serialized, Some(true))
-      .await
-      .into_napi()?;
-    serde_json::to_value(&result).map_err(|e| napi::Error::from_reason(e.to_string()))
-  }
-
-  /// Playwright: `jsHandle.evaluateHandle(pageFunction, arg?)`.
-  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
-  pub async fn evaluate_handle_with_arg(
-    &self,
-    fn_source: String,
+    page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<JSHandle> {
     let serialized = crate::page::build_serialized_argument(arg);
     let handle = self
       .inner
-      .evaluate_handle_with_arg(&fn_source, serialized, Some(true))
+      .evaluate_handle(&page_function.source, serialized, page_function.is_function)
       .await
       .into_napi()?;
     Ok(JSHandle::wrap(handle))

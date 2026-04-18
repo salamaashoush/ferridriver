@@ -554,14 +554,49 @@ impl LocatorJs {
 
   // ── Evaluation ────────────────────────────────────────────────────────────
 
-  /// Evaluate `expression` against this locator's first element. Returns the
-  /// JSON-encoded result as a string (or `null`).
-  ///
-  /// Parity gap: core takes a string, not a function. See
-  /// `PLAYWRIGHT_COMPAT.md` "Gaps surfaced by scripting bindings" item 8.
+  /// Playwright: `locator.evaluate(pageFunction, arg?, options?): Promise<R>`.
   #[qjs(rename = "evaluate")]
-  pub async fn evaluate(&self, expression: String) -> rquickjs::Result<Option<String>> {
-    let value = self.inner.evaluate(&expression).await.into_js()?;
-    Ok(value.map(|v| serde_json::to_string(&v).unwrap_or_default()))
+  pub async fn evaluate<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    page_function: rquickjs::Value<'js>,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let (source, is_fn) = crate::bindings::convert::extract_page_function(&ctx, page_function)?;
+    let serialized = crate::bindings::convert::quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self.inner.evaluate(&source, serialized, is_fn, None).await.into_js()?;
+    crate::bindings::convert::serialized_value_to_quickjs(&ctx, &result)
+  }
+
+  /// Playwright: `locator.evaluateHandle(pageFunction, arg?, options?): Promise<JSHandle>`.
+  #[qjs(rename = "evaluateHandle")]
+  pub async fn evaluate_handle<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    page_function: rquickjs::Value<'js>,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
+    let (source, is_fn) = crate::bindings::convert::extract_page_function(&ctx, page_function)?;
+    let serialized = crate::bindings::convert::quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let handle = self
+      .inner
+      .evaluate_handle(&source, serialized, is_fn, None)
+      .await
+      .into_js()?;
+    Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
+  }
+
+  /// Playwright: `locator.evaluateAll(pageFunction, arg?): Promise<R>`.
+  #[qjs(rename = "evaluateAll")]
+  pub async fn evaluate_all<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    page_function: rquickjs::Value<'js>,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let (source, is_fn) = crate::bindings::convert::extract_page_function(&ctx, page_function)?;
+    let serialized = crate::bindings::convert::quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self.inner.evaluate_all(&source, serialized, is_fn).await.into_js()?;
+    crate::bindings::convert::serialized_value_to_quickjs(&ctx, &result)
   }
 }

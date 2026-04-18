@@ -83,53 +83,39 @@ impl ElementHandle {
     crate::js_handle::JSHandle::wrap(self.inner.as_js_handle().clone())
   }
 
-  /// Playwright: `elementHandle.evaluate(pageFunction, arg?)`.
+  /// Playwright: `elementHandle.evaluate(pageFunction, arg?): Promise<R>`.
   /// Delegates through the companion `JSHandle`.
-  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
-  pub async fn evaluate_with_arg(
+  #[napi(
+    ts_args_type = "pageFunction: string | Function, arg?: unknown",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn evaluate(
     &self,
-    fn_source: String,
+    page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
-  ) -> Result<Option<serde_json::Value>> {
+  ) -> Result<crate::serialize_out::Evaluated> {
     let serialized = crate::page::build_serialized_argument(arg);
     let result = self
       .inner
       .as_js_handle()
-      .evaluate_with_arg(&fn_source, serialized, Some(true))
+      .evaluate(&page_function.source, serialized, page_function.is_function)
       .await
       .into_napi()?;
-    Ok(result.to_json_like())
+    Ok(crate::serialize_out::Evaluated(result))
   }
 
-  /// Raw isomorphic wire shape variant of [`Self::evaluateWithArg`].
-  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
-  pub async fn evaluate_with_arg_wire(
+  /// Playwright: `elementHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown")]
+  pub async fn evaluate_handle(
     &self,
-    fn_source: String,
-    arg: Option<crate::types::NapiEvaluateArg>,
-  ) -> Result<serde_json::Value> {
-    let serialized = crate::page::build_serialized_argument(arg);
-    let result = self
-      .inner
-      .as_js_handle()
-      .evaluate_with_arg(&fn_source, serialized, Some(true))
-      .await
-      .into_napi()?;
-    serde_json::to_value(&result).map_err(|e| napi::Error::from_reason(e.to_string()))
-  }
-
-  /// Playwright: `elementHandle.evaluateHandle(pageFunction, arg?)`.
-  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
-  pub async fn evaluate_handle_with_arg(
-    &self,
-    fn_source: String,
+    page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::js_handle::JSHandle> {
     let serialized = crate::page::build_serialized_argument(arg);
     let handle = self
       .inner
       .as_js_handle()
-      .evaluate_handle_with_arg(&fn_source, serialized, Some(true))
+      .evaluate_handle(&page_function.source, serialized, page_function.is_function)
       .await
       .into_napi()?;
     Ok(crate::js_handle::JSHandle::wrap(handle))
@@ -257,38 +243,48 @@ impl ElementHandle {
 
   // ── $eval / $$eval (Playwright parity) ───────────────────────────────
 
-  /// Playwright: `elementHandle.$eval(selector, pageFunction, arg?): Promise<R>`.
-  #[napi(ts_args_type = "selector: string, fnSource: string, arg?: unknown")]
-  pub async fn eval_on_selector(
+  /// Playwright: `elementHandle.$eval(selector, pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:215`).
+  #[napi(
+    js_name = "$eval",
+    ts_args_type = "selector: string, pageFunction: string | Function, arg?: unknown",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn dollar_eval(
     &self,
     selector: String,
-    fn_source: String,
+    page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
-  ) -> Result<Option<serde_json::Value>> {
+  ) -> Result<crate::serialize_out::Evaluated> {
     let serialized = crate::page::build_serialized_argument(arg);
     let result = self
       .inner
-      .eval_on_selector(&selector, &fn_source, serialized)
+      .eval_on_selector(&selector, &page_function.source, serialized)
       .await
       .into_napi()?;
-    Ok(result.to_json_like())
+    Ok(crate::serialize_out::Evaluated(result))
   }
 
-  /// Playwright: `elementHandle.$$eval(selector, pageFunction, arg?): Promise<R>`.
-  #[napi(ts_args_type = "selector: string, fnSource: string, arg?: unknown")]
-  pub async fn eval_on_selector_all(
+  /// Playwright: `elementHandle.$$eval(selector, pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:220`).
+  #[napi(
+    js_name = "$$eval",
+    ts_args_type = "selector: string, pageFunction: string | Function, arg?: unknown",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn dollar_dollar_eval(
     &self,
     selector: String,
-    fn_source: String,
+    page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
-  ) -> Result<Option<serde_json::Value>> {
+  ) -> Result<crate::serialize_out::Evaluated> {
     let serialized = crate::page::build_serialized_argument(arg);
     let result = self
       .inner
-      .eval_on_selector_all(&selector, &fn_source, serialized)
+      .eval_on_selector_all(&selector, &page_function.source, serialized)
       .await
       .into_napi()?;
-    Ok(result.to_json_like())
+    Ok(crate::serialize_out::Evaluated(result))
   }
 
   // ── Frame accessors ──────────────────────────────────────────────────

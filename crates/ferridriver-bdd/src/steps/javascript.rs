@@ -8,7 +8,7 @@ use ferridriver_bdd_macros::{step, then, when};
 async fn evaluate(world: &mut BrowserWorld, expression: String) {
   world
     .page()
-    .evaluate(&expression)
+    .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
     .map_err(|e| StepError::from(format!("evaluate JS: {e}")))?;
 }
@@ -17,36 +17,22 @@ async fn evaluate(world: &mut BrowserWorld, expression: String) {
 async fn store_result(world: &mut BrowserWorld, expression: String, var_name: String) {
   let result = world
     .page()
-    .evaluate(&expression)
+    .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
     .map_err(|e| StepError::from(format!("evaluate JS for variable: {e}")))?;
 
-  let value = match result {
-    Some(serde_json::Value::String(s)) => s,
-    Some(serde_json::Value::Number(n)) => n.to_string(),
-    Some(serde_json::Value::Bool(b)) => b.to_string(),
-    Some(serde_json::Value::Null) | None => "null".to_string(),
-    Some(other) => other.to_string(),
-  };
-
-  world.set_var(var_name, value);
+  world.set_var(var_name, result.as_string_lossy());
 }
 
 #[then("I evaluate {string} and expect {string}")]
 async fn evaluate_and_expect(world: &mut BrowserWorld, expression: String, expected: String) {
   let result = world
     .page()
-    .evaluate(&expression)
+    .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
     .map_err(|e| StepError::from(format!("evaluate JS: {e}")))?;
 
-  let actual = match result {
-    Some(serde_json::Value::String(s)) => s,
-    Some(serde_json::Value::Number(n)) => n.to_string(),
-    Some(serde_json::Value::Bool(b)) => b.to_string(),
-    Some(serde_json::Value::Null) | None => "null".to_string(),
-    Some(other) => serde_json::to_string(&other).unwrap_or_else(|_| other.to_string()),
-  };
+  let actual = result.as_string_lossy();
 
   if actual != expected {
     return Err(StepError {

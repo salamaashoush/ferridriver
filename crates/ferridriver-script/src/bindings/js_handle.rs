@@ -10,7 +10,7 @@ use rquickjs::JsLifetime;
 use rquickjs::class::Trace;
 
 use crate::bindings::convert::{
-  FerriResultExt, json_value_to_quickjs, quickjs_arg_to_serialized, serialized_value_to_quickjs,
+  FerriResultExt, extract_page_function, quickjs_arg_to_serialized, serialized_value_to_quickjs,
 };
 
 /// QuickJS-visible wrapper around a core [`JSHandle`].
@@ -63,25 +63,15 @@ impl JSHandleJs {
     Ok(maybe.map(crate::bindings::element_handle::ElementHandleJs::new))
   }
 
-  /// Playwright: `jsHandle.jsonValue(): Promise<T>`. Projects the
-  /// remote value to its JSON-like form. Rich types without a native
-  /// JSON shape surface as `null`; use [`Self::jsonValueWire`] for
-  /// the full isomorphic wire shape.
+  /// Playwright: `jsHandle.jsonValue(): Promise<T>`. Rich types
+  /// (`Date` / `RegExp` / `BigInt` / `URL` / `Error` / typed arrays /
+  /// `NaN` / `±Infinity` / `undefined` / `-0`) arrive as native JS —
+  /// matches Playwright's `parseSerializedValue` at
+  /// `/tmp/playwright/packages/playwright-core/src/protocol/serializers.ts:19`.
   #[qjs(rename = "jsonValue")]
   pub async fn json_value<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
     let v = self.inner.json_value().await.into_js()?;
     serialized_value_to_quickjs(&ctx, &v)
-  }
-
-  /// Raw isomorphic wire shape variant of [`Self::jsonValue`] — keeps
-  /// rich types (`Date`, `RegExp`, `BigInt`, typed arrays, `NaN`,
-  /// `Infinity`, `undefined`) intact as their tagged wire form.
-  #[qjs(rename = "jsonValueWire")]
-  pub async fn json_value_wire<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let v = self.inner.json_value().await.into_js()?;
-    let wire = serde_json::to_value(&v)
-      .map_err(|e| rquickjs::Error::new_from_js_message("jsonValueWire", "", &e.to_string()))?;
-    json_value_to_quickjs(&ctx, &wire)
   }
 
   /// Playwright: `jsHandle.getProperty(propertyName): Promise<JSHandle>`.
@@ -106,59 +96,33 @@ impl JSHandleJs {
     Ok(obj.into_value())
   }
 
-  /// Playwright: `jsHandle.evaluate(fn, arg?)`. The handle's remote
-  /// object is passed as the first argument to `fn`. See
-  /// `ferridriver::JSHandle::evaluate_with_arg` for the phase-D MVP
-  /// semantic.
-  #[qjs(rename = "evaluateWithArg")]
-  pub async fn evaluate_with_arg<'js>(
+  /// Playwright: `jsHandle.evaluate(pageFunction, arg?): Promise<R>`.
+  /// `pageFunction` accepts a string or a JS function — matches
+  /// Playwright's `String(pageFunction)` + `typeof fn === 'function'`.
+  #[qjs(rename = "evaluate")]
+  pub async fn evaluate<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
-    fn_source: String,
+    page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
     let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let result = self
-      .inner
-      .evaluate_with_arg(&fn_source, serialized, Some(true))
-      .await
-      .into_js()?;
+    let result = self.inner.evaluate(&source, serialized, is_fn).await.into_js()?;
     serialized_value_to_quickjs(&ctx, &result)
   }
 
-  /// Raw isomorphic wire shape variant of [`Self::evaluateWithArg`].
-  #[qjs(rename = "evaluateWithArgWire")]
-  pub async fn evaluate_with_arg_wire<'js>(
+  /// Playwright: `jsHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  #[qjs(rename = "evaluateHandle")]
+  pub async fn evaluate_handle<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
-    fn_source: String,
-    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let result = self
-      .inner
-      .evaluate_with_arg(&fn_source, serialized, Some(true))
-      .await
-      .into_js()?;
-    let wire = serde_json::to_value(&result)
-      .map_err(|e| rquickjs::Error::new_from_js_message("evaluateWithArgWire", "", &e.to_string()))?;
-    json_value_to_quickjs(&ctx, &wire)
-  }
-
-  /// Playwright: `jsHandle.evaluateHandle(fn, arg?)`.
-  #[qjs(rename = "evaluateHandleWithArg")]
-  pub async fn evaluate_handle_with_arg<'js>(
-    &self,
-    ctx: rquickjs::Ctx<'js>,
-    fn_source: String,
+    page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<JSHandleJs> {
+    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
     let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let handle = self
-      .inner
-      .evaluate_handle_with_arg(&fn_source, serialized, Some(true))
-      .await
-      .into_js()?;
+    let handle = self.inner.evaluate_handle(&source, serialized, is_fn).await.into_js()?;
     Ok(JSHandleJs::new(handle))
   }
 }

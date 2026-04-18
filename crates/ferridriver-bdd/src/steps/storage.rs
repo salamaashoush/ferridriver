@@ -8,11 +8,15 @@ use ferridriver_bdd_macros::{step, when};
 async fn set_local_storage(world: &mut BrowserWorld, key: String, value: String) {
   world
     .page()
-    .evaluate(&format!(
-      "localStorage.setItem('{}', '{}')",
-      key.replace('\'', "\\'"),
-      value.replace('\'', "\\'")
-    ))
+    .evaluate(
+      &format!(
+        "localStorage.setItem('{}', '{}')",
+        key.replace('\'', "\\'"),
+        value.replace('\'', "\\'")
+      ),
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
     .map_err(|e| StepError::from(format!("set localStorage \"{key}\": {e}")))?;
 }
@@ -21,7 +25,11 @@ async fn set_local_storage(world: &mut BrowserWorld, key: String, value: String)
 async fn remove_local_storage(world: &mut BrowserWorld, key: String) {
   world
     .page()
-    .evaluate(&format!("localStorage.removeItem('{}')", key.replace('\'', "\\'")))
+    .evaluate(
+      &format!("localStorage.removeItem('{}')", key.replace('\'', "\\'")),
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
     .map_err(|e| StepError::from(format!("remove localStorage \"{key}\": {e}")))?;
 }
@@ -30,7 +38,11 @@ async fn remove_local_storage(world: &mut BrowserWorld, key: String) {
 async fn clear_local_storage(world: &mut BrowserWorld) {
   world
     .page()
-    .evaluate("localStorage.clear()")
+    .evaluate(
+      "localStorage.clear()",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
     .map_err(|e| StepError::from(format!("clear localStorage: {e}")))?;
 }
@@ -39,11 +51,15 @@ async fn clear_local_storage(world: &mut BrowserWorld) {
 async fn set_session_storage(world: &mut BrowserWorld, key: String, value: String) {
   world
     .page()
-    .evaluate(&format!(
-      "sessionStorage.setItem('{}', '{}')",
-      key.replace('\'', "\\'"),
-      value.replace('\'', "\\'")
-    ))
+    .evaluate(
+      &format!(
+        "sessionStorage.setItem('{}', '{}')",
+        key.replace('\'', "\\'"),
+        value.replace('\'', "\\'")
+      ),
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
     .map_err(|e| StepError::from(format!("set sessionStorage \"{key}\": {e}")))?;
 }
@@ -52,7 +68,11 @@ async fn set_session_storage(world: &mut BrowserWorld, key: String, value: Strin
 async fn remove_session_storage(world: &mut BrowserWorld, key: String) {
   world
     .page()
-    .evaluate(&format!("sessionStorage.removeItem('{}')", key.replace('\'', "\\'")))
+    .evaluate(
+      &format!("sessionStorage.removeItem('{}')", key.replace('\'', "\\'")),
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
     .map_err(|e| StepError::from(format!("remove sessionStorage \"{key}\": {e}")))?;
 }
@@ -61,7 +81,11 @@ async fn remove_session_storage(world: &mut BrowserWorld, key: String) {
 async fn clear_session_storage(world: &mut BrowserWorld) {
   world
     .page()
-    .evaluate("sessionStorage.clear()")
+    .evaluate(
+      "sessionStorage.clear()",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
     .map_err(|e| StepError::from(format!("clear sessionStorage: {e}")))?;
 }
