@@ -1,61 +1,76 @@
-//! Playwright's tagged-union wire serializer.
+//! Playwright's utility-script tagged-union wire serializer (isomorphic variant).
 //!
 //! Exact Rust mirror of
-//! `/tmp/playwright/packages/playwright-core/src/protocol/serializers.ts` plus
-//! the `SerializedValue` / `SerializedArgument` types from
-//! `/tmp/playwright/packages/protocol/src/channels.d.ts`. Every field, tag
-//! letter, and union member matches Playwright byte-for-byte so
-//! `JSON.stringify` on a Playwright-built value and `serde_json::to_string` on
-//! our Rust value produce identical strings — that's the load-bearing
-//! invariant for talking to the injected TS half of the serializer.
+//! `/tmp/playwright/packages/injected/src/utilityScriptSerializers.ts`
+//! (which our injected engine ships verbatim under
+//! `crates/ferridriver/src/injected/isomorphic/utilityScriptSerializers.ts`).
+//! Every variant, tag letter, and wire shape matches Playwright byte-for-byte
+//! so the round-trip `Rust serialize → CDP Runtime.callFunctionOn CallArgument
+//! → utilityScript.evaluate → parseEvaluationResultValue → user fn(arg)` lines
+//! up without a translation step.
+//!
+//! **Why the "isomorphic" variant and not the "channels" variant.** Playwright
+//! has two wire formats: the *channels* format
+//! (`playwright-core/src/protocol/serializers.ts`), with every primitive
+//! wrapped as `{n: 42}` / `{b: true}` / `{s: "hi"}`, used only on the
+//! Playwright client↔server WebSocket RPC; and the *isomorphic* format
+//! (utilityScriptSerializers.ts) where primitives pass through raw and only
+//! rich types are tagged, used on the server↔page bridge over CDP / `BiDi` /
+//! `WebKit`. ferridriver has no client↔server RPC — we *are* the server — so
+//! the only format we need is the isomorphic one the page's injected utility
+//! script parses. Sending channels-shape primitives (`{n: 42}`) through a
+//! CDP `CallArgument.value` would leave the page seeing a literal
+//! `{n: 42}` JS object instead of the number 42.
 //!
 //! ## Wire shape
 //!
-//! A `SerializedValue` is a tagged union encoded as a single JSON object where
-//! exactly one primary tag field is set (plus the optional `id` companion on
-//! `a` / `o`, used for back-reference deduplication on shared sub-graphs):
+//! | JS value           | Wire encoding                     |
+//! |--------------------|-----------------------------------|
+//! | `true` / `false`   | raw `true` / `false`              |
+//! | finite `number`    | raw number (`42`, `3.14`)         |
+//! | `string`           | raw JSON string                   |
+//! | `null`             | `{v: "null"}`                     |
+//! | `undefined`        | `{v: "undefined"}`                |
+//! | `NaN`              | `{v: "NaN"}`                      |
+//! | `Infinity`         | `{v: "Infinity"}`                 |
+//! | `-Infinity`        | `{v: "-Infinity"}`                |
+//! | `-0`               | `{v: "-0"}`                       |
+//! | `Date`             | `{d: "<toJSON()>"}`               |
+//! | `URL`              | `{u: "<toJSON()>"}`               |
+//! | `BigInt`           | `{bi: "<toString()>"}`            |
+//! | `Error`            | `{e: {m, n, s}}`                  |
+//! | `RegExp`           | `{r: {p, f}}`                     |
+//! | `TypedArray`       | `{ta: {b: <base64>, k: <kind>}}`  |
+//! | `ArrayBuffer`      | `{ab: {b: <base64>}}`             |
+//! | `Array`            | `{a: [...], id: <n>}`             |
+//! | `Object` (plain)   | `{o: [{k,v}, ...], id: <n>}`      |
+//! | `JSHandle` ref     | `{h: <index>}`                    |
+//! | shared-subgraph    | `{ref: <id>}`                     |
 //!
-//! | tag  | type                  | JS value it represents               |
-//! |------|-----------------------|--------------------------------------|
-//! | `n`  | `f64`                 | regular `number` (non-special)       |
-//! | `b`  | `bool`                | `boolean`                            |
-//! | `s`  | `String`              | `string`                             |
-//! | `v`  | [`SpecialValue`]      | `null` / `undefined` / `NaN` / `±Infinity` / `-0` |
-//! | `d`  | `String` (ISO)        | `Date` via `.toJSON()`               |
-//! | `u`  | `String`              | `URL` via `.toJSON()`                |
-//! | `bi` | `String` (decimal)    | `BigInt` via `.toString()`           |
-//! | `r`  | [`RegExpValue`]       | `RegExp { p, f }`                    |
-//! | `e`  | [`ErrorValue`]        | `Error { m, n, s }`                  |
-//! | `ta` | [`TypedArrayValue`]   | `TypedArray { b: base64, k: kind }`  |
-//! | `a`  | `Vec<SerializedValue>`| `Array` — paired with unique `id`    |
-//! | `o`  | `Vec<PropertyEntry>`  | plain `Object` — paired with `id`    |
-//! | `h`  | `u32`                 | index into [`SerializedArgument::handles`] (`JSHandle` ref) |
-//! | `ref`| `u32`                 | back-reference to a previously-emitted collection by its `id` |
-//!
-//! `Map` / `Set` are NOT distinct variants in Playwright's serializer —
-//! they are walked as plain objects via `Object.keys`, matching browser JS
-//! semantics where iteration order is insertion order.
+//! `Map` / `Set` are NOT distinct variants — Playwright walks them as plain
+//! objects via `Object.keys`, matching browser iteration order.
 //!
 //! ## Dedup / cycles
 //!
-//! When serializing an object graph with shared substructure (the same
-//! array or object referenced from two places), the first emission gets a
-//! unique `id: N` and every subsequent emission of the same object gets
-//! replaced with `ref: N`. Cycles terminate because the second visit hits
-//! the back-reference path before recursing. The caller controls the
-//! identity notion (pointer equality for FFI boundaries, semantic equality
-//! for plain JSON) by constructing their own [`SerializationContext`] or
-//! by using [`SerializedValue::from_json`] for the pure-JSON case.
+//! Arrays and objects carry a unique `id`; a second visit to the same
+//! JS object (pointer-equal) is encoded as `{ref: <id>}` instead, which
+//! terminates cycles and deduplicates shared subgraphs. For pure-JSON input
+//! (no shared structure) every collection still gets a fresh id — the
+//! deserializer ignores unreferenced ids harmlessly.
 
 use base64::Engine;
-use serde::{Deserialize, Serialize};
+use serde::de::{self, MapAccess, Visitor};
+use serde::ser::SerializeMap;
+use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 // ── SpecialValue ────────────────────────────────────────────────────────────
 
 /// JS values that have no faithful JSON representation but still exist at
-/// runtime — `undefined`, `NaN`, `±Infinity`, and the negative zero
-/// distinct from positive zero. Encoded under the `v` tag with the exact
-/// string literal Playwright uses (case matters: `NaN`, not `nan`).
+/// runtime — `undefined`, `NaN`, `±Infinity`, negative zero distinct from
+/// positive zero, and `null` (Playwright wraps `null` the same way so the
+/// deserializer can distinguish an intentional `null` from a missing field).
+/// Encoded under the `v` tag with the exact string literal Playwright
+/// emits (case matters: `NaN`, not `nan`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum SpecialValue {
   #[serde(rename = "null")]
@@ -74,8 +89,8 @@ pub enum SpecialValue {
 
 // ── RegExpValue ─────────────────────────────────────────────────────────────
 
-/// Wire shape of a `RegExp`: pattern + flags, matching the
-/// `RegExp.prototype.source` / `RegExp.prototype.flags` output and the JS
+/// Wire shape of a `RegExp`: pattern + flags, matching
+/// `RegExp.prototype.source` / `RegExp.prototype.flags` and the JS
 /// constructor invariant `new RegExp(p, f)`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RegExpValue {
@@ -98,7 +113,7 @@ pub struct ErrorValue {
   /// `"RangeError"`, etc.
   pub n: String,
   /// `Error.prototype.stack`. May be an empty string if the source had no
-  /// stack (e.g. `new Error()` before the property resolved).
+  /// stack.
   pub s: String,
 }
 
@@ -107,7 +122,7 @@ pub struct ErrorValue {
 /// Enumeration of the `TypedArray` subclasses the serializer supports.
 /// Encoded as the short string Playwright uses on the wire (e.g. `"i8"`
 /// for `Int8Array`). Matches
-/// `/tmp/playwright/packages/playwright-core/src/protocol/serializers.ts:196`.
+/// `/tmp/playwright/packages/injected/src/utilityScriptSerializers.ts:90`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum TypedArrayKind {
   #[serde(rename = "i8")]
@@ -138,8 +153,7 @@ impl TypedArrayKind {
   /// The byte stride of a single element in this typed array.
   ///
   /// Matches `TypedArray.BYTES_PER_ELEMENT` for the JS constructor the
-  /// kind names. Used when decoding the raw byte slice back into a
-  /// concrete Rust typed sequence.
+  /// kind names.
   #[must_use]
   pub fn bytes_per_element(self) -> usize {
     match self {
@@ -153,18 +167,84 @@ impl TypedArrayKind {
 
 // ── TypedArrayValue ─────────────────────────────────────────────────────────
 
-/// Wire shape of a `TypedArray`: the raw byte buffer plus a kind tag. The
-/// bytes are base64-encoded in JSON transit (Playwright uses `Binary`
-/// which is `Buffer` in Node.js and base64 on the wire); we mirror that
-/// with a custom serde helper so `serde_json::to_string` emits a string
-/// and not a `number[]`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+/// Wire shape of a `TypedArray`: the raw byte buffer plus a kind tag. Bytes
+/// are base64-encoded on the JSON wire (matching Playwright's `btoa` /
+/// `typedArrayToBase64` helper) and a `Vec<u8>` in Rust.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TypedArrayValue {
-  /// Underlying byte buffer, base64-encoded on the JSON wire.
-  #[serde(with = "base64_bytes")]
+  /// Underlying bytes, base64-encoded on the JSON wire.
   pub b: Vec<u8>,
   /// Typed-array constructor tag.
   pub k: TypedArrayKind,
+}
+
+#[derive(Serialize, Deserialize)]
+struct TypedArrayWire<'a> {
+  b: &'a str,
+  k: TypedArrayKind,
+}
+
+#[derive(Deserialize)]
+struct TypedArrayWireOwned {
+  b: String,
+  k: TypedArrayKind,
+}
+
+impl Serialize for TypedArrayValue {
+  fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&self.b);
+    let wire = TypedArrayWire { b: &encoded, k: self.k };
+    wire.serialize(s)
+  }
+}
+
+impl<'de> Deserialize<'de> for TypedArrayValue {
+  fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    let wire = TypedArrayWireOwned::deserialize(d)?;
+    let b = base64::engine::general_purpose::STANDARD
+      .decode(&wire.b)
+      .map_err(de::Error::custom)?;
+    Ok(Self { b, k: wire.k })
+  }
+}
+
+// ── ArrayBufferValue ────────────────────────────────────────────────────────
+
+/// Wire shape of a plain `ArrayBuffer` (no kind tag; it's just bytes).
+/// Serialized as `{ab: {b: <base64>}}` matching Playwright's isomorphic
+/// serializer.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayBufferValue {
+  /// Underlying bytes.
+  pub b: Vec<u8>,
+}
+
+#[derive(Serialize, Deserialize)]
+struct ArrayBufferWire<'a> {
+  b: &'a str,
+}
+
+#[derive(Deserialize)]
+struct ArrayBufferWireOwned {
+  b: String,
+}
+
+impl Serialize for ArrayBufferValue {
+  fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&self.b);
+    let wire = ArrayBufferWire { b: &encoded };
+    wire.serialize(s)
+  }
+}
+
+impl<'de> Deserialize<'de> for ArrayBufferValue {
+  fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    let wire = ArrayBufferWireOwned::deserialize(d)?;
+    let b = base64::engine::general_purpose::STANDARD
+      .decode(&wire.b)
+      .map_err(de::Error::custom)?;
+    Ok(Self { b })
+  }
 }
 
 // ── PropertyEntry ───────────────────────────────────────────────────────────
@@ -175,8 +255,8 @@ pub struct TypedArrayValue {
 /// we model it as an ordered `Vec`, not a map.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PropertyEntry {
-  /// Property key. Always a string on the wire (Symbols are dropped by
-  /// the JS-side serializer, matching `Object.keys` behavior).
+  /// Property key. Always a string on the wire (Symbol keys are
+  /// dropped by the JS serializer, matching `Object.keys`).
   pub k: String,
   /// Property value.
   pub v: SerializedValue,
@@ -184,293 +264,192 @@ pub struct PropertyEntry {
 
 // ── SerializedValue ─────────────────────────────────────────────────────────
 
-/// The wire tagged-union. Exactly one primary tag is set per value
-/// (plus optional `id` on `a` / `o`). Field order is irrelevant on the
-/// JSON wire; we follow Playwright's source order for diffability.
-///
-/// See the module docs for the full tag table.
-#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
-pub struct SerializedValue {
-  /// Regular `number` — any finite non-negative-zero value. `NaN` /
-  /// `±Infinity` / `-0` go through [`Self::v`] instead.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub n: Option<f64>,
-  /// `boolean`.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub b: Option<bool>,
-  /// `string`.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub s: Option<String>,
-  /// `null` / `undefined` / `NaN` / `Infinity` / `-Infinity` / `-0`.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub v: Option<SpecialValue>,
-  /// `Date`, encoded as `toJSON()` ISO string.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub d: Option<String>,
-  /// `URL`, encoded as `toJSON()` full URL string.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub u: Option<String>,
-  /// `BigInt`, encoded as the decimal-string `toString()`.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub bi: Option<String>,
-  /// `TypedArray` — base64 bytes + kind tag.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub ta: Option<TypedArrayValue>,
-  /// `Error`.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub e: Option<ErrorValue>,
-  /// `RegExp`.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub r: Option<RegExpValue>,
-  /// `Array` — elements by position. Paired with [`Self::id`] so
-  /// another occurrence of the same array elsewhere in the graph can
-  /// back-reference via [`Self::ref_`].
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub a: Option<Vec<SerializedValue>>,
-  /// Plain `Object` — properties as an ordered `{k, v}` list. Paired
-  /// with [`Self::id`].
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub o: Option<Vec<PropertyEntry>>,
-  /// Handle index — points into [`SerializedArgument::handles`]. Used
-  /// when a `JSHandle` / `ElementHandle` is passed through `evaluate`
-  /// arguments or returned from the function.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub h: Option<u32>,
-  /// Companion to `a` / `o` — a unique-per-value id so back-references
-  /// (`ref`) can resolve.
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub id: Option<u32>,
+/// The wire tagged union. Primitives (`bool` / `f64` / `String`) pass
+/// through as raw JSON primitives; rich types ride inside a single-key
+/// JSON object matching the [wire-shape](self#wire-shape) table.
+#[derive(Debug, Clone, PartialEq)]
+pub enum SerializedValue {
+  /// `true` / `false` — raw JSON boolean.
+  Bool(bool),
+  /// Finite non-`±0`-special non-`NaN` non-`±Infinity` number.
+  /// IEEE-754 specials go through [`Self::Special`].
+  Number(f64),
+  /// Regular JS `string` — raw JSON string on the wire.
+  Str(String),
+  /// `null` / `undefined` / `NaN` / `±Infinity` / `-0` — wire shape
+  /// `{v: <tag>}`.
+  Special(SpecialValue),
+  /// `Date` — wire shape `{d: <iso-string>}`.
+  Date(String),
+  /// `URL` — wire shape `{u: <url>}`.
+  Url(String),
+  /// `BigInt` — wire shape `{bi: <decimal>}`.
+  BigInt(String),
+  /// `Error` — wire shape `{e: {m, n, s}}`.
+  Error(ErrorValue),
+  /// `RegExp` — wire shape `{r: {p, f}}`.
+  RegExp(RegExpValue),
+  /// `TypedArray` — wire shape `{ta: {b, k}}`.
+  TypedArray(TypedArrayValue),
+  /// `ArrayBuffer` — wire shape `{ab: {b}}`.
+  ArrayBuffer(ArrayBufferValue),
+  /// `Array` — wire shape `{a: [...], id}`. `id` enables back-references
+  /// from cycles / shared subgraphs.
+  Array { id: u32, items: Vec<SerializedValue> },
+  /// Plain `Object` — wire shape `{o: [{k, v}, ...], id}`.
+  Object { id: u32, entries: Vec<PropertyEntry> },
+  /// `JSHandle` reference — wire shape `{h: <index>}` pointing into
+  /// [`SerializedArgument::handles`].
+  Handle(u32),
   /// Back-reference to a previously-emitted `a` / `o` by its `id`.
-  /// Terminates cycles and deduplicates shared sub-structures.
-  #[serde(skip_serializing_if = "Option::is_none", rename = "ref")]
-  pub ref_: Option<u32>,
+  Reference(u32),
 }
 
 impl SerializedValue {
   // ── Primitive builders ────────────────────────────────────────────────────
 
-  /// Wrap a finite, non-special `f64`. Does NOT auto-route `NaN` /
-  /// `Infinity` / `-0` into the `v` tag — the caller is responsible
-  /// for picking the right constructor.
-  #[must_use]
-  pub fn number(n: f64) -> Self {
-    Self {
-      n: Some(n),
-      ..Self::default()
-    }
-  }
-
-  /// Build a number, auto-routing the IEEE-754 specials through the
-  /// correct wire tag. `-0.0` is detected via bit-equality with the
-  /// IEEE-754 negative-zero pattern, matching Playwright's
-  /// `Object.is(value, -0)`.
-  #[must_use]
-  pub fn from_f64(n: f64) -> Self {
-    if n.is_nan() {
-      return Self::special(SpecialValue::NaN);
-    }
-    if n == f64::INFINITY {
-      return Self::special(SpecialValue::Infinity);
-    }
-    if n == f64::NEG_INFINITY {
-      return Self::special(SpecialValue::NegInfinity);
-    }
-    // Distinguish negative zero from positive zero without comparing
-    // `n == 0.0` (which is true for both). Bit pattern of `-0.0` is
-    // `0x8000_0000_0000_0000`.
-    if n == 0.0 && n.to_bits() == (-0.0_f64).to_bits() {
-      return Self::special(SpecialValue::NegZero);
-    }
-    Self::number(n)
-  }
-
   #[must_use]
   pub fn boolean(b: bool) -> Self {
-    Self {
-      b: Some(b),
-      ..Self::default()
-    }
+    Self::Bool(b)
+  }
+
+  #[must_use]
+  pub fn number(n: f64) -> Self {
+    Self::Number(n)
   }
 
   #[must_use]
   pub fn string(s: impl Into<String>) -> Self {
-    Self {
-      s: Some(s.into()),
-      ..Self::default()
-    }
+    Self::Str(s.into())
   }
 
   #[must_use]
   pub fn special(v: SpecialValue) -> Self {
-    Self {
-      v: Some(v),
-      ..Self::default()
-    }
+    Self::Special(v)
   }
 
   #[must_use]
   pub fn null() -> Self {
-    Self::special(SpecialValue::Null)
+    Self::Special(SpecialValue::Null)
   }
 
   #[must_use]
   pub fn undefined() -> Self {
-    Self::special(SpecialValue::Undefined)
+    Self::Special(SpecialValue::Undefined)
+  }
+
+  /// Build a number, auto-routing the IEEE-754 specials through the
+  /// `v` tag. `-0.0` is detected via bit-equality with the IEEE-754
+  /// negative-zero pattern, matching Playwright's `Object.is(value, -0)`.
+  #[must_use]
+  pub fn from_f64(n: f64) -> Self {
+    if n.is_nan() {
+      return Self::Special(SpecialValue::NaN);
+    }
+    if n == f64::INFINITY {
+      return Self::Special(SpecialValue::Infinity);
+    }
+    if n == f64::NEG_INFINITY {
+      return Self::Special(SpecialValue::NegInfinity);
+    }
+    if n == 0.0 && n.to_bits() == (-0.0_f64).to_bits() {
+      return Self::Special(SpecialValue::NegZero);
+    }
+    Self::Number(n)
   }
 
   // ── Rich-type builders ────────────────────────────────────────────────────
 
-  /// Construct a `Date` from its `toJSON()` ISO string (e.g.
-  /// `"2024-01-01T00:00:00.000Z"`). The deserializer will reconstruct
-  /// `new Date(value)` from it.
   #[must_use]
   pub fn date(iso: impl Into<String>) -> Self {
-    Self {
-      d: Some(iso.into()),
-      ..Self::default()
-    }
+    Self::Date(iso.into())
   }
 
-  /// Construct a `URL` from its `toJSON()` string.
   #[must_use]
   pub fn url(url: impl Into<String>) -> Self {
-    Self {
-      u: Some(url.into()),
-      ..Self::default()
-    }
+    Self::Url(url.into())
   }
 
-  /// Construct a `BigInt` from its decimal string representation.
-  /// Caller is responsible for generating a valid `BigInt.prototype
-  /// .toString()` form — no base prefix, no `n` suffix, leading minus
-  /// allowed.
   #[must_use]
   pub fn bigint(decimal: impl Into<String>) -> Self {
-    Self {
-      bi: Some(decimal.into()),
-      ..Self::default()
-    }
+    Self::BigInt(decimal.into())
   }
 
-  /// Construct a `RegExp` from pattern + flags (the `/p/f` form, without
-  /// the surrounding slashes). The deserializer does `new RegExp(p, f)`.
   #[must_use]
   pub fn regexp(pattern: impl Into<String>, flags: impl Into<String>) -> Self {
-    Self {
-      r: Some(RegExpValue {
-        p: pattern.into(),
-        f: flags.into(),
-      }),
-      ..Self::default()
-    }
+    Self::RegExp(RegExpValue {
+      p: pattern.into(),
+      f: flags.into(),
+    })
   }
 
-  /// Construct an `Error` from name / message / stack. Pass an empty
-  /// stack string if none is available — the wire format always
-  /// carries a `s` field.
   #[must_use]
   pub fn error(name: impl Into<String>, message: impl Into<String>, stack: impl Into<String>) -> Self {
-    Self {
-      e: Some(ErrorValue {
-        n: name.into(),
-        m: message.into(),
-        s: stack.into(),
-      }),
-      ..Self::default()
-    }
+    Self::Error(ErrorValue {
+      n: name.into(),
+      m: message.into(),
+      s: stack.into(),
+    })
   }
 
-  /// Construct a `TypedArray` from a raw byte buffer + kind tag. The
-  /// byte length MUST be a multiple of `kind.bytes_per_element()`; the
-  /// builder does not enforce this (the JS deserializer will surface
-  /// it as a runtime error).
   #[must_use]
   pub fn typed_array(bytes: Vec<u8>, kind: TypedArrayKind) -> Self {
-    Self {
-      ta: Some(TypedArrayValue { b: bytes, k: kind }),
-      ..Self::default()
-    }
+    Self::TypedArray(TypedArrayValue { b: bytes, k: kind })
+  }
+
+  #[must_use]
+  pub fn array_buffer(bytes: Vec<u8>) -> Self {
+    Self::ArrayBuffer(ArrayBufferValue { b: bytes })
   }
 
   // ── Collection builders ───────────────────────────────────────────────────
 
-  /// Build an `Array` value. The `id` is required so ref-back from
-  /// cycles / shared structure can resolve; callers without a shared
-  /// graph still need to allocate one (use [`SerializationContext`] to
-  /// manage allocation).
   #[must_use]
-  pub fn array(elements: Vec<SerializedValue>, id: u32) -> Self {
-    Self {
-      a: Some(elements),
-      id: Some(id),
-      ..Self::default()
-    }
+  pub fn array(id: u32, items: Vec<SerializedValue>) -> Self {
+    Self::Array { id, items }
   }
 
-  /// Build a plain `Object` value. See [`Self::array`] on the `id`.
   #[must_use]
-  pub fn object(entries: Vec<PropertyEntry>, id: u32) -> Self {
-    Self {
-      o: Some(entries),
-      id: Some(id),
-      ..Self::default()
-    }
+  pub fn object(id: u32, entries: Vec<PropertyEntry>) -> Self {
+    Self::Object { id, entries }
   }
 
-  /// Build a back-reference to a previously-emitted collection by its
-  /// `id`. Used to dedup shared sub-structures and terminate cycles.
   #[must_use]
   pub fn reference(id: u32) -> Self {
-    Self {
-      ref_: Some(id),
-      ..Self::default()
-    }
+    Self::Reference(id)
   }
 
-  /// Build a handle reference — `handle_index` is the position in the
-  /// companion [`SerializedArgument::handles`] array. Used when a
-  /// `JSHandle` / `ElementHandle` is marshaled through `evaluate`.
   #[must_use]
   pub fn handle(handle_index: u32) -> Self {
-    Self {
-      h: Some(handle_index),
-      ..Self::default()
-    }
+    Self::Handle(handle_index)
   }
 
   // ── Conversion helpers ────────────────────────────────────────────────────
 
   /// Convert a [`serde_json::Value`] into a `SerializedValue`, covering
-  /// the JSON subset of JS types: `null`, `bool`, finite `number`,
-  /// `string`, `Array`, `Object`. Rich JS types (`undefined` / `NaN` /
-  /// `Date` / `RegExp` / `BigInt` / handles) have no JSON form; if the
-  /// input happens to produce a finite IEEE-754 special anyway (a
-  /// parsed `"NaN"` somewhere?) it is routed through `v` via
-  /// [`Self::from_f64`].
-  ///
-  /// `ctx` supplies fresh `id`s for arrays / objects. Each call to
-  /// `from_json` uses an independent sub-graph, so cycle detection
-  /// isn't applicable (`serde_json::Value` is a pure tree).
+  /// the JSON subset of JS types: `null` → `{v: null}`, `bool`,
+  /// finite `number`, `string`, `Array`, `Object`. `ctx` supplies
+  /// fresh ids for each collection. Rich JS types (`undefined` /
+  /// `NaN` / `Date` / `RegExp` / `BigInt` / handles) aren't
+  /// representable in JSON; callers build those via the explicit
+  /// constructors.
   #[must_use]
   pub fn from_json(value: &serde_json::Value, ctx: &mut SerializationContext) -> Self {
     match value {
       serde_json::Value::Null => Self::null(),
-      serde_json::Value::Bool(b) => Self::boolean(*b),
+      serde_json::Value::Bool(b) => Self::Bool(*b),
       serde_json::Value::Number(num) => num.as_f64().map_or_else(
-        || {
-          // `serde_json::Number` promises either i64, u64, or f64 is
-          // representable. If `as_f64` returns None on an integer
-          // outside f64's safe range we still produce something
-          // reasonable rather than panic: stringify as BigInt.
-          Self::bigint(num.to_string())
-        },
+        // Number outside f64-safe range: fall back to BigInt string
+        // so no digits are lost. serde_json can hold u64/i64 that f64
+        // can't express exactly.
+        || Self::BigInt(num.to_string()),
         Self::from_f64,
       ),
-      serde_json::Value::String(s) => Self::string(s.clone()),
+      serde_json::Value::String(s) => Self::Str(s.clone()),
       serde_json::Value::Array(items) => {
         let id = ctx.alloc_id();
-        let a = items.iter().map(|v| Self::from_json(v, ctx)).collect();
-        Self::array(a, id)
+        let wire_items = items.iter().map(|v| Self::from_json(v, ctx)).collect();
+        Self::Array { id, items: wire_items }
       },
       serde_json::Value::Object(map) => {
         let id = ctx.alloc_id();
@@ -481,66 +460,285 @@ impl SerializedValue {
             v: Self::from_json(v, ctx),
           })
           .collect();
-        Self::object(entries, id)
+        Self::Object { id, entries }
       },
     }
   }
 
-  /// Attempt to convert back into a [`serde_json::Value`]. Succeeds for
-  /// the JSON-expressible subset (`n` / `b` / `s` / `v=null` /
-  /// `a` / `o`). Returns `None` for any rich type (`undefined` / `NaN` /
-  /// `Date` / `RegExp` / `Error` / typed array / handle / ref) since
-  /// `serde_json::Value` cannot represent them faithfully.
+  /// Attempt to convert into a [`serde_json::Value`]. Succeeds for the
+  /// JSON-expressible subset (`Bool` / `Number` / `Str` / `Special::Null`
+  /// / `Array` / `Object`). Returns `None` for rich types (`undefined` /
+  /// `NaN` / `Date` / `RegExp` / `Error` / `TypedArray` / `ArrayBuffer` /
+  /// `Handle` / `Reference` / `BigInt`).
   #[must_use]
   pub fn to_json_like(&self) -> Option<serde_json::Value> {
-    if let Some(n) = self.n {
-      // Preserve integer form when the value is losslessly representable
-      // in an i64's f64-safe range (±2^53 — the largest integer f64 can
-      // hold exactly). Makes `from_json(json!(1)) → to_json_like() ==
-      // json!(1)` round-trip, matching "JSON in, JSON out" user
-      // expectations even though JS itself has only one numeric type.
-      // Outside that range we stay with the float representation to
-      // avoid silently aliasing two distinct integers.
-      const F64_INT_MAX: f64 = 9_007_199_254_740_992.0; // 2^53
-      if n.is_finite() && n.fract() == 0.0 && n.abs() <= F64_INT_MAX {
-        #[allow(clippy::cast_possible_truncation)]
-        let as_i64 = n as i64;
-        return Some(serde_json::Value::Number(as_i64.into()));
-      }
-      return serde_json::Number::from_f64(n).map(serde_json::Value::Number);
+    match self {
+      Self::Bool(b) => Some(serde_json::Value::Bool(*b)),
+      Self::Number(n) => {
+        // Preserve integer form when the value is losslessly
+        // representable within f64's safe integer range (±2^53).
+        const F64_INT_MAX: f64 = 9_007_199_254_740_992.0;
+        if n.is_finite() && n.fract() == 0.0 && n.abs() <= F64_INT_MAX {
+          #[allow(clippy::cast_possible_truncation)]
+          let as_i64 = *n as i64;
+          Some(serde_json::Value::Number(as_i64.into()))
+        } else {
+          serde_json::Number::from_f64(*n).map(serde_json::Value::Number)
+        }
+      },
+      Self::Str(s) => Some(serde_json::Value::String(s.clone())),
+      Self::Special(SpecialValue::Null) => Some(serde_json::Value::Null),
+      Self::Array { items, .. } => {
+        let mut out = Vec::with_capacity(items.len());
+        for v in items {
+          out.push(v.to_json_like()?);
+        }
+        Some(serde_json::Value::Array(out))
+      },
+      Self::Object { entries, .. } => {
+        let mut map = serde_json::Map::with_capacity(entries.len());
+        for e in entries {
+          map.insert(e.k.clone(), e.v.to_json_like()?);
+        }
+        Some(serde_json::Value::Object(map))
+      },
+      // Rich types + non-Null specials have no lossless JSON form.
+      Self::Special(_)
+      | Self::Date(_)
+      | Self::Url(_)
+      | Self::BigInt(_)
+      | Self::Error(_)
+      | Self::RegExp(_)
+      | Self::TypedArray(_)
+      | Self::ArrayBuffer(_)
+      | Self::Handle(_)
+      | Self::Reference(_) => None,
     }
-    if let Some(b) = self.b {
-      return Some(serde_json::Value::Bool(b));
-    }
-    if let Some(s) = &self.s {
-      return Some(serde_json::Value::String(s.clone()));
-    }
-    if let Some(v) = self.v {
-      return match v {
-        SpecialValue::Null => Some(serde_json::Value::Null),
-        // `undefined` has no JSON form; `NaN` / `±Inf` / `-0` are not
-        // JSON-representable either.
-        _ => None,
-      };
-    }
-    if let Some(arr) = &self.a {
-      let mut out = Vec::with_capacity(arr.len());
-      for v in arr {
-        out.push(v.to_json_like()?);
-      }
-      return Some(serde_json::Value::Array(out));
-    }
-    if let Some(obj) = &self.o {
-      let mut map = serde_json::Map::with_capacity(obj.len());
-      for entry in obj {
-        map.insert(entry.k.clone(), entry.v.to_json_like()?);
-      }
-      return Some(serde_json::Value::Object(map));
-    }
-    // `d` / `u` / `bi` / `ta` / `e` / `r` / `h` / `ref` have no lossless
-    // JSON form.
-    None
   }
+}
+
+// ── SerializedValue wire serialization ──────────────────────────────────────
+
+impl Serialize for SerializedValue {
+  fn serialize<S: Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+    match self {
+      // Primitives pass through as raw JSON primitives.
+      Self::Bool(b) => s.serialize_bool(*b),
+      Self::Number(n) => s.serialize_f64(*n),
+      Self::Str(v) => s.serialize_str(v),
+      // Single-key object shapes.
+      Self::Special(v) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("v", v)?;
+        m.end()
+      },
+      Self::Date(d) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("d", d)?;
+        m.end()
+      },
+      Self::Url(u) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("u", u)?;
+        m.end()
+      },
+      Self::BigInt(bi) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("bi", bi)?;
+        m.end()
+      },
+      Self::Error(e) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("e", e)?;
+        m.end()
+      },
+      Self::RegExp(r) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("r", r)?;
+        m.end()
+      },
+      Self::TypedArray(ta) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("ta", ta)?;
+        m.end()
+      },
+      Self::ArrayBuffer(ab) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("ab", ab)?;
+        m.end()
+      },
+      Self::Array { id, items } => {
+        let mut m = s.serialize_map(Some(2))?;
+        m.serialize_entry("a", items)?;
+        m.serialize_entry("id", id)?;
+        m.end()
+      },
+      Self::Object { id, entries } => {
+        let mut m = s.serialize_map(Some(2))?;
+        m.serialize_entry("o", entries)?;
+        m.serialize_entry("id", id)?;
+        m.end()
+      },
+      Self::Handle(idx) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("h", idx)?;
+        m.end()
+      },
+      Self::Reference(id) => {
+        let mut m = s.serialize_map(Some(1))?;
+        m.serialize_entry("ref", id)?;
+        m.end()
+      },
+    }
+  }
+}
+
+impl<'de> Deserialize<'de> for SerializedValue {
+  fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    d.deserialize_any(SerializedValueVisitor)
+  }
+}
+
+struct SerializedValueVisitor;
+
+impl<'de> Visitor<'de> for SerializedValueVisitor {
+  type Value = SerializedValue;
+
+  fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.write_str("a Playwright isomorphic SerializedValue: raw bool/number/string, or single-key tagged object")
+  }
+
+  // Primitives come in as raw JSON values.
+
+  fn visit_bool<E: de::Error>(self, v: bool) -> Result<Self::Value, E> {
+    Ok(SerializedValue::Bool(v))
+  }
+
+  fn visit_i64<E: de::Error>(self, v: i64) -> Result<Self::Value, E> {
+    #[allow(clippy::cast_precision_loss)]
+    let as_f64 = v as f64;
+    Ok(SerializedValue::Number(as_f64))
+  }
+
+  fn visit_u64<E: de::Error>(self, v: u64) -> Result<Self::Value, E> {
+    #[allow(clippy::cast_precision_loss)]
+    let as_f64 = v as f64;
+    Ok(SerializedValue::Number(as_f64))
+  }
+
+  fn visit_f64<E: de::Error>(self, v: f64) -> Result<Self::Value, E> {
+    Ok(SerializedValue::Number(v))
+  }
+
+  fn visit_str<E: de::Error>(self, v: &str) -> Result<Self::Value, E> {
+    Ok(SerializedValue::Str(v.to_string()))
+  }
+
+  fn visit_string<E: de::Error>(self, v: String) -> Result<Self::Value, E> {
+    Ok(SerializedValue::Str(v))
+  }
+
+  fn visit_none<E: de::Error>(self) -> Result<Self::Value, E> {
+    // `undefined` over the JSON wire has no native form; some
+    // encoders emit it as absent-field / `null`. Treat as `undefined`.
+    Ok(SerializedValue::Special(SpecialValue::Undefined))
+  }
+
+  fn visit_unit<E: de::Error>(self) -> Result<Self::Value, E> {
+    // Same as above — bare JSON `null` is NOT what Playwright emits
+    // (it uses `{v: "null"}`), but be tolerant so callers can pass
+    // plain JSON graphs too.
+    Ok(SerializedValue::Special(SpecialValue::Null))
+  }
+
+  fn visit_map<A: MapAccess<'de>>(self, mut map: A) -> Result<Self::Value, A::Error> {
+    // Playwright's tagged objects always have either one primary key
+    // (plus `id` companion for `a` / `o`). We collect the raw key/value
+    // pairs into a `serde_json::Map` first, then dispatch on the
+    // primary tag. This keeps the impl compact at the cost of one
+    // extra allocation per object — cheap compared to the wire-
+    // decoding cost.
+    let mut bag = serde_json::Map::new();
+    while let Some((k, v)) = map.next_entry::<String, serde_json::Value>()? {
+      bag.insert(k, v);
+    }
+    decode_tagged_object(bag).map_err(de::Error::custom)
+  }
+}
+
+fn decode_tagged_object(mut bag: serde_json::Map<String, serde_json::Value>) -> Result<SerializedValue, String> {
+  // The tag precedence mirrors Playwright's own deserializer
+  // (`ref` > `v` > rich types > `a` / `o` > `h` > typed / array
+  // buffer). See
+  // `/tmp/playwright/packages/injected/src/utilityScriptSerializers.ts:124`.
+  if let Some(v) = bag.remove("ref") {
+    let id = v.as_u64().ok_or_else(|| format!("ref must be a u64, got {v}"))?;
+    return Ok(SerializedValue::Reference(
+      u32::try_from(id).map_err(|e| e.to_string())?,
+    ));
+  }
+  if let Some(v) = bag.remove("v") {
+    let special: SpecialValue = serde_json::from_value(v).map_err(|e| e.to_string())?;
+    return Ok(SerializedValue::Special(special));
+  }
+  if let Some(v) = bag.remove("d") {
+    let iso = v.as_str().ok_or("d must be string")?.to_string();
+    return Ok(SerializedValue::Date(iso));
+  }
+  if let Some(v) = bag.remove("u") {
+    let s = v.as_str().ok_or("u must be string")?.to_string();
+    return Ok(SerializedValue::Url(s));
+  }
+  if let Some(v) = bag.remove("bi") {
+    let s = v.as_str().ok_or("bi must be string")?.to_string();
+    return Ok(SerializedValue::BigInt(s));
+  }
+  if let Some(v) = bag.remove("e") {
+    let e: ErrorValue = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    return Ok(SerializedValue::Error(e));
+  }
+  if let Some(v) = bag.remove("r") {
+    let r: RegExpValue = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    return Ok(SerializedValue::RegExp(r));
+  }
+  if let Some(v) = bag.remove("a") {
+    let items: Vec<SerializedValue> = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    let id = bag
+      .remove("id")
+      .and_then(|v| v.as_u64())
+      .ok_or("a must be paired with numeric id")?;
+    return Ok(SerializedValue::Array {
+      id: u32::try_from(id).map_err(|e| e.to_string())?,
+      items,
+    });
+  }
+  if let Some(v) = bag.remove("o") {
+    let entries: Vec<PropertyEntry> = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    let id = bag
+      .remove("id")
+      .and_then(|v| v.as_u64())
+      .ok_or("o must be paired with numeric id")?;
+    return Ok(SerializedValue::Object {
+      id: u32::try_from(id).map_err(|e| e.to_string())?,
+      entries,
+    });
+  }
+  if let Some(v) = bag.remove("h") {
+    let idx = v.as_u64().ok_or("h must be u64")?;
+    return Ok(SerializedValue::Handle(u32::try_from(idx).map_err(|e| e.to_string())?));
+  }
+  if let Some(v) = bag.remove("ta") {
+    let ta: TypedArrayValue = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    return Ok(SerializedValue::TypedArray(ta));
+  }
+  if let Some(v) = bag.remove("ab") {
+    let ab: ArrayBufferValue = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    return Ok(SerializedValue::ArrayBuffer(ab));
+  }
+  Err(format!(
+    "SerializedValue: no recognized tag in object (keys: {:?})",
+    bag.keys().collect::<Vec<_>>()
+  ))
 }
 
 // ── SerializationContext ────────────────────────────────────────────────────
@@ -564,21 +762,26 @@ impl SerializationContext {
 
 // ── SerializedArgument ──────────────────────────────────────────────────────
 
-/// The full `{ value, handles }` pair Playwright sends with every
-/// `evaluate(fn, arg)` call. `value` carries the serialized arg tree
-/// (possibly containing `h: N` refs into `handles`); `handles` carries
-/// the live backend object `IDs` those refs resolve to.
-///
-/// On the Rust side we model `handles` as an opaque identifier list
-/// (`Vec<HandleId>`) — the actual shape (CDP `RemoteObjectId` string /
-/// `BiDi` `shared_id` / `WebKit` `ref_id`) lives on the backend layer
-/// and is resolved when the argument is marshaled into the
-/// corresponding protocol command.
+/// The full `{ value, handles }` envelope ferridriver passes to the
+/// injected utility script when a user calls `page.evaluate(fn, arg)`.
+/// `value` carries the serialized arg tree (possibly containing
+/// `h: N` refs into `handles`); `handles` carries the backend object
+/// references those refs resolve to. [`HandleId`] models the cross-
+/// backend variant (CDP `RemoteObjectId` string / `BiDi`
+/// `{shared_id, handle}` / `WebKit` `__wr[]` index); the backend
+/// marshaler layer converts each entry into the protocol's native
+/// remote-object reference (CDP `CallArgument.objectId`, etc.).
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct SerializedArgument {
   pub value: SerializedValue,
   #[serde(default, skip_serializing_if = "Vec::is_empty")]
   pub handles: Vec<HandleId>,
+}
+
+impl Default for SerializedValue {
+  fn default() -> Self {
+    Self::Special(SpecialValue::Undefined)
+  }
 }
 
 /// Backend-agnostic handle identifier used in
@@ -588,36 +791,17 @@ pub struct SerializedArgument {
 pub enum HandleId {
   /// CDP `Runtime.RemoteObjectId` — an opaque string.
   Cdp(String),
-  /// `WebDriver` `BiDi` shared reference — `{ sharedId, handle? }`. We
-  /// carry the `sharedId` since it's the stable half; `handle` is an
-  /// optional realm-scoped identifier Playwright adds when relevant.
+  /// `WebDriver` `BiDi` shared reference — `{ sharedId, handle? }`.
   Bidi { shared_id: String, handle: Option<String> },
   /// `WebKit` host IPC ref — an index into `window.__wr[]`.
   WebKit(u64),
 }
 
-// ── base64 helper ───────────────────────────────────────────────────────────
+// ── base64 helpers (stand-alone) ────────────────────────────────────────────
 
-/// Custom serde helper for the `ta.b` typed-array byte buffer: base64
-/// on the JSON wire (matching Playwright's `Binary` encoding), raw
-/// `Vec<u8>` in Rust.
-mod base64_bytes {
-  use base64::Engine;
-  use base64::engine::general_purpose::STANDARD;
-  use serde::{Deserialize, Deserializer, Serializer};
-
-  pub fn serialize<S: Serializer>(bytes: &[u8], s: S) -> Result<S::Ok, S::Error> {
-    s.serialize_str(&STANDARD.encode(bytes))
-  }
-
-  pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<u8>, D::Error> {
-    let s = String::deserialize(d)?;
-    STANDARD.decode(s).map_err(serde::de::Error::custom)
-  }
-}
-
-/// Stand-alone helper so other call sites can emit the same base64
-/// encoding without touching the private helper module.
+/// Emit the same base64 encoding the `ta.b` / `ab.b` serializers use.
+/// Handy for backend marshalers that need to produce or consume the raw
+/// bytes outside the serde path.
 #[must_use]
 pub fn encode_typed_array_bytes(bytes: &[u8]) -> String {
   base64::engine::general_purpose::STANDARD.encode(bytes)
@@ -640,34 +824,33 @@ mod tests {
   use super::*;
   use serde_json::json;
 
-  // Parity check: serializing each variant produces a JSON object with
-  // exactly the keys Playwright's wire format uses. These strings come
-  // from running Playwright's `serializeValue` on the corresponding JS
-  // value and reading the `JSON.stringify` output.
+  // ── Primitive wire shapes ────────────────────────────────────────────────
 
   #[test]
-  fn serializes_number() {
+  fn serializes_bool_raw() {
+    assert_eq!(serde_json::to_value(SerializedValue::Bool(true)).unwrap(), json!(true));
     assert_eq!(
-      serde_json::to_value(SerializedValue::number(42.0)).unwrap(),
-      json!({"n": 42.0})
+      serde_json::to_value(SerializedValue::Bool(false)).unwrap(),
+      json!(false)
     );
   }
 
   #[test]
-  fn serializes_boolean() {
-    assert_eq!(
-      serde_json::to_value(SerializedValue::boolean(true)).unwrap(),
-      json!({"b": true})
-    );
+  fn serializes_number_raw() {
+    // Playwright's isomorphic format emits primitives raw — `42.0`, not
+    // `{n: 42.0}`. That's what the page's utilityScript expects.
+    assert_eq!(serde_json::to_value(SerializedValue::Number(1.5)).unwrap(), json!(1.5));
   }
 
   #[test]
-  fn serializes_string() {
+  fn serializes_string_raw() {
     assert_eq!(
-      serde_json::to_value(SerializedValue::string("hi")).unwrap(),
-      json!({"s": "hi"})
+      serde_json::to_value(SerializedValue::Str("hi".into())).unwrap(),
+      json!("hi")
     );
   }
+
+  // ── Special values ───────────────────────────────────────────────────────
 
   #[test]
   fn serializes_special_values() {
@@ -680,7 +863,7 @@ mod tests {
       (SpecialValue::NegZero, json!({"v": "-0"})),
     ] {
       assert_eq!(
-        serde_json::to_value(SerializedValue::special(special)).unwrap(),
+        serde_json::to_value(SerializedValue::Special(special)).unwrap(),
         expected,
         "variant {special:?}"
       );
@@ -689,26 +872,33 @@ mod tests {
 
   #[test]
   fn from_f64_routes_ieee_specials() {
-    assert_eq!(SerializedValue::from_f64(f64::NAN).v, Some(SpecialValue::NaN));
-    assert_eq!(SerializedValue::from_f64(f64::INFINITY).v, Some(SpecialValue::Infinity));
-    assert_eq!(
-      SerializedValue::from_f64(f64::NEG_INFINITY).v,
-      Some(SpecialValue::NegInfinity)
-    );
-    assert_eq!(SerializedValue::from_f64(-0.0_f64).v, Some(SpecialValue::NegZero));
-    assert_eq!(SerializedValue::from_f64(0.0_f64).n, Some(0.0_f64));
-    assert_eq!(SerializedValue::from_f64(1.5).n, Some(1.5));
+    assert!(matches!(
+      SerializedValue::from_f64(f64::NAN),
+      SerializedValue::Special(SpecialValue::NaN)
+    ));
+    assert!(matches!(
+      SerializedValue::from_f64(f64::INFINITY),
+      SerializedValue::Special(SpecialValue::Infinity)
+    ));
+    assert!(matches!(
+      SerializedValue::from_f64(f64::NEG_INFINITY),
+      SerializedValue::Special(SpecialValue::NegInfinity)
+    ));
+    assert!(matches!(
+      SerializedValue::from_f64(-0.0_f64),
+      SerializedValue::Special(SpecialValue::NegZero)
+    ));
+    assert!(matches!(
+      SerializedValue::from_f64(0.0_f64),
+      SerializedValue::Number(n) if (n - 0.0_f64).abs() < f64::EPSILON
+    ));
+    assert!(matches!(
+      SerializedValue::from_f64(1.5),
+      SerializedValue::Number(n) if (n - 1.5_f64).abs() < f64::EPSILON
+    ));
   }
 
-  #[test]
-  fn from_f64_distinguishes_positive_and_negative_zero() {
-    let pos = SerializedValue::from_f64(0.0);
-    let neg = SerializedValue::from_f64(-0.0);
-    assert_eq!(pos.n, Some(0.0));
-    assert!(pos.v.is_none());
-    assert!(neg.n.is_none());
-    assert_eq!(neg.v, Some(SpecialValue::NegZero));
-  }
+  // ── Rich types ──────────────────────────────────────────────────────────
 
   #[test]
   fn serializes_date_url_bigint() {
@@ -748,15 +938,18 @@ mod tests {
 
   #[test]
   fn serializes_typed_array_with_base64() {
-    // Uint8Array([1, 2, 3, 4]).buffer encoded as base64 is "AQIDBA==".
     let wire = serde_json::to_value(SerializedValue::typed_array(vec![1, 2, 3, 4], TypedArrayKind::U8)).unwrap();
     assert_eq!(wire, json!({"ta": {"b": "AQIDBA==", "k": "ui8"}}));
   }
 
   #[test]
+  fn serializes_array_buffer_with_base64() {
+    let wire = serde_json::to_value(SerializedValue::array_buffer(vec![0xca, 0xfe, 0xba, 0xbe])).unwrap();
+    assert_eq!(wire, json!({"ab": {"b": "yv66vg=="}}));
+  }
+
+  #[test]
   fn typed_array_bytes_per_element_matches_js() {
-    // Same invariant as `TypedArray.BYTES_PER_ELEMENT` — any drift
-    // here breaks round-trip through the page.
     assert_eq!(TypedArrayKind::I8.bytes_per_element(), 1);
     assert_eq!(TypedArrayKind::U8.bytes_per_element(), 1);
     assert_eq!(TypedArrayKind::U8Clamped.bytes_per_element(), 1);
@@ -770,37 +963,37 @@ mod tests {
     assert_eq!(TypedArrayKind::BUI64.bytes_per_element(), 8);
   }
 
+  // ── Collections ──────────────────────────────────────────────────────────
+
   #[test]
   fn serializes_array_with_id() {
     let wire = serde_json::to_value(SerializedValue::array(
-      vec![SerializedValue::number(1.0), SerializedValue::number(2.0)],
       1,
+      vec![SerializedValue::Number(1.0), SerializedValue::Number(2.0)],
     ))
     .unwrap();
-    assert_eq!(wire, json!({"a": [{"n": 1.0}, {"n": 2.0}], "id": 1}));
+    assert_eq!(wire, json!({"a": [1.0, 2.0], "id": 1}));
   }
 
   #[test]
   fn serializes_object_with_id_preserves_order() {
     let wire = serde_json::to_value(SerializedValue::object(
+      2,
       vec![
         PropertyEntry {
           k: "first".into(),
-          v: SerializedValue::number(1.0),
+          v: SerializedValue::Number(1.0),
         },
         PropertyEntry {
           k: "second".into(),
-          v: SerializedValue::string("two"),
+          v: SerializedValue::Str("two".into()),
         },
       ],
-      2,
     ))
     .unwrap();
-    // Array-of-entries preserves insertion order; a HashMap-based
-    // encoding would not.
     assert_eq!(
       wire,
-      json!({"o": [{"k": "first", "v": {"n": 1.0}}, {"k": "second", "v": {"s": "two"}}], "id": 2})
+      json!({"o": [{"k": "first", "v": 1.0}, {"k": "second", "v": "two"}], "id": 2})
     );
   }
 
@@ -816,31 +1009,165 @@ mod tests {
     );
   }
 
+  // ── Deserialization ─────────────────────────────────────────────────────
+
   #[test]
-  fn roundtrips_via_serde() {
+  fn deserializes_primitives_raw() {
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!(true)).unwrap(),
+      SerializedValue::Bool(true)
+    );
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!(42)).unwrap(),
+      SerializedValue::Number(42.0)
+    );
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!("hi")).unwrap(),
+      SerializedValue::Str("hi".into())
+    );
+  }
+
+  #[test]
+  fn deserializes_special_tag() {
+    for (wire, expected) in [
+      (json!({"v": "null"}), SpecialValue::Null),
+      (json!({"v": "undefined"}), SpecialValue::Undefined),
+      (json!({"v": "NaN"}), SpecialValue::NaN),
+      (json!({"v": "Infinity"}), SpecialValue::Infinity),
+      (json!({"v": "-Infinity"}), SpecialValue::NegInfinity),
+      (json!({"v": "-0"}), SpecialValue::NegZero),
+    ] {
+      let parsed = serde_json::from_value::<SerializedValue>(wire.clone()).unwrap();
+      assert_eq!(parsed, SerializedValue::Special(expected), "wire: {wire}");
+    }
+  }
+
+  #[test]
+  fn deserializes_rich_tagged_forms() {
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!({"d": "2024"})).unwrap(),
+      SerializedValue::Date("2024".into())
+    );
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!({"u": "https://a/"})).unwrap(),
+      SerializedValue::Url("https://a/".into())
+    );
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!({"bi": "-42"})).unwrap(),
+      SerializedValue::BigInt("-42".into())
+    );
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!({"r": {"p": "a", "f": "g"}})).unwrap(),
+      SerializedValue::RegExp(RegExpValue {
+        p: "a".into(),
+        f: "g".into()
+      })
+    );
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!({"e": {"n": "E", "m": "m", "s": "s"}})).unwrap(),
+      SerializedValue::Error(ErrorValue {
+        n: "E".into(),
+        m: "m".into(),
+        s: "s".into()
+      })
+    );
+  }
+
+  #[test]
+  fn deserializes_array_and_object_with_id() {
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!({"a": [1, 2], "id": 1})).unwrap(),
+      SerializedValue::Array {
+        id: 1,
+        items: vec![SerializedValue::Number(1.0), SerializedValue::Number(2.0)],
+      }
+    );
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!({"o": [{"k": "x", "v": true}], "id": 2})).unwrap(),
+      SerializedValue::Object {
+        id: 2,
+        entries: vec![PropertyEntry {
+          k: "x".into(),
+          v: SerializedValue::Bool(true),
+        }],
+      }
+    );
+  }
+
+  #[test]
+  fn deserializes_handle_and_reference() {
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!({"h": 0})).unwrap(),
+      SerializedValue::Handle(0)
+    );
+    assert_eq!(
+      serde_json::from_value::<SerializedValue>(json!({"ref": 5})).unwrap(),
+      SerializedValue::Reference(5)
+    );
+  }
+
+  #[test]
+  fn deserializes_typed_array_base64() {
+    let parsed: SerializedValue = serde_json::from_value(json!({"ta": {"b": "AQIDBA==", "k": "ui8"}})).unwrap();
+    assert_eq!(
+      parsed,
+      SerializedValue::TypedArray(TypedArrayValue {
+        b: vec![1, 2, 3, 4],
+        k: TypedArrayKind::U8
+      })
+    );
+  }
+
+  #[test]
+  fn deserializes_array_buffer_base64() {
+    let parsed: SerializedValue = serde_json::from_value(json!({"ab": {"b": "yv66vg=="}})).unwrap();
+    assert_eq!(
+      parsed,
+      SerializedValue::ArrayBuffer(ArrayBufferValue {
+        b: vec![0xca, 0xfe, 0xba, 0xbe],
+      })
+    );
+  }
+
+  #[test]
+  fn rejects_empty_tagged_object() {
+    let err = serde_json::from_value::<SerializedValue>(json!({})).unwrap_err();
+    assert!(
+      err.to_string().contains("no recognized tag"),
+      "unexpected error message: {err}"
+    );
+  }
+
+  // ── Round-trip ──────────────────────────────────────────────────────────
+
+  #[test]
+  fn roundtrips_every_variant_via_serde() {
     let values = vec![
-      SerializedValue::number(1.5),
-      SerializedValue::boolean(false),
-      SerializedValue::string("hello"),
-      SerializedValue::special(SpecialValue::Null),
-      SerializedValue::special(SpecialValue::Undefined),
-      SerializedValue::special(SpecialValue::NaN),
-      SerializedValue::special(SpecialValue::Infinity),
-      SerializedValue::special(SpecialValue::NegInfinity),
-      SerializedValue::special(SpecialValue::NegZero),
+      SerializedValue::Bool(true),
+      SerializedValue::Bool(false),
+      SerializedValue::Number(1.5),
+      SerializedValue::Number(0.0),
+      SerializedValue::Str("hello".into()),
+      SerializedValue::Special(SpecialValue::Null),
+      SerializedValue::Special(SpecialValue::Undefined),
+      SerializedValue::Special(SpecialValue::NaN),
+      SerializedValue::Special(SpecialValue::Infinity),
+      SerializedValue::Special(SpecialValue::NegInfinity),
+      SerializedValue::Special(SpecialValue::NegZero),
       SerializedValue::date("2024-06-01T12:00:00.000Z"),
       SerializedValue::url("https://a.test/"),
       SerializedValue::bigint("-12345678901234567890"),
       SerializedValue::regexp("a|b", "i"),
       SerializedValue::error("Error", "boom", ""),
       SerializedValue::typed_array(vec![0xde, 0xad, 0xbe, 0xef], TypedArrayKind::U32),
-      SerializedValue::array(vec![SerializedValue::number(1.0)], 1),
+      SerializedValue::array_buffer(vec![0x01, 0x02]),
+      SerializedValue::array(1, vec![SerializedValue::Number(1.0)]),
       SerializedValue::object(
+        2,
         vec![PropertyEntry {
           k: "x".into(),
-          v: SerializedValue::boolean(true),
+          v: SerializedValue::Bool(true),
         }],
-        2,
       ),
       SerializedValue::handle(0),
       SerializedValue::reference(1),
@@ -852,45 +1179,43 @@ mod tests {
     }
   }
 
+  // ── JSON conversion helpers ─────────────────────────────────────────────
+
   #[test]
   fn from_json_maps_scalars() {
     let mut ctx = SerializationContext::default();
     assert_eq!(
-      SerializedValue::from_json(&json!(null), &mut ctx).v,
-      Some(SpecialValue::Null)
+      SerializedValue::from_json(&json!(null), &mut ctx),
+      SerializedValue::Special(SpecialValue::Null)
     );
-    assert_eq!(SerializedValue::from_json(&json!(true), &mut ctx).b, Some(true));
     assert_eq!(
-      SerializedValue::from_json(&json!("hi"), &mut ctx).s,
-      Some("hi".to_string())
+      SerializedValue::from_json(&json!(true), &mut ctx),
+      SerializedValue::Bool(true)
     );
-    assert_eq!(SerializedValue::from_json(&json!(42), &mut ctx).n, Some(42.0));
+    assert_eq!(
+      SerializedValue::from_json(&json!("hi"), &mut ctx),
+      SerializedValue::Str("hi".into())
+    );
+    assert!(matches!(
+      SerializedValue::from_json(&json!(42), &mut ctx),
+      SerializedValue::Number(n) if (n - 42.0).abs() < f64::EPSILON
+    ));
   }
 
   #[test]
   fn from_json_allocates_ids_for_collections() {
     let mut ctx = SerializationContext::default();
     let val = SerializedValue::from_json(&json!({"a": [1, 2], "b": null}), &mut ctx);
-    // Top-level object gets id 1 first (context init), then the inner
-    // array gets id 2. Property order follows serde_json::Map key
-    // iteration order, which for the `preserve_order` feature is
-    // insertion order; we only assert the ids are distinct and the
-    // structure round-trips.
-    assert!(val.id.is_some(), "outer object has id");
-    let outer_id = val.id.unwrap();
-    let entries = val.o.as_ref().expect("outer is object");
+    let (outer_id, entries) = match &val {
+      SerializedValue::Object { id, entries } => (*id, entries),
+      _ => panic!("expected Object"),
+    };
     let a_entry = entries.iter().find(|e| e.k == "a").expect("has key `a`");
-    let a_id = a_entry.v.id.expect("inner array has id");
-    assert_ne!(outer_id, a_id, "ids distinct");
-  }
-
-  #[test]
-  fn from_json_routes_ieee_specials_when_present() {
-    // serde_json::Value::Number can't natively carry NaN (JSON spec
-    // forbids it), so construct the SerializedValue directly and
-    // verify the from_f64 path picks the right tag.
-    let v = SerializedValue::from_f64(f64::NAN);
-    assert_eq!(v.v, Some(SpecialValue::NaN));
+    let a_id = match &a_entry.v {
+      SerializedValue::Array { id, .. } => *id,
+      _ => panic!("expected Array"),
+    };
+    assert_ne!(outer_id, a_id, "ids are distinct");
   }
 
   #[test]
@@ -919,42 +1244,25 @@ mod tests {
   fn serialization_context_allocates_distinct_ids() {
     let mut ctx = SerializationContext::default();
     let ids: Vec<u32> = (0..5).map(|_| ctx.alloc_id()).collect();
-    assert_eq!(
-      ids,
-      vec![1, 2, 3, 4, 5],
-      "first id is 1 (matches Playwright's ++lastId)"
-    );
+    assert_eq!(ids, vec![1, 2, 3, 4, 5]);
   }
 
-  #[test]
-  fn decodes_base64_typed_array_bytes() {
-    let wire = json!({"ta": {"b": "AQIDBA==", "k": "ui8"}});
-    let decoded: SerializedValue = serde_json::from_value(wire).unwrap();
-    assert_eq!(
-      decoded.ta,
-      Some(TypedArrayValue {
-        b: vec![1, 2, 3, 4],
-        k: TypedArrayKind::U8
-      })
-    );
-  }
+  // ── SerializedArgument ──────────────────────────────────────────────────
 
   #[test]
   fn serialized_argument_omits_empty_handles() {
     let arg = SerializedArgument {
-      value: SerializedValue::number(1.0),
+      value: SerializedValue::Number(1.0),
       handles: vec![],
     };
-    // Empty handles array should be skipped on the wire — Playwright's
-    // producer only emits `handles` when it's non-empty.
     let s = serde_json::to_string(&arg).unwrap();
-    assert_eq!(s, r#"{"value":{"n":1.0}}"#);
+    assert_eq!(s, r#"{"value":1.0}"#);
   }
 
   #[test]
   fn serialized_argument_carries_handle_list() {
     let arg = SerializedArgument {
-      value: SerializedValue::array(vec![SerializedValue::handle(0), SerializedValue::handle(1)], 1),
+      value: SerializedValue::array(1, vec![SerializedValue::handle(0), SerializedValue::handle(1)]),
       handles: vec![
         HandleId::Cdp("obj-1".into()),
         HandleId::Bidi {
@@ -968,7 +1276,69 @@ mod tests {
       wire,
       json!({
         "value": {"a": [{"h": 0}, {"h": 1}], "id": 1},
-        "handles": [{"Cdp": "obj-1"}, {"Bidi": {"shared_id": "shared-1", "handle": null}}]
+        "handles": [
+          {"Cdp": "obj-1"},
+          {"Bidi": {"shared_id": "shared-1", "handle": null}}
+        ]
+      })
+    );
+  }
+
+  // ── Playwright-wire-exact parity spot checks ────────────────────────────
+  //
+  // Each case mirrors a value Playwright's own `serializeAsCallArgument` in
+  // `/tmp/playwright/packages/injected/src/utilityScriptSerializers.ts`
+  // would produce for the corresponding JS value. If we ever drift from
+  // these strings the page-side `parseEvaluationResultValue` would
+  // misinterpret the CDP arguments.
+
+  #[test]
+  fn parity_array_of_mixed_primitives() {
+    let v = SerializedValue::array(
+      1,
+      vec![
+        SerializedValue::Number(1.0),
+        SerializedValue::Bool(true),
+        SerializedValue::Str("x".into()),
+        SerializedValue::Special(SpecialValue::Null),
+        SerializedValue::Special(SpecialValue::NaN),
+      ],
+    );
+    assert_eq!(
+      serde_json::to_value(&v).unwrap(),
+      json!({"a": [1.0, true, "x", {"v": "null"}, {"v": "NaN"}], "id": 1})
+    );
+  }
+
+  #[test]
+  fn parity_nested_object_with_handle_refs() {
+    let v = SerializedValue::object(
+      1,
+      vec![
+        PropertyEntry {
+          k: "el".into(),
+          v: SerializedValue::handle(0),
+        },
+        PropertyEntry {
+          k: "meta".into(),
+          v: SerializedValue::object(
+            2,
+            vec![PropertyEntry {
+              k: "count".into(),
+              v: SerializedValue::Number(3.0),
+            }],
+          ),
+        },
+      ],
+    );
+    assert_eq!(
+      serde_json::to_value(&v).unwrap(),
+      json!({
+        "o": [
+          {"k": "el", "v": {"h": 0}},
+          {"k": "meta", "v": {"o": [{"k": "count", "v": 3.0}], "id": 2}}
+        ],
+        "id": 1
       })
     );
   }
