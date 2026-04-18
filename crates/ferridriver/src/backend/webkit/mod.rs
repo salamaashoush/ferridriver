@@ -327,7 +327,7 @@ impl WebKitPage {
   /// Returns an error if no element matches the selector or the JS evaluation fails.
   pub async fn find_element(&self, selector: &str) -> Result<AnyElement, String> {
     let js = format!(
-      r"(function(){{var e=document.querySelector('{}');if(!e)return null;if(!window.__wr)window.__wr={{}};var id=Object.keys(window.__wr).length+1;window.__wr[id]=e;return id}})()",
+      r"(function(){{var e=document.querySelector('{}');if(!e)return null;if(!window.__wr)window.__wr=new Map();if(!window.__wr_next)window.__wr_next=1;var id=window.__wr_next++;window.__wr.set(id,e);return id}})()",
       selector.replace('\\', "\\\\").replace('\'', "\\'")
     );
     let r = self.evaluate(&js).await?;
@@ -354,7 +354,7 @@ impl WebKitPage {
   /// `PLAYWRIGHT_COMPAT.md` until `WKFrameInfo`-based evaluation lands.
   pub async fn evaluate_to_element(&self, js: &str, _frame_id: Option<&str>) -> Result<AnyElement, String> {
     let wrap = format!(
-      r"(function(){{var e=({js});if(!e)return null;if(!window.__wr)window.__wr={{}};var id=Object.keys(window.__wr).length+1;window.__wr[id]=e;return id}})()"
+      r"(function(){{var e=({js});if(!e)return null;if(!window.__wr)window.__wr=new Map();if(!window.__wr_next)window.__wr_next=1;var id=window.__wr_next++;window.__wr.set(id,e);return id}})()"
     );
     let r = self.evaluate(&wrap).await?;
     let ref_id = r.and_then(|v| v.as_u64()).ok_or("JS did not return a DOM element")?;
@@ -1734,6 +1734,25 @@ impl WebKitPage {
     Ok(())
   }
 
+  // ── Handle lifecycle ────────────────────────────────────────────────────
+
+  /// Release the `window.__wr` registry entry for the given ref via the
+  /// `Op::ReleaseRef` IPC op. Used by `AnyPage::release_handle` when
+  /// disposing a `JSHandle` / `ElementHandle` on the `WebKit` backend.
+  ///
+  /// Idempotent on the host side: deleting an absent key is a no-op.
+  ///
+  /// # Errors
+  ///
+  /// Returns the transport error if the IPC call fails.
+  pub async fn release_ref(&self, ref_id: u64) -> Result<(), String> {
+    let mut payload = Vec::with_capacity(16);
+    payload.extend_from_slice(&ref_id.to_le_bytes());
+    payload.extend_from_slice(&self.vid().to_le_bytes());
+    let r = self.client.send(ipc::Op::ReleaseRef, &payload).await?;
+    Self::ok(r)
+  }
+
   /// Close this page (view) via the IPC close command.
   ///
   /// Honors `run_before_unload`: when `true`, synchronously dispatches a
@@ -1782,7 +1801,16 @@ pub struct WebKitElement {
 
 impl WebKitElement {
   fn el(&self) -> String {
-    format!("window.__wr[{}]", self.ref_id)
+    format!("window.__wr.get({})", self.ref_id)
+  }
+
+  /// Raw `window.__wr` registry index. Public so
+  /// [`crate::backend::element_handle_remote`] can extract it when
+  /// minting a [`crate::js_handle::HandleRemote::WebKit`] for a public
+  /// [`crate::element_handle::ElementHandle`].
+  #[must_use]
+  pub fn ref_id(&self) -> u64 {
+    self.ref_id
   }
 
   async fn eval(&self, js: &str) -> Result<(), String> {

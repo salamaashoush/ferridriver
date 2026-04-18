@@ -125,6 +125,27 @@ impl Page {
     Locator::wrap(self.inner.locator(&selector, opts))
   }
 
+  /// Playwright: `page.querySelector(selector): Promise<ElementHandle | null>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts`). The
+  /// `$` alias is also exposed for parity.
+  ///
+  /// Returns the first element matching `selector`, pinned to the
+  /// [`crate::element_handle::ElementHandle`] returned. `null` when no
+  /// element matches. Unlike `page.locator()`, the returned handle
+  /// does not re-resolve on each action — callers `dispose()` it when
+  /// done.
+  #[napi]
+  pub async fn query_selector(&self, selector: String) -> Result<Option<crate::element_handle::ElementHandle>> {
+    let inner = self.inner.query_selector(&selector).await.into_napi()?;
+    Ok(inner.map(crate::element_handle::ElementHandle::wrap))
+  }
+
+  /// Alias for [`Self::query_selector`] matching Playwright's `$` shortcut.
+  #[napi(js_name = "$")]
+  pub async fn dollar(&self, selector: String) -> Result<Option<crate::element_handle::ElementHandle>> {
+    self.query_selector(selector).await
+  }
+
   #[napi]
   pub fn get_by_role(&self, role: String, options: Option<RoleOptions>) -> Locator {
     let opts: ferridriver::options::RoleOptions = options.map_or_else(Default::default, Into::into);

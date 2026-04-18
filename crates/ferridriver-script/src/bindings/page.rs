@@ -339,6 +339,29 @@ impl PageJs {
 
   // ── Locators ──────────────────────────────────────────────────────────────
 
+  /// Playwright: `page.querySelector(selector): Promise<ElementHandle | null>`.
+  /// Mints a lifecycle [`crate::bindings::element_handle::ElementHandleJs`]
+  /// pinned to the first element matching `selector`, or `null` when no
+  /// element matches. Callers `dispose()` the handle when done to
+  /// release the backend remote.
+  #[qjs(rename = "querySelector")]
+  pub async fn query_selector(
+    &self,
+    selector: String,
+  ) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
+    let inner = self.inner.query_selector(&selector).await.into_js()?;
+    Ok(inner.map(crate::bindings::element_handle::ElementHandleJs::new))
+  }
+
+  /// Playwright `$` shortcut for [`Self::query_selector`].
+  #[qjs(rename = "$")]
+  pub async fn dollar(
+    &self,
+    selector: String,
+  ) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
+    self.query_selector(selector).await
+  }
+
   /// Playwright: `page.locator(selector, options?: LocatorOptions): Locator`.
   /// Thin delegator to Rust core's `Page::locator`.
   #[qjs(rename = "locator")]

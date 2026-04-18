@@ -1130,6 +1130,80 @@ impl AnyPage {
   pub async fn remove_init_script(&self, identifier: &str) -> Result<(), String> {
     page_dispatch!(self, remove_init_script(identifier))
   }
+
+  // ── Handle lifecycle ──
+
+  /// Release the backend object the given [`HandleRemote`] refers to.
+  ///
+  /// Each backend uses its native release primitive:
+  ///
+  /// * CDP: `Runtime.releaseObject { objectId }`.
+  /// * `BiDi`: `script.disown { handles: [sharedId], target: {context} }`.
+  /// * `WebKit`: `Op::ReleaseRef` IPC — deletes the host-side
+  ///   `window.__wr` entry so a subsequent `window.__wr[id]` returns
+  ///   `undefined`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards the backend's protocol error if the release call fails.
+  /// Already-released handles are silently tolerated where the backend
+  /// allows it (CDP raises an error only on structural issues like an
+  /// invalid session id; `BiDi` returns `invalid argument` for an unknown
+  /// `sharedId` which we surface).
+  pub async fn release_handle(&self, remote: &crate::js_handle::HandleRemote) -> crate::error::Result<()> {
+    use crate::js_handle::HandleRemote;
+    match (self, remote) {
+      (Self::CdpPipe(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await.map_err(Into::into),
+      (Self::CdpRaw(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await.map_err(Into::into),
+      #[cfg(target_os = "macos")]
+      (Self::WebKit(p), HandleRemote::WebKit(ref_id)) => p.release_ref(*ref_id).await.map_err(Into::into),
+      (Self::Bidi(p), HandleRemote::Bidi { shared_id, handle }) => {
+        p.release_handle(shared_id, handle.as_deref()).await.map_err(Into::into)
+      },
+      // A HandleRemote shape that doesn't match the backend kind is a
+      // programming error — mixed-backend handle use.
+      (page, remote) => Err(crate::error::FerriError::Backend(format!(
+        "handle/backend mismatch: {:?} handle on {:?} backend",
+        remote,
+        page.kind()
+      ))),
+    }
+  }
+}
+
+/// Extract a [`crate::js_handle::HandleRemote`] from a backend `AnyElement`.
+///
+/// Called by [`crate::element_handle::ElementHandle::from_any_element`]
+/// when wrapping a backend element into a public `ElementHandle`. Each
+/// backend exposes its native wire reference (CDP `objectId` string,
+/// `BiDi` `sharedId`, `WebKit` `ref_id`); this helper maps them into
+/// the unified [`crate::js_handle::HandleRemote`] enum.
+///
+/// # Errors
+///
+/// Returns an error if a CDP element has neither a cached `object_id`
+/// nor a `node_id` that can be resolved into one — this should never
+/// happen for elements freshly returned from `find_element` /
+/// `evaluate_to_element` / `DOM.resolveNode`, which always produce at
+/// least one of the two.
+pub async fn element_handle_remote(element: &AnyElement) -> crate::error::Result<crate::js_handle::HandleRemote> {
+  use crate::js_handle::HandleRemote;
+  match element {
+    AnyElement::CdpPipe(e) => {
+      let obj = e.ensure_object_id().await.map_err(crate::error::FerriError::from)?;
+      Ok(HandleRemote::Cdp(obj))
+    },
+    AnyElement::CdpRaw(e) => {
+      let obj = e.ensure_object_id().await.map_err(crate::error::FerriError::from)?;
+      Ok(HandleRemote::Cdp(obj))
+    },
+    #[cfg(target_os = "macos")]
+    AnyElement::WebKit(e) => Ok(HandleRemote::WebKit(e.ref_id())),
+    AnyElement::Bidi(e) => Ok(HandleRemote::Bidi {
+      shared_id: e.shared_id.clone(),
+      handle: None,
+    }),
+  }
 }
 
 // ─── AnyElement ─────────────────────────────────────────────────────────────

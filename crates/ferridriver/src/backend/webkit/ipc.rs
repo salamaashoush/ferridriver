@@ -64,6 +64,12 @@ pub enum Op {
   /// shape CDP's `Browser.getVersion().product` returns for Chromium, so
   /// `browser.version()` surfaces a real product version on every backend.
   GetWebKitVersion = 72,
+  /// Release a `window.__wr` registry entry — the `WebKit` equivalent of
+  /// CDP's `Runtime.releaseObject` and `BiDi`'s `script.disown`. Payload:
+  /// `u64 ref_id + u64 view_id` (LE). Response: `REP_OK` on successful
+  /// delete, `REP_OK` also when the ref doesn't exist (idempotent). Used
+  /// by [`crate::js_handle::JSHandle::dispose`] on the `WebKit` backend.
+  ReleaseRef = 73,
   Shutdown = 255,
 }
 

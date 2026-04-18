@@ -390,6 +390,42 @@ impl Page {
     self.main_frame().frame_locator(selector)
   }
 
+  // ── Handle materialisation (Playwright `page.$` / `page.$$`) ─────
+
+  /// Resolve the selector once and return a lifecycle
+  /// [`crate::element_handle::ElementHandle`] — or `None` when the
+  /// selector matches no element. Mirrors Playwright's
+  /// `page.querySelector(selector)` /
+  /// `page.$(selector)` (`/tmp/playwright/packages/playwright-core/src/client/page.ts`).
+  ///
+  /// Unlike [`Self::locator`] (lazy, re-resolves on every action), the
+  /// returned handle is pinned to the element resolved at call time.
+  /// Subsequent DOM mutations that remove the element won't invalidate
+  /// the handle itself — actions against a detached element surface a
+  /// backend-specific error — but the handle's lifecycle is decoupled
+  /// from the page's frame cache. Callers release it via
+  /// [`crate::element_handle::ElementHandle::dispose`] or let it
+  /// drop when the page closes.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend cannot execute the underlying
+  /// query (protocol failure, target closed, etc.). A selector that
+  /// does not match any element returns `Ok(None)`.
+  pub async fn query_selector(
+    self: &Arc<Self>,
+    selector: &str,
+  ) -> Result<Option<crate::element_handle::ElementHandle>> {
+    match self.inner.find_element(selector).await {
+      Ok(element) => {
+        let handle = crate::element_handle::ElementHandle::from_any_element(Arc::clone(self), element).await?;
+        Ok(Some(handle))
+      },
+      Err(err) if is_element_not_found(&err) => Ok(None),
+      Err(err) => Err(crate::error::FerriError::from(err)),
+    }
+  }
+
   // ── Action methods (delegate to mainFrame — Playwright parity) ─────
   //
   // Mirrors `/tmp/playwright/packages/playwright-core/src/client/page.ts:658+`:
@@ -2456,5 +2492,38 @@ impl Touchscreen<'_> {
        }}}})()"
     )).await?;
     Ok(())
+  }
+}
+
+/// Pattern-match the backend's "selector did not match any element"
+/// error String so [`Page::query_selector`] can surface `Ok(None)` for
+/// the missing-element case. Each backend uses a different message:
+///
+/// * CDP (`crates/ferridriver/src/backend/cdp/mod.rs`): `"'{selector}' not found"`
+/// * `WebKit` (`crates/ferridriver/src/backend/webkit/mod.rs`): `"'{selector}' not found"`
+/// * `BiDi` (`crates/ferridriver/src/backend/bidi/page.rs`): `"No element found for selector: {selector}"`
+///
+/// Other backend errors (protocol detach, target closed, invalid
+/// selector) bubble up unmodified.
+fn is_element_not_found(err: &str) -> bool {
+  let lower = err.to_ascii_lowercase();
+  lower.contains("not found") || lower.contains("no element found")
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn is_element_not_found_matches_every_backend_message() {
+    // CDP + WebKit message shape.
+    assert!(is_element_not_found("'button#primary' not found"));
+    // BiDi message shape.
+    assert!(is_element_not_found("No element found for selector: button#primary"));
+    // Case-insensitive so future backend variants don't regress.
+    assert!(is_element_not_found("NO ELEMENT FOUND FOR SELECTOR: x"));
+    // Other errors bubble up unchanged.
+    assert!(!is_element_not_found("session detached"));
+    assert!(!is_element_not_found("Timeout 30000ms exceeded"));
   }
 }

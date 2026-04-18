@@ -56,10 +56,12 @@ mod bdd_registry;
 mod browser;
 mod codegen;
 mod context;
+mod element_handle;
 mod error;
 mod frame;
 #[allow(dead_code)]
 mod install;
+mod js_handle;
 mod locator;
 mod page;
 mod route;

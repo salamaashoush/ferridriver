@@ -1451,6 +1451,128 @@ fn test_script_utility_script_exposed(c: &mut McpClient) {
   );
 }
 
+// Task 1.2 + 1.3 phase C — JSHandle + ElementHandle lifecycle. Rule 9:
+// dispose must work end-to-end on every backend (cdp-pipe, cdp-raw,
+// webkit, bidi). Exercises the QuickJS `ElementHandle.dispose()` +
+// `JSHandle.dispose()` + idempotence via `run_script` so all four
+// backends are proven.
+fn test_script_handle_lifecycle(c: &mut McpClient) {
+  c.nav("<button id='primary'>ok</button><div class='needle'>x</div>");
+
+  // querySelector returns an ElementHandle with isDisposed=false.
+  let v = c.script_value(
+    "const h = await page.querySelector('button#primary');\
+     return {found: h !== null, disposed: h.isDisposed};",
+  );
+  assert_eq!(v["found"], json!(true), "querySelector missed #primary: {v}");
+  assert_eq!(v["disposed"], json!(false), "fresh handle already disposed: {v}");
+
+  // $ alias returns a handle too.
+  let v = c.script_value(
+    "const h = await page.$('div.needle');\
+     return h !== null;",
+  );
+  assert_eq!(v, json!(true), "$ alias missed .needle: {v}");
+
+  // Missing selector returns null/undefined (not an error). Use `== null`
+  // (loose equality) so we accept both representations — rquickjs maps
+  // Rust's `Option::None` to `undefined` on the JS side, while
+  // Playwright's TS types say `null`. Either is acceptable here; what
+  // we're testing is that an unmatched selector is non-truthy, not an
+  // error.
+  let v = c.script_value(
+    "const r = await page.querySelector('button#does-not-exist');\
+     return r === null || r === undefined;",
+  );
+  assert_eq!(v, json!(true), "missing selector did not return null: {v}");
+
+  // dispose() latches isDisposed and is idempotent.
+  let v = c.script_value(
+    "const h = await page.querySelector('button#primary');\
+     const before = h.isDisposed;\
+     await h.dispose();\
+     const after1 = h.isDisposed;\
+     await h.dispose();\
+     const after2 = h.isDisposed;\
+     return {before, after1, after2};",
+  );
+  assert_eq!(v["before"], json!(false), "before dispose: {v}");
+  assert_eq!(v["after1"], json!(true), "after first dispose: {v}");
+  assert_eq!(v["after2"], json!(true), "after second dispose: {v}");
+
+  // asJSHandle shares the disposed flag with the ElementHandle.
+  let v = c.script_value(
+    "const eh = await page.querySelector('button#primary');\
+     const jh = eh.asJSHandle();\
+     const before_eh = eh.isDisposed;\
+     const before_jh = jh.isDisposed;\
+     await eh.dispose();\
+     const after_eh = eh.isDisposed;\
+     const after_jh = jh.isDisposed;\
+     return {before_eh, before_jh, after_eh, after_jh};",
+  );
+  assert_eq!(v["before_eh"], json!(false));
+  assert_eq!(v["before_jh"], json!(false));
+  assert_eq!(v["after_eh"], json!(true));
+  // Shared Arc<AtomicBool> means the JSHandle observes the dispose too.
+  assert_eq!(
+    v["after_jh"],
+    json!(true),
+    "JSHandle sibling did not see the dispose: {v}"
+  );
+
+  // JSHandle.asElement is a phase-C stub — always null/undefined until
+  // phase-D inspects the remote type.
+  let v = c.script_value(
+    "const eh = await page.querySelector('button#primary');\
+     const jh = eh.asJSHandle();\
+     const asEl = jh.asElement();\
+     await eh.dispose();\
+     return asEl === null || asEl === undefined;",
+  );
+  assert_eq!(v, json!(true), "asElement was not null in phase C: {v}");
+}
+
+// WebKit-specific Rule-9 probe: proves Op::ReleaseRef actually reached
+// the host and deleted from `window.__wr`. CDP's Runtime.releaseObject
+// and BiDi's script.disown are not observable from page-side JS without
+// the phase-D use-after-dispose path; this probe covers WebKit's
+// page-side registry shrink which IS observable.
+fn test_script_handle_lifecycle_webkit_observable(c: &mut McpClient) {
+  c.nav("<button id='primary'>ok</button>");
+
+  // `page.evaluate` through the QuickJS binding JSON-stringifies its
+  // result, so the Number comes back as a string (`"0"`). Coerce via
+  // `Number(...)` inside JS so we get a real number on the wire.
+  let v = c.script_value(
+    "const sizeNow = async () => Number(await page.evaluate('window.__wr ? window.__wr.size : 0'));\
+     const before = await sizeNow();\
+     const h = await page.querySelector('button#primary');\
+     const during = await sizeNow();\
+     await h.dispose();\
+     const after = await sizeNow();\
+     return {before, during, after};",
+  );
+  let as_int = |k: &str| -> i64 {
+    v[k]
+      .as_i64()
+      .or_else(|| v[k].as_str().and_then(|s| s.parse::<i64>().ok()))
+      .unwrap_or(-1)
+  };
+  let before_size = as_int("before");
+  let during_size = as_int("during");
+  let after_size = as_int("after");
+  assert_eq!(
+    during_size,
+    before_size + 1,
+    "querySelector did not grow window.__wr by 1 (before={before_size}, during={during_size}): {v}"
+  );
+  assert_eq!(
+    after_size, before_size,
+    "Op::ReleaseRef did not shrink window.__wr back to pre-mint size (before={before_size}, after={after_size}): {v}"
+  );
+}
+
 // Task 3.25: `page.addInitScript(script, arg)` — exercise the full
 // Playwright surface (Function + arg, string, `{ content }`) from QuickJS
 // end-to-end, including the Rust-core-driven `Cannot evaluate a string with
@@ -1879,6 +2001,14 @@ fn run_all_tests(backend: &str) {
     }};
   }
 
+  macro_rules! run_webkit {
+    ($name:ident) => {{
+      if backend == "webkit" {
+        run!($name);
+      }
+    }};
+  }
+
   // Navigation + session
   run!(test_navigate);
   run!(test_page_list);
@@ -1940,6 +2070,14 @@ fn run_all_tests(backend: &str) {
   run!(test_script_emulate_media_null_disables_single_field);
   run!(test_script_add_init_script);
   run!(test_script_utility_script_exposed);
+  // Task 1.2 + 1.3 phase C — JSHandle + ElementHandle lifecycle (4
+  // backends via the QuickJS bindings).
+  run!(test_script_handle_lifecycle);
+  // WebKit-only observability: Op::ReleaseRef actually shrinks
+  // `window.__wr` (CDP and BiDi dispose paths are proven via the
+  // successful `dispose()` call but have no page-observable side
+  // effect until phase D's use-after-dispose test).
+  run_webkit!(test_script_handle_lifecycle_webkit_observable);
   run!(test_script_click_options);
   run!(test_script_action_timeout);
   run!(test_script_tap_native);
