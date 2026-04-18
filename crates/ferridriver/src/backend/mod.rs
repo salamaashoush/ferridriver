@@ -160,12 +160,46 @@ pub struct ClearCookieOptions {
   pub path: Option<String>,
 }
 
-/// Screenshot options.
+/// Backend-level screenshot options — the flat, Playwright-independent
+/// wire struct each backend consumes. `crate::options::ScreenshotOptions`
+/// (the user-facing Playwright-shaped bag) is lowered into this by
+/// [`crate::page::Page::screenshot`], which also handles the Rust-side
+/// concerns (`path` write-to-disk, `timeout` race) that don't belong in
+/// the per-backend dispatch path.
 #[derive(Debug, Clone)]
 pub struct ScreenshotOpts {
   pub format: ImageFormat,
   pub quality: Option<i64>,
   pub full_page: bool,
+  /// Pixel rectangle relative to the viewport (or full-page bounds
+  /// when `full_page` is true). `None` captures the whole viewport /
+  /// full page.
+  pub clip: Option<crate::options::ClipRect>,
+  /// When `true`, emit a PNG with transparent pixels where the page
+  /// doesn't have its own background. Ignored for JPEG (no alpha).
+  pub omit_background: bool,
+  /// `"css"` → one image pixel per CSS pixel (smaller, stable across
+  /// DPR); `"device"` → one image pixel per device pixel (default,
+  /// Retina captures are 2× bigger). `None` = Playwright default.
+  pub scale: Option<ScreenshotScale>,
+  /// `"disabled"` pauses CSS animations and Web Animations during
+  /// capture; finite animations fast-forward to completion, infinite
+  /// ones revert to their initial state. `"allow"` leaves them
+  /// running. `None` = Playwright default (`"allow"`).
+  pub animations: Option<ScreenshotAnimations>,
+  /// `"hide"` (Playwright default) hides the text caret; `"initial"`
+  /// leaves it visible. `None` = Playwright default.
+  pub caret: Option<ScreenshotCaret>,
+  /// Selectors whose matches are overlaid with [`Self::mask_color`]
+  /// before capture. Backends resolve each against the target and
+  /// paint a fixed-position div at each element's bounding rect.
+  pub mask: Vec<String>,
+  /// CSS color for the mask overlay. Backends default to `#FF00FF`
+  /// (Playwright's pink) when this is `None`.
+  pub mask_color: Option<String>,
+  /// Raw CSS injected before capture and removed afterwards. Pierces
+  /// shadow DOM, applies to subframes.
+  pub style: Option<String>,
 }
 
 impl Default for ScreenshotOpts {
@@ -174,7 +208,140 @@ impl Default for ScreenshotOpts {
       format: ImageFormat::Png,
       quality: None,
       full_page: false,
+      clip: None,
+      omit_background: false,
+      scale: None,
+      animations: None,
+      caret: None,
+      mask: Vec::new(),
+      mask_color: None,
+      style: None,
     }
+  }
+}
+
+/// `scale` option for screenshots — mirrors Playwright's `"css" | "device"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenshotScale {
+  /// One image pixel per CSS pixel — small, DPR-independent output.
+  Css,
+  /// One image pixel per device pixel — sharp, larger on Retina.
+  Device,
+}
+
+/// `animations` option for screenshots — mirrors Playwright's
+/// `"disabled" | "allow"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenshotAnimations {
+  /// Pause animations during capture.
+  Disabled,
+  /// Leave animations running.
+  Allow,
+}
+
+/// `caret` option for screenshots — mirrors Playwright's `"hide" | "initial"`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ScreenshotCaret {
+  /// Hide the text input caret (Playwright default).
+  Hide,
+  /// Leave the caret visible in its natural state.
+  Initial,
+}
+
+/// Backend-agnostic JS helpers for the DOM-side part of `screenshot()`
+/// — caret hiding, user-style injection, animation pause via CSS, and
+/// mask overlay painting. Each backend wraps its own
+/// protocol-specific execution (CDP `Runtime.evaluate`, `BiDi`
+/// `script.callFunction`, `WebKit` `evaluate`) around these helpers so
+/// all three produce the same observable DOM state before capturing.
+pub mod screenshot_js {
+  use super::{ScreenshotAnimations, ScreenshotCaret, ScreenshotOpts};
+
+  /// Build the combined CSS rules that `screenshot()` injects before
+  /// capture: caret-hide (unless the caller explicitly opted into
+  /// `Initial`), optional user `style`, and optional animation pause.
+  /// Returns an empty string when no rules apply — the caller should
+  /// skip the install/teardown JS entirely in that case.
+  #[must_use]
+  pub fn build_css(opts: &ScreenshotOpts) -> String {
+    let mut css = String::new();
+    if !matches!(opts.caret, Some(ScreenshotCaret::Initial)) {
+      css.push_str("* { caret-color: transparent !important; }");
+    }
+    if matches!(opts.animations, Some(ScreenshotAnimations::Disabled)) {
+      css.push_str(" *, *::before, *::after { animation-play-state: paused !important; transition: none !important; }");
+    }
+    if let Some(ref user) = opts.style {
+      css.push_str(user);
+    }
+    css
+  }
+
+  /// Build a JS expression that installs a `<style id="__fd_screenshot_style__">`
+  /// element carrying the supplied CSS. Paired with [`uninstall_style_js`]
+  /// for teardown.
+  #[must_use]
+  pub fn install_style_js(css: &str) -> String {
+    let esc = css.replace('\\', "\\\\").replace('`', "\\`");
+    format!(
+      r"(function(){{
+        const s = document.createElement('style');
+        s.id = '__fd_screenshot_style__';
+        s.textContent = `{esc}`;
+        (document.head || document.documentElement).appendChild(s);
+      }})()"
+    )
+  }
+
+  /// Removes the style element installed by [`install_style_js`].
+  #[must_use]
+  pub fn uninstall_style_js() -> &'static str {
+    "document.getElementById('__fd_screenshot_style__')?.remove()"
+  }
+
+  /// Build a JS expression that paints a fixed `<div>` over every
+  /// match of each selector in [`ScreenshotOpts::mask`]. Returns
+  /// `None` when there are no selectors to mask — caller should skip
+  /// the install/teardown JS entirely.
+  ///
+  /// The overlay divs are tagged with a random class name stored on
+  /// `window.__fd_mask_tag` so [`uninstall_mask_js`] can remove them
+  /// without relying on the selectors resolving to the same matches
+  /// a second time.
+  #[must_use]
+  pub fn install_mask_js(opts: &ScreenshotOpts) -> Option<String> {
+    if opts.mask.is_empty() {
+      return None;
+    }
+    let selectors_json = serde_json::to_string(&opts.mask).unwrap_or_else(|_| "[]".into());
+    let color = opts.mask_color.clone().unwrap_or_else(|| "#FF00FF".into());
+    let color_json = serde_json::to_string(&color).unwrap_or_else(|_| "\"#FF00FF\"".into());
+    Some(format!(
+      r"(function(){{
+        const selectors = {selectors_json};
+        const color = {color_json};
+        const tag = '__fd_mask_' + Math.random().toString(36).slice(2);
+        window.__fd_mask_tag = tag;
+        for (const sel of selectors) {{
+          try {{
+            const els = document.querySelectorAll(sel);
+            for (const el of els) {{
+              const r = el.getBoundingClientRect();
+              const o = document.createElement('div');
+              o.className = tag;
+              o.style.cssText = `all: initial; position: fixed; left: ${{r.left}}px; top: ${{r.top}}px; width: ${{r.width}}px; height: ${{r.height}}px; background: ${{color}}; z-index: 2147483647; pointer-events: none;`;
+              document.body.appendChild(o);
+            }}
+          }} catch (e) {{}}
+        }}
+      }})()"
+    ))
+  }
+
+  /// Removes the mask overlay divs installed by [`install_mask_js`].
+  #[must_use]
+  pub fn uninstall_mask_js() -> &'static str {
+    "(function(){const t=window.__fd_mask_tag;if(!t)return;document.querySelectorAll('.'+t).forEach(n=>n.remove());delete window.__fd_mask_tag;})()"
   }
 }
 

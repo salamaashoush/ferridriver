@@ -1082,6 +1082,84 @@ impl<T: CdpWrap> CdpPage<T> {
   // ---- Screenshots ----
 
   pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>, String> {
+    // Pre-capture: set up per-field state and collect teardown tokens.
+    let (style_installed, mask_installed) = self.screenshot_install_dom(&opts).await?;
+    let bg_installed = self.screenshot_install_transparent_bg(&opts).await?;
+    let params = self.screenshot_build_params(&opts).await?;
+
+    let result = self.cmd("Page.captureScreenshot", params).await;
+
+    // Teardown — always runs so user interaction after a failure sees
+    // a pristine page state.
+    if style_installed {
+      let _ = self.evaluate(crate::backend::screenshot_js::uninstall_style_js()).await;
+    }
+    if mask_installed {
+      let _ = self.evaluate(crate::backend::screenshot_js::uninstall_mask_js()).await;
+    }
+    if bg_installed {
+      let _ = self
+        .cmd(
+          "Emulation.setDefaultBackgroundColorOverride",
+          serde_json::Value::Object(serde_json::Map::default()),
+        )
+        .await;
+    }
+
+    let data = result?
+      .get("data")
+      .and_then(|v| v.as_str().map(String::from))
+      .ok_or("No screenshot data")?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+      .map_err(|e| format!("Decode screenshot: {e}"))
+  }
+
+  /// Install the DOM-side screenshot overrides (caret hide, user style,
+  /// animation pause, mask overlays) via `Runtime.evaluate`. Returns
+  /// `(style_installed, mask_installed)` so the caller knows which
+  /// teardown calls to make.
+  async fn screenshot_install_dom(&self, opts: &ScreenshotOpts) -> Result<(bool, bool), String> {
+    let css = crate::backend::screenshot_js::build_css(opts);
+    let style_installed = if css.is_empty() {
+      false
+    } else {
+      self
+        .evaluate(&crate::backend::screenshot_js::install_style_js(&css))
+        .await?;
+      true
+    };
+    let mask_installed = if let Some(js) = crate::backend::screenshot_js::install_mask_js(opts) {
+      self.evaluate(&js).await?;
+      true
+    } else {
+      false
+    };
+    Ok((style_installed, mask_installed))
+  }
+
+  /// Enable transparent-background capture via CDP
+  /// `Emulation.setDefaultBackgroundColorOverride` when
+  /// `opts.omit_background` is set. Returns `true` if the override
+  /// was installed (caller must reverse it).
+  async fn screenshot_install_transparent_bg(&self, opts: &ScreenshotOpts) -> Result<bool, String> {
+    if !opts.omit_background {
+      return Ok(false);
+    }
+    self
+      .cmd(
+        "Emulation.setDefaultBackgroundColorOverride",
+        serde_json::json!({"color": {"r": 0, "g": 0, "b": 0, "a": 0}}),
+      )
+      .await?;
+    Ok(true)
+  }
+
+  /// Build the `Page.captureScreenshot` parameter object from
+  /// `opts.format`, `opts.quality`, `opts.clip`, `opts.full_page`,
+  /// and `opts.scale`. Caller-supplied clips win over full-page
+  /// computation; CSS scale translates to `clip.scale = 1 / devicePixelRatio`.
+  async fn screenshot_build_params(&self, opts: &ScreenshotOpts) -> Result<serde_json::Value, String> {
+    use crate::backend::ScreenshotScale;
     let format_str = match opts.format {
       ImageFormat::Png => "png",
       ImageFormat::Jpeg => "jpeg",
@@ -1091,9 +1169,18 @@ impl<T: CdpWrap> CdpPage<T> {
     if let Some(q) = opts.quality {
       params["quality"] = serde_json::json!(q);
     }
-    if opts.full_page {
-      // Playwright approach: get full page dimensions via JS + getLayoutMetrics in parallel,
-      // then use clip with captureBeyondViewport to render everything in one pass.
+    let css_scale = matches!(opts.scale, Some(ScreenshotScale::Css));
+    if let Some(rect) = opts.clip {
+      let scale = if css_scale {
+        1.0 / self.device_pixel_ratio().await.unwrap_or(1.0)
+      } else {
+        1.0
+      };
+      params["clip"] = serde_json::json!({
+          "x": rect.x, "y": rect.y, "width": rect.width, "height": rect.height, "scale": scale
+      });
+      params["captureBeyondViewport"] = serde_json::json!(true);
+    } else if opts.full_page {
       let metrics = self.cmd("Page.getLayoutMetrics", super::empty_params()).await?;
       let content_size = metrics.get("contentSize");
       let w = content_size
@@ -1104,25 +1191,29 @@ impl<T: CdpWrap> CdpPage<T> {
         .and_then(|c| c.get("height"))
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(600.0);
-      // Use visualViewport.scale like Playwright (not hardcoded 1)
-      let scale = metrics
+      let mut scale = metrics
         .get("visualViewport")
         .and_then(|v| v.get("scale"))
         .and_then(serde_json::Value::as_f64)
         .unwrap_or(1.0);
+      if css_scale {
+        scale /= self.device_pixel_ratio().await.unwrap_or(1.0);
+      }
       params["clip"] = serde_json::json!({
           "x": 0, "y": 0, "width": w, "height": h, "scale": scale
       });
       params["captureBeyondViewport"] = serde_json::json!(true);
     }
+    Ok(params)
+  }
 
-    let result = self.cmd("Page.captureScreenshot", params).await?;
-    let data = result
-      .get("data")
-      .and_then(|v| v.as_str())
-      .ok_or("No screenshot data")?;
-    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
-      .map_err(|e| format!("Decode screenshot: {e}"))
+  /// Fetch the target's current `window.devicePixelRatio`. Used to
+  /// translate the `scale: "css"` option into CDP's per-clip scale
+  /// multiplier — `clip.scale = 1/DPR` means "one image pixel per
+  /// CSS pixel" even on Retina.
+  async fn device_pixel_ratio(&self) -> Result<f64, String> {
+    let v = self.evaluate("window.devicePixelRatio || 1").await?;
+    Ok(v.and_then(|v| v.as_f64()).unwrap_or(1.0))
   }
 
   pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>, String> {

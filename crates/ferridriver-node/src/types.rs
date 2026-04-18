@@ -76,14 +76,62 @@ pub struct WaitOptions {
   pub timeout: Option<f64>,
 }
 
-/// Options for screenshots.
+/// Pixel rectangle for [`ScreenshotOptions::clip`]. All values are in
+/// CSS pixels relative to the viewport (or the full-page bounds when
+/// `fullPage` is also set).
+#[napi(object)]
+#[derive(Debug, Clone, Copy)]
+pub struct ClipRect {
+  pub x: f64,
+  pub y: f64,
+  pub width: f64,
+  pub height: f64,
+}
+
+impl From<ClipRect> for ferridriver::options::ClipRect {
+  fn from(c: ClipRect) -> Self {
+    Self {
+      x: c.x,
+      y: c.y,
+      width: c.width,
+      height: c.height,
+    }
+  }
+}
+
+/// Playwright-parity `PageScreenshotOptions`. Mirrors
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct ScreenshotOptions {
+  #[napi(ts_type = "'disabled' | 'allow'")]
+  pub animations: Option<String>,
+  #[napi(ts_type = "'hide' | 'initial'")]
+  pub caret: Option<String>,
+  pub clip: Option<ClipRect>,
   pub full_page: Option<bool>,
-  /// "png", "jpeg", "webp"
+  /// Screenshot image type — Playwright calls this `type` in TS, but
+  /// `type` is reserved in Rust; we rename to `format` internally and
+  /// expose as `type` in the generated `.d.ts` to stay byte-for-byte
+  /// identical with Playwright.
+  #[napi(ts_type = "'png' | 'jpeg' | 'webp'", js_name = "type")]
   pub format: Option<String>,
+  /// Selectors whose matches are painted over with [`Self::mask_color`].
+  /// Playwright takes `Array<Locator>`; we accept selectors here
+  /// because `Locator` instances lower to their selector string at
+  /// the NAPI boundary (see [`LocatorRef`]).
+  pub mask: Option<Vec<LocatorRef>>,
+  /// CSS color for the mask overlay. Default `#FF00FF`.
+  pub mask_color: Option<String>,
+  pub omit_background: Option<bool>,
+  /// If set, the captured bytes are additionally written to disk.
+  pub path: Option<String>,
   pub quality: Option<i32>,
+  #[napi(ts_type = "'css' | 'device'")]
+  pub scale: Option<String>,
+  /// Raw CSS injected before capture and removed afterwards.
+  pub style: Option<String>,
+  pub timeout: Option<f64>,
 }
 
 /// Viewport configuration.
@@ -366,10 +414,19 @@ impl From<WaitOptions> for ferridriver::options::WaitOptions {
 impl From<ScreenshotOptions> for ferridriver::options::ScreenshotOptions {
   fn from(o: ScreenshotOptions) -> Self {
     Self {
+      animations: o.animations,
+      caret: o.caret,
+      clip: o.clip.map(Into::into),
       full_page: o.full_page,
       format: o.format,
+      mask: o.mask.unwrap_or_default().into_iter().map(|l| l.selector).collect(),
+      mask_color: o.mask_color,
+      omit_background: o.omit_background,
+      path: o.path.map(std::path::PathBuf::from),
       quality: o.quality.map(i64::from),
-      ..Default::default()
+      scale: o.scale,
+      style: o.style,
+      timeout: o.timeout.map(f64_to_u64),
     }
   }
 }

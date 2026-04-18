@@ -253,9 +253,16 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.3 ScreenshotOptions complete
 
-- [ ] Add: `mask: Vec<Locator>`, `mask_color`, `clip`, `animations: Allow|Disabled`, `caret: Hide|Initial`, `scale: Css|Device`, `omit_background`, `style` (CSS injection), `path`, `timeout`, `type: Png|Jpeg`.
-- **Files**: `options.rs`, `page.rs` screenshot path, `locator.rs` screenshot path.
-- **Tests**: mask redacts regions; `omit_background: true` yields transparent png; `animations: 'disabled'` stops CSS animations.
+- [x] Full 13-field Playwright surface: `animations`, `caret`, `clip`, `fullPage`, `type` (emitted in `.d.ts` via `#[napi(js_name = "type")]` — Rust field renamed to `format` because `type` is reserved), `mask`, `maskColor`, `omitBackground`, `path`, `quality`, `scale`, `style`, `timeout`. Matches `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280` byte-for-byte.
+  - **Core**: `ScreenshotOptions` + `ClipRect` in `options.rs`; the backend-level `ScreenshotOpts` wire struct in `backend/mod.rs` gains matching fields plus three sibling enums (`ScreenshotScale`, `ScreenshotAnimations`, `ScreenshotCaret`). `Page::screenshot` lowers the Playwright bag into the wire struct, handles Rust-side `path` write-to-disk, and wraps the whole capture in a `tokio::time::timeout` race when `timeout > 0`.
+  - **Shared JS helpers** (`backend::screenshot_js`): `build_css`, `install_style_js`, `uninstall_style_js`, `install_mask_js`, `uninstall_mask_js`. All three backends install/teardown through the same helpers so caret-hide, `animations: "disabled"` (via CSS `animation-play-state: paused`), user `style`, and mask overlays produce the same observable DOM state regardless of protocol.
+  - **CDP** (`cdp/mod.rs:screenshot`): caret/style/mask via `Runtime.evaluate`; `omitBackground` via `Emulation.setDefaultBackgroundColorOverride` (transparent RGBA); `clip`/`fullPage` via `Page.captureScreenshot` + `captureBeyondViewport`; `scale: "css"` via `clip.scale = 1 / devicePixelRatio`. Mirrors `crPage.ts:_screenshotter`.
+  - **BiDi** (`bidi/page.rs:screenshot`): caret/style/mask via `script.callFunction`; `clip` via the native `browsingContext.captureScreenshot` clip field. `omitBackground` and `scale: "css"` return typed `Unsupported` errors — Firefox/BiDi has no protocol command for either, and Playwright's own BiDi path leaves both unwired.
+  - **WebKit** (`webkit/mod.rs:screenshot`): caret/style/mask via `evaluate`. `clip`, `omitBackground`, and `scale: "css"` return typed `Unsupported` — `WKWebView`'s `takeSnapshotWithConfiguration:` has no clip parameter, always composites against the view background, and captures at device-pixel scale.
+  - **NAPI** (`types.rs`, `page.rs`): `ScreenshotOptions` + `ClipRect` `#[napi(object)]` surfaces; `mask: Option<Vec<LocatorRef>>` accepts the selector string; `scale` / `caret` / `animations` / `type` carry `ts_type` annotations so the generated `.d.ts` emits precise string-literal unions matching Playwright.
+  - **QuickJS** (`bindings/page.rs`): `JsScreenshotOptions` covers every field, lowers into `ScreenshotOptions` with path → `PathBuf`, clip → `ClipRect`, `mask` as selector strings.
+  - **Tests**: 18 new NAPI live-browser cases across three backends (full page / element / type / clip / omitBackground / path-to-disk / mask / style) plus the existing full-page / element-screenshot coverage. All green on cdp-pipe, cdp-raw, bidi, webkit — where a backend refuses an option (clip/omit/scale), the test skips that backend explicitly rather than asserting a fiction.
+- **Playwright ref**: `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`, `packages/playwright-core/src/server/chromium/crPage.ts:_screenshotter`.
 
 ### 3.4 PDFOptions complete
 

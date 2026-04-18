@@ -424,7 +424,41 @@ impl WebKitPage {
   ///
   /// Returns an error if the screenshot IPC call fails or no image data is returned.
   pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>, String> {
-    // Send format + quality as payload: u8 format (0=png, 1=jpeg, 2=webp) + u8 quality + u64 vid
+    // WebKit-specific refusals for knobs WKWebView can't express.
+    if opts.clip.is_some() {
+      return Err(
+        "WebKit backend does not support `clip` screenshots yet — WKWebView's takeSnapshotWithConfiguration: has no clip parameter. Use `page.locator(selector).screenshot()` for element-scoped capture.".into(),
+      );
+    }
+    if matches!(opts.scale, Some(crate::backend::ScreenshotScale::Css)) {
+      return Err(
+        "WebKit backend does not support `scale: \"css\"` screenshots yet — WKWebView always captures at device-pixel scale.".into(),
+      );
+    }
+    if opts.omit_background {
+      return Err(
+        "WebKit backend does not support `omitBackground` screenshots yet — WKWebView's snapshot API always composites against the view background.".into(),
+      );
+    }
+
+    // Pre-capture DOM setup via shared helpers.
+    let css = crate::backend::screenshot_js::build_css(&opts);
+    let style_installed = if css.is_empty() {
+      false
+    } else {
+      self
+        .evaluate(&crate::backend::screenshot_js::install_style_js(&css))
+        .await?;
+      true
+    };
+    let mask_installed = if let Some(js) = crate::backend::screenshot_js::install_mask_js(&opts) {
+      self.evaluate(&js).await?;
+      true
+    } else {
+      false
+    };
+
+    // IPC payload: u8 format + u8 quality + u64 vid.
     let mut p = Vec::new();
     let fmt_byte: u8 = match opts.format {
       ImageFormat::Jpeg => 1,
@@ -436,8 +470,16 @@ impl WebKitPage {
     let quality_byte = opts.quality.unwrap_or(80) as u8;
     p.push(quality_byte);
     p.extend_from_slice(&self.vid().to_le_bytes());
-    let r = self.client.send(Op::Screenshot, &p).await?;
-    match r {
+    let r = self.client.send(Op::Screenshot, &p).await;
+
+    if style_installed {
+      let _ = self.evaluate(crate::backend::screenshot_js::uninstall_style_js()).await;
+    }
+    if mask_installed {
+      let _ = self.evaluate(crate::backend::screenshot_js::uninstall_mask_js()).await;
+    }
+
+    match r? {
       IpcResponse::Binary(d) => Ok(d),
       IpcResponse::Error(e) => Err(e),
       _ => Err("no data".into()),
@@ -477,8 +519,7 @@ impl WebKitPage {
     let full_png = self
       .screenshot(ScreenshotOpts {
         format: fmt,
-        quality: None,
-        full_page: false,
+        ..Default::default()
       })
       .await?;
 

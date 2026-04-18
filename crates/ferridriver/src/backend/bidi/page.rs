@@ -472,36 +472,115 @@ impl BidiPage {
   // ── Screenshots ─────────────────────────────────────────────────────────
 
   pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>, String> {
+    // BiDi-specific refusals for knobs Firefox has no protocol for.
+    if opts.omit_background {
+      return Err("BiDi/Firefox does not support `omitBackground` screenshots — no BiDi command exposes the transparent-background override.".into());
+    }
+    if matches!(opts.scale, Some(crate::backend::ScreenshotScale::Css)) {
+      return Err(
+        "BiDi/Firefox does not support `scale: \"css\"` screenshots — BiDi always captures at device-pixel scale."
+          .into(),
+      );
+    }
+
+    // Pre-capture DOM setup (caret, style, mask, CSS-animation pause) —
+    // shared helpers, BiDi-specific execution via `script.callFunction`.
+    let style_installed = self.screenshot_install_style(&opts).await?;
+    let mask_installed = self.screenshot_install_mask(&opts).await?;
+    let params = self.screenshot_build_params(&opts);
+
+    let result = self.cmd("browsingContext.captureScreenshot", params).await;
+
+    if style_installed {
+      let _ = self
+        .eval_bidi_function(&format!(
+          "() => {{ {}; }}",
+          crate::backend::screenshot_js::uninstall_style_js()
+        ))
+        .await;
+    }
+    if mask_installed {
+      let _ = self
+        .eval_bidi_function(&format!(
+          "() => {{ {}; }}",
+          crate::backend::screenshot_js::uninstall_mask_js()
+        ))
+        .await;
+    }
+
+    let data_str = result?
+      .get("data")
+      .and_then(|v| v.as_str().map(String::from))
+      .ok_or("Screenshot: missing data")?;
+    base64::engine::general_purpose::STANDARD
+      .decode(data_str)
+      .map_err(|e| format!("Screenshot base64 decode: {e}"))
+  }
+
+  /// Run a JS function-declaration expression via
+  /// `script.callFunction` in this page's browsing context. Used by
+  /// `screenshot()` to install and tear down DOM overrides.
+  async fn eval_bidi_function(&self, function_declaration: &str) -> Result<(), String> {
+    self
+      .cmd(
+        "script.callFunction",
+        json!({
+          "functionDeclaration": function_declaration,
+          "target": {"context": &*self.context_id},
+          "awaitPromise": false,
+          "resultOwnership": "none",
+        }),
+      )
+      .await
+      .map(|_| ())
+  }
+
+  async fn screenshot_install_style(&self, opts: &ScreenshotOpts) -> Result<bool, String> {
+    let css = crate::backend::screenshot_js::build_css(opts);
+    if css.is_empty() {
+      return Ok(false);
+    }
+    let install = format!("() => {{ {}; }}", crate::backend::screenshot_js::install_style_js(&css));
+    self.eval_bidi_function(&install).await.map(|()| true)
+  }
+
+  async fn screenshot_install_mask(&self, opts: &ScreenshotOpts) -> Result<bool, String> {
+    if let Some(js) = crate::backend::screenshot_js::install_mask_js(opts) {
+      let wrapped = format!("() => {{ {js}; }}");
+      self.eval_bidi_function(&wrapped).await.map(|()| true)
+    } else {
+      Ok(false)
+    }
+  }
+
+  fn screenshot_build_params(&self, opts: &ScreenshotOpts) -> serde_json::Value {
     let format_type = match opts.format {
       ImageFormat::Png => "image/png",
       ImageFormat::Jpeg => "image/jpeg",
       ImageFormat::Webp => "image/webp",
     };
-    let quality = opts.quality.map(|q| {
-      // Quality is 0-100; narrow to i32 for lossless f64 conversion.
-      f64::from(i32::try_from(q.clamp(0, 100)).unwrap_or(100)) / 100.0
-    });
+    let quality = opts
+      .quality
+      .map(|q| f64::from(i32::try_from(q.clamp(0, 100)).unwrap_or(100)) / 100.0);
     let origin = if opts.full_page { "document" } else { "viewport" };
-
     let mut params = json!({
       "context": &*self.context_id,
       "origin": origin,
-      "format": {
-        "type": format_type
-      }
+      "format": { "type": format_type }
     });
     if let Some(q) = quality {
       params["format"]["quality"] = json!(q);
     }
-
-    let result = self.cmd("browsingContext.captureScreenshot", params).await?;
-    let data_str = result
-      .get("data")
-      .and_then(|v| v.as_str())
-      .ok_or("Screenshot: missing data")?;
-    base64::engine::general_purpose::STANDARD
-      .decode(data_str)
-      .map_err(|e| format!("Screenshot base64 decode: {e}"))
+    if let Some(rect) = opts.clip {
+      params["clip"] = json!({
+        "type": "box",
+        "x": rect.x,
+        "y": rect.y,
+        "width": rect.width,
+        "height": rect.height,
+      });
+    }
+    params
   }
 
   pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>, String> {

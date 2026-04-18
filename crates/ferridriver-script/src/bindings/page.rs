@@ -692,13 +692,49 @@ impl PageJs {
   }
 }
 
-/// Shape of `page.screenshot` options accepted from JS.
+/// Shape of `page.screenshot` options accepted from JS. Full Playwright
+/// `PageScreenshotOptions` surface per
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
 struct JsScreenshotOptions {
+  animations: Option<String>,
+  caret: Option<String>,
+  clip: Option<JsClipRect>,
   full_page: Option<bool>,
+  #[serde(rename = "type")]
   format: Option<String>,
+  /// `mask` accepts selector strings. Full `Locator` instances aren't
+  /// deserialisable from JS via serde, so Playwright-style
+  /// `mask: [page.locator('.foo')]` should be rewritten at the call
+  /// site as `mask: ['.foo']` — documented on the QuickJS binding.
+  mask: Option<Vec<String>>,
+  mask_color: Option<String>,
+  omit_background: Option<bool>,
+  path: Option<String>,
   quality: Option<i64>,
+  scale: Option<String>,
+  style: Option<String>,
+  timeout: Option<u64>,
+}
+
+#[derive(Debug, Default, Deserialize, Clone, Copy)]
+struct JsClipRect {
+  x: f64,
+  y: f64,
+  width: f64,
+  height: f64,
+}
+
+impl From<JsClipRect> for ferridriver::options::ClipRect {
+  fn from(c: JsClipRect) -> Self {
+    Self {
+      x: c.x,
+      y: c.y,
+      width: c.width,
+      height: c.height,
+    }
+  }
 }
 
 fn parse_screenshot_options<'js>(
@@ -709,10 +745,19 @@ fn parse_screenshot_options<'js>(
     Some(v) if !v.is_undefined() && !v.is_null() => {
       let js: JsScreenshotOptions = serde_from_js(ctx, v)?;
       Ok(ferridriver::options::ScreenshotOptions {
+        animations: js.animations,
+        caret: js.caret,
+        clip: js.clip.map(Into::into),
         full_page: js.full_page,
         format: js.format,
+        mask: js.mask.unwrap_or_default(),
+        mask_color: js.mask_color,
+        omit_background: js.omit_background,
+        path: js.path.map(std::path::PathBuf::from),
         quality: js.quality,
-        ..Default::default()
+        scale: js.scale,
+        style: js.style,
+        timeout: js.timeout,
       })
     },
     _ => Ok(ferridriver::options::ScreenshotOptions::default()),
