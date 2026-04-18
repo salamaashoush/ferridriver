@@ -1288,6 +1288,169 @@ fn test_script_action_timeout(c: &mut McpClient) {
   }
 }
 
+// Task 1.3 phase B: the injected `window.__fd` namespace exposes the
+// Playwright `UtilityScript` class and its isomorphic serializer
+// helpers (`parseEvaluationResultValue`, `serializeAsCallArgument`).
+// These are the load-bearing primitives for `page.evaluate(fn, arg)` +
+// JSHandle round-trip in phase D — if they're missing from the bundle
+// or shadowed by a later `if (!window.__fd)` guard, evaluate(fn, arg)
+// will never work no matter how the Rust side serializes. Proves the
+// bundle surfaces them on every backend.
+fn test_script_utility_script_exposed(c: &mut McpClient) {
+  c.nav("<div id='x'></div>");
+
+  // 1. The class and both serializer helpers exist on window.__fd.
+  //    `page.evaluate` JSON-stringifies the result string `"function"`,
+  //    so one JSON.parse unwraps the quote.
+  let v = c.script_value(
+    "return {\
+       hasClass: JSON.parse(await page.evaluate('typeof window.__fd.UtilityScript')),\
+       hasFactory: JSON.parse(await page.evaluate('typeof window.__fd.newUtilityScript')),\
+       hasParse: JSON.parse(await page.evaluate('typeof window.__fd.parseEvaluationResultValue')),\
+       hasSerialize: JSON.parse(await page.evaluate('typeof window.__fd.serializeAsCallArgument')),\
+     };",
+  );
+  assert_eq!(v["hasClass"], json!("function"), "UtilityScript class missing: {v}");
+  assert_eq!(
+    v["hasFactory"],
+    json!("function"),
+    "newUtilityScript factory missing: {v}"
+  );
+  assert_eq!(
+    v["hasParse"],
+    json!("function"),
+    "parseEvaluationResultValue missing: {v}"
+  );
+  assert_eq!(
+    v["hasSerialize"],
+    json!("function"),
+    "serializeAsCallArgument missing: {v}"
+  );
+
+  // 2. The factory returns a working instance — its `evaluate` and
+  //    `jsonValue` methods are invokable.
+  let v = c.script_value(
+    "return {\
+       hasEvaluate: JSON.parse(await page.evaluate('typeof window.__fd.newUtilityScript().evaluate')),\
+       hasJsonValue: JSON.parse(await page.evaluate('typeof window.__fd.newUtilityScript().jsonValue')),\
+     };",
+  );
+  assert_eq!(
+    v["hasEvaluate"],
+    json!("function"),
+    "UtilityScript.evaluate missing: {v}"
+  );
+  assert_eq!(
+    v["hasJsonValue"],
+    json!("function"),
+    "UtilityScript.jsonValue missing: {v}"
+  );
+
+  // 3. The deserializer round-trips Playwright's wire shapes for rich
+  //    types — a smoke check that the isomorphic format we built on the
+  //    Rust side is the same one the page's utility script parses.
+  //    Probe each result as a primitive string so QuickJS' JSON.stringify
+  //    on page.evaluate plays nicely.
+  let probes = [
+    // `{v: 'NaN'}` → NaN. Use Number.isNaN to verify since NaN !== NaN.
+    (
+      "nan",
+      "Number.isNaN(window.__fd.parseEvaluationResultValue({v: 'NaN'}))",
+      json!(true),
+    ),
+    // `{v: 'Infinity'}` → Infinity.
+    (
+      "inf",
+      "window.__fd.parseEvaluationResultValue({v: 'Infinity'}) === Infinity",
+      json!(true),
+    ),
+    // `{v: '-Infinity'}` → -Infinity.
+    (
+      "neginf",
+      "window.__fd.parseEvaluationResultValue({v: '-Infinity'}) === -Infinity",
+      json!(true),
+    ),
+    // `{v: '-0'}` → -0. Detect via 1/-0 === -Infinity.
+    (
+      "negzero",
+      "1 / window.__fd.parseEvaluationResultValue({v: '-0'}) === -Infinity",
+      json!(true),
+    ),
+    // `{v: 'null'}` → null.
+    (
+      "null",
+      "window.__fd.parseEvaluationResultValue({v: 'null'}) === null",
+      json!(true),
+    ),
+    // `{v: 'undefined'}` → undefined.
+    (
+      "undef",
+      "typeof window.__fd.parseEvaluationResultValue({v: 'undefined'})",
+      json!("undefined"),
+    ),
+    // `{d: '...'}` → Date instance.
+    (
+      "date",
+      "window.__fd.parseEvaluationResultValue({d: '2024-01-01T00:00:00.000Z'}) instanceof Date",
+      json!(true),
+    ),
+    // `{u: '...'}` → URL instance.
+    (
+      "url",
+      "window.__fd.parseEvaluationResultValue({u: 'https://a.test/x'}) instanceof URL",
+      json!(true),
+    ),
+    // `{r: {p, f}}` → RegExp.
+    (
+      "regexp",
+      "window.__fd.parseEvaluationResultValue({r: {p: 'foo', f: 'gi'}}) instanceof RegExp",
+      json!(true),
+    ),
+    // `{bi: '42'}` → BigInt(42n). `typeof` == 'bigint'.
+    (
+      "bigint",
+      "typeof window.__fd.parseEvaluationResultValue({bi: '42'})",
+      json!("bigint"),
+    ),
+    // `{e: {m, n, s}}` → Error.
+    (
+      "error",
+      "window.__fd.parseEvaluationResultValue({e: {n: 'TypeError', m: 'oops', s: ''}}) instanceof Error",
+      json!(true),
+    ),
+  ];
+  for (name, probe_expr, expected) in probes {
+    // `page.evaluate` in QuickJS already JSON-stringifies its result
+    // before handing it back, so one `JSON.parse` is enough to unwrap.
+    // The inline-script `{probe_expr}` must return a JSON-expressible
+    // primitive (bool or typeof-string in our probes).
+    let script = format!("return JSON.parse(await page.evaluate({probe_expr:?}));");
+    let got = c.script_value(&script);
+    assert_eq!(
+      got, expected,
+      "deserializer probe '{name}' failed: expr {probe_expr}, got {got}"
+    );
+  }
+
+  // 4. Round-trip: serialize a rich value → deserialize → re-serialize
+  //    and assert the wire shape is stable. Exercises the complete
+  //    isomorphic format end-to-end inside the page. `page.evaluate`
+  //    already JSON-stringifies the IIFE's return value, so one
+  //    `JSON.parse` unwraps the object shape.
+  let v = c.script_value(
+    "return JSON.parse(await page.evaluate(`(() => {\
+       const raw = {d: '2024-06-01T00:00:00.000Z'};\
+       const dateObj = window.__fd.parseEvaluationResultValue(raw);\
+       return window.__fd.serializeAsCallArgument(dateObj, v => ({fallThrough: v}));\
+     })()`));",
+  );
+  assert_eq!(
+    v,
+    json!({"d": "2024-06-01T00:00:00.000Z"}),
+    "Date round-trip should preserve the d-tag wire shape: {v}"
+  );
+}
+
 // Task 3.25: `page.addInitScript(script, arg)` — exercise the full
 // Playwright surface (Function + arg, string, `{ content }`) from QuickJS
 // end-to-end, including the Rust-core-driven `Cannot evaluate a string with
@@ -1776,6 +1939,7 @@ fn run_all_tests(backend: &str) {
   run!(test_script_emulate_media_all_fields);
   run!(test_script_emulate_media_null_disables_single_field);
   run!(test_script_add_init_script);
+  run!(test_script_utility_script_exposed);
   run!(test_script_click_options);
   run!(test_script_action_timeout);
   run!(test_script_tap_native);
