@@ -11,6 +11,8 @@ import { InjectedScript } from './injectedScript';
 import { isElementVisible, parentElementOrShadowHost, enclosingShadowRootOrDocument } from './domUtils';
 import { getAriaDisabled, getAriaRole, getCheckedWithoutMixed, getElementAccessibleName, getReadonly } from './roleUtils';
 import { escapeForTextSelector, escapeForAttributeSelector } from '@isomorphic/stringUtils';
+import { UtilityScript } from './utilityScript';
+import { parseEvaluationResultValue, serializeAsCallArgument } from '@isomorphic/utilityScriptSerializers';
 
 // ── Types ──
 
@@ -572,5 +574,25 @@ if (!window.__fd) {
 
     // Accessibility tree (shared by BiDi + WebKit)
     accessibilityTree,
+
+    // ── Evaluate(fn, arg) plumbing ──
+    //
+    // Playwright's utility-script machinery, lifted verbatim from
+    // packages/injected/src/utilityScript.ts. The Rust side creates one
+    // `UtilityScript` instance per execution context (materialized as a
+    // JSHandle via CDP `Runtime.evaluate` on
+    // `window.__fd.newUtilityScript()`) and then every subsequent
+    // `page.evaluate(fn, arg)` / `locator.evaluate(fn, arg)` call goes
+    // through CDP `Runtime.callFunctionOn` with the utility-script
+    // handle as the receiver. The function body is
+    //   `(utilityScript, ...args) => utilityScript.evaluate(...args)`
+    // and `utilityScript.evaluate(isFunction, returnByValue, expression,
+    // argCount, ...argsAndHandles)` reconstructs each serialized arg via
+    // `parseEvaluationResultValue`, invokes the user function, and
+    // serializes the result back with `serializeAsCallArgument`.
+    UtilityScript,
+    newUtilityScript: () => new UtilityScript(window as any, false),
+    parseEvaluationResultValue,
+    serializeAsCallArgument,
   };
 }
