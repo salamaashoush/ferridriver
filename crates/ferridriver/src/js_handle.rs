@@ -194,16 +194,11 @@ impl JSHandle {
   }
 
   /// Playwright: `jsHandle.evaluate(pageFunction, arg?): Promise<R>`.
-  /// Runs `fn_source` on the page with this handle's remote as the
-  /// first argument — Playwright's `handle.evaluate(el => el.tagName)`
-  /// semantic.
-  ///
-  /// Phase-D MVP: the user's `arg` parameter is currently ignored.
-  /// Multi-arg support (prepending the handle before a user arg) is
-  /// a straightforward extension of the utility-script call path —
-  /// bump `argCount` to 2 and push a second serialized value into
-  /// the argument list — and is scheduled alongside Phase-E's
-  /// `ElementHandle` methods.
+  /// Matches Playwright's call site
+  /// (`/tmp/playwright/packages/playwright-core/src/server/javascript.ts:161`):
+  /// `evaluate(ctx, true, pageFunction, this, arg)` — the handle and
+  /// the user arg are the first two positional arguments to the user
+  /// function, which receives `(handleValue, userArg) => ...`.
   ///
   /// # Errors
   ///
@@ -213,19 +208,16 @@ impl JSHandle {
   pub async fn evaluate_with_arg(
     &self,
     fn_source: &str,
-    _user_arg: crate::protocol::SerializedArgument,
+    user_arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<crate::protocol::SerializedValue> {
     if self.is_disposed() {
       return Err(disposed_error());
     }
-    let arg = crate::protocol::SerializedArgument {
-      value: crate::protocol::SerializedValue::handle(0),
-      handles: vec![self.remote.to_handle_id()],
-    };
+    let (args, handles) = build_handle_evaluate_args(&self.remote, user_arg);
     let result = self
       .any_page()
-      .call_utility_evaluate(fn_source, &arg, None, is_function, true, None)
+      .call_utility_evaluate(fn_source, &args, &handles, None, is_function, true)
       .await?;
     match result {
       EvaluateResult::Value(v) => Ok(v),
@@ -245,19 +237,16 @@ impl JSHandle {
   pub async fn evaluate_handle_with_arg(
     &self,
     fn_source: &str,
-    _user_arg: crate::protocol::SerializedArgument,
+    user_arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<JSHandle> {
     if self.is_disposed() {
       return Err(disposed_error());
     }
-    let arg = crate::protocol::SerializedArgument {
-      value: crate::protocol::SerializedValue::handle(0),
-      handles: vec![self.remote.to_handle_id()],
-    };
+    let (args, handles) = build_handle_evaluate_args(&self.remote, user_arg);
     let result = self
       .any_page()
-      .call_utility_evaluate(fn_source, &arg, None, is_function, false, None)
+      .call_utility_evaluate(fn_source, &args, &handles, None, is_function, false)
       .await?;
     match result {
       EvaluateResult::Handle(remote) => Ok(JSHandle::new(Arc::clone(&self.page), remote)),
@@ -267,24 +256,121 @@ impl JSHandle {
     }
   }
 
-  /// Return this handle as an `ElementHandle` if its remote object is a
-  /// DOM element. Playwright's `JSHandle.asElement()` inspects an
-  /// initializer field set by the server when the remote is known to
-  /// be a DOM node; ferridriver's core `JSHandle` does not (yet) carry
-  /// that marker, so this method always returns `None`.
+  /// Playwright: `jsHandle.jsonValue(): Promise<T>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:61`).
+  /// Returns a JSON-like projection of the remote value — matches
+  /// Playwright's server-side `_jsonValue` which runs
+  /// `utilityScript.jsonValue(true, value)` on the page and round-trips
+  /// through the isomorphic serializer so rich types (`Date`, `RegExp`,
+  /// `NaN`, `Infinity`, `BigInt`, typed arrays) project to their wire
+  /// representations.
   ///
-  /// Element-typed handles are produced by
-  /// [`ElementHandle::from_any_element`] and callers obtain them
-  /// directly from [`crate::page::Page::query_selector`] /
-  /// `Locator::element_handle`. Phase D extends this method to return
-  /// `Some(ElementHandle)` when the underlying remote describes a DOM
-  /// node — decided by the CDP `RemoteObject.subtype` /
-  /// `BiDi` `RemoteValue::Node` / `WebKit` value-type round-trip that
-  /// will ship with `evaluate_handle`.
-  #[allow(clippy::unused_self, reason = "phase-C stub; phase-D wires remote-type inspection")]
-  #[must_use]
-  pub fn as_element(&self) -> Option<ElementHandle> {
-    None
+  /// # Errors
+  ///
+  /// Forwards backend error on protocol failure / page-side exception,
+  /// and [`crate::error::FerriError::TargetClosed`] when this handle
+  /// is already disposed.
+  pub async fn json_value(&self) -> Result<crate::protocol::SerializedValue> {
+    self
+      .evaluate_with_arg("h => h", crate::protocol::SerializedArgument::default(), Some(true))
+      .await
+  }
+
+  /// Playwright: `jsHandle.getProperty(propertyName): Promise<JSHandle>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:49`).
+  /// Returns a [`JSHandle`] for the named own property. Matches
+  /// Playwright's server-side `_getProperty` semantics by evaluating
+  /// `h => h[propertyName]` with `propertyName` inlined as a
+  /// JSON-escaped literal.
+  ///
+  /// # Errors
+  ///
+  /// Forwards backend error on protocol failure / page-side exception,
+  /// and [`crate::error::FerriError::TargetClosed`] when this handle
+  /// is already disposed.
+  pub async fn get_property(&self, name: &str) -> Result<JSHandle> {
+    let escaped =
+      serde_json::to_string(name).map_err(|e| FerriError::Other(format!("getProperty name escape: {e}")))?;
+    let expr = format!("h => h[{escaped}]");
+    self
+      .evaluate_handle_with_arg(&expr, crate::protocol::SerializedArgument::default(), Some(true))
+      .await
+  }
+
+  /// Playwright: `jsHandle.getProperties(): Promise<Map<string, JSHandle>>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:54`).
+  /// Returns every own enumerable string-keyed property as a
+  /// `(name, handle)` pair. Uses a two-phase evaluate to stay backend-
+  /// agnostic: first enumerate the keys, then mint a handle per key.
+  /// Callers are responsible for disposing each returned handle when
+  /// they're done with it.
+  ///
+  /// # Errors
+  ///
+  /// Forwards backend error on protocol failure / page-side exception,
+  /// and [`crate::error::FerriError::TargetClosed`] when this handle
+  /// is already disposed.
+  pub async fn get_properties(&self) -> Result<Vec<(String, JSHandle)>> {
+    use crate::protocol::SerializedValue;
+    let keys_value = self
+      .evaluate_with_arg(
+        "h => (h && typeof h === 'object') ? Object.keys(h) : []",
+        crate::protocol::SerializedArgument::default(),
+        Some(true),
+      )
+      .await?;
+    let keys: Vec<String> = match keys_value {
+      SerializedValue::Array { items, .. } => items
+        .into_iter()
+        .filter_map(|v| match v {
+          SerializedValue::Str(s) => Some(s),
+          _ => None,
+        })
+        .collect(),
+      _ => Vec::new(),
+    };
+    let mut out = Vec::with_capacity(keys.len());
+    for key in keys {
+      let handle = self.get_property(&key).await?;
+      out.push((key, handle));
+    }
+    Ok(out)
+  }
+
+  /// Playwright: `jsHandle.asElement(): ElementHandle | null`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:65`).
+  /// Inspects the remote value — returns `Some(ElementHandle)` if it
+  /// is a DOM `Node`, `None` otherwise. Implemented via an
+  /// `h => h instanceof Node` probe so every backend resolves the
+  /// check page-side uniformly; on a true result the handle's remote
+  /// is re-wrapped into a backend `AnyElement` and packaged as a
+  /// [`ElementHandle`].
+  ///
+  /// # Errors
+  ///
+  /// Forwards backend error on protocol failure / page-side exception,
+  /// and [`crate::error::FerriError::TargetClosed`] when this handle
+  /// is already disposed.
+  pub async fn as_element(&self) -> Result<Option<ElementHandle>> {
+    if self.is_disposed() {
+      return Ok(None);
+    }
+    let is_node = self
+      .evaluate_with_arg(
+        "h => h instanceof Node",
+        crate::protocol::SerializedArgument::default(),
+        Some(true),
+      )
+      .await?;
+    let is_element = matches!(is_node, crate::protocol::SerializedValue::Bool(true));
+    if !is_element {
+      return Ok(None);
+    }
+    let any_element = crate::backend::element_from_remote(self.any_page(), &self.remote)?;
+    Ok(Some(ElementHandle::from_js_handle_and_element(
+      self.clone(),
+      any_element,
+    )))
   }
 }
 
@@ -294,6 +380,61 @@ impl std::fmt::Debug for JSHandle {
       .field("remote", &self.remote)
       .field("disposed", &self.is_disposed())
       .finish_non_exhaustive()
+  }
+}
+
+/// Pack `handle.evaluate(fn, userArg)` as two positional args — the
+/// handle at index 0 (`{h: 0}` → `handles[0]`) and the user arg at
+/// index 1 with its `{h: i}` references relocated to `{h: i+1}` to
+/// sit alongside the prepended handle. Mirrors Playwright's
+/// `JSHandle.evaluate`'s call site at
+/// `/tmp/playwright/packages/playwright-core/src/server/javascript.ts:161-163`
+/// where the handle and user arg are passed as the first two variadic
+/// arguments.
+fn build_handle_evaluate_args(
+  receiver: &HandleRemote,
+  user_arg: crate::protocol::SerializedArgument,
+) -> (Vec<crate::protocol::SerializedValue>, Vec<crate::protocol::HandleId>) {
+  let crate::protocol::SerializedArgument {
+    value: user_value,
+    handles: user_handles,
+  } = user_arg;
+
+  // Relocate `{h: i}` refs inside the user value by +1 so they index
+  // into the combined handle table where `handles[0]` is the receiver.
+  let shifted_user_value = shift_handle_indices(user_value, 1);
+
+  let args = vec![crate::protocol::SerializedValue::handle(0), shifted_user_value];
+  let mut handles = Vec::with_capacity(1 + user_handles.len());
+  handles.push(receiver.to_handle_id());
+  handles.extend(user_handles);
+  (args, handles)
+}
+
+/// Walk a [`crate::protocol::SerializedValue`] tree and shift every
+/// `{h: idx}` reference by `offset`. Used when merging a user-arg
+/// sub-tree into a larger multi-arg evaluate call whose shared
+/// `handles` list starts with pre-existing receiver entries. Other
+/// nodes pass through unchanged.
+fn shift_handle_indices(value: crate::protocol::SerializedValue, offset: u32) -> crate::protocol::SerializedValue {
+  use crate::protocol::{PropertyEntry, SerializedValue};
+  match value {
+    SerializedValue::Handle(i) => SerializedValue::Handle(i + offset),
+    SerializedValue::Array { id, items } => SerializedValue::Array {
+      id,
+      items: items.into_iter().map(|v| shift_handle_indices(v, offset)).collect(),
+    },
+    SerializedValue::Object { id, entries } => SerializedValue::Object {
+      id,
+      entries: entries
+        .into_iter()
+        .map(|e| PropertyEntry {
+          k: e.k,
+          v: shift_handle_indices(e.v, offset),
+        })
+        .collect(),
+    },
+    other => other,
   }
 }
 

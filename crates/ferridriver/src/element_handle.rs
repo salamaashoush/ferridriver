@@ -136,6 +136,18 @@ impl ElementHandle {
     })
   }
 
+  /// Construct an `ElementHandle` from an existing [`JSHandle`] plus a
+  /// freshly-minted backend `AnyElement`. Used by
+  /// [`JSHandle::as_element`] when re-wrapping a `JSHandle` whose
+  /// remote turns out to be a DOM node — the handle's disposed flag,
+  /// page, and remote are reused so the two views share a lifecycle.
+  pub(crate) fn from_js_handle_and_element(js_handle: JSHandle, element: AnyElement) -> Self {
+    Self {
+      js_handle,
+      element: Arc::new(element),
+    }
+  }
+
   /// Underlying [`JSHandle`] — exposes lifecycle + evaluate (phase D).
   #[must_use]
   pub fn as_js_handle(&self) -> &JSHandle {

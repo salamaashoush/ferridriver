@@ -491,9 +491,20 @@ impl Page {
     arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<crate::protocol::SerializedValue> {
+    // Playwright's `page.evaluate(fn, arg)` passes a single positional
+    // `arg` to the user function. We honour that by sending a
+    // single-element `args` slice containing the user value — except
+    // when the caller explicitly passed no arg (the `undefined`
+    // sentinel with no handles), in which case we send an empty slice
+    // so the utility script runs the user function with zero params.
+    let empty = matches!(
+      arg.value,
+      crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+    ) && arg.handles.is_empty();
+    let args_slice: &[crate::protocol::SerializedValue] = if empty { &[] } else { std::slice::from_ref(&arg.value) };
     let result = self
       .inner
-      .call_utility_evaluate(fn_source, &arg, None, is_function, true, None)
+      .call_utility_evaluate(fn_source, args_slice, &arg.handles, None, is_function, true)
       .await?;
     match result {
       crate::js_handle::EvaluateResult::Value(v) => Ok(v),
@@ -518,9 +529,14 @@ impl Page {
     arg: crate::protocol::SerializedArgument,
     is_function: Option<bool>,
   ) -> Result<crate::js_handle::JSHandle> {
+    let empty = matches!(
+      arg.value,
+      crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+    ) && arg.handles.is_empty();
+    let args_slice: &[crate::protocol::SerializedValue] = if empty { &[] } else { std::slice::from_ref(&arg.value) };
     let result = self
       .inner
-      .call_utility_evaluate(fn_source, &arg, None, is_function, false, None)
+      .call_utility_evaluate(fn_source, args_slice, &arg.handles, None, is_function, false)
       .await?;
     match result {
       crate::js_handle::EvaluateResult::Handle(remote) => Ok(crate::js_handle::JSHandle::new(Arc::clone(self), remote)),
