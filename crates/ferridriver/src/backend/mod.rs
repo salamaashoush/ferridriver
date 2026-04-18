@@ -1150,6 +1150,53 @@ impl AnyPage {
   /// allows it (CDP raises an error only on structural issues like an
   /// invalid session id; `BiDi` returns `invalid argument` for an unknown
   /// `sharedId` which we surface).
+  /// Call the page-side `UtilityScript.evaluate` — dispatches to each
+  /// backend's native impl (`CdpPage::call_utility_evaluate`,
+  /// `BidiPage::call_utility_evaluate`, `WebKitPage::call_utility_evaluate`).
+  /// The three implementations all follow Playwright's isomorphic
+  /// serializer contract: handles ride through as native remote
+  /// references, rich types round-trip via the wrapper function's
+  /// `JSON.parse` / `JSON.stringify`.
+  ///
+  /// `receiver` is the `this` of the user function — when the caller
+  /// invokes `handle.evaluate(fn, arg)` we pass the handle's remote
+  /// here; for `page.evaluate(fn, arg)` it is `None`.
+  ///
+  /// # Errors
+  ///
+  /// Forwards backend errors (protocol failure, page-side exception,
+  /// handle/backend mismatch).
+  #[allow(clippy::too_many_arguments)]
+  pub async fn call_utility_evaluate(
+    &self,
+    fn_source: &str,
+    arg: &crate::protocol::SerializedArgument,
+    frame_id: Option<&str>,
+    is_function: Option<bool>,
+    return_by_value: bool,
+    receiver: Option<&crate::js_handle::HandleRemote>,
+  ) -> crate::error::Result<crate::js_handle::EvaluateResult> {
+    match self {
+      Self::CdpPipe(p) => p
+        .call_utility_evaluate(fn_source, arg, frame_id, is_function, return_by_value, receiver)
+        .await
+        .map_err(Into::into),
+      Self::CdpRaw(p) => p
+        .call_utility_evaluate(fn_source, arg, frame_id, is_function, return_by_value, receiver)
+        .await
+        .map_err(Into::into),
+      #[cfg(target_os = "macos")]
+      Self::WebKit(p) => p
+        .call_utility_evaluate(fn_source, arg, frame_id, is_function, return_by_value, receiver)
+        .await
+        .map_err(Into::into),
+      Self::Bidi(p) => p
+        .call_utility_evaluate(fn_source, arg, frame_id, is_function, return_by_value, receiver)
+        .await
+        .map_err(Into::into),
+    }
+  }
+
   pub async fn release_handle(&self, remote: &crate::js_handle::HandleRemote) -> crate::error::Result<()> {
     use crate::js_handle::HandleRemote;
     match (self, remote) {

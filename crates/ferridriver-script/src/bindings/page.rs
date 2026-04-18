@@ -14,7 +14,10 @@ use ferridriver::options::WaitOptions;
 use rquickjs::function::Opt;
 use serde::Deserialize;
 
-use crate::bindings::convert::{FerriResultExt, init_script_from_js, serde_from_js};
+use crate::bindings::convert::{
+  FerriResultExt, init_script_from_js, json_value_to_quickjs, quickjs_arg_to_serialized, serde_from_js,
+  serialized_value_to_quickjs,
+};
 use crate::bindings::keyboard::KeyboardJs;
 use crate::bindings::locator::LocatorJs;
 use crate::bindings::mouse::MouseJs;
@@ -360,6 +363,63 @@ impl PageJs {
     selector: String,
   ) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
     self.query_selector(selector).await
+  }
+
+  /// Playwright: `page.evaluate(fn, arg?)` — function-call variant.
+  /// Serialises `arg` through the isomorphic wire protocol and returns
+  /// the function's result as a JSON-like value. Rich types that have
+  /// no native JSON form surface as `null` — callers needing lossless
+  /// round-trip use [`Self::evaluateWithArgWire`].
+  #[qjs(rename = "evaluateWithArg")]
+  pub async fn evaluate_with_arg<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    fn_source: String,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self
+      .inner
+      .evaluate_with_arg(&fn_source, serialized, Some(true))
+      .await
+      .into_js()?;
+    serialized_value_to_quickjs(&ctx, &result)
+  }
+
+  /// Raw isomorphic wire shape variant of [`Self::evaluateWithArg`].
+  #[qjs(rename = "evaluateWithArgWire")]
+  pub async fn evaluate_with_arg_wire<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    fn_source: String,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let result = self
+      .inner
+      .evaluate_with_arg(&fn_source, serialized, Some(true))
+      .await
+      .into_js()?;
+    let wire = serde_json::to_value(&result)
+      .map_err(|e| rquickjs::Error::new_from_js_message("evaluateWithArgWire", "", &e.to_string()))?;
+    json_value_to_quickjs(&ctx, &wire)
+  }
+
+  /// Playwright: `page.evaluateHandle(fn, arg?)`.
+  #[qjs(rename = "evaluateHandleWithArg")]
+  pub async fn evaluate_handle_with_arg<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    fn_source: String,
+    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
+    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
+    let handle = self
+      .inner
+      .evaluate_handle_with_arg(&fn_source, serialized, Some(true))
+      .await
+      .into_js()?;
+    Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
   }
 
   /// Playwright: `page.locator(selector, options?: LocatorOptions): Locator`.

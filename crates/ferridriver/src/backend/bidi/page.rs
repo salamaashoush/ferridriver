@@ -1727,6 +1727,162 @@ impl BidiPage {
     Ok(())
   }
 
+  // ── Utility-script evaluate (Playwright `page.evaluate(fn, arg)`) ──────
+
+  /// Call the page-side `UtilityScript.evaluate` over `BiDi`. Parallels
+  /// `CdpPage::call_utility_evaluate` but sends the arguments as
+  /// `BiDi` `LocalValue` / `RemoteReference` entries through
+  /// `script.callFunction`.
+  ///
+  /// The wrapper function is identical to the CDP path — it memoises
+  /// the utility script on `window.__fd.__us`, `JSON.parse`s the
+  /// serialized argument, and `JSON.stringify`s the result back so we
+  /// only ship strings through `script.callFunction`'s native
+  /// serializer. Handles arrive as `{type: "sharedReference", sharedId}`
+  /// `BiDi` arguments — the browser hydrates each back to its native
+  /// JS object before the wrapper receives it.
+  ///
+  /// # Errors
+  ///
+  /// Returns a String on transport failure, page-side exception, or
+  /// handle/backend mismatch.
+  #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+  pub async fn call_utility_evaluate(
+    &self,
+    fn_source: &str,
+    arg: &crate::protocol::SerializedArgument,
+    frame_id: Option<&str>,
+    is_function: Option<bool>,
+    return_by_value: bool,
+    receiver: Option<&crate::js_handle::HandleRemote>,
+  ) -> Result<crate::js_handle::EvaluateResult, String> {
+    use crate::js_handle::{EvaluateResult as FdEvalResult, HandleRemote};
+    use crate::protocol::HandleId;
+    use serde_json::json;
+
+    self.ensure_engine_injected().await?;
+
+    let target_ctx: &str = frame_id.unwrap_or(&self.context_id);
+
+    let this_arg = match receiver {
+      Some(HandleRemote::Bidi { shared_id, .. }) => Some(json!({"type": "sharedReference", "sharedId": shared_id})),
+      Some(_) => return Err("call_utility_evaluate: non-BiDi receiver handle on BiDi backend".into()),
+      None => None,
+    };
+
+    let arg_json = serde_json::to_string(&arg.value).map_err(|e| e.to_string())?;
+    let count = usize::from(
+      !(matches!(
+        arg.value,
+        crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+      ) && arg.handles.is_empty()),
+    );
+
+    let is_fn_local = match is_function {
+      Some(true) => json!({"type": "boolean", "value": true}),
+      Some(false) => json!({"type": "boolean", "value": false}),
+      None => json!({"type": "undefined"}),
+    };
+
+    let mut arguments = vec![
+      is_fn_local,
+      json!({"type": "boolean", "value": return_by_value}),
+      json!({"type": "string", "value": fn_source}),
+      json!({"type": "number", "value": count}),
+      json!({"type": "string", "value": arg_json}),
+    ];
+    for handle in &arg.handles {
+      match handle {
+        HandleId::Bidi { shared_id, .. } => {
+          arguments.push(json!({"type": "sharedReference", "sharedId": shared_id}));
+        },
+        _ => return Err("call_utility_evaluate: non-BiDi handle in arg.handles on BiDi backend".into()),
+      }
+    }
+
+    let mut params = json!({
+      "functionDeclaration": crate::backend::cdp::UTILITY_EVAL_WRAPPER,
+      "target": {"context": target_ctx},
+      "arguments": arguments,
+      "awaitPromise": true,
+      "resultOwnership": if return_by_value { "none" } else { "root" },
+    });
+    if let Some(t) = this_arg {
+      params["this"] = t;
+    }
+
+    let response = self.cmd("script.callFunction", params).await?;
+    let eval_result: super::types::EvaluateResult =
+      serde_json::from_value(response).map_err(|e| format!("BiDi call_utility_evaluate parse: {e}"))?;
+
+    match eval_result {
+      super::types::EvaluateResult::Exception { exception_details } => {
+        Err(format!("Evaluation error: {}", exception_details.text))
+      },
+      super::types::EvaluateResult::Success { result } => {
+        if return_by_value {
+          // Wrapper JSON.stringified its result. The BiDi wire shape
+          // for a string is `{type: "string", value: "<json>"}`; for
+          // a null (undefined sentinel) it's `{type: "null"}`.
+          let inner_json: serde_json::Value = match result {
+            super::types::RemoteValue::String { value } => {
+              let s = value.as_str().unwrap_or("null").to_string();
+              serde_json::from_str(&s).map_err(|e| format!("BiDi parse utility result: {e}"))?
+            },
+            super::types::RemoteValue::Null | super::types::RemoteValue::Undefined => {
+              return Ok(FdEvalResult::Value(crate::protocol::SerializedValue::Special(
+                crate::protocol::SpecialValue::Undefined,
+              )));
+            },
+            other => {
+              return Err(format!(
+                "BiDi call_utility_evaluate: wrapper returned non-string in returnByValue mode: {other:?}"
+              ));
+            },
+          };
+          let parsed: crate::protocol::SerializedValue =
+            serde_json::from_value(inner_json).map_err(|e| format!("BiDi parse SerializedValue: {e}"))?;
+          Ok(FdEvalResult::Value(parsed))
+        } else {
+          // Returning a handle: extract sharedId. BiDi represents a
+          // DOM node as {type: "node"} and other objects as
+          // {type: "object" | "array" | ...} with a `handle` field.
+          if let Some(shared) = result.as_shared_reference() {
+            Ok(FdEvalResult::Handle(HandleRemote::Bidi {
+              shared_id: shared.shared_id,
+              handle: shared.handle,
+            }))
+          } else {
+            // Non-node objects: surface via the `handle` field BiDi
+            // attaches to Array / Object / Map / Set / Function / ...
+            // when `resultOwnership: "root"` is requested.
+            let non_node_handle = match &result {
+              super::types::RemoteValue::Array { handle, .. }
+              | super::types::RemoteValue::Object { handle, .. }
+              | super::types::RemoteValue::Map { handle, .. }
+              | super::types::RemoteValue::Set { handle, .. }
+              | super::types::RemoteValue::Function { handle }
+              | super::types::RemoteValue::Error { handle }
+              | super::types::RemoteValue::Promise { handle }
+              | super::types::RemoteValue::Symbol { handle } => handle.clone(),
+              _ => None,
+            };
+            if let Some(h) = non_node_handle {
+              Ok(FdEvalResult::Handle(HandleRemote::Bidi {
+                shared_id: h.clone(),
+                handle: Some(h),
+              }))
+            } else {
+              Err(format!(
+                "BiDi call_utility_evaluate: returnByValue=false but result has no handle: {result:?}"
+              ))
+            }
+          }
+        }
+      },
+    }
+  }
+
   // ── Handle lifecycle ────────────────────────────────────────────────────
 
   /// Release the remote handle identified by `shared_id` via

@@ -341,6 +341,168 @@ impl WebKitPage {
     }))
   }
 
+  /// Call the page-side `UtilityScript.evaluate` — `WebKit` analogue of
+  /// `CdpPage::call_utility_evaluate` / `BidiPage::call_utility_evaluate`.
+  ///
+  /// `WebKit`'s IPC exposes only a single evaluate primitive, but
+  /// because every handle is already addressable from page-side JS
+  /// through `window.__wr.get(ref_id)`, we can synthesise a fully
+  /// inlined expression that calls the utility script directly. No
+  /// new IPC op is required — the Phase-A/B work that exposed
+  /// `window.__fd.newUtilityScript()` and the `window.__wr` Map
+  /// migration in Phase C cover everything we need.
+  ///
+  /// Handle / backend mismatches surface as errors (non-`WebKit`
+  /// handles in `arg.handles`). Non-element `JSHandle` return values
+  /// are minted by allocating a fresh `window.__wr` entry whose
+  /// `ref_id` is returned alongside the result.
+  ///
+  /// # Errors
+  ///
+  /// Returns a String on IPC failure or page-side exception.
+  #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+  pub async fn call_utility_evaluate(
+    &self,
+    fn_source: &str,
+    arg: &crate::protocol::SerializedArgument,
+    _frame_id: Option<&str>,
+    is_function: Option<bool>,
+    return_by_value: bool,
+    receiver: Option<&crate::js_handle::HandleRemote>,
+  ) -> Result<crate::js_handle::EvaluateResult, String> {
+    use crate::js_handle::{EvaluateResult as FdEvalResult, HandleRemote};
+    use crate::protocol::HandleId;
+
+    self.ensure_engine_injected().await?;
+
+    let receiver_ref: Option<u64> = match receiver {
+      Some(HandleRemote::WebKit(r)) => Some(*r),
+      Some(_) => return Err("call_utility_evaluate: non-WebKit receiver handle on WebKit backend".into()),
+      None => None,
+    };
+
+    let arg_json = serde_json::to_string(&arg.value).map_err(|e| e.to_string())?;
+    let count = usize::from(
+      !(matches!(
+        arg.value,
+        crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+      ) && arg.handles.is_empty()),
+    );
+
+    let mut handle_refs = Vec::with_capacity(arg.handles.len());
+    for handle in &arg.handles {
+      match handle {
+        HandleId::WebKit(r) => handle_refs.push(*r),
+        _ => return Err("call_utility_evaluate: non-WebKit handle in arg.handles on WebKit backend".into()),
+      }
+    }
+
+    let is_fn_js = match is_function {
+      Some(true) => "true",
+      Some(false) => "false",
+      None => "undefined",
+    };
+    let return_by_value_js = if return_by_value { "true" } else { "false" };
+    let this_js = match receiver_ref {
+      Some(r) => format!("window.__wr.get({r})"),
+      None => "globalThis".to_string(),
+    };
+    let handle_list_js = if handle_refs.is_empty() {
+      String::from("[]")
+    } else {
+      let inner = handle_refs
+        .iter()
+        .map(|r| format!("window.__wr.get({r})"))
+        .collect::<Vec<_>>()
+        .join(",");
+      format!("[{inner}]")
+    };
+    // `__fd_arg_literal` is baked into the JS as a single-quoted
+    // string after escaping — the utility-script wrapper JSON.parses
+    // it back on the page.
+    let arg_literal = serde_json::to_string(&arg_json).map_err(|e| e.to_string())?;
+    let fn_source_literal = serde_json::to_string(fn_source).map_err(|e| e.to_string())?;
+
+    // When returning a handle, we need ref_id allocation. Include the
+    // allocator inline and return `{kind: 'handle', ref: id}`. When
+    // returning a value, JSON.stringify the isomorphic wire shape and
+    // return `{kind: 'value', payload: <jsonString>}`.
+    let body = format!(
+      r"(function(){{
+        const us = (window.__fd && window.__fd.__us) || (window.__fd.__us = window.__fd.newUtilityScript());
+        const isFn = {is_fn_js};
+        const retVal = {return_by_value_js};
+        const expr = {fn_source_literal};
+        const count = {count};
+        const serializedArg = {arg_literal};
+        const parsed = count > 0 ? [JSON.parse(serializedArg)] : [];
+        const handles = {handle_list_js};
+        const recv = {this_js};
+        const invoke = us.evaluate.bind(us);
+        const fn = function(){{
+          return invoke(isFn, retVal, expr, count, ...parsed, ...handles);
+        }}.bind(recv);
+        const result = fn();
+        if (retVal) {{
+          const encoded = JSON.stringify(result);
+          return JSON.stringify({{kind: 'value', payload: encoded === undefined ? null : encoded}});
+        }}
+        if (!window.__wr) window.__wr = new Map();
+        if (!window.__wr_next) window.__wr_next = 1;
+        const id = window.__wr_next++;
+        window.__wr.set(id, result);
+        return JSON.stringify({{kind: 'handle', ref: id}});
+      }})()"
+    );
+
+    let raw = self.evaluate(&body).await?;
+    let Some(raw_val) = raw else {
+      return Err("call_utility_evaluate: WebKit evaluate returned null".into());
+    };
+    // WebKit's evaluate returns a JSON-parsed value OR a stringified
+    // JSON (depending on path). Our wrapper always returns a string,
+    // so the value here will be a String (from JSON.stringify) —
+    // unless WebKit already parsed it to an object. Handle both.
+    let envelope: serde_json::Value = match raw_val {
+      serde_json::Value::String(s) => {
+        serde_json::from_str(&s).map_err(|e| format!("call_utility_evaluate: envelope parse: {e}"))?
+      },
+      other => other,
+    };
+
+    let kind = envelope
+      .get("kind")
+      .and_then(|v| v.as_str())
+      .ok_or("call_utility_evaluate: missing envelope.kind")?
+      .to_string();
+
+    match kind.as_str() {
+      "value" => {
+        let payload = envelope.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+        let parsed: crate::protocol::SerializedValue = match payload {
+          serde_json::Value::Null => {
+            crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+          },
+          serde_json::Value::String(s) => {
+            let inner: serde_json::Value =
+              serde_json::from_str(&s).map_err(|e| format!("call_utility_evaluate: payload parse: {e}"))?;
+            serde_json::from_value(inner).map_err(|e| format!("call_utility_evaluate: parse result: {e}"))?
+          },
+          other => serde_json::from_value(other).map_err(|e| format!("call_utility_evaluate: parse result: {e}"))?,
+        };
+        Ok(FdEvalResult::Value(parsed))
+      },
+      "handle" => {
+        let ref_id = envelope
+          .get("ref")
+          .and_then(serde_json::Value::as_u64)
+          .ok_or("call_utility_evaluate: missing envelope.ref")?;
+        Ok(FdEvalResult::Handle(HandleRemote::WebKit(ref_id)))
+      },
+      other => Err(format!("call_utility_evaluate: unknown envelope kind {other}")),
+    }
+  }
+
   /// Evaluate a JS expression that returns a DOM element, returning a reference handle.
   ///
   /// # Errors
