@@ -83,6 +83,113 @@ impl From<&String> for LocatorLike {
   }
 }
 
+/// Script argument shape for [`crate::page::Page::add_init_script`] and
+/// [`crate::context::ContextRef::add_init_script`]. Mirrors Playwright's
+/// `Function | string | { path?, content? }` union from
+/// `/tmp/playwright/packages/playwright-core/src/client/page.ts:520`.
+///
+/// The binding layer (NAPI / `QuickJS`) is responsible for the engine-local
+/// step of extracting a JS function's source via `.toString()`; everything
+/// else — reading file paths, JSON-serialising `arg`, composing the
+/// `(body)(arg)` wrapper, the "cannot evaluate a string with arguments"
+/// invariant — runs here in core.
+#[derive(Debug, Clone)]
+pub enum InitScriptSource {
+  /// Pre-serialised JS function body (the result of `fn.toString()` on
+  /// the caller's function). Rendered as `(body)(arg)` by
+  /// [`evaluation_script`]; `arg` is JSON-stringified, missing `arg`
+  /// renders as the literal `undefined`.
+  Function { body: String },
+  /// Script source code used verbatim. Passing `arg` alongside this form
+  /// errors with Playwright's "Cannot evaluate a string with arguments".
+  Source(String),
+  /// Path to an on-disk script file. Read at [`evaluation_script`] call
+  /// time; a `//# sourceURL=<path>` comment is appended per Playwright's
+  /// `addSourceUrlToScript` helper. Passing `arg` alongside errors.
+  Path(std::path::PathBuf),
+  /// Literal script content (from the `{ content }` bag variant).
+  /// Semantically equivalent to [`Self::Source`]; kept as a distinct
+  /// variant so callers can route the Playwright object shape losslessly.
+  /// Passing `arg` alongside errors.
+  Content(String),
+}
+
+impl From<String> for InitScriptSource {
+  fn from(s: String) -> Self {
+    Self::Source(s)
+  }
+}
+
+impl From<&str> for InitScriptSource {
+  fn from(s: &str) -> Self {
+    Self::Source(s.to_string())
+  }
+}
+
+impl From<std::path::PathBuf> for InitScriptSource {
+  fn from(p: std::path::PathBuf) -> Self {
+    Self::Path(p)
+  }
+}
+
+/// Lower an [`InitScriptSource`] + optional JSON argument into the
+/// wire-level source string the backend receives. Mirrors Playwright's
+/// client-side `evaluationScript` in
+/// `/tmp/playwright/packages/playwright-core/src/client/clientHelper.ts:31`.
+///
+/// Semantics:
+/// - [`InitScriptSource::Function`] + `arg` → `(body)(JSON.stringify(arg))`.
+///   Absent `arg` renders as `undefined` per Playwright's
+///   `Object.is(arg, undefined)` check. Playwright passes `null` through as
+///   `"null"` — this function does the same.
+/// - [`InitScriptSource::Source`] / [`InitScriptSource::Content`] →
+///   the raw source; `arg.is_some()` rejects with
+///   `FerriError::InvalidArgument` ("Cannot evaluate a string with
+///   arguments").
+/// - [`InitScriptSource::Path`] → file contents followed by
+///   `//# sourceURL=<path>` (newlines in the path are stripped so the
+///   pragma stays on one line). Same `arg.is_some()` rejection.
+///
+/// # Errors
+///
+/// - `arg` is `Some` while `script` is `Source`, `Content`, or `Path`.
+/// - `Path` refers to a file that cannot be read.
+/// - `Function` + `arg` whose JSON serialisation fails.
+pub fn evaluation_script(
+  script: InitScriptSource,
+  arg: Option<&serde_json::Value>,
+) -> Result<String, crate::error::FerriError> {
+  match script {
+    InitScriptSource::Function { body } => {
+      let arg_str = match arg {
+        None => "undefined".to_string(),
+        Some(v) => serde_json::to_string(v)?,
+      };
+      Ok(format!("({body})({arg_str})"))
+    },
+    InitScriptSource::Source(s) | InitScriptSource::Content(s) => {
+      if arg.is_some() {
+        return Err(crate::error::FerriError::invalid_argument(
+          "arg",
+          "Cannot evaluate a string with arguments",
+        ));
+      }
+      Ok(s)
+    },
+    InitScriptSource::Path(p) => {
+      if arg.is_some() {
+        return Err(crate::error::FerriError::invalid_argument(
+          "arg",
+          "Cannot evaluate a string with arguments",
+        ));
+      }
+      let source = std::fs::read_to_string(&p)?;
+      let safe_path = p.display().to_string().replace('\n', "");
+      Ok(format!("{source}\n//# sourceURL={safe_path}"))
+    },
+  }
+}
+
 /// Options for filtering locators — mirrors Playwright's `LocatorOptions`
 /// used by both `Locator::filter(options)` and the `Locator` constructor.
 /// Every field maps directly to a corresponding injected-selector clause
@@ -843,5 +950,109 @@ mod drag_option_tests {
   #[test]
   fn point_default_is_origin() {
     assert_eq!(Point::default(), Point { x: 0.0, y: 0.0 });
+  }
+}
+
+#[cfg(test)]
+mod init_script_tests {
+  use super::*;
+  use serde_json::json;
+
+  #[test]
+  fn function_with_undefined_arg_renders_literal_undefined() {
+    // Playwright: `Object.is(arg, undefined) ? 'undefined' : JSON.stringify(arg)`.
+    let src = evaluation_script(
+      InitScriptSource::Function {
+        body: "(x) => x + 1".to_string(),
+      },
+      None,
+    )
+    .unwrap();
+    assert_eq!(src, "((x) => x + 1)(undefined)");
+  }
+
+  #[test]
+  fn function_with_null_arg_renders_literal_null() {
+    // `Object.is(null, undefined)` is false — null goes through JSON.stringify.
+    let src = evaluation_script(
+      InitScriptSource::Function {
+        body: "(x) => x".to_string(),
+      },
+      Some(&serde_json::Value::Null),
+    )
+    .unwrap();
+    assert_eq!(src, "((x) => x)(null)");
+  }
+
+  #[test]
+  fn function_with_object_arg_renders_json() {
+    let arg = json!({ "answer": 42, "nested": [1, 2, 3] });
+    let src = evaluation_script(
+      InitScriptSource::Function {
+        body: "function (o) { window.x = o; }".to_string(),
+      },
+      Some(&arg),
+    )
+    .unwrap();
+    assert_eq!(
+      src,
+      r#"(function (o) { window.x = o; })({"answer":42,"nested":[1,2,3]})"#
+    );
+  }
+
+  #[test]
+  fn source_without_arg_passes_through_verbatim() {
+    let src = evaluation_script(InitScriptSource::Source("window.x = 1".into()), None).unwrap();
+    assert_eq!(src, "window.x = 1");
+  }
+
+  #[test]
+  fn source_with_arg_errors() {
+    let err = evaluation_script(InitScriptSource::Source("window.x = 1".into()), Some(&json!(42))).unwrap_err();
+    assert!(
+      err.to_string().contains("Cannot evaluate a string with arguments"),
+      "unexpected error: {err}"
+    );
+  }
+
+  #[test]
+  fn content_with_arg_errors() {
+    let err = evaluation_script(InitScriptSource::Content("1".into()), Some(&json!(0))).unwrap_err();
+    assert!(err.to_string().contains("Cannot evaluate a string with arguments"));
+  }
+
+  #[test]
+  fn path_with_arg_errors() {
+    let err = evaluation_script(
+      InitScriptSource::Path(std::path::PathBuf::from("/nope")),
+      Some(&json!(0)),
+    )
+    .unwrap_err();
+    assert!(err.to_string().contains("Cannot evaluate a string with arguments"));
+  }
+
+  #[test]
+  fn path_reads_file_and_appends_source_url() {
+    let dir = std::env::temp_dir();
+    let path = dir.join(format!("fd-init-script-{}.js", std::process::id()));
+    std::fs::write(&path, "window.__fromFile = 7;").unwrap();
+    let src = evaluation_script(InitScriptSource::Path(path.clone()), None).unwrap();
+    let expected = format!("window.__fromFile = 7;\n//# sourceURL={}", path.display());
+    assert_eq!(src, expected);
+    let _ = std::fs::remove_file(path);
+  }
+
+  #[test]
+  fn path_missing_errors() {
+    let missing = std::path::PathBuf::from("/definitely/not/a/real/path/x.js");
+    let err = evaluation_script(InitScriptSource::Path(missing), None).unwrap_err();
+    // Surfaces as Io(_) via FerriError::From<io::Error>.
+    assert!(matches!(err, crate::error::FerriError::Io(_)), "unexpected: {err}");
+  }
+
+  #[test]
+  fn content_passes_through_verbatim() {
+    let src = evaluation_script(InitScriptSource::Content("let z = 2;".into()), None).unwrap();
+    assert_eq!(src, "let z = 2;");
   }
 }

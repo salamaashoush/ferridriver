@@ -2048,15 +2048,30 @@ impl Page {
 
   // ── Init Scripts ────────────────────────────────────────────────────────
 
-  /// Inject a script to run before any page JS on every navigation.
-  /// The script runs at document start, before any page scripts execute.
+  /// Register a script to run before any page JS on every navigation.
+  /// Mirrors Playwright's `page.addInitScript(script, arg)` from
+  /// `/tmp/playwright/packages/playwright-core/src/client/page.ts:520`.
+  ///
+  /// Accepts the full Playwright argument shape: a JS function body
+  /// (pre-serialised via `fn.toString()` at the binding layer), a verbatim
+  /// source string, a `{ path }`, or a `{ content }`. The optional `arg`
+  /// is JSON-stringified and composed into a `(body)(arg)` wrapper for
+  /// the `Function` variant; passing `arg` alongside any non-function
+  /// variant is a Playwright-parity error (see [`crate::options::evaluation_script`]).
+  ///
   /// Returns an identifier that can be used with `remove_init_script`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the init script cannot be injected.
-  pub async fn add_init_script(&self, source: &str) -> Result<String> {
-    self.inner.add_init_script(source).await.map_err(Into::into)
+  /// Returns an error if `evaluation_script` lowering fails (bad path, bad
+  /// arg combination, JSON serialisation) or the backend injection fails.
+  pub async fn add_init_script(
+    &self,
+    script: crate::options::InitScriptSource,
+    arg: Option<serde_json::Value>,
+  ) -> Result<String> {
+    let source = crate::options::evaluation_script(script, arg.as_ref())?;
+    self.inner.add_init_script(&source).await.map_err(Into::into)
   }
 
   /// Remove a previously injected init script by identifier.

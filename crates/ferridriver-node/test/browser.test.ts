@@ -930,6 +930,87 @@ for (const backend of BACKENDS) {
       await page.removeInitScript(id);
     });
 
+    it("addInitScript accepts a function + JSON-serialised arg", async () => {
+      // Mirrors Playwright docs example `page.addInitScript(mock => {...}, mock)`
+      // from /tmp/playwright/packages/playwright-core/types/types.d.ts:303.
+      const id = await page.addInitScript(
+        (cfg: { answer: number; label: string }) => {
+          (window as any).__fd_init_arg = cfg;
+        },
+        { answer: 42, label: "hello" }
+      );
+      await page.goto(testUrl);
+      const answer = await page.evaluateStr("window.__fd_init_arg.answer");
+      const label = await page.evaluateStr("window.__fd_init_arg.label");
+      expect(Number(answer)).toBe(42);
+      expect(label).toBe("hello");
+      await page.removeInitScript(id);
+    });
+
+    it("addInitScript function without arg renders as (fn)(undefined)", async () => {
+      const id = await page.addInitScript((x: unknown) => {
+        (window as any).__fd_init_noarg = typeof x;
+      });
+      await page.goto(testUrl);
+      const ty = await page.evaluateStr("window.__fd_init_noarg");
+      expect(ty).toBe("undefined");
+      await page.removeInitScript(id);
+    });
+
+    it("addInitScript function with explicit null arg receives null", async () => {
+      // Playwright: `Object.is(null, undefined)` is false → JSON.stringify(null) = "null".
+      const id = await page.addInitScript((x: unknown) => {
+        (window as any).__fd_init_null = x === null ? "is-null" : typeof x;
+      }, null);
+      await page.goto(testUrl);
+      const val = await page.evaluateStr("window.__fd_init_null");
+      expect(val).toBe("is-null");
+      await page.removeInitScript(id);
+    });
+
+    it("addInitScript with { content } bag treats string as-is", async () => {
+      const id = await page.addInitScript({
+        content: "window.__fd_init_content = 'from-content';",
+      });
+      await page.goto(testUrl);
+      const val = await page.evaluateStr("window.__fd_init_content");
+      expect(val).toBe("from-content");
+      await page.removeInitScript(id);
+    });
+
+    it("addInitScript with { path } reads the file from disk", async () => {
+      const fs = await import("node:fs/promises");
+      const os = await import("node:os");
+      const path = await import("node:path");
+      const tmpFile = path.join(
+        os.tmpdir(),
+        `fd-init-script-${process.pid}-${Date.now()}.js`
+      );
+      await fs.writeFile(tmpFile, "window.__fd_init_file = 'from-file';");
+      try {
+        const id = await page.addInitScript({ path: tmpFile });
+        await page.goto(testUrl);
+        const val = await page.evaluateStr("window.__fd_init_file");
+        expect(val).toBe("from-file");
+        await page.removeInitScript(id);
+      } finally {
+        await fs.unlink(tmpFile);
+      }
+    });
+
+    it("addInitScript rejects string + arg with Playwright's error message", async () => {
+      let caught: unknown = null;
+      try {
+        await page.addInitScript("window.x = 1", { bad: true });
+      } catch (e) {
+        caught = e;
+      }
+      expect(caught).not.toBeNull();
+      expect(String((caught as Error).message)).toContain(
+        "Cannot evaluate a string with arguments"
+      );
+    });
+
     // ── Page.addScriptTag / addStyleTag ──────────────────────────────
 
     it("addScriptTag injects inline script", async () => {

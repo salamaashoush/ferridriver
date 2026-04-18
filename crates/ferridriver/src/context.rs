@@ -445,17 +445,28 @@ impl ContextRef {
   // ── Context-level APIs (apply to all pages) ────────────────────────────
 
   /// Add an init script to all pages in this context (current + future).
-  /// Returns identifiers for each page.
+  /// Mirrors Playwright's `browserContext.addInitScript(script, arg)` from
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:356`.
+  /// See [`crate::page::Page::add_init_script`] for argument semantics.
+  ///
+  /// Returns identifiers for each existing page — the same injection also
+  /// lands on pages created later in the context.
   ///
   /// # Errors
   ///
-  /// Returns an error if the context does not exist or script injection fails.
-  pub async fn add_init_script(&self, source: &str) -> Result<Vec<String>> {
+  /// Returns an error if `evaluation_script` lowering fails, the context
+  /// does not exist, or script injection fails on any page.
+  pub async fn add_init_script(
+    &self,
+    script: crate::options::InitScriptSource,
+    arg: Option<serde_json::Value>,
+  ) -> Result<Vec<String>> {
+    let source = crate::options::evaluation_script(script, arg.as_ref())?;
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     let mut ids = Vec::new();
     for page in &ctx.pages {
-      ids.push(page.add_init_script(source).await?);
+      ids.push(page.add_init_script(&source).await?);
     }
     Ok(ids)
   }

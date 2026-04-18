@@ -99,7 +99,9 @@ impl Recorder {
     page.expose_function("__fdRecorderAction", callback).await?;
 
     // Inject recorder JS (persists across navigations via add_init_script).
-    page.add_init_script(RECORDER_JS).await?;
+    page
+      .add_init_script(crate::options::InitScriptSource::Source(RECORDER_JS.into()), None)
+      .await?;
     // Also evaluate immediately for the current page.
     let _ = page.evaluate(RECORDER_JS).await;
 

@@ -505,7 +505,10 @@ async fn add_init_script_tests() {
   let page = browser.page().await.expect("get page");
 
   // Add an init script that sets a global variable
-  let id = page.add_init_script("window.__test_init = 'injected'").await.unwrap();
+  let id = page
+    .add_init_script("window.__test_init = 'injected'".into(), None)
+    .await
+    .unwrap();
   assert!(!id.is_empty(), "should return identifier");
 
   // Navigate -- the init script should run before page JS
@@ -534,7 +537,10 @@ async fn add_init_script_tests() {
   assert_eq!(title, "injected", "init script should persist across navigations");
 
   // Multiple init scripts
-  page.add_init_script("window.__test_init2 = 'second'").await.unwrap();
+  page
+    .add_init_script("window.__test_init2 = 'second'".into(), None)
+    .await
+    .unwrap();
   page
     .goto(
       &data_url("<script>document.title = (window.__test_init || '') + ':' + (window.__test_init2 || '')</script>"),

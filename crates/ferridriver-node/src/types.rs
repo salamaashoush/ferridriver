@@ -649,3 +649,120 @@ pub(crate) fn string_or_regex_to_rust(
       .map_err(|e| napi::Error::from_reason(e.to_string())),
   }
 }
+
+/// `addInitScript` first-argument shape at the NAPI boundary.
+///
+/// Mirrors Playwright's `Function | string | { path?: string, content?: string }`
+/// union from `/tmp/playwright/packages/playwright-core/src/client/page.ts:520`.
+/// We don't lower into [`ferridriver::options::InitScriptSource`] inline in a
+/// `#[napi]` async fn because `napi::Unknown<'_>` is `!Send` and the generated
+/// future would fail the runtime's `Send` bound. Instead the
+/// [`napi::bindgen_prelude::FromNapiValue`] impl here runs during the
+/// synchronous NAPI→Rust unmarshal (where holding the JS scope is fine) and
+/// produces an owned, `Send`-safe value before the async body starts.
+#[derive(Debug, Clone)]
+pub enum NapiInitScript {
+  /// JS function — we captured its `.toString()` here so core can compose
+  /// `(body)(arg)` without touching the JS engine.
+  Function(String),
+  /// Bare source string, used verbatim.
+  Source(String),
+  /// `{ content: "…" }` — content wins over `path` if both are present.
+  Content(String),
+  /// `{ path: "…" }` — core reads the file.
+  Path(String),
+}
+
+impl From<NapiInitScript> for ferridriver::options::InitScriptSource {
+  fn from(s: NapiInitScript) -> Self {
+    match s {
+      NapiInitScript::Function(body) => Self::Function { body },
+      NapiInitScript::Source(s) => Self::Source(s),
+      NapiInitScript::Content(c) => Self::Content(c),
+      NapiInitScript::Path(p) => Self::Path(p.into()),
+    }
+  }
+}
+
+impl napi::bindgen_prelude::TypeName for NapiInitScript {
+  fn type_name() -> &'static str {
+    "Function | string | { path?, content? }"
+  }
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Unknown
+  }
+}
+
+impl napi::bindgen_prelude::ValidateNapiValue for NapiInitScript {}
+
+impl napi::bindgen_prelude::FromNapiValue for NapiInitScript {
+  unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    use napi::JsValue;
+    let unknown = unsafe { napi::Unknown::from_raw_unchecked(env, napi_val) };
+    match unknown.get_type()? {
+      napi::ValueType::Function => {
+        // `.toString()` on a JS function gives its source text — same
+        // primitive Playwright's client uses via `fun.toString()`.
+        let s = unknown.coerce_to_string()?.into_utf8()?.into_owned()?;
+        Ok(Self::Function(s))
+      },
+      napi::ValueType::String => {
+        let s = unknown.coerce_to_string()?.into_utf8()?.into_owned()?;
+        Ok(Self::Source(s))
+      },
+      napi::ValueType::Object => {
+        let obj = napi::bindgen_prelude::Object::from_raw(env, napi_val);
+        // `content` wins over `path` — same precedence Playwright's
+        // `evaluationScript` uses.
+        if let Some(content) = obj.get::<String>("content")? {
+          return Ok(Self::Content(content));
+        }
+        if let Some(path) = obj.get::<String>("path")? {
+          return Ok(Self::Path(path));
+        }
+        Err(napi::Error::from_reason(
+          "Either path or content property must be present",
+        ))
+      },
+      other => Err(napi::Error::from_reason(format!(
+        "addInitScript expects Function | string | {{ path?, content? }}, got {other}"
+      ))),
+    }
+  }
+}
+
+/// `addInitScript` second-argument shape — the optional JSON-serialisable
+/// `arg`. Distinguishes `null` from "not passed / undefined" because
+/// Playwright's `Object.is(arg, undefined)` renders `null` as the string
+/// `"null"` but absent arg as the literal `undefined`; the vanilla
+/// `Option<serde_json::Value>` unmarshal collapses both JS `null` and
+/// `undefined` to `None`, which would silently change semantics for the
+/// `page.addInitScript(fn, null)` case.
+#[derive(Debug, Clone, Default)]
+pub struct NapiInitScriptArg(pub Option<serde_json::Value>);
+
+impl napi::bindgen_prelude::TypeName for NapiInitScriptArg {
+  fn type_name() -> &'static str {
+    "any"
+  }
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Unknown
+  }
+}
+
+impl napi::bindgen_prelude::ValidateNapiValue for NapiInitScriptArg {}
+
+impl napi::bindgen_prelude::FromNapiValue for NapiInitScriptArg {
+  unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    let mut t: napi::sys::napi_valuetype = 0;
+    napi::check_status!(unsafe { napi::sys::napi_typeof(env, napi_val, &raw mut t) })?;
+    if t == napi::sys::ValueType::napi_undefined {
+      return Ok(Self(None));
+    }
+    if t == napi::sys::ValueType::napi_null {
+      return Ok(Self(Some(serde_json::Value::Null)));
+    }
+    let v: serde_json::Value = unsafe { napi::bindgen_prelude::FromNapiValue::from_napi_value(env, napi_val)? };
+    Ok(Self(Some(v)))
+  }
+}

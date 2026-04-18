@@ -47,3 +47,64 @@ pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>
   let json: String = stringify.call((value,))?;
   serde_json::from_str(&json).map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
 }
+
+/// Lower an `addInitScript`-style JS argument into
+/// [`ferridriver::options::InitScriptSource`] plus an optional JSON arg.
+/// Mirrors Playwright's
+/// `Function | string | { path?: string, content?: string }` union from
+/// `/tmp/playwright/packages/playwright-core/src/client/page.ts:520` — all
+/// semantic lowering (function body via `.toString()`, path/content
+/// precedence, `null`-vs-`undefined` preservation for `arg`) happens here
+/// synchronously so the async binding method can immediately hand owned,
+/// `Send`-safe values to Rust core.
+///
+/// Returns an error for non-matching `script` shapes or for a missing
+/// `{ path, content }` entry. The (source|path|content) + arg rejection is
+/// left to [`ferridriver::options::evaluation_script`] so both binding
+/// layers share the exact error text Playwright ships.
+pub fn init_script_from_js<'js>(
+  ctx: &Ctx<'js>,
+  script: Value<'js>,
+  arg: Option<Value<'js>>,
+) -> rquickjs::Result<(ferridriver::options::InitScriptSource, Option<serde_json::Value>)> {
+  let arg_json = match arg {
+    None => None,
+    Some(v) if v.is_undefined() => None,
+    Some(v) if v.is_null() => Some(serde_json::Value::Null),
+    Some(v) => Some(serde_from_js::<serde_json::Value>(ctx, v)?),
+  };
+
+  let init = if script.is_function() {
+    // `String(fn)` invokes `Function.prototype.toString` — the same
+    // primitive Playwright's client uses via `fun.toString()`.
+    let string_global: Function<'js> = ctx.globals().get("String")?;
+    let body: String = string_global.call((script,))?;
+    ferridriver::options::InitScriptSource::Function { body }
+  } else if script.is_string() {
+    let s: String = script.get()?;
+    ferridriver::options::InitScriptSource::Source(s)
+  } else if script.is_object() {
+    let obj = script
+      .as_object()
+      .ok_or_else(|| rquickjs::Error::new_from_js_message("ferridriver", "addInitScript", "expected object"))?;
+    if let Ok(content) = obj.get::<_, String>("content") {
+      ferridriver::options::InitScriptSource::Content(content)
+    } else if let Ok(path) = obj.get::<_, String>("path") {
+      ferridriver::options::InitScriptSource::Path(path.into())
+    } else {
+      return Err(rquickjs::Error::new_from_js_message(
+        "ferridriver",
+        "addInitScript",
+        "Either path or content property must be present",
+      ));
+    }
+  } else {
+    return Err(rquickjs::Error::new_from_js_message(
+      "ferridriver",
+      "addInitScript",
+      "script must be Function | string | { path?, content? }",
+    ));
+  };
+
+  Ok((init, arg_json))
+}
