@@ -1475,7 +1475,7 @@ async fn capture_screenshot(page: &ferridriver::Page) -> Option<Vec<u8>> {
   let opts = ferridriver::options::ScreenshotOptions {
     full_page: Some(true),
     format: Some("png".into()),
-    quality: None,
+    ..Default::default()
   };
   page.screenshot(opts).await.ok()
 }

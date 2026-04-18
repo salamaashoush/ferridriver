@@ -42,7 +42,10 @@ pub struct BrowserArgs {
   #[arg(long, default_value = "cdp-pipe")]
   pub backend: Backend,
 
-  /// Run headless (default: true)
+  /// Run the browser without a visible window. Off by default because
+  /// MCP's canonical use case is an interactive debugging / agent
+  /// session where the user wants to watch the browser. CI and batch
+  /// callers should opt into `--headless` explicitly.
   #[arg(long)]
   pub headless: bool,
 

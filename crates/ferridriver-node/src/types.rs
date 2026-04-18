@@ -369,6 +369,7 @@ impl From<ScreenshotOptions> for ferridriver::options::ScreenshotOptions {
       full_page: o.full_page,
       format: o.format,
       quality: o.quality.map(i64::from),
+      ..Default::default()
     }
   }
 }

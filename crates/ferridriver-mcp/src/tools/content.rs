@@ -72,6 +72,7 @@ impl McpServer {
         format: p.format.clone(),
         quality: p.quality,
         full_page: p.full_page,
+        ..Default::default()
       };
       page.screenshot(opts).await.map_err(Self::err)?
     };
