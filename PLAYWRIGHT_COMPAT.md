@@ -48,32 +48,29 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 1.2 ElementHandle
 
-- [~] **Core lifecycle + reads + state + click/hover/focus/scroll/screenshot/bounding_box on all 4 backends; `query_selector` + `query_selector_all` + `locator.elementHandle{,s}` materialisation. Phases C → F shipped (`2c3f03f`, `20347f6`, `badfe7b`, this commit).**
-- **Shipped surface**: `dispose`, `isDisposed`, `asJsHandle` ↔ `asElement`, `inner_html`, `inner_text`, `text_content`, `get_attribute`, `input_value`, `is_visible`, `is_hidden`, `is_disabled`, `is_enabled`, `is_checked`, `is_editable`, `bounding_box`, `click`, `dblclick`, `hover`, `type`, `focus`, `scroll_into_view_if_needed`, `screenshot(format)`, `evaluate_with_arg`, `evaluate_with_arg_wire`, `evaluate_handle_with_arg`. Plus materialisation: `page.querySelector` + `$`, `page.querySelectorAll` + `$$`, `locator.elementHandle`, `locator.elementHandles`.
+- [~] **Full ElementHandle surface landed on core + NAPI across phases C → G (`2c3f03f`, `20347f6`, `badfe7b`, `769ff78`, `828a2bc`). QuickJS bindings, rich-arg walker at the binding layer, and Rule-9 4-backend tests for the new surface are the remaining gates before flipping `[x]`.**
+- **Shipped surface (core + NAPI)**: `dispose`, `isDisposed`, `asJsHandle` ↔ `asElement`, `inner_html`, `inner_text`, `text_content`, `get_attribute`, `input_value`, `is_visible`, `is_hidden`, `is_disabled`, `is_enabled`, `is_checked`, `is_editable`, `bounding_box`, `click`, `dblclick`, `hover`, `type`, `focus`, `scroll_into_view_if_needed`, `screenshot(format)`, `screenshot_with_opts(ScreenshotOpts)`, `evaluate_with_arg`, `evaluate_with_arg_wire`, `evaluate_handle_with_arg`, `eval_on_selector` (`$eval`), `eval_on_selector_all` (`$$eval`), `owner_frame`, `content_frame`, `wait_for_element_state`, `wait_for_selector`, `fill`, `check`, `uncheck`, `set_checked`, `tap`, `press`, `dispatch_event`, `select_option`, `select_text`, `set_input_files`. Plus materialisation: `page.querySelector` + `$`, `page.querySelectorAll` + `$$`, `locator.elementHandle`, `locator.elementHandles`.
 - **Still owed for top-level [x]**:
-  - `check`, `uncheck`, `set_checked`, `tap`, `fill`, `press`, `dispatch_event`, `select_option`, `select_text`, `set_input_files` — Playwright's option-bag-rich actions. Most lower to existing Locator implementations with a handle-resolved selector; pattern is mechanical once `Locator::for_handle(&ElementHandle)` lands.
-  - `wait_for_element_state(state, opts)` and handle-scoped `wait_for_selector(selector, opts)`.
-  - `owner_frame`, `content_frame` — Frame accessors.
-  - `eval_on_selector`, `eval_on_selector_all` — `$eval` / `$$eval` shortcuts.
-  - Full screenshot option bag (`path`, `omitBackground`, `animations`, `mask`, `style`, `clip`).
+  - QuickJS bindings at `crates/ferridriver-script/src/bindings/element_handle.rs` for the post-phase-F surface (`$eval`, `$$eval`, `ownerFrame`, `contentFrame`, `waitForElementState`, `waitForSelector`, `fill`, `check`, `uncheck`, `setChecked`, `tap`, `press`, `dispatchEvent`, `selectOption`, `selectText`, `setInputFiles`, `screenshotWithOpts`).
+  - Rule-9 integration tests on cdp-pipe / cdp-raw / bidi / webkit for every method above. `test_script_element_handle_methods` in `crates/ferridriver-cli/tests/backends.rs` needs per-method assertions; NAPI tests in `crates/ferridriver-node/test/handles.test.ts` cover 3 backends and need BiDi parity.
+  - Full screenshot option bag at the backend path — the handle-level `screenshot_with_opts` accepts the bag but today only honours `format`. Completing `omitBackground`, `animations`, `mask`, `style`, `clip` requires threading `ScreenshotOpts` through `AnyPage::screenshot_element` on all 4 backends.
+  - `owner_frame` multi-frame attribution via per-backend primitives (CDP `DOM.describeNode`, BiDi context-id mapping, WebKit main-frame fallback). Current impl returns the main frame for any connected element — correct for single-frame pages.
 - **Playwright ref**: `packages/playwright-core/src/client/elementHandle.ts`.
 - **Files**: `crates/ferridriver/src/element_handle.rs`; NAPI `crates/ferridriver-node/src/element_handle.rs`; QuickJS `crates/ferridriver-script/src/bindings/element_handle.rs`.
-- **Acceptance for flipping [x]**: every shipped method has a Rule-9 integration test on cdp-pipe / cdp-raw / webkit / bidi (✓ for the surface above). Remaining methods need their own per-backend test before flipping.
+- **Acceptance for flipping [x]**: QuickJS binding parity + Rule-9 tests on all 4 backends for every method in the shipped surface.
 
 ### 1.3 JSHandle
 
-- [~] **Core lifecycle + per-backend dispose (`Runtime.releaseObject` / `script.disown` / `Op::ReleaseRef`) + `page.evaluate(fn, arg)` + `page.evaluateHandle(fn)` + `handle.evaluate(fn)` + isomorphic wire round-trip on all 4 backends. Phases A → D shipped (`b355513`, `7a29ce5`, `0591807`, `2c3f03f`, `20347f6`).**
-- **Shipped surface**: `dispose`, `isDisposed`, `asElement` (phase-C stub returning null until phase-D wires remote-type inspection), `evaluate_with_arg`, `evaluate_with_arg_wire`, `evaluate_handle_with_arg`. Wire format: full `protocol::serializers` Playwright-isomorphic round-trip (Date, RegExp, BigInt, NaN, ±Infinity, undefined, -0, typed arrays, ArrayBuffer, Array, Object, Handle, Reference) — proven via `test_script_evaluate_rich_types`.
+- [~] **Full JSHandle surface landed on core + NAPI across phases A → G (`b355513`, `7a29ce5`, `0591807`, `2c3f03f`, `20347f6`, `f3d3cdd`, `828a2bc`). QuickJS bindings, rich-arg walker at the binding layer, and Rule-9 4-backend tests for the new surface are the remaining gates before flipping `[x]`.**
+- **Shipped surface (core + NAPI)**: `dispose`, `isDisposed`, `asElement` (functional — inspects `h instanceof Node` and re-wraps via `backend::element_from_remote`), `jsonValue` / `jsonValueWire`, `getProperty(name)`, `getProperties()`, `evaluate_with_arg` / `evaluate_with_arg_wire` / `evaluate_handle_with_arg` — the latter now packs `[handle, userArg]` with proper `{h:i}` index shifting so `handle.evaluate(fn, arg)` receives the handle and user arg as two positional parameters (matching Playwright's `javascript.ts:161-163`). Wire format: full `protocol::serializers` Playwright-isomorphic round-trip (Date, RegExp, BigInt, NaN, ±Infinity, undefined, -0, typed arrays, ArrayBuffer, Array, Object, Handle, Reference).
 - **Still owed for top-level [x]**:
-  - `getProperties()` → `Map<string, JSHandle>` and `getProperty(name)` → `JSHandle`.
-  - `jsonValue()` user-facing method (already implementable via `evaluate_with_arg("el => el", null)` but deserves its own surface).
-  - Multi-arg evaluate: `handle.evaluate(fn, userArg)` currently ignores `userArg`; bumping `argCount` to 2 and threading a second serialized value through the utility-script wrapper is mechanical.
-  - NAPI / QuickJS arg walker that detects `JSHandle` / `ElementHandle` class instances at the boundary and emits the `{h: idx}` reference + the backend `HandleId` automatically. Phase-D MVP only handles JSON-expressible values.
-  - `asElement()` actually inspects the remote (CDP `RemoteObject.subtype === 'node'`, BiDi `RemoteValue::Node`, WebKit value-type round-trip).
+  - QuickJS bindings at `crates/ferridriver-script/src/bindings/js_handle.rs` for `jsonValue`, `getProperty`, `getProperties`, and the updated async `asElement` (currently a phase-C stub).
+  - NAPI + QuickJS arg walker that detects `JSHandle` / `ElementHandle` class instances at the binding boundary and emits the `{h: idx}` reference + backend `HandleId` automatically. Today the wrapper only handles JSON-expressible user args; passing a handle as an argument requires manually constructing the `SerializedArgument`.
+  - Rule-9 integration tests on all 4 backends for the phase-G surface (`jsonValue`, `getProperty`, `getProperties`, `asElement`, multi-arg `evaluate`).
   - Phase-D rollback when a CDP `Runtime.releaseObject` fails partway — current behaviour is to roll back the disposed flag, which is correct, but observable cleanup of a leaked remote isn't tested.
 - **Playwright ref**: `packages/playwright-core/src/client/jsHandle.ts`.
 - **Files**: `crates/ferridriver/src/js_handle.rs`; NAPI `crates/ferridriver-node/src/js_handle.rs`; QuickJS `crates/ferridriver-script/src/bindings/js_handle.rs`. Wire serializer at `crates/ferridriver/src/protocol/serializers.rs`. Injected utility script at `crates/ferridriver/src/injected/{utilityScript,isomorphic/utilityScriptSerializers}.ts`.
-- **Acceptance for flipping [x]**: ship `getProperties` / `getProperty` / `jsonValue` / multi-arg evaluate / class-instance arg detection, each with Rule-9 tests on all 4 backends.
+- **Acceptance for flipping [x]**: QuickJS binding parity + NAPI/QuickJS arg walker for handle-valued args + Rule-9 tests on all 4 backends for every method in the shipped surface.
 
 ### 1.4 Request / Response / WebSocket as lifecycle objects
 
