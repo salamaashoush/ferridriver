@@ -60,4 +60,56 @@ impl ElementHandle {
   pub fn as_js_handle(&self) -> crate::js_handle::JSHandle {
     crate::js_handle::JSHandle::wrap(self.inner.as_js_handle().clone())
   }
+
+  /// Playwright: `elementHandle.evaluate(pageFunction, arg?)`.
+  /// Delegates through the companion `JSHandle`.
+  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
+  pub async fn evaluate_with_arg(
+    &self,
+    fn_source: String,
+    arg: Option<serde_json::Value>,
+  ) -> Result<Option<serde_json::Value>> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let result = self
+      .inner
+      .as_js_handle()
+      .evaluate_with_arg(&fn_source, serialized, Some(true))
+      .await
+      .into_napi()?;
+    Ok(result.to_json_like())
+  }
+
+  /// Raw isomorphic wire shape variant of [`Self::evaluateWithArg`].
+  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
+  pub async fn evaluate_with_arg_wire(
+    &self,
+    fn_source: String,
+    arg: Option<serde_json::Value>,
+  ) -> Result<serde_json::Value> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let result = self
+      .inner
+      .as_js_handle()
+      .evaluate_with_arg(&fn_source, serialized, Some(true))
+      .await
+      .into_napi()?;
+    serde_json::to_value(&result).map_err(|e| napi::Error::from_reason(e.to_string()))
+  }
+
+  /// Playwright: `elementHandle.evaluateHandle(pageFunction, arg?)`.
+  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
+  pub async fn evaluate_handle_with_arg(
+    &self,
+    fn_source: String,
+    arg: Option<serde_json::Value>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    let serialized = crate::page::build_serialized_argument(arg);
+    let handle = self
+      .inner
+      .as_js_handle()
+      .evaluate_handle_with_arg(&fn_source, serialized, Some(true))
+      .await
+      .into_napi()?;
+    Ok(crate::js_handle::JSHandle::wrap(handle))
+  }
 }

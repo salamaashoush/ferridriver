@@ -614,6 +614,26 @@ impl LifecycleState {
   }
 }
 
+/// Wrapper function declaration sent to `Runtime.callFunctionOn` /
+/// `script.callFunction` by [`CdpPage::call_utility_evaluate`] /
+/// [`super::bidi::page::BidiPage::call_utility_evaluate`]. Shared
+/// because the flow is identical on both backends: memoise the
+/// `UtilityScript` instance on `window.__fd.__us`, `JSON.parse` the
+/// serialized arg, forward into `utilityScript.evaluate`, and
+/// `JSON.stringify` the result back so the backend's own serializer
+/// only has to ship a flat string.
+pub(crate) const UTILITY_EVAL_WRAPPER: &str = "function(isFn, retVal, expr, count, serializedArg, ...handles) {\
+    const parsed = count > 0 ? [JSON.parse(serializedArg)] : [];\
+    const us = (window.__fd && window.__fd.__us) ||\
+               (window.__fd.__us = window.__fd.newUtilityScript());\
+    const result = us.evaluate(isFn, retVal, expr, count, ...parsed, ...handles);\
+    if (retVal) {\
+      const encoded = JSON.stringify(result);\
+      return encoded === undefined ? null : encoded;\
+    }\
+    return result;\
+  }";
+
 pub struct CdpPage<T: CdpTransport> {
   transport: Arc<T>,
   session_id: Option<Arc<str>>,
@@ -929,6 +949,171 @@ impl<T: CdpWrap> CdpPage<T> {
     }
 
     Ok(result.get("result").and_then(|r| r.get("value")).cloned())
+  }
+
+  /// Call the page-side `UtilityScript.evaluate` with Playwright's
+  /// isomorphic wire protocol — the canonical path for
+  /// `page.evaluate(fn, arg)` / `page.evaluateHandle(fn, arg)` and
+  /// `handle.evaluate(fn, arg)` on CDP. Mirrors Playwright's
+  /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crExecutionContext.ts`.
+  ///
+  /// Dispatch strategy:
+  ///
+  /// 1. Ensure `window.__fd` engine (and its `UtilityScript`) is
+  ///    injected — the existing `ensure_engine_injected` does this.
+  /// 2. Resolve the target execution context (main page or iframe via
+  ///    `frame_id`).
+  /// 3. Send `Runtime.callFunctionOn` with a small wrapper function
+  ///    declaration that reads / memoises the per-frame
+  ///    `UtilityScript` instance on `window.__fd.__us`, then forwards
+  ///    its arguments into `utilityScript.evaluate(...)`. The
+  ///    `serializedArg` argument arrives as a string — the wrapper
+  ///    `JSON.parse`s it so the page receives the tagged-object wire
+  ///    shape the utility script's `parseEvaluationResultValue`
+  ///    expects.
+  /// 4. Handles in `arg.handles` are passed as `CallArgument
+  ///    { objectId: <RemoteObjectId> }` entries — CDP hydrates each
+  ///    back to the original remote object before the wrapper
+  ///    receives it.
+  /// 5. Parse the response. `returnByValue=true` yields a
+  ///    `RemoteObject.value` that's already the isomorphic wire
+  ///    form for the result — we deserialise it into
+  ///    [`crate::protocol::SerializedValue`]. `returnByValue=false`
+  ///    yields a `RemoteObject.objectId` that we wrap in
+  ///    [`crate::js_handle::HandleRemote::Cdp`] for the caller to turn
+  ///    into a [`crate::js_handle::JSHandle`].
+  ///
+  /// # Errors
+  ///
+  /// Returns a String error on protocol failure, `exceptionDetails`
+  /// from the page, or backend/handle mismatch (non-CDP handles in
+  /// `arg.handles`).
+  #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
+  pub async fn call_utility_evaluate(
+    &self,
+    fn_source: &str,
+    arg: &crate::protocol::SerializedArgument,
+    frame_id: Option<&str>,
+    is_function: Option<bool>,
+    return_by_value: bool,
+    receiver: Option<&crate::js_handle::HandleRemote>,
+  ) -> Result<crate::js_handle::EvaluateResult, String> {
+    self.ensure_engine_injected().await?;
+
+    let context_id = match frame_id {
+      Some(fid) => self.frame_contexts.read().await.get(fid).copied(),
+      None => None,
+    };
+
+    // `this` of the wrapper function on the page — either the handle
+    // the caller is invoking against (for `handle.evaluate(fn, arg)`)
+    // or `globalThis` (for `page.evaluate(fn, arg)`).
+    let receiver_objid: Option<String> = match receiver {
+      Some(crate::js_handle::HandleRemote::Cdp(obj)) => Some((**obj).to_string()),
+      Some(_) => return Err("call_utility_evaluate: non-CDP receiver handle on CDP backend".into()),
+      None => None,
+    };
+
+    let arg_json = serde_json::to_string(&arg.value).map_err(|e| e.to_string())?;
+    let is_fn_json: serde_json::Value = match is_function {
+      Some(true) => serde_json::Value::Bool(true),
+      Some(false) => serde_json::Value::Bool(false),
+      None => serde_json::Value::Null,
+    };
+
+    let count = usize::from(
+      !(matches!(
+        arg.value,
+        crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+      ) && arg.handles.is_empty()),
+    );
+
+    let mut arguments: Vec<serde_json::Value> = vec![
+      serde_json::json!({"value": is_fn_json}),
+      serde_json::json!({"value": return_by_value}),
+      serde_json::json!({"value": fn_source}),
+      serde_json::json!({"value": count}),
+      serde_json::json!({"value": arg_json}),
+    ];
+    for handle in &arg.handles {
+      match handle {
+        crate::protocol::HandleId::Cdp(obj_id) => {
+          arguments.push(serde_json::json!({"objectId": obj_id}));
+        },
+        _ => return Err("call_utility_evaluate: non-CDP handle in arg.handles on CDP backend".into()),
+      }
+    }
+
+    let mut params = serde_json::json!({
+      "functionDeclaration": UTILITY_EVAL_WRAPPER,
+      "arguments": arguments,
+      "returnByValue": return_by_value,
+      "awaitPromise": true,
+    });
+    if let Some(obj_id) = receiver_objid {
+      params["objectId"] = serde_json::json!(obj_id);
+    } else if let Some(ctx_id) = context_id {
+      params["executionContextId"] = serde_json::json!(ctx_id);
+    } else {
+      // No objectId and no contextId — CDP requires one of them.
+      // Evaluate `globalThis` in the main context to get an objectId
+      // we can anchor the callFunctionOn to.
+      let r = self
+        .cmd(
+          "Runtime.evaluate",
+          serde_json::json!({
+            "expression": "globalThis",
+            "returnByValue": false,
+          }),
+        )
+        .await?;
+      let obj_id = r
+        .get("result")
+        .and_then(|r| r.get("objectId"))
+        .and_then(|v| v.as_str())
+        .ok_or("call_utility_evaluate: could not obtain globalThis objectId")?
+        .to_string();
+      params["objectId"] = serde_json::json!(obj_id);
+    }
+
+    let response = self.cmd("Runtime.callFunctionOn", params).await?;
+
+    if let Some(exception) = response.get("exceptionDetails") {
+      let text = exception
+        .get("text")
+        .and_then(|v| v.as_str())
+        .unwrap_or("Evaluation error");
+      return Err(text.to_string());
+    }
+
+    let result_obj = response.get("result").ok_or("call_utility_evaluate: no result")?;
+
+    if return_by_value {
+      // The wrapper JSON.stringified the isomorphic wire shape so
+      // CDP just ships a string back. `result.value` is that string;
+      // JSON.parse it and hand to the SerializedValue deserializer.
+      // `null` (from `undefined` sentinel) maps to
+      // `SerializedValue::Special(Undefined)`.
+      let wire = result_obj.get("value").cloned().unwrap_or(serde_json::Value::Null);
+      let parsed: crate::protocol::SerializedValue = match wire {
+        serde_json::Value::Null => crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined),
+        serde_json::Value::String(ref s) => {
+          let inner: serde_json::Value =
+            serde_json::from_str(s).map_err(|e| format!("call_utility_evaluate: parse inner JSON: {e}"))?;
+          serde_json::from_value(inner).map_err(|e| format!("call_utility_evaluate: parse result: {e}"))?
+        },
+        other => serde_json::from_value(other).map_err(|e| format!("call_utility_evaluate: parse result: {e}"))?,
+      };
+      Ok(crate::js_handle::EvaluateResult::Value(parsed))
+    } else {
+      let obj_id = result_obj
+        .get("objectId")
+        .and_then(|v| v.as_str())
+        .ok_or("call_utility_evaluate: result has no objectId in evaluateHandle mode")?;
+      Ok(crate::js_handle::EvaluateResult::Handle(
+        crate::js_handle::HandleRemote::Cdp(Arc::from(obj_id)),
+      ))
+    }
   }
 
   // ---- Frames ----

@@ -1533,6 +1533,107 @@ fn test_script_handle_lifecycle(c: &mut McpClient) {
   assert_eq!(v, json!(true), "asElement was not null in phase C: {v}");
 }
 
+// Task 1.3 phase D — page.evaluate(fn, arg) + evaluateHandle(fn) +
+// handle.evaluate(fn). Rule 9 covers all four backends via QuickJS
+// `run_script` (CDP + BiDi go through callFunctionOn / callFunction
+// with remote references; WebKit inlines the call via the shared
+// `window.__wr` registry).
+fn test_script_evaluate_fn_and_handle(c: &mut McpClient) {
+  c.nav("<button id='primary'>ok</button>");
+
+  // page.evaluateWithArg(fn, primitive) — function-call semantics.
+  let v = c.script_value("return await page.evaluateWithArg('x => x + 1', 41);");
+  assert_eq!(v, json!(42), "primitive arg round-trip: {v}");
+
+  // page.evaluateWithArg(fn, object) — JSON round-trip.
+  let v = c.script_value("return await page.evaluateWithArg('o => o.a + o.b', {a: 2, b: 3});");
+  assert_eq!(v, json!(5), "object arg round-trip: {v}");
+
+  // page.evaluateWithArg(fn, null) — no-arg function-call with null.
+  let v = c.script_value("return await page.evaluateWithArg('() => 7', null);");
+  assert_eq!(v, json!(7), "null-arg call: {v}");
+
+  // page.evaluateHandleWithArg — returns a live JSHandle.
+  let v = c.script_value(
+    "const h = await page.evaluateHandleWithArg('() => ({x: 42})', null);\
+     const disposed = h.isDisposed;\
+     await h.dispose();\
+     return {disposed_before: disposed, disposed_after: h.isDisposed};",
+  );
+  assert_eq!(v["disposed_before"], json!(false));
+  assert_eq!(v["disposed_after"], json!(true));
+
+  // handle.evaluateWithArg passes the handle as arg[0].
+  let v = c.script_value(
+    "const h = await page.evaluateHandleWithArg('() => document.body', null);\
+     const tag = await h.evaluateWithArg('el => el.tagName', null);\
+     await h.dispose();\
+     return tag;",
+  );
+  assert_eq!(v, json!("BODY"), "handle.evaluate: {v}");
+
+  // ElementHandle.evaluateWithArg routes through its JSHandle.
+  let v = c.script_value(
+    "const eh = await page.querySelector('button#primary');\
+     const tag = await eh.evaluateWithArg('el => el.tagName', null);\
+     await eh.dispose();\
+     return tag;",
+  );
+  assert_eq!(v, json!("BUTTON"), "ElementHandle.evaluate: {v}");
+
+  // Disposed-handle use raises the Playwright 'disposed' error.
+  let v = c.script_value(
+    "const eh = await page.querySelector('button#primary');\
+     const jh = eh.asJSHandle();\
+     await eh.dispose();\
+     let threw = false;\
+     let msg = '';\
+     try { await jh.evaluateWithArg('el => el.tagName', null); }\
+     catch (e) { threw = true; msg = String(e.message || e); }\
+     return {threw, hasDisposedWord: msg.indexOf('disposed') >= 0};",
+  );
+  assert_eq!(v["threw"], json!(true), "disposed-use threw?: {v}");
+  assert_eq!(
+    v["hasDisposedWord"],
+    json!(true),
+    "disposed error mentions 'disposed': {v}"
+  );
+}
+
+// Phase D — rich-type round-trip via the isomorphic wire. Exercised
+// through `evaluateWithArgWire` which bypasses the JSON-like
+// lowering and returns the raw tagged object. Proves Playwright's
+// serializer round-trips every wire variant end-to-end on every
+// backend.
+fn test_script_evaluate_rich_types(c: &mut McpClient) {
+  c.nav("<div></div>");
+
+  // Date → {d: '<iso>'}
+  let v =
+    c.script_value("return await page.evaluateWithArgWire(\"() => new Date('2024-06-01T00:00:00.000Z')\", null);");
+  assert_eq!(v, json!({"d": "2024-06-01T00:00:00.000Z"}), "Date wire round-trip: {v}");
+
+  // RegExp → {r: {p, f}}
+  let v = c.script_value("return await page.evaluateWithArgWire(\"() => /foo.*bar/gi\", null);");
+  assert_eq!(v, json!({"r": {"p": "foo.*bar", "f": "gi"}}), "RegExp wire: {v}");
+
+  // NaN → {v: 'NaN'}
+  let v = c.script_value("return await page.evaluateWithArgWire('() => NaN', null);");
+  assert_eq!(v, json!({"v": "NaN"}), "NaN wire: {v}");
+
+  // Infinity → {v: 'Infinity'}
+  let v = c.script_value("return await page.evaluateWithArgWire('() => Infinity', null);");
+  assert_eq!(v, json!({"v": "Infinity"}), "Infinity wire: {v}");
+
+  // BigInt → {bi: '<digits>'}
+  let v = c.script_value("return await page.evaluateWithArgWire('() => 9007199254740993n', null);");
+  assert_eq!(v, json!({"bi": "9007199254740993"}), "BigInt wire: {v}");
+
+  // undefined → {v: 'undefined'}
+  let v = c.script_value("return await page.evaluateWithArgWire('() => undefined', null);");
+  assert_eq!(v, json!({"v": "undefined"}), "undefined wire: {v}");
+}
+
 // WebKit-specific Rule-9 probe: proves Op::ReleaseRef actually reached
 // the host and deleted from `window.__wr`. CDP's Runtime.releaseObject
 // and BiDi's script.disown are not observable from page-side JS without
@@ -2078,6 +2179,10 @@ fn run_all_tests(backend: &str) {
   // successful `dispose()` call but have no page-observable side
   // effect until phase D's use-after-dispose test).
   run_webkit!(test_script_handle_lifecycle_webkit_observable);
+  // Task 1.3 phase D — page.evaluate(fn, arg) + evaluateHandle + rich
+  // type round-trip. Rule 9 covers all 4 backends.
+  run!(test_script_evaluate_fn_and_handle);
+  run!(test_script_evaluate_rich_types);
   run!(test_script_click_options);
   run!(test_script_action_timeout);
   run!(test_script_tap_native);

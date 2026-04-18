@@ -52,6 +52,28 @@ pub enum HandleRemote {
   WebKit(u64),
 }
 
+/// Outcome of calling the utility script's `evaluate()` method through
+/// one of the backends. When the caller requested `returnByValue=true`
+/// (or Playwright parity's `page.evaluate(fn, arg)`), the backend parses
+/// the returned `RemoteObject.value` into a [`Value`] variant.
+/// When `returnByValue=false` (Playwright's `page.evaluateHandle`), the
+/// remote object is retained and a [`Handle`] variant surfaces the
+/// backend ref. Either way, handles owned by the page are the caller's
+/// to dispose.
+#[derive(Debug, Clone)]
+pub enum EvaluateResult {
+  /// The utility script ran with `returnByValue=true`; the page-side
+  /// `UtilityScript.jsonValue` serialised the result back through the
+  /// isomorphic wire format. Exceptions inside the user function
+  /// surface as [`crate::error::FerriError::Evaluation`] from the
+  /// enclosing backend call.
+  Value(crate::protocol::SerializedValue),
+  /// The utility script ran with `returnByValue=false`; the result is a
+  /// retained remote object addressable via [`HandleRemote`]. Callers
+  /// typically wrap this in a [`JSHandle`] / [`crate::element_handle::ElementHandle`].
+  Handle(HandleRemote),
+}
+
 impl HandleRemote {
   /// Convert to the serialization-boundary [`HandleId`] form used by the
   /// protocol wire serializer. The two types exist separately so the
@@ -169,6 +191,80 @@ impl JSHandle {
       self.disposed.store(false, Ordering::SeqCst);
     }
     result
+  }
+
+  /// Playwright: `jsHandle.evaluate(pageFunction, arg?): Promise<R>`.
+  /// Runs `fn_source` on the page with this handle's remote as the
+  /// first argument — Playwright's `handle.evaluate(el => el.tagName)`
+  /// semantic.
+  ///
+  /// Phase-D MVP: the user's `arg` parameter is currently ignored.
+  /// Multi-arg support (prepending the handle before a user arg) is
+  /// a straightforward extension of the utility-script call path —
+  /// bump `argCount` to 2 and push a second serialized value into
+  /// the argument list — and is scheduled alongside Phase-E's
+  /// `ElementHandle` methods.
+  ///
+  /// # Errors
+  ///
+  /// Forwards backend error on protocol failure / page-side exception,
+  /// and [`crate::error::FerriError::TargetClosed`] when this handle
+  /// is already disposed.
+  pub async fn evaluate_with_arg(
+    &self,
+    fn_source: &str,
+    _user_arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::protocol::SerializedValue> {
+    if self.is_disposed() {
+      return Err(disposed_error());
+    }
+    let arg = crate::protocol::SerializedArgument {
+      value: crate::protocol::SerializedValue::handle(0),
+      handles: vec![self.remote.to_handle_id()],
+    };
+    let result = self
+      .any_page()
+      .call_utility_evaluate(fn_source, &arg, None, is_function, true, None)
+      .await?;
+    match result {
+      EvaluateResult::Value(v) => Ok(v),
+      EvaluateResult::Handle(_) => Err(crate::error::FerriError::Evaluation(
+        "JSHandle::evaluate_with_arg: backend returned handle in returnByValue=true mode".into(),
+      )),
+    }
+  }
+
+  /// Playwright: `jsHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  /// Same wire path as [`Self::evaluate_with_arg`] but retains the
+  /// result on the page and hands back a fresh [`JSHandle`].
+  ///
+  /// # Errors
+  ///
+  /// See [`Self::evaluate_with_arg`].
+  pub async fn evaluate_handle_with_arg(
+    &self,
+    fn_source: &str,
+    _user_arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<JSHandle> {
+    if self.is_disposed() {
+      return Err(disposed_error());
+    }
+    let arg = crate::protocol::SerializedArgument {
+      value: crate::protocol::SerializedValue::handle(0),
+      handles: vec![self.remote.to_handle_id()],
+    };
+    let result = self
+      .any_page()
+      .call_utility_evaluate(fn_source, &arg, None, is_function, false, None)
+      .await?;
+    match result {
+      EvaluateResult::Handle(remote) => Ok(JSHandle::new(Arc::clone(&self.page), remote)),
+      EvaluateResult::Value(_) => Err(crate::error::FerriError::Evaluation(
+        "JSHandle::evaluate_handle_with_arg: backend returned value in returnByValue=false mode".into(),
+      )),
+    }
   }
 
   /// Return this handle as an `ElementHandle` if its remote object is a

@@ -134,6 +134,81 @@ for (const backend of BACKENDS) {
       await eh!.dispose();
     });
 
+    // ── Phase D: evaluate(fn, arg) + evaluateHandle ──
+
+    it("page.evaluateWithArg runs fn with primitive arg", async () => {
+      const result = await page.evaluateWithArg("x => x + 1", 41);
+      expect(result).toBe(42);
+    });
+
+    it("page.evaluateWithArg accepts no arg", async () => {
+      const result = await page.evaluateWithArg("() => 7", null);
+      expect(result).toBe(7);
+    });
+
+    it("page.evaluateWithArg runs fn with object arg", async () => {
+      const result = await page.evaluateWithArg("o => o.x + o.y", { x: 3, y: 4 });
+      expect(result).toBe(7);
+    });
+
+    it("page.evaluateWithArg runs fn with array arg (roundtrip via isomorphic wire)", async () => {
+      const result = await page.evaluateWithArg(
+        "a => a.reduce((s, n) => s + n, 0)",
+        [1, 2, 3, 4]
+      );
+      expect(result).toBe(10);
+    });
+
+    it("page.evaluateWithArgWire surfaces rich types (Date) via wire shape", async () => {
+      // Date has no JSON form; evaluateWithArgWire returns the
+      // isomorphic wire shape so callers can pluck the ISO string.
+      const wire = await page.evaluateWithArgWire(
+        "() => new Date('2024-06-01T00:00:00.000Z')",
+        null
+      );
+      expect(wire).toEqual({ d: "2024-06-01T00:00:00.000Z" });
+    });
+
+    it("page.evaluateHandleWithArg returns a live JSHandle", async () => {
+      const handle = await page.evaluateHandleWithArg("() => document.body", null);
+      expect(handle.isDisposed).toBe(false);
+      await handle.dispose();
+      expect(handle.isDisposed).toBe(true);
+    });
+
+    it("handle.evaluateWithArg runs fn with the handle as `this`/arg", async () => {
+      const handle = await page.evaluateHandleWithArg("() => document.body", null);
+      const tagName = await handle.evaluateWithArg("el => el.tagName", null);
+      expect(tagName).toBe("BODY");
+      await handle.dispose();
+    });
+
+    it("ElementHandle.evaluateWithArg delegates through the JSHandle path", async () => {
+      const eh = await page.querySelector("button#primary");
+      expect(eh).not.toBeNull();
+      const tag = await eh!.evaluateWithArg("el => el.tagName", null);
+      expect(tag).toBe("BUTTON");
+      await eh!.dispose();
+    });
+
+    it("evaluate on a disposed handle raises", async () => {
+      const eh = await page.querySelector("button#primary");
+      expect(eh).not.toBeNull();
+      const jh = eh!.asJsHandle();
+      await eh!.dispose();
+      // Both the ElementHandle and its JSHandle companion should
+      // refuse subsequent evaluate calls with the disposed error —
+      // Playwright contract.
+      let threw = false;
+      try {
+        await jh.evaluateWithArg("el => el.tagName", null);
+      } catch (e: any) {
+        threw = true;
+        expect(String(e.message)).toContain("disposed");
+      }
+      expect(threw).toBe(true);
+    });
+
     if (backend === "webkit") {
       it("WebKit Op::ReleaseRef observably shrinks window.__wr", async () => {
         // WebKit keeps all live element handles in a per-page `window.__wr`

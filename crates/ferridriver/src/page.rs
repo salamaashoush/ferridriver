@@ -426,6 +426,71 @@ impl Page {
     }
   }
 
+  // ── evaluate(fn, arg) (Playwright parity — task 1.3 phase D) ─────
+
+  /// Playwright's `page.evaluate(pageFunction, arg?)` — runs a JS
+  /// function in the page with `arg` serialised through the
+  /// isomorphic wire protocol. Returns the function's result as a
+  /// [`crate::protocol::SerializedValue`] so every rich type
+  /// (`NaN`, `Date`, `RegExp`, `BigInt`, typed arrays, …) round-trips
+  /// losslessly.
+  ///
+  /// The `is_function` hint mirrors Playwright's auto-detect: when
+  /// `None`, the page side decides from the evaluated expression —
+  /// if it evaluates to a function, the function is called with
+  /// `arg`; otherwise the expression's value is returned directly.
+  /// Pass `Some(true)` to force function-call semantics and `Some(false)`
+  /// to force expression-only.
+  ///
+  /// # Errors
+  ///
+  /// Returns a [`crate::error::FerriError`] on page-side exception,
+  /// protocol failure, or a disposed handle in `arg.handles`.
+  pub async fn evaluate_with_arg(
+    self: &Arc<Self>,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::protocol::SerializedValue> {
+    let result = self
+      .inner
+      .call_utility_evaluate(fn_source, &arg, None, is_function, true, None)
+      .await?;
+    match result {
+      crate::js_handle::EvaluateResult::Value(v) => Ok(v),
+      crate::js_handle::EvaluateResult::Handle(_) => Err(crate::error::FerriError::Evaluation(
+        "evaluate_with_arg: backend returned handle but returnByValue=true was requested".into(),
+      )),
+    }
+  }
+
+  /// Playwright's `page.evaluateHandle(pageFunction, arg?)` — same
+  /// wire path as [`Self::evaluate_with_arg`] but the result is
+  /// retained on the page and returned as a [`crate::js_handle::JSHandle`]
+  /// that the caller owns.
+  ///
+  /// # Errors
+  ///
+  /// Returns a [`crate::error::FerriError`] on page-side exception or
+  /// protocol failure.
+  pub async fn evaluate_handle_with_arg(
+    self: &Arc<Self>,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    let result = self
+      .inner
+      .call_utility_evaluate(fn_source, &arg, None, is_function, false, None)
+      .await?;
+    match result {
+      crate::js_handle::EvaluateResult::Handle(remote) => Ok(crate::js_handle::JSHandle::new(Arc::clone(self), remote)),
+      crate::js_handle::EvaluateResult::Value(_) => Err(crate::error::FerriError::Evaluation(
+        "evaluate_handle_with_arg: backend returned value but returnByValue=false was requested".into(),
+      )),
+    }
+  }
+
   // ── Action methods (delegate to mainFrame — Playwright parity) ─────
   //
   // Mirrors `/tmp/playwright/packages/playwright-core/src/client/page.ts:658+`:

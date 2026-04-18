@@ -48,6 +48,76 @@ pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>
   serde_json::from_str(&json).map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
 }
 
+// ── evaluate(fn, arg) wire bridge (Phase D) ───────────────────────────
+
+/// Lower a QuickJS JS argument into a
+/// [`ferridriver::protocol::SerializedArgument`] ready for
+/// `page.evaluate(fn, arg)` / `page.evaluateHandle(fn, arg)` etc.
+///
+/// Phase-D MVP covers JSON-expressible values (primitives, plain
+/// arrays, plain objects). `undefined` / absent maps to the utility
+/// script's `{v: "undefined"}` sentinel; `null` maps to `{v: "null"}`.
+///
+/// Future phases extend this to detect `JSHandle` / `ElementHandle`
+/// class instances and emit the `{h: idx}` reference + the backend
+/// [`ferridriver::protocol::HandleId`] into the `handles` slot.
+pub fn quickjs_arg_to_serialized<'js>(
+  ctx: &Ctx<'js>,
+  value: Option<Value<'js>>,
+) -> rquickjs::Result<ferridriver::protocol::SerializedArgument> {
+  use ferridriver::protocol::{SerializationContext, SerializedArgument, SerializedValue, SpecialValue};
+
+  let v = match value {
+    Some(v) if !v.is_undefined() => v,
+    _ => {
+      return Ok(SerializedArgument {
+        value: SerializedValue::Special(SpecialValue::Undefined),
+        handles: Vec::new(),
+      });
+    },
+  };
+
+  if v.is_null() {
+    return Ok(SerializedArgument {
+      value: SerializedValue::Special(SpecialValue::Null),
+      handles: Vec::new(),
+    });
+  }
+
+  let json: serde_json::Value = serde_from_js(ctx, v)?;
+  let mut alloc = SerializationContext::default();
+  Ok(SerializedArgument {
+    value: SerializedValue::from_json(&json, &mut alloc),
+    handles: Vec::new(),
+  })
+}
+
+/// Convert a [`ferridriver::protocol::SerializedValue`] into a QuickJS
+/// JS value. Rich types (`Date`, `RegExp`, `BigInt`, typed arrays)
+/// that have no JSON form surface as `null` in this phase-D MVP
+/// helper — callers that need lossless round-trip go through
+/// [`page.evaluateWithArgWire`] which hands back the raw wire shape.
+pub fn serialized_value_to_quickjs<'js>(
+  ctx: &Ctx<'js>,
+  value: &ferridriver::protocol::SerializedValue,
+) -> rquickjs::Result<Value<'js>> {
+  match value.to_json_like() {
+    Some(json) => json_value_to_quickjs(ctx, &json),
+    None => Ok(Value::new_null(ctx.clone())),
+  }
+}
+
+/// Convert a `serde_json::Value` into a QuickJS `Value` via
+/// `JSON.parse(JSON.stringify(...))`. Small helper used by the
+/// phase-D `evaluateWithArg*` return path.
+pub fn json_value_to_quickjs<'js>(ctx: &Ctx<'js>, value: &serde_json::Value) -> rquickjs::Result<Value<'js>> {
+  let serialised = serde_json::to_string(value)
+    .map_err(|e| rquickjs::Error::new_from_js_message("json", "serialize", e.to_string()))?;
+  let json_global: Object<'js> = ctx.globals().get("JSON")?;
+  let parse: Function<'js> = json_global.get("parse")?;
+  parse.call((serialised,))
+}
+
 /// Shape of a JS `{ x, y }` point passed as `position` in click-family
 /// options. Deserialised out of the raw `ClickOptions` JS object.
 #[derive(serde::Deserialize, Debug, Default, Clone, Copy)]

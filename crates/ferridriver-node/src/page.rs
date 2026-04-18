@@ -6,10 +6,37 @@ use crate::types::{
   DragAndDropOptions, GotoOptions, MetricData, ResponseData, RoleOptions, ScreenshotOptions, TextOptions,
   ViewportConfig, WaitOptions,
 };
+use ferridriver::protocol::{SerializationContext, SerializedArgument, SerializedValue, SpecialValue};
 use napi::Result;
 use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
 use std::sync::{Arc, Mutex};
+
+/// Lower a JSON-expressible NAPI argument into a
+/// [`SerializedArgument`] ready for the core's `evaluate_with_arg` /
+/// `evaluate_handle_with_arg` path. `None` becomes an `undefined`
+/// sentinel with empty handles; any other JSON value is walked through
+/// [`SerializedValue::from_json`].
+///
+/// Phase-D MVP: rich types (`Date`, `RegExp`, `BigInt`, typed arrays,
+/// `JSHandle` references) are not detected yet — callers pass those
+/// through their Playwright-typed counterparts once the detection
+/// layer is bolted on.
+pub(crate) fn build_serialized_argument(arg: Option<serde_json::Value>) -> SerializedArgument {
+  match arg {
+    None => SerializedArgument {
+      value: SerializedValue::Special(SpecialValue::Undefined),
+      handles: Vec::new(),
+    },
+    Some(v) => {
+      let mut ctx = SerializationContext::default();
+      SerializedArgument {
+        value: SerializedValue::from_json(&v, &mut ctx),
+        handles: Vec::new(),
+      }
+    },
+  }
+}
 
 /// High-level page API, mirrors Playwright's Page interface.
 #[napi]
@@ -578,6 +605,67 @@ impl Page {
       .evaluate_str(&expression)
       .await
       .map_err(napi::Error::from_reason)
+  }
+
+  /// Playwright: `page.evaluate(pageFunction, arg?)` — function-call
+  /// variant. Serialises `arg` through the isomorphic wire protocol
+  /// and returns the function's result as a JSON-expressible value.
+  /// Rich types (Date / RegExp / BigInt / typed arrays / ...) that
+  /// have no native JSON form surface as `null` for the phase-D
+  /// MVP; callers needing lossless round-trip can use
+  /// [`Self::evaluate_with_arg_wire`] which returns the raw
+  /// isomorphic wire shape.
+  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
+  pub async fn evaluate_with_arg(
+    &self,
+    fn_source: String,
+    arg: Option<serde_json::Value>,
+  ) -> Result<Option<serde_json::Value>> {
+    let serialized = build_serialized_argument(arg);
+    let result = self
+      .inner
+      .evaluate_with_arg(&fn_source, serialized, Some(true))
+      .await
+      .into_napi()?;
+    Ok(result.to_json_like())
+  }
+
+  /// Playwright: `page.evaluate(pageFunction, arg?)` — returns the
+  /// raw isomorphic wire shape so rich types (Date / RegExp / BigInt
+  /// / typed arrays / ...) survive the round-trip. Phase-D MVP
+  /// escape hatch until the NAPI boundary learns to re-hydrate each
+  /// wire tag into its native JS value.
+  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
+  pub async fn evaluate_with_arg_wire(
+    &self,
+    fn_source: String,
+    arg: Option<serde_json::Value>,
+  ) -> Result<serde_json::Value> {
+    let serialized = build_serialized_argument(arg);
+    let result = self
+      .inner
+      .evaluate_with_arg(&fn_source, serialized, Some(true))
+      .await
+      .into_napi()?;
+    serde_json::to_value(&result).map_err(|e| napi::Error::from_reason(e.to_string()))
+  }
+
+  /// Playwright: `page.evaluateHandle(pageFunction, arg?)` — retains
+  /// the result on the page and returns a `JSHandle` the caller
+  /// owns.
+  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
+  pub async fn evaluate_handle_with_arg(
+    &self,
+    fn_source: String,
+    arg: Option<serde_json::Value>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    let serialized = build_serialized_argument(arg);
+    let handle = self
+      .inner
+      .evaluate_handle_with_arg(&fn_source, serialized, Some(true))
+      .await
+      .into_napi()?;
+    Ok(crate::js_handle::JSHandle::wrap(handle))
   }
 
   // ── Waiting ─────────────────────────────────────────────────────────────
