@@ -92,9 +92,16 @@ impl McpServer {
     let s = sess(p.session.as_opt());
     let _guard = self.session_guard(s).await;
     let page = Box::pin(self.page(s)).await?;
-    let result = page.evaluate(p.expression.as_str()).await.map_err(Self::err)?;
-    let val = result.map_or_else(
-      || "undefined".to_string(),
+    let result = page
+      .evaluate(
+        p.expression.as_str(),
+        ferridriver::protocol::SerializedArgument::default(),
+        None,
+      )
+      .await
+      .map_err(Self::err)?;
+    let val = result.to_json_like().map_or_else(
+      || result.as_string_lossy(),
       |v| serde_json::to_string_pretty(&v).unwrap_or_else(|_| v.to_string()),
     );
     Ok(CallToolResult::success(vec![Content::text(val)]))

@@ -140,7 +140,10 @@ async fn deep_profile() {
     page.locator("#b", None).text_content().await.unwrap();
     text_times.push(t.elapsed());
     let t = Instant::now();
-    page.evaluate("1+1").await.unwrap();
+    page
+      .evaluate("1+1", ferridriver::protocol::SerializedArgument::default(), None)
+      .await
+      .unwrap();
     eval_times.push(t.elapsed());
   }
   println!("      title():                 {:>7.2}ms avg", avg_ms(&title_times));

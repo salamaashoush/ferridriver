@@ -103,7 +103,7 @@ impl Recorder {
       .add_init_script(crate::options::InitScriptSource::Source(RECORDER_JS.into()), None)
       .await?;
     // Also evaluate immediately for the current page.
-    let _ = page.evaluate(RECORDER_JS).await;
+    let _ = page.inner().evaluate(RECORDER_JS).await;
 
     eprintln!("Recording started. Interact with the browser.");
     eprintln!("Press Ctrl+C or close the browser to stop.\n");

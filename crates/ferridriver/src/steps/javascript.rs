@@ -11,7 +11,7 @@ step!(Evaluate {
     example: "When I evaluate \"document.title\"",
     execute(page, caps, _table, _vars) {
         let expr = q(&caps[1]);
-        let result = page.evaluate(expr.as_str()).await?;
+        let result = page.inner().evaluate(expr.as_str()).await?;
         Ok(result)
     }
 });

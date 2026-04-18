@@ -15,7 +15,7 @@ use rquickjs::function::Opt;
 use serde::Deserialize;
 
 use crate::bindings::convert::{
-  FerriResultExt, init_script_from_js, json_value_to_quickjs, quickjs_arg_to_serialized, serde_from_js,
+  FerriResultExt, extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js,
   serialized_value_to_quickjs,
 };
 use crate::bindings::keyboard::KeyboardJs;
@@ -389,60 +389,35 @@ impl PageJs {
     self.query_selector_all(selector).await
   }
 
-  /// Playwright: `page.evaluate(fn, arg?)` — function-call variant.
-  /// Serialises `arg` through the isomorphic wire protocol and returns
-  /// the function's result as a JSON-like value. Rich types that have
-  /// no native JSON form surface as `null` — callers needing lossless
-  /// round-trip use [`Self::evaluateWithArgWire`].
-  #[qjs(rename = "evaluateWithArg")]
-  pub async fn evaluate_with_arg<'js>(
+  /// Playwright: `page.evaluate(pageFunction, arg?): Promise<R>`.
+  /// `pageFunction` accepts a string or a JS function; rich return
+  /// types (`Date` / `RegExp` / `BigInt` / `URL` / `Error` / typed
+  /// arrays / `NaN` / `±Infinity` / `undefined` / `-0`) arrive as
+  /// native JS, matching Playwright's `parseResult`.
+  #[qjs(rename = "evaluate")]
+  pub async fn evaluate<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
-    fn_source: String,
+    page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
     let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let result = self
-      .inner
-      .evaluate_with_arg(&fn_source, serialized, Some(true))
-      .await
-      .into_js()?;
+    let result = self.inner.evaluate(&source, serialized, is_fn).await.into_js()?;
     serialized_value_to_quickjs(&ctx, &result)
   }
 
-  /// Raw isomorphic wire shape variant of [`Self::evaluateWithArg`].
-  #[qjs(rename = "evaluateWithArgWire")]
-  pub async fn evaluate_with_arg_wire<'js>(
+  /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
+  #[qjs(rename = "evaluateHandle")]
+  pub async fn evaluate_handle<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
-    fn_source: String,
-    arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<rquickjs::Value<'js>> {
-    let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let result = self
-      .inner
-      .evaluate_with_arg(&fn_source, serialized, Some(true))
-      .await
-      .into_js()?;
-    let wire = serde_json::to_value(&result)
-      .map_err(|e| rquickjs::Error::new_from_js_message("evaluateWithArgWire", "", &e.to_string()))?;
-    json_value_to_quickjs(&ctx, &wire)
-  }
-
-  /// Playwright: `page.evaluateHandle(fn, arg?)`.
-  #[qjs(rename = "evaluateHandleWithArg")]
-  pub async fn evaluate_handle_with_arg<'js>(
-    &self,
-    ctx: rquickjs::Ctx<'js>,
-    fn_source: String,
+    page_function: rquickjs::Value<'js>,
     arg: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<crate::bindings::js_handle::JSHandleJs> {
+    let (source, is_fn) = extract_page_function(&ctx, page_function)?;
     let serialized = quickjs_arg_to_serialized(&ctx, arg.0)?;
-    let handle = self
-      .inner
-      .evaluate_handle_with_arg(&fn_source, serialized, Some(true))
-      .await
-      .into_js()?;
+    let handle = self.inner.evaluate_handle(&source, serialized, is_fn).await.into_js()?;
     Ok(crate::bindings::js_handle::JSHandleJs::new(handle))
   }
 
@@ -768,20 +743,6 @@ impl PageJs {
   #[qjs(rename = "isChecked")]
   pub async fn is_checked(&self, selector: String) -> rquickjs::Result<bool> {
     self.inner.is_checked(&selector).await.into_js()
-  }
-
-  // ── Evaluation ────────────────────────────────────────────────────────────
-
-  /// Evaluate a JavaScript expression in the page's JS context and return
-  /// the JSON-serialized result.
-  ///
-  /// NOTE (parity gap): core's `evaluate` takes a string. Playwright's
-  /// `evaluate(fn, arg)` function-argument form is not supported yet — see
-  /// `PLAYWRIGHT_COMPAT.md` "Gaps surfaced by scripting bindings" item 1.
-  #[qjs(rename = "evaluate")]
-  pub async fn evaluate(&self, expression: String) -> rquickjs::Result<Option<String>> {
-    let value = self.inner.evaluate(&expression).await.into_js()?;
-    Ok(value.map(|v| serde_json::to_string(&v).unwrap_or_default()))
   }
 
   // ── Mouse / keyboard namespaces (Playwright parity) ──────────────────────

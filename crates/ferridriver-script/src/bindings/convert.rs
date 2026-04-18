@@ -112,30 +112,181 @@ pub fn quickjs_arg_to_serialized<'js>(
   })
 }
 
-/// Convert a [`ferridriver::protocol::SerializedValue`] into a QuickJS
-/// JS value. Rich types (`Date`, `RegExp`, `BigInt`, typed arrays)
-/// that have no JSON form surface as `null` in this phase-D MVP
-/// helper — callers that need lossless round-trip go through
-/// [`page.evaluateWithArgWire`] which hands back the raw wire shape.
+/// Convert a [`ferridriver::protocol::SerializedValue`] into a native
+/// QuickJS JS value — `Date` / `RegExp` / `BigInt` / `URL` / `Error` /
+/// typed arrays / `NaN` / `±Infinity` / `undefined` / `-0` all round-trip
+/// as their native JS form. Mirrors Playwright's `parseSerializedValue`
+/// at `/tmp/playwright/packages/playwright-core/src/protocol/serializers.ts:19`.
 pub fn serialized_value_to_quickjs<'js>(
   ctx: &Ctx<'js>,
   value: &ferridriver::protocol::SerializedValue,
 ) -> rquickjs::Result<Value<'js>> {
-  match value.to_json_like() {
-    Some(json) => json_value_to_quickjs(ctx, &json),
-    None => Ok(Value::new_null(ctx.clone())),
+  let mut refs: rustc_hash::FxHashMap<u32, Value<'js>> = rustc_hash::FxHashMap::default();
+  rehydrate(ctx, value, &mut refs)
+}
+
+fn rehydrate<'js>(
+  ctx: &Ctx<'js>,
+  value: &ferridriver::protocol::SerializedValue,
+  refs: &mut rustc_hash::FxHashMap<u32, Value<'js>>,
+) -> rquickjs::Result<Value<'js>> {
+  use ferridriver::protocol::{ErrorValue, RegExpValue, SerializedValue, SpecialValue};
+
+  match value {
+    SerializedValue::Bool(b) => Ok(Value::new_bool(ctx.clone(), *b)),
+    SerializedValue::Number(n) => {
+      if let Some(i) = f64_as_exact_i32(*n) {
+        Ok(Value::new_int(ctx.clone(), i))
+      } else {
+        Ok(Value::new_number(ctx.clone(), *n))
+      }
+    },
+    SerializedValue::Str(s) => {
+      let js = rquickjs::String::from_str(ctx.clone(), s)?;
+      Ok(js.into_value())
+    },
+    SerializedValue::Special(SpecialValue::Null) => Ok(Value::new_null(ctx.clone())),
+    SerializedValue::Special(SpecialValue::Undefined) => Ok(Value::new_undefined(ctx.clone())),
+    SerializedValue::Special(SpecialValue::NaN) => Ok(Value::new_number(ctx.clone(), f64::NAN)),
+    SerializedValue::Special(SpecialValue::Infinity) => Ok(Value::new_number(ctx.clone(), f64::INFINITY)),
+    SerializedValue::Special(SpecialValue::NegInfinity) => Ok(Value::new_number(ctx.clone(), f64::NEG_INFINITY)),
+    SerializedValue::Special(SpecialValue::NegZero) => Ok(Value::new_number(ctx.clone(), -0.0)),
+    SerializedValue::Date(iso) => construct_global(ctx, "Date", (iso.clone(),)),
+    SerializedValue::Url(url) => construct_global(ctx, "URL", (url.clone(),)),
+    SerializedValue::BigInt(s) => {
+      // BigInt(value) — must be called as function, not constructor.
+      let func: Function<'js> = ctx.globals().get("BigInt")?;
+      func.call((s.clone(),))
+    },
+    SerializedValue::RegExp(RegExpValue { p, f }) => construct_global(ctx, "RegExp", (p.clone(), f.clone())),
+    SerializedValue::Error(ErrorValue { m, n, s }) => {
+      let err: Value<'js> = construct_global(ctx, "Error", (m.clone(),))?;
+      let obj = err
+        .as_object()
+        .ok_or_else(|| rquickjs::Error::new_from_js_message("Error", "", "not an object"))?;
+      obj.set("name", n.clone())?;
+      obj.set("stack", s.clone())?;
+      Ok(err)
+    },
+    SerializedValue::TypedArray(ta) => rehydrate_typed_array(ctx, ta.k, &ta.b),
+    SerializedValue::ArrayBuffer(ab) => {
+      let len = u32::try_from(ab.b.len())
+        .map_err(|_| rquickjs::Error::new_from_js_message("rehydrate", "ArrayBuffer", "length exceeds u32"))?;
+      let buf: Value<'js> = construct_global(ctx, "ArrayBuffer", (len,))?;
+      let view: Value<'js> = construct_global(ctx, "Uint8Array", (buf.clone(),))?;
+      let view_obj = view
+        .as_object()
+        .ok_or_else(|| rquickjs::Error::new_from_js_message("ArrayBuffer", "", "view not an object"))?;
+      for (i, byte) in ab.b.iter().enumerate() {
+        view_obj.set(u32::try_from(i).unwrap_or(u32::MAX), *byte)?;
+      }
+      Ok(buf)
+    },
+    SerializedValue::Array { id, items } => {
+      let arr = rquickjs::Array::new(ctx.clone())?;
+      let arr_value: Value<'js> = arr.clone().into_value();
+      refs.insert(*id, arr_value.clone());
+      for (i, item) in items.iter().enumerate() {
+        let v = rehydrate(ctx, item, refs)?;
+        arr.set(i, v)?;
+      }
+      Ok(arr_value)
+    },
+    SerializedValue::Object { id, entries } => {
+      let obj = Object::new(ctx.clone())?;
+      let obj_value: Value<'js> = obj.clone().into_value();
+      refs.insert(*id, obj_value.clone());
+      for entry in entries {
+        let v = rehydrate(ctx, &entry.v, refs)?;
+        obj.set(entry.k.clone(), v)?;
+      }
+      Ok(obj_value)
+    },
+    SerializedValue::Reference(id) => refs
+      .get(id)
+      .cloned()
+      .ok_or_else(|| rquickjs::Error::new_from_js_message("rehydrate", "ref", format!("unknown back-ref id {id}"))),
+    SerializedValue::Handle(_) => Err(rquickjs::Error::new_from_js_message(
+      "rehydrate",
+      "handle",
+      "bare Handle in return value — use evaluateHandle()",
+    )),
   }
 }
 
-/// Convert a `serde_json::Value` into a QuickJS `Value` via
-/// `JSON.parse(JSON.stringify(...))`. Small helper used by the
-/// phase-D `evaluateWithArg*` return path.
-pub fn json_value_to_quickjs<'js>(ctx: &Ctx<'js>, value: &serde_json::Value) -> rquickjs::Result<Value<'js>> {
-  let serialised = serde_json::to_string(value)
-    .map_err(|e| rquickjs::Error::new_from_js_message("json", "serialize", e.to_string()))?;
-  let json_global: Object<'js> = ctx.globals().get("JSON")?;
-  let parse: Function<'js> = json_global.get("parse")?;
-  parse.call((serialised,))
+fn f64_as_exact_i32(n: f64) -> Option<i32> {
+  if n.is_finite() && n.fract() == 0.0 && n >= f64::from(i32::MIN) && n <= f64::from(i32::MAX) {
+    // SAFETY: bounds-checked above. Direct cast preserves value for integers in i32 range.
+    let trunc = n.trunc();
+    i32::try_from(trunc as i64).ok()
+  } else {
+    None
+  }
+}
+
+fn construct_global<'js, Args>(ctx: &Ctx<'js>, ctor_name: &'static str, args: Args) -> rquickjs::Result<Value<'js>>
+where
+  Args: rquickjs::function::IntoArgs<'js>,
+{
+  let raw: Value<'js> = ctx.globals().get(ctor_name)?;
+  let ctor = raw
+    .try_into_constructor()
+    .map_err(|_| rquickjs::Error::new_from_js_message("construct", ctor_name, "global is not a constructor"))?;
+  ctor.construct(args)
+}
+
+fn rehydrate_typed_array<'js>(
+  ctx: &Ctx<'js>,
+  kind: ferridriver::protocol::TypedArrayKind,
+  bytes: &[u8],
+) -> rquickjs::Result<Value<'js>> {
+  use ferridriver::protocol::TypedArrayKind;
+  // Build the backing ArrayBuffer first (as bytes), then construct the
+  // typed-array view via `new <Kind>Array(buffer)` so each variant
+  // reuses one code path.
+  let len = u32::try_from(bytes.len())
+    .map_err(|_| rquickjs::Error::new_from_js_message("rehydrate", "TypedArray", "length exceeds u32"))?;
+  let ab: Value<'js> = construct_global(ctx, "ArrayBuffer", (len,))?;
+  let view: Value<'js> = construct_global(ctx, "Uint8Array", (ab.clone(),))?;
+  let view_obj = view
+    .as_object()
+    .ok_or_else(|| rquickjs::Error::new_from_js_message("TypedArray", "", "view not an object"))?;
+  for (i, byte) in bytes.iter().enumerate() {
+    view_obj.set(u32::try_from(i).unwrap_or(u32::MAX), *byte)?;
+  }
+  let ctor_name = match kind {
+    TypedArrayKind::I8 => "Int8Array",
+    TypedArrayKind::U8 => "Uint8Array",
+    TypedArrayKind::U8Clamped => "Uint8ClampedArray",
+    TypedArrayKind::I16 => "Int16Array",
+    TypedArrayKind::U16 => "Uint16Array",
+    TypedArrayKind::I32 => "Int32Array",
+    TypedArrayKind::U32 => "Uint32Array",
+    TypedArrayKind::F32 => "Float32Array",
+    TypedArrayKind::F64 => "Float64Array",
+    TypedArrayKind::BI64 => "BigInt64Array",
+    TypedArrayKind::BUI64 => "BigUint64Array",
+  };
+  construct_global(ctx, ctor_name, (ab,))
+}
+
+/// Extract `(fn_source, is_function_hint)` from an evaluate `pageFunction`
+/// arg that can be a JS string or a JS function — matches Playwright's
+/// `String(pageFunction)` + `typeof pageFunction === 'function'` check.
+/// For functions, invokes the engine's `Function.prototype.toString()`
+/// via global `String(...)`.
+pub fn extract_page_function<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<(String, Option<bool>)> {
+  let is_fn = value.is_function();
+  let s: String = if let Some(str_val) = value.clone().into_string() {
+    str_val.to_string()?
+  } else {
+    // For Function / other object: invoke global String(v) to run
+    // ECMA ToString, which calls Function.prototype.toString for
+    // functions (matching Playwright's `String(pageFunction)`).
+    let string_fn: Function<'js> = ctx.globals().get("String")?;
+    string_fn.call((value,))?
+  };
+  Ok((s, Some(is_fn)))
 }
 
 /// Shape of a JS `{ x, y }` point passed as `position` in click-family

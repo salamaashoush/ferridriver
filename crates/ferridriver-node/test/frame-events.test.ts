@@ -97,7 +97,7 @@ for (const backend of CDP_BACKENDS) {
     it("evaluates JS in main frame", async () => {
       await page.setContent("<h1>Main</h1>");
       const main = page.mainFrame()!;
-      const title = await main.evaluateStr("document.querySelector('h1').textContent");
+      const title = await main.evaluate("document.querySelector('h1').textContent");
       expect(title).toBe("Main");
     });
 
@@ -109,7 +109,7 @@ for (const backend of CDP_BACKENDS) {
       await page.waitForTimeout(500);
       const frame = page.frame("child");
       if (frame) {
-        const text = await frame.evaluateStr("document.querySelector('h1')?.textContent || 'none'");
+        const text = await frame.evaluate("document.querySelector('h1')?.textContent || 'none'");
         expect(text).toBe("Child Content");
       }
     });

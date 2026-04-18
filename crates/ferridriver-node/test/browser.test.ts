@@ -99,7 +99,7 @@ for (const backend of BACKENDS) {
     });
 
     it("evaluates JS and returns string", async () => {
-      const result = await page.evaluateStr("document.title");
+      const result = await page.evaluate("document.title");
       expect(result).toContain("Test Page");
     });
 
@@ -356,21 +356,21 @@ for (const backend of BACKENDS) {
 
     it("sets user agent", async () => {
       await page.setUserAgent("FerridriverTest/1.0");
-      const ua = await page.evaluateStr("navigator.userAgent");
+      const ua = await page.evaluate("navigator.userAgent");
       expect(ua).toBe("FerridriverTest/1.0");
     });
 
     it("sets locale", async () => {
       await page.setLocale("de-DE");
       await page.goto(testUrl);
-      const lang = await page.evaluateStr("navigator.language");
+      const lang = await page.evaluate("navigator.language");
       expect(lang).toBe("de-DE");
     });
 
     it("sets timezone", async () => {
       await page.setTimezone("America/New_York");
       await page.goto(testUrl);
-      const tz = await page.evaluateStr(
+      const tz = await page.evaluate(
         "Intl.DateTimeFormat().resolvedOptions().timeZone"
       );
       expect(tz).toBe("America/New_York");
@@ -961,13 +961,13 @@ for (const backend of BACKENDS) {
       await page.waitForSelector("#input");
       const loc = page.locator("#input");
       await loc.focus();
-      const focused = await page.evaluateStr(
+      const focused = await page.evaluate(
         "document.activeElement?.id || ''"
       );
       expect(focused).toBe("input");
 
       await loc.blur();
-      const blurred = await page.evaluateStr(
+      const blurred = await page.evaluate(
         "document.activeElement?.tagName || ''"
       );
       expect(blurred.toLowerCase()).toBe("body");
@@ -1245,7 +1245,7 @@ for (const backend of BACKENDS) {
     it("waitForLoadState accepts state string", async () => {
       await page.goto(testUrl);
       await page.waitForLoadState("domcontentloaded");
-      const ready = await page.evaluateStr("document.readyState");
+      const ready = await page.evaluate("document.readyState");
       expect(ready === "interactive" || ready === "complete").toBe(true);
     });
 
@@ -1257,7 +1257,7 @@ for (const backend of BACKENDS) {
       );
       expect(id.length).toBeGreaterThan(0);
       await page.goto(testUrl);
-      const val = await page.evaluateStr("window.__test_init_napi || 'missing'");
+      const val = await page.evaluate("window.__test_init_napi || 'missing'");
       expect(val).toBe("injected");
       await page.removeInitScript(id);
     });
@@ -1272,8 +1272,8 @@ for (const backend of BACKENDS) {
         { answer: 42, label: "hello" }
       );
       await page.goto(testUrl);
-      const answer = await page.evaluateStr("window.__fd_init_arg.answer");
-      const label = await page.evaluateStr("window.__fd_init_arg.label");
+      const answer = await page.evaluate("window.__fd_init_arg.answer");
+      const label = await page.evaluate("window.__fd_init_arg.label");
       expect(Number(answer)).toBe(42);
       expect(label).toBe("hello");
       await page.removeInitScript(id);
@@ -1284,7 +1284,7 @@ for (const backend of BACKENDS) {
         (window as any).__fd_init_noarg = typeof x;
       });
       await page.goto(testUrl);
-      const ty = await page.evaluateStr("window.__fd_init_noarg");
+      const ty = await page.evaluate("window.__fd_init_noarg");
       expect(ty).toBe("undefined");
       await page.removeInitScript(id);
     });
@@ -1295,7 +1295,7 @@ for (const backend of BACKENDS) {
         (window as any).__fd_init_null = x === null ? "is-null" : typeof x;
       }, null);
       await page.goto(testUrl);
-      const val = await page.evaluateStr("window.__fd_init_null");
+      const val = await page.evaluate("window.__fd_init_null");
       expect(val).toBe("is-null");
       await page.removeInitScript(id);
     });
@@ -1305,7 +1305,7 @@ for (const backend of BACKENDS) {
         content: "window.__fd_init_content = 'from-content';",
       });
       await page.goto(testUrl);
-      const val = await page.evaluateStr("window.__fd_init_content");
+      const val = await page.evaluate("window.__fd_init_content");
       expect(val).toBe("from-content");
       await page.removeInitScript(id);
     });
@@ -1322,7 +1322,7 @@ for (const backend of BACKENDS) {
       try {
         const id = await page.addInitScript({ path: tmpFile });
         await page.goto(testUrl);
-        const val = await page.evaluateStr("window.__fd_init_file");
+        const val = await page.evaluate("window.__fd_init_file");
         expect(val).toBe("from-file");
         await page.removeInitScript(id);
       } finally {
@@ -1355,7 +1355,7 @@ for (const backend of BACKENDS) {
     it("addStyleTag injects inline CSS", async () => {
       await page.setContent('<div id="box">test</div>');
       await page.addStyleTag(undefined, "#box { color: red }");
-      const color = await page.evaluateStr(
+      const color = await page.evaluate(
         "getComputedStyle(document.getElementById('box')).color"
       );
       expect(color).toBe("rgb(255, 0, 0)");
@@ -1466,7 +1466,7 @@ for (const backend of BACKENDS) {
       await page.setContent('<input id="inp" type="text" value="select me">');
       await page.waitForSelector("#inp");
       await page.locator("#inp").selectText();
-      const selected = await page.evaluateStr(
+      const selected = await page.evaluate(
         "window.getSelection().toString()"
       );
       expect(selected).toBe("select me");
@@ -1476,7 +1476,7 @@ for (const backend of BACKENDS) {
 
     it("locator.evaluate runs JS on element", async () => {
       await page.setContent('<h1 id="heading">Hello</h1>');
-      const tag = await page.locator("#heading").evaluate("el.tagName");
+      const tag = await page.locator("#heading").evaluate((el: Element) => el.tagName);
       expect(tag).toBe("H1");
     });
 
@@ -1484,7 +1484,7 @@ for (const backend of BACKENDS) {
       await page.setContent(`
         <ul><li class="item">A</li><li class="item">B</li><li class="item">C</li></ul>
       `);
-      const count = await page.locator("css=.item").evaluateAll("elements.length");
+      const count = await page.locator("css=.item").evaluateAll((els: Element[]) => els.length);
       expect(count).toBe(3);
     });
 

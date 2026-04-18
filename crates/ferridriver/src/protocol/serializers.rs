@@ -515,6 +515,63 @@ impl SerializedValue {
       | Self::Reference(_) => None,
     }
   }
+
+  /// Boolean projection for call sites that expect a `Bool` result. Non-bool
+  /// values return `None` — callers typically `.unwrap_or(false)`.
+  #[must_use]
+  pub fn as_bool(&self) -> Option<bool> {
+    match self {
+      Self::Bool(b) => Some(*b),
+      _ => None,
+    }
+  }
+
+  /// String projection for call sites that expect a `Str` result. Non-string
+  /// values return `None`.
+  #[must_use]
+  pub fn as_str(&self) -> Option<&str> {
+    match self {
+      Self::Str(s) => Some(s.as_str()),
+      _ => None,
+    }
+  }
+
+  /// Number projection. Returns `None` for non-number tags (including `BigInt`).
+  #[must_use]
+  pub fn as_number(&self) -> Option<f64> {
+    match self {
+      Self::Number(n) => Some(*n),
+      _ => None,
+    }
+  }
+
+  /// Array projection — borrows the item slice when this is an `Array`,
+  /// `None` otherwise.
+  #[must_use]
+  pub fn as_array(&self) -> Option<&[SerializedValue]> {
+    match self {
+      Self::Array { items, .. } => Some(items),
+      _ => None,
+    }
+  }
+
+  /// Lossy text projection: `Str` → its content, numbers / booleans /
+  /// `Date` / `Url` / `BigInt` / `RegExp` / `null` → their human-readable
+  /// form, everything else (`undefined`, arrays, objects, handles) →
+  /// empty string. Intended as a migration shim for call sites that
+  /// used to call `Page::evaluate_str(expr)` and expected the raw string
+  /// content without the surrounding JSON quoting.
+  #[must_use]
+  pub fn as_string_lossy(&self) -> String {
+    match self {
+      Self::Str(s) | Self::Date(s) | Self::Url(s) | Self::BigInt(s) => s.clone(),
+      Self::Number(n) => n.to_string(),
+      Self::Bool(b) => b.to_string(),
+      Self::Special(SpecialValue::Null) => "null".to_string(),
+      Self::RegExp(RegExpValue { p, .. }) => p.clone(),
+      _ => String::new(),
+    }
+  }
 }
 
 // ── SerializedValue wire serialization ──────────────────────────────────────

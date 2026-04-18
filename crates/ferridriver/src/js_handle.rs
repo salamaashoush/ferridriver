@@ -296,7 +296,7 @@ impl JSHandle {
   /// Forwards backend error on protocol failure / page-side exception,
   /// and [`crate::error::FerriError::TargetClosed`] when this handle
   /// is already disposed.
-  pub async fn evaluate_with_arg(
+  pub async fn evaluate(
     &self,
     fn_source: &str,
     user_arg: crate::protocol::SerializedArgument,
@@ -313,20 +313,20 @@ impl JSHandle {
     match result {
       EvaluateResult::Value(v) => Ok(v),
       EvaluateResult::Handle(_) => Err(crate::error::FerriError::Evaluation(
-        "JSHandle::evaluate_with_arg: backend returned handle in returnByValue=true mode".into(),
+        "JSHandle::evaluate: backend returned handle in returnByValue=true mode".into(),
       )),
     }
   }
 
   /// Playwright: `jsHandle.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`.
-  /// Same wire path as [`Self::evaluate_with_arg`] but retains the
-  /// result on the page (or inlines primitives as `JSHandleBacking::Value`)
-  /// and hands back a fresh [`JSHandle`].
+  /// Same wire path as [`Self::evaluate`] but retains the result on
+  /// the page (or inlines primitives as `JSHandleBacking::Value`) and
+  /// hands back a fresh [`JSHandle`].
   ///
   /// # Errors
   ///
-  /// See [`Self::evaluate_with_arg`].
-  pub async fn evaluate_handle_with_arg(
+  /// See [`Self::evaluate`].
+  pub async fn evaluate_handle(
     &self,
     fn_source: &str,
     user_arg: crate::protocol::SerializedArgument,
@@ -343,7 +343,7 @@ impl JSHandle {
     match result {
       EvaluateResult::Handle(backing) => Ok(JSHandle::from_backing(Arc::clone(&self.page), backing)),
       EvaluateResult::Value(_) => Err(crate::error::FerriError::Evaluation(
-        "JSHandle::evaluate_handle_with_arg: backend returned value in returnByValue=false mode".into(),
+        "JSHandle::evaluate_handle: backend returned value in returnByValue=false mode".into(),
       )),
     }
   }
@@ -370,7 +370,7 @@ impl JSHandle {
       return Ok(v.clone());
     }
     self
-      .evaluate_with_arg("h => h", crate::protocol::SerializedArgument::default(), Some(true))
+      .evaluate("h => h", crate::protocol::SerializedArgument::default(), Some(true))
       .await
   }
 
@@ -391,7 +391,7 @@ impl JSHandle {
       serde_json::to_string(name).map_err(|e| FerriError::Other(format!("getProperty name escape: {e}")))?;
     let expr = format!("h => h[{escaped}]");
     self
-      .evaluate_handle_with_arg(&expr, crate::protocol::SerializedArgument::default(), Some(true))
+      .evaluate_handle(&expr, crate::protocol::SerializedArgument::default(), Some(true))
       .await
   }
 
@@ -411,7 +411,7 @@ impl JSHandle {
   pub async fn get_properties(&self) -> Result<Vec<(String, JSHandle)>> {
     use crate::protocol::SerializedValue;
     let keys_value = self
-      .evaluate_with_arg(
+      .evaluate(
         "h => (h && typeof h === 'object') ? Object.keys(h) : []",
         crate::protocol::SerializedArgument::default(),
         Some(true),
@@ -460,7 +460,7 @@ impl JSHandle {
       return Ok(None);
     };
     let is_node = self
-      .evaluate_with_arg(
+      .evaluate(
         "h => h instanceof Node",
         crate::protocol::SerializedArgument::default(),
         Some(true),

@@ -1361,40 +1361,108 @@ impl Locator {
     self.all_text_contents().await
   }
 
-  // ── Evaluate ────────────────────────────────────────────────────────────
+  // ── Evaluate (Playwright parity) ─────────────────────────────────────
 
-  /// Evaluate a JS expression with the first matching element as `el`.
-  /// The expression should return a value.
+  /// Playwright: `locator.evaluate(pageFunction, arg?, options?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:129`).
   ///
-  /// ```ignore
-  /// let tag = locator.evaluate("el.tagName").await?;
-  /// ```
+  /// Resolves this locator's element under the auto-wait / retry
+  /// pipeline, then calls `fn(element, arg)` in the page context.
+  /// Disposes the intermediate handle before returning.
   ///
   /// # Errors
   ///
-  /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
-    self.eval_on_element(&format!("return ({expression});")).await
+  /// Returns [`crate::error::FerriError::Timeout`] when the element
+  /// cannot be resolved within the configured timeout, or forwards
+  /// the page-side evaluate error.
+  pub async fn evaluate(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+    options: Option<crate::options::EvaluateOptions>,
+  ) -> Result<crate::protocol::SerializedValue> {
+    let timeout_ms = options.and_then(|o| o.timeout);
+    let fn_source = fn_source.to_string();
+    retry_resolve!(self, timeout_ms, "evaluate", |el, _page| async {
+      let page_arc = Arc::clone(self.frame.page_arc());
+      let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el)
+        .await
+        .map_err(|e| e.to_string())?;
+      let result = handle
+        .as_js_handle()
+        .evaluate(&fn_source, arg.clone(), is_function)
+        .await
+        .map_err(|e| e.to_string());
+      let _ = handle.dispose().await;
+      result
+    })
   }
 
-  /// Evaluate a JS expression with ALL matching elements as `elements` array.
-  /// The expression should return a value.
+  /// Playwright: `locator.evaluateHandle(pageFunction, arg?, options?): Promise<JSHandle>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:138`).
   ///
-  /// ```ignore
-  /// let count = locator.evaluate_all("elements.length").await?;
-  /// let texts = locator.evaluate_all("elements.map(e => e.textContent)").await?;
-  /// ```
+  /// Resolves this locator's element under auto-wait / retry, then calls
+  /// `fn(element, arg)` retaining the result on the page and returning
+  /// it as a [`crate::js_handle::JSHandle`]. The intermediate
+  /// `ElementHandle` is disposed — the returned handle is an independent
+  /// remote reference.
   ///
   /// # Errors
   ///
-  /// Returns an error if selector parsing or JS evaluation fails.
-  pub async fn evaluate_all(&self, expression: &str) -> Result<Option<serde_json::Value>> {
+  /// See [`Self::evaluate`].
+  pub async fn evaluate_handle(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+    options: Option<crate::options::EvaluateOptions>,
+  ) -> Result<crate::js_handle::JSHandle> {
+    let timeout_ms = options.and_then(|o| o.timeout);
+    let fn_source = fn_source.to_string();
+    retry_resolve!(self, timeout_ms, "evaluateHandle", |el, _page| async {
+      let page_arc = Arc::clone(self.frame.page_arc());
+      let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el)
+        .await
+        .map_err(|e| e.to_string())?;
+      let result = handle
+        .as_js_handle()
+        .evaluate_handle(&fn_source, arg.clone(), is_function)
+        .await
+        .map_err(|e| e.to_string());
+      let _ = handle.dispose().await;
+      result
+    })
+  }
+
+  /// Playwright: `locator.evaluateAll(pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:133`).
+  ///
+  /// Resolves every matching element in this locator's frame and calls
+  /// `fn(elements, arg)` with the array as the first argument. Unlike
+  /// [`Self::evaluate`], no retry/auto-wait — empty matches produce an
+  /// empty array (Playwright parity).
+  ///
+  /// # Errors
+  ///
+  /// Forwards page-side evaluate error.
+  pub async fn evaluate_all(
+    &self,
+    fn_source: &str,
+    arg: crate::protocol::SerializedArgument,
+    is_function: Option<bool>,
+  ) -> Result<crate::protocol::SerializedValue> {
     let parsed = selectors::parse(&self.selector)?;
     let parts_json = selectors::build_parts_json(&parsed);
     self.frame.page_arc().inner().ensure_engine_injected().await?;
-    let fd = "window.__fd";
-    let js = format!("(function() {{ var elements = {fd}.selAll({parts_json}); return ({expression}); }})()");
-    self.evaluate_in_frame_js(&js).await
+    let probe = format!("() => window.__fd.selAll({parts_json})");
+    let array_handle = self
+      .frame
+      .evaluate_handle(&probe, crate::protocol::SerializedArgument::default(), Some(true))
+      .await?;
+    let result = array_handle.evaluate(fn_source, arg, is_function).await;
+    let _ = array_handle.dispose().await;
+    result
   }
 
   /// Run a value-returning JS expression in this locator's frame.

@@ -8,6 +8,6 @@ try {
   console.log("setLocale error:", e.message);
 }
 // Try the Playwright approach: set via Network.setUserAgentOverride with acceptLanguage
-const lang = await p.evaluateStr("navigator.language");
+const lang = await p.evaluate("navigator.language");
 console.log("lang:", lang);
 await b.close();

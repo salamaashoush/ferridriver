@@ -596,76 +596,41 @@ impl Page {
 
   // ── Evaluation ──────────────────────────────────────────────────────────
 
-  #[napi]
-  pub async fn evaluate(&self, expression: String) -> Result<Option<serde_json::Value>> {
-    self.inner.evaluate(&expression).await.map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn evaluate_str(&self, expression: String) -> Result<String> {
-    self
-      .inner
-      .evaluate_str(&expression)
-      .await
-      .map_err(napi::Error::from_reason)
-  }
-
-  /// Playwright: `page.evaluate(pageFunction, arg?)` — function-call
-  /// variant. Serialises `arg` through the isomorphic wire protocol
-  /// and returns the function's result as a JSON-expressible value.
-  /// Rich types (Date / RegExp / BigInt / typed arrays / ...) that
-  /// have no native JSON form surface as `null` for the phase-D
-  /// MVP; callers needing lossless round-trip can use
-  /// [`Self::evaluate_with_arg_wire`] which returns the raw
-  /// isomorphic wire shape.
-  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
-  pub async fn evaluate_with_arg(
+  /// Playwright: `page.evaluate(pageFunction, arg?): Promise<R>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:515`).
+  /// Rich types (`Date` / `RegExp` / `BigInt` / `URL` / `Error` / typed
+  /// arrays / `NaN` / `±Infinity` / `undefined` / `-0`) round-trip as
+  /// their native JS form — same as Playwright's `parseResult`.
+  #[napi(
+    ts_args_type = "pageFunction: string | Function, arg?: unknown",
+    ts_return_type = "Promise<unknown>"
+  )]
+  pub async fn evaluate(
     &self,
-    fn_source: String,
+    page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
-  ) -> Result<Option<serde_json::Value>> {
+  ) -> Result<crate::serialize_out::Evaluated> {
     let serialized = build_serialized_argument(arg);
     let result = self
       .inner
-      .evaluate_with_arg(&fn_source, serialized, Some(true))
+      .evaluate(&page_function.source, serialized, page_function.is_function)
       .await
       .into_napi()?;
-    Ok(result.to_json_like())
+    Ok(crate::serialize_out::Evaluated(result))
   }
 
-  /// Playwright: `page.evaluate(pageFunction, arg?)` — returns the
-  /// raw isomorphic wire shape so rich types (Date / RegExp / BigInt
-  /// / typed arrays / ...) survive the round-trip. Phase-D MVP
-  /// escape hatch until the NAPI boundary learns to re-hydrate each
-  /// wire tag into its native JS value.
-  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
-  pub async fn evaluate_with_arg_wire(
+  /// Playwright: `page.evaluateHandle(pageFunction, arg?): Promise<JSHandle>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:529`).
+  #[napi(ts_args_type = "pageFunction: string | Function, arg?: unknown")]
+  pub async fn evaluate_handle(
     &self,
-    fn_source: String,
-    arg: Option<crate::types::NapiEvaluateArg>,
-  ) -> Result<serde_json::Value> {
-    let serialized = build_serialized_argument(arg);
-    let result = self
-      .inner
-      .evaluate_with_arg(&fn_source, serialized, Some(true))
-      .await
-      .into_napi()?;
-    serde_json::to_value(&result).map_err(|e| napi::Error::from_reason(e.to_string()))
-  }
-
-  /// Playwright: `page.evaluateHandle(pageFunction, arg?)` — retains
-  /// the result on the page and returns a `JSHandle` the caller
-  /// owns.
-  #[napi(ts_args_type = "fnSource: string, arg?: unknown")]
-  pub async fn evaluate_handle_with_arg(
-    &self,
-    fn_source: String,
+    page_function: crate::types::NapiPageFunction,
     arg: Option<crate::types::NapiEvaluateArg>,
   ) -> Result<crate::js_handle::JSHandle> {
     let serialized = build_serialized_argument(arg);
     let handle = self
       .inner
-      .evaluate_handle_with_arg(&fn_source, serialized, Some(true))
+      .evaluate_handle(&page_function.source, serialized, page_function.is_function)
       .await
       .into_napi()?;
     Ok(crate::js_handle::JSHandle::wrap(handle))

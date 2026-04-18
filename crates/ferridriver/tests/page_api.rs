@@ -13,6 +13,23 @@ use ferridriver::Browser;
 use ferridriver::backend::BackendKind;
 use ferridriver::options::*;
 
+async fn eval_str(page: &std::sync::Arc<ferridriver::Page>, expr: &str) -> ferridriver::Result<String> {
+  let v = page
+    .evaluate(expr, ferridriver::protocol::SerializedArgument::default(), None)
+    .await?;
+  Ok(v.as_string_lossy())
+}
+
+async fn eval_json(
+  page: &std::sync::Arc<ferridriver::Page>,
+  expr: &str,
+) -> ferridriver::Result<Option<serde_json::Value>> {
+  let v = page
+    .evaluate(expr, ferridriver::protocol::SerializedArgument::default(), None)
+    .await?;
+  Ok(v.to_json_like())
+}
+
 fn data_url(html: &str) -> String {
   format!(
     "data:text/html,{}",
@@ -49,9 +66,9 @@ async fn page_api_tests() {
   assert!(url.starts_with("data:"), "url: {url}");
 
   // ── Evaluate ──
-  let val = page.evaluate("1 + 2").await.unwrap();
+  let val = eval_json(&page, "1 + 2").await.unwrap();
   assert_eq!(val, Some(serde_json::json!(3)));
-  let s = page.evaluate_str("'hello'").await.unwrap();
+  let s = eval_str(&page, "'hello'").await.unwrap();
   assert!(s.contains("hello"), "evaluate_str: {s}");
 
   // ── Locator click ──
@@ -63,8 +80,7 @@ async fn page_api_tests() {
     .await
     .unwrap();
   page.locator("#b", None).click(None).await.unwrap();
-  let t = page
-    .evaluate_str("document.getElementById('b').textContent")
+  let t = eval_str(&page, "document.getElementById('b').textContent")
     .await
     .unwrap();
   assert!(t.contains("clicked"), "locator click: {t}");
@@ -112,7 +128,7 @@ async fn page_api_tests() {
     .fill("a@b.com", None)
     .await
     .unwrap();
-  let v = page.evaluate_str("document.getElementById('e').value").await.unwrap();
+  let v = eval_str(&page, "document.getElementById('e').value").await.unwrap();
   assert!(v.contains("a@b.com"), "get_by_label fill: {v}");
 
   // ── get_by_test_id ──
@@ -259,8 +275,7 @@ async fn page_api_tests() {
   // ── dblclick ──
   page.goto(&data_url("<h1 id='h'>0</h1><button id='b' onclick=\"document.getElementById('h').textContent=Number(document.getElementById('h').textContent)+1\">+</button>"), None).await.unwrap();
   page.locator("#b", None).dblclick(None).await.unwrap();
-  let t = page
-    .evaluate_str("document.getElementById('h').textContent")
+  let t = eval_str(&page, "document.getElementById('h').textContent")
     .await
     .unwrap();
   assert!(t.contains("2"), "dblclick: {t}");
@@ -268,10 +283,10 @@ async fn page_api_tests() {
   // ── focus + blur ──
   page.goto(&data_url("<input id='i'>"), None).await.unwrap();
   page.locator("#i", None).focus().await.unwrap();
-  let active = page.evaluate_str("document.activeElement?.id||''").await.unwrap();
+  let active = eval_str(&page, "document.activeElement?.id||''").await.unwrap();
   assert!(active.contains("i"), "focus: {active}");
   page.locator("#i", None).blur().await.unwrap();
-  let active = page.evaluate_str("document.activeElement?.tagName||''").await.unwrap();
+  let active = eval_str(&page, "document.activeElement?.tagName||''").await.unwrap();
   assert!(!active.contains("INPUT"), "blur: {active}");
 
   // ── select_option ──
@@ -289,7 +304,7 @@ async fn page_api_tests() {
     .select_option(vec![SelectOptionValue::by_label("Banana")], None)
     .await
     .unwrap();
-  let v = page.evaluate_str("document.getElementById('s').value").await.unwrap();
+  let v = eval_str(&page, "document.getElementById('s').value").await.unwrap();
   assert!(v.contains("b"), "select_option: {v}");
 
   // ── Click guard on <select> ──
@@ -677,8 +692,7 @@ async fn add_script_style_tag_tests() {
   // Inline style tag
   page.goto(&data_url("<div id='box'>text</div>"), None).await.unwrap();
   page.add_style_tag(None, Some("#box { color: red }")).await.unwrap();
-  let color = page
-    .evaluate_str("getComputedStyle(document.getElementById('box')).color")
+  let color = eval_str(&page, "getComputedStyle(document.getElementById('box')).color")
     .await
     .unwrap();
   assert_eq!(color, "rgb(255, 0, 0)", "inline style tag should apply: {color}");
@@ -712,10 +726,12 @@ async fn expose_function_tests() {
 
   // Navigate and call the exposed function from page JS
   page.goto(&data_url("<body></body>"), None).await.unwrap();
-  let result = page
-    .evaluate_str("(async () => { const r = await window.double(21); return String(r); })()")
-    .await
-    .unwrap();
+  let result = eval_str(
+    &page,
+    "(async () => { const r = await window.double(21); return String(r); })()",
+  )
+  .await
+  .unwrap();
   assert_eq!(result, "42", "exposed function should return doubled value: {result}");
 
   // Expose a function that concatenates strings
@@ -730,16 +746,14 @@ async fn expose_function_tests() {
     .await
     .unwrap();
 
-  let result = page
-    .evaluate_str("(async () => { return await window.greet('Rust'); })()")
+  let result = eval_str(&page, "(async () => { return await window.greet('Rust'); })()")
     .await
     .unwrap();
   assert_eq!(result, "Hello, Rust!", "greet function should work: {result}");
 
   // Exposed function persists across navigations
   page.goto(&data_url("<body></body>"), None).await.unwrap();
-  let result = page
-    .evaluate_str("(async () => { return String(await window.double(5)); })()")
+  let result = eval_str(&page, "(async () => { return String(await window.double(5)); })()")
     .await
     .unwrap();
   assert_eq!(
@@ -760,15 +774,14 @@ async fn expose_function_tests() {
     .await
     .unwrap();
 
-  let result = page
-    .evaluate_str("(async () => { return String(await window.add(3, 4)); })()")
+  let result = eval_str(&page, "(async () => { return String(await window.add(3, 4)); })()")
     .await
     .unwrap();
   assert_eq!(result, "7", "multi-arg function should work: {result}");
 
   // Remove exposed function
   page.remove_exposed_function("double").await.unwrap();
-  let result = page.evaluate_str("typeof window.double").await.unwrap();
+  let result = eval_str(&page, "typeof window.double").await.unwrap();
   assert_eq!(result, "undefined", "removed function should be gone");
 
   browser.close(None).await.unwrap();
@@ -787,13 +800,13 @@ async fn wait_for_load_state_tests() {
   // "load" state (default)
   page.goto(&data_url("<body>content</body>"), None).await.unwrap();
   page.wait_for_load_state(Some("load")).await.unwrap();
-  let state = page.evaluate_str("document.readyState").await.unwrap();
+  let state = eval_str(&page, "document.readyState").await.unwrap();
   assert_eq!(state, "complete", "should be complete after load state");
 
   // "domcontentloaded" state
   page.goto(&data_url("<body>content</body>"), None).await.unwrap();
   page.wait_for_load_state(Some("domcontentloaded")).await.unwrap();
-  let state = page.evaluate_str("document.readyState").await.unwrap();
+  let state = eval_str(&page, "document.readyState").await.unwrap();
   assert!(
     state == "interactive" || state == "complete",
     "should be at least interactive after domcontentloaded: {state}"
@@ -802,7 +815,7 @@ async fn wait_for_load_state_tests() {
   // None defaults to "load"
   page.goto(&data_url("<body>content</body>"), None).await.unwrap();
   page.wait_for_load_state(None).await.unwrap();
-  let state = page.evaluate_str("document.readyState").await.unwrap();
+  let state = eval_str(&page, "document.readyState").await.unwrap();
   assert_eq!(state, "complete");
 
   // "networkidle" -- page with no pending requests
@@ -826,33 +839,69 @@ async fn locator_evaluate_tests() {
   page.goto(&data_url("<ul><li class='item'>Alpha</li><li class='item'>Beta</li><li class='item'>Gamma</li></ul><h1 id='title'>Hello</h1>"), None).await.unwrap();
 
   // evaluate on single element
-  let tag = page.locator("#title", None).evaluate("el.tagName").await.unwrap();
+  let tag = page
+    .locator("#title", None)
+    .evaluate(
+      "el => el.tagName",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+      None,
+    )
+    .await
+    .unwrap()
+    .to_json_like();
   assert_eq!(tag, Some(serde_json::json!("H1")));
 
-  let text = page.locator("#title", None).evaluate("el.textContent").await.unwrap();
+  let text = page
+    .locator("#title", None)
+    .evaluate(
+      "el => el.textContent",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+      None,
+    )
+    .await
+    .unwrap()
+    .to_json_like();
   assert_eq!(text, Some(serde_json::json!("Hello")));
 
   // evaluate_all on multiple elements
   let count = page
     .locator("css=.item", None)
-    .evaluate_all("elements.length")
+    .evaluate_all(
+      "elements => elements.length",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
-    .unwrap();
+    .unwrap()
+    .to_json_like();
   assert_eq!(count, Some(serde_json::json!(3)));
 
   let texts = page
     .locator("css=.item", None)
-    .evaluate_all("elements.map(function(e){return e.textContent})")
+    .evaluate_all(
+      "elements => elements.map(function(e){return e.textContent})",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
-    .unwrap();
+    .unwrap()
+    .to_json_like();
   assert_eq!(texts, Some(serde_json::json!(["Alpha", "Beta", "Gamma"])));
 
   // evaluate with computed values
   let rect = page
     .locator("#title", None)
-    .evaluate("({w: el.offsetWidth, h: el.offsetHeight})")
+    .evaluate(
+      "el => ({w: el.offsetWidth, h: el.offsetHeight})",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+      None,
+    )
     .await
-    .unwrap();
+    .unwrap()
+    .to_json_like();
   assert!(rect.is_some());
   let r = rect.unwrap();
   assert!(
@@ -901,7 +950,7 @@ async fn locator_set_checked_tap_select_text() {
 
   // select_text
   page.locator("#inp", None).select_text().await.unwrap();
-  let selected = page.evaluate_str("window.getSelection().toString()").await.unwrap();
+  let selected = eval_str(&page, "window.getSelection().toString()").await.unwrap();
   assert_eq!(selected, "select me", "select_text should select all text in input");
 
   // tap -- listens for both touchend (Chrome) and pointerup with touch type (WebKit fallback)
@@ -1065,7 +1114,7 @@ async fn network_interception_tests() {
   page.goto("http://mock.test/mock-page", None).await.unwrap();
   let title = page.title().await.unwrap();
   assert_eq!(title, "Mocked", "navigated page should show mocked content: {title}");
-  let body = page.evaluate_str("document.body.textContent").await.unwrap();
+  let body = eval_str(&page, "document.body.textContent").await.unwrap();
   assert!(
     body.contains("This page is mocked"),
     "body should contain mocked text: {body}"
@@ -1087,10 +1136,12 @@ async fn network_interception_tests() {
     .await
     .unwrap();
 
-  let result = page
-    .evaluate_str("(async () => { const r = await fetch('/api/data'); return await r.text(); })()")
-    .await
-    .unwrap();
+  let result = eval_str(
+    &page,
+    "(async () => { const r = await fetch('/api/data'); return await r.text(); })()",
+  )
+  .await
+  .unwrap();
   assert!(
     result.contains("\"mocked\":true"),
     "API should return mocked JSON: {result}"
@@ -1107,12 +1158,12 @@ async fn network_interception_tests() {
     .await
     .unwrap();
 
-  let result = page
-    .evaluate_str(
-      "(async () => { try { await fetch('/blocked'); return 'ok'; } catch(e) { return 'error:' + e.message; } })()",
-    )
-    .await
-    .unwrap();
+  let result = eval_str(
+    &page,
+    "(async () => { try { await fetch('/blocked'); return 'ok'; } catch(e) { return 'error:' + e.message; } })()",
+  )
+  .await
+  .unwrap();
   assert!(result.starts_with("error:"), "blocked request should throw: {result}");
 
   // 4. Unroute

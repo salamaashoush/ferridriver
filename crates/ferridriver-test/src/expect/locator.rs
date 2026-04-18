@@ -150,9 +150,14 @@ impl Expect<'_, Locator> {
       locator_ctx(locator, "toBeFocused", is_not),
       || async move {
         let focused = locator
-          .evaluate("document.activeElement === el")
+          .evaluate(
+            "el => document.activeElement === el",
+            ferridriver::protocol::SerializedArgument::default(),
+            None,
+            None,
+          )
           .await
-          .unwrap_or(None)
+          .ok()
           .and_then(|v| v.as_bool())
           .unwrap_or(false);
         check_bool(focused, is_not, "to be focused")
@@ -171,12 +176,15 @@ impl Expect<'_, Locator> {
       || async move {
         let in_viewport = locator
           .evaluate(
-            "(function() { var r = el.getBoundingClientRect(); \
+            "el => { var r = el.getBoundingClientRect(); \
            return r.top < window.innerHeight && r.bottom > 0 && \
-           r.left < window.innerWidth && r.right > 0; })()",
+           r.left < window.innerWidth && r.right > 0; }",
+            ferridriver::protocol::SerializedArgument::default(),
+            None,
+            None,
           )
           .await
-          .unwrap_or(None)
+          .ok()
           .and_then(|v| v.as_bool())
           .unwrap_or(false);
         check_bool(in_viewport, is_not, "to be in viewport")
@@ -256,9 +264,14 @@ impl Expect<'_, Locator> {
       let expected = expected.clone();
       async move {
         let actual = locator
-          .evaluate("Array.from(el.selectedOptions).map(function(o) { return o.value; })")
+          .evaluate(
+            "el => Array.from(el.selectedOptions).map(function(o) { return o.value; })",
+            ferridriver::protocol::SerializedArgument::default(),
+            None,
+            None,
+          )
           .await
-          .unwrap_or(None)
+          .ok()
           .and_then(|v| {
             v.as_array().map(|arr| {
               arr
@@ -355,13 +368,13 @@ impl Expect<'_, Locator> {
       let prop = prop.clone();
       async move {
         let js = format!(
-          "window.getComputedStyle(el).getPropertyValue('{}')",
+          "el => window.getComputedStyle(el).getPropertyValue('{}')",
           prop.replace('\'', "\\'")
         );
         let actual = locator
-          .evaluate(&js)
+          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None, None)
           .await
-          .unwrap_or(None)
+          .ok()
           .and_then(|v| v.as_str().map(String::from))
           .unwrap_or_default();
         check_text_match(&expected, &actual, is_not, &format!("CSS \"{prop}\""))
@@ -384,9 +397,14 @@ impl Expect<'_, Locator> {
       let expected = expected.clone();
       async move {
         let actual = locator
-          .evaluate("el.getAttribute('role') || el.tagName.toLowerCase()")
+          .evaluate(
+            "el => el.getAttribute('role') || el.tagName.toLowerCase()",
+            ferridriver::protocol::SerializedArgument::default(),
+            None,
+            None,
+          )
           .await
-          .unwrap_or(None)
+          .ok()
           .and_then(|v| v.as_str().map(String::from))
           .unwrap_or_default();
         check_text_match(&expected, &actual, is_not, "role")
@@ -408,16 +426,19 @@ impl Expect<'_, Locator> {
         async move {
           let actual = locator
             .evaluate(
-              "(function() { \
+              "el => { \
               var label = el.getAttribute('aria-label') || \
                 (el.getAttribute('aria-labelledby') ? \
                   (document.getElementById(el.getAttribute('aria-labelledby')) || {}).textContent : null) || \
                 (el.labels && el.labels[0] ? el.labels[0].textContent : null) || ''; \
               return label.trim(); \
-            })()",
+            }",
+              ferridriver::protocol::SerializedArgument::default(),
+              None,
+              None,
             )
             .await
-            .unwrap_or(None)
+            .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
           check_text_match(&expected, &actual, is_not, "accessible name")
@@ -440,15 +461,18 @@ impl Expect<'_, Locator> {
         async move {
           let actual = locator
             .evaluate(
-              "(function() { \
+              "el => { \
               var desc = el.getAttribute('aria-description') || \
                 (el.getAttribute('aria-describedby') ? \
                   (document.getElementById(el.getAttribute('aria-describedby')) || {}).textContent : null) || ''; \
               return desc.trim(); \
-            })()",
+            }",
+              ferridriver::protocol::SerializedArgument::default(),
+              None,
+              None,
             )
             .await
-            .unwrap_or(None)
+            .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
           check_text_match(&expected, &actual, is_not, "accessible description")
@@ -471,17 +495,20 @@ impl Expect<'_, Locator> {
         async move {
           let actual = locator
             .evaluate(
-              "(function() { \
+              "el => { \
               var errId = el.getAttribute('aria-errormessage'); \
               if (errId) { \
                 var errEl = document.getElementById(errId); \
                 return errEl ? errEl.textContent.trim() : ''; \
               } \
               return el.validationMessage || ''; \
-            })()",
+            }",
+              ferridriver::protocol::SerializedArgument::default(),
+              None,
+              None,
             )
             .await
-            .unwrap_or(None)
+            .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
           check_text_match(&expected, &actual, is_not, "accessible error message")
@@ -500,11 +527,11 @@ impl Expect<'_, Locator> {
       let prop_name = prop_name.clone();
       let expected = value.clone();
       async move {
-        let js = format!("JSON.stringify(el['{}'])", prop_name.replace('\'', "\\'"));
+        let js = format!("el => JSON.stringify(el['{}'])", prop_name.replace('\'', "\\'"));
         let actual = locator
-          .evaluate(&js)
+          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None, None)
           .await
-          .unwrap_or(None)
+          .ok()
           .and_then(|v| {
             v.as_str()
               .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok())
@@ -542,12 +569,17 @@ impl Expect<'_, Locator> {
           let _selector = format!("{}:nth-child({})", locator.selector(), i + 1);
           // Use the parent page's evaluate to get text for each child.
           let text = locator
-            .evaluate(&format!(
-              "document.querySelectorAll('{}')[{i}]?.textContent?.trim() || ''",
-              locator.selector().replace('\'', "\\'")
-            ))
+            .evaluate(
+              &format!(
+                "() => document.querySelectorAll('{}')[{i}]?.textContent?.trim() || ''",
+                locator.selector().replace('\'', "\\'")
+              ),
+              ferridriver::protocol::SerializedArgument::default(),
+              None,
+              None,
+            )
             .await
-            .unwrap_or(None)
+            .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
           actuals.push(text);
@@ -595,12 +627,17 @@ impl Expect<'_, Locator> {
         let mut actuals = Vec::with_capacity(count);
         for i in 0..count {
           let text = locator
-            .evaluate(&format!(
-              "document.querySelectorAll('{}')[{i}]?.textContent?.trim() || ''",
-              locator.selector().replace('\'', "\\'")
-            ))
+            .evaluate(
+              &format!(
+                "() => document.querySelectorAll('{}')[{i}]?.textContent?.trim() || ''",
+                locator.selector().replace('\'', "\\'")
+              ),
+              ferridriver::protocol::SerializedArgument::default(),
+              None,
+              None,
+            )
             .await
-            .unwrap_or(None)
+            .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_default();
           actuals.push(text);
@@ -708,8 +745,7 @@ impl Expect<'_, Locator> {
           // Get the accessible name and role of matched elements.
           let aria_tree = locator
             .evaluate(
-              "(() => { \
-              const el = document.querySelector(selector); \
+              "el => { \
               if (!el) return 'EMPTY'; \
               function walk(node, indent) { \
                 let role = node.getAttribute('role') || node.tagName.toLowerCase(); \
@@ -723,10 +759,13 @@ impl Expect<'_, Locator> {
                 return lines; \
               } \
               return walk(el, '').join('\\n'); \
-            })()",
+            }",
+              ferridriver::protocol::SerializedArgument::default(),
+              None,
+              None,
             )
             .await
-            .unwrap_or(None)
+            .ok()
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "EMPTY".into());
 

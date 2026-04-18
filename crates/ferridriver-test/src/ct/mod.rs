@@ -96,7 +96,9 @@ pub async fn mount(
     }})()"#,
   );
 
-  let eval_result = page.evaluate(&js).await;
+  let eval_result = page
+    .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None)
+    .await;
   eval_result.map_err(|e| TestFailure {
     message: format!("mount failed: {e}"),
     stack: None,
@@ -109,9 +111,13 @@ pub async fn mount(
 }
 
 /// Unmount the currently mounted component.
-pub async fn unmount(page: &ferridriver::Page) -> Result<(), TestFailure> {
+pub async fn unmount(page: &std::sync::Arc<ferridriver::Page>) -> Result<(), TestFailure> {
   page
-    .evaluate("() => { if (window.__ferriUnmount) window.__ferriUnmount(); }")
+    .evaluate(
+      "() => { if (window.__ferriUnmount) window.__ferriUnmount(); }",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
     .map_err(|e| TestFailure {
       message: format!("unmount failed: {e}"),

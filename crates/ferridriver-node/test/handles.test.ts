@@ -132,7 +132,7 @@ for (const backend of BACKENDS) {
     });
 
     it("JSHandle.asElement returns null for non-DOM remotes", async () => {
-      const jh = await page.evaluateHandleWithArg("() => ({ not: 'a dom node' })", null);
+      const jh = await page.evaluateHandle("() => ({ not: 'a dom node' })", null);
       const promoted = await jh.asElement();
       expect(promoted).toBeNull();
       await jh.dispose();
@@ -140,57 +140,63 @@ for (const backend of BACKENDS) {
 
     // ── Phase D: evaluate(fn, arg) + evaluateHandle ──
 
-    it("page.evaluateWithArg runs fn with primitive arg", async () => {
-      const result = await page.evaluateWithArg("x => x + 1", 41);
+    it("page.evaluate runs fn with primitive arg", async () => {
+      const result = await page.evaluate((x: number) => x + 1, 41);
       expect(result).toBe(42);
     });
 
-    it("page.evaluateWithArg accepts no arg", async () => {
-      const result = await page.evaluateWithArg("() => 7", null);
+    it("page.evaluate accepts no arg", async () => {
+      const result = await page.evaluate(() => 7);
       expect(result).toBe(7);
     });
 
-    it("page.evaluateWithArg runs fn with object arg", async () => {
-      const result = await page.evaluateWithArg("o => o.x + o.y", { x: 3, y: 4 });
+    it("page.evaluate runs fn with object arg", async () => {
+      const result = await page.evaluate((o: { x: number; y: number }) => o.x + o.y, { x: 3, y: 4 });
       expect(result).toBe(7);
     });
 
-    it("page.evaluateWithArg runs fn with array arg (roundtrip via isomorphic wire)", async () => {
-      const result = await page.evaluateWithArg(
-        "a => a.reduce((s, n) => s + n, 0)",
+    it("page.evaluate runs fn with array arg (roundtrip via isomorphic wire)", async () => {
+      const result = await page.evaluate(
+        (a: number[]) => a.reduce((s, n) => s + n, 0),
         [1, 2, 3, 4]
       );
       expect(result).toBe(10);
     });
 
-    it("page.evaluateWithArgWire surfaces rich types (Date) via wire shape", async () => {
-      // Date has no JSON form; evaluateWithArgWire returns the
-      // isomorphic wire shape so callers can pluck the ISO string.
-      const wire = await page.evaluateWithArgWire(
-        "() => new Date('2024-06-01T00:00:00.000Z')",
-        null
-      );
-      expect(wire).toEqual({ d: "2024-06-01T00:00:00.000Z" });
+    it("page.evaluate rehydrates rich types (Date) to native JS", async () => {
+      // Mirrors Playwright's `parseResult` — Date arrives as a real
+      // `Date` instance, not the wire `{d: iso}` shape.
+      const d = (await page.evaluate(() => new Date("2024-06-01T00:00:00.000Z"))) as Date;
+      expect(d instanceof Date).toBe(true);
+      expect(d.toISOString()).toBe("2024-06-01T00:00:00.000Z");
     });
 
-    it("page.evaluateHandleWithArg returns a live JSHandle", async () => {
-      const handle = await page.evaluateHandleWithArg("() => document.body", null);
+    it("page.evaluate accepts a string expression (Playwright parity)", async () => {
+      // `typeof pageFunction === 'function'` is false for strings, so
+      // the backend evaluates as expression — matches Playwright's
+      // `evaluateExpression({ isFunction: false })` path.
+      const result = await page.evaluate("1 + 1");
+      expect(result).toBe(2);
+    });
+
+    it("page.evaluateHandle returns a live JSHandle", async () => {
+      const handle = await page.evaluateHandle(() => document.body);
       expect(handle.isDisposed).toBe(false);
       await handle.dispose();
       expect(handle.isDisposed).toBe(true);
     });
 
-    it("handle.evaluateWithArg runs fn with the handle as `this`/arg", async () => {
-      const handle = await page.evaluateHandleWithArg("() => document.body", null);
-      const tagName = await handle.evaluateWithArg("el => el.tagName", null);
+    it("handle.evaluate runs fn with the handle as `this`/arg", async () => {
+      const handle = await page.evaluateHandle(() => document.body);
+      const tagName = await handle.evaluate((el: Element) => el.tagName);
       expect(tagName).toBe("BODY");
       await handle.dispose();
     });
 
-    it("ElementHandle.evaluateWithArg delegates through the JSHandle path", async () => {
+    it("ElementHandle.evaluate delegates through the JSHandle path", async () => {
       const eh = await page.querySelector("button#primary");
       expect(eh).not.toBeNull();
-      const tag = await eh!.evaluateWithArg("el => el.tagName", null);
+      const tag = await eh!.evaluate((el: Element) => el.tagName);
       expect(tag).toBe("BUTTON");
       await eh!.dispose();
     });
@@ -330,7 +336,7 @@ for (const backend of BACKENDS) {
       // Playwright contract.
       let threw = false;
       try {
-        await jh.evaluateWithArg("el => el.tagName", null);
+        await jh.evaluate("el => el.tagName", null);
       } catch (e: any) {
         threw = true;
         expect(String(e.message)).toContain("disposed");

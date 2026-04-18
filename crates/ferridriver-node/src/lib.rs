@@ -65,6 +65,7 @@ mod js_handle;
 mod locator;
 mod page;
 mod route;
+mod serialize_out;
 mod step_handle;
 mod test_fixtures;
 mod test_info;

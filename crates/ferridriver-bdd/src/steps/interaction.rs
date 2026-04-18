@@ -121,7 +121,11 @@ async fn uncheck(world: &mut BrowserWorld, selector: String) {
 async fn scroll_down(world: &mut BrowserWorld) {
   world
     .page()
-    .evaluate("window.scrollBy(0, 500)")
+    .evaluate(
+      "window.scrollBy(0, 500)",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
     .map_err(|e| StepError::from(format!("scroll down: {e}")))?;
 }
@@ -130,7 +134,11 @@ async fn scroll_down(world: &mut BrowserWorld) {
 async fn scroll_up(world: &mut BrowserWorld) {
   world
     .page()
-    .evaluate("window.scrollBy(0, -500)")
+    .evaluate(
+      "window.scrollBy(0, -500)",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
     .map_err(|e| StepError::from(format!("scroll up: {e}")))?;
 }

@@ -20,7 +20,7 @@ pub fn test_handle_json_value(c: &mut McpClient) {
   // jsonValue round-trips JSON-expressible values through the utility
   // script's isomorphic serializer.
   let v = c.script_value(
-    "const jh = await page.evaluateHandleWithArg(\"() => ({a: 1, b: 'two', c: [3, 4]})\", null);\
+    "const jh = await page.evaluateHandle(() => ({a: 1, b: 'two', c: [3, 4]}));\
      const v = await jh.jsonValue();\
      await jh.dispose();\
      return v;",
@@ -29,17 +29,22 @@ pub fn test_handle_json_value(c: &mut McpClient) {
   assert_eq!(v["b"], json!("two"), "jsonValue.b: {v}");
   assert_eq!(v["c"], json!([3, 4]), "jsonValue.c: {v}");
 
-  // jsonValueWire preserves the isomorphic wire shape — rich types
-  // (Date, NaN, BigInt, typed arrays) survive here where jsonValue
-  // would drop them to `null`.
+  // jsonValue rehydrates rich types (Date, NaN, BigInt, typed arrays)
+  // into native JS — matching Playwright's `parseResult` in
+  // `/tmp/playwright/packages/playwright-core/src/protocol/serializers.ts:19`.
   let v = c.script_value(
-    "const jh = await page.evaluateHandleWithArg(\"() => ({d: new Date(0), n: NaN})\", null);\
-     const wire = await jh.jsonValueWire();\
+    "const jh = await page.evaluateHandle(() => ({d: new Date(0), n: NaN}));\
+     const v = await jh.jsonValue();\
      await jh.dispose();\
-     return {d_tag: 'd' in wire.o.find(e => e.k === 'd').v, n_tag: wire.o.find(e => e.k === 'n').v.v};",
+     return {d_is_date: v.d instanceof Date, d_iso: v.d.toISOString(), n_is_nan: Number.isNaN(v.n)};",
   );
-  assert_eq!(v["d_tag"], json!(true), "wire preserves Date tag: {v}");
-  assert_eq!(v["n_tag"], json!("NaN"), "wire preserves NaN sentinel: {v}");
+  assert_eq!(v["d_is_date"], json!(true), "jsonValue rehydrates Date: {v}");
+  assert_eq!(
+    v["d_iso"],
+    json!("1970-01-01T00:00:00.000Z"),
+    "Date preserves epoch-zero: {v}"
+  );
+  assert_eq!(v["n_is_nan"], json!(true), "jsonValue rehydrates NaN: {v}");
 }
 
 pub fn test_handle_properties(c: &mut McpClient) {
@@ -50,7 +55,7 @@ pub fn test_handle_properties(c: &mut McpClient) {
   // or an inline primitive (`_value`) — the two shapes round-trip
   // through jsonValue identically.
   let v = c.script_value(
-    "const jh = await page.evaluateHandleWithArg(\"() => ({x: 42, y: 'hi', z: {n: 7}})\", null);\
+    "const jh = await page.evaluateHandle(() => ({x: 42, y: 'hi', z: {n: 7}}));\
      const xh = await jh.getProperty('x');\
      const xv = await xh.jsonValue();\
      const yh = await jh.getProperty('y');\
@@ -69,7 +74,7 @@ pub fn test_handle_properties(c: &mut McpClient) {
   // value-backed; object-valued props are remote-backed. Dispose is
   // a no-op for value-backed handles.
   let v = c.script_value(
-    "const jh = await page.evaluateHandleWithArg(\"() => ({a: 1, b: 2})\", null);\
+    "const jh = await page.evaluateHandle(() => ({a: 1, b: 2}));\
      const props = await jh.getProperties();\
      const keys = Object.keys(props).sort();\
      const a = await props.a.jsonValue();\
@@ -91,7 +96,7 @@ pub fn test_handle_multi_arg_evaluate(c: &mut McpClient) {
   // `javascript.ts:161-163` `evaluate(ctx, true, fn, this, arg)`.
   let v = c.script_value(
     "const eh = await page.querySelector('button#primary');\
-     const out = await eh.evaluateWithArg('(el, suffix) => el.tagName + suffix', '!');\
+     const out = await eh.evaluate((el, suffix) => el.tagName + suffix, '!');\
      await eh.dispose();\
      return out;",
   );
@@ -102,7 +107,7 @@ pub fn test_handle_multi_arg_evaluate(c: &mut McpClient) {
   let v = c.script_value(
     "const body = await page.querySelector('body');\
      const btn = await page.querySelector('button#primary');\
-     const out = await btn.evaluateWithArg('(el, other) => other.contains(el)', body);\
+     const out = await btn.evaluate((el, other) => other.contains(el), body);\
      await btn.dispose(); await body.dispose();\
      return out;",
   );
@@ -115,7 +120,7 @@ pub fn test_element_handle_eval(c: &mut McpClient) {
   // $eval runs `fn` with the first matched descendant as arg.
   let v = c.script_value(
     "const p = await page.querySelector('#parent');\
-     const out = await p.evalOnSelector('button.b', 'el => el.textContent');\
+     const out = await p.$eval('button.b', el => el.textContent);\
      await p.dispose();\
      return out;",
   );
@@ -124,7 +129,7 @@ pub fn test_element_handle_eval(c: &mut McpClient) {
   // $$eval runs `fn` with the array of matches as arg.
   let v = c.script_value(
     "const p = await page.querySelector('#parent');\
-     const out = await p.evalOnSelectorAll('button.b', 'els => els.map(e => e.textContent).join(\"|\")');\
+     const out = await p.$$eval('button.b', els => els.map(e => e.textContent).join('|'));\
      await p.dispose();\
      return out;",
   );
@@ -134,7 +139,7 @@ pub fn test_element_handle_eval(c: &mut McpClient) {
   let v = c.script(
     "const p = await page.querySelector('#parent');\
      try {\
-       const out = await p.evalOnSelector('button.does-not-exist', 'el => el.textContent');\
+       const out = await p.$eval('button.does-not-exist', el => el.textContent);\
        await p.dispose();\
        return {ok: true, out};\
      } catch (e) {\
@@ -151,7 +156,7 @@ pub fn test_element_handle_eval(c: &mut McpClient) {
   // $$eval with no match returns an empty array — not an error.
   let v = c.script_value(
     "const p = await page.querySelector('#parent');\
-     const out = await p.evalOnSelectorAll('button.none', 'els => els.length');\
+     const out = await p.$$eval('button.none', els => els.length);\
      await p.dispose();\
      return out;",
   );

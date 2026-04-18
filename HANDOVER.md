@@ -10,11 +10,8 @@ Everything needed is committed. Next session should read, in order:
 1. `CLAUDE.md` — the Playwright-parity rules and consolidated
    lessons. Authoritative cross-device source.
 2. `PLAYWRIGHT_COMPAT.md` — gap tracker. §1.4 is the next Tier-1
-   item after the consolidation below.
-3. `docs/CONSOLIDATE_EVALUATE_API.md` — the self-contained prompt
-   for the evaluate-API consolidation session. Paste that prompt
-   into a fresh Claude Code run to resume.
-4. This file — block-level commit summary below.
+   item.
+3. This file — block-level commit summary below.
 
 Set up the cloned Playwright at `/tmp/playwright` if it isn't there:
 
@@ -22,129 +19,101 @@ Set up the cloned Playwright at `/tmp/playwright` if it isn't there:
 git clone https://github.com/microsoft/playwright /tmp/playwright
 ```
 
-## Branch state
+## What just landed
 
-`main`, **54 commits ahead** of `origin/main` (recent this block):
+The evaluate-API consolidation is complete. One commit, no
+`PLAYWRIGHT_COMPAT.md` checkboxes flipped.
 
-```
-7cd7a41 feat(core): primitive-value JSHandle backing + Rule-9 tests; tick 1.2 / 1.3
-0b1519f feat(bindings): QuickJS phase-G surface + NAPI/QuickJS handle-arg walker + BiDi non-node wire fix
-843989b docs: task 1.2/1.3 end-of-session snapshot; delete FINISH_TASKS prompt
-828a2bc feat(node): NAPI bindings for new JSHandle + ElementHandle surface
-769ff78 feat(core): ElementHandle $eval, frame accessors, wait helpers, action bridge
-f3d3cdd feat(core): Playwright-shape evaluate primitive + JSHandle value/property/asElement
-```
+Highlights:
 
-## What's landed
+- **Surface now matches Playwright's public API exactly**:
+  `page.evaluate(fn, arg?)`, `page.evaluateHandle(fn, arg?)`,
+  `frame.evaluate` / `frame.evaluateHandle`,
+  `locator.evaluate` / `evaluateHandle` / `evaluateAll`,
+  `jsHandle.evaluate` / `evaluateHandle` / `jsonValue`,
+  `elementHandle.$eval` / `$$eval`. No more `WithArg` suffixes.
+- **`pageFunction` accepts `string | Function` everywhere** (NAPI +
+  QuickJS). Matches Playwright's `String(pageFunction)` +
+  `typeof fn === 'function'` check.
+- **Rehydration to native JS** in NAPI + QuickJS returns: `Date`,
+  `RegExp`, `BigInt`, `URL`, `Error`, typed arrays, `ArrayBuffer`,
+  `NaN`, `±Infinity`, `undefined`, `-0`. Mirrors Playwright's
+  `parseSerializedValue`. All `*Wire` escape-hatch methods deleted.
+- **Utility-eval wrapper is now `async` + `await`s** on every backend
+  (CDP, WebKit, BiDi) so Promise-returning expressions settle before
+  the wrapper JSON.stringify's the result.
+- **Frame gets a native `evaluate` primitive**; Page delegates to
+  main frame as per Playwright.
+- **Locator uses `retry_resolve!` + delegate-to-ElementHandle** so
+  auto-wait is on the evaluate path automatically.
 
-**Tasks 1.2 (ElementHandle) and 1.3 (JSHandle) are `[x]` in
-`PLAYWRIGHT_COMPAT.md`** — full surface shipped on core + NAPI +
-QuickJS, Rule-9 tests on all four backends.
-
-Highlights from the block:
-
-- **Backend evaluate primitive** (`call_utility_evaluate(fn_source,
-  args, handles, frame_id, is_function, return_by_value)`) matches
-  Playwright's `evaluateExpression` exactly. One method per backend,
-  variadic args, no receiver parameter (handles go positional via
-  `{h: 0}` + `handles[0]` — same shape Playwright uses).
-
-- **`JSHandle` dual backing** (`JSHandleBacking::Remote` /
-  `JSHandleBacking::Value`) matches Playwright's `_objectId` /
-  `_value` split. All three backends emit the correct variant:
-  CDP reads `objectId` vs inline `value`; BiDi distinguishes Node
-  / handle-bearing objects / primitives; WebKit's utility-script
-  wrapper emits a `{kind: 'valueHandle'}` envelope for non-object
-  results so primitives ride inline instead of allocating
-  `window.__wr` entries.
-
-- **BiDi wire fix**: non-node objects (Array / Object / Map / Set /
-  Function / …) store their BiDi handle string in the
-  `HandleRemote::Bidi::handle` slot with `shared_id` empty. The
-  argument-emit path prefers `{type: "handle", handle}` when
-  present, only falls back to `{type: "sharedReference", sharedId}`
-  for node-typed remotes. The old code wrongly put the handle
-  string in both slots and always emitted sharedReference, which
-  BiDi rejected with "no such node".
-
-- **Rich-arg walker**: NAPI (`NapiEvaluateArg::FromNapiValue`) and
-  QuickJS (`bindings::convert::quickjs_arg_to_serialized`) detect
-  top-level `JSHandle` / `ElementHandle` class instances at the
-  boundary and emit via the shared core helper
-  `JSHandleBacking::to_serialized_argument`. Per Rule 1, detection
-  is binding-specific (unavoidable) but the packaging is core.
-
-- **`Locator::press` focuses the element first** — real parity gap
-  surfaced by the element-handle press test; Playwright's
-  `server/dom.ts::_press` focuses before key dispatch.
-
-- **Integration test restructure**: `crates/ferridriver-cli/tests/backends.rs`
-  was growing past 2,700 lines. Shared helpers + the new handle-
-  surface tests moved to `tests/backends_support/{client,
-  handle_surface}.rs`. `backends.rs` has a NOTE at the top telling
-  next sessions not to extend it — add new groups as well-named
-  files under `backends_support/`.
-
-- **Memory entry** `feedback_no_task_phase_annotations_in_source`:
-  no more "Task 1.2 phase E" / rule numbers / commit SHAs in
-  source comments or filenames across sessions.
-
-## Next session: evaluate API consolidation
-
-Playwright-parity evaluate surface is **functionally complete** but
-the user-facing method names are still a mess from incremental
-iteration:
+Baseline, all green after consolidation:
 
 ```
-Page::evaluate(expr)             legacy, expression-only
-Page::evaluate_str(expr)         legacy stringify variant
-Page::evaluate_with_arg(fn, arg) new Playwright shape
-Page::evaluate_handle_with_arg   new
-Frame::evaluate(expr)            legacy
-Frame::evaluate_str(expr)        legacy
-Locator::evaluate(expr)          legacy
-Locator::evaluate_all(expr)      legacy
-JSHandle::evaluate_with_arg      new
-JSHandle::evaluate_handle_with_arg new
-ElementHandle::evaluate_with_arg new (delegates to js_handle)
-ElementHandle::evaluate_handle_with_arg new
+cargo clippy --workspace --all-targets -- -D warnings  # clean
+cargo test --workspace --lib                           # 119 core
+cd crates/ferridriver-node && bun run build:debug && bun test   # 730/730
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1   # 4/4
 ```
 
-Playwright's public API is:
+## Next session: Tier-1 §1.4
 
-```
-Page:          evaluate(fn, arg) + evaluateHandle(fn, arg)
-Frame:         evaluate(fn, arg) + evaluateHandle(fn, arg)
-Locator:       evaluate(fn, arg) + evaluateAll(fn, arg) + evaluateHandle(fn, arg)
-JSHandle:      evaluate(fn, arg) + evaluateHandle(fn, arg)
-ElementHandle: inherits JSHandle; adds $eval / $$eval (ElementHandle only)
-```
+`PLAYWRIGHT_COMPAT.md` §1.4 — Request / Response / WebSocket
+lifecycle objects — is the next Tier-1 item and the largest
+remaining one in Tier 1.
 
-The consolidation has its own self-contained prompt at
-`docs/CONSOLIDATE_EVALUATE_API.md`. **Do not interleave with other
-parity work** — it's a focused rename + delete + migrate pass
-touching ~74 call sites across the workspace. Ship in its own
-commit.
+Canonical Playwright sources to read before starting:
 
-## After consolidation: Tier-1 gap 1.4
+- `/tmp/playwright/packages/playwright-core/src/client/network.ts`
+  — `Request`, `Response`, `Route`, `WebSocket`.
+- `/tmp/playwright/packages/playwright-core/src/server/network.ts`
+  — server-side shape each backend delivers.
+- Existing ferridriver spots: `crates/ferridriver/src/route.rs`,
+  `crates/ferridriver-mcp/src/tools/network.rs`, per-backend
+  network events in `backend/{cdp,bidi,webkit}/*`.
 
-Once the API is clean, `PLAYWRIGHT_COMPAT.md` §1.4 (Request /
-Response / WebSocket lifecycle objects) is the next Tier-1 item —
-the largest remaining one in Tier 1.
+The MCP and QuickJS bindings don't yet expose `Request`/`Response`
+as first-class handle-like objects with fluent accessors (`.url()`,
+`.method()`, `.headers()`, `.postData()`, `.response()` /
+`.request()`, `.body()`, `.text()`, `.ok()`, `.finished()`).
+ferridriver has `ResponseEvent`/`RequestEvent` structs (snapshot-
+shaped) on the events bus but not the object lifecycle.
+
+Playwright parity requires:
+
+1. Core types `Request`, `Response`, `WebSocket` with the full
+   accessor surface.
+2. Events delivered with live object references (not just POJO
+   snapshots) so `.response()` resolves against the current state.
+3. NAPI + QuickJS bindings exposing each accessor (and Rule-2
+   `ts_args_type` / `ts_return_type` where napi-rs inference
+   diverges from Playwright's `types.d.ts`).
+4. Rule-9 integration tests on all 4 backends (cdp-pipe, cdp-raw,
+   bidi, webkit).
+
+Consider a short design pass before coding — `Request`/`Response`
+are stateful and interact with the route-handling pipeline already
+shipped in `route.rs`. Split the work by sub-surface
+(Request → Response → WebSocket) rather than by backend.
 
 ## Ground rules (unchanged)
 
 - Rule 1: core is source of truth; NAPI / QuickJS bindings mirror.
+- Rule 2: all three layers update in the same commit; diff NAPI's
+  generated `index.d.ts` against Playwright's `test.d.ts`.
 - Rule 4: every backend real — no stubs; typed
   `FerriError::Unsupported { reason }` only where the protocol
   genuinely can't.
+- Rule 6: read `/tmp/playwright/...` before coding the signature.
 - Rule 9: per-option integration test on every backend before
   flipping `[x]`.
 - Rule 10: no escape hatches. No `#[allow(clippy::...)]` without
   explicit `reason = "…"`; never on `dead_code` except the
   phase-scaffolding exception in `CLAUDE.md`.
 - No task / phase / rule-number annotations in source comments or
-  filenames — see `memory/feedback_no_task_phase_annotations_in_source.md`.
+  filenames — see
+  `memory/feedback_no_task_phase_annotations_in_source.md`.
 - No emojis. No AI attribution in commit messages.
 
 ## Tests that must stay green
@@ -158,14 +127,15 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1
 ```
 
-Current baseline: 119 core tests, 727 NAPI bun tests, 4/4 backend
-integration tests, workspace-lib clippy clean.
+Current baseline after the consolidation: 119 core tests,
+730 NAPI bun tests, 4/4 backend integration tests, workspace-wide
+clippy clean.
 
 ## Known flakes
 
 - `context.setOffline toggles network` on WebKit bun occasionally
   fails under the full suite but passes in isolation. Pre-existing
-  state leak, unrelated to 1.2 / 1.3 / consolidation.
+  state leak, unrelated to the consolidation.
 
 ## Key source locations
 
@@ -176,11 +146,11 @@ integration tests, workspace-lib clippy clean.
 | Per-backend eval + release + element-from-remote | `crates/ferridriver/src/backend/{cdp,bidi,webkit}/*` |
 | Wire serializer (isomorphic) | `crates/ferridriver/src/protocol/serializers.rs` |
 | Injected utility script | `crates/ferridriver/src/injected/{utilityScript,isomorphic/utilityScriptSerializers}.ts` |
-| Page-level evaluate + query_selector{,_all} | `crates/ferridriver/src/page.rs` |
-| Frame-level evaluate (today: expression-only) | `crates/ferridriver/src/frame.rs` |
-| Locator | `crates/ferridriver/src/locator.rs` |
-| NAPI bindings | `crates/ferridriver-node/src/{js_handle,element_handle,page}.rs` |
-| QuickJS bindings | `crates/ferridriver-script/src/bindings/{js_handle,element_handle,page}.rs` |
+| Page / Frame / Locator evaluate | `crates/ferridriver/src/{page,frame,locator}.rs` |
+| NAPI rehydration + function-source extraction | `crates/ferridriver-node/src/serialize_out.rs` |
+| QuickJS rehydration + `extract_page_function` | `crates/ferridriver-script/src/bindings/convert.rs` |
+| NAPI bindings | `crates/ferridriver-node/src/{page,frame,locator,js_handle,element_handle}.rs` |
+| QuickJS bindings | `crates/ferridriver-script/src/bindings/{page,frame,locator,js_handle,element_handle}.rs` |
 | Integration test client + helpers | `crates/ferridriver-cli/tests/backends_support/client.rs` |
 | Handle-surface tests | `crates/ferridriver-cli/tests/backends_support/handle_surface.rs` |
 | NAPI tests | `crates/ferridriver-node/test/handles.test.ts` |

@@ -103,7 +103,11 @@ async fn screenshot_detects_visual_change() {
 
   // Change the color.
   page
-    .evaluate("(() => { document.getElementById('box').style.background = 'blue'; })()")
+    .evaluate(
+      "() => { document.getElementById('box').style.background = 'blue'; }",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
+    )
     .await
     .unwrap();
 
@@ -179,7 +183,9 @@ async fn screenshot_size_mismatch_detected() {
   // Resize the element.
   page
     .evaluate(
-      "(() => { const b = document.getElementById('box'); b.style.width = '200px'; b.style.height = '200px'; })()",
+      "() => { const b = document.getElementById('box'); b.style.width = '200px'; b.style.height = '200px'; }",
+      ferridriver::protocol::SerializedArgument::default(),
+      None,
     )
     .await
     .unwrap();
