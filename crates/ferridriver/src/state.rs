@@ -168,13 +168,35 @@ pub enum ConnectMode {
 }
 
 impl BrowserState {
+  /// Construct a `BrowserState` with `headless = false` and the
+  /// corresponding non-headless Chrome / Firefox binary resolved. See
+  /// [`BrowserState::new_with_headless`] when the caller knows the
+  /// headless flag up-front — that path keeps binary selection
+  /// consistent with it, so `headless = true` picks Chrome Headless
+  /// Shell rather than full Chrome.
   #[must_use]
   pub fn new(connect_mode: ConnectMode, backend_kind: BackendKind) -> Self {
+    Self::new_with_headless(connect_mode, backend_kind, false)
+  }
+
+  /// Construct a `BrowserState` with the headless flag applied
+  /// up-front, so binary resolution (Chrome Headless Shell vs full
+  /// Chrome; Firefox honours only `FIREFOX_PATH` either way) agrees
+  /// with the flag. This matters because launching headless Chrome
+  /// (the regular browser app) retains the user's macOS system
+  /// appearance — including `prefers-color-scheme: dark` when the OS
+  /// is in dark mode — whereas Chrome Headless Shell defaults to
+  /// light. Downstream CDP `Emulation.setEmulatedMedia` resets
+  /// correctly but can't un-pick the system's own preference, so
+  /// consumers that expect a clean light baseline must run on
+  /// headless-shell.
+  #[must_use]
+  pub fn new_with_headless(connect_mode: ConnectMode, backend_kind: BackendKind, headless: bool) -> Self {
     let chromium_path = match backend_kind {
       BackendKind::Bidi => std::env::var("FIREFOX_PATH")
         .or_else(|_| detect_firefox().map_err(|_| std::env::VarError::NotPresent))
-        .unwrap_or_else(|_| resolve_chromium(false)),
-      _ => resolve_chromium(false),
+        .unwrap_or_else(|_| resolve_chromium(headless)),
+      _ => resolve_chromium(headless),
     };
     Self {
       instances: HashMap::default(),
@@ -184,7 +206,7 @@ impl BrowserState {
       extra_args: Vec::new(),
       instance_args_fn: None,
       instance_resolver_fn: None,
-      headless: false,
+      headless,
       user_data_dir: None,
       default_viewport: Some(crate::options::ViewportConfig::default()),
       close_reason: None,

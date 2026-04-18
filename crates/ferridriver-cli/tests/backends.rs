@@ -771,6 +771,47 @@ fn test_script_emulate_media_all_fields(c: &mut McpClient) {
   );
 }
 
+fn test_script_emulate_media_null_disables_single_field(c: &mut McpClient) {
+  if c.backend == "bidi" {
+    return;
+  }
+  c.nav("<html><body>init</body></html>");
+  let v = c.script_value(
+    "await page.emulateMedia({ colorScheme: 'dark', reducedMotion: 'reduce' }); \
+     const pre = await page.evaluate(\"JSON.stringify({\
+        dark: matchMedia('(prefers-color-scheme: dark)').matches, \
+        reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, \
+     })\"); \
+     await page.emulateMedia({ colorScheme: null }); \
+     const post = await page.evaluate(\"JSON.stringify({\
+        dark: matchMedia('(prefers-color-scheme: dark)').matches, \
+        reduced: matchMedia('(prefers-reduced-motion: reduce)').matches, \
+     })\"); \
+     return { pre: JSON.parse(JSON.parse(pre)), post: JSON.parse(JSON.parse(post)) };",
+  );
+  assert_eq!(
+    v["pre"]["dark"],
+    json!(true),
+    "sanity: dark should be active before reset: {v}"
+  );
+  assert_eq!(
+    v["pre"]["reduced"],
+    json!(true),
+    "sanity: reduced should be active before reset: {v}"
+  );
+  assert_eq!(
+    v["post"]["dark"],
+    json!(false),
+    "colorScheme=null should disable the override: {v}"
+  );
+  assert_eq!(
+    v["post"]["reduced"],
+    json!(true),
+    "reducedMotion should survive a sibling reset: {v}"
+  );
+  c.script_value("await page.emulateMedia({ reducedMotion: null }); return 'ok';");
+}
+
 fn test_script_drag_and_drop_trial(c: &mut McpClient) {
   c.nav(
     "<style>html,body{margin:0;padding:0}</style>\
@@ -1149,6 +1190,7 @@ fn run_all_tests(backend: &str) {
   run!(test_script_locator_drag_to_options);
   run!(test_script_drag_and_drop_trial);
   run!(test_script_emulate_media_all_fields);
+  run!(test_script_emulate_media_null_disables_single_field);
   run!(test_script_mouse_wheel);
   run!(test_script_keyboard_press);
 
