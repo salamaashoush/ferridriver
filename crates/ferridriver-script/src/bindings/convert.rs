@@ -383,9 +383,9 @@ pub fn parse_check_options<'js>(
   }))
 }
 
-/// Raw JS shape of Playwright's `HoverOptions` — `ClickOptions` minus
-/// `button`, `click_count`, `delay`. Also used for `TapOptions` (same
-/// shape per Playwright).
+/// Raw JS shape of Playwright's `HoverOptions` — mirrors
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
+/// `locator.hover(options?)`. No `steps` — hover does a single move.
 #[derive(serde::Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct JsHoverOptions {
@@ -393,15 +393,14 @@ struct JsHoverOptions {
   modifiers: Option<Vec<String>>,
   no_wait_after: Option<bool>,
   position: Option<JsClickPosition>,
-  steps: Option<u32>,
   timeout: Option<u64>,
   trial: Option<bool>,
 }
 
-fn hover_options_from_raw<'js>(
+/// Parse Playwright's `HoverOptions` JS bag into the core struct.
+pub fn parse_hover_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
-  label: &'static str,
 ) -> rquickjs::Result<Option<ferridriver::options::HoverOptions>> {
   let raw = match value.0 {
     Some(v) if !v.is_undefined() && !v.is_null() => v,
@@ -412,7 +411,7 @@ fn hover_options_from_raw<'js>(
   if let Some(list) = js.modifiers {
     for name in list {
       let m = ferridriver::options::Modifier::parse(&name).ok_or_else(|| {
-        rquickjs::Error::new_from_js_message("ferridriver", label, format!("Unknown modifier: {name}"))
+        rquickjs::Error::new_from_js_message("ferridriver", "hover", format!("Unknown modifier: {name}"))
       })?;
       modifiers.push(m);
     }
@@ -422,26 +421,52 @@ fn hover_options_from_raw<'js>(
     modifiers,
     no_wait_after: js.no_wait_after,
     position: js.position.map(Into::into),
-    steps: js.steps,
     timeout: js.timeout,
     trial: js.trial,
   }))
 }
 
-/// Parse Playwright's `HoverOptions` JS bag into the core struct.
-pub fn parse_hover_options<'js>(
-  ctx: &Ctx<'js>,
-  value: rquickjs::function::Opt<Value<'js>>,
-) -> rquickjs::Result<Option<ferridriver::options::HoverOptions>> {
-  hover_options_from_raw(ctx, value, "hover")
+/// Raw JS shape of Playwright's `TapOptions` — mirrors
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
+/// `locator.tap(options?)`. Same fields as hover (no `steps`).
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsTapOptions {
+  force: Option<bool>,
+  modifiers: Option<Vec<String>>,
+  no_wait_after: Option<bool>,
+  position: Option<JsClickPosition>,
+  timeout: Option<u64>,
+  trial: Option<bool>,
 }
 
-/// Parse Playwright's `TapOptions` JS bag — same shape as `HoverOptions`.
+/// Parse Playwright's `TapOptions` JS bag into the core struct.
 pub fn parse_tap_options<'js>(
   ctx: &Ctx<'js>,
   value: rquickjs::function::Opt<Value<'js>>,
 ) -> rquickjs::Result<Option<ferridriver::options::TapOptions>> {
-  hover_options_from_raw(ctx, value, "tap")
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsTapOptions = serde_from_js(ctx, raw)?;
+  let mut modifiers = Vec::new();
+  if let Some(list) = js.modifiers {
+    for name in list {
+      let m = ferridriver::options::Modifier::parse(&name).ok_or_else(|| {
+        rquickjs::Error::new_from_js_message("ferridriver", "tap", format!("Unknown modifier: {name}"))
+      })?;
+      modifiers.push(m);
+    }
+  }
+  Ok(Some(ferridriver::options::TapOptions {
+    force: js.force,
+    modifiers,
+    no_wait_after: js.no_wait_after,
+    position: js.position.map(Into::into),
+    timeout: js.timeout,
+    trial: js.trial,
+  }))
 }
 
 /// Raw JS shape of Playwright's `DblClickOptions` — same fields as

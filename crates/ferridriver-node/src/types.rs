@@ -628,9 +628,10 @@ impl From<DispatchEventOptions> for ferridriver::options::DispatchEventOptions {
 }
 
 /// Playwright-parity options for `page.hover` / `locator.hover` /
-/// `frame.hover`. Same shape as `LocatorHoverOptions` at
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` — subset
-/// of [`ClickOptions`] (no button/click_count/delay).
+/// `frame.hover`. Mirrors `LocatorHoverOptions` at
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
+/// `hover(options?)`. No `steps` — hover always moves in a single step
+/// in Playwright (steps is a click/dblclick-only field).
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct HoverOptions {
@@ -639,7 +640,6 @@ pub struct HoverOptions {
   pub modifiers: Option<Vec<String>>,
   pub no_wait_after: Option<bool>,
   pub position: Option<Point>,
-  pub steps: Option<u32>,
   pub timeout: Option<f64>,
   pub trial: Option<bool>,
 }
@@ -661,7 +661,6 @@ impl TryFrom<HoverOptions> for ferridriver::options::HoverOptions {
       modifiers,
       no_wait_after: o.no_wait_after,
       position: o.position.map(Into::into),
-      steps: o.steps,
       timeout: o.timeout.map(f64_to_u64),
       trial: o.trial,
     })
@@ -669,8 +668,44 @@ impl TryFrom<HoverOptions> for ferridriver::options::HoverOptions {
 }
 
 /// Playwright-parity options for `page.tap` / `locator.tap` /
-/// `frame.tap` — same shape as `HoverOptions` per Playwright's TS.
-pub type TapOptions = HoverOptions;
+/// `frame.tap`. Mirrors `LocatorTapOptions` at
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
+/// `tap(options?)`. Explicit struct — distinct from `HoverOptions` so
+/// future tap-only divergence has a home.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct TapOptions {
+  pub force: Option<bool>,
+  #[napi(ts_type = "Array<'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift'>")]
+  pub modifiers: Option<Vec<String>>,
+  pub no_wait_after: Option<bool>,
+  pub position: Option<Point>,
+  pub timeout: Option<f64>,
+  pub trial: Option<bool>,
+}
+
+impl TryFrom<TapOptions> for ferridriver::options::TapOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: TapOptions) -> std::result::Result<Self, Self::Error> {
+    let mut modifiers = Vec::new();
+    if let Some(list) = o.modifiers {
+      for name in list {
+        let m = ferridriver::options::Modifier::parse(&name)
+          .ok_or_else(|| napi::Error::from_reason(format!("Unknown modifier: {name}")))?;
+        modifiers.push(m);
+      }
+    }
+    Ok(Self {
+      force: o.force,
+      modifiers,
+      no_wait_after: o.no_wait_after,
+      position: o.position.map(Into::into),
+      timeout: o.timeout.map(f64_to_u64),
+      trial: o.trial,
+    })
+  }
+}
 
 /// Playwright-parity options for `page.dragAndDrop` and `locator.dragTo`.
 /// Mirrors `FrameDragAndDropOptions & TimeoutOptions` at

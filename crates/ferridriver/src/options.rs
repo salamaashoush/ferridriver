@@ -744,7 +744,6 @@ pub struct HoverOptions {
   pub modifiers: Vec<Modifier>,
   pub no_wait_after: Option<bool>,
   pub position: Option<Point>,
-  pub steps: Option<u32>,
   pub timeout: Option<u64>,
   pub trial: Option<bool>,
 }
@@ -761,19 +760,36 @@ impl HoverOptions {
   pub fn is_trial(&self) -> bool {
     self.trial.unwrap_or(false)
   }
-
-  /// [`Self::steps`] with the default `1` applied (and clamped to ≥1).
-  #[must_use]
-  pub fn resolved_steps(&self) -> u32 {
-    self.steps.unwrap_or(1).max(1)
-  }
 }
 
 /// Options for tap actions (touch input). Mirrors Playwright's
 /// `LocatorTapOptions` / `PageTapOptions` / `FrameTapOptions` —
 /// `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
-/// `tap`. Same shape as [`HoverOptions`] (touch-based, no button).
-pub type TapOptions = HoverOptions;
+/// `tap`. Distinct from [`HoverOptions`] so future tap-only divergence
+/// (e.g. native touch options) has a stable home.
+#[derive(Debug, Clone, Default)]
+pub struct TapOptions {
+  pub force: Option<bool>,
+  pub modifiers: Vec<Modifier>,
+  pub no_wait_after: Option<bool>,
+  pub position: Option<Point>,
+  pub timeout: Option<u64>,
+  pub trial: Option<bool>,
+}
+
+impl TapOptions {
+  /// `true` when the caller asked to bypass actionability checks.
+  #[must_use]
+  pub fn is_force(&self) -> bool {
+    self.force.unwrap_or(false)
+  }
+
+  /// `true` when the caller asked to run checks only (no touch dispatch).
+  #[must_use]
+  pub fn is_trial(&self) -> bool {
+    self.trial.unwrap_or(false)
+  }
+}
 
 /// Options for double-click actions. Mirrors Playwright's
 /// `LocatorDblClickOptions` / `PageDblClickOptions` /
