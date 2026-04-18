@@ -3,6 +3,34 @@
 **Read-first for any session continuing Playwright-parity work on
 `ferridriver`.** Overwrite with a fresh summary at the end of each batch.
 
+## Cross-device setup
+
+Everything needed to resume is committed in this repo — no local
+per-project memory is required. The next session should read, in order:
+
+1. `CLAUDE.md` — 10 Playwright-parity rules, user preferences, and
+   the consolidated "Lessons learned" section (phase-scaffolding
+   exception, BiDi `data-fdref` quirk, rquickjs `None → undefined`,
+   QuickJS lacks `setTimeout`, the utility-script `JSON.stringify`
+   wrapper trick, etc.). This file is the authoritative source for
+   rules; don't try to reach into any local memory.
+2. `PLAYWRIGHT_COMPAT.md` — the gap tracker, §1.2 and §1.3 for
+   anything still `[~]`.
+3. `docs/FINISH_TASKS_1.2_1.3.md` — a self-contained handoff prompt
+   to finish the remaining surface of tasks 1.2 and 1.3 in a single
+   session (14 numbered items).
+4. This file (HANDOVER.md) — commit-level block summary below.
+
+Set up the cloned Playwright source at `/tmp/playwright` (needed by
+every rule-6 lookup) once per machine:
+
+```bash
+git clone https://github.com/microsoft/playwright /tmp/playwright
+```
+
+Same goes for dev deps on a fresh machine: `just test` handles
+Chrome / NAPI / Bun dependencies automatically.
+
 ---
 
 ## Branch state
@@ -273,10 +301,19 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 cd crates/ferridriver/src/injected && bun build.ts   # re-bundle engine
 ```
 
-## State of memory
+## Cross-device state (no local-only memory)
 
-Auto-memory under
-`/Users/sashoush/.claude/projects/-Users-sashoush-Workspace-Box-ferridriver/memory/`.
-The new `feedback_keep_phase_scaffolding.md` entry from this block
-documents the "don't delete next-phase fields to silence dead_code"
-guidance.
+Everything that previously lived in the user's per-project auto-memory
+has been consolidated into `CLAUDE.md` under "User preferences" and
+"Lessons learned". Resuming on another device does not require
+restoring any local files.
+
+- 10 Playwright-parity rules — `CLAUDE.md` "Playwright Parity Rules"
+  section.
+- `#[allow(dead_code)]` phase-scaffolding exception — `CLAUDE.md`
+  Rule 10 + "Keep phase scaffolding" lesson.
+- rquickjs / QuickJS / BiDi / WebKit quirks from this block —
+  `CLAUDE.md` "Backend / wire / binding quirks" lesson.
+- Commit-message style, emoji policy, git safety — `CLAUDE.md`
+  "User preferences" section.
+- Finish-prompt for tasks 1.2/1.3 — `docs/FINISH_TASKS_1.2_1.3.md`.
