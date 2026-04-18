@@ -1634,6 +1634,134 @@ fn test_script_evaluate_rich_types(c: &mut McpClient) {
   assert_eq!(v, json!({"v": "undefined"}), "undefined wire: {v}");
 }
 
+// Task 1.2 phase E — ElementHandle DOM methods. Rule 9: verify reads,
+// state predicates, bounding_box, click / focus / scrollIntoView on
+// all four backends via QuickJS.
+fn test_script_element_handle_methods(c: &mut McpClient) {
+  c.nav("<a id='l' href='/x' data-k='v'>hello <b>world</b></a>");
+
+  // innerHTML / innerText / textContent / getAttribute
+  let v = c.script_value(
+    "const eh = await page.querySelector('a#l');\
+     const result = {\
+       inner_html: await eh.innerHTML(),\
+       inner_text: await eh.innerText(),\
+       text_content: await eh.textContent(),\
+       href: await eh.getAttribute('href'),\
+       k: await eh.getAttribute('data-k'),\
+     };\
+     await eh.dispose();\
+     return result;",
+  );
+  let inner = v["inner_html"].as_str().unwrap_or("");
+  // BiDi injects a `data-fdref` attribute on DOM elements it
+  // references, so the serialised innerHTML is `<b data-fdref="...">`
+  // rather than a bare `<b>`. Match the substrings that matter.
+  assert!(inner.contains("<b") && inner.contains("world</b>"), "innerHTML: {v}");
+  assert_eq!(v["inner_text"], json!("hello world"), "innerText: {v}");
+  assert_eq!(v["text_content"], json!("hello world"), "textContent: {v}");
+  assert_eq!(v["href"], json!("/x"), "getAttribute(href): {v}");
+  assert_eq!(v["k"], json!("v"), "getAttribute(data-k): {v}");
+
+  // inputValue
+  c.nav("<input id='i' value='hi'>");
+  let v = c.script_value(
+    "const eh = await page.querySelector('#i');\
+     const v = await eh.inputValue();\
+     await eh.dispose();\
+     return v;",
+  );
+  assert_eq!(v, json!("hi"), "inputValue: {v}");
+
+  // State predicates
+  c.nav("<button id='v'>x</button><button id='d' disabled>x</button><button id='h' style='display:none'>x</button>");
+  let v = c.script_value(
+    "const v = await page.querySelector('#v');\
+     const d = await page.querySelector('#d');\
+     const h = await page.querySelector('#h');\
+     const result = {\
+       v_visible: await v.isVisible(),\
+       v_enabled: await v.isEnabled(),\
+       d_disabled: await d.isDisabled(),\
+       h_hidden: await h.isHidden(),\
+     };\
+     await v.dispose(); await d.dispose(); await h.dispose();\
+     return result;",
+  );
+  assert_eq!(v["v_visible"], json!(true));
+  assert_eq!(v["v_enabled"], json!(true));
+  assert_eq!(v["d_disabled"], json!(true));
+  assert_eq!(v["h_hidden"], json!(true));
+
+  // isChecked + isEditable
+  c.nav("<input type='checkbox' id='c' checked><input id='i'><input id='r' readonly>");
+  let v = c.script_value(
+    "const c = await page.querySelector('#c');\
+     const i = await page.querySelector('#i');\
+     const r = await page.querySelector('#r');\
+     const result = {\
+       c_checked: await c.isChecked(),\
+       i_editable: await i.isEditable(),\
+       r_editable: await r.isEditable(),\
+     };\
+     await c.dispose(); await i.dispose(); await r.dispose();\
+     return result;",
+  );
+  assert_eq!(v["c_checked"], json!(true));
+  assert_eq!(v["i_editable"], json!(true));
+  assert_eq!(v["r_editable"], json!(false));
+
+  // boundingBox
+  c.nav("<button id='b' style='position:absolute;left:10px;top:20px;width:50px;height:30px'>b</button>");
+  let v = c.script_value(
+    "const b = await page.querySelector('#b');\
+     const box = await b.boundingBox();\
+     await b.dispose();\
+     return box;",
+  );
+  let width = v["width"].as_f64().unwrap_or(0.0);
+  let height = v["height"].as_f64().unwrap_or(0.0);
+  assert!(width > 0.0, "bbox width > 0: {v}");
+  assert!(height > 0.0, "bbox height > 0: {v}");
+
+  // click fires the native handler. The onclick handler is
+  // synchronous so the title update is observable on the next
+  // page.title round-trip — no setTimeout needed (QuickJS doesn't
+  // have setTimeout anyway).
+  c.nav("<button id='b' onclick=\"document.title='clicked'\">b</button>");
+  let v = c.script_value(
+    "const b = await page.querySelector('#b');\
+     await b.click();\
+     const t = await page.title();\
+     await b.dispose();\
+     return t;",
+  );
+  assert_eq!(v, json!("clicked"), "click fired: {v}");
+
+  // focus updates activeElement
+  c.nav("<input id='i'>");
+  let v = c.script_value(
+    "const i = await page.querySelector('#i');\
+     await i.focus();\
+     const active = await page.evaluate('document.activeElement && document.activeElement.id');\
+     await i.dispose();\
+     return active;",
+  );
+  // QuickJS page.evaluate wraps strings as JSON — result may be either a
+  // bare "i" or the string "\"i\"". Normalize.
+  let s = v.as_str().unwrap_or("");
+  assert!(s == "i" || s == "\"i\"", "focus activeElement: {v}");
+
+  // scrollIntoViewIfNeeded shouldn't throw on an offscreen element
+  c.nav("<div style='height:2000px'></div><button id='b'>b</button>");
+  c.script_value(
+    "const b = await page.querySelector('#b');\
+     await b.scrollIntoViewIfNeeded();\
+     await b.dispose();\
+     return true;",
+  );
+}
+
 // WebKit-specific Rule-9 probe: proves Op::ReleaseRef actually reached
 // the host and deleted from `window.__wr`. CDP's Runtime.releaseObject
 // and BiDi's script.disown are not observable from page-side JS without
@@ -2183,6 +2311,10 @@ fn run_all_tests(backend: &str) {
   // type round-trip. Rule 9 covers all 4 backends.
   run!(test_script_evaluate_fn_and_handle);
   run!(test_script_evaluate_rich_types);
+  // Task 1.2 phase E — ElementHandle DOM methods (reads, state,
+  // bounding box, click / focus / scroll). Rule 9 covers all 4
+  // backends.
+  run!(test_script_element_handle_methods);
   run!(test_script_click_options);
   run!(test_script_action_timeout);
   run!(test_script_tap_native);

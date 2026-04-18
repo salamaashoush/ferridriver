@@ -10,7 +10,29 @@
 
 use crate::error::IntoNapi;
 use napi::Result;
+use napi::bindgen_prelude::Buffer;
 use napi_derive::napi;
+
+/// Axis-aligned bounding rectangle returned by
+/// [`ElementHandle::boundingBox`]. Mirrors Playwright's `BoundingBox`.
+#[napi(object)]
+pub struct BoundingBox {
+  pub x: f64,
+  pub y: f64,
+  pub width: f64,
+  pub height: f64,
+}
+
+impl From<ferridriver::BoundingBox> for BoundingBox {
+  fn from(b: ferridriver::BoundingBox) -> Self {
+    Self {
+      x: b.x,
+      y: b.y,
+      width: b.width,
+      height: b.height,
+    }
+  }
+}
 
 /// Handle to a DOM element living in a page.
 ///
@@ -111,5 +133,124 @@ impl ElementHandle {
       .await
       .into_napi()?;
     Ok(crate::js_handle::JSHandle::wrap(handle))
+  }
+
+  // ── Content reads (Phase E) ──────────────────────────────────────────
+
+  /// Playwright: `elementHandle.innerHTML(): Promise<string>`.
+  #[napi]
+  pub async fn inner_html(&self) -> Result<String> {
+    self.inner.inner_html().await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.innerText(): Promise<string>`.
+  #[napi]
+  pub async fn inner_text(&self) -> Result<String> {
+    self.inner.inner_text().await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.textContent(): Promise<string | null>`.
+  #[napi]
+  pub async fn text_content(&self) -> Result<Option<String>> {
+    self.inner.text_content().await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.getAttribute(name): Promise<string | null>`.
+  #[napi]
+  pub async fn get_attribute(&self, name: String) -> Result<Option<String>> {
+    self.inner.get_attribute(&name).await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.inputValue(): Promise<string>`.
+  #[napi]
+  pub async fn input_value(&self) -> Result<String> {
+    self.inner.input_value().await.into_napi()
+  }
+
+  // ── State predicates (Phase E) ───────────────────────────────────────
+
+  #[napi]
+  pub async fn is_visible(&self) -> Result<bool> {
+    self.inner.is_visible().await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_hidden(&self) -> Result<bool> {
+    self.inner.is_hidden().await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_disabled(&self) -> Result<bool> {
+    self.inner.is_disabled().await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_enabled(&self) -> Result<bool> {
+    self.inner.is_enabled().await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_checked(&self) -> Result<bool> {
+    self.inner.is_checked().await.into_napi()
+  }
+
+  #[napi]
+  pub async fn is_editable(&self) -> Result<bool> {
+    self.inner.is_editable().await.into_napi()
+  }
+
+  // ── Geometry (Phase E) ───────────────────────────────────────────────
+
+  /// Playwright: `elementHandle.boundingBox(): Promise<BoundingBox | null>`.
+  #[napi]
+  pub async fn bounding_box(&self) -> Result<Option<BoundingBox>> {
+    Ok(self.inner.bounding_box().await.into_napi()?.map(Into::into))
+  }
+
+  // ── Actions (Phase E) ────────────────────────────────────────────────
+
+  #[napi]
+  pub async fn click(&self) -> Result<()> {
+    self.inner.click().await.into_napi()
+  }
+
+  #[napi]
+  pub async fn dblclick(&self) -> Result<()> {
+    self.inner.dblclick().await.into_napi()
+  }
+
+  #[napi]
+  pub async fn hover(&self) -> Result<()> {
+    self.inner.hover().await.into_napi()
+  }
+
+  #[napi]
+  pub async fn type_str(&self, text: String) -> Result<()> {
+    self.inner.type_str(&text).await.into_napi()
+  }
+
+  #[napi]
+  pub async fn focus(&self) -> Result<()> {
+    self.inner.focus().await.into_napi()
+  }
+
+  #[napi]
+  pub async fn scroll_into_view_if_needed(&self) -> Result<()> {
+    self.inner.scroll_into_view_if_needed().await.into_napi()
+  }
+
+  /// Playwright: `elementHandle.screenshot(opts?): Promise<Buffer>`.
+  /// Phase-E MVP only supports format selection; the full option bag
+  /// (`path`, `omitBackground`, `animations`, ...) lands with Phase F.
+  #[napi]
+  pub async fn screenshot(&self, format: Option<String>) -> Result<Buffer> {
+    let fmt = match format.as_deref().unwrap_or("png") {
+      "png" => ferridriver::backend::ImageFormat::Png,
+      "jpeg" | "jpg" => ferridriver::backend::ImageFormat::Jpeg,
+      "webp" => ferridriver::backend::ImageFormat::Webp,
+      other => return Err(napi::Error::from_reason(format!("invalid screenshot format: {other}"))),
+    };
+    let bytes = self.inner.screenshot(fmt).await.into_napi()?;
+    Ok(bytes.into())
   }
 }

@@ -38,7 +38,7 @@ pub mod url_matcher;
 
 pub use browser::Browser;
 pub use context::{BrowserContext, ContextRef};
-pub use element_handle::ElementHandle;
+pub use element_handle::{BoundingBox, ElementHandle, ElementState};
 pub use error::{FerriError, Result};
 pub use events::{EventEmitter, PageEvent};
 pub use frame::Frame;
