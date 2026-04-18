@@ -85,27 +85,43 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 1.5 Action option bags on Locator and Page
 
-- [x] Every Playwright action method grew its full option bag across Rust core, NAPI, and QuickJS. Every field reaches CDP/BiDi/WebKit. No stubs.
-- **Playwright ref**: `LocatorClickOptions`, `LocatorHoverOptions`, `LocatorFillOptions`, `LocatorPressOptions`, `LocatorTypeOptions`, `LocatorCheckOptions`, `LocatorSetCheckedOptions`, `LocatorTapOptions`, `LocatorDblClickOptions`, `LocatorDragToOptions`, `LocatorScreenshotOptions`, `LocatorWaitForOptions` in `types.d.ts`.
-- **Files**: `crates/ferridriver/src/options.rs` (new structs); `crates/ferridriver/src/locator.rs`; `crates/ferridriver/src/page.rs`; `crates/ferridriver-node/src/locator.rs`; `crates/ferridriver-node/src/page.rs`.
-- **Per-option coverage** (all fields, not a subset):
-  - [x] Click: `button`, `click_count`, `delay`, `force`, `modifiers`, `no_wait_after`, `position`, `steps`, `timeout`, `trial`.
-    - Core: new `MouseButton`, `Modifier`, `modifiers_bitmask`, `ClickOptions` (+ `resolved_*` helpers) in `options.rs`; shared `actions::click_with_opts(el, page, opts)` that scrolls-into-view, honors `force` (skip actionability), `trial` (skip click but still press/release modifiers), and delegates to `BackendClickArgs` for the wire dispatch.
-    - Backends: every backend grew `click_at_with(x, y, args)` + `press_modifiers(&mods)` + `release_modifiers(&mods)` in the same commit. CDP dispatches `Input.dispatchKeyEvent` for modifier keydown/keyup + `Input.dispatchMouseEvent` with the CDP modifier bitmask; BiDi uses `input.performActions` with separate `key` + `pointer` action sources + a `pause` action for `delay`; WebKit's IPC host grew a `held_modifier_flags` field on `ViewEntry` so `OP_KEY_DOWN` / `OP_KEY_UP` track Shift/Option/Command/Control and the next `OP_MOUSE_EVENT` carries them on the synthesised `NSEvent`. Middle-click takes a CGEvent path (since `NSEvent mouseEventWithType:` leaves `buttonNumber=0`, which WKWebView surfaces as DOM `button=0`) + a belt-and-suspenders JS `MouseEvent` dispatch for DOM `auxclick` reliability in offscreen WKWebView.
-    - NAPI: `ClickOptions` `#[napi(object)]` with `ts_type` unions for `button` and `modifiers`; `TryFrom<ClickOptions> for core::ClickOptions` raises `Unknown mouse button` / `Unknown modifier` as typed errors. Nine new `bun test` cases cover every field + the error paths.
-    - QuickJS: shared `bindings/convert::parse_click_options` lowers the JS bag into core; one backends live-browser test exercises button/clickCount/modifiers/position/delay/trial + the error paths across all four backends.
-  - Hover: `force`, `modifiers`, `no_wait_after`, `position`, `timeout`, `trial`.
-  - Fill: `force`, `no_wait_after`, `timeout`.
-  - Type: `delay`, `no_wait_after`, `timeout`.
-  - Press: `delay`, `no_wait_after`, `timeout`.
-  - Check/Uncheck/SetChecked: `force`, `no_wait_after`, `position`, `timeout`, `trial`.
-  - Tap: `force`, `modifiers`, `no_wait_after`, `position`, `timeout`, `trial`.
-  - DragTo: `force`, `no_wait_after`, `source_position`, `target_position`, `timeout`, `trial`.
-  - DispatchEvent: `event_init` (serde_json::Value), `timeout`.
-  - SelectOption: accept `string | { value, label, index } | ElementHandle` plus arrays; options `force`, `no_wait_after`, `timeout`.
-  - SetInputFiles: `FilePayload { name, mime_type, buffer }` plus path; options `no_wait_after`, `timeout`.
-- **Acceptance**: passing each option through NAPI reaches Rust core and lands on CDP.
-- **Tests**: an option-matrix test crate exercising every field on every method.
+- [~] **Signatures shipped, semantic fidelity partial, per-option integration tests missing.** The commit `8fa8afb` wired option-bag structs across Rust core + NAPI + QuickJS for every action, but the end-to-end parity claim in that commit message was premature. Concrete gaps, every one a session's worth of work, are listed below.
+
+#### Shipped (real, tested)
+
+- [x] **Click** — full option surface with per-option NAPI + backends tests (commit `d1e36ee`). `button`, `click_count`, `delay`, `force`, `modifiers`, `no_wait_after`, `position`, `steps`, `timeout*`, `trial`. `*timeout`: accepted but not actually propagated to the retry loop — same gap as every other method below.
+  - Core: `MouseButton`, `Modifier`, `modifiers_bitmask`, `ClickOptions` + `resolved_*` helpers + `actions::click_with_opts(el, page, opts)` that scroll-into-view, honor `force` / `trial`, and delegate to `BackendClickArgs`.
+  - Backends: every backend grew `click_at_with(x, y, args)` + `press_modifiers(&mods)` + `release_modifiers(&mods)`. CDP uses `Input.dispatchKeyEvent` + `Input.dispatchMouseEvent{modifiers}`. BiDi `input.performActions` with separate `key` + `pointer` sources. WebKit's host.m tracks `held_modifier_flags` on `ViewEntry` so `OP_KEY_DOWN` / `OP_KEY_UP` update the mask and the next `OP_MOUSE_EVENT` carries it on the `NSEvent`. Middle-click takes a CGEvent path because `NSEvent mouseEventWithType:` leaves `buttonNumber=0`; offscreen WKWebView also needs a JS `MouseEvent` belt for `auxclick`.
+  - Tests: 9 NAPI `bun test` cases, 1 backends live-browser test covering button / clickCount / modifiers / position / delay / trial + the error paths. Passing on all 4 backends.
+
+#### Partial — signatures + wire plumbing only (commit `8fa8afb`)
+
+- [~] **Dblclick** — `DblClickOptions` → `ClickOptions { click_count: Some(2) }` lowering. No new option-specific tests.
+- [~] **Hover** — core helper, `BackendHoverArgs` dispatch on all 3 backends. **BUG: `HoverOptions` includes a `steps` field Playwright doesn't have on `hover` — strict spec divergence. Remove it.** No option-specific tests.
+- [~] **Tap** — **implemented via JS `TouchEvent`/`PointerEvent` dispatch across all backends, producing `isTrusted: false` events**. CDP has `Input.dispatchTouchEvent` and should be used for Chromium. This is a Rule 4 violation — fix with a native path per backend. Also: **`TapOptions = HoverOptions` alias inherits the bogus `steps` field — remove**. No option-specific tests.
+- [~] **Fill** — `FillOptions { force, no_wait_after, timeout }`. `force` only skips the Locator-level actionability check; the inner `actions::fill` still runs its JS-side state guards, so `force=true` isn't actually bypassing everything. No option-specific tests.
+- [~] **Press** — `PressOptions { delay, no_wait_after, timeout }`. Delay wires into keyDown + sleep + keyUp. No option-specific tests.
+- [~] **Type / pressSequentially** — `TypeOptions { delay, no_wait_after, timeout }`. Delay wires into per-character press loop. No option-specific tests.
+- [~] **Check / Uncheck / SetChecked** — reads `this.checked` once, clicks once if state differs. **BUG: Playwright retries the read/click cycle until state matches for elements that need multiple clicks to toggle (e.g. custom components that intercept the first click); mine doesn't loop.** Per `/tmp/playwright/packages/playwright-core/src/server/dom.ts::_setChecked`. No option-specific tests.
+- [~] **DispatchEvent** — picks Event / MouseEvent / KeyboardEvent / TouchEvent / PointerEvent / DragEvent / FocusEvent / InputEvent / WheelEvent by type; applies `eventInit`. **BUG: Playwright runs actionability checks + scrolls-into-view before dispatch; mine skips straight to `this.dispatchEvent`.** No option-specific tests.
+- [~] **SelectOption** — polymorphic `string | string[] | {value,label,index} | array` via custom `FromNapiValue` + `parse_select_option_values`. Uses Playwright's own injected `selectOptions` helper (verbatim). **BUG: `force` is unused — no actionability check is performed at any level.** Ignores `ElementHandle` variant (blocks on 1.2, documented). No option-specific tests.
+- [~] **SetInputFiles** — polymorphic `string | string[] | FilePayload | FilePayload[]`. Payloads write to temp files, upload via `set_file_input`, delete after. No option-specific tests.
+- [x] **DragTo** — pre-existing full `DragAndDropOptions` with `force`, `no_wait_after`, `source_position`, `target_position`, `steps`, `strict`, `timeout*`, `trial` (commit `b6e0f6c`). `*timeout` not propagated — same gap.
+
+#### Cross-cutting gaps (all ~[~] methods share these)
+
+1. **`timeout` is accepted but never honored.** The `Locator::RETRY_BACKOFFS_MS` constant schedule is used on every retry; the per-call option is ignored. The NAPI/QuickJS TS surface advertises `timeout` as working, but it doesn't. This is half of task **3.17**; the other half is `context.setDefaultTimeout` overrides. Fix both at once: thread a deadline through `retry_resolve!` and honor `ClickOptions::timeout` / `HoverOptions::timeout` / etc.
+2. **`force` is partial.** At the Locator level we skip `wait_for_actionable`; at the `actions::*` JS level the existing state guards still run. Audit every `actions::` helper and add a `force` bypass where Playwright skips the check (see `server/dom.ts::_dispatchEvent`, `_setChecked`, `_selectOption`).
+3. **No per-option integration tests on 12 of 13 methods.** Rule 9 is explicit: "Signatures alone are not parity — prove it works end-to-end on every backend." The only methods with real per-option NAPI + backends tests are Click and addInitScript. Every other method needs: a NAPI `bun test` per option field + a QuickJS backends test exercising the option across all 4 backends + a DOM-side probe proving the option *took effect* (not just that the call didn't error).
+
+#### Rule-4 native-path gaps
+
+4. **`tap` should use `Input.dispatchTouchEvent` on CDP** (Chromium supports it). BiDi has no touch pointerType in stable — typed `Unsupported` is correct there. WebKit has no public touch injection — typed `Unsupported` there. JS-fallback across the board isn't "real implementation on every backend" per Rule 4.
+
+- **Playwright ref**: `LocatorClickOptions`, `LocatorHoverOptions`, `LocatorFillOptions`, `LocatorPressOptions`, `LocatorTypeOptions`, `LocatorCheckOptions`, `LocatorSetCheckedOptions`, `LocatorTapOptions`, `LocatorDblClickOptions`, `LocatorDragToOptions`, `LocatorDispatchEventOptions`, `LocatorSelectOptionOptions`, `LocatorSetInputFilesOptions` in `/tmp/playwright/packages/playwright-core/types/types.d.ts`.
+- **Files touched**: `crates/ferridriver/src/options.rs` (13 option structs, `SelectOptionValue`, `FilePayload`, `InputFiles`, `MouseButton`, `Modifier`); `crates/ferridriver/src/{locator,page,frame}.rs` (signature changes, every action method); `crates/ferridriver/src/actions.rs` (shared `click_with_opts`, `hover_with_opts`, `tap_with_opts`, `select_options`); `crates/ferridriver/src/backend/{cdp,bidi,webkit}` (`click_at_with`, `hover_at_with`, `press_modifiers`, `release_modifiers`, `BackendClickArgs`, `BackendHoverArgs`); `crates/ferridriver-node/src/{types,locator,page,frame}.rs` (13 NAPI option structs, 2 custom `FromNapiValue` enums for polymorphic inputs); `crates/ferridriver-script/src/bindings/{convert,locator,page,frame}.rs` (11 `parse_*` helpers).
+- **Acceptance for real completion**: per-option integration test proving the option takes visible effect on all 4 backends, for every field on every method. Rule 9.
+- **Next-session remediation plan**: see the `1.5 remediation` section in `HANDOVER.md`.
 
 ---
 
