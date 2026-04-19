@@ -304,7 +304,9 @@ impl Frame {
     self.inner.select_option(&selector, values.0, opts).await.into_napi()
   }
 
-  #[napi]
+  #[napi(
+    ts_args_type = "selector: string, files: string | string[] | FilePayload | FilePayload[], options?: SetInputFilesOptions"
+  )]
   pub async fn set_input_files(
     &self,
     selector: String,

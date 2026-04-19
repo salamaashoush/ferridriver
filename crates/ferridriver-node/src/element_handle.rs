@@ -404,7 +404,7 @@ impl ElementHandle {
   }
 
   /// Playwright: `elementHandle.setInputFiles(files, options?)`.
-  #[napi]
+  #[napi(ts_args_type = "files: string | string[] | FilePayload | FilePayload[], options?: SetInputFilesOptions")]
   pub async fn set_input_files(
     &self,
     files: crate::types::NapiInputFiles,

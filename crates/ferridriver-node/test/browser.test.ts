@@ -1582,5 +1582,303 @@ for (const backend of BACKENDS) {
       const title = await page.title();
       expect(title).toContain("Test Page");
     });
+
+    // ── action options – Playwright parity (§1.5) ─────────────────────
+    // Per-option coverage for the four methods whose option bags had
+    // signature-only support (dblclick, press, type, setInputFiles).
+    // Timeout coverage for all methods lives in the earlier
+    // "action timeout fires before the page default" test; these
+    // focus on option semantics beyond timeout.
+
+    it("locator.dblclick honors modifiers, position, delay, trial, button", async () => {
+      // Baseline: ondblclick fires on a plain dblclick().
+      await page.setContent(
+        '<button id="b">b</button><div id="out">no</div>' +
+          "<script>document.getElementById('b').addEventListener('dblclick',function(){document.getElementById('out').textContent='yes'})</script>"
+      );
+      await page.waitForSelector("#b");
+      await page.locator("#b").dblclick();
+      expect(await page.locator("#out").textContent()).toBe("yes");
+
+      // modifiers:['Shift'] — dblclick event carries shiftKey.
+      await page.setContent(
+        '<button id="b">b</button><div id="out">n</div>' +
+          "<script>document.getElementById('b').addEventListener('dblclick',function(e){document.getElementById('out').textContent=e.shiftKey?'shift':'none'})</script>"
+      );
+      await page.waitForSelector("#b");
+      await page.locator("#b").dblclick({ modifiers: ["Shift"] });
+      expect(await page.locator("#out").textContent()).toBe("shift");
+
+      // position:{x:15,y:25} — event lands at offset (not centre).
+      await page.setContent(
+        '<div id="b" style="width:200px;height:100px;background:#ccc"></div>' +
+          '<div id="out">n</div>' +
+          "<script>document.getElementById('b').addEventListener('dblclick',function(e){var r=e.currentTarget.getBoundingClientRect();document.getElementById('out').textContent=Math.round(e.clientX-r.left)+','+Math.round(e.clientY-r.top)})</script>"
+      );
+      await page.waitForSelector("#b");
+      await page.locator("#b").dblclick({ position: { x: 15, y: 25 } });
+      expect(await page.locator("#out").textContent()).toBe("15,25");
+
+      // delay:120 — first mousedown→mouseup gap ≥ 80ms.
+      await page.setContent(
+        '<button id="b">b</button><div id="out">0</div>' +
+          "<script>" +
+          "var downAt = 0, gap = null;" +
+          "var b = document.getElementById('b');" +
+          "b.addEventListener('mousedown', function() { downAt = Date.now(); });" +
+          "b.addEventListener('mouseup', function() { if (gap === null) { gap = Date.now() - downAt; document.getElementById('out').textContent = String(gap); } });" +
+          "</script>"
+      );
+      await page.waitForSelector("#b");
+      await page.locator("#b").dblclick({ delay: 120 });
+      const gapStr = await page.locator("#out").textContent();
+      const gap = Number.parseInt(gapStr ?? "0", 10);
+      expect(
+        gap,
+        `dblclick delay:120 should hold ≥ 80ms; got ${gap}ms`
+      ).toBeGreaterThanOrEqual(80);
+
+      // trial:true — skips dispatch; modifier keydown still fires.
+      await page.setContent(
+        '<button id="b">b</button><div id="dbl">no</div><div id="kd">n</div>' +
+          "<script>" +
+          "document.getElementById('b').addEventListener('dblclick',function(){document.getElementById('dbl').textContent='yes'});" +
+          "document.addEventListener('keydown',function(e){if(e.key==='Shift')document.getElementById('kd').textContent='shift'});" +
+          "</script>"
+      );
+      await page.waitForSelector("#b");
+      await page.locator("#b").dblclick({ trial: true, modifiers: ["Shift"] });
+      expect(await page.locator("#dbl").textContent()).toBe("no");
+      expect(await page.locator("#kd").textContent()).toBe("shift");
+
+      // button:'right' — emits contextmenu events with event.button === 2.
+      await page.setContent(
+        "<button id=\"b\" oncontextmenu=\"event.preventDefault()\">b</button>" +
+          '<div id="count">0</div><div id="btn">-1</div>' +
+          "<script>" +
+          "var b = document.getElementById('b');" +
+          "var cnt = document.getElementById('count');" +
+          "var btn = document.getElementById('btn');" +
+          "b.addEventListener('contextmenu', function(e) { cnt.textContent = String(parseInt(cnt.textContent,10)+1); btn.textContent = String(e.button); });" +
+          "</script>"
+      );
+      await page.waitForSelector("#b");
+      await page.locator("#b").dblclick({ button: "right" });
+      const ctxCount = Number.parseInt(
+        (await page.locator("#count").textContent()) ?? "0",
+        10
+      );
+      expect(ctxCount).toBeGreaterThanOrEqual(1);
+      expect(await page.locator("#btn").textContent()).toBe("2");
+    });
+
+    it("locator.press honors delay and no_wait_after", async () => {
+      // delay:120 — keydown→keyup wall gap ≥ 80ms.
+      await page.setContent(
+        '<input id="i" /><div id="out">0</div>' +
+          "<script>" +
+          "var downAt = 0;" +
+          "var i = document.getElementById('i');" +
+          "i.addEventListener('keydown', function() { downAt = performance.now(); });" +
+          "i.addEventListener('keyup', function() { document.getElementById('out').textContent = String(Math.round(performance.now() - downAt)); });" +
+          "</script>"
+      );
+      await page.waitForSelector("#i");
+      await page.locator("#i").click();
+      await page.locator("#i").press("A", { delay: 120 });
+      const gapStr = await page.locator("#out").textContent();
+      const gap = Number.parseInt(gapStr ?? "0", 10);
+      expect(
+        gap,
+        `press delay:120 should hold ≥ 80ms; got ${gap}ms`
+      ).toBeGreaterThanOrEqual(80);
+
+      // delay:0 (default) — near-zero gap.
+      await page.setContent(
+        '<input id="i" /><div id="out">0</div>' +
+          "<script>" +
+          "var downAt = 0;" +
+          "var i = document.getElementById('i');" +
+          "i.addEventListener('keydown', function() { downAt = performance.now(); });" +
+          "i.addEventListener('keyup', function() { document.getElementById('out').textContent = String(Math.round(performance.now() - downAt)); });" +
+          "</script>"
+      );
+      await page.waitForSelector("#i");
+      await page.locator("#i").click();
+      await page.locator("#i").press("B");
+      const noDelayStr = await page.locator("#out").textContent();
+      const noDelay = Number.parseInt(noDelayStr ?? "0", 10);
+      expect(
+        noDelay,
+        `press() no delay should be <80ms; got ${noDelay}ms`
+      ).toBeLessThan(80);
+
+      // noWaitAfter:true — call returns in bounded time.
+      await page.setContent('<input id="i" />');
+      await page.waitForSelector("#i");
+      await page.locator("#i").click();
+      const t0 = Date.now();
+      await page.locator("#i").press("C", { noWaitAfter: true });
+      expect(Date.now() - t0).toBeLessThan(2_000);
+    });
+
+    it("locator.type honors delay (per-character gap)", async () => {
+      // delay:50 across 3 chars — at least 2 gaps each ≥ ~35ms.
+      // `autofocus` doesn't always fire on `setContent` — click the
+      // input explicitly so the page-level keyboard dispatch
+      // (delay > 0 takes the page.press_key path) targets our
+      // listener rather than the body.
+      await page.setContent(
+        '<input id="i" /><div id="marks">[]</div>' +
+          "<script>" +
+          "var marks = [];" +
+          "document.getElementById('i').addEventListener('keydown', function() { marks.push(performance.now()); document.getElementById('marks').textContent = JSON.stringify(marks); });" +
+          "</script>"
+      );
+      await page.waitForSelector("#i");
+      await page.locator("#i").click();
+      await page.locator("#i").type("abc", { delay: 50 });
+      const marksRaw = await page.locator("#marks").textContent();
+      const marks = JSON.parse(marksRaw ?? "[]") as number[];
+      expect(marks.length).toBe(3);
+      const g1 = marks[1]! - marks[0]!;
+      const g2 = marks[2]! - marks[1]!;
+      expect(
+        Math.min(g1, g2),
+        `type delay:50 min inter-keystroke gap; g1=${g1}ms g2=${g2}ms`
+      ).toBeGreaterThanOrEqual(35);
+      expect(await page.locator("#i").inputValue()).toBe("abc");
+
+      // delay:0 (default) — three strokes in well under 1s.
+      await page.setContent('<input id="i" />');
+      await page.waitForSelector("#i");
+      await page.locator("#i").click();
+      const t0 = Date.now();
+      await page.locator("#i").type("xyz");
+      expect(Date.now() - t0).toBeLessThan(1_000);
+      expect(await page.locator("#i").inputValue()).toBe("xyz");
+    });
+
+    it("locator.setInputFiles accepts all four polymorphic forms", async () => {
+      const fs = await import("node:fs");
+      const path = await import("node:path");
+      const os = await import("node:os");
+      const uid = `napi-setinputfiles-${process.pid}-${Date.now()}`;
+      const path1 = path.join(os.tmpdir(), `${uid}-a.txt`);
+      const path2 = path.join(os.tmpdir(), `${uid}-b.txt`);
+      fs.writeFileSync(path1, "alpha");
+      fs.writeFileSync(path2, "beta-beta");
+
+      // Form 1 — single path string.
+      await page.setContent('<input type="file" id="f" />');
+      await page.waitForSelector("#f");
+      await page.locator("#f").setInputFiles(path1);
+      const countStr1 = await page.evaluate(
+        "document.getElementById('f').files.length"
+      );
+      expect(Number(countStr1)).toBe(1);
+      const name1 = (await page.evaluate(
+        "document.getElementById('f').files[0].name"
+      )) as string;
+      expect(name1).toBe(`${uid}-a.txt`);
+      const size1 = await page.evaluate(
+        "document.getElementById('f').files[0].size"
+      );
+      expect(Number(size1)).toBe(5);
+
+      // Form 2 — array of path strings (multi-file input).
+      await page.setContent('<input type="file" id="f" multiple />');
+      await page.waitForSelector("#f");
+      await page.locator("#f").setInputFiles([path1, path2]);
+      const countStr2 = await page.evaluate(
+        "document.getElementById('f').files.length"
+      );
+      expect(Number(countStr2)).toBe(2);
+      const size2a = await page.evaluate(
+        "document.getElementById('f').files[0].size"
+      );
+      expect(Number(size2a)).toBe(5);
+      const size2b = await page.evaluate(
+        "document.getElementById('f').files[1].size"
+      );
+      expect(Number(size2b)).toBe(9);
+
+      // Form 3 — single FilePayload (buffer-backed, name/mimeType survive).
+      await page.setContent('<input type="file" id="f" />');
+      await page.waitForSelector("#f");
+      await page
+        .locator("#f")
+        .setInputFiles({
+          name: "payload.txt",
+          mimeType: "text/plain",
+          buffer: Buffer.from("payload-body"),
+        });
+      expect(
+        Number(
+          await page.evaluate("document.getElementById('f').files.length")
+        )
+      ).toBe(1);
+      expect(
+        await page.evaluate("document.getElementById('f').files[0].name")
+      ).toBe("payload.txt");
+      expect(
+        await page.evaluate("document.getElementById('f').files[0].type")
+      ).toBe("text/plain");
+      expect(
+        Number(
+          await page.evaluate("document.getElementById('f').files[0].size")
+        )
+      ).toBe("payload-body".length);
+
+      // Form 4 — array of FilePayloads (multi-file input).
+      await page.setContent('<input type="file" id="f" multiple />');
+      await page.waitForSelector("#f");
+      await page.locator("#f").setInputFiles([
+        {
+          name: "a.txt",
+          mimeType: "text/plain",
+          buffer: Buffer.from("one"),
+        },
+        {
+          name: "b.json",
+          mimeType: "application/json",
+          buffer: Buffer.from("twelvebytes!"),
+        },
+      ]);
+      expect(
+        Number(
+          await page.evaluate("document.getElementById('f').files.length")
+        )
+      ).toBe(2);
+      expect(
+        await page.evaluate("document.getElementById('f').files[0].name")
+      ).toBe("a.txt");
+      expect(
+        await page.evaluate("document.getElementById('f').files[0].type")
+      ).toBe("text/plain");
+      expect(
+        Number(
+          await page.evaluate("document.getElementById('f').files[0].size")
+        )
+      ).toBe(3);
+      expect(
+        await page.evaluate("document.getElementById('f').files[1].name")
+      ).toBe("b.json");
+      expect(
+        await page.evaluate("document.getElementById('f').files[1].type")
+      ).toBe("application/json");
+      expect(
+        Number(
+          await page.evaluate("document.getElementById('f').files[1].size")
+        )
+      ).toBe(12);
+
+      try {
+        fs.unlinkSync(path1);
+      } catch {}
+      try {
+        fs.unlinkSync(path2);
+      } catch {}
+    });
   });
 }
