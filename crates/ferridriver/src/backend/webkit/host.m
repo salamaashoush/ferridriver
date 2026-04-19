@@ -1181,7 +1181,13 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
             else if ([ext isEqualToString:@"xml"]) mime = @"application/xml";
             else if ([ext isEqualToString:@"zip"]) mime = @"application/zip";
 
-            // JS: decode base64, create File, assign via DataTransfer
+            // JS: decode base64, create File, APPEND via DataTransfer.
+            // Each SetFileInput call carries one path; preserving any
+            // files already on the element lets `set_input_files` loop
+            // path-by-path and still produce a multi-file FileList
+            // (used by `<input type=file multiple>`). The Rust caller is
+            // expected to `value = ''` the input before the first call
+            // of a new upload so the previous selection doesn't leak.
             NSString *js = [NSString stringWithFormat:
                 @"(function(){"
                 "var el=document.querySelector('%@');"
@@ -1192,6 +1198,7 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 "for(var i=0;i<bytes.length;i++)arr[i]=bytes.charCodeAt(i);"
                 "var file=new File([arr],'%@',{type:'%@'});"
                 "var dt=new DataTransfer();"
+                "for(var j=0;j<el.files.length;j++)dt.items.add(el.files[j]);"
                 "dt.items.add(file);"
                 "el.files=dt.files;"
                 "el.dispatchEvent(new Event('change',{bubbles:true}));"

@@ -2217,6 +2217,11 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::handle_surface::test_element_handle_temp_tag_actions);
   run!(backends_support::handle_surface::test_element_handle_select_text);
   run!(test_script_click_options);
+  // Per-option Rule-9 coverage for the remaining §1.5 methods.
+  run!(backends_support::action_options::test_script_dblclick_options);
+  run!(backends_support::action_options::test_script_press_options);
+  run!(backends_support::action_options::test_script_type_options);
+  run!(backends_support::action_options::test_script_set_input_files_polymorphism);
   run!(test_script_action_timeout);
   run!(test_script_tap_native);
   run!(test_script_fill_force);

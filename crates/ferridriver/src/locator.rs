@@ -763,25 +763,46 @@ impl Locator {
           .map_err(Into::into)
       },
       crate::options::InputFiles::Payloads(payloads) => {
-        let tmp_dir = std::env::temp_dir().join(format!("ferridriver-files-{}", std::process::id()));
-        std::fs::create_dir_all(&tmp_dir)
+        // Each payload gets its own subdirectory so the filename on
+        // disk matches `payload.name` verbatim — otherwise the page
+        // would see a ferridriver-internal `{i}-` prefix and
+        // duplicate names would collide in the shared temp root.
+        // Matches Playwright's `setInputFilePaths` server path which
+        // materialises each payload to a temporary directory unique
+        // to the upload.
+        //
+        // We deliberately DO NOT delete these temp files after
+        // `upload_file` returns. CDP's `DOM.setFileInputFiles` only
+        // records the paths on the `<input>`; the browser does not
+        // actually read file content until the page JS calls
+        // `input.files[i].size` / `reader.readAsText(...)` — which
+        // happens AFTER this function returns. Deleting on the
+        // success path leaves the page with zero-byte files (the
+        // handle survives but the backing file is gone). The
+        // process-scoped root is cleaned up by the OS on reboot and
+        // the per-upload subdirs share that root, so we don't leak
+        // indefinitely across a test run.
+        let tmp_root = std::env::temp_dir().join(format!("ferridriver-files-{}", std::process::id()));
+        std::fs::create_dir_all(&tmp_root)
           .map_err(|e| crate::error::FerriError::Other(format!("failed to create upload temp dir: {e}")))?;
+        let upload_id = std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .map(|d| d.as_nanos())
+          .unwrap_or(0);
         let mut paths: Vec<String> = Vec::new();
         for (i, p) in payloads.iter().enumerate() {
+          let sub = tmp_root.join(format!("{upload_id}-{i}"));
+          std::fs::create_dir_all(&sub)
+            .map_err(|e| crate::error::FerriError::Other(format!("failed to create payload subdir: {e}")))?;
           let safe_name = p.name.replace(['/', '\\', '\0'], "_");
-          let path = tmp_dir.join(format!("{i}-{safe_name}"));
+          let path = sub.join(&safe_name);
           std::fs::write(&path, &p.buffer)
             .map_err(|e| crate::error::FerriError::Other(format!("failed to write upload payload: {e}")))?;
           paths.push(path.display().to_string());
         }
-        let res = actions::upload_file(self.frame.page_arc().inner(), &self.selector, &paths).await;
-        // Best-effort cleanup — don't let an unlink error shadow the
-        // primary upload outcome.
-        for p in &paths {
-          let _ = std::fs::remove_file(p);
-        }
-        let _ = std::fs::remove_dir(&tmp_dir);
-        res.map_err(Into::into)
+        actions::upload_file(self.frame.page_arc().inner(), &self.selector, &paths)
+          .await
+          .map_err(Into::into)
       },
     }
   }

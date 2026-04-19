@@ -1120,7 +1120,9 @@ impl Page {
 
   /// Set files on the `<input type=file>` matching `selector`.
   /// Accepts Playwright's full value union + `PageSetInputFilesOptions`.
-  #[napi]
+  #[napi(
+    ts_args_type = "selector: string, files: string | string[] | FilePayload | FilePayload[], options?: SetInputFilesOptions"
+  )]
   pub async fn set_input_files(
     &self,
     selector: String,

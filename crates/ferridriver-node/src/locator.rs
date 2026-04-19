@@ -455,7 +455,7 @@ impl Locator {
   /// Set files on a `<input type=file>` element. Accepts Playwright's
   /// full `string | string[] | FilePayload | FilePayload[]` union plus
   /// the `LocatorSetInputFilesOptions` bag.
-  #[napi]
+  #[napi(ts_args_type = "files: string | string[] | FilePayload | FilePayload[], options?: SetInputFilesOptions")]
   pub async fn set_input_files(
     &self,
     files: crate::types::NapiInputFiles,

@@ -819,6 +819,17 @@ impl WebKitPage {
     if paths.is_empty() {
       return Err("No file paths provided".into());
     }
+    // Clear any previously-assigned files so this call replaces the
+    // selection rather than appending (matches Playwright's
+    // setInputFiles semantics). The per-path IPC op then appends one
+    // file at a time into the live DataTransfer. Using `value = ''`
+    // is the canonical way to reset a file input — `el.files = null`
+    // throws in strict mode.
+    let clear = format!(
+      "(function(){{var el=document.querySelector('{}');if(el){{el.value='';}}}})()",
+      selector.replace('\'', "\\'"),
+    );
+    let _ = self.evaluate(&clear).await;
     for path in paths {
       let mut p = Vec::new();
       ipc::str_encode(&mut p, selector);

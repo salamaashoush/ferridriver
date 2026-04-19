@@ -8,5 +8,6 @@
 //! `pub mod` line below — `tests/backends.rs` will pick up the test
 //! functions via the module path.
 
+pub mod action_options;
 pub mod client;
 pub mod handle_surface;
