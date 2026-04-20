@@ -152,6 +152,18 @@ impl BidiSession {
       .stderr(std::process::Stdio::piped())
       .kill_on_drop(true);
 
+    // Put Firefox into its own session+process group so content/plugin
+    // subprocesses die together with the parent on teardown.
+    // SAFETY: `setsid` is async-signal-safe; the closure performs no
+    // allocation and captures nothing. `pre_exec` is unsafe on tokio's
+    // `Command` because arbitrary code runs post-fork; our closure is
+    // trivially sound.
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    unsafe {
+      command.pre_exec(crate::backend::process::setsid_pre_exec());
+    }
+
     debug!("Launching Firefox for BiDi: {firefox_path}");
     let mut child = command.spawn().map_err(|e| format!("Firefox launch: {e}"))?;
 

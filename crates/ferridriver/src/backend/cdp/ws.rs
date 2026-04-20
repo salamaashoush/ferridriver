@@ -94,6 +94,19 @@ impl WsTransport {
       .stderr(std::process::Stdio::piped())
       .kill_on_drop(true);
 
+    // Put Chrome into its own session+process group so helper subprocesses
+    // (renderer/GPU/zygote) die together with the parent on teardown. See
+    // `backend::process`.
+    // SAFETY: `setsid` is async-signal-safe; the closure performs no
+    // allocation and captures nothing. `pre_exec` is unsafe on tokio's
+    // `Command` because arbitrary code runs post-fork; our closure is
+    // trivially sound.
+    #[cfg(unix)]
+    #[allow(unsafe_code)]
+    unsafe {
+      command.pre_exec(super::super::process::setsid_pre_exec());
+    }
+
     let mut child = command.spawn().map_err(|e| format!("Chrome launch: {e}"))?;
 
     let port_file = user_data_dir.join("DevToolsActivePort");

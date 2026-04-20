@@ -33,10 +33,13 @@ impl WebKitChildGuard {
   }
 
   /// Kill the host subprocess and reap it. Idempotent — safe to call from both
-  /// [`WebKitBrowser::close`] and `Drop`.
+  /// [`WebKitBrowser::close`] and `Drop`. Kills the whole process group (the
+  /// host is a session leader thanks to `setsid()` in its `pre_exec`), so any
+  /// worker the host forked dies with it.
   fn shutdown(&self) {
     if let Ok(mut guard) = self.child.lock() {
       if let Some(mut child) = guard.take() {
+        crate::backend::process::kill_process_group(child.id());
         let _ = child.kill();
         let _ = child.wait();
       }
