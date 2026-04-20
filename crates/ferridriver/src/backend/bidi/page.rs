@@ -18,8 +18,12 @@ use super::types::EvaluateResult;
 use crate::backend::{
   AnyElement, AxNodeData, AxProperty, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle, ScreenshotOpts,
 };
-use crate::events::{EventEmitter, NetResponse, PageEvent};
-use crate::state::{ConsoleMsg, DialogEvent, NetRequest};
+use crate::events::{EventEmitter, PageEvent};
+use crate::network::{
+  self, BodyFn, RawHeadersFn, RemoteAddr, Request as NetworkRequest, RequestInit, Response, ResponseInit,
+  SecurityDetails,
+};
+use crate::state::{ConsoleMsg, DialogEvent};
 
 /// Page handle for the `BiDi` backend. Cheaply cloneable (Arc-based).
 #[derive(Clone)]
@@ -1254,7 +1258,7 @@ impl BidiPage {
   pub fn attach_listeners(
     &self,
     console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
-    network_log: Arc<RwLock<Vec<NetRequest>>>,
+    network_log: Arc<RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<RwLock<Vec<DialogEvent>>>,
   ) {
     let mut rx = self.session.transport.subscribe_events();
@@ -1264,6 +1268,7 @@ impl BidiPage {
     let closed = self.closed.clone();
     let emitter = self.events.clone();
     let injected_script = self.injected_script.clone();
+    let tracker = Arc::new(BidiNetworkTracker::new(self.session.clone()));
 
     tokio::spawn(async move {
       while let Ok(event) = rx.recv().await {
@@ -1291,10 +1296,18 @@ impl BidiPage {
             emitter.emit(PageEvent::Console(msg));
           },
           "network.beforeRequestSent" => {
-            handle_request_sent(&event.params, &emitter, &network_log).await;
+            tracker
+              .on_before_request_sent(&event.params, &emitter, &network_log)
+              .await;
+          },
+          "network.responseStarted" => {
+            tracker.on_response_started(&event.params, &emitter).await;
           },
           "network.responseCompleted" => {
-            handle_response_completed(&event.params, &emitter, &network_log).await;
+            tracker.on_response_completed(&event.params, &emitter).await;
+          },
+          "network.fetchError" => {
+            tracker.on_fetch_error(&event.params, &emitter).await;
           },
           "browsingContext.userPromptOpened" => {
             let prompt_type = event.params.get("type").and_then(|v| v.as_str()).unwrap_or("alert");
@@ -2042,99 +2055,282 @@ fn collect_frames(ctx: &serde_json::Value, parent_id: Option<&str>, frames: &mut
   }
 }
 
-/// Handle a `network.beforeRequestSent` event: parse the request, log it, emit it.
-async fn handle_request_sent(
-  params: &serde_json::Value,
-  emitter: &EventEmitter,
-  network_log: &Arc<RwLock<Vec<NetRequest>>>,
-) {
-  let Some(req) = params.get("request") else { return };
-  let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-  let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string();
-  let id = req.get("request").and_then(|v| v.as_str()).unwrap_or("").to_string();
-
-  let has_listeners = emitter.receiver_count() > 0;
-  let headers = if has_listeners {
-    req.get("headers").map(parse_bidi_headers)
-  } else {
-    None
-  };
-
-  let resource_type = params
-    .get("initiator")
-    .and_then(|i| i.get("type"))
-    .and_then(|v| v.as_str())
-    .map_or("", |t| match t {
-      "parser" => "Document",
-      "script" => "Script",
-      "preflight" => "Preflight",
-      other => other,
-    })
-    .to_string();
-
-  let post_data = req
-    .get("body")
-    .and_then(|b| b.get("value"))
-    .and_then(|v| v.as_str())
-    .map(std::string::ToString::to_string);
-
-  let mime_type = headers
-    .as_ref()
-    .and_then(|h| h.get("content-type").or_else(|| h.get("Content-Type")).cloned());
-
-  let net_request = NetRequest {
-    id,
-    url,
-    method,
-    status: None,
-    resource_type,
-    mime_type,
-    headers,
-    post_data,
-  };
-  if has_listeners {
-    emitter.emit(PageEvent::Request(net_request.clone()));
-  }
-  network_log.write().await.push(net_request);
+/// Per-page bookkeeping for live `Request` / `Response` lifecycle objects
+/// across the `BiDi` network event sequence (`beforeRequestSent` →
+/// `responseStarted` → `responseCompleted` / `fetchError`).
+///
+/// W3C `BiDi` today does not expose `WebSocket` frame events — Playwright's
+/// own `BiDi` backend skips `WebSocket` handling for the same reason — so
+/// `WebSocket.body()` / `WebSocket` frame observation surface the typed
+/// `FerriError::Unsupported` per Rule 4 instead of dangling indefinitely.
+struct BidiNetworkTracker {
+  session: Arc<super::session::BidiSession>,
+  requests: tokio::sync::Mutex<FxHashMap<String, NetworkRequest>>,
+  responses: tokio::sync::Mutex<FxHashMap<String, Response>>,
 }
 
-/// Handle a `network.responseCompleted` event: update log entry, emit response.
-async fn handle_response_completed(
-  params: &serde_json::Value,
-  emitter: &EventEmitter,
-  network_log: &Arc<RwLock<Vec<NetRequest>>>,
-) {
-  let response = params.get("response");
-  let request = params.get("request");
-  let (Some(resp), Some(req)) = (response, request) else {
-    return;
-  };
-
-  let request_id = req.get("request").and_then(|v| v.as_str()).unwrap_or("");
-  let status = resp.get("status").and_then(serde_json::Value::as_i64);
-  let status_text = resp
-    .get("statusText")
-    .and_then(|v| v.as_str())
-    .unwrap_or("")
-    .to_string();
-  let mime_type = resp.get("mimeType").and_then(|v| v.as_str()).unwrap_or("").to_string();
-  let url = resp.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-  let headers = resp.get("headers").map(parse_bidi_headers);
-
-  let mut log = network_log.write().await;
-  if let Some(entry) = log.iter_mut().find(|e| e.id == request_id) {
-    entry.status = status;
-    entry.mime_type = Some(mime_type.clone());
+impl BidiNetworkTracker {
+  fn new(session: Arc<super::session::BidiSession>) -> Self {
+    Self {
+      session,
+      requests: tokio::sync::Mutex::new(FxHashMap::default()),
+      responses: tokio::sync::Mutex::new(FxHashMap::default()),
+    }
   }
 
-  emitter.emit(PageEvent::Response(NetResponse {
-    request_id: request_id.to_string(),
-    url,
-    status: status.unwrap_or(0),
-    status_text,
-    mime_type,
-    headers,
-  }));
+  async fn on_before_request_sent(
+    self: &Arc<Self>,
+    params: &serde_json::Value,
+    emitter: &EventEmitter,
+    network_log: &Arc<RwLock<Vec<NetworkRequest>>>,
+  ) {
+    let Some(req) = params.get("request") else {
+      return;
+    };
+    let id = req.get("request").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if id.is_empty() {
+      return;
+    }
+    let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET").to_string();
+    let headers = req.get("headers").map(parse_bidi_headers).unwrap_or_default();
+    let resource_type = params
+      .get("initiator")
+      .and_then(|i| i.get("type"))
+      .and_then(|v| v.as_str())
+      .map_or("", |t| match t {
+        "parser" => "Document",
+        "script" => "Script",
+        "preflight" => "Preflight",
+        other => other,
+      })
+      .to_string();
+    let post_data = req
+      .get("body")
+      .and_then(|b| b.get("value"))
+      .and_then(|v| v.as_str())
+      .map(|s| s.as_bytes().to_vec());
+    let frame_id = params
+      .get("context")
+      .and_then(|v| v.as_str())
+      .map(std::string::ToString::to_string);
+    let is_navigation_request = params.get("navigation").and_then(|v| v.as_str()).is_some();
+
+    // Redirects: BiDi reuses the request id and signals the prior with
+    // `redirectCount`. When the count > 0, treat it like the next hop.
+    let redirected_from = if params
+      .get("redirectCount")
+      .and_then(serde_json::Value::as_u64)
+      .unwrap_or(0)
+      > 0
+    {
+      let mut requests = self.requests.lock().await;
+      requests.remove(&id)
+    } else {
+      None
+    };
+
+    let new_request = network::Request::new(RequestInit {
+      id: id.clone(),
+      url,
+      method,
+      resource_type,
+      is_navigation_request,
+      post_data,
+      headers,
+      frame_id,
+      redirected_from,
+      timing: None,
+      raw_headers_fn: None,
+    });
+
+    self.requests.lock().await.insert(id.clone(), new_request.clone());
+    network_log.write().await.push(new_request.clone());
+    emitter.emit(PageEvent::Request(new_request));
+  }
+
+  async fn on_response_started(self: &Arc<Self>, params: &serde_json::Value, emitter: &EventEmitter) {
+    let Some(request_id) = params
+      .get("request")
+      .and_then(|r| r.get("request"))
+      .and_then(|v| v.as_str())
+    else {
+      return;
+    };
+    let request_id = request_id.to_string();
+    let Some(req) = self.requests.lock().await.get(&request_id).cloned() else {
+      return;
+    };
+    let Some(resp) = params.get("response") else {
+      return;
+    };
+    let response = self.build_response(req.clone(), resp, &request_id);
+    self.responses.lock().await.insert(request_id, response.clone());
+    req.set_response(&response).await;
+    emitter.emit(PageEvent::Response(response));
+  }
+
+  async fn on_response_completed(self: &Arc<Self>, params: &serde_json::Value, emitter: &EventEmitter) {
+    let Some(request_id) = params
+      .get("request")
+      .and_then(|r| r.get("request"))
+      .and_then(|v| v.as_str())
+    else {
+      return;
+    };
+    let request_id = request_id.to_string();
+    let Some(req) = self.requests.lock().await.get(&request_id).cloned() else {
+      return;
+    };
+    // BiDi sometimes omits responseStarted (e.g. cache-served responses);
+    // synthesise the Response here if necessary.
+    if req.existing_response().await.is_none() {
+      if let Some(resp) = params.get("response") {
+        let response = self.build_response(req.clone(), resp, &request_id);
+        self.responses.lock().await.insert(request_id.clone(), response.clone());
+        req.set_response(&response).await;
+        emitter.emit(PageEvent::Response(response));
+      }
+    }
+    if let Some(resp) = self.responses.lock().await.get(&request_id).cloned() {
+      resp.finish_success().await;
+    }
+    emitter.emit(PageEvent::RequestFinished(req));
+  }
+
+  async fn on_fetch_error(self: &Arc<Self>, params: &serde_json::Value, emitter: &EventEmitter) {
+    let Some(request_id) = params
+      .get("request")
+      .and_then(|r| r.get("request"))
+      .and_then(|v| v.as_str())
+    else {
+      return;
+    };
+    let request_id = request_id.to_string();
+    let Some(req) = self.requests.lock().await.get(&request_id).cloned() else {
+      return;
+    };
+    let error_text = params
+      .get("errorText")
+      .and_then(|v| v.as_str())
+      .unwrap_or("net::ERR_FAILED")
+      .to_string();
+    req.set_failure(error_text.clone()).await;
+    if let Some(resp) = self.responses.lock().await.get(&request_id).cloned() {
+      resp.finish_failure(error_text).await;
+    }
+    emitter.emit(PageEvent::RequestFailed(req));
+  }
+
+  fn build_response(self: &Arc<Self>, request: NetworkRequest, resp: &serde_json::Value, request_id: &str) -> Response {
+    let url = resp.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    let status = resp.get("status").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let status_text = resp
+      .get("statusText")
+      .and_then(|v| v.as_str())
+      .unwrap_or("")
+      .to_string();
+    let from_service_worker = resp
+      .get("fromCache")
+      .and_then(serde_json::Value::as_bool)
+      .unwrap_or(false);
+    let headers = resp.get("headers").map(parse_bidi_headers).unwrap_or_default();
+    let body_fn = self.make_body_fn(request_id);
+    let raw_headers_fn = self.make_raw_headers_fn(request_id);
+    Response::new(ResponseInit {
+      request,
+      url,
+      status,
+      status_text,
+      from_service_worker,
+      http_version: None,
+      headers,
+      remote_addr: parse_bidi_remote_addr(resp),
+      security_details: parse_bidi_security_details(resp),
+      body_fn: Some(body_fn),
+      raw_headers_fn: Some(raw_headers_fn),
+    })
+  }
+
+  fn make_body_fn(self: &Arc<Self>, request_id: &str) -> BodyFn {
+    let session = self.session.clone();
+    let request_id = request_id.to_string();
+    Arc::new(move || {
+      let session = session.clone();
+      let request_id = request_id.clone();
+      Box::pin(async move {
+        let resp = session
+          .transport
+          .send_command(
+            "network.getData",
+            json!({"request": request_id, "dataType": "response"}),
+          )
+          .await
+          .map_err(|e| {
+            // Firefox discards response body bytes for non-intercepted
+            // responses; `network.getData` then returns "no such network
+            // data". Mirror Playwright's own BiDi backend behaviour and
+            // surface this as a typed `Unsupported` so callers can
+            // distinguish "Firefox dropped it" from a real protocol
+            // failure.
+            if e.contains("no such network data") {
+              crate::error::FerriError::Unsupported(
+                "Response body unavailable on BiDi without network interception (Firefox discards bytes after response)".into(),
+              )
+            } else {
+              crate::error::FerriError::Protocol {
+                method: "network.getData".into(),
+                message: e,
+              }
+            }
+          })?;
+        let bytes = resp.get("bytes").and_then(|b| b.get("value")).and_then(|v| v.as_str());
+        let data = bytes.unwrap_or("");
+        base64::engine::general_purpose::STANDARD
+          .decode(data)
+          .map_err(|e| crate::error::FerriError::Other(format!("base64 decode: {e}")))
+      })
+    })
+  }
+
+  fn make_raw_headers_fn(self: &Arc<Self>, request_id: &str) -> RawHeadersFn {
+    let tracker = self.clone();
+    let request_id = request_id.to_string();
+    Arc::new(move || {
+      let tracker = tracker.clone();
+      let request_id = request_id.clone();
+      Box::pin(async move {
+        if let Some(resp) = tracker.responses.lock().await.get(&request_id) {
+          return Ok(resp.headers_array().await);
+        }
+        Ok(Vec::new())
+      })
+    })
+  }
+}
+
+fn parse_bidi_remote_addr(_resp: &serde_json::Value) -> Option<RemoteAddr> {
+  // WebDriver BiDi (W3C draft) does not currently surface remote IP /
+  // port on `network.responseStarted` / `responseCompleted` payloads —
+  // Playwright's own BiDi backend leaves the field unset for the same
+  // reason. Returning `None` matches the other backend behaviours when
+  // the field is missing rather than guessing.
+  None
+}
+
+fn parse_bidi_security_details(resp: &serde_json::Value) -> Option<SecurityDetails> {
+  // BiDi exposes `securityDetails` only for redirected responses on
+  // some implementations; treat absence as None.
+  resp
+    .get("securityDetails")
+    .and_then(|s| s.as_object())
+    .map(|obj| SecurityDetails {
+      protocol: obj.get("protocol").and_then(|v| v.as_str()).map(String::from),
+      subject_name: obj.get("subjectName").and_then(|v| v.as_str()).map(String::from),
+      issuer: obj.get("issuer").and_then(|v| v.as_str()).map(String::from),
+      valid_from: obj.get("validFrom").and_then(serde_json::Value::as_f64),
+      valid_to: obj.get("validTo").and_then(serde_json::Value::as_f64),
+    })
 }
 
 /// Parse BiDi-format headers `[{name, value: {type, value}}]` into a `FxHashMap`.

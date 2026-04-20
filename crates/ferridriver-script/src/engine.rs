@@ -190,6 +190,7 @@ impl ScriptEngine {
       page: context.page.clone(),
       browser_context: context.browser_context.clone(),
       request: context.request.clone(),
+      async_ctx: ctx.clone(),
     };
     let source_owned = source.to_string();
 
@@ -246,6 +247,10 @@ struct GlobalsInstall {
   page: Option<Arc<ferridriver::Page>>,
   browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
+  /// `AsyncContext` driving the script — passed to `install_page` so
+  /// `page.route` callbacks can dispatch back into JS from a separate
+  /// tokio task. Always present (cloned from the engine's context).
+  async_ctx: AsyncContext,
 }
 
 /// Install the sandbox globals: `args`, `console`, `vars`, `fs`, and any of
@@ -267,7 +272,7 @@ fn install_globals(ctx: &Ctx<'_>, args_json: &str, inst: GlobalsInstall) -> rqui
     crate::bindings::install_artifacts(ctx, artifacts)?;
   }
   if let Some(page) = inst.page {
-    crate::bindings::install_page(ctx, page)?;
+    crate::bindings::install_page(ctx, page, inst.async_ctx.clone())?;
   }
   if let Some(bcx) = inst.browser_context {
     crate::bindings::install_browser_context(ctx, bcx)?;

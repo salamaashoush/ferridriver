@@ -31,6 +31,7 @@ pub mod frame;
 pub(crate) mod frame_cache;
 pub mod js_handle;
 pub mod locator;
+pub mod network;
 pub mod options;
 pub mod page;
 pub mod protocol;

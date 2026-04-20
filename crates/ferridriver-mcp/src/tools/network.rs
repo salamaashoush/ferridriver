@@ -61,8 +61,12 @@ impl McpServer {
           .rev()
           .collect();
         drop(log);
+        let mut snapshots = Vec::with_capacity(reqs.len());
+        for req in &reqs {
+          snapshots.push(req.to_diagnostic_json().await);
+        }
         Ok(CallToolResult::success(vec![Content::text(
-          serde_json::to_string_pretty(&reqs).unwrap_or_default(),
+          serde_json::to_string_pretty(&snapshots).unwrap_or_default(),
         )]))
       },
       "trace_start" => {

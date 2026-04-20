@@ -3,8 +3,7 @@
 use crate::error::IntoNapi;
 use crate::locator::Locator;
 use crate::types::{
-  DragAndDropOptions, GotoOptions, MetricData, ResponseData, RoleOptions, ScreenshotOptions, TextOptions,
-  ViewportConfig, WaitOptions,
+  DragAndDropOptions, GotoOptions, MetricData, RoleOptions, ScreenshotOptions, TextOptions, ViewportConfig, WaitOptions,
 };
 use ferridriver::protocol::SerializedArgument;
 use napi::Result;
@@ -321,37 +320,61 @@ impl Page {
     self.inner.remove_all_listeners();
   }
 
-  /// Wait for a specific event. Playwright API: `page.waitForEvent(event)`.
+  /// Wait for a specific event. Playwright API:
+  /// `page.waitForEvent(event, options?)`. Returns a live class (`Request` /
+  /// `Response` / `WebSocket`) for lifecycle events, or a plain snapshot
+  /// object for simpler events — matches Playwright's `PageEventsMap`.
   #[napi(
-    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
-    ts_return_type = "Promise<{ type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | Record<string, any>>"
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
+    ts_return_type = "Promise<Request | Response | WebSocket | Record<string, any>>"
   )]
-  pub async fn wait_for_event(&self, event: String, timeout_ms: Option<f64>) -> Result<serde_json::Value> {
+  pub async fn wait_for_event(
+    &self,
+    event: String,
+    timeout_ms: Option<f64>,
+  ) -> Result<
+    napi::bindgen_prelude::Either4<
+      crate::network::Request,
+      crate::network::Response,
+      crate::network::WebSocket,
+      serde_json::Value,
+    >,
+  > {
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
     let ev = self.inner.events().wait_for_event(&event, timeout).await.into_napi()?;
-    Ok(page_event_to_value(&ev))
+    use ferridriver::events::PageEvent;
+    Ok(match ev {
+      PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => {
+        napi::bindgen_prelude::Either4::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
+      },
+      PageEvent::Response(r) => {
+        napi::bindgen_prelude::Either4::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
+      },
+      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either4::C(crate::network::WebSocket::from_core(ws)),
+      other => napi::bindgen_prelude::Either4::D(page_event_to_value(&other)),
+    })
   }
 
   /// Wait for a network response matching a URL pattern.
   /// Playwright API: `page.waitForResponse(urlOrPredicate)`.
   /// `url` accepts a glob string or a native JS `RegExp`.
-  #[napi(ts_args_type = "url: string | RegExp, timeoutMs?: number")]
+  /// Returns the live `Response` object (Playwright parity).
+  #[napi(
+    ts_args_type = "url: string | RegExp, timeoutMs?: number",
+    ts_return_type = "Promise<Response>"
+  )]
   pub async fn wait_for_response(
     &self,
     url: napi::Either<String, crate::types::JsRegExpLike>,
     timeout_ms: Option<f64>,
-  ) -> Result<ResponseData> {
+  ) -> Result<crate::network::Response> {
     let matcher = crate::types::string_or_regex_to_rust(url)?;
     let r = self
       .inner
       .wait_for_response(matcher, timeout_ms.map(crate::types::f64_to_u64))
       .await
       .map_err(napi::Error::from_reason)?;
-    Ok(ResponseData {
-      url: r.url,
-      status: i32::try_from(r.status).unwrap_or(i32::MAX),
-      status_text: r.status_text,
-    })
+    Ok(crate::network::Response::from_core_with_page(r, self.inner.clone()))
   }
 
   // ── Page-level actions ──────────────────────────────────────────────────
@@ -1140,19 +1163,23 @@ impl Page {
   /// Wait for a network request matching a URL pattern.
   /// Playwright API: `page.waitForRequest(urlOrPredicate)`.
   /// `url` accepts a glob string or a native JS `RegExp`.
-  #[napi(ts_args_type = "url: string | RegExp, timeoutMs?: number")]
+  /// Returns the live `Request` object (Playwright parity).
+  #[napi(
+    ts_args_type = "url: string | RegExp, timeoutMs?: number",
+    ts_return_type = "Promise<Request>"
+  )]
   pub async fn wait_for_request(
     &self,
     url: napi::Either<String, crate::types::JsRegExpLike>,
     timeout_ms: Option<f64>,
-  ) -> Result<serde_json::Value> {
+  ) -> Result<crate::network::Request> {
     let matcher = crate::types::string_or_regex_to_rust(url)?;
     let req = self
       .inner
       .wait_for_request(matcher, timeout_ms.map(crate::types::f64_to_u64))
       .await
       .map_err(napi::Error::from_reason)?;
-    Ok(serde_json::json!({"url": req.url, "method": req.method, "resourceType": req.resource_type}))
+    Ok(crate::network::Request::from_core_with_page(req, self.inner.clone()))
   }
 
   #[napi]
@@ -1421,17 +1448,42 @@ impl Mouse {
 // ── Event conversion helpers ─────────────────────────────────────────────
 
 use ferridriver::events::PageEvent;
+use ferridriver::network::{Request as NetRequest, Response as NetResponse};
 
-/// Convert a `PageEvent` to a JS-friendly `serde_json::Value`, filtered by event name.
-/// Returns None if the event doesn't match the requested name.
-#[allow(clippy::match_same_arms)] // arms differ by event name filter, bodies intentionally identical
-/// Convert a named event to a JS value. Uses serde::Serialize on the event
-/// structs directly — avoids the `json!()` macro's per-field string cloning.
+fn request_snapshot(req: &NetRequest) -> serde_json::Value {
+  serde_json::json!({
+    "url": req.url(),
+    "method": req.method(),
+    "resourceType": req.resource_type(),
+    "isNavigationRequest": req.is_navigation_request(),
+    "headers": req.headers(),
+    "postData": req.post_data(),
+  })
+}
+
+fn response_snapshot(resp: &NetResponse) -> serde_json::Value {
+  serde_json::json!({
+    "url": resp.url(),
+    "status": resp.status(),
+    "statusText": resp.status_text(),
+    "ok": resp.ok(),
+    "fromServiceWorker": resp.is_from_service_worker(),
+    "headers": resp.headers(),
+  })
+}
+
+/// Convert a named event to a JS value. The `request`/`response` family
+/// surfaces a sync snapshot here — full live access to `Request` /
+/// `Response` lifecycle methods is exposed via `wait_for_request` and
+/// `wait_for_response` which return the dedicated NAPI classes.
 fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value> {
   match (event_name, event) {
     ("console", PageEvent::Console(msg)) => serde_json::to_value(msg).ok(),
-    ("response", PageEvent::Response(r)) => serde_json::to_value(r).ok(),
-    ("request", PageEvent::Request(r)) => serde_json::to_value(r).ok(),
+    ("response", PageEvent::Response(r)) => Some(response_snapshot(r)),
+    ("request", PageEvent::Request(r))
+    | ("requestfinished", PageEvent::RequestFinished(r))
+    | ("requestfailed", PageEvent::RequestFailed(r)) => Some(request_snapshot(r)),
+    ("websocket", PageEvent::WebSocket(ws)) => Some(serde_json::json!({"url": ws.url(), "isClosed": ws.is_closed()})),
     ("dialog", PageEvent::Dialog(d)) => serde_json::to_value(d).ok(),
     ("frameattached", PageEvent::FrameAttached(f)) | ("framenavigated", PageEvent::FrameNavigated(f)) => {
       serde_json::to_value(f).ok()
@@ -1439,19 +1491,20 @@ fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value>
     ("framedetached", PageEvent::FrameDetached { frame_id }) => Some(serde_json::json!({"frameId": frame_id})),
     ("download", PageEvent::Download(d)) => serde_json::to_value(d).ok(),
     ("load", PageEvent::Load) | ("domcontentloaded", PageEvent::DomContentLoaded) | ("close", PageEvent::Close) => {
-      Some(serde_json::Value::Object(Default::default()))
+      Some(serde_json::Value::Object(serde_json::Map::new()))
     },
     ("pageerror", PageEvent::PageError(msg)) => Some(serde_json::json!({"message": msg})),
     _ => None,
   }
 }
 
-/// Convert any `PageEvent` to a JS value (for waitForEvent).
+/// Convert any `PageEvent` to a JS value (for `waitForEvent`).
 fn page_event_to_value(event: &PageEvent) -> serde_json::Value {
   match event {
     PageEvent::Console(msg) => serde_json::to_value(msg).unwrap_or_default(),
-    PageEvent::Response(r) => serde_json::to_value(r).unwrap_or_default(),
-    PageEvent::Request(r) => serde_json::to_value(r).unwrap_or_default(),
+    PageEvent::Response(r) => response_snapshot(r),
+    PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => request_snapshot(r),
+    PageEvent::WebSocket(ws) => serde_json::json!({"url": ws.url(), "isClosed": ws.is_closed()}),
     PageEvent::Dialog(d) => serde_json::to_value(d).unwrap_or_default(),
     PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
     PageEvent::FrameDetached { frame_id } => serde_json::json!({"frameId": frame_id}),

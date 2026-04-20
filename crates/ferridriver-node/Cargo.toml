@@ -25,6 +25,7 @@ rustc-hash = "2"
 tracing = { workspace = true }
 mimalloc = { workspace = true }
 async-channel = "2"
+base64 = { workspace = true }
 
 [features]
 profiling = ["ferridriver-test/profiling"]

@@ -24,6 +24,7 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 rustc-hash = "2"
+base64 = { workspace = true }
 
 rquickjs = { version = "0.11", features = ["macro", "futures", "parallel", "loader", "array-buffer"] }
 

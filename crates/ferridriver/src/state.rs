@@ -19,13 +19,14 @@ pub const DEFAULT_VIEWPORT_WIDTH: i64 = 1280;
 pub const DEFAULT_VIEWPORT_HEIGHT: i64 = 720;
 
 // Re-export log types from context (they live there now).
-pub use crate::context::{ConsoleMsg, DialogEvent, NetRequest};
+pub use crate::context::{ConsoleMsg, DialogEvent};
+pub use crate::network::Request;
 
 /// Arc handles to a context's log collections, usable without holding the `BrowserState` lock.
 #[derive(Clone)]
 pub struct ContextLogHandles {
   pub console: std::sync::Arc<tokio::sync::RwLock<Vec<ConsoleMsg>>>,
-  pub network: std::sync::Arc<tokio::sync::RwLock<Vec<NetRequest>>>,
+  pub network: std::sync::Arc<tokio::sync::RwLock<Vec<Request>>>,
   pub dialog: std::sync::Arc<tokio::sync::RwLock<Vec<DialogEvent>>>,
 }
 
@@ -760,7 +761,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the instance or context does not exist.
-  pub async fn network_requests(&self, context: &str, limit: usize) -> Result<Vec<NetRequest>, String> {
+  pub async fn network_requests(&self, context: &str, limit: usize) -> Result<Vec<Request>, String> {
     let key = SessionKey::parse(context);
     let inst = self.instance(&key.instance)?;
     let ctx = inst.context(&key.context)?;

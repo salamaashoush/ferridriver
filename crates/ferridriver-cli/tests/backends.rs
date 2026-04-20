@@ -2275,6 +2275,14 @@ fn run_all_tests(backend: &str) {
   run!(test_script_console_captured);
   run!(test_script_error_surfaces_structured);
 
+  // §1.4 lifecycle objects (Request / Response / WebSocket).
+  run!(backends_support::network::test_network_redirect_chain);
+  run!(backends_support::network::test_network_request_failure);
+  run!(backends_support::network::test_network_response_body);
+  run!(backends_support::network::test_network_post_data);
+  run!(backends_support::network::test_network_headers);
+  run!(backends_support::network::test_network_websocket);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

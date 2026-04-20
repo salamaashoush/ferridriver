@@ -8,7 +8,8 @@
 //! continues working alongside the new event system.
 
 use crate::backend::FrameInfo;
-use crate::context::{ConsoleMsg, NetRequest};
+use crate::context::ConsoleMsg;
+use crate::network::{Request, Response, WebSocket};
 use std::sync::Arc;
 use tokio::sync::broadcast;
 
@@ -19,10 +20,18 @@ use tokio::sync::broadcast;
 pub enum PageEvent {
   /// Console message from the page (console.log, console.error, etc.)
   Console(ConsoleMsg),
-  /// Network request started.
-  Request(NetRequest),
-  /// Network response received.
-  Response(NetResponse),
+  /// Network request started — Playwright `page.on('request')`.
+  Request(Request),
+  /// Network response received — Playwright `page.on('response')`.
+  Response(Response),
+  /// Network request finished (`loadingFinished`) —
+  /// Playwright `page.on('requestfinished')`.
+  RequestFinished(Request),
+  /// Network request failed (`loadingFailed`) —
+  /// Playwright `page.on('requestfailed')`.
+  RequestFailed(Request),
+  /// WebSocket opened — Playwright `page.on('websocket')`.
+  WebSocket(WebSocket),
   /// Dialog appeared (alert, confirm, prompt).
   Dialog(PendingDialog),
   /// Frame attached to the page.
@@ -52,19 +61,6 @@ pub struct DownloadInfo {
   pub url: String,
   /// Suggested filename from the server.
   pub suggested_filename: String,
-}
-
-/// Network response data with headers.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct NetResponse {
-  pub request_id: String,
-  pub url: String,
-  pub status: i64,
-  pub status_text: String,
-  pub mime_type: String,
-  /// Response headers (key -> value).
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub headers: Option<rustc_hash::FxHashMap<String, String>>,
 }
 
 /// A dialog that is pending user action (accept/dismiss).
@@ -122,6 +118,9 @@ fn event_name_matches(name: &str, event: &PageEvent) -> bool {
     ("console", PageEvent::Console(_))
       | ("request", PageEvent::Request(_))
       | ("response", PageEvent::Response(_))
+      | ("requestfinished", PageEvent::RequestFinished(_))
+      | ("requestfailed", PageEvent::RequestFailed(_))
+      | ("websocket", PageEvent::WebSocket(_))
       | ("dialog", PageEvent::Dialog(_))
       | ("frameattached", PageEvent::FrameAttached(_))
       | ("framedetached", PageEvent::FrameDetached { .. })

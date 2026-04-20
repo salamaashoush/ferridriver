@@ -209,9 +209,9 @@ for (const backend of BACKENDS) {
       setTimeout(() => {
         page.evaluate("fetch('/api/posts').then(r => r.text())").catch(() => {});
       }, 50);
-      const req = (await waiter) as { url: string; method: string };
-      expect(req.url).toContain("/api/posts");
-      expect(req.method).toBe("GET");
+      const req = await waiter;
+      expect(req.url()).toContain("/api/posts");
+      expect(req.method()).toBe("GET");
     });
 
     it("waitForResponse resolves when a matching RegExp response is observed", async () => {
@@ -220,8 +220,8 @@ for (const backend of BACKENDS) {
         page.evaluate("fetch('/api/posts').then(r => r.text())").catch(() => {});
       }, 50);
       const resp = await waiter;
-      expect(resp.status).toBe(200);
-      expect(resp.url).toContain("/api/posts");
+      expect(resp.status()).toBe(200);
+      expect(resp.url()).toContain("/api/posts");
     });
 
     // ── unroute ────────────────────────────────────────────────────────

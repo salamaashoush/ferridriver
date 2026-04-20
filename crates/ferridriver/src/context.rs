@@ -9,6 +9,7 @@
 
 use crate::backend::{AnyPage, CookieData};
 use crate::error::Result;
+use crate::network::Request;
 use crate::page::Page;
 use crate::state::SessionKey;
 use arc_swap::ArcSwap;
@@ -22,23 +23,6 @@ pub struct ConsoleMsg {
   /// Console message type: "log", "warn", "error", "info", "debug", "trace".
   pub r#type: String,
   pub text: String,
-}
-
-/// A collected network request with headers and optional post data.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct NetRequest {
-  pub id: String,
-  pub method: String,
-  pub url: String,
-  pub resource_type: String,
-  pub status: Option<i64>,
-  pub mime_type: Option<String>,
-  /// Request headers (key -> value).
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub headers: Option<HashMap<String, String>>,
-  /// POST body data (if applicable).
-  #[serde(skip_serializing_if = "Option::is_none")]
-  pub post_data: Option<String>,
 }
 
 /// A dismissed dialog event (alert, confirm, prompt).
@@ -61,8 +45,10 @@ pub struct BrowserContext {
   pub ref_map: Arc<ArcSwap<HashMap<String, i64>>>,
   /// Console messages collected from page events.
   pub console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
-  /// Network requests collected from page events.
-  pub network_log: Arc<RwLock<Vec<NetRequest>>>,
+  /// Network requests collected from page events. Live `Request`
+  /// references — listeners may inspect the stored object's response /
+  /// failure via the `Request` async accessors.
+  pub network_log: Arc<RwLock<Vec<Request>>>,
   /// Dialog events.
   pub dialog_log: Arc<RwLock<Vec<DialogEvent>>>,
   /// Context name (unique identifier).
@@ -176,8 +162,8 @@ impl BrowserContext {
       .collect()
   }
 
-  /// Get network requests.
-  pub async fn network_requests(&self, limit: usize) -> Vec<NetRequest> {
+  /// Get network requests (most recent `limit` in chronological order).
+  pub async fn network_requests(&self, limit: usize) -> Vec<Request> {
     let reqs = self.network_log.read().await;
     reqs
       .iter()

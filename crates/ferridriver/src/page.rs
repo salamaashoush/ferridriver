@@ -1835,14 +1835,14 @@ impl Page {
     &self,
     url_pattern: &str,
     timeout_ms: Option<u64>,
-  ) -> impl std::future::Future<Output = Result<crate::events::NetResponse>> + '_ {
+  ) -> impl std::future::Future<Output = Result<crate::network::Response>> + '_ {
     let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let events = self.inner.events().clone();
     let pattern = url_pattern.to_string();
     async move {
       let event = events
         .wait_for(
-          move |e| matches!(e, PageEvent::Response(r) if r.url.contains(&pattern)),
+          move |e| matches!(e, PageEvent::Response(r) if r.url().contains(&pattern)),
           timeout,
         )
         .await
@@ -1863,14 +1863,14 @@ impl Page {
     &self,
     url_pattern: &str,
     timeout_ms: Option<u64>,
-  ) -> impl std::future::Future<Output = Result<crate::context::NetRequest>> + '_ {
+  ) -> impl std::future::Future<Output = Result<crate::network::Request>> + '_ {
     let timeout = timeout_ms.unwrap_or(self.default_timeout());
     let events = self.inner.events().clone();
     let pattern = url_pattern.to_string();
     async move {
       let event = events
         .wait_for(
-          move |e| matches!(e, PageEvent::Request(r) if r.url.contains(&pattern)),
+          move |e| matches!(e, PageEvent::Request(r) if r.url().contains(&pattern)),
           timeout,
         )
         .await
@@ -1953,12 +1953,12 @@ impl Page {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     timeout_ms: Option<u64>,
-  ) -> Result<crate::context::NetRequest> {
+  ) -> Result<crate::network::Request> {
     let event = self
       .inner
       .events()
       .wait_for(
-        move |e| matches!(e, PageEvent::Request(r) if matcher.matches(&r.url)),
+        move |e| matches!(e, PageEvent::Request(r) if matcher.matches(r.url())),
         timeout_ms.unwrap_or(self.default_timeout()),
       )
       .await
@@ -1978,12 +1978,12 @@ impl Page {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     timeout_ms: Option<u64>,
-  ) -> Result<crate::events::NetResponse> {
+  ) -> Result<crate::network::Response> {
     let event = self
       .inner
       .events()
       .wait_for(
-        move |e| matches!(e, PageEvent::Response(r) if matcher.matches(&r.url)),
+        move |e| matches!(e, PageEvent::Response(r) if matcher.matches(r.url())),
         timeout_ms.unwrap_or(self.default_timeout()),
       )
       .await
