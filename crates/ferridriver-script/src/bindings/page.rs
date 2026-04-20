@@ -5,6 +5,7 @@
 //! boundary via [`super::convert::FerriResultExt`].
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ferridriver::Page;
 use rquickjs::JsLifetime;
@@ -15,7 +16,7 @@ use rquickjs::function::Opt;
 use serde::Deserialize;
 
 use crate::bindings::convert::{
-  FerriResultExt, extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js,
+  FerriResultExt, extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js, serde_to_js,
   serialized_value_to_quickjs,
 };
 use crate::bindings::keyboard::KeyboardJs;
@@ -211,12 +212,37 @@ pub struct PageJs {
   // `#[qjs(skip_trace)]` so the macro skips tracing this field.
   #[qjs(skip_trace)]
   inner: Arc<Page>,
+  /// `AsyncContext` used by `page.route` to dispatch JS callbacks
+  /// from a separate tokio task back into the script's JS context.
+  /// `None` only when the wrapper was constructed directly (e.g. by
+  /// tests); the engine always installs PageJs via
+  /// `install_page` which sets this field.
+  #[qjs(skip_trace)]
+  async_ctx: Option<rquickjs::AsyncContext>,
+  /// Per-page route registration counter. Each `page.route(matcher, fn)`
+  /// gets a unique numeric ID stored in the JS-side `globalThis.__fdRoutes`
+  /// `Map`; the Rust handler dispatches by ID via the AsyncContext.
+  #[qjs(skip_trace)]
+  next_route_id: Arc<AtomicU64>,
 }
 
 impl PageJs {
   #[must_use]
   pub fn new(inner: Arc<Page>) -> Self {
-    Self { inner }
+    Self {
+      inner,
+      async_ctx: None,
+      next_route_id: Arc::new(AtomicU64::new(0)),
+    }
+  }
+
+  #[must_use]
+  pub fn new_with_async_ctx(inner: Arc<Page>, async_ctx: rquickjs::AsyncContext) -> Self {
+    Self {
+      inner,
+      async_ctx: Some(async_ctx),
+      next_route_id: Arc::new(AtomicU64::new(0)),
+    }
   }
 
   #[must_use]
@@ -912,6 +938,170 @@ impl PageJs {
     self.inner.is_closed()
   }
 
+  // ── Network interception ─────────────────────────────────────────────────
+
+  /// Mirrors Playwright `page.route(url, handler)`. Registers a JS
+  /// callback to intercept requests matching `url` (`string | RegExp`).
+  /// The callback receives a `Route` instance and must call exactly one
+  /// of `route.fulfill()`, `route.continue()`, or `route.abort()` to
+  /// resume the request.
+  ///
+  /// Cross-task dispatch: the Rust route handler runs inside the
+  /// backend's network listener (a separate tokio task from the
+  /// script's JS context). The handler stashes the JS callback in a
+  /// per-page `globalThis.__fdRoutes` `Map` keyed by ID at registration
+  /// time; when a request matches, the handler spawns a task that
+  /// `async_with`s back into the script's `AsyncContext`, looks up the
+  /// callback by ID, and invokes it with a fresh `RouteJs` wrapper.
+  /// `rquickjs`'s scheduler serialises the dispatch against the
+  /// script's own `await` points so JS-side state stays consistent.
+  #[qjs(rename = "route")]
+  pub async fn route<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    url: rquickjs::Value<'js>,
+    handler: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<()> {
+    let matcher = url_value_to_matcher(&ctx, url)?;
+    let async_ctx = self.async_ctx.clone().ok_or_else(|| {
+      rquickjs::Error::new_from_js_message(
+        "page.route",
+        "Error",
+        "page.route requires the script engine's AsyncContext (install_page)".to_string(),
+      )
+    })?;
+    let id = self.next_route_id.fetch_add(1, Ordering::Relaxed);
+    let id_key = id.to_string();
+    let registry: rquickjs::Object<'js> = ctx.globals().get("__fdRoutes")?;
+    registry.set(&id_key, handler)?;
+
+    let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
+      let async_ctx = async_ctx.clone();
+      let id_key = id.to_string();
+      // Cross-task dispatch: spawn a tokio task that grabs the
+      // AsyncContext lock and calls the JS callback by ID. Errors are
+      // swallowed because the route's own `Drop` (fail-open continue)
+      // covers the case where dispatch can't reach JS.
+      tokio::spawn(async move {
+        use rquickjs::class::Class;
+        let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
+          let registry: rquickjs::Object<'_> = ctx.globals().get("__fdRoutes")?;
+          let f: rquickjs::Function<'_> = registry.get(id_key.as_str())?;
+          let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
+          let _: rquickjs::Value<'_> = f.call((route_class,))?;
+          Ok(())
+        })
+        .await;
+      });
+    });
+
+    self.inner.route(matcher, rust_handler).await.into_js()
+  }
+
+  /// Mirrors Playwright `page.unroute(url)`. Removes route handlers
+  /// matching `url` (`string | RegExp`).
+  #[qjs(rename = "unroute")]
+  pub async fn unroute<'js>(&self, ctx: rquickjs::Ctx<'js>, url: rquickjs::Value<'js>) -> rquickjs::Result<()> {
+    let matcher = url_value_to_matcher(&ctx, url)?;
+    self.inner.unroute(&matcher).await.into_js()
+  }
+
+  // ── Network lifecycle waits ──────────────────────────────────────────────
+  //
+  // Mirror Playwright's `page.waitForRequest` / `page.waitForResponse` /
+  // `page.waitForEvent('websocket')` — return live `RequestJs` /
+  // `ResponseJs` / `WebSocketJs` so callers can inspect headers, body,
+  // failure, etc.
+
+  /// Mirrors Playwright `page.waitForRequest(urlOrPredicate, options?)`.
+  /// Accepts `string | RegExp` — RegExp objects are detected via the
+  /// `source` / `flags` getters and lowered through
+  /// `UrlMatcher::regex_from_source`.
+  #[qjs(rename = "waitForRequest")]
+  pub async fn wait_for_request<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    url: rquickjs::Value<'js>,
+    timeout_ms: Option<f64>,
+  ) -> rquickjs::Result<crate::bindings::network::RequestJs> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let timeout = timeout_ms.map(|t| t as u64);
+    let matcher = url_value_to_matcher(&ctx, url)?;
+    let req = self.inner.wait_for_request(matcher, timeout).await.into_js()?;
+    Ok(crate::bindings::network::RequestJs::new_with_page(
+      req,
+      self.inner.clone(),
+    ))
+  }
+
+  /// Mirrors Playwright `page.waitForResponse(urlOrPredicate, options?)`.
+  /// Accepts `string | RegExp`.
+  #[qjs(rename = "waitForResponse")]
+  pub async fn wait_for_response<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    url: rquickjs::Value<'js>,
+    timeout_ms: Option<f64>,
+  ) -> rquickjs::Result<crate::bindings::network::ResponseJs> {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let timeout = timeout_ms.map(|t| t as u64);
+    let matcher = url_value_to_matcher(&ctx, url)?;
+    let resp = self.inner.wait_for_response(matcher, timeout).await.into_js()?;
+    Ok(crate::bindings::network::ResponseJs::new_with_page(
+      resp,
+      self.inner.clone(),
+    ))
+  }
+
+  /// Mirrors Playwright `page.waitForEvent(event, options?)`. Dispatches
+  /// on the event name and returns the live class for the lifecycle
+  /// events (`Request` / `Response` / `WebSocket`), or a snapshot object
+  /// for simpler events. The overloaded return keeps the Playwright-
+  /// canonical call shape — scripts write `await page.waitForEvent('websocket')`
+  /// and receive a real `WebSocket` instance.
+  #[qjs(rename = "waitForEvent")]
+  pub async fn wait_for_event<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    event: String,
+    timeout_ms: Option<f64>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    use rquickjs::class::Class;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let timeout = timeout_ms.unwrap_or(30_000.0) as u64;
+    let event_lc = event.to_ascii_lowercase();
+    let name = event_lc.clone();
+    let ev = self
+      .inner
+      .events()
+      .wait_for(move |e| match_event_name(&name, e), timeout)
+      .await
+      .map_err(|e| rquickjs::Error::new_from_js_message("Page.waitForEvent", "Error", e.to_string()))?;
+    match ev {
+      ferridriver::events::PageEvent::WebSocket(ws) => {
+        let wrapper = crate::bindings::network::WebSocketJs::new(ws);
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
+      ferridriver::events::PageEvent::Request(req)
+      | ferridriver::events::PageEvent::RequestFinished(req)
+      | ferridriver::events::PageEvent::RequestFailed(req) => {
+        let wrapper = crate::bindings::network::RequestJs::new_with_page(req, self.inner.clone());
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
+      ferridriver::events::PageEvent::Response(resp) => {
+        let wrapper = crate::bindings::network::ResponseJs::new_with_page(resp, self.inner.clone());
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
+      other => {
+        let json = page_event_json(&other);
+        serde_to_js(&ctx, &json)
+      },
+    }
+  }
+
   // ── Frames (sync, Playwright parity — task 3.8) ─────────────────────
   //
   // Mirrors `/tmp/playwright/packages/playwright-core/src/client/page.ts:258-275`
@@ -1099,4 +1289,72 @@ fn parse_pdf_options<'js>(
     },
     _ => Ok(ferridriver::options::PdfOptions::default()),
   }
+}
+
+fn match_event_name(name: &str, ev: &ferridriver::events::PageEvent) -> bool {
+  use ferridriver::events::PageEvent;
+  matches!(
+    (name, ev),
+    ("console", PageEvent::Console(_))
+      | ("request", PageEvent::Request(_))
+      | ("response", PageEvent::Response(_))
+      | ("requestfinished", PageEvent::RequestFinished(_))
+      | ("requestfailed", PageEvent::RequestFailed(_))
+      | ("websocket", PageEvent::WebSocket(_))
+      | ("dialog", PageEvent::Dialog(_))
+      | ("frameattached", PageEvent::FrameAttached(_))
+      | ("framedetached", PageEvent::FrameDetached { .. })
+      | ("framenavigated", PageEvent::FrameNavigated(_))
+      | ("load", PageEvent::Load)
+      | ("domcontentloaded", PageEvent::DomContentLoaded)
+      | ("close", PageEvent::Close)
+      | ("pageerror", PageEvent::PageError(_))
+      | ("download", PageEvent::Download(_))
+  )
+}
+
+fn page_event_json(ev: &ferridriver::events::PageEvent) -> serde_json::Value {
+  use ferridriver::events::PageEvent;
+  match ev {
+    PageEvent::Console(msg) => serde_json::to_value(msg).unwrap_or_default(),
+    PageEvent::Dialog(d) => serde_json::to_value(d).unwrap_or_default(),
+    PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
+    PageEvent::FrameDetached { frame_id } => serde_json::json!({ "frameId": frame_id }),
+    PageEvent::Download(d) => serde_json::to_value(d).unwrap_or_default(),
+    PageEvent::Load => serde_json::json!({ "type": "load" }),
+    PageEvent::DomContentLoaded => serde_json::json!({ "type": "domcontentloaded" }),
+    PageEvent::Close => serde_json::json!({ "type": "close" }),
+    PageEvent::PageError(msg) => serde_json::json!({ "message": msg }),
+    _ => serde_json::Value::Null,
+  }
+}
+
+/// Lower a JS `string | RegExp` value into a [`UrlMatcher`]. Mirrors
+/// the NAPI `JsRegExpLike` shape — the JS RegExp's `source` and
+/// `flags` getters drive `UrlMatcher::regex_from_source`. Plain
+/// strings go through `UrlMatcher::glob`.
+fn url_value_to_matcher<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  value: rquickjs::Value<'js>,
+) -> rquickjs::Result<ferridriver::url_matcher::UrlMatcher> {
+  use crate::bindings::convert::FerriResultExt;
+  if let Some(s) = value.as_string() {
+    let glob = s.to_string()?;
+    return ferridriver::url_matcher::UrlMatcher::glob(glob).into_js();
+  }
+  if let Some(obj) = value.as_object() {
+    // RegExp constructor.name === "RegExp" — also has `source` (string)
+    // and `flags` (string) getters per ECMAScript spec.
+    let source: rquickjs::Result<String> = obj.get("source");
+    let flags: rquickjs::Result<String> = obj.get("flags");
+    if let (Ok(source), Ok(flags)) = (source, flags) {
+      return ferridriver::url_matcher::UrlMatcher::regex_from_source(&source, &flags).into_js();
+    }
+  }
+  let _ = ctx;
+  Err(rquickjs::Error::new_from_js_message(
+    "Page.waitFor*",
+    "url",
+    "expected string | RegExp".to_string(),
+  ))
 }

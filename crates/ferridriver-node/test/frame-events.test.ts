@@ -296,8 +296,8 @@ for (const backend of CDP_BACKENDS) {
         page.goto(testUrl),
       ]);
       expect(response).toBeDefined();
-      expect(response.status).toBe(200);
-      expect(response.url).toContain("127.0.0.1");
+      expect(response.status()).toBe(200);
+      expect(response.url()).toContain("127.0.0.1");
     });
 
     it("waitForResponse with navigation", async () => {
@@ -305,8 +305,8 @@ for (const backend of CDP_BACKENDS) {
         page.waitForResponse(/127\.0\.0\.1/, 10000),
         page.goto(testUrl),
       ]);
-      expect(response.url).toContain("127.0.0.1");
-      expect(response.status).toBe(200);
+      expect(response.url()).toContain("127.0.0.1");
+      expect(response.status()).toBe(200);
     });
   });
 }
@@ -366,8 +366,10 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
         page.goto(testUrl),
       ]);
       expect(event).toBeDefined();
-      expect((event as any).status).toBe(200);
-      expect((event as any).url).toContain("127.0.0.1");
+      // `waitForEvent('response')` now returns a live `Response` instance
+      // (Playwright parity: methods, not fields).
+      expect((event as any).status()).toBe(200);
+      expect((event as any).url()).toContain("127.0.0.1");
     });
 
     it("page.waitForResponse matches URL pattern", async () => {
@@ -375,8 +377,8 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
         page.waitForResponse(/127\.0\.0\.1/, 10000),
         page.goto(testUrl),
       ]);
-      expect(response.status).toBe(200);
-      expect(response.url).toContain("127.0.0.1");
+      expect(response.status()).toBe(200);
+      expect(response.url()).toContain("127.0.0.1");
     });
 
     it("page.on('response') fires for every request", async () => {

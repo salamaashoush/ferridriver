@@ -448,6 +448,36 @@ impl McpServer {
     ErrorData::internal_error(msg.into(), None)
   }
 
+  /// Build the JSON snapshot returned by the `network` MCP resource.
+  /// Extracted from `read_resource` because async lock + per-request
+  /// snapshotting pushed that handler over the line-count threshold.
+  async fn read_network_resource(&self, context_name: &str, uri: &str) -> Result<ReadResourceResult, ErrorData> {
+    let handles = self
+      .state
+      .log_handles_for(context_name)
+      .await
+      .ok_or_else(|| Self::err(format!("Context '{context_name}' not found")))?;
+    let reqs = handles.network.read().await;
+    let last: Vec<_> = reqs
+      .iter()
+      .rev()
+      .take(100)
+      .cloned()
+      .collect::<Vec<_>>()
+      .into_iter()
+      .rev()
+      .collect();
+    drop(reqs);
+    let mut snapshots = Vec::with_capacity(last.len());
+    for r in &last {
+      snapshots.push(r.to_diagnostic_json().await);
+    }
+    let text = serde_json::to_string_pretty(&snapshots).unwrap_or_default();
+    Ok(ReadResourceResult::new(vec![
+      ResourceContents::text(text, uri.to_string()).with_mime_type("application/json"),
+    ]))
+  }
+
   pub async fn context_guard(&self, context: &str) -> tokio::sync::OwnedMutexGuard<()> {
     let lock = self
       .state
@@ -740,28 +770,7 @@ impl ServerHandler for McpServer {
           ResourceContents::text(text, uri).with_mime_type("application/json"),
         ]))
       },
-      "network" => {
-        let handles = self
-          .state
-          .log_handles_for(&context_name)
-          .await
-          .ok_or_else(|| Self::err(format!("Context '{context_name}' not found")))?;
-        let reqs = handles.network.read().await;
-        let last: Vec<_> = reqs
-          .iter()
-          .rev()
-          .take(100)
-          .cloned()
-          .collect::<Vec<_>>()
-          .into_iter()
-          .rev()
-          .collect();
-        drop(reqs);
-        let text = serde_json::to_string_pretty(&last).unwrap_or_default();
-        Ok(ReadResourceResult::new(vec![
-          ResourceContents::text(text, uri).with_mime_type("application/json"),
-        ]))
-      },
+      "network" => self.read_network_resource(&context_name, uri).await,
       "snapshot" => {
         let snap = self.snap(&page, &context_name).await;
         Ok(ReadResourceResult::new(vec![

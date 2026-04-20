@@ -104,11 +104,12 @@ async fn page_bindings_drive_real_browser() {
       h.ctx.clone(),
     )
     .await;
-  // evaluate returns JSON-encoded string per the binding.
+  // evaluate returns the native JS value via serialized_value_to_quickjs;
+  // the wrapper script `JSON.stringify`s the final return so the harness
+  // sees a serde_json::Number(3) here, not the string "3".
   match r.outcome {
     Outcome::Ok { success } => {
-      let encoded = success.value.as_str().unwrap_or_default();
-      assert_eq!(encoded, "3");
+      assert_eq!(success.value.as_i64(), Some(3));
     },
     Outcome::Error { error } => panic!("evaluate failed: {error:?}"),
   }

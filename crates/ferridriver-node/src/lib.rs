@@ -63,6 +63,7 @@ mod frame;
 mod install;
 mod js_handle;
 mod locator;
+mod network;
 mod page;
 mod route;
 mod serialize_out;

@@ -28,6 +28,7 @@ pub mod js_handle;
 pub mod keyboard;
 pub mod locator;
 pub mod mouse;
+pub mod network;
 pub mod page;
 
 pub use api_request::{APIRequestContextJs, APIResponseJs};
@@ -39,9 +40,10 @@ pub use js_handle::JSHandleJs;
 pub use keyboard::KeyboardJs;
 pub use locator::LocatorJs;
 pub use mouse::MouseJs;
+pub use network::{RequestJs, ResponseJs, RouteJs, WebSocketJs};
 pub use page::PageJs;
 
-use rquickjs::{Ctx, class::Class};
+use rquickjs::{AsyncContext, Ctx, class::Class};
 use std::sync::Arc;
 
 /// Register every class prototype scripts can encounter so rquickjs knows how
@@ -60,17 +62,32 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<ArtifactsJs>::define(&g)?;
   Class::<JSHandleJs>::define(&g)?;
   Class::<ElementHandleJs>::define(&g)?;
+  Class::<RequestJs>::define(&g)?;
+  Class::<ResponseJs>::define(&g)?;
+  Class::<RouteJs>::define(&g)?;
+  Class::<WebSocketJs>::define(&g)?;
   Ok(())
 }
 
 /// Install the `page` global when a page is available on the run context.
 ///
+/// `async_ctx` is the `AsyncContext` driving the script — `PageJs`
+/// captures a clone so `page.route(matcher, fn)` can dispatch the JS
+/// callback back into the same context from a backend route handler
+/// (which runs on a separate tokio task, outside the script's
+/// `async_with` block).
+///
 /// Scripts that do not need browser interaction can run with
 /// `RunContext.page = None` and simply have no `page` binding.
-pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>) -> rquickjs::Result<()> {
+pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, async_ctx: AsyncContext) -> rquickjs::Result<()> {
   define_classes(ctx)?;
-  let js_page = Class::instance(ctx.clone(), PageJs::new(page))?;
+  let js_page = Class::instance(ctx.clone(), PageJs::new_with_async_ctx(page, async_ctx))?;
   ctx.globals().set("page", js_page)?;
+  // Per-page route handler registry (`Map<id, fn>`) used by
+  // `page.route(matcher, fn)` to look up callbacks from cross-task
+  // dispatch. Created here so scripts that never call `route` don't
+  // pay any setup cost beyond installing the global.
+  ctx.eval::<(), _>(b"globalThis.__fdRoutes = new Map();".as_slice())?;
   Ok(())
 }
 

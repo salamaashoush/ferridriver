@@ -270,8 +270,68 @@ fn handle_route_request(
 /// Takes (url, method, `headers_json`, `post_data`) and returns serialized `RouteAction` JSON.
 pub type RouteCallback = Arc<dyn Fn(&str, &str, &str, &str) -> String + Send + Sync>;
 
-/// Network event tuple: (id, method, url, `resource_type`).
-pub type NetworkEvent = (String, String, String, String);
+/// Decode `REP_NET_RESPONSE_EVENT`'s single-string JSON payload into a
+/// [`NetworkEvent::Response`]. Extracted from the reader-thread match
+/// arm so the dispatch loop stays under the line-count budget.
+fn decode_network_response_event(payload: &[u8]) -> Option<NetworkEvent> {
+  let mut o = 0;
+  let json = str_decode(payload, &mut o);
+  let value: serde_json::Value = serde_json::from_str(&json).ok()?;
+  let id = value.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+  let status = value.get("status").and_then(serde_json::Value::as_i64).unwrap_or(0);
+  let status_text = value
+    .get("statusText")
+    .and_then(|v| v.as_str())
+    .unwrap_or("")
+    .to_string();
+  let url = value.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+  let headers = value
+    .get("headers")
+    .and_then(|h| h.as_object())
+    .map(|obj| {
+      obj
+        .iter()
+        .map(|(k, v)| (k.clone(), v.as_str().unwrap_or("").to_string()))
+        .collect::<FxHashMap<String, String>>()
+    })
+    .unwrap_or_default();
+  Some(NetworkEvent::Response {
+    id,
+    status,
+    status_text,
+    url,
+    headers,
+  })
+}
+
+/// Network event payload pushed by the host's JS interceptor.
+///
+/// `Request` carries the four-string tuple from the original
+/// `REP_NET_EVENT`. `Response` and `Failure` are added so
+/// `Page.on('response')` / `request.failure()` work on the `WebKit`
+/// backend (within the JS-fetch interceptor's reach — body bytes are
+/// still typed `Unsupported` because `WKWebView` exposes no public
+/// API for them).
+#[derive(Debug, Clone)]
+pub enum NetworkEvent {
+  Request {
+    id: String,
+    method: String,
+    url: String,
+    resource_type: String,
+  },
+  Response {
+    id: String,
+    status: i64,
+    status_text: String,
+    url: String,
+    headers: FxHashMap<String, String>,
+  },
+  Failure {
+    id: String,
+    error_text: String,
+  },
+}
 
 /// Context for the background reader thread, bundling event logs and routing state.
 struct ReaderCtx {
@@ -534,13 +594,37 @@ impl IpcClient {
             let url = str_decode(&payload, &mut o);
             let res_type = str_decode(&payload, &mut o);
             if let Ok(mut log) = ctx.network_log.lock() {
-              log.push((id, method, url, res_type));
+              log.push(NetworkEvent::Request {
+                id,
+                method,
+                url,
+                resource_type: res_type,
+              });
             }
             ctx.event_notify.notify_one();
             continue;
           },
           11 => {
             handle_route_request(rid, &payload, &ctx.route_handler, &ctx.writer);
+            continue;
+          },
+          12 => {
+            if let Some(event) = decode_network_response_event(&payload) {
+              if let Ok(mut log) = ctx.network_log.lock() {
+                log.push(event);
+              }
+              ctx.event_notify.notify_one();
+            }
+            continue;
+          },
+          13 => {
+            let mut o = 0;
+            let id = str_decode(&payload, &mut o);
+            let error_text = str_decode(&payload, &mut o);
+            if let Ok(mut log) = ctx.network_log.lock() {
+              log.push(NetworkEvent::Failure { id, error_text });
+            }
+            ctx.event_notify.notify_one();
             continue;
           },
           _ => IpcResponse::Error(format!("unknown rep {rep}")),

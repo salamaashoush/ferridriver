@@ -78,6 +78,9 @@ enum Rep {
     REP_CONSOLE_EVENT = 8,  // unsolicited: payload = str level + str text
     REP_DIALOG_EVENT = 9,   // unsolicited: payload = str type + str message + str action
     REP_NET_EVENT = 10,     // unsolicited: payload = str id + str method + str url + str resourceType
+    REP_NET_RESPONSE_EVENT = 12, // unsolicited: payload = single JSON string
+                                 // {id, status, statusText, url, headers}
+    REP_NET_FAILURE_EVENT = 13,  // unsolicited: payload = str id + str errorText
 };
 
 // ─── JS-based accessibility tree builder ────────────────────────────────────
@@ -278,21 +281,49 @@ static uint64_t read_u64(const uint8_t *data, uint32_t data_len, uint32_t *offse
         free(buf);
     }
     else if ([message.name isEqualToString:@"fdNetwork"]) {
-        NSString *rid = body[@"id"] ?: @"";
-        NSString *method = body[@"method"] ?: @"GET";
-        NSString *url = body[@"url"] ?: @"";
-        NSString *resType = body[@"resourceType"] ?: @"Fetch";
-        const char *r = [rid UTF8String], *m = [method UTF8String], *u = [url UTF8String], *rt = [resType UTF8String];
-        uint32_t rl = (uint32_t)strlen(r), ml = (uint32_t)strlen(m), ul = (uint32_t)strlen(u), rtl = (uint32_t)strlen(rt);
-        uint32_t total = 16 + rl + ml + ul + rtl;
-        uint8_t *buf = malloc(total);
-        uint32_t off = 0;
-        memcpy(buf+off, &rl, 4); off+=4; memcpy(buf+off, r, rl); off+=rl;
-        memcpy(buf+off, &ml, 4); off+=4; memcpy(buf+off, m, ml); off+=ml;
-        memcpy(buf+off, &ul, 4); off+=4; memcpy(buf+off, u, ul); off+=ul;
-        memcpy(buf+off, &rtl, 4); off+=4; memcpy(buf+off, rt, rtl); off+=rtl;
-        write_frame(0, REP_NET_EVENT, buf, total);
-        free(buf);
+        NSString *kind = body[@"kind"] ?: @"request";
+        if ([kind isEqualToString:@"response"]) {
+            // Response observability — pack as a single JSON string.
+            NSError *jerr = nil;
+            NSData *json = [NSJSONSerialization dataWithJSONObject:body options:0 error:&jerr];
+            if (json && !jerr) {
+                uint32_t jl = (uint32_t)json.length;
+                uint32_t total = 4 + jl;
+                uint8_t *buf = malloc(total);
+                memcpy(buf, &jl, 4);
+                memcpy(buf + 4, json.bytes, jl);
+                write_frame(0, REP_NET_RESPONSE_EVENT, buf, total);
+                free(buf);
+            }
+        } else if ([kind isEqualToString:@"failure"]) {
+            NSString *rid = body[@"id"] ?: @"";
+            NSString *errText = body[@"errorText"] ?: @"net::ERR_FAILED";
+            const char *r = [rid UTF8String], *e = [errText UTF8String];
+            uint32_t rl = (uint32_t)strlen(r), el = (uint32_t)strlen(e);
+            uint32_t total = 8 + rl + el;
+            uint8_t *buf = malloc(total);
+            uint32_t off = 0;
+            memcpy(buf+off, &rl, 4); off+=4; memcpy(buf+off, r, rl); off+=rl;
+            memcpy(buf+off, &el, 4); off+=4; memcpy(buf+off, e, el); off+=el;
+            write_frame(0, REP_NET_FAILURE_EVENT, buf, total);
+            free(buf);
+        } else {
+            NSString *rid = body[@"id"] ?: @"";
+            NSString *method = body[@"method"] ?: @"GET";
+            NSString *url = body[@"url"] ?: @"";
+            NSString *resType = body[@"resourceType"] ?: @"Fetch";
+            const char *r = [rid UTF8String], *m = [method UTF8String], *u = [url UTF8String], *rt = [resType UTF8String];
+            uint32_t rl = (uint32_t)strlen(r), ml = (uint32_t)strlen(m), ul = (uint32_t)strlen(u), rtl = (uint32_t)strlen(rt);
+            uint32_t total = 16 + rl + ml + ul + rtl;
+            uint8_t *buf = malloc(total);
+            uint32_t off = 0;
+            memcpy(buf+off, &rl, 4); off+=4; memcpy(buf+off, r, rl); off+=rl;
+            memcpy(buf+off, &ml, 4); off+=4; memcpy(buf+off, m, ml); off+=ml;
+            memcpy(buf+off, &ul, 4); off+=4; memcpy(buf+off, u, ul); off+=ul;
+            memcpy(buf+off, &rtl, 4); off+=4; memcpy(buf+off, rt, rtl); off+=rtl;
+            write_frame(0, REP_NET_EVENT, buf, total);
+            free(buf);
+        }
     }
 }
 // Global dictionary for pending route reply handlers, keyed by req_id.
@@ -564,8 +595,20 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                 "window.fetch=function(input,opts){"
                   "var method=(opts&&opts.method)||'GET';"
                   "var u=typeof input==='string'?input:(input&&input.url||'');"
-                  "try{hNet.postMessage({id:'f'+(seq++),method:method,url:u,resourceType:'Fetch'})}catch(e){}"
-                  "if(!matchRoute(u))return origFetch.apply(this,arguments);"
+                  "var rid='f'+(seq++);"
+                  "try{hNet.postMessage({id:rid,method:method,url:u,resourceType:'Fetch'})}catch(e){}"
+                  "if(!matchRoute(u)){"
+                    // No route — let fetch run normally, observe outcome.
+                    "return origFetch.apply(this,arguments).then(function(resp){"
+                      "var headers={};"
+                      "try{resp.headers.forEach(function(v,k){headers[k]=v})}catch(e){}"
+                      "try{hNet.postMessage({kind:'response',id:rid,status:resp.status,statusText:resp.statusText,url:resp.url,headers:headers})}catch(e){}"
+                      "return resp;"
+                    "}).catch(function(err){"
+                      "try{hNet.postMessage({kind:'failure',id:rid,errorText:String((err&&err.message)||err)})}catch(e){}"
+                      "throw err;"
+                    "});"
+                  "}"
                   // Route matches -- ask Rust for the action
                   "var hdrs='{}';"
                   "try{if(opts&&opts.headers){hdrs=JSON.stringify(Object.fromEntries("
@@ -574,12 +617,27 @@ static void dispatch_frame(uint32_t req_id, uint8_t op,
                   "return webkit.messageHandlers.fdRoute.postMessage("
                     "{url:u,method:method,headers:hdrs,postData:typeof body==='string'?body:''}"
                   ").then(function(action){"
-                    "if(!action||action.action==='continue')return origFetch.apply(null,[input,opts]);"
-                    "if(action.action==='abort')throw new TypeError('Request blocked by route');"
+                    "if(!action||action.action==='continue'){"
+                      "return origFetch.apply(null,[input,opts]).then(function(resp){"
+                        "var hh={};"
+                        "try{resp.headers.forEach(function(v,k){hh[k]=v})}catch(e){}"
+                        "try{hNet.postMessage({kind:'response',id:rid,status:resp.status,statusText:resp.statusText,url:resp.url,headers:hh})}catch(e){}"
+                        "return resp;"
+                      "}).catch(function(err){"
+                        "try{hNet.postMessage({kind:'failure',id:rid,errorText:String((err&&err.message)||err)})}catch(e){}"
+                        "throw err;"
+                      "});"
+                    "}"
+                    "if(action.action==='abort'){"
+                      "try{hNet.postMessage({kind:'failure',id:rid,errorText:'blockedbyclient'})}catch(e){}"
+                      "throw new TypeError('Request blocked by route');"
+                    "}"
                     "if(action.action==='fulfill'){"
                       "var h=new Headers();"
                       "if(action.headers){for(var k in action.headers)h.set(k,action.headers[k])}"
                       "if(action.contentType)h.set('content-type',action.contentType);"
+                      "var hh2={};h.forEach(function(v,k){hh2[k]=v});"
+                      "try{hNet.postMessage({kind:'response',id:rid,status:action.status||200,statusText:'OK',url:u,headers:hh2})}catch(e){}"
                       "return new Response(action.body||'',{status:action.status||200,headers:h})"
                     "}"
                     "return origFetch.apply(null,[input,opts]);"

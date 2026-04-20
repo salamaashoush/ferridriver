@@ -1147,15 +1147,6 @@ impl From<&ferridriver::backend::MetricData> for MetricData {
 
 // ── Event data types (Playwright-compatible) ─────────────────────────────
 
-/// Network response data. Matches Playwright's Response interface (subset).
-#[napi(object)]
-#[derive(Debug, Clone)]
-pub struct ResponseData {
-  pub url: String,
-  pub status: i32,
-  pub status_text: String,
-}
-
 /// Per-side PDF margin. Each side is a `string | number`. Playwright parity:
 /// bare number → CSS pixels, string takes a unit suffix (`"10cm"`, `"2in"`,
 /// `"5mm"`, `"100px"`).

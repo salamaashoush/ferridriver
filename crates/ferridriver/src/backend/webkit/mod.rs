@@ -9,9 +9,10 @@
 pub mod ipc;
 
 use super::{
-  AnyElement, AnyPage, Arc, AxNodeData, AxProperty, ConsoleMsg, CookieData, ImageFormat, MetricData, NetRequest,
+  AnyElement, AnyPage, Arc, AxNodeData, AxProperty, ConsoleMsg, CookieData, ImageFormat, MetricData, NetworkRequest,
   RwLock, ScreenshotOpts,
 };
+use crate::network::{self, Headers, RequestInit, Response as NetworkResponse, ResponseInit, body_unsupported};
 use ipc::{IpcClient, IpcResponse, Op};
 
 // ─── WebKitBrowser ──────────────────────────────────────────────────────────
@@ -1671,7 +1672,7 @@ impl WebKitPage {
   pub fn attach_listeners(
     &self,
     console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
-    net_log: Arc<RwLock<Vec<NetRequest>>>,
+    net_log: Arc<RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
   ) {
     let client = self.client.clone();
@@ -1735,39 +1736,7 @@ impl WebKitPage {
           }
         }
 
-        // Drain network events
-        {
-          let evts: Vec<(String, String, String, String)> = {
-            let Ok(mut log) = client.network_log.lock() else {
-              continue;
-            };
-            if log.is_empty() {
-              Vec::new()
-            } else {
-              std::mem::take(&mut *log)
-            }
-          };
-          if !evts.is_empty() {
-            let mut dest = net_log.write().await;
-            for (id, method, url, resource_type) in evts {
-              if resource_type == "Document" {
-                injected_script.reset();
-              }
-              let req = NetRequest {
-                id: id.clone(),
-                method: method.clone(),
-                url: url.clone(),
-                resource_type: resource_type.clone(),
-                status: None,
-                mime_type: None,
-                headers: None,
-                post_data: None,
-              };
-              emitter.emit(crate::events::PageEvent::Request(req.clone()));
-              dest.push(req);
-            }
-          }
-        }
+        drain_network_events(&client, &net_log, &emitter, &injected_script).await;
       }
     });
   }
@@ -2261,6 +2230,105 @@ impl WebKitElement {
       IpcResponse::Binary(d) => Ok(d),
       IpcResponse::Error(e) => Err(e),
       _ => Err("no data".into()),
+    }
+  }
+}
+
+/// Drain pending JS-interceptor network events into the page's
+/// `network_log` and emit the matching `PageEvent` variants. Extracted
+/// from `WebKitPage::attach_listeners` so the listener loop stays
+/// under the line-count budget.
+async fn drain_network_events(
+  client: &Arc<ipc::IpcClient>,
+  net_log: &Arc<RwLock<Vec<NetworkRequest>>>,
+  emitter: &crate::events::EventEmitter,
+  injected_script: &Arc<InjectedScriptManager>,
+) {
+  use ipc::NetworkEvent;
+  let evts: Vec<NetworkEvent> = {
+    let Ok(mut log) = client.network_log.lock() else {
+      return;
+    };
+    if log.is_empty() {
+      Vec::new()
+    } else {
+      std::mem::take(&mut *log)
+    }
+  };
+  if evts.is_empty() {
+    return;
+  }
+  let mut dest = net_log.write().await;
+  // Per-drain request lookup index — every Response/Failure event
+  // refers back to the originating request by JS-side seq id.
+  let mut by_id: rustc_hash::FxHashMap<String, network::Request> = rustc_hash::FxHashMap::default();
+  for r in dest.iter() {
+    by_id.insert(r.id().to_string(), r.clone());
+  }
+  for ev in evts {
+    match ev {
+      NetworkEvent::Request {
+        id,
+        method,
+        url,
+        resource_type,
+      } => {
+        if resource_type == "Document" {
+          injected_script.reset();
+        }
+        // Stock `WKWebView` exposes no public API for raw request body
+        // bytes — `request.postData()` stays null. Response bodies
+        // surface typed `Unsupported` via `body_unsupported`. Per Rule 4.
+        let req = network::Request::new(RequestInit {
+          id: id.clone(),
+          url: url.clone(),
+          method: method.clone(),
+          resource_type: resource_type.clone(),
+          is_navigation_request: resource_type == "Document",
+          post_data: None,
+          headers: Headers::default(),
+          frame_id: None,
+          redirected_from: None,
+          timing: None,
+          raw_headers_fn: None,
+        });
+        by_id.insert(id, req.clone());
+        emitter.emit(crate::events::PageEvent::Request(req.clone()));
+        dest.push(req);
+      },
+      NetworkEvent::Response {
+        id,
+        status,
+        status_text,
+        url,
+        headers,
+      } => {
+        let Some(req) = by_id.get(&id).cloned() else { continue };
+        let response = NetworkResponse::new(ResponseInit {
+          request: req.clone(),
+          url,
+          status,
+          status_text,
+          from_service_worker: false,
+          http_version: None,
+          headers,
+          remote_addr: None,
+          security_details: None,
+          body_fn: Some(body_unsupported(
+            "Response body is not retrievable on stock WKWebView (no public API)",
+          )),
+          raw_headers_fn: None,
+        });
+        req.set_response(&response).await;
+        response.finish_success().await;
+        emitter.emit(crate::events::PageEvent::Response(response));
+        emitter.emit(crate::events::PageEvent::RequestFinished(req));
+      },
+      NetworkEvent::Failure { id, error_text } => {
+        let Some(req) = by_id.get(&id).cloned() else { continue };
+        req.set_failure(error_text).await;
+        emitter.emit(crate::events::PageEvent::RequestFailed(req));
+      },
     }
   }
 }

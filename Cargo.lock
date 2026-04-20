@@ -1971,8 +1971,10 @@ dependencies = [
  "clap",
  "ferridriver",
  "ferridriver-mcp",
+ "futures",
  "serde_json",
  "tokio",
+ "tokio-tungstenite",
  "tracing",
  "tracing-subscriber",
 ]
@@ -2007,6 +2009,7 @@ version = "0.1.0"
 dependencies = [
  "async-channel",
  "async-trait",
+ "base64 0.22.1",
  "ferridriver",
  "ferridriver-bdd",
  "ferridriver-test",
@@ -2026,6 +2029,7 @@ name = "ferridriver-script"
 version = "0.1.0"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "ferridriver",
  "futures",
  "rquickjs",

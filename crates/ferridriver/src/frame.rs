@@ -36,6 +36,14 @@ impl Frame {
     Self { page, id }
   }
 
+  /// Backend-issued frame identifier. Sync — the underlying `Arc<str>`
+  /// is set at construction. Used by the network module to match
+  /// `Request.frame()` lookups against the page's frame cache.
+  #[must_use]
+  pub fn frame_id(&self) -> &str {
+    &self.id
+  }
+
   /// Frame name (from the `name` attribute of the iframe element).
   /// Playwright: [`frame.name()`](https://playwright.dev/docs/api/class-frame#frame-name)
   /// -- `name(): string` sync, reads cached state.
