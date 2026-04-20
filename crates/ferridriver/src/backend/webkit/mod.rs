@@ -16,10 +16,44 @@ use ipc::{IpcClient, IpcResponse, Op};
 
 // ─── WebKitBrowser ──────────────────────────────────────────────────────────
 
+/// Owns the `std::process::Child` for the `WebKit` host subprocess and kills
+/// it when dropped. `std::process::Child` does not kill on drop — we need
+/// this wrapper so that losing the last `WebKitBrowser` handle (panic, early
+/// return, test worker shutdown) tears down the host. The `Arc<WebKitChildGuard>`
+/// on `WebKitBrowser` ensures this `Drop` only runs on the final clone.
+struct WebKitChildGuard {
+  child: std::sync::Mutex<Option<std::process::Child>>,
+}
+
+impl WebKitChildGuard {
+  fn new(child: std::process::Child) -> Self {
+    Self {
+      child: std::sync::Mutex::new(Some(child)),
+    }
+  }
+
+  /// Kill the host subprocess and reap it. Idempotent — safe to call from both
+  /// [`WebKitBrowser::close`] and `Drop`.
+  fn shutdown(&self) {
+    if let Ok(mut guard) = self.child.lock() {
+      if let Some(mut child) = guard.take() {
+        let _ = child.kill();
+        let _ = child.wait();
+      }
+    }
+  }
+}
+
+impl Drop for WebKitChildGuard {
+  fn drop(&mut self) {
+    self.shutdown();
+  }
+}
+
 #[derive(Clone)]
 pub struct WebKitBrowser {
   client: Arc<IpcClient>,
-  child: Arc<std::sync::Mutex<Option<std::process::Child>>>,
+  child: Arc<WebKitChildGuard>,
   /// Running `WebKit.framework` product version captured at launch via
   /// `Op::GetWebKitVersion`. Shape mirrors the CDP
   /// `Browser.getVersion().product` string, e.g. `"WebKit/617.1.2 (17618)"`.
@@ -55,7 +89,7 @@ impl WebKitBrowser {
     };
     Ok(Self {
       client,
-      child: Arc::new(std::sync::Mutex::new(Some(child))),
+      child: Arc::new(WebKitChildGuard::new(child)),
       version,
     })
   }
@@ -130,16 +164,10 @@ impl WebKitBrowser {
   /// on the child process are silently ignored.
   pub fn close(&mut self) -> impl std::future::Future<Output = Result<(), String>> {
     // OP_SHUTDOWN calls _exit(0) immediately -- no response comes back.
-    // Just kill the child process directly.
-    if let Some(mut child) = self
-      .child
-      .lock()
-      .unwrap_or_else(std::sync::PoisonError::into_inner)
-      .take()
-    {
-      let _ = child.kill();
-      let _ = child.wait();
-    }
+    // Kill the host subprocess via the shared guard; `WebKitChildGuard::Drop`
+    // also runs when the last clone of the `Arc` goes, so this is the graceful
+    // path and `Drop` is the safety net for panics / missing explicit close.
+    self.child.shutdown();
     std::future::ready(Ok(()))
   }
 }

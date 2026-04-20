@@ -13,6 +13,15 @@ use crate::backend::{AnyPage, NavLifecycle};
 pub struct BidiBrowser {
   pub(crate) session: Arc<BidiSession>,
   child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+  /// Owned Firefox `--profile` directory for launched browsers. Held as
+  /// `Arc<TempDir>` so cheap `Clone`s share ownership; the directory is
+  /// removed when the last handle drops. `None` for `connect()` — we don't
+  /// own the profile of a browser someone else launched.
+  #[allow(
+    dead_code,
+    reason = "held so TempDir::Drop removes the profile dir on last Arc release"
+  )]
+  profile_dir: Option<Arc<tempfile::TempDir>>,
 }
 
 impl BidiBrowser {
@@ -73,10 +82,11 @@ impl BidiBrowser {
   pub async fn launch_with_flags(browser_path: &str, flags: &[String]) -> Result<Self, String> {
     // Determine if headless from flags
     let headless = flags.iter().any(|f| f == "--headless");
-    let (session, child) = Box::pin(BidiSession::launch(browser_path, flags, headless)).await?;
+    let (session, child, profile_dir) = Box::pin(BidiSession::launch(browser_path, flags, headless)).await?;
     Ok(Self {
       session: Arc::new(session),
       child: Arc::new(tokio::sync::Mutex::new(Some(child))),
+      profile_dir: Some(Arc::new(profile_dir)),
     })
   }
 
@@ -86,6 +96,7 @@ impl BidiBrowser {
     Ok(Self {
       session: Arc::new(session),
       child: Arc::new(tokio::sync::Mutex::new(None)),
+      profile_dir: None,
     })
   }
 

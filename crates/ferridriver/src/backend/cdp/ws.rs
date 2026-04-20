@@ -91,7 +91,8 @@ impl WsTransport {
     command
       .stdin(std::process::Stdio::null())
       .stdout(std::process::Stdio::null())
-      .stderr(std::process::Stdio::piped());
+      .stderr(std::process::Stdio::piped())
+      .kill_on_drop(true);
 
     let mut child = command.spawn().map_err(|e| format!("Chrome launch: {e}"))?;
 

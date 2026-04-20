@@ -108,11 +108,16 @@ impl BidiSession {
   ///
   /// Firefox natively supports `BiDi`: launch with `--remote-debugging-port`,
   /// read the `BiDi` WebSocket URL from stderr, connect directly.
+  ///
+  /// Returns `(session, child, profile_dir)`. The caller must keep
+  /// `profile_dir` alive for the lifetime of the browser — its `Drop` removes
+  /// the directory from disk. Firefox is launched with `kill_on_drop(true)`
+  /// so the process dies before the dir vanishes.
   pub async fn launch_firefox(
     firefox_path: &str,
     flags: &[String],
     headless: bool,
-  ) -> Result<(Self, tokio::process::Child), String> {
+  ) -> Result<(Self, tokio::process::Child, tempfile::TempDir), String> {
     let profile_dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
 
     // Write automation preferences to user.js in the profile directory.
@@ -144,7 +149,8 @@ impl BidiSession {
     command
       .stdin(std::process::Stdio::null())
       .stdout(std::process::Stdio::null())
-      .stderr(std::process::Stdio::piped());
+      .stderr(std::process::Stdio::piped())
+      .kill_on_drop(true);
 
     debug!("Launching Firefox for BiDi: {firefox_path}");
     let mut child = command.spawn().map_err(|e| format!("Firefox launch: {e}"))?;
@@ -155,10 +161,7 @@ impl BidiSession {
 
     let session = Self::connect(&ws_url).await?;
 
-    // Keep the profile dir alive
-    std::mem::forget(profile_dir);
-
-    Ok((session, child))
+    Ok((session, child, profile_dir))
   }
 
   /// Launch a browser and create a `BiDi` session.
@@ -168,7 +171,7 @@ impl BidiSession {
     browser_path: &str,
     flags: &[String],
     headless: bool,
-  ) -> Result<(Self, tokio::process::Child), String> {
+  ) -> Result<(Self, tokio::process::Child, tempfile::TempDir), String> {
     let path_lower = browser_path.to_lowercase();
     if path_lower.contains("firefox") {
       Box::pin(Self::launch_firefox(browser_path, flags, headless)).await

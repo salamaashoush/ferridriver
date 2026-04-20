@@ -60,6 +60,12 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// (its initializer stores the same value and returns it synchronously).
   /// Example: `"HeadlessChrome/120.0.6099.109"`.
   version: Arc<str>,
+  /// Owned `--user-data-dir` for launched browsers. Held as `Arc<TempDir>` so
+  /// cheap `Clone`s share ownership, and the directory is removed from disk
+  /// when the last handle drops (after the `Child` is killed via
+  /// `kill_on_drop(true)`). `None` for `connect()` — we don't own the dir
+  /// of a browser someone else launched.
+  user_data_dir: Option<Arc<tempfile::TempDir>>,
 }
 
 impl<T: CdpTransport> CdpBrowser<T> {
@@ -82,6 +88,7 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
           .clone(),
       ),
       version: Arc::clone(&self.version),
+      user_data_dir: self.user_data_dir.as_ref().map(Arc::clone),
     }
   }
 }
@@ -182,7 +189,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// 2. `Target.setAutoAttach` — auto-attach new targets with `waitForDebuggerOnStart`
   ///
   /// No page creation here — pages are created on demand via `new_page()`.
-  async fn init(transport: Arc<T>, child: Option<tokio::process::Child>) -> Result<Self, String> {
+  async fn init(
+    transport: Arc<T>,
+    child: Option<tokio::process::Child>,
+    user_data_dir: Option<tempfile::TempDir>,
+  ) -> Result<Self, String> {
     let version_resp = transport
       .send_command(None, "Browser.getVersion", super::empty_params())
       .await?;
@@ -210,6 +221,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       child: Arc::new(tokio::sync::Mutex::new(child)),
       attached_targets: std::sync::Mutex::new(FxHashMap::default()),
       version,
+      user_data_dir: user_data_dir.map(Arc::new),
     })
   }
 
@@ -455,12 +467,17 @@ impl CdpBrowser<pipe::PipeTransport> {
 
   /// Launch Chrome with custom flags and communicate over fd 3/4.
   pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self, String> {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let user_data_dir = std::env::temp_dir().join(format!("ferridriver-pipe-{}-{id}", std::process::id()));
+    // Hold the user-data-dir as a `TempDir` so it's removed from disk when the
+    // browser handle drops. The Child owned by the CDP browser has
+    // `kill_on_drop(true)` set in `pipe::PipeTransport::spawn`, so the Chrome
+    // process dies first, releasing any locks on the dir.
+    let user_data_dir = tempfile::Builder::new()
+      .prefix("ferridriver-pipe-")
+      .tempdir()
+      .map_err(|e| format!("create user-data-dir: {e}"))?;
 
-    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, &user_data_dir, flags)?;
-    Self::init(Arc::new(transport), Some(child)).await
+    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir.path(), flags)?;
+    Self::init(Arc::new(transport), Some(child), Some(user_data_dir)).await
   }
 }
 
@@ -478,12 +495,16 @@ impl CdpBrowser<ws::WsTransport> {
 
   /// Launch Chrome with custom flags and communicate over WebSocket.
   pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self, String> {
-    static COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let id = COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let user_data_dir = std::env::temp_dir().join(format!("ferridriver-raw-{}-{id}", std::process::id()));
+    // Held as a `TempDir` so the dir is removed from disk when the browser
+    // handle drops. The Child spawned by `WsTransport::spawn` has
+    // `kill_on_drop(true)` set, so Chrome dies before the directory vanishes.
+    let user_data_dir = tempfile::Builder::new()
+      .prefix("ferridriver-raw-")
+      .tempdir()
+      .map_err(|e| format!("create user-data-dir: {e}"))?;
 
-    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, &user_data_dir, flags)).await?;
-    Self::init(Arc::new(transport), Some(child)).await
+    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir.path(), flags)).await?;
+    Self::init(Arc::new(transport), Some(child), Some(user_data_dir)).await
   }
 
   /// Connect to a running Chrome instance via WebSocket URL.
@@ -569,6 +590,7 @@ impl CdpBrowser<ws::WsTransport> {
       child: Arc::new(tokio::sync::Mutex::new(None)),
       attached_targets: std::sync::Mutex::new(attached),
       version,
+      user_data_dir: None,
     })
   }
 }

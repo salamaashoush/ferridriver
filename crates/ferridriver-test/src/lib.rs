@@ -177,6 +177,12 @@ pub fn run_harness() {
     runner.run(plan).await
   });
 
+  // Drain any still-running tasks so that child processes spawned via
+  // `tokio::process::Command::kill_on_drop(true)` actually get their `Drop`
+  // impls run — `std::process::exit` below would otherwise abort the process
+  // without destructors, leaving browser zombies.
+  rt.shutdown_timeout(std::time::Duration::from_secs(5));
+
   std::process::exit(exit_code);
 }
 
