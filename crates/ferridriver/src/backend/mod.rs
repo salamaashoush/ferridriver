@@ -10,6 +10,7 @@
 
 pub mod cdp;
 pub(crate) mod json_scan;
+pub(crate) mod process;
 #[cfg(target_os = "macos")]
 pub mod webkit;
 

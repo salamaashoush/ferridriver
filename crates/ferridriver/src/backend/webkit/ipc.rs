@@ -452,6 +452,9 @@ impl IpcClient {
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit());
       cmd.pre_exec(move || {
+        // Put the WebKit host in its own session+process group so any
+        // helper it forks is torn down together with it.
+        libc::setsid();
         let flags = libc::fcntl(child_fd, libc::F_GETFD);
         if flags != -1 {
           libc::fcntl(child_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);

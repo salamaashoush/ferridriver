@@ -52,7 +52,7 @@ impl CdpWrap for ws::WsTransport {
 
 pub struct CdpBrowser<T: CdpTransport> {
   transport: Arc<T>,
-  child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+  child: Arc<tokio::sync::Mutex<Option<super::process::ChildGroup>>>,
   /// Track targetId -> sessionId for already-attached targets.
   attached_targets: std::sync::Mutex<FxHashMap<String, Option<String>>>,
   /// Product version string captured from CDP `Browser.getVersion().product`
@@ -191,7 +191,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// No page creation here — pages are created on demand via `new_page()`.
   async fn init(
     transport: Arc<T>,
-    child: Option<tokio::process::Child>,
+    child: Option<super::process::ChildGroup>,
     user_data_dir: Option<tempfile::TempDir>,
   ) -> Result<Self, String> {
     let version_resp = transport
@@ -450,8 +450,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .transport
       .send_command(None, "Browser.close", super::empty_params())
       .await;
-    if let Some(mut child) = self.child.lock().await.take() {
-      let _ = child.kill().await;
+    if let Some(mut group) = self.child.lock().await.take() {
+      // `ChildGroup::drop` kills every helper subprocess in the group
+      // regardless, but calling `kill().await` here gives us the reap
+      // opportunity (waits for the parent to be collected) so the
+      // enclosing runtime doesn't carry a zombie pending waitpid.
+      let _ = group.inner_mut().kill().await;
     }
     Ok(())
   }
@@ -477,7 +481,12 @@ impl CdpBrowser<pipe::PipeTransport> {
       .map_err(|e| format!("create user-data-dir: {e}"))?;
 
     let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir.path(), flags)?;
-    Self::init(Arc::new(transport), Some(child), Some(user_data_dir)).await
+    Self::init(
+      Arc::new(transport),
+      Some(super::process::ChildGroup::new(child)),
+      Some(user_data_dir),
+    )
+    .await
   }
 }
 
@@ -504,7 +513,12 @@ impl CdpBrowser<ws::WsTransport> {
       .map_err(|e| format!("create user-data-dir: {e}"))?;
 
     let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir.path(), flags)).await?;
-    Self::init(Arc::new(transport), Some(child), Some(user_data_dir)).await
+    Self::init(
+      Arc::new(transport),
+      Some(super::process::ChildGroup::new(child)),
+      Some(user_data_dir),
+    )
+    .await
   }
 
   /// Connect to a running Chrome instance via WebSocket URL.

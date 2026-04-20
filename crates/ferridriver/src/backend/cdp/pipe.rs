@@ -153,6 +153,10 @@ fn spawn_with_pipes(
   #[allow(unsafe_code)]
   unsafe {
     command.pre_exec(move || {
+      // Put the Chrome parent in its own session + process group so
+      // `kill_process_group` can take down every renderer/GPU/zygote
+      // helper together on teardown. See `backend::process`.
+      libc::setsid();
       let flags = libc::fcntl(child_fd, libc::F_GETFD);
       if flags != -1 {
         libc::fcntl(child_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC);

@@ -12,7 +12,7 @@ use crate::backend::{AnyPage, NavLifecycle};
 /// Browser instance using the `WebDriver` `BiDi` protocol.
 pub struct BidiBrowser {
   pub(crate) session: Arc<BidiSession>,
-  child: Arc<tokio::sync::Mutex<Option<tokio::process::Child>>>,
+  child: Arc<tokio::sync::Mutex<Option<crate::backend::process::ChildGroup>>>,
   /// Owned Firefox `--profile` directory for launched browsers. Held as
   /// `Arc<TempDir>` so cheap `Clone`s share ownership; the directory is
   /// removed when the last handle drops. `None` for `connect()` — we don't
@@ -85,7 +85,9 @@ impl BidiBrowser {
     let (session, child, profile_dir) = Box::pin(BidiSession::launch(browser_path, flags, headless)).await?;
     Ok(Self {
       session: Arc::new(session),
-      child: Arc::new(tokio::sync::Mutex::new(Some(child))),
+      child: Arc::new(tokio::sync::Mutex::new(Some(crate::backend::process::ChildGroup::new(
+        child,
+      )))),
       profile_dir: Some(Arc::new(profile_dir)),
     })
   }
@@ -221,9 +223,10 @@ impl BidiBrowser {
     // Try graceful BiDi close first
     let _ = self.session.transport.send_command("browser.close", json!({})).await;
 
-    // Then kill the child process if we own it
-    if let Some(mut child) = self.child.lock().await.take() {
-      let _ = child.kill().await;
+    // Then kill the child process if we own it. `ChildGroup::drop`
+    // additionally takes down every helper subprocess in the group.
+    if let Some(mut group) = self.child.lock().await.take() {
+      let _ = group.inner_mut().kill().await;
     }
 
     Ok(())
