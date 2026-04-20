@@ -39,7 +39,8 @@ impl PipeTransport {
     command
       .stdin(std::process::Stdio::null())
       .stdout(std::process::Stdio::null())
-      .stderr(std::process::Stdio::piped());
+      .stderr(std::process::Stdio::piped())
+      .kill_on_drop(true);
 
     let (child, reader, writer) = spawn_with_pipes(&mut command, chromium_path)?;
 

@@ -18,7 +18,12 @@ static GLOBAL_ID: AtomicU64 = AtomicU64::new(1);
 pub struct McpClient {
   child: Child,
   reader: BufReader<std::process::ChildStdout>,
-  stdin: std::process::ChildStdin,
+  /// `Option` so `Drop` can close the write end of the pipe *before* killing
+  /// the child — closing stdin lets the CLI's MCP transport return from
+  /// `svc.waiting()` and drop its `BrowserState` cleanly (which in turn kills
+  /// any spawned Chrome via `kill_on_drop`). Without the closure, we'd jump
+  /// straight to SIGKILL and Chrome would leak.
+  stdin: Option<std::process::ChildStdin>,
   #[allow(dead_code)]
   pub backend: String,
 }
@@ -51,7 +56,7 @@ impl McpClient {
     let mut c = McpClient {
       child,
       reader: BufReader::new(stdout),
-      stdin,
+      stdin: Some(stdin),
       backend: backend.to_string(),
     };
     c.initialize();
@@ -60,8 +65,9 @@ impl McpClient {
   }
 
   fn send_raw(&mut self, msg: &Value) {
-    writeln!(self.stdin, "{}", serde_json::to_string(msg).unwrap()).unwrap();
-    self.stdin.flush().unwrap();
+    let stdin = self.stdin.as_mut().expect("stdin already closed");
+    writeln!(stdin, "{}", serde_json::to_string(msg).unwrap()).unwrap();
+    stdin.flush().unwrap();
   }
 
   fn read_response(&mut self) -> Value {
@@ -149,6 +155,25 @@ impl McpClient {
 
 impl Drop for McpClient {
   fn drop(&mut self) {
+    // Close stdin first so the CLI's MCP stdio transport returns from
+    // `svc.waiting()` and its tokio runtime shuts down gracefully — that's
+    // what drops `BrowserState` and (via `kill_on_drop(true)`) kills Chrome.
+    // Without this step we'd jump straight to SIGKILL below and Chrome
+    // would leak: SIGKILL cannot be caught, so the CLI never runs
+    // destructors.
+    drop(self.stdin.take());
+
+    // Poll for graceful exit; if the CLI is wedged, fall back to kill.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    loop {
+      match self.child.try_wait() {
+        Ok(Some(_)) => return,
+        Ok(None) if std::time::Instant::now() < deadline => {
+          std::thread::sleep(std::time::Duration::from_millis(25));
+        },
+        _ => break,
+      }
+    }
     let _ = self.child.kill();
     let _ = self.child.wait();
   }

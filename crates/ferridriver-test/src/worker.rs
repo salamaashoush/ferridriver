@@ -714,6 +714,14 @@ impl Worker {
     }
     custom_fixture_pool.teardown_all().await;
 
+    // Graceful browser close. `custom_fixture_pool.teardown_all()` above
+    // releases the `browser` fixture clone injected at the top of `run`;
+    // calling `close` here ensures the CDP `Browser.close` handshake runs
+    // before the `Arc<Browser>` drops — without it the browser stays up
+    // until the tokio task unwinds, which can keep Chrome alive for the
+    // whole runner process.
+    let _ = browser.close(None).await;
+
     self
       .event_bus
       .emit(ReporterEvent::WorkerFinished { worker_id: self.id })
