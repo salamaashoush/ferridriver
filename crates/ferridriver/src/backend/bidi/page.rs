@@ -39,6 +39,11 @@ pub struct BidiPage {
   pub dialog_handler: Arc<RwLock<crate::events::DialogHandler>>,
   /// Manager for lazy engine injection.
   injected_script: Arc<InjectedScriptManager>,
+  /// Most recent main-document `Request` observed by the `BiDi` network
+  /// listener. Populated when `BidiNetworkTracker` sees a request with
+  /// `navigation` set. Consumed by `goto` / `reload` / history
+  /// traversals to resolve the final main-document `Response`.
+  nav_request_slot: crate::network::NavRequestSlot,
 }
 
 pub struct InjectedScriptManager {
@@ -92,6 +97,7 @@ impl BidiPage {
       exposed_fns: Arc::new(RwLock::new(FxHashMap::default())),
       dialog_handler: Arc::new(RwLock::new(crate::events::default_dialog_handler())),
       injected_script: Arc::new(InjectedScriptManager::new()),
+      nav_request_slot: crate::network::NavRequestSlot::new(),
     }
   }
 
@@ -218,8 +224,9 @@ impl BidiPage {
     lifecycle: NavLifecycle,
     timeout_ms: u64,
     referer: Option<&str>,
-  ) -> Result<(), String> {
+  ) -> Result<Option<Response>, String> {
     self.injected_script.reset();
+    self.nav_request_slot.clear();
 
     // WebDriver BiDi `browsingContext.navigate` has no `referrer` param —
     // Playwright's own BiDi backend drops it too
@@ -265,10 +272,19 @@ impl BidiPage {
     }
 
     match result {
-      Ok(Ok(_)) => Ok(()),
+      Ok(Ok(_)) => Ok(self.await_nav_response().await),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(format!("Navigation to '{url}' timed out after {timeout_ms}ms")),
     }
+  }
+
+  /// Resolve the main-document `Response` captured by the network
+  /// listener for the most recent navigation. Returns `None` for
+  /// same-document navigations (no new request was issued) or when
+  /// the underlying request ended in failure.
+  async fn await_nav_response(&self) -> Option<Response> {
+    let req = self.nav_request_slot.get()?;
+    req.response().await.ok().flatten()
   }
 
   pub async fn wait_for_navigation(&self) -> Result<(), String> {
@@ -293,8 +309,9 @@ impl BidiPage {
     }
   }
 
-  pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+  pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>, String> {
     self.injected_script.reset();
+    self.nav_request_slot.clear();
     let wait = Self::lifecycle_to_wait(lifecycle);
     let result = tokio::time::timeout(
       std::time::Duration::from_millis(timeout_ms),
@@ -309,13 +326,14 @@ impl BidiPage {
     .await;
 
     match result {
-      Ok(Ok(_)) => Ok(()),
+      Ok(Ok(_)) => Ok(self.await_nav_response().await),
       Ok(Err(e)) => Err(e),
       Err(_) => Err(format!("Reload timed out after {timeout_ms}ms")),
     }
   }
 
-  pub async fn go_back(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+  pub async fn go_back(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>, String> {
+    self.nav_request_slot.clear();
     let result = tokio::time::timeout(
       std::time::Duration::from_millis(timeout_ms),
       self.cmd(
@@ -329,13 +347,14 @@ impl BidiPage {
     .await;
 
     match result {
-      Ok(Ok(_)) => Ok(()),
+      Ok(Ok(_)) => Ok(self.await_nav_response().await),
       Ok(Err(e)) => Err(e),
       Err(_) => Err("go_back timed out".into()),
     }
   }
 
-  pub async fn go_forward(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+  pub async fn go_forward(&self, _lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>, String> {
+    self.nav_request_slot.clear();
     let result = tokio::time::timeout(
       std::time::Duration::from_millis(timeout_ms),
       self.cmd(
@@ -349,7 +368,7 @@ impl BidiPage {
     .await;
 
     match result {
-      Ok(Ok(_)) => Ok(()),
+      Ok(Ok(_)) => Ok(self.await_nav_response().await),
       Ok(Err(e)) => Err(e),
       Err(_) => Err("go_forward timed out".into()),
     }
@@ -1268,7 +1287,10 @@ impl BidiPage {
     let closed = self.closed.clone();
     let emitter = self.events.clone();
     let injected_script = self.injected_script.clone();
-    let tracker = Arc::new(BidiNetworkTracker::new(self.session.clone()));
+    let tracker = Arc::new(BidiNetworkTracker::new(
+      self.session.clone(),
+      self.nav_request_slot.clone(),
+    ));
 
     tokio::spawn(async move {
       while let Ok(event) = rx.recv().await {
@@ -2067,14 +2089,16 @@ struct BidiNetworkTracker {
   session: Arc<super::session::BidiSession>,
   requests: tokio::sync::Mutex<FxHashMap<String, NetworkRequest>>,
   responses: tokio::sync::Mutex<FxHashMap<String, Response>>,
+  nav_request_slot: crate::network::NavRequestSlot,
 }
 
 impl BidiNetworkTracker {
-  fn new(session: Arc<super::session::BidiSession>) -> Self {
+  fn new(session: Arc<super::session::BidiSession>, nav_request_slot: crate::network::NavRequestSlot) -> Self {
     Self {
       session,
       requests: tokio::sync::Mutex::new(FxHashMap::default()),
       responses: tokio::sync::Mutex::new(FxHashMap::default()),
+      nav_request_slot,
     }
   }
 
@@ -2145,6 +2169,18 @@ impl BidiNetworkTracker {
     });
 
     self.requests.lock().await.insert(id.clone(), new_request.clone());
+
+    // Main-document navigations: update the per-page slot so
+    // `BidiPage::goto` / `reload` / `go_back` / `go_forward` can
+    // resolve the final main-document `Response` after the
+    // lifecycle wait completes. BiDi flags a navigation request via
+    // the `navigation` field on `network.beforeRequestSent`; the
+    // slot therefore tracks each redirect hop (same request id,
+    // reused across the chain).
+    if new_request.is_navigation_request() {
+      self.nav_request_slot.set(new_request.clone());
+    }
+
     network_log.write().await.push(new_request.clone());
     emitter.emit(PageEvent::Request(new_request));
   }

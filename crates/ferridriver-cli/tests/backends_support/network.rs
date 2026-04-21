@@ -50,7 +50,7 @@ use std::thread;
 /// - `POST /echo` → 200 echoes the request body back as text/plain
 /// - `GET /multi-cookie` → 200 with two `Set-Cookie` headers
 /// - `GET /ua-marker` → 200 echoes `User-Agent` back as text/plain
-fn with_stub_server<F: FnOnce(&str)>(body: F) {
+pub fn with_stub_server<F: FnOnce(&str)>(body: F) {
   let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
   let addr = listener.local_addr().expect("addr");
   let base = format!("http://{addr}");

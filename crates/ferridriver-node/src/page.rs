@@ -88,28 +88,42 @@ impl Page {
 
   // ── Navigation ──────────────────────────────────────────────────────────
 
-  #[napi]
-  pub async fn goto(&self, url: String, options: Option<GotoOptions>) -> Result<()> {
+  /// Navigate to `url`. Returns the main-document `Response`, or `null`
+  /// for same-document navigations / backends that cannot observe the
+  /// main-document response (stock `WKWebView` — see the §1.4 backend
+  /// gap matrix). Mirrors Playwright's `Promise<Response | null>`.
+  #[napi(ts_return_type = "Promise<Response | null>")]
+  pub async fn goto(&self, url: String, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    self.inner.goto(&url, opts).await.map_err(napi::Error::from_reason)
+    let resp = self.inner.goto(&url, opts).await.map_err(napi::Error::from_reason)?;
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
-  #[napi]
-  pub async fn go_back(&self, options: Option<GotoOptions>) -> Result<()> {
+  /// Navigate back in history. Returns the main-document `Response`
+  /// on the same basis as `goto` (or `null`).
+  #[napi(ts_return_type = "Promise<Response | null>")]
+  pub async fn go_back(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    self.inner.go_back(opts).await.map_err(napi::Error::from_reason)
+    let resp = self.inner.go_back(opts).await.map_err(napi::Error::from_reason)?;
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
-  #[napi]
-  pub async fn go_forward(&self, options: Option<GotoOptions>) -> Result<()> {
+  /// Navigate forward in history. Returns the main-document
+  /// `Response` on the same basis as `goto` (or `null`).
+  #[napi(ts_return_type = "Promise<Response | null>")]
+  pub async fn go_forward(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    self.inner.go_forward(opts).await.map_err(napi::Error::from_reason)
+    let resp = self.inner.go_forward(opts).await.map_err(napi::Error::from_reason)?;
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
-  #[napi]
-  pub async fn reload(&self, options: Option<GotoOptions>) -> Result<()> {
+  /// Reload the current page. Returns the main-document `Response`
+  /// on the same basis as `goto` (or `null`).
+  #[napi(ts_return_type = "Promise<Response | null>")]
+  pub async fn reload(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    self.inner.reload(opts).await.map_err(napi::Error::from_reason)
+    let resp = self.inner.reload(opts).await.map_err(napi::Error::from_reason)?;
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
   #[napi]

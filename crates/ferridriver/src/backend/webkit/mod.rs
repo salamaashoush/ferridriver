@@ -249,13 +249,23 @@ impl WebKitPage {
     _lifecycle: crate::backend::NavLifecycle,
     _timeout_ms: u64,
     referer: Option<&str>,
-  ) -> Result<(), String> {
+  ) -> Result<Option<crate::network::Response>, String> {
     // WebKit backend: WKWebView navigation delegate fires on load complete.
     // Lifecycle granularity (commit vs domcontentloaded vs load) is not
     // distinguishable via the native API — all waits resolve on load.
     //
     // Referer is attached as a `Referer` HTTP header on the
     // `NSMutableURLRequest` by the Obj-C side when present.
+    //
+    // Main-document `Response` observability: stock `WKWebView` has no
+    // public API surface for main-doc response headers/status. The
+    // `WKNavigationDelegate` callbacks (`decidePolicyForNavigationResponse:`)
+    // expose a `WKNavigationResponse`, but the carried `NSURLResponse`
+    // doesn't round-trip status/headers into our IPC, and the JS-fetch
+    // interceptor only observes user-script fetches. This is the same
+    // limitation already documented in the §1.4 backend gap matrix.
+    // Returning `None` is the honest Playwright-parity outcome for a
+    // backend that genuinely cannot observe the navigation response.
     let mut p = Vec::new();
     ipc::str_encode(&mut p, url);
     p.extend_from_slice(&self.vid().to_le_bytes());
@@ -263,7 +273,8 @@ impl WebKitPage {
     let r = self.client.send(Op::Navigate, &p).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
-    Self::ok(r2)
+    Self::ok(r2)?;
+    Ok(None)
   }
 
   /// Wait for the current navigation to complete.
@@ -272,25 +283,40 @@ impl WebKitPage {
     Self::ok(r)
   }
 
-  pub async fn reload(&self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64) -> Result<(), String> {
+  pub async fn reload(
+    &self,
+    _lifecycle: crate::backend::NavLifecycle,
+    _timeout_ms: u64,
+  ) -> Result<Option<crate::network::Response>, String> {
     let r = self.client.send_vid(Op::Reload, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
-    Self::ok(r2)
+    Self::ok(r2)?;
+    Ok(None)
   }
 
-  pub async fn go_back(&self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64) -> Result<(), String> {
+  pub async fn go_back(
+    &self,
+    _lifecycle: crate::backend::NavLifecycle,
+    _timeout_ms: u64,
+  ) -> Result<Option<crate::network::Response>, String> {
     let r = self.client.send_vid(Op::GoBack, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
-    Self::ok(r2)
+    Self::ok(r2)?;
+    Ok(None)
   }
 
-  pub async fn go_forward(&self, _lifecycle: crate::backend::NavLifecycle, _timeout_ms: u64) -> Result<(), String> {
+  pub async fn go_forward(
+    &self,
+    _lifecycle: crate::backend::NavLifecycle,
+    _timeout_ms: u64,
+  ) -> Result<Option<crate::network::Response>, String> {
     let r = self.client.send_vid(Op::GoForward, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
-    Self::ok(r2)
+    Self::ok(r2)?;
+    Ok(None)
   }
 
   /// Get the current URL of the page.

@@ -133,9 +133,15 @@ impl Frame {
 
   // ── Navigation ────────────────────────────────────────────────────────
 
-  #[napi]
-  pub async fn goto(&self, url: String) -> Result<()> {
-    self.inner.goto(&url).await.into_napi()
+  /// Navigate this frame to a URL. Returns the main-document
+  /// `Response` when the frame is the main frame and the backend can
+  /// observe it; `null` otherwise (child frame navigation / same-doc
+  /// navigation / unobservable backend).
+  #[napi(ts_return_type = "Promise<Response | null>")]
+  pub async fn goto(&self, url: String) -> Result<Option<crate::network::Response>> {
+    let resp = self.inner.goto(&url).await.into_napi()?;
+    let page = self.inner.page_arc().clone();
+    Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, page)))
   }
 
   // ── Waiting ───────────────────────────────────────────────────────────
