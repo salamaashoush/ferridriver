@@ -2100,18 +2100,27 @@ fn run_all_tests(backend: &str) {
   let mut failed = 0u32;
   let mut failures: Vec<String> = Vec::new();
 
+  // Optional substring filter for interactive debugging. When
+  // `FERRIDRIVER_TEST_FILTER` is set, only tests whose fully-qualified
+  // function path contains the given substring run; the rest are
+  // silently skipped. Lets developers re-run a single group without
+  // editing the test harness.
+  let filter = std::env::var("FERRIDRIVER_TEST_FILTER").ok();
+
   macro_rules! run {
     ($name:path) => {{
       let name = stringify!($name);
-      match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $name(&mut c))) {
-        Ok(()) => {
-          passed += 1;
-        },
-        Err(_) => {
-          failed += 1;
-          failures.push(name.to_string());
-          eprintln!("  FAIL {name}");
-        },
+      if filter.as_deref().is_none_or(|f| name.contains(f)) {
+        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $name(&mut c))) {
+          Ok(()) => {
+            passed += 1;
+          },
+          Err(_) => {
+            failed += 1;
+            failures.push(name.to_string());
+            eprintln!("  FAIL {name}");
+          },
+        }
       }
     }};
   }
@@ -2302,6 +2311,13 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::dialog::test_dialog_prompt_with_text);
   run!(backends_support::dialog::test_dialog_double_accept_rejects);
   run!(backends_support::dialog::test_dialog_auto_dismiss_without_listener);
+
+  // §2.11 FileChooser as first-class event handle.
+  run!(backends_support::file_chooser::test_file_chooser_webkit_unsupported);
+  run!(backends_support::file_chooser::test_file_chooser_single_string_path);
+  run!(backends_support::file_chooser::test_file_chooser_multiple_string_array);
+  run!(backends_support::file_chooser::test_file_chooser_file_payload_single);
+  run!(backends_support::file_chooser::test_file_chooser_unclaimed_disposes);
 
   // Multi-page last (changes session state)
   run!(test_new_page);

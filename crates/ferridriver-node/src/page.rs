@@ -295,11 +295,11 @@ impl Page {
 
   /// Register an event listener. Returns a listener ID for removal with `off()`.
   ///
-  /// Supported events: 'console', 'response', 'request', 'dialog', 'download',
-  /// 'frameattached', 'framedetached', 'framenavigated',
-  /// 'load', 'domcontentloaded', 'close', 'pageerror'
+  /// Supported events: 'console', 'response', 'request', 'dialog',
+  /// 'filechooser', 'download', 'frameattached', 'framedetached',
+  /// 'framenavigated', 'load', 'domcontentloaded', 'close', 'pageerror'
   #[napi(
-    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | Record<string, any>) => void"
+    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | { isMultiple: boolean } | Record<string, any>) => void"
   )]
   pub fn on(&self, event: String, listener: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>) -> Result<f64> {
     let tsfn = listener
@@ -364,23 +364,24 @@ impl Page {
 
   /// Wait for a specific event. Playwright API:
   /// `page.waitForEvent(event, options?)`. Returns a live class
-  /// (`Request` / `Response` / `WebSocket` / `Dialog`) for lifecycle
-  /// events, or a plain snapshot object for simpler events — matches
-  /// Playwright's `PageEventsMap`.
+  /// (`Request` / `Response` / `WebSocket` / `Dialog` / `FileChooser`)
+  /// for lifecycle events, or a plain snapshot object for simpler
+  /// events — matches Playwright's `PageEventsMap`.
   #[napi(
-    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
-    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | Record<string, any>>"
+    ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
+    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Record<string, any>>"
   )]
   pub async fn wait_for_event(
     &self,
     event: String,
     timeout_ms: Option<f64>,
   ) -> Result<
-    napi::bindgen_prelude::Either5<
+    napi::bindgen_prelude::Either6<
       crate::network::Request,
       crate::network::Response,
       crate::network::WebSocket,
       crate::dialog::Dialog,
+      crate::file_chooser::FileChooser,
       serde_json::Value,
     >,
   > {
@@ -392,23 +393,32 @@ impl Page {
     // `addDialogHandler` flow verbatim).
     if event.eq_ignore_ascii_case("dialog") {
       let dialog = self.inner.wait_for_dialog(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either5::D(crate::dialog::Dialog::from_core(
+      return Ok(napi::bindgen_prelude::Either6::D(crate::dialog::Dialog::from_core(
         dialog,
       )));
+    }
+    // Same pattern for `filechooser` — one-shot handler on the
+    // per-page `FileChooserManager` delivers the live handle.
+    if event.eq_ignore_ascii_case("filechooser") {
+      let chooser = self.inner.wait_for_file_chooser(timeout).await.into_napi()?;
+      return Ok(napi::bindgen_prelude::Either6::E(
+        crate::file_chooser::FileChooser::from_core(chooser),
+      ));
     }
 
     let ev = self.inner.events().wait_for_event(&event, timeout).await.into_napi()?;
     use ferridriver::events::PageEvent;
     Ok(match ev {
       PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => {
-        napi::bindgen_prelude::Either5::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
+        napi::bindgen_prelude::Either6::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
       },
       PageEvent::Response(r) => {
-        napi::bindgen_prelude::Either5::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
+        napi::bindgen_prelude::Either6::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
       },
-      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either5::C(crate::network::WebSocket::from_core(ws)),
-      PageEvent::Dialog(d) => napi::bindgen_prelude::Either5::D(crate::dialog::Dialog::from_core(d)),
-      other => napi::bindgen_prelude::Either5::E(page_event_to_value(&other)),
+      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either6::C(crate::network::WebSocket::from_core(ws)),
+      PageEvent::Dialog(d) => napi::bindgen_prelude::Either6::D(crate::dialog::Dialog::from_core(d)),
+      PageEvent::FileChooser(fc) => napi::bindgen_prelude::Either6::E(crate::file_chooser::FileChooser::from_core(fc)),
+      other => napi::bindgen_prelude::Either6::F(page_event_to_value(&other)),
     })
   }
 
@@ -1546,6 +1556,9 @@ fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value>
       "message": d.message(),
       "defaultValue": d.default_value(),
     })),
+    ("filechooser", PageEvent::FileChooser(fc)) => Some(serde_json::json!({
+      "isMultiple": fc.is_multiple(),
+    })),
     ("frameattached", PageEvent::FrameAttached(f)) | ("framenavigated", PageEvent::FrameNavigated(f)) => {
       serde_json::to_value(f).ok()
     },
@@ -1570,6 +1583,9 @@ fn page_event_to_value(event: &PageEvent) -> serde_json::Value {
       "type": d.dialog_type().as_str(),
       "message": d.message(),
       "defaultValue": d.default_value(),
+    }),
+    PageEvent::FileChooser(fc) => serde_json::json!({
+      "isMultiple": fc.is_multiple(),
     }),
     PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
     PageEvent::FrameDetached { frame_id } => serde_json::json!({"frameId": frame_id}),

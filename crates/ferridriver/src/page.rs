@@ -89,6 +89,11 @@ impl Page {
       frame_cache: Arc::new(Mutex::new(FrameCache::default())),
       frame_listener: Mutex::new(None),
     });
+    // Wire the backend's weak back-reference before the frame cache
+    // starts seeding — the file-chooser listener (spawned in
+    // `attach_listeners`) reads this slot per event and silently
+    // drops events that arrive before the page is addressable.
+    page.inner.set_page_backref(Arc::downgrade(&page));
     page.seed_frame_cache().await?;
     Ok(page)
   }
@@ -113,6 +118,7 @@ impl Page {
       frame_cache: Arc::new(Mutex::new(FrameCache::default())),
       frame_listener: Mutex::new(None),
     });
+    page.inner.set_page_backref(Arc::downgrade(&page));
     page.seed_frame_cache().await?;
     Ok(page)
   }
@@ -2205,6 +2211,71 @@ impl Page {
         "page closed while waiting for dialog".into(),
       ))),
       Err(_) => Err(crate::error::FerriError::timeout("waiting for dialog", timeout_ms)),
+    }
+  }
+
+  // ── File choosers (live handle, first-class) ────────────────────────────
+  //
+  // Symmetric with the dialog surface above:
+  //
+  // * [`Self::events`]`.on("filechooser", cb)` — broadcast listener,
+  //   live [`crate::file_chooser::FileChooser`] handle delivered in
+  //   the callback. Backed by the per-page
+  //   [`crate::file_chooser::FileChooserManager`]'s emitter-bridge
+  //   (installed once at `attach_listeners` time).
+  // * [`Self::wait_for_file_chooser`] — one-shot async wait. Mirrors
+  //   Playwright's `page.waitForEvent('filechooser')` directly against
+  //   the `FileChooserManager`; bypasses the broadcast so the claim
+  //   is synchronous with the chooser opening.
+  //
+  // If no handler claims at `did_open` time, the manager disposes the
+  // captured `<input>` element handle — matches Playwright's
+  // `server/page.ts::_onFileChooserOpened` no-listener branch.
+
+  /// Wait for the next file chooser to open, with a timeout. Returns
+  /// the live [`crate::file_chooser::FileChooser`] handle; the caller
+  /// may then call `set_files(...)` (or drop the handle to cancel the
+  /// upload — the native picker was already suppressed by CDP's
+  /// `Page.setInterceptFileChooserDialog`). Mirrors Playwright's
+  /// `page.waitForEvent('filechooser', { timeout })`.
+  ///
+  /// Registers a one-shot handler with the page's
+  /// [`crate::file_chooser::FileChooserManager`] that claims the
+  /// first chooser and delivers it here. The handler is removed
+  /// automatically on resolve or timeout.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Timeout`] if no file chooser
+  /// opens within `timeout_ms`. Returns
+  /// [`crate::error::FerriError::TargetClosed`] if the page closes
+  /// before a chooser arrives.
+  pub async fn wait_for_file_chooser(&self, timeout_ms: u64) -> Result<crate::file_chooser::FileChooser> {
+    use std::sync::Mutex;
+    let (tx, rx) = tokio::sync::oneshot::channel::<crate::file_chooser::FileChooser>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let tx_clone = tx.clone();
+    let id = self.inner.file_chooser_manager().add_handler(Arc::new(move |chooser| {
+      let mut guard = match tx_clone.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+      };
+      match guard.take() {
+        Some(sender) => {
+          let _ = sender.send(chooser.clone());
+          true
+        },
+        None => false,
+      }
+    }));
+    let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
+    self.inner.file_chooser_manager().remove_handler(id);
+    match result {
+      Ok(Ok(chooser)) => Ok(chooser),
+      Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
+        "page closed while waiting for filechooser".into(),
+      ))),
+      Err(_) => Err(crate::error::FerriError::timeout("waiting for filechooser", timeout_ms)),
     }
   }
 

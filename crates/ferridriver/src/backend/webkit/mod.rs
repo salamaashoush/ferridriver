@@ -124,6 +124,8 @@ impl WebKitBrowser {
               closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
               injected_script: std::sync::Arc::new(InjectedScriptManager::new()),
               dialog_manager: crate::dialog::DialogManager::new(),
+              file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+              page_backref: crate::backend::PageBackref::new(),
             })
           })
           .collect(),
@@ -151,6 +153,8 @@ impl WebKitBrowser {
           closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
           injected_script: std::sync::Arc::new(InjectedScriptManager::new()),
           dialog_manager: crate::dialog::DialogManager::new(),
+          file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+          page_backref: crate::backend::PageBackref::new(),
         };
         Ok(AnyPage::WebKit(page))
       },
@@ -202,6 +206,22 @@ pub struct WebKitPage {
   /// (`type`/`message`) still flows through the manager so listeners
   /// can record what happened.
   pub dialog_manager: crate::dialog::DialogManager,
+  /// Per-page file-chooser handler registry. See
+  /// `crates/ferridriver/src/file_chooser.rs::FileChooserManager`.
+  /// Stock `WKWebView` exposes no public API for intercepting the
+  /// open-panel (the host's `WKUIDelegate::-webView:runOpenPanel...`
+  /// runs in the Obj-C subprocess and either answers synchronously or
+  /// not at all — no event flows through our IPC). So this manager is
+  /// constructed for API parity but never receives `did_open` calls
+  /// on `WebKit`; any registered handler simply never fires. Rule-4
+  /// honest: the feature is documented as `Unsupported` at the
+  /// backend boundary via the null no-op attach path, and the outer
+  /// `Page::wait_for_file_chooser` still returns `Timeout`.
+  pub file_chooser_manager: crate::file_chooser::FileChooserManager,
+  /// Weak back-reference to the outer [`crate::page::Page`]. Carried
+  /// here for struct parity across backends even though the `WebKit`
+  /// file-chooser path never upgrades it.
+  pub page_backref: crate::backend::PageBackref,
 }
 
 pub struct InjectedScriptManager {
@@ -1715,6 +1735,13 @@ impl WebKitPage {
     // Register the emitter-bridge so `page.events().on("dialog", cb)`
     // continues to deliver live `Dialog` handles via the broadcast.
     let _ = self.dialog_manager.register_emitter_bridge(self.events.clone());
+    // Parity bridge for `filechooser` — registered for API
+    // consistency with CDP/BiDi even though stock `WKWebView` has no
+    // public API for intercepting the native `NSOpenPanel`. Any
+    // `page.on('filechooser', cb)` registration completes silently;
+    // no event ever arrives on WebKit. Callers that care about this
+    // path see the gap via `page.wait_for_file_chooser` timing out.
+    let _ = self.file_chooser_manager.register_emitter_bridge(self.events.clone());
 
     let client = self.client.clone();
     let emitter = self.events.clone();
