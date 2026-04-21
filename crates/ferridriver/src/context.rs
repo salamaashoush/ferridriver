@@ -17,14 +17,6 @@ use rustc_hash::FxHashMap as HashMap;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
-/// A collected console message (matches Playwright's `ConsoleMessage`).
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct ConsoleMsg {
-  /// Console message type: "log", "warn", "error", "info", "debug", "trace".
-  pub r#type: String,
-  pub text: String,
-}
-
 /// A dismissed dialog event (alert, confirm, prompt).
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct DialogEvent {
@@ -44,7 +36,7 @@ pub struct BrowserContext {
   /// Element ref map for accessibility snapshots (wait-free reads via `ArcSwap`).
   pub ref_map: Arc<ArcSwap<HashMap<String, i64>>>,
   /// Console messages collected from page events.
-  pub console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
+  pub console_log: Arc<RwLock<Vec<crate::console_message::ConsoleMessage>>>,
   /// Network requests collected from page events. Live `Request`
   /// references — listeners may inspect the stored object's response /
   /// failure via the `Request` async accessors.
@@ -148,11 +140,15 @@ impl BrowserContext {
   // -- Console/network/dialog log access -----------------------------------
 
   /// Get console messages, optionally filtered by level.
-  pub async fn console_messages(&self, level: Option<&str>, limit: usize) -> Vec<ConsoleMsg> {
+  pub async fn console_messages(
+    &self,
+    level: Option<&str>,
+    limit: usize,
+  ) -> Vec<crate::console_message::ConsoleMessage> {
     let msgs = self.console_log.read().await;
     msgs
       .iter()
-      .filter(|m| level.is_none_or(|l| l == "all" || m.r#type == l))
+      .filter(|m| level.is_none_or(|l| l == "all" || m.type_str() == l))
       .rev()
       .take(limit)
       .cloned()

@@ -27,12 +27,17 @@ impl McpServer {
         let limit = p.limit.unwrap_or(50);
         let level = p.level.as_deref();
         let log = handles.console.read().await;
-        let msgs: Vec<_> = log
+        let msgs: Vec<serde_json::Value> = log
           .iter()
-          .filter(|m| level.is_none_or(|l| l == "all" || m.r#type == l))
+          .filter(|m| level.is_none_or(|l| l == "all" || m.type_str() == l))
           .rev()
           .take(limit)
-          .cloned()
+          .map(|m| {
+            serde_json::json!({
+              "type": m.type_str(),
+              "text": m.text(),
+            })
+          })
           .collect::<Vec<_>>()
           .into_iter()
           .rev()

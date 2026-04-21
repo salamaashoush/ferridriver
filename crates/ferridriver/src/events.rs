@@ -8,7 +8,7 @@
 //! continues working alongside the new event system.
 
 use crate::backend::FrameInfo;
-use crate::context::ConsoleMsg;
+use crate::console_message::ConsoleMessage;
 use crate::dialog::Dialog;
 use crate::download::Download;
 use crate::file_chooser::FileChooser;
@@ -21,8 +21,11 @@ use tokio::sync::broadcast;
 /// Events emitted by pages. Mirrors Playwright's page event types.
 #[derive(Debug, Clone)]
 pub enum PageEvent {
-  /// Console message from the page (console.log, console.error, etc.)
-  Console(ConsoleMsg),
+  /// Console message from the page (`console.log`, `console.error`, etc.)
+  /// Carries a live [`ConsoleMessage`] with `args` / `location` /
+  /// `text` / `type` / `timestamp` / `page` accessors; matches
+  /// Playwright's `page.on('console', (msg: ConsoleMessage) => ...)`.
+  Console(ConsoleMessage),
   /// Network request started — Playwright `page.on('request')`.
   Request(Request),
   /// Network response received — Playwright `page.on('response')`.

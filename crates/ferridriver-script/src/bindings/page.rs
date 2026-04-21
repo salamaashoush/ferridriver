@@ -1186,6 +1186,11 @@ impl PageJs {
         let instance = Class::instance(ctx.clone(), wrapper)?;
         rquickjs::IntoJs::into_js(instance, &ctx)
       },
+      ferridriver::events::PageEvent::Console(msg) => {
+        let wrapper = crate::bindings::console_message::ConsoleMessageJs::new(msg);
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
       other => {
         let json = page_event_json(&other);
         serde_to_js(&ctx, &json)
@@ -1408,7 +1413,20 @@ fn match_event_name(name: &str, ev: &ferridriver::events::PageEvent) -> bool {
 fn page_event_json(ev: &ferridriver::events::PageEvent) -> serde_json::Value {
   use ferridriver::events::PageEvent;
   match ev {
-    PageEvent::Console(msg) => serde_json::to_value(msg).unwrap_or_default(),
+    PageEvent::Console(msg) => {
+      let loc = msg.location();
+      serde_json::json!({
+        "type": msg.type_str(),
+        "text": msg.text(),
+        "location": {
+          "url": loc.url,
+          "lineNumber": loc.line_number,
+          "columnNumber": loc.column_number,
+        },
+        "timestamp": msg.timestamp(),
+        "argsCount": msg.args().len(),
+      })
+    },
     PageEvent::Dialog(d) => serde_json::json!({
       "type": d.dialog_type().as_str(),
       "message": d.message(),

@@ -365,24 +365,26 @@ impl Page {
   /// Wait for a specific event. Playwright API:
   /// `page.waitForEvent(event, options?)`. Returns a live class
   /// (`Request` / `Response` / `WebSocket` / `Dialog` / `FileChooser` /
-  /// `Download`) for lifecycle events, or a plain snapshot object for
-  /// simpler events — matches Playwright's `PageEventsMap`.
+  /// `Download` / `ConsoleMessage`) for lifecycle events, or a plain
+  /// snapshot object for simpler events — matches Playwright's
+  /// `PageEventsMap`.
   #[napi(
     ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
-    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | Record<string, any>>"
+    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage | Record<string, any>>"
   )]
   pub async fn wait_for_event(
     &self,
     event: String,
     timeout_ms: Option<f64>,
   ) -> Result<
-    napi::bindgen_prelude::Either7<
+    napi::bindgen_prelude::Either8<
       crate::network::Request,
       crate::network::Response,
       crate::network::WebSocket,
       crate::dialog::Dialog,
       crate::file_chooser::FileChooser,
       crate::download::Download,
+      crate::console_message::ConsoleMessage,
       serde_json::Value,
     >,
   > {
@@ -394,7 +396,7 @@ impl Page {
     // `addDialogHandler` flow verbatim).
     if event.eq_ignore_ascii_case("dialog") {
       let dialog = self.inner.wait_for_dialog(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either7::D(crate::dialog::Dialog::from_core(
+      return Ok(napi::bindgen_prelude::Either8::D(crate::dialog::Dialog::from_core(
         dialog,
       )));
     }
@@ -402,7 +404,7 @@ impl Page {
     // per-page `FileChooserManager` delivers the live handle.
     if event.eq_ignore_ascii_case("filechooser") {
       let chooser = self.inner.wait_for_file_chooser(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either7::E(
+      return Ok(napi::bindgen_prelude::Either8::E(
         crate::file_chooser::FileChooser::from_core(chooser),
       ));
     }
@@ -411,7 +413,7 @@ impl Page {
     // the protocol's download-begin event.
     if event.eq_ignore_ascii_case("download") {
       let download = self.inner.wait_for_download(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either7::F(crate::download::Download::from_core(
+      return Ok(napi::bindgen_prelude::Either8::F(crate::download::Download::from_core(
         download,
       )));
     }
@@ -420,16 +422,19 @@ impl Page {
     use ferridriver::events::PageEvent;
     Ok(match ev {
       PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => {
-        napi::bindgen_prelude::Either7::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
+        napi::bindgen_prelude::Either8::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
       },
       PageEvent::Response(r) => {
-        napi::bindgen_prelude::Either7::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
+        napi::bindgen_prelude::Either8::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
       },
-      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either7::C(crate::network::WebSocket::from_core(ws)),
-      PageEvent::Dialog(d) => napi::bindgen_prelude::Either7::D(crate::dialog::Dialog::from_core(d)),
-      PageEvent::FileChooser(fc) => napi::bindgen_prelude::Either7::E(crate::file_chooser::FileChooser::from_core(fc)),
-      PageEvent::Download(d) => napi::bindgen_prelude::Either7::F(crate::download::Download::from_core(d)),
-      other => napi::bindgen_prelude::Either7::G(page_event_to_value(&other)),
+      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either8::C(crate::network::WebSocket::from_core(ws)),
+      PageEvent::Dialog(d) => napi::bindgen_prelude::Either8::D(crate::dialog::Dialog::from_core(d)),
+      PageEvent::FileChooser(fc) => napi::bindgen_prelude::Either8::E(crate::file_chooser::FileChooser::from_core(fc)),
+      PageEvent::Download(d) => napi::bindgen_prelude::Either8::F(crate::download::Download::from_core(d)),
+      PageEvent::Console(msg) => {
+        napi::bindgen_prelude::Either8::G(crate::console_message::ConsoleMessage::from_core(msg))
+      },
+      other => napi::bindgen_prelude::Either8::H(page_event_to_value(&other)),
     })
   }
 
@@ -1536,13 +1541,33 @@ fn response_snapshot(resp: &NetResponse) -> serde_json::Value {
   })
 }
 
+/// Project a live [`ferridriver::console_message::ConsoleMessage`] into
+/// the compact JSON shape `page.on('console', cb)` / the
+/// `waitForEvent` fallback path surface. Live-handle access (args as
+/// `JSHandle`, `location`, `page`) goes through the dedicated
+/// `ConsoleMessage` NAPI class returned from `page.waitForEvent('console')`.
+fn console_message_snapshot(msg: &ferridriver::console_message::ConsoleMessage) -> serde_json::Value {
+  let loc = msg.location();
+  serde_json::json!({
+    "type": msg.type_str(),
+    "text": msg.text(),
+    "location": {
+      "url": loc.url,
+      "lineNumber": loc.line_number,
+      "columnNumber": loc.column_number,
+    },
+    "timestamp": msg.timestamp(),
+    "argsCount": msg.args().len(),
+  })
+}
+
 /// Convert a named event to a JS value. The `request`/`response` family
 /// surfaces a sync snapshot here — full live access to `Request` /
 /// `Response` lifecycle methods is exposed via `wait_for_request` and
 /// `wait_for_response` which return the dedicated NAPI classes.
 fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value> {
   match (event_name, event) {
-    ("console", PageEvent::Console(msg)) => serde_json::to_value(msg).ok(),
+    ("console", PageEvent::Console(msg)) => Some(console_message_snapshot(msg)),
     ("response", PageEvent::Response(r)) => Some(response_snapshot(r)),
     ("request", PageEvent::Request(r))
     | ("requestfinished", PageEvent::RequestFinished(r))
@@ -1575,7 +1600,7 @@ fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value>
 /// Convert any `PageEvent` to a JS value (for `waitForEvent`).
 fn page_event_to_value(event: &PageEvent) -> serde_json::Value {
   match event {
-    PageEvent::Console(msg) => serde_json::to_value(msg).unwrap_or_default(),
+    PageEvent::Console(msg) => console_message_snapshot(msg),
     PageEvent::Response(r) => response_snapshot(r),
     PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => request_snapshot(r),
     PageEvent::WebSocket(ws) => serde_json::json!({"url": ws.url(), "isClosed": ws.is_closed()}),

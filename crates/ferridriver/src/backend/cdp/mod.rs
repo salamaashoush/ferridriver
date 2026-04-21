@@ -16,8 +16,8 @@ pub mod ws;
 use base64::Engine as _;
 
 use super::{
-  AnyElement, AnyPage, Arc, AxNodeData, AxProperty, ConsoleMsg, CookieData, ImageFormat, MetricData, NetworkRequest,
-  RwLock, ScreenshotOpts,
+  AnyElement, AnyPage, Arc, AxNodeData, AxProperty, ConsoleMessage, CookieData, ImageFormat, MetricData,
+  NetworkRequest, RwLock, ScreenshotOpts,
 };
 use crate::network::{
   self, BodyFn, HeaderEntry, Headers, RawHeadersFn, RemoteAddr, RequestInit, RequestSizes, RequestTiming, Response,
@@ -636,6 +636,85 @@ impl CdpBrowser<ws::WsTransport> {
 // ---- CdpPage<T> ------------------------------------------------------------
 
 /// Recursively collect frame info from a CDP frame tree node.
+/// Convert a CDP `Runtime.RemoteObject` JSON payload into a
+/// [`crate::js_handle::JSHandleBacking`]. Remote-backed handles come
+/// from objects with `objectId`; value-backed handles come from inline
+/// primitives. Mirrors Playwright's
+/// `crProtocolHelper.ts::createHandle(context, arg)` behaviour.
+fn cdp_remote_object_to_backing(arg: &serde_json::Value) -> crate::js_handle::JSHandleBacking {
+  if let Some(obj_id) = arg.get("objectId").and_then(|v| v.as_str()) {
+    return crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Cdp(std::sync::Arc::from(
+      obj_id,
+    )));
+  }
+  let value = arg.get("value").cloned().unwrap_or(serde_json::Value::Null);
+  let ty = arg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+  let serialized = if value.is_null() {
+    if ty == "undefined" {
+      crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
+    } else {
+      crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Null)
+    }
+  } else {
+    let mut ctx = crate::protocol::SerializationContext::default();
+    crate::protocol::SerializedValue::from_json(&value, &mut ctx)
+  };
+  crate::js_handle::JSHandleBacking::Value(serialized)
+}
+
+/// Convert a CDP `Runtime.StackTrace` JSON payload into a
+/// [`crate::console_message::ConsoleMessageLocation`] from its first
+/// call frame. Mirrors Playwright's
+/// `crProtocolHelper.ts::toConsoleMessageLocation` byte-for-byte.
+fn cdp_stack_trace_to_location(stack: Option<&serde_json::Value>) -> crate::console_message::ConsoleMessageLocation {
+  let Some(stack) = stack else {
+    return crate::console_message::ConsoleMessageLocation::default();
+  };
+  let Some(frames) = stack.get("callFrames").and_then(|v| v.as_array()) else {
+    return crate::console_message::ConsoleMessageLocation::default();
+  };
+  let Some(frame) = frames.first() else {
+    return crate::console_message::ConsoleMessageLocation::default();
+  };
+  crate::console_message::ConsoleMessageLocation {
+    url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    line_number: frame
+      .get("lineNumber")
+      .and_then(serde_json::Value::as_u64)
+      .map_or(0, u64_to_u32_saturating),
+    column_number: frame
+      .get("columnNumber")
+      .and_then(serde_json::Value::as_u64)
+      .map_or(0, u64_to_u32_saturating),
+  }
+}
+
+/// Clamp a JSON-typed `u64` (line / column offsets always well within
+/// `u32::MAX` in practice) down to `u32` without the clippy warning
+/// for unguarded casts.
+fn u64_to_u32_saturating(n: u64) -> u32 {
+  u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+/// CDP `timestamp` is fractional milliseconds. Non-finite / negative
+/// values collapse to `0`; representable positives saturate at
+/// `u64::MAX`. Works around clippy's unguarded f64-to-u64 cast lint.
+fn f64_to_u64_saturating(n: f64) -> u64 {
+  #[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+  )]
+  let clamped = if !n.is_finite() || n < 0.0 {
+    0_u64
+  } else if n >= u64::MAX as f64 {
+    u64::MAX
+  } else {
+    n as u64
+  };
+  clamped
+}
+
 fn collect_frames(node: &serde_json::Value, out: &mut Vec<super::FrameInfo>) {
   if let Some(frame) = node.get("frame") {
     out.push(super::FrameInfo {
@@ -2632,7 +2711,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   pub fn attach_listeners(
     &self,
-    console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
+    console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
     network_log: Arc<RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
   ) {
@@ -2642,7 +2721,13 @@ impl<T: CdpWrap> CdpPage<T> {
     let emitter2 = self.events.clone();
     let emitter3 = self.events.clone();
 
-    Self::spawn_console_listener(transport.clone(), session_id.clone(), console_log, emitter1);
+    Self::spawn_console_listener(
+      transport.clone(),
+      session_id.clone(),
+      console_log,
+      emitter1,
+      self.page_backref.clone(),
+    );
     Self::spawn_network_listener(
       transport.clone(),
       session_id.clone(),
@@ -2698,8 +2783,9 @@ impl<T: CdpWrap> CdpPage<T> {
   fn spawn_console_listener(
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
-    console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
+    console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
     emitter: crate::events::EventEmitter,
+    page_backref: crate::backend::PageBackref,
   ) {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_events();
@@ -2711,25 +2797,40 @@ impl<T: CdpWrap> CdpPage<T> {
           }
         }
 
-        if event.get("method").and_then(|m| m.as_str()) == Some("Runtime.consoleAPICalled") {
-          if let Some(params) = event.get("params") {
-            let r#type = params.get("type").and_then(|v| v.as_str()).unwrap_or("log").to_string();
-            let text = params
-              .get("args")
-              .and_then(|a| a.as_array())
-              .map(|args| {
-                args
-                  .iter()
-                  .filter_map(|a| a.get("value").map(|v| v.to_string().trim_matches('"').to_string()))
-                  .collect::<Vec<_>>()
-                  .join(" ")
-              })
-              .unwrap_or_default();
-            let msg = ConsoleMsg { r#type, text };
-            console_log.write().await.push(msg.clone());
-            emitter.emit(crate::events::PageEvent::Console(msg));
-          }
+        if event.get("method").and_then(|m| m.as_str()) != Some("Runtime.consoleAPICalled") {
+          continue;
         }
+        let Some(params) = event.get("params") else {
+          continue;
+        };
+        // Without an owning page we cannot build live `JSHandle`s —
+        // drop the event silently (matches Playwright's
+        // `createHandle(context, arg)` guard which returns early if the
+        // execution context is unknown).
+        let Some(page) = page_backref.upgrade() else {
+          continue;
+        };
+
+        let type_str = params.get("type").and_then(|v| v.as_str()).unwrap_or("log").to_string();
+        let args_json = params
+          .get("args")
+          .and_then(|v| v.as_array())
+          .cloned()
+          .unwrap_or_default();
+        let mut args: Vec<crate::js_handle::JSHandle> = Vec::with_capacity(args_json.len());
+        for arg in &args_json {
+          let backing = cdp_remote_object_to_backing(arg);
+          args.push(crate::js_handle::JSHandle::from_backing(page.clone(), backing));
+        }
+        let location = cdp_stack_trace_to_location(params.get("stackTrace"));
+        let timestamp = params
+          .get("timestamp")
+          .and_then(serde_json::Value::as_f64)
+          .map_or(0, f64_to_u64_saturating);
+
+        let msg = crate::console_message::ConsoleMessage::new(&page, type_str, None, args, location, timestamp);
+        console_log.write().await.push(msg.clone());
+        emitter.emit(crate::events::PageEvent::Console(msg));
       }
     });
   }

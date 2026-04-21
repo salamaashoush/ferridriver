@@ -755,11 +755,16 @@ impl ServerHandler for McpServer {
           .await
           .ok_or_else(|| Self::err(format!("Context '{context_name}' not found")))?;
         let msgs = handles.console.read().await;
-        let last: Vec<_> = msgs
+        let last: Vec<serde_json::Value> = msgs
           .iter()
           .rev()
           .take(100)
-          .cloned()
+          .map(|m| {
+            serde_json::json!({
+              "type": m.type_str(),
+              "text": m.text(),
+            })
+          })
           .collect::<Vec<_>>()
           .into_iter()
           .rev()

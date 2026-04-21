@@ -9,8 +9,8 @@
 pub mod ipc;
 
 use super::{
-  AnyElement, AnyPage, Arc, AxNodeData, AxProperty, ConsoleMsg, CookieData, ImageFormat, MetricData, NetworkRequest,
-  RwLock, ScreenshotOpts,
+  AnyElement, AnyPage, Arc, AxNodeData, AxProperty, ConsoleMessage, CookieData, ImageFormat, MetricData,
+  NetworkRequest, RwLock, ScreenshotOpts,
 };
 use crate::network::{self, Headers, RequestInit, Response as NetworkResponse, ResponseInit, body_unsupported};
 use ipc::{IpcClient, IpcResponse, Op};
@@ -1743,7 +1743,7 @@ impl WebKitPage {
   /// from the IPC reader thread into the shared state logs.
   pub fn attach_listeners(
     &self,
-    console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
+    console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
     net_log: Arc<RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
   ) {
@@ -1769,6 +1769,7 @@ impl WebKitPage {
     let notify = client.event_notify.clone();
     let injected_script = self.injected_script.clone();
     let dialog_manager = self.dialog_manager.clone();
+    let page_backref = self.page_backref.clone();
     tokio::spawn(async move {
       loop {
         // Wait for the IPC reader thread to signal that events arrived.
@@ -1788,9 +1789,48 @@ impl WebKitPage {
             }
           };
           if !msgs.is_empty() {
+            // WebKit's host interceptor currently surfaces only
+            // `(level, text)` for each `console.*` call. Args and
+            // stack-trace location require a new IPC op — tracked as
+            // a Section B gap in PLAYWRIGHT_COMPAT.md. Build a
+            // ConsoleMessage with empty `args` + default location so
+            // callers still get a live handle they can dispatch off
+            // `type()` / `text()` / `timestamp()`.
+            let page = page_backref.upgrade();
             let mut dest = console_log.write().await;
-            for (r#type, text) in msgs {
-              let msg = ConsoleMsg { r#type, text };
+            for (raw_type, text) in msgs {
+              let timestamp = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+              // Remap `'warn'` to `'warning'` for Playwright parity —
+              // CDP's `Runtime.consoleAPICalled.type` is already
+              // `'warning'`; BiDi's `log.entryAdded.method` is
+              // `'warn'` which we remap at the BiDi listener. Do the
+              // same for WebKit's host-side label so every backend's
+              // `ConsoleMessage.type()` is consistent.
+              let type_str = if raw_type == "warn" {
+                "warning".to_string()
+              } else {
+                raw_type
+              };
+              let msg = if let Some(ref page) = page {
+                ConsoleMessage::new(
+                  page,
+                  type_str,
+                  Some(text),
+                  Vec::new(),
+                  crate::console_message::ConsoleMessageLocation::default(),
+                  timestamp,
+                )
+              } else {
+                ConsoleMessage::new_detached(
+                  type_str,
+                  Some(text),
+                  Vec::new(),
+                  crate::console_message::ConsoleMessageLocation::default(),
+                  timestamp,
+                )
+              };
               emitter.emit(crate::events::PageEvent::Console(msg.clone()));
               dest.push(msg);
             }

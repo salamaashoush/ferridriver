@@ -23,6 +23,7 @@
 
 // ── Public API (Playwright-compatible) ──
 pub mod browser;
+pub mod console_message;
 pub mod context;
 pub mod dialog;
 pub mod download;

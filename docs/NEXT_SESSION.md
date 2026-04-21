@@ -1,101 +1,81 @@
-# Next session — §2.12 ConsoleMessage rich
+# Next session — §2.13 WebError
 
-Tier 1 done. §3.1, §3.12, §2.9, §2.11, §2.10 landed. Next pick:
-**§2.12 ConsoleMessage rich** — replace the wire-shaped
-`ConsoleMsg { type, text }` with the full Playwright
-`ConsoleMessage { args, location, page, text, type, timestamp }`.
+Tier 1 done. §3.1, §3.12, §2.9, §2.11, §2.10, §2.12 landed. Next pick:
+**§2.13 WebError** — live handle for `context.on('weberror')`
+carrying the page's unhandled `Error` + page back-reference.
 
 ## Read-first
 
 1. `CLAUDE.md` — rules + lessons.
-2. `PLAYWRIGHT_COMPAT.md` — §2.12 is next; §2.10 just landed.
-3. `HANDOVER.md` — §2.10 Download summary (load-bearing — the
-   `DownloadManager` + `watch::send_replace` pattern generalises
-   to any future live-handle with terminal state).
-4. `/tmp/playwright/packages/playwright-core/src/client/consoleMessage.ts`
-   + `/tmp/playwright/packages/playwright-core/src/server/console.ts`.
+2. `PLAYWRIGHT_COMPAT.md` — §2.13 is next; §2.12 just landed.
+3. `HANDOVER.md` — §2.12 ConsoleMessage summary.
+4. `/tmp/playwright/packages/playwright-core/src/client/webError.ts`
+   + `/tmp/playwright/packages/playwright-core/src/server/` for the
+   server-side emission path.
 
-## §2.12 canonical surface
+## §2.13 canonical surface
 
 ```ts
-class ConsoleMessage {
-  args(): JSHandle[];
-  location(): { url: string; lineNumber: number; columnNumber: number };
+class WebError {
   page(): Page | null;
-  text(): string;
-  type(): ConsoleMessageType;
+  error(): Error;
 }
 
-// event: page.on('console', (msg: ConsoleMessage) => { ... })
+// event: context.on('weberror', (err: WebError) => { ... })
 ```
 
-`ConsoleMessageType` union includes
-`'log' | 'debug' | 'info' | 'error' | 'warning' | 'dir' | 'dirxml' |
- 'table' | 'trace' | 'clear' | 'startGroup' | 'startGroupCollapsed' |
- 'endGroup' | 'assert' | 'profile' | 'profileEnd' | 'count' |
- 'timeEnd'`.
+WebError is emitted on the *context*, not the page — unhandled
+errors and promise rejections in any of the context's pages route
+there. Playwright's `Page` also has `page.on('pageerror')` which is
+the page-scoped equivalent; the two surfaces share the same underlying
+event.
 
-## Implementation sketch (generalise §2.10)
+## Implementation sketch (generalise §2.12)
 
-1. **Rust core — new `crates/ferridriver/src/console_message.rs`**:
-   - `ConsoleMessage` struct behind `Arc` with sync getters.
-   - `args` is `Vec<JSHandle>` — each arg was a `Runtime.RemoteObject`
-     in CDP (or a BiDi equivalent). Blocks on §1.3 (`JSHandle` rich
-     shape) — if nested-arg walking is still incomplete, shipping a
-     flat `args: Vec<JSHandle>` keyed off top-level objectIds is OK
-     for now, Rule-9 test just asserts `args.length === 2` +
-     `args[0].asElement()` for an element arg.
-   - `location` = `{ url, line, column }` — CDP
-     `Runtime.consoleAPICalled` carries `stackTrace.callFrames[0]`;
-     BiDi `log.entryAdded` carries `source.url|lineNumber|columnNumber`.
-     WebKit's console interceptor currently reports the text only —
-     stack frames are a real gap to add.
+1. **Rust core — new `crates/ferridriver/src/web_error.rs`**:
+   - `WebError` struct behind `Arc` with `page() -> Option<Arc<Page>>`
+     and `error() -> &ErrorDetails { name, message, stack }`.
+     Reusing `JsError` / existing error types is fine if they have
+     the right shape; otherwise a dedicated `ErrorDetails` struct.
+   - `WebErrorManager` or direct emission via `PageEvent::PageError`
+     (already exists — just upgrade the variant from `String` to
+     `WebError`).
+   - Context-level fanout: ferridriver currently has
+     `PageEvent::PageError(String)` on the page emitter. For parity
+     we need both `page.on('pageerror', cb)` AND
+     `context.on('weberror', cb)`. The simplest path: keep the
+     per-page emission, and add a context-side bridge that forwards.
 
-2. **Per-backend upgrades**:
-   - **CDP** (`backend/cdp/mod.rs::spawn_console_listener`): already
-     reads `Runtime.consoleAPICalled.args[i].value`. Upgrade to
-     build `JSHandle`s from `args[i]` (keep the `objectId` for
-     remote-backed handles, inline `value` for value-backed). Include
-     `stackTrace` for location.
+2. **Per-backend listeners**:
+   - **CDP** (`backend/cdp/mod.rs`): `Runtime.exceptionThrown` — already
+     has partial wiring for `PageEvent::PageError`. Upgrade to full
+     `Error` object (name, message, stack from the exception details).
    - **BiDi** (`backend/bidi/page.rs`): `log.entryAdded` with
-     `type: 'console'` carries `args` (serializable `RemoteValue`s) +
-     `source: { url, lineNumber, columnNumber }`. Reuse the §1.3 BiDi
-     handle builder.
-   - **WebKit** (`backend/webkit/mod.rs`): console currently reports
-     only `(level, text)` — the host's JS interceptor logs to the
-     webview's `console` protocol. Extending to args requires a new
-     IPC op that captures each arg's serialization; left as a gap
-     under §B if the scope is too large for one commit.
+     `type: 'javascript'` already logs as page error. Same upgrade.
+   - **WebKit** (`backend/webkit/mod.rs`): host interceptor may only
+     surface `(level, text)` for JS errors — if stack traces aren't
+     available through IPC, document Section B gap.
 
-3. **Event flow**:
-   - `PageEvent::Console(ConsoleMsg)` → `PageEvent::Console(ConsoleMessage)`.
-   - Update NAPI `Either7` path — add a `ConsoleMessage` class OR
-     route through the existing JSON snapshot path if a live class
-     isn't needed (Playwright returns a live class).
+3. **NAPI / QuickJS**:
+   - `#[napi] class WebError` with `page()` / `error()`.
+   - Extend `waitForEvent` union `Either8 -> Either9` adding
+     `WebError`.
+   - `context.on('weberror', cb)` wire-up on `BrowserContextJs`.
 
-4. **NAPI / QuickJS**:
-   - `#[napi] class ConsoleMessage` with `args()` / `location()` /
-     `text()` / `type()`. Union the `Either7` into `Either8` adding
-     `ConsoleMessage`.
-   - QuickJS `ConsoleMessageJs` same surface.
-
-5. **Rule-9 integration tests**:
-   - Page-side `console.log('hello', {foo:1}, document.body)`.
-   - Observer: `msg.text() === "hello [object Object] [object HTMLBodyElement]"`
-     (Playwright's stringification), `msg.type() === 'log'`,
-     `msg.args().length === 3`, `msg.args()[2].asElement()` returns
-     a `<body>` handle.
-   - Per-backend on all four. WebKit may be partial — document
-     honestly under §B if so.
+4. **Rule-9 integration tests**:
+   - Page-side `throw new Error('boom')` from inline `<script>`.
+   - Observe via `context.waitForEvent('weberror')`:
+     `err.error().message === 'boom'`, `err.error().name === 'Error'`,
+     `err.page()` returns the page where the error originated.
+   - Per-backend on all four. Document any backend gap honestly.
 
 ## Ground rules (from CLAUDE.md)
 
-- Rule 1/2: core is source of truth; three layers update in the same commit.
-- Rule 3: no wire shapes leak — args are `JSHandle`, not `RemoteObject`.
-- Rule 4: every backend real — typed `Unsupported` only where the
-  protocol genuinely can't.
-- Rule 6: read `/tmp/playwright/...` before each signature.
-- Rule 7: rebuild NAPI + diff `.d.ts` against Playwright's `test.d.ts`.
+- Rule 1/2/3: core is source of truth; three layers update in the
+  same commit; no wire shapes leak.
+- Rule 4: every backend real.
+- Rule 6: read `/tmp/playwright/...` first.
+- Rule 7: rebuild NAPI + diff `.d.ts` against Playwright's types.
 - Rule 9: per-backend integration test before flipping `[x]`.
 - Rule 10: no escape hatches.
 
@@ -104,48 +84,41 @@ class ConsoleMessage {
 ```
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test -p ferridriver --lib                                 # 125 core
-cargo test -p ferridriver-script --lib                          # 22 script
+cargo test -p ferridriver-script --lib                          # 13 script
 cargo test -p ferridriver-mcp --lib                             # 38 MCP
 cd crates/ferridriver-node && bun run build:debug
-cd <repo root> && bun test                                      # 825
+cd <repo root> && bun test                                      # 835
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1
-# cdp-pipe 132, cdp-raw 132, bidi 127, webkit 128
+# cdp-pipe 136, cdp-raw 136, bidi 131, webkit 132
 ```
 
 ## Commit shape
 
-Single commit: `feat(page): ConsoleMessage as first-class handle (§2.12)`.
-Update `PLAYWRIGHT_COMPAT.md` §2.12 to `[x]` and rewrite
-`HANDOVER.md` + `docs/NEXT_SESSION.md` in the same commit.
+Single commit: `feat(context): WebError as first-class handle (§2.13)`.
+Update `PLAYWRIGHT_COMPAT.md` §2.13 to `[x]` and rewrite `HANDOVER.md`
++ `docs/NEXT_SESSION.md` in the same commit.
 
-## Notes from §2.10 that generalise
+## Notes from §2.12 that generalise
 
-- **`tokio::sync::watch::Sender::send` silently discards the value
-  when `receiver_count() == 0`**. For any one-shot terminal-state
-  transition on a handle whose consumer subscribes lazily (like
-  `download.path()` on a download emitted via `page.on('download')`),
-  use `send_replace` — it always updates the internal state. This
-  was an hour-long hang in the §2.10 session before we traced it.
-  If you use `watch` for another terminal-state handle, same rule
-  applies.
-- **`PageBackref` is shared infra** (`backend/mod.rs`). Any new
-  live-handle that needs an `Arc<Page>` from a backend async task
-  can reuse it as-is.
-- **`DownloadManager` is the third clone of the
-  `DialogManager` / `FileChooserManager` pattern**. If you're
-  adding a fourth (`WebError`, `ConsoleMessage` broadcast, etc.),
-  consider whether it's worth pulling out a generic
-  `HandleManager<T>` — the code is 95% identical across the three.
-  For §2.12 specifically it's probably fine to keep inlining;
-  generalisation may belong in §2.13 / §2.14.
-- **Per-backend temp dirs**: downloads land in a per-page `Arc<TempDir>`
-  owned by each backend's `Page` struct. The `TempDir` drop cleans
-  up orphans on page close. Same pattern would work for
-  `record_har`, `record_video` paths (both in §4.x).
-- **QuickJS has no `setTimeout`** (still — unchanged from §2.11).
-  When a `run_script` test needs to observe an async DOM mutation,
-  poll from the **page context** via
-  `await page.evaluate(async (arg) => { ... await new Promise(r =>
-  setTimeout(r, 10)); ... }, arg)`. See `WAIT_FOR_TITLE_CALL` in
-  `tests/backends_support/file_chooser.rs`.
+- **`tokio::sync::watch::Sender::send` vs `send_replace`** — still
+  load-bearing. For any one-shot terminal-state transition on a
+  handle whose consumer subscribes lazily, use `send_replace`.
+- **`cdp_remote_object_to_backing` / `bidi_remote_value_to_backing`**
+  helpers are the canonical protocol-wire-value -> `JSHandleBacking`
+  shape for a future §2.13 / §2.14 that carries a `JSHandle`-typed
+  arg. Reuse verbatim.
+- **Inline `<script>` vs `page.evaluate` for stack-trace attribution**
+  — CDP's `Runtime.consoleAPICalled.stackTrace` has empty frames for
+  devtools-evaluate calls (no user-script source URL). Rule-9 tests
+  that need a real stack trace must trigger via an inline `<script>`
+  block in a navigated HTML document.
+- **WebKit `(level, text)` IPC limitation** — host interceptor's
+  current payload is the ceiling for console + WebError richness.
+  Future phase: add a new `Op::ConsoleEvent` that carries
+  args + stack-trace frames + `isError: bool` so console and
+  WebError both benefit from the same IPC extension.
+- **Section B gap paragraph style** — document backend limits in the
+  field's doc comment (rustdoc visible) AND in PLAYWRIGHT_COMPAT.md
+  §B, with the concrete symptom observable users see (timeout, empty
+  vec, default value). Don't leave gaps implicit.

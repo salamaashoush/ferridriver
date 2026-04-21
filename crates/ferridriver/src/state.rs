@@ -19,13 +19,14 @@ pub const DEFAULT_VIEWPORT_WIDTH: i64 = 1280;
 pub const DEFAULT_VIEWPORT_HEIGHT: i64 = 720;
 
 // Re-export log types from context (they live there now).
-pub use crate::context::{ConsoleMsg, DialogEvent};
+pub use crate::console_message::ConsoleMessage;
+pub use crate::context::DialogEvent;
 pub use crate::network::Request;
 
 /// Arc handles to a context's log collections, usable without holding the `BrowserState` lock.
 #[derive(Clone)]
 pub struct ContextLogHandles {
-  pub console: std::sync::Arc<tokio::sync::RwLock<Vec<ConsoleMsg>>>,
+  pub console: std::sync::Arc<tokio::sync::RwLock<Vec<ConsoleMessage>>>,
   pub network: std::sync::Arc<tokio::sync::RwLock<Vec<Request>>>,
   pub dialog: std::sync::Arc<tokio::sync::RwLock<Vec<DialogEvent>>>,
 }
@@ -751,7 +752,7 @@ impl BrowserState {
     context: &str,
     level: Option<&str>,
     limit: usize,
-  ) -> Result<Vec<ConsoleMsg>, String> {
+  ) -> Result<Vec<ConsoleMessage>, String> {
     let key = SessionKey::parse(context);
     let inst = self.instance(&key.instance)?;
     let ctx = inst.context(&key.context)?;

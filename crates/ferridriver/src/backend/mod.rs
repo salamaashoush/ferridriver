@@ -22,9 +22,9 @@ pub(crate) fn empty_params() -> serde_json::Value {
   serde_json::Value::Object(serde_json::Map::new())
 }
 
+use crate::console_message::ConsoleMessage;
 use crate::events::EventEmitter;
 use crate::network::Request as NetworkRequest;
-use crate::state::ConsoleMsg;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -1123,7 +1123,7 @@ impl AnyPage {
 
   pub fn attach_listeners(
     &self,
-    console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
+    console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
     network_log: Arc<RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
   ) {

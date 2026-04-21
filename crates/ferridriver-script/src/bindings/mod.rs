@@ -20,6 +20,7 @@
 
 pub mod api_request;
 pub mod artifacts;
+pub mod console_message;
 pub mod context;
 pub mod convert;
 pub mod dialog;
@@ -36,6 +37,7 @@ pub mod page;
 
 pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
+pub use console_message::ConsoleMessageJs;
 pub use context::BrowserContextJs;
 pub use dialog::DialogJs;
 pub use download::DownloadJs;
@@ -75,6 +77,7 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<DialogJs>::define(&g)?;
   Class::<FileChooserJs>::define(&g)?;
   Class::<DownloadJs>::define(&g)?;
+  Class::<ConsoleMessageJs>::define(&g)?;
   Ok(())
 }
 

@@ -2326,6 +2326,12 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::download::test_download_cancel_surfaces_failure);
   run!(backends_support::download::test_download_cancel_bidi_unsupported);
 
+  // §2.12 ConsoleMessage as first-class event handle.
+  run!(backends_support::console_message::test_console_message_primitives);
+  run!(backends_support::console_message::test_console_message_warn_maps_to_warning);
+  run!(backends_support::console_message::test_console_message_error_type);
+  run!(backends_support::console_message::test_console_message_location_shape);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

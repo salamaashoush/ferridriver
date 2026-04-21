@@ -10,6 +10,7 @@
 
 pub mod action_options;
 pub mod client;
+pub mod console_message;
 pub mod dialog;
 pub mod download;
 pub mod file_chooser;

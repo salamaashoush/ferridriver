@@ -55,6 +55,7 @@ mod api_request;
 mod bdd_registry;
 mod browser;
 mod codegen;
+mod console_message;
 mod context;
 mod dialog;
 mod download;

@@ -18,12 +18,123 @@ use super::types::EvaluateResult;
 use crate::backend::{
   AnyElement, AxNodeData, AxProperty, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle, ScreenshotOpts,
 };
+use crate::console_message::{ConsoleMessage, ConsoleMessageLocation};
 use crate::events::{EventEmitter, PageEvent};
 use crate::network::{
   self, BodyFn, RawHeadersFn, RemoteAddr, Request as NetworkRequest, RequestInit, Response, ResponseInit,
   SecurityDetails,
 };
-use crate::state::{ConsoleMsg, DialogEvent};
+use crate::state::DialogEvent;
+
+/// Convert a raw `BiDi` `Script.RemoteValue` JSON payload into a
+/// [`crate::js_handle::JSHandleBacking`]. DOM nodes become
+/// remote-backed via their `sharedId`; other object-like types
+/// (`object`, `array`, `map`, `set`, `function`, `error`, `promise`,
+/// `symbol`) use the `handle` slot; primitives inline their value.
+/// Mirrors Playwright's `bidiPage.ts::_onLogEntryAdded` which calls
+/// `createHandle(context, arg)` — the `BiDi` half of the same handle
+/// construction.
+fn bidi_remote_value_to_backing(arg: &serde_json::Value) -> crate::js_handle::JSHandleBacking {
+  let ty = arg.get("type").and_then(|v| v.as_str()).unwrap_or("");
+  if ty == "node" {
+    if let Some(shared_id) = arg.get("sharedId").and_then(|v| v.as_str()) {
+      let handle = arg
+        .get("handle")
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string);
+      return crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Bidi {
+        shared_id: shared_id.to_string(),
+        handle,
+      });
+    }
+  }
+  if matches!(
+    ty,
+    "object" | "array" | "map" | "set" | "function" | "error" | "promise" | "symbol" | "window" | "weakmap" | "weakset"
+  ) {
+    if let Some(h) = arg.get("handle").and_then(|v| v.as_str()) {
+      return crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Bidi {
+        shared_id: String::new(),
+        handle: Some(h.to_string()),
+      });
+    }
+  }
+  // Primitive path — fall back to an inline value-backed handle.
+  let serialized = match ty {
+    "undefined" => crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined),
+    "null" => crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Null),
+    "bigint" => {
+      let s = arg
+        .get("value")
+        .and_then(|v| v.as_str())
+        .map_or_else(String::new, std::string::ToString::to_string);
+      crate::protocol::SerializedValue::BigInt(s)
+    },
+    _ => {
+      let value = arg.get("value").cloned().unwrap_or(serde_json::Value::Null);
+      let mut ctx = crate::protocol::SerializationContext::default();
+      crate::protocol::SerializedValue::from_json(&value, &mut ctx)
+    },
+  };
+  crate::js_handle::JSHandleBacking::Value(serialized)
+}
+
+/// Extract a [`ConsoleMessageLocation`] from a `BiDi` log entry's
+/// `stackTrace` (first frame) or its `source.realm` (fallback).
+/// `BiDi` doesn't always emit a `stackTrace`; when missing Playwright
+/// falls back to `{ '', 1, 1 }` (`bidiPage.ts:295`).
+fn bidi_stack_trace_to_location(
+  stack: Option<&serde_json::Value>,
+  _source: Option<&serde_json::Value>,
+) -> ConsoleMessageLocation {
+  let Some(frame) = stack
+    .and_then(|s| s.get("callFrames"))
+    .and_then(|v| v.as_array())
+    .and_then(|frames| frames.first())
+  else {
+    return ConsoleMessageLocation {
+      url: String::new(),
+      line_number: 1,
+      column_number: 1,
+    };
+  };
+  ConsoleMessageLocation {
+    url: frame.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+    line_number: frame
+      .get("lineNumber")
+      .and_then(serde_json::Value::as_u64)
+      .map_or(1, u64_to_u32_saturating),
+    column_number: frame
+      .get("columnNumber")
+      .and_then(serde_json::Value::as_u64)
+      .map_or(1, u64_to_u32_saturating),
+  }
+}
+
+fn u64_to_u32_saturating(n: u64) -> u32 {
+  u32::try_from(n).unwrap_or(u32::MAX)
+}
+
+fn f64_to_u64_saturating(n: f64) -> u64 {
+  // Saturating cast — clippy's `cast_possible_truncation`/`cast_sign_loss`
+  // fire on a raw `as u64` cast. Manual range check + saturation is the
+  // documented workaround. `u64::MAX as f64` is over `2^63` so a
+  // `>=` comparison is safe even though f64 can't represent u64::MAX
+  // exactly (the comparison uses the closest f64 which is `2^64`).
+  #[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+  )]
+  let clamped = if !n.is_finite() || n < 0.0 {
+    0_u64
+  } else if n >= u64::MAX as f64 {
+    u64::MAX
+  } else {
+    n as u64
+  };
+  clamped
+}
 
 /// Page handle for the `BiDi` backend. Cheaply cloneable (Arc-based).
 #[derive(Clone)]
@@ -1312,7 +1423,7 @@ impl BidiPage {
   #[allow(clippy::too_many_lines)]
   pub fn attach_listeners(
     &self,
-    console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
+    console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
     network_log: Arc<RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<RwLock<Vec<DialogEvent>>>,
   ) {
@@ -1382,12 +1493,54 @@ impl BidiPage {
             injected_script.reset();
           },
           "log.entryAdded" => {
-            let r#type = event.params.get("level").and_then(|v| v.as_str()).unwrap_or("log");
-            let text = event.params.get("text").and_then(|v| v.as_str()).unwrap_or("");
-            let msg = ConsoleMsg {
-              r#type: r#type.to_string(),
-              text: text.to_string(),
+            // Mirrors Playwright's `bidiPage.ts::_onLogEntryAdded`. We
+            // only surface entries with `type: 'console'` — javascript
+            // errors are routed through `pageerror` (future §2.13
+            // WebError work; for now we silently drop them to match
+            // the previous behaviour, which is also what Playwright
+            // does for a page without a `pageerror` listener).
+            let entry_type = event.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            if entry_type != "console" {
+              continue;
+            }
+            let Some(page) = page_backref.upgrade() else {
+              continue;
             };
+            // BiDi reports `method` for the console variant (e.g.
+            // 'log', 'warn', 'error'). Playwright remaps `'warn'` to
+            // `'warning'` for parity with CDP's `Runtime.consoleAPICalled.type`.
+            let method = event.params.get("method").and_then(|v| v.as_str()).unwrap_or("log");
+            let type_str = if method == "warn" { "warning" } else { method };
+            // `text` is explicit only for `timeLog` / `timeEnd`. For
+            // other variants Playwright leaves it undefined so the
+            // lazy `text()` falls back to args preview.
+            let text = if matches!(method, "timeLog" | "timeEnd") {
+              event
+                .params
+                .get("text")
+                .and_then(|v| v.as_str())
+                .map(std::string::ToString::to_string)
+            } else {
+              None
+            };
+            let args_json = event
+              .params
+              .get("args")
+              .and_then(|v| v.as_array())
+              .cloned()
+              .unwrap_or_default();
+            let mut args: Vec<crate::js_handle::JSHandle> = Vec::with_capacity(args_json.len());
+            for arg in &args_json {
+              let backing = bidi_remote_value_to_backing(arg);
+              args.push(crate::js_handle::JSHandle::from_backing(page.clone(), backing));
+            }
+            let location = bidi_stack_trace_to_location(event.params.get("stackTrace"), event.params.get("source"));
+            let timestamp = event
+              .params
+              .get("timestamp")
+              .and_then(serde_json::Value::as_f64)
+              .map_or(0, f64_to_u64_saturating);
+            let msg = ConsoleMessage::new(&page, type_str, text, args, location, timestamp);
             console_log.write().await.push(msg.clone());
             emitter.emit(PageEvent::Console(msg));
           },
