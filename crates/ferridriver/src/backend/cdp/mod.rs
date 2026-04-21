@@ -302,7 +302,6 @@ impl<T: CdpWrap> CdpBrowser<T> {
         browser_context_id: None,
         events: crate::events::EventEmitter::new(),
         frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
-        dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
         exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
         binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -314,6 +313,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         lifecycle_notify: lc_notify.clone(),
         injected_script: Arc::new(InjectedScriptManager::new()),
         nav_request_slot: crate::network::NavRequestSlot::new(),
+        dialog_manager: crate::dialog::DialogManager::new(),
       }));
     }
     Ok(pages)
@@ -422,7 +422,6 @@ impl<T: CdpWrap> CdpBrowser<T> {
       browser_context_id: browser_context_id.map(Arc::from),
       events: crate::events::EventEmitter::new(),
       frame_contexts: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
-      dialog_handler: Arc::new(tokio::sync::RwLock::new(crate::events::default_dialog_handler())),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(FxHashMap::default())),
       binding_initialized: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       closed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
@@ -434,6 +433,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       lifecycle_notify: lc_notify.clone(),
       injected_script: Arc::new(InjectedScriptManager::new()),
       nav_request_slot: crate::network::NavRequestSlot::new(),
+      dialog_manager: crate::dialog::DialogManager::new(),
     };
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
@@ -693,8 +693,6 @@ pub struct CdpPage<T: CdpTransport> {
   pub events: crate::events::EventEmitter,
   /// Frame ID -> execution context ID mapping for frame-scoped evaluation.
   frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
-  /// Configurable dialog handler. Called when a JS dialog appears.
-  pub dialog_handler: Arc<tokio::sync::RwLock<crate::events::DialogHandler>>,
   /// Registered exposed function callbacks.
   pub exposed_fns: Arc<tokio::sync::RwLock<FxHashMap<String, crate::events::ExposedFn>>>,
   /// Whether the binding channel has been initialized.
@@ -722,6 +720,13 @@ pub struct CdpPage<T: CdpTransport> {
   /// request) resolve as "no response" — mirrors Playwright's
   /// `Response | null` contract on `page.goto`.
   nav_request_slot: crate::network::NavRequestSlot,
+  /// Per-page dialog handler registry. Backend dialog listener
+  /// constructs a [`crate::dialog::Dialog`] on `Page.javascriptDialogOpening`
+  /// and synchronously calls [`crate::dialog::DialogManager::did_open`].
+  /// If no handler claims the dialog, the manager auto-closes (accept
+  /// for `beforeunload`, dismiss otherwise) — mirrors
+  /// `/tmp/playwright/packages/playwright-core/src/server/dialog.ts::DialogManager`.
+  pub dialog_manager: crate::dialog::DialogManager,
 }
 
 pub struct InjectedScriptManager {
@@ -778,7 +783,6 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       browser_context_id: self.browser_context_id.clone(),
       events: self.events.clone(),
       frame_contexts: self.frame_contexts.clone(),
-      dialog_handler: self.dialog_handler.clone(),
       exposed_fns: self.exposed_fns.clone(),
       binding_initialized: self.binding_initialized.clone(),
       closed: self.closed.clone(),
@@ -790,6 +794,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       lifecycle_notify: self.lifecycle_notify.clone(),
       injected_script: self.injected_script.clone(),
       nav_request_slot: self.nav_request_slot.clone(),
+      dialog_manager: self.dialog_manager.clone(),
     }
   }
 }
@@ -2586,12 +2591,19 @@ impl<T: CdpWrap> CdpPage<T> {
       emitter2,
       self.nav_request_slot.clone(),
     );
+    // Register the emitter-bridge: `page.events().on("dialog", cb)`
+    // keeps working because the bridge handler — installed here for
+    // the page's lifetime — synchronously claims dialogs on behalf
+    // of broadcast listeners. Handler id is discarded: we never
+    // unregister until the page is dropped.
+    let _ = self.dialog_manager.register_emitter_bridge(self.events.clone());
+
     Self::spawn_dialog_listener(
       self.transport.clone(),
       self.session_id.clone(),
-      self.dialog_handler.clone(),
       dialog_log,
       emitter3,
+      self.dialog_manager.clone(),
     );
     Self::spawn_frame_context_tracker(
       self.transport.clone(),
@@ -2745,9 +2757,9 @@ impl<T: CdpWrap> CdpPage<T> {
   fn spawn_dialog_listener(
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
-    handler: Arc<tokio::sync::RwLock<crate::events::DialogHandler>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
-    emitter: crate::events::EventEmitter,
+    _emitter: crate::events::EventEmitter,
+    dialog_manager: crate::dialog::DialogManager,
   ) {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_events();
@@ -2758,49 +2770,73 @@ impl<T: CdpWrap> CdpPage<T> {
             continue;
           }
         }
-        if event.get("method").and_then(|m| m.as_str()) == Some("Page.javascriptDialogOpening") {
-          if let Some(params) = event.get("params") {
-            let dialog_type = params.get("type").and_then(|v| v.as_str()).unwrap_or("alert");
-            let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
-            let default_value = params
-              .get("defaultPrompt")
-              .and_then(|v| v.as_str())
-              .unwrap_or("")
-              .to_string();
-
-            let pending = crate::events::PendingDialog {
-              dialog_type: dialog_type.to_string(),
-              message: message.clone(),
-              default_value: default_value.clone(),
-            };
-
-            let action = handler.read().await(&pending);
-            let (accept, prompt_text) = match &action {
-              crate::events::DialogAction::Accept(text) => (true, text.clone()),
-              crate::events::DialogAction::Dismiss => (false, None),
-            };
-
-            let mut cmd_params = serde_json::json!({"accept": accept});
-            if let Some(text) = &prompt_text {
-              cmd_params["promptText"] = serde_json::Value::String(text.clone());
-            }
-            let _ = transport
-              .send_command(session_id.as_deref(), "Page.handleJavaScriptDialog", cmd_params)
-              .await;
-
-            let action_str = match &action {
-              crate::events::DialogAction::Accept(_) => "accepted",
-              crate::events::DialogAction::Dismiss => "dismissed",
-            };
-            dialog_log.write().await.push(crate::state::DialogEvent {
-              dialog_type: dialog_type.to_string(),
-              message: message.clone(),
-              action: action_str.to_string(),
-            });
-
-            emitter.emit(crate::events::PageEvent::Dialog(pending));
-          }
+        if event.get("method").and_then(|m| m.as_str()) != Some("Page.javascriptDialogOpening") {
+          continue;
         }
+        let Some(params) = event.get("params") else {
+          continue;
+        };
+        let dialog_type_str = params
+          .get("type")
+          .and_then(|v| v.as_str())
+          .unwrap_or("alert")
+          .to_string();
+        let message = params.get("message").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let default_value = params
+          .get("defaultPrompt")
+          .and_then(|v| v.as_str())
+          .unwrap_or("")
+          .to_string();
+        let dialog_type = crate::dialog::DialogType::parse(&dialog_type_str);
+
+        // Build the responder: a closure that translates the user's
+        // accept/dismiss into CDP `Page.handleJavaScriptDialog`. The
+        // closure captures an `Arc` of the transport + session id so
+        // it stays valid across the dialog's lifetime.
+        let responder_transport = Arc::clone(&transport);
+        let responder_session = session_id.clone();
+        let responder: crate::dialog::DialogResponder = Arc::new(move |response| {
+          let transport = Arc::clone(&responder_transport);
+          let session = responder_session.clone();
+          Box::pin(async move {
+            let mut cmd_params = serde_json::json!({
+              "accept": matches!(response, crate::dialog::DialogResponse::Accept { .. }),
+            });
+            if let crate::dialog::DialogResponse::Accept {
+              prompt_text: Some(text),
+            } = response
+            {
+              cmd_params["promptText"] = serde_json::Value::String(text);
+            }
+            transport
+              .send_command(session.as_deref(), "Page.handleJavaScriptDialog", cmd_params)
+              .await
+              .map(|_| ())
+          })
+        });
+
+        let dialog = crate::dialog::Dialog::new_with_manager(
+          dialog_type,
+          message.clone(),
+          default_value.clone(),
+          responder,
+          Some(dialog_manager.clone()),
+        );
+
+        // Synchronous dialog dispatch — mirrors Playwright's
+        // `DialogManager.dialogDidOpen`. Each registered handler is
+        // called with the live `Dialog` and returns `true` to claim
+        // ownership. If no handler claims, the manager auto-closes
+        // (accept for `beforeunload`, dismiss otherwise). There is no
+        // grace window and no race: `did_open` calls handlers
+        // synchronously in the same stack as the CDP event arrival.
+        dialog_manager.did_open(dialog);
+
+        dialog_log.write().await.push(crate::state::DialogEvent {
+          dialog_type: dialog_type_str,
+          message,
+          action: "dispatched".to_string(),
+        });
       }
     });
   }

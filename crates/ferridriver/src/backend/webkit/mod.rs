@@ -123,6 +123,7 @@ impl WebKitBrowser {
               routes: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
               closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
               injected_script: std::sync::Arc::new(InjectedScriptManager::new()),
+              dialog_manager: crate::dialog::DialogManager::new(),
             })
           })
           .collect(),
@@ -149,6 +150,7 @@ impl WebKitBrowser {
           routes: std::sync::Arc::new(std::sync::RwLock::new(Vec::new())),
           closed: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
           injected_script: std::sync::Arc::new(InjectedScriptManager::new()),
+          dialog_manager: crate::dialog::DialogManager::new(),
         };
         Ok(AnyPage::WebKit(page))
       },
@@ -191,6 +193,15 @@ pub struct WebKitPage {
   closed: std::sync::Arc<std::sync::atomic::AtomicBool>,
   /// Manager for lazy engine injection.
   injected_script: std::sync::Arc<InjectedScriptManager>,
+  /// Per-page dialog handler registry. See
+  /// `crates/ferridriver/src/dialog.rs::DialogManager`. On `WebKit` the
+  /// host's `WKUIDelegate` auto-decides the accept/dismiss in the
+  /// Obj-C subprocess before the event reaches Rust (the IPC payload
+  /// already carries `action`), so the handler's `accept`/`dismiss`
+  /// return `FerriError::Unsupported` — the observation surface
+  /// (`type`/`message`) still flows through the manager so listeners
+  /// can record what happened.
+  pub dialog_manager: crate::dialog::DialogManager,
 }
 
 pub struct InjectedScriptManager {
@@ -1701,10 +1712,15 @@ impl WebKitPage {
     net_log: Arc<RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
   ) {
+    // Register the emitter-bridge so `page.events().on("dialog", cb)`
+    // continues to deliver live `Dialog` handles via the broadcast.
+    let _ = self.dialog_manager.register_emitter_bridge(self.events.clone());
+
     let client = self.client.clone();
     let emitter = self.events.clone();
     let notify = client.event_notify.clone();
     let injected_script = self.injected_script.clone();
+    let dialog_manager = self.dialog_manager.clone();
     tokio::spawn(async move {
       loop {
         // Wait for the IPC reader thread to signal that events arrived.
@@ -1734,6 +1750,18 @@ impl WebKitPage {
         }
 
         // Drain dialog events
+        //
+        // Stock `WKWebView` makes its accept/dismiss decision inside
+        // the host subprocess's `WKUIDelegate` before the event
+        // reaches Rust — the IPC payload already carries the
+        // `action`. We still dispatch the event through the same
+        // `DialogManager` as the CDP/BiDi backends so listeners
+        // observe the dialog (`type` / `message`); the
+        // [`crate::dialog::Dialog`]'s responder rejects
+        // `accept` / `dismiss` with a typed error naming the
+        // limitation, because the host has already closed the
+        // dialog. Rule-4 honesty: the observation surface works,
+        // the manipulation surface reports why it can't.
         {
           let evts: Vec<(String, String, String)> = {
             let Ok(mut log) = client.dialog_log.lock() else {
@@ -1748,11 +1776,23 @@ impl WebKitPage {
           if !evts.is_empty() {
             let mut dest = dialog_log.write().await;
             for (dtype, message, action) in evts {
-              emitter.emit(crate::events::PageEvent::Dialog(crate::events::PendingDialog {
-                dialog_type: dtype.clone(),
-                message: message.clone(),
-                default_value: String::new(),
-              }));
+              let dialog_type = crate::dialog::DialogType::parse(&dtype);
+              let responder: crate::dialog::DialogResponder = Arc::new(move |_response| {
+                Box::pin(async move {
+                  Err(
+                    "Dialog.accept/dismiss is not supported on the WebKit backend: stock WKWebView decides the response in the host's WKUIDelegate before the event reaches Rust"
+                      .to_string(),
+                  )
+                })
+              });
+              let dialog = crate::dialog::Dialog::new_with_manager(
+                dialog_type,
+                message.clone(),
+                String::new(),
+                responder,
+                Some(dialog_manager.clone()),
+              );
+              dialog_manager.did_open(dialog);
               dest.push(crate::state::DialogEvent {
                 dialog_type: dtype,
                 message,

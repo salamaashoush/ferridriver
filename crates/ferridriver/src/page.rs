@@ -2146,30 +2146,66 @@ impl Page {
   }
 
   // ── Dialog handling ─────────────────────────────────────────────────────
+  //
+  // Dialogs (alert/confirm/prompt/beforeunload) are observed through
+  // two equivalent surfaces:
+  //
+  // * [`Self::events`]`.on("dialog", cb)` — broadcast listener, live
+  //   [`crate::dialog::Dialog`] handle delivered in the callback.
+  //   Backed by the per-page [`crate::dialog::DialogManager`]'s
+  //   emitter-bridge (installed once at page construction).
+  // * [`Self::wait_for_dialog`] — one-shot async wait. Mirrors
+  //   Playwright's `page.waitForEvent('dialog')` directly against
+  //   the `DialogManager`; bypasses the broadcast entirely so the
+  //   claim is synchronous with dialog open, matching Playwright's
+  //   `addDialogHandler` semantics verbatim.
+  //
+  // If no handler claims a dialog at open time, the `DialogManager`
+  // auto-closes it — accept for `beforeunload`, dismiss otherwise —
+  // matching Playwright's `Dialog._close` branch.
 
-  /// Set a custom dialog handler. The handler is called for every JS dialog
-  /// (alert, confirm, prompt, beforeunload) and decides the action to take.
+  /// Wait for the next dialog of any type, with a timeout. Returns
+  /// the live [`crate::dialog::Dialog`] handle; the caller must then
+  /// call `accept(...)` or `dismiss()` exactly once. Mirrors
+  /// Playwright's `page.waitForEvent('dialog', { timeout })`.
   ///
-  /// Default behavior: accept alerts/confirms, accept prompts with default value.
+  /// Registers a one-shot handler with the page's
+  /// [`crate::dialog::DialogManager`] that claims the first dialog
+  /// and delivers it here. The handler is removed automatically on
+  /// resolve or timeout.
   ///
-  /// ```ignore
-  /// use ferridriver::events::{DialogAction, PendingDialog};
-  /// use std::sync::Arc;
+  /// # Errors
   ///
-  /// // Dismiss all dialogs
-  /// page.set_dialog_handler(Arc::new(|_dialog: &PendingDialog| DialogAction::Dismiss)).await;
-  ///
-  /// // Accept prompts with custom text
-  /// page.set_dialog_handler(Arc::new(|dialog: &PendingDialog| {
-  ///     if dialog.dialog_type == "prompt" {
-  ///         DialogAction::Accept(Some("custom answer".into()))
-  ///     } else {
-  ///         DialogAction::Accept(None)
-  ///     }
-  /// })).await;
-  /// ```
-  pub async fn set_dialog_handler(&self, handler: crate::events::DialogHandler) {
-    self.inner.set_dialog_handler(handler).await;
+  /// Returns [`crate::error::FerriError::Timeout`] if no dialog opens
+  /// within `timeout_ms`. Returns [`crate::error::FerriError::TargetClosed`]
+  /// if the page closes before a dialog arrives.
+  pub async fn wait_for_dialog(&self, timeout_ms: u64) -> Result<crate::dialog::Dialog> {
+    use std::sync::Mutex;
+    let (tx, rx) = tokio::sync::oneshot::channel::<crate::dialog::Dialog>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let tx_clone = tx.clone();
+    let id = self.inner.dialog_manager().add_handler(Arc::new(move |dialog| {
+      let mut guard = match tx_clone.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+      };
+      match guard.take() {
+        Some(sender) => {
+          let _ = sender.send(dialog.clone());
+          true
+        },
+        None => false,
+      }
+    }));
+    let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
+    self.inner.dialog_manager().remove_handler(id);
+    match result {
+      Ok(Ok(dialog)) => Ok(dialog),
+      Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
+        "page closed while waiting for dialog".into(),
+      ))),
+      Err(_) => Err(crate::error::FerriError::timeout("waiting for dialog", timeout_ms)),
+    }
   }
 
   // ── Init Scripts ────────────────────────────────────────────────────────

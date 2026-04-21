@@ -36,7 +36,6 @@ pub struct BidiPage {
   closed: Arc<AtomicBool>,
   preload_scripts: Arc<RwLock<FxHashMap<String, String>>>,
   exposed_fns: Arc<RwLock<FxHashMap<String, crate::events::ExposedFn>>>,
-  pub dialog_handler: Arc<RwLock<crate::events::DialogHandler>>,
   /// Manager for lazy engine injection.
   injected_script: Arc<InjectedScriptManager>,
   /// Most recent main-document `Request` observed by the `BiDi` network
@@ -44,6 +43,9 @@ pub struct BidiPage {
   /// `navigation` set. Consumed by `goto` / `reload` / history
   /// traversals to resolve the final main-document `Response`.
   nav_request_slot: crate::network::NavRequestSlot,
+  /// Per-page dialog handler registry. See
+  /// `crates/ferridriver/src/dialog.rs::DialogManager`.
+  pub dialog_manager: crate::dialog::DialogManager,
 }
 
 pub struct InjectedScriptManager {
@@ -95,9 +97,9 @@ impl BidiPage {
       closed: Arc::new(AtomicBool::new(false)),
       preload_scripts: Arc::new(RwLock::new(FxHashMap::default())),
       exposed_fns: Arc::new(RwLock::new(FxHashMap::default())),
-      dialog_handler: Arc::new(RwLock::new(crate::events::default_dialog_handler())),
       injected_script: Arc::new(InjectedScriptManager::new()),
       nav_request_slot: crate::network::NavRequestSlot::new(),
+      dialog_manager: crate::dialog::DialogManager::new(),
     }
   }
 
@@ -1274,16 +1276,26 @@ impl BidiPage {
 
   // ── Event listeners ─────────────────────────────────────────────────────
 
+  // The BiDi listener branches on every protocol event we subscribe
+  // to (network, console, dialog, navigation) and has grown past
+  // clippy's default 100-line cap. Splitting it into per-domain
+  // sub-functions would require threading eight captured `Arc`s
+  // through each call — the inline match is clearer as-is.
+  #[allow(clippy::too_many_lines)]
   pub fn attach_listeners(
     &self,
     console_log: Arc<RwLock<Vec<ConsoleMsg>>>,
     network_log: Arc<RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<RwLock<Vec<DialogEvent>>>,
   ) {
+    // Register the emitter-bridge so `page.events().on("dialog", cb)`
+    // continues to deliver live `Dialog` handles via the broadcast.
+    let _ = self.dialog_manager.register_emitter_bridge(self.events.clone());
+
     let mut rx = self.session.transport.subscribe_events();
     let ctx = self.context_id.clone();
-    let dialog_handler = self.dialog_handler.clone();
     let session = self.session.clone();
+    let dialog_manager = self.dialog_manager.clone();
     let closed = self.closed.clone();
     let emitter = self.events.clone();
     let injected_script = self.injected_script.clone();
@@ -1332,44 +1344,69 @@ impl BidiPage {
             tracker.on_fetch_error(&event.params, &emitter).await;
           },
           "browsingContext.userPromptOpened" => {
-            let prompt_type = event.params.get("type").and_then(|v| v.as_str()).unwrap_or("alert");
-            let message = event.params.get("message").and_then(|v| v.as_str()).unwrap_or("");
-            let default_value = event.params.get("defaultValue").and_then(|v| v.as_str());
+            let prompt_type_str = event
+              .params
+              .get("type")
+              .and_then(|v| v.as_str())
+              .unwrap_or("alert")
+              .to_string();
+            let message = event
+              .params
+              .get("message")
+              .and_then(|v| v.as_str())
+              .unwrap_or("")
+              .to_string();
+            let default_value = event
+              .params
+              .get("defaultValue")
+              .and_then(|v| v.as_str())
+              .unwrap_or("")
+              .to_string();
+            let dialog_type = crate::dialog::DialogType::parse(&prompt_type_str);
 
-            // Call the dialog handler to decide action
-            let handler = dialog_handler.read().await;
-            let pending = crate::events::PendingDialog {
-              dialog_type: prompt_type.to_string(),
-              message: message.to_string(),
-              default_value: default_value.unwrap_or("").to_string(),
-            };
-            emitter.emit(PageEvent::Dialog(pending.clone()));
-            let action = handler(&pending);
+            // Build the responder: translates the user's accept/dismiss
+            // into `browsingContext.handleUserPrompt`. Captures an Arc
+            // of the session + context id.
+            let responder_session = session.clone();
+            let responder_ctx = ctx.clone();
+            let responder: crate::dialog::DialogResponder = Arc::new(move |response| {
+              let session = responder_session.clone();
+              let ctx = responder_ctx.clone();
+              Box::pin(async move {
+                let accept = matches!(response, crate::dialog::DialogResponse::Accept { .. });
+                let mut handle_params = json!({
+                  "context": &*ctx,
+                  "accept": accept,
+                });
+                if let crate::dialog::DialogResponse::Accept { prompt_text: Some(t) } = response {
+                  handle_params["userText"] = json!(t);
+                }
+                session
+                  .transport
+                  .send_command("browsingContext.handleUserPrompt", handle_params)
+                  .await
+                  .map(|_| ())
+              })
+            });
 
-            let (accept, text) = match action {
-              crate::events::DialogAction::Accept(text) => (true, text),
-              crate::events::DialogAction::Dismiss => (false, None),
-            };
+            let dialog = crate::dialog::Dialog::new_with_manager(
+              dialog_type,
+              message.clone(),
+              default_value,
+              responder,
+              Some(dialog_manager.clone()),
+            );
 
-            let action_str = if accept { "accept" } else { "dismiss" };
+            // Synchronous dialog dispatch — mirrors Playwright's
+            // `DialogManager.dialogDidOpen`. See the CDP equivalent
+            // in `backend/cdp/mod.rs` for the full rationale.
+            dialog_manager.did_open(dialog);
+
             dialog_log.write().await.push(DialogEvent {
-              dialog_type: prompt_type.to_string(),
-              message: message.to_string(),
-              action: action_str.to_string(),
+              dialog_type: prompt_type_str,
+              message,
+              action: "dispatched".to_string(),
             });
-
-            let mut handle_params = json!({
-              "context": &*ctx,
-              "accept": accept
-            });
-            if let Some(t) = text {
-              handle_params["userText"] = json!(t);
-            }
-
-            let _ = session
-              .transport
-              .send_command("browsingContext.handleUserPrompt", handle_params)
-              .await;
           },
           "browsingContext.contextDestroyed" => {
             closed.store(true, Ordering::Relaxed);

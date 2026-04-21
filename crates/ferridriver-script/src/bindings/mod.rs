@@ -22,6 +22,7 @@ pub mod api_request;
 pub mod artifacts;
 pub mod context;
 pub mod convert;
+pub mod dialog;
 pub mod element_handle;
 pub mod frame;
 pub mod js_handle;
@@ -34,6 +35,7 @@ pub mod page;
 pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
 pub use context::BrowserContextJs;
+pub use dialog::DialogJs;
 pub use element_handle::ElementHandleJs;
 pub use frame::FrameJs;
 pub use js_handle::JSHandleJs;
@@ -66,6 +68,7 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<ResponseJs>::define(&g)?;
   Class::<RouteJs>::define(&g)?;
   Class::<WebSocketJs>::define(&g)?;
+  Class::<DialogJs>::define(&g)?;
   Ok(())
 }
 

@@ -24,6 +24,7 @@
 // ── Public API (Playwright-compatible) ──
 pub mod browser;
 pub mod context;
+pub mod dialog;
 pub mod element_handle;
 pub mod error;
 pub mod events;

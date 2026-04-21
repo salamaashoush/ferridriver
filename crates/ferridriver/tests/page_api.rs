@@ -589,7 +589,7 @@ async fn add_init_script_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn dialog_handling_tests() {
-  use ferridriver::events::{DialogAction, PendingDialog};
+  use ferridriver::events::PageEvent;
   use std::sync::Arc;
 
   let browser = Browser::launch(LaunchOptions {
@@ -600,7 +600,10 @@ async fn dialog_handling_tests() {
   .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
-  // Default behavior: auto-accept alerts
+  // Default behavior with no listener: alert/confirm/prompt all
+  // auto-dismiss per Playwright's `DialogManager._close` branch when
+  // `hasHandlers === false`. Prompts return null because the backend
+  // dismisses them.
   page
     .goto(
       &data_url("<script>alert('hello'); document.title = 'after_alert'</script>"),
@@ -609,9 +612,8 @@ async fn dialog_handling_tests() {
     .await
     .unwrap();
   let title = page.title().await.unwrap();
-  assert_eq!(title, "after_alert", "alert should be auto-accepted");
+  assert_eq!(title, "after_alert", "alert should be auto-closed so script continues");
 
-  // Default behavior: auto-accept confirms
   page
     .goto(
       &data_url("<script>var r = confirm('sure?'); document.title = r ? 'yes' : 'no'</script>"),
@@ -620,9 +622,8 @@ async fn dialog_handling_tests() {
     .await
     .unwrap();
   let title = page.title().await.unwrap();
-  assert_eq!(title, "yes", "confirm should be auto-accepted");
+  assert_eq!(title, "no", "confirm should be auto-dismissed when no listener");
 
-  // Default behavior: accept prompts with default value
   page
     .goto(
       &data_url("<script>var r = prompt('name?', 'default'); document.title = r || 'null'</script>"),
@@ -631,12 +632,19 @@ async fn dialog_handling_tests() {
     .await
     .unwrap();
   let title = page.title().await.unwrap();
-  assert_eq!(title, "default", "prompt should be accepted with default value");
+  assert_eq!(title, "null", "prompt should be auto-dismissed when no listener");
 
-  // Custom handler: dismiss all
-  page
-    .set_dialog_handler(Arc::new(|_: &PendingDialog| DialogAction::Dismiss))
-    .await;
+  // Listener: accept every dialog.
+  page.events().on(
+    "dialog",
+    Arc::new(|event: PageEvent| {
+      if let PageEvent::Dialog(dialog) = event {
+        tokio::spawn(async move {
+          let _ = dialog.accept(None).await;
+        });
+      }
+    }),
+  );
   page
     .goto(
       &data_url("<script>var r = confirm('sure?'); document.title = r ? 'yes' : 'no'</script>"),
@@ -645,18 +653,24 @@ async fn dialog_handling_tests() {
     .await
     .unwrap();
   let title = page.title().await.unwrap();
-  assert_eq!(title, "no", "confirm should be dismissed by custom handler");
+  assert_eq!(title, "yes", "confirm should be accepted by listener");
 
-  // Custom handler: accept prompt with custom text
-  page
-    .set_dialog_handler(Arc::new(|dialog: &PendingDialog| {
-      if dialog.dialog_type == "prompt" {
-        DialogAction::Accept(Some("custom_answer".into()))
-      } else {
-        DialogAction::Accept(None)
+  // Listener that replies with prompt text.
+  page.events().remove_all_listeners();
+  page.events().on(
+    "dialog",
+    Arc::new(|event: PageEvent| {
+      if let PageEvent::Dialog(dialog) = event {
+        tokio::spawn(async move {
+          if dialog.dialog_type() == ferridriver::dialog::DialogType::Prompt {
+            let _ = dialog.accept(Some("custom_answer".into())).await;
+          } else {
+            let _ = dialog.accept(None).await;
+          }
+        });
       }
-    }))
-    .await;
+    }),
+  );
   page
     .goto(
       &data_url("<script>var r = prompt('name?'); document.title = r || 'null'</script>"),
@@ -665,7 +679,7 @@ async fn dialog_handling_tests() {
     .await
     .unwrap();
   let title = page.title().await.unwrap();
-  assert_eq!(title, "custom_answer", "prompt should get custom answer from handler");
+  assert_eq!(title, "custom_answer", "prompt should get custom answer from listener");
 
   browser.close(None).await.unwrap();
 }
