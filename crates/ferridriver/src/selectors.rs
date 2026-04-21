@@ -56,6 +56,27 @@ pub enum Engine {
   /// Playwright-compatible `internal:or` engine. Union of two locators;
   /// matches elements resolved by either selector.
   InternalOr,
+  /// Playwright-native `internal:text` engine. Accepts the Playwright body
+  /// format (`"quoted"i` / `"quoted"s` / `/regex/flags`). Used by
+  /// `get_by_text` when the input is a regex or needs to round-trip
+  /// `RegExp` semantics through the injected engine.
+  InternalText,
+  /// Playwright-native `internal:label` engine. Same body format as
+  /// `internal:text`.
+  InternalLabel,
+  /// Playwright-native `internal:attr=[name=value]` engine. Used by
+  /// `get_by_alt_text`, `get_by_title`, `get_by_placeholder` — the body
+  /// is `[name=<escaped>]` where `<escaped>` is Playwright's attribute
+  /// escape (quoted string with `i`/`s` suffix or `/regex/flags`).
+  InternalAttr,
+  /// Playwright-native `internal:testid` engine. Body is
+  /// `[data-testid=<escaped>]` with attribute-selector escape
+  /// (test-id matches are always exact per Playwright).
+  InternalTestId,
+  /// Playwright-native `internal:role` engine. Body is `<role>[<props>...]`
+  /// with `[name=<escaped>]` using attribute-selector escape when a
+  /// name filter is supplied.
+  InternalRole,
 }
 
 /// Bootstrap JS script to be evaluated on new document.
@@ -127,6 +148,11 @@ pub fn is_rich_selector(s: &str) -> bool {
     "internal:has-not-text=",
     "internal:and=",
     "internal:or=",
+    "internal:text=",
+    "internal:label=",
+    "internal:attr=",
+    "internal:testid=",
+    "internal:role=",
   ];
   let trimmed = s.trim();
   // Has explicit engine prefix
@@ -261,6 +287,11 @@ fn parse_part(s: &str) -> SelectorPart {
     ("internal:has-not-text=", Engine::HasNotText),
     ("internal:and=", Engine::InternalAnd),
     ("internal:or=", Engine::InternalOr),
+    ("internal:text=", Engine::InternalText),
+    ("internal:label=", Engine::InternalLabel),
+    ("internal:attr=", Engine::InternalAttr),
+    ("internal:testid=", Engine::InternalTestId),
+    ("internal:role=", Engine::InternalRole),
   ];
 
   for (prefix, engine) in &engines {
@@ -339,6 +370,11 @@ fn engine_str(engine: &Engine) -> &'static str {
     Engine::HasNotText => "has-not-text",
     Engine::InternalAnd => "internal:and",
     Engine::InternalOr => "internal:or",
+    Engine::InternalText => "internal:text",
+    Engine::InternalLabel => "internal:label",
+    Engine::InternalAttr => "internal:attr",
+    Engine::InternalTestId => "internal:testid",
+    Engine::InternalRole => "internal:role",
   }
 }
 

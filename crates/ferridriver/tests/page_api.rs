@@ -109,7 +109,7 @@ async fn page_api_tests() {
     .await
     .unwrap();
   let count = page
-    .get_by_text("Hello", &TextOptions::default())
+    .get_by_text(&"Hello".into(), &TextOptions::default())
     .count()
     .await
     .unwrap();
@@ -124,7 +124,7 @@ async fn page_api_tests() {
     .await
     .unwrap();
   page
-    .get_by_label("Email", &TextOptions::default())
+    .get_by_label(&"Email".into(), &TextOptions::default())
     .fill("a@b.com", None)
     .await
     .unwrap();
@@ -136,7 +136,7 @@ async fn page_api_tests() {
     .goto(&data_url("<div data-testid='card'>Content</div>"), None)
     .await
     .unwrap();
-  let t = page.get_by_test_id("card").text_content().await.unwrap();
+  let t = page.get_by_test_id(&"card".into()).text_content().await.unwrap();
   assert!(t.unwrap_or_default().contains("Content"), "get_by_test_id");
 
   // ── Locator chaining ──

@@ -363,32 +363,32 @@ impl Page {
   }
 
   #[must_use]
-  pub fn get_by_text(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
+  pub fn get_by_text(self: &Arc<Self>, text: &crate::options::StringOrRegex, opts: &TextOptions) -> Locator {
     self.main_frame().get_by_text(text, opts)
   }
 
   #[must_use]
-  pub fn get_by_label(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
+  pub fn get_by_label(self: &Arc<Self>, text: &crate::options::StringOrRegex, opts: &TextOptions) -> Locator {
     self.main_frame().get_by_label(text, opts)
   }
 
   #[must_use]
-  pub fn get_by_placeholder(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
+  pub fn get_by_placeholder(self: &Arc<Self>, text: &crate::options::StringOrRegex, opts: &TextOptions) -> Locator {
     self.main_frame().get_by_placeholder(text, opts)
   }
 
   #[must_use]
-  pub fn get_by_alt_text(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
+  pub fn get_by_alt_text(self: &Arc<Self>, text: &crate::options::StringOrRegex, opts: &TextOptions) -> Locator {
     self.main_frame().get_by_alt_text(text, opts)
   }
 
   #[must_use]
-  pub fn get_by_title(self: &Arc<Self>, text: &str, opts: &TextOptions) -> Locator {
+  pub fn get_by_title(self: &Arc<Self>, text: &crate::options::StringOrRegex, opts: &TextOptions) -> Locator {
     self.main_frame().get_by_title(text, opts)
   }
 
   #[must_use]
-  pub fn get_by_test_id(self: &Arc<Self>, test_id: &str) -> Locator {
+  pub fn get_by_test_id(self: &Arc<Self>, test_id: &crate::options::StringOrRegex) -> Locator {
     self.main_frame().get_by_test_id(test_id)
   }
 

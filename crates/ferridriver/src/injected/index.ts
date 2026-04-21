@@ -70,6 +70,24 @@ function executeSelector(parts: SelectorPart[], root: Node): Element[] {
         return `internal:has-text=${escapeForTextSelector(rawBody, isExact)}`;
       case 'has-not-text':
         return `internal:has-not-text=${escapeForTextSelector(rawBody, isExact)}`;
+      // Playwright-native internal:* engines emitted by ferridriver's
+      // regex-capable getBy* builders. Body is already in Playwright's
+      // internal format (`"quoted"i`/`"quoted"s`/`/regex/flags` for
+      // text/label; `[name=<escaped>]` for attr/testid; role spec for
+      // role) — pass through verbatim so the native Playwright selector
+      // engine does the matching (including RegExp).
+      case 'internal:text':
+      case 'internal:label':
+      case 'internal:attr':
+      case 'internal:testid':
+      case 'internal:role':
+      case 'internal:has':
+      case 'internal:has-not':
+      case 'internal:has-text':
+      case 'internal:has-not-text':
+      case 'internal:and':
+      case 'internal:or':
+        return `${engine}=${body}`;
       default:
         // css, xpath, id, nth, visible - pass through
         return `${engine}=${body}`;

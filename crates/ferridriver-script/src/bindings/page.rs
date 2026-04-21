@@ -480,60 +480,84 @@ impl PageJs {
     Ok(LocatorJs::new(self.inner.locator(&selector, filter)))
   }
 
-  /// Locate elements by ARIA role.
+  /// Locate elements by ARIA role. Accepts `{ name: string | RegExp,
+  /// exact, checked, disabled, expanded, level, pressed, selected,
+  /// includeHidden }` via the options bag.
   #[qjs(rename = "getByRole")]
-  pub fn get_by_role(&self, role: String) -> LocatorJs {
-    LocatorJs::new(
-      self
-        .inner
-        .get_by_role(&role, &ferridriver::options::RoleOptions::default()),
-    )
+  pub fn get_by_role(
+    &self,
+    role: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let opts = parse_role_options(options)?;
+    Ok(LocatorJs::new(self.inner.get_by_role(&role, &opts)))
   }
 
-  /// Locate elements containing the given text.
+  /// Locate elements containing the given text. Accepts `string | RegExp`.
   #[qjs(rename = "getByText")]
-  pub fn get_by_text(&self, text: String) -> LocatorJs {
-    LocatorJs::new(
-      self
-        .inner
-        .get_by_text(&text, &ferridriver::options::TextOptions::default()),
-    )
+  pub fn get_by_text(
+    &self,
+    text: rquickjs::Value<'_>,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = string_or_regex_from_js(text)?;
+    let opts = parse_text_options(options);
+    Ok(LocatorJs::new(self.inner.get_by_text(&t, &opts)))
   }
 
   /// Locate form controls by associated label text.
   #[qjs(rename = "getByLabel")]
-  pub fn get_by_label(&self, text: String) -> LocatorJs {
-    LocatorJs::new(
-      self
-        .inner
-        .get_by_label(&text, &ferridriver::options::TextOptions::default()),
-    )
+  pub fn get_by_label(
+    &self,
+    text: rquickjs::Value<'_>,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = string_or_regex_from_js(text)?;
+    let opts = parse_text_options(options);
+    Ok(LocatorJs::new(self.inner.get_by_label(&t, &opts)))
   }
 
   /// Locate inputs by placeholder text.
   #[qjs(rename = "getByPlaceholder")]
-  pub fn get_by_placeholder(&self, text: String) -> LocatorJs {
-    LocatorJs::new(
-      self
-        .inner
-        .get_by_placeholder(&text, &ferridriver::options::TextOptions::default()),
-    )
+  pub fn get_by_placeholder(
+    &self,
+    text: rquickjs::Value<'_>,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = string_or_regex_from_js(text)?;
+    let opts = parse_text_options(options);
+    Ok(LocatorJs::new(self.inner.get_by_placeholder(&t, &opts)))
   }
 
   /// Locate images/media by alt text.
   #[qjs(rename = "getByAltText")]
-  pub fn get_by_alt_text(&self, text: String) -> LocatorJs {
-    LocatorJs::new(
-      self
-        .inner
-        .get_by_alt_text(&text, &ferridriver::options::TextOptions::default()),
-    )
+  pub fn get_by_alt_text(
+    &self,
+    text: rquickjs::Value<'_>,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = string_or_regex_from_js(text)?;
+    let opts = parse_text_options(options);
+    Ok(LocatorJs::new(self.inner.get_by_alt_text(&t, &opts)))
   }
 
-  /// Locate elements by `data-testid`.
+  /// Locate elements by `title` attribute text.
+  #[qjs(rename = "getByTitle")]
+  pub fn get_by_title(
+    &self,
+    text: rquickjs::Value<'_>,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = string_or_regex_from_js(text)?;
+    let opts = parse_text_options(options);
+    Ok(LocatorJs::new(self.inner.get_by_title(&t, &opts)))
+  }
+
+  /// Locate elements by `data-testid`. Accepts `string | RegExp`.
   #[qjs(rename = "getByTestId")]
-  pub fn get_by_test_id(&self, test_id: String) -> LocatorJs {
-    LocatorJs::new(self.inner.get_by_test_id(&test_id))
+  pub fn get_by_test_id(&self, test_id: rquickjs::Value<'_>) -> rquickjs::Result<LocatorJs> {
+    let t = string_or_regex_from_js(test_id)?;
+    Ok(LocatorJs::new(self.inner.get_by_test_id(&t)))
   }
 
   // ── Interaction ───────────────────────────────────────────────────────────
@@ -1365,4 +1389,87 @@ fn url_value_to_matcher<'js>(
     "url",
     "expected string | RegExp".to_string(),
   ))
+}
+
+/// Lower a JS `string | RegExp` value into a Rust
+/// [`ferridriver::options::StringOrRegex`] for every `getBy*` matcher
+/// and `RoleOptions.name`. Reads `source` / `flags` via the RegExp
+/// prototype getters (same technique as NAPI's `JsRegExpLike`), so a
+/// real JS `RegExp` round-trips without a wire-shape escape.
+pub(crate) fn string_or_regex_from_js(
+  value: rquickjs::Value<'_>,
+) -> rquickjs::Result<ferridriver::options::StringOrRegex> {
+  if let Some(s) = value.as_string() {
+    return Ok(ferridriver::options::StringOrRegex::String(s.to_string()?));
+  }
+  if let Some(obj) = value.as_object() {
+    let source: rquickjs::Result<String> = obj.get("source");
+    let flags: rquickjs::Result<String> = obj.get("flags");
+    if let (Ok(source), Ok(flags)) = (source, flags) {
+      return Ok(ferridriver::options::StringOrRegex::Regex { source, flags });
+    }
+  }
+  Err(rquickjs::Error::new_from_js_message(
+    "getBy*",
+    "text",
+    "expected string | RegExp".to_string(),
+  ))
+}
+
+/// Parse `{ exact?: boolean }` options for `getByText` / `getByLabel` / etc.
+pub(crate) fn parse_text_options(
+  value: rquickjs::function::Opt<rquickjs::Value<'_>>,
+) -> ferridriver::options::TextOptions {
+  let Some(v) = value.0 else {
+    return ferridriver::options::TextOptions::default();
+  };
+  if v.is_undefined() || v.is_null() {
+    return ferridriver::options::TextOptions::default();
+  }
+  let Some(obj) = v.as_object() else {
+    return ferridriver::options::TextOptions::default();
+  };
+  let exact: Option<bool> = obj.get("exact").ok();
+  ferridriver::options::TextOptions { exact }
+}
+
+/// Parse the `getByRole` options bag. `{ name?: string | RegExp,
+/// exact?, checked?, disabled?, expanded?, level?, pressed?,
+/// selected?, includeHidden? }`. Mirrors Playwright's `ByRoleOptions`.
+pub(crate) fn parse_role_options<'js>(
+  value: rquickjs::function::Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<ferridriver::options::RoleOptions> {
+  let Some(v) = value.0 else {
+    return Ok(ferridriver::options::RoleOptions::default());
+  };
+  if v.is_undefined() || v.is_null() {
+    return Ok(ferridriver::options::RoleOptions::default());
+  }
+  let Some(obj) = v.as_object() else {
+    return Ok(ferridriver::options::RoleOptions::default());
+  };
+  let name_val: Option<rquickjs::Value<'js>> = obj.get("name").ok();
+  let name = match name_val {
+    Some(val) if !val.is_undefined() && !val.is_null() => Some(string_or_regex_from_js(val)?),
+    _ => None,
+  };
+  let exact: Option<bool> = obj.get("exact").ok();
+  let checked: Option<bool> = obj.get("checked").ok();
+  let disabled: Option<bool> = obj.get("disabled").ok();
+  let expanded: Option<bool> = obj.get("expanded").ok();
+  let level: Option<i32> = obj.get("level").ok();
+  let pressed: Option<bool> = obj.get("pressed").ok();
+  let selected: Option<bool> = obj.get("selected").ok();
+  let include_hidden: Option<bool> = obj.get("includeHidden").ok();
+  Ok(ferridriver::options::RoleOptions {
+    name,
+    exact,
+    checked,
+    disabled,
+    expanded,
+    level,
+    pressed,
+    selected,
+    include_hidden,
+  })
 }

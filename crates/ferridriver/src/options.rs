@@ -1,9 +1,62 @@
 //! Option structs for the Playwright-compatible Page and Locator API.
 
+/// A string or a regular expression — mirrors Playwright's
+/// `string | RegExp` union accepted by every `getBy*` matcher,
+/// `page.waitForURL`, and similar selector inputs.
+///
+/// Construction:
+/// * `StringOrRegex::from("foo")` — literal string (substring match
+///   case-insensitive by default, matched verbatim when `exact: true`).
+/// * `StringOrRegex::regex("foo\\d+", "i")` — regex with pattern +
+///   `ECMAScript` flags. At the binding boundary NAPI accepts a real
+///   JS `RegExp` instance; `QuickJS` similarly reads `source`/`flags`
+///   getters off a `RegExp` via prototype-chain access. Wire-shape
+///   inputs like `{ regexSource, regexFlags }` are never exposed to
+///   the user — Rule 3.
+#[derive(Debug, Clone)]
+pub enum StringOrRegex {
+  String(String),
+  Regex { source: String, flags: String },
+}
+
+impl StringOrRegex {
+  /// Return the literal string if this is a `String` variant. Used by
+  /// backends that only accept a literal (no regex support).
+  #[must_use]
+  pub fn as_str(&self) -> Option<&str> {
+    match self {
+      Self::String(s) => Some(s),
+      Self::Regex { .. } => None,
+    }
+  }
+
+  /// Convenience — construct the regex variant from source + flags.
+  #[must_use]
+  pub fn regex(source: impl Into<String>, flags: impl Into<String>) -> Self {
+    Self::Regex {
+      source: source.into(),
+      flags: flags.into(),
+    }
+  }
+}
+
+impl From<&str> for StringOrRegex {
+  fn from(s: &str) -> Self {
+    Self::String(s.to_string())
+  }
+}
+
+impl From<String> for StringOrRegex {
+  fn from(s: String) -> Self {
+    Self::String(s)
+  }
+}
+
 /// Options for role-based locators (getByRole).
 #[derive(Debug, Clone, Default)]
 pub struct RoleOptions {
-  pub name: Option<String>,
+  /// `string | RegExp` — matches the element's accessible name.
+  pub name: Option<StringOrRegex>,
   pub exact: Option<bool>,
   pub checked: Option<bool>,
   pub disabled: Option<bool>,

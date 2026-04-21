@@ -108,15 +108,19 @@ impl Frame {
     Locator::wrap(self.inner.get_by_role(&role, &opts))
   }
 
-  #[napi]
-  pub fn get_by_text(&self, text: String, options: Option<crate::types::TextOptions>) -> Locator {
+  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
+  pub fn get_by_text(
+    &self,
+    text: napi::Either<String, crate::types::JsRegExpLike>,
+    options: Option<crate::types::TextOptions>,
+  ) -> Locator {
     let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_text(&text, &opts))
+    Locator::wrap(self.inner.get_by_text(&crate::types::getby_input_to_rust(text), &opts))
   }
 
-  #[napi]
-  pub fn get_by_test_id(&self, test_id: String) -> Locator {
-    Locator::wrap(self.inner.get_by_test_id(&test_id))
+  #[napi(ts_args_type = "testId: string | RegExp")]
+  pub fn get_by_test_id(&self, test_id: napi::Either<String, crate::types::JsRegExpLike>) -> Locator {
+    Locator::wrap(self.inner.get_by_test_id(&crate::types::getby_input_to_rust(test_id)))
   }
 
   // ── Content ───────────────────────────────────────────────────────────
@@ -196,16 +200,28 @@ impl Frame {
 
   // ── Additional locators ──────────────────────────────────────────────
 
-  #[napi]
-  pub fn get_by_label(&self, text: String, options: Option<crate::types::TextOptions>) -> Locator {
+  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
+  pub fn get_by_label(
+    &self,
+    text: napi::Either<String, crate::types::JsRegExpLike>,
+    options: Option<crate::types::TextOptions>,
+  ) -> Locator {
     let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_label(&text, &opts))
+    Locator::wrap(self.inner.get_by_label(&crate::types::getby_input_to_rust(text), &opts))
   }
 
-  #[napi]
-  pub fn get_by_placeholder(&self, text: String, options: Option<crate::types::TextOptions>) -> Locator {
+  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
+  pub fn get_by_placeholder(
+    &self,
+    text: napi::Either<String, crate::types::JsRegExpLike>,
+    options: Option<crate::types::TextOptions>,
+  ) -> Locator {
     let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
-    Locator::wrap(self.inner.get_by_placeholder(&text, &opts))
+    Locator::wrap(
+      self
+        .inner
+        .get_by_placeholder(&crate::types::getby_input_to_rust(text), &opts),
+    )
   }
 
   // ── Action methods (Playwright parity — task 3.9) ────────────────────

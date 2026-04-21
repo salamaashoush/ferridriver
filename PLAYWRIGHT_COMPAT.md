@@ -347,9 +347,20 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.12 Locator / getBy regex args
 
-- [ ] `StringOrRegex` param on `get_by_role.name`, `get_by_text`, `get_by_label`, `get_by_placeholder`, `get_by_alt_text`, `get_by_title`, `get_by_test_id`; on `get_attribute` compare, `wait_for_url`, etc.
-- **Files**: `options.rs`, `locator.rs`.
-- **NAPI**: accept `string | RegExp`.
+- [x] `StringOrRegex` enum in `options.rs`; every `get_by_*` matcher + `RoleOptions.name` accepts `string | RegExp` across Rust core, NAPI, and QuickJS. `wait_for_url` was already `string | RegExp` via the existing `UrlMatcher` (pre-existing from §3.5).
+  - **Core** (`crates/ferridriver/src/options.rs`, `locator.rs`, `frame.rs`, `page.rs`): new `StringOrRegex { String(String) | Regex { source, flags } }` enum with `From<&str> / From<String>` ergonomics. `build_text_like_selector` / `build_attr_selector` / `build_testid_selector` / `build_role_selector` now emit Playwright-native `internal:text=` / `internal:label=` / `internal:attr=[name=<escaped>]` / `internal:testid=[<attr>=<escaped>]` / `internal:role=<role>[...]` with ports of Playwright's `escapeForTextSelector`, `escapeForAttributeSelector`, `escapeRegexForSelector` (from `/tmp/playwright/packages/isomorphic/stringUtils.ts`). Literal strings render as `"quoted"i` / `"quoted"s`; regexes render as `/source/flags` with `>>` escaped to avoid selector-chain collisions.
+  - **Engine parser** (`selectors.rs`): `Engine::InternalText / InternalLabel / InternalAttr / InternalTestId / InternalRole` variants added; parser recognises the corresponding `internal:*=` prefixes. `is_rich_selector` extended.
+  - **Injected JS adapter** (`crates/ferridriver/src/injected/index.ts::executeSelector`): `internal:text|label|attr|testid|role|has|has-not|has-text|has-not-text|and|or` bodies pass through unchanged so the selector bundled engine (verbatim Playwright from §3.9) can do the regex matching natively. Bundle rebuilt — 164.3 KB.
+  - **NAPI** (`crates/ferridriver-node/src/{page,frame,locator}.rs`, `types.rs`): `ts_args_type = "text: string | RegExp, options?: TextOptions"` / `"testId: string | RegExp"` on every `getBy*`. `RoleOptions.name` now typed `Option<Either<String, JsRegExpLike>>` with `ts_type = "string | RegExp"`. New `getby_input_to_rust` helper lowers `Either` into `StringOrRegex` — reuses the `JsRegExpLike` prototype-chain trick, no `{ regexSource, regexFlags }` wire shape ever exposed.
+  - **QuickJS** (`crates/ferridriver-script/src/bindings/page.rs`): new `string_or_regex_from_js` + `parse_text_options` + `parse_role_options` helpers read real JS `RegExp` instances via the `source`/`flags` prototype getters. `getByRole` gains its options bag (was missing — shipped alongside the regex change).
+  - **Tests** (Rule 9, per-backend):
+    - Rust integration (`tests/backends_support/getby_regex.rs`): `test_getby_text_regex` (case-sensitive regex matches exactly two of four candidates; `/flags/i` matches three), `test_getby_role_name_regex` (regex name filter + literal substring both match 2-of-3), `test_getby_placeholder_regex` (2-of-3), `test_getby_test_id_regex` (2-of-3). All four backends green (cdp-pipe, cdp-raw, bidi, webkit) — the injected engine is identical across backends so the regex path works uniformly.
+    - NAPI (`crates/ferridriver-node/test/getby-regex.test.ts`): 9 tests × 2 CDP backends = 18 assertions covering every `getBy*` + `RoleOptions.name` + composition with `locator()` parent scope.
+  - Baseline after the change: 122 core + 29 script + 38 MCP lib + 799 NAPI/Bun (was 781) + 4/4 backends green.
+- **Playwright refs**:
+  - `/tmp/playwright/packages/playwright-core/src/client/locator.ts:176-205` (Locator getBy surface)
+  - `/tmp/playwright/packages/isomorphic/locatorUtils.ts` (selector builders)
+  - `/tmp/playwright/packages/isomorphic/stringUtils.ts:110-124` (escape helpers)
 
 ### 3.13 Locator-as-argument to `.locator()`
 

@@ -2290,6 +2290,12 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::navigation_response::test_reload_returns_response);
   run!(backends_support::navigation_response::test_history_traversal_returns_response);
 
+  // §3.12 getBy* accept string | RegExp.
+  run!(backends_support::getby_regex::test_getby_text_regex);
+  run!(backends_support::getby_regex::test_getby_role_name_regex);
+  run!(backends_support::getby_regex::test_getby_placeholder_regex);
+  run!(backends_support::getby_regex::test_getby_test_id_regex);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

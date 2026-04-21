@@ -15,7 +15,7 @@ use std::sync::Arc;
 use crate::actions;
 use crate::backend::AnyElement;
 use crate::error::Result;
-use crate::options::{BoundingBox, FilterOptions, RoleOptions, TextOptions, WaitOptions};
+use crate::options::{BoundingBox, FilterOptions, RoleOptions, StringOrRegex, TextOptions, WaitOptions};
 use crate::selectors;
 
 /// Zero-cost retry macro that resolves an element with backoff, then runs an
@@ -227,44 +227,57 @@ impl Locator {
   }
 
   /// Locate elements by ARIA role, optionally filtered by role options.
+  /// `options.name` accepts `string | RegExp` per Playwright's
+  /// `getByRole(role, { name })` — passing a regex matches the
+  /// accessible name with its full JS regex semantics (flags
+  /// preserved), while a literal string matches case-insensitively
+  /// unless `exact: true`.
   #[must_use]
   pub fn get_by_role(&self, role: &str, opts: &RoleOptions) -> Locator {
     self.chain(&build_role_selector(role, opts))
   }
 
-  /// Locate elements by visible text content.
+  /// Locate elements by visible text content. `text` accepts
+  /// `string | RegExp` per Playwright's `getByText`.
   #[must_use]
-  pub fn get_by_text(&self, text: &str, opts: &TextOptions) -> Locator {
-    self.chain(&build_text_selector("text", text, opts))
+  pub fn get_by_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    self.chain(&build_text_like_selector("internal:text", text, opts))
   }
 
-  /// Locate form elements by their associated label text.
+  /// Locate form elements by their associated label text. Accepts
+  /// `string | RegExp` per Playwright's `getByLabel`.
   #[must_use]
-  pub fn get_by_label(&self, text: &str, opts: &TextOptions) -> Locator {
-    self.chain(&build_text_selector("label", text, opts))
+  pub fn get_by_label(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    self.chain(&build_text_like_selector("internal:label", text, opts))
   }
 
-  /// Locate input elements by their placeholder text.
+  /// Locate input elements by their placeholder text. Accepts
+  /// `string | RegExp` per Playwright's `getByPlaceholder`.
   #[must_use]
-  pub fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Locator {
-    self.chain(&build_text_selector("placeholder", text, opts))
+  pub fn get_by_placeholder(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    self.chain(&build_attr_selector("placeholder", text, opts))
   }
 
-  /// Locate elements by their `alt` attribute text.
+  /// Locate elements by their `alt` attribute text. Accepts
+  /// `string | RegExp` per Playwright's `getByAltText`.
   #[must_use]
-  pub fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Locator {
-    self.chain(&build_text_selector("alt", text, opts))
+  pub fn get_by_alt_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    self.chain(&build_attr_selector("alt", text, opts))
   }
 
-  /// Locate elements by their `title` attribute text.
+  /// Locate elements by their `title` attribute text. Accepts
+  /// `string | RegExp` per Playwright's `getByTitle`.
   #[must_use]
-  pub fn get_by_title(&self, text: &str, opts: &TextOptions) -> Locator {
-    self.chain(&build_text_selector("title", text, opts))
+  pub fn get_by_title(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    self.chain(&build_attr_selector("title", text, opts))
   }
 
+  /// Locate elements by their `data-testid` (or the configured
+  /// test-id attribute). Accepts `string | RegExp` per Playwright's
+  /// `getByTestId`. Matches are always exact per Playwright.
   #[must_use]
-  pub fn get_by_test_id(&self, test_id: &str) -> Locator {
-    self.chain(&format!("testid={test_id}"))
+  pub fn get_by_test_id(&self, test_id: &StringOrRegex) -> Locator {
+    self.chain(&build_testid_selector("data-testid", test_id))
   }
 
   /// First element. Opts out of strict mode because the selector explicitly
@@ -1801,38 +1814,38 @@ impl FrameLocator {
 
   /// `getByText` inside this iframe.
   #[must_use]
-  pub fn get_by_text(&self, text: &str, opts: &TextOptions) -> Locator {
-    self.locator(&build_text_selector("text", text, opts), None)
+  pub fn get_by_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    self.locator(&build_text_like_selector("internal:text", text, opts), None)
   }
 
   /// `getByTestId` inside this iframe.
   #[must_use]
-  pub fn get_by_test_id(&self, test_id: &str) -> Locator {
-    self.locator(&format!("testid={test_id}"), None)
+  pub fn get_by_test_id(&self, test_id: &StringOrRegex) -> Locator {
+    self.locator(&build_testid_selector("data-testid", test_id), None)
   }
 
   /// `getByLabel` inside this iframe.
   #[must_use]
-  pub fn get_by_label(&self, text: &str, opts: &TextOptions) -> Locator {
-    self.locator(&build_text_selector("label", text, opts), None)
+  pub fn get_by_label(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    self.locator(&build_text_like_selector("internal:label", text, opts), None)
   }
 
   /// `getByPlaceholder` inside this iframe.
   #[must_use]
-  pub fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Locator {
-    self.locator(&build_text_selector("placeholder", text, opts), None)
+  pub fn get_by_placeholder(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    self.locator(&build_attr_selector("placeholder", text, opts), None)
   }
 
   /// `getByAltText` inside this iframe.
   #[must_use]
-  pub fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Locator {
-    self.locator(&build_text_selector("alt", text, opts), None)
+  pub fn get_by_alt_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    self.locator(&build_attr_selector("alt", text, opts), None)
   }
 
   /// `getByTitle` inside this iframe.
   #[must_use]
-  pub fn get_by_title(&self, text: &str, opts: &TextOptions) -> Locator {
-    self.locator(&build_text_selector("title", text, opts), None)
+  pub fn get_by_title(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    self.locator(&build_attr_selector("title", text, opts), None)
   }
 
   /// The locator pointing at the `<iframe>` element itself, in the
@@ -1909,51 +1922,109 @@ fn rect_point(rect: &serde_json::Value, position: Option<crate::options::Point>)
 }
 
 pub(crate) fn build_role_selector(role: &str, opts: &RoleOptions) -> String {
-  let mut sel = format!("role={role}");
+  let mut sel = format!("internal:role={role}");
   if let Some(name) = &opts.name {
-    let _ = write!(sel, "[name=\"{}\"]", name.replace('"', "\\\""));
+    let escaped = escape_for_attribute_selector(name, opts.exact == Some(true));
+    let _ = write!(sel, "[name={escaped}]");
   }
-  if opts.exact == Some(true) {
-    // exact name matching handled at the engine level
+  if let Some(checked) = opts.checked {
+    let _ = write!(sel, "[checked={checked}]");
   }
-  if let Some(true) = opts.checked {
-    sel.push_str("[checked=true]");
+  if let Some(disabled) = opts.disabled {
+    let _ = write!(sel, "[disabled={disabled}]");
   }
-  if let Some(false) = opts.checked {
-    sel.push_str("[checked=false]");
-  }
-  if let Some(true) = opts.disabled {
-    sel.push_str("[disabled=true]");
-  }
-  if let Some(false) = opts.disabled {
-    sel.push_str("[disabled=false]");
-  }
-  if let Some(true) = opts.expanded {
-    sel.push_str("[expanded=true]");
-  }
-  if let Some(false) = opts.expanded {
-    sel.push_str("[expanded=false]");
+  if let Some(expanded) = opts.expanded {
+    let _ = write!(sel, "[expanded={expanded}]");
   }
   if let Some(level) = opts.level {
     let _ = write!(sel, "[level={level}]");
   }
-  if let Some(true) = opts.pressed {
-    sel.push_str("[pressed=true]");
+  if let Some(pressed) = opts.pressed {
+    let _ = write!(sel, "[pressed={pressed}]");
   }
-  if let Some(true) = opts.selected {
-    sel.push_str("[selected=true]");
+  if let Some(selected) = opts.selected {
+    let _ = write!(sel, "[selected={selected}]");
   }
-  if let Some(true) = opts.include_hidden {
-    sel.push_str("[include-hidden=true]");
+  if let Some(include_hidden) = opts.include_hidden {
+    let _ = write!(sel, "[include-hidden={include_hidden}]");
   }
   sel
 }
 
-fn build_text_selector(engine: &str, text: &str, opts: &TextOptions) -> String {
-  if opts.exact == Some(true) {
-    format!("{engine}=\"{text}\"")
+/// Build a Playwright-native text-engine selector body. `engine_prefix`
+/// is one of `internal:text` / `internal:label`. For `text: String` we
+/// emit `"quoted"i` / `"quoted"s`; for `text: Regex` we emit
+/// `/source/flags`. Mirrors
+/// `packages/isomorphic/stringUtils.ts::escapeForTextSelector` from
+/// `/tmp/playwright`.
+pub(crate) fn build_text_like_selector(engine_prefix: &str, text: &StringOrRegex, opts: &TextOptions) -> String {
+  let body = escape_for_text_selector(text, opts.exact == Some(true));
+  format!("{engine_prefix}={body}")
+}
+
+/// Build a Playwright-native attribute-engine selector body of the
+/// form `internal:attr=[<name>=<escaped>]` for `get_by_alt_text`,
+/// `get_by_title`, `get_by_placeholder`. Mirrors
+/// `packages/isomorphic/locatorUtils.ts::getByAttributeTextSelector`.
+pub(crate) fn build_attr_selector(attr: &str, value: &StringOrRegex, opts: &TextOptions) -> String {
+  let escaped = escape_for_attribute_selector(value, opts.exact == Some(true));
+  format!("internal:attr=[{attr}={escaped}]")
+}
+
+/// Build a `get_by_test_id` selector. Testid matches are always exact
+/// per Playwright.
+pub(crate) fn build_testid_selector(attr_name: &str, testid: &StringOrRegex) -> String {
+  let escaped = escape_for_attribute_selector(testid, true);
+  format!("internal:testid=[{attr_name}={escaped}]")
+}
+
+/// Port of Playwright's `escapeForTextSelector` from
+/// `/tmp/playwright/packages/isomorphic/stringUtils.ts`.
+///
+/// For a literal string returns `"quoted"i` (substring,
+/// case-insensitive) or `"quoted"s` (exact, case-sensitive). For a
+/// regex returns the `/source/flags` literal form with `>>` escaped so
+/// the selector chain operator doesn't collide. `unicode`/`unicodeSets`
+/// regex flags are preserved — the injected engine's `RegExp`
+/// construction handles them natively.
+fn escape_for_text_selector(value: &StringOrRegex, exact: bool) -> String {
+  match value {
+    StringOrRegex::String(s) => {
+      let quoted = serde_json::to_string(s).unwrap_or_else(|_| format!("\"{s}\""));
+      format!("{quoted}{}", if exact { "s" } else { "i" })
+    },
+    StringOrRegex::Regex { source, flags } => escape_regex_for_selector(source, flags),
+  }
+}
+
+/// Port of Playwright's `escapeForAttributeSelector`.
+fn escape_for_attribute_selector(value: &StringOrRegex, exact: bool) -> String {
+  match value {
+    StringOrRegex::String(s) => {
+      let escaped = s.replace('\\', "\\\\").replace('"', "\\\"");
+      format!("\"{escaped}\"{}", if exact { "s" } else { "i" })
+    },
+    StringOrRegex::Regex { source, flags } => escape_regex_for_selector(source, flags),
+  }
+}
+
+/// Port of Playwright's `escapeRegexForSelector`. For regexes with
+/// `unicode` / `unicodeSets` flags we emit the source verbatim (per the
+/// upstream comment — identity character escapes aren't allowed in
+/// those modes). Otherwise we escape `>>` so the selector chain
+/// operator doesn't collide with the regex literal.
+fn escape_regex_for_selector(source: &str, flags: &str) -> String {
+  let has_unicode = flags.contains('u') || flags.contains('v');
+  if has_unicode {
+    format!("/{source}/{flags}")
   } else {
-    format!("{engine}={text}")
+    // Escape `>>` as `\>\>` so the selector chain operator can't
+    // prematurely split the regex literal. Matches Playwright's
+    // `String(re).replace(/>>/g, '\\>\\>')` step — quote escaping is
+    // only needed for attribute selectors, which our callers handle
+    // separately.
+    let escaped_source = source.replace(">>", "\\>\\>");
+    format!("/{escaped_source}/{flags}")
   }
 }
 

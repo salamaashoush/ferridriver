@@ -11,7 +11,7 @@ use std::sync::Arc;
 
 use crate::error::Result;
 use crate::locator::Locator;
-use crate::options::{RoleOptions, TextOptions, WaitOptions};
+use crate::options::{RoleOptions, StringOrRegex, TextOptions, WaitOptions};
 use crate::page::Page;
 
 /// A frame within a page. Mirrors Playwright's
@@ -209,64 +209,54 @@ impl Frame {
     Locator::new(self.clone(), crate::locator::build_role_selector(role, opts))
   }
 
+  /// `getByText` in this frame. Accepts `string | RegExp`.
   #[must_use]
-  pub fn get_by_text(&self, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) {
-      format!("text=\"{text}\"")
-    } else {
-      format!("text={text}")
-    };
-    Locator::new(self.clone(), sel)
+  pub fn get_by_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    Locator::new(
+      self.clone(),
+      crate::locator::build_text_like_selector("internal:text", text, opts),
+    )
   }
 
+  /// `getByTestId` in this frame.
   #[must_use]
-  pub fn get_by_test_id(&self, test_id: &str) -> Locator {
-    Locator::new(self.clone(), format!("testid={test_id}"))
+  pub fn get_by_test_id(&self, test_id: &StringOrRegex) -> Locator {
+    Locator::new(
+      self.clone(),
+      crate::locator::build_testid_selector("data-testid", test_id),
+    )
   }
 
+  /// `getByLabel` in this frame.
   #[must_use]
-  pub fn get_by_label(&self, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) {
-      format!("label=\"{text}\"")
-    } else {
-      format!("label={text}")
-    };
-    Locator::new(self.clone(), sel)
+  pub fn get_by_label(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    Locator::new(
+      self.clone(),
+      crate::locator::build_text_like_selector("internal:label", text, opts),
+    )
   }
 
+  /// `getByPlaceholder` in this frame.
   #[must_use]
-  pub fn get_by_placeholder(&self, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) {
-      format!("placeholder=\"{text}\"")
-    } else {
-      format!("placeholder={text}")
-    };
-    Locator::new(self.clone(), sel)
+  pub fn get_by_placeholder(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    Locator::new(
+      self.clone(),
+      crate::locator::build_attr_selector("placeholder", text, opts),
+    )
   }
 
   /// Locate elements by `alt` attribute. Mirrors Playwright's
-  /// `frame.getByAltText(text, options?)`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts`).
+  /// `frame.getByAltText(text, options?)`.
   #[must_use]
-  pub fn get_by_alt_text(&self, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) {
-      format!("alt=\"{text}\"")
-    } else {
-      format!("alt={text}")
-    };
-    Locator::new(self.clone(), sel)
+  pub fn get_by_alt_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    Locator::new(self.clone(), crate::locator::build_attr_selector("alt", text, opts))
   }
 
   /// Locate elements by `title` attribute. Mirrors Playwright's
   /// `frame.getByTitle(text, options?)`.
   #[must_use]
-  pub fn get_by_title(&self, text: &str, opts: &TextOptions) -> Locator {
-    let sel = if opts.exact == Some(true) {
-      format!("title=\"{text}\"")
-    } else {
-      format!("title={text}")
-    };
-    Locator::new(self.clone(), sel)
+  pub fn get_by_title(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
+    Locator::new(self.clone(), crate::locator::build_attr_selector("title", text, opts))
   }
 
   /// Create a `FrameLocator` for an `<iframe>` matching `selector`

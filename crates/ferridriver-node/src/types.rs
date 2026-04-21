@@ -22,7 +22,12 @@ pub(crate) fn f64_to_u64(v: f64) -> u64 {
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct RoleOptions {
-  pub name: Option<String>,
+  /// Playwright: `name?: string | RegExp` — the accessible-name
+  /// matcher. `JsRegExpLike` walks the prototype chain so a real JS
+  /// `RegExp` passed as `name` round-trips cleanly; a plain string
+  /// still works. No `{ source, flags }` wire shape is exposed.
+  #[napi(ts_type = "string | RegExp")]
+  pub name: Option<napi::Either<String, JsRegExpLike>>,
   pub exact: Option<bool>,
   pub checked: Option<bool>,
   pub disabled: Option<bool>,
@@ -1028,7 +1033,7 @@ pub struct LaunchOptions {
 impl From<RoleOptions> for ferridriver::options::RoleOptions {
   fn from(o: RoleOptions) -> Self {
     Self {
-      name: o.name,
+      name: o.name.map(getby_input_to_rust),
       exact: o.exact,
       checked: o.checked,
       disabled: o.disabled,
@@ -1272,6 +1277,20 @@ pub(crate) fn string_or_regex_to_rust(
     napi::Either::A(glob) => ferridriver::UrlMatcher::glob(glob).map_err(|e| napi::Error::from_reason(e.to_string())),
     napi::Either::B(re) => ferridriver::UrlMatcher::regex_from_source(&re.source, re.flags.as_deref().unwrap_or(""))
       .map_err(|e| napi::Error::from_reason(e.to_string())),
+  }
+}
+
+/// Lower a JS `string | RegExp` into [`ferridriver::options::StringOrRegex`]
+/// for every `getBy*` matcher and `RoleOptions.name`. Mirrors the
+/// Playwright TS union byte-for-byte via `JsRegExpLike`'s prototype-chain
+/// trick — no `{ source, flags }` wire shape ever leaks to the user.
+pub(crate) fn getby_input_to_rust(input: napi::Either<String, JsRegExpLike>) -> ferridriver::options::StringOrRegex {
+  match input {
+    napi::Either::A(s) => ferridriver::options::StringOrRegex::String(s),
+    napi::Either::B(re) => ferridriver::options::StringOrRegex::Regex {
+      source: re.source,
+      flags: re.flags.unwrap_or_default(),
+    },
   }
 }
 
