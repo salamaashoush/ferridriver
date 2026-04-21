@@ -718,6 +718,22 @@ impl AnyPage {
     }
   }
 
+  /// Per-page download handler registry. Mirrors Playwright's
+  /// server-side download dispatch path. Register with
+  /// [`crate::download::DownloadManager::add_handler`] to receive live
+  /// [`crate::download::Download`] handles when the browser starts
+  /// writing a file download.
+  #[must_use]
+  pub fn download_manager(&self) -> &crate::download::DownloadManager {
+    match self {
+      AnyPage::CdpPipe(p) => &p.download_manager,
+      AnyPage::CdpRaw(p) => &p.download_manager,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(p) => &p.download_manager,
+      AnyPage::Bidi(p) => &p.download_manager,
+    }
+  }
+
   /// Populate the weak back-reference to the outer `Arc<Page>`.
   /// Called by [`crate::page::Page::new`] / `Page::with_context`
   /// every time a new `Arc<Page>` is constructed — callers like the

@@ -1898,29 +1898,6 @@ impl Page {
     }
   }
 
-  /// Start listening for a download. Call BEFORE the action that triggers it.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if no download event occurs within the timeout.
-  pub fn expect_download(
-    &self,
-    timeout_ms: Option<u64>,
-  ) -> impl std::future::Future<Output = Result<crate::events::DownloadInfo>> + '_ {
-    let timeout = timeout_ms.unwrap_or(self.default_timeout());
-    let events = self.inner.events().clone();
-    async move {
-      let event = events
-        .wait_for(|e| matches!(e, PageEvent::Download(_)), timeout)
-        .await
-        .map_err(|e| e.to_string())?;
-      match event {
-        PageEvent::Download(d) => Ok(d),
-        _ => Err("Unexpected event type".into()),
-      }
-    }
-  }
-
   /// Wait for a specific event (by name) with timeout.
   ///
   /// # Errors
@@ -1932,32 +1909,6 @@ impl Page {
       .events()
       .wait_for_event(event_name, timeout_ms.unwrap_or(self.default_timeout()))
       .await
-  }
-
-  /// Wait for a download to start, matching an optional URL pattern.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if no matching download occurs within the timeout.
-  pub async fn wait_for_download(
-    &self,
-    url_pattern: Option<&str>,
-    timeout_ms: Option<u64>,
-  ) -> Result<crate::events::DownloadInfo> {
-    let pattern = url_pattern.map(std::string::ToString::to_string);
-    let event = self
-      .inner
-      .events()
-      .wait_for(
-        move |e| matches!(e, PageEvent::Download(d) if pattern.as_ref().is_none_or(|p| d.url.contains(p))),
-        timeout_ms.unwrap_or(self.default_timeout()),
-      )
-      .await
-      .map_err(|e| e.to_string())?;
-    match event {
-      PageEvent::Download(d) => Ok(d),
-      _ => Err("Unexpected event type".into()),
-    }
   }
 
   /// Wait for a network request matching a URL pattern.
@@ -2276,6 +2227,70 @@ impl Page {
         "page closed while waiting for filechooser".into(),
       ))),
       Err(_) => Err(crate::error::FerriError::timeout("waiting for filechooser", timeout_ms)),
+    }
+  }
+
+  // ── Downloads (live handle, first-class) ──────────────────────────────
+  //
+  // Symmetric with dialog / filechooser above.
+  //
+  // * [`Self::events`]`.on("download", cb)` — broadcast listener, live
+  //   [`crate::download::Download`] handle delivered in the callback.
+  //   Backed by the per-page
+  //   [`crate::download::DownloadManager`]'s emitter-bridge (installed
+  //   once at `attach_listeners` time).
+  // * [`Self::wait_for_download`] — one-shot async wait. Mirrors
+  //   Playwright's `page.waitForEvent('download')`. Registers a
+  //   one-shot handler directly on the `DownloadManager`; the claim is
+  //   synchronous with the backend's download-begin event, so there's
+  //   no broadcast round-trip to race against.
+  //
+  // Unclaimed downloads are not auto-cancelled — Playwright's server
+  // does the same (just emits the event and leaves the bytes in the
+  // per-context `downloadsPath`). The per-page `downloads_dir` drop
+  // cleans up orphan files on page close.
+
+  /// Wait for the next download, with a timeout. Returns the live
+  /// [`crate::download::Download`] handle; the caller may then call
+  /// `save_as(path)` / `path()` / `failure()` / `cancel()` / `delete()`.
+  /// Mirrors Playwright's `page.waitForEvent('download', { timeout })`.
+  ///
+  /// Registers a one-shot handler with the page's
+  /// [`crate::download::DownloadManager`]; the handler is removed
+  /// automatically on resolve or timeout.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError::Timeout`] if no download
+  /// begins within `timeout_ms`. Returns
+  /// [`crate::error::FerriError::TargetClosed`] if the page closes
+  /// before a download begins.
+  pub async fn wait_for_download(&self, timeout_ms: u64) -> Result<crate::download::Download> {
+    use std::sync::Mutex;
+    let (tx, rx) = tokio::sync::oneshot::channel::<crate::download::Download>();
+    let tx = Arc::new(Mutex::new(Some(tx)));
+    let tx_clone = tx.clone();
+    let id = self.inner.download_manager().add_handler(Arc::new(move |download| {
+      let mut guard = match tx_clone.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+      };
+      match guard.take() {
+        Some(sender) => {
+          let _ = sender.send(download.clone());
+          true
+        },
+        None => false,
+      }
+    }));
+    let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await;
+    self.inner.download_manager().remove_handler(id);
+    match result {
+      Ok(Ok(download)) => Ok(download),
+      Ok(Err(_)) => Err(crate::error::FerriError::target_closed(Some(
+        "page closed while waiting for download".into(),
+      ))),
+      Err(_) => Err(crate::error::FerriError::timeout("waiting for download", timeout_ms)),
     }
   }
 

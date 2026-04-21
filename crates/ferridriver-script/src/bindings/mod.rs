@@ -23,6 +23,7 @@ pub mod artifacts;
 pub mod context;
 pub mod convert;
 pub mod dialog;
+pub mod download;
 pub mod element_handle;
 pub mod file_chooser;
 pub mod frame;
@@ -37,6 +38,7 @@ pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
 pub use context::BrowserContextJs;
 pub use dialog::DialogJs;
+pub use download::DownloadJs;
 pub use element_handle::ElementHandleJs;
 pub use file_chooser::FileChooserJs;
 pub use frame::FrameJs;
@@ -72,6 +74,7 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<WebSocketJs>::define(&g)?;
   Class::<DialogJs>::define(&g)?;
   Class::<FileChooserJs>::define(&g)?;
+  Class::<DownloadJs>::define(&g)?;
   Ok(())
 }
 

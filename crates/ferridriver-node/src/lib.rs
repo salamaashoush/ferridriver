@@ -57,6 +57,7 @@ mod browser;
 mod codegen;
 mod context;
 mod dialog;
+mod download;
 mod element_handle;
 mod error;
 mod file_chooser;

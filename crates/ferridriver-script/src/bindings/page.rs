@@ -1130,6 +1130,18 @@ impl PageJs {
       let instance = Class::instance(ctx.clone(), wrapper)?;
       return rquickjs::IntoJs::into_js(instance, &ctx);
     }
+    // And for `download` — same one-shot handler pattern via the
+    // per-page `DownloadManager`.
+    if event_lc == "download" {
+      let download = self
+        .inner
+        .wait_for_download(timeout)
+        .await
+        .map_err(|e| rquickjs::Error::new_from_js_message("Page.waitForEvent", "Error", e.to_string()))?;
+      let wrapper = crate::bindings::download::DownloadJs::new(download);
+      let instance = Class::instance(ctx.clone(), wrapper)?;
+      return rquickjs::IntoJs::into_js(instance, &ctx);
+    }
 
     let name = event_lc.clone();
     let ev = self
@@ -1166,6 +1178,11 @@ impl PageJs {
       },
       ferridriver::events::PageEvent::FileChooser(chooser) => {
         let wrapper = crate::bindings::file_chooser::FileChooserJs::new(chooser);
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
+      ferridriver::events::PageEvent::Download(download) => {
+        let wrapper = crate::bindings::download::DownloadJs::new(download);
         let instance = Class::instance(ctx.clone(), wrapper)?;
         rquickjs::IntoJs::into_js(instance, &ctx)
       },
@@ -1402,7 +1419,10 @@ fn page_event_json(ev: &ferridriver::events::PageEvent) -> serde_json::Value {
     }),
     PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
     PageEvent::FrameDetached { frame_id } => serde_json::json!({ "frameId": frame_id }),
-    PageEvent::Download(d) => serde_json::to_value(d).unwrap_or_default(),
+    PageEvent::Download(d) => serde_json::json!({
+      "url": d.url(),
+      "suggestedFilename": d.suggested_filename(),
+    }),
     PageEvent::Load => serde_json::json!({ "type": "load" }),
     PageEvent::DomContentLoaded => serde_json::json!({ "type": "domcontentloaded" }),
     PageEvent::Close => serde_json::json!({ "type": "close" }),

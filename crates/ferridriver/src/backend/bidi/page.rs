@@ -51,6 +51,17 @@ pub struct BidiPage {
   /// Backend listener dispatches on `input.fileDialogOpened` (the
   /// `BiDi` equivalent of CDP's `Page.fileChooserOpened`).
   pub file_chooser_manager: crate::file_chooser::FileChooserManager,
+  /// Per-page download handler registry. See
+  /// `crates/ferridriver/src/download.rs::DownloadManager`. Dispatches
+  /// on `browsingContext.downloadWillBegin` and flips terminal state
+  /// on `browsingContext.downloadEnd` — Firefox's native `BiDi` events.
+  pub download_manager: crate::download::DownloadManager,
+  /// Per-page temp directory Firefox is configured to write downloads
+  /// into (via `browser.setDownloadBehavior({ downloadBehavior: { type:
+  /// 'allowed', destinationFolder }, userContexts })`). Held as
+  /// `Arc<TempDir>` so the directory lives as long as any `Download`
+  /// referencing a file under it.
+  pub downloads_dir: Arc<tempfile::TempDir>,
   /// Weak back-reference to the outer [`crate::page::Page`]. Same
   /// purpose as the CDP page's field — the file-chooser listener
   /// upgrades it to build the `ElementHandle`.
@@ -94,10 +105,14 @@ impl InjectedScriptManager {
 impl BidiPage {
   /// Create a new `BidiPage` and enable required domains (inject engine, etc.).
   /// This is the `BiDi` equivalent of CDP's `enable_domains()`.
-  pub(crate) fn create(session: Arc<BidiSession>, context_id: String) -> Self {
+  pub(crate) fn create(session: Arc<BidiSession>, context_id: String) -> Result<Self, String> {
     // BiDi handles navigation-aware injection via script.addPreloadScript.
     // Domain enables are deferred (lazy injection), unlike CDP's upfront enable_domains().
-    Self {
+    let downloads_dir = tempfile::Builder::new()
+      .prefix("ferridriver-downloads-")
+      .tempdir()
+      .map_err(|e| format!("downloads tempdir: {e}"))?;
+    Ok(Self {
       session,
       context_id: Arc::from(context_id),
       events: EventEmitter::new(),
@@ -110,8 +125,10 @@ impl BidiPage {
       nav_request_slot: crate::network::NavRequestSlot::new(),
       dialog_manager: crate::dialog::DialogManager::new(),
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+      download_manager: crate::download::DownloadManager::new(),
+      downloads_dir: Arc::new(downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
-    }
+    })
   }
 
   /// Helper: send a `BiDi` command.
@@ -1306,12 +1323,40 @@ impl BidiPage {
     // handles without needing the one-shot
     // `page.wait_for_file_chooser` flow.
     let _ = self.file_chooser_manager.register_emitter_bridge(self.events.clone());
+    // Download bridge: broadcast `download` listeners see live
+    // [`crate::download::Download`] handles via the same claim-on-open
+    // path.
+    let _ = self.download_manager.register_emitter_bridge(self.events.clone());
+
+    // Configure Firefox to land downloads in our per-page tempdir.
+    // `browser.setDownloadBehavior` is a best-effort browser-scoped
+    // command (Playwright swallows errors too); the tempdir drop
+    // cleans up any files if the command fails. Firing the setup on a
+    // detached task because `attach_listeners` is synchronous.
+    {
+      let session = self.session.clone();
+      let downloads_dir = self.downloads_dir.clone();
+      tokio::spawn(async move {
+        let params = serde_json::json!({
+          "downloadBehavior": {
+            "type": "allowed",
+            "destinationFolder": downloads_dir.path().to_string_lossy(),
+          },
+        });
+        let _ = session
+          .transport
+          .send_command("browser.setDownloadBehavior", params)
+          .await;
+      });
+    }
 
     let mut rx = self.session.transport.subscribe_events();
     let ctx = self.context_id.clone();
     let session = self.session.clone();
     let dialog_manager = self.dialog_manager.clone();
     let file_chooser_manager = self.file_chooser_manager.clone();
+    let download_manager = self.download_manager.clone();
+    let downloads_dir = self.downloads_dir.clone();
     let page_backref = self.page_backref.clone();
     let closed = self.closed.clone();
     let emitter = self.events.clone();
@@ -1470,6 +1515,82 @@ impl BidiPage {
               let chooser = crate::file_chooser::FileChooser::new(handle, is_multiple);
               manager_clone.did_open(&chooser);
             });
+          },
+          "browsingContext.downloadWillBegin" => {
+            // BiDi correlates a download with its triggering navigation
+            // via the `navigation` id on the event. If the browser
+            // doesn't attribute it to a navigation, Playwright skips
+            // (see `bidiPage.ts::_onDownloadWillBegin`) — so do we.
+            let Some(navigation) = event
+              .params
+              .get("navigation")
+              .and_then(|v| v.as_str())
+              .map(std::string::ToString::to_string)
+            else {
+              continue;
+            };
+            let url = event
+              .params
+              .get("url")
+              .and_then(|v| v.as_str())
+              .unwrap_or("")
+              .to_string();
+            let suggested = event
+              .params
+              .get("suggestedFilename")
+              .and_then(|v| v.as_str())
+              .unwrap_or("")
+              .to_string();
+
+            let Some(page) = page_backref.upgrade() else {
+              continue;
+            };
+
+            // BiDi has no native cancel — Playwright's own
+            // `bidiBrowser.ts::cancelDownload` is a no-op. Surface
+            // typed `Unsupported` per Rule 4 so callers know.
+            let canceler: crate::download::DownloadCanceler = Arc::new(|| {
+              Box::pin(async {
+                Err(crate::error::FerriError::Unsupported(
+                  "Download.cancel is not supported on the BiDi backend: Firefox's BiDi implementation has no browser.cancelDownload command and Playwright's own BiDi backend leaves cancelDownload as a no-op (see bidiBrowser.ts::cancelDownload)".into(),
+                ))
+              })
+            });
+
+            let download = crate::download::Download::new(
+              &page,
+              navigation,
+              url,
+              suggested,
+              downloads_dir.path().to_path_buf(),
+              canceler,
+            );
+            download_manager.did_open(&download);
+          },
+          "browsingContext.downloadEnd" => {
+            let Some(navigation) = event.params.get("navigation").and_then(|v| v.as_str()) else {
+              continue;
+            };
+            let status = event
+              .params
+              .get("status")
+              .and_then(|v| v.as_str())
+              .unwrap_or("complete");
+            if let Some(d) = download_manager.take_for_guid(navigation) {
+              if status == "canceled" {
+                d.report_finished(None, Some("canceled".to_string()));
+              } else {
+                // `complete` carries the absolute `filepath` Firefox
+                // wrote to — override the default
+                // `<downloads_dir>/<guid>` path with the real one.
+                let filepath = event
+                  .params
+                  .get("filepath")
+                  .and_then(|v| v.as_str())
+                  .map(std::path::PathBuf::from);
+                d.report_finished(filepath, None);
+              }
+            }
           },
           _ => {},
         }

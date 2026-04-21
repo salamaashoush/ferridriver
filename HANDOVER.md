@@ -7,7 +7,7 @@ fresh summary at the end of each block.
 
 1. `CLAUDE.md` — rules + lessons.
 2. `PLAYWRIGHT_COMPAT.md` — gap tracker. Tier 1 done. §3.1, §3.12,
-   §2.9, and §2.11 landed in recent sessions.
+   §2.9, §2.11, and now §2.10 landed in recent sessions.
 3. This file — block summary below.
 4. `docs/NEXT_SESSION.md` — next-block brief.
 
@@ -15,119 +15,147 @@ fresh summary at the end of each block.
 
 ## Landed this session
 
-### §2.11 — FileChooser as first-class handle (this commit)
+### §2.10 — Download as first-class handle (this commit)
 
-Live `FileChooser` handle with `element()` / `isMultiple()` / `page()`
-/ async `setFiles(files, options?)`. Dispatch follows the same
-synchronous-claim pattern §2.9 Dialog shipped: backend listener
-resolves the triggering `<input>` into an `ElementHandle` in its
-async task, then synchronously calls `FileChooserManager::did_open(&chooser)`
-— no broadcast race, no grace-window polling.
+Live `Download` handle with `url()` / `suggestedFilename()` / `page()`
+sync accessors + async `path()` / `saveAs(path)` / `cancel()` /
+`delete()` / `failure()`. Dispatch follows the same synchronous-claim
+pattern §2.9 / §2.11 shipped: backend listener builds the live
+`Download` from the protocol's download-begin event and synchronously
+calls `DownloadManager::did_open(&download)` — no broadcast race, no
+grace-window polling.
 
-- **`crates/ferridriver/src/file_chooser.rs`** — new module:
-  - `FileChooser { element, is_multiple }` behind `Arc`. `page()` derives
-    from `element.page()` so the chooser always reports the page its
-    element lives on. `set_files` delegates to
-    `ElementHandle::set_input_files` and reuses the §1.5 path /
-    payload plumbing verbatim.
-  - `FileChooserManager` per-page registry. `add_handler(Fn(&FileChooser) -> bool) ->
-    FileChooserHandlerId`, `remove_handler(id)`, `did_open(&FileChooser)`.
-    `did_open` iterates handlers synchronously; each returns `true`
-    to claim. If nobody claims, a detached task disposes the
-    underlying `ElementHandle` (matches Playwright's
-    `server/page.ts::_onFileChooserOpened` no-listener branch).
-  - `FileChooserManager::register_emitter_bridge(events)` — default
-    handler installed once per page in each backend's
-    `attach_listeners`. When a `filechooser` broadcast listener is
-    registered, the bridge emits `PageEvent::FileChooser` on the
-    broadcast and returns `true` synchronously.
-
-- **`crate::backend::PageBackref`** — new shared helper (`Mutex<Weak<Page>>`):
-  every backend page struct carries one. Populated by `Page::new` /
-  `Page::with_context` on every construction — MCP tool handlers wrap
-  the same backend page fresh on every call, so a one-shot
-  `OnceLock<Weak<Page>>` would lock in a stale weak whose target
-  dies as soon as the first call returns. The file-chooser listener
-  calls `page_backref.upgrade()` per event.
+- **`crates/ferridriver/src/download.rs`** — new module:
+  - `Download { url, suggested_filename, page (weak), guid,
+    downloads_dir, local_path, canceler, state_tx, deleted }` behind
+    `Arc`. Terminal state on `tokio::sync::watch::Sender<DownloadStatus>`
+    (`Pending` / `Finished { path }` / `Failed { error }`); `path()` /
+    `failure()` subscribe and await the transition. `saveAs` = await
+    path + `tokio::fs::copy` (matches Playwright's `_localPathAfterFinished`
+    + copy flow). `delete` = await path + unlink, idempotent.
+  - **Critical correctness note**: `report_finished` uses
+    `watch::Sender::send_replace`, **not** `send`. `send` silently
+    discards the value when `receiver_count() == 0`, which causes any
+    later `path()` / `failure()` caller to hang forever on
+    `changed().await` — a real race because the backend's terminal
+    progress event can arrive before user code subscribes. Documented
+    inline so the fix isn't regressed.
+  - `DownloadManager` per-page registry: `add_handler(Fn(&Download) ->
+    bool) -> DownloadHandlerId`, `remove_handler(id)`,
+    `did_open(&Download)`, `take_for_guid(guid)` / `peek_for_guid(guid)`
+    for the backend listener's terminal-event lookup. **Unclaimed
+    downloads are not auto-cancelled** — matches Playwright's server,
+    which emits `Page.Events.Download` and leaves the bytes in
+    `downloadsPath`. The per-page `Arc<TempDir>` drop cleans up
+    orphans.
+  - `DownloadManager::register_emitter_bridge(events)` — default
+    handler installed once per page so
+    `page.events().on("download", cb)` keeps delivering live handles.
+  - Removed the old `Page::wait_for_download(url_pattern, timeout)` +
+    `Page::expect_download` + `DownloadInfo` wire struct. Both were
+    Rule-3 violations (exposed `{guid, url, suggested_filename}` as a
+    user-facing type). Callers now use `page.waitForEvent('download')`.
 
 - **Backends** — all three wire the same pattern:
-  - CDP (`backend/cdp/mod.rs::spawn_file_chooser_listener`):
-    subscribes first, **then** sends `Page.setInterceptFileChooserDialog({ enabled: true })`
-    (reverse order misses events triggered between the enable-reply
-    and subscribe). On `Page.fileChooserOpened`, reads `backendNodeId`
-    + `mode`, upgrades the backref, spawns a per-event task that
-    resolves the element via `AnyPage::resolve_backend_node`, builds
-    the `ElementHandle`, and dispatches via `manager.did_open(&chooser)`.
-  - BiDi (`backend/bidi/page.rs`): same for `input.fileDialogOpened`
-    (Firefox's native BiDi event). Resolves via the sharedId payload
-    directly — no extra DOM round-trip.
-  - WebKit: stock `WKWebView` has no public API for intercepting
-    the open-panel; the host's `WKUIDelegate` runs the native panel
-    before any event could reach Rust. The manager is still wired
-    for API parity, but no event is ever dispatched. Rule-4 honest.
+  - CDP (`backend/cdp/mod.rs::spawn_download_listener`): subscribes to
+    the transport event stream **first**, then sends
+    `Browser.setDownloadBehavior({ behavior: 'allowAndName',
+    downloadPath: <tempdir>, eventsEnabled: true })` — same ordering
+    rationale as §2.11 (fast click can beat the enable reply).
+    `allowAndName` writes each download as `<downloadPath>/<guid>` so
+    parallel downloads don't collide on filename. On
+    `Browser.downloadWillBegin`: reads `guid` + `url` +
+    `suggestedFilename`, upgrades the page backref, builds `Download`
+    with a canceler that issues `Browser.cancelDownload`, synchronously
+    calls `did_open`. On `Browser.downloadProgress state: 'completed'
+    | 'canceled'`: `take_for_guid` + `report_finished`.
+  - BiDi (`backend/bidi/page.rs`): same for
+    `browsingContext.downloadWillBegin` + `browsingContext.downloadEnd`.
+    `downloadEnd.filepath` overrides the default
+    `<downloads_dir>/<guid>` path with the real absolute path Firefox
+    wrote to. BiDi cancel is typed `Unsupported` because Firefox's
+    BiDi has no cancel primitive — Playwright's own BiDi backend
+    leaves `cancelDownload` as a no-op (`bidiBrowser.ts:527`). Rule-4
+    honest.
+  - WebKit: stock `WKWebView` routes downloads through
+    `WKDownloadDelegate` in the host's Obj-C subprocess and those
+    events don't currently flow through our IPC. The manager is wired
+    for API parity (bridge registered so `page.on('download', cb)`
+    doesn't error), but no event ever dispatches and
+    `Page::wait_for_download` times out honestly. Scoped as a future
+    phase — wiring requires a new `WKDownload` delegate class on the
+    host side + ~3 new IPC ops. Documented in the `download_manager`
+    field's doc comment.
 
-- **Page API** — new `Page::wait_for_file_chooser(timeout_ms) -> Result<FileChooser>`:
-  registers a one-shot handler with `FileChooserManager`, awaits a
-  `tokio::sync::oneshot`, removes the handler on resolve / timeout.
-  Typed `Timeout` / `TargetClosed` errors. NAPI + QuickJS route
-  `page.waitForEvent('filechooser')` through it so the claim is
-  synchronous with the browser event — no broadcast round-trip.
+- **Page API** — new `Page::wait_for_download(timeout_ms) ->
+  Result<Download>`: registers a one-shot handler with the
+  `DownloadManager`, awaits a `tokio::sync::oneshot`, removes the
+  handler on resolve / timeout. Typed `Timeout` / `TargetClosed`
+  errors. NAPI + QuickJS route `page.waitForEvent('download')` through
+  it so the claim is synchronous with the browser event.
 
-- **NAPI** (`crates/ferridriver-node/src/file_chooser.rs`): new
-  `#[napi] class FileChooser`. `page.waitForEvent('filechooser')`
-  returns it via a new `Either6<Request, Response, WebSocket, Dialog,
-  FileChooser, Value>` — generated `.d.ts` matches Playwright's
-  `Promise<Request | Response | WebSocket | Dialog | FileChooser | Record<string, any>>`.
-  `setFiles` accepts the full `string | string[] | FilePayload | FilePayload[]`
-  union via `ts_args_type`.
+- **NAPI** (`crates/ferridriver-node/src/download.rs`): new `#[napi]
+  class Download`. `page.waitForEvent('download')` returns it via a
+  new `Either7<Request, Response, WebSocket, Dialog, FileChooser,
+  Download, Value>` — generated `.d.ts` matches Playwright's
+  `Promise<Request | Response | WebSocket | Dialog | FileChooser |
+  Download | Record<string, any>>`. `page()` returns `Page` non-null.
+  `createReadStream` deferred to future NAPI parity pass — callers use
+  `fs.createReadStream(await download.path())`.
 
-- **QuickJS** (`crates/ferridriver-script/src/bindings/file_chooser.rs`):
-  new `FileChooserJs`. `page.waitForEvent('filechooser')` instantiates it.
-  `setFiles` reuses `parse_input_files` / `parse_set_input_files_options`
-  from §1.5.
+- **QuickJS** (`crates/ferridriver-script/src/bindings/download.rs`):
+  new `DownloadJs`. `page.waitForEvent('download')` instantiates it.
+  Same sync/async surface minus `page()` (symmetric with
+  `FileChooserJs`).
 
 ### Rule-9 tests
 
-- `tests/backends_support/file_chooser.rs`: single path + multiple
-  array + FilePayload + unclaimed-disposes + WebKit-unsupported. All
-  four backends green.
-- `crates/ferridriver-node/test/filechooser.test.ts`: single path +
-  multiple array + FilePayload with `text=hello` round-trip (also
-  proves payload bytes reached the DOM's view of the file) + waitForEvent
-  timeout. 4 tests × 2 CDP backends = 8 assertions.
+- `tests/backends_support/download.rs`: webkit-unsupported timeout +
+  save-as byte-for-byte round-trip + path() contents + cdp cancel-then-failure
+  + bidi cancel-typed-Unsupported. Stand up a local attachment server
+  (HTTP stub serving `Content-Disposition: attachment`) — downloads
+  trigger via `<a href="/file.bin">` click. All four backends green.
+- `crates/ferridriver-node/test/download.test.ts`: saveAs + path +
+  cancel-failure + waitForEvent timeout. 4 tests × 2 CDP backends = 8
+  assertions (`node:http` attachment server per test, no shared
+  fixture state).
 
 ### Baseline after this commit (must stay green)
 
 ```
-cargo clippy --workspace --all-targets -- -D warnings   # clean
-cargo test --workspace --lib                            # 122 core + 29 script + 38 MCP
+cargo clippy --workspace --all-targets -- -D warnings         # clean
+cargo test -p ferridriver --lib                                # 125 core
+cargo test -p ferridriver-script --lib                         # 22 script
+cargo test -p ferridriver-mcp --lib                            # 38 MCP
 cd crates/ferridriver-node && bun run build:debug
-cd <repo root> && bun test                              # 817 (was 809)
+cd <repo root> && bun test                                     # 825 (was 817)
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
-  cargo test -p ferridriver-cli --test backends -- --test-threads=1   # 4/4 backends
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+# cdp-pipe 132, cdp-raw 132, bidi 127, webkit 128
 ```
 
 ## Next priorities
 
-1. **§2.10 Download as handle** — promote `Download` to a first-class
-   handle (`cancel`, `create_read_stream`, `delete`, `failure`, `page`,
-   `path`, `save_as`, `suggested_filename`, `url`). Follows the same
-   live-event pattern as §2.9 / §2.11.
+1. **§2.12 ConsoleMessage rich** — replace `ConsoleMsg { type, text }`
+   with the full Playwright `ConsoleMessage { args: Vec<JSHandle>,
+   location, page, text, type, timestamp }`. Blocks on JSHandle
+   parity (§1.3) which is mostly in place.
 2. **§4.1 BrowserContextOptions** — 28-field option bag at context
    creation (viewport, userAgent, locale, timezone, geolocation,
-   permissions, …). Probably 2–3 sessions.
-3. **§3.17 Auto-waiting deadline parity** — replace fixed backoff with
-   Playwright's exponential polling + deadline propagation.
-4. **§2.12 ConsoleMessage rich** — replace `ConsoleMsg { type, text }`
-   with the full Playwright `ConsoleMessage { args, location, page,
-   text, type, timestamp }`.
+   permissions, acceptDownloads, ...). Probably 2–3 sessions.
+3. **§3.17 Auto-waiting deadline parity** — replace fixed backoff
+   with Playwright's exponential polling + deadline propagation.
+4. **WebKit Download bridge** — add `WKDownloadDelegate` to `host.m`
+   + IPC op routing to unblock downloads on WebKit. Closes the
+   documented §2.10 WebKit gap.
 
 ## Carried-forward backend gaps (real protocol limits)
 
 - **BiDi**: response body unavailable for non-intercepted responses
   (Firefox discards bytes; Playwright's own BiDi backend has the
   same limit). Multi-`Set-Cookie` collapses. `request.postData()`
-  null for fetch-with-body.
+  null for fetch-with-body. `Download.cancel` typed `Unsupported`
+  (Firefox BiDi has no cancel primitive).
 - **WebKit**: stock `WKWebView` exposes no public API for main-doc
   Response observability (§3.1: returns `null`, documented),
   redirect chain, response body bytes, browser-set request headers,
@@ -136,8 +164,10 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   (§2.9: `Dialog.accept/dismiss` returns typed `Unsupported`). **File
   chooser** cannot be intercepted — no event flows through our IPC
   (§2.11: `Page::wait_for_file_chooser` times out, documented).
-  `page.evaluate` runs in utility context isolated from the
-  user-script's fetch wrap.
+  **Download** events route through `WKDownloadDelegate` in the host
+  subprocess and don't currently flow through our IPC (§2.10:
+  `Page::wait_for_download` times out). `page.evaluate` runs in
+  utility context isolated from the user-script's fetch wrap.
 
 ## Known flakes
 
@@ -148,16 +178,18 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 
 | area | path |
 |---|---|
-| FileChooser handle + manager | `crates/ferridriver/src/file_chooser.rs` |
+| Download handle + manager | `crates/ferridriver/src/download.rs` |
+| `send_replace` correctness note | `Download::report_finished` docstring |
+| CDP download listener | `crates/ferridriver/src/backend/cdp/mod.rs::spawn_download_listener` |
+| BiDi download listener | `crates/ferridriver/src/backend/bidi/page.rs` (`browsingContext.downloadWillBegin` / `downloadEnd` arms) |
+| WebKit download (no-op bridge) | `crates/ferridriver/src/backend/webkit/mod.rs::attach_listeners` |
+| Page::wait_for_download | `crates/ferridriver/src/page.rs` |
+| NAPI Download class | `crates/ferridriver-node/src/download.rs` |
+| QuickJS DownloadJs class | `crates/ferridriver-script/src/bindings/download.rs` |
+| Rust integration tests | `crates/ferridriver-cli/tests/backends_support/download.rs` |
+| NAPI download tests | `crates/ferridriver-node/test/download.test.ts` |
+| FileChooser handle + manager (§2.11) | `crates/ferridriver/src/file_chooser.rs` |
 | PageBackref helper | `crates/ferridriver/src/backend/mod.rs::PageBackref` |
-| CDP fileChooser listener | `crates/ferridriver/src/backend/cdp/mod.rs::spawn_file_chooser_listener` |
-| BiDi fileChooser listener | `crates/ferridriver/src/backend/bidi/page.rs` (`input.fileDialogOpened` arm) |
-| WebKit fileChooser (no-op bridge) | `crates/ferridriver/src/backend/webkit/mod.rs::attach_listeners` |
-| Page::wait_for_file_chooser | `crates/ferridriver/src/page.rs` |
-| NAPI FileChooser class | `crates/ferridriver-node/src/file_chooser.rs` |
-| QuickJS FileChooserJs class | `crates/ferridriver-script/src/bindings/file_chooser.rs` |
-| Rust integration tests | `crates/ferridriver-cli/tests/backends_support/file_chooser.rs` |
-| NAPI filechooser tests | `crates/ferridriver-node/test/filechooser.test.ts` |
 | Dialog handle + manager (§2.9) | `crates/ferridriver/src/dialog.rs` |
 | Navigation `NavRequestSlot` (§3.1) | `crates/ferridriver/src/network.rs` |
 | `StringOrRegex` + escapes (§3.12) | `crates/ferridriver/src/options.rs`, `locator.rs` |
