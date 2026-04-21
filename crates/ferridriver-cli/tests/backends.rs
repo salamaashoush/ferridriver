@@ -2319,6 +2319,13 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::file_chooser::test_file_chooser_file_payload_single);
   run!(backends_support::file_chooser::test_file_chooser_unclaimed_disposes);
 
+  // §2.10 Download as first-class event handle.
+  run!(backends_support::download::test_download_webkit_unsupported);
+  run!(backends_support::download::test_download_save_as_roundtrip);
+  run!(backends_support::download::test_download_path_contents);
+  run!(backends_support::download::test_download_cancel_surfaces_failure);
+  run!(backends_support::download::test_download_cancel_bidi_unsupported);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

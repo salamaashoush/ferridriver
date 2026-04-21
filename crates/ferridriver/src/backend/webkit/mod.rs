@@ -125,6 +125,7 @@ impl WebKitBrowser {
               injected_script: std::sync::Arc::new(InjectedScriptManager::new()),
               dialog_manager: crate::dialog::DialogManager::new(),
               file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+              download_manager: crate::download::DownloadManager::new(),
               page_backref: crate::backend::PageBackref::new(),
             })
           })
@@ -154,6 +155,7 @@ impl WebKitBrowser {
           injected_script: std::sync::Arc::new(InjectedScriptManager::new()),
           dialog_manager: crate::dialog::DialogManager::new(),
           file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+          download_manager: crate::download::DownloadManager::new(),
           page_backref: crate::backend::PageBackref::new(),
         };
         Ok(AnyPage::WebKit(page))
@@ -218,6 +220,19 @@ pub struct WebKitPage {
   /// backend boundary via the null no-op attach path, and the outer
   /// `Page::wait_for_file_chooser` still returns `Timeout`.
   pub file_chooser_manager: crate::file_chooser::FileChooserManager,
+  /// Per-page download handler registry. See
+  /// `crates/ferridriver/src/download.rs::DownloadManager`. Stock
+  /// `WKWebView` routes downloads through `WKDownloadDelegate` in the
+  /// host's Obj-C subprocess; wiring the begin/complete/error events
+  /// back over IPC would require a new `WKDownload` delegate class in
+  /// `host.m`, three new `Op::*` / `Rep::*` codes, and buffer
+  /// management for the landed file bytes. This is scoped as a
+  /// future phase (documented under §B of `PLAYWRIGHT_COMPAT.md`);
+  /// for now the manager is present for API parity (so
+  /// `page.on("download", ...)` doesn't error) but no event ever
+  /// dispatches to it and `Page::wait_for_download` times out
+  /// honestly. Rule-4 honest: callers observe the gap explicitly.
+  pub download_manager: crate::download::DownloadManager,
   /// Weak back-reference to the outer [`crate::page::Page`]. Carried
   /// here for struct parity across backends even though the `WebKit`
   /// file-chooser path never upgrades it.
@@ -1742,6 +1757,12 @@ impl WebKitPage {
     // no event ever arrives on WebKit. Callers that care about this
     // path see the gap via `page.wait_for_file_chooser` timing out.
     let _ = self.file_chooser_manager.register_emitter_bridge(self.events.clone());
+    // Parity bridge for `download` — registered for API consistency
+    // with CDP/BiDi even though stock `WKWebView`'s download events
+    // don't yet flow through our IPC. See the docstring on
+    // `download_manager` above for the gap specifics; a future phase
+    // adds the `WKDownloadDelegate` wiring on the host side.
+    let _ = self.download_manager.register_emitter_bridge(self.events.clone());
 
     let client = self.client.clone();
     let emitter = self.events.clone();

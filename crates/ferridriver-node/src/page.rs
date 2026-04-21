@@ -364,24 +364,25 @@ impl Page {
 
   /// Wait for a specific event. Playwright API:
   /// `page.waitForEvent(event, options?)`. Returns a live class
-  /// (`Request` / `Response` / `WebSocket` / `Dialog` / `FileChooser`)
-  /// for lifecycle events, or a plain snapshot object for simpler
-  /// events — matches Playwright's `PageEventsMap`.
+  /// (`Request` / `Response` / `WebSocket` / `Dialog` / `FileChooser` /
+  /// `Download`) for lifecycle events, or a plain snapshot object for
+  /// simpler events — matches Playwright's `PageEventsMap`.
   #[napi(
     ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
-    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Record<string, any>>"
+    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | Record<string, any>>"
   )]
   pub async fn wait_for_event(
     &self,
     event: String,
     timeout_ms: Option<f64>,
   ) -> Result<
-    napi::bindgen_prelude::Either6<
+    napi::bindgen_prelude::Either7<
       crate::network::Request,
       crate::network::Response,
       crate::network::WebSocket,
       crate::dialog::Dialog,
       crate::file_chooser::FileChooser,
+      crate::download::Download,
       serde_json::Value,
     >,
   > {
@@ -393,7 +394,7 @@ impl Page {
     // `addDialogHandler` flow verbatim).
     if event.eq_ignore_ascii_case("dialog") {
       let dialog = self.inner.wait_for_dialog(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either6::D(crate::dialog::Dialog::from_core(
+      return Ok(napi::bindgen_prelude::Either7::D(crate::dialog::Dialog::from_core(
         dialog,
       )));
     }
@@ -401,24 +402,34 @@ impl Page {
     // per-page `FileChooserManager` delivers the live handle.
     if event.eq_ignore_ascii_case("filechooser") {
       let chooser = self.inner.wait_for_file_chooser(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either6::E(
+      return Ok(napi::bindgen_prelude::Either7::E(
         crate::file_chooser::FileChooser::from_core(chooser),
       ));
+    }
+    // Same pattern for `download` — one-shot handler on the per-page
+    // `DownloadManager` delivers the live handle synchronously with
+    // the protocol's download-begin event.
+    if event.eq_ignore_ascii_case("download") {
+      let download = self.inner.wait_for_download(timeout).await.into_napi()?;
+      return Ok(napi::bindgen_prelude::Either7::F(crate::download::Download::from_core(
+        download,
+      )));
     }
 
     let ev = self.inner.events().wait_for_event(&event, timeout).await.into_napi()?;
     use ferridriver::events::PageEvent;
     Ok(match ev {
       PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => {
-        napi::bindgen_prelude::Either6::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
+        napi::bindgen_prelude::Either7::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
       },
       PageEvent::Response(r) => {
-        napi::bindgen_prelude::Either6::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
+        napi::bindgen_prelude::Either7::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
       },
-      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either6::C(crate::network::WebSocket::from_core(ws)),
-      PageEvent::Dialog(d) => napi::bindgen_prelude::Either6::D(crate::dialog::Dialog::from_core(d)),
-      PageEvent::FileChooser(fc) => napi::bindgen_prelude::Either6::E(crate::file_chooser::FileChooser::from_core(fc)),
-      other => napi::bindgen_prelude::Either6::F(page_event_to_value(&other)),
+      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either7::C(crate::network::WebSocket::from_core(ws)),
+      PageEvent::Dialog(d) => napi::bindgen_prelude::Either7::D(crate::dialog::Dialog::from_core(d)),
+      PageEvent::FileChooser(fc) => napi::bindgen_prelude::Either7::E(crate::file_chooser::FileChooser::from_core(fc)),
+      PageEvent::Download(d) => napi::bindgen_prelude::Either7::F(crate::download::Download::from_core(d)),
+      other => napi::bindgen_prelude::Either7::G(page_event_to_value(&other)),
     })
   }
 
@@ -1249,20 +1260,6 @@ impl Page {
     Ok(crate::network::Request::from_core_with_page(req, self.inner.clone()))
   }
 
-  #[napi]
-  pub async fn wait_for_download(
-    &self,
-    url_pattern: Option<String>,
-    timeout_ms: Option<f64>,
-  ) -> Result<serde_json::Value> {
-    let dl = self
-      .inner
-      .wait_for_download(url_pattern.as_deref(), timeout_ms.map(crate::types::f64_to_u64))
-      .await
-      .map_err(napi::Error::from_reason)?;
-    Ok(serde_json::json!({"guid": dl.guid, "url": dl.url, "suggestedFilename": dl.suggested_filename}))
-  }
-
   #[napi(getter)]
   pub fn default_timeout(&self) -> f64 {
     #[allow(clippy::cast_precision_loss)]
@@ -1563,7 +1560,10 @@ fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value>
       serde_json::to_value(f).ok()
     },
     ("framedetached", PageEvent::FrameDetached { frame_id }) => Some(serde_json::json!({"frameId": frame_id})),
-    ("download", PageEvent::Download(d)) => serde_json::to_value(d).ok(),
+    ("download", PageEvent::Download(d)) => Some(serde_json::json!({
+      "url": d.url(),
+      "suggestedFilename": d.suggested_filename(),
+    })),
     ("load", PageEvent::Load) | ("domcontentloaded", PageEvent::DomContentLoaded) | ("close", PageEvent::Close) => {
       Some(serde_json::Value::Object(serde_json::Map::new()))
     },
@@ -1589,7 +1589,10 @@ fn page_event_to_value(event: &PageEvent) -> serde_json::Value {
     }),
     PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
     PageEvent::FrameDetached { frame_id } => serde_json::json!({"frameId": frame_id}),
-    PageEvent::Download(d) => serde_json::to_value(d).unwrap_or_default(),
+    PageEvent::Download(d) => serde_json::json!({
+      "url": d.url(),
+      "suggestedFilename": d.suggested_filename(),
+    }),
     PageEvent::Load => serde_json::json!({"type": "load"}),
     PageEvent::DomContentLoaded => serde_json::json!({"type": "domcontentloaded"}),
     PageEvent::Close => serde_json::json!({"type": "close"}),

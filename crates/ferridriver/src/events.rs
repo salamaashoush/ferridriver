@@ -10,6 +10,7 @@
 use crate::backend::FrameInfo;
 use crate::context::ConsoleMsg;
 use crate::dialog::Dialog;
+use crate::download::Download;
 use crate::file_chooser::FileChooser;
 use crate::network::{Request, Response, WebSocket};
 use std::sync::Arc;
@@ -62,19 +63,11 @@ pub enum PageEvent {
   Close,
   /// Uncaught exception or unhandled rejection in page.
   PageError(String),
-  /// Download started.
-  Download(DownloadInfo),
-}
-
-/// Information about a download.
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct DownloadInfo {
-  /// Unique identifier for this download.
-  pub guid: String,
-  /// URL that triggered the download.
-  pub url: String,
-  /// Suggested filename from the server.
-  pub suggested_filename: String,
+  /// Browser-initiated download. Carries a live
+  /// [`crate::download::Download`] handle with `path` / `save_as` /
+  /// `cancel` / `delete` / `failure` methods; mirrors Playwright's
+  /// `page.on('download', (download: Download) => ...)`.
+  Download(Download),
 }
 
 /// Callback type for exposed functions.

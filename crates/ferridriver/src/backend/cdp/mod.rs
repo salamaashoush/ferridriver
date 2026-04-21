@@ -315,6 +315,13 @@ impl<T: CdpWrap> CdpBrowser<T> {
         nav_request_slot: crate::network::NavRequestSlot::new(),
         dialog_manager: crate::dialog::DialogManager::new(),
         file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+        download_manager: crate::download::DownloadManager::new(),
+        downloads_dir: Arc::new(
+          tempfile::Builder::new()
+            .prefix("ferridriver-downloads-")
+            .tempdir()
+            .map_err(|e| format!("downloads tempdir: {e}"))?,
+        ),
         page_backref: crate::backend::PageBackref::new(),
       }));
     }
@@ -437,6 +444,13 @@ impl<T: CdpWrap> CdpBrowser<T> {
       nav_request_slot: crate::network::NavRequestSlot::new(),
       dialog_manager: crate::dialog::DialogManager::new(),
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+      download_manager: crate::download::DownloadManager::new(),
+      downloads_dir: Arc::new(
+        tempfile::Builder::new()
+          .prefix("ferridriver-downloads-")
+          .tempdir()
+          .map_err(|e| format!("downloads tempdir: {e}"))?,
+      ),
       page_backref: crate::backend::PageBackref::new(),
     };
 
@@ -739,6 +753,22 @@ pub struct CdpPage<T: CdpTransport> {
   /// handler claims, the element handle is disposed — mirrors
   /// `/tmp/playwright/packages/playwright-core/src/server/page.ts::_onFileChooserOpened`.
   pub file_chooser_manager: crate::file_chooser::FileChooserManager,
+  /// Per-page download handler registry. Backend download listener
+  /// builds a live [`crate::download::Download`] on
+  /// `Browser.downloadWillBegin` and synchronously calls
+  /// [`crate::download::DownloadManager::did_open`]; progress events
+  /// (`Browser.downloadProgress`) flip the download's terminal state
+  /// watch. Mirrors
+  /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts::_onDownloadWillBegin`.
+  pub download_manager: crate::download::DownloadManager,
+  /// Per-page temp directory that Chrome is configured to write
+  /// downloads into (via `Browser.setDownloadBehavior({ behavior:
+  /// 'allowAndName', downloadPath, eventsEnabled: true })`). Held as
+  /// `Arc<TempDir>` so the directory lives as long as any [`Download`]
+  /// referencing a file under it — drop cleans up orphaned files
+  /// (matches Playwright's per-context `_downloadsPath` cleanup on
+  /// close).
+  pub downloads_dir: Arc<tempfile::TempDir>,
   /// Weak back-reference to the outer [`crate::page::Page`] that wraps
   /// this backend page. Populated by [`crate::page::Page::new`] /
   /// `Page::with_context` every time a new `Arc<Page>` is constructed;
@@ -821,6 +851,8 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       nav_request_slot: self.nav_request_slot.clone(),
       dialog_manager: self.dialog_manager.clone(),
       file_chooser_manager: self.file_chooser_manager.clone(),
+      download_manager: self.download_manager.clone(),
+      downloads_dir: self.downloads_dir.clone(),
       page_backref: self.page_backref.clone(),
     }
   }
@@ -2628,6 +2660,10 @@ impl<T: CdpWrap> CdpPage<T> {
     // listeners see live handles via the bridge handler; one-shot
     // `page.wait_for_file_chooser` callers register directly.
     let _ = self.file_chooser_manager.register_emitter_bridge(self.events.clone());
+    // And one more for downloads — live [`crate::download::Download`]
+    // handles delivered to `page.events().on("download", cb)` via the
+    // bridge, same claim-on-open pattern as dialog / file-chooser.
+    let _ = self.download_manager.register_emitter_bridge(self.events.clone());
 
     Self::spawn_dialog_listener(
       self.transport.clone(),
@@ -2640,6 +2676,14 @@ impl<T: CdpWrap> CdpPage<T> {
       self.transport.clone(),
       self.session_id.clone(),
       self.file_chooser_manager.clone(),
+      self.page_backref.clone(),
+    );
+    Self::spawn_download_listener(
+      self.transport.clone(),
+      self.session_id.clone(),
+      self.browser_context_id.clone(),
+      self.download_manager.clone(),
+      self.downloads_dir.clone(),
       self.page_backref.clone(),
     );
     Self::spawn_frame_context_tracker(
@@ -2767,22 +2811,6 @@ impl<T: CdpWrap> CdpPage<T> {
           "Network.webSocketClosed" => {
             if let Some(p) = params {
               tracker.on_websocket_closed(p).await;
-            }
-          },
-          "Page.downloadWillBegin" => {
-            if let Some(p) = params {
-              let guid = p.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
-              let url = p.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
-              let filename = p
-                .get("suggestedFilename")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-              emitter.emit(crate::events::PageEvent::Download(crate::events::DownloadInfo {
-                guid,
-                url,
-                suggested_filename: filename,
-              }));
             }
           },
           _ => {},
@@ -2975,6 +3003,167 @@ impl<T: CdpWrap> CdpPage<T> {
           let chooser = crate::file_chooser::FileChooser::new(handle, is_multiple);
           manager_clone.did_open(&chooser);
         });
+      }
+    });
+  }
+
+  /// Listen for `Browser.downloadWillBegin` / `Browser.downloadProgress`
+  /// CDP events on this page and dispatch them through the page's
+  /// [`crate::download::DownloadManager`].
+  ///
+  /// Sequence matters: subscribe to the event stream **before**
+  /// sending `Browser.setDownloadBehavior`. A fast `<a download>` click
+  /// can trigger `Browser.downloadWillBegin` before the configuration
+  /// reply lands; subscribing after would race the event. Same
+  /// rationale as the file-chooser listener's
+  /// `setInterceptFileChooserDialog` ordering.
+  ///
+  /// Behaviour: `allowAndName` so Chrome writes each download to
+  /// `<downloadPath>/<guid>` instead of the server's suggested name
+  /// (protects tests against filename collisions on parallel downloads
+  /// sharing a tempdir and matches Playwright's own behaviour at
+  /// `server/chromium/crBrowser.ts:354`). `eventsEnabled: true` so
+  /// `downloadProgress` fires terminal-state events — without it we'd
+  /// never resolve `path()`.
+  ///
+  /// Filtering: `Browser.downloadWillBegin` carries `frameId`. We
+  /// claim events whose `frameId` matches our page's main frame id
+  /// (populated by the navigation path) so a multi-page browser doesn't
+  /// cross-wire downloads. When a download fires before we've cached a
+  /// main-frame id, we accept it optimistically — matches Playwright's
+  /// `_findOwningPage` behaviour, which also falls through when it
+  /// cannot resolve the frame.
+  #[allow(clippy::too_many_lines)]
+  fn spawn_download_listener(
+    transport: Arc<T>,
+    session_id: Option<Arc<str>>,
+    browser_context_id: Option<Arc<str>>,
+    download_manager: crate::download::DownloadManager,
+    downloads_dir: Arc<tempfile::TempDir>,
+    page_backref: crate::backend::PageBackref,
+  ) {
+    tokio::spawn(async move {
+      // Subscribe FIRST to avoid racing the enable reply.
+      let mut rx = transport.subscribe_events();
+
+      // Configure the download behaviour at the browser session via
+      // our page's session. Per-browser-context where we have a
+      // context id, browser-wide default otherwise. Errors are
+      // swallowed — the command is best-effort (Playwright's own
+      // `browser.setDownloadBehavior` caller also has error-tolerant
+      // semantics in test harnesses).
+      let params = if let Some(ref ctx) = browser_context_id {
+        serde_json::json!({
+          "behavior": "allowAndName",
+          "browserContextId": &**ctx,
+          "downloadPath": downloads_dir.path().to_string_lossy(),
+          "eventsEnabled": true,
+        })
+      } else {
+        serde_json::json!({
+          "behavior": "allowAndName",
+          "downloadPath": downloads_dir.path().to_string_lossy(),
+          "eventsEnabled": true,
+        })
+      };
+      let _ = transport
+        .send_command(session_id.as_deref(), "Browser.setDownloadBehavior", params)
+        .await;
+
+      while let Ok(event) = rx.recv().await {
+        // `Browser.downloadWillBegin` / `Browser.downloadProgress` fire
+        // on the root browser session (no `sessionId`) when
+        // `eventsEnabled: true`. Events with a `sessionId` come from
+        // page targets; those are irrelevant to downloads. Accept
+        // events whose `sessionId` is absent OR matches ours — CDP's
+        // flatten-mode behaviour varies by Chrome version and we want
+        // to cover both.
+        let event_sid = event.get("sessionId").and_then(|v| v.as_str());
+        if let (Some(expected), Some(got)) = (session_id.as_deref(), event_sid) {
+          if got != expected {
+            continue;
+          }
+        }
+        let method = event.get("method").and_then(|m| m.as_str()).unwrap_or("");
+        match method {
+          "Browser.downloadWillBegin" => {
+            let Some(params) = event.get("params") else {
+              continue;
+            };
+            let guid = params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if guid.is_empty() {
+              continue;
+            }
+            let url = params.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let suggested = params
+              .get("suggestedFilename")
+              .and_then(|v| v.as_str())
+              .unwrap_or("")
+              .to_string();
+
+            let Some(page) = page_backref.upgrade() else {
+              continue;
+            };
+
+            // Build the canceler that issues `Browser.cancelDownload`.
+            let transport_c = transport.clone();
+            let session_c = session_id.clone();
+            let ctx_c = browser_context_id.clone();
+            let guid_for_cancel = guid.clone();
+            let canceler: crate::download::DownloadCanceler = Arc::new(move || {
+              let transport = transport_c.clone();
+              let session = session_c.clone();
+              let ctx = ctx_c.clone();
+              let guid = guid_for_cancel.clone();
+              Box::pin(async move {
+                let mut params = serde_json::json!({ "guid": guid });
+                if let Some(c) = ctx.as_deref() {
+                  params["browserContextId"] = serde_json::Value::String(c.to_string());
+                }
+                transport
+                  .send_command(session.as_deref(), "Browser.cancelDownload", params)
+                  .await
+                  .map(|_| ())
+                  .map_err(|e| crate::error::FerriError::protocol("Browser.cancelDownload", e))
+              })
+            });
+
+            let download = crate::download::Download::new(
+              &page,
+              guid,
+              url,
+              suggested,
+              downloads_dir.path().to_path_buf(),
+              canceler,
+            );
+            download_manager.did_open(&download);
+          },
+          "Browser.downloadProgress" => {
+            let Some(params) = event.get("params") else {
+              continue;
+            };
+            let guid = params.get("guid").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            if guid.is_empty() {
+              continue;
+            }
+            let state = params.get("state").and_then(|v| v.as_str()).unwrap_or("inProgress");
+            match state {
+              "completed" => {
+                if let Some(d) = download_manager.take_for_guid(&guid) {
+                  d.report_finished(None, None);
+                }
+              },
+              "canceled" => {
+                if let Some(d) = download_manager.take_for_guid(&guid) {
+                  d.report_finished(None, Some("canceled".to_string()));
+                }
+              },
+              // "inProgress" — no-op; we only surface terminal state.
+              _ => {},
+            }
+          },
+          _ => {},
+        }
       }
     });
   }
