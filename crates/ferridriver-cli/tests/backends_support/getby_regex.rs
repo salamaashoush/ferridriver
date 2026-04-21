@@ -55,13 +55,13 @@ pub fn test_getby_text_regex(c: &mut McpClient) {
 /// `page.getByRole('button', { name: /submit/i })` — regex name filter.
 pub fn test_getby_role_name_regex(c: &mut McpClient) {
   c.nav_url("data:text/html,<button>Submit form</button><button>submit data</button><button>Cancel</button>");
-  let script = r#"
+  let script = r"
     const count = await page.getByRole('button', { name: /submit/i }).count();
     // Literal 'Submit' (no regex) matches case-insensitively by default but
     // with substring semantics on the accessible name — should also be 2.
     const countLiteral = await page.getByRole('button', { name: 'submit' }).count();
     return { count, countLiteral };
-  "#;
+  ";
   let v = c.script_value(script);
   assert_eq!(
     v["count"].as_i64(),
@@ -80,10 +80,10 @@ pub fn test_getby_placeholder_regex(c: &mut McpClient) {
   c.nav_url(
     "data:text/html,<input placeholder='Enter Email'><input placeholder='Your email'><input placeholder='Phone'>",
   );
-  let script = r#"
+  let script = r"
     const count = await page.getByPlaceholder(/email/i).count();
     return { count };
-  "#;
+  ";
   let v = c.script_value(script);
   assert_eq!(
     v["count"].as_i64(),
@@ -97,10 +97,10 @@ pub fn test_getby_test_id_regex(c: &mut McpClient) {
   c.nav_url(
     "data:text/html,<div data-testid='card-1'>A</div><div data-testid='card-42'>B</div><div data-testid='other'>C</div>",
   );
-  let script = r#"
+  let script = r"
     const count = await page.getByTestId(/card-\d+/).count();
     return { count };
-  "#;
+  ";
   let v = c.script_value(script);
   assert_eq!(
     v["count"].as_i64(),

@@ -644,6 +644,22 @@ impl AnyPage {
     }
   }
 
+  /// Per-page dialog handler registry. Mirrors Playwright's server-side
+  /// `DialogManager`. Register with
+  /// [`crate::dialog::DialogManager::add_handler`] to receive live
+  /// [`crate::dialog::Dialog`] handles when `alert` / `confirm` /
+  /// `prompt` / `beforeunload` fire.
+  #[must_use]
+  pub fn dialog_manager(&self) -> &crate::dialog::DialogManager {
+    match self {
+      AnyPage::CdpPipe(p) => &p.dialog_manager,
+      AnyPage::CdpRaw(p) => &p.dialog_manager,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(p) => &p.dialog_manager,
+      AnyPage::Bidi(p) => &p.dialog_manager,
+    }
+  }
+
   /// The backend kind this page lives on. Used by action paths that
   /// branch per-backend (e.g. `tap` needs a CDP-only native touch API
   /// and returns `FerriError::Unsupported` on `BiDi` / `WebKit` where
@@ -1078,20 +1094,12 @@ impl AnyPage {
   }
 
   // ── Dialog handling ──
-
-  pub async fn set_dialog_handler(&self, handler: crate::events::DialogHandler) {
-    match self {
-      Self::CdpPipe(p) => *p.dialog_handler.write().await = handler,
-      Self::CdpRaw(p) => *p.dialog_handler.write().await = handler,
-      #[cfg(target_os = "macos")]
-      Self::WebKit(_) => {
-        // WebKit dialog handling is in the ObjC subprocess via WKUIDelegate.
-        // Custom handlers would need a new IPC op. For now, auto-behavior only.
-      },
-
-      Self::Bidi(p) => *p.dialog_handler.write().await = handler,
-    }
-  }
+  //
+  // `set_dialog_handler` was removed — dialogs are now observed via
+  // `page.on('dialog', ...)` with live `crate::dialog::Dialog`
+  // handles. When no listener is registered, each backend's dialog
+  // listener auto-closes (accept for `beforeunload`, dismiss
+  // otherwise).
 
   // ── Network Interception ──
 

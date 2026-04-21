@@ -1,14 +1,16 @@
 //! Dialog handling step definitions.
 //!
-//! ferridriver uses handler-based dialogs: you set a handler *before* the action
-//! that triggers the dialog. These steps configure the dialog handler and track
-//! dialog events via typed state in BrowserWorld.
+//! ferridriver mirrors Playwright's event-based dialog model: you
+//! register a `page.on('dialog', ...)` listener before the action that
+//! triggers the dialog. These steps install such a listener and record
+//! every dialog into a typed log for the assertion steps to read.
 
 use std::sync::{Arc, Mutex};
 
 use crate::step::StepError;
 use crate::world::BrowserWorld;
-use ferridriver::events::{DialogAction, PendingDialog};
+use ferridriver::dialog::Dialog;
+use ferridriver::events::PageEvent;
 use ferridriver_bdd_macros::{given, then};
 use ferridriver_test::expect::expect_poll;
 use ferridriver_test::model::TestFailure;
@@ -21,14 +23,22 @@ fn to_step_err(e: TestFailure) -> StepError {
   }
 }
 
+/// A recorded dialog snapshot: just the fields the step assertions
+/// need. Keeping a pure-data snapshot avoids retaining the live
+/// `Dialog` handle past its single-shot accept/dismiss lifetime.
+#[derive(Clone, Debug)]
+struct DialogRecord {
+  message: String,
+}
+
 /// Tracks dialog events for assertion steps.
 #[derive(Clone, Default)]
 struct DialogLog {
-  entries: Arc<Mutex<Vec<PendingDialog>>>,
+  entries: Arc<Mutex<Vec<DialogRecord>>>,
 }
 
 impl DialogLog {
-  fn push(&self, dialog: PendingDialog) {
+  fn push(&self, dialog: DialogRecord) {
     self.entries.lock().unwrap_or_else(|e| e.into_inner()).push(dialog);
   }
 
@@ -54,40 +64,63 @@ fn ensure_dialog_log(world: &mut BrowserWorld) -> DialogLog {
   world.get_state::<DialogLog>().cloned().unwrap_or_default()
 }
 
+/// Shared: register a `dialog` listener that records the dialog and
+/// responds according to the given closure. The closure receives the
+/// live [`Dialog`] and is responsible for calling `accept` or
+/// `dismiss`. Each registered listener also pushes a [`DialogRecord`]
+/// into the per-world [`DialogLog`] so the `then` steps can make
+/// assertions.
+fn install_dialog_listener<F>(world: &mut BrowserWorld, respond: F)
+where
+  F: Fn(Dialog) + Send + Sync + 'static,
+{
+  let log = ensure_dialog_log(world);
+  let respond = Arc::new(respond);
+  world.page().events().on(
+    "dialog",
+    Arc::new(move |event: PageEvent| {
+      if let PageEvent::Dialog(dialog) = event {
+        log.push(DialogRecord {
+          message: dialog.message().to_string(),
+        });
+        let respond = respond.clone();
+        // Dispatch the user's intended response on a tokio task so
+        // the broadcast callback stays non-blocking.
+        tokio::spawn(async move {
+          (respond)(dialog);
+        });
+      }
+    }),
+  );
+}
+
 #[given("I accept the dialog")]
 async fn accept_dialog(world: &mut BrowserWorld) {
-  let log = ensure_dialog_log(world);
-  world
-    .page()
-    .set_dialog_handler(Arc::new(move |dialog: &PendingDialog| {
-      log.push(dialog.clone());
-      DialogAction::Accept(None)
-    }))
-    .await;
+  install_dialog_listener(world, |dialog| {
+    tokio::spawn(async move {
+      let _ = dialog.accept(None).await;
+    });
+  });
 }
 
 #[given("I dismiss the dialog")]
 async fn dismiss_dialog(world: &mut BrowserWorld) {
-  let log = ensure_dialog_log(world);
-  world
-    .page()
-    .set_dialog_handler(Arc::new(move |dialog: &PendingDialog| {
-      log.push(dialog.clone());
-      DialogAction::Dismiss
-    }))
-    .await;
+  install_dialog_listener(world, |dialog| {
+    tokio::spawn(async move {
+      let _ = dialog.dismiss().await;
+    });
+  });
 }
 
 #[given("I type {string} in the dialog")]
 async fn type_in_dialog(world: &mut BrowserWorld, text: String) {
-  let log = ensure_dialog_log(world);
-  world
-    .page()
-    .set_dialog_handler(Arc::new(move |dialog: &PendingDialog| {
-      log.push(dialog.clone());
-      DialogAction::Accept(Some(text.clone()))
-    }))
-    .await;
+  let text = Arc::new(text);
+  install_dialog_listener(world, move |dialog| {
+    let text = text.clone();
+    tokio::spawn(async move {
+      let _ = dialog.accept(Some((*text).clone())).await;
+    });
+  });
 }
 
 #[then("I should see dialog with text {string}")]

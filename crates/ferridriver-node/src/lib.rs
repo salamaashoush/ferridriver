@@ -56,6 +56,7 @@ mod bdd_registry;
 mod browser;
 mod codegen;
 mod context;
+mod dialog;
 mod element_handle;
 mod error;
 mod frame;

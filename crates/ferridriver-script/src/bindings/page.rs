@@ -1102,6 +1102,22 @@ impl PageJs {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let timeout = timeout_ms.unwrap_or(30_000.0) as u64;
     let event_lc = event.to_ascii_lowercase();
+
+    // `dialog` bypasses the broadcast — it registers a one-shot
+    // handler on the per-page `DialogManager` so the claim is
+    // synchronous at `did_open` time (mirrors Playwright's
+    // `addDialogHandler` + `dialogDidOpen` flow exactly).
+    if event_lc == "dialog" {
+      let dialog = self
+        .inner
+        .wait_for_dialog(timeout)
+        .await
+        .map_err(|e| rquickjs::Error::new_from_js_message("Page.waitForEvent", "Error", e.to_string()))?;
+      let wrapper = crate::bindings::dialog::DialogJs::new(dialog);
+      let instance = Class::instance(ctx.clone(), wrapper)?;
+      return rquickjs::IntoJs::into_js(instance, &ctx);
+    }
+
     let name = event_lc.clone();
     let ev = self
       .inner
@@ -1124,6 +1140,14 @@ impl PageJs {
       },
       ferridriver::events::PageEvent::Response(resp) => {
         let wrapper = crate::bindings::network::ResponseJs::new_with_page(resp, self.inner.clone());
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
+      ferridriver::events::PageEvent::Dialog(dialog) => {
+        // Reached via broadcast when a `page.events().on("dialog", cb)`
+        // listener is also present — fall through to deliver the
+        // live handle.
+        let wrapper = crate::bindings::dialog::DialogJs::new(dialog);
         let instance = Class::instance(ctx.clone(), wrapper)?;
         rquickjs::IntoJs::into_js(instance, &ctx)
       },
@@ -1349,7 +1373,11 @@ fn page_event_json(ev: &ferridriver::events::PageEvent) -> serde_json::Value {
   use ferridriver::events::PageEvent;
   match ev {
     PageEvent::Console(msg) => serde_json::to_value(msg).unwrap_or_default(),
-    PageEvent::Dialog(d) => serde_json::to_value(d).unwrap_or_default(),
+    PageEvent::Dialog(d) => serde_json::json!({
+      "type": d.dialog_type().as_str(),
+      "message": d.message(),
+      "defaultValue": d.default_value(),
+    }),
     PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
     PageEvent::FrameDetached { frame_id } => serde_json::json!({ "frameId": frame_id }),
     PageEvent::Download(d) => serde_json::to_value(d).unwrap_or_default(),

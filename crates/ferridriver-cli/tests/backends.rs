@@ -2296,6 +2296,13 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::getby_regex::test_getby_placeholder_regex);
   run!(backends_support::getby_regex::test_getby_test_id_regex);
 
+  // §2.9 Dialog as first-class event handle.
+  run!(backends_support::dialog::test_dialog_accept_confirm);
+  run!(backends_support::dialog::test_dialog_dismiss_confirm);
+  run!(backends_support::dialog::test_dialog_prompt_with_text);
+  run!(backends_support::dialog::test_dialog_double_accept_rejects);
+  run!(backends_support::dialog::test_dialog_auto_dismiss_without_listener);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

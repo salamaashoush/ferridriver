@@ -9,6 +9,7 @@
 
 use crate::backend::FrameInfo;
 use crate::context::ConsoleMsg;
+use crate::dialog::Dialog;
 use crate::network::{Request, Response, WebSocket};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -32,8 +33,12 @@ pub enum PageEvent {
   RequestFailed(Request),
   /// WebSocket opened — Playwright `page.on('websocket')`.
   WebSocket(WebSocket),
-  /// Dialog appeared (alert, confirm, prompt).
-  Dialog(PendingDialog),
+  /// Dialog appeared (alert, confirm, prompt, beforeunload). Carries
+  /// a live [`Dialog`] handle — listeners are expected to call
+  /// `dialog.accept(...)` or `dialog.dismiss()` exactly once. If no
+  /// listener is registered when the dialog opens, the backend
+  /// auto-closes it (accept for `beforeunload`, dismiss otherwise).
+  Dialog(Dialog),
   /// Frame attached to the page.
   FrameAttached(FrameInfo),
   /// Frame detached from the page.
@@ -63,31 +68,6 @@ pub struct DownloadInfo {
   pub suggested_filename: String,
 }
 
-/// A dialog that is pending user action (accept/dismiss).
-#[derive(Debug, Clone, serde::Serialize)]
-pub struct PendingDialog {
-  /// Dialog type: "alert", "confirm", "prompt", "beforeunload"
-  pub dialog_type: String,
-  /// The message displayed in the dialog.
-  pub message: String,
-  /// Default value for prompt dialogs.
-  pub default_value: String,
-}
-
-/// How to respond to a dialog.
-#[derive(Debug, Clone)]
-pub enum DialogAction {
-  /// Accept the dialog, optionally with prompt text.
-  Accept(Option<String>),
-  /// Dismiss (cancel) the dialog.
-  Dismiss,
-}
-
-/// Dialog handler function type.
-/// Takes dialog info, returns the action to take.
-/// Must be Send + Sync since it's called from async tasks.
-pub type DialogHandler = Arc<dyn Fn(&PendingDialog) -> DialogAction + Send + Sync>;
-
 /// Callback type for exposed functions.
 /// Takes serialized JSON arguments, returns serialized JSON result.
 pub type ExposedFn = Arc<dyn Fn(Vec<serde_json::Value>) -> serde_json::Value + Send + Sync>;
@@ -99,17 +79,10 @@ pub type EventCallback = Arc<dyn Fn(PageEvent) + Send + Sync>;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct ListenerId(pub u64);
 
-/// Default dialog handler: accept alerts/confirms, dismiss prompts.
-#[must_use]
-pub fn default_dialog_handler() -> DialogHandler {
-  Arc::new(|dialog| {
-    if dialog.dialog_type == "prompt" {
-      DialogAction::Accept(Some(dialog.default_value.clone()))
-    } else {
-      DialogAction::Accept(None)
-    }
-  })
-}
+// `DialogHandler` / `DialogAction` / `default_dialog_handler` /
+// `PendingDialog` were removed — dialogs are now observed via
+// `page.on('dialog', ...)` with live [`crate::dialog::Dialog`]
+// handles. See that module for the new API.
 
 /// Check if an event matches a named event type.
 fn event_name_matches(name: &str, event: &PageEvent) -> bool {
@@ -139,11 +112,22 @@ fn event_name_matches(name: &str, event: &PageEvent) -> bool {
 #[derive(Clone)]
 pub struct EventEmitter {
   tx: broadcast::Sender<PageEvent>,
-  /// Active listeners with their abort handles.
-  listeners: Arc<std::sync::Mutex<rustc_hash::FxHashMap<u64, tokio::task::AbortHandle>>>,
+  /// Active listeners with their abort handles and the event name
+  /// each one filters for. The event name is retained so
+  /// [`Self::has_listener`] can answer per-name — dialog and
+  /// filechooser dispatch depend on knowing whether a listener
+  /// exists for the specific event, not just whether any listener
+  /// is attached.
+  listeners: Arc<std::sync::Mutex<rustc_hash::FxHashMap<u64, ListenerEntry>>>,
   next_listener_id: Arc<std::sync::atomic::AtomicU64>,
   /// Stored runtime handle so `on()` works from non-async contexts (NAPI).
   runtime_handle: Arc<std::sync::Mutex<Option<tokio::runtime::Handle>>>,
+}
+
+/// Per-registered-listener bookkeeping.
+struct ListenerEntry {
+  abort: tokio::task::AbortHandle,
+  event_name: String,
 }
 
 impl EventEmitter {
@@ -158,6 +142,24 @@ impl EventEmitter {
       next_listener_id: Arc::new(std::sync::atomic::AtomicU64::new(1)),
       runtime_handle: Arc::new(std::sync::Mutex::new(handle)),
     }
+  }
+
+  /// Whether any named listener registered via [`Self::on`] or
+  /// [`Self::once`] is filtering for `event_name`. Used by backend
+  /// dialog / filechooser listeners purely as an optimisation to
+  /// short-circuit the grace-period wait when there is demonstrably
+  /// nobody attached; auto-close behaviour is primarily driven by
+  /// the `Dialog::is_handled` check after the grace period in the
+  /// backend listener, which also covers the
+  /// `page.waitForEvent('dialog')` path (raw broadcast subscribers
+  /// don't increment the named count but do receive the emitted
+  /// event within the grace window).
+  #[must_use]
+  pub fn has_listener(&self, event_name: &str) -> bool {
+    let Ok(listeners) = self.listeners.lock() else {
+      return false;
+    };
+    listeners.values().any(|entry| entry.event_name == event_name)
   }
 
   /// Spawn a task on the captured runtime (works from non-async contexts).
@@ -258,33 +260,39 @@ impl EventEmitter {
     let id = self.next_listener_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut rx = self.tx.subscribe();
     let name = event_name.to_string();
+    let filter_name = name.clone();
 
     let abort_handle = self.spawn_listener(async move {
       while let Ok(event) = rx.recv().await {
-        if event_name_matches(&name, &event) {
+        if event_name_matches(&filter_name, &event) {
           callback(event);
         }
       }
     });
 
     if let Ok(mut guard) = self.listeners.lock() {
-      guard.insert(id, abort_handle);
+      guard.insert(
+        id,
+        ListenerEntry {
+          abort: abort_handle,
+          event_name: name,
+        },
+      );
     }
     ListenerId(id)
   }
 
-  /// Subscribe to a single event, then auto-remove the listener.
-  ///
   /// Subscribe to a single event, then auto-remove the listener.
   pub fn once(&self, event_name: &str, callback: EventCallback) -> ListenerId {
     let listeners = self.listeners.clone();
     let id = self.next_listener_id.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let mut rx = self.tx.subscribe();
     let name = event_name.to_string();
+    let filter_name = name.clone();
 
     let abort_handle = self.spawn_listener(async move {
       while let Ok(event) = rx.recv().await {
-        if event_name_matches(&name, &event) {
+        if event_name_matches(&filter_name, &event) {
           callback(event);
           if let Ok(mut guard) = listeners.lock() {
             guard.remove(&id);
@@ -295,29 +303,31 @@ impl EventEmitter {
     });
 
     if let Ok(mut guard) = self.listeners.lock() {
-      guard.insert(id, abort_handle);
+      guard.insert(
+        id,
+        ListenerEntry {
+          abort: abort_handle,
+          event_name: name,
+        },
+      );
     }
     ListenerId(id)
   }
 
   /// Remove an event listener by ID.
-  ///
-  /// Remove an event listener by ID.
   pub fn off(&self, id: ListenerId) {
     if let Ok(mut guard) = self.listeners.lock() {
-      if let Some(handle) = guard.remove(&id.0) {
-        handle.abort();
+      if let Some(entry) = guard.remove(&id.0) {
+        entry.abort.abort();
       }
     }
   }
 
   /// Remove all event listeners.
-  ///
-  /// Remove all event listeners.
   pub fn remove_all_listeners(&self) {
     if let Ok(mut listeners) = self.listeners.lock() {
-      for (_, handle) in listeners.drain() {
-        handle.abort();
+      for (_, entry) in listeners.drain() {
+        entry.abort.abort();
       }
     }
   }

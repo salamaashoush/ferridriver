@@ -5,78 +5,106 @@ fresh summary at the end of each block.
 
 ## Cross-device setup
 
-Everything needed is committed. Next session should read, in order:
+1. `CLAUDE.md` — rules + lessons.
+2. `PLAYWRIGHT_COMPAT.md` — gap tracker. Tier 1 done. §3.1, §3.12, §2.9
+   landed this session.
+3. This file — block summary below.
+4. `docs/NEXT_SESSION.md` — next-block brief.
 
-1. `CLAUDE.md` — the Playwright-parity rules and consolidated
-   lessons. Authoritative cross-device source.
-2. `PLAYWRIGHT_COMPAT.md` — gap tracker. Tier 1 is fully closed. §3.1,
-   §3.12 just landed this session. §2.9 Dialog / §2.11 FileChooser
-   are the next large pair (deferred together — see below).
-3. This file — block-level commit summary below.
-4. `docs/NEXT_SESSION.md` — specific next-block brief (currently
-   pointed at §2.9 Dialog + §2.11 FileChooser, bundled because both
-   require a NAPI event-dispatch refactor).
+`git clone https://github.com/microsoft/playwright /tmp/playwright` if missing.
 
-Set up the cloned Playwright at `/tmp/playwright` if it isn't there:
+## Landed this session
 
-```bash
-git clone https://github.com/microsoft/playwright /tmp/playwright
-```
+### §3.1 — Navigation returns Response (`3c26547`)
 
-## What just landed this session (2026-04-21)
+`page.goto` / `reload` / `goBack` / `goForward` (+ `frame.goto`) return
+`Promise<Response | null>`. New `NavRequestSlot` helper shared between
+the backend network listener and the Page; CDP + BiDi capture the
+main-doc request via `is_navigation_request` and return the resolved
+Response. WebKit returns `null` (stock `WKWebView` has no public API
+for main-doc response observability — documented §1.4 gap).
 
-Two blocks committed back-to-back:
+### §3.12 — Regex on `getBy*` (`bc6aff4`)
 
-### §3.1 — Navigation returns Response (commit `3c26547`)
+`StringOrRegex` enum; every `getBy*` matcher and `RoleOptions.name`
+accepts `string | RegExp`. Selector builders emit Playwright-native
+`internal:text=` / `internal:label=` / `internal:attr=[name=…]` /
+`internal:testid=[data-testid=…]` / `internal:role=…` bodies with Rust
+ports of `escapeForTextSelector` / `escapeForAttributeSelector` /
+`escapeRegexForSelector`. NAPI uses `JsRegExpLike` prototype-walker;
+QuickJS reads RegExp `source`/`flags` via prototype getters. Injected
+engine adapter passes `internal:*` bodies through unchanged so the
+bundled verbatim Playwright engine does regex matching natively.
 
-`page.goto` / `reload` / `goBack` / `goForward` (and `frame.goto`)
-return `Promise<Response | null>` matching Playwright verbatim. New
-`NavRequestSlot` helper (cheap `Arc<Mutex<Option<Request>>>`) shared
-between each page and its backend network listener. CDP + BiDi
-observe the response via `is_navigation_request`; WebKit returns
-`null` (documented §1.4 gap — stock `WKWebView` has no public API for
-main-doc response observability). NAPI `ts_return_type = "Promise<Response | null>"`
-on every method; QuickJS returns `Option<ResponseJs>`. Rule-9 coverage:
-5 Rust integration tests × 4 backends + 6 NAPI tests × 2 backends.
+### §2.9 — Dialog as first-class handle (this commit)
 
-### §3.12 — Regex on `getBy*` + `RoleOptions.name` (this commit)
+Live `Dialog` handle with `type` / `message` / `defaultValue` / async
+`accept(promptText?)` / `dismiss()`. Dispatch follows Playwright's
+`DialogManager.dialogDidOpen` **synchronously** — no broadcast race,
+no grace-window timing hack, no `has_listener` check at dispatch.
 
-Every `getBy*` matcher accepts `string | RegExp` — Playwright parity
-for `page.getByRole('button', { name: /submit/i })`,
-`page.getByText(/hello \d+/)`, etc.
+- **`crates/ferridriver/src/dialog.rs`** — new module:
+  - `Dialog` with one-shot `handled: AtomicBool`. `accept` / `dismiss`
+    run the backend-supplied async `DialogResponder` closure; second
+    call rejects with Playwright's exact wording `"Cannot accept
+    dialog which is already handled!"`.
+  - `DialogManager` per-page registry. `add_handler(Fn(&Dialog) -> bool) ->
+    DialogHandlerId`, `remove_handler(id)`, `did_open(dialog)`.
+    `did_open` iterates handlers synchronously; each returns `true`
+    to claim. If nobody claims, detaches a task running
+    `Dialog::auto_close` — accept for `beforeunload`, dismiss
+    otherwise (matches `Dialog._close`). `remove_handler`
+    auto-closes orphaned open dialogs when the last handler drops,
+    matching Playwright's `removeDialogHandler`.
+  - `DialogManager::register_emitter_bridge(events)` — default
+    handler installed once per page in each backend's
+    `attach_listeners`. Checks `events.has_listener("dialog")` at
+    `did_open` time; when a `page.events().on("dialog", cb)` listener
+    is present, emits `PageEvent::Dialog(clone)` on the broadcast and
+    returns `true` synchronously. Preserves the existing broadcast
+    API while keeping the claim synchronous.
 
-New `options::StringOrRegex` enum. `RoleOptions.name` changes from
-`Option<String>` to `Option<StringOrRegex>`. Selector builders are
-rewritten to emit Playwright-native `internal:text=` /
-`internal:label=` / `internal:attr=[name=<escaped>]` /
-`internal:testid=[data-testid=<escaped>]` /
-`internal:role=<role>[...]` forms with ports of Playwright's
-`escapeForTextSelector` / `escapeForAttributeSelector` /
-`escapeRegexForSelector` (from
-`/tmp/playwright/packages/isomorphic/stringUtils.ts`). Literal
-strings encode as `"quoted"i`/`"quoted"s`; regexes encode as
-`/source/flags` with `>>` escaped.
+- **Backends** — all three wire the same pattern:
+  - CDP (`backend/cdp/mod.rs::spawn_dialog_listener`): on
+    `Page.javascriptDialogOpening`, builds a `Dialog` whose responder
+    sends `Page.handleJavaScriptDialog`, then calls
+    `dialog_manager.did_open(dialog)` synchronously.
+  - BiDi (`backend/bidi/page.rs`): same for
+    `browsingContext.userPromptOpened` + `browsingContext.handleUserPrompt`.
+  - WebKit: the Obj-C host's `WKUIDelegate` decides before the event
+    reaches Rust. Dialog is still dispatched so listeners observe
+    `type`/`message`; the responder returns a documented
+    `FerriError::Unsupported` naming the limitation. Rule-4 honest.
 
-The selector parser (`selectors.rs`) gained `InternalText`,
-`InternalLabel`, `InternalAttr`, `InternalTestId`, `InternalRole`
-engine variants. The injected-JS adapter (`injected/index.ts::executeSelector`)
-passes `internal:*` bodies through unchanged so Playwright's bundled
-selector engine (verbatim from §3.9) does the regex matching natively.
-Bundle rebuilt — 164.3 KB.
+- **Page API** — new `Page::wait_for_dialog(timeout_ms) -> Result<Dialog>`:
+  registers a one-shot handler with `DialogManager`, awaits a
+  `tokio::sync::oneshot`, removes the handler on resolve / timeout.
+  Typed `Timeout` / `TargetClosed` errors. NAPI + QuickJS route
+  `page.waitForEvent('dialog')` through it so the claim is synchronous
+  with the browser event — no broadcast round-trip.
 
-NAPI: `ts_args_type = "text: string | RegExp"` / `"testId: string | RegExp"`
-on every `getBy*`; `RoleOptions.name` typed `Option<Either<String,
-JsRegExpLike>>` with `ts_type = "string | RegExp"`. Reuses the
-`JsRegExpLike` prototype-chain trick — no `{ regexSource, regexFlags }`
-wire shape ever exposed.
+- **Removed the old API**: `DialogHandler`, `DialogAction`,
+  `PendingDialog`, `default_dialog_handler`, `Page::set_dialog_handler`,
+  `AnyPage::set_dialog_handler`. BDD steps in
+  `ferridriver-bdd/src/steps/dialog.rs` rewritten to use
+  `events().on("dialog", cb)`. `tests/page_api.rs::dialog_handling_tests`
+  rewritten.
 
-QuickJS: new `string_or_regex_from_js` helper reads real JS RegExp
-instances via `source`/`flags` prototype getters. `getByRole`
-gained its options bag (was missing — shipped alongside).
+- **NAPI** (`crates/ferridriver-node/src/dialog.rs`): new `#[napi]
+  class Dialog`. `page.waitForEvent('dialog')` returns it via
+  `Either5<Request, Response, WebSocket, Dialog, Value>` — generated
+  `.d.ts` matches Playwright.
 
-Rule-9 coverage:
-- Rust integration: 4 tests × 4 backends (`tests/backends_support/getby_regex.rs`).
-- NAPI: 9 tests × 2 CDP backends = 18 assertions (`test/getby-regex.test.ts`).
+- **QuickJS** (`crates/ferridriver-script/src/bindings/dialog.rs`):
+  new `DialogJs`. `page.waitForEvent('dialog')` instantiates it.
+
+### Rule-9 tests
+
+- `tests/backends_support/dialog.rs` — accept confirm, dismiss
+  confirm, prompt with text, double-accept rejection, auto-dismiss
+  without listener. All four backends green.
+- `crates/ferridriver-node/test/dialog.test.ts` — same five cases
+  × 2 CDP backends.
 
 ### Baseline after this commit (must stay green)
 
@@ -84,100 +112,60 @@ Rule-9 coverage:
 cargo clippy --workspace --all-targets -- -D warnings   # clean
 cargo test --workspace --lib                            # 122 core
 cd crates/ferridriver-node && bun run build:debug
-cd <repo root> && bun test                              # 799 bun (was 781)
+cd <repo root> && bun test                              # 809 bun (was 799)
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1   # 4/4 backends
 ```
 
-## Next session priority queue
+## Next priorities
 
-1. **`§2.9 Dialog as first-class handle` + `§2.11 FileChooser`** — bundle
-   them together. Both require the NAPI event-dispatch to pass live
-   class instances (not JSON snapshots) to `page.on('dialog', ...)` /
-   `page.on('filechooser', ...)`. That refactor is load-bearing for every
-   future event-handle API (Dialog, FileChooser, Download-as-handle
-   §2.10, Page.on('popup') §3.22) — best done once, correctly. Plan:
-   - Extend NAPI `page.on` / `page.once` / `page.waitForEvent` to build
-     threadsafe functions that pass `NapiDialog` / `NapiFileChooser`
-     instances directly. Likely uses `Function<'_, Unknown, ()>` + a
-     per-event builder callback that constructs the right class.
-   - Delete `page.set_dialog_handler` callback API; replace with
-     `PageEvent::Dialog(Dialog)` carrying a live handle.
-   - CDP / BiDi: route `Page.javascriptDialogOpening` /
-     `browsingContext.userPromptOpened` through the new Dialog handle.
-     CDP: add `Page.fileChooserOpened` listener + `Page.setInterceptFileChooserDialog`.
-   - WebKit: already has an IPC dialog path — thread through Dialog.
-     FileChooser on WebKit is a follow-up (WKWebView's
-     `runOpenPanelWithParameters:` hook needs a new IPC op).
-   - Per-event-name listener counting on `EventEmitter` (auto-dismiss
-     when no listener; `beforeunload` auto-accepts per Playwright).
-2. `§4.1 BrowserContextOptions` — 28-field option object at context
+1. **§2.11 FileChooser** — follows the same live-handle pattern as §2.9
+   Dialog. New `FileChooser { element, isMultiple, page, setFiles }`,
+   `Page::wait_for_file_chooser(timeout)`, per-backend listener on
+   `Page.fileChooserOpened` (CDP) / `browsingContext.fileDialogOpened`
+   (BiDi) / new IPC op on WebKit. Routes through existing `setInputFiles`
+   plumbing from §1.5.
+2. **§4.1 BrowserContextOptions** — 28-field option bag at context
    creation (viewport, userAgent, locale, timezone, geolocation,
-   permissions, etc.). Probably 2–3 sessions.
-3. `§3.17 Auto-waiting deadline parity` — replace fixed backoff with
+   permissions, …). Probably 2–3 sessions.
+3. **§3.17 Auto-waiting deadline parity** — replace fixed backoff with
    Playwright's exponential polling + deadline propagation.
-4. `§2.10 Download as handle` — once the event-handle refactor from
-   #1 is in place, this is mechanical.
+4. **§2.10 Download as handle** — event-handle pattern from §2.9
+   applies.
 
-See `docs/NEXT_SESSION.md` for the §2.9 + §2.11 block brief.
-
-## Ground rules reminder
-
-- Rule 1: core is source of truth; bindings are thin delegators.
-- Rule 2: all three layers update in the same commit.
-- Rule 4: every backend real — `FerriError::Unsupported` / honest
-  `None` only where the protocol genuinely can't.
-- Rule 6: read `/tmp/playwright/...` before coding each signature.
-- Rule 7: rebuild NAPI + diff generated `index.d.ts` against
-  `/tmp/playwright/packages/playwright/types/test.d.ts` after every
-  binding change.
-- Rule 9: per-backend integration test on every backend before
-  flipping `[x]`.
-- Rule 10: no `#[allow(clippy::*)]` escape hatches.
-- No task / phase / rule-number annotations in source comments or
-  filenames.
-- No emojis. No AI attribution in commit messages.
-
-## Carried-forward backend gaps (don't relitigate)
-
-From §1.4 / §3.1, still real protocol limits:
+## Carried-forward backend gaps (real protocol limits)
 
 - **BiDi**: response body unavailable for non-intercepted responses
-  (Firefox discards bytes; Playwright's BiDi backend hits the same).
-  Multi-`Set-Cookie` collapses. `request.postData()` null for
-  fetch-with-body.
+  (Firefox discards bytes; Playwright's own BiDi backend has the
+  same limit). Multi-`Set-Cookie` collapses. `request.postData()`
+  null for fetch-with-body.
 - **WebKit**: stock `WKWebView` exposes no public API for main-doc
-  Response observability (§3.1: `goto`/`reload`/`goBack`/`goForward`
-  all return `null` — documented, honest, not a shortcut), redirect
-  chain, response body bytes, browser-set request headers
-  (`User-Agent`), `Set-Cookie`, or WebSocket frame events. Also:
+  Response observability (§3.1: returns `null`, documented),
+  redirect chain, response body bytes, browser-set request headers,
+  `Set-Cookie`, WebSocket frame events. Dialog accept/dismiss is
+  decided by the host `WKUIDelegate` before the event reaches Rust
+  (§2.9: `Dialog.accept/dismiss` returns typed `Unsupported`).
   `page.evaluate` runs in utility context isolated from the
-  user-script's fetch wrap, so `page.route` cannot intercept fetches
-  initiated through `page.evaluate("fetch(...)")` — only main-world
-  fetches initiated from user-controlled JS.
+  user-script's fetch wrap.
 
 ## Known flakes
 
 - `context.setOffline toggles network` on WebKit bun occasionally
-  fails under the full suite but passes in isolation. Pre-existing
-  state leak, unrelated to recent work.
-- `[cdp-raw] Navigation returns Response > 404 case` occasionally
-  fails in the full bun suite (observed once during §3.12) — passes
-  in isolation. Likely a test-ordering artifact; if it recurs, stage
-  a `beforeEach` browser reset.
+  fails under the full suite but passes in isolation. Pre-existing.
 
 ## Key source locations
 
 | area | path |
 |---|---|
-| Navigation methods + `NavRequestSlot` | `crates/ferridriver/src/page.rs`, `frame.rs`, `network.rs` |
-| `StringOrRegex` + escape helpers | `crates/ferridriver/src/options.rs`, `locator.rs` (`build_text_like_selector`, `escape_*_for_selector`) |
-| Selector engine + `internal:*` parser | `crates/ferridriver/src/selectors.rs` |
-| Injected JS adapter | `crates/ferridriver/src/injected/index.ts::executeSelector` |
-| NAPI getBy + RoleOptions | `crates/ferridriver-node/src/{page,frame,locator}.rs`, `types.rs::{JsRegExpLike, RoleOptions, getby_input_to_rust}` |
-| QuickJS getBy helpers | `crates/ferridriver-script/src/bindings/page.rs::{string_or_regex_from_js, parse_text_options, parse_role_options}` |
-| §3.1 Rust integration | `crates/ferridriver-cli/tests/backends_support/navigation_response.rs` |
-| §3.12 Rust integration | `crates/ferridriver-cli/tests/backends_support/getby_regex.rs` |
-| §3.1 NAPI tests | `crates/ferridriver-node/test/navigation-response.test.ts` |
-| §3.12 NAPI tests | `crates/ferridriver-node/test/getby-regex.test.ts` |
+| Dialog handle + manager | `crates/ferridriver/src/dialog.rs` |
+| CDP dialog listener | `crates/ferridriver/src/backend/cdp/mod.rs::spawn_dialog_listener` |
+| BiDi dialog listener | `crates/ferridriver/src/backend/bidi/page.rs` (`browsingContext.userPromptOpened` arm) |
+| WebKit dialog drain | `crates/ferridriver/src/backend/webkit/mod.rs` (inside `attach_listeners`) |
+| Page::wait_for_dialog | `crates/ferridriver/src/page.rs` |
+| NAPI Dialog class | `crates/ferridriver-node/src/dialog.rs` |
+| QuickJS DialogJs class | `crates/ferridriver-script/src/bindings/dialog.rs` |
+| Rust integration tests | `crates/ferridriver-cli/tests/backends_support/dialog.rs` |
+| NAPI dialog tests | `crates/ferridriver-node/test/dialog.test.ts` |
+| Navigation `NavRequestSlot` | `crates/ferridriver/src/network.rs` |
+| `StringOrRegex` + escapes | `crates/ferridriver/src/options.rs`, `locator.rs` |
 | Rules + lessons | `CLAUDE.md` |

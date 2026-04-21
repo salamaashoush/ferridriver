@@ -363,37 +363,52 @@ impl Page {
   }
 
   /// Wait for a specific event. Playwright API:
-  /// `page.waitForEvent(event, options?)`. Returns a live class (`Request` /
-  /// `Response` / `WebSocket`) for lifecycle events, or a plain snapshot
-  /// object for simpler events — matches Playwright's `PageEventsMap`.
+  /// `page.waitForEvent(event, options?)`. Returns a live class
+  /// (`Request` / `Response` / `WebSocket` / `Dialog`) for lifecycle
+  /// events, or a plain snapshot object for simpler events — matches
+  /// Playwright's `PageEventsMap`.
   #[napi(
     ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
-    ts_return_type = "Promise<Request | Response | WebSocket | Record<string, any>>"
+    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | Record<string, any>>"
   )]
   pub async fn wait_for_event(
     &self,
     event: String,
     timeout_ms: Option<f64>,
   ) -> Result<
-    napi::bindgen_prelude::Either4<
+    napi::bindgen_prelude::Either5<
       crate::network::Request,
       crate::network::Response,
       crate::network::WebSocket,
+      crate::dialog::Dialog,
       serde_json::Value,
     >,
   > {
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
+
+    // `dialog` bypasses the broadcast — it registers a one-shot
+    // handler on the per-page `DialogManager` so the claim is
+    // synchronous at `did_open` time (mirrors Playwright's
+    // `addDialogHandler` flow verbatim).
+    if event.eq_ignore_ascii_case("dialog") {
+      let dialog = self.inner.wait_for_dialog(timeout).await.into_napi()?;
+      return Ok(napi::bindgen_prelude::Either5::D(crate::dialog::Dialog::from_core(
+        dialog,
+      )));
+    }
+
     let ev = self.inner.events().wait_for_event(&event, timeout).await.into_napi()?;
     use ferridriver::events::PageEvent;
     Ok(match ev {
       PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => {
-        napi::bindgen_prelude::Either4::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
+        napi::bindgen_prelude::Either5::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
       },
       PageEvent::Response(r) => {
-        napi::bindgen_prelude::Either4::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
+        napi::bindgen_prelude::Either5::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
       },
-      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either4::C(crate::network::WebSocket::from_core(ws)),
-      other => napi::bindgen_prelude::Either4::D(page_event_to_value(&other)),
+      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either5::C(crate::network::WebSocket::from_core(ws)),
+      PageEvent::Dialog(d) => napi::bindgen_prelude::Either5::D(crate::dialog::Dialog::from_core(d)),
+      other => napi::bindgen_prelude::Either5::E(page_event_to_value(&other)),
     })
   }
 
@@ -1526,7 +1541,11 @@ fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value>
     | ("requestfinished", PageEvent::RequestFinished(r))
     | ("requestfailed", PageEvent::RequestFailed(r)) => Some(request_snapshot(r)),
     ("websocket", PageEvent::WebSocket(ws)) => Some(serde_json::json!({"url": ws.url(), "isClosed": ws.is_closed()})),
-    ("dialog", PageEvent::Dialog(d)) => serde_json::to_value(d).ok(),
+    ("dialog", PageEvent::Dialog(d)) => Some(serde_json::json!({
+      "type": d.dialog_type().as_str(),
+      "message": d.message(),
+      "defaultValue": d.default_value(),
+    })),
     ("frameattached", PageEvent::FrameAttached(f)) | ("framenavigated", PageEvent::FrameNavigated(f)) => {
       serde_json::to_value(f).ok()
     },
@@ -1547,7 +1566,11 @@ fn page_event_to_value(event: &PageEvent) -> serde_json::Value {
     PageEvent::Response(r) => response_snapshot(r),
     PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => request_snapshot(r),
     PageEvent::WebSocket(ws) => serde_json::json!({"url": ws.url(), "isClosed": ws.is_closed()}),
-    PageEvent::Dialog(d) => serde_json::to_value(d).unwrap_or_default(),
+    PageEvent::Dialog(d) => serde_json::json!({
+      "type": d.dialog_type().as_str(),
+      "message": d.message(),
+      "defaultValue": d.default_value(),
+    }),
     PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
     PageEvent::FrameDetached { frame_id } => serde_json::json!({"frameId": frame_id}),
     PageEvent::Download(d) => serde_json::to_value(d).unwrap_or_default(),
