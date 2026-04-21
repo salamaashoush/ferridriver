@@ -108,11 +108,17 @@ Update `PLAYWRIGHT_COMPAT.md` §2.10 to `[x]` and rewrite
 
 - **`PageBackref` is shared infra now** (`backend/mod.rs`). `Download`
   can reuse it as-is — no need for a separate helper.
-- **QuickJS busy-wait Promise trick hangs forever on async
-  `document.title` updates**. Page-side change handlers should set
-  the title synchronously so the `run_script` observer doesn't need
-  to sleep. (This bit §2.11's FilePayload test — we now split async
-  vs sync forms between NAPI and QuickJS.)
+- **QuickJS has no `setTimeout`** — it's a pure ES2020 engine and
+  `setTimeout` is a Web API. The host-side busy-wait idiom
+  `new Promise(r => { while(Date.now()<d) {} })` hangs forever (`r`
+  never called). When a `run_script` test needs to observe an async
+  DOM mutation, poll from the **page context** via
+  `await page.evaluate(async (arg) => { ... await new Promise(r => setTimeout(r, 10)); ... }, arg)`
+  — the browser has a real `setTimeout`. Pass a function (not a
+  string) so `extract_page_function` flags it `is_fn=true` and the
+  utility-script wrapper invokes it with the arg. See
+  `WAIT_FOR_TITLE_CALL` in `tests/backends_support/file_chooser.rs`
+  for the canonical pattern.
 - **`Page.setInterceptFileChooserDialog` must be sent AFTER
   subscribing to events**. Same principle likely applies to any
   future `Page.setDownloadBehavior`-adjacent command: subscribe first,

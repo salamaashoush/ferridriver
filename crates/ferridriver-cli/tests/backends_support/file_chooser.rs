@@ -63,14 +63,10 @@ i.addEventListener('change', () => {\
 });\
 </script>";
 
-/// Variant that reports the uploaded file's `name` and `size` back
-/// via `document.title` — used to prove a `FilePayload`'s bytes
-/// reached the page's view of the file. Synchronous on purpose: the
-/// QuickJS test runtime has no real `setTimeout`, and the sync
-/// busy-wait polling pattern used in other backends tests can't
-/// observe a title set by an async handler. The NAPI parity test
-/// (`crates/ferridriver-node/test/filechooser.test.ts`) additionally
-/// verifies the payload's decoded text via `await f.text()`.
+/// Variant that reports the uploaded file's `name`, `size`, and the
+/// decoded text back via `document.title` — proves a `FilePayload`'s
+/// bytes reached the page's view of the file end-to-end, not just
+/// that the input was populated.
 const PAYLOAD_FORM_HTML: &str = "<form id=\"f\">\
 <input id=\"i\" type=\"file\" name=\"f\" />\
 <button id=\"b\" type=\"button\">pick</button>\
@@ -79,11 +75,36 @@ const PAYLOAD_FORM_HTML: &str = "<form id=\"f\">\
 const i = document.getElementById('i');\
 const b = document.getElementById('b');\
 b.addEventListener('click', () => i.click());\
-i.addEventListener('change', () => {\
+i.addEventListener('change', async () => {\
   const f = i.files[0];\
-  document.title = `name=${f.name};size=${f.size}`;\
+  const text = await f.text();\
+  document.title = `name=${f.name};size=${f.size};text=${text}`;\
 });\
 </script>";
+
+/// JS fragment that `page.evaluate`s a page-side poll for
+/// `document.title` starting with the caller-supplied prefix. Lives
+/// in the PAGE context so it uses the browser's real `setTimeout` —
+/// QuickJS's host-side `setTimeout` is undefined (QuickJS is a pure
+/// ES2020 engine; `setTimeout` is a Web API, not in the ECMAScript
+/// spec), and the host-side busy-wait idiom
+/// `new Promise(r => { while(Date.now()<d) {} })` never resolves
+/// (`r` is never called). Passing the function directly (not a
+/// string) lets the QuickJS binding's `extract_page_function` flag it
+/// as `is_fn=true`, which makes the utility-script wrapper invoke it
+/// with the prefix argument.
+///
+/// Bounded at ~2s (200 × 10ms) so genuine failures surface fast.
+const WAIT_FOR_TITLE_CALL: &str = r"
+    await page.evaluate(async (prefix) => {
+      for (let i = 0; i < 200; i++) {
+        const t = document.title;
+        if (t && t.startsWith(prefix)) return t;
+        await new Promise(r => setTimeout(r, 10));
+      }
+      return document.title;
+    }, PREFIX_JSON)
+";
 
 /// Make a unique temp file whose absolute path we can feed to
 /// `setFiles(string)`. Cleaned up on test-process exit.
@@ -143,21 +164,19 @@ pub fn test_file_chooser_single_string_path(c: &mut McpClient) {
   let html = SINGLE_FORM_HTML.to_string();
   c.nav_url(&format!("data:text/html,{}", urlencoding(&html)));
   let path = tmp_file("a.txt", "alpha");
-  let script = r##"
+  let script = format!(
+    r##"
     const p = page.waitForEvent("filechooser", 10000);
     await page.click("#b");
     const chooser = await p;
     const isMult = chooser.isMultiple();
-    await chooser.setFiles(JSON_STRING);
-    // Poll for the change handler to fire.
-    for (let i = 0; i < 200; i++) {
-      const t = await page.title();
-      if (t && t.startsWith("count=")) return { isMult, title: t };
-      await new Promise(r => { let d = Date.now() + 10; while (Date.now() < d) {} });
-    }
-    return { isMult, title: await page.title() };
-  "##
-    .replace("JSON_STRING", &serde_json::to_string(&path).unwrap());
+    await chooser.setFiles({path});
+    const title = {wait};
+    return {{ isMult, title }};
+  "##,
+    path = serde_json::to_string(&path).unwrap(),
+    wait = WAIT_FOR_TITLE_CALL.replace("PREFIX_JSON", "\"count=\"").trim(),
+  );
   let v = c.script_value(&script);
   assert_eq!(
     v["isMult"].as_bool(),
@@ -181,21 +200,20 @@ pub fn test_file_chooser_multiple_string_array(c: &mut McpClient) {
   c.nav_url(&format!("data:text/html,{}", urlencoding(&html)));
   let p1 = tmp_file("a-multi.txt", "alpha");
   let p2 = tmp_file("b-multi.txt", "beta");
-  let script = r##"
+  let script = format!(
+    r##"
     const p = page.waitForEvent("filechooser", 10000);
     await page.click("#b");
     const chooser = await p;
     const isMult = chooser.isMultiple();
-    await chooser.setFiles([P1, P2]);
-    for (let i = 0; i < 200; i++) {
-      const t = await page.title();
-      if (t && t.startsWith("count=")) return { isMult, title: t };
-      await new Promise(r => { let d = Date.now() + 10; while (Date.now() < d) {} });
-    }
-    return { isMult, title: await page.title() };
-  "##
-    .replace("P1", &serde_json::to_string(&p1).unwrap())
-    .replace("P2", &serde_json::to_string(&p2).unwrap());
+    await chooser.setFiles([{p1}, {p2}]);
+    const title = {wait};
+    return {{ isMult, title }};
+  "##,
+    p1 = serde_json::to_string(&p1).unwrap(),
+    p2 = serde_json::to_string(&p2).unwrap(),
+    wait = WAIT_FOR_TITLE_CALL.replace("PREFIX_JSON", "\"count=\"").trim(),
+  );
   let v = c.script_value(&script);
   assert_eq!(
     v["isMult"].as_bool(),
@@ -210,31 +228,42 @@ pub fn test_file_chooser_multiple_string_array(c: &mut McpClient) {
 }
 
 /// `setFiles(FilePayload)` uploads an in-memory payload without
-/// touching the caller's disk. The page sees the declared `name` +
-/// `size` (proving the payload bytes reached the browser).
+/// touching the caller's disk. The page reads the uploaded file via
+/// `await f.text()` and reports `name`, `size`, and the decoded
+/// `text` — proving the payload bytes round-tripped byte-for-byte,
+/// not just that the input was populated.
 pub fn test_file_chooser_file_payload_single(c: &mut McpClient) {
   if c.backend == "webkit" {
     return;
   }
   let html = PAYLOAD_FORM_HTML.to_string();
   c.nav_url(&format!("data:text/html,{}", urlencoding(&html)));
-  let script = r##"
+  let script = format!(
+    r##"
     const p = page.waitForEvent("filechooser", 10000);
     await page.click("#b");
     const chooser = await p;
     const bytes = [104, 101, 108, 108, 111]; // 'hello'
-    await chooser.setFiles({ name: "greeting.txt", mimeType: "text/plain", buffer: bytes });
-    // Change handler is synchronous (PAYLOAD_FORM_HTML keeps it
-    // sync), so the title is set by the time `setFiles` resolves.
-    return { title: await page.title() };
-  "##;
-  let v = c.script_value(script);
+    await chooser.setFiles({{ name: "greeting.txt", mimeType: "text/plain", buffer: bytes }});
+    // The page-side change handler awaits `f.text()`; poll for the
+    // title from the page context so the browser's real `setTimeout`
+    // is used (see WAIT_FOR_TITLE_CALL docstring).
+    const title = {wait};
+    return {{ title }};
+  "##,
+    wait = WAIT_FOR_TITLE_CALL.replace("PREFIX_JSON", "\"name=\"").trim(),
+  );
+  let v = c.script_value(&script);
   let title = v["title"].as_str().unwrap_or("");
   assert!(
     title.contains("name=greeting.txt"),
     "page saw the declared FilePayload name: {v}"
   );
   assert!(title.contains("size=5"), "page saw the payload byte length: {v}");
+  assert!(
+    title.contains("text=hello"),
+    "page decoded the payload bytes back to the original string via `await f.text()`: {v}"
+  );
 }
 
 /// No listener attached — the CDP intercept is enabled at
