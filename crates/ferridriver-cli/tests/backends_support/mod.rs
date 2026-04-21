@@ -11,6 +11,7 @@
 pub mod action_options;
 pub mod client;
 pub mod dialog;
+pub mod file_chooser;
 pub mod getby_regex;
 pub mod handle_surface;
 pub mod navigation_response;

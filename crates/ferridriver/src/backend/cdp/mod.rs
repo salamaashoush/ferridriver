@@ -314,6 +314,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
         injected_script: Arc::new(InjectedScriptManager::new()),
         nav_request_slot: crate::network::NavRequestSlot::new(),
         dialog_manager: crate::dialog::DialogManager::new(),
+        file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+        page_backref: crate::backend::PageBackref::new(),
       }));
     }
     Ok(pages)
@@ -434,6 +436,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
       injected_script: Arc::new(InjectedScriptManager::new()),
       nav_request_slot: crate::network::NavRequestSlot::new(),
       dialog_manager: crate::dialog::DialogManager::new(),
+      file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+      page_backref: crate::backend::PageBackref::new(),
     };
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
@@ -727,6 +731,27 @@ pub struct CdpPage<T: CdpTransport> {
   /// for `beforeunload`, dismiss otherwise) — mirrors
   /// `/tmp/playwright/packages/playwright-core/src/server/dialog.ts::DialogManager`.
   pub dialog_manager: crate::dialog::DialogManager,
+  /// Per-page file-chooser handler registry. Backend file-chooser
+  /// listener resolves the triggering `<input>` into an
+  /// [`crate::element_handle::ElementHandle`] on
+  /// `Page.fileChooserOpened` and synchronously calls
+  /// [`crate::file_chooser::FileChooserManager::did_open`]. If no
+  /// handler claims, the element handle is disposed — mirrors
+  /// `/tmp/playwright/packages/playwright-core/src/server/page.ts::_onFileChooserOpened`.
+  pub file_chooser_manager: crate::file_chooser::FileChooserManager,
+  /// Weak back-reference to the outer [`crate::page::Page`] that wraps
+  /// this backend page. Populated by [`crate::page::Page::new`] /
+  /// `Page::with_context` every time a new `Arc<Page>` is constructed;
+  /// the file-chooser listener reads it to turn a CDP `backendNodeId`
+  /// into an [`crate::element_handle::ElementHandle`] (which requires
+  /// an `Arc<Page>` for the inner `JSHandle`). The outer `Mutex`
+  /// allows successive `Page::new` calls on the same backend page to
+  /// overwrite the slot — callers like MCP tool handlers wrap the
+  /// same backend page fresh on every invocation, so a one-shot
+  /// `OnceLock` would lock in a stale weak whose target dies as soon
+  /// as the first tool call returns. Stored as `Weak` so the listener
+  /// task never keeps the outer page alive after the user drops it.
+  pub page_backref: crate::backend::PageBackref,
 }
 
 pub struct InjectedScriptManager {
@@ -795,6 +820,8 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       injected_script: self.injected_script.clone(),
       nav_request_slot: self.nav_request_slot.clone(),
       dialog_manager: self.dialog_manager.clone(),
+      file_chooser_manager: self.file_chooser_manager.clone(),
+      page_backref: self.page_backref.clone(),
     }
   }
 }
@@ -2597,6 +2624,10 @@ impl<T: CdpWrap> CdpPage<T> {
     // of broadcast listeners. Handler id is discarded: we never
     // unregister until the page is dropped.
     let _ = self.dialog_manager.register_emitter_bridge(self.events.clone());
+    // Same pattern for file-chooser: broadcast `filechooser`
+    // listeners see live handles via the bridge handler; one-shot
+    // `page.wait_for_file_chooser` callers register directly.
+    let _ = self.file_chooser_manager.register_emitter_bridge(self.events.clone());
 
     Self::spawn_dialog_listener(
       self.transport.clone(),
@@ -2604,6 +2635,12 @@ impl<T: CdpWrap> CdpPage<T> {
       dialog_log,
       emitter3,
       self.dialog_manager.clone(),
+    );
+    Self::spawn_file_chooser_listener(
+      self.transport.clone(),
+      self.session_id.clone(),
+      self.file_chooser_manager.clone(),
+      self.page_backref.clone(),
     );
     Self::spawn_frame_context_tracker(
       self.transport.clone(),
@@ -2836,6 +2873,107 @@ impl<T: CdpWrap> CdpPage<T> {
           dialog_type: dialog_type_str,
           message,
           action: "dispatched".to_string(),
+        });
+      }
+    });
+  }
+
+  /// Listen for `Page.fileChooserOpened` and dispatch a live
+  /// [`crate::file_chooser::FileChooser`] through the page's
+  /// [`crate::file_chooser::FileChooserManager`].
+  ///
+  /// Enables `Page.setInterceptFileChooserDialog({ enabled: true })`
+  /// at listener-spawn time so the native file picker is suppressed —
+  /// mirrors Playwright's `_updateFileChooserInterception` flow. We
+  /// intercept unconditionally because the synchronous claim path
+  /// in [`crate::file_chooser::FileChooserManager::did_open`] makes
+  /// toggling interception per-listener-count (the way Playwright does
+  /// it) racy with the user's listener registration.
+  ///
+  /// The event carries `backendNodeId` + `mode:'selectSingle'|'selectMultiple'`.
+  /// Resolution to an [`crate::element_handle::ElementHandle`] goes
+  /// through `DOM.resolveNode` + [`crate::page::Page`] via the
+  /// `page_backref` weak — the listener task runs before the outer
+  /// `Arc<Page>` exists, so the backref is checked per-event and
+  /// silently drops events that arrive before the backref is
+  /// populated (matches the Playwright server's "frame/context may go
+  /// away" guard).
+  fn spawn_file_chooser_listener(
+    transport: Arc<T>,
+    session_id: Option<Arc<str>>,
+    file_chooser_manager: crate::file_chooser::FileChooserManager,
+    page_backref: crate::backend::PageBackref,
+  ) {
+    tokio::spawn(async move {
+      // Subscribe FIRST so we don't race: `subscribe_events` only
+      // delivers events published AFTER subscription, and a fast
+      // test can trigger the picker before our enable-intercept
+      // reply lands. `transport.subscribe_events()` is synchronous
+      // and cheap.
+      let mut rx = transport.subscribe_events();
+
+      // Enable the intercept. Errors are swallowed — the target may
+      // have closed before we got here, and the command is
+      // best-effort (Playwright also `.catch(() => {})`s it).
+      let _ = transport
+        .send_command(
+          session_id.as_deref(),
+          "Page.setInterceptFileChooserDialog",
+          serde_json::json!({ "enabled": true }),
+        )
+        .await;
+
+      while let Ok(event) = rx.recv().await {
+        if let Some(ref expected_sid) = session_id {
+          let event_sid = event.get("sessionId").and_then(|v| v.as_str());
+          if event_sid != Some(&**expected_sid) {
+            continue;
+          }
+        }
+        if event.get("method").and_then(|m| m.as_str()) != Some("Page.fileChooserOpened") {
+          continue;
+        }
+        let Some(params) = event.get("params") else {
+          continue;
+        };
+        let Some(backend_node_id) = params.get("backendNodeId").and_then(serde_json::Value::as_i64) else {
+          continue;
+        };
+        let is_multiple = params
+          .get("mode")
+          .and_then(|v| v.as_str())
+          .is_some_and(|m| m == "selectMultiple");
+
+        // Upgrade the Weak back-reference; the outer Page may not
+        // exist yet (listener spawned before `Page::new` populated
+        // the backref) or may have been dropped. Either way, no
+        // valid target — skip.
+        let Some(page) = page_backref.upgrade() else {
+          continue;
+        };
+
+        // Resolve backendNodeId -> AnyElement -> ElementHandle. This
+        // is async, so we spawn the per-event work to keep the
+        // outer subscription loop draining — rapid file-picker
+        // triggers shouldn't queue up behind a slow DOM resolve.
+        let page_clone = Arc::clone(&page);
+        let manager_clone = file_chooser_manager.clone();
+        tokio::spawn(async move {
+          let Ok(element) = page_clone
+            .inner()
+            .resolve_backend_node(backend_node_id, "filechooser")
+            .await
+          else {
+            // Frame/context may have gone away mid-resolve; Playwright
+            // has the same guard and silently returns.
+            return;
+          };
+          let Ok(handle) = crate::element_handle::ElementHandle::from_any_element(page_clone.clone(), element).await
+          else {
+            return;
+          };
+          let chooser = crate::file_chooser::FileChooser::new(handle, is_multiple);
+          manager_clone.did_open(&chooser);
         });
       }
     });

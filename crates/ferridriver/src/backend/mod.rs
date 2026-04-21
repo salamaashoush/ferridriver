@@ -28,6 +28,48 @@ use crate::state::ConsoleMsg;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
+/// Mutable weak back-reference to the outer `Arc<Page>`. Every backend
+/// page struct carries one of these so async event listeners
+/// (file-chooser, future per-frame probes) can upgrade the weak on
+/// demand and build `ElementHandle`s without threading the page
+/// through the backend.
+///
+/// Why `Mutex<Weak<Page>>` and not `OnceLock<Weak<Page>>`: callers
+/// like the MCP server construct a fresh `Arc<Page>` on every tool
+/// invocation and drop it when the tool returns. A one-shot slot
+/// would lock in the first `Arc<Page>`'s weak — whose target dies as
+/// soon as that tool call completes, leaving every subsequent event
+/// unable to resolve. The mutex lets successive `Page::new` calls
+/// overwrite the slot with a weak that tracks the currently-live
+/// outer page.
+#[derive(Clone, Default)]
+pub struct PageBackref {
+  inner: Arc<std::sync::Mutex<std::sync::Weak<crate::page::Page>>>,
+}
+
+impl PageBackref {
+  #[must_use]
+  pub fn new() -> Self {
+    Self::default()
+  }
+
+  /// Overwrite the stored weak reference. Called by `Page::new` /
+  /// `Page::with_context` on every construction.
+  pub fn set(&self, weak: std::sync::Weak<crate::page::Page>) {
+    if let Ok(mut guard) = self.inner.lock() {
+      *guard = weak;
+    }
+  }
+
+  /// Upgrade to an `Arc<Page>` if the outer page is still alive.
+  /// Backend listeners call this per event and silently skip events
+  /// that arrive when no outer page wraps this backend page.
+  #[must_use]
+  pub fn upgrade(&self) -> Option<Arc<crate::page::Page>> {
+    self.inner.lock().ok()?.upgrade()
+  }
+}
+
 // ─── Backend-agnostic types ─────────────────────────────────────────────────
 
 /// Frame metadata (backend-agnostic).
@@ -658,6 +700,39 @@ impl AnyPage {
       AnyPage::WebKit(p) => &p.dialog_manager,
       AnyPage::Bidi(p) => &p.dialog_manager,
     }
+  }
+
+  /// Per-page file-chooser handler registry. Mirrors Playwright's
+  /// `FileChooser` dispatch path. Register with
+  /// [`crate::file_chooser::FileChooserManager::add_handler`] to
+  /// receive live [`crate::file_chooser::FileChooser`] handles when
+  /// an `<input type=file>` click (or `showPicker()`) fires.
+  #[must_use]
+  pub fn file_chooser_manager(&self) -> &crate::file_chooser::FileChooserManager {
+    match self {
+      AnyPage::CdpPipe(p) => &p.file_chooser_manager,
+      AnyPage::CdpRaw(p) => &p.file_chooser_manager,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(p) => &p.file_chooser_manager,
+      AnyPage::Bidi(p) => &p.file_chooser_manager,
+    }
+  }
+
+  /// Populate the weak back-reference to the outer `Arc<Page>`.
+  /// Called by [`crate::page::Page::new`] / `Page::with_context`
+  /// every time a new `Arc<Page>` is constructed — callers like the
+  /// MCP server wrap the same backend page fresh on every tool
+  /// invocation, so successive calls must be able to overwrite the
+  /// slot. See [`PageBackref`] for the rationale.
+  pub fn set_page_backref(&self, weak: std::sync::Weak<crate::page::Page>) {
+    let slot = match self {
+      AnyPage::CdpPipe(p) => &p.page_backref,
+      AnyPage::CdpRaw(p) => &p.page_backref,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(p) => &p.page_backref,
+      AnyPage::Bidi(p) => &p.page_backref,
+    };
+    slot.set(weak);
   }
 
   /// The backend kind this page lives on. Used by action paths that

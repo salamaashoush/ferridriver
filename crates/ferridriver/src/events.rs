@@ -10,6 +10,7 @@
 use crate::backend::FrameInfo;
 use crate::context::ConsoleMsg;
 use crate::dialog::Dialog;
+use crate::file_chooser::FileChooser;
 use crate::network::{Request, Response, WebSocket};
 use std::sync::Arc;
 use tokio::sync::broadcast;
@@ -39,6 +40,14 @@ pub enum PageEvent {
   /// listener is registered when the dialog opens, the backend
   /// auto-closes it (accept for `beforeunload`, dismiss otherwise).
   Dialog(Dialog),
+  /// File chooser opened on the page — intercepted via CDP
+  /// `Page.fileChooserOpened` / `BiDi` `input.fileDialogOpened`.
+  /// Carries a live [`FileChooser`] whose `setFiles(...)` uploads via
+  /// the captured `<input type=file>`. If no listener is registered,
+  /// the backend disposes the underlying element handle (matches
+  /// Playwright's `server/page.ts::_onFileChooserOpened` no-listener
+  /// branch).
+  FileChooser(FileChooser),
   /// Frame attached to the page.
   FrameAttached(FrameInfo),
   /// Frame detached from the page.
@@ -95,6 +104,7 @@ fn event_name_matches(name: &str, event: &PageEvent) -> bool {
       | ("requestfailed", PageEvent::RequestFailed(_))
       | ("websocket", PageEvent::WebSocket(_))
       | ("dialog", PageEvent::Dialog(_))
+      | ("filechooser", PageEvent::FileChooser(_))
       | ("frameattached", PageEvent::FrameAttached(_))
       | ("framedetached", PageEvent::FrameDetached { .. })
       | ("framenavigated", PageEvent::FrameNavigated(_))

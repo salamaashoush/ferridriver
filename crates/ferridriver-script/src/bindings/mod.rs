@@ -24,6 +24,7 @@ pub mod context;
 pub mod convert;
 pub mod dialog;
 pub mod element_handle;
+pub mod file_chooser;
 pub mod frame;
 pub mod js_handle;
 pub mod keyboard;
@@ -37,6 +38,7 @@ pub use artifacts::ArtifactsJs;
 pub use context::BrowserContextJs;
 pub use dialog::DialogJs;
 pub use element_handle::ElementHandleJs;
+pub use file_chooser::FileChooserJs;
 pub use frame::FrameJs;
 pub use js_handle::JSHandleJs;
 pub use keyboard::KeyboardJs;
@@ -69,6 +71,7 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<RouteJs>::define(&g)?;
   Class::<WebSocketJs>::define(&g)?;
   Class::<DialogJs>::define(&g)?;
+  Class::<FileChooserJs>::define(&g)?;
   Ok(())
 }
 

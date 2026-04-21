@@ -1117,6 +1117,19 @@ impl PageJs {
       let instance = Class::instance(ctx.clone(), wrapper)?;
       return rquickjs::IntoJs::into_js(instance, &ctx);
     }
+    // Same pattern for `filechooser` — one-shot handler on the
+    // per-page `FileChooserManager` so the claim is synchronous with
+    // the backend event arrival.
+    if event_lc == "filechooser" {
+      let chooser = self
+        .inner
+        .wait_for_file_chooser(timeout)
+        .await
+        .map_err(|e| rquickjs::Error::new_from_js_message("Page.waitForEvent", "Error", e.to_string()))?;
+      let wrapper = crate::bindings::file_chooser::FileChooserJs::new(chooser);
+      let instance = Class::instance(ctx.clone(), wrapper)?;
+      return rquickjs::IntoJs::into_js(instance, &ctx);
+    }
 
     let name = event_lc.clone();
     let ev = self
@@ -1148,6 +1161,11 @@ impl PageJs {
         // listener is also present — fall through to deliver the
         // live handle.
         let wrapper = crate::bindings::dialog::DialogJs::new(dialog);
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
+      ferridriver::events::PageEvent::FileChooser(chooser) => {
+        let wrapper = crate::bindings::file_chooser::FileChooserJs::new(chooser);
         let instance = Class::instance(ctx.clone(), wrapper)?;
         rquickjs::IntoJs::into_js(instance, &ctx)
       },
@@ -1358,6 +1376,7 @@ fn match_event_name(name: &str, ev: &ferridriver::events::PageEvent) -> bool {
       | ("requestfailed", PageEvent::RequestFailed(_))
       | ("websocket", PageEvent::WebSocket(_))
       | ("dialog", PageEvent::Dialog(_))
+      | ("filechooser", PageEvent::FileChooser(_))
       | ("frameattached", PageEvent::FrameAttached(_))
       | ("framedetached", PageEvent::FrameDetached { .. })
       | ("framenavigated", PageEvent::FrameNavigated(_))
@@ -1377,6 +1396,9 @@ fn page_event_json(ev: &ferridriver::events::PageEvent) -> serde_json::Value {
       "type": d.dialog_type().as_str(),
       "message": d.message(),
       "defaultValue": d.default_value(),
+    }),
+    PageEvent::FileChooser(fc) => serde_json::json!({
+      "isMultiple": fc.is_multiple(),
     }),
     PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
     PageEvent::FrameDetached { frame_id } => serde_json::json!({ "frameId": frame_id }),

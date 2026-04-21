@@ -46,6 +46,15 @@ pub struct BidiPage {
   /// Per-page dialog handler registry. See
   /// `crates/ferridriver/src/dialog.rs::DialogManager`.
   pub dialog_manager: crate::dialog::DialogManager,
+  /// Per-page file-chooser handler registry. See
+  /// `crates/ferridriver/src/file_chooser.rs::FileChooserManager`.
+  /// Backend listener dispatches on `input.fileDialogOpened` (the
+  /// `BiDi` equivalent of CDP's `Page.fileChooserOpened`).
+  pub file_chooser_manager: crate::file_chooser::FileChooserManager,
+  /// Weak back-reference to the outer [`crate::page::Page`]. Same
+  /// purpose as the CDP page's field — the file-chooser listener
+  /// upgrades it to build the `ElementHandle`.
+  pub page_backref: crate::backend::PageBackref,
 }
 
 pub struct InjectedScriptManager {
@@ -100,6 +109,8 @@ impl BidiPage {
       injected_script: Arc::new(InjectedScriptManager::new()),
       nav_request_slot: crate::network::NavRequestSlot::new(),
       dialog_manager: crate::dialog::DialogManager::new(),
+      file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+      page_backref: crate::backend::PageBackref::new(),
     }
   }
 
@@ -1291,11 +1302,17 @@ impl BidiPage {
     // Register the emitter-bridge so `page.events().on("dialog", cb)`
     // continues to deliver live `Dialog` handles via the broadcast.
     let _ = self.dialog_manager.register_emitter_bridge(self.events.clone());
+    // Same bridge for `filechooser`: broadcast listeners observe live
+    // handles without needing the one-shot
+    // `page.wait_for_file_chooser` flow.
+    let _ = self.file_chooser_manager.register_emitter_bridge(self.events.clone());
 
     let mut rx = self.session.transport.subscribe_events();
     let ctx = self.context_id.clone();
     let session = self.session.clone();
     let dialog_manager = self.dialog_manager.clone();
+    let file_chooser_manager = self.file_chooser_manager.clone();
+    let page_backref = self.page_backref.clone();
     let closed = self.closed.clone();
     let emitter = self.events.clone();
     let injected_script = self.injected_script.clone();
@@ -1411,6 +1428,48 @@ impl BidiPage {
           "browsingContext.contextDestroyed" => {
             closed.store(true, Ordering::Relaxed);
             emitter.emit(PageEvent::Close);
+          },
+          "input.fileDialogOpened" => {
+            // BiDi event shape:
+            // { "context": "<frameId>", "element": { "sharedId": "..." }, "multiple": bool }
+            // Per `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPage.ts::_onFileDialogOpened`.
+            let shared_id = event
+              .params
+              .get("element")
+              .and_then(|e| e.get("sharedId"))
+              .and_then(|v| v.as_str())
+              .map(std::string::ToString::to_string);
+            let is_multiple = event
+              .params
+              .get("multiple")
+              .and_then(serde_json::Value::as_bool)
+              .unwrap_or(false);
+            let Some(shared_id) = shared_id else {
+              continue;
+            };
+            // Resolve the element -> ElementHandle off the hot
+            // subscription loop. Same rationale as the CDP listener:
+            // we don't want rapid file-picker triggers queued
+            // behind a slow DOM round-trip.
+            let manager_clone = file_chooser_manager.clone();
+            let backref_clone = page_backref.clone();
+            let ctx_clone = ctx.clone();
+            let session_clone = session.clone();
+            tokio::spawn(async move {
+              let Some(page) = backref_clone.upgrade() else {
+                return;
+              };
+              // Build a BidiElement directly from the shared id so
+              // we don't need a page-scoped selector round-trip.
+              let element =
+                crate::backend::AnyElement::Bidi(super::BidiElement::new(session_clone, ctx_clone, shared_id));
+              let Ok(handle) = crate::element_handle::ElementHandle::from_any_element(page.clone(), element).await
+              else {
+                return;
+              };
+              let chooser = crate::file_chooser::FileChooser::new(handle, is_multiple);
+              manager_clone.did_open(&chooser);
+            });
           },
           _ => {},
         }

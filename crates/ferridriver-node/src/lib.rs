@@ -59,6 +59,7 @@ mod context;
 mod dialog;
 mod element_handle;
 mod error;
+mod file_chooser;
 mod frame;
 #[allow(dead_code)]
 mod install;
