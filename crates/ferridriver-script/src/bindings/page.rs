@@ -263,16 +263,22 @@ impl PageJs {
     ctx: rquickjs::Ctx<'js>,
     url: String,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
+  ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
     let opts = parse_goto_options(&ctx, options)?;
-    self.inner.goto(&url, opts).await.into_js()
+    let resp = self.inner.goto(&url, opts).await.into_js()?;
+    Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
   }
 
   /// Reload the current page. Accepts the same option bag as `goto`.
   #[qjs(rename = "reload")]
-  pub async fn reload<'js>(&self, ctx: rquickjs::Ctx<'js>, options: Opt<rquickjs::Value<'js>>) -> rquickjs::Result<()> {
+  pub async fn reload<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
     let opts = parse_goto_options(&ctx, options)?;
-    self.inner.reload(opts).await.into_js()
+    let resp = self.inner.reload(opts).await.into_js()?;
+    Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
   }
 
   /// Navigate back in history. Accepts the same option bag as `goto`.
@@ -281,9 +287,10 @@ impl PageJs {
     &self,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
+  ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
     let opts = parse_goto_options(&ctx, options)?;
-    self.inner.go_back(opts).await.into_js()
+    let resp = self.inner.go_back(opts).await.into_js()?;
+    Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
   }
 
   /// Navigate forward in history. Accepts the same option bag as `goto`.
@@ -292,9 +299,10 @@ impl PageJs {
     &self,
     ctx: rquickjs::Ctx<'js>,
     options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
+  ) -> rquickjs::Result<Option<crate::bindings::network::ResponseJs>> {
     let opts = parse_goto_options(&ctx, options)?;
-    self.inner.go_forward(opts).await.into_js()
+    let resp = self.inner.go_forward(opts).await.into_js()?;
+    Ok(resp.map(|r| crate::bindings::network::ResponseJs::new_with_page(r, self.inner.clone())))
   }
 
   /// Current URL of the page.

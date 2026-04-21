@@ -535,6 +535,46 @@ pub struct RequestInit {
   pub raw_headers_fn: Option<RawHeadersFn>,
 }
 
+/// Shared slot for the most recent main-document navigation `Request`.
+///
+/// Filled by backend network listeners whenever a request with
+/// `is_navigation_request == true` is observed (matches Playwright's
+/// `_isNavigationRequest` flag — `requestId == loaderId` on CDP,
+/// `navigation` field present on `BiDi`). Consumed by
+/// `AnyPage::goto` / `reload` / `go_back` / `go_forward` to resolve
+/// the final main-document `Response` after the lifecycle waiter
+/// fires. Callers clear the slot before issuing the navigation so
+/// same-document navigations (no new request) can be detected as
+/// "no response" per Playwright's `Response | null` contract.
+#[derive(Clone, Default)]
+pub struct NavRequestSlot {
+  inner: Arc<std::sync::Mutex<Option<Request>>>,
+}
+
+impl NavRequestSlot {
+  #[must_use]
+  pub fn new() -> Self {
+    Self::default()
+  }
+
+  pub fn set(&self, request: Request) {
+    if let Ok(mut guard) = self.inner.lock() {
+      *guard = Some(request);
+    }
+  }
+
+  #[must_use]
+  pub fn get(&self) -> Option<Request> {
+    self.inner.lock().ok().and_then(|g| g.clone())
+  }
+
+  pub fn clear(&self) {
+    if let Ok(mut guard) = self.inner.lock() {
+      *guard = None;
+    }
+  }
+}
+
 // ── Response ────────────────────────────────────────────────────────────────
 
 #[derive(Clone)]

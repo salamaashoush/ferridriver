@@ -1,89 +1,124 @@
-# Next session — Tier 2 §2.1 CDPSession
+# Next session — §2.9 Dialog as first-class handle + page.on('dialog')
 
-Tier 1 is fully [x] in `PLAYWRIGHT_COMPAT.md` (commit `1c84045`).
-The natural next item is `§2.1 CDPSession` — exposing Chrome's raw
-CDP session surface so users can drive the protocol directly. This
-mirrors Playwright's `chromiumBrowserContext.newCDPSession(page)`.
+Tier 1 is fully [x]. §3.1 (navigation returns Response) is fully [x]
+from this cycle. The next pick from the high-usage Playwright queue is
+`§2.9 Dialog` — promoting Dialog from our current callback-based
+`set_dialog_handler` to a first-class event handle matching Playwright's
+`page.on('dialog', dialog => dialog.accept())` shape.
 
 ## Read-first
 
 1. `CLAUDE.md` — Playwright-parity rules (Rules 1–10) and the
    consolidated lessons. Authoritative cross-device source.
-2. `PLAYWRIGHT_COMPAT.md` — gap tracker. §2.1 is the next item.
-3. `HANDOVER.md` — full block-level summary of what landed in §1.4
-   plus the documented gap matrix carried forward.
-4. `/tmp/playwright/packages/playwright-core/src/client/cdpSession.ts`
-   — canonical client surface (clone with
-   `git clone https://github.com/microsoft/playwright /tmp/playwright`
-   if missing).
-5. `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts`
-   (the `_newCDPSession` server-side path) for protocol shape.
+2. `PLAYWRIGHT_COMPAT.md` — gap tracker. §2.9 is the next item.
+3. `HANDOVER.md` — full block-level summary of what landed in §3.1.
+4. `/tmp/playwright/packages/playwright-core/src/client/dialog.ts`
+   — canonical client surface.
+5. `/tmp/playwright/packages/playwright-core/src/server/dialog.ts`
+   (server-side protocol shape).
 
-## §2.1 scope (canonical Playwright signature)
+## §2.9 scope (canonical Playwright signature)
 
 ```ts
-class CDPSession {
-  send<T extends keyof Protocol.CommandParameters>(
-    method: T,
-    params?: Protocol.CommandParameters[T]
-  ): Promise<Protocol.CommandReturnValues[T]>;
-  on<T extends keyof Protocol.Events>(
-    event: T,
-    listener: (params: Protocol.Events[T]) => void
-  ): this;
-  off / once / removeAllListeners: standard EventEmitter shape;
-  detach(): Promise<void>;
+class Dialog {
+  type(): string;                   // 'alert' | 'confirm' | 'prompt' | 'beforeunload'
+  message(): string;
+  defaultValue(): string;
+  accept(promptText?: string): Promise<void>;
+  dismiss(): Promise<void>;
+  page(): Page | null;
 }
 
-// Entry point on a Chromium-flavored context:
-chromiumBrowserContext.newCDPSession(page: Page): Promise<CDPSession>
+// Event wiring:
+page.on('dialog', (d: Dialog) => { ... });
 ```
+
+Important semantics:
+
+- **One-shot**: each Dialog must be accepted or dismissed exactly once.
+  Double-accept/double-dismiss must error (matches Playwright).
+- **Beforeunload auto-dismiss**: if no `dialog` listener is registered
+  at the time `beforeunload` fires, the dialog must be automatically
+  dismissed (otherwise the page hangs). All other dialog types with
+  no listener: auto-dismiss too (Playwright: "dialogs are dismissed
+  automatically unless there's a listener").
+- **Default value**: `'prompt'` dialogs carry the default text in the
+  HTML input; accept with `promptText` overrides it.
 
 ## Architecture sketch
 
-1. **Rust core** — new `crates/ferridriver/src/cdp_session.rs` with a
-   `CDPSession` struct holding `Arc<dyn CdpTransport>` + the
-   `session_id` (or `None` for browser-target sessions). Methods:
-   - `send(method: &str, params: serde_json::Value) -> Result<serde_json::Value>`
-   - `on(event: &str, callback) -> ListenerId` (uses the same
-     `EventEmitter` pattern as `PageEvent`, but generic over event name
-     rather than typed enum)
-   - `off(id)` / `once` / `remove_all_listeners`
-   - `detach()` — calls `Target.detachFromTarget` (or
-     `Target.disposeBrowserContext` for context sessions)
+1. **Rust core** — delete `page.set_dialog_handler` and its
+   `DialogHandler` type. New `crates/ferridriver/src/dialog.rs` with:
+   - `Dialog` struct wrapping `Arc<DialogState>`.
+   - `DialogState { dialog_type, message, default_value, page_weak,
+     responded: AtomicBool, responder: Arc<dyn Fn(DialogResponse) +
+     Send + Sync> }`.
+   - `Dialog::accept(prompt_text) -> Result<()>` — flip `responded`,
+     dispatch the responder with `Accept { prompt_text }`. Double-accept
+     errors.
+   - `Dialog::dismiss()` — same pattern, `Dismiss`.
+   - Auto-dismiss: each backend's dialog listener, after emitting
+     `PageEvent::Dialog(handle)`, starts a short grace task (say one
+     event-loop tick) — if the emitter has zero listeners OR the
+     emitted Dialog is not `responded`, dismiss it. For `beforeunload`
+     the grace must be immediate / before the navigation unpauses.
 
-   Live wiring: piggy-back on the existing `CdpTransport::subscribe_events`
-   machinery. The CDP backend already broadcasts every event — `CDPSession::on`
-   filters by method name and (optionally) session id.
+2. **CDP backend** (`backend/cdp/mod.rs`) — the existing
+   `Page.javascriptDialogOpening` listener constructs a `DialogState`
+   that, on `accept`/`dismiss`, sends `Page.handleJavaScriptDialog`
+   with the right action. Emit `PageEvent::Dialog(Dialog { state })`.
 
-2. **CdpPipe / CdpRaw** — `CdpBrowser::new_cdp_session(page) -> Result<CDPSession>`
-   issues `Target.attachToTarget { targetId, flatten: true }` (already
-   set as default per `init`), then constructs a `CDPSession` keyed off
-   the returned `sessionId`. For browser-level sessions, pass `None`.
+3. **BiDi backend** (`backend/bidi/page.rs`) — already handles
+   `browsingContext.userPromptOpened`. Change it from a
+   `dialog_handler`-based auto-respond into emitting
+   `PageEvent::Dialog(...)` with the responder calling
+   `browsingContext.handleUserPrompt`.
 
-3. **BiDi / WebKit** — return typed `FerriError::Unsupported`. Per Rule 4:
-   - BiDi has its own protocol (no CDP at all). Playwright's BiDi backend
-     refuses CDPSession.
-   - WebKit doesn't expose CDP. Same.
+4. **WebKit backend** (`backend/webkit/mod.rs`) — the Obj-C host
+   reports alert/confirm/prompt via IPC. Thread through the same
+   `Dialog` wrapper. `beforeunload` is tricky on WKWebView — document
+   the limit if there's no public API.
 
-4. **NAPI / QuickJS bindings** — `#[napi] class CDPSession` and
-   `CDPSessionJs` with the four methods. Mirror the Playwright TS shape.
+5. **NAPI** — `#[napi] class Dialog` with the four methods.
+   `page.on('dialog', cb)` event subscription already routed via
+   `EventEmitter`; wire the `Dialog` type into the existing
+   `PageEvent` → JS event dispatcher.
 
-5. **Per-backend Rule-9 integration tests** in
-   `crates/ferridriver-cli/tests/backends_support/cdp_session.rs`:
-   - cdp-pipe / cdp-raw: send `Browser.getVersion`, assert non-empty
-     `product`. Subscribe to `Page.frameNavigated`, navigate, assert
-     callback fires.
-   - bidi / webkit: assert `chromiumBrowserContext.newCDPSession` rejects
-     with typed `Unsupported`.
-6. NAPI parity test in `crates/ferridriver-node/test/cdp-session.test.ts`.
+6. **QuickJS** — `DialogJs` class in `bindings/dialog.rs`. Register.
+   `page.on('dialog', cb)` dispatches the JS callback with a live
+   wrapper.
+
+## Per-backend Rule-9 integration tests
+
+In a new `crates/ferridriver-cli/tests/backends_support/dialog.rs`:
+
+1. `test_dialog_accept_alert` — page runs `alert('hi')`, listener
+   accepts, `alert()` returns to page JS.
+2. `test_dialog_accept_prompt_with_text` — page runs
+   `prompt('name?', 'alice')`, listener inspects `defaultValue() ===
+   'alice'` then `accept('bob')`, page JS sees `'bob'`.
+3. `test_dialog_dismiss_confirm` — page runs `confirm('ok?')`,
+   listener dismisses, `confirm()` returns `false`.
+4. `test_dialog_auto_dismiss_no_listener` — remove all `dialog`
+   listeners, page runs `alert('hi')`; dialog auto-dismisses, page
+   JS continues within bounded time.
+5. `test_dialog_beforeunload` — page with a `beforeunload` handler;
+   without listener → auto-dismiss (navigation proceeds); with
+   listener + accept → navigation proceeds; with listener + dismiss
+   → navigation is canceled.
+6. `test_dialog_double_accept_errors` — second `accept()` on the same
+   Dialog rejects with a typed error.
+
+Matching NAPI tests in `crates/ferridriver-node/test/dialog.test.ts`
+covering at least items 1, 2, 3, and 4.
 
 ## Ground rules (from CLAUDE.md — non-negotiable)
 
 - Rule 1: core is source of truth; bindings are thin delegators.
 - Rule 2: all three layers (Rust core / NAPI / QuickJS) update in the same commit.
-- Rule 4: every backend real — `FerriError::Unsupported` only where
-  the protocol genuinely can't.
+- Rule 4: every backend real — typed `FerriError::Unsupported` only
+  where the protocol genuinely can't (e.g. `beforeunload` on
+  WKWebView if stock public API has no hook).
 - Rule 6: read `/tmp/playwright/...` before coding each signature.
 - Rule 7: rebuild NAPI + diff generated `index.d.ts` against
   `/tmp/playwright/packages/playwright/types/test.d.ts` after every
@@ -91,19 +126,16 @@ chromiumBrowserContext.newCDPSession(page: Page): Promise<CDPSession>
 - Rule 9: per-backend integration test on every backend before
   flipping `[x]`. No silent `if backend == ...` skips — typed
   `Unsupported` is the documented Rule-4 path.
-- Rule 10: no `#[allow(clippy::*)]` escape hatches. The single-site
-  `unused_self` allow on `Request::service_worker` is the only
-  precedent — only justified because of Rule 2 (Playwright signature
-  parity) vs Rule 10 collision; document `Why:` if you need another.
+- Rule 10: no `#[allow(clippy::*)]` escape hatches.
 - No emojis, no AI attribution in commit messages, no task / phase
   / rule-number annotations in source comments or filenames.
 
-## Baseline (must stay green through §2.1)
+## Baseline (must stay green through §2.9)
 
 ```
 cargo clippy --workspace --all-targets -- -D warnings   # clean
 cargo test --workspace --lib                            # 122 core
-cd crates/ferridriver-node && bun run build:debug && bun test   # 754 bun
+cd crates/ferridriver-node && bun run build:debug && bun test   # 781 bun
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1   # 4/4 backends
 ```
@@ -111,43 +143,24 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 ## Commit shape
 
 Single commit:
-- `feat(cdp): CDPSession lifecycle on chromium contexts (§2.1)` —
-  body lists the surface, per-backend implementation (real on CDP,
-  typed Unsupported on BiDi/WebKit), test coverage, and the
-  `PLAYWRIGHT_COMPAT.md` §2.1 flip.
+- `feat(page): Dialog as first-class handle + page.on('dialog') (§2.9)` —
+  body lists the surface, per-backend implementation (CDP via
+  `Page.handleJavaScriptDialog`, BiDi via `browsingContext.handleUserPrompt`,
+  WebKit via existing IPC), the `set_dialog_handler` removal, test
+  coverage, and the `PLAYWRIGHT_COMPAT.md` §2.9 flip.
 
 Update `PLAYWRIGHT_COMPAT.md` + `HANDOVER.md` in the same commit.
-
-## Carried-forward backend gaps (don't relitigate; track in PLAYWRIGHT_COMPAT.md)
-
-These are real protocol limits documented under §1.4 — not in scope
-for §2.1, but worth re-reading so you don't accidentally re-introduce
-shortcuts:
-
-- **BiDi**: response body unavailable for non-intercepted responses
-  (Firefox discards bytes; Playwright's BiDi backend hits the same).
-  Multi-`Set-Cookie` collapses. `request.postData()` null for
-  fetch-with-body.
-- **WebKit**: stock `WKWebView` exposes no public API for: main-doc
-  Response observability, redirect chain, response body bytes,
-  browser-set request headers (`User-Agent`), `Set-Cookie` (Fetch
-  spec hides it from `Headers.forEach`), or WebSocket frame events.
-  Also: `page.evaluate` runs in utility context isolated from the
-  user-script's fetch wrap, so `page.route` cannot intercept fetches
-  initiated through `page.evaluate("fetch(...)")` — only main-world
-  fetches initiated from user-controlled JS.
 
 ## Useful key locations
 
 | area | path |
 |---|---|
-| Live network types | `crates/ferridriver/src/network.rs` |
-| CDP backend dispatch | `crates/ferridriver/src/backend/cdp/mod.rs` |
-| BiDi backend | `crates/ferridriver/src/backend/bidi/page.rs` |
-| WebKit backend | `crates/ferridriver/src/backend/webkit/mod.rs` |
-| WebKit IPC + host | `crates/ferridriver/src/backend/webkit/ipc.rs`, `host.m` |
-| NAPI bindings entry | `crates/ferridriver-node/src/lib.rs` |
-| QuickJS bindings entry | `crates/ferridriver-script/src/bindings/mod.rs` |
+| Existing dialog handler (to replace) | `crates/ferridriver/src/page.rs` (grep `set_dialog_handler`) |
+| CDP dialog listener | `crates/ferridriver/src/backend/cdp/mod.rs::spawn_dialog_listener` |
+| BiDi dialog listener | `crates/ferridriver/src/backend/bidi/page.rs` (grep `userPromptOpened`) |
+| WebKit dialog IPC | `crates/ferridriver/src/backend/webkit/ipc.rs`, `host.m` |
+| Event emitter + PageEvent | `crates/ferridriver/src/events.rs` |
+| NAPI entry | `crates/ferridriver-node/src/lib.rs` |
+| QuickJS entry | `crates/ferridriver-script/src/bindings/mod.rs` |
 | Per-backend integration tests | `crates/ferridriver-cli/tests/backends_support/` |
-| MCP server | `crates/ferridriver-mcp/src/` |
 | Rules + lessons | `CLAUDE.md` |

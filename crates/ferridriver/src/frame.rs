@@ -312,7 +312,7 @@ impl Frame {
   /// # Errors
   ///
   /// Returns an error if navigation fails.
-  pub async fn goto(&self, url: &str) -> Result<()> {
+  pub async fn goto(&self, url: &str) -> Result<Option<crate::network::Response>> {
     if self.is_main_frame() {
       self.page.goto(url, None).await
     } else {
@@ -320,7 +320,7 @@ impl Frame {
       self
         .backend_eval_expr(&format!("window.location.href = '{}'", url.replace('\'', "\\'")))
         .await?;
-      Ok(())
+      Ok(None)
     }
   }
 

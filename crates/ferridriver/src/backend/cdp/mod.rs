@@ -313,6 +313,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         lifecycle: lc_state.clone(),
         lifecycle_notify: lc_notify.clone(),
         injected_script: Arc::new(InjectedScriptManager::new()),
+        nav_request_slot: crate::network::NavRequestSlot::new(),
       }));
     }
     Ok(pages)
@@ -432,6 +433,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       lifecycle: lc_state.clone(),
       lifecycle_notify: lc_notify.clone(),
       injected_script: Arc::new(InjectedScriptManager::new()),
+      nav_request_slot: crate::network::NavRequestSlot::new(),
     };
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
@@ -714,6 +716,12 @@ pub struct CdpPage<T: CdpTransport> {
   lifecycle_notify: Arc<tokio::sync::Notify>,
   /// Manager for lazy engine injection.
   injected_script: Arc<InjectedScriptManager>,
+  /// Most recent main-document `Request` observed by the network
+  /// listener. Cleared by `goto`/`reload`/`go_back`/`go_forward` before
+  /// issuing the navigation so same-document navigations (no new
+  /// request) resolve as "no response" — mirrors Playwright's
+  /// `Response | null` contract on `page.goto`.
+  nav_request_slot: crate::network::NavRequestSlot,
 }
 
 pub struct InjectedScriptManager {
@@ -781,6 +789,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       lifecycle: self.lifecycle.clone(),
       lifecycle_notify: self.lifecycle_notify.clone(),
       injected_script: self.injected_script.clone(),
+      nav_request_slot: self.nav_request_slot.clone(),
     }
   }
 }
@@ -802,13 +811,19 @@ impl<T: CdpWrap> CdpPage<T> {
     lifecycle: crate::backend::NavLifecycle,
     timeout_ms: u64,
     referer: Option<&str>,
-  ) -> Result<(), String> {
+  ) -> Result<Option<Response>, String> {
     self.injected_script.reset();
     let target_event = match lifecycle {
       crate::backend::NavLifecycle::Commit => "commit",
       crate::backend::NavLifecycle::DomContentLoaded => "domcontentloaded",
       crate::backend::NavLifecycle::Load => "load",
     };
+
+    // Clear any previous main-doc request slot so a same-document
+    // navigation (no new request) resolves as "no response" per
+    // Playwright's `Response | null` contract. The network listener
+    // refills the slot when it observes the next navigation request.
+    self.nav_request_slot.clear();
 
     // Register nav waiter BEFORE navigate.
     let rx = self
@@ -837,18 +852,28 @@ impl<T: CdpWrap> CdpPage<T> {
     // fired (reader processed frameNavigated + lifecycle events during the navigate
     // command), return immediately. The loaderId match ensures we don't return
     // early with stale data from a previous navigation.
-    {
+    let already_fired = {
       let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      if state.current_loader_id == nav_loader_id && state.fired.contains(target_event) {
-        return Ok(());
-      }
+      state.current_loader_id == nav_loader_id && state.fired.contains(target_event)
+    };
+    if already_fired {
+      return Ok(self.await_nav_response().await);
     }
 
     // Async wait for the lifecycle event via oneshot.
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
-      Ok(Ok(result)) => result,
-      Ok(Err(_)) | Err(_) => Ok(()),
+      Ok(Ok(Ok(())) | Err(_)) | Err(_) => Ok(self.await_nav_response().await),
+      Ok(Ok(Err(e))) => Err(e),
     }
+  }
+
+  /// Resolve the main-document `Response` captured by the network
+  /// listener for the most recent navigation. Returns `None` for
+  /// same-document navigations (no new request was issued) or when
+  /// the underlying request ended in failure.
+  async fn await_nav_response(&self) -> Option<Response> {
+    let req = self.nav_request_slot.get()?;
+    req.response().await.ok().flatten()
   }
 
   pub async fn wait_for_navigation(&self) -> Result<(), String> {
@@ -864,23 +889,36 @@ impl<T: CdpWrap> CdpPage<T> {
     }
   }
 
-  pub async fn reload(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+  pub async fn reload(
+    &self,
+    lifecycle: crate::backend::NavLifecycle,
+    timeout_ms: u64,
+  ) -> Result<Option<Response>, String> {
     self.injected_script.reset();
+    self.nav_request_slot.clear();
     let rx = self
       .transport
       .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
     self.cmd("Page.reload", super::empty_params()).await?;
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
-      Ok(Ok(r)) => r,
-      _ => Ok(()),
+      Ok(Ok(Ok(())) | Err(_)) | Err(_) => Ok(self.await_nav_response().await),
+      Ok(Ok(Err(e))) => Err(e),
     }
   }
 
-  pub async fn go_back(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+  pub async fn go_back(
+    &self,
+    lifecycle: crate::backend::NavLifecycle,
+    timeout_ms: u64,
+  ) -> Result<Option<Response>, String> {
     self.history_go(-1, lifecycle, timeout_ms).await
   }
 
-  pub async fn go_forward(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<(), String> {
+  pub async fn go_forward(
+    &self,
+    lifecycle: crate::backend::NavLifecycle,
+    timeout_ms: u64,
+  ) -> Result<Option<Response>, String> {
     self.history_go(1, lifecycle, timeout_ms).await
   }
 
@@ -889,7 +927,7 @@ impl<T: CdpWrap> CdpPage<T> {
     delta: i32,
     lifecycle: crate::backend::NavLifecycle,
     timeout_ms: u64,
-  ) -> Result<(), String> {
+  ) -> Result<Option<Response>, String> {
     let hist = self.cmd("Page.getNavigationHistory", super::empty_params()).await?;
     let current_i64 = hist
       .get("currentIndex")
@@ -899,19 +937,20 @@ impl<T: CdpWrap> CdpPage<T> {
     let target = current + delta;
     let entries = hist.get("entries").and_then(|v| v.as_array());
     let Some(entries) = entries else {
-      return Ok(());
+      return Ok(None);
     };
     let Ok(target_usize) = usize::try_from(target) else {
-      return Ok(());
+      return Ok(None);
     };
     if target_usize >= entries.len() {
-      return Ok(());
+      return Ok(None);
     }
     let entry_id = entries[target_usize]
       .get("id")
       .and_then(serde_json::Value::as_i64)
       .unwrap_or(0);
 
+    self.nav_request_slot.clear();
     let rx = self
       .transport
       .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
@@ -919,8 +958,8 @@ impl<T: CdpWrap> CdpPage<T> {
       .cmd("Page.navigateToHistoryEntry", serde_json::json!({"entryId": entry_id}))
       .await?;
     match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
-      Ok(Ok(r)) => r,
-      _ => Ok(()),
+      Ok(Ok(Ok(())) | Err(_)) | Err(_) => Ok(self.await_nav_response().await),
+      Ok(Ok(Err(e))) => Err(e),
     }
   }
 
@@ -2540,7 +2579,13 @@ impl<T: CdpWrap> CdpPage<T> {
     let emitter3 = self.events.clone();
 
     Self::spawn_console_listener(transport.clone(), session_id.clone(), console_log, emitter1);
-    Self::spawn_network_listener(transport.clone(), session_id.clone(), network_log, emitter2);
+    Self::spawn_network_listener(
+      transport.clone(),
+      session_id.clone(),
+      network_log,
+      emitter2,
+      self.nav_request_slot.clone(),
+    );
     Self::spawn_dialog_listener(
       self.transport.clone(),
       self.session_id.clone(),
@@ -2601,8 +2646,13 @@ impl<T: CdpWrap> CdpPage<T> {
     session_id: Option<Arc<str>>,
     network_log: Arc<RwLock<Vec<NetworkRequest>>>,
     emitter: crate::events::EventEmitter,
+    nav_request_slot: crate::network::NavRequestSlot,
   ) {
-    let tracker: Arc<NetworkTracker<T>> = Arc::new(NetworkTracker::new(transport.clone(), session_id.clone()));
+    let tracker: Arc<NetworkTracker<T>> = Arc::new(NetworkTracker::new(
+      transport.clone(),
+      session_id.clone(),
+      nav_request_slot,
+    ));
     tokio::spawn(async move {
       let mut rx = transport.subscribe_events();
       while let Ok(event) = rx.recv().await {
@@ -3664,10 +3714,11 @@ struct NetworkTracker<T: CdpTransport> {
   // Buffered extra-info events that may arrive before the main events.
   pending_request_extra: tokio::sync::Mutex<FxHashMap<String, Vec<HeaderEntry>>>,
   pending_response_extra: tokio::sync::Mutex<FxHashMap<String, Vec<HeaderEntry>>>,
+  nav_request_slot: crate::network::NavRequestSlot,
 }
 
 impl<T: CdpTransport + 'static> NetworkTracker<T> {
-  fn new(transport: Arc<T>, session_id: Option<Arc<str>>) -> Self {
+  fn new(transport: Arc<T>, session_id: Option<Arc<str>>, nav_request_slot: crate::network::NavRequestSlot) -> Self {
     Self {
       transport,
       session_id,
@@ -3676,6 +3727,7 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       websockets: tokio::sync::Mutex::new(FxHashMap::default()),
       pending_request_extra: tokio::sync::Mutex::new(FxHashMap::default()),
       pending_response_extra: tokio::sync::Mutex::new(FxHashMap::default()),
+      nav_request_slot,
     }
   }
 
@@ -3769,6 +3821,17 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
     }
 
     self.requests.lock().await.insert(request_id, new_request.clone());
+
+    // Main-document navigations: update the per-page slot so
+    // `AnyPage::goto` / `reload` / history traversals can resolve the
+    // final `Response` after the lifecycle waiter fires. CDP flags a
+    // request as navigation by setting `loaderId == requestId`; the
+    // slot therefore tracks each redirect hop (same requestId, reused
+    // across the chain) and naturally ends up pointing at the final
+    // request in the chain when redirects settle.
+    if new_request.is_navigation_request() {
+      self.nav_request_slot.set(new_request.clone());
+    }
 
     network_log.write().await.push(new_request.clone());
     emitter.emit(crate::events::PageEvent::Request(new_request));

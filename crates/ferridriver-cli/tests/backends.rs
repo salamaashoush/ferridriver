@@ -2283,6 +2283,13 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::network::test_network_headers);
   run!(backends_support::network::test_network_websocket);
 
+  // §3.1 Navigation methods return main-document Response.
+  run!(backends_support::navigation_response::test_goto_returns_response);
+  run!(backends_support::navigation_response::test_goto_follows_redirects);
+  run!(backends_support::navigation_response::test_goto_network_failure);
+  run!(backends_support::navigation_response::test_reload_returns_response);
+  run!(backends_support::navigation_response::test_history_traversal_returns_response);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

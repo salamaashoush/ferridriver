@@ -254,11 +254,18 @@ impl Page {
 
   /// Navigate to a URL with optional options (waitUntil, timeout).
   ///
+  /// Returns the main-document `Response` when the backend can observe
+  /// it, or `None` for same-document navigations (no new request was
+  /// issued) / backends that genuinely cannot expose the main-document
+  /// response (stock `WKWebView` has no public API for this — see the
+  /// §1.4 backend gap matrix in `PLAYWRIGHT_COMPAT.md`). Mirrors
+  /// Playwright's `Promise<Response | null>` contract on `page.goto`.
+  ///
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   #[tracing::instrument(skip(self, opts), fields(url))]
-  pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<()> {
+  pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     tracing::debug!(target: "ferridriver::action", action = "goto", url, "page.goto");
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let referer = opts.as_ref().and_then(|o| o.referer.as_deref());
@@ -269,32 +276,35 @@ impl Page {
       .map_err(Into::into)
   }
 
-  /// Navigate back in history.
+  /// Navigate back in history. Returns the main-document `Response` on
+  /// the same basis as `goto` (or `None`).
   ///
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
-  pub async fn go_back(&self, opts: Option<GotoOptions>) -> Result<()> {
+  pub async fn go_back(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     self.inner.go_back(lifecycle, timeout).await.map_err(Into::into)
   }
 
-  /// Navigate forward in history.
+  /// Navigate forward in history. Returns the main-document `Response`
+  /// on the same basis as `goto` (or `None`).
   ///
   /// # Errors
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
-  pub async fn go_forward(&self, opts: Option<GotoOptions>) -> Result<()> {
+  pub async fn go_forward(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     self.inner.go_forward(lifecycle, timeout).await.map_err(Into::into)
   }
 
-  /// Reload the current page.
+  /// Reload the current page. Returns the main-document `Response` on
+  /// the same basis as `goto` (or `None`).
   ///
   /// # Errors
   ///
   /// Returns an error if the reload fails or the wait condition times out.
-  pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<()> {
+  pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     self.inner.reload(lifecycle, timeout).await.map_err(Into::into)
   }

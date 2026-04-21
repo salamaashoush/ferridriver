@@ -241,9 +241,18 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 3.1 Navigation returns Response
 
-- [ ] `page.goto`, `page.reload`, `page.go_back`, `page.go_forward` return `Result<Option<Response>, FerriError>`.
-- **Files**: `crates/ferridriver/src/page.rs`.
-- **Blocks on**: 1.4.
+- [x] `page.goto`, `page.reload`, `page.go_back`, `page.go_forward` (and `frame.goto`) return `Result<Option<Response>, FerriError>` — matches Playwright's `Promise<Response | null>` byte-for-byte across all three layers.
+  - **Core** (`crates/ferridriver/src/network.rs`, `page.rs`, `frame.rs`): new `NavRequestSlot` helper — a cheap `Arc<Mutex<Option<Request>>>` slot shared between each page and its backend network listener. `CdpPage` / `BidiPage` hold one; on every `is_navigation_request` request observed by the listener, the slot is updated. Navigation methods call `slot.clear()` before issuing the navigation command and `slot.get().response().await` after the lifecycle waiter resolves. Same-document navigations (no new request) naturally resolve as `None` because the slot stays empty — matches Playwright's contract for hash-only / SPA / `history.pushState` navigations.
+  - **CDP** (`backend/cdp/mod.rs`): nav request is detected via `loaderId == requestId` (same as the existing `is_navigation_request` flag). Redirects reuse the CDP request id so the slot naturally ends up pointing at the final request in the chain; the Response is attached to that request by `on_response_received`, so `request.response().await` returns immediately once lifecycle fires.
+  - **BiDi** (`backend/bidi/page.rs`): nav request is detected via the `navigation` field on `network.beforeRequestSent`. `BidiNetworkTracker` updates the slot the same way.
+  - **WebKit** (`backend/webkit/mod.rs`): returns `Ok(None)` with a docstring naming the limit. Stock `WKWebView`'s `WKNavigationDelegate` callbacks don't round-trip `NSURLResponse` status/headers through our IPC, and the JS-fetch interceptor only observes user-script fetches — not main-document navigations. This is the documented §1.4 gap. Returning `None` is honest Playwright-parity (Playwright itself returns `null` for navigations it can't observe); placeholder responses would violate Rule 4.
+  - **NAPI** (`crates/ferridriver-node/src/page.rs`, `frame.rs`): `ts_return_type = "Promise<Response | null>"` on every `goto`/`reload`/`goBack`/`goForward`. Generated `.d.ts` matches Playwright's `types/test.d.ts` verbatim.
+  - **QuickJS** (`crates/ferridriver-script/src/bindings/page.rs`): returns `Option<ResponseJs>` so callers see `resp == null` (both `null` and `undefined` match) when the backend can't observe the response.
+- **Tests**:
+  - **Rust integration** (`tests/backends_support/navigation_response.rs`, 5 tests × 4 backends = 20 assertions): `test_goto_returns_response` (status/ok/url), `test_goto_follows_redirects` (302→200 chain resolves to the landed URL), `test_goto_network_failure` (unreachable URL rejects with a typed error), `test_reload_returns_response`, `test_history_traversal_returns_response` (goBack + goForward). All green on cdp-pipe / cdp-raw / bidi. WebKit asserts `null` explicitly rather than skipping silently — Rule 4 honesty.
+  - **NAPI** (`crates/ferridriver-node/test/navigation-response.test.ts`, 6 tests × 2 CDP backends = 12 assertions): every method round-trips status / ok / url end-to-end; non-2xx (404) surfaces in the Response without throwing; unreachable URL rejects.
+  - Baseline after the change: 122 core + 29 script + 38 MCP lib + 781 NAPI/Bun + 4/4 backends green.
+- **Playwright ref**: `/tmp/playwright/packages/playwright-core/src/client/page.ts:378-489`, `frame.ts:111-114`.
 
 ### 3.2 `goto` accepts `referer`
 
