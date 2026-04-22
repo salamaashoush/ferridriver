@@ -112,7 +112,7 @@ impl Page {
       default_navigation_timeout: AtomicU64::new(u64::MAX),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       mouse_position: Mutex::new((0.0, 0.0)),
-      context_ref: Some(context),
+      context_ref: Some(context.clone()),
       close_reason: Mutex::new(None),
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
       frame_cache: Arc::new(Mutex::new(FrameCache::default())),

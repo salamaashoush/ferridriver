@@ -297,9 +297,12 @@ impl Page {
   ///
   /// Supported events: 'console', 'response', 'request', 'dialog',
   /// 'filechooser', 'download', 'frameattached', 'framedetached',
-  /// 'framenavigated', 'load', 'domcontentloaded', 'close', 'pageerror'
+  /// 'framenavigated', 'load', 'domcontentloaded', 'close', 'pageerror'.
+  /// `'pageerror'` delivers a `{ name, message, stack }` snapshot to
+  /// callback listeners; use `waitForEvent('pageerror')` for the live
+  /// [`WebError`] handle.
   #[napi(
-    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | { isMultiple: boolean } | Record<string, any>) => void"
+    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | { isMultiple: boolean } | { name: string; message: string; stack: string } | Record<string, any>) => void"
   )]
   pub fn on(&self, event: String, listener: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>) -> Result<f64> {
     let tsfn = listener
@@ -321,7 +324,7 @@ impl Page {
 
   /// Register a one-time event listener. Auto-removed after first match.
   #[napi(
-    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | Record<string, any>) => void"
+    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | { name: string; message: string; stack: string } | Record<string, any>) => void"
   )]
   pub fn once(
     &self,
@@ -365,19 +368,19 @@ impl Page {
   /// Wait for a specific event. Playwright API:
   /// `page.waitForEvent(event, options?)`. Returns a live class
   /// (`Request` / `Response` / `WebSocket` / `Dialog` / `FileChooser` /
-  /// `Download` / `ConsoleMessage`) for lifecycle events, or a plain
-  /// snapshot object for simpler events — matches Playwright's
-  /// `PageEventsMap`.
+  /// `Download` / `ConsoleMessage` / `WebError`) for lifecycle events,
+  /// or a plain snapshot object for simpler events — matches
+  /// Playwright's `PageEventsMap`.
   #[napi(
     ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
-    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage | Record<string, any>>"
+    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage | WebError | Record<string, any>>"
   )]
   pub async fn wait_for_event(
     &self,
     event: String,
     timeout_ms: Option<f64>,
   ) -> Result<
-    napi::bindgen_prelude::Either8<
+    napi::bindgen_prelude::Either9<
       crate::network::Request,
       crate::network::Response,
       crate::network::WebSocket,
@@ -385,6 +388,7 @@ impl Page {
       crate::file_chooser::FileChooser,
       crate::download::Download,
       crate::console_message::ConsoleMessage,
+      crate::web_error::WebError,
       serde_json::Value,
     >,
   > {
@@ -396,7 +400,7 @@ impl Page {
     // `addDialogHandler` flow verbatim).
     if event.eq_ignore_ascii_case("dialog") {
       let dialog = self.inner.wait_for_dialog(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either8::D(crate::dialog::Dialog::from_core(
+      return Ok(napi::bindgen_prelude::Either9::D(crate::dialog::Dialog::from_core(
         dialog,
       )));
     }
@@ -404,7 +408,7 @@ impl Page {
     // per-page `FileChooserManager` delivers the live handle.
     if event.eq_ignore_ascii_case("filechooser") {
       let chooser = self.inner.wait_for_file_chooser(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either8::E(
+      return Ok(napi::bindgen_prelude::Either9::E(
         crate::file_chooser::FileChooser::from_core(chooser),
       ));
     }
@@ -413,7 +417,7 @@ impl Page {
     // the protocol's download-begin event.
     if event.eq_ignore_ascii_case("download") {
       let download = self.inner.wait_for_download(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either8::F(crate::download::Download::from_core(
+      return Ok(napi::bindgen_prelude::Either9::F(crate::download::Download::from_core(
         download,
       )));
     }
@@ -422,19 +426,20 @@ impl Page {
     use ferridriver::events::PageEvent;
     Ok(match ev {
       PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => {
-        napi::bindgen_prelude::Either8::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
+        napi::bindgen_prelude::Either9::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
       },
       PageEvent::Response(r) => {
-        napi::bindgen_prelude::Either8::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
+        napi::bindgen_prelude::Either9::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
       },
-      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either8::C(crate::network::WebSocket::from_core(ws)),
-      PageEvent::Dialog(d) => napi::bindgen_prelude::Either8::D(crate::dialog::Dialog::from_core(d)),
-      PageEvent::FileChooser(fc) => napi::bindgen_prelude::Either8::E(crate::file_chooser::FileChooser::from_core(fc)),
-      PageEvent::Download(d) => napi::bindgen_prelude::Either8::F(crate::download::Download::from_core(d)),
+      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either9::C(crate::network::WebSocket::from_core(ws)),
+      PageEvent::Dialog(d) => napi::bindgen_prelude::Either9::D(crate::dialog::Dialog::from_core(d)),
+      PageEvent::FileChooser(fc) => napi::bindgen_prelude::Either9::E(crate::file_chooser::FileChooser::from_core(fc)),
+      PageEvent::Download(d) => napi::bindgen_prelude::Either9::F(crate::download::Download::from_core(d)),
       PageEvent::Console(msg) => {
-        napi::bindgen_prelude::Either8::G(crate::console_message::ConsoleMessage::from_core(msg))
+        napi::bindgen_prelude::Either9::G(crate::console_message::ConsoleMessage::from_core(msg))
       },
-      other => napi::bindgen_prelude::Either8::H(page_event_to_value(&other)),
+      PageEvent::PageError(err) => napi::bindgen_prelude::Either9::H(crate::web_error::WebError::from_core(err)),
+      other => napi::bindgen_prelude::Either9::I(page_event_to_value(&other)),
     })
   }
 
@@ -1592,7 +1597,14 @@ fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value>
     ("load", PageEvent::Load) | ("domcontentloaded", PageEvent::DomContentLoaded) | ("close", PageEvent::Close) => {
       Some(serde_json::Value::Object(serde_json::Map::new()))
     },
-    ("pageerror", PageEvent::PageError(msg)) => Some(serde_json::json!({"message": msg})),
+    ("pageerror", PageEvent::PageError(err)) => {
+      let d = err.error();
+      Some(serde_json::json!({
+        "name": d.name,
+        "message": d.message,
+        "stack": d.stack,
+      }))
+    },
     _ => None,
   }
 }
@@ -1621,6 +1633,13 @@ fn page_event_to_value(event: &PageEvent) -> serde_json::Value {
     PageEvent::Load => serde_json::json!({"type": "load"}),
     PageEvent::DomContentLoaded => serde_json::json!({"type": "domcontentloaded"}),
     PageEvent::Close => serde_json::json!({"type": "close"}),
-    PageEvent::PageError(msg) => serde_json::json!({"message": msg}),
+    PageEvent::PageError(err) => {
+      let d = err.error();
+      serde_json::json!({
+        "name": d.name,
+        "message": d.message,
+        "stack": d.stack,
+      })
+    },
   }
 }

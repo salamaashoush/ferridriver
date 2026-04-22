@@ -291,10 +291,86 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 2.13 WebError
 
-- [ ] Add `WebError { error, page }` for `context.on('weberror')`.
-- **Playwright ref**: `packages/playwright-core/src/client/webError.ts`.
-- **Files**: new `crates/ferridriver/src/web_error.rs`.
-- **Tests**: throw an unhandled error in a page, assert it arrives on context.
+- [x] `WebError { page(), error() -> { name, message, stack } }` delivered as a live handle via
+  `page.waitForEvent('pageerror')` / `page.on('pageerror', cb)` (page-scoped) and
+  `context.waitForEvent('weberror')` / `context.on('weberror', cb)` (context-scoped). Three layers
+  (Rust core / NAPI / QuickJS) updated together; four backends emit real exception data (no stubs).
+  - **Core** (`crates/ferridriver/src/web_error.rs`): new module. `WebError` is `Arc`-backed with
+    `page() -> Option<Arc<Page>>` + `error() -> &ErrorDetails { name, message, stack }`. The variant
+    `PageEvent::PageError` was upgraded from `String` to `WebError` — wire-shaped payload removed.
+    A new `ContextEvent::WebError(WebError)` + `ContextEventEmitter` pair (`crates/ferridriver/src/events.rs`)
+    carries the context-side fan-out; `ContextRef` owns the emitter handle sync-accessible to
+    NAPI / QuickJS. The emitter registry lives on `BrowserState::context_events`
+    (`std::sync::Mutex<HashMap<composite-key, ContextEventEmitter>>`) so every `ContextRef::new`
+    call with the same composite key hands out the SAME emitter (otherwise `browser.defaultContext()`
+    called twice would hand out independent channels and miss events). The per-page → per-context
+    `PageError` → `WebError` bridge is spawned exactly once per page inside
+    `BrowserState::register_opened_page` — runs regardless of whether the page was wrapped via
+    `Page::new` or `Page::with_context`, so MCP-server `run_script` callers receive the same
+    `context.waitForEvent('weberror')` fan-out NAPI callers do.
+  - **Backends**:
+    - CDP (`backend/cdp/mod.rs::spawn_web_error_listener`): new listener subscribes to
+      `Runtime.exceptionThrown`. Three free helpers (`cdp_exception_to_error_details`,
+      `cdp_get_exception_message`, `split_error_message`) mirror Playwright's
+      `server/chromium/crProtocolHelper.ts::{getExceptionMessage, exceptionToError}` +
+      `packages/isomorphic/stackTrace.ts::splitErrorMessage` byte-for-byte. Supports the
+      `exception.preview.properties.name` override branch so custom `Error`-subclass names
+      (`TypeError`, `RangeError`, etc.) round-trip correctly.
+    - BiDi (`backend/bidi/page.rs`): `log.entryAdded` with `type: 'javascript' + level: 'error'`
+      now produces `PageEvent::PageError(WebError)` (previously silently dropped). New helpers
+      `split_error_text` (splits `text` at `': '`) + `build_bidi_stack` (mirrors `bidiPage.ts:280-283` —
+      `text` followed by `    at <func> (<url>:<line+1>:<col+1>)` per frame, with `+1` adjusting BiDi's
+      0-based line/column to the 1-based JS convention).
+    - WebKit (`backend/webkit/mod.rs` + `backend/webkit/host.m`): a new host-side userScript
+      (`errorJS`) installs `window.addEventListener('error', …)` + `'unhandledrejection'` handlers
+      that post `{ level: 'pageerror', text: '<name>: <message>\\n<stack>' }` through the existing
+      `fdConsole` IPC message handler. `drain_console_events` recognises `level == "pageerror"`
+      and routes via `parse_webkit_pageerror_payload` (splits at `\n` for head / stack, then at
+      `': '` for name / message) into `PageEvent::PageError(WebError)`. Reuses the `(level, text)`
+      IPC payload with no protocol additions — same Section B ceiling as §2.12 console, but the
+      structured `{name, message, stack}` round-trip is accurate within that ceiling.
+  - **NAPI**: new `#[napi] class WebError` in `crates/ferridriver-node/src/web_error.rs` with
+    `page(): Page | null` + `error(): { name, message, stack }`. `page.waitForEvent` extended from
+    `Either8 -> Either9` (adds the `WebError` slot); generated `.d.ts`:
+    `Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage |
+    WebError | Record<string, any>>`. `BrowserContext` grows `on('weberror', cb)` /
+    `once('weberror', cb)` / `off(id)` / `waitForEvent('weberror')` — same listener shape callers
+    use for page events.
+  - **QuickJS**: `WebErrorJs` in `crates/ferridriver-script/src/bindings/web_error.rs`
+    (symmetric with `ConsoleMessageJs` / `DownloadJs` — `error()` only, no `page()`).
+    `BrowserContextJs::waitForEvent('weberror')` instantiates `WebErrorJs` via `Class::instance`.
+    `PageJs::waitForEvent('pageerror')` extended likewise.
+- **Rule-9 coverage**:
+  - Rust integration (`tests/backends_support/web_error.rs`, 2 tests × 4 backends = **8 assertions**):
+    `test_page_error_sync_throw` (page-scoped `pageerror` carries `{ name: 'Error', message: 'boom' }`
+    + stack is string-shaped), `test_context_weberror_forwarding` (context-scoped `weberror` observes
+    the same errors from any page in the context). Tests poll for the specific error message rather
+    than asserting the first event — Firefox's BiDi emits spurious cross-origin permission errors at
+    page init that would otherwise land first. All four backends green.
+  - NAPI (`crates/ferridriver-node/test/web-error.test.ts`): 5 tests × 2 CDP backends = **10
+    assertions** covering `{name, message, stack}` round-trip, `page()` back-reference, `TypeError`
+    name preservation through CDP's `exception.description` split, context-side `weberror`
+    forwarding, and the `page.on('pageerror', cb)` callback-path snapshot shape.
+  - Baseline after the change: 125 core + 13 script + 38 MCP lib + 845 NAPI/Bun (was 835) +
+    4/4 backends green (cdp-pipe 138, cdp-raw 138, bidi 133, webkit 134).
+- **Playwright refs**:
+  - `/tmp/playwright/packages/playwright-core/src/client/webError.ts` — client shape verified byte-for-byte.
+  - `/tmp/playwright/packages/playwright-core/src/server/page.ts:425` — `addPageError` + dispatch-on-init.
+  - `/tmp/playwright/packages/playwright-core/src/server/browserContext.ts:54,73` — `PageError` event on
+    context + `[error: Error, page: Page]` fan-out signature.
+  - `/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:751` — `Runtime.exceptionThrown`
+    wiring.
+  - `/tmp/playwright/packages/playwright-core/src/server/chromium/crProtocolHelper.ts:28-100` —
+    `getExceptionMessage` + `exceptionToError` (mirrored verbatim).
+  - `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPage.ts:267-286` — BiDi JS-error
+    routing (mirrored verbatim).
+  - `/tmp/playwright/packages/isomorphic/stackTrace.ts:129-135` — `splitErrorMessage` (mirrored verbatim).
+- **Known Section B gap**: WebKit's host interceptor currently reuses the `(level, text)` IPC
+  payload from §2.12 console — a new IPC op would let the bridge carry structured
+  stack-trace frames + `cause` chain + async-stack information. Today, `stack` is the raw
+  `error.stack` string JSC produces (typically non-empty for inline-script errors, potentially
+  empty for synthetic `ErrorEvent` dispatches). Tracked under "WebKit console args + location +
+  pageerror stack frames" — one future IPC op closes §2.12 AND §2.13 gaps together.
 
 ### 2.14 Video as handle
 

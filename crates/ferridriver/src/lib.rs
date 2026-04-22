@@ -40,12 +40,13 @@ pub mod options;
 pub mod page;
 pub mod protocol;
 pub mod url_matcher;
+pub mod web_error;
 
 pub use browser::Browser;
 pub use context::{BrowserContext, ContextRef};
 pub use element_handle::{BoundingBox, ElementHandle, ElementState};
 pub use error::{FerriError, Result};
-pub use events::{EventEmitter, PageEvent};
+pub use events::{ContextEvent, ContextEventEmitter, EventEmitter, PageEvent};
 pub use frame::Frame;
 pub use js_handle::{HandleRemote, JSHandle};
 pub use locator::{FrameLocator, Locator};

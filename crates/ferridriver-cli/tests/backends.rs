@@ -2332,6 +2332,10 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::console_message::test_console_message_error_type);
   run!(backends_support::console_message::test_console_message_location_shape);
 
+  // §2.13 WebError as first-class event handle (page + context fan-out).
+  run!(backends_support::web_error::test_page_error_sync_throw);
+  run!(backends_support::web_error::test_context_weberror_forwarding);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

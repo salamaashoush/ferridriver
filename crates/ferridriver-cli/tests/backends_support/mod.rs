@@ -18,3 +18,4 @@ pub mod getby_regex;
 pub mod handle_surface;
 pub mod navigation_response;
 pub mod network;
+pub mod web_error;

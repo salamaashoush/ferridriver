@@ -1789,51 +1789,7 @@ impl WebKitPage {
             }
           };
           if !msgs.is_empty() {
-            // WebKit's host interceptor currently surfaces only
-            // `(level, text)` for each `console.*` call. Args and
-            // stack-trace location require a new IPC op — tracked as
-            // a Section B gap in PLAYWRIGHT_COMPAT.md. Build a
-            // ConsoleMessage with empty `args` + default location so
-            // callers still get a live handle they can dispatch off
-            // `type()` / `text()` / `timestamp()`.
-            let page = page_backref.upgrade();
-            let mut dest = console_log.write().await;
-            for (raw_type, text) in msgs {
-              let timestamp = std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
-              // Remap `'warn'` to `'warning'` for Playwright parity —
-              // CDP's `Runtime.consoleAPICalled.type` is already
-              // `'warning'`; BiDi's `log.entryAdded.method` is
-              // `'warn'` which we remap at the BiDi listener. Do the
-              // same for WebKit's host-side label so every backend's
-              // `ConsoleMessage.type()` is consistent.
-              let type_str = if raw_type == "warn" {
-                "warning".to_string()
-              } else {
-                raw_type
-              };
-              let msg = if let Some(ref page) = page {
-                ConsoleMessage::new(
-                  page,
-                  type_str,
-                  Some(text),
-                  Vec::new(),
-                  crate::console_message::ConsoleMessageLocation::default(),
-                  timestamp,
-                )
-              } else {
-                ConsoleMessage::new_detached(
-                  type_str,
-                  Some(text),
-                  Vec::new(),
-                  crate::console_message::ConsoleMessageLocation::default(),
-                  timestamp,
-                )
-              };
-              emitter.emit(crate::events::PageEvent::Console(msg.clone()));
-              dest.push(msg);
-            }
+            drain_console_events(&msgs, &page_backref, &emitter, &console_log).await;
           }
         }
 
@@ -2386,6 +2342,97 @@ impl WebKitElement {
       _ => Err("no data".into()),
     }
   }
+}
+
+/// Drain a batch of host-side `(level, text)` console events,
+/// dispatching each through the appropriate page-event variant.
+///
+/// `WebKit`'s host interceptor currently surfaces only `(level, text)`
+/// for each `console.*` call. Args and stack-trace location require a
+/// new IPC op — tracked as a Section B gap in `PLAYWRIGHT_COMPAT.md`.
+/// We build a `ConsoleMessage` with empty `args` + default location so
+/// callers still get a live handle they can dispatch off
+/// `type()` / `text()` / `timestamp()`.
+///
+/// `level == "pageerror"` is a synthetic marker injected by the host
+/// userScript for uncaught JS errors / unhandled rejections (see
+/// `host.m::errorJS`). These are routed to
+/// `PageEvent::PageError(WebError)` instead of `PageEvent::Console`.
+/// The `text` field is `"<name>: <message>\n<stack>"` so
+/// [`parse_webkit_pageerror_payload`] can recover the structured
+/// `{ name, message, stack }` without a new IPC op.
+async fn drain_console_events(
+  msgs: &[(String, String)],
+  page_backref: &crate::backend::PageBackref,
+  emitter: &crate::events::EventEmitter,
+  console_log: &Arc<RwLock<Vec<ConsoleMessage>>>,
+) {
+  let page = page_backref.upgrade();
+  let mut dest = console_log.write().await;
+  for (raw_type, text) in msgs {
+    if raw_type == "pageerror" {
+      let details = parse_webkit_pageerror_payload(text);
+      let web_err = match page {
+        Some(ref p) => crate::web_error::WebError::new(p, details),
+        None => crate::web_error::WebError::new_detached(details),
+      };
+      emitter.emit(crate::events::PageEvent::PageError(web_err));
+      continue;
+    }
+    let timestamp = std::time::SystemTime::now()
+      .duration_since(std::time::UNIX_EPOCH)
+      .map_or(0, |d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX));
+    // Remap `'warn'` to `'warning'` for Playwright parity — CDP's
+    // `Runtime.consoleAPICalled.type` is already `'warning'`; BiDi's
+    // `log.entryAdded.method` is `'warn'` which we remap at the BiDi
+    // listener. Do the same for WebKit's host-side label so every
+    // backend's `ConsoleMessage.type()` is consistent.
+    let type_str = if raw_type == "warn" {
+      "warning".to_string()
+    } else {
+      raw_type.clone()
+    };
+    let msg = if let Some(ref page) = page {
+      ConsoleMessage::new(
+        page,
+        type_str,
+        Some(text.clone()),
+        Vec::new(),
+        crate::console_message::ConsoleMessageLocation::default(),
+        timestamp,
+      )
+    } else {
+      ConsoleMessage::new_detached(
+        type_str,
+        Some(text.clone()),
+        Vec::new(),
+        crate::console_message::ConsoleMessageLocation::default(),
+        timestamp,
+      )
+    };
+    emitter.emit(crate::events::PageEvent::Console(msg.clone()));
+    dest.push(msg);
+  }
+}
+
+/// Parse the `"<name>: <message>\n<stack>"` payload emitted by the
+/// `WebKit` host-side error userScript (`host.m::errorJS`) into a
+/// structured [`crate::web_error::ErrorDetails`]. Splits at the first
+/// `\n` for the `{ name, message }` head vs. `stack` body, then splits
+/// the head at the first `': '` for `name` vs. `message`. When neither
+/// separator is present, the entire `text` becomes `message` and
+/// `name` defaults to `'Error'` — matches the behaviour of JS-side
+/// `String(new Error('…'))`.
+fn parse_webkit_pageerror_payload(text: &str) -> crate::web_error::ErrorDetails {
+  let (head, stack) = match text.find('\n') {
+    Some(idx) => (&text[..idx], text[idx + 1..].to_string()),
+    None => (text, String::new()),
+  };
+  let (name, message) = match head.find(": ") {
+    Some(idx) => (head[..idx].to_string(), head[idx + 2..].to_string()),
+    None => ("Error".to_string(), head.to_string()),
+  };
+  crate::web_error::ErrorDetails { name, message, stack }
 }
 
 /// Drain pending JS-interceptor network events into the page's

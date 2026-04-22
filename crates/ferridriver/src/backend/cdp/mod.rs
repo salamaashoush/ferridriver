@@ -696,6 +696,131 @@ fn u64_to_u32_saturating(n: u64) -> u32 {
   u32::try_from(n).unwrap_or(u32::MAX)
 }
 
+/// Convert a CDP `Runtime.ExceptionDetails` JSON payload into a
+/// [`crate::web_error::ErrorDetails`]. Mirrors Playwright's
+/// `server/chromium/crProtocolHelper.ts::{getExceptionMessage, exceptionToError}`
+/// byte-for-byte (see `/tmp/playwright/packages/playwright-core/src/server/chromium/crProtocolHelper.ts:28-100`):
+///
+/// 1. Build the combined message:
+///    - If `exception.description` is set, use it (carries the full
+///      `Error: message\n    at foo (bar.js:3:5)` form the engine
+///      produces).
+///    - Else if `exception.value` is set, stringify it.
+///    - Else fall back to `exceptionDetails.text` and synthesise stack
+///      frames by appending `\n    at <func> (<url>:<line>:<col>)` for
+///      each `stackTrace.callFrames` entry.
+/// 2. Split at the first line starting with `    at`. Everything before
+///    is `{ name, message }` (parsed via `splitErrorMessage`'s `': '`
+///    separator); everything from that line onward is `stack`.
+/// 3. If the exception's remote-object preview exposes a `name`
+///    property, override the parsed name with its value
+///    (e.g. custom `Error` subclasses).
+fn cdp_exception_to_error_details(exception_details: &serde_json::Value) -> crate::web_error::ErrorDetails {
+  let message_with_stack = cdp_get_exception_message(exception_details);
+  let lines: Vec<&str> = message_with_stack.split('\n').collect();
+  let first_stack_idx = lines.iter().position(|l| l.starts_with("    at"));
+  let (message_with_name, stack) = match first_stack_idx {
+    Some(idx) => (lines[..idx].join("\n"), message_with_stack.clone()),
+    None => (message_with_stack.clone(), String::new()),
+  };
+  let (parsed_name, parsed_message) = split_error_message(&message_with_name);
+  let name_override = exception_details
+    .get("exception")
+    .and_then(|e| e.get("preview"))
+    .and_then(|p| p.get("properties"))
+    .and_then(|v| v.as_array())
+    .and_then(|props| {
+      props
+        .iter()
+        .find(|p| p.get("name").and_then(|n| n.as_str()) == Some("name"))
+    })
+    .and_then(|p| {
+      p.get("value")
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string)
+    });
+  let name = name_override.unwrap_or(parsed_name);
+  crate::web_error::ErrorDetails {
+    name,
+    message: parsed_message,
+    stack,
+  }
+}
+
+/// Build the combined `description + stack` message for a CDP
+/// `Runtime.ExceptionDetails` payload. Mirrors
+/// `crProtocolHelper.ts::getExceptionMessage` byte-for-byte.
+fn cdp_get_exception_message(exception_details: &serde_json::Value) -> String {
+  use std::fmt::Write as _;
+  if let Some(exception) = exception_details.get("exception") {
+    if let Some(description) = exception.get("description").and_then(|v| v.as_str()) {
+      return description.to_string();
+    }
+    if let Some(value) = exception.get("value") {
+      return value_to_plain_string(value);
+    }
+  }
+  let mut message = exception_details
+    .get("text")
+    .and_then(|v| v.as_str())
+    .unwrap_or("")
+    .to_string();
+  if let Some(stack_trace) = exception_details.get("stackTrace") {
+    if let Some(frames) = stack_trace.get("callFrames").and_then(|v| v.as_array()) {
+      for frame in frames {
+        let url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
+        let line = frame.get("lineNumber").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let column = frame
+          .get("columnNumber")
+          .and_then(serde_json::Value::as_u64)
+          .unwrap_or(0);
+        let function_name = frame.get("functionName").and_then(|v| v.as_str()).unwrap_or("");
+        let function_name = if function_name.is_empty() {
+          "<anonymous>"
+        } else {
+          function_name
+        };
+        // Write directly into the buffer to avoid an extra allocation;
+        // writes into a String are infallible.
+        let _ = write!(message, "\n    at {function_name} ({url}:{line}:{column})");
+      }
+    }
+  }
+  message
+}
+
+/// JS `String(value)` equivalent for the handful of JSON-representable
+/// remote-object `value` shapes that appear in `Runtime.ExceptionDetails.exception.value`.
+fn value_to_plain_string(value: &serde_json::Value) -> String {
+  match value {
+    serde_json::Value::Null => "null".to_string(),
+    serde_json::Value::Bool(b) => b.to_string(),
+    serde_json::Value::Number(n) => n.to_string(),
+    serde_json::Value::String(s) => s.clone(),
+    other => other.to_string(),
+  }
+}
+
+/// Split a combined error message into `{ name, message }`. Mirrors
+/// Playwright's `packages/isomorphic/stackTrace.ts::splitErrorMessage`:
+/// the separator is the first `': '` occurrence; if absent, `name` is
+/// empty and `message` is the full input.
+fn split_error_message(message: &str) -> (String, String) {
+  if let Some(idx) = message.find(':') {
+    let name = message[..idx].to_string();
+    // Playwright requires the separator to be `': '` — the `+ 2`
+    // offset below mirrors `separationIdx + 2` in
+    // `splitErrorMessage`. When the char after ':' is not a space,
+    // fall back to the full message (keeps parity with the TS
+    // `separationIdx + 2 <= message.length` guard).
+    if message.as_bytes().get(idx + 1) == Some(&b' ') && idx + 2 <= message.len() {
+      let msg = message[idx + 2..].to_string();
+      return (name, msg);
+    }
+  }
+  (String::new(), message.to_string())
+}
+
 /// CDP `timestamp` is fractional milliseconds. Non-finite / negative
 /// values collapse to `0`; representable positives saturate at
 /// `u64::MAX`. Works around clippy's unguarded f64-to-u64 cast lint.
@@ -2728,6 +2853,12 @@ impl<T: CdpWrap> CdpPage<T> {
       emitter1,
       self.page_backref.clone(),
     );
+    Self::spawn_web_error_listener(
+      transport.clone(),
+      session_id.clone(),
+      self.events.clone(),
+      self.page_backref.clone(),
+    );
     Self::spawn_network_listener(
       transport.clone(),
       session_id.clone(),
@@ -2831,6 +2962,52 @@ impl<T: CdpWrap> CdpPage<T> {
         let msg = crate::console_message::ConsoleMessage::new(&page, type_str, None, args, location, timestamp);
         console_log.write().await.push(msg.clone());
         emitter.emit(crate::events::PageEvent::Console(msg));
+      }
+    });
+  }
+
+  /// Listen for `Runtime.exceptionThrown` and emit
+  /// [`crate::events::PageEvent::PageError`] carrying a live
+  /// [`crate::web_error::WebError`]. Mirrors Playwright's
+  /// `crPage.ts:751` — `session.on('Runtime.exceptionThrown', …)` feeding
+  /// `exceptionToError(exceptionDetails)` → `page.addPageError(err)`.
+  ///
+  /// The exception conversion follows
+  /// `crProtocolHelper.ts::{getExceptionMessage, exceptionToError}`
+  /// byte-for-byte: the combined `description` + stack lines is split at
+  /// the first `    at …` line; everything before becomes
+  /// `{ name, message }` (parsed via `splitErrorMessage`'s `': '`
+  /// separator), everything from that line onward becomes `stack`. When
+  /// the exception carries an object `preview` with a `name` property,
+  /// that value overrides the parsed name — matches Playwright's
+  /// `nameOverride` branch.
+  fn spawn_web_error_listener(
+    transport: Arc<T>,
+    session_id: Option<Arc<str>>,
+    emitter: crate::events::EventEmitter,
+    page_backref: crate::backend::PageBackref,
+  ) {
+    tokio::spawn(async move {
+      let mut rx = transport.subscribe_events();
+      while let Ok(event) = rx.recv().await {
+        if let Some(ref expected_sid) = session_id {
+          let event_sid = event.get("sessionId").and_then(|v| v.as_str());
+          if event_sid != Some(&**expected_sid) {
+            continue;
+          }
+        }
+        if event.get("method").and_then(|m| m.as_str()) != Some("Runtime.exceptionThrown") {
+          continue;
+        }
+        let Some(exception_details) = event.get("params").and_then(|p| p.get("exceptionDetails")) else {
+          continue;
+        };
+        let details = cdp_exception_to_error_details(exception_details);
+        let web_err = match page_backref.upgrade() {
+          Some(page) => crate::web_error::WebError::new(&page, details),
+          None => crate::web_error::WebError::new_detached(details),
+        };
+        emitter.emit(crate::events::PageEvent::PageError(web_err));
       }
     });
   }

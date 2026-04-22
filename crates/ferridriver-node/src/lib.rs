@@ -76,3 +76,4 @@ mod test_fixtures;
 mod test_info;
 mod test_runner;
 mod types;
+mod web_error;

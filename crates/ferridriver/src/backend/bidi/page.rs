@@ -115,6 +115,52 @@ fn u64_to_u32_saturating(n: u64) -> u32 {
   u32::try_from(n).unwrap_or(u32::MAX)
 }
 
+/// Split a `BiDi` `log.entryAdded.text` (for `type: 'javascript'`)
+/// into `{ name, message }`. Mirrors the `params.text?.includes(': ')`
+/// branch in `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiPage.ts:271-277`.
+/// If no `': '` separator is present, `name` is empty and `message` is
+/// the full `text`.
+fn split_error_text(text: &str) -> (String, String) {
+  if let Some(idx) = text.find(": ") {
+    (text[..idx].to_string(), text[idx + 2..].to_string())
+  } else {
+    (String::new(), text.to_string())
+  }
+}
+
+/// Build the `error.stack` string for a `BiDi` JS error. Mirrors
+/// `bidiPage.ts:280-283` byte-for-byte: the first line is the original
+/// `text`, followed by one `    at <func> (<url>:<line+1>:<col+1>)`
+/// line per `stackTrace.callFrames` entry. `BiDi` line / column
+/// numbers are 0-based; Playwright adds `+ 1` to match the user-facing
+/// 1-based JS convention.
+fn build_bidi_stack(text: &str, stack: Option<&serde_json::Value>) -> String {
+  use std::fmt::Write as _;
+  let mut out = text.to_string();
+  let Some(frames) = stack.and_then(|s| s.get("callFrames")).and_then(|v| v.as_array()) else {
+    return out;
+  };
+  for frame in frames {
+    let url = frame.get("url").and_then(|v| v.as_str()).unwrap_or("");
+    let line = frame.get("lineNumber").and_then(serde_json::Value::as_u64).unwrap_or(0) + 1;
+    let col = frame
+      .get("columnNumber")
+      .and_then(serde_json::Value::as_u64)
+      .unwrap_or(0)
+      + 1;
+    let function_name = frame.get("functionName").and_then(|v| v.as_str()).unwrap_or("");
+    out.push('\n');
+    // `write!` into a `String` is infallible — ignore the `Result` to
+    // avoid the intermediate allocation clippy flags on `push_str(&format!)`.
+    if function_name.is_empty() {
+      let _ = write!(out, "    at {url}:{line}:{col}");
+    } else {
+      let _ = write!(out, "    at {function_name} ({url}:{line}:{col})");
+    }
+  }
+  out
+}
+
 fn f64_to_u64_saturating(n: f64) -> u64 {
   // Saturating cast — clippy's `cast_possible_truncation`/`cast_sign_loss`
   // fire on a raw `as u64` cast. Manual range check + saturation is the
@@ -1493,13 +1539,34 @@ impl BidiPage {
             injected_script.reset();
           },
           "log.entryAdded" => {
-            // Mirrors Playwright's `bidiPage.ts::_onLogEntryAdded`. We
-            // only surface entries with `type: 'console'` — javascript
-            // errors are routed through `pageerror` (future §2.13
-            // WebError work; for now we silently drop them to match
-            // the previous behaviour, which is also what Playwright
-            // does for a page without a `pageerror` listener).
+            // Mirrors Playwright's `bidiPage.ts::_onLogEntryAdded`.
+            // Routes `type: 'javascript'` + `level: 'error'` entries to
+            // `PageEvent::PageError(WebError)`; `type: 'console'`
+            // entries to `PageEvent::Console(ConsoleMessage)`; other
+            // entry types (`'deprecation'`, etc.) are ignored.
             let entry_type = event.params.get("type").and_then(|v| v.as_str()).unwrap_or("");
+            let level = event.params.get("level").and_then(|v| v.as_str()).unwrap_or("");
+            if entry_type == "javascript" && level == "error" {
+              // Parity with `bidiPage.ts:267-286`: split `text` at the
+              // first `': '` for `name` / `message`, synthesise `stack`
+              // from the entry's `stackTrace.callFrames` (BiDi
+              // line/column are 0-based so Playwright adds `+ 1`).
+              let text = event
+                .params
+                .get("text")
+                .and_then(|v| v.as_str())
+                .unwrap_or("")
+                .to_string();
+              let (name, message) = split_error_text(&text);
+              let stack = build_bidi_stack(&text, event.params.get("stackTrace"));
+              let details = crate::web_error::ErrorDetails { name, message, stack };
+              let web_err = match page_backref.upgrade() {
+                Some(page) => crate::web_error::WebError::new(&page, details),
+                None => crate::web_error::WebError::new_detached(details),
+              };
+              emitter.emit(PageEvent::PageError(web_err));
+              continue;
+            }
             if entry_type != "console" {
               continue;
             }
