@@ -559,13 +559,13 @@ impl AnyBrowser {
   /// # Errors
   ///
   /// Returns an error if context creation fails.
-  pub async fn new_context(&self) -> Result<String, String> {
+  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String, String> {
     match self {
-      Self::CdpPipe(b) => b.new_context().await,
-      Self::CdpRaw(b) => b.new_context().await,
+      Self::CdpPipe(b) => b.new_context(proxy).await,
+      Self::CdpRaw(b) => b.new_context(proxy).await,
       #[cfg(target_os = "macos")]
       Self::WebKit(_) => Err("WebKit does not support multiple browser contexts".into()),
-      Self::Bidi(b) => b.new_context().await,
+      Self::Bidi(b) => b.new_context(proxy).await,
     }
   }
 

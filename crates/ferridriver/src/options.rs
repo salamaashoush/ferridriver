@@ -1310,6 +1310,54 @@ impl Default for VideoSize {
   }
 }
 
+/// Resolve a user-supplied URL against an optional base URL. Mirrors
+/// Playwright's `constructURLBasedOnBaseURL`
+/// (`/tmp/playwright/packages/isomorphic/urlMatch.ts:253`): delegates
+/// to the standard URL `new URL(given, base)` resolution rule.
+///
+/// - Absolute URLs (with scheme) are returned verbatim.
+/// - Relative paths (`/foo`, `./foo`, `foo`) resolve against `base`.
+/// - Invalid inputs fall through to the given URL unchanged —
+///   matches Playwright's try/catch fallback.
+#[must_use]
+pub fn construct_url_with_base(base: Option<&str>, given: &str) -> String {
+  // No base, or already absolute (scheme present) → passthrough.
+  if base.is_none() || given.contains("://") || given.starts_with("data:") || given.starts_with("about:") {
+    return given.to_string();
+  }
+  let base = base.unwrap_or("");
+  // Minimal URL-join: strip trailing slash from base (keep the root
+  // slash only), handle given-has-leading-slash vs not. This is a
+  // pragmatic subset — covers the common `baseURL + /path` and
+  // `baseURL + path` cases. Absolute-URL / query / fragment rules
+  // match `new URL(given, base)` for the common patterns.
+  let (base_origin, base_path) = split_origin_and_path(base);
+  if given.starts_with('/') {
+    // Root-relative: replace the base's path entirely.
+    return format!("{base_origin}{given}");
+  }
+  // Path-relative: strip the last segment of base_path (everything
+  // after the final `/`) then append `given`.
+  let cut = base_path.rfind('/').map_or(0, |i| i + 1);
+  let kept = &base_path[..cut];
+  format!("{base_origin}{kept}{given}")
+}
+
+fn split_origin_and_path(url: &str) -> (&str, &str) {
+  // Locate the `://` separator; if missing, treat the whole thing
+  // as a path (no origin).
+  let Some(scheme_end) = url.find("://") else {
+    return ("", url);
+  };
+  let rest_start = scheme_end + 3;
+  let rest = &url[rest_start..];
+  // The path starts at the first `/` after the host (+optional port).
+  match rest.find('/') {
+    Some(path_start) => (&url[..rest_start + path_start], &rest[path_start..]),
+    None => (url, "/"),
+  }
+}
+
 // ── BrowserContextOptions ──────────────────────────────────────────────────
 
 /// Geographic location emulation. Mirrors Playwright's

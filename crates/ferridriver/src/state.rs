@@ -181,6 +181,13 @@ pub struct BrowserState {
   /// every fresh page. Sync mutex so non-async construction paths
   /// can write without owning a tokio guard.
   pub context_options: Arc<std::sync::Mutex<HashMap<String, crate::options::BrowserContextOptions>>>,
+  /// Per-context `storageState` hydration flag. Set the first time a
+  /// page opens in a context whose options bag carries a
+  /// `storageState` — subsequent pages in the same context skip the
+  /// hydration (cookies are context-scoped; localStorage persists per
+  /// origin across subsequent pages). Mirrors Playwright's
+  /// "set storage state once at context creation".
+  pub storage_state_hydrated: Arc<std::sync::Mutex<rustc_hash::FxHashSet<String>>>,
 }
 
 #[derive(Clone)]
@@ -242,7 +249,20 @@ impl BrowserState {
       context_events: Arc::new(std::sync::Mutex::new(HashMap::default())),
       record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
+      storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
     }
+  }
+
+  /// Mark a context composite-key as having had its storageState
+  /// hydrated. Returns `true` if this is the first call (hydration
+  /// should run); `false` if already hydrated.
+  #[must_use]
+  pub fn claim_storage_state_hydration(&self, composite_key: &str) -> bool {
+    let mut set = match self.storage_state_hydrated.lock() {
+      Ok(g) => g,
+      Err(p) => p.into_inner(),
+    };
+    set.insert(composite_key.to_string())
   }
 
   /// Install the [`crate::options::BrowserContextOptions`] bag for a
@@ -692,7 +712,11 @@ impl BrowserState {
         Some(existing_ctx_id),
       )
     } else {
-      let ctx_id = plan.browser.new_context().await?;
+      // Legacy `open_page_keyed` path — no options bag flows through
+      // here (used by older MCP call sites that don't go via
+      // `ContextRef::new_page`). Proxy wiring happens on the
+      // `ContextRef` path exclusively.
+      let ctx_id = plan.browser.new_context(None).await?;
       let p = Box::pin(plan.browser.new_page(url, Some(&ctx_id), plan.viewport.as_ref())).await?;
       (p, Some(ctx_id))
     };

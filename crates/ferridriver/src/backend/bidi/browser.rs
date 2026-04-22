@@ -102,12 +102,38 @@ impl BidiBrowser {
     })
   }
 
-  /// Create a new isolated user context.
-  pub async fn new_context(&self) -> Result<String, String> {
+  /// Create a new isolated user context. `proxy` is wired via
+  /// `browser.createUserContext({ proxy })` — `BiDi`'s proxy shape
+  /// matches `WebDriver`'s capabilities (`proxyType: 'manual', httpProxy,
+  /// sslProxy, socksProxy, socksVersion, noProxy`). For the common
+  /// `http://host:port` / `socks5://host:port` input we decompose into
+  /// the equivalent `BiDi` shape.
+  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String, String> {
+    let mut params = json!({});
+    if let Some(p) = proxy {
+      // Parse the server URL into BiDi's proxy capability fields.
+      let (proxy_type, host_port, is_socks, socks_version) = parse_bidi_proxy(&p.server);
+      let mut bidi_proxy = json!({ "proxyType": proxy_type });
+      if is_socks {
+        bidi_proxy["socksProxy"] = json!(host_port);
+        if let Some(v) = socks_version {
+          bidi_proxy["socksVersion"] = json!(v);
+        }
+      } else {
+        bidi_proxy["httpProxy"] = json!(host_port);
+        bidi_proxy["sslProxy"] = json!(host_port);
+      }
+      if let Some(ref bypass) = p.bypass {
+        // WebDriver noProxy is an array of host strings.
+        let list: Vec<&str> = bypass.split(',').map(str::trim).filter(|s| !s.is_empty()).collect();
+        bidi_proxy["noProxy"] = json!(list);
+      }
+      params["proxy"] = bidi_proxy;
+    }
     let result = self
       .session
       .transport
-      .send_command("browser.createUserContext", json!({}))
+      .send_command("browser.createUserContext", params)
       .await?;
     result
       .get("userContext")
@@ -230,5 +256,18 @@ impl BidiBrowser {
     }
 
     Ok(())
+  }
+}
+
+/// Decompose a Playwright-shaped proxy `server` string into the
+/// BiDi/WebDriver capability fields. Returns `(proxyType, host_port,
+/// is_socks, socks_version)`.
+fn parse_bidi_proxy(server: &str) -> (&'static str, String, bool, Option<i64>) {
+  let (scheme, rest) = server.split_once("://").unwrap_or(("", server));
+  let host_port = rest.to_string();
+  match scheme {
+    "socks5" => ("manual", host_port, true, Some(5)),
+    "socks4" => ("manual", host_port, true, Some(4)),
+    _ => ("manual", host_port, false, None),
   }
 }

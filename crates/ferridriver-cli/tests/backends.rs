@@ -2377,6 +2377,12 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::browser_context_options::test_context_options_offline);
   run!(backends_support::browser_context_options::test_context_options_device_scale_factor);
   run!(backends_support::browser_context_options::test_context_options_has_touch);
+  run!(backends_support::browser_context_options::test_context_options_service_workers_block);
+  run!(backends_support::browser_context_options::test_context_options_screen);
+  run!(backends_support::browser_context_options::test_context_options_bypass_csp);
+  run!(backends_support::browser_context_options::test_context_options_base_url);
+  run!(backends_support::browser_context_options::test_context_options_storage_state);
+  run!(backends_support::browser_context_options::test_context_options_proxy);
 
   // Multi-page last (changes session state)
   run!(test_new_page);

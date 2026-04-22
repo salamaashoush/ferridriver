@@ -98,6 +98,9 @@ struct JsBrowserContextOptions {
   reduced_motion: Option<serde_json::Value>,
   screen: Option<JsScreenSize>,
   service_workers: Option<String>,
+  /// `string` = file path; `object` = inline state JSON. Playwright:
+  /// `storageState: string | { cookies, origins }`.
+  storage_state: Option<serde_json::Value>,
   strict_selectors: Option<bool>,
   timezone_id: Option<String>,
   user_agent: Option<String>,
@@ -243,7 +246,10 @@ impl JsBrowserContextOptions {
       reduced_motion: lower_media(self.reduced_motion),
       screen,
       service_workers,
-      storage_state: None,
+      storage_state: self.storage_state.map(|v| match v {
+        serde_json::Value::String(path) => fo::StorageStateInput::Path(std::path::PathBuf::from(path)),
+        other => fo::StorageStateInput::Inline(other),
+      }),
       strict_selectors: self.strict_selectors,
       timezone_id: self.timezone_id,
       user_agent: self.user_agent,

@@ -312,7 +312,13 @@ impl ContextRef {
         Some(existing_ctx_id),
       )
     } else {
-      let ctx_id = plan.browser.new_context().await?;
+      // Per-context `proxy` flows through
+      // `Target.createBrowserContext({ proxyServer, proxyBypassList })`
+      // on CDP (`crBrowser.ts::doCreateNewContext`) and
+      // `browser.createUserContext({ proxy })` on BiDi
+      // (`bidiBrowser.ts::doCreateNewContext`).
+      let proxy = ctx_opts.as_ref().and_then(|o| o.proxy.as_ref());
+      let ctx_id = plan.browser.new_context(proxy).await?;
       let page = Box::pin(
         plan
           .browser
@@ -342,6 +348,29 @@ impl ContextRef {
     // context.newPage rejects" contract.
     if let Some(opts) = ctx_opts.as_ref() {
       apply_context_options(&page, opts).await?;
+      // Hydrate `storageState` once per context — cookies + localStorage
+      // applied to the first page; subsequent pages in the same
+      // context inherit. Mirrors Playwright's
+      // `/tmp/playwright/packages/playwright-core/src/server/browserContext.ts::setStorageState`.
+      if let Some(ref storage) = opts.storage_state {
+        let should_hydrate = {
+          let state = self.state.read().await;
+          state.claim_storage_state_hydration(&self.key.to_composite())
+        };
+        if should_hydrate {
+          let state_value = match storage {
+            crate::options::StorageStateInput::Inline(v) => v.clone(),
+            crate::options::StorageStateInput::Path(p) => {
+              let text = std::fs::read_to_string(p)
+                .map_err(|e| crate::error::FerriError::Other(format!("storageState: read {}: {e}", p.display())))?;
+              serde_json::from_str(&text).map_err(|e| {
+                crate::error::FerriError::Other(format!("storageState: parse JSON from {}: {e}", p.display()))
+              })?
+            },
+          };
+          page.set_storage_state(&state_value).await?;
+        }
+      }
     }
 
     // If the context was configured with `recordVideo`, spawn the

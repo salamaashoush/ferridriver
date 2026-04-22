@@ -330,14 +330,20 @@ impl<T: CdpWrap> CdpBrowser<T> {
 
   /// Create a new browser context (isolated cookies, storage, cache).
   /// Matches Playwright's `browser.newContext()` → `Target.createBrowserContext`.
-  pub async fn new_context(&self) -> Result<String, String> {
+  /// Per-context `proxy` wires through `proxyServer` + `proxyBypassList`
+  /// mirroring `crBrowser.ts::doCreateNewContext` at
+  /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts:121`.
+  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String, String> {
+    let mut params = serde_json::json!({"disposeOnDetach": true});
+    if let Some(p) = proxy {
+      params["proxyServer"] = serde_json::json!(p.server);
+      if let Some(ref bypass) = p.bypass {
+        params["proxyBypassList"] = serde_json::json!(bypass);
+      }
+    }
     let ctx = self
       .transport
-      .send_command(
-        None,
-        "Target.createBrowserContext",
-        serde_json::json!({"disposeOnDetach": true}),
-      )
+      .send_command(None, "Target.createBrowserContext", params)
       .await?;
 
     ctx

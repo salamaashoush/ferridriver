@@ -281,14 +281,36 @@ impl Page {
   /// Returns an error if the navigation fails or the wait condition times out.
   #[tracing::instrument(skip(self, opts), fields(url))]
   pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
-    tracing::debug!(target: "ferridriver::action", action = "goto", url, "page.goto");
+    // Resolve against the context's `baseURL` option when set —
+    // mirrors Playwright's `constructURLBasedOnBaseURL` applied in
+    // `Page._goto` (`/tmp/playwright/packages/playwright-core/src/client/page.ts`).
+    // Absolute URLs passthrough; relative paths resolve against baseURL.
+    let resolved = self.resolve_with_base_url(url).await;
+    tracing::debug!(target: "ferridriver::action", action = "goto", url = %resolved, "page.goto");
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let referer = opts.as_ref().and_then(|o| o.referer.as_deref());
     self
       .inner
-      .goto(url, lifecycle, timeout, referer)
+      .goto(&resolved, lifecycle, timeout, referer)
       .await
       .map_err(Into::into)
+  }
+
+  /// Resolve a user-supplied URL against the owning context's
+  /// `baseURL` option. Returns the input unchanged when no context
+  /// is attached, no `baseURL` is set, or the input is already
+  /// absolute. See
+  /// [`crate::options::construct_url_with_base`] for the resolution
+  /// rules.
+  async fn resolve_with_base_url(&self, url: &str) -> String {
+    let Some(ctx) = self.context_ref.as_ref() else {
+      return url.to_string();
+    };
+    let state = ctx.state.read().await;
+    let Some(bag) = state.get_context_options(&ctx.key.to_composite()) else {
+      return url.to_string();
+    };
+    crate::options::construct_url_with_base(bag.base_url.as_deref(), url)
   }
 
   /// Navigate back in history. Returns the main-document `Response` on

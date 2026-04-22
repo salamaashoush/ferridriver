@@ -771,19 +771,35 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
     geolocation+permissions, `setNetworkConditions` shape — Firefox
     BiDi is missing or not-yet-wired to the equivalent commands.
 
-  **Deferred to a follow-up §4.1.x phase (struct field present in
-  Rust, NAPI, QuickJS — but `apply_context_options` is a no-op for
-  these)**: `acceptDownloads`, `baseURL`, `bypassCSP`,
-  `ignoreHTTPSErrors` (each maps cleanly to an existing per-page
-  setter; just need the wire-up + tests), `proxy` (needs per-context
-  proxy configuration on launch), `recordHar` (needs HAR writer crate
-  — see §2.6), `serviceWorkers` (page-level setter exists; only the
-  Rule-9 test needs writing), `storageState` (needs IndexedDB capture
-  — see §4.2/§4.3), `screen` (CDP `screenWidth`/`screenHeight` already
-  set from viewport, but the dedicated `screen` field deserves its
-  own override), `strictSelectors` (core-side flag only — no backend
-  wire), `httpCredentials` (per-page setter exists; needs origin
-  scoping and the `send` policy hooked through APIRequestContext).
+  **Also landed (second wave, Rule-9 tested)**:
+  - `bypassCSP` (CDP `Page.setBypassCSP`; webkit / bidi typed
+    Unsupported).
+  - `ignoreHTTPSErrors` (CDP `Security.setIgnoreCertificateErrors`).
+  - `acceptDownloads` (CDP `Browser.setDownloadBehavior`; BiDi
+    `browser.setDownloadBehavior`).
+  - `serviceWorkers: 'block'` (cross-backend init-script injection —
+    `navigator.serviceWorker.register = () => Promise.reject(...)`).
+  - `screen` (CDP `Emulation.setDeviceMetricsOverride` screenWidth/Height).
+  - `baseURL` (client-side `construct_url_with_base` in
+    `options.rs`; applied in `page.goto` before dispatch).
+  - `storageState: string | { cookies, origins }` — cookies +
+    localStorage hydrated once per context on the first page open;
+    `Path(PathBuf)` reads JSON from disk, `Inline(Value)` consumes
+    directly. Tracked by
+    `BrowserState::claim_storage_state_hydration`.
+  - `proxy: { server, bypass? }` per-context via
+    `Target.createBrowserContext({ proxyServer, proxyBypassList })`
+    (CDP; `--proxy-server=per-context` launch flag now enabled) and
+    `browser.createUserContext({ proxy })` (BiDi; decomposed into
+    WebDriver capability shape).
+
+  **Still deferred** (requires substantial new infra):
+  - `recordHar` — blocks on §2.6 HAR writer.
+  - `clientCertificates` — needs a TLS-intercepting proxy.
+  - `httpCredentials.send` policy — needs APIRequestContext
+    integration (origin scoping is done on CDP).
+  - `strictSelectors` — needs strict-mode counting threaded through
+    every backend selector path; parked until a dedicated session.
 
 - **Playwright ref**: `types.d.ts` `BrowserContextOptions` (line 22229).
 - **Files**: `crates/ferridriver/src/options.rs::BrowserContextOptions`;
