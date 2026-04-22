@@ -461,19 +461,55 @@ impl ContextRef {
     self.default_navigation_timeout_ms = ms;
   }
 
-  /// Grant permissions in this context.
+  /// Mutate the stored [`crate::options::BrowserContextOptions`] bag
+  /// via `f`, then re-apply the bag to every already-open page in
+  /// this context. The single idiomatic entry point behind every
+  /// Playwright public context setter (`setGeolocation`,
+  /// `setOffline`, `setExtraHTTPHeaders`, `grantPermissions`, etc.)
+  /// and the backbone for future per-field mutators.
+  ///
+  /// Future pages opened in this context see the updated bag because
+  /// `ContextRef::new_page` reads from the same registry.
   ///
   /// # Errors
   ///
-  /// Returns an error if the context or page does not exist, or granting fails.
-  pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<()> {
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    if let Some(page) = ctx.active_page() {
-      page.grant_permissions(permissions, origin).await.map_err(Into::into)
-    } else {
-      Err(crate::error::FerriError::Other("No page in context".into()))
+  /// Returns an error when `page.apply_context_options` rejects on
+  /// any open page (aggregated per-field).
+  async fn mutate_options<F>(&self, f: F) -> Result<()>
+  where
+    F: FnOnce(&mut crate::options::BrowserContextOptions),
+  {
+    let composite = self.key.to_composite();
+    let updated = {
+      let state = self.state.read().await;
+      let mut opts = state.get_context_options(&composite).unwrap_or_default();
+      f(&mut opts);
+      state.set_context_options(&composite, opts.clone());
+      opts
+    };
+    let pages = Box::pin(self.pages()).await?;
+    for page in pages {
+      Box::pin(page.apply_context_options(&updated)).await?;
     }
+    Ok(())
+  }
+
+  /// Grant permissions in this context. Stores the list on the
+  /// options bag and re-applies to every open page — matches
+  /// Playwright's `browserContext.grantPermissions` semantics where
+  /// the grant persists for future pages too.
+  ///
+  /// The `origin` parameter is currently ignored at the backend
+  /// level (CDP `Browser.grantPermissions` accepts an `origin` but
+  /// we don't thread it through the options bag yet — the
+  /// bag-stored list grants for every origin).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the re-application fails on any page.
+  pub async fn grant_permissions(&self, permissions: &[String], _origin: Option<&str>) -> Result<()> {
+    let perms = permissions.to_vec();
+    self.mutate_options(|o| o.permissions = Some(perms)).await
   }
 
   /// Clear all granted permissions.
@@ -482,13 +518,13 @@ impl ContextRef {
   ///
   /// Returns an error if resetting permissions fails.
   pub async fn clear_permissions(&self) -> Result<()> {
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    if let Some(page) = ctx.active_page() {
-      page.reset_permissions().await.map_err(Into::into)
-    } else {
-      Ok(())
+    // Reset via the backend's `Browser.resetPermissions` on every
+    // page, then drop the list from the options bag.
+    let pages = self.pages().await?;
+    for page in &pages {
+      page.inner().reset_permissions().await?;
     }
+    self.mutate_options(|o| o.permissions = None).await
   }
 
   /// Close this context (remove from `BrowserState`).
@@ -508,26 +544,29 @@ impl ContextRef {
     &self.state
   }
 
-  /// Enable `recordVideo` for every page opened in this context.
-  /// Mirrors Playwright's
-  /// `browser.newContext({ recordVideo: { dir, size? } })` — see
-  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:10150`.
-  /// Calls after this setter propagate to pages opened thereafter;
-  /// pages already open do NOT retroactively start recording (matches
-  /// Playwright's context-creation-time binding semantics).
+  /// Enable `recordVideo` for pages opened in this context AFTER
+  /// the call. Pages already open do not retroactively start
+  /// recording — matches Playwright's context-creation-time binding
+  /// semantics (`browser.newContext({ recordVideo: { dir, size? } })`).
   ///
-  /// Transitional: §4.1's `BrowserContextOptions` bag will fold this
-  /// into the full options struct at context creation time.
+  /// Transitional shim — prefer passing `recordVideo` to
+  /// `browser.newContext(options)` directly.
   ///
   /// # Errors
   ///
-  /// Returns an error if the state lock cannot be acquired. In
-  /// practice the state is uncontended at setter time; the error path
-  /// only fires if a concurrent writer holds the guard (same
-  /// fallthrough contract as [`Self::on`]).
+  /// Returns an error if the state write fails. Does NOT re-apply
+  /// to already-open pages (the recording runtime attaches at page
+  /// open via `start_video_recording`).
   pub async fn set_record_video(&self, opts: crate::options::RecordVideoOptions) -> Result<()> {
+    let composite = self.key.to_composite();
     let state = self.state.read().await;
-    state.set_record_video(&self.key.to_composite(), opts);
+    state.set_record_video(&composite, opts.clone());
+    // Also fold into the options bag so future `browser.newContext`
+    // re-reads see it, and so a later `context.setOffline`-style
+    // mutator doesn't clobber the record_video field.
+    let mut bag = state.get_context_options(&composite).unwrap_or_default();
+    bag.record_video = Some(opts);
+    state.set_context_options(&composite, bag);
     Ok(())
   }
 
@@ -591,46 +630,41 @@ impl ContextRef {
     Ok(ids)
   }
 
-  /// Set geolocation for all pages in this context.
+  /// Playwright: `browserContext.setGeolocation(geo)` — mutates the
+  /// options bag and re-applies to every open page.
   ///
   /// # Errors
   ///
-  /// Returns an error if the context does not exist or geolocation emulation fails.
+  /// Returns an error if re-application fails on any page.
   pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<()> {
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    for page in &ctx.pages {
-      page.set_geolocation(lat, lng, accuracy).await?;
-    }
-    Ok(())
+    self
+      .mutate_options(|o| {
+        o.geolocation = Some(crate::options::Geolocation {
+          latitude: lat,
+          longitude: lng,
+          accuracy,
+        });
+      })
+      .await
   }
 
-  /// Set extra HTTP headers for all pages in this context.
+  /// Playwright: `browserContext.setExtraHTTPHeaders(headers)`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the context does not exist or setting headers fails.
+  /// Returns an error if re-application fails on any page.
   pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    for page in &ctx.pages {
-      page.set_extra_http_headers(headers).await?;
-    }
-    Ok(())
+    let headers = headers.clone();
+    self.mutate_options(|o| o.extra_http_headers = Some(headers)).await
   }
 
-  /// Set offline mode for all pages in this context.
+  /// Playwright: `browserContext.setOffline(offline)`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the context does not exist or network state change fails.
+  /// Returns an error if re-application fails on any page.
   pub async fn set_offline(&self, offline: bool) -> Result<()> {
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    for page in &ctx.pages {
-      page.set_network_state(offline, 0.0, -1.0, -1.0).await?;
-    }
-    Ok(())
+    self.mutate_options(|o| o.offline = Some(offline)).await
   }
 
   /// Register a route handler for all pages in this context.
@@ -681,63 +715,15 @@ impl ContextRef {
 /// `http_credentials`, `accept_downloads`, `ignore_https_errors`,
 /// `strict_selectors` beyond storage, `bypass_csp`. Each gets a
 /// dedicated implementation when the supporting infrastructure lands.
+/// Apply a context-options bag to a freshly-opened page. This
+/// delegates to the backend's single `apply_context_options` dispatch
+/// which fires every protocol command in parallel and aggregates
+/// errors (matches Playwright's `crPage._updateXxx()` set driven by
+/// `Promise.all`). Keeping the helper thin here means the context
+/// layer stays backend-agnostic — the only Rust-level choice is
+/// "apply the whole bag or don't".
 async fn apply_context_options(page: &Arc<Page>, opts: &crate::options::BrowserContextOptions) -> Result<()> {
-  // Re-apply the resolved viewport explicitly. `Browser::new_page`
-  // already invoked `Emulation.setDeviceMetricsOverride` from
-  // `enable_domains` based on the same `ViewportConfig`, but
-  // `Emulation.setTouchEmulationEnabled` only fires from the
-  // dedicated [`Page::set_viewport`] path. Calling it here is the
-  // simplest way to honour `hasTouch: true` without duplicating the
-  // touch-toggle in `enable_domains` for every fresh page (most of
-  // which set `has_touch=false`).
-  if let Some(vp) = opts.resolved_viewport() {
-    page.set_viewport(&vp).await?;
-  }
-  if let Some(ua) = opts.user_agent.as_deref() {
-    page.set_user_agent(ua).await?;
-  }
-  if let Some(locale) = opts.locale.as_deref() {
-    page.set_locale(locale).await?;
-  }
-  if let Some(tz) = opts.timezone_id.as_deref() {
-    page.set_timezone(tz).await?;
-  }
-  if let Some(enabled) = opts.java_script_enabled {
-    page.set_javascript_enabled(enabled).await?;
-  }
-  if let Some(bypass) = opts.bypass_csp {
-    page.set_bypass_csp(bypass).await?;
-  }
-  if let Some(ignore) = opts.ignore_https_errors {
-    page.set_ignore_certificate_errors(ignore).await?;
-  }
-  if let Some(ref creds) = opts.http_credentials {
-    page.set_http_credentials(&creds.username, &creds.password).await?;
-  }
-  if let Some(policy) = opts.service_workers {
-    page
-      .set_service_workers_blocked(matches!(policy, crate::options::ServiceWorkerPolicy::Block))
-      .await?;
-  }
-  if let Some(ref headers) = opts.extra_http_headers {
-    page.set_extra_http_headers(headers).await?;
-  }
-  if opts.any_media_override() {
-    page.emulate_media(&opts.as_emulate_media()).await?;
-  }
-  if let Some(geo) = opts.geolocation {
-    // Playwright defaults accuracy to `0`; the page-level setter takes
-    // a `0`-as-unset sentinel via `-1` on some backends — reuse the
-    // concrete value.
-    page.set_geolocation(geo.latitude, geo.longitude, geo.accuracy).await?;
-  }
-  if let Some(ref perms) = opts.permissions {
-    page.grant_permissions(perms, None).await?;
-  }
-  if let Some(offline) = opts.offline {
-    page.set_network_state(offline, 0.0, -1.0, -1.0).await?;
-  }
-  Ok(())
+  Box::pin(page.apply_context_options(opts)).await
 }
 
 /// Kick off a background recording runtime for a freshly-opened page

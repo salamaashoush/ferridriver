@@ -1202,6 +1202,196 @@ impl BidiPage {
 
   // ── Emulation ───────────────────────────────────────────────────────────
 
+  /// Apply a [`crate::options::BrowserContextOptions`] bag to this
+  /// page. Every `BiDi` command is inlined — no per-field helpers
+  /// remain. Mirrors Playwright's
+  /// `/tmp/playwright/packages/playwright-core/src/server/bidi/bidiBrowser.ts::initialize`
+  /// sequence. Unsupported fields return a typed error per field
+  /// which is aggregated and surfaced to the caller.
+  #[allow(clippy::too_many_lines)]
+  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<(), String> {
+    use futures::future::OptionFuture;
+
+    let viewport_fut: OptionFuture<_> = opts
+      .resolved_viewport()
+      .map(|vp| async move { self.emulate_viewport(&vp).await })
+      .into();
+    let media_fut: OptionFuture<_> = opts
+      .any_media_override()
+      .then(|| {
+        let m = opts.as_emulate_media();
+        async move { self.emulate_media(&m).await }
+      })
+      .into();
+    let ua_fut: OptionFuture<_> = opts
+      .user_agent
+      .as_deref()
+      .map(|ua| async move {
+        self
+          .cmd(
+            "emulation.setUserAgentOverride",
+            json!({"contexts": [&*self.context_id], "value": ua}),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let locale_fut: OptionFuture<_> = opts
+      .locale
+      .as_deref()
+      .map(|l| async move {
+        self
+          .cmd(
+            "emulation.setLocaleOverride",
+            json!({"contexts": [&*self.context_id], "locale": l}),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let tz_fut: OptionFuture<_> = opts
+      .timezone_id
+      .as_deref()
+      .map(|tz| async move {
+        self
+          .cmd(
+            "emulation.setTimezoneOverride",
+            json!({"contexts": [&*self.context_id], "timezone": tz}),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let js_fut: OptionFuture<_> = opts
+      .java_script_enabled
+      .map(|v| async move {
+        self
+          .cmd(
+            "emulation.setScriptingEnabled",
+            json!({"contexts": [&*self.context_id], "enabled": v}),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let dl_fut: OptionFuture<_> = opts
+      .accept_downloads
+      .map(|accept| async move {
+        let dl = if accept {
+          json!({ "type": "allowed", "destinationFolder": "" })
+        } else {
+          json!({ "type": "denied" })
+        };
+        self
+          .cmd("browser.setDownloadBehavior", json!({"downloadBehavior": dl}))
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let headers_fut: OptionFuture<_> = opts
+      .extra_http_headers
+      .as_ref()
+      .map(|h| async move { self.set_extra_http_headers(h).await })
+      .into();
+    let geo_fut: OptionFuture<_> = opts
+      .geolocation
+      .map(|g| async move {
+        self
+          .cmd(
+            "emulation.setGeolocationOverride",
+            json!({
+              "contexts": [&*self.context_id],
+              "coordinates": {"latitude": g.latitude, "longitude": g.longitude, "accuracy": g.accuracy},
+            }),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let offline_fut: OptionFuture<_> = opts
+      .offline
+      .map(|o| async move {
+        self
+          .cmd(
+            "emulation.setNetworkConditions",
+            json!({
+              "contexts": [&*self.context_id],
+              "offline": o, "latency": 0.0, "downloadThroughput": -1.0, "uploadThroughput": -1.0,
+            }),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let sw_fut: OptionFuture<_> = opts
+      .service_workers
+      .map(|p| async move {
+        if matches!(p, crate::options::ServiceWorkerPolicy::Block) {
+          self
+            .add_init_script(
+              "if(navigator.serviceWorker){navigator.serviceWorker.register=()=>Promise.reject(new Error('Service workers blocked'))}",
+            )
+            .await
+            .map(|_| ())
+        } else {
+          Ok(())
+        }
+      })
+      .into();
+
+    let (r_vp, r_ua, r_loc, r_tz, r_js, r_dl, r_hdr, r_med, r_geo, r_off, r_sw) = tokio::join!(
+      viewport_fut,
+      ua_fut,
+      locale_fut,
+      tz_fut,
+      js_fut,
+      dl_fut,
+      headers_fut,
+      media_fut,
+      geo_fut,
+      offline_fut,
+      sw_fut,
+    );
+
+    let mut errs: Vec<String> = Vec::new();
+    for (label, r) in [
+      ("viewport", r_vp),
+      ("userAgent", r_ua),
+      ("locale", r_loc),
+      ("timezoneId", r_tz),
+      ("javaScriptEnabled", r_js),
+      ("acceptDownloads", r_dl),
+      ("extraHTTPHeaders", r_hdr),
+      ("media (colorScheme/reducedMotion/forcedColors/contrast)", r_med),
+      ("geolocation", r_geo),
+      ("offline", r_off),
+      ("serviceWorkers", r_sw),
+    ] {
+      if let Some(Err(e)) = r {
+        errs.push(format!("{label}: {e}"));
+      }
+    }
+    // Explicit unsupported fields — Firefox BiDi lacks these
+    // primitives. Surfacing the gap to the caller (vs. silently
+    // dropping) matches Playwright's Rule-4 "typed Unsupported for
+    // real protocol gaps".
+    for (label, present) in [
+      ("bypassCSP", opts.bypass_csp.is_some()),
+      ("ignoreHTTPSErrors", opts.ignore_https_errors.is_some()),
+      ("httpCredentials", opts.http_credentials.is_some()),
+      ("screen", opts.screen.is_some()),
+      ("permissions", opts.permissions.is_some()),
+    ] {
+      if present {
+        errs.push(format!(
+          "{label}: BiDi/Firefox backend does not yet support this context option"
+        ));
+      }
+    }
+
+    if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
+  }
+
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
     let mut params = json!({
       "context": &*self.context_id,
@@ -1214,62 +1404,6 @@ impl BidiPage {
       params["devicePixelRatio"] = json!(config.device_scale_factor);
     }
     self.cmd("browsingContext.setViewport", params).await?;
-    Ok(())
-  }
-
-  pub async fn set_user_agent(&self, ua: &str) -> Result<(), String> {
-    self
-      .cmd(
-        "emulation.setUserAgentOverride",
-        json!({
-          "contexts": [&*self.context_id],
-          "value": ua
-        }),
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<(), String> {
-    self
-      .cmd(
-        "emulation.setGeolocationOverride",
-        json!({
-          "contexts": [&*self.context_id],
-          "coordinates": {
-            "latitude": lat,
-            "longitude": lng,
-            "accuracy": accuracy
-          }
-        }),
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
-    self
-      .cmd(
-        "emulation.setLocaleOverride",
-        json!({
-          "contexts": [&*self.context_id],
-          "locale": locale
-        }),
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
-    self
-      .cmd(
-        "emulation.setTimezoneOverride",
-        json!({
-          "contexts": [&*self.context_id],
-          "timezone": timezone_id
-        }),
-      )
-      .await?;
     Ok(())
   }
 
@@ -1326,52 +1460,9 @@ impl BidiPage {
     Ok(())
   }
 
-  pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
-    self
-      .cmd(
-        "emulation.setScriptingEnabled",
-        json!({
-          "contexts": [&*self.context_id],
-          "enabled": enabled
-        }),
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub fn set_bypass_csp(&self, _enabled: bool) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.context_id;
-    std::future::ready(Ok(()))
-  }
-
-  pub fn set_ignore_certificate_errors(&self, _ignore: bool) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.context_id;
-    std::future::ready(Ok(()))
-  }
-
-  pub fn set_download_behavior(
-    &self,
-    _behavior: &str,
-    _download_path: &str,
-  ) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.context_id;
-    std::future::ready(Ok(()))
-  }
-
-  pub fn set_http_credentials(
-    &self,
-    _username: &str,
-    _password: &str,
-  ) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.context_id;
-    std::future::ready(Ok(()))
-  }
-
-  pub fn set_service_workers_blocked(&self, _blocked: bool) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.context_id;
-    std::future::ready(Ok(()))
-  }
-
+  /// Direct `BiDi` `network.setExtraHeaders` command. Backs
+  /// [`crate::Page::set_extra_http_headers`] (Playwright's public
+  /// `page.setExtraHTTPHeaders(headers)`).
   pub async fn set_extra_http_headers(&self, headers: &FxHashMap<String, String>) -> Result<(), String> {
     let header_list: Vec<serde_json::Value> = headers
       .iter()
@@ -1395,44 +1486,11 @@ impl BidiPage {
     Ok(())
   }
 
-  pub fn grant_permissions(
-    &self,
-    _permissions: &[String],
-    _origin: Option<&str>,
-  ) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.context_id;
-    std::future::ready(Err("Permissions API not available in BiDi backend".into()))
-  }
-
+  /// `BiDi` has no Permissions API. Called from
+  /// [`crate::ContextRef::clear_permissions`] — returns typed error.
   pub fn reset_permissions(&self) -> impl std::future::Future<Output = Result<(), String>> {
     let _ = &self.context_id;
     std::future::ready(Err("Permissions API not available in BiDi backend".into()))
-  }
-
-  pub async fn set_focus_emulation_enabled(&self, _enabled: bool) -> Result<(), String> {
-    // Activate the browsing context to give it focus
-    let _ = self
-      .cmd("browsingContext.activate", json!({"context": &*self.context_id}))
-      .await;
-    Ok(())
-  }
-
-  // ── Network ─────────────────────────────────────────────────────────────
-
-  pub async fn set_network_state(&self, offline: bool, latency: f64, download: f64, upload: f64) -> Result<(), String> {
-    self
-      .cmd(
-        "emulation.setNetworkConditions",
-        json!({
-          "contexts": [&*self.context_id],
-          "offline": offline,
-          "latency": latency,
-          "downloadThroughput": download,
-          "uploadThroughput": upload
-        }),
-      )
-      .await?;
-    Ok(())
   }
 
   // ── Tracing ─────────────────────────────────────────────────────────────

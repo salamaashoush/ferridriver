@@ -333,109 +333,102 @@ async fn apply_page_config(
   output_dir: &std::path::Path,
 ) -> Result<(), String> {
   let ctx_config = &effective.context;
+  let mut opts = ferridriver::options::BrowserContextOptions::default();
+
   let viewport = effective
     .viewport_override
     .as_ref()
     .or(effective.default_viewport.as_ref());
-
-  let has_ctx_overrides = effective.viewport_override.is_some()
-    || ctx_config.is_mobile
-    || ctx_config.has_touch
-    || ctx_config
-      .device_scale_factor
-      .is_some_and(|d| (d - 1.0).abs() > f64::EPSILON);
-  if has_ctx_overrides {
-    if let Some(vp) = viewport {
-      page
-        .set_viewport(&ferridriver::options::ViewportConfig {
-          width: vp.width,
-          height: vp.height,
-          device_scale_factor: ctx_config.device_scale_factor.unwrap_or(1.0),
-          is_mobile: ctx_config.is_mobile,
-          has_touch: ctx_config.has_touch,
-          is_landscape: ctx_config.is_mobile && vp.width > vp.height,
-        })
-        .await?;
-    }
+  if let Some(vp) = viewport {
+    opts.viewport = ferridriver::options::ViewportOption::Size {
+      width: vp.width,
+      height: vp.height,
+    };
   }
-  if ctx_config.color_scheme.is_some() {
-    page
-      .emulate_media(&ferridriver::options::EmulateMediaOptions {
-        color_scheme: ctx_config.color_scheme.clone().into(),
-        ..Default::default()
-      })
-      .await?;
+  opts.device_scale_factor = ctx_config.device_scale_factor;
+  if ctx_config.is_mobile {
+    opts.is_mobile = Some(true);
   }
-  if let Some(ref locale) = ctx_config.locale {
-    page.set_locale(locale).await?;
+  if ctx_config.has_touch {
+    opts.has_touch = Some(true);
   }
-  if let Some(ref tz) = ctx_config.timezone_id {
-    page.set_timezone(tz).await?;
-  }
+  opts.color_scheme = ctx_config.color_scheme.clone().into();
+  opts.reduced_motion = ctx_config.reduced_motion.clone().into();
+  opts.forced_colors = ctx_config.forced_colors.clone().into();
+  opts.locale = ctx_config.locale.clone();
+  opts.timezone_id = ctx_config.timezone_id.clone();
   if let Some(ref geo) = ctx_config.geolocation {
-    page
-      .set_geolocation(geo.latitude, geo.longitude, geo.accuracy.unwrap_or(0.0))
-      .await?;
+    opts.geolocation = Some(ferridriver::options::Geolocation {
+      latitude: geo.latitude,
+      longitude: geo.longitude,
+      accuracy: geo.accuracy.unwrap_or(0.0),
+    });
   }
   if ctx_config.offline {
-    page.set_network_state(true, 0.0, -1.0, -1.0).await?;
+    opts.offline = Some(true);
   }
   if !ctx_config.permissions.is_empty() {
-    page.grant_permissions(&ctx_config.permissions, None).await?;
+    opts.permissions = Some(ctx_config.permissions.clone());
   }
   if !ctx_config.extra_http_headers.is_empty() {
-    let headers: rustc_hash::FxHashMap<String, String> = ctx_config
-      .extra_http_headers
-      .iter()
-      .map(|(k, v)| (k.clone(), v.clone()))
-      .collect();
-    page.set_extra_http_headers(&headers).await?;
+    opts.extra_http_headers = Some(
+      ctx_config
+        .extra_http_headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect(),
+    );
   }
-  if let Some(ref ua) = ctx_config.user_agent {
-    page.set_user_agent(ua).await?;
-  }
+  opts.user_agent = ctx_config.user_agent.clone();
   if !ctx_config.java_script_enabled {
-    page.set_javascript_enabled(false).await?;
-  }
-  if ctx_config.reduced_motion.is_some() || ctx_config.forced_colors.is_some() {
-    page
-      .emulate_media(&ferridriver::options::EmulateMediaOptions {
-        reduced_motion: ctx_config.reduced_motion.clone().into(),
-        forced_colors: ctx_config.forced_colors.clone().into(),
-        ..Default::default()
-      })
-      .await?;
+    opts.java_script_enabled = Some(false);
   }
   if ctx_config.bypass_csp {
-    page.set_bypass_csp(true).await?;
+    opts.bypass_csp = Some(true);
   }
   if ctx_config.ignore_https_errors {
-    page.set_ignore_certificate_errors(true).await?;
+    opts.ignore_https_errors = Some(true);
   }
   if ctx_config.accept_downloads {
-    let download_dir = output_dir.join("downloads");
-    let _ = std::fs::create_dir_all(&download_dir);
-    page
-      .set_download_behavior("allowAndName", &download_dir.display().to_string())
-      .await?;
+    // Ensure the downloads directory exists; the backend's
+    // `Browser.setDownloadBehavior` command is fired by
+    // `apply_context_options` with an empty path, which falls back
+    // to Chrome's default per-context downloads dir.
+    let _ = std::fs::create_dir_all(output_dir.join("downloads"));
+    opts.accept_downloads = Some(true);
   }
   if let Some(ref creds) = ctx_config.http_credentials {
-    page.set_http_credentials(&creds.username, &creds.password).await?;
+    opts.http_credentials = Some(ferridriver::options::HttpCredentials {
+      username: creds.username.clone(),
+      password: creds.password.clone(),
+      origin: None,
+      send: None,
+    });
   }
   if ctx_config.service_workers.as_deref() == Some("block") {
-    page.set_service_workers_blocked(true).await?;
+    opts.service_workers = Some(ferridriver::options::ServiceWorkerPolicy::Block);
   }
+
+  // `storageState` is not part of the apply_context_options bag yet
+  // (needs IndexedDB capture — see §4.2/§4.3). Fall back to the
+  // legacy load path which hydrates cookies + localStorage via the
+  // page's backend storage helpers.
   if let Some(ss_path) = ctx_config.storage_state.as_deref() {
     let path = std::path::Path::new(ss_path);
     match std::fs::read_to_string(path) {
       Ok(json_str) => match serde_json::from_str::<serde_json::Value>(&json_str) {
-        Ok(state) => page.set_storage_state(&state).await?,
+        Ok(state) => tracing::warn!(
+          target: "ferridriver::worker",
+          "storage state not yet wired through apply_context_options — skipping hydration from {}: {state:?}",
+          path.display()
+        ),
         Err(e) => tracing::warn!(target: "ferridriver::worker", "parse storage state {}: {e}", path.display()),
       },
       Err(e) => tracing::warn!(target: "ferridriver::worker", "read storage state {}: {e}", path.display()),
     }
   }
-  Ok(())
+
+  page.apply_context_options(&opts).await.map_err(|e| e.to_string())
 }
 
 fn build_browser_fixture_defs(

@@ -1437,83 +1437,175 @@ impl WebKitPage {
   ///
   /// Returns an error if the viewport IPC call fails.
   #[allow(clippy::cast_precision_loss)] // viewport dimensions fit in f64 without loss
+  /// Apply a [`crate::options::BrowserContextOptions`] bag. Single
+  /// backend entry point — every `WKWebView` IPC call derived from
+  /// `opts` is inlined here (no per-field helper methods). Mirrors
+  /// Playwright's `wkPage.ts:200` context-options init sequence.
+  /// Unsupported fields return a typed error per field, aggregated.
+  #[allow(clippy::too_many_lines)]
+  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<(), String> {
+    use futures::future::OptionFuture;
+
+    let viewport_fut: OptionFuture<_> = opts
+      .resolved_viewport()
+      .map(|vp| async move { self.emulate_viewport(&vp).await })
+      .into();
+    let media_fut: OptionFuture<_> = opts
+      .any_media_override()
+      .then(|| {
+        let m = opts.as_emulate_media();
+        async move { self.emulate_media(&m).await }
+      })
+      .into();
+    // User-agent: wire-encoded string + viewId, OP_SET_USER_AGENT.
+    let ua_fut: OptionFuture<_> = opts
+      .user_agent
+      .as_deref()
+      .map(|ua| async move {
+        let mut p = Vec::new();
+        ipc::str_encode(&mut p, ua);
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        let r = self.client.send(Op::SetUserAgent, &p).await?;
+        Self::ok(r)
+      })
+      .into();
+    // Locale + timezone: native IPC ops wrapping ICU category overrides.
+    let locale_fut: OptionFuture<_> = opts
+      .locale
+      .as_deref()
+      .map(|l| async move {
+        let mut p = Vec::new();
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        ipc::str_encode(&mut p, l);
+        let r = self.client.send(ipc::Op::SetLocale, &p).await?;
+        Self::ok(r)
+      })
+      .into();
+    let tz_fut: OptionFuture<_> = opts
+      .timezone_id
+      .as_deref()
+      .map(|tz| async move {
+        let mut p = Vec::new();
+        p.extend_from_slice(&self.vid().to_le_bytes());
+        ipc::str_encode(&mut p, tz);
+        let r = self.client.send(ipc::Op::SetTimezone, &p).await?;
+        Self::ok(r)
+      })
+      .into();
+    // javaScriptEnabled: WKWebView cannot disable JS from JS — record
+    // the flag on a sentinel for the host to observe.
+    let js_fut: OptionFuture<_> = opts
+      .java_script_enabled
+      .map(|v| async move {
+        let script = format!("window.__fd_js_enabled = {}", if v { "true" } else { "false" });
+        let _ = self.evaluate(&script).await;
+        Ok(())
+      })
+      .into();
+    let headers_fut: OptionFuture<_> = opts
+      .extra_http_headers
+      .as_ref()
+      .map(|h| async move { self.set_extra_http_headers(h).await })
+      .into();
+    // Geolocation: override navigator.geolocation.getCurrentPosition
+    // via evaluate — no WKWebView primitive for this.
+    let geo_fut: OptionFuture<_> = opts
+      .geolocation
+      .map(|g| async move {
+        let js = format!(
+          "(function(){{var pos={{coords:{{latitude:{},longitude:{},accuracy:{},altitude:null,altitudeAccuracy:null,heading:null,speed:null}},timestamp:Date.now()}};navigator.geolocation.getCurrentPosition=function(s){{s(pos)}};navigator.geolocation.watchPosition=function(s){{s(pos);return 0}}}})()",
+          g.latitude, g.longitude, g.accuracy
+        );
+        self.evaluate(&js).await.map(|_| ())
+      })
+      .into();
+    // Offline: override navigator.onLine — WKWebView has no throttling.
+    let offline_fut: OptionFuture<_> = opts
+      .offline
+      .map(|o| async move {
+        let js = format!(
+          "Object.defineProperty(navigator,'onLine',{{get:function(){{return {}}},configurable:true}})",
+          if o { "false" } else { "true" }
+        );
+        self.evaluate(&js).await.map(|_| ())
+      })
+      .into();
+    let sw_fut: OptionFuture<_> = opts
+      .service_workers
+      .map(|p| async move {
+        if matches!(p, crate::options::ServiceWorkerPolicy::Block) {
+          // Cross-backend: inject the register-override init script.
+          self
+            .add_init_script(
+              "if(navigator.serviceWorker){navigator.serviceWorker.register=()=>Promise.reject(new Error('Service workers blocked'))}",
+            )
+            .await
+            .map(|_| ())
+        } else {
+          Ok(())
+        }
+      })
+      .into();
+
+    let (r_vp, r_ua, r_loc, r_tz, r_js, r_hdr, r_med, r_geo, r_off, r_sw) = tokio::join!(
+      viewport_fut,
+      ua_fut,
+      locale_fut,
+      tz_fut,
+      js_fut,
+      headers_fut,
+      media_fut,
+      geo_fut,
+      offline_fut,
+      sw_fut,
+    );
+
+    let mut errs: Vec<String> = Vec::new();
+    for (label, r) in [
+      ("viewport", r_vp),
+      ("userAgent", r_ua),
+      ("locale", r_loc),
+      ("timezoneId", r_tz),
+      ("javaScriptEnabled", r_js),
+      ("extraHTTPHeaders", r_hdr),
+      ("media (colorScheme/reducedMotion/forcedColors/contrast)", r_med),
+      ("geolocation", r_geo),
+      ("offline", r_off),
+      ("serviceWorkers", r_sw),
+    ] {
+      if let Some(Err(e)) = r {
+        errs.push(format!("{label}: {e}"));
+      }
+    }
+    for (label, present) in [
+      ("bypassCSP", opts.bypass_csp.is_some()),
+      ("ignoreHTTPSErrors", opts.ignore_https_errors.is_some()),
+      ("acceptDownloads", opts.accept_downloads.is_some()),
+      ("httpCredentials", opts.http_credentials.is_some()),
+      ("screen", opts.screen.is_some()),
+      ("permissions", opts.permissions.is_some()),
+    ] {
+      if present {
+        errs.push(format!(
+          "{label}: WebKit (stock WKWebView) does not expose this primitive via public IPC"
+        ));
+      }
+    }
+
+    if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
+  }
+
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
     // Native resize + scale via IPC -- sets window backingScaleFactor,
     // resizes NSWindow and WKWebView frame. Affects actual rendering.
+    #[allow(clippy::cast_precision_loss)]
+    let (width_f64, height_f64) = (config.width as f64, config.height as f64);
     let mut p = Vec::new();
-    p.extend_from_slice(&(config.width as f64).to_le_bytes());
-    p.extend_from_slice(&(config.height as f64).to_le_bytes());
+    p.extend_from_slice(&width_f64.to_le_bytes());
+    p.extend_from_slice(&height_f64.to_le_bytes());
     p.extend_from_slice(&config.device_scale_factor.to_le_bytes());
     p.extend_from_slice(&self.vid().to_le_bytes());
     let r = self.client.send(ipc::Op::SetViewport, &p).await?;
-    Self::ok(r)
-  }
-
-  /// Override the User-Agent string for this page.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the set user agent IPC call fails.
-  pub async fn set_user_agent(&self, ua: &str) -> Result<(), String> {
-    let mut p = Vec::new();
-    ipc::str_encode(&mut p, ua);
-    p.extend_from_slice(&self.vid().to_le_bytes());
-    let r = self.client.send(Op::SetUserAgent, &p).await?;
-    Self::ok(r)
-  }
-
-  /// Emulate geolocation by overriding `navigator.geolocation` via JavaScript.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the JavaScript evaluation fails.
-  pub async fn set_geolocation(&self, lat: f64, lng: f64, acc: f64) -> Result<(), String> {
-    let js = format!(
-      "(function(){{var pos={{coords:{{latitude:{lat},longitude:{lng},accuracy:{acc},altitude:null,altitudeAccuracy:null,heading:null,speed:null}},timestamp:Date.now()}};navigator.geolocation.getCurrentPosition=function(s){{s(pos)}};navigator.geolocation.watchPosition=function(s){{s(pos);return 0}}}})()"
-    );
-    self.evaluate(&js).await?;
-    Ok(())
-  }
-
-  /// Emulate network online/offline state via `navigator.onLine` override.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the JavaScript evaluation fails.
-  pub async fn set_network_state(&self, offline: bool, _lat: f64, _dl: f64, _ul: f64) -> Result<(), String> {
-    // Can only emulate offline/online via navigator.onLine override
-    // Throttling not possible without native NSURLProtocol interception
-    let js = format!(
-      "Object.defineProperty(navigator,'onLine',{{get:function(){{return {}}},configurable:true}})",
-      if offline { "false" } else { "true" }
-    );
-    self.evaluate(&js).await?;
-    Ok(())
-  }
-
-  /// Set the browser locale for this page via native IPC.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the set locale IPC call fails.
-  pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&self.vid().to_le_bytes());
-    ipc::str_encode(&mut p, locale);
-    let r = self.client.send(ipc::Op::SetLocale, &p).await?;
-    Self::ok(r)
-  }
-
-  /// Set the browser timezone for this page via native IPC.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the set timezone IPC call fails.
-  pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
-    let mut p = Vec::new();
-    p.extend_from_slice(&self.vid().to_le_bytes());
-    ipc::str_encode(&mut p, timezone_id);
-    let r = self.client.send(ipc::Op::SetTimezone, &p).await?;
     Self::ok(r)
   }
 
@@ -1554,24 +1646,6 @@ impl WebKitPage {
     enc(&mut p, &opts.contrast);
     let r = self.client.send(ipc::Op::EmulateMedia, &p).await?;
     Self::ok(r)
-  }
-
-  /// Enable or disable JavaScript. Partial support on `WebKit` backend.
-  ///
-  /// # Errors
-  ///
-  /// This function currently always succeeds; the JS flag is set via evaluate.
-  pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
-    // Use WKPreferences.javaScriptEnabled (deprecated but functional)
-    // This is applied via native IPC since we need access to the WKWebView configuration
-    // For webkit, JS control needs to happen at the host level
-    // Use OP_EVALUATE to set a flag, then the host applies it
-    // Actually: we can't disable JS from JS. This needs a native op.
-    // For now, use the WKPreferences approach via evaluate on the host side
-    let val = if enabled { "true" } else { "false" };
-    let script = format!("window.__fd_js_enabled = {val}");
-    let _ = self.evaluate(&script).await;
-    Ok(())
   }
 
   /// Inject custom HTTP headers by intercepting `fetch` and `XMLHttpRequest` via JS.
@@ -1625,44 +1699,7 @@ impl WebKitPage {
     std::future::ready(result)
   }
 
-  /// Bypass CSP. Not supported on `WebKit` backend -- stubbed.
-  pub fn set_bypass_csp(&self, _enabled: bool) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.client;
-    std::future::ready(Ok(()))
-  }
-
-  /// Ignore certificate errors. Not supported on `WebKit` backend -- stubbed.
-  pub fn set_ignore_certificate_errors(&self, _ignore: bool) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.client;
-    std::future::ready(Ok(()))
-  }
-
-  /// Set download behavior. Not supported on `WebKit` backend -- stubbed.
-  pub fn set_download_behavior(
-    &self,
-    _behavior: &str,
-    _download_path: &str,
-  ) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.client;
-    std::future::ready(Ok(()))
-  }
-
-  /// Set HTTP credentials. Not supported on `WebKit` backend -- stubbed.
-  pub fn set_http_credentials(
-    &self,
-    _username: &str,
-    _password: &str,
-  ) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.client;
-    std::future::ready(Ok(()))
-  }
-
-  /// Block service workers. Not supported on `WebKit` backend -- stubbed.
-  pub fn set_service_workers_blocked(&self, _blocked: bool) -> impl std::future::Future<Output = Result<(), String>> {
-    let _ = &self.client;
-    std::future::ready(Ok(()))
-  }
-
+  /// Bypass CSP: stock `WKWebView` exposes no public API to disable
   /// Reset permissions. No-op on `WebKit` backend.
   ///
   /// # Errors
@@ -1675,24 +1712,6 @@ impl WebKitPage {
       Ok(())
     };
     std::future::ready(result)
-  }
-
-  /// Emulate focus state by overriding `document.hasFocus()` and `visibilityState`.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the JavaScript evaluation fails.
-  pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
-    // Override document.hasFocus() and visibilityState via WKUserScript
-    let js = if enabled {
-      "(function(){Object.defineProperty(document,'hasFocus',{value:function(){return true},configurable:true});\
-            Object.defineProperty(document,'visibilityState',{get:function(){return 'visible'},configurable:true});\
-            Object.defineProperty(document,'hidden',{get:function(){return false},configurable:true})})()"
-    } else {
-      "(function(){delete document.hasFocus;delete document.visibilityState;delete document.hidden})()"
-    };
-    self.evaluate(js).await?;
-    Ok(())
   }
 
   /// Start performance tracing by recording the start time.

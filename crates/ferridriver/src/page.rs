@@ -1200,63 +1200,41 @@ impl Page {
 
   // ── Emulation ───────────────────────────────────────────────────────────
 
-  /// Set viewport with full configuration (matches Playwright's viewport options).
+  /// Apply a full [`crate::options::BrowserContextOptions`] bag to
+  /// this page. The single entry point for context-level state —
+  /// delegates to the backend's `apply_context_options` which fires
+  /// every relevant protocol command in parallel and aggregates
+  /// errors per field. Mirrors Playwright's pattern of storing the
+  /// bag on the context and having each `FrameSession._initialize()`
+  /// read from it on page open (see
+  /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:510-545`).
+  ///
+  /// `Box::pin`ned because the inner future composes 16 per-field
+  /// `OptionFuture`s whose combined state machine is too large for
+  /// an async-fn stack frame by clippy's default.
   ///
   /// # Errors
   ///
-  /// Returns an error if the viewport emulation fails.
-  pub async fn set_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
-    self.inner.emulate_viewport(config).await.map_err(Into::into)
-  }
-
-  /// Set the user agent string.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend rejects the user agent change.
-  pub async fn set_user_agent(&self, ua: &str) -> Result<()> {
-    self.inner.set_user_agent(ua).await.map_err(Into::into)
-  }
-
-  /// Set the geolocation override.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the geolocation emulation fails.
-  pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<()> {
-    self.inner.set_geolocation(lat, lng, accuracy).await.map_err(Into::into)
-  }
-
-  /// Set network conditions (offline, latency, throughput).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the network emulation fails.
-  pub async fn set_network_state(&self, offline: bool, latency: f64, download: f64, upload: f64) -> Result<()> {
-    self
-      .inner
-      .set_network_state(offline, latency, download, upload)
+  /// Returns an aggregated error when one or more fields fail to
+  /// apply. The aggregated message lists each failing field by name.
+  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
+    Box::pin(self.inner.apply_context_options(opts))
       .await
       .map_err(Into::into)
   }
 
-  /// Set the browser locale (affects navigator.language and Intl APIs).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the locale emulation fails.
-  pub async fn set_locale(&self, locale: &str) -> Result<()> {
-    self.inner.set_locale(locale).await.map_err(Into::into)
-  }
-
-  /// Set the browser timezone (affects Date and Intl.DateTimeFormat).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the timezone emulation fails.
-  pub async fn set_timezone(&self, timezone_id: &str) -> Result<()> {
-    self.inner.set_timezone(timezone_id).await.map_err(Into::into)
-  }
+  // Context-level setters (setUserAgent, setLocale, setTimezone,
+  // setGeolocation, setNetworkState, setBypassCSP,
+  // setIgnoreCertificateErrors, setDownloadBehavior,
+  // setHTTPCredentials, setServiceWorkersBlocked,
+  // setJavaScriptEnabled, grantPermissions, resetPermissions,
+  // setFocusEmulationEnabled, setStorageState) were removed. The
+  // single entry point is [`Self::apply_context_options`] — matches
+  // Playwright's public API where these are all properties of the
+  // `BrowserContextOptions` bag, not page-level mutators. Context-
+  // level setters (`context.setGeolocation` etc.) live on
+  // [`crate::ContextRef`] and mutate the bag + re-apply to every
+  // open page.
 
   /// Emulate media features (color scheme, reduced motion, media type,
   /// forced-colors, contrast). Mirrors Playwright's
@@ -1299,120 +1277,14 @@ impl Page {
   /// Enable or disable JavaScript execution.
   ///
   /// # Errors
-  ///
-  /// Returns an error if the backend rejects the change.
-  pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<()> {
-    self.inner.set_javascript_enabled(enabled).await.map_err(Into::into)
-  }
-
   /// Set extra HTTP headers that will be sent with every request.
+  /// Playwright public: `page.setExtraHTTPHeaders(headers)`.
   ///
   /// # Errors
   ///
   /// Returns an error if the headers cannot be set.
   pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
     self.inner.set_extra_http_headers(headers).await.map_err(Into::into)
-  }
-
-  /// Grant browser permissions (geolocation, notifications, camera, etc.).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the permission grant fails.
-  pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<()> {
-    self
-      .inner
-      .grant_permissions(permissions, origin)
-      .await
-      .map_err(Into::into)
-  }
-
-  /// Reset all granted permissions.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the permission reset fails.
-  pub async fn reset_permissions(&self) -> Result<()> {
-    self.inner.reset_permissions().await.map_err(Into::into)
-  }
-
-  /// Bypass Content Security Policy. Must be called before any navigation.
-  /// Matches Playwright's `bypassCSP` context option.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend rejects the change.
-  pub async fn set_bypass_csp(&self, enabled: bool) -> Result<()> {
-    self.inner.set_bypass_csp(enabled).await.map_err(Into::into)
-  }
-
-  /// Ignore HTTPS certificate errors for this page.
-  /// Matches Playwright's `ignoreHTTPSErrors` option.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend rejects the change.
-  pub async fn set_ignore_certificate_errors(&self, ignore: bool) -> Result<()> {
-    self
-      .inner
-      .set_ignore_certificate_errors(ignore)
-      .await
-      .map_err(Into::into)
-  }
-
-  /// Configure download behavior (allow/deny, download directory).
-  /// Matches Playwright's `acceptDownloads` option.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend rejects the change.
-  pub async fn set_download_behavior(&self, behavior: &str, download_path: &str) -> Result<()> {
-    self
-      .inner
-      .set_download_behavior(behavior, download_path)
-      .await
-      .map_err(Into::into)
-  }
-
-  /// Set HTTP credentials for basic/digest auth.
-  /// Matches Playwright's `httpCredentials` option.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend rejects the change.
-  pub async fn set_http_credentials(&self, username: &str, password: &str) -> Result<()> {
-    self
-      .inner
-      .set_http_credentials(username, password)
-      .await
-      .map_err(Into::into)
-  }
-
-  /// Block service worker registration.
-  /// Matches Playwright's `serviceWorkers: "block"` option.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend rejects the change.
-  pub async fn set_service_workers_blocked(&self, blocked: bool) -> Result<()> {
-    self
-      .inner
-      .set_service_workers_blocked(blocked)
-      .await
-      .map_err(Into::into)
-  }
-
-  /// Emulate focus state (page always appears focused even when not).
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the focus emulation fails.
-  pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<()> {
-    self
-      .inner
-      .set_focus_emulation_enabled(enabled)
-      .await
-      .map_err(Into::into)
   }
 
   // ── Tracing ─────────────────────────────────────────────────────────────

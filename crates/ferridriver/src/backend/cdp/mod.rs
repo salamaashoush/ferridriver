@@ -926,7 +926,7 @@ pub struct CdpPage<T: CdpTransport> {
   /// Whether Fetch domain is enabled for interception.
   fetch_enabled: Arc<std::sync::atomic::AtomicBool>,
   /// HTTP credentials for Fetch.authRequired handling (digest/NTLM/basic).
-  http_credentials: Arc<tokio::sync::RwLock<Option<(String, String)>>>,
+  http_credentials: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
   /// Cached main frame ID to avoid repeated `Page.getFrameTree` calls.
   main_frame_id: Arc<tokio::sync::OnceCell<String>>,
   /// Lifecycle state for current document — tracks loaderId + fired events.
@@ -2554,6 +2554,266 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Emulation ----
 
+  /// Apply a [`crate::options::BrowserContextOptions`] bag to this
+  /// page. Every protocol command is inlined here — there are no
+  /// per-field helper methods. Mirrors Playwright's
+  /// `crPage._updateXxx()` family in
+  /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:520`
+  /// but folded into one call so `ContextRef::new_page` dispatches
+  /// once and every command ships in parallel via [`tokio::join!`].
+  ///
+  /// Any field whose `Option` is `None` is skipped; `MediaOverride`
+  /// fields with `Unchanged` are skipped. Errors from individual
+  /// commands fold into a single aggregated error listing every
+  /// field that failed — matches Playwright's `Promise.all` failure
+  /// mode.
+  #[allow(clippy::too_many_lines)]
+  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<(), String> {
+    use futures::future::OptionFuture;
+
+    // `viewport` and `media` compose over `EmulateMediaOptions` /
+    // `ViewportConfig` helpers reused elsewhere (`emulate_viewport`,
+    // `emulate_media`) — those methods are also called from
+    // `Page::set_viewport_size` and `Page::emulate_media` (Playwright
+    // public API), so they keep dedicated methods.
+    let viewport_fut: OptionFuture<_> = opts
+      .resolved_viewport()
+      .map(|vp| async move { self.emulate_viewport(&vp).await })
+      .into();
+    let media_fut: OptionFuture<_> = opts
+      .any_media_override()
+      .then(|| {
+        let m = opts.as_emulate_media();
+        async move { self.emulate_media(&m).await }
+      })
+      .into();
+
+    // Every remaining field is a direct CDP command — inlined below
+    // so no `set_*` helper lives on the backend.
+    let screen_fut: OptionFuture<_> = opts
+      .screen
+      .map(|s| async move {
+        self
+          .cmd(
+            "Emulation.setDeviceMetricsOverride",
+            serde_json::json!({
+              "width": s.width, "height": s.height, "deviceScaleFactor": 1, "mobile": false,
+              "screenWidth": s.width, "screenHeight": s.height,
+              "screenOrientation": {"angle": 0, "type": "landscapePrimary"},
+            }),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let ua_fut: OptionFuture<_> = opts
+      .user_agent
+      .as_deref()
+      .map(|ua| async move {
+        self
+          .cmd("Network.setUserAgentOverride", serde_json::json!({"userAgent": ua}))
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let locale_fut: OptionFuture<_> = opts
+      .locale
+      .as_deref()
+      .map(|l| async move {
+        let _ = self
+          .cmd("Emulation.setLocaleOverride", serde_json::json!({"locale": l}))
+          .await;
+        self
+          .cmd(
+            "Network.setUserAgentOverride",
+            serde_json::json!({"userAgent": "", "acceptLanguage": l}),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let tz_fut: OptionFuture<_> = opts
+      .timezone_id
+      .as_deref()
+      .map(|tz| async move {
+        self
+          .cmd("Emulation.setTimezoneOverride", serde_json::json!({"timezoneId": tz}))
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let js_fut: OptionFuture<_> = opts
+      .java_script_enabled
+      .map(|v| async move {
+        self
+          .cmd("Emulation.setScriptExecutionDisabled", serde_json::json!({"value": !v}))
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let csp_fut: OptionFuture<_> = opts
+      .bypass_csp
+      .map(|v| async move {
+        self
+          .cmd("Page.setBypassCSP", serde_json::json!({"enabled": v}))
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let tls_fut: OptionFuture<_> = opts
+      .ignore_https_errors
+      .map(|v| async move {
+        self
+          .cmd("Security.setIgnoreCertificateErrors", serde_json::json!({"ignore": v}))
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let creds_fut: OptionFuture<_> = opts
+      .http_credentials
+      .clone()
+      .map(|c| async move {
+        *self.http_credentials.write().await = Some(c);
+        self.ensure_fetch_enabled().await
+      })
+      .into();
+    let sw_fut: OptionFuture<_> = opts
+      .service_workers
+      .map(|p| async move {
+        if matches!(p, crate::options::ServiceWorkerPolicy::Block) {
+          self
+            .cmd(
+              "Page.addScriptToEvaluateOnNewDocument",
+              serde_json::json!({
+                "source": "if(navigator.serviceWorker){navigator.serviceWorker.register=()=>Promise.reject(new Error('Service workers blocked'))}"
+              }),
+            )
+            .await
+            .map(|_| ())
+        } else {
+          Ok(())
+        }
+      })
+      .into();
+    let dl_fut: OptionFuture<_> = opts
+      .accept_downloads
+      .map(|accept| async move {
+        let behavior = if accept { "allow" } else { "deny" };
+        self
+          .cmd(
+            "Browser.setDownloadBehavior",
+            serde_json::json!({"behavior": behavior, "downloadPath": "", "eventsEnabled": true}),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let headers_fut: OptionFuture<_> = opts
+      .extra_http_headers
+      .as_ref()
+      .map(|h| async move {
+        let pairs: serde_json::Map<String, serde_json::Value> = h
+          .iter()
+          .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
+          .collect();
+        self
+          .cmd("Network.setExtraHTTPHeaders", serde_json::json!({"headers": pairs}))
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let geo_fut: OptionFuture<_> = opts
+      .geolocation
+      .map(|g| async move {
+        self
+          .cmd(
+            "Emulation.setGeolocationOverride",
+            serde_json::json!({"latitude": g.latitude, "longitude": g.longitude, "accuracy": g.accuracy}),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let perms_fut: OptionFuture<_> = opts
+      .permissions
+      .as_ref()
+      .map(|p| async move {
+        // `Browser.grantPermissions` must ship with `browserContextId`
+        // so the grant applies to THIS context, and must be sent at
+        // the browser level (no sessionId) — matches
+        // `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts::doGrantPermissions`.
+        let mut params = serde_json::json!({"permissions": p});
+        if let Some(ref ctx_id) = self.browser_context_id {
+          params["browserContextId"] = serde_json::json!(ctx_id.as_ref());
+        }
+        self
+          .transport
+          .send_command(None, "Browser.grantPermissions", params)
+          .await
+          .map(|_| ())
+      })
+      .into();
+    let offline_fut: OptionFuture<_> = opts
+      .offline
+      .map(|o| async move {
+        self
+          .cmd(
+            "Network.emulateNetworkConditions",
+            serde_json::json!({
+              "offline": o, "latency": 0, "downloadThroughput": -1, "uploadThroughput": -1,
+            }),
+          )
+          .await
+          .map(|_| ())
+      })
+      .into();
+
+    let (r_vp, r_scr, r_ua, r_loc, r_tz, r_js, r_csp, r_tls, r_cred, r_sw, r_dl, r_hdr, r_med, r_geo, r_perm, r_off) = tokio::join!(
+      viewport_fut,
+      screen_fut,
+      ua_fut,
+      locale_fut,
+      tz_fut,
+      js_fut,
+      csp_fut,
+      tls_fut,
+      creds_fut,
+      sw_fut,
+      dl_fut,
+      headers_fut,
+      media_fut,
+      geo_fut,
+      perms_fut,
+      offline_fut,
+    );
+
+    // Aggregate errors — one failure per field, each labelled.
+    let mut errs: Vec<String> = Vec::new();
+    for (label, r) in [
+      ("viewport", r_vp),
+      ("screen", r_scr),
+      ("userAgent", r_ua),
+      ("locale", r_loc),
+      ("timezoneId", r_tz),
+      ("javaScriptEnabled", r_js),
+      ("bypassCSP", r_csp),
+      ("ignoreHTTPSErrors", r_tls),
+      ("httpCredentials", r_cred),
+      ("serviceWorkers", r_sw),
+      ("acceptDownloads", r_dl),
+      ("extraHTTPHeaders", r_hdr),
+      ("media (colorScheme/reducedMotion/forcedColors/contrast)", r_med),
+      ("geolocation", r_geo),
+      ("permissions", r_perm),
+      ("offline", r_off),
+    ] {
+      if let Some(Err(e)) = r {
+        errs.push(format!("{label}: {e}"));
+      }
+    }
+    if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
+  }
+
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
     let is_landscape = config.is_landscape || config.width > config.height;
     let orientation = if config.is_mobile {
@@ -2590,46 +2850,6 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn set_user_agent(&self, ua: &str) -> Result<(), String> {
-    self
-      .cmd("Network.setUserAgentOverride", serde_json::json!({"userAgent": ua}))
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<(), String> {
-    self
-      .cmd(
-        "Emulation.setGeolocationOverride",
-        serde_json::json!({"latitude": lat, "longitude": lng, "accuracy": accuracy}),
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
-    let _ = self
-      .cmd("Emulation.setLocaleOverride", serde_json::json!({"locale": locale}))
-      .await;
-    self
-      .cmd(
-        "Network.setUserAgentOverride",
-        serde_json::json!({"userAgent": "", "acceptLanguage": locale}),
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
-    self
-      .cmd(
-        "Emulation.setTimezoneOverride",
-        serde_json::json!({"timezoneId": timezone_id}),
-      )
-      .await?;
-    Ok(())
-  }
-
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
     use crate::options::MediaOverride;
     // CDP's `Emulation.setEmulatedMedia` replaces all emulation state per
@@ -2660,134 +2880,37 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
-    self
-      .cmd(
-        "Emulation.setScriptExecutionDisabled",
-        serde_json::json!({"value": !enabled}),
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set_bypass_csp(&self, enabled: bool) -> Result<(), String> {
-    self
-      .cmd("Page.setBypassCSP", serde_json::json!({"enabled": enabled}))
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set_ignore_certificate_errors(&self, ignore: bool) -> Result<(), String> {
-    self
-      .cmd(
-        "Security.setIgnoreCertificateErrors",
-        serde_json::json!({"ignore": ignore}),
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set_download_behavior(&self, behavior: &str, download_path: &str) -> Result<(), String> {
-    self
-      .cmd(
-        "Browser.setDownloadBehavior",
-        serde_json::json!({"behavior": behavior, "downloadPath": download_path, "eventsEnabled": true}),
-      )
-      .await?;
-    Ok(())
-  }
-
-  pub async fn set_http_credentials(&self, username: &str, password: &str) -> Result<(), String> {
-    // Store credentials for Fetch.authRequired event handling.
-    // This supports all auth schemes (Basic, Digest, NTLM) — the browser
-    // sends the challenge, we respond via Fetch.continueWithAuth.
-    *self.http_credentials.write().await = Some((username.to_string(), password.to_string()));
-    // Ensure Fetch domain is enabled with auth handling.
-    self.ensure_fetch_enabled().await
-  }
-
-  pub async fn set_service_workers_blocked(&self, blocked: bool) -> Result<(), String> {
-    if blocked {
-      self
-        .cmd(
-          "Page.addScriptToEvaluateOnNewDocument",
-          serde_json::json!({
-            "source": "if(navigator.serviceWorker){navigator.serviceWorker.register=()=>Promise.reject(new Error('Service workers blocked'))}"
-          }),
-        )
-        .await?;
+  /// Reset permissions granted via the options-bag / context-level
+  /// `grantPermissions` — called from
+  /// [`crate::ContextRef::clear_permissions`] (`Playwright
+  /// browserContext.clearPermissions`).
+  pub async fn reset_permissions(&self) -> Result<(), String> {
+    // Scope to this page's CDP browser context (see `apply_context_options`
+    // for why grant must ship `browserContextId`). `Browser.resetPermissions`
+    // is browser-level too.
+    let mut params = serde_json::json!({});
+    if let Some(ref ctx_id) = self.browser_context_id {
+      params["browserContextId"] = serde_json::json!(ctx_id.as_ref());
     }
+    self
+      .transport
+      .send_command(None, "Browser.resetPermissions", params)
+      .await?;
     Ok(())
   }
 
+  /// Direct `Network.setExtraHTTPHeaders` command. Backs
+  /// [`crate::Page::set_extra_http_headers`] (Playwright's public
+  /// `page.setExtraHTTPHeaders(headers)`). The `apply_context_options`
+  /// path inlines the same command separately so both entry points
+  /// land independently.
   pub async fn set_extra_http_headers(&self, headers: &FxHashMap<String, String>) -> Result<(), String> {
-    let h: serde_json::Map<String, serde_json::Value> = headers
+    let pairs: serde_json::Map<String, serde_json::Value> = headers
       .iter()
       .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
       .collect();
     self
-      .cmd("Network.setExtraHTTPHeaders", serde_json::json!({"headers": h}))
-      .await?;
-    Ok(())
-  }
-
-  pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<(), String> {
-    let mut params = serde_json::json!({"permissions": permissions});
-    if let Some(o) = origin {
-      params["origin"] = serde_json::json!(o);
-    }
-    // Scope the grant to this page's CDP browser context. Without
-    // `browserContextId` Chrome applies the grant to the *default*
-    // context only — pages opened under a fresh
-    // `Target.createBrowserContext` context (any non-default
-    // ContextRef) silently fall back to the prompt-and-deny path.
-    // Mirrors Playwright's `Browser.grantPermissions(...{ browserContextId })`
-    // wiring in `crBrowser.ts::doGrantPermissions`.
-    if let Some(ref ctx_id) = self.browser_context_id {
-      params["browserContextId"] = serde_json::json!(ctx_id.as_ref());
-    }
-    // `Browser.grantPermissions` is a browser-level command and must
-    // be sent without a `sessionId`. Calling via `self.cmd` (which
-    // forwards `self.session_id`) routes the request through the
-    // attached page session — Chrome accepts that for many browser-
-    // level commands but `grantPermissions` specifically silently
-    // applies to the default context unless dispatched at the
-    // browser level.
-    self
-      .transport
-      .send_command(None, "Browser.grantPermissions", params)
-      .await?;
-    Ok(())
-  }
-
-  pub async fn reset_permissions(&self) -> Result<(), String> {
-    self.cmd("Browser.resetPermissions", super::empty_params()).await?;
-    Ok(())
-  }
-
-  pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
-    self
-      .cmd(
-        "Emulation.setFocusEmulationEnabled",
-        serde_json::json!({"enabled": enabled}),
-      )
-      .await?;
-    Ok(())
-  }
-
-  // ---- Network ----
-
-  pub async fn set_network_state(&self, offline: bool, latency: f64, download: f64, upload: f64) -> Result<(), String> {
-    self
-      .cmd(
-        "Network.emulateNetworkConditions",
-        serde_json::json!({
-            "offline": offline,
-            "latency": latency,
-            "downloadThroughput": download,
-            "uploadThroughput": upload,
-        }),
-      )
+      .cmd("Network.setExtraHTTPHeaders", serde_json::json!({"headers": pairs}))
       .await?;
     Ok(())
   }
@@ -3783,12 +3906,25 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     Ok(())
   }
 
+  #[allow(clippy::too_many_lines)]
   async fn handle_fetch_events(
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
     routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
-    http_credentials: Arc<tokio::sync::RwLock<Option<(String, String)>>>,
+    http_credentials: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
   ) {
+    // Extract `scheme://host[:port]` from a request URL for
+    // origin-scoped credential matching. Handles `http(s)://host[:port]/path`;
+    // `data:` / `file:` / opaque schemes return `None` (credentials
+    // don't apply to them).
+    fn origin_of_url(url: &str) -> Option<String> {
+      let (scheme, rest) = url.split_once("://")?;
+      let host_and_port = rest.split(['/', '?', '#']).next().unwrap_or("");
+      if host_and_port.is_empty() {
+        return None;
+      }
+      Some(format!("{scheme}://{host_and_port}"))
+    }
     let mut rx = transport.subscribe_events();
     while let Ok(event) = rx.recv().await {
       if let Some(ref expected_sid) = session_id {
@@ -3800,19 +3936,42 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       let method = event.get("method").and_then(|m| m.as_str());
 
       // ── Handle Fetch.authRequired — respond with stored credentials ──
+      // Playwright scopes credentials to `options.httpCredentials.origin`
+      // (see `crNetworkManager.ts::_authenticate`): when `origin` is
+      // set and the incoming request's origin doesn't match, we
+      // answer `Default` so the browser surfaces the native 401
+      // instead of silently authenticating on the wrong host.
       if method == Some("Fetch.authRequired") {
         let Some(params) = event.get("params") else { continue };
         let request_id = params.get("requestId").and_then(|v| v.as_str()).unwrap_or("");
+        let req_url = params
+          .get("request")
+          .and_then(|r| r.get("url"))
+          .and_then(|v| v.as_str())
+          .unwrap_or("");
         let creds = http_credentials.read().await;
-        let response = if let Some((ref user, ref pass)) = *creds {
-          serde_json::json!({
-            "requestId": request_id,
-            "authChallengeResponse": {
-              "response": "ProvideCredentials",
-              "username": user,
-              "password": pass,
-            }
-          })
+        let response = if let Some(ref c) = *creds {
+          let origin_matches = match c.origin.as_deref() {
+            None => true,
+            Some(expected) => origin_of_url(req_url).is_some_and(|o| o.eq_ignore_ascii_case(expected)),
+          };
+          if origin_matches {
+            serde_json::json!({
+              "requestId": request_id,
+              "authChallengeResponse": {
+                "response": "ProvideCredentials",
+                "username": c.username,
+                "password": c.password,
+              }
+            })
+          } else {
+            // Defer to the browser's default (cancel) so the 401
+            // surfaces — matches Playwright's origin-mismatch path.
+            serde_json::json!({
+              "requestId": request_id,
+              "authChallengeResponse": { "response": "Default" }
+            })
+          }
         } else {
           serde_json::json!({
             "requestId": request_id,

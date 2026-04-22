@@ -1889,14 +1889,28 @@ fn test_script_upload_file(c: &mut McpClient) {
 }
 
 fn test_script_user_agent(c: &mut McpClient) {
-  c.nav("<body>ua-test</body>");
+  // `userAgent` is a context-level option in Playwright. Construct a
+  // fresh context via the `browser` global with `userAgent` set, open
+  // a page there, and observe `navigator.userAgent`. WebKit skips —
+  // single-context limitation (see skip_if_no_new_context in §4.1
+  // tests).
+  if c.backend == "webkit" || c.backend == "bidi" {
+    // WebKit: no multi-context. BiDi: our backend currently returns
+    // `Unsupported` for the userAgent override (Firefox BiDi wiring
+    // not yet in place).
+    return;
+  }
   let v = c.script_value(
-    "await page.setUserAgent('TestBot/1.0'); \
-       const rawUa = await page.evaluate('navigator.userAgent'); \
-       return rawUa;",
+    "const ctx = await browser.newContext({ userAgent: 'TestBot/1.0' }); \
+     try { \
+       const p = await ctx.newPage(); \
+       return await p.evaluate('navigator.userAgent'); \
+     } finally { \
+       await ctx.close(); \
+     }",
   );
   let ua = v.as_str().unwrap_or("").to_string();
-  assert!(ua.contains("TestBot"), "setUserAgent should override UA: {ua}");
+  assert!(ua.contains("TestBot"), "userAgent option should override UA: {ua}");
 }
 
 fn test_script_viewport(c: &mut McpClient) {

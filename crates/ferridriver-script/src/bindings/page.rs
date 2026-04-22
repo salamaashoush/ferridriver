@@ -894,15 +894,10 @@ impl PageJs {
     self.inner.set_input_files(&selector, files, opts).await.into_js()
   }
 
-  // ── Emulation (page-scoped) ──────────────────────────────────────────────
+  // ── Emulation (page-scoped Playwright API) ───────────────────────────────
 
-  /// Override the User-Agent string for this page.
-  #[qjs(rename = "setUserAgent")]
-  pub async fn set_user_agent(&self, user_agent: String) -> rquickjs::Result<()> {
-    self.inner.set_user_agent(&user_agent).await.into_js()
-  }
-
-  /// Override the viewport size for this page.
+  /// Override the viewport size for this page. Playwright public:
+  /// `page.setViewportSize({ width, height })`.
   #[qjs(rename = "setViewportSize")]
   pub async fn set_viewport_size(&self, width: i64, height: i64) -> rquickjs::Result<()> {
     self.inner.set_viewport_size(width, height).await.into_js()

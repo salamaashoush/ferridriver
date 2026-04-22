@@ -3,7 +3,7 @@
 use crate::error::IntoNapi;
 use crate::locator::Locator;
 use crate::types::{
-  DragAndDropOptions, GotoOptions, MetricData, RoleOptions, ScreenshotOptions, TextOptions, ViewportConfig, WaitOptions,
+  DragAndDropOptions, GotoOptions, MetricData, RoleOptions, ScreenshotOptions, TextOptions, WaitOptions,
 };
 use ferridriver::protocol::SerializedArgument;
 use napi::Result;
@@ -861,20 +861,12 @@ impl Page {
 
   // ── Viewport ────────────────────────────────────────────────────────────
 
+  /// Playwright public: `page.setViewportSize({ width, height })`.
   #[napi]
   pub async fn set_viewport_size(&self, width: i32, height: i32) -> Result<()> {
     self
       .inner
       .set_viewport_size(i64::from(width), i64::from(height))
-      .await
-      .map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn set_viewport(&self, config: ViewportConfig) -> Result<()> {
-    self
-      .inner
-      .set_viewport(&ferridriver::options::ViewportConfig::from(config))
       .await
       .map_err(napi::Error::from_reason)
   }
@@ -968,45 +960,14 @@ impl Page {
   }
 
   // ── Emulation ───────────────────────────────────────────────────────────
-
-  #[napi]
-  pub async fn set_user_agent(&self, ua: String) -> Result<()> {
-    self.inner.set_user_agent(&ua).await.map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: Option<f64>) -> Result<()> {
-    self
-      .inner
-      .set_geolocation(lat, lng, accuracy.unwrap_or(1.0))
-      .await
-      .map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn set_network_state(&self, offline: bool, latency: f64, download: f64, upload: f64) -> Result<()> {
-    self
-      .inner
-      .set_network_state(offline, latency, download, upload)
-      .await
-      .map_err(napi::Error::from_reason)
-  }
-
-  /// Set the browser locale (navigator.language, Intl APIs).
-  #[napi]
-  pub async fn set_locale(&self, locale: String) -> Result<()> {
-    self.inner.set_locale(&locale).await.map_err(napi::Error::from_reason)
-  }
-
-  /// Set the browser timezone (Date, Intl.DateTimeFormat).
-  #[napi]
-  pub async fn set_timezone(&self, timezone_id: String) -> Result<()> {
-    self
-      .inner
-      .set_timezone(&timezone_id)
-      .await
-      .map_err(napi::Error::from_reason)
-  }
+  //
+  // Non-Playwright page-level emulation setters (userAgent, locale,
+  // timezone, geolocation, offline, javaScriptEnabled) are
+  // intentionally NOT exposed here — they live on `BrowserContext`
+  // in Playwright's JS API. Use
+  // `browser.newContext({ userAgent, locale, ... })` or the
+  // context-level mutators (`context.setGeolocation`,
+  // `context.setOffline`, `context.setExtraHTTPHeaders`).
 
   /// Emulate media features. Mirrors Playwright's
   /// `page.emulateMedia(options?: { media, colorScheme, reducedMotion, forcedColors, contrast })`
@@ -1019,16 +980,6 @@ impl Page {
   pub async fn emulate_media(&self, options: Option<crate::types::EmulateMediaOptions>) -> Result<()> {
     let opts: ferridriver::options::EmulateMediaOptions = options.map(Into::into).unwrap_or_default();
     self.inner.emulate_media(&opts).await.map_err(napi::Error::from_reason)
-  }
-
-  /// Enable or disable JavaScript execution.
-  #[napi]
-  pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<()> {
-    self
-      .inner
-      .set_javascript_enabled(enabled)
-      .await
-      .map_err(napi::Error::from_reason)
   }
 
   // ── Focus / dispatch ────────────────────────────────────────────────────
@@ -1113,15 +1064,6 @@ impl Page {
     self.inner.storage_state().await.map_err(napi::Error::from_reason)
   }
 
-  #[napi]
-  pub async fn set_storage_state(&self, state: serde_json::Value) -> Result<()> {
-    self
-      .inner
-      .set_storage_state(&state)
-      .await
-      .map_err(napi::Error::from_reason)
-  }
-
   /// Register a JS snippet to run on every new document (main frame and
   /// iframes) before any page script executes. Mirrors Playwright's
   /// `page.addInitScript(script, arg)` — see
@@ -1192,29 +1134,6 @@ impl Page {
     self
       .inner
       .set_extra_http_headers(&fx)
-      .await
-      .map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn grant_permissions(&self, permissions: Vec<String>, origin: Option<String>) -> Result<()> {
-    self
-      .inner
-      .grant_permissions(&permissions, origin.as_deref())
-      .await
-      .map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn reset_permissions(&self) -> Result<()> {
-    self.inner.reset_permissions().await.map_err(napi::Error::from_reason)
-  }
-
-  #[napi]
-  pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<()> {
-    self
-      .inner
-      .set_focus_emulation_enabled(enabled)
       .await
       .map_err(napi::Error::from_reason)
   }

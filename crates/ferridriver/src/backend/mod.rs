@@ -1029,74 +1029,34 @@ impl AnyPage {
 
   // ── Emulation ──
 
+  /// Apply a full [`crate::options::BrowserContextOptions`] bag. The
+  /// single dispatch point for context-level state — each backend
+  /// implementation fires the relevant protocol commands in parallel
+  /// via `tokio::join!` and aggregates errors. Callers in
+  /// `ContextRef::new_page` and the context-level public setters
+  /// (`setOffline`, `setGeolocation`, etc.) mutate the bag and
+  /// re-apply.
+  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<(), String> {
+    page_dispatch!(self, apply_context_options(opts))
+  }
+
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
     page_dispatch!(self, emulate_viewport(config))
-  }
-
-  pub async fn set_user_agent(&self, ua: &str) -> Result<(), String> {
-    page_dispatch!(self, set_user_agent(ua))
-  }
-
-  pub async fn set_geolocation(&self, lat: f64, lng: f64, accuracy: f64) -> Result<(), String> {
-    page_dispatch!(self, set_geolocation(lat, lng, accuracy))
-  }
-
-  pub async fn set_locale(&self, locale: &str) -> Result<(), String> {
-    page_dispatch!(self, set_locale(locale))
-  }
-
-  pub async fn set_timezone(&self, timezone_id: &str) -> Result<(), String> {
-    page_dispatch!(self, set_timezone(timezone_id))
   }
 
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
     page_dispatch!(self, emulate_media(opts))
   }
 
-  pub async fn set_javascript_enabled(&self, enabled: bool) -> Result<(), String> {
-    page_dispatch!(self, set_javascript_enabled(enabled))
-  }
-
   pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
     page_dispatch!(self, set_extra_http_headers(headers))
   }
 
-  pub async fn grant_permissions(&self, permissions: &[String], origin: Option<&str>) -> Result<(), String> {
-    page_dispatch!(self, grant_permissions(permissions, origin))
-  }
-
-  pub async fn set_bypass_csp(&self, enabled: bool) -> Result<(), String> {
-    page_dispatch!(self, set_bypass_csp(enabled))
-  }
-
-  pub async fn set_ignore_certificate_errors(&self, ignore: bool) -> Result<(), String> {
-    page_dispatch!(self, set_ignore_certificate_errors(ignore))
-  }
-
-  pub async fn set_download_behavior(&self, behavior: &str, download_path: &str) -> Result<(), String> {
-    page_dispatch!(self, set_download_behavior(behavior, download_path))
-  }
-
-  pub async fn set_http_credentials(&self, username: &str, password: &str) -> Result<(), String> {
-    page_dispatch!(self, set_http_credentials(username, password))
-  }
-
-  pub async fn set_service_workers_blocked(&self, blocked: bool) -> Result<(), String> {
-    page_dispatch!(self, set_service_workers_blocked(blocked))
-  }
-
+  /// Reset any context-granted permissions. Backs
+  /// [`crate::ContextRef::clear_permissions`] (Playwright
+  /// `browserContext.clearPermissions`).
   pub async fn reset_permissions(&self) -> Result<(), String> {
     page_dispatch!(self, reset_permissions())
-  }
-
-  pub async fn set_focus_emulation_enabled(&self, enabled: bool) -> Result<(), String> {
-    page_dispatch!(self, set_focus_emulation_enabled(enabled))
-  }
-
-  // ── Network ──
-
-  pub async fn set_network_state(&self, offline: bool, latency: f64, download: f64, upload: f64) -> Result<(), String> {
-    page_dispatch!(self, set_network_state(offline, latency, download, upload))
   }
 
   // ── Tracing ──

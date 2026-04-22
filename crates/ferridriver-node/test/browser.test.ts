@@ -337,44 +337,11 @@ for (const backend of BACKENDS) {
       expect(width).toBe(800);
     });
 
-    it("sets viewport with full config", async () => {
-      await page.setViewport({
-        width: 375,
-        height: 812,
-        deviceScaleFactor: 3,
-        isMobile: true,
-      });
-      // Navigate to a page with viewport meta tag (required for mobile
-      // emulation to set CSS layout viewport -- without it Chrome defaults
-      // to 980px, matching real mobile browser behavior).
-      await page.goto(
-        'data:text/html,<meta name="viewport" content="width=device-width,initial-scale=1"><h1>Mobile</h1>'
-      );
-      const width = await page.evaluate("window.innerWidth");
-      expect(width).toBe(375);
-    });
-
-    it("sets user agent", async () => {
-      await page.setUserAgent("FerridriverTest/1.0");
-      const ua = await page.evaluate("navigator.userAgent");
-      expect(ua).toBe("FerridriverTest/1.0");
-    });
-
-    it("sets locale", async () => {
-      await page.setLocale("de-DE");
-      await page.goto(testUrl);
-      const lang = await page.evaluate("navigator.language");
-      expect(lang).toBe("de-DE");
-    });
-
-    it("sets timezone", async () => {
-      await page.setTimezone("America/New_York");
-      await page.goto(testUrl);
-      const tz = await page.evaluate(
-        "Intl.DateTimeFormat().resolvedOptions().timeZone"
-      );
-      expect(tz).toBe("America/New_York");
-    });
+    // Viewport / userAgent / locale / timezone / isMobile /
+    // deviceScaleFactor are context-level in Playwright and have no
+    // page-level setter. Full coverage lives in
+    // `browser-context-options.test.ts`; we keep a single here to
+    // prove the legacy `page.setViewportSize` path still works.
 
     // Helper to restore the page to a clean emulation state after each
     // emulateMedia test so state doesn't leak into unrelated tests (a
