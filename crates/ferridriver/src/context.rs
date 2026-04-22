@@ -196,18 +196,47 @@ pub struct ContextRef {
   default_timeout_ms: u64,
   /// Default navigation timeout in this context (ms). 0 = no override.
   default_navigation_timeout_ms: u64,
+  /// Context-scoped event emitter. Shared across every `ContextRef`
+  /// clone with the same composite session key via the per-state
+  /// [`BrowserState::get_or_create_context_events`] registry — without
+  /// this, `browser.defaultContext()` called twice would hand out two
+  /// separate emitters and `context.on('weberror', cb)` would silently
+  /// miss events dispatched via the per-page bridge installed on a
+  /// page created through a different `ContextRef` instance.
+  events: crate::events::ContextEventEmitter,
 }
 
 impl ContextRef {
   pub fn new(state: Arc<RwLock<BrowserState>>, name: String) -> Self {
     let key = SessionKey::parse(&name);
+    // Look up (or initialise) the shared emitter for this composite
+    // key. Uses `try_read` because `ContextRef::new` must be callable
+    // from sync contexts (e.g. `Browser::default_context`). In the
+    // common case the state lock is uncontended at construction time;
+    // if `try_read` fails (concurrent writer) we fall back to a
+    // transient per-instance emitter so the handle is still usable —
+    // event delivery would then be scoped to this `ContextRef` clone
+    // only, matching the old behaviour. `get_or_create_context_events`
+    // itself uses a `std::sync::Mutex` so it doesn't need the tokio
+    // read guard to stay alive beyond the call.
+    let events = match state.try_read() {
+      Ok(s) => s.get_or_create_context_events(&key.to_composite()),
+      Err(_) => crate::events::ContextEventEmitter::new(),
+    };
     Self {
       state,
       name: Arc::from(name),
       key,
       default_timeout_ms: 0,
       default_navigation_timeout_ms: 0,
+      events,
     }
+  }
+
+  /// Context-scoped event emitter. Cheap to clone.
+  #[must_use]
+  pub fn events(&self) -> &crate::events::ContextEventEmitter {
+    &self.events
   }
 
   /// Context name.
@@ -422,6 +451,37 @@ impl ContextRef {
   #[must_use]
   pub fn state(&self) -> &Arc<RwLock<BrowserState>> {
     &self.state
+  }
+
+  // ── Context-level events ────────────────────────────────────────────────
+
+  /// Register a context-level event listener. Supported events:
+  /// `'weberror'` (unhandled errors / rejections on any page in this
+  /// context — mirrors Playwright's
+  /// `browserContext.on('weberror', (webError: WebError) => ...)`).
+  pub fn on(&self, event_name: &str, callback: crate::events::ContextEventCallback) -> crate::events::ListenerId {
+    self.events.on(event_name, callback)
+  }
+
+  /// One-shot context-level listener — see [`Self::on`].
+  pub fn once(&self, event_name: &str, callback: crate::events::ContextEventCallback) -> crate::events::ListenerId {
+    self.events.once(event_name, callback)
+  }
+
+  /// Remove a previously registered context-level listener.
+  pub fn off(&self, id: crate::events::ListenerId) {
+    self.events.off(id);
+  }
+
+  /// Wait for the next context-level event matching `event_name`, with
+  /// `timeout_ms`. Mirrors Playwright's
+  /// `browserContext.waitForEvent(event, options?)`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the timeout elapses or the event channel is closed.
+  pub async fn wait_for_event(&self, event_name: &str, timeout_ms: u64) -> Result<crate::events::ContextEvent> {
+    self.events.wait_for_event(event_name, timeout_ms).await
   }
 
   // ── Context-level APIs (apply to all pages) ────────────────────────────

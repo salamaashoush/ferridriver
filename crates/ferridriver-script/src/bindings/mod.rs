@@ -34,6 +34,7 @@ pub mod locator;
 pub mod mouse;
 pub mod network;
 pub mod page;
+pub mod web_error;
 
 pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
@@ -50,6 +51,7 @@ pub use locator::LocatorJs;
 pub use mouse::MouseJs;
 pub use network::{RequestJs, ResponseJs, RouteJs, WebSocketJs};
 pub use page::PageJs;
+pub use web_error::WebErrorJs;
 
 use rquickjs::{AsyncContext, Ctx, class::Class};
 use std::sync::Arc;
@@ -78,6 +80,7 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<FileChooserJs>::define(&g)?;
   Class::<DownloadJs>::define(&g)?;
   Class::<ConsoleMessageJs>::define(&g)?;
+  Class::<WebErrorJs>::define(&g)?;
   Ok(())
 }
 

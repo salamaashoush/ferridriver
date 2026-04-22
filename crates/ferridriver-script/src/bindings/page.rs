@@ -1191,6 +1191,11 @@ impl PageJs {
         let instance = Class::instance(ctx.clone(), wrapper)?;
         rquickjs::IntoJs::into_js(instance, &ctx)
       },
+      ferridriver::events::PageEvent::PageError(err) => {
+        let wrapper = crate::bindings::web_error::WebErrorJs::new(err);
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
       other => {
         let json = page_event_json(&other);
         serde_to_js(&ctx, &json)
@@ -1444,7 +1449,14 @@ fn page_event_json(ev: &ferridriver::events::PageEvent) -> serde_json::Value {
     PageEvent::Load => serde_json::json!({ "type": "load" }),
     PageEvent::DomContentLoaded => serde_json::json!({ "type": "domcontentloaded" }),
     PageEvent::Close => serde_json::json!({ "type": "close" }),
-    PageEvent::PageError(msg) => serde_json::json!({ "message": msg }),
+    PageEvent::PageError(err) => {
+      let details = err.error();
+      serde_json::json!({
+        "name": details.name,
+        "message": details.message,
+        "stack": details.stack,
+      })
+    },
     _ => serde_json::Value::Null,
   }
 }

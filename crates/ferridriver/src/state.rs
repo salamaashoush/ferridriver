@@ -154,6 +154,16 @@ pub struct BrowserState {
   /// Reason passed to the most recent `Browser::close({ reason })` call,
   /// surfaced on `TargetClosed` errors emitted after shutdown.
   close_reason: Option<String>,
+  /// Per-context-name event emitter registry. Every [`crate::ContextRef`]
+  /// constructed with the same composite session key must share the
+  /// same `ContextEventEmitter` so that `context.on('weberror', cb)`
+  /// and the per-page → per-context `PageError` → `WebError` bridge
+  /// dispatch through the same broadcast channel. The registry is a
+  /// sync `std::sync::Mutex` (not tokio) so `ContextRef::new` can
+  /// lazily init the entry without needing to own the tokio `RwLock`
+  /// guard — `get_or_create_context_events` is called on every
+  /// `ContextRef::new` for its composite key.
+  pub context_events: Arc<std::sync::Mutex<HashMap<String, crate::events::ContextEventEmitter>>>,
 }
 
 #[derive(Clone)]
@@ -212,7 +222,25 @@ impl BrowserState {
       user_data_dir: opts.user_data_dir,
       default_viewport: opts.viewport,
       close_reason: None,
+      context_events: Arc::new(std::sync::Mutex::new(HashMap::default())),
     }
+  }
+
+  /// Look up (or lazily create) the `ContextEventEmitter` for a
+  /// composite session key. All `ContextRef` clones with the same key
+  /// receive the same emitter so `context.on('weberror', cb)`
+  /// observers and the per-page page-error bridge dispatch through
+  /// the same broadcast channel.
+  #[must_use]
+  pub fn get_or_create_context_events(&self, key: &str) -> crate::events::ContextEventEmitter {
+    let mut map = match self.context_events.lock() {
+      Ok(g) => g,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    map
+      .entry(key.to_string())
+      .or_insert_with(crate::events::ContextEventEmitter::new)
+      .clone()
   }
 
   /// Record the reason given to `Browser::close({ reason })` so downstream
@@ -531,12 +559,37 @@ impl BrowserState {
     page: AnyPage,
     browser_context_id: Option<String>,
   ) -> Result<(), String> {
+    // Pull the context-event emitter for this session key BEFORE
+    // taking the mutable instance borrow, so we can hand it to the
+    // per-page → per-context `PageError` → `WebError` bridge spawned
+    // below. Every `ContextRef` cloned with the same composite key
+    // receives the same emitter via the registry, so listeners
+    // registered anywhere (NAPI `context.on('weberror')`, QuickJS
+    // `context.waitForEvent('weberror')`, etc.) all observe events
+    // fanned out here.
+    let composite = key.to_composite();
+    let context_events = self.get_or_create_context_events(&composite);
+
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut(&key.context);
     if let Some(id) = browser_context_id {
       ctx.cdp_context_id = Some(id);
     }
     page.attach_listeners(ctx.console_log.clone(), ctx.network_log.clone(), ctx.dialog_log.clone());
+
+    // Spawn the page→context bridge exactly once per registered page.
+    // Runs independently of any `ContextRef` or `Page` wrapper
+    // lifetime — forwards as long as the backend's broadcast
+    // channel stays open (i.e. the page is alive).
+    let mut rx = page.events().subscribe();
+    tokio::spawn(async move {
+      while let Ok(event) = rx.recv().await {
+        if let crate::events::PageEvent::PageError(err) = event {
+          context_events.emit(crate::events::ContextEvent::WebError(err));
+        }
+      }
+    });
+
     ctx.pages.push(page);
     ctx.active_page_idx = ctx.pages.len() - 1;
     Ok(())

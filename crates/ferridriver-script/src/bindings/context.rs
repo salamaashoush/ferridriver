@@ -142,4 +142,33 @@ impl BrowserContextJs {
   pub async fn close(&self) -> rquickjs::Result<()> {
     self.inner.close().await.into_js()
   }
+
+  // ── Context-level events ───────────────────────────────────────────────
+
+  /// Wait for the next context-scoped event. Currently supports
+  /// `'weberror'` — returns a live [`crate::bindings::web_error::WebErrorJs`].
+  /// Playwright: `browserContext.waitForEvent(event, options?)`.
+  #[qjs(rename = "waitForEvent")]
+  pub async fn wait_for_event<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    event: String,
+    timeout_ms: Opt<f64>,
+  ) -> rquickjs::Result<Value<'js>> {
+    use rquickjs::class::Class;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let timeout = timeout_ms.0.unwrap_or(30_000.0) as u64;
+    let ev = self
+      .inner
+      .wait_for_event(&event, timeout)
+      .await
+      .map_err(|e| rquickjs::Error::new_from_js_message("BrowserContext.waitForEvent", "Error", e.to_string()))?;
+    match ev {
+      ferridriver::events::ContextEvent::WebError(err) => {
+        let wrapper = crate::bindings::web_error::WebErrorJs::new(err);
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
+    }
+  }
 }
