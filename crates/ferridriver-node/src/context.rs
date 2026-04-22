@@ -258,6 +258,206 @@ pub struct VideoSizeJs {
   pub height: f64,
 }
 
+/// NAPI shape for Playwright's
+/// `BrowserContextOptions` —
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22229`.
+/// Every field is optional. Fields that must mirror Playwright's
+/// string unions (e.g. `colorScheme: null | "light" | "dark" |
+/// "no-preference"`) use string passthrough here with the exact union
+/// rendered via `#[napi(ts_args_type = ...)]` on the consuming
+/// `browser.newContext(options)` method.
+#[napi(object)]
+pub struct NapiBrowserContextOptions {
+  pub accept_downloads: Option<bool>,
+  pub base_url: Option<String>,
+  pub bypass_csp: Option<bool>,
+  pub color_scheme: Option<String>,
+  pub contrast: Option<String>,
+  pub device_scale_factor: Option<f64>,
+  pub extra_http_headers: Option<HashMap<String, String>>,
+  pub forced_colors: Option<String>,
+  pub geolocation: Option<NapiGeolocation>,
+  pub has_touch: Option<bool>,
+  pub http_credentials: Option<NapiHttpCredentials>,
+  pub ignore_https_errors: Option<bool>,
+  pub is_mobile: Option<bool>,
+  pub java_script_enabled: Option<bool>,
+  pub locale: Option<String>,
+  pub offline: Option<bool>,
+  pub permissions: Option<Vec<String>>,
+  pub proxy: Option<NapiProxyConfig>,
+  pub record_video: Option<RecordVideoOptionsJs>,
+  pub reduced_motion: Option<String>,
+  pub screen: Option<NapiScreenSize>,
+  pub service_workers: Option<String>,
+  pub strict_selectors: Option<bool>,
+  pub timezone_id: Option<String>,
+  pub user_agent: Option<String>,
+  /// Playwright allows `viewport: null` to opt out of viewport
+  /// emulation. NAPI inbound deserialisation treats `null` and
+  /// `undefined` identically, so we expose an explicit boolean
+  /// `disable_viewport` for the `null` case alongside `viewport` for
+  /// a concrete size. Callers pass `{ width, height }` to set, or
+  /// `{ disableViewport: true }` to opt out. Absent fields =
+  /// `undefined` = "browser default".
+  pub viewport: Option<NapiViewportSize>,
+  pub disable_viewport: Option<bool>,
+}
+
+#[napi(object)]
+pub struct NapiGeolocation {
+  pub latitude: f64,
+  pub longitude: f64,
+  pub accuracy: Option<f64>,
+}
+
+#[napi(object)]
+pub struct NapiHttpCredentials {
+  pub username: String,
+  pub password: String,
+  pub origin: Option<String>,
+  pub send: Option<String>,
+}
+
+#[napi(object)]
+pub struct NapiProxyConfig {
+  pub server: String,
+  pub bypass: Option<String>,
+  pub username: Option<String>,
+  pub password: Option<String>,
+}
+
+#[napi(object)]
+pub struct NapiScreenSize {
+  pub width: f64,
+  pub height: f64,
+}
+
+#[napi(object)]
+pub struct NapiViewportSize {
+  pub width: f64,
+  pub height: f64,
+}
+
+impl NapiBrowserContextOptions {
+  /// Lower into the core [`ferridriver::options::BrowserContextOptions`]
+  /// bag. Unknown string values for enum-typed fields fall back to
+  /// `None` (same-as-absent), matching Playwright's lenient client-side
+  /// parsing.
+  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+  #[must_use]
+  pub fn into_core(self) -> ferridriver::options::BrowserContextOptions {
+    use ferridriver::options as fo;
+    let color_scheme = self
+      .color_scheme
+      .map_or(fo::MediaOverride::Unchanged, |s| match s.as_str() {
+        "null" => fo::MediaOverride::Disabled,
+        other => fo::MediaOverride::Set(other.to_string()),
+      });
+    let contrast = self
+      .contrast
+      .map_or(fo::MediaOverride::Unchanged, |s| match s.as_str() {
+        "null" => fo::MediaOverride::Disabled,
+        other => fo::MediaOverride::Set(other.to_string()),
+      });
+    let forced_colors = self
+      .forced_colors
+      .map_or(fo::MediaOverride::Unchanged, |s| match s.as_str() {
+        "null" => fo::MediaOverride::Disabled,
+        other => fo::MediaOverride::Set(other.to_string()),
+      });
+    let reduced_motion = self
+      .reduced_motion
+      .map_or(fo::MediaOverride::Unchanged, |s| match s.as_str() {
+        "null" => fo::MediaOverride::Disabled,
+        other => fo::MediaOverride::Set(other.to_string()),
+      });
+    let viewport = if self.disable_viewport == Some(true) {
+      fo::ViewportOption::Null
+    } else if let Some(vp) = self.viewport {
+      fo::ViewportOption::Size {
+        width: vp.width.max(0.0) as i64,
+        height: vp.height.max(0.0) as i64,
+      }
+    } else {
+      fo::ViewportOption::Default
+    };
+    let extra_http_headers = self.extra_http_headers.map(|h| {
+      let mut fx = rustc_hash::FxHashMap::default();
+      for (k, v) in h {
+        fx.insert(k, v);
+      }
+      fx
+    });
+    let http_credentials = self.http_credentials.map(|c| fo::HttpCredentials {
+      username: c.username,
+      password: c.password,
+      origin: c.origin,
+      send: c.send.and_then(|s| match s.as_str() {
+        "always" => Some(fo::HttpCredentialsSend::Always),
+        "unauthorized" => Some(fo::HttpCredentialsSend::Unauthorized),
+        _ => None,
+      }),
+    });
+    let proxy = self.proxy.map(|p| fo::ProxyConfig {
+      server: p.server,
+      bypass: p.bypass,
+      username: p.username,
+      password: p.password,
+    });
+    let record_video = self.record_video.map(|rv| fo::RecordVideoOptions {
+      dir: std::path::PathBuf::from(rv.dir),
+      size: rv.size.map(|s| fo::VideoSize {
+        width: s.width.max(0.0) as u32,
+        height: s.height.max(0.0) as u32,
+      }),
+    });
+    let screen = self.screen.map(|s| fo::ScreenSize {
+      width: s.width.max(0.0) as i64,
+      height: s.height.max(0.0) as i64,
+    });
+    let service_workers = self.service_workers.and_then(|s| match s.as_str() {
+      "allow" => Some(fo::ServiceWorkerPolicy::Allow),
+      "block" => Some(fo::ServiceWorkerPolicy::Block),
+      _ => None,
+    });
+    fo::BrowserContextOptions {
+      accept_downloads: self.accept_downloads,
+      base_url: self.base_url,
+      bypass_csp: self.bypass_csp,
+      color_scheme,
+      contrast,
+      device_scale_factor: self.device_scale_factor,
+      extra_http_headers,
+      forced_colors,
+      geolocation: self.geolocation.map(|g| fo::Geolocation {
+        latitude: g.latitude,
+        longitude: g.longitude,
+        accuracy: g.accuracy.unwrap_or(0.0),
+      }),
+      has_touch: self.has_touch,
+      http_credentials,
+      ignore_https_errors: self.ignore_https_errors,
+      is_mobile: self.is_mobile,
+      java_script_enabled: self.java_script_enabled,
+      locale: self.locale,
+      offline: self.offline,
+      permissions: self.permissions,
+      proxy,
+      record_har: None,
+      record_video,
+      reduced_motion,
+      screen,
+      service_workers,
+      storage_state: None,
+      strict_selectors: self.strict_selectors,
+      timezone_id: self.timezone_id,
+      user_agent: self.user_agent,
+      viewport,
+    }
+  }
+}
+
 fn build_context_event_callback(
   listener: napi::bindgen_prelude::Function<'_, crate::web_error::WebErrorArg, ()>,
 ) -> Result<ferridriver::events::ContextEventCallback> {

@@ -174,6 +174,13 @@ pub struct BrowserState {
   /// `BrowserContextOptions` bag will fold this into a single
   /// options struct.
   pub record_video: Arc<std::sync::Mutex<HashMap<String, crate::options::RecordVideoOptions>>>,
+  /// Per-context `BrowserContextOptions` registry. Populated by
+  /// [`Self::set_context_options`] when the caller constructs a
+  /// context via `Browser::new_context(Some(options))`; consumed by
+  /// `ContextRef::new_page` to apply emulation/permissions/headers on
+  /// every fresh page. Sync mutex so non-async construction paths
+  /// can write without owning a tokio guard.
+  pub context_options: Arc<std::sync::Mutex<HashMap<String, crate::options::BrowserContextOptions>>>,
 }
 
 #[derive(Clone)]
@@ -234,7 +241,30 @@ impl BrowserState {
       close_reason: None,
       context_events: Arc::new(std::sync::Mutex::new(HashMap::default())),
       record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
+      context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
     }
+  }
+
+  /// Install the [`crate::options::BrowserContextOptions`] bag for a
+  /// composite session key. Any fields that also live in the older
+  /// per-field registries (currently `record_video`) are mirrored
+  /// there too so existing consumers keep working.
+  pub fn set_context_options(&self, composite_key: &str, opts: crate::options::BrowserContextOptions) {
+    if let Some(ref rv) = opts.record_video {
+      self.set_record_video(composite_key, rv.clone());
+    }
+    let mut map = match self.context_options.lock() {
+      Ok(g) => g,
+      Err(p) => p.into_inner(),
+    };
+    map.insert(composite_key.to_string(), opts);
+  }
+
+  /// Fetch a clone of the options bag for a composite key, if any.
+  #[must_use]
+  pub fn get_context_options(&self, composite_key: &str) -> Option<crate::options::BrowserContextOptions> {
+    let map = self.context_options.lock().ok()?;
+    map.get(composite_key).cloned()
   }
 
   /// Enable `recordVideo` for every page opened under `composite_key`

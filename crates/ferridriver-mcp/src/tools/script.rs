@@ -152,6 +152,7 @@ impl McpServer {
       ferridriver::api_request::RequestContextOptions::default(),
     ));
 
+    let browser_handle = std::sync::Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
     let context = RunContext {
       vars,
       sandbox,
@@ -159,6 +160,7 @@ impl McpServer {
       page: Some(page),
       browser_context: Some(std::sync::Arc::new(ctx_ref)),
       request: Some(request),
+      browser: Some(browser_handle),
     };
 
     let result = self.script_engine.run(&source, &args, options, context).await;

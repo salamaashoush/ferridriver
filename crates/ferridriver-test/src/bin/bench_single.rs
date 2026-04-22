@@ -16,7 +16,7 @@ async fn main() {
 
   for i in 0..5 {
     let t = Instant::now();
-    let ctx = browser.new_context();
+    let ctx = browser.new_context(None);
     let page = ctx.new_page().await.unwrap();
     page
       .goto("data:text/html,<title>T</title><button id='b'>Go</button>", None)

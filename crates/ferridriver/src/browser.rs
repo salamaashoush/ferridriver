@@ -36,6 +36,17 @@ pub struct Browser {
   /// `Browser.getVersion().product`. Cached here so `version()` stays
   /// synchronous and `Arc`-shared across cheap `Browser::clone`s.
   version: Arc<str>,
+  /// Direct handle to [`BrowserState::context_options`] so the sync
+  /// `new_context` setter can register the options bag without having
+  /// to obtain the outer `RwLock` read guard. Cloned at launch from
+  /// the state and again in [`Self::from_shared_state`].
+  context_options: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::BrowserContextOptions>>>,
+  /// Mirror of [`BrowserState::record_video`] for the same reason — so
+  /// a caller that only sets `record_video` via the bag still gets the
+  /// per-page recording runtime kicked off in
+  /// [`crate::context::ContextRef::new_page`]. Kept alongside
+  /// `context_options` until the video-only registry is retired.
+  record_video: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::RecordVideoOptions>>>,
 }
 
 impl Browser {
@@ -62,9 +73,13 @@ impl Browser {
       .default_browser()
       .map(crate::backend::AnyBrowser::version)
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
+    let context_options = state.context_options.clone();
+    let record_video = state.record_video.clone();
     Ok(Self {
       state: Arc::new(RwLock::new(state)),
       version,
+      context_options,
+      record_video,
     })
   }
 
@@ -88,21 +103,70 @@ impl Browser {
   /// the instance has not been launched yet, `version()` returns
   /// `"Unknown"` until a subsequent `ensure_browser` fills it in.
   pub fn from_shared_state(state: Arc<RwLock<BrowserState>>) -> Self {
-    let version: Arc<str> = state
-      .try_read()
-      .ok()
-      .and_then(|s| s.default_browser().map(crate::backend::AnyBrowser::version))
-      .map_or_else(|| Arc::from("Unknown"), Arc::from);
-    Self { state, version }
+    let (version, context_options, record_video) = state.try_read().ok().map_or_else(
+      || {
+        (
+          Arc::from("Unknown"),
+          Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+          Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+        )
+      },
+      |s| {
+        (
+          s.default_browser()
+            .map(crate::backend::AnyBrowser::version)
+            .map_or_else(|| Arc::<str>::from("Unknown"), Arc::from),
+          s.context_options.clone(),
+          s.record_video.clone(),
+        )
+      },
+    );
+    Self {
+      state,
+      version,
+      context_options,
+      record_video,
+    }
   }
 
   /// Create a new isolated browser context.
-  /// Mirrors Playwright's `browser.newContext()`.
-  pub fn new_context(&self) -> ContextRef {
+  /// Mirrors Playwright's `browser.newContext(options?)` —
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22229`.
+  /// Pass `None` for the no-options case (Playwright's zero-arg form).
+  ///
+  /// Options are stored on the shared
+  /// [`crate::state::BrowserState::context_options`] registry keyed by
+  /// composite session key and consumed by
+  /// [`ContextRef::new_page`] as each page is opened. The registry
+  /// itself is a plain `std::sync::Mutex` clone-handle on `self` so
+  /// this setter stays sync regardless of whether an async writer
+  /// holds the outer `RwLock<BrowserState>`.
+  pub fn new_context(&self, options: Option<crate::options::BrowserContextOptions>) -> ContextRef {
     static CTX_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = CTX_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = format!("context-{id}");
-    ContextRef::new(self.state.clone(), name)
+    let ctx = ContextRef::new(self.state.clone(), name);
+    if let Some(opts) = options {
+      let composite = ctx.key.to_composite();
+      // Mirror `record_video` into the legacy per-video registry too,
+      // so the recording runtime (which still reads via
+      // `BrowserState::get_record_video`) continues to kick in on
+      // every new_page without waiting for that registry to be
+      // retired.
+      if let Some(ref rv) = opts.record_video {
+        let mut rv_map = match self.record_video.lock() {
+          Ok(g) => g,
+          Err(poisoned) => poisoned.into_inner(),
+        };
+        rv_map.insert(composite.clone(), rv.clone());
+      }
+      let mut map = match self.context_options.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+      };
+      map.insert(composite, opts);
+    }
+    ctx
   }
 
   /// Get the default browser context.

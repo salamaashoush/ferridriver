@@ -20,6 +20,7 @@
 
 pub mod api_request;
 pub mod artifacts;
+pub mod browser;
 pub mod console_message;
 pub mod context;
 pub mod convert;
@@ -39,6 +40,7 @@ pub mod web_error;
 
 pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
+pub use browser::BrowserJs;
 pub use console_message::ConsoleMessageJs;
 pub use context::BrowserContextJs;
 pub use dialog::DialogJs;
@@ -67,6 +69,7 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<FrameJs>::define(&g)?;
   Class::<LocatorJs>::define(&g)?;
   Class::<BrowserContextJs>::define(&g)?;
+  Class::<BrowserJs>::define(&g)?;
   Class::<APIRequestContextJs>::define(&g)?;
   Class::<APIResponseJs>::define(&g)?;
   Class::<KeyboardJs>::define(&g)?;
@@ -114,6 +117,17 @@ pub fn install_browser_context(ctx: &Ctx<'_>, bcx: Arc<ferridriver::context::Con
   define_classes(ctx)?;
   let js_bcx = Class::instance(ctx.clone(), BrowserContextJs::new(bcx))?;
   ctx.globals().set("context", js_bcx)?;
+  Ok(())
+}
+
+/// Install the `browser` global — exposes `browser.newContext(options?)`
+/// so scripts can construct fresh contexts with the full Playwright
+/// [`ferridriver::options::BrowserContextOptions`] bag. Rule-9 tests
+/// for §4.1 consume this entry point.
+pub fn install_browser(ctx: &Ctx<'_>, browser: Arc<ferridriver::Browser>) -> rquickjs::Result<()> {
+  define_classes(ctx)?;
+  let js_browser = Class::instance(ctx.clone(), BrowserJs::new(browser))?;
+  ctx.globals().set("browser", js_browser)?;
   Ok(())
 }
 

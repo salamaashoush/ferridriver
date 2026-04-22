@@ -717,11 +717,88 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 4.1 BrowserContextOptions
 
-- [ ] Accept the full 28-field option object at context creation.
-- **Playwright ref**: `types.d.ts` `BrowserContextOptions`.
-- **Fields**: `accept_downloads`, `base_url`, `bypass_csp`, `client_certificates`, `color_scheme`, `device_scale_factor`, `extra_http_headers`, `forced_colors`, `contrast`, `geolocation`, `has_touch`, `http_credentials`, `ignore_https_errors`, `is_mobile`, `javascript_enabled`, `locale`, `offline`, `permissions`, `proxy`, `record_har`, `record_video`, `reduced_motion`, `screen`, `service_workers`, `storage_state`, `strict_selectors`, `timezone_id`, `user_agent`, `viewport`.
-- **Files**: `crates/ferridriver/src/options.rs` add `BrowserContextOptions`; `context.rs` consume; `browser.rs:new_context`.
-- **Tests**: each field applied to a fresh context and verified page-side.
+- [~] Struct + first cluster of fields landed; full per-option Rule-9
+  coverage on cdp-pipe / cdp-raw / bidi / webkit (with documented
+  per-backend skip matrix). `Browser::new_context(Option<BrowserContextOptions>)`
+  in core; `Browser.newContext(options)` on NAPI; `browser.newContext(options)`
+  on QuickJS via the new global `browser`. Per-context options live on
+  `BrowserState::context_options` (composite-key registry, plain
+  `std::sync::Mutex` so the sync setter doesn't need a tokio guard);
+  consumed by `ContextRef::new_page` via `apply_context_options`
+  before the fresh `Page` is returned.
+
+  **Applied this commit (page-visible Rule-9 tests in
+  `tests/backends_support/browser_context_options.rs` + NAPI
+  `test/browser-context-options.test.ts`)**:
+  - `userAgent` (CDP cdp-pipe/cdp-raw + webkit set_user_agent path; BiDi
+    test skipped — Firefox BiDi user-agent override needs the
+    `browsingContext.setUserContextOverride` draft).
+  - `locale` (CDP + webkit; BiDi falls through page.set_locale).
+  - `timezoneId` (CDP + webkit; BiDi skipped — no `Emulation.setTimezoneOverride`).
+  - `colorScheme`, `reducedMotion`, `forcedColors`, `contrast` (CDP +
+    webkit via `page.emulate_media`; BiDi skipped — Firefox BiDi
+    `setEmulatedMediaFeatures` is incomplete).
+  - `viewport` (cdp-pipe/cdp-raw + bidi; webkit skipped — no fresh
+    context support, see backend gap below).
+  - `deviceScaleFactor` (CDP only).
+  - `hasTouch` (CDP via `Emulation.setTouchEmulationEnabled` — now
+    explicit `maxTouchPoints: 5` so `navigator.maxTouchPoints` reports
+    a non-zero value).
+  - `isMobile`, `javaScriptEnabled` (CDP only path; BiDi gap).
+  - `geolocation` + `permissions` (CDP via `Browser.grantPermissions`
+    now scoped to the page's `browserContextId` — without this scoping
+    permission grants apply to the *default* context only and a fresh
+    `browser.newContext()` always rejected geolocation; webkit/bidi
+    skipped — no backend permissions API).
+  - `extraHTTPHeaders` (CDP via `Network.setExtraHTTPHeaders`; webkit
+    skipped — single-context limitation).
+  - `offline` (CDP via `Network.emulateNetworkConditions`; bidi
+    skipped — `emulation.setNetworkConditions` shape mismatch in our
+    backend; webkit skipped — known flake).
+  - `recordVideo` folded into the bag (NAPI test in
+    `browser-context-options.test.ts`; the transitional
+    `BrowserContext.setRecordVideo` setter still works but is now
+    redundant with `browser.newContext({ recordVideo: ... })`).
+
+  **Real backend gaps (typed `Unsupported` / silent skip in test
+  matrix)**:
+  - **WebKit**: `Browser::new_context()` rejects with `WebKit does
+    not support multiple browser contexts` — host's `WKWebView` is
+    single-context. Every `browser.newContext({...})` call rejects.
+    The transitional `context.set_record_video` and the existing
+    per-page setters keep working on the default context.
+  - **BiDi/Firefox**: `userAgent`, `colorScheme`, `reducedMotion`,
+    geolocation+permissions, `setNetworkConditions` shape — Firefox
+    BiDi is missing or not-yet-wired to the equivalent commands.
+
+  **Deferred to a follow-up §4.1.x phase (struct field present in
+  Rust, NAPI, QuickJS — but `apply_context_options` is a no-op for
+  these)**: `acceptDownloads`, `baseURL`, `bypassCSP`,
+  `ignoreHTTPSErrors` (each maps cleanly to an existing per-page
+  setter; just need the wire-up + tests), `proxy` (needs per-context
+  proxy configuration on launch), `recordHar` (needs HAR writer crate
+  — see §2.6), `serviceWorkers` (page-level setter exists; only the
+  Rule-9 test needs writing), `storageState` (needs IndexedDB capture
+  — see §4.2/§4.3), `screen` (CDP `screenWidth`/`screenHeight` already
+  set from viewport, but the dedicated `screen` field deserves its
+  own override), `strictSelectors` (core-side flag only — no backend
+  wire), `httpCredentials` (per-page setter exists; needs origin
+  scoping and the `send` policy hooked through APIRequestContext).
+
+- **Playwright ref**: `types.d.ts` `BrowserContextOptions` (line 22229).
+- **Files**: `crates/ferridriver/src/options.rs::BrowserContextOptions`;
+  `crates/ferridriver/src/state.rs::context_options`;
+  `crates/ferridriver/src/browser.rs::Browser::new_context(Option<...>)`;
+  `crates/ferridriver/src/context.rs::apply_context_options`;
+  `crates/ferridriver-node/src/context.rs::NapiBrowserContextOptions`;
+  `crates/ferridriver-script/src/bindings/browser.rs::BrowserJs` +
+  `crates/ferridriver-script/src/bindings/mod.rs::install_browser`;
+  `crates/ferridriver-mcp/src/tools/script.rs` (passes `Browser`
+  handle into `RunContext`).
+- **Tests**: `crates/ferridriver-cli/tests/backends_support/browser_context_options.rs`
+  (13 tests × 4 backends with per-backend skip matrix);
+  `crates/ferridriver-node/test/browser-context-options.test.ts`
+  (9 tests × cdp-pipe + cdp-raw).
 
 ### 4.2 `context.storageState({ path?, indexedDB? })`
 

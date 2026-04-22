@@ -35,7 +35,7 @@ async fn main() {
     let b = Arc::clone(browser);
     worker_handles.push(tokio::spawn(async move {
       for i in 0..iters {
-        let ctx = b.new_context();
+        let ctx = b.new_context(None);
         let page = ctx.new_page().await.unwrap();
         let url = format!(
           "data:text/html,<title>T{}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>",

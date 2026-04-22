@@ -76,7 +76,7 @@ impl Recorder {
     })
     .await?;
 
-    let ctx = browser.new_context();
+    let ctx = browser.new_context(None);
     let page = Box::pin(ctx.new_page()).await?;
     page.goto(&self.options.url, None).await?;
 

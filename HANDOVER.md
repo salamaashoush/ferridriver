@@ -7,94 +7,108 @@ fresh summary at the end of each block.
 
 1. `CLAUDE.md` — rules + lessons.
 2. `PLAYWRIGHT_COMPAT.md` — gap tracker. Tier 1 done. §3.1, §3.12,
-   §2.9, §2.11, §2.10, §2.12, §2.13, and now §2.14 landed in recent
-   sessions.
+   §2.9, §2.11, §2.10, §2.12, §2.13, §2.14, and now §4.1 (partial)
+   landed in recent sessions.
 3. This file — block summary below.
 4. `docs/NEXT_SESSION.md` — next-block brief.
 
 `git clone https://github.com/microsoft/playwright /tmp/playwright` if missing.
 
-## Landed this session
-
-### §2.14 — Video as first-class handle + context recordVideo option
+## Landed this session — §4.1 BrowserContextOptions (partial)
 
 Playwright-parity surface verified against
-`/tmp/playwright/packages/playwright-core/types/types.d.ts:21621` (Video)
-and `:4756` (page.video). Three layers, four backends green.
+`/tmp/playwright/packages/playwright-core/types/types.d.ts:22229`
+(`BrowserContextOptions`) and `:9851` (`browser.newContext`). Three
+layers, four backends, with a documented per-backend skip matrix for
+fields the underlying protocol cannot honour.
 
-| Surface | Shape | Playwright ref |
+| Surface | Shape | Where wired |
 |---|---|---|
-| `page.video()` | `Video | null` | `types.d.ts:4756` |
-| `Video.path()` | `Promise<string>` | `types.d.ts:21631` |
-| `Video.saveAs(path)` | `Promise<void>` | `types.d.ts:21638` |
-| `Video.delete()` | `Promise<void>` | `types.d.ts:21625` |
-| `context.setRecordVideo({dir,size?})` | transitional until §4.1 | `types.d.ts:10150` |
+| `Browser::new_context(Option<BrowserContextOptions>)` | core sync setter | `crates/ferridriver/src/browser.rs:142` |
+| `BrowserContextOptions` | full struct + sub-types | `crates/ferridriver/src/options.rs::BrowserContextOptions` |
+| `BrowserState::context_options` | per-composite-key registry | `crates/ferridriver/src/state.rs::context_options` |
+| `apply_context_options(page, opts)` | per-field application | `crates/ferridriver/src/context.rs::apply_context_options` |
+| `Browser.newContext(options?)` (NAPI) | typed TS via `ts_args_type` | `crates/ferridriver-node/src/browser.rs::new_context` |
+| `NapiBrowserContextOptions::into_core` | NAPI → core lowering | `crates/ferridriver-node/src/context.rs:NapiBrowserContextOptions` |
+| `browser.newContext(options?)` (QuickJS) | new global `browser` | `crates/ferridriver-script/src/bindings/browser.rs::BrowserJs` |
+| `install_browser` | engine + MCP wiring | `crates/ferridriver-script/src/bindings/mod.rs::install_browser`, `crates/ferridriver-mcp/src/tools/script.rs` |
 
-- **Core `video.rs`**: wraps the existing `VideoRecordingHandle` in a
-  public `Video` + paired `VideoSink`. The sink carries
-  `watch::Sender<Option<FinalPath>>`; the Video blocks on
-  `watch::Receiver::changed` inside every accessor until the sink
-  announces the terminal state. `send_replace` on finalisation so
-  callers that subscribe before the first publish still observe the
-  value — mirrors §2.12's lazy-subscriber pattern.
+### Field coverage applied
 
-- **Context option plumbing** (`options.rs::RecordVideoOptions`):
-  `{ dir: PathBuf, size: Option<VideoSize> }`. Per-composite-key
-  registry on `BrowserState::record_video` (sync `std::sync::Mutex`
-  so `ContextRef::set_record_video` — a sync setter — doesn't need to
-  own a tokio guard). Call `set_record_video` BEFORE opening a page
-  — registry lookup happens in `ContextRef::new_page` after
-  `Page::with_context` returns.
+* `userAgent`, `locale`, `timezoneId` — via existing per-page setters.
+* `colorScheme`, `reducedMotion`, `forcedColors`, `contrast` — via
+  `page.emulate_media`.
+* `viewport`, `deviceScaleFactor`, `hasTouch`, `isMobile`,
+  `javaScriptEnabled` — via `page.set_viewport` (the bag's
+  `resolved_viewport()` folds dimensions + scale + touch into one
+  `ViewportConfig`).
+* `geolocation` + `permissions` — via `page.set_geolocation` +
+  `page.grant_permissions`. **CDP fix landed this session**:
+  `Browser.grantPermissions` now scoped to the page's
+  `browserContextId` so grants on a fresh `browser.newContext()`
+  actually apply (silent default-context-only fallback before).
+* `extraHTTPHeaders` — via `page.set_extra_http_headers`.
+* `offline` — via `page.set_network_state`.
+* `recordVideo` — folded into the bag (transitional
+  `BrowserContext.setRecordVideo` setter still works for back-compat).
 
-- **Recording runtime**
-  (`context.rs::start_video_recording`): spawns a tokio task that
-  runs `video::start_recording(page, output_path, w, h, quality=90)`
-  → polls `page.is_closed()` at 50ms → `handle.stop(&page)` →
-  `sink.finish_ok(path)` / `finish_err(reason)`. Filename format
-  `<dir>/<millis>-<counter>.<ext>` (ext from `video_extension()`).
+### CDP-side fixes that ride along
 
-- **Backends**:
-  - **CDP** (cdp-pipe/cdp-raw): real recording via the existing
-    `Page.startScreencast` + ffmpeg encoder path. Default quality 90
-    (Playwright parity).
-  - **BiDi** (Firefox): polls at ~15fps via the backend's existing
-    `start_screencast` polyfill (no native screencast primitive).
-  - **WebKit**: `AnyPage::start_screencast` returns a typed
-    `Unsupported`. The recording runtime funnels that into
-    `VideoSink::finish_err(...)`, so `page.video()` STILL returns a
-    non-null handle (Playwright parity: the class is always present
-    when `recordVideo` is set) but its accessors reject with the
-    backend reason. Section B gap documented.
+* `Browser.grantPermissions` now sends with `browserContextId` so
+  permissions actually apply to fresh contexts (was silently scoping
+  to default-context-only).
+* `Emulation.setTouchEmulationEnabled` now passes
+  `maxTouchPoints: 5` so `navigator.maxTouchPoints` reports a
+  non-zero value (Playwright uses 5 too — see
+  `crEmulationManager._updateTouch`).
+* Browser.grantPermissions dispatched at the browser level (no
+  `sessionId`), not via the page session.
 
-- **NAPI** (`ferridriver-node/src/video.rs`): new `#[napi] class
-  Video` with async `path()` / `saveAs(path)` / `delete()`.
-  `page.video()` accessor on the `Page` class returns
-  `Video | null`. `BrowserContext.setRecordVideo({ dir, size? })`
-  as the transitional setter.
+### Real backend gaps (typed skip in test matrix)
 
-- **QuickJS** (`ferridriver-script/src/bindings/video.rs`): new
-  `VideoJs` class. `PageJs::video()` accessor; new
-  `BrowserContextJs::newPage()` (tests need it to open a recording
-  page without closing the ambient `page` global that `run_script`
-  binds); `BrowserContextJs::setRecordVideo(options)`.
+* **WebKit** — `WKWebView` is a single-context host. `Browser::new_context`
+  rejects with `WebKit does not support multiple browser contexts`,
+  so all `browser.newContext({...})` calls reject. The transitional
+  per-page setters keep working on the default context. WebKit
+  Rule-9 tests early-return via `skip_if_no_new_context`.
+* **BiDi/Firefox** — `userAgent`, `colorScheme`, `reducedMotion`,
+  `forcedColors`, `contrast`, `geolocation`+`permissions`,
+  `setNetworkConditions` shape, `javaScriptEnabled` —
+  Firefox BiDi is missing or not-yet-wired to the equivalent
+  commands. Tracked as Section B gaps.
+
+### Deferred to follow-up §4.1.x phase
+
+Struct field present in Rust + NAPI + QuickJS, but
+`apply_context_options` is a no-op for these:
+
+* `acceptDownloads`, `baseURL`, `bypassCSP`, `ignoreHTTPSErrors`
+  (each maps to an existing per-page setter; just needs the
+  apply-helper line + Rule-9 test).
+* `httpCredentials` (per-page setter exists; `origin` scoping +
+  `send` policy via APIRequestContext still pending).
+* `serviceWorkers` (per-page setter exists; just needs the
+  apply-helper line + Rule-9 test).
+* `proxy` (needs per-context proxy on `Browser::launch`; CDP supports
+  it, BiDi has it via `network.addIntercept`-style overrides).
+* `recordHar` (needs HAR writer crate — see §2.6).
+* `storageState` (needs IndexedDB capture — see §4.2/§4.3).
+* `screen` (CDP `screenWidth/screenHeight` already set from viewport,
+  but the dedicated `screen` field deserves its own override).
+* `strictSelectors` (core-side flag only — locator strict-mode is
+  already on).
 
 ### Rule-9 tests
 
-- `tests/backends_support/video.rs` — 2 tests × 4 backends =
-  **8 assertions**. `test_video_null_without_recording` asserts
-  `page.video() === null` when no `recordVideo`.
-  `test_video_recording_lifecycle` opens a fresh page via
-  `context.newPage()` (so the ambient page isn't disrupted),
-  navigates twice (two `goto`s give the screencast encoder a visible
-  state transition without `setTimeout` — QuickJS doesn't have it),
-  closes, awaits `video.path()`. CDP asserts file exists + non-empty
-  size; BiDi asserts file exists; WebKit asserts `path()` rejects.
-  Uses size 1280x720 to avoid ffmpeg "padded dimensions cannot be
-  smaller than input" error on BiDi where Firefox renders at a
-  larger viewport than the 800x450 default.
-- `crates/ferridriver-node/test/video.test.ts`: 3 tests × 2 CDP
-  backends = **6 assertions** covering null without recording,
-  record-and-path-resolves, and saveAs/delete.
+* `crates/ferridriver-cli/tests/backends_support/browser_context_options.rs`
+  — **13 tests** with per-backend skip matrix. Each opens a fresh
+  context via the new QuickJS `browser` global, applies one option,
+  navigates, and observes a page-side effect produced ONLY when the
+  option took effect. Tests for `extraHTTPHeaders` and
+  `geolocation`+`permissions` spin up tiny one-shot HTTP servers on
+  localhost (secure-context requirement for geolocation).
+* `crates/ferridriver-node/test/browser-context-options.test.ts` —
+  **9 tests** × `cdp-pipe` + `cdp-raw` = 18 NAPI assertions.
 
 ### Baseline after this commit (must stay green)
 
@@ -104,31 +118,35 @@ cargo test -p ferridriver --lib                                  # 125 core
 cargo test -p ferridriver-script --lib                           # 13 script
 cargo test -p ferridriver-mcp --lib                              # 38 MCP
 cd crates/ferridriver-node && bun run build:debug
-cd <repo root> && bun test                                       # 853 (was 847)
+cd <repo root> && bun test                                       # 871 (was 853)
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1
-# cdp-pipe 140, cdp-raw 140, bidi 135, webkit 136
+# cdp-pipe 153, cdp-raw 153, bidi 148, webkit 149  (+13 each)
 ```
 
 ## Next priorities
 
-1. **§4.1 BrowserContextOptions** — 28-field option bag at context
-   creation (viewport, userAgent, locale, timezone, geolocation,
-   permissions, acceptDownloads, recordVideo, recordHar, …). This
-   folds today's transitional `set_record_video` setter into the full
-   options struct. Probably 2–3 sessions.
+1. **§4.1.x — close the deferred subset of BrowserContextOptions**.
+   Quick wins (small per-field PRs, each with a Rule-9 test):
+   - `acceptDownloads` → `page.set_download_behavior`.
+   - `baseURL` → store on `ContextRef`, apply in `page.goto` resolver.
+   - `bypassCSP` → `page.set_bypass_csp`.
+   - `ignoreHTTPSErrors` → `page.set_ignore_certificate_errors`.
+   - `serviceWorkers` → `page.set_service_workers_blocked`.
+   - `httpCredentials` → finish origin scoping + `send` policy.
+   Larger: `proxy` (per-context launch flags), `recordHar` (writer
+   crate, see §2.6), `storageState` (needs §4.2/§4.3 IndexedDB).
 2. **§2.15 BrowserType class** — remove ad-hoc `Browser::launch` /
    `Browser::connect` on `Browser`, introduce `BrowserType` with
    `launch`/`connect`/`connectOverCdp`/etc.
 3. **§3.17 Auto-waiting deadline parity** — replace fixed backoff
    with Playwright's exponential polling + deadline propagation.
-4. **WebKit rich IPC op** — one new `Op::RichConsoleEvent` carrying
-   `args + stack frames + isError: bool` closes both §2.12 console-
-   args/location AND §2.13 stack-richness gaps together.
-5. **WebKit screencast bridge** — the §2.14 WebKit gap. Options: new
-   Objective-C pipeline via `CGDisplayStreamCreate` + CoreVideo frame
-   pump through IPC, or macOS 14+ `WKWebView._takeSnapshot` with
-   frame scheduling. Closes the §2.14 WebKit gap.
+4. **WebKit multi-context** — biggest §4.1 gap. Stock `WKWebView`
+   can host multiple `WKWebViewConfiguration` instances each with
+   their own `WKProcessPool` for cookie isolation. Plumbing this
+   through our IPC unlocks §4.1 across the WebKit backend.
+5. **BiDi parity** for the §4.1 fields above. `userAgent` and the
+   media overrides are the most impactful.
 
 ## Carried-forward backend gaps (real protocol limits)
 
@@ -139,22 +157,21 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   (Firefox BiDi has no cancel primitive). Page-init emits a spurious
   `"Permission denied to access property 'length'"` cross-origin
   error observed by `pageerror` listeners — real Firefox behaviour,
-  tests poll past it.
+  tests poll past it. **§4.1: `userAgent`, `colorScheme`,
+  `reducedMotion`, `forcedColors`, `contrast`, `geolocation` +
+  `permissions`, `offline` (setNetworkConditions shape mismatch),
+  `javaScriptEnabled`** — protocol gaps documented in §4.1.
 - **WebKit**: stock `WKWebView` exposes no public API for main-doc
-  Response observability (§3.1: returns `null`, documented),
-  redirect chain, response body bytes, browser-set request headers,
-  `Set-Cookie`, WebSocket frame events. Dialog accept/dismiss is
-  decided by the host `WKUIDelegate` before the event reaches Rust
-  (§2.9: `Dialog.accept/dismiss` returns typed `Unsupported`). File
-  chooser cannot be intercepted (§2.11: times out). Download events
-  don't flow through our IPC (§2.10: times out). **Console args +
-  location** are not carried by our current `(level, text)` IPC
-  payload (§2.12: `args = []`, default location). **WebError stack
-  richness** is bounded by the same IPC — `stack` is whatever JSC's
-  `error.stack` string reports, no structured frame array (§2.13).
-  **Screencast** has no public API — `page.video().path()` rejects
-  with the typed `Unsupported` reason (§2.14). `page.evaluate` runs
-  in utility context isolated from the user-script's fetch wrap.
+  Response observability (§3.1), redirect chain, response body
+  bytes, browser-set request headers, `Set-Cookie`, WebSocket frame
+  events. Dialog accept/dismiss is decided by the host
+  `WKUIDelegate` before the event reaches Rust (§2.9). File chooser
+  cannot be intercepted (§2.11). Download events don't flow through
+  our IPC (§2.10). **Console args + location** are not carried by
+  our current `(level, text)` IPC payload (§2.12). **WebError stack
+  richness** is bounded by the same IPC (§2.13). **Screencast** has
+  no public API (§2.14). **Multiple browser contexts** unsupported
+  (§4.1) — single-host limitation.
 
 ## Known flakes
 
@@ -165,19 +182,21 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 
 | area | path |
 |---|---|
+| BrowserContextOptions struct | `crates/ferridriver/src/options.rs::BrowserContextOptions` |
+| Geolocation / HttpCredentials / ProxyConfig / RecordHarOptions / StorageStateInput / ScreenSize / ServiceWorkerPolicy / ViewportOption | same file |
+| context_options registry | `crates/ferridriver/src/state.rs::{context_options, set_context_options, get_context_options}` |
+| Browser::new_context(opts) | `crates/ferridriver/src/browser.rs:142` |
+| apply_context_options | `crates/ferridriver/src/context.rs::apply_context_options` |
+| NAPI Browser.newContext | `crates/ferridriver-node/src/browser.rs::new_context` (with `ts_args_type` for Playwright unions) |
+| NAPI options struct | `crates/ferridriver-node/src/context.rs::NapiBrowserContextOptions` |
+| QuickJS BrowserJs | `crates/ferridriver-script/src/bindings/browser.rs` |
+| QuickJS install_browser | `crates/ferridriver-script/src/bindings/mod.rs::install_browser` |
+| MCP run_script wiring | `crates/ferridriver-mcp/src/tools/script.rs` (passes `Browser` handle) |
+| Rust integration tests | `crates/ferridriver-cli/tests/backends_support/browser_context_options.rs` |
+| NAPI tests | `crates/ferridriver-node/test/browser-context-options.test.ts` |
 | Video handle + VideoSink | `crates/ferridriver/src/video.rs::{Video, VideoSink}` |
-| RecordVideoOptions | `crates/ferridriver/src/options.rs::RecordVideoOptions` |
-| Recording runtime | `crates/ferridriver/src/context.rs::start_video_recording` |
-| record_video registry | `crates/ferridriver/src/state.rs::{record_video, set_record_video, get_record_video}` |
-| `page.video()` accessor | `crates/ferridriver/src/page.rs::video` |
-| NAPI Video class | `crates/ferridriver-node/src/video.rs` |
-| NAPI context.setRecordVideo | `crates/ferridriver-node/src/context.rs` |
-| QuickJS VideoJs | `crates/ferridriver-script/src/bindings/video.rs` |
-| QuickJS context.newPage + setRecordVideo | `crates/ferridriver-script/src/bindings/context.rs` |
-| Rust integration tests | `crates/ferridriver-cli/tests/backends_support/video.rs` |
-| NAPI tests | `crates/ferridriver-node/test/video.test.ts` |
 | WebError handle + ErrorDetails (§2.13) | `crates/ferridriver/src/web_error.rs` |
-| ContextEvent + ContextEventEmitter (§2.13) | `crates/ferridriver/src/events.rs` |
+| ContextEvent + ContextEventEmitter | `crates/ferridriver/src/events.rs` |
 | ConsoleMessage handle (§2.12) | `crates/ferridriver/src/console_message.rs` |
 | Download handle (§2.10) | `crates/ferridriver/src/download.rs` |
 | FileChooser handle (§2.11) | `crates/ferridriver/src/file_chooser.rs` |

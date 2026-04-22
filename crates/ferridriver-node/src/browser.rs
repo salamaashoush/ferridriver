@@ -107,10 +107,56 @@ impl Browser {
   }
 
   /// Create a new isolated browser context.
-  /// Mirrors Playwright's `browser.newContext()`.
-  #[napi]
-  pub fn new_context(&self) -> crate::context::BrowserContext {
-    crate::context::BrowserContext::wrap(self.inner.new_context())
+  /// Mirrors Playwright's `browser.newContext(options?)` —
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22229`.
+  /// Every option field is optional; pass `undefined` or `{}` for
+  /// no-options.
+  ///
+  /// The `ts_args_type` below forces the generated `.d.ts` to carry
+  /// Playwright's exact string-literal unions (e.g. `colorScheme:
+  /// 'light' | 'dark' | 'no-preference' | null`) — napi-rs's default
+  /// inference would widen them to `string`.
+  #[napi(ts_args_type = "options?: {
+    acceptDownloads?: boolean;
+    baseURL?: string;
+    bypassCSP?: boolean;
+    colorScheme?: 'light' | 'dark' | 'no-preference' | null;
+    contrast?: 'no-preference' | 'more' | null;
+    deviceScaleFactor?: number;
+    extraHTTPHeaders?: Record<string, string>;
+    forcedColors?: 'active' | 'none' | null;
+    geolocation?: { latitude: number; longitude: number; accuracy?: number };
+    hasTouch?: boolean;
+    httpCredentials?: { username: string; password: string; origin?: string; send?: 'always' | 'unauthorized' };
+    ignoreHTTPSErrors?: boolean;
+    isMobile?: boolean;
+    javaScriptEnabled?: boolean;
+    locale?: string;
+    offline?: boolean;
+    permissions?: string[];
+    proxy?: { server: string; bypass?: string; username?: string; password?: string };
+    recordVideo?: { dir: string; size?: { width: number; height: number } };
+    reducedMotion?: 'reduce' | 'no-preference' | null;
+    screen?: { width: number; height: number };
+    serviceWorkers?: 'allow' | 'block';
+    strictSelectors?: boolean;
+    timezoneId?: string;
+    userAgent?: string;
+    viewport?: { width: number; height: number };
+    /**
+     * Set to `true` to opt out of viewport emulation entirely —
+     * equivalent to Playwright's `viewport: null`. napi-rs cannot
+     * distinguish JS `null` from `undefined`, so the opt-out is
+     * exposed as this explicit boolean. Defaults to `false`.
+     */
+    disableViewport?: boolean;
+  }")]
+  pub fn new_context(
+    &self,
+    options: Option<crate::context::NapiBrowserContextOptions>,
+  ) -> crate::context::BrowserContext {
+    let core = options.map(crate::context::NapiBrowserContextOptions::into_core);
+    crate::context::BrowserContext::wrap(self.inner.new_context(core))
   }
 
   /// Get the default browser context.

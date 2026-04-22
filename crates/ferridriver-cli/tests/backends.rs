@@ -2346,6 +2346,24 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::video::test_video_null_without_recording);
   run!(backends_support::video::test_video_recording_lifecycle);
 
+  // §4.1 BrowserContextOptions — per-option Rule-9 coverage. Each
+  // creates a fresh `browser.newContext({...})`, opens a page, and
+  // observes a page-side effect produced ONLY when the bag's field
+  // took effect.
+  run!(backends_support::browser_context_options::test_context_options_user_agent);
+  run!(backends_support::browser_context_options::test_context_options_locale);
+  run!(backends_support::browser_context_options::test_context_options_timezone);
+  run!(backends_support::browser_context_options::test_context_options_color_scheme);
+  run!(backends_support::browser_context_options::test_context_options_reduced_motion);
+  run!(backends_support::browser_context_options::test_context_options_forced_colors);
+  run!(backends_support::browser_context_options::test_context_options_viewport);
+  run!(backends_support::browser_context_options::test_context_options_javascript_enabled);
+  run!(backends_support::browser_context_options::test_context_options_geolocation);
+  run!(backends_support::browser_context_options::test_context_options_extra_http_headers);
+  run!(backends_support::browser_context_options::test_context_options_offline);
+  run!(backends_support::browser_context_options::test_context_options_device_scale_factor);
+  run!(backends_support::browser_context_options::test_context_options_has_touch);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

@@ -256,9 +256,39 @@ impl ContextRef {
       Box::pin(state.ensure_instance(&self.key.instance)).await?;
     }
 
+    // Read the (optional) `BrowserContextOptions` bag before the open —
+    // a custom `viewport` (or `null` viewport) has to be known up-front
+    // so the backend opens the page at the right size rather than
+    // resizing afterwards.
+    let ctx_opts = {
+      let state = self.state.read().await;
+      state.get_context_options(&self.key.to_composite())
+    };
+    let resolved_viewport = match &ctx_opts {
+      Some(opts) => match opts.viewport {
+        crate::options::ViewportOption::Null => None,
+        crate::options::ViewportOption::Default | crate::options::ViewportOption::Size { .. } => {
+          opts.resolved_viewport()
+        },
+      },
+      None => None,
+    };
+
     let plan = {
       let state = self.state.read().await;
       state.page_open_plan(&self.key)?
+    };
+    // Override the state's default viewport with the options bag's
+    // resolved viewport when the caller supplied one. `ViewportOption::Null`
+    // drops the default entirely (matches Playwright's `viewport: null`
+    // opt-out).
+    let effective_viewport = if ctx_opts
+      .as_ref()
+      .is_some_and(|o| o.viewport != crate::options::ViewportOption::Default)
+    {
+      resolved_viewport
+    } else {
+      plan.viewport.clone()
     };
 
     let (any_page, browser_context_id) = if &*self.key.context == "default" {
@@ -266,7 +296,7 @@ impl ContextRef {
         Box::pin(plan.browser.new_page(
           "about:blank",
           plan.browser_context_id.as_deref(),
-          plan.viewport.as_ref(),
+          effective_viewport.as_ref(),
         ))
         .await?,
         None,
@@ -276,7 +306,7 @@ impl ContextRef {
         Box::pin(
           plan
             .browser
-            .new_page("about:blank", Some(&existing_ctx_id), plan.viewport.as_ref()),
+            .new_page("about:blank", Some(&existing_ctx_id), effective_viewport.as_ref()),
         )
         .await?,
         Some(existing_ctx_id),
@@ -286,7 +316,7 @@ impl ContextRef {
       let page = Box::pin(
         plan
           .browser
-          .new_page("about:blank", Some(&ctx_id), plan.viewport.as_ref()),
+          .new_page("about:blank", Some(&ctx_id), effective_viewport.as_ref()),
       )
       .await?;
       (page, Some(ctx_id))
@@ -304,6 +334,15 @@ impl ContextRef {
     // very first call. Mirrors Playwright's client always receiving the
     // main frame via the channel initializer.
     let page = Page::with_context(any_page, self.clone()).await?;
+
+    // Apply the BrowserContextOptions bag to the fresh page. Fields
+    // without a backend implementation are silently skipped;
+    // backend-specific failures funnel up as `FerriError` and fail
+    // `new_page`, matching Playwright's "option applies or
+    // context.newPage rejects" contract.
+    if let Some(opts) = ctx_opts.as_ref() {
+      apply_context_options(&page, opts).await?;
+    }
 
     // If the context was configured with `recordVideo`, spawn the
     // recording runtime now that we have the strong `Arc<Page>`.
@@ -625,6 +664,80 @@ impl ContextRef {
     }
     Ok(())
   }
+}
+
+/// Apply every supported field on a [`crate::options::BrowserContextOptions`]
+/// bag to a freshly-opened [`Page`]. Each field corresponds to an
+/// existing Page setter; fields with no backend support on a given
+/// backend bubble up the backend's `FerriError` (typically
+/// `FerriError::Unsupported { reason }`) which then fails
+/// `ContextRef::new_page`. Field application order mirrors Playwright's
+/// `BrowserContext.doCreateNewContext` server-side sequencing
+/// (`/tmp/playwright/packages/playwright-core/src/server/browserContext.ts`):
+/// emulation before navigation, permissions last.
+///
+/// Fields deferred to a follow-up session (no-op here): `proxy`,
+/// `record_har`, `storage_state`, `screen`, `base_url`, `service_workers`,
+/// `http_credentials`, `accept_downloads`, `ignore_https_errors`,
+/// `strict_selectors` beyond storage, `bypass_csp`. Each gets a
+/// dedicated implementation when the supporting infrastructure lands.
+async fn apply_context_options(page: &Arc<Page>, opts: &crate::options::BrowserContextOptions) -> Result<()> {
+  // Re-apply the resolved viewport explicitly. `Browser::new_page`
+  // already invoked `Emulation.setDeviceMetricsOverride` from
+  // `enable_domains` based on the same `ViewportConfig`, but
+  // `Emulation.setTouchEmulationEnabled` only fires from the
+  // dedicated [`Page::set_viewport`] path. Calling it here is the
+  // simplest way to honour `hasTouch: true` without duplicating the
+  // touch-toggle in `enable_domains` for every fresh page (most of
+  // which set `has_touch=false`).
+  if let Some(vp) = opts.resolved_viewport() {
+    page.set_viewport(&vp).await?;
+  }
+  if let Some(ua) = opts.user_agent.as_deref() {
+    page.set_user_agent(ua).await?;
+  }
+  if let Some(locale) = opts.locale.as_deref() {
+    page.set_locale(locale).await?;
+  }
+  if let Some(tz) = opts.timezone_id.as_deref() {
+    page.set_timezone(tz).await?;
+  }
+  if let Some(enabled) = opts.java_script_enabled {
+    page.set_javascript_enabled(enabled).await?;
+  }
+  if let Some(bypass) = opts.bypass_csp {
+    page.set_bypass_csp(bypass).await?;
+  }
+  if let Some(ignore) = opts.ignore_https_errors {
+    page.set_ignore_certificate_errors(ignore).await?;
+  }
+  if let Some(ref creds) = opts.http_credentials {
+    page.set_http_credentials(&creds.username, &creds.password).await?;
+  }
+  if let Some(policy) = opts.service_workers {
+    page
+      .set_service_workers_blocked(matches!(policy, crate::options::ServiceWorkerPolicy::Block))
+      .await?;
+  }
+  if let Some(ref headers) = opts.extra_http_headers {
+    page.set_extra_http_headers(headers).await?;
+  }
+  if opts.any_media_override() {
+    page.emulate_media(&opts.as_emulate_media()).await?;
+  }
+  if let Some(geo) = opts.geolocation {
+    // Playwright defaults accuracy to `0`; the page-level setter takes
+    // a `0`-as-unset sentinel via `-1` on some backends — reuse the
+    // concrete value.
+    page.set_geolocation(geo.latitude, geo.longitude, geo.accuracy).await?;
+  }
+  if let Some(ref perms) = opts.permissions {
+    page.grant_permissions(perms, None).await?;
+  }
+  if let Some(offline) = opts.offline {
+    page.set_network_state(offline, 0.0, -1.0, -1.0).await?;
+  }
+  Ok(())
 }
 
 /// Kick off a background recording runtime for a freshly-opened page

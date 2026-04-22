@@ -26,7 +26,7 @@ async fn measure_operation_costs() {
   let n = 10;
   for _ in 0..n {
     let start = Instant::now();
-    let ctx = browser.new_context();
+    let ctx = browser.new_context(None);
     let _page = ctx.new_page().await.unwrap();
     ctx_total += start.elapsed();
     ctx.close().await.ok();
@@ -37,7 +37,7 @@ async fn measure_operation_costs() {
   );
 
   // 3. Page navigation (data URL, 10x average)
-  let ctx = browser.new_context();
+  let ctx = browser.new_context(None);
   let page = ctx.new_page().await.unwrap();
   let mut nav_total = std::time::Duration::ZERO;
   for i in 0..n {

@@ -2576,10 +2576,14 @@ impl<T: CdpWrap> CdpPage<T> {
     });
     self.cmd("Emulation.setDeviceMetricsOverride", params).await?;
     if config.has_touch {
+      // Pass `maxTouchPoints` explicitly so `navigator.maxTouchPoints`
+      // reports a non-zero value (Chrome leaves it at 0 when the
+      // param is omitted on some channels). Mirrors Playwright's
+      // `crEmulationManager._updateTouch` which uses 5.
       let _ = self
         .cmd(
           "Emulation.setTouchEmulationEnabled",
-          serde_json::json!({"enabled": true}),
+          serde_json::json!({"enabled": true, "maxTouchPoints": 5}),
         )
         .await;
     }
@@ -2732,7 +2736,27 @@ impl<T: CdpWrap> CdpPage<T> {
     if let Some(o) = origin {
       params["origin"] = serde_json::json!(o);
     }
-    self.cmd("Browser.grantPermissions", params).await?;
+    // Scope the grant to this page's CDP browser context. Without
+    // `browserContextId` Chrome applies the grant to the *default*
+    // context only — pages opened under a fresh
+    // `Target.createBrowserContext` context (any non-default
+    // ContextRef) silently fall back to the prompt-and-deny path.
+    // Mirrors Playwright's `Browser.grantPermissions(...{ browserContextId })`
+    // wiring in `crBrowser.ts::doGrantPermissions`.
+    if let Some(ref ctx_id) = self.browser_context_id {
+      params["browserContextId"] = serde_json::json!(ctx_id.as_ref());
+    }
+    // `Browser.grantPermissions` is a browser-level command and must
+    // be sent without a `sessionId`. Calling via `self.cmd` (which
+    // forwards `self.session_id`) routes the request through the
+    // attached page session — Chrome accepts that for many browser-
+    // level commands but `grantPermissions` specifically silently
+    // applies to the default context unless dispatched at the
+    // browser level.
+    self
+      .transport
+      .send_command(None, "Browser.grantPermissions", params)
+      .await?;
     Ok(())
   }
 

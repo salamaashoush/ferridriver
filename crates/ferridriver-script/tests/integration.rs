@@ -61,6 +61,7 @@ async fn harness() -> Harness {
     page: Some(page),
     browser_context: None,
     request: None,
+    browser: None,
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
 

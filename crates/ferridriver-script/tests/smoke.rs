@@ -20,6 +20,7 @@ fn make_engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
     page: None,
     browser_context: None,
     request: None,
+    browser: None,
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
   (engine, tmp, context)
@@ -38,6 +39,7 @@ fn make_engine_with_artifacts() -> (ScriptEngine, tempfile::TempDir, tempfile::T
     page: None,
     browser_context: None,
     request: None,
+    browser: None,
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
   (engine, scripts_tmp, artifacts_tmp, context)

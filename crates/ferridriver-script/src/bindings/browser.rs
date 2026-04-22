@@ -1,0 +1,253 @@
+//! `BrowserJs`: JS wrapper around [`ferridriver::Browser`].
+//!
+//! Exposes `browser.newContext(options?)` so scripts can exercise
+//! [`ferridriver::options::BrowserContextOptions`] at its natural
+//! Playwright entry point. The `browser` global is installed by
+//! [`crate::bindings::install_browser`] when the run context carries a
+//! `Browser` handle (see `engine::RunContext`). Tests that only need
+//! the ambient `context` can continue to ignore it.
+//!
+//! Playwright reference:
+//! `/tmp/playwright/packages/playwright-core/types/types.d.ts:22229`
+//! (`BrowserContextOptions`) and `:9851` (`browser.newContext`).
+
+use std::sync::Arc;
+
+use ferridriver::Browser;
+use rquickjs::function::Opt;
+use rquickjs::{Ctx, JsLifetime, Value, class::Class, class::Trace};
+
+use super::context::BrowserContextJs;
+use crate::bindings::convert::serde_from_js;
+
+#[derive(JsLifetime, Trace)]
+#[rquickjs::class(rename = "Browser")]
+pub struct BrowserJs {
+  #[qjs(skip_trace)]
+  inner: Arc<Browser>,
+}
+
+impl BrowserJs {
+  #[must_use]
+  pub fn new(inner: Arc<Browser>) -> Self {
+    Self { inner }
+  }
+}
+
+#[rquickjs::methods]
+impl BrowserJs {
+  /// Playwright: `browser.newContext(options?)` —
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:9851`.
+  /// Accepts the full [`BrowserContextOptions`] bag via the
+  /// isomorphic serde lowering.
+  #[qjs(rename = "newContext")]
+  pub fn new_context<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    let core_opts = match options.0 {
+      None => None,
+      Some(v) if v.is_undefined() || v.is_null() => None,
+      Some(v) => {
+        let parsed: JsBrowserContextOptions = serde_from_js(&ctx, v)?;
+        Some(parsed.into_core())
+      },
+    };
+    let ctx_ref = Arc::new(self.inner.new_context(core_opts));
+    let wrapper = BrowserContextJs::new(ctx_ref);
+    let instance = Class::instance(ctx.clone(), wrapper)?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
+  }
+
+  /// Playwright: `browser.version()` —
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts` on
+  /// `Browser`. Returns the product version string captured at launch.
+  #[qjs(rename = "version")]
+  pub fn version(&self) -> String {
+    self.inner.version().to_string()
+  }
+}
+
+/// JS-side shape for the options bag. Deserialised via serde-through-JSON
+/// so aliased field names, null/undefined handling, and nested shapes
+/// all match Playwright's client-side parsing. Convert with
+/// [`Self::into_core`].
+#[derive(serde::Deserialize, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsBrowserContextOptions {
+  accept_downloads: Option<bool>,
+  #[serde(rename = "baseURL")]
+  base_url: Option<String>,
+  #[serde(rename = "bypassCSP")]
+  bypass_csp: Option<bool>,
+  color_scheme: Option<serde_json::Value>,
+  contrast: Option<serde_json::Value>,
+  device_scale_factor: Option<f64>,
+  #[serde(rename = "extraHTTPHeaders")]
+  extra_http_headers: Option<rustc_hash::FxHashMap<String, String>>,
+  forced_colors: Option<serde_json::Value>,
+  geolocation: Option<JsGeolocation>,
+  has_touch: Option<bool>,
+  http_credentials: Option<JsHttpCredentials>,
+  #[serde(rename = "ignoreHTTPSErrors")]
+  ignore_https_errors: Option<bool>,
+  is_mobile: Option<bool>,
+  java_script_enabled: Option<bool>,
+  locale: Option<String>,
+  offline: Option<bool>,
+  permissions: Option<Vec<String>>,
+  proxy: Option<JsProxyConfig>,
+  record_video: Option<JsRecordVideoOptions>,
+  reduced_motion: Option<serde_json::Value>,
+  screen: Option<JsScreenSize>,
+  service_workers: Option<String>,
+  strict_selectors: Option<bool>,
+  timezone_id: Option<String>,
+  user_agent: Option<String>,
+  /// JS `null` → explicit opt-out; omitted → browser default.
+  viewport: Option<serde_json::Value>,
+}
+
+#[derive(serde::Deserialize)]
+struct JsGeolocation {
+  latitude: f64,
+  longitude: f64,
+  accuracy: Option<f64>,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsHttpCredentials {
+  username: String,
+  password: String,
+  origin: Option<String>,
+  send: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct JsProxyConfig {
+  server: String,
+  bypass: Option<String>,
+  username: Option<String>,
+  password: Option<String>,
+}
+
+#[derive(serde::Deserialize)]
+struct JsScreenSize {
+  width: i64,
+  height: i64,
+}
+
+#[derive(serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct JsRecordVideoOptions {
+  dir: String,
+  size: Option<JsVideoSize>,
+}
+
+#[derive(serde::Deserialize)]
+struct JsVideoSize {
+  width: f64,
+  height: f64,
+}
+
+#[derive(serde::Deserialize)]
+struct JsViewportSize {
+  width: i64,
+  height: i64,
+}
+
+fn lower_media(v: Option<serde_json::Value>) -> ferridriver::options::MediaOverride {
+  match v {
+    Some(serde_json::Value::Null) => ferridriver::options::MediaOverride::Disabled,
+    Some(serde_json::Value::String(s)) => ferridriver::options::MediaOverride::Set(s),
+    None | Some(_) => ferridriver::options::MediaOverride::Unchanged,
+  }
+}
+
+impl JsBrowserContextOptions {
+  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+  fn into_core(self) -> ferridriver::options::BrowserContextOptions {
+    use ferridriver::options as fo;
+
+    let viewport = match self.viewport {
+      None => fo::ViewportOption::Default,
+      Some(serde_json::Value::Null) => fo::ViewportOption::Null,
+      Some(v) => {
+        let parsed: Result<JsViewportSize, _> = serde_json::from_value(v);
+        match parsed {
+          Ok(vp) => fo::ViewportOption::Size {
+            width: vp.width,
+            height: vp.height,
+          },
+          Err(_) => fo::ViewportOption::Default,
+        }
+      },
+    };
+
+    let http_credentials = self.http_credentials.map(|c| fo::HttpCredentials {
+      username: c.username,
+      password: c.password,
+      origin: c.origin,
+      send: c.send.and_then(|s| match s.as_str() {
+        "always" => Some(fo::HttpCredentialsSend::Always),
+        "unauthorized" => Some(fo::HttpCredentialsSend::Unauthorized),
+        _ => None,
+      }),
+    });
+    let proxy = self.proxy.map(|p| fo::ProxyConfig {
+      server: p.server,
+      bypass: p.bypass,
+      username: p.username,
+      password: p.password,
+    });
+    let record_video = self.record_video.map(|rv| fo::RecordVideoOptions {
+      dir: std::path::PathBuf::from(rv.dir),
+      size: rv.size.map(|s| fo::VideoSize {
+        width: s.width.max(0.0) as u32,
+        height: s.height.max(0.0) as u32,
+      }),
+    });
+    let screen = self.screen.map(|s| fo::ScreenSize {
+      width: s.width,
+      height: s.height,
+    });
+    let service_workers = self.service_workers.and_then(|s| match s.as_str() {
+      "allow" => Some(fo::ServiceWorkerPolicy::Allow),
+      "block" => Some(fo::ServiceWorkerPolicy::Block),
+      _ => None,
+    });
+
+    fo::BrowserContextOptions {
+      accept_downloads: self.accept_downloads,
+      base_url: self.base_url,
+      bypass_csp: self.bypass_csp,
+      color_scheme: lower_media(self.color_scheme),
+      contrast: lower_media(self.contrast),
+      device_scale_factor: self.device_scale_factor,
+      extra_http_headers: self.extra_http_headers,
+      forced_colors: lower_media(self.forced_colors),
+      geolocation: self.geolocation.map(|g| fo::Geolocation {
+        latitude: g.latitude,
+        longitude: g.longitude,
+        accuracy: g.accuracy.unwrap_or(0.0),
+      }),
+      has_touch: self.has_touch,
+      http_credentials,
+      ignore_https_errors: self.ignore_https_errors,
+      is_mobile: self.is_mobile,
+      java_script_enabled: self.java_script_enabled,
+      locale: self.locale,
+      offline: self.offline,
+      permissions: self.permissions,
+      proxy,
+      record_har: None,
+      record_video,
+      reduced_motion: lower_media(self.reduced_motion),
+      screen,
+      service_workers,
+      storage_state: None,
+      strict_selectors: self.strict_selectors,
+      timezone_id: self.timezone_id,
+      user_agent: self.user_agent,
+      viewport,
+    }
+  }
+}

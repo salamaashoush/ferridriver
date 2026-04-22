@@ -74,6 +74,11 @@ pub struct RunContext {
   pub page: Option<Arc<ferridriver::Page>>,
   pub browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   pub request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
+  /// Optional root `Browser` handle exposed as the `browser` global.
+  /// Scripts use it for
+  /// `browser.newContext(BrowserContextOptions)` — the natural
+  /// Playwright entry point that §4.1's options bag attaches to.
+  pub browser: Option<Arc<ferridriver::Browser>>,
 }
 
 /// Sandboxed `QuickJS` scripting engine.
@@ -190,6 +195,7 @@ impl ScriptEngine {
       page: context.page.clone(),
       browser_context: context.browser_context.clone(),
       request: context.request.clone(),
+      browser: context.browser.clone(),
       async_ctx: ctx.clone(),
     };
     let source_owned = source.to_string();
@@ -247,6 +253,7 @@ struct GlobalsInstall {
   page: Option<Arc<ferridriver::Page>>,
   browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
+  browser: Option<Arc<ferridriver::Browser>>,
   /// `AsyncContext` driving the script — passed to `install_page` so
   /// `page.route` callbacks can dispatch back into JS from a separate
   /// tokio task. Always present (cloned from the engine's context).
@@ -276,6 +283,9 @@ fn install_globals(ctx: &Ctx<'_>, args_json: &str, inst: GlobalsInstall) -> rqui
   }
   if let Some(bcx) = inst.browser_context {
     crate::bindings::install_browser_context(ctx, bcx)?;
+  }
+  if let Some(browser) = inst.browser {
+    crate::bindings::install_browser(ctx, browser)?;
   }
   if let Some(req) = inst.request {
     crate::bindings::install_request(ctx, req)?;

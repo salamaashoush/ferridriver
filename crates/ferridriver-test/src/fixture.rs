@@ -398,7 +398,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
       setup: Arc::new(|pool| {
         Box::pin(async move {
           let browser: Arc<Browser> = pool.get("browser").await?;
-          let context = browser.new_context();
+          let context = browser.new_context(None);
           Ok(Arc::new(context) as ArcValue)
         })
       }),

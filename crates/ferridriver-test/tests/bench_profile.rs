@@ -79,7 +79,7 @@ async fn deep_profile() {
   let mut total_times = Vec::new();
   for _ in 0..iters {
     let t0 = Instant::now();
-    let ctx = b1.new_context();
+    let ctx = b1.new_context(None);
     let t1 = Instant::now();
     let _page = ctx.new_page().await.unwrap();
     let t2 = Instant::now();
@@ -103,7 +103,7 @@ async fn deep_profile() {
 
   // ── 3. Navigation cost ──
   println!("  [3] Navigation cost ({iters} iterations)");
-  let ctx = b1.new_context();
+  let ctx = b1.new_context(None);
   let page = ctx.new_page().await.unwrap();
   let mut nav_times = Vec::new();
   for i in 0..iters {
@@ -158,7 +158,7 @@ async fn deep_profile() {
   println!("  [5] Context close cost ({iters} iterations)");
   let mut close_times = Vec::new();
   for _ in 0..iters {
-    let ctx = b1.new_context();
+    let ctx = b1.new_context(None);
     let _page = ctx.new_page().await.unwrap();
     let t = Instant::now();
     ctx.close().await.ok();
@@ -177,7 +177,7 @@ async fn deep_profile() {
   let mut cycle_times = Vec::new();
   for i in 0..iters {
     let t = Instant::now();
-    let ctx = b1.new_context();
+    let ctx = b1.new_context(None);
     let page = ctx.new_page().await.unwrap();
     let url = data_url(&format!(
       "<button id='b' onclick=\"this.textContent='done'\">Click {i}</button>"

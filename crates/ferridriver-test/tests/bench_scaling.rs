@@ -58,7 +58,7 @@ async fn diagnose_scaling() {
     let iters = 10;
     let t = Instant::now();
     for i in 0..iters {
-      let ctx = browser.new_context();
+      let ctx = browser.new_context(None);
       let page = ctx.new_page().await.unwrap();
       let url =
         format!("data:text/html,<title>T{i}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>");
@@ -98,7 +98,7 @@ async fn diagnose_scaling() {
         for _ in 0..per_worker {
           let i = counter.fetch_add(1, Ordering::Relaxed);
           let t = Instant::now();
-          let ctx = b.new_context();
+          let ctx = b.new_context(None);
           let page = ctx.new_page().await.unwrap();
           let url =
             format!("data:text/html,<title>T{i}</title><button id='b' onclick=\"this.textContent='d'\">Go</button>");
@@ -141,7 +141,7 @@ async fn diagnose_scaling() {
     // Measure with a CPU-heavy background task vs without.
     let t = Instant::now();
     for i in 0..iters {
-      let ctx = browser.new_context();
+      let ctx = browser.new_context(None);
       let page = ctx.new_page().await.unwrap();
       page
         .goto(&format!("data:text/html,<title>T{i}</title>"), None)
@@ -170,7 +170,7 @@ async fn diagnose_scaling() {
 
     let t = Instant::now();
     for i in 0..iters {
-      let ctx = browser.new_context();
+      let ctx = browser.new_context(None);
       let page = ctx.new_page().await.unwrap();
       page
         .goto(&format!("data:text/html,<title>T{i}</title>"), None)

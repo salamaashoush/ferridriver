@@ -1310,6 +1310,244 @@ impl Default for VideoSize {
   }
 }
 
+// ── BrowserContextOptions ──────────────────────────────────────────────────
+
+/// Geographic location emulation. Mirrors Playwright's
+/// `Geolocation { latitude, longitude, accuracy? }` — see
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22678`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Geolocation {
+  /// Latitude between -90 and 90.
+  pub latitude: f64,
+  /// Longitude between -180 and 180.
+  pub longitude: f64,
+  /// Non-negative accuracy value. Playwright defaults to 0.
+  pub accuracy: f64,
+}
+
+impl Default for Geolocation {
+  fn default() -> Self {
+    Self {
+      latitude: 0.0,
+      longitude: 0.0,
+      accuracy: 0.0,
+    }
+  }
+}
+
+/// HTTP basic/digest credentials. Mirrors Playwright's
+/// `HTTPCredentials { username, password, origin?, send? }` —
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22658`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct HttpCredentials {
+  pub username: String,
+  pub password: String,
+  /// Scheme + host + optional port — restrict credential send to this
+  /// origin. `None` sends on any 401 response.
+  pub origin: Option<String>,
+  /// `"always"` sends credentials on every `APIRequest`; `"unauthorized"`
+  /// (default) waits for a 401. Playwright default: unauthorized.
+  pub send: Option<HttpCredentialsSend>,
+}
+
+/// Send policy for [`HttpCredentials`].
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum HttpCredentialsSend {
+  /// Only on 401 responses (Playwright default).
+  #[default]
+  Unauthorized,
+  /// On every request (`APIRequestContext` only).
+  Always,
+}
+
+/// Network proxy configuration. Mirrors Playwright's
+/// `{ server, bypass?, username?, password? }` — types.d.ts:22412.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ProxyConfig {
+  pub server: String,
+  /// Comma-separated domain list (e.g. `".com, chromium.org"`).
+  pub bypass: Option<String>,
+  pub username: Option<String>,
+  pub password: Option<String>,
+}
+
+/// `recordHar` options bag. Mirrors Playwright's `recordHar` shape —
+/// types.d.ts:22441.
+#[derive(Debug, Clone)]
+pub struct RecordHarOptions {
+  pub path: std::path::PathBuf,
+  /// `omit`/`embed`/`attach`. Default derived from `.path` extension.
+  pub content: Option<RecordHarContent>,
+  /// `full`/`minimal`. Default: full.
+  pub mode: Option<RecordHarMode>,
+  /// Legacy alias for `content: "omit"`. Playwright flags this deprecated
+  /// but still accepts it.
+  pub omit_content: Option<bool>,
+  /// Glob/regex filter for stored requests.
+  pub url_filter: Option<crate::url_matcher::UrlMatcher>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordHarContent {
+  Omit,
+  Embed,
+  Attach,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecordHarMode {
+  Full,
+  Minimal,
+}
+
+/// Logical viewport dimensions for [`BrowserContextOptions::viewport`].
+/// Three states: `Default` (omit → browser default), `Null` (explicit
+/// null → opt out of viewport emulation), or `Size(w,h)`.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub enum ViewportOption {
+  /// Field absent — Playwright default 1280x720.
+  #[default]
+  Default,
+  /// Field explicitly `null` — opt out of fixed viewport.
+  Null,
+  /// Concrete viewport size.
+  Size { width: i64, height: i64 },
+}
+
+/// `window.screen` size emulation (when viewport is set). Mirrors
+/// Playwright's `screen: { width, height }` — types.d.ts:22539.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct ScreenSize {
+  pub width: i64,
+  pub height: i64,
+}
+
+/// Storage state bag — cookies + per-origin localStorage snapshot.
+/// Mirrors Playwright's `storageState: string | { cookies, origins }` —
+/// types.d.ts:22566.
+#[derive(Debug, Clone)]
+pub enum StorageStateInput {
+  /// Path to a JSON file written by `context.storageState({ path })`.
+  Path(std::path::PathBuf),
+  /// Inline state object.
+  Inline(serde_json::Value),
+}
+
+/// Service-worker policy. Mirrors Playwright's
+/// `serviceWorkers: "allow" | "block"` — types.d.ts:22557.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum ServiceWorkerPolicy {
+  #[default]
+  Allow,
+  Block,
+}
+
+/// `BrowserContextOptions` — the option bag accepted by
+/// `Browser::new_context`. Mirrors Playwright's full 28-field shape per
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22229`.
+///
+/// Every field is optional. `None` means "browser default"; an explicit
+/// value applies the corresponding emulation at every page opened in
+/// the context. Several fields have sub-options that distinguish
+/// explicit `null` from absent (e.g. `viewport: null` to disable
+/// viewport emulation vs. omitted).
+///
+/// Field coverage on the current implementation cluster:
+/// * **applied now**: `viewport`, `user_agent`, `locale`, `timezone_id`,
+///   `geolocation`, `permissions`, `extra_http_headers`, `offline`,
+///   `color_scheme`, `reduced_motion`, `forced_colors`, `contrast`,
+///   `device_scale_factor`, `has_touch`, `is_mobile`,
+///   `java_script_enabled`, `record_video`, `bypass_csp`,
+///   `ignore_https_errors`, `service_workers`, `http_credentials`,
+///   `accept_downloads`, `strict_selectors`, `base_url`.
+/// * **deferred** (stored but not yet applied; follow-up session):
+///   `proxy`, `record_har`, `storage_state`, `screen`.
+///
+/// Construction: use [`BrowserContextOptions::default`] and set fields
+/// field-by-field, or use any of the dedicated builder helpers defined
+/// inline.
+#[derive(Debug, Clone, Default)]
+pub struct BrowserContextOptions {
+  pub accept_downloads: Option<bool>,
+  pub base_url: Option<String>,
+  pub bypass_csp: Option<bool>,
+  /// `null` → disable media emulation; `Some(value)` → apply; absent →
+  /// leave backend default. Use [`MediaOverride`] for the null/value
+  /// distinction.
+  pub color_scheme: MediaOverride,
+  pub contrast: MediaOverride,
+  pub device_scale_factor: Option<f64>,
+  pub extra_http_headers: Option<rustc_hash::FxHashMap<String, String>>,
+  pub forced_colors: MediaOverride,
+  pub geolocation: Option<Geolocation>,
+  pub has_touch: Option<bool>,
+  pub http_credentials: Option<HttpCredentials>,
+  pub ignore_https_errors: Option<bool>,
+  pub is_mobile: Option<bool>,
+  pub java_script_enabled: Option<bool>,
+  pub locale: Option<String>,
+  pub offline: Option<bool>,
+  pub permissions: Option<Vec<String>>,
+  pub proxy: Option<ProxyConfig>,
+  pub record_har: Option<RecordHarOptions>,
+  pub record_video: Option<RecordVideoOptions>,
+  pub reduced_motion: MediaOverride,
+  pub screen: Option<ScreenSize>,
+  pub service_workers: Option<ServiceWorkerPolicy>,
+  pub storage_state: Option<StorageStateInput>,
+  pub strict_selectors: Option<bool>,
+  pub timezone_id: Option<String>,
+  pub user_agent: Option<String>,
+  pub viewport: ViewportOption,
+}
+
+impl BrowserContextOptions {
+  /// Resolve [`Self::viewport`] to the [`ViewportConfig`] a freshly
+  /// opened page should be emulated with. Returns `None` when the
+  /// caller passed `viewport: null` — the page inherits the backend's
+  /// native window size. `ViewportOption::Default` folds in
+  /// `device_scale_factor`, `is_mobile`, and `has_touch` into the
+  /// Playwright default 1280x720; explicit `Size(w,h)` likewise.
+  #[must_use]
+  pub fn resolved_viewport(&self) -> Option<ViewportConfig> {
+    let (width, height) = match self.viewport {
+      ViewportOption::Null => return None,
+      ViewportOption::Default => (1280, 720),
+      ViewportOption::Size { width, height } => (width, height),
+    };
+    Some(ViewportConfig {
+      width,
+      height,
+      device_scale_factor: self.device_scale_factor.unwrap_or(1.0),
+      is_mobile: self.is_mobile.unwrap_or(false),
+      has_touch: self.has_touch.unwrap_or(false),
+      is_landscape: false,
+    })
+  }
+
+  /// `true` iff any emulated-media field needs to be applied.
+  #[must_use]
+  pub fn any_media_override(&self) -> bool {
+    self.color_scheme.is_specified()
+      || self.reduced_motion.is_specified()
+      || self.forced_colors.is_specified()
+      || self.contrast.is_specified()
+  }
+
+  /// Collect the media fields into an [`EmulateMediaOptions`] bag for
+  /// `page.emulate_media`.
+  #[must_use]
+  pub fn as_emulate_media(&self) -> EmulateMediaOptions {
+    EmulateMediaOptions {
+      media: MediaOverride::Unchanged,
+      color_scheme: self.color_scheme.clone(),
+      reduced_motion: self.reduced_motion.clone(),
+      forced_colors: self.forced_colors.clone(),
+      contrast: self.contrast.clone(),
+    }
+  }
+}
+
 /// Selector for [`crate::Page::frame`]. Mirrors Playwright's
 /// `page.frame(frameSelector)` union type
 /// `string | { name?: string; url?: string|RegExp|URLPattern|(url => bool) }`
