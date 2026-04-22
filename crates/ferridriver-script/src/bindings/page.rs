@@ -1191,10 +1191,11 @@ impl PageJs {
         let instance = Class::instance(ctx.clone(), wrapper)?;
         rquickjs::IntoJs::into_js(instance, &ctx)
       },
+      // Playwright: `page.waitForEvent('pageerror'): Promise<Error>`.
+      // Emit a native JS `Error` (not the `WebError` wrapper — that
+      // class only exists for the context-scoped `'weberror'` surface).
       ferridriver::events::PageEvent::PageError(err) => {
-        let wrapper = crate::bindings::web_error::WebErrorJs::new(err);
-        let instance = Class::instance(ctx.clone(), wrapper)?;
-        rquickjs::IntoJs::into_js(instance, &ctx)
+        crate::bindings::web_error::build_native_error(&ctx, err.error())
       },
       other => {
         let json = page_event_json(&other);

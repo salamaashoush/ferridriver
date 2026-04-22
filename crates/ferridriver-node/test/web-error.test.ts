@@ -1,34 +1,29 @@
 /**
  * NAPI parity tests for the WebError lifecycle handle.
  *
- * `page.waitForEvent('pageerror')` returns a live `WebError` class
- * instance with `error()` -> `{ name, message, stack }` and
- * `page()` -> `Page | null`. Context-level `'weberror'` fan-out is
- * wired via the per-page → per-context bridge installed in
- * `Page::with_context`, so `context.waitForEvent('weberror')` observes
- * errors from every page in the context.
+ * Playwright public API shapes (verified against
+ * `/tmp/playwright/packages/playwright-core/types/types.d.ts`):
  *
- * Dispatch paths:
- * * CDP — `Runtime.exceptionThrown` → `exceptionToError` → live handle.
- * * BiDi — `log.entryAdded` with `type: 'javascript' + level: 'error'`.
- * * WebKit — host userScript captures `window.onerror` /
- *   `unhandledrejection` and forwards through the existing console IPC
- *   with `level: 'pageerror'`; the Rust drainer splits the payload.
+ * - `page.on('pageerror', (error: Error) => any)` — native `Error`.
+ * - `page.waitForEvent('pageerror'): Promise<Error>` — native `Error`.
+ * - `context.on('weberror', (webError: WebError) => any)` — live
+ *   `WebError` class instance.
+ * - `context.waitForEvent('weberror'): Promise<WebError>` — live
+ *   `WebError` class instance.
+ * - `WebError.error(): Error` — native `Error` (not a plain object).
  *
- * Gated to CDP backends here; the Rust integration suite
+ * All five shapes asserted here via `instanceof Error` + constructor
+ * instance checks so divergences are caught loudly.
+ *
+ * Gated to CDP backends; the Rust integration suite
  * (`tests/backends_support/web_error.rs`) covers all four backends.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { Browser, type Page, type BrowserContext } from "../index.js";
+import { Browser, type Page, type BrowserContext, WebError as WebErrorClass } from "../index.js";
 
 const BACKENDS = process.env.FERRIDRIVER_BACKEND
   ? [process.env.FERRIDRIVER_BACKEND]
   : (["cdp-pipe", "cdp-raw"] as const);
-
-type WebError = {
-  page(): unknown;
-  error(): { name: string; message: string; stack: string };
-};
 
 for (const backend of BACKENDS) {
   describe(`[${backend}] WebError as first-class handle (§2.13)`, () => {
@@ -46,28 +41,17 @@ for (const backend of BACKENDS) {
       await browser?.close();
     });
 
-    it("page.waitForEvent('pageerror') surfaces { name, message, stack }", async () => {
+    it("page.waitForEvent('pageerror') returns a native JS Error", async () => {
       const waiter = page.waitForEvent("pageerror", 5_000);
       await page.goto(
         "data:text/html,<script>throw new Error('boom')</script>",
         null,
       );
-      const err = (await waiter) as unknown as WebError;
-      const d = err.error();
-      expect(d.name).toBe("Error");
-      expect(d.message).toBe("boom");
-      expect(typeof d.stack).toBe("string");
-    });
-
-    it("page() back-reference returns the owning Page", async () => {
-      const waiter = page.waitForEvent("pageerror", 5_000);
-      await page.goto(
-        "data:text/html,<script>throw new Error('ref-test')</script>",
-        null,
-      );
-      const err = (await waiter) as unknown as WebError;
-      const p = err.page();
-      expect(p).not.toBeNull();
+      const err = await waiter;
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).name).toBe("Error");
+      expect((err as Error).message).toBe("boom");
+      expect(typeof (err as Error).stack).toBe("string");
     });
 
     it("TypeError name survives the CDP 'exception.description' split", async () => {
@@ -76,38 +60,22 @@ for (const backend of BACKENDS) {
         "data:text/html,<script>throw new TypeError('nope')</script>",
         null,
       );
-      const err = (await waiter) as unknown as WebError;
-      const d = err.error();
-      expect(d.name).toBe("TypeError");
-      expect(d.message).toBe("nope");
+      const err = await waiter;
+      expect(err).toBeInstanceOf(Error);
+      expect((err as Error).name).toBe("TypeError");
+      expect((err as Error).message).toBe("nope");
     });
 
-    it("context.waitForEvent('weberror') forwards page errors from every page", async () => {
-      const waiter = context.waitForEvent("weberror", 5_000);
-      await page.goto(
-        "data:text/html,<script>throw new RangeError('ctx-route')</script>",
-        null,
-      );
-      const err = (await waiter) as unknown as WebError;
-      const d = err.error();
-      expect(d.name).toBe("RangeError");
-      expect(d.message).toBe("ctx-route");
-    });
-
-    it("page.on('pageerror') callback gets a plain { name, message, stack } snapshot", async () => {
-      const received: Array<{ name: string; message: string; stack: string }> =
-        [];
+    it("page.on('pageerror', cb) delivers a native JS Error", async () => {
+      const received: Error[] = [];
       const id = page.on("pageerror", (data) => {
-        received.push(
-          data as unknown as { name: string; message: string; stack: string },
-        );
+        received.push(data as unknown as Error);
       });
       try {
         await page.goto(
           "data:text/html,<script>throw new Error('callback-path')</script>",
           null,
         );
-        // Give the async event loop a tick to deliver the callback.
         const deadline = Date.now() + 3_000;
         while (received.length === 0 && Date.now() < deadline) {
           await new Promise((r) => setTimeout(r, 50));
@@ -117,8 +85,59 @@ for (const backend of BACKENDS) {
       }
       expect(received.length).toBeGreaterThanOrEqual(1);
       const last = received[received.length - 1]!;
+      expect(last).toBeInstanceOf(Error);
       expect(last.name).toBe("Error");
       expect(last.message).toBe("callback-path");
+    });
+
+    it("context.waitForEvent('weberror') returns a live WebError class", async () => {
+      const waiter = context.waitForEvent("weberror", 5_000);
+      await page.goto(
+        "data:text/html,<script>throw new RangeError('ctx-route')</script>",
+        null,
+      );
+      const webErr = await waiter;
+      expect(webErr).toBeInstanceOf(WebErrorClass);
+      const err = webErr.error();
+      expect(err).toBeInstanceOf(Error);
+      expect(err.name).toBe("RangeError");
+      expect(err.message).toBe("ctx-route");
+    });
+
+    it("context.on('weberror', cb) delivers a live WebError class", async () => {
+      const received: WebErrorClass[] = [];
+      const id = context.on("weberror", (webErr) => {
+        received.push(webErr as WebErrorClass);
+      });
+      try {
+        await page.goto(
+          "data:text/html,<script>throw new Error('ctx-callback')</script>",
+          null,
+        );
+        const deadline = Date.now() + 3_000;
+        while (received.length === 0 && Date.now() < deadline) {
+          await new Promise((r) => setTimeout(r, 50));
+        }
+      } finally {
+        context.off(id);
+      }
+      expect(received.length).toBeGreaterThanOrEqual(1);
+      const last = received[received.length - 1]!;
+      expect(last).toBeInstanceOf(WebErrorClass);
+      const err = last.error();
+      expect(err).toBeInstanceOf(Error);
+      expect(err.message).toBe("ctx-callback");
+    });
+
+    it("WebError.page() returns the owning Page", async () => {
+      const waiter = context.waitForEvent("weberror", 5_000);
+      await page.goto(
+        "data:text/html,<script>throw new Error('ref-test')</script>",
+        null,
+      );
+      const webErr = await waiter;
+      const p = webErr.page();
+      expect(p).not.toBeNull();
     });
   });
 }

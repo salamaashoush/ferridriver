@@ -143,28 +143,30 @@ impl BrowserContext {
   /// Register a context-level event listener. Currently supports
   /// `'weberror'` — unhandled errors / rejections from any page in
   /// this context. Playwright:
-  /// `browserContext.on('weberror', (webError: WebError) => …)`.
-  /// Returns a numeric listener id for removal via [`Self::off`].
-  #[napi(
-    ts_args_type = "event: 'weberror', listener: (data: { name: string; message: string; stack: string }) => void"
-  )]
-  pub fn on(&self, event: String, listener: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>) -> Result<f64> {
-    let callback = build_context_event_callback(listener, event.clone())?;
+  /// `browserContext.on('weberror', (webError: WebError) => …)` —
+  /// callback receives a live [`crate::web_error::WebError`] class
+  /// instance (not a snapshot). Returns a numeric listener id for
+  /// removal via [`Self::off`].
+  #[napi(ts_args_type = "event: 'weberror', listener: (webError: WebError) => void")]
+  pub fn on(
+    &self,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, crate::web_error::WebErrorArg, ()>,
+  ) -> Result<f64> {
+    let callback = build_context_event_callback(listener)?;
     let id = self.inner.on(&event, callback);
     #[allow(clippy::cast_precision_loss)]
     Ok(id.0 as f64)
   }
 
   /// One-shot variant of [`Self::on`]. Auto-removed after first match.
-  #[napi(
-    ts_args_type = "event: 'weberror', listener: (data: { name: string; message: string; stack: string }) => void"
-  )]
+  #[napi(ts_args_type = "event: 'weberror', listener: (webError: WebError) => void")]
   pub fn once(
     &self,
     event: String,
-    listener: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>,
+    listener: napi::bindgen_prelude::Function<'_, crate::web_error::WebErrorArg, ()>,
   ) -> Result<f64> {
-    let callback = build_context_event_callback(listener, event.clone())?;
+    let callback = build_context_event_callback(listener)?;
     let id = self.inner.once(&event, callback);
     #[allow(clippy::cast_precision_loss)]
     Ok(id.0 as f64)
@@ -203,13 +205,19 @@ impl BrowserContext {
 }
 
 /// Lower a JS listener `Function<'_>` (which is `!Send` because it
-/// holds a raw NAPI value pointer) into a pure-Send `ContextEventCallback`.
-/// Kept in a separate sync function so async `BrowserContext::on` /
-/// `once` don't capture the `!Send` `Function` across their await
-/// points (raw-pointer borrows leak into the async generator otherwise).
+/// holds a raw NAPI value pointer) into a pure-Send
+/// [`ContextEventCallback`]. Kept in a separate sync function so the
+/// async `BrowserContext::on` / `once` generators don't capture the
+/// `!Send` `Function<'_>` across their await points.
+///
+/// The threadsafe function's arg type is [`crate::web_error::WebErrorArg`],
+/// which [`napi::bindgen_prelude::ToNapiValue`]-converts (inside the
+/// JS thread) into a live NAPI [`crate::web_error::WebError`] class
+/// instance — matching Playwright's
+/// `browserContext.on('weberror', (webError: WebError) => any)` byte
+/// for byte.
 fn build_context_event_callback(
-  listener: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>,
-  event_name: String,
+  listener: napi::bindgen_prelude::Function<'_, crate::web_error::WebErrorArg, ()>,
 ) -> Result<ferridriver::events::ContextEventCallback> {
   let tsfn = listener
     .build_threadsafe_function()
@@ -217,23 +225,12 @@ fn build_context_event_callback(
     .weak::<true>()
     .max_queue_size::<0>()
     .build()?;
-  Ok(std::sync::Arc::new(move |ev| {
-    if let Some(data) = context_event_to_js(&event_name, &ev) {
-      tsfn.call(data, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
-    }
-  }))
-}
-
-fn context_event_to_js(name: &str, ev: &ferridriver::events::ContextEvent) -> Option<serde_json::Value> {
-  match (name, ev) {
-    ("weberror", ferridriver::events::ContextEvent::WebError(err)) => {
-      let d = err.error();
-      Some(serde_json::json!({
-        "name": d.name,
-        "message": d.message,
-        "stack": d.stack,
-      }))
+  Ok(std::sync::Arc::new(move |ev| match ev {
+    ferridriver::events::ContextEvent::WebError(err) => {
+      tsfn.call(
+        crate::web_error::WebErrorArg(err),
+        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+      );
     },
-    _ => None,
-  }
+  }))
 }

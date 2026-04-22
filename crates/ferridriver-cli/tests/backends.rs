@@ -2332,9 +2332,13 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::console_message::test_console_message_error_type);
   run!(backends_support::console_message::test_console_message_location_shape);
 
-  // §2.13 WebError as first-class event handle (page + context fan-out).
-  run!(backends_support::web_error::test_page_error_sync_throw);
-  run!(backends_support::web_error::test_context_weberror_forwarding);
+  // §2.13 WebError / pageerror / weberror — Playwright-shape
+  // assertions: `page.waitForEvent('pageerror')` resolves to a native
+  // JS `Error` (not a wrapper); `context.waitForEvent('weberror')`
+  // resolves to a live `WebError` class whose `.error()` returns a
+  // native JS `Error`.
+  run!(backends_support::web_error::test_page_error_is_native_error);
+  run!(backends_support::web_error::test_context_weberror_is_webbed_error_class);
 
   // Multi-page last (changes session state)
   run!(test_new_page);

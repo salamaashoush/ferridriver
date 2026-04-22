@@ -15,14 +15,25 @@ fresh summary at the end of each block.
 
 ## Landed this session
 
-### §2.13 — WebError as first-class handle + context weberror fanout
+### §2.13 — WebError / pageerror / weberror with Playwright API shape
 
-Live `WebError` with sync `error() -> { name, message, stack }` and
-`page() -> Option<Arc<Page>>`. Replaces the old flat
-`PageEvent::PageError(String)` — Rule-3 violation. Dispatched to
-`page.on('pageerror', cb)` / `page.waitForEvent('pageerror')`
-(page-scoped) AND fanned out via a new `ContextEvent::WebError`
-channel to `context.on('weberror', cb)` /
+Playwright-parity surface verified against
+`/tmp/playwright/packages/playwright-core/types/types.d.ts`:
+
+| Surface | Delivers | Playwright ref |
+|---|---|---|
+| `page.on('pageerror', cb)` | native JS `Error` | `types.d.ts:1101` |
+| `page.waitForEvent('pageerror')` | `Promise<Error>` | `types.d.ts:4897` |
+| `context.on('weberror', cb)` | live `WebError` class | `types.d.ts:8365` |
+| `context.waitForEvent('weberror')` | `Promise<WebError>` | `types.d.ts:9629` |
+| `WebError.page()` | `null | Page` | `types.d.ts:21667` |
+| `WebError.error()` | native JS `Error` | `types.d.ts:21662` |
+
+All tests assert `err instanceof Error` (page surface) and
+`webErr instanceof WebError` + `webErr.error() instanceof Error`
+(context surface). Replaces the old flat
+`PageEvent::PageError(String)` — Rule-3 violation. Dispatched via a
+new `ContextEvent::WebError` channel to `context.on('weberror', cb)` /
 `context.waitForEvent('weberror')` (context-scoped).
 
 - **`crates/ferridriver/src/web_error.rs`** — new module:
@@ -87,36 +98,56 @@ channel to `context.on('weberror', cb)` /
   `once` / `waitForEvent` / page-event-JSON projection, QuickJS
   `match_event_name` / `page_event_json` / `waitForEvent`.
 
-- **NAPI** (`crates/ferridriver-node/src/web_error.rs`): new
-  `#[napi] class WebError` with `page()` / `error()` returning
-  `{ name, message, stack }`. `page.waitForEvent` union extended
-  `Either8 -> Either9` (adds `WebError`). `BrowserContext` grows
-  `on('weberror', cb)` / `once('weberror', cb)` / `off(id)` /
-  `waitForEvent('weberror')`. `build_context_event_callback` helper
-  isolates the `!Send` `Function<'_>` lowering from the
-  async-state future so the NAPI macro doesn't reject the resulting
-  generator.
+- **NAPI** (`crates/ferridriver-node/src/web_error.rs`):
+  `#[napi] class WebError` with `page()` / `error(): Error` (native).
+  `JsErrorValue` is the cross-thread Rust wrapper whose
+  `ToNapiValue::to_napi_value` runs inside the JS thread: it fetches
+  `globalThis.Error`, calls `new Error(message)`, and overrides
+  `name` / `stack` — the returned value satisfies `instanceof Error`.
+  `PageListenerArg` enum (`Snapshot(Value)` | `PageError(JsErrorValue)`)
+  is the threadsafe-function arg for `page.on/once`; non-pageerror
+  events keep the existing JSON snapshot path.
+  `WebErrorArg(CoreWebError)` is the threadsafe-function arg for
+  `context.on/once` — its `ToNapiValue` wraps the core handle in the
+  NAPI `WebError` class.
+  `page.waitForEvent` union: `Either9` slot H changed from `WebError`
+  to `JsErrorValue` (and `ts_return_type` updated from
+  `… | WebError | …` to `… | Error | …`) — the `WebError` class is
+  only reachable via the context surface, matching Playwright.
+  `build_context_event_callback` helper isolates the `!Send`
+  `Function<'_>` lowering from the async generator.
 
 - **QuickJS** (`crates/ferridriver-script/src/bindings/web_error.rs`):
   `WebErrorJs` mirrors NAPI minus `page()` (symmetric with
   `ConsoleMessageJs` / `DownloadJs` / `FileChooserJs`).
-  `BrowserContextJs::waitForEvent('weberror')` added.
-  `PageJs::waitForEvent('pageerror')` extended.
+  `build_native_error(ctx, details)` is the shared helper: `ctx.eval`
+  defines a tiny `(n, m, s) => { const e = new Error(m); e.name = n;
+  if (s) e.stack = s; return e; }` factory and invokes it. Used by
+  `WebErrorJs::error()` AND `PageJs::waitForEvent('pageerror')`.
+  rquickjs's `Function` lacks a `call-as-new` primitive and
+  `Constructor`'s inner field is `pub(crate)`, blocking the obvious
+  `Constructor(fun)` wrap — the eval factory is the cleanest portable
+  path and keeps both surfaces consistent.
+  `BrowserContextJs::waitForEvent('weberror')` returns `WebErrorJs`.
 
 ### Rule-9 tests
 
 - `tests/backends_support/web_error.rs` — 2 tests × 4 backends =
-  **8 assertions**. Both tests poll for the specific error message
-  rather than asserting the first event — Firefox BiDi emits a spurious
+  **8 assertions**. Playwright-shape: `test_page_error_is_native_error`
+  asserts `err instanceof Error` on the raw `page.waitForEvent('pageerror')`
+  return value; `test_context_weberror_is_webbed_error_class` asserts
+  `typeof webErr.error === 'function'` + `webErr.error() instanceof Error`
+  on the raw `context.waitForEvent('weberror')` return value. Both poll
+  for the specific error identifier — Firefox BiDi emits a spurious
   `"Permission denied to access property 'length'"` cross-origin error
-  at page init that would otherwise land first. Tests trigger errors
-  via `setTimeout(() => { throw … }, 10)` + `ErrorEvent` dispatch so
-  the listener is registered before the error fires.
-- `crates/ferridriver-node/test/web-error.test.ts`: 5 tests ×
-  2 CDP backends = **10 assertions** covering `{name, message, stack}`
-  round-trip, `page()` back-reference, `TypeError` name preservation,
-  context-side `weberror` forwarding, and the `page.on('pageerror',
-  cb)` callback-path snapshot shape.
+  at page init that would otherwise land first.
+- `crates/ferridriver-node/test/web-error.test.ts`: 6 tests ×
+  2 CDP backends = **12 assertions** covering `page.waitForEvent` →
+  `instanceof Error`, `TypeError` name preservation,
+  `page.on('pageerror', cb)` → `instanceof Error`,
+  `context.waitForEvent` → `instanceof WebError` + `.error() instanceof Error`,
+  `context.on('weberror', cb)` → `instanceof WebError`, and
+  `WebError.page()` back-reference.
 
 ### Baseline after this commit (must stay green)
 
@@ -126,7 +157,7 @@ cargo test -p ferridriver --lib                                  # 125 core
 cargo test -p ferridriver-script --lib                           # 13 script
 cargo test -p ferridriver-mcp --lib                              # 38 MCP
 cd crates/ferridriver-node && bun run build:debug
-cd <repo root> && bun test                                       # 845 (was 835)
+cd <repo root> && bun test                                       # 847 (was 845 / 835)
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1
 # cdp-pipe 138, cdp-raw 138, bidi 133, webkit 134

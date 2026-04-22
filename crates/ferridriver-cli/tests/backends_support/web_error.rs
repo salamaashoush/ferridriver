@@ -1,23 +1,26 @@
-//! Rule-9 integration tests for `WebError` as a first-class event
-//! handle accessible via `page.waitForEvent('pageerror')` and
-//! `context.waitForEvent('weberror')`.
+//! Rule-9 integration tests for `WebError` / `pageerror` / `weberror`
+//! as first-class event handles accessible via
+//! `page.waitForEvent('pageerror')` (Playwright:
+//! `Promise<Error>` — native JS `Error`) and
+//! `context.waitForEvent('weberror')` (Playwright:
+//! `Promise<WebError>` — live `WebError` class with
+//! `error()` → native `Error`).
 //!
 //! Per-backend expectations:
 //! * cdp-pipe / cdp-raw — full round-trip through
 //!   `Runtime.exceptionThrown`. `name` comes from the exception's
 //!   description prefix (or `preview.name` override), `message` is the
-//!   post-`': '` remainder, `stack` is the full `description + callFrames`
-//!   string.
+//!   post-`': '` remainder, `stack` is the full
+//!   `description + callFrames` string.
 //! * bidi — `log.entryAdded` with `type: 'javascript'` + `level: 'error'`.
-//!   `name` / `message` come from splitting `text` at `': '`; `stack` is
-//!   `text` followed by one `    at <func> (<url>:<line+1>:<col+1>)` line
-//!   per stack frame.
+//!   `name` / `message` come from splitting `text` at `': '`; `stack`
+//!   is `text` followed by one `    at <func> (<url>:<line+1>:<col+1>)`
+//!   line per stack frame.
 //! * webkit — `window.addEventListener('error', …)` injected via the
 //!   host-side userScript posts `"<name>: <message>\n<stack>"` through
 //!   the existing `fdConsole` IPC with `level: 'pageerror'`. The Rust
-//!   drain routes to `PageEvent::PageError` and recovers the structured
-//!   shape. `stack` is whatever `error.stack` reported by the engine (may
-//!   be empty for `Error` thrown from inline scripts).
+//!   drain routes to `PageEvent::PageError` and recovers the
+//!   structured shape.
 
 #![allow(
   clippy::too_many_lines,
@@ -34,34 +37,22 @@ fn urlencoding(s: &str) -> String {
   s.replace(' ', "%20").replace('#', "%23").replace('"', "%22")
 }
 
-/// Navigate to an inline HTML page, then dispatch an error from a
-/// *second* microtask so the `pageerror` listener is registered before
-/// the error fires. Drains any spurious BiDi/Firefox startup errors
-/// that land first (e.g. cross-origin warnings from injected scripts)
-/// by looping until we see our boom.
+/// `page.waitForEvent('pageerror')` resolves to a **native JS `Error`**
+/// (not a wrapper class). Assertions use `instanceof Error` + direct
+/// `.name` / `.message` / `.stack` property access on the raw value.
 ///
-/// Using `dispatchEvent(new ErrorEvent('error', { error: new Error('boom') }))`
-/// rather than `throw` from inline `<script>` because:
-/// * CDP `Runtime.exceptionThrown` surfaces both equally.
-/// * BiDi Firefox sometimes emits a spurious
-///   `"Permission denied to access property 'length'"` from its own
-///   cross-origin guards before the user error; polling for the
-///   correct payload is more robust than asserting the first event.
-/// * WebKit only catches via `window.addEventListener('error', …)`
-///   which `ErrorEvent` dispatch propagates directly.
-pub fn test_page_error_sync_throw(c: &mut McpClient) {
+/// Polls for the specific error identifier rather than asserting the
+/// first event — Firefox BiDi emits a spurious cross-origin
+/// `"Permission denied"` error at page init that would otherwise land
+/// first. Playwright's own BiDi consumers hit the same quirk; polling
+/// is the robust stance (matches their waitForEvent + predicate
+/// option).
+pub fn test_page_error_is_native_error(c: &mut McpClient) {
   let html = "<!doctype html><html><body><h1>wait-pageerror</h1></body></html>";
   let url = format!("data:text/html,{}", urlencoding(html));
   let script = format!(
     r"
     await page.goto({url});
-    // Poll up to 5s for a 'pageerror' event whose message === 'boom'.
-    // Drains any unrelated errors backends may emit (BiDi Firefox
-    // sometimes reports a cross-origin permission error first).
-    const deadline = Date.now() + 5000;
-    // Kick off the throw via an in-page listener so the backend's
-    // `Runtime.exceptionThrown` / `log.entryAdded` / host 'error'
-    // handler fires on the next microtask.
     await page.evaluate(() => {{
       setTimeout(() => {{
         const e = new Error('boom');
@@ -69,30 +60,34 @@ pub fn test_page_error_sync_throw(c: &mut McpClient) {
         throw e;
       }}, 10);
     }});
+    const deadline = Date.now() + 5000;
     let match = null;
     while (Date.now() < deadline) {{
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
       const err = await page.waitForEvent('pageerror', remaining);
-      const d = err.error();
-      if (d.message && d.message.indexOf('boom') !== -1) {{
-        match = d;
+      // Playwright parity: `err` is a native JS Error, not a wrapper.
+      if (err && err.message && err.message.indexOf('boom') !== -1) {{
+        match = {{
+          isError: err instanceof Error,
+          name: err.name,
+          message: err.message,
+          stackIsString: typeof err.stack === 'string',
+        }};
         break;
       }}
     }}
-    return match ? {{
-      name: match.name,
-      message: match.message,
-      stackNonEmpty: (match.stack || '').length > 0,
-    }} : null;
+    return match;
   ",
     url = serde_json::to_string(&url).unwrap()
   );
   let v = c.script_value(&script);
   assert!(!v.is_null(), "expected a pageerror with 'boom' message: {v}");
-  // Name parity across engines: Chrome reports `'Error'`, Firefox
-  // reports `'Error'`, WebKit via host listener recovers `'Error'`
-  // from the payload. The first `: '-separated prefix.
+  assert_eq!(
+    v["isError"].as_bool(),
+    Some(true),
+    "page.waitForEvent('pageerror') should resolve to `instanceof Error`: {v}"
+  );
   assert_eq!(
     v["name"].as_str(),
     Some("Error"),
@@ -102,23 +97,23 @@ pub fn test_page_error_sync_throw(c: &mut McpClient) {
     v["message"].as_str().unwrap_or("").contains("boom"),
     "pageerror message should contain 'boom': {v}"
   );
-  assert!(v["stackNonEmpty"].is_boolean(), "stackNonEmpty must exist: {v}");
+  assert_eq!(
+    v["stackIsString"].as_bool(),
+    Some(true),
+    "pageerror stack must be a string (possibly empty on synthesised dispatches): {v}"
+  );
 }
 
-/// Context-level `'weberror'` listener observes the same error via the
-/// per-page → per-context bridge installed by
-/// `BrowserState::register_opened_page`. This exercises the fan-out
-/// added alongside §2.13.
-///
-/// Same polling strategy as [`test_page_error_sync_throw`] — some
-/// backends emit spurious errors before the user error.
-pub fn test_context_weberror_forwarding(c: &mut McpClient) {
+/// `context.waitForEvent('weberror')` resolves to a live `WebError`
+/// class instance with `error()` returning a native JS `Error`.
+/// Exercises the per-page → per-context bridge installed by
+/// `BrowserState::register_opened_page`.
+pub fn test_context_weberror_is_webbed_error_class(c: &mut McpClient) {
   let html = "<!doctype html><html><body><h1>wait-weberror</h1></body></html>";
   let url = format!("data:text/html,{}", urlencoding(html));
   let script = format!(
     r"
     await page.goto({url});
-    const deadline = Date.now() + 5000;
     await page.evaluate(() => {{
       setTimeout(() => {{
         const e = new Error('ctx-forwarded');
@@ -126,30 +121,48 @@ pub fn test_context_weberror_forwarding(c: &mut McpClient) {
         throw e;
       }}, 10);
     }});
+    const deadline = Date.now() + 5000;
     let match = null;
     while (Date.now() < deadline) {{
       const remaining = deadline - Date.now();
       if (remaining <= 0) break;
-      const err = await context.waitForEvent('weberror', remaining);
-      const d = err.error();
-      if (d.message && d.message.indexOf('ctx-forwarded') !== -1) {{
-        match = d;
+      const webErr = await context.waitForEvent('weberror', remaining);
+      // `webErr` is a WebError class instance — call .error() to
+      // retrieve the native JS Error.
+      const err = webErr && typeof webErr.error === 'function' ? webErr.error() : null;
+      if (err && err.message && err.message.indexOf('ctx-forwarded') !== -1) {{
+        match = {{
+          webErrorHasErrorMethod: typeof webErr.error === 'function',
+          errorIsError: err instanceof Error,
+          name: err.name,
+          message: err.message,
+        }};
         break;
       }}
     }}
-    return match ? {{ name: match.name, message: match.message }} : null;
+    return match;
   ",
     url = serde_json::to_string(&url).unwrap()
   );
   let v = c.script_value(&script);
   assert!(!v.is_null(), "expected a weberror with 'ctx-forwarded' message: {v}");
   assert_eq!(
+    v["webErrorHasErrorMethod"].as_bool(),
+    Some(true),
+    "context.waitForEvent('weberror') should resolve to a class with `.error()`: {v}"
+  );
+  assert_eq!(
+    v["errorIsError"].as_bool(),
+    Some(true),
+    "webError.error() should return a native JS Error: {v}"
+  );
+  assert_eq!(
     v["name"].as_str(),
     Some("Error"),
-    "weberror name should be 'Error': {v}"
+    "webError.error().name should be 'Error': {v}"
   );
   assert!(
     v["message"].as_str().unwrap_or("").contains("ctx-forwarded"),
-    "weberror message should contain 'ctx-forwarded': {v}"
+    "webError.error().message should contain 'ctx-forwarded': {v}"
   );
 }

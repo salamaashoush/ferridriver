@@ -298,38 +298,18 @@ impl Page {
   /// Supported events: 'console', 'response', 'request', 'dialog',
   /// 'filechooser', 'download', 'frameattached', 'framedetached',
   /// 'framenavigated', 'load', 'domcontentloaded', 'close', 'pageerror'.
-  /// `'pageerror'` delivers a `{ name, message, stack }` snapshot to
-  /// callback listeners; use `waitForEvent('pageerror')` for the live
-  /// [`WebError`] handle.
+  /// `'pageerror'` delivers a **native JS `Error`** directly (matches
+  /// Playwright's `page.on('pageerror', (error: Error) => any)`);
+  /// other events deliver a plain snapshot object — use
+  /// `waitForEvent(event)` for live class handles (Request / Response
+  /// / Dialog / FileChooser / Download / ConsoleMessage).
   #[napi(
-    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | { isMultiple: boolean } | { name: string; message: string; stack: string } | Record<string, any>) => void"
+    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: Error | { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | { isMultiple: boolean } | Record<string, any>) => void"
   )]
-  pub fn on(&self, event: String, listener: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>) -> Result<f64> {
-    let tsfn = listener
-      .build_threadsafe_function()
-      .callee_handled::<false>()
-      .weak::<true>()
-      .max_queue_size::<0>()
-      .build()?;
-    let event_name = event.clone();
-    let callback: ferridriver::events::EventCallback = std::sync::Arc::new(move |ev| {
-      if let Some(data) = event_to_js(&event_name, &ev) {
-        tsfn.call(data, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
-      }
-    });
-    let id = self.inner.on(&event, callback);
-    #[allow(clippy::cast_precision_loss)]
-    Ok(id.0 as f64)
-  }
-
-  /// Register a one-time event listener. Auto-removed after first match.
-  #[napi(
-    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | { name: string; message: string; stack: string } | Record<string, any>) => void"
-  )]
-  pub fn once(
+  pub fn on(
     &self,
     event: String,
-    listener: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>,
+    listener: napi::bindgen_prelude::Function<'_, crate::web_error::PageListenerArg, ()>,
   ) -> Result<f64> {
     let tsfn = listener
       .build_threadsafe_function()
@@ -339,8 +319,34 @@ impl Page {
       .build()?;
     let event_name = event.clone();
     let callback: ferridriver::events::EventCallback = std::sync::Arc::new(move |ev| {
-      if let Some(data) = event_to_js(&event_name, &ev) {
-        tsfn.call(data, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
+      if let Some(arg) = event_to_listener_arg(&event_name, &ev) {
+        tsfn.call(arg, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
+      }
+    });
+    let id = self.inner.on(&event, callback);
+    #[allow(clippy::cast_precision_loss)]
+    Ok(id.0 as f64)
+  }
+
+  /// Register a one-time event listener. Auto-removed after first match.
+  #[napi(
+    ts_args_type = "event: 'console' | 'response' | 'request' | 'dialog' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', listener: (data: Error | { type: string; text: string } | ResponseData | { type: string; message: string; defaultValue: string } | Record<string, any>) => void"
+  )]
+  pub fn once(
+    &self,
+    event: String,
+    listener: napi::bindgen_prelude::Function<'_, crate::web_error::PageListenerArg, ()>,
+  ) -> Result<f64> {
+    let tsfn = listener
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+    let event_name = event.clone();
+    let callback: ferridriver::events::EventCallback = std::sync::Arc::new(move |ev| {
+      if let Some(arg) = event_to_listener_arg(&event_name, &ev) {
+        tsfn.call(arg, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
       }
     });
     let id = self.inner.once(&event, callback);
@@ -368,12 +374,13 @@ impl Page {
   /// Wait for a specific event. Playwright API:
   /// `page.waitForEvent(event, options?)`. Returns a live class
   /// (`Request` / `Response` / `WebSocket` / `Dialog` / `FileChooser` /
-  /// `Download` / `ConsoleMessage` / `WebError`) for lifecycle events,
-  /// or a plain snapshot object for simpler events — matches
-  /// Playwright's `PageEventsMap`.
+  /// `Download` / `ConsoleMessage`) for lifecycle events, a native
+  /// `Error` for `'pageerror'` (mirrors Playwright's
+  /// `waitForEvent('pageerror'): Promise<Error>`), or a plain snapshot
+  /// object for simpler events — matches Playwright's `PageEventsMap`.
   #[napi(
     ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
-    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage | WebError | Record<string, any>>"
+    ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage | Error | Record<string, any>>"
   )]
   pub async fn wait_for_event(
     &self,
@@ -388,7 +395,7 @@ impl Page {
       crate::file_chooser::FileChooser,
       crate::download::Download,
       crate::console_message::ConsoleMessage,
-      crate::web_error::WebError,
+      crate::web_error::JsErrorValue,
       serde_json::Value,
     >,
   > {
@@ -438,7 +445,14 @@ impl Page {
       PageEvent::Console(msg) => {
         napi::bindgen_prelude::Either9::G(crate::console_message::ConsoleMessage::from_core(msg))
       },
-      PageEvent::PageError(err) => napi::bindgen_prelude::Either9::H(crate::web_error::WebError::from_core(err)),
+      // Playwright's `page.waitForEvent('pageerror')` resolves to a
+      // native JS `Error` directly (not a `WebError` wrapper — that
+      // class only exists for the context-scoped `'weberror'` surface).
+      // `JsErrorValue::to_napi_value` constructs a real `Error`
+      // instance inside the JS thread so `instanceof Error === true`.
+      PageEvent::PageError(err) => {
+        napi::bindgen_prelude::Either9::H(crate::web_error::JsErrorValue::from_details(err.error()))
+      },
       other => napi::bindgen_prelude::Either9::I(page_event_to_value(&other)),
     })
   }
@@ -1607,6 +1621,24 @@ fn event_to_js(event_name: &str, event: &PageEvent) -> Option<serde_json::Value>
     },
     _ => None,
   }
+}
+
+/// Project a page event into the NAPI-side [`PageListenerArg`] enum
+/// that's sent through the threadsafe function. `'pageerror'` uses
+/// the `PageError` variant so the JS callback receives a native JS
+/// `Error` (Playwright parity); every other event surface keeps the
+/// existing compact-JSON snapshot so consumers see the same shape
+/// they did before.
+fn event_to_listener_arg(event_name: &str, event: &PageEvent) -> Option<crate::web_error::PageListenerArg> {
+  if event_name == "pageerror" {
+    if let PageEvent::PageError(err) = event {
+      return Some(crate::web_error::PageListenerArg::PageError(
+        crate::web_error::JsErrorValue::from_details(err.error()),
+      ));
+    }
+    return None;
+  }
+  event_to_js(event_name, event).map(crate::web_error::PageListenerArg::Snapshot)
 }
 
 /// Convert any `PageEvent` to a JS value (for `waitForEvent`).

@@ -291,10 +291,22 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 2.13 WebError
 
-- [x] `WebError { page(), error() -> { name, message, stack } }` delivered as a live handle via
-  `page.waitForEvent('pageerror')` / `page.on('pageerror', cb)` (page-scoped) and
-  `context.waitForEvent('weberror')` / `context.on('weberror', cb)` (context-scoped). Three layers
-  (Rust core / NAPI / QuickJS) updated together; four backends emit real exception data (no stubs).
+- [x] Playwright-shape `WebError` / `pageerror` / `weberror` surface, three layers (Rust core /
+  NAPI / QuickJS), four backends emit real exception data (no stubs). Public surface verified
+  against `/tmp/playwright/packages/playwright-core/types/types.d.ts:1101,8365,9629,21658`:
+  - `page.on('pageerror', (error: Error) => any)` — callback receives a **native JS `Error`**
+    (instance-of-`Error`), not a snapshot. NAPI threadsafe-function arg is
+    `PageListenerArg::PageError(JsErrorValue)`; on conversion the JS thread constructs
+    `new Error(message)` via the global `Error` constructor and overrides `name` / `stack`.
+  - `page.waitForEvent('pageerror'): Promise<Error>` — resolves to a **native JS `Error`** (not
+    the `WebError` wrapper — that class only exists for the context-scoped surface). NAPI
+    `Either9` slot H is `JsErrorValue`.
+  - `context.on('weberror', (webError: WebError) => any)` — callback receives a live `WebError`
+    class instance. NAPI threadsafe-function arg is `WebErrorArg(CoreWebError)`; on conversion
+    the JS thread wraps it in the NAPI `WebError` class.
+  - `context.waitForEvent('weberror'): Promise<WebError>` — resolves to the same live class.
+  - `WebError.page(): null | Page` + `WebError.error(): Error` — `error()` returns a native JS
+    `Error` (not a plain `{name, message, stack}`) via `JsErrorValue::ToNapiValue`.
   - **Core** (`crates/ferridriver/src/web_error.rs`): new module. `WebError` is `Arc`-backed with
     `page() -> Option<Arc<Page>>` + `error() -> &ErrorDetails { name, message, stack }`. The variant
     `PageEvent::PageError` was upgraded from `String` to `WebError` — wire-shaped payload removed.
@@ -329,31 +341,56 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
       `': '` for name / message) into `PageEvent::PageError(WebError)`. Reuses the `(level, text)`
       IPC payload with no protocol additions — same Section B ceiling as §2.12 console, but the
       structured `{name, message, stack}` round-trip is accurate within that ceiling.
-  - **NAPI**: new `#[napi] class WebError` in `crates/ferridriver-node/src/web_error.rs` with
-    `page(): Page | null` + `error(): { name, message, stack }`. `page.waitForEvent` extended from
-    `Either8 -> Either9` (adds the `WebError` slot); generated `.d.ts`:
+  - **NAPI**: `#[napi] class WebError` in `crates/ferridriver-node/src/web_error.rs` —
+    `page(): Page | null` and `error(): Error` (native JS `Error`). `JsErrorValue` is a Rust-side
+    `ToNapiValue`-impl wrapper whose conversion runs `new Error(msg)` via the global `Error`
+    constructor and sets `name` / `stack` — returning one from a `#[napi]` method materialises a
+    real `Error` instance in the JS thread. `PageListenerArg` enum (Snapshot(Value) | PageError(JsErrorValue))
+    is the threadsafe-function arg for `page.on`/`once`; `WebErrorArg(CoreWebError)` is the
+    threadsafe-function arg for `context.on`/`once` and converts to the live `WebError` class.
+    `page.waitForEvent` generated `.d.ts`:
     `Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage |
-    WebError | Record<string, any>>`. `BrowserContext` grows `on('weberror', cb)` /
-    `once('weberror', cb)` / `off(id)` / `waitForEvent('weberror')` — same listener shape callers
-    use for page events.
+    Error | Record<string, any>>` — byte-for-byte match with Playwright's union (WebError only
+    appears in the context event signatures, never on page events).
   - **QuickJS**: `WebErrorJs` in `crates/ferridriver-script/src/bindings/web_error.rs`
     (symmetric with `ConsoleMessageJs` / `DownloadJs` — `error()` only, no `page()`).
-    `BrowserContextJs::waitForEvent('weberror')` instantiates `WebErrorJs` via `Class::instance`.
-    `PageJs::waitForEvent('pageerror')` extended likewise.
-- **Rule-9 coverage**:
-  - Rust integration (`tests/backends_support/web_error.rs`, 2 tests × 4 backends = **8 assertions**):
-    `test_page_error_sync_throw` (page-scoped `pageerror` carries `{ name: 'Error', message: 'boom' }`
-    + stack is string-shaped), `test_context_weberror_forwarding` (context-scoped `weberror` observes
-    the same errors from any page in the context). Tests poll for the specific error message rather
-    than asserting the first event — Firefox's BiDi emits spurious cross-origin permission errors at
-    page init that would otherwise land first. All four backends green.
-  - NAPI (`crates/ferridriver-node/test/web-error.test.ts`): 5 tests × 2 CDP backends = **10
-    assertions** covering `{name, message, stack}` round-trip, `page()` back-reference, `TypeError`
-    name preservation through CDP's `exception.description` split, context-side `weberror`
-    forwarding, and the `page.on('pageerror', cb)` callback-path snapshot shape.
-  - Baseline after the change: 125 core + 13 script + 38 MCP lib + 845 NAPI/Bun (was 835) +
-    4/4 backends green (cdp-pipe 138, cdp-raw 138, bidi 133, webkit 134).
+    `WebErrorJs::error()` and `PageJs::waitForEvent('pageerror')` both return native JS
+    `Error` instances via the shared `build_native_error` helper, which `ctx.eval`-defines a
+    tiny factory `(n, m, s) => { const e = new Error(m); e.name = n; … }` — rquickjs's
+    `Function` lacks a `call-as-new` primitive (see `Constructor::construct`, only reachable via
+    `Class::create_constructor` for Rust-side class registration), and its `pub(crate)` inner
+    field blocks the obvious `Constructor(fun)` wrap. Going through `eval` keeps the binding
+    readable and lets `WebErrorJs::error` + `page.waitForEvent` share a single construction path.
+- **Rule-9 coverage (Playwright-shape assertions)**:
+  - Rust integration (`tests/backends_support/web_error.rs`, 2 tests × 4 backends = **8
+    assertions**): `test_page_error_is_native_error` asserts `err instanceof Error` +
+    `err.name === 'Error'` + `err.message === 'boom'` on the value returned by
+    `page.waitForEvent('pageerror')` (no `.error()` call — err IS the native Error).
+    `test_context_weberror_is_webbed_error_class` asserts `typeof webErr.error === 'function'` +
+    `webErr.error() instanceof Error` on the value returned by `context.waitForEvent('weberror')`.
+    Tests poll for the specific identifier rather than asserting the first event — Firefox BiDi
+    emits a spurious cross-origin `"Permission denied"` at page init that would otherwise land
+    first. All four backends green.
+  - NAPI (`crates/ferridriver-node/test/web-error.test.ts`): 6 tests × 2 CDP backends = **12
+    assertions** covering `page.waitForEvent('pageerror')` returning `instanceof Error`,
+    `TypeError` name preservation through CDP's `exception.description` split,
+    `page.on('pageerror', cb)` callback receiving `instanceof Error`,
+    `context.waitForEvent('weberror')` returning `instanceof WebError` whose `.error()` is
+    `instanceof Error`, `context.on('weberror', cb)` callback receiving `instanceof WebError`,
+    and `WebError.page()` back-reference.
+  - Baseline after the change: 125 core + 13 script + 38 MCP lib + 847 NAPI/Bun (was 845, was
+    835 before §2.13) + 4/4 backends green (cdp-pipe 138, cdp-raw 138, bidi 133, webkit 134).
 - **Playwright refs**:
+  - `/tmp/playwright/packages/playwright-core/types/types.d.ts:1101` — `page.on('pageerror')`
+    callback signature `(error: Error) => any`.
+  - `/tmp/playwright/packages/playwright-core/types/types.d.ts:4897` — `page.waitForEvent('pageerror')`
+    return type `Promise<Error>`.
+  - `/tmp/playwright/packages/playwright-core/types/types.d.ts:8365` — `context.on('weberror')`
+    callback signature `(webError: WebError) => any`.
+  - `/tmp/playwright/packages/playwright-core/types/types.d.ts:9629` — `context.waitForEvent('weberror')`
+    return type `Promise<WebError>`.
+  - `/tmp/playwright/packages/playwright-core/types/types.d.ts:21658` — `WebError` interface
+    (`page(): null|Page`, `error(): Error`).
   - `/tmp/playwright/packages/playwright-core/src/client/webError.ts` — client shape verified byte-for-byte.
   - `/tmp/playwright/packages/playwright-core/src/server/page.ts:425` — `addPageError` + dispatch-on-init.
   - `/tmp/playwright/packages/playwright-core/src/server/browserContext.ts:54,73` — `PageError` event on
