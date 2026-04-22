@@ -1271,6 +1271,45 @@ impl Default for ViewportConfig {
   }
 }
 
+/// Per-context video-recording configuration. Mirrors Playwright's
+/// `recordVideo: { dir, size? }` option on `browserType.launch` +
+/// `browser.newContext` (see
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:10150`
+/// and `:22483`). Enabling it starts `CDP` screencast / `BiDi`
+/// polyfill recording on every new page in the context; the file is
+/// finalised when the page closes and surfaced via
+/// `page.video().path()`.
+#[derive(Debug, Clone)]
+pub struct RecordVideoOptions {
+  /// Directory where the video file is written. One file per page.
+  /// Filenames are derived from the page's created-at timestamp.
+  pub dir: std::path::PathBuf,
+  /// Optional explicit video dimensions. When `None`, Playwright's
+  /// contract is to scale `viewport` down to fit 800x800; ferridriver
+  /// defaults to `800x450` (Playwright's fallback when no viewport is
+  /// set) unless the caller supplies a size. Values are forced to an
+  /// even number of pixels so `libx264` accepts them without
+  /// `yuv420p`-conversion warnings.
+  pub size: Option<VideoSize>,
+}
+
+/// Video frame dimensions for [`RecordVideoOptions::size`]. Matches
+/// Playwright's `recordVideo.size: { width, height }` shape.
+#[derive(Debug, Clone, Copy)]
+pub struct VideoSize {
+  pub width: u32,
+  pub height: u32,
+}
+
+impl Default for VideoSize {
+  fn default() -> Self {
+    Self {
+      width: 800,
+      height: 450,
+    }
+  }
+}
+
 /// Selector for [`crate::Page::frame`]. Mirrors Playwright's
 /// `page.frame(frameSelector)` union type
 /// `string | { name?: string; url?: string|RegExp|URLPattern|(url => bool) }`

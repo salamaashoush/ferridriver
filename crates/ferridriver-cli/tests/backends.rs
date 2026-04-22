@@ -2340,6 +2340,12 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::web_error::test_page_error_is_native_error);
   run!(backends_support::web_error::test_context_weberror_is_webbed_error_class);
 
+  // §2.14 Video as first-class handle. CDP backends record to a real
+  // file; BiDi uses the poll-based screencast polyfill; WebKit returns
+  // a handle whose accessors reject with the typed Unsupported reason.
+  run!(backends_support::video::test_video_null_without_recording);
+  run!(backends_support::video::test_video_recording_lifecycle);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

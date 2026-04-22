@@ -52,6 +52,7 @@ pub use js_handle::{HandleRemote, JSHandle};
 pub use locator::{FrameLocator, Locator};
 pub use page::Page;
 pub use url_matcher::{UrlMatcher, UrlPredicate};
+pub use video::Video;
 
 // ── Public lower-level modules (needed by MCP server and consumers) ──
 pub mod backend;

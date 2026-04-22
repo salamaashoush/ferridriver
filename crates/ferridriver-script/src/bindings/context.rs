@@ -143,6 +143,56 @@ impl BrowserContextJs {
     self.inner.close().await.into_js()
   }
 
+  // ── Page creation ──────────────────────────────────────────────────────
+
+  /// Playwright: `browser.newContext().newPage(): Promise<Page>` —
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts` (on
+  /// `BrowserContext`). Opens a new tab in this context; the returned
+  /// [`crate::bindings::page::PageJs`] inherits the context's
+  /// `recordVideo` configuration (if any) and every other per-context
+  /// setting wired through [`ContextRef`].
+  #[qjs(rename = "newPage")]
+  pub async fn new_page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    use rquickjs::class::Class;
+    let page = self.inner.new_page().await.into_js()?;
+    let wrapper = crate::bindings::page::PageJs::new(page);
+    let instance = Class::instance(ctx.clone(), wrapper)?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
+  }
+
+  // ── Video recording ────────────────────────────────────────────────────
+
+  /// Playwright:
+  /// `browser.newContext({ recordVideo: { dir, size? } })` —
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:10150`.
+  /// Transitional API: §4.1's `BrowserContextOptions` bag will fold
+  /// this into the full options struct.
+  #[qjs(rename = "setRecordVideo")]
+  pub async fn set_record_video<'js>(&self, ctx: Ctx<'js>, options: Value<'js>) -> rquickjs::Result<()> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct JsRecordVideoOptions {
+      dir: String,
+      size: Option<JsVideoSize>,
+    }
+    #[derive(serde::Deserialize)]
+    struct JsVideoSize {
+      width: f64,
+      height: f64,
+    }
+    let parsed: JsRecordVideoOptions = serde_from_js(&ctx, options)?;
+    let opts = ferridriver::options::RecordVideoOptions {
+      dir: std::path::PathBuf::from(parsed.dir),
+      size: parsed.size.map(|s| ferridriver::options::VideoSize {
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        width: s.width.max(0.0) as u32,
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        height: s.height.max(0.0) as u32,
+      }),
+    };
+    self.inner.set_record_video(opts).await.into_js()
+  }
+
   // ── Context-level events ───────────────────────────────────────────────
 
   /// Wait for the next context-scoped event. Currently supports

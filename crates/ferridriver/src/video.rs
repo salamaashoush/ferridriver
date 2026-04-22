@@ -8,13 +8,30 @@
 //!
 //! Shutdown is natural: `stop_screencast` -> pump sees channel close -> encoder drains
 //! remaining frames -> finishes. No abort, no hang.
+//!
+//! # Playwright-facing `Video` handle (§2.14)
+//!
+//! [`Video`] is the user-facing class matching Playwright's
+//! `/tmp/playwright/packages/playwright-core/src/client/video.ts` — sync
+//! construction, async `path()` / `save_as()` / `delete()` that all
+//! await the page-close-triggered recording finalise. Mirrors
+//! `types.d.ts:21621` byte-for-byte:
+//!
+//! ```text
+//! interface Video {
+//!   delete(): Promise<void>;
+//!   path(): Promise<string>;
+//!   saveAs(path: string): Promise<void>;
+//! }
+//! ```
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use tokio::sync::{Mutex, mpsc};
+use tokio::sync::{Mutex, mpsc, watch};
 
 use crate::Page;
+use crate::error::FerriError;
 
 const FPS: u32 = 25;
 
@@ -174,5 +191,166 @@ impl BufferedRecordingHandle {
     let _ = page.stop_screencast().await;
     self.pump_task.abort();
     let _ = self.pump_task.await;
+  }
+}
+
+// ── Public Video handle (§2.14) ─────────────────────────────────────────────
+
+/// Terminal state of a recording: either the finalised file path, or a
+/// typed error explaining why finalisation failed (backend does not
+/// support recording, encoder crashed, page never closed, …).
+type FinalPath = std::result::Result<PathBuf, String>;
+
+/// Live [`Video`] handle returned by [`crate::Page::video`]. Matches
+/// Playwright's `page.video(): null | Video` (types.d.ts:4756) and the
+/// `Video` interface at types.d.ts:21621.
+///
+/// All three accessor methods (`path`, `save_as`, `delete`) block on a
+/// `tokio::sync::watch` channel until the owning page closes and the
+/// encoder thread finishes — matches Playwright's contract that "the
+/// video is guaranteed to be written to the filesystem upon closing the
+/// browser context."
+#[derive(Clone)]
+pub struct Video {
+  state: Arc<VideoState>,
+}
+
+struct VideoState {
+  /// Receiver half of the watch channel. `None` while recording is in
+  /// progress; `Some(Ok(path))` once the encoder finishes successfully;
+  /// `Some(Err(reason))` if encoding or start-up failed. Cloneable —
+  /// every Video clone shares the same terminal-state channel.
+  path_rx: watch::Receiver<Option<FinalPath>>,
+}
+
+impl Video {
+  /// Construct a new live [`Video`] handle + its paired
+  /// [`VideoSink`]. The sink is the write-side handle the recording
+  /// runtime uses to announce the terminal state; callers receive the
+  /// read-only [`Video`] and dispatch the sink into whatever task
+  /// actually awaits the page close / encoder completion.
+  #[must_use]
+  pub fn new() -> (Self, VideoSink) {
+    let (tx, rx) = watch::channel(None);
+    let video = Self {
+      state: Arc::new(VideoState { path_rx: rx }),
+    };
+    let sink = VideoSink { tx };
+    (video, sink)
+  }
+
+  /// Playwright: `video.path(): Promise<string>`. Resolves to the
+  /// recorded file path once the owning page closes and the encoder
+  /// finishes. Returns a typed [`FerriError::Unsupported`] (or a
+  /// pass-through of the encoder's own error text) when recording
+  /// couldn't be produced — matches Playwright's behaviour of
+  /// surfacing the root cause rather than silently returning an empty
+  /// string.
+  ///
+  /// # Errors
+  ///
+  /// * If the terminal state carries an error from the encoder / a
+  ///   backend that cannot record, the error is returned verbatim as
+  ///   [`FerriError::Unsupported`] (encoder path) or the raw reason
+  ///   string wrapped in [`FerriError::Other`].
+  /// * If the owning page is dropped without ever finishing the
+  ///   recording, returns [`FerriError::target_closed`].
+  pub async fn path(&self) -> crate::error::Result<PathBuf> {
+    let value = self.await_terminal_state().await?;
+    value.map_err(FerriError::Other)
+  }
+
+  /// Playwright: `video.saveAs(path): Promise<void>`. Blocks until the
+  /// recording is finalised, then `std::fs::copy`'s the file to
+  /// `dest`. Safe to call during or after recording — matches
+  /// Playwright's "safe to call this method while the video is still
+  /// in progress" contract (types.d.ts:21634).
+  ///
+  /// # Errors
+  ///
+  /// * Propagates any finalise-time error (same shape as
+  ///   [`Self::path`]).
+  /// * Wraps I/O errors from [`std::fs::copy`] in
+  ///   [`FerriError::Other`].
+  pub async fn save_as(&self, dest: impl AsRef<Path>) -> crate::error::Result<()> {
+    let source = self.path().await?;
+    let dest = dest.as_ref().to_path_buf();
+    if let Some(parent) = dest.parent() {
+      if !parent.as_os_str().is_empty() {
+        std::fs::create_dir_all(parent)
+          .map_err(|e| FerriError::Other(format!("video.saveAs create parent {}: {e}", parent.display())))?;
+      }
+    }
+    tokio::task::spawn_blocking(move || std::fs::copy(&source, &dest).map(|_| ()))
+      .await
+      .map_err(|e| FerriError::Other(format!("video.saveAs join: {e}")))?
+      .map_err(|e| FerriError::Other(format!("video.saveAs copy: {e}")))
+  }
+
+  /// Playwright: `video.delete(): Promise<void>`. Blocks until the
+  /// recording is finalised, then removes the file. If finalisation
+  /// failed (e.g. `WebKit`), deletion is a no-op.
+  ///
+  /// # Errors
+  ///
+  /// Wraps I/O errors from [`std::fs::remove_file`] in
+  /// [`FerriError::Other`]; silences `NotFound` (idempotent delete).
+  pub async fn delete(&self) -> crate::error::Result<()> {
+    let Ok(path) = self.path().await else {
+      // Finalisation failed; nothing to delete.
+      return Ok(());
+    };
+    tokio::task::spawn_blocking(move || match std::fs::remove_file(&path) {
+      Ok(()) => Ok(()),
+      Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+      Err(e) => Err(format!("video.delete remove {}: {e}", path.display())),
+    })
+    .await
+    .map_err(|e| FerriError::Other(format!("video.delete join: {e}")))?
+    .map_err(FerriError::Other)
+  }
+
+  async fn await_terminal_state(&self) -> crate::error::Result<FinalPath> {
+    let mut rx = self.state.path_rx.clone();
+    loop {
+      if let Some(val) = rx.borrow_and_update().clone() {
+        return Ok(val);
+      }
+      if rx.changed().await.is_err() {
+        return Err(FerriError::target_closed(Some(
+          "video recording was cancelled before finalisation".into(),
+        )));
+      }
+    }
+  }
+}
+
+/// Write-side handle for a [`Video`] — used exclusively by the
+/// recording runtime (see `state::register_opened_page` wiring) to
+/// announce the terminal state. Cheap to move; drop sets the channel
+/// to `Err("dropped before completion")` automatically via the
+/// `tokio::sync::watch` Sender being dropped.
+pub struct VideoSink {
+  tx: watch::Sender<Option<FinalPath>>,
+}
+
+impl VideoSink {
+  /// Publish the successful finalise path. Subsequent callers of
+  /// [`Video::path`] / [`Video::save_as`] / [`Video::delete`] observe
+  /// the path and proceed. Uses `send_replace` so listeners that
+  /// subscribe before the first publish see the terminal value on
+  /// their next poll — matches the §2.12 pattern for one-shot
+  /// terminal-state transitions on handles with lazy subscribers.
+  pub fn finish_ok(self, path: PathBuf) {
+    let _ = self.tx.send_replace(Some(Ok(path)));
+  }
+
+  /// Publish a finalise-time error. The backend-unsupported path
+  /// ([`crate::web_error::ErrorDetails`] doesn't apply here — this is
+  /// a process-level failure, not a JS exception) is the typical
+  /// caller: a `WebKit` page's `page.video()` accessor still returns
+  /// a [`Video`], but its accessors all resolve with a reason string.
+  pub fn finish_err(self, reason: impl Into<String>) {
+    let _ = self.tx.send_replace(Some(Err(reason.into())));
   }
 }

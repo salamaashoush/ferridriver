@@ -303,7 +303,23 @@ impl ContextRef {
     // `child_frames`, `is_detached`, `name`, `url`) see live state on the
     // very first call. Mirrors Playwright's client always receiving the
     // main frame via the channel initializer.
-    Page::with_context(any_page, self.clone()).await
+    let page = Page::with_context(any_page, self.clone()).await?;
+
+    // If the context was configured with `recordVideo`, spawn the
+    // recording runtime now that we have the strong `Arc<Page>`.
+    // `start_video_recording` attaches a `Video` handle on the Page
+    // that resolves when the encoder finishes; the recording runs in
+    // the background via `tokio::spawn` and is stopped when the page
+    // closes.
+    let record_opts = {
+      let state = self.state.read().await;
+      state.get_record_video(&self.key.to_composite())
+    };
+    if let Some(opts) = record_opts {
+      start_video_recording(&page, &opts);
+    }
+
+    Ok(page)
   }
 
   /// Get all pages in this context as Page handles.
@@ -453,6 +469,29 @@ impl ContextRef {
     &self.state
   }
 
+  /// Enable `recordVideo` for every page opened in this context.
+  /// Mirrors Playwright's
+  /// `browser.newContext({ recordVideo: { dir, size? } })` — see
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:10150`.
+  /// Calls after this setter propagate to pages opened thereafter;
+  /// pages already open do NOT retroactively start recording (matches
+  /// Playwright's context-creation-time binding semantics).
+  ///
+  /// Transitional: §4.1's `BrowserContextOptions` bag will fold this
+  /// into the full options struct at context creation time.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the state lock cannot be acquired. In
+  /// practice the state is uncontended at setter time; the error path
+  /// only fires if a concurrent writer holds the guard (same
+  /// fallthrough contract as [`Self::on`]).
+  pub async fn set_record_video(&self, opts: crate::options::RecordVideoOptions) -> Result<()> {
+    let state = self.state.read().await;
+    state.set_record_video(&self.key.to_composite(), opts);
+    Ok(())
+  }
+
   // ── Context-level events ────────────────────────────────────────────────
 
   /// Register a context-level event listener. Supported events:
@@ -586,4 +625,78 @@ impl ContextRef {
     }
     Ok(())
   }
+}
+
+/// Kick off a background recording runtime for a freshly-opened page
+/// whose context has `recordVideo` enabled. Constructs the Video
+/// handle, attaches it to the page, and spawns a task that awaits the
+/// page close then drives the encoder to completion.
+///
+/// The attach-first-then-spawn ordering matters: callers of
+/// [`crate::Page::video`] can observe the handle the moment `new_page`
+/// returns, even before the first frame has been captured. The handle
+/// blocks on the underlying watch channel inside `path()` /
+/// `save_as()` / `delete()`, so observing an in-progress recording
+/// and calling `await video.path()` resolves cleanly once the page
+/// closes.
+///
+/// On backends that do not support screencast (stock `WKWebView`,
+/// surfaced through `AnyPage::start_screencast`'s typed error), the
+/// video sink is populated with the error text so the Playwright
+/// contract — `page.video()` returns a handle; the handle's methods
+/// reject with a clear reason — is preserved.
+fn start_video_recording(page: &Arc<Page>, opts: &crate::options::RecordVideoOptions) {
+  // Compose the output filename: `<dir>/<timestamp>-<page-id>.<ext>`.
+  // Playwright derives its name from the page's GUID; ferridriver uses
+  // millisecond-since-epoch + an atomic counter — unique across pages
+  // within the same context and the same second. The extension comes
+  // from `crate::video::video_extension()` so changes to the encoder
+  // format propagate without a filename rewrite.
+  static VIDEO_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+  let (video, sink) = crate::video::Video::new();
+  page.attach_video(Arc::new(video));
+
+  let size = opts.size.unwrap_or_default();
+  let width = size.width & !1;
+  let height = size.height & !1;
+  let millis = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .map_or(0, |d| d.as_millis());
+  let id = VIDEO_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+  let filename = format!("{millis}-{id}.{}", crate::video::video_extension());
+  let output_path = opts.dir.join(filename);
+
+  // Ensure the directory exists before the encoder opens the file.
+  // Errors here funnel into the sink so the user-facing `path()`
+  // rejects with a clear reason instead of the test hanging.
+  if let Err(e) = std::fs::create_dir_all(&opts.dir) {
+    sink.finish_err(format!("failed to create recordVideo.dir {}: {e}", opts.dir.display()));
+    return;
+  }
+
+  let page_for_task = page.clone();
+  tokio::spawn(async move {
+    // Default CDP screencast quality matches Playwright's
+    // `DEFAULT_SCREENCAST_OPTIONS.quality` (90).
+    let handle = match crate::video::start_recording(&page_for_task, output_path.clone(), width, height, 90).await {
+      Ok(h) => h,
+      Err(e) => {
+        sink.finish_err(format!("start_recording: {e}"));
+        return;
+      },
+    };
+    // Wait for the page to close before stopping the recording.
+    // Polls at 50ms — matches the cadence of the frame-cache
+    // listener task and keeps the observable delay inside the
+    // "page.close() has returned" barrier below ~50ms in the
+    // common case.
+    while !page_for_task.is_closed() {
+      tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+    match handle.stop(&page_for_task).await {
+      Ok(path) => sink.finish_ok(path),
+      Err(e) => sink.finish_err(format!("stop recording: {e}")),
+    }
+  });
 }

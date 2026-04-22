@@ -34,6 +34,7 @@ pub mod locator;
 pub mod mouse;
 pub mod network;
 pub mod page;
+pub mod video;
 pub mod web_error;
 
 pub use api_request::{APIRequestContextJs, APIResponseJs};
@@ -51,6 +52,7 @@ pub use locator::LocatorJs;
 pub use mouse::MouseJs;
 pub use network::{RequestJs, ResponseJs, RouteJs, WebSocketJs};
 pub use page::PageJs;
+pub use video::VideoJs;
 pub use web_error::WebErrorJs;
 
 use rquickjs::{AsyncContext, Ctx, class::Class};
@@ -81,6 +83,7 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<DownloadJs>::define(&g)?;
   Class::<ConsoleMessageJs>::define(&g)?;
   Class::<WebErrorJs>::define(&g)?;
+  Class::<VideoJs>::define(&g)?;
   Ok(())
 }
 

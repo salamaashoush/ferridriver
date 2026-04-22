@@ -317,6 +317,23 @@ impl PageJs {
     self.inner.title().await.into_js()
   }
 
+  /// Playwright: `page.video(): null | Video` —
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:4756`.
+  /// Returns a live `Video` handle when the owning context was
+  /// created with `recordVideo`, or `null` otherwise.
+  #[qjs(rename = "video")]
+  pub fn video<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+    use rquickjs::class::Class;
+    match self.inner.video() {
+      Some(video) => {
+        let wrapper = crate::bindings::video::VideoJs::new(video);
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
+      None => Ok(rquickjs::Value::new_null(ctx)),
+    }
+  }
+
   /// Full HTML content of the page.
   #[qjs(rename = "content")]
   pub async fn content(&self) -> rquickjs::Result<String> {

@@ -53,6 +53,13 @@ pub struct Page {
   /// [`Page::init_frame_cache`]. Aborted on [`Page::drop`] so no listener
   /// outlives its Page.
   frame_listener: Mutex<Option<tokio::task::AbortHandle>>,
+  /// Live [`crate::video::Video`] handle when this page was opened
+  /// inside a context with `record_video` enabled. `None` otherwise
+  /// (matches Playwright's `page.video(): null | Video` —
+  /// `types.d.ts:4756`). Populated by
+  /// [`crate::state::BrowserState::register_opened_page`] at page
+  /// registration time, when the recording runtime is spawned.
+  video: Mutex<Option<Arc<crate::video::Video>>>,
 }
 
 impl Drop for Page {
@@ -88,6 +95,7 @@ impl Page {
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
       frame_cache: Arc::new(Mutex::new(FrameCache::default())),
       frame_listener: Mutex::new(None),
+      video: Mutex::new(None),
     });
     // Wire the backend's weak back-reference before the frame cache
     // starts seeding — the file-chooser listener (spawned in
@@ -117,6 +125,7 @@ impl Page {
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
       frame_cache: Arc::new(Mutex::new(FrameCache::default())),
       frame_listener: Mutex::new(None),
+      video: Mutex::new(None),
     });
     page.inner.set_page_backref(Arc::downgrade(&page));
     page.seed_frame_cache().await?;
@@ -2384,6 +2393,29 @@ impl Page {
   #[must_use]
   pub fn is_closed(&self) -> bool {
     self.inner.is_closed()
+  }
+
+  /// Video handle for this page when recording is enabled on the
+  /// owning context. Playwright:
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:4756`
+  /// — `video(): null | Video`. Returns `None` for pages in contexts
+  /// that were not created with `recordVideo`, and on backends where
+  /// recording genuinely isn't wired (e.g. stock `WKWebView`, which
+  /// surfaces a typed `Unsupported` via the handle's accessors).
+  #[must_use]
+  pub fn video(&self) -> Option<Arc<crate::video::Video>> {
+    self.video.lock().ok().and_then(|g| g.clone())
+  }
+
+  /// Attach a [`crate::video::Video`] handle. Called by
+  /// [`crate::state::BrowserState::register_opened_page`] when a page
+  /// is opened in a `record_video`-enabled context. Silent no-op on
+  /// mutex poisoning (non-correctness-critical; the handle simply
+  /// won't be exposed).
+  pub(crate) fn attach_video(&self, video: Arc<crate::video::Video>) {
+    if let Ok(mut guard) = self.video.lock() {
+      *guard = Some(video);
+    }
   }
 
   // ── Input device accessors ────────────────────────────────────────────

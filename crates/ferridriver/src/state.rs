@@ -164,6 +164,16 @@ pub struct BrowserState {
   /// guard — `get_or_create_context_events` is called on every
   /// `ContextRef::new` for its composite key.
   pub context_events: Arc<std::sync::Mutex<HashMap<String, crate::events::ContextEventEmitter>>>,
+  /// Per-context `recordVideo` configuration registry. Mirrors
+  /// `context_events` above: sync `std::sync::Mutex` so the
+  /// non-async setter (`ContextRef::set_record_video`) can write
+  /// without the tokio `RwLock` and `register_opened_page` can read
+  /// without awaiting. Populated by `ContextRef::set_record_video`;
+  /// consumed by `register_opened_page` when attaching a
+  /// [`crate::video::Video`] handle to the new page. §4.1's
+  /// `BrowserContextOptions` bag will fold this into a single
+  /// options struct.
+  pub record_video: Arc<std::sync::Mutex<HashMap<String, crate::options::RecordVideoOptions>>>,
 }
 
 #[derive(Clone)]
@@ -223,7 +233,32 @@ impl BrowserState {
       default_viewport: opts.viewport,
       close_reason: None,
       context_events: Arc::new(std::sync::Mutex::new(HashMap::default())),
+      record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
     }
+  }
+
+  /// Enable `recordVideo` for every page opened under `composite_key`
+  /// (format: `"<instance>:<context>"`). Playwright equivalent:
+  /// `browser.newContext({ recordVideo: { dir, size? } })`. Calls
+  /// after the setter propagate to pages opened thereafter; pages
+  /// already opened in the context do NOT retroactively start
+  /// recording (matches Playwright's behaviour of binding the
+  /// option at context-creation time).
+  pub fn set_record_video(&self, composite_key: &str, opts: crate::options::RecordVideoOptions) {
+    let mut map = match self.record_video.lock() {
+      Ok(g) => g,
+      Err(p) => p.into_inner(),
+    };
+    map.insert(composite_key.to_string(), opts);
+  }
+
+  /// Fetch the `recordVideo` configuration for a composite key, if
+  /// any. Returns a clone — the stored options are rarely
+  /// mutated after the initial set.
+  #[must_use]
+  pub fn get_record_video(&self, composite_key: &str) -> Option<crate::options::RecordVideoOptions> {
+    let map = self.record_video.lock().ok()?;
+    map.get(composite_key).cloned()
   }
 
   /// Look up (or lazily create) the `ContextEventEmitter` for a

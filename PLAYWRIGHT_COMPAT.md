@@ -411,11 +411,82 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 2.14 Video as handle
 
-- [ ] Expose `Video` class via `page.video()`.
-- **Playwright ref**: `packages/playwright-core/src/client/video.ts`.
-- **Surface**: `Video { path, save_as, delete }`.
-- **Files**: wrap existing `crates/ferridriver/src/video.rs` `VideoRecordingHandle` in a public `Video` API; wire into `record_video` context option.
-- **Tests**: record + save-as + delete.
+- [x] Playwright-shape `Video { path, saveAs, delete }` + `page.video(): null | Video`,
+  three layers (Rust core / NAPI / QuickJS), four backends green. Public surface verified
+  against `/tmp/playwright/packages/playwright-core/types/types.d.ts:21621` and
+  `:4756`.
+  - **Core** (`crates/ferridriver/src/video.rs`): wraps the existing
+    `VideoRecordingHandle` in a public `Video` + paired `VideoSink` pair. The sink
+    carries a `tokio::sync::watch::Sender<Option<FinalPath>>`; `Video::{path,
+    save_as, delete}` all block on `watch::Receiver::changed` until the sink
+    announces the terminal state. `send_replace` on finalisation so listeners that
+    subscribe before the first publish still observe the value — same pattern as
+    §2.12 console args.
+  - **Context option** (`crates/ferridriver/src/options.rs`): new
+    `RecordVideoOptions { dir: PathBuf, size: Option<VideoSize> }` mirroring
+    Playwright's `recordVideo: { dir, size? }` (types.d.ts:10150). Transitional
+    setter `ContextRef::set_record_video(opts)` on the per-composite-key registry
+    on `BrowserState::record_video` (std::sync::Mutex so the setter is sync). §4.1's
+    `BrowserContextOptions` bag will fold this into the full context options struct.
+  - **Recording runtime** (`crates/ferridriver/src/context.rs::start_video_recording`):
+    `ContextRef::new_page` checks the per-key registry after `Page::with_context`
+    returns; if `recordVideo` is set, constructs the `(Video, VideoSink)` pair,
+    attaches the Video to the page, and spawns a task that drives
+    `video::start_recording` → awaits `page.is_closed()` → `handle.stop(&page)`
+    → `sink.finish_ok(path)` / `finish_err(reason)`. Filename format
+    `<dir>/<millis>-<counter>.<ext>` (ext from `video_extension()`).
+  - **Backends**:
+    - CDP (cdp-pipe / cdp-raw): real recording via the existing
+      `Page.startScreencast` + ffmpeg encoder path. Default quality 90 (matches
+      Playwright's `DEFAULT_SCREENCAST_OPTIONS.quality`).
+    - BiDi: Firefox has no native screencast; the backend's `start_screencast`
+      polyfill polls at ~15fps with extra captures on navigation events
+      (`backend/bidi/page.rs`). Records to the same filename format.
+    - WebKit: stock `WKWebView` has no screencast primitive.
+      `AnyPage::start_screencast` returns a typed `Unsupported` which funnels
+      through `VideoSink::finish_err`. `page.video()` still returns a non-null
+      handle (Playwright parity — the class is always present when `recordVideo` is
+      set); its accessors reject with the backend reason.
+  - **NAPI** (`crates/ferridriver-node/src/video.rs`): new `#[napi] class Video`
+    with `path(): Promise<string>` / `saveAs(path): Promise<void>` /
+    `delete(): Promise<void>`. `page.video(): Video | null` on the NAPI `Page`
+    class; `BrowserContext.setRecordVideo({ dir, size? })` as the transitional
+    option setter. Generated `.d.ts` matches Playwright byte-for-byte.
+  - **QuickJS** (`crates/ferridriver-script/src/bindings/video.rs`): new `VideoJs`
+    class; `PageJs::video()` accessor; `BrowserContextJs::setRecordVideo(options)`.
+    Also adds `BrowserContextJs::newPage()` (needed so tests can open a recording
+    page without closing the ambient `page` global that run_script binds).
+- **Rule-9 coverage**:
+  - Rust integration (`tests/backends_support/video.rs`, 2 tests × 4 backends = **8
+    assertions**): `test_video_null_without_recording` — `page.video()` is null when
+    recordVideo wasn't set. `test_video_recording_lifecycle` — `setRecordVideo` →
+    `context.newPage()` → navigate twice → close → `video.path()` resolves. CDP
+    asserts file exists + non-empty size; BiDi asserts file exists (size not
+    asserted — fast-close polyfill can produce tiny files); WebKit asserts
+    `video.path()` rejects with the typed `Unsupported` reason (Section B gap).
+    All four backends green.
+  - NAPI (`crates/ferridriver-node/test/video.test.ts`): 3 tests × 2 CDP backends =
+    **6 assertions** covering `null` without recording, record-and-path-resolves,
+    saveAs copies + delete removes.
+  - Baseline after the change: 125 core + 13 script + 38 MCP lib + 853 NAPI/Bun
+    (was 847) + 4/4 backends green (cdp-pipe 140, cdp-raw 140, bidi 135,
+    webkit 136).
+- **Playwright refs**:
+  - `/tmp/playwright/packages/playwright-core/types/types.d.ts:4756` —
+    `page.video(): null | Video`.
+  - `/tmp/playwright/packages/playwright-core/types/types.d.ts:10150,15586,17172,22483` —
+    `recordVideo: { dir, size? }` on launch / new-context / persistent-context /
+    connect.
+  - `/tmp/playwright/packages/playwright-core/types/types.d.ts:21621` — `Video`
+    interface (`delete(), path(), saveAs(path)`).
+  - `/tmp/playwright/packages/playwright-core/src/client/video.ts` — client-side
+    class; `path()` throws remotely, `saveAs` / `delete` delegate to artifact.
+- **Known Section B gap**: stock `WKWebView` has no public screencast API.
+  `page.video()` returns a handle but its accessors reject with the typed
+  `Unsupported` reason. Closing the gap requires either a new Objective-C
+  screencast pipeline (e.g. `CGDisplayStreamCreate` + a CoreVideo frame pump
+  through IPC) or the upcoming `WKWebView._takeSnapshot` with frame scheduling
+  (macOS 14+). Tracked under "WebKit screencast" in future phases.
 
 ### 2.15 BrowserType class
 

@@ -138,6 +138,32 @@ impl BrowserContext {
     self.inner.add_init_script(script.into(), arg.0).await.into_napi()
   }
 
+  // ── Video recording ──
+
+  /// Enable `recordVideo` for every page opened in this context.
+  /// Playwright:
+  /// `browser.newContext({ recordVideo: { dir, size? } })` —
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:10150`.
+  ///
+  /// Transitional API: §4.1's `BrowserContextOptions` bag will fold
+  /// this into the full context-creation options struct. Until then,
+  /// call `context.setRecordVideo({ dir, size })` after
+  /// `browser.newContext()` and BEFORE `context.newPage()` — pages
+  /// already open do not retroactively record.
+  #[napi(ts_args_type = "options: { dir: string, size?: { width: number, height: number } }")]
+  pub async fn set_record_video(&self, options: RecordVideoOptionsJs) -> Result<()> {
+    let opts = ferridriver::options::RecordVideoOptions {
+      dir: std::path::PathBuf::from(options.dir),
+      size: options.size.map(|s| ferridriver::options::VideoSize {
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        width: s.width.max(0.0) as u32,
+        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+        height: s.height.max(0.0) as u32,
+      }),
+    };
+    self.inner.set_record_video(opts).await.into_napi()
+  }
+
   // ── Context-level events ──
 
   /// Register a context-level event listener. Currently supports
@@ -216,6 +242,22 @@ impl BrowserContext {
 /// instance — matching Playwright's
 /// `browserContext.on('weberror', (webError: WebError) => any)` byte
 /// for byte.
+/// NAPI shape for Playwright's
+/// `recordVideo?: { dir: string, size?: { width, height } }` option —
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:10150`.
+#[napi(object)]
+pub struct RecordVideoOptionsJs {
+  pub dir: String,
+  pub size: Option<VideoSizeJs>,
+}
+
+/// NAPI shape for Playwright's `recordVideo.size: { width, height }`.
+#[napi(object)]
+pub struct VideoSizeJs {
+  pub width: f64,
+  pub height: f64,
+}
+
 fn build_context_event_callback(
   listener: napi::bindgen_prelude::Function<'_, crate::web_error::WebErrorArg, ()>,
 ) -> Result<ferridriver::events::ContextEventCallback> {

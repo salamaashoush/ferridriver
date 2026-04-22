@@ -136,6 +136,18 @@ impl Page {
     self.inner.title().await.map_err(napi::Error::from_reason)
   }
 
+  /// Playwright: `page.video(): null | Video` —
+  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:4756`.
+  /// Returns a live [`crate::video::Video`] handle when the owning
+  /// context was created with `recordVideo`, or `null` otherwise. On
+  /// backends that do not support screencast (stock `WKWebView`), a
+  /// handle is still returned but its `path()` / `saveAs()` /
+  /// `delete()` reject with a typed error explaining the reason.
+  #[napi(ts_return_type = "Video | null")]
+  pub fn video(&self) -> Option<crate::video::Video> {
+    self.inner.video().map(crate::video::Video::from_core)
+  }
+
   // ── Locators (lazy) ─────────────────────────────────────────────────────
 
   /// Playwright: `page.locator(selector, options?: LocatorOptions): Locator`

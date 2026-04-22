@@ -1973,6 +1973,7 @@ dependencies = [
  "ferridriver-mcp",
  "futures",
  "serde_json",
+ "tempfile",
  "tokio",
  "tokio-tungstenite",
  "tracing",
