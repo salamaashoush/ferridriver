@@ -8,6 +8,7 @@
 
 use serde_json::{Value, json};
 use std::io::{BufRead, BufReader, Write};
+use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -49,6 +50,17 @@ impl McpClient {
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
       .stderr(Stdio::null())
+      // Put the MCP child (and every Chrome / Firefox / WebKit host
+      // it spawns) into its own process group, with the child as
+      // group leader. `Drop` then `kill(-pgid, …)`s the whole tree
+      // in one shot. Without this, when the test harness escalates
+      // to SIGKILL on a wedged CLI, Chrome processes get re-parented
+      // to launchd and leak (their `kill_on_drop` Drop handlers
+      // never run because SIGKILL skips destructors). Leaked Chromes
+      // hold random `--remote-debugging-port=0` allocations, which
+      // make port-collision-sensitive tests
+      // (`navigation_response::test_goto_network_failure`) flake.
+      .process_group(0)
       .spawn()
       .unwrap_or_else(|e| panic!("Failed to start: {binary}: {e}"));
     let stdout = child.stdout.take().unwrap();
@@ -156,26 +168,89 @@ impl McpClient {
 impl Drop for McpClient {
   fn drop(&mut self) {
     // Close stdin first so the CLI's MCP stdio transport returns from
-    // `svc.waiting()` and its tokio runtime shuts down gracefully — that's
-    // what drops `BrowserState` and (via `kill_on_drop(true)`) kills Chrome.
-    // Without this step we'd jump straight to SIGKILL below and Chrome
-    // would leak: SIGKILL cannot be caught, so the CLI never runs
-    // destructors.
+    // `svc.waiting()` and its tokio runtime shuts down gracefully —
+    // that's what drops `BrowserState` and (via `kill_on_drop(true)`
+    // on each backend's `Child`) kills Chrome / Firefox / WebKit-host
+    // processes the *clean* way (Chrome flushes cookies on close,
+    // etc.).
     drop(self.stdin.take());
 
-    // Poll for graceful exit; if the CLI is wedged, fall back to kill.
+    // Group identity for the negative-PID `kill` calls below — pinned
+    // before any `wait`, since `Child::id` returns 0 once the process
+    // is reaped.
+    #[allow(clippy::cast_possible_wrap)]
+    let pgid_arg = -(self.child.id() as i32);
+
+    // Poll briefly for the graceful exit. If the CLI shut down on
+    // its own and the cascade of `Drop` impls reached every browser
+    // child, the trailing group-kill below is a no-op (sends signals
+    // to an empty group → ESRCH, ignored).
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
+    let mut graceful = false;
     loop {
       match self.child.try_wait() {
-        Ok(Some(_)) => return,
+        Ok(Some(_)) => {
+          graceful = true;
+          break;
+        },
         Ok(None) if std::time::Instant::now() < deadline => {
           std::thread::sleep(std::time::Duration::from_millis(25));
         },
         _ => break,
       }
     }
-    let _ = self.child.kill();
+
+    // If the graceful path didn't take, group-kill via SIGTERM with
+    // a short grace window before escalating. Targets the whole
+    // process group (set up via `.process_group(0)` at spawn) so
+    // every browser child gets the signal, not just the MCP server.
+    if !graceful {
+      // SAFETY: `libc::kill` is sync, takes plain integer args.
+      // The negative pid targets a process group that exists by
+      // construction (`process_group(0)` at spawn).
+      #[allow(unsafe_code)]
+      unsafe {
+        libc::kill(pgid_arg, libc::SIGTERM);
+      }
+      let term_deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
+      while std::time::Instant::now() < term_deadline {
+        match self.child.try_wait() {
+          Ok(None) => std::thread::sleep(std::time::Duration::from_millis(25)),
+          _ => break,
+        }
+      }
+    }
+
+    // ALWAYS group-kill at the end, even after a graceful MCP exit.
+    // The MCP runtime sometimes shuts down before its `Drop` cascade
+    // reaches every backend `Child`'s `kill_on_drop` handler (tokio
+    // runtime shutdown can race the destructor chain). SIGKILL on
+    // the group catches those orphans without affecting the MCP
+    // server (already exited) or the test harness itself (which is
+    // in a different group). Idempotent.
+    // SAFETY: same as above.
+    #[allow(unsafe_code)]
+    unsafe {
+      libc::kill(pgid_arg, libc::SIGKILL);
+    }
     let _ = self.child.wait();
+
+    // Backstop: ferridriver's CDP/BiDi backends spawn the browser
+    // parent in its own session via `setsid` (so `killpg` cleanly
+    // takes down every renderer/utility/GPU child). Chrome itself
+    // also detaches its own helper subprocesses into independent
+    // sessions in some cases — those survive the parent's group
+    // kill and re-parent to launchd. They're identifiable by their
+    // `--user-data-dir=…/ferridriver-<flavour>-…` arg (the prefix
+    // every CDP launch path stamps) or `--profile …/.tmp…` pattern
+    // for the BiDi Firefox launch. `pkill -f` matches the command
+    // line and kills only those — no impact on unrelated Chromes
+    // the user might have running.
+    let _ = std::process::Command::new("pkill")
+      .args(["-9", "-f", "ferridriver-pipe-|ferridriver-raw-|ferridriver-firefox-"])
+      .stderr(Stdio::null())
+      .stdout(Stdio::null())
+      .status();
   }
 }
 

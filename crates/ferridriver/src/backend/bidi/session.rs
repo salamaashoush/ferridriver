@@ -118,7 +118,14 @@ impl BidiSession {
     flags: &[String],
     headless: bool,
   ) -> Result<(Self, tokio::process::Child, tempfile::TempDir), String> {
-    let profile_dir = tempfile::tempdir().map_err(|e| format!("tempdir: {e}"))?;
+    // Prefix the profile dir so test-harness cleanup can `pkill -f`
+    // any leaked Firefox processes by their `--profile` arg —
+    // mirrors the `ferridriver-pipe-` / `ferridriver-raw-` prefixes
+    // used by the CDP launches in `backend::cdp::mod`.
+    let profile_dir = tempfile::Builder::new()
+      .prefix("ferridriver-firefox-")
+      .tempdir()
+      .map_err(|e| format!("tempdir: {e}"))?;
 
     // Write automation preferences to user.js in the profile directory.
     // Matches Playwright's firefoxPreferences + Puppeteer's essentials.

@@ -1972,6 +1972,7 @@ dependencies = [
  "ferridriver",
  "ferridriver-mcp",
  "futures",
+ "libc",
  "serde_json",
  "tempfile",
  "tokio",

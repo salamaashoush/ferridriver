@@ -32,3 +32,4 @@ base64 = { workspace = true }
 tokio-tungstenite = "0.29"
 futures = { workspace = true }
 tempfile = "3"
+libc = "0.2"
