@@ -2394,6 +2394,20 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::browser_type::test_browser_type_connect_over_cdp_chromium_only);
   run!(backends_support::browser_type::test_browser_type_launch_persistent_context);
 
+  // QuickJS binding surface — `getBy*` accessors on Frame/Locator,
+  // FrameLocator class, page-level `touchscreen`/`snapshotForAI`/
+  // `exposeFunction`/`frameLocator`, and `context.clearCookies({...})`.
+  run!(backends_support::binding_surface::test_frame_get_by_methods);
+  run!(backends_support::binding_surface::test_frame_page_and_frame_locator);
+  run!(backends_support::binding_surface::test_locator_get_by_methods);
+  run!(backends_support::binding_surface::test_locator_page_and_frame_methods);
+  run!(backends_support::binding_surface::test_frame_locator_class);
+  run!(backends_support::binding_surface::test_page_frame_locator);
+  run!(backends_support::binding_surface::test_page_touchscreen_tap);
+  run!(backends_support::binding_surface::test_page_snapshot_for_ai);
+  run!(backends_support::binding_surface::test_page_expose_function);
+  run!(backends_support::binding_surface::test_context_clear_cookies_filter);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

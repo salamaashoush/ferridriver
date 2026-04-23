@@ -57,9 +57,22 @@ impl BrowserContext {
     self.inner.add_cookies(native).await.into_napi()
   }
 
+  /// Playwright: `context.clearCookies(options?)`. Without options
+  /// clears every cookie; with `{ name?, domain?, path? }` only
+  /// cookies matching ALL specified filters are cleared.
+  ///
+  /// Filter values are exact-match strings — Playwright's TS API
+  /// accepts `string | RegExp` here too; regex filters are tracked
+  /// under "Section B" pending a Rust core extension.
   #[napi]
-  pub async fn clear_cookies(&self) -> Result<()> {
-    self.inner.clear_cookies().await.into_napi()
+  pub async fn clear_cookies(&self, options: Option<crate::types::ClearCookieOptions>) -> Result<()> {
+    match options {
+      None => self.inner.clear_cookies().await.into_napi(),
+      Some(opts) => {
+        let core: ferridriver::backend::ClearCookieOptions = opts.into();
+        self.inner.clear_cookies_filtered(&core).await.into_napi()
+      },
+    }
   }
 
   #[napi]

@@ -46,10 +46,37 @@ impl BrowserContextJs {
     self.inner.add_cookies(parsed).await.into_js()
   }
 
-  /// Clear all cookies.
+  /// Playwright: `context.clearCookies(options?)`. Without options
+  /// clears every cookie; with `{ name?, domain?, path? }` only
+  /// cookies matching ALL specified filters are cleared. Filter
+  /// values are exact-match strings — Playwright's TS surface accepts
+  /// `string | RegExp` here too; regex filters are tracked under
+  /// "Section B" pending a Rust core extension.
   #[qjs(rename = "clearCookies")]
-  pub async fn clear_cookies(&self) -> rquickjs::Result<()> {
-    self.inner.clear_cookies().await.into_js()
+  pub async fn clear_cookies<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    match options.0 {
+      None => self.inner.clear_cookies().await.into_js(),
+      Some(v) if v.is_undefined() || v.is_null() => self.inner.clear_cookies().await.into_js(),
+      Some(v) => {
+        #[derive(serde::Deserialize, Default)]
+        struct Filter {
+          name: Option<String>,
+          domain: Option<String>,
+          path: Option<String>,
+        }
+        let parsed: Filter = crate::bindings::convert::serde_from_js(&ctx, v)?;
+        let core = ferridriver::backend::ClearCookieOptions {
+          name: parsed.name,
+          domain: parsed.domain,
+          path: parsed.path,
+        };
+        self.inner.clear_cookies_filtered(&core).await.into_js()
+      },
+    }
   }
 
   /// Delete a cookie by name (optionally scoped to a domain).

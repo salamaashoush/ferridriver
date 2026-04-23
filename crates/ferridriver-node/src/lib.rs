@@ -64,6 +64,7 @@ mod element_handle;
 mod error;
 mod file_chooser;
 mod frame;
+mod frame_locator;
 #[allow(dead_code)]
 mod install;
 mod js_handle;

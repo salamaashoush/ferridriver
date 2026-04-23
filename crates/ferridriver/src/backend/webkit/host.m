@@ -31,6 +31,10 @@ typedef struct {
 } Frame;
 #pragma pack(pop)
 
+// Forward declaration so fdConsole (defined upthread of g_views) can
+// resolve its originating view-id.
+static uint64_t vid_for_webview(WKWebView *src);
+
 enum Op {
     OP_CREATE_VIEW = 1,
     OP_NAVIGATE = 2,
@@ -252,16 +256,21 @@ static uint64_t read_u64(const uint8_t *data, uint32_t data_len, uint32_t *offse
     if ([message.name isEqualToString:@"fdConsole"]) {
         NSString *level = body[@"level"] ?: @"log";
         NSString *text = body[@"text"] ?: @"";
+        // Locate the originating view's vid so the Rust side can route
+        // exposed-function dispatches to the correct page (multiple
+        // pages share one fdConsole IPC channel).
+        uint64_t source_vid = vid_for_webview(message.webView);
         const char *levelUtf8 = [level UTF8String];
         const char *textUtf8 = [text UTF8String];
         uint32_t levelLen = (uint32_t)strlen(levelUtf8);
         uint32_t textLen = (uint32_t)strlen(textUtf8);
-        uint32_t total = 4 + levelLen + 4 + textLen;
+        uint32_t total = 4 + levelLen + 4 + textLen + 8;
         uint8_t *buf = malloc(total);
         memcpy(buf, &levelLen, 4);
         memcpy(buf + 4, levelUtf8, levelLen);
         memcpy(buf + 4 + levelLen, &textLen, 4);
         memcpy(buf + 4 + levelLen + 4, textUtf8, textLen);
+        memcpy(buf + 4 + levelLen + 4 + textLen, &source_vid, 8);
         write_frame(0, REP_CONSOLE_EVENT, buf, total);
         free(buf);
     }
@@ -520,6 +529,17 @@ static void cf_callback(CFFileDescriptorRef cffd, CFOptionFlags flags, void *inf
 static ViewEntry *get_view(uint64_t vid) {
     NSValue *v = g_views[@(vid)];
     return v ? (ViewEntry*)[v pointerValue] : NULL;
+}
+
+static uint64_t vid_for_webview(WKWebView *src) {
+    if (!src || !g_views) return 0;
+    for (NSNumber *key in g_views) {
+        ViewEntry *entry = (ViewEntry *)[g_views[key] pointerValue];
+        if (entry && entry->webview == src) {
+            return (uint64_t)[key unsignedLongLongValue];
+        }
+    }
+    return 0;
 }
 
 static void dispatch_frame(uint32_t req_id, uint8_t op,

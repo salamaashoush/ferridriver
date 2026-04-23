@@ -1242,6 +1242,14 @@ impl PageJs {
       .collect()
   }
 
+  /// Playwright: `page.frameLocator(selector): FrameLocator`. Targets
+  /// an `<iframe>` matching the selector at the page's main-frame
+  /// scope.
+  #[qjs(rename = "frameLocator")]
+  pub fn frame_locator(&self, selector: String) -> crate::bindings::frame_locator::FrameLocatorJs {
+    crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(&selector))
+  }
+
   /// Locate a frame by name or URL. Accepts Playwright's union:
   /// `frame(string | { name?: string; url?: string })`.
   ///
@@ -1282,6 +1290,182 @@ impl PageJs {
       return Ok(None);
     }
     Ok(self.inner.frame(core_sel).map(crate::bindings::frame::FrameJs::new))
+  }
+
+  /// Playwright: `page.touchscreen: Touchscreen`.
+  #[qjs(rename = "touchscreen", get)]
+  pub fn touchscreen(&self) -> TouchscreenJs {
+    TouchscreenJs {
+      page: self.inner.clone(),
+    }
+  }
+
+  /// Playwright: `page.snapshotForAI(options?)`.
+  ///
+  /// Returns `{ full: string, incremental?: string, refMap: Record<string, number> }`.
+  #[qjs(rename = "snapshotForAI")]
+  pub async fn snapshot_for_ai<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let core_opts = match options.0 {
+      None => ferridriver::snapshot::SnapshotOptions::default(),
+      Some(v) if v.is_undefined() || v.is_null() => ferridriver::snapshot::SnapshotOptions::default(),
+      Some(v) => {
+        #[derive(serde::Deserialize, Default)]
+        #[serde(rename_all = "camelCase", default)]
+        struct JsSnap {
+          depth: Option<i32>,
+          track: Option<String>,
+        }
+        let parsed: JsSnap = crate::bindings::convert::serde_from_js(&ctx, v)?;
+        ferridriver::snapshot::SnapshotOptions {
+          depth: parsed.depth,
+          track: parsed.track,
+        }
+      },
+    };
+    let snap = self.inner.snapshot_for_ai(core_opts).await.into_js()?;
+    let obj = rquickjs::Object::new(ctx.clone())?;
+    obj.set("full", snap.full)?;
+    if let Some(inc) = snap.incremental {
+      obj.set("incremental", inc)?;
+    }
+    let ref_map = rquickjs::Object::new(ctx.clone())?;
+    for (k, v) in snap.ref_map {
+      ref_map.set(k, v as f64)?;
+    }
+    obj.set("refMap", ref_map)?;
+    rquickjs::IntoJs::into_js(obj, &ctx)
+  }
+
+  /// Playwright: `page.exposeFunction(name, callback)`. Binds
+  /// `window[name]` to a page-side proxy that asynchronously invokes
+  /// `callback(args)` in the script context.
+  ///
+  /// The callback receives the args as a single array. The page-side
+  /// call resolves to `null` since the script-side callback runs
+  /// asynchronously (Rust core's `ExposedFn` is sync + JSON-in/out;
+  /// QuickJS dispatch is async-only).
+  #[qjs(rename = "exposeFunction")]
+  pub async fn expose_function<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    name: String,
+    callback: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<()> {
+    let async_ctx = self.async_ctx.clone().ok_or_else(|| {
+      rquickjs::Error::new_from_js_message(
+        "page.exposeFunction",
+        "Error",
+        "page.exposeFunction requires the script engine's AsyncContext (install_page)".to_string(),
+      )
+    })?;
+    // Stash the JS callback in a page-global registry keyed by name
+    // — cross-task dispatch (the Rust ExposedFn runs outside the
+    // QuickJS context) looks it up by name via `async_with!`.
+    let globals = ctx.globals();
+    let registry: rquickjs::Object<'js> = match globals.get::<_, rquickjs::Value<'_>>("__fdExposed") {
+      Ok(v) if !v.is_undefined() && !v.is_null() => rquickjs::Object::from_value(v)?,
+      _ => {
+        let obj = rquickjs::Object::new(ctx.clone())?;
+        globals.set("__fdExposed", obj.clone())?;
+        obj
+      },
+    };
+    registry.set(name.clone(), callback)?;
+
+    let cb: ferridriver::events::ExposedFn = std::sync::Arc::new({
+      let name = name.clone();
+      move |args: Vec<serde_json::Value>| {
+        let async_ctx = async_ctx.clone();
+        let name = name.clone();
+        tokio::spawn(async move {
+          let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
+            let registry: rquickjs::Object<'_> = ctx.globals().get("__fdExposed")?;
+            let f: rquickjs::Function<'_> = registry.get(name.as_str())?;
+            // Pass args as a single JS array. The user's callback
+            // signature is `(args: unknown[]) => ...`.
+            let js_args = rquickjs::Array::new(ctx.clone())?;
+            for (i, v) in args.into_iter().enumerate() {
+              let val = crate::bindings::convert::serde_to_js(&ctx, &v)?;
+              js_args.set(i, val)?;
+            }
+            let _: rquickjs::Value<'_> = f.call((js_args,))?;
+            Ok(())
+          })
+          .await;
+        });
+        serde_json::Value::Null
+      }
+    });
+    self.inner.expose_function(&name, cb).await.into_js()
+  }
+
+  /// Playwright internal: `page.startScreencast(quality, maxWidth,
+  /// maxHeight, callback)`. Callback receives `{ frame: Uint8Array,
+  /// timestamp: number }` for each frame.
+  #[qjs(rename = "startScreencast")]
+  pub async fn start_screencast<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    quality: u8,
+    max_width: u32,
+    max_height: u32,
+    callback: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<()> {
+    let async_ctx = self.async_ctx.clone().ok_or_else(|| {
+      rquickjs::Error::new_from_js_message(
+        "page.startScreencast",
+        "Error",
+        "page.startScreencast requires the script engine's AsyncContext (install_page)".to_string(),
+      )
+    })?;
+    ctx.globals().set("__fdScreencast", callback)?;
+    let mut rx = self
+      .inner
+      .start_screencast(quality, max_width, max_height)
+      .await
+      .into_js()?;
+    tokio::spawn(async move {
+      while let Some((bytes, ts)) = rx.recv().await {
+        let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
+          let f: rquickjs::Function<'_> = ctx.globals().get("__fdScreencast")?;
+          let payload = rquickjs::Object::new(ctx.clone())?;
+          let buf = rquickjs::TypedArray::<u8>::new(ctx.clone(), bytes)?;
+          payload.set("frame", buf)?;
+          payload.set("timestamp", ts)?;
+          let _: rquickjs::Value<'_> = f.call((payload,))?;
+          Ok(())
+        })
+        .await;
+      }
+    });
+    Ok(())
+  }
+
+  /// Stop the screencast started by `startScreencast`.
+  #[qjs(rename = "stopScreencast")]
+  pub async fn stop_screencast(&self) -> rquickjs::Result<()> {
+    self.inner.stop_screencast().await.into_js()
+  }
+}
+
+/// Playwright `Touchscreen`. Construct via `page.touchscreen`.
+#[derive(rquickjs::JsLifetime, rquickjs::class::Trace)]
+#[rquickjs::class(rename = "Touchscreen")]
+pub struct TouchscreenJs {
+  #[qjs(skip_trace)]
+  page: std::sync::Arc<ferridriver::Page>,
+}
+
+#[rquickjs::methods]
+impl TouchscreenJs {
+  /// Playwright: `touchscreen.tap(x, y)`.
+  #[qjs(rename = "tap")]
+  pub async fn tap(&self, x: f64, y: f64) -> rquickjs::Result<()> {
+    self.page.touchscreen().tap(x, y).await.into_js()
   }
 }
 

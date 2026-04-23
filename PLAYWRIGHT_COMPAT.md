@@ -1108,18 +1108,19 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ---
 
-## Tier 9 — NAPI surface gaps (Rust exists, binding missing)
+## Tier 9 — JS-binding surface gaps (Rust exists, binding missing)
 
-- [ ] `page.expose_function` (Rust `page.rs:1614`).
-- [ ] `page.set_bypass_csp`, `page.set_ignore_certificate_errors`, `page.set_download_behavior`, `page.set_http_credentials`, `page.set_service_workers_blocked`.
-- [ ] `page.touchscreen()` — Mouse/Keyboard bound, Touchscreen missing.
-- [ ] `page.start_screencast` / `stop_screencast`.
-- [ ] `page.snapshot_for_ai`.
-- [ ] `expect_navigation / expect_response / expect_request / expect_download` as awaitable returns.
-- [ ] `frame.get_by_title`, `frame.page()`.
-- [ ] `locator.content_frame`, `locator.frame_locator`, `locator.page`.
-- [ ] `FrameLocator` entire class (Rust has it at `locator.rs:1030`).
-- [ ] `context.clear_cookies_filtered` with regex options.
+- [x] `page.exposeFunction(name, callback)` shipped in NAPI + QuickJS. Rust core gained real `WebKit` + `BiDi` paths (the previous WebKit `Unsupported` stub is gone) by routing the page-side dispatch envelope through the existing `console.log` / `log.entryAdded` channel and resolving the page promise via a follow-up evaluate. WebKit also got per-view console-event routing (host's `fdConsole` IPC frame now carries the source `view_id` so multi-page hosts route exposed-function dispatches to the right page; sibling-page events get re-notified rather than silently parked).
+- [x] `page.set_*` Java-bean setters dropped — those went away in §4.1's `apply_context_options` consolidation; the remaining Playwright-API setters (`setContent`, `setExtraHTTPHeaders`, `setDefaultTimeout`, etc.) have always been bound.
+- [x] `page.touchscreen` — Touchscreen class added in NAPI + QuickJS; `tap(x, y)` routes to the existing core `Touchscreen` handle.
+- [x] `page.startScreencast` / `stopScreencast` shipped in both layers as a callback-based API (`callback({ frame: Buffer, timestamp })`).
+- [x] `page.snapshotForAI(options?)` returns `{ full, incremental?, refMap }`.
+- [x] `wait_for_navigation` / `wait_for_response` / `wait_for_request` / `wait_for_event` already shipped earlier (the `expect_*` entry above was bookkeeping drift). `expect_download` deferred to `page.waitForEvent('download')` which exists.
+- [x] `frame.getByTitle`, `frame.getByAltText`, `frame.frameLocator`, `frame.page` shipped in NAPI + QuickJS. Companion sweep also added all missing `getBy*` methods on QuickJS Frame and Locator (Rust core had them; QuickJS bindings only had Page-level coverage).
+- [x] `locator.contentFrame`, `locator.frameLocator`, `locator.page` shipped in both layers.
+- [x] `FrameLocator` class (14 methods) shipped in both layers — `crates/ferridriver-node/src/frame_locator.rs` and `crates/ferridriver-script/src/bindings/frame_locator.rs`.
+- [x] `context.clearCookies({ name?, domain?, path? })` shipped — string-only filter (Rust core's `ClearCookieOptions` is string-only). Playwright's TS surface accepts `string | RegExp`; the regex form would require extending Rust core's filter type and the per-backend cookie-clear paths — tracked as a follow-up Section B item, separate from the binding gap closed here.
+- **Tests** (Rule 9 across all 4 backends): 13 NAPI cases in `crates/ferridriver-node/test/binding-surface.test.ts` + 10 QuickJS-via-MCP cases in `crates/ferridriver-cli/tests/backends_support/binding_surface.rs`. WebKit `exposeFunction` exercises the new console-routing IPC frame end-to-end.
 - [ ] Dialog / Download / ConsoleMessage / Worker / CDPSession / Video / WebSocket bindings — blocked on Tier 2 implementations first.
 
 ---

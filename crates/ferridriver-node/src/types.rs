@@ -1426,6 +1426,51 @@ impl napi::bindgen_prelude::TypeName for NapiInitScriptArg {
   }
 }
 
+/// Options for `page.snapshotForAI(options?)`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct SnapshotForAiOptions {
+  /// Maximum traversal depth. `None` or negative = unlimited.
+  pub depth: Option<i32>,
+  /// Track key for incremental snapshots — pass the same key across
+  /// calls to receive the `incremental` field with only changed
+  /// nodes since the last call with this key.
+  pub track: Option<String>,
+}
+
+impl From<SnapshotForAiOptions> for ferridriver::snapshot::SnapshotOptions {
+  fn from(o: SnapshotForAiOptions) -> Self {
+    Self {
+      depth: o.depth,
+      track: o.track,
+    }
+  }
+}
+
+/// Filter options for `context.clearCookies(options?)`. Each field is
+/// a string match (exact). The Playwright TS surface accepts
+/// `string | RegExp` here too; ferridriver's Rust core only supports
+/// the string form today (regex filtering would require touching
+/// every backend's cookie clear path) — that gap is tracked under
+/// "Section B" of `PLAYWRIGHT_COMPAT.md`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct ClearCookieOptions {
+  pub name: Option<String>,
+  pub domain: Option<String>,
+  pub path: Option<String>,
+}
+
+impl From<ClearCookieOptions> for ferridriver::backend::ClearCookieOptions {
+  fn from(o: ClearCookieOptions) -> Self {
+    Self {
+      name: o.name,
+      domain: o.domain,
+      path: o.path,
+    }
+  }
+}
+
 impl napi::bindgen_prelude::ValidateNapiValue for NapiInitScriptArg {}
 
 impl napi::bindgen_prelude::FromNapiValue for NapiInitScriptArg {
