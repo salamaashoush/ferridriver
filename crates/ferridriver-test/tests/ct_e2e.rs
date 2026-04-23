@@ -49,7 +49,8 @@ window.__ferriMount({ id: 'Counter' }, document.getElementById('app'), { props: 
   let url = server.url();
   assert!(url.starts_with("http://127.0.0.1:"));
 
-  let browser = ferridriver::Browser::launch(ferridriver::options::LaunchOptions::default())
+  let browser = ferridriver::chromium()
+    .launch(ferridriver::options::LaunchOptions::default())
     .await
     .unwrap();
   let page = browser.new_page_with_url(&url).await.unwrap();
@@ -115,7 +116,8 @@ window.__ferriMount = function(componentRef, rootEl, options) {
   .unwrap();
 
   let server = ComponentServer::start(&tmp).await.unwrap();
-  let browser = ferridriver::Browser::launch(ferridriver::options::LaunchOptions::default())
+  let browser = ferridriver::chromium()
+    .launch(ferridriver::options::LaunchOptions::default())
     .await
     .unwrap();
   let page = browser.new_page_with_url(&server.url()).await.unwrap();

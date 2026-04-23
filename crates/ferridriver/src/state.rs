@@ -188,6 +188,13 @@ pub struct BrowserState {
   /// origin across subsequent pages). Mirrors Playwright's
   /// "set storage state once at context creation".
   pub storage_state_hydrated: Arc<std::sync::Mutex<rustc_hash::FxHashSet<String>>>,
+  /// Set by [`crate::BrowserType::launch_persistent_context`] to mark
+  /// this `BrowserState` as backing a persistent-context launch.
+  /// When the persistent default context closes, the whole browser
+  /// must shut down — Playwright's contract:
+  /// "Closing this context will automatically close the browser."
+  /// (`/tmp/playwright/packages/playwright-core/types/types.d.ts:15199`).
+  pub persistent_context: bool,
 }
 
 #[derive(Clone)]
@@ -204,52 +211,51 @@ pub enum ConnectMode {
 }
 
 impl BrowserState {
-  /// Construct a `BrowserState` from a Playwright-shaped
-  /// [`LaunchOptions`](crate::options::LaunchOptions) bag. This is the
-  /// single construction path — there used to be a parallel
-  /// `new(mode, backend)` shortcut that hard-coded `headless = false`,
-  /// which silently launched full Google Chrome for MCP servers even
-  /// when the CLI passed `--headless`. Full Chrome inherits the macOS
+  /// Construct a `BrowserState` from an internal
+  /// [`LaunchPlan`](crate::options::LaunchPlan). This is the single
+  /// construction path — there used to be a parallel `new(mode,
+  /// backend)` shortcut that hard-coded `headless = false`, which
+  /// silently launched full Google Chrome for MCP servers even when
+  /// the CLI passed `--headless`. Full Chrome inherits the macOS
   /// system appearance (including `prefers-color-scheme: dark` on
   /// dark-mode hosts), which broke `emulateMedia` reset behaviour
-  /// tested via `run_script`. Funneling everyone through
-  /// `LaunchOptions` guarantees binary resolution stays aligned with
-  /// the caller's headless intent.
+  /// tested via `run_script`. Funneling everyone through `LaunchPlan`
+  /// guarantees binary resolution stays aligned with the caller's
+  /// headless intent.
+  ///
+  /// `LaunchPlan` is the internal sister of the public Playwright-
+  /// shaped [`crate::options::LaunchOptions`]; the
+  /// [`crate::BrowserType`] factory is the only place that builds a
+  /// plan from public options.
   #[must_use]
-  pub fn with_options(connect_mode: ConnectMode, opts: crate::options::LaunchOptions) -> Self {
-    let chromium_path = if let Some(path) = opts.executable_path {
+  pub fn with_plan(connect_mode: ConnectMode, plan: crate::options::LaunchPlan) -> Self {
+    let chromium_path = if let Some(path) = plan.executable_path {
       path
     } else {
-      // Infer browser type from backend if not explicitly set
-      let browser = opts.browser.unwrap_or(match opts.backend {
-        BackendKind::Bidi => crate::options::BrowserType::Firefox,
-        #[cfg(target_os = "macos")]
-        BackendKind::WebKit => crate::options::BrowserType::WebKit,
-        _ => crate::options::BrowserType::Chromium,
-      });
-      match browser {
-        crate::options::BrowserType::Firefox => std::env::var("FIREFOX_PATH")
+      match plan.kind {
+        crate::options::BrowserKind::Firefox => std::env::var("FIREFOX_PATH")
           .or_else(|_| detect_firefox().map_err(|_| std::env::VarError::NotPresent))
-          .unwrap_or_else(|_| resolve_chromium(opts.headless)),
-        _ => resolve_chromium(opts.headless),
+          .unwrap_or_else(|_| resolve_chromium(plan.headless)),
+        _ => resolve_chromium(plan.headless),
       }
     };
     Self {
       instances: HashMap::default(),
       chromium_path,
       connect_mode,
-      backend_kind: opts.backend,
-      extra_args: opts.args,
+      backend_kind: plan.backend,
+      extra_args: plan.args,
       instance_args_fn: None,
       instance_resolver_fn: None,
-      headless: opts.headless,
-      user_data_dir: opts.user_data_dir,
-      default_viewport: opts.viewport,
+      headless: plan.headless,
+      user_data_dir: plan.user_data_dir,
+      default_viewport: plan.default_viewport,
       close_reason: None,
       context_events: Arc::new(std::sync::Mutex::new(HashMap::default())),
       record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
+      persistent_context: false,
     }
   }
 
@@ -410,12 +416,34 @@ impl BrowserState {
         BackendKind::CdpPipe => {
           use crate::backend::cdp::{CdpBrowser, pipe::PipeTransport};
           let flags = chrome_flags(self.headless, &all_extra);
-          AnyBrowser::CdpPipe(CdpBrowser::<PipeTransport>::launch_with_flags(&self.chromium_path, &flags).await?)
+          let browser = match &self.user_data_dir {
+            Some(dir) => {
+              CdpBrowser::<PipeTransport>::launch_with_flags_in_dir(
+                &self.chromium_path,
+                &flags,
+                std::path::Path::new(dir),
+              )
+              .await?
+            },
+            None => CdpBrowser::<PipeTransport>::launch_with_flags(&self.chromium_path, &flags).await?,
+          };
+          AnyBrowser::CdpPipe(browser)
         },
         BackendKind::CdpRaw => {
           use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
           let flags = chrome_flags(self.headless, &all_extra);
-          AnyBrowser::CdpRaw(CdpBrowser::<WsTransport>::launch_with_flags(&self.chromium_path, &flags).await?)
+          let browser = match &self.user_data_dir {
+            Some(dir) => {
+              Box::pin(CdpBrowser::<WsTransport>::launch_with_flags_in_dir(
+                &self.chromium_path,
+                &flags,
+                std::path::Path::new(dir),
+              ))
+              .await?
+            },
+            None => CdpBrowser::<WsTransport>::launch_with_flags(&self.chromium_path, &flags).await?,
+          };
+          AnyBrowser::CdpRaw(browser)
         },
         #[cfg(target_os = "macos")]
         BackendKind::WebKit => {
@@ -1637,16 +1665,22 @@ mod tests {
   use super::*;
   use crate::backend::BackendKind;
 
-  /// Test helper: build a `BrowserState` with the minimum `LaunchOptions`
+  /// Test helper: build a `BrowserState` with the minimum `LaunchPlan`
   /// needed to exercise the resolver/args plumbing. Using
-  /// `LaunchOptions::default()` here keeps these tests in lock-step with
-  /// the single production construction path
-  /// ([`BrowserState::with_options`]).
+  /// `LaunchPlan::default()` keeps these tests in lock-step with the
+  /// single production construction path ([`BrowserState::with_plan`]).
   fn test_state(backend: BackendKind) -> BrowserState {
-    BrowserState::with_options(
+    let kind = match backend {
+      BackendKind::Bidi => crate::options::BrowserKind::Firefox,
+      #[cfg(target_os = "macos")]
+      BackendKind::WebKit => crate::options::BrowserKind::WebKit,
+      _ => crate::options::BrowserKind::Chromium,
+    };
+    BrowserState::with_plan(
       ConnectMode::Launch,
-      crate::options::LaunchOptions {
+      crate::options::LaunchPlan {
         backend,
+        kind,
         headless: false,
         ..Default::default()
       },

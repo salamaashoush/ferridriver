@@ -8,7 +8,7 @@
 
 use std::time::Instant;
 
-use ferridriver::Browser;
+use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -18,7 +18,7 @@ async fn measure_operation_costs() {
 
   // 1. Browser launch
   let start = Instant::now();
-  let browser = Browser::launch(LaunchOptions::default()).await.unwrap();
+  let browser = chromium().launch(LaunchOptions::default()).await.unwrap();
   println!("  Browser launch:        {:>6}ms", start.elapsed().as_millis());
 
   // 2. Context creation (10x average)

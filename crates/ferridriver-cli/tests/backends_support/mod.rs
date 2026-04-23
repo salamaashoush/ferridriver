@@ -10,6 +10,7 @@
 
 pub mod action_options;
 pub mod browser_context_options;
+pub mod browser_type;
 pub mod client;
 pub mod console_message;
 pub mod dialog;

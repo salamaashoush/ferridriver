@@ -19,7 +19,8 @@
  * (`tests/backends_support/web_error.rs`) covers all four backends.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { Browser, type Page, type BrowserContext, WebError as WebErrorClass } from "../index.js";
+import { type Browser, type Page, type BrowserContext, WebError as WebErrorClass } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 
 const BACKENDS = process.env.FERRIDRIVER_BACKEND
   ? [process.env.FERRIDRIVER_BACKEND]
@@ -32,7 +33,7 @@ for (const backend of BACKENDS) {
     let context: BrowserContext;
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
       context = browser.defaultContext();
       page = await browser.newPage();
     }, 30_000);

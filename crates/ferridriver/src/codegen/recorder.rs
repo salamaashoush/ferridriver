@@ -5,10 +5,10 @@ use std::sync::Arc;
 
 use tokio::sync::Mutex;
 
-use crate::Browser;
+use crate::chromium;
 use crate::error::Result;
 use crate::events::ExposedFn;
-use crate::options::LaunchOptions;
+use crate::options::{BrowserContextOptions, LaunchOptions, ViewportOption};
 
 use super::emitter::{CodeEmitter, GherkinEmitter, RustEmitter, TypeScriptEmitter};
 use super::{Action, OutputLanguage};
@@ -63,20 +63,24 @@ impl Recorder {
       let _ = out.flush();
     }
 
-    // Launch headed browser.
-    let viewport = self.options.viewport.map(|(w, h)| crate::options::ViewportConfig {
-      width: i64::from(w),
-      height: i64::from(h),
+    // Launch headed Chromium and apply the viewport at the context
+    // level — Playwright puts viewport on `BrowserContextOptions`,
+    // not on `LaunchOptions`.
+    let browser = chromium()
+      .launch(LaunchOptions {
+        headless: Some(false),
+        ..Default::default()
+      })
+      .await?;
+
+    let ctx_opts = self.options.viewport.map(|(w, h)| BrowserContextOptions {
+      viewport: ViewportOption::Size {
+        width: i64::from(w),
+        height: i64::from(h),
+      },
       ..Default::default()
     });
-    let browser = Browser::launch(LaunchOptions {
-      headless: false,
-      viewport,
-      ..Default::default()
-    })
-    .await?;
-
-    let ctx = browser.new_context(None);
+    let ctx = browser.new_context(ctx_opts);
     let page = Box::pin(ctx.new_page()).await?;
     page.goto(&self.options.url, None).await?;
 

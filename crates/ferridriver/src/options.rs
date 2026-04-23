@@ -1195,9 +1195,12 @@ pub struct GotoOptions {
   pub referer: Option<String>,
 }
 
-/// Which browser to use.
+/// Which browser product. Mirrors Playwright's three `BrowserType`
+/// instances exposed as `chromium`, `firefox`, and `webkit` on the
+/// top-level Playwright module
+/// (`/tmp/playwright/packages/playwright-core/src/client/browserType.ts`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum BrowserType {
+pub enum BrowserKind {
   /// Google Chrome / Chromium
   Chromium,
   /// Mozilla Firefox
@@ -1206,32 +1209,179 @@ pub enum BrowserType {
   WebKit,
 }
 
-/// Launch options for the browser -- matches Playwright's `browserType.launch()`.
-#[derive(Debug, Clone)]
+impl BrowserKind {
+  /// Playwright product name string: `"chromium"` / `"firefox"` /
+  /// `"webkit"`. Matches `BrowserType.name()` in
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserType.ts:60`.
+  #[must_use]
+  pub fn name(self) -> &'static str {
+    match self {
+      Self::Chromium => "chromium",
+      Self::Firefox => "firefox",
+      Self::WebKit => "webkit",
+    }
+  }
+
+  /// Default backend protocol for this product. Chromium runs over the
+  /// CDP pipe transport (lowest latency), Firefox over `WebDriver`
+  /// `BiDi`, and `WebKit` over the native macOS host IPC.
+  #[must_use]
+  pub fn default_backend(self) -> crate::backend::BackendKind {
+    match self {
+      Self::Chromium => crate::backend::BackendKind::CdpPipe,
+      Self::Firefox => crate::backend::BackendKind::Bidi,
+      #[cfg(target_os = "macos")]
+      Self::WebKit => crate::backend::BackendKind::WebKit,
+      #[cfg(not(target_os = "macos"))]
+      Self::WebKit => crate::backend::BackendKind::CdpPipe,
+    }
+  }
+}
+
+/// Public launch options bag. Mirrors Playwright's `LaunchOptions` —
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:15192`
+/// (the `browserType.launch(options)` parameter). Selection of which
+/// browser to launch happens via the `BrowserType` instance you call
+/// `.launch(...)` on (`chromium()`, `firefox()`, `webkit()`); this bag
+/// only carries the per-launch knobs.
+#[derive(Debug, Clone, Default)]
 pub struct LaunchOptions {
-  /// Backend protocol: `CdpPipe`, `CdpRaw`, `WebKit`, `Bidi`.
-  pub backend: crate::backend::BackendKind,
-  /// Which browser to launch. Inferred from backend if not set.
-  /// `Chromium` for CDP backends, `Firefox` for `BiDi`, `WebKit` for `WebKit`.
-  pub browser: Option<BrowserType>,
-  /// Run in headful mode (show browser window). Default: false (headless).
-  pub headless: bool,
-  /// Path to browser executable. Default: auto-detect based on `browser` type.
+  /// Run in headless mode. Defaults to `true` (Playwright default).
+  pub headless: Option<bool>,
+  /// Path to a browser executable to run instead of the bundled one.
   pub executable_path: Option<String>,
   /// Extra command-line arguments to pass to the browser.
   pub args: Vec<String>,
-  /// User data directory. Default: temp dir per launch.
-  pub user_data_dir: Option<String>,
-  /// WebSocket URL to connect to instead of launching.
-  pub ws_endpoint: Option<String>,
-  /// Auto-connect to running Chrome instance.
-  pub auto_connect: Option<AutoConnectOptions>,
-  /// Default viewport for new pages. None = use browser defaults.
-  pub viewport: Option<ViewportConfig>,
-  /// Slow down operations by this many ms (for debugging).
+  /// Browser distribution channel (e.g. `"chrome"`, `"chrome-beta"`,
+  /// `"msedge"`). Currently surface-only — the bundled-browser resolver
+  /// reads this when selecting between the headless shell and a
+  /// channel-specific Chrome install.
+  pub channel: Option<String>,
+  /// Environment variables to set when spawning the browser process.
+  pub env: Option<rustc_hash::FxHashMap<String, String>>,
+  /// Slow down operations by this many ms (debugging).
   pub slow_mo: Option<u64>,
-  /// Default navigation timeout in ms.
+  /// Maximum time to wait for the browser to start. `0` means no
+  /// timeout. Defaults to `30_000`.
   pub timeout: Option<u64>,
+  /// Directory to use for downloads (per-context override is on
+  /// [`BrowserContextOptions`] / persistent-context launch).
+  pub downloads_path: Option<std::path::PathBuf>,
+  /// If `true`, do not pass the bundled "default args"; if a list of
+  /// strings, filter out the named default args. Currently surface-only
+  /// — wired through to [`LaunchPlan`] for future filtering work.
+  pub ignore_default_args: Option<IgnoreDefaultArgs>,
+  /// Per-process signal handling — Playwright defaults all three to
+  /// `true` (close the browser on SIGHUP / SIGINT / SIGTERM).
+  pub handle_sighup: Option<bool>,
+  pub handle_sigint: Option<bool>,
+  pub handle_sigterm: Option<bool>,
+  /// Enable Chromium sandboxing. Defaults to `false`.
+  pub chromium_sandbox: Option<bool>,
+  /// Firefox `about:config` user-prefs map.
+  pub firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
+  /// Network proxy applied at the browser level.
+  pub proxy: Option<ProxyConfig>,
+  /// Tracing artifact directory.
+  pub traces_dir: Option<std::path::PathBuf>,
+}
+
+/// Playwright's `ignoreDefaultArgs?: boolean | string[]` shape.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum IgnoreDefaultArgs {
+  /// `true` — drop ALL default args.
+  All,
+  /// String list — drop just these.
+  Some(Vec<String>),
+}
+
+/// Connect-to-server options bag. Playwright:
+/// `browserType.connect(wsEndpoint, options)` —
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:15112`.
+#[derive(Debug, Clone, Default)]
+pub struct ConnectOptions {
+  pub headers: Option<rustc_hash::FxHashMap<String, String>>,
+  pub slow_mo: Option<u64>,
+  pub timeout: Option<u64>,
+  pub expose_network: Option<String>,
+}
+
+/// Connect-over-CDP options bag. Playwright:
+/// `browserType.connectOverCDP(endpointURL, options)` —
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:15072`.
+/// Chromium-only.
+#[derive(Debug, Clone, Default)]
+pub struct ConnectOverCdpOptions {
+  pub headers: Option<rustc_hash::FxHashMap<String, String>>,
+  pub slow_mo: Option<u64>,
+  pub timeout: Option<u64>,
+}
+
+/// Persistent-context launch options bag. Playwright:
+/// `browserType.launchPersistentContext(userDataDir, options)` —
+/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:15218`.
+/// Composed of the launch knobs plus a full
+/// [`BrowserContextOptions`] applied to the implicit default context.
+#[derive(Debug, Clone, Default)]
+pub struct LaunchPersistentContextOptions {
+  /// Per-launch knobs (mirror [`LaunchOptions`] exactly).
+  pub launch: LaunchOptions,
+  /// Per-context knobs applied to the default context that ships with
+  /// the persistent profile.
+  pub context: BrowserContextOptions,
+}
+
+/// Per-`BrowserType` instance configuration carried by `chromium()` /
+/// `firefox()` / `webkit()` factories. The single field that varies
+/// today is `transport` for Chromium — Playwright's `chromium` is
+/// always pipe-only; ferridriver lets callers override to the
+/// `WebSocket` transport (`CdpRaw`) for backend-coverage testing.
+#[derive(Debug, Clone, Default)]
+pub struct BrowserTypeOptions {
+  /// Transport override for Chromium. Ignored for Firefox / `WebKit`.
+  pub transport: Option<ChromiumTransport>,
+}
+
+/// Wire transport for the Chromium backend.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChromiumTransport {
+  /// CDP over Unix pipe (fd 3/4). Default — lowest latency.
+  Pipe,
+  /// CDP over WebSocket. Used by `connectOverCDP` and explicitly
+  /// selectable via `chromium({ transport: 'ws' })`.
+  Ws,
+}
+
+/// Internal launch plan. Carries fields that are NOT exposed on the
+/// public [`LaunchOptions`] (which mirrors Playwright verbatim) but
+/// that the runtime needs in order to launch / connect to the right
+/// backend. Constructed by `BrowserType` from the public options bag
+/// and the per-instance kind/transport, then handed to
+/// [`crate::state::BrowserState::with_plan`].
+#[derive(Debug, Clone)]
+pub struct LaunchPlan {
+  pub backend: crate::backend::BackendKind,
+  pub kind: BrowserKind,
+  pub headless: bool,
+  pub executable_path: Option<String>,
+  pub args: Vec<String>,
+  pub channel: Option<String>,
+  pub env: Option<rustc_hash::FxHashMap<String, String>>,
+  pub user_data_dir: Option<String>,
+  pub ws_endpoint: Option<String>,
+  pub auto_connect: Option<AutoConnectOptions>,
+  pub default_viewport: Option<ViewportConfig>,
+  pub slow_mo: Option<u64>,
+  pub timeout: Option<u64>,
+  pub downloads_path: Option<std::path::PathBuf>,
+  pub ignore_default_args: Option<IgnoreDefaultArgs>,
+  pub handle_sighup: Option<bool>,
+  pub handle_sigint: Option<bool>,
+  pub handle_sigterm: Option<bool>,
+  pub chromium_sandbox: Option<bool>,
+  pub firefox_user_prefs: Option<rustc_hash::FxHashMap<String, serde_json::Value>>,
+  pub proxy: Option<ProxyConfig>,
+  pub traces_dir: Option<std::path::PathBuf>,
 }
 
 #[derive(Debug, Clone)]
@@ -1240,20 +1390,68 @@ pub struct AutoConnectOptions {
   pub user_data_dir: Option<String>,
 }
 
-impl Default for LaunchOptions {
+impl Default for LaunchPlan {
   fn default() -> Self {
     Self {
       backend: crate::backend::BackendKind::CdpPipe,
-      browser: None,
+      kind: BrowserKind::Chromium,
       headless: true,
       executable_path: None,
       args: Vec::new(),
+      channel: None,
+      env: None,
       user_data_dir: None,
       ws_endpoint: None,
       auto_connect: None,
-      viewport: Some(ViewportConfig::default()),
+      default_viewport: Some(ViewportConfig::default()),
       slow_mo: None,
       timeout: None,
+      downloads_path: None,
+      ignore_default_args: None,
+      handle_sighup: None,
+      handle_sigint: None,
+      handle_sigterm: None,
+      chromium_sandbox: None,
+      firefox_user_prefs: None,
+      proxy: None,
+      traces_dir: None,
+    }
+  }
+}
+
+impl LaunchPlan {
+  /// Build a launch plan from the public Playwright-shaped
+  /// [`LaunchOptions`] plus the per-`BrowserType` selection
+  /// (`kind` + optional Chromium transport override).
+  #[must_use]
+  pub fn from_public(kind: BrowserKind, transport: Option<ChromiumTransport>, opts: LaunchOptions) -> Self {
+    let backend = match (kind, transport) {
+      (BrowserKind::Chromium, Some(ChromiumTransport::Ws)) => crate::backend::BackendKind::CdpRaw,
+      _ => kind.default_backend(),
+    };
+    Self {
+      backend,
+      kind,
+      headless: opts.headless.unwrap_or(true),
+      executable_path: opts.executable_path,
+      args: opts.args,
+      channel: opts.channel,
+      env: opts.env,
+      user_data_dir: None,
+      ws_endpoint: None,
+      auto_connect: None,
+      default_viewport: Some(ViewportConfig::default()),
+      slow_mo: opts.slow_mo,
+      timeout: opts.timeout,
+      downloads_path: opts.downloads_path,
+      ignore_default_args: opts.ignore_default_args,
+      handle_sighup: opts.handle_sighup,
+      handle_sigint: opts.handle_sigint,
+      handle_sigterm: opts.handle_sigterm,
+      chromium_sandbox: opts.chromium_sandbox,
+      firefox_user_prefs: opts.firefox_user_prefs,
+      proxy: opts.proxy,
+      traces_dir: opts.traces_dir,
     }
   }
 }

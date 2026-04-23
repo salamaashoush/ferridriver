@@ -5,8 +5,7 @@
 //! handler. For independent parallelism, use separate Browser instances or
 //! the cdp-pipe backend.
 
-use ferridriver::Browser;
-use ferridriver::backend::BackendKind;
+use ferridriver::chromium;
 use ferridriver::options::*;
 use std::time::Instant;
 
@@ -29,12 +28,7 @@ fn data_url(html: &str) -> String {
 async fn multi_page_automation() {
   let t0 = Instant::now();
 
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch");
+  let browser = chromium().launch(LaunchOptions::default()).await.expect("launch");
 
   // Create 3 pages with different content
   let page1 = browser.new_page().await.unwrap();

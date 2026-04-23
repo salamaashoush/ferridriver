@@ -1,5 +1,5 @@
-import { Browser } from "../index.js";
-const b = await Browser.launch({ backend: "cdp-pipe" });
+import { chromium } from "../index.js";
+const b = await chromium().launch();
 const p = await b.newPage();
 
 p.on("console", (...args: any[]) => {

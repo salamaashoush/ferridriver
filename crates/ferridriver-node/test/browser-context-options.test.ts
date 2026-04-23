@@ -8,7 +8,8 @@
 // `browser.newContext()` outright.
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { Browser } from "../index.js";
+import { type Browser } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 
 const BACKENDS: string[] = process.env.FERRIDRIVER_BACKEND
   ? [process.env.FERRIDRIVER_BACKEND]
@@ -19,7 +20,7 @@ for (const backend of BACKENDS) {
     let browser: Browser;
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
     });
 
     afterAll(async () => {

@@ -1,14 +1,14 @@
 #![allow(clippy::cast_lossless, clippy::unwrap_used)]
 //! Measure futex calls per operation.
 
-use ferridriver::Browser;
+use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
 use std::time::Instant;
 
 #[tokio::main(flavor = "multi_thread", worker_threads = 2)]
 async fn main() {
   ferridriver_test::logging::init(1);
-  let browser = Browser::launch(LaunchOptions::default()).await.unwrap();
+  let browser = chromium().launch(LaunchOptions::default()).await.unwrap();
   eprintln!("=== BROWSER LAUNCHED, starting test cycles ===");
 
   // Marker so strace -e write can see it

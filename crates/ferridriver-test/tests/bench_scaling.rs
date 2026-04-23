@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Instant;
 
 use ferridriver::Browser;
+use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
@@ -25,7 +26,7 @@ async fn diagnose_scaling() {
     let t = Instant::now();
     let mut handles = Vec::new();
     for _ in 0..n {
-      handles.push(tokio::spawn(Browser::launch(LaunchOptions::default())));
+      handles.push(tokio::spawn(chromium().launch(LaunchOptions::default())));
     }
     let mut browsers = Vec::new();
     for h in handles {
@@ -50,7 +51,7 @@ async fn diagnose_scaling() {
   for n in [1, 2, 4, 6] {
     let mut browsers = Vec::new();
     for _ in 0..n {
-      browsers.push(Browser::launch(LaunchOptions::default()).await.unwrap());
+      browsers.push(chromium().launch(LaunchOptions::default()).await.unwrap());
     }
 
     // Measure 10 test cycles on the first browser.
@@ -81,7 +82,7 @@ async fn diagnose_scaling() {
   for n in [1u32, 2, 4, 6] {
     let mut browsers: Vec<Arc<Browser>> = Vec::new();
     for _ in 0..n {
-      browsers.push(Arc::new(Browser::launch(LaunchOptions::default()).await.unwrap()));
+      browsers.push(Arc::new(chromium().launch(LaunchOptions::default()).await.unwrap()));
     }
 
     let total_tests = 20u32;
@@ -135,7 +136,7 @@ async fn diagnose_scaling() {
   // 4. Check if tokio runtime thread count matters.
   println!("  [4] Are we CPU-bound or I/O-bound?");
   {
-    let browser = Browser::launch(LaunchOptions::default()).await.unwrap();
+    let browser = chromium().launch(LaunchOptions::default()).await.unwrap();
     let iters = 10;
 
     // Measure with a CPU-heavy background task vs without.

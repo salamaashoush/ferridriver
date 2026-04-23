@@ -1,36 +1,18 @@
-//! Browser class -- NAPI binding for `ferridriver::Browser`.
+//! `Browser` -- NAPI binding for `ferridriver::Browser`.
+//!
+//! `Browser` instances are produced exclusively by the
+//! [`crate::browser_type::BrowserType`] factory (`chromium()` /
+//! `firefox()` / `webkit()` top-level functions). There is no
+//! `Browser.launch` / `Browser.connect` static — that mirrors
+//! Playwright's `chromium.launch()` / `firefox.launch()` /
+//! `webkit.launch()` entry points.
 
 use crate::error::IntoNapi;
 use crate::page::Page;
-use crate::types::LaunchOptions;
-use ferridriver::backend::BackendKind;
 use napi::Result;
 use napi_derive::napi;
 
-/// Parse browser type string to `BrowserType`.
-fn parse_browser_type(s: Option<&str>) -> Option<ferridriver::options::BrowserType> {
-  match s {
-    None => None,
-    Some("chromium" | "chrome") => Some(ferridriver::options::BrowserType::Chromium),
-    Some("firefox") => Some(ferridriver::options::BrowserType::Firefox),
-    Some("webkit" | "safari") => Some(ferridriver::options::BrowserType::WebKit),
-    Some(_) => None,
-  }
-}
-
-/// Parse backend string to `BackendKind`.
-fn parse_backend(s: Option<&str>) -> Result<BackendKind> {
-  match s {
-    None | Some("cdp-pipe" | "cdpPipe") => Ok(BackendKind::CdpPipe),
-    Some("cdp-raw" | "cdpRaw") => Ok(BackendKind::CdpRaw),
-    #[cfg(target_os = "macos")]
-    Some("webkit") => Ok(BackendKind::WebKit),
-    Some("bidi") => Ok(BackendKind::Bidi),
-    Some(other) => Err(napi::Error::from_reason(format!("Unknown backend: {other}"))),
-  }
-}
-
-/// Browser instance. Manages pages and browser lifecycle.
+/// Browser instance. Manages contexts, pages, and browser lifecycle.
 #[napi]
 pub struct Browser {
   inner: ferridriver::Browser,
@@ -45,46 +27,6 @@ impl Browser {
 
 #[napi]
 impl Browser {
-  /// Launch a new browser with default settings.
-  #[napi(factory)]
-  pub async fn launch(options: Option<LaunchOptions>) -> Result<Self> {
-    let opts = options.unwrap_or_default();
-
-    let browser_type = parse_browser_type(opts.browser.as_deref());
-    // If backend not explicitly set, infer from browser type
-    let backend = if let Some(b) = opts.backend.as_deref() {
-      parse_backend(Some(b))?
-    } else {
-      match browser_type {
-        Some(ferridriver::options::BrowserType::Firefox) => BackendKind::Bidi,
-        #[cfg(target_os = "macos")]
-        Some(ferridriver::options::BrowserType::WebKit) => BackendKind::WebKit,
-        _ => BackendKind::CdpPipe,
-      }
-    };
-    let launch_opts = ferridriver::options::LaunchOptions {
-      backend,
-      browser: browser_type,
-      headless: opts.headless.unwrap_or(true),
-      ws_endpoint: opts.ws_endpoint.clone(),
-      executable_path: opts.executable_path.clone(),
-      args: opts.args.clone().unwrap_or_default(),
-      ..Default::default()
-    };
-    let inner = Box::pin(ferridriver::Browser::launch(launch_opts)).await.into_napi()?;
-
-    Ok(Self { inner })
-  }
-
-  /// Connect to a running browser via WebSocket URL.
-  #[napi(factory)]
-  pub async fn connect(ws_endpoint: String) -> Result<Self> {
-    let inner = Box::pin(ferridriver::Browser::connect(&ws_endpoint))
-      .await
-      .into_napi()?;
-    Ok(Self { inner })
-  }
-
   /// Create a new page (tab).
   #[napi]
   pub async fn new_page(&self) -> Result<Page> {
@@ -181,7 +123,7 @@ impl Browser {
     Ok(contexts.into_iter().map(crate::context::BrowserContext::wrap).collect())
   }
 
-  /// Get the browser engine name.
+  /// Real product version string (e.g. `"HeadlessChrome/120.0.6099.109"`).
   #[napi(getter)]
   pub fn version(&self) -> String {
     self.inner.version().to_string()

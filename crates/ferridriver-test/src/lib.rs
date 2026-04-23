@@ -174,7 +174,7 @@ pub fn run_harness() {
     });
     let plan = discovery::collect_rust_tests(&config);
     let mut runner = runner::TestRunner::new(config, overrides);
-    runner.run(plan).await
+    Box::pin(runner.run(plan)).await
   });
 
   // Drain any still-running tasks so that child processes spawned via

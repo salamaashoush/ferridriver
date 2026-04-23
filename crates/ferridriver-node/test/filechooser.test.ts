@@ -15,7 +15,8 @@
  * intercepting `<input type=file>` clicks).
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { Browser, type Page } from "../index.js";
+import { type Browser, type Page } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 import { writeFileSync, mkdtempSync } from "node:fs";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
@@ -106,7 +107,7 @@ for (const backend of BACKENDS) {
     const tmpDir = mkdtempSync(join(tmpdir(), "ferridriver-fc-napi-"));
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
       page = await browser.newPage();
     }, 30_000);
 

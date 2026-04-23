@@ -20,7 +20,8 @@ import { describe, it, expect, beforeAll, afterAll } from "bun:test";
 import { existsSync, mkdtempSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { Browser, type BrowserContext } from "../index.js";
+import { type Browser, type BrowserContext } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 
 const BACKENDS = process.env.FERRIDRIVER_BACKEND
   ? [process.env.FERRIDRIVER_BACKEND]
@@ -32,7 +33,7 @@ for (const backend of BACKENDS) {
     let recordDir: string;
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
       recordDir = mkdtempSync(join(tmpdir(), "ferridriver-video-"));
     }, 30_000);
 

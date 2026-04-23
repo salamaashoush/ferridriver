@@ -7,9 +7,8 @@ fresh summary at the end of each block.
 
 1. `CLAUDE.md` — rules + lessons.
 2. `PLAYWRIGHT_COMPAT.md` — gap tracker. Tier 1 done. §3.1, §3.12,
-   §2.9, §2.11, §2.10, §2.12, §2.13, §2.14 landed earlier. §4.1
-   now at **18 of 28 fields** — the big BrowserContextOptions
-   refactor + coverage landed across three commits.
+   §2.9, §2.11, §2.10, §2.12, §2.13, §2.14, §4.1 (18/28 fields), and
+   now §2.15 landed.
 3. This file — block summary below.
 4. `docs/NEXT_SESSION.md` — next-block brief + prompt.
 
@@ -17,87 +16,80 @@ fresh summary at the end of each block.
 
 ## Landed this session
 
-### Commit 1 — `48cc794` feat(context): BrowserContextOptions bag
+### Single commit — `feat: BrowserType class (§2.15)`
 
-Struct + core wiring + NAPI + QuickJS + first cluster of 13 fields
-with Rule-9 tests. See the commit message for the full list; summary:
-`userAgent`, `locale`, `timezoneId`, `colorScheme`, `reducedMotion`,
-`forcedColors`, `contrast`, `viewport`, `deviceScaleFactor`,
-`hasTouch`, `isMobile`, `javaScriptEnabled`, `geolocation` +
-`permissions`, `extraHTTPHeaders`, `offline`, `recordVideo` folded
-in.
+`Browser::launch` / `Browser::connect` are gone. The Playwright-shaped
+`BrowserType` factory is the sole entry point in all three layers
+(Rust core / NAPI / QuickJS). Three top-level factories — `chromium`,
+`firefox`, `webkit` — mirror Playwright's
+`import { chromium, firefox, webkit } from 'playwright'`.
 
-CDP fixes that rode along: `Browser.grantPermissions` now ships
-`browserContextId` (without it permissions silently scoped to
-default context only); `Emulation.setTouchEmulationEnabled` passes
-`maxTouchPoints: 5`.
+#### Public surface (matches Playwright verbatim)
 
-### Commit 2 — `3ec1dc9` refactor: single apply_context_options pathway
+```rust
+use ferridriver::{chromium, firefox, webkit};
+use ferridriver::options::{LaunchOptions, ConnectOverCdpOptions, LaunchPersistentContextOptions};
 
-Deleted 13 Java-bean-style page setters (`set_user_agent`,
-`set_locale`, `set_timezone`, `set_geolocation`, `set_network_state`,
-`set_javascript_enabled`, `set_bypass_csp`,
-`set_ignore_certificate_errors`, `set_download_behavior`,
-`set_http_credentials`, `set_service_workers_blocked`,
-`set_focus_emulation_enabled`, `set_storage_state`, `set_viewport`).
+let browser = chromium().launch(LaunchOptions::default()).await?;
+let firefox_browser = firefox().launch(LaunchOptions::default()).await?;
+let attached = chromium()
+  .connect_over_cdp("ws://127.0.0.1:9222/...", ConnectOverCdpOptions::default())
+  .await?;
+let persistent = chromium()
+  .launch_persistent_context(Path::new("/tmp/profile"), LaunchPersistentContextOptions::default())
+  .await?;
+```
 
-One method on each layer — `Page::apply_context_options(opts)` →
-`AnyPage::apply_context_options(opts)` → backend's single
-`apply_context_options` which inlines every protocol command via
-`tokio::join!` + `OptionFuture` per field, aggregating failures
-into one labelled error.
+`chromium({ transport: 'ws' })` (NAPI/QuickJS) and
+`BrowserType::chromium_with(BrowserTypeOptions { transport: Some(Ws) })`
+(Rust) drive the CDP-WebSocket transport instead of the pipe default —
+ferridriver's only deviation from Playwright's pipe-only `chromium`,
+required to keep the `cdp-raw` backend coverage matrix usable.
 
-ContextRef public setters (`setGeolocation`, `setOffline`,
-`setExtraHTTPHeaders`, `grantPermissions`, `clearPermissions`) now
-go through a single `mutate_options` helper that mutates the stored
-bag on `BrowserState::context_options` and re-applies to every open
-page. Matches Playwright's "the bag is the source of truth".
+#### Public `LaunchOptions` is now Playwright-shaped
 
-Worker/BDD/NAPI-test/QuickJS callers migrated to build options bags
-and call apply once.
+Dropped: `backend`, `browser`, `viewport`, `user_data_dir`,
+`ws_endpoint`, `auto_connect`. Those are now internal — the
+`crate::options::LaunchPlan` struct (consumed only by
+`BrowserState::with_plan`) carries them. Kept (Playwright fields):
+`headless`, `executable_path`, `args`, `channel`, `env`, `slow_mo`,
+`timeout`, `downloads_path`, `ignore_default_args`,
+`handle_sighup`, `handle_sigint`, `handle_sigterm`,
+`chromium_sandbox`, `firefox_user_prefs`, `proxy`, `traces_dir`.
 
-Remaining `set_*` methods anywhere in the codebase are direct
-Playwright JS API names (`setContent`, `setViewportSize`,
-`setExtraHTTPHeaders`, `setDefaultTimeout`,
-`setDefaultNavigationTimeout`, `setInputFiles`, `setChecked`,
-`setGeolocation`, `setOffline`) or wire-protocol command wrappers
-(`set_cookie` → `Network.setCookie`).
+Viewport now lives where Playwright puts it: on
+`BrowserContextOptions::viewport`. `recorder.rs` was the only caller
+that used to pass viewport via `LaunchOptions`; it now constructs a
+`BrowserContextOptions` and passes it to `browser.new_context(...)`.
 
-### Commit 3 — `e0b3d51` feat(context): second wave (bypassCSP / serviceWorkers / screen / baseURL / storageState / proxy)
+#### Persistent-context wiring
 
-Six more fields, Rule-9 tested on every supported backend:
+- `BrowserState::persistent_context: bool` set by
+  `launch_persistent_context`. `ContextRef::close` reads it and calls
+  `state.shutdown()` so closing the persistent default context
+  terminates the underlying browser too — Playwright's contract at
+  `types.d.ts:15199`.
+- `CdpBrowser::launch_with_flags_in_dir` (pipe + ws) accepts a
+  borrowed `&Path` for `--user-data-dir` so the dir survives across
+  re-launches. `state.rs::ensure_instance` switches between the
+  TempDir and explicit-path variants based on `BrowserState.user_data_dir`.
 
-- **`bypassCSP`** — CDP `Page.setBypassCSP`. Test serves a
-  `Content-Security-Policy: script-src 'none'` HTML and asserts
-  `addInitScript` executes only with bypass. BiDi skipped.
-- **`serviceWorkers: 'block'`** — cross-backend init-script
-  injection (Playwright's exact pattern at
-  `browserContext.ts:168`).
-- **`screen`** — CDP `setDeviceMetricsOverride` with `screenWidth`/
-  `screenHeight`. Test asserts `window.screen.{width,height}`.
-  CDP only.
-- **`baseURL`** — new `options::construct_url_with_base`, applied
-  in `Page::goto` before dispatch. Mirrors Playwright's
-  `constructURLBasedOnBaseURL` at
-  `/tmp/playwright/packages/isomorphic/urlMatch.ts:253`.
-  Works on every backend.
-- **`storageState: string | { cookies, origins }`** — cookies +
-  localStorage hydration on the first page of a context, tracked
-  per-composite-key via
-  `BrowserState::claim_storage_state_hydration`. `Path(PathBuf)`
-  reads JSON from disk; `Inline(Value)` consumes directly. Works
-  on every backend (WebKit cookie assertion is CDP-only due to
-  stricter `secure`+loopback validation).
-- **`proxy: { server, bypass? }`** — per-context via
-  `Target.createBrowserContext({ proxyServer, proxyBypassList })`
-  on CDP and `browser.createUserContext({ proxy })` on BiDi with
-  WebDriver capability decomposition (`proxyType: 'manual',
-  httpProxy, sslProxy, socksProxy, socksVersion, noProxy`). Test
-  uses `bypass: '<-loopback>'` so 127.0.0.1 routes through the
-  proxy (matches Playwright's `chromium.ts::proxyBypassRules`).
-  BiDi skipped (Firefox 137+ required).
+#### Migration scope
 
-### Baseline after this session (must stay green)
+| layer | files | sites |
+|---|---|---|
+| Rust tests / runners / MCP / codegen | ~30 | every `Browser::launch` / `Browser::connect` site |
+| TypeScript bun tests | ~26 | every `Browser.launch({ backend })` site |
+| MCP server | 2 (`server.rs`, `config.rs`) | `BrowserState::with_options` -> `with_plan` |
+| Test runner / fixture | 2 (`runner.rs`, `fixture.rs`) | `build_launch_options` -> `build_launch_plan` |
+
+Bun tests gained a tiny `_helpers.ts` with `launchForBackend(backend)`
+that maps `cdp-pipe`→`chromium().launch()`,
+`cdp-raw`→`chromium({transport:'ws'}).launch()`,
+`bidi`→`firefox().launch()`, `webkit`→`webkit().launch()` so the
+existing per-backend test matrix keeps working unchanged.
+
+### Baseline (must stay green)
 
 ```
 cargo clippy --workspace --all-targets -- -D warnings            # clean
@@ -105,49 +97,33 @@ cargo test -p ferridriver --lib                                   # 125 pass
 cargo test -p ferridriver-script --lib                            # 13 pass
 cargo test -p ferridriver-mcp --lib                               # 38 pass
 cd crates/ferridriver-node && bun run build:debug
-cd <repo root> && bun test                                        # 859 pass (was 871; 12 non-Playwright-public setter tests deleted in refactor)
+cd <repo root> && bun test                                        # 859 pass
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1
-# cdp-pipe 159, cdp-raw 159, bidi 154, webkit 155  (+19 per backend vs pre-§4.1)
+# cdp-pipe 164, cdp-raw 164, bidi 159, webkit 161  (+5 §2.15 tests on each chromium-capable backend)
 ```
 
-## §4.1 coverage matrix (now)
-
-18 of 28 Playwright `BrowserContextOptions` fields have
-apply_context_options plumbing + Rule-9 tests:
-
-Applied: `acceptDownloads`, `baseURL`, `bypassCSP`, `colorScheme`,
-`contrast`, `deviceScaleFactor`, `extraHTTPHeaders`, `forcedColors`,
-`geolocation`, `hasTouch`, `httpCredentials` (origin scoping),
-`ignoreHTTPSErrors`, `isMobile`, `javaScriptEnabled`, `locale`,
-`offline`, `permissions`, `proxy`, `recordVideo`, `reducedMotion`,
-`screen`, `serviceWorkers`, `storageState` (cookies+localStorage),
-`timezoneId`, `userAgent`, `viewport`.
-
-Deferred (documented in PLAYWRIGHT_COMPAT.md §4.1 + "Section B"):
-
-- **`recordHar`** — blocks on **§2.6** (HAR writer).
-- **`clientCertificates`** — needs TLS-intercepting proxy (major).
-- **`httpCredentials.send` policy** — needs APIRequestContext
-  preemptive-header wiring.
-- **`strictSelectors`** — needs strict-mode counting threaded
-  through every backend selector path.
+CI note: a stale-Chrome-process leak from earlier failed runs can
+bind random high ports (e.g. 65531) and make
+`navigation_response::test_goto_network_failure` falsely pass on a
+"refused" goto. Kill leftover `chrome-headless-shell` processes
+between runs if you hit that.
 
 ## Next priorities
 
-See `docs/NEXT_SESSION.md` for the full next-session prompt. Top pick
-is **§2.15 BrowserType class** — extracts `Browser::launch` /
-`Browser::connect` off `Browser`, introduces `BrowserType` with
-`launch` / `connect` / `connectOverCDP` / `launchPersistentContext`.
-Matches Playwright's public JS entry point (`chromium.launch()`
-rather than `Browser.launch({ browser: 'chromium' })`).
+See `docs/NEXT_SESSION.md` for the full next-session prompt.
 
-Alternative picks:
+Top picks (in rough order of unblock-value):
 
-- Close the four §4.1 deferred fields (one per dedicated session).
-- §2.6 HAR recording (unblocks §4.1 `recordHar`).
-- §2.3 Tracing (unblocks §4.5 `context.tracing`).
-- §3.17 Auto-waiting deadline parity.
+1. **§2.6 HAR recording** — unblocks `BrowserContextOptions::recordHar`
+   (one of the four §4.1 deferred fields).
+2. **§2.3 Tracing** — unblocks `context.tracing` (§4.5).
+3. **§4.1 closing fields**: `recordHar`, `clientCertificates`,
+   `httpCredentials.send`, `strictSelectors` — each its own session.
+4. **§3.17 Auto-waiting deadline parity** — small surface, fully
+   independent.
+5. **`launchServer` / BrowserServer protocol** — ferridriver has no
+   equivalent today; needed only for distributed-test workflows.
 
 ## Carried-forward backend gaps (real protocol limits)
 
@@ -163,27 +139,19 @@ Alternative picks:
   download intercept, console args+location, WebError stack frames,
   screencast, multiple browser contexts.
 
-## Key source locations (§4.1)
+## Key source locations (§2.15)
 
 | area | path |
 |---|---|
-| `BrowserContextOptions` struct | `crates/ferridriver/src/options.rs::BrowserContextOptions` |
-| `construct_url_with_base` | `crates/ferridriver/src/options.rs::construct_url_with_base` |
-| `context_options` registry | `crates/ferridriver/src/state.rs::{context_options, set_context_options, get_context_options}` |
-| `storage_state_hydrated` | `crates/ferridriver/src/state.rs::claim_storage_state_hydration` |
-| `Browser::new_context(opts)` | `crates/ferridriver/src/browser.rs` |
-| `apply_context_options` (context side) | `crates/ferridriver/src/context.rs::apply_context_options` |
-| `ContextRef::mutate_options` | `crates/ferridriver/src/context.rs::mutate_options` |
-| `AnyPage::apply_context_options` | `crates/ferridriver/src/backend/mod.rs` |
-| CDP impl | `crates/ferridriver/src/backend/cdp/mod.rs::apply_context_options` |
-| BiDi impl | `crates/ferridriver/src/backend/bidi/page.rs::apply_context_options` |
-| WebKit impl | `crates/ferridriver/src/backend/webkit/mod.rs::apply_context_options` |
-| BiDi proxy decomposition | `crates/ferridriver/src/backend/bidi/browser.rs::parse_bidi_proxy` |
-| NAPI `Browser.newContext(options)` | `crates/ferridriver-node/src/browser.rs::new_context` |
-| NAPI options struct | `crates/ferridriver-node/src/context.rs::NapiBrowserContextOptions` |
-| QuickJS `browser` global | `crates/ferridriver-script/src/bindings/browser.rs::BrowserJs` |
-| QuickJS install | `crates/ferridriver-script/src/bindings/mod.rs::install_browser` |
-| MCP run_script wiring | `crates/ferridriver-mcp/src/tools/script.rs` |
-| Rust integration tests | `crates/ferridriver-cli/tests/backends_support/browser_context_options.rs` (17 tests) |
-| NAPI tests | `crates/ferridriver-node/test/browser-context-options.test.ts` (9 tests × 2 backends) |
+| `BrowserType` core | `crates/ferridriver/src/browser_type.rs` |
+| Public `LaunchOptions` / `ConnectOptions` / `LaunchPersistentContextOptions` | `crates/ferridriver/src/options.rs` |
+| Internal `LaunchPlan` | `crates/ferridriver/src/options.rs::LaunchPlan` |
+| `BrowserState::with_plan` | `crates/ferridriver/src/state.rs` |
+| `persistent_context` flag + `ContextRef::close` shutdown | `crates/ferridriver/src/state.rs`, `crates/ferridriver/src/context.rs` |
+| CDP `launch_with_flags_in_dir` | `crates/ferridriver/src/backend/cdp/mod.rs` |
+| NAPI `BrowserType` + `chromium`/`firefox`/`webkit` exports | `crates/ferridriver-node/src/browser_type.rs` |
+| NAPI `LaunchOptions` shape | `crates/ferridriver-node/src/types.rs` |
+| QuickJS `BrowserTypeJs` + `install_browser_type` | `crates/ferridriver-script/src/bindings/browser_type.rs` |
+| Rust integration tests | `crates/ferridriver-cli/tests/backends_support/browser_type.rs` (6 tests) |
+| NAPI test helper | `crates/ferridriver-node/test/_helpers.ts::launchForBackend` |
 | Rules + lessons | `CLAUDE.md` |

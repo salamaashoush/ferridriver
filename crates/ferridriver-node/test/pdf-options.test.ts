@@ -26,7 +26,8 @@
  * backend (cdp-pipe + cdp-raw only).
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { Browser, type Page } from "../index.js";
+import { type Browser, type Page } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 import { createServer, type Server } from "node:http";
 import { mkdtempSync, rmSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
@@ -86,7 +87,7 @@ for (const backend of BACKENDS) {
     let page: Page;
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
       page = await browser.newPageWithUrl(testUrl);
     });
 

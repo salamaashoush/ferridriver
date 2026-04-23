@@ -8,7 +8,7 @@
  * 2. Multiple sequential CDP commands - to see if NAPI overhead compounds
  * 3. A pure NAPI call with no CDP (create a locator - synchronous, no browser)
  */
-import { Browser } from "../index.js";
+import { chromium } from "../index.js";
 
 const RUNS = 500;
 
@@ -38,7 +38,7 @@ async function medianAsync(fn: () => Promise<any>): Promise<number> {
 }
 
 async function main() {
-  const browser = await Browser.launch({ backend: "cdp-pipe" });
+  const browser = await chromium().launch();
   const page = await browser.newPageWithUrl("https://example.com");
 
   console.log("=== SYNCHRONOUS NAPI CALLS (no CDP, pure NAPI boundary cost) ===\n");

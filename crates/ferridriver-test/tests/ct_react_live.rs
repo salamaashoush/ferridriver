@@ -16,7 +16,8 @@ async fn test_react_counter_live() {
     },
   };
 
-  let browser = ferridriver::Browser::launch(ferridriver::options::LaunchOptions::default())
+  let browser = ferridriver::chromium()
+    .launch(ferridriver::options::LaunchOptions::default())
     .await
     .unwrap();
   let page = browser.new_page_with_url(&url).await.unwrap();

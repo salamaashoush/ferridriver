@@ -975,10 +975,11 @@ connect_url = "ws://prod-browser:9222/devtools"
     let config: Arc<dyn McpServerConfig> = Arc::new(config);
 
     // Simulate what McpServer::with_options does
-    let mut state = BrowserState::with_options(
+    let mut state = BrowserState::with_plan(
       ConnectMode::Launch,
-      ferridriver::options::LaunchOptions {
+      ferridriver::options::LaunchPlan {
         backend: BackendKind::CdpPipe,
+        kind: ferridriver::options::BrowserKind::Chromium,
         headless: false,
         args: config.chrome_args(),
         ..Default::default()

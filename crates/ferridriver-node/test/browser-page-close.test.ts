@@ -13,7 +13,8 @@
  * — no placeholder strings. See feedback_no_stubs_all_backends.md.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { Browser } from "../index.js";
+import { type Browser } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 
 const BACKENDS: string[] = process.env.FERRIDRIVER_BACKEND
   ? [process.env.FERRIDRIVER_BACKEND]
@@ -24,7 +25,7 @@ for (const backend of BACKENDS) {
     let browser: Browser;
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
     });
 
     afterAll(async () => {
@@ -87,7 +88,7 @@ for (const backend of BACKENDS) {
     // ── 3.20 Browser.close({ reason }) ──────────────────────────────────
 
     it("browser.close({ reason }) is accepted and closes the browser", async () => {
-      const short = await Browser.launch({ backend });
+      const short = await launchForBackend(backend);
       const v = short.version;
       expect(v).toContain("/");
       await short.close({ reason: "test cleanup" });

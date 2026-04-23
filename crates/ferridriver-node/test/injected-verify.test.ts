@@ -3,7 +3,8 @@
  * Tests every function in the injected script against real browser behavior.
  */
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
-import { Browser } from "../index.js";
+import { type Browser } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 
 // When FERRIDRIVER_BACKEND is set, run only that backend for parallel execution.
 const BACKENDS = process.env.FERRIDRIVER_BACKEND
@@ -53,7 +54,7 @@ for (const backend of BACKENDS) {
 </body></html>`;
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
       page = await browser.newPage();
       // Use data URL instead of setContent to ensure addScriptToEvaluateOnNewDocument fires
       const dataUrl = `data:text/html,${encodeURIComponent(HTML)}`;

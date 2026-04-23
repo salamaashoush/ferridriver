@@ -16,7 +16,8 @@ use rustc_hash::FxHashMap;
 
 use ferridriver::Browser;
 use ferridriver::backend::BackendKind;
-use ferridriver::options::LaunchOptions;
+use ferridriver::options::{BrowserKind, LaunchPlan};
+use ferridriver::state::{BrowserState, ConnectMode};
 
 use crate::config::BrowserConfig;
 
@@ -338,7 +339,13 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
     "cdp-raw" => BackendKind::CdpRaw,
     #[cfg(target_os = "macos")]
     "webkit" => BackendKind::WebKit,
+    "bidi" => BackendKind::Bidi,
     _ => BackendKind::CdpPipe,
+  };
+  let kind = match browser_config.browser.as_str() {
+    "firefox" => BrowserKind::Firefox,
+    "webkit" => BrowserKind::WebKit,
+    _ => BrowserKind::Chromium,
   };
   let headless = browser_config.headless;
   let executable_path = browser_config.executable_path.clone();
@@ -364,16 +371,20 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
         let extra_args = args.clone();
         let vp = viewport.clone();
         Box::pin(async move {
-          let browser = Browser::launch(LaunchOptions {
+          let plan = LaunchPlan {
             backend,
+            kind,
             headless,
             executable_path: exec,
             args: extra_args,
-            viewport: vp,
+            default_viewport: vp,
             ..Default::default()
-          })
-          .await
-          .map_err(|e| format!("failed to launch browser: {e}"))?;
+          };
+          let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
+          Box::pin(state.ensure_browser())
+            .await
+            .map_err(|e| format!("failed to launch browser: {e}"))?;
+          let browser = Browser::from_state(state);
           Ok(Arc::new(browser) as ArcValue)
         })
       }),

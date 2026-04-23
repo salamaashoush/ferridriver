@@ -14,7 +14,8 @@
  * `(level, text)` through our IPC).
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { Browser, type Page } from "../index.js";
+import { type Browser, type Page } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 
 const BACKENDS = process.env.FERRIDRIVER_BACKEND
   ? [process.env.FERRIDRIVER_BACKEND]
@@ -35,7 +36,7 @@ for (const backend of BACKENDS) {
     let page: Page;
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
       page = await browser.newPage();
       await page.goto("data:text/html,<h1>x</h1>", null);
     }, 30_000);

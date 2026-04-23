@@ -2384,6 +2384,16 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::browser_context_options::test_context_options_storage_state);
   run!(backends_support::browser_context_options::test_context_options_proxy);
 
+  // §2.15 BrowserType — script-side `chromium`/`firefox`/`webkit`
+  // factory tests. Each call spins up a SECONDARY browser independent
+  // of the host backend.
+  run!(backends_support::browser_type::test_browser_type_name);
+  run!(backends_support::browser_type::test_browser_type_executable_path);
+  run!(backends_support::browser_type::test_browser_type_chromium_launch);
+  run!(backends_support::browser_type::test_browser_type_chromium_transport_ws);
+  run!(backends_support::browser_type::test_browser_type_connect_over_cdp_chromium_only);
+  run!(backends_support::browser_type::test_browser_type_launch_persistent_context);
+
   // Multi-page last (changes session state)
   run!(test_new_page);
 

@@ -1,15 +1,16 @@
-//! ferridriver -- High-performance browser automation library.
+//! ferridriver -- Rust-based browser automation library.
 //!
-//! Provides a Playwright-compatible API for browser automation across
-//! multiple backends (CDP WebSocket, CDP Pipes, native `WebKit`).
+//! Provides a Playwright-shaped API for browser automation across
+//! multiple backends (CDP WebSocket, CDP Pipes, native `WebKit`,
+//! `WebDriver` `BiDi`).
 //!
 //! # Quick Start
 //!
 //! ```ignore
-//! use ferridriver::{Browser, Page};
-//! use ferridriver::options::RoleOptions;
+//! use ferridriver::{chromium, Page};
+//! use ferridriver::options::{LaunchOptions, RoleOptions};
 //!
-//! let browser = Browser::launch().await?;
+//! let browser = chromium().launch(LaunchOptions::default()).await?;
 //! let page = browser.new_page_with_url("https://example.com").await?;
 //!
 //! // Playwright-style locators
@@ -23,6 +24,7 @@
 
 // ── Public API (Playwright-compatible) ──
 pub mod browser;
+pub mod browser_type;
 pub mod console_message;
 pub mod context;
 pub mod dialog;
@@ -43,6 +45,7 @@ pub mod url_matcher;
 pub mod web_error;
 
 pub use browser::Browser;
+pub use browser_type::{BrowserType, chromium, firefox, webkit};
 pub use context::{BrowserContext, ContextRef};
 pub use element_handle::{BoundingBox, ElementHandle, ElementState};
 pub use error::{FerriError, Result};

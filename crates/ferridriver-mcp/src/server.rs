@@ -341,10 +341,17 @@ impl McpServer {
     headless: bool,
     config: Arc<dyn McpServerConfig>,
   ) -> Self {
-    let mut browser_state = BrowserState::with_options(
+    let kind = match backend {
+      BackendKind::Bidi => ferridriver::options::BrowserKind::Firefox,
+      #[cfg(target_os = "macos")]
+      BackendKind::WebKit => ferridriver::options::BrowserKind::WebKit,
+      _ => ferridriver::options::BrowserKind::Chromium,
+    };
+    let mut browser_state = BrowserState::with_plan(
       mode,
-      ferridriver::options::LaunchOptions {
+      ferridriver::options::LaunchPlan {
         backend,
+        kind,
         headless,
         args: config.chrome_args(),
         ..Default::default()

@@ -1,4 +1,5 @@
-import { Browser } from "../index.js";
+import { type Browser } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 
 const RUNS = 50;
 async function med(fn: () => Promise<any>): Promise<number> {
@@ -14,7 +15,7 @@ async function med(fn: () => Promise<any>): Promise<number> {
 }
 
 async function bench(backend: string) {
-  const b = await Browser.launch({ backend });
+  const b = await launchForBackend(backend);
   const p = await b.newPageWithUrl("https://example.com");
   
   // Single CDP call baseline

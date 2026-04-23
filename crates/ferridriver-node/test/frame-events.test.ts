@@ -3,7 +3,8 @@
  * Verifies Playwright-compatible behavior across all backends.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { Browser, type Page } from "../index.js";
+import { type Browser, type Page } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 import { createServer, type Server } from "node:http";
 
 // Local test server -- guaranteed 200 responses, no external network dependency.
@@ -44,7 +45,7 @@ for (const backend of CDP_BACKENDS) {
     let page: Page;
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
       page = await browser.newPage();
     }, 30_000);
 
@@ -282,7 +283,7 @@ for (const backend of CDP_BACKENDS) {
     let page: Page;
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
       page = await browser.newPage();
     }, 30_000);
 
@@ -322,7 +323,7 @@ describe(`Events - on/once/waitForEvent (${backend})`, () => {
   let page: Page;
 
   beforeAll(async () => {
-    browser = await Browser.launch({ backend });
+    browser = await launchForBackend(backend);
     page = await browser.newPage();
   });
 

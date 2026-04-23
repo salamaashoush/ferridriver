@@ -17,7 +17,8 @@ use crate::worker::{Worker, WorkerTestResult};
 
 use ferridriver::Browser;
 use ferridriver::backend::BackendKind;
-use ferridriver::options::LaunchOptions;
+use ferridriver::options::{BrowserKind, LaunchPlan};
+use ferridriver::state::{BrowserState, ConnectMode};
 
 /// Top-level test runner.
 pub struct TestRunner {
@@ -62,7 +63,7 @@ impl TestRunner {
   pub async fn run(&mut self, plan: TestPlan) -> i32 {
     // ── Multi-project path ──
     if !self.config.projects.is_empty() {
-      return self.run_projects(plan).await;
+      return Box::pin(self.run_projects(plan)).await;
     }
 
     // ── Single-project path ──
@@ -477,7 +478,7 @@ impl TestRunner {
     let (result_tx, mut result_rx) = mpsc::channel::<WorkerTestResult>(256);
 
     let mut worker_handles = Vec::new();
-    let launch_opts = build_launch_options(&self.config.browser);
+    let launch_plan = build_launch_plan(&self.config.browser);
 
     for worker_id in 0..num_workers {
       let worker = Worker::new(worker_id, Arc::clone(&self.config), event_bus.clone());
@@ -485,14 +486,14 @@ impl TestRunner {
       let tx = result_tx.clone();
       let custom_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Worker);
       let shared = self.shared_browser.clone();
-      let opts = launch_opts.clone();
+      let plan = launch_plan.clone();
 
       let handle = tokio::spawn(async move {
         // Use shared browser (watch mode) or launch a new one per worker.
         let browser = if let Some(b) = shared {
           b
         } else {
-          match Browser::launch(opts).await {
+          match launch_with_plan(plan).await {
             Ok(b) => Arc::new(b),
             Err(e) => {
               tracing::error!(target: "ferridriver::worker", "worker {worker_id}: browser launch failed: {e}");
@@ -646,8 +647,8 @@ impl TestRunner {
     use crate::watch::FileWatcher;
 
     // Launch browser once — reuse across all watch cycles.
-    let launch_opts = build_launch_options(&self.config.browser);
-    let browser = match Browser::launch(launch_opts).await {
+    let launch_plan = build_launch_plan(&self.config.browser);
+    let browser = match launch_with_plan(launch_plan).await {
       Ok(b) => Arc::new(b),
       Err(e) => {
         eprintln!("Failed to launch browser: {e}");
@@ -678,7 +679,7 @@ impl TestRunner {
       Err(e) => {
         // Non-TTY fallback: file changes only, no keyboard, normal terminal output.
         tracing::debug!(target: "ferridriver::watch", "TUI unavailable ({e}), running non-interactive");
-        self.run_watch_headless(&watcher, &plan_factory).await;
+        Box::pin(self.run_watch_headless(&watcher, &plan_factory)).await;
       },
     }
 
@@ -836,7 +837,7 @@ impl TestRunner {
   {
     // Initial run.
     let plan = plan_factory(None);
-    let _ = self.run(plan).await;
+    let _ = Box::pin(self.run(plan)).await;
     eprintln!("\n\x1b[2mWatching for changes (non-interactive)...\x1b[0m\n");
 
     loop {
@@ -857,7 +858,7 @@ impl TestRunner {
         continue;
       }
 
-      let _ = self.run(plan).await;
+      let _ = Box::pin(self.run(plan)).await;
       eprintln!("\n\x1b[2mWatching for changes (non-interactive)...\x1b[0m\n");
     }
   }
@@ -984,7 +985,7 @@ fn filter_plan_for_project(plan: &mut TestPlan, config: &TestConfig, project: &P
   plan.total_tests = plan.suites.iter().map(|s| s.tests.len()).sum();
 }
 
-fn build_launch_options(browser_config: &crate::config::BrowserConfig) -> LaunchOptions {
+fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPlan {
   // BrowserConfig is already normalized (browser↔backend consistent).
   let backend = match browser_config.backend.as_str() {
     "cdp-raw" => BackendKind::CdpRaw,
@@ -994,11 +995,10 @@ fn build_launch_options(browser_config: &crate::config::BrowserConfig) -> Launch
     _ => BackendKind::CdpPipe,
   };
 
-  let browser_type = match browser_config.browser.as_str() {
-    "firefox" => Some(ferridriver::options::BrowserType::Firefox),
-    "webkit" => Some(ferridriver::options::BrowserType::WebKit),
-    "chromium" => Some(ferridriver::options::BrowserType::Chromium),
-    _ => None,
+  let kind = match browser_config.browser.as_str() {
+    "firefox" => BrowserKind::Firefox,
+    "webkit" => BrowserKind::WebKit,
+    _ => BrowserKind::Chromium,
   };
 
   let mut args = browser_config.args.clone();
@@ -1014,13 +1014,13 @@ fn build_launch_options(browser_config: &crate::config::BrowserConfig) -> Launch
     args.push("--ignore-certificate-errors".to_string());
   }
 
-  LaunchOptions {
+  LaunchPlan {
     backend,
-    browser: browser_type,
+    kind,
     headless: browser_config.headless,
     executable_path: browser_config.executable_path.clone(),
     args,
-    viewport: browser_config
+    default_viewport: browser_config
       .viewport
       .as_ref()
       .map(|v| ferridriver::options::ViewportConfig {
@@ -1030,4 +1030,13 @@ fn build_launch_options(browser_config: &crate::config::BrowserConfig) -> Launch
       }),
     ..Default::default()
   }
+}
+
+/// Launch a browser using the runner's internal `LaunchPlan`. Wraps
+/// `BrowserState::with_plan` + `Browser::from_state` so callers don't
+/// need to repeat the handshake-await dance.
+async fn launch_with_plan(plan: LaunchPlan) -> Result<Browser, String> {
+  let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
+  Box::pin(state.ensure_browser()).await?;
+  Ok(Browser::from_state(state))
 }

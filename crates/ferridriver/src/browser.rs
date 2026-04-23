@@ -1,27 +1,23 @@
-//! Browser management -- mirrors Playwright's Browser interface.
+//! Browser management -- mirrors Playwright's `Browser` interface.
+//!
+//! `Browser` instances are produced by the [`crate::BrowserType`]
+//! factory ([`crate::chromium`] / [`crate::firefox`] /
+//! [`crate::webkit`]) — there is no `Browser::launch` /
+//! `Browser::connect` shortcut. This matches Playwright's
+//! `chromium.launch()` / `firefox.launch()` / `webkit.launch()` entry
+//! points.
 //!
 //! ```ignore
-//! use ferridriver::{Browser, options::LaunchOptions};
+//! use ferridriver::{chromium, options::LaunchOptions};
 //!
-//! // Simple launch (headless, auto-detect Chrome, cdp-pipe backend)
-//! let browser = Browser::launch(LaunchOptions::default()).await?;
-//!
-//! // Headful with custom args
-//! let browser = Browser::launch(LaunchOptions {
-//!     headless: false,
-//!     args: vec!["--window-size=1920,1080".into()],
-//!     ..Default::default()
-//! }).await?;
-//!
-//! // Connect to running browser
-//! let browser = Browser::connect("ws://localhost:9222/...").await?;
+//! let browser = chromium().launch(LaunchOptions::default()).await?;
+//! let page = browser.new_page_with_url("https://example.com").await?;
 //! ```
 
 use crate::context::ContextRef;
 use crate::error::Result;
-use crate::options::LaunchOptions;
 use crate::page::Page;
-use crate::state::{BrowserState, ConnectMode};
+use crate::state::BrowserState;
 use std::sync::Arc;
 use tokio::sync::RwLock;
 
@@ -50,50 +46,47 @@ pub struct Browser {
 }
 
 impl Browser {
-  /// Launch a browser with the given options.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the browser process fails to start or connection fails.
-  pub async fn launch(options: LaunchOptions) -> Result<Self> {
-    let mode = if let Some(url) = &options.ws_endpoint {
-      ConnectMode::ConnectUrl(url.clone())
-    } else if let Some(ac) = &options.auto_connect {
-      ConnectMode::AutoConnect {
-        channel: ac.channel.clone(),
-        user_data_dir: ac.user_data_dir.clone(),
-      }
-    } else {
-      ConnectMode::Launch
-    };
+  /// Construct from already-prepared component handles. Used by
+  /// [`crate::browser_type`] after `state.ensure_browser()` has run
+  /// and by callers who need to supply pre-resolved version/registry
+  /// handles (the test runner). The expected single-source-of-truth
+  /// path to construct a `Browser` is the `BrowserType` factory.
+  pub(crate) fn from_parts(
+    state: Arc<RwLock<BrowserState>>,
+    version: Arc<str>,
+    context_options: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::BrowserContextOptions>>>,
+    record_video: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::RecordVideoOptions>>>,
+  ) -> Self {
+    Self {
+      state,
+      version,
+      context_options,
+      record_video,
+    }
+  }
 
-    let mut state = BrowserState::with_options(mode, options);
-    Box::pin(state.ensure_browser()).await?;
+  /// Infra constructor: wrap a [`BrowserState`] whose
+  /// `ensure_browser()` has already completed. `BrowserType::launch`
+  /// is the user-facing path; this entry point exists for
+  /// ferridriver-internal callers (the test runner / test fixtures /
+  /// MCP server) that build a [`crate::options::LaunchPlan`] directly
+  /// and need a matching `Browser` handle.
+  ///
+  /// # Safety contract
+  ///
+  /// The caller MUST have awaited `state.ensure_browser()` (or an
+  /// equivalent `ensure_instance(...)` call) before handing the state
+  /// in — otherwise `version()` will return `"Unknown"` until a
+  /// subsequent ensure.
+  #[must_use]
+  pub fn from_state(state: BrowserState) -> Self {
     let version: Arc<str> = state
       .default_browser()
       .map(crate::backend::AnyBrowser::version)
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
     let context_options = state.context_options.clone();
     let record_video = state.record_video.clone();
-    Ok(Self {
-      state: Arc::new(RwLock::new(state)),
-      version,
-      context_options,
-      record_video,
-    })
-  }
-
-  /// Connect to a running browser via WebSocket URL.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the WebSocket connection fails.
-  pub async fn connect(url: &str) -> Result<Self> {
-    Box::pin(Self::launch(LaunchOptions {
-      ws_endpoint: Some(url.to_string()),
-      ..Default::default()
-    }))
-    .await
+    Self::from_parts(Arc::new(RwLock::new(state)), version, context_options, record_video)
   }
 
   /// Wrap an existing shared state as a Browser handle.

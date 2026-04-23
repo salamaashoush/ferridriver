@@ -5,7 +5,8 @@
  * Each backend gets its own browser instance to avoid interference.
  */
 
-import { Browser as FdBrowser } from "../index.js";
+import { type Browser as FdBrowser } from "../index.js";
+import { launchForBackend as fdLaunchForBackend } from "./_helpers.js";
 import { chromium } from "playwright";
 
 const WARMUP = 3;
@@ -96,7 +97,7 @@ async function main() {
 
   const fdBrowsers: { backend: string; browser: FdBrowser; page: any }[] = [];
   for (const backend of FD_BACKENDS) {
-    const browser = await FdBrowser.launch({ backend });
+    const browser = await fdLaunchForBackend(backend);
     const page = await browser.newPage();
     await page.goto("https://example.com"); // initial load
     await page.setContent(HTML);

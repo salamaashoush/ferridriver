@@ -7,7 +7,7 @@
 //! Standalone profiling binary -- run with samply or strace.
 //! Does 20 test cycles: ctx+page+navigate+click+text+close.
 
-use ferridriver::Browser;
+use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
 use std::sync::Arc;
 use std::time::Instant;
@@ -20,7 +20,7 @@ async fn main() {
   // Launch 4 browsers in parallel.
   let mut browsers = Vec::new();
   let handles: Vec<_> = (0..4)
-    .map(|_| tokio::spawn(Browser::launch(LaunchOptions::default())))
+    .map(|_| tokio::spawn(chromium().launch(LaunchOptions::default())))
     .collect();
   for h in handles {
     browsers.push(Arc::new(h.await.unwrap().unwrap()));

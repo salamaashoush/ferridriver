@@ -54,6 +54,7 @@ static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 mod api_request;
 mod bdd_registry;
 mod browser;
+mod browser_type;
 mod codegen;
 mod console_message;
 mod context;

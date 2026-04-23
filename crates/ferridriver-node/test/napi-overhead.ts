@@ -2,7 +2,7 @@
  * Measure NAPI boundary overhead: how much time is spent in
  * Rust<->JS serialization vs actual browser work.
  */
-import { Browser } from "../index.js";
+import { chromium } from "../index.js";
 
 const RUNS = 100;
 
@@ -20,7 +20,7 @@ async function timeMs(fn: () => Promise<any>): Promise<number> {
 }
 
 async function main() {
-  const browser = await Browser.launch({ backend: "cdp-pipe" });
+  const browser = await chromium().launch();
   const page = await browser.newPageWithUrl("https://example.com");
 
   // 1. Pure JS evaluate (minimal NAPI overhead - just string in, value out)

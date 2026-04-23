@@ -63,15 +63,45 @@ impl BrowserJs {
   pub fn version(&self) -> String {
     self.inner.version().to_string()
   }
+
+  /// Playwright: `browser.close()`. Accepts no options here — the
+  /// `BrowserCloseOptions { reason }` form can be added once a script
+  /// case demands it.
+  #[qjs(rename = "close")]
+  pub async fn close(&self) -> rquickjs::Result<()> {
+    self
+      .inner
+      .close(None)
+      .await
+      .map_err(|e| crate::bindings::convert::to_rq_error(&e))?;
+    Ok(())
+  }
+
+  /// Playwright: `browser.contexts()`. Returns the list of contexts as
+  /// JS handles.
+  #[qjs(rename = "contexts")]
+  pub async fn contexts<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let contexts = self.inner.contexts().await;
+    let arr = rquickjs::Array::new(ctx.clone())?;
+    for (i, c) in contexts.into_iter().enumerate() {
+      let wrapper = BrowserContextJs::new(std::sync::Arc::new(c));
+      let instance = Class::instance(ctx.clone(), wrapper)?;
+      arr.set(i, instance)?;
+    }
+    rquickjs::IntoJs::into_js(arr, &ctx)
+  }
 }
 
 /// JS-side shape for the options bag. Deserialised via serde-through-JSON
 /// so aliased field names, null/undefined handling, and nested shapes
 /// all match Playwright's client-side parsing. Convert with
 /// [`Self::into_core`].
+///
+/// `pub(super)` so `super::browser_type::BrowserTypeJs` can reuse the
+/// same parser for `launchPersistentContext`'s merged options bag.
 #[derive(serde::Deserialize, Default)]
 #[serde(rename_all = "camelCase", default)]
-struct JsBrowserContextOptions {
+pub(super) struct JsBrowserContextOptions {
   accept_downloads: Option<bool>,
   #[serde(rename = "baseURL")]
   base_url: Option<String>,
@@ -167,7 +197,7 @@ fn lower_media(v: Option<serde_json::Value>) -> ferridriver::options::MediaOverr
 
 impl JsBrowserContextOptions {
   #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-  fn into_core(self) -> ferridriver::options::BrowserContextOptions {
+  pub(super) fn into_core(self) -> ferridriver::options::BrowserContextOptions {
     use ferridriver::options as fo;
 
     let viewport = match self.viewport {

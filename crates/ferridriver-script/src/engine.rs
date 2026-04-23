@@ -291,6 +291,12 @@ fn install_globals(ctx: &Ctx<'_>, args_json: &str, inst: GlobalsInstall) -> rqui
     crate::bindings::install_request(ctx, req)?;
   }
 
+  // The chromium / firefox / webkit globals are always available —
+  // they don't depend on any per-script handle. Mirrors Playwright's
+  // `import { chromium } from 'playwright'`, which is universally
+  // accessible once the package is loaded.
+  crate::bindings::install_browser_type(ctx)?;
+
   Ok(())
 }
 

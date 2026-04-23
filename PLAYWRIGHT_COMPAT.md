@@ -490,11 +490,22 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 2.15 BrowserType class
 
-- [ ] Introduce `BrowserType` — remove ad-hoc `Browser::launch` / `Browser::connect` on `Browser`.
-- **Playwright ref**: `packages/playwright-core/src/client/browserType.ts`.
-- **Surface**: `name()`, `executable_path()`, `launch(options)`, `launch_persistent_context(user_data_dir, options)`, `launch_server(options)`, `connect(endpoint, options)`, `connect_over_cdp(endpoint, options)`.
-- **Files**: new `crates/ferridriver/src/browser_type.rs`; NAPI module.
-- **Tests**: launch each browser type, connect-over-CDP to an externally-launched Chrome.
+- [x] `BrowserType` is the sole entry point — `Browser::launch` / `Browser::connect` are gone. Three top-level factories (`chromium`, `firefox`, `webkit`) shipped in all three layers; existing call sites all migrated.
+  - **Core** (`crates/ferridriver/src/browser_type.rs`): `BrowserType { kind: BrowserKind, transport: Option<ChromiumTransport> }` with `chromium()` / `firefox()` / `webkit()` ctors plus `chromium_with(BrowserTypeOptions)` for the transport override. Methods: `name`, `kind`, `executable_path`, `launch`, `connect`, `connect_over_cdp`, `launch_persistent_context`. Public `LaunchOptions` is now Playwright-shaped (`headless`, `executable_path`, `args`, `channel`, `env`, `slow_mo`, `timeout`, `downloads_path`, `ignore_default_args`, `handle_sighup/int/term`, `chromium_sandbox`, `firefox_user_prefs`, `proxy`, `traces_dir`); the old `backend` / `browser` / `viewport` / `user_data_dir` / `ws_endpoint` / `auto_connect` fields moved to internal `LaunchPlan` (consumed by `BrowserState::with_plan`). New types: `ConnectOptions`, `ConnectOverCdpOptions`, `LaunchPersistentContextOptions`, `BrowserTypeOptions`, `ChromiumTransport`, `IgnoreDefaultArgs`.
+  - **Persistent-context wiring**: `BrowserState::persistent_context: bool` flag set by `launch_persistent_context`. `ContextRef::close` checks it and triggers `state.shutdown()` so closing the persistent default context closes the underlying browser too — Playwright's contract `types.d.ts:15199`. `CdpBrowser::launch_with_flags_in_dir` (pipe + ws) lets `--user-data-dir` come from the caller without TempDir wrapping; state.rs ensures the dir is honoured when set.
+  - **NAPI** (`crates/ferridriver-node/src/browser_type.rs`): `BrowserType` class plus top-level `chromium(options?)` / `firefox()` / `webkit()` functions. `chromium`'s arg accepts `{ transport?: 'pipe' \| 'ws' }` via `ts_args_type`. `Browser` class loses its `launch` / `connect` factories. Generated `index.d.ts` lines up with `/tmp/playwright/packages/playwright-core/types/types.d.ts:15046`.
+  - **QuickJS** (`crates/ferridriver-script/src/bindings/browser_type.rs`): `BrowserTypeJs` class plus `install_browser_type` registers `chromium` / `firefox` / `webkit` as globals on every script-engine context. Scripts run `await chromium().launch()` exactly like Playwright TS. `BrowserJs` gains `close()` and `contexts()` so persistent-context tests can drive the full lifecycle.
+  - **Migration**: every Rust caller of `Browser::launch` / `Browser::connect` (~30 sites: `ferridriver/tests/{page_api,parallel}.rs`, `ferridriver-script/tests/integration.rs`, `ferridriver-test src/{runner,fixture,bin/*} + tests/*`, `ferridriver/src/codegen/recorder.rs`, `ferridriver-mcp src/{server,config}.rs`) and every TS test file (~26 files) ported. NAPI `_helpers.ts` adds `launchForBackend(backend)` mapping `cdp-pipe`→`chromium().launch()`, `cdp-raw`→`chromium({transport:'ws'}).launch()`, `bidi`→`firefox().launch()`, `webkit`→`webkit().launch()`.
+- **Playwright ref**: `packages/playwright-core/src/client/browserType.ts`, `types/types.d.ts:15046`.
+- **Tests** — Rule 9 across all 4 backends (`crates/ferridriver-cli/tests/backends_support/browser_type.rs`):
+  - `test_browser_type_name` — `chromium().name()` / `firefox().name()` / `webkit().name()`.
+  - `test_browser_type_executable_path` — `chromium().executablePath()` returns a real path.
+  - `test_browser_type_chromium_launch` — `chromium().launch()` then `browser.version()` returns a real Chrome product string.
+  - `test_browser_type_chromium_transport_ws` — `chromium({ transport: 'ws' }).launch()` works (drives CdpRaw end-to-end).
+  - `test_browser_type_connect_over_cdp_chromium_only` — `firefox().connectOverCDP()` / `webkit().connectOverCDP()` reject with typed `Unsupported`.
+  - `test_browser_type_launch_persistent_context` — twice-launch against a temp `userDataDir`; second launch produces a usable page (proves the first browser actually shut down via `ctx.close` -> persistent_context shutdown wiring).
+  Plus 859 NAPI bun tests pass on the migrated `launchForBackend` helper across `cdp-pipe` and `cdp-raw`, and the cli backends matrix is `cdp-pipe 164 / cdp-raw 164 / bidi 159 / webkit 161`.
+- **Deferred**: `launch_server()` — ferridriver has no equivalent of Playwright's BrowserServer protocol yet. Tracked separately under "Section B" once a use case lands.
 
 ---
 

@@ -9,8 +9,7 @@
 //!
 //! Tests the library API directly -- one browser, sequential tests.
 
-use ferridriver::Browser;
-use ferridriver::backend::BackendKind;
+use ferridriver::chromium;
 use ferridriver::options::*;
 
 async fn eval_str(page: &std::sync::Arc<ferridriver::Page>, expr: &str) -> ferridriver::Result<String> {
@@ -47,12 +46,10 @@ fn data_url(html: &str) -> String {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn page_api_tests() {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   // ── Navigation ──
@@ -376,12 +373,10 @@ async fn page_api_tests() {
 async fn snapshot_for_ai_tests() {
   use ferridriver::snapshot::SnapshotOptions;
 
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   // ── Basic snapshot ──
@@ -517,12 +512,10 @@ async fn snapshot_for_ai_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn add_init_script_tests() {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   // Add an init script that sets a global variable
@@ -592,12 +585,10 @@ async fn dialog_handling_tests() {
   use ferridriver::events::PageEvent;
   use std::sync::Arc;
 
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   // Default behavior with no listener: alert/confirm/prompt all
@@ -686,12 +677,10 @@ async fn dialog_handling_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn add_script_style_tag_tests() {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   // Inline script tag
@@ -718,12 +707,10 @@ async fn add_script_style_tag_tests() {
 async fn expose_function_tests() {
   use std::sync::Arc;
 
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   // Expose a simple function that doubles a number
@@ -803,12 +790,10 @@ async fn expose_function_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn wait_for_load_state_tests() {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   // "load" state (default)
@@ -842,12 +827,10 @@ async fn wait_for_load_state_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn locator_evaluate_tests() {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   page.goto(&data_url("<ul><li class='item'>Alpha</li><li class='item'>Beta</li><li class='item'>Gamma</li></ul><h1 id='title'>Hello</h1>"), None).await.unwrap();
@@ -928,12 +911,10 @@ async fn locator_evaluate_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn locator_set_checked_tap_select_text() {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   // set_checked
@@ -982,12 +963,10 @@ async fn locator_set_checked_tap_select_text() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn storage_state_tests() {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   page.goto(&data_url("<body>storage</body>"), None).await.unwrap();
@@ -1018,12 +997,10 @@ async fn storage_state_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn page_close_is_closed_tests() {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
 
   // Open a new page
   let page = browser.new_page_with_url("about:blank").await.unwrap();
@@ -1042,12 +1019,10 @@ async fn page_close_is_closed_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn locator_or_and_tests() {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   page
@@ -1099,12 +1074,10 @@ async fn network_interception_tests() {
   use ferridriver::route::FulfillResponse;
   use std::sync::Arc;
 
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   // 1. Fulfill -- mock a page navigation response
@@ -1191,12 +1164,10 @@ async fn network_interception_tests() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn quick_wins_tests() {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   // ── browser.is_connected / version / contexts ──

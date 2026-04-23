@@ -27,7 +27,8 @@ async fn screenshot_creates_baseline_then_matches() {
 
   let snap_dir = tmp.join("__snapshots__");
   let server = ComponentServer::start(&tmp).await.unwrap();
-  let browser = ferridriver::Browser::launch(ferridriver::options::LaunchOptions::default())
+  let browser = ferridriver::chromium()
+    .launch(ferridriver::options::LaunchOptions::default())
     .await
     .unwrap();
   let page = browser.new_page_with_url(&server.url()).await.unwrap();
@@ -83,7 +84,8 @@ async fn screenshot_detects_visual_change() {
   .unwrap();
 
   let server = ComponentServer::start(&tmp).await.unwrap();
-  let browser = ferridriver::Browser::launch(ferridriver::options::LaunchOptions::default())
+  let browser = ferridriver::chromium()
+    .launch(ferridriver::options::LaunchOptions::default())
     .await
     .unwrap();
   let page = browser.new_page_with_url(&server.url()).await.unwrap();
@@ -162,7 +164,8 @@ async fn screenshot_size_mismatch_detected() {
   .unwrap();
 
   let server = ComponentServer::start(&tmp).await.unwrap();
-  let browser = ferridriver::Browser::launch(ferridriver::options::LaunchOptions::default())
+  let browser = ferridriver::chromium()
+    .launch(ferridriver::options::LaunchOptions::default())
     .await
     .unwrap();
   let page = browser.new_page_with_url(&server.url()).await.unwrap();

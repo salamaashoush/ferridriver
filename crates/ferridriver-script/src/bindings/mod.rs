@@ -21,6 +21,7 @@
 pub mod api_request;
 pub mod artifacts;
 pub mod browser;
+pub mod browser_type;
 pub mod console_message;
 pub mod context;
 pub mod convert;
@@ -41,6 +42,7 @@ pub mod web_error;
 pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
 pub use browser::BrowserJs;
+pub use browser_type::{BrowserTypeJs, install_browser_type};
 pub use console_message::ConsoleMessageJs;
 pub use context::BrowserContextJs;
 pub use dialog::DialogJs;
@@ -87,6 +89,7 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<ConsoleMessageJs>::define(&g)?;
   Class::<WebErrorJs>::define(&g)?;
   Class::<VideoJs>::define(&g)?;
+  Class::<BrowserTypeJs>::define(&g)?;
   Ok(())
 }
 

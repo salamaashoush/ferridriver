@@ -13,7 +13,7 @@
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ferridriver::Browser;
+use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
 use ferridriver_test::config::{CliOverrides, TestConfig};
 use ferridriver_test::model::*;
@@ -47,7 +47,7 @@ async fn deep_profile() {
   // ── 1. Browser launch cost ──
   println!("  [1] Browser launch (parallel vs sequential)");
   let t = Instant::now();
-  let b1 = Browser::launch(LaunchOptions::default()).await.unwrap();
+  let b1 = chromium().launch(LaunchOptions::default()).await.unwrap();
   println!(
     "      Single browser launch:   {:>7.1}ms",
     t.elapsed().as_secs_f64() * 1000.0
@@ -55,9 +55,9 @@ async fn deep_profile() {
 
   let t = Instant::now();
   let (b2, b3, b4) = tokio::join!(
-    Browser::launch(LaunchOptions::default()),
-    Browser::launch(LaunchOptions::default()),
-    Browser::launch(LaunchOptions::default()),
+    chromium().launch(LaunchOptions::default()),
+    chromium().launch(LaunchOptions::default()),
+    chromium().launch(LaunchOptions::default()),
   );
   let b2 = b2.unwrap();
   let b3 = b3.unwrap();

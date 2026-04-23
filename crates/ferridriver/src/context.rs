@@ -563,7 +563,14 @@ impl ContextRef {
   /// Returns an error if state lock acquisition fails.
   pub async fn close(&self) -> Result<()> {
     let mut state = self.state.write().await;
+    let persistent = state.persistent_context;
     state.remove_context(&self.name).await;
+    if persistent {
+      // Persistent-context launch contract: closing the context closes
+      // the underlying browser too. Playwright:
+      // `/tmp/playwright/packages/playwright-core/types/types.d.ts:15199`.
+      state.shutdown().await;
+    }
     Ok(())
   }
 

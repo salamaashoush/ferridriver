@@ -17,7 +17,8 @@
  * than skipping.
  */
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
-import { Browser, type Page } from "../index.js";
+import { type Browser, type Page } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 
@@ -76,7 +77,7 @@ for (const backend of BACKENDS) {
     let page: Page;
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
       page = await browser.newPage();
     }, 30_000);
 

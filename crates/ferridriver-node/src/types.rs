@@ -1005,27 +1005,59 @@ impl From<FrameSelectorBag> for ferridriver::options::FrameSelector {
   }
 }
 
-/// Launch options for the browser.
+/// Launch options for the browser. Mirrors Playwright's `LaunchOptions`
+/// (`/tmp/playwright/packages/playwright-core/types/types.d.ts:15192`).
+/// Browser selection happens via the `BrowserType` you call `.launch`
+/// on (`chromium()`, `firefox()`, `webkit()`); this bag carries only
+/// the per-launch knobs.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
 pub struct LaunchOptions {
-  /// Backend protocol: "cdp-pipe" (default), "cdp-raw", "webkit", "bidi".
-  /// Inferred from `browser` if not set.
-  pub backend: Option<String>,
-  /// Browser product to launch: "chromium" (default), "firefox", "webkit".
-  /// Determines the default backend and executable detection:
-  /// - "chromium" -> cdp-pipe backend, detects Chrome/Chromium
-  /// - "firefox"  -> bidi backend, detects Firefox
-  /// - "webkit"   -> webkit backend (macOS only)
-  pub browser: Option<String>,
-  /// WebSocket URL to connect to (instead of launching)
-  pub ws_endpoint: Option<String>,
-  /// Run in headless mode (default: true)
+  /// Run in headless mode. Defaults to `true`.
   pub headless: Option<bool>,
-  /// Path to the browser executable
+  /// Path to the browser executable.
   pub executable_path: Option<String>,
-  /// Additional browser arguments
+  /// Additional browser arguments.
   pub args: Option<Vec<String>>,
+  /// Browser distribution channel ("chrome", "chrome-beta", "msedge", ...).
+  pub channel: Option<String>,
+  /// Slow down operations by this many ms (debugging).
+  pub slow_mo: Option<u32>,
+  /// Maximum time to wait for the browser to start (ms). `0` disables.
+  pub timeout: Option<u32>,
+  /// Where to save downloads (per-launch override).
+  pub downloads_path: Option<String>,
+  /// Tracing artifact directory.
+  pub traces_dir: Option<String>,
+}
+
+/// Options for `chromium()` / `firefox()` / `webkit()` factory.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct BrowserTypeOptions {
+  /// Wire transport. Chromium-only. `"pipe"` (default) drives CDP
+  /// over a Unix pipe; `"ws"` drives CDP over WebSocket. Ignored on
+  /// `firefox` / `webkit`.
+  pub transport: Option<String>,
+}
+
+/// Options for `BrowserType.connect(wsEndpoint, options?)`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct ConnectOptions {
+  pub headers: Option<std::collections::HashMap<String, String>>,
+  pub slow_mo: Option<u32>,
+  pub timeout: Option<u32>,
+  pub expose_network: Option<String>,
+}
+
+/// Options for `BrowserType.connectOverCDP(endpointURL, options?)`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct ConnectOverCdpOptions {
+  pub headers: Option<std::collections::HashMap<String, String>>,
+  pub slow_mo: Option<u32>,
+  pub timeout: Option<u32>,
 }
 
 // ── Conversion helpers ────────────────────────────────────────────────────

@@ -518,6 +518,21 @@ impl CdpBrowser<pipe::PipeTransport> {
     )
     .await
   }
+
+  /// Launch Chrome with a caller-supplied `--user-data-dir`. The
+  /// directory is NOT owned by the browser handle — the caller is
+  /// responsible for its lifetime. Used by
+  /// [`crate::BrowserType::launch_persistent_context`] to ensure
+  /// cookies / `localStorage` / `IndexedDB` persist across re-launches
+  /// against the same directory.
+  pub async fn launch_with_flags_in_dir(
+    chromium_path: &str,
+    flags: &[String],
+    user_data_dir: &std::path::Path,
+  ) -> Result<Self, String> {
+    let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir, flags)?;
+    Self::init(Arc::new(transport), Some(super::process::ChildGroup::new(child)), None).await
+  }
 }
 
 // ── WS-specific launch + connect ─────────────────────────────────────────────
@@ -549,6 +564,18 @@ impl CdpBrowser<ws::WsTransport> {
       Some(user_data_dir),
     )
     .await
+  }
+
+  /// Launch Chrome over WebSocket with a caller-supplied
+  /// `--user-data-dir`. See `launch_with_flags_in_dir` on the pipe
+  /// flavour for the persistence rationale.
+  pub async fn launch_with_flags_in_dir(
+    chromium_path: &str,
+    flags: &[String],
+    user_data_dir: &std::path::Path,
+  ) -> Result<Self, String> {
+    let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir, flags)).await?;
+    Self::init(Arc::new(transport), Some(super::process::ChildGroup::new(child)), None).await
   }
 
   /// Connect to a running Chrome instance via WebSocket URL.

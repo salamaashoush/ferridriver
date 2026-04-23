@@ -15,8 +15,7 @@
 
 use std::sync::Arc;
 
-use ferridriver::Browser;
-use ferridriver::backend::BackendKind;
+use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
 use ferridriver_script::{
   InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig,
@@ -42,12 +41,10 @@ struct Harness {
 }
 
 async fn harness() -> Harness {
-  let browser = Browser::launch(LaunchOptions {
-    backend: BackendKind::CdpPipe,
-    ..Default::default()
-  })
-  .await
-  .expect("launch browser");
+  let browser = chromium()
+    .launch(LaunchOptions::default())
+    .await
+    .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
   let tmp = tempfile::tempdir().expect("tempdir");

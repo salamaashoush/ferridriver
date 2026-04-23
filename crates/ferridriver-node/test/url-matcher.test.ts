@@ -20,7 +20,8 @@
  * every matcher-accepting call site.
  */
 import { describe, it, expect, beforeAll, afterAll, afterEach } from "bun:test";
-import { Browser, type Page } from "../index.js";
+import { type Browser, type Page } from "../index.js";
+import { launchForBackend } from "./_helpers.js";
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from "node:http";
 
 const SERVE: Record<string, { body: string; type: string }> = {
@@ -82,7 +83,7 @@ for (const backend of BACKENDS) {
     };
 
     beforeAll(async () => {
-      browser = await Browser.launch({ backend });
+      browser = await launchForBackend(backend);
       page = await browser.newPageWithUrl(testUrl + "/");
     });
 
