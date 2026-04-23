@@ -129,6 +129,94 @@ impl FrameJs {
     LocatorJs::new(self.inner.locator(&selector, None))
   }
 
+  #[qjs(rename = "getByRole")]
+  pub fn get_by_role(
+    &self,
+    role: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let opts = crate::bindings::page::parse_role_options(options)?;
+    Ok(LocatorJs::new(self.inner.get_by_role(&role, &opts)))
+  }
+
+  #[qjs(rename = "getByText")]
+  pub fn get_by_text(
+    &self,
+    text: rquickjs::Value<'_>,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = crate::bindings::page::string_or_regex_from_js(text)?;
+    let opts = crate::bindings::page::parse_text_options(options);
+    Ok(LocatorJs::new(self.inner.get_by_text(&t, &opts)))
+  }
+
+  #[qjs(rename = "getByLabel")]
+  pub fn get_by_label(
+    &self,
+    text: rquickjs::Value<'_>,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = crate::bindings::page::string_or_regex_from_js(text)?;
+    let opts = crate::bindings::page::parse_text_options(options);
+    Ok(LocatorJs::new(self.inner.get_by_label(&t, &opts)))
+  }
+
+  #[qjs(rename = "getByPlaceholder")]
+  pub fn get_by_placeholder(
+    &self,
+    text: rquickjs::Value<'_>,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = crate::bindings::page::string_or_regex_from_js(text)?;
+    let opts = crate::bindings::page::parse_text_options(options);
+    Ok(LocatorJs::new(self.inner.get_by_placeholder(&t, &opts)))
+  }
+
+  #[qjs(rename = "getByAltText")]
+  pub fn get_by_alt_text(
+    &self,
+    text: rquickjs::Value<'_>,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = crate::bindings::page::string_or_regex_from_js(text)?;
+    let opts = crate::bindings::page::parse_text_options(options);
+    Ok(LocatorJs::new(self.inner.get_by_alt_text(&t, &opts)))
+  }
+
+  #[qjs(rename = "getByTitle")]
+  pub fn get_by_title(
+    &self,
+    text: rquickjs::Value<'_>,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<LocatorJs> {
+    let t = crate::bindings::page::string_or_regex_from_js(text)?;
+    let opts = crate::bindings::page::parse_text_options(options);
+    Ok(LocatorJs::new(self.inner.get_by_title(&t, &opts)))
+  }
+
+  #[qjs(rename = "getByTestId")]
+  pub fn get_by_test_id(&self, test_id: rquickjs::Value<'_>) -> rquickjs::Result<LocatorJs> {
+    let t = crate::bindings::page::string_or_regex_from_js(test_id)?;
+    Ok(LocatorJs::new(self.inner.get_by_test_id(&t)))
+  }
+
+  /// Playwright: `frame.frameLocator(selector): FrameLocator`.
+  #[qjs(rename = "frameLocator")]
+  pub fn frame_locator(&self, selector: String) -> crate::bindings::frame_locator::FrameLocatorJs {
+    crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(&selector))
+  }
+
+  /// Playwright: `frame.page(): Page`. Returns the owning page as a
+  /// fresh `PageJs` handle. Note: the returned handle does NOT carry
+  /// the script engine's `AsyncContext`, so methods that dispatch JS
+  /// callbacks across tasks (`page.route`, `page.exposeFunction`)
+  /// will reject — those need the parent `page` global from
+  /// `install_page`.
+  #[qjs(rename = "page")]
+  pub fn page(&self) -> crate::bindings::page::PageJs {
+    crate::bindings::page::PageJs::new(self.inner.page_arc().clone())
+  }
+
   // ── Action methods (Playwright parity — task 3.9) ──────────────────
   //
   // Mirror the surface from

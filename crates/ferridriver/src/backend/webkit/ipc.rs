@@ -335,7 +335,7 @@ pub enum NetworkEvent {
 
 /// Context for the background reader thread, bundling event logs and routing state.
 struct ReaderCtx {
-  console_log: Arc<StdMutex<Vec<(String, String)>>>,
+  console_log: Arc<StdMutex<Vec<(String, String, u64)>>>,
   dialog_log: Arc<StdMutex<Vec<(String, String, String)>>>,
   network_log: Arc<StdMutex<Vec<NetworkEvent>>>,
   route_handler: Arc<StdMutex<Option<RouteCallback>>>,
@@ -348,7 +348,7 @@ pub struct IpcClient {
   pending: Arc<StdMutex<FxHashMap<u64, oneshot::Sender<IpcResponse>>>>,
   next_id: AtomicU64,
   /// Console messages pushed by the host via `REP_CONSOLE_EVENT`.
-  pub console_log: Arc<StdMutex<Vec<(String, String)>>>,
+  pub console_log: Arc<StdMutex<Vec<(String, String, u64)>>>,
   /// Dialog events pushed by the host via `REP_DIALOG_EVENT`.
   pub dialog_log: Arc<StdMutex<Vec<(String, String, String)>>>,
   /// Network events pushed by the host via `REP_NET_EVENT`.
@@ -450,7 +450,7 @@ impl IpcClient {
 
     let pending: Arc<StdMutex<FxHashMap<u64, oneshot::Sender<IpcResponse>>>> =
       Arc::new(StdMutex::new(FxHashMap::default()));
-    let console_log: Arc<StdMutex<Vec<(String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
+    let console_log: Arc<StdMutex<Vec<(String, String, u64)>>> = Arc::new(StdMutex::new(Vec::new()));
     let dialog_log: Arc<StdMutex<Vec<(String, String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
     let network_log: Arc<StdMutex<Vec<NetworkEvent>>> = Arc::new(StdMutex::new(Vec::new()));
     let route_handler: Arc<StdMutex<Option<RouteCallback>>> = Arc::new(StdMutex::new(None));
@@ -535,6 +535,7 @@ impl IpcClient {
   }
 
   /// Spawn the background reader thread that processes incoming IPC frames.
+  #[allow(clippy::too_many_lines)] // dispatcher fan-out per Rep code; splitting hurts readability
   fn spawn_reader_thread(
     read_sock: std::os::unix::net::UnixStream,
     pending: Arc<StdMutex<FxHashMap<u64, oneshot::Sender<IpcResponse>>>>,
@@ -570,8 +571,18 @@ impl IpcClient {
             let mut o = 0;
             let level = str_decode(&payload, &mut o);
             let text = str_decode(&payload, &mut o);
+            // The host now appends the originating view id so per-page
+            // listeners can filter to events that originated in their
+            // own view (`drain_console_events` discards mismatches).
+            let vid = if o + 8 <= payload.len() {
+              let mut vid_bytes = [0u8; 8];
+              vid_bytes.copy_from_slice(&payload[o..o + 8]);
+              u64::from_le_bytes(vid_bytes)
+            } else {
+              0
+            };
             if let Ok(mut log) = ctx.console_log.lock() {
-              log.push((level, text));
+              log.push((level, text, vid));
             }
             ctx.event_notify.notify_one();
             continue;

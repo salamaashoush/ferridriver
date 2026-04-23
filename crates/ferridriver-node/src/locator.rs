@@ -152,6 +152,28 @@ impl Locator {
     Self::wrap(self.inner.get_by_test_id(&crate::types::getby_input_to_rust(test_id)))
   }
 
+  /// Playwright: `locator.contentFrame(): FrameLocator`. Treats the
+  /// matched element as an `<iframe>` and returns a `FrameLocator`
+  /// scoped to its contents.
+  #[napi]
+  pub fn content_frame(&self) -> crate::frame_locator::FrameLocator {
+    crate::frame_locator::FrameLocator::wrap(self.inner.content_frame())
+  }
+
+  /// Playwright: `locator.frameLocator(selector): FrameLocator`.
+  /// Targets an `<iframe>` matched by `selector` within this locator's
+  /// scope.
+  #[napi]
+  pub fn frame_locator(&self, selector: String) -> crate::frame_locator::FrameLocator {
+    crate::frame_locator::FrameLocator::wrap(self.inner.frame_locator(&selector))
+  }
+
+  /// Playwright: `locator.page(): Page`.
+  #[napi]
+  pub fn page(&self) -> crate::page::Page {
+    crate::page::Page::wrap(self.inner.page().clone())
+  }
+
   #[napi]
   pub fn first(&self) -> Locator {
     Self::wrap(self.inner.first())

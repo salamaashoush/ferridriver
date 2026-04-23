@@ -224,6 +224,43 @@ impl Frame {
     )
   }
 
+  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
+  pub fn get_by_alt_text(
+    &self,
+    text: napi::Either<String, crate::types::JsRegExpLike>,
+    options: Option<crate::types::TextOptions>,
+  ) -> Locator {
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
+    Locator::wrap(
+      self
+        .inner
+        .get_by_alt_text(&crate::types::getby_input_to_rust(text), &opts),
+    )
+  }
+
+  #[napi(ts_args_type = "text: string | RegExp, options?: TextOptions")]
+  pub fn get_by_title(
+    &self,
+    text: napi::Either<String, crate::types::JsRegExpLike>,
+    options: Option<crate::types::TextOptions>,
+  ) -> Locator {
+    let opts: ferridriver::options::TextOptions = options.map_or_else(Default::default, Into::into);
+    Locator::wrap(self.inner.get_by_title(&crate::types::getby_input_to_rust(text), &opts))
+  }
+
+  /// Playwright: `frame.frameLocator(selector): FrameLocator`. Targets
+  /// an `<iframe>` matching the selector within this frame.
+  #[napi]
+  pub fn frame_locator(&self, selector: String) -> crate::frame_locator::FrameLocator {
+    crate::frame_locator::FrameLocator::wrap(self.inner.frame_locator(&selector))
+  }
+
+  /// Playwright: `frame.page(): Page` — the page this frame belongs to.
+  #[napi]
+  pub fn page(&self) -> crate::page::Page {
+    crate::page::Page::wrap(self.inner.page_arc().clone())
+  }
+
   // ── Action methods (Playwright parity — task 3.9) ────────────────────
   //
   // Mirror the surface from

@@ -1576,6 +1576,9 @@ impl BidiPage {
     let closed = self.closed.clone();
     let emitter = self.events.clone();
     let injected_script = self.injected_script.clone();
+    let exposed_fns = self.exposed_fns.clone();
+    let exposed_session = self.session.clone();
+    let exposed_ctx = self.context_id.clone();
     let tracker = Arc::new(BidiNetworkTracker::new(
       self.session.clone(),
       self.nav_request_slot.clone(),
@@ -1628,6 +1631,65 @@ impl BidiPage {
             if entry_type != "console" {
               continue;
             }
+
+            // Exposed-function dispatch path. The JS shim installed
+            // by `expose_function` calls
+            // `console.log(JSON.stringify({__ferri_call, id, args}))`
+            // and parks on a Promise stored in `window.__ferri_exposed[id]`.
+            // Intercept those entries here, run the Rust callback,
+            // and resolve the promise via a follow-up `script.evaluate`.
+            // BiDi has no `Runtime.bindingCalled` analogue, so this
+            // console-side channel is the available transport.
+            if let Some(text_arg) = event
+              .params
+              .get("args")
+              .and_then(|v| v.as_array())
+              .and_then(|arr| arr.first())
+              .and_then(|a| a.get("value"))
+              .and_then(|v| v.as_str())
+            {
+              if text_arg.starts_with(r#"{"__ferri_call":"#) {
+                if let Ok(payload) = serde_json::from_str::<serde_json::Value>(text_arg) {
+                  let fn_name = payload
+                    .get("__ferri_call")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("")
+                    .to_string();
+                  let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                  let args: Vec<serde_json::Value> = payload
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .cloned()
+                    .unwrap_or_default();
+                  let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
+                  if let Some(callback) = maybe_fn {
+                    let result = callback(args);
+                    let result_js = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
+                    let escaped_id = id.replace('\\', r"\\").replace('\'', r"\'");
+                    let resolve_js = format!(
+                      "(() => {{ const f = window.__ferri_exposed && window.__ferri_exposed['{escaped_id}']; if (f) {{ delete window.__ferri_exposed['{escaped_id}']; f({result_js}); }} }})()"
+                    );
+                    let _ = exposed_session
+                      .transport
+                      .send_command(
+                        "script.callFunction",
+                        json!({
+                          "functionDeclaration": format!("() => {{ {resolve_js} }}"),
+                          "target": {"context": &*exposed_ctx},
+                          "awaitPromise": false,
+                          "resultOwnership": "none"
+                        }),
+                      )
+                      .await;
+                  }
+                  // Don't surface the dispatch envelope as a regular
+                  // console.log — Playwright hides bindings from the
+                  // user's `page.on('console')` stream.
+                  continue;
+                }
+              }
+            }
+
             let Some(page) = page_backref.upgrade() else {
               continue;
             };

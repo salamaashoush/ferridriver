@@ -30,6 +30,7 @@ pub mod download;
 pub mod element_handle;
 pub mod file_chooser;
 pub mod frame;
+pub mod frame_locator;
 pub mod js_handle;
 pub mod keyboard;
 pub mod locator;
@@ -50,6 +51,7 @@ pub use download::DownloadJs;
 pub use element_handle::ElementHandleJs;
 pub use file_chooser::FileChooserJs;
 pub use frame::FrameJs;
+pub use frame_locator::FrameLocatorJs;
 pub use js_handle::JSHandleJs;
 pub use keyboard::KeyboardJs;
 pub use locator::LocatorJs;
@@ -90,6 +92,8 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<WebErrorJs>::define(&g)?;
   Class::<VideoJs>::define(&g)?;
   Class::<BrowserTypeJs>::define(&g)?;
+  Class::<FrameLocatorJs>::define(&g)?;
+  Class::<crate::bindings::page::TouchscreenJs>::define(&g)?;
   Ok(())
 }
 

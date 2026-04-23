@@ -127,6 +127,7 @@ impl WebKitBrowser {
               file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
               download_manager: crate::download::DownloadManager::new(),
               page_backref: crate::backend::PageBackref::new(),
+              exposed_fns: std::sync::Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
             })
           })
           .collect(),
@@ -157,6 +158,7 @@ impl WebKitBrowser {
           file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
           download_manager: crate::download::DownloadManager::new(),
           page_backref: crate::backend::PageBackref::new(),
+          exposed_fns: std::sync::Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
         };
         Ok(AnyPage::WebKit(page))
       },
@@ -237,6 +239,14 @@ pub struct WebKitPage {
   /// here for struct parity across backends even though the `WebKit`
   /// file-chooser path never upgrades it.
   pub page_backref: crate::backend::PageBackref,
+  /// Per-page exposed-function registry. Mirrors CDP / `BiDi` —
+  /// `expose_function` installs a JS shim that posts a JSON envelope
+  /// through `console.log`; the `attach_listeners` console drain
+  /// intercepts those envelopes, runs the registered Rust callback,
+  /// and resolves the page-side promise. `WebKit` has no
+  /// `Runtime.addBinding` analogue so the console-side channel is
+  /// the available transport, same approach as `BiDi`.
+  exposed_fns: std::sync::Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
 }
 
 pub struct InjectedScriptManager {
@@ -1789,6 +1799,8 @@ impl WebKitPage {
     let injected_script = self.injected_script.clone();
     let dialog_manager = self.dialog_manager.clone();
     let page_backref = self.page_backref.clone();
+    let exposed_fns = self.exposed_fns.clone();
+    let view_id = self.view_id;
     tokio::spawn(async move {
       loop {
         // Wait for the IPC reader thread to signal that events arrived.
@@ -1797,18 +1809,56 @@ impl WebKitPage {
 
         // Drain console events
         {
-          let msgs: Vec<(String, String)> = {
+          // Multi-page hosts share a single fdConsole IPC channel —
+          // pull only the events tagged with this listener's view_id
+          // (the host appends `source_vid` to every console frame).
+          // Events for other pages are left in the buffer for their
+          // own listeners. `vid == 0` is the legacy/unknown bucket
+          // and falls through to whichever drainer wakes first
+          // (matches the pre-vid behaviour for events the host
+          // couldn't attribute).
+          let (msgs, others_present) = {
             let Ok(mut log) = client.console_log.lock() else {
               continue;
             };
             if log.is_empty() {
-              Vec::new()
+              (Vec::new(), false)
             } else {
-              std::mem::take(&mut *log)
+              let mut mine = Vec::new();
+              let mut others = Vec::new();
+              for entry in log.drain(..) {
+                if entry.2 == view_id || entry.2 == 0 {
+                  mine.push(entry);
+                } else {
+                  others.push(entry);
+                }
+              }
+              let others_present = !others.is_empty();
+              *log = others;
+              (mine, others_present)
             }
           };
+          // Multi-page hosts share one `event_notify` semaphore.
+          // `notify_one` wakes only one waiter; if a sibling page's
+          // event landed in our wake-up but not ours, we have to
+          // re-notify so the sibling's listener picks it up — without
+          // this the buffered event stays parked until the NEXT
+          // unrelated notify fires.
+          if others_present {
+            client.event_notify.notify_one();
+          }
+          let msgs: Vec<(String, String, u64)> = msgs;
           if !msgs.is_empty() {
-            drain_console_events(&msgs, &page_backref, &emitter, &console_log).await;
+            drain_console_events(
+              &msgs,
+              &page_backref,
+              &emitter,
+              &console_log,
+              &exposed_fns,
+              &client,
+              view_id,
+            )
+            .await;
           }
         }
 
@@ -1912,42 +1962,63 @@ impl WebKitPage {
   }
 
   // ── Exposed Functions ──
-  // WebKit uses JS-based binding controller (same as CDP) injected via evaluate.
-  // WKScriptMessageHandler could be used but would require new IPC ops for
-  // per-function message routing. The JS approach works and is performant.
+  // WebKit has no `Runtime.addBinding` analogue. The exposed-function
+  // dispatch rides over the existing console-event channel: the JS
+  // shim posts a JSON envelope through `console.log`; the
+  // `attach_listeners` console drain (see `drain_console_events`)
+  // intercepts envelopes whose first arg starts with
+  // `{"__ferri_call":`, runs the registered Rust callback, and
+  // resolves the page-side promise via `evaluate`.
 
-  /// Expose a function to JavaScript. Not yet supported on `WebKit` backend.
+  /// Install a JS shim that proxies `window[name](...args)` into the
+  /// supplied Rust callback. The callback's JSON return becomes the
+  /// page-side promise resolution.
   ///
   /// # Errors
   ///
-  /// Always returns an error because `WebKit` lacks `Runtime.addBinding` equivalent.
-  pub fn expose_function(
-    &self,
-    name: &str,
-    _func: crate::events::ExposedFn,
-  ) -> impl std::future::Future<Output = Result<(), String>> {
-    let result = if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
-      Err("Page is closed".into())
-    } else {
-      Err(format!("expose_function('{name}') not yet supported on WebKit backend"))
-    };
-    std::future::ready(result)
+  /// Returns an error if the page is closed or the host rejects the
+  /// `add_init_script` / `evaluate` calls.
+  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<(), String> {
+    if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
+      return Err("Page is closed".into());
+    }
+    let escaped = crate::steps::js_escape(name);
+    let shim = format!(
+      r"(function(){{
+        if (window['{escaped}']) return;
+        window['{escaped}'] = function(){{
+          var s = (window.__ferri_seq = (window.__ferri_seq || 0) + 1).toString(36) + Math.random().toString(36).slice(2);
+          var args = [];
+          for (var i = 0; i < arguments.length; i++) args.push(arguments[i]);
+          var p = new Promise(function(resolve){{
+            window.__ferri_exposed = window.__ferri_exposed || {{}};
+            window.__ferri_exposed[s] = resolve;
+          }});
+          console.log(JSON.stringify({{__ferri_call: '{escaped}', id: s, args: args}}));
+          return p;
+        }};
+      }})()"
+    );
+    self.add_init_script(&shim).await?;
+    let _ = self.evaluate(&shim).await?;
+    self.exposed_fns.write().await.insert(name.to_string(), func);
+    Ok(())
   }
 
-  /// Remove an exposed function. Not yet supported on `WebKit` backend.
+  /// Drop the registration and remove the page-side shim.
   ///
   /// # Errors
   ///
-  /// Always returns an error because exposed functions are not supported.
-  pub fn remove_exposed_function(&self, name: &str) -> impl std::future::Future<Output = Result<(), String>> {
-    let result = if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
-      Err("Page is closed".into())
-    } else {
-      Err(format!(
-        "remove_exposed_function('{name}') not yet supported on WebKit backend"
-      ))
-    };
-    std::future::ready(result)
+  /// Returns an error if the page is closed or the deregister
+  /// `evaluate` fails.
+  pub async fn remove_exposed_function(&self, name: &str) -> Result<(), String> {
+    if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
+      return Err("Page is closed".into());
+    }
+    self.exposed_fns.write().await.remove(name);
+    let escaped = crate::steps::js_escape(name);
+    let _ = self.evaluate(&format!("delete window['{escaped}']")).await?;
+    Ok(())
   }
 
   /// Register a route handler to intercept network requests matching the given matcher.
@@ -2381,14 +2452,17 @@ impl WebKitElement {
 /// [`parse_webkit_pageerror_payload`] can recover the structured
 /// `{ name, message, stack }` without a new IPC op.
 async fn drain_console_events(
-  msgs: &[(String, String)],
+  msgs: &[(String, String, u64)],
   page_backref: &crate::backend::PageBackref,
   emitter: &crate::events::EventEmitter,
   console_log: &Arc<RwLock<Vec<ConsoleMessage>>>,
+  exposed_fns: &Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
+  client: &Arc<ipc::IpcClient>,
+  view_id: u64,
 ) {
   let page = page_backref.upgrade();
   let mut dest = console_log.write().await;
-  for (raw_type, text) in msgs {
+  for (raw_type, text, _src_vid) in msgs {
     if raw_type == "pageerror" {
       let details = parse_webkit_pageerror_payload(text);
       let web_err = match page {
@@ -2397,6 +2471,37 @@ async fn drain_console_events(
       };
       emitter.emit(crate::events::PageEvent::PageError(web_err));
       continue;
+    }
+    // Exposed-function dispatch (see `WebKitPage::expose_function`).
+    // The JS shim posts `console.log(JSON.stringify({__ferri_call,
+    // id, args}))`; intercept that envelope, run the registered
+    // callback, resolve the page-side promise, and skip the
+    // user-visible console emit.
+    if text.starts_with(r#"{"__ferri_call":"#) {
+      if let Ok(payload) = serde_json::from_str::<serde_json::Value>(text) {
+        let fn_name = payload
+          .get("__ferri_call")
+          .and_then(|v| v.as_str())
+          .unwrap_or("")
+          .to_string();
+        let id = payload.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+        let args: Vec<serde_json::Value> = payload
+          .get("args")
+          .and_then(|v| v.as_array())
+          .cloned()
+          .unwrap_or_default();
+        let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
+        if let Some(callback) = maybe_fn {
+          let result = callback(args);
+          let result_js = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
+          let escaped_id = id.replace('\\', r"\\").replace('\'', r"\'");
+          let resolve_js = format!(
+            "(function(){{ var f = window.__ferri_exposed && window.__ferri_exposed['{escaped_id}']; if (f) {{ delete window.__ferri_exposed['{escaped_id}']; f({result_js}); }} }})()"
+          );
+          let _ = client.send_str_vid(Op::Evaluate, &resolve_js, view_id).await;
+        }
+        continue;
+      }
     }
     let timestamp = std::time::SystemTime::now()
       .duration_since(std::time::UNIX_EPOCH)

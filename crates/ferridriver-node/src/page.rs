@@ -3,7 +3,8 @@
 use crate::error::IntoNapi;
 use crate::locator::Locator;
 use crate::types::{
-  DragAndDropOptions, GotoOptions, MetricData, RoleOptions, ScreenshotOptions, TextOptions, WaitOptions,
+  DragAndDropOptions, GotoOptions, MetricData, RoleOptions, ScreenshotOptions, SnapshotForAiOptions, TextOptions,
+  WaitOptions,
 };
 use ferridriver::protocol::SerializedArgument;
 use napi::Result;
@@ -68,6 +69,26 @@ impl Page {
       page: Arc::clone(&self.inner),
       position: Arc::clone(&self.mouse_position),
     }
+  }
+
+  /// Playwright: `page.touchscreen: Touchscreen` — exposes
+  /// virtual-touch dispatch independent of `Mouse` / `Keyboard`. On
+  /// CDP backends the touch event is delivered via
+  /// `Input.dispatchTouchEvent`; on backends without touch, falls
+  /// back to a synthesized `PointerEvent`.
+  #[napi(getter)]
+  pub fn touchscreen(&self) -> Touchscreen {
+    Touchscreen {
+      page: Arc::clone(&self.inner),
+    }
+  }
+
+  /// Playwright: `page.frameLocator(selector): FrameLocator`. Targets
+  /// an `<iframe>` matching the selector at the page's main-frame
+  /// scope. Equivalent to `page.mainFrame().frameLocator(selector)`.
+  #[napi]
+  pub fn frame_locator(&self, selector: String) -> crate::frame_locator::FrameLocator {
+    crate::frame_locator::FrameLocator::wrap(self.inner.frame_locator(&selector))
   }
 
   /// Set the default timeout for all operations (milliseconds).
@@ -1102,6 +1123,137 @@ impl Page {
       .map_err(napi::Error::from_reason)
   }
 
+  /// Playwright: `page.exposeFunction(name, callback)`. Registers a
+  /// JS function on `window` that proxies into the supplied
+  /// `callback`. The callback receives the args from the page-side
+  /// call as a single array.
+  ///
+  /// The Rust core's `ExposedFn` is a sync callback that returns the
+  /// page-visible value synchronously; NAPI's threadsafe-function
+  /// dispatch is async, so this binding is fire-and-forget — the
+  /// page-side call resolves to `null` while the JS callback runs
+  /// asynchronously.
+  #[napi(
+    ts_args_type = "name: string, callback: (args: unknown[]) => void",
+    ts_return_type = "Promise<void>"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)] // napi-derive requires `&Env`
+  pub fn expose_function(
+    &self,
+    env: &napi::Env,
+    name: String,
+    callback: napi::bindgen_prelude::Function<'_, serde_json::Value, ()>,
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+    let tsfn = callback
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+    let cb: ferridriver::events::ExposedFn = std::sync::Arc::new(move |args: Vec<serde_json::Value>| {
+      let arg = serde_json::Value::Array(args);
+      tsfn.call(arg, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
+      serde_json::Value::Null
+    });
+    let inner = Arc::clone(&self.inner);
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      inner.expose_function(&name, cb).await.map_err(napi::Error::from_reason)
+    })
+    .build(env)
+  }
+
+  /// Playwright: `page.snapshotForAI(options?)`. Returns a structured
+  /// accessibility snapshot tuned for LLM consumption.
+  ///
+  /// Returns `{ full, incremental?, refMap }`:
+  /// - `full` — always present, the complete accessibility tree as
+  ///   a YAML-ish string with `[ref=eN]` labels.
+  /// - `incremental` — present only when the same `track` key is
+  ///   reused; lists nodes that changed since the last call.
+  /// - `refMap` — `{ "eN": backendNodeId }` so callers can map the
+  ///   labels back to live DOM nodes.
+  #[napi(
+    js_name = "snapshotForAI",
+    ts_args_type = "options?: { depth?: number, track?: string }",
+    ts_return_type = "Promise<{ full: string; incremental?: string; refMap: Record<string, number> }>"
+  )]
+  pub async fn snapshot_for_ai(&self, options: Option<SnapshotForAiOptions>) -> Result<serde_json::Value> {
+    let opts = options.map(Into::into).unwrap_or_default();
+    let snap = self
+      .inner
+      .snapshot_for_ai(opts)
+      .await
+      .map_err(napi::Error::from_reason)?;
+    let mut obj = serde_json::Map::new();
+    obj.insert("full".to_string(), serde_json::Value::String(snap.full));
+    if let Some(inc) = snap.incremental {
+      obj.insert("incremental".to_string(), serde_json::Value::String(inc));
+    }
+    let ref_map: serde_json::Map<String, serde_json::Value> = snap
+      .ref_map
+      .into_iter()
+      .map(|(k, v)| (k, serde_json::Value::Number(v.into())))
+      .collect();
+    obj.insert("refMap".to_string(), serde_json::Value::Object(ref_map));
+    Ok(serde_json::Value::Object(obj))
+  }
+
+  /// Playwright internal: `page.startScreencast(quality, maxWidth, maxHeight, callback)`.
+  /// Begins streaming JPEG frames; the callback fires for each frame
+  /// with `{ frame: Buffer, timestamp: number }`. Call
+  /// `stopScreencast()` to halt.
+  ///
+  /// Backends: CDP-pipe / CDP-raw via `Page.startScreencast`. BiDi
+  /// and stock `WKWebView` reject with a typed `Unsupported`.
+  #[napi(
+    ts_args_type = "quality: number, maxWidth: number, maxHeight: number, callback: (frame: { frame: Buffer; timestamp: number }) => void",
+    ts_return_type = "Promise<void>"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)] // napi-derive requires `&Env`
+  pub fn start_screencast(
+    &self,
+    env: &napi::Env,
+    quality: u32,
+    max_width: u32,
+    max_height: u32,
+    callback: napi::bindgen_prelude::Function<'_, ScreencastFrame, ()>,
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+    let q = u8::try_from(quality).map_err(|_| napi::Error::from_reason("quality must fit in u8 (0-100)"))?;
+    let tsfn = callback
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+    let inner = Arc::clone(&self.inner);
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      let mut rx = inner
+        .start_screencast(q, max_width, max_height)
+        .await
+        .map_err(napi::Error::from_reason)?;
+      tokio::spawn(async move {
+        while let Some((bytes, ts)) = rx.recv().await {
+          let payload = ScreencastFrame {
+            frame: napi::bindgen_prelude::Buffer::from(bytes),
+            timestamp: ts,
+          };
+          tsfn.call(
+            payload,
+            napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
+          );
+        }
+      });
+      Ok(())
+    })
+    .build(env)
+  }
+
+  /// Stop the screencast started by `startScreencast`.
+  #[napi]
+  pub async fn stop_screencast(&self) -> Result<()> {
+    self.inner.stop_screencast().await.map_err(napi::Error::from_reason)
+  }
+
   #[napi]
   pub async fn add_script_tag(
     &self,
@@ -1459,6 +1611,37 @@ impl Mouse {
       .page
       .mouse()
       .wheel(delta_x, delta_y)
+      .await
+      .map_err(napi::Error::from_reason)
+  }
+}
+
+/// Single screencast frame surfaced through the
+/// `page.startScreencast` callback.
+#[napi(object)]
+pub struct ScreencastFrame {
+  pub frame: napi::bindgen_prelude::Buffer,
+  pub timestamp: f64,
+}
+
+/// Playwright `Touchscreen`. Construct via `page.touchscreen`.
+#[napi]
+pub struct Touchscreen {
+  page: Arc<ferridriver::Page>,
+}
+
+#[napi]
+impl Touchscreen {
+  /// Playwright: `touchscreen.tap(x, y)`. Dispatches a real
+  /// `TouchEvent` on platforms supporting it; falls back to a
+  /// synthesized `PointerEvent` on platforms without touch (e.g.,
+  /// stock `WKWebView` on macOS).
+  #[napi]
+  pub async fn tap(&self, x: f64, y: f64) -> Result<()> {
+    self
+      .page
+      .touchscreen()
+      .tap(x, y)
       .await
       .map_err(napi::Error::from_reason)
   }
