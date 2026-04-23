@@ -1180,6 +1180,40 @@ The `ferridriver-script` crate exposes core Rust types to QuickJS via rquickjs c
 
 These are not ferridriver bugs per se — they are backend-surface gaps. The tests document them.
 
+**§4.1 deferred fields** (apply_context_options + Rule-9 cover 18 of
+28; these 4 need dedicated follow-ups):
+
+- **`recordHar`** — no `apply_context_options` branch. Blocks on
+  **§2.6** (HAR writer). When §2.6 lands, fold the option into the
+  bag the same way `recordVideo` already is (§2.14 →
+  `start_video_recording` wired from `ContextRef::new_page`).
+- **`clientCertificates`** — struct field absent. Playwright runs a
+  dedicated TLS-intercepting proxy
+  (`ClientCertificatesProxy` in
+  `/tmp/playwright/packages/playwright-core/src/server/socksClientCertificatesInterceptor.ts`).
+  Major: needs a local SOCKS/TLS listener, per-origin cert selection,
+  Chrome's `--proxy-server=socks5://` integration. Deferred until
+  someone actively needs it — ferridriver users can work around via
+  `Browser::launch({ args: ['--ignore-certificate-errors'] })`.
+- **`httpCredentials.send` policy** (`'unauthorized' | 'always'`) —
+  origin scoping IS wired on CDP (`Fetch.authRequired` now checks
+  request origin against `creds.origin`). The `send: 'always'`
+  variant only affects `APIRequestContext` — preemptive
+  `Authorization: Basic <base64>` header on every API request.
+  Needs `APIRequestContext` to read the context's options bag and
+  inject the header before each `request.get/post/...`. Tracked in
+  §10 below.
+- **`strictSelectors`** — non-trivial. Playwright's
+  `frameSelectors.ts:48` reads `context._options.strictSelectors` at
+  every selector resolve and ORs it into the per-call `strict` flag.
+  Our backend action paths (`CdpPage::click(selector, ...)` etc.) do
+  not currently count matches before acting. Landing this means:
+  (a) add a strict-count probe in every backend's selector-resolve
+  helper, (b) throw a structured "strict mode violation" error when
+  count > 1, (c) thread the context's `strict_selectors` flag
+  through Page → backend at action time. Parked until a dedicated
+  session.
+
 1. ~~**WebKit: `context.addCookies` → `context.cookies()` round-trip drops the cookie**~~ — **fixed** alongside task #3.4. The Obj-C `OP_GET_COOKIES` handler was emitting `"http_only"` (snake_case) but Rust `CookieData` switched to `#[serde(rename_all = "camelCase")]` in `c820caf`, so serde rejected the whole entry (`.unwrap_or_default()` then collapsed to `[]`). Obj-C now emits `"httpOnly"` to match the Rust wire contract. All three backends round-trip cookies.
 2. ~~**BiDi (Firefox): `page.dragAndDrop` fails with `scrollIntoViewIfNeeded is not a function`**~~ — **fixed** alongside task #3.10. The bounding-rect JS probe now does `try { this.scrollIntoViewIfNeeded(); } catch (e) { this.scrollIntoView(); }` so Firefox/BiDi falls back to the standards-compliant method. `page.dragAndDrop` and `locator.dragTo` pass on all four backends.
 3. **CDP: `page.mouse.wheel(dx, dy)` does not reliably produce a page scroll**. CDP's `Input.dispatchMouseEvent` with `type: "mouseWheel"` requires mouse position routing that doesn't always land on the scrollable viewport. `test_script_mouse_wheel` asserts only that the call does not error, not that `window.scrollY` changed.
