@@ -1,199 +1,171 @@
-# Next session — §2.6 HAR recording (or alt picks)
+# Next session — Cluster 2 (built-in fixtures + auto enforcement)
 
-§2.15 BrowserType is shipped (single commit, replaces
-`Browser::launch` / `Browser::connect` with the Playwright-shaped
-`chromium()` / `firefox()` / `webkit()` factories across all three
-layers). The natural next pick is **§2.6 HAR recording**, which
-unblocks `BrowserContextOptions::recordHar` (one of the four §4.1
-deferred fields).
+Cluster 1 (CLI flag surfacing) is shipped. Cluster 2 is the next-lowest-
+risk piece in the Tier 7 push: register the four first-class Playwright
+fixtures (`browserName`, `browserVersion`, `playwright`, `request`) in
+the Rust core fixture pool, and make the `auto: true` annotation that
+the TS layer parses actually do its job in the resolver.
 
-## Why §2.6 next
+## Why Cluster 2 next
 
-Playwright's `recordHar` ships an HTTP Archive (`.har`) file
-containing every request/response observed in a context. ferridriver's
-§4.1 work shipped the `recordHar` option-bag field but NOT the writer
-— `BrowserContextOptions` accepts `recordHar: { path, ... }` and
-silently drops it. Implementing the writer closes that loop.
+The `browserName` fixture in particular keeps cropping up — a lot of
+Playwright fixture conventions (`test.skip(({ browserName }) => ...)`,
+conditional `use` blocks) read it directly. Today a test that requests
+`browserName` gets a "fixture not found" error from the pool because
+the standard fixture set in `crates/ferridriver-test/src/fixture.rs`
+only registers `browser`, `context`, `page`, `test_info`, `request`
+(and `request` itself isn't auto-resolved as a top-level alias to
+`APIRequestContext` the way Playwright wires it). `auto: true` fixtures
+that the TS macro records get stripped at the boundary instead of
+resolving regardless of the test's requested set.
 
 ## Read-first
 
 1. `CLAUDE.md` — rules + lessons.
-2. `PLAYWRIGHT_COMPAT.md` — §2.6 entry. §4.1 `recordHar` in the
-   "Section B" deferred list (line ~150 in §4.1).
-3. `HANDOVER.md` — §2.15 session recap.
-4. `/tmp/playwright/packages/playwright-core/src/server/har/harTracer.ts`
-   — canonical HAR tracer.
-5. `/tmp/playwright/packages/playwright-core/src/server/har/harRecorder.ts`
-   — context-side recorder hooks.
-6. `/tmp/playwright/packages/har-format/index.d.ts` — HAR 1.2 schema.
+2. `PLAYWRIGHT_COMPAT.md` — §7.18 / §7.19 entries.
+3. `HANDOVER.md` — Cluster 1 recap (CLI flag surface).
+4. `/tmp/playwright/packages/playwright/src/index.ts` — the canonical
+   built-in fixtures table (the part that registers
+   `browserName`, `browserVersion`, `playwright`, `request`,
+   `_combinedContextOptions`, etc. — search for `coreTestFixtures`).
+5. `/tmp/playwright/packages/playwright/types/test.d.ts` — see the
+   `PlaywrightTestArgs` / `PlaywrightWorkerArgs` interfaces for the
+   exact field shapes (`browserName: 'chromium' | 'firefox' | 'webkit'`,
+   `browserVersion: string`, `playwright: typeof import('playwright-core')`,
+   `request: APIRequestContext`).
+6. `crates/ferridriver-test/src/fixture.rs` — current pool / scope /
+   `builtin_fixtures` registry. Look at how `browser` / `context` /
+   `page` are registered today.
+7. `crates/ferridriver-test/src/worker.rs::request_fixture_set` —
+   the standard fixture list `STANDARD_FIXTURE_NAMES` is shadowed in
+   `crates/ferridriver-node/src/test_runner.rs` (search the file for
+   `STANDARD_FIXTURE_NAMES`); both must include the new auto-resolved
+   names.
+8. `crates/ferridriver-node/src/test_fixtures.rs` — how the TS-side
+   `TestFixtures` struct exposes fields. The new fixtures need:
+   - `browserName` and `browserVersion` as plain strings.
+   - `playwright` reference (likely the `BrowserType` factory namespace
+     `{ chromium, firefox, webkit }`).
+   - `request` as a real `APIRequestContext` (already in NAPI as
+     `ApiRequestContext` — verify the binding is exposed).
 
-## §2.6 surface
+## Cluster scope
 
-`BrowserContextOptions::recordHar` accepts:
+### §7.18 — first-class fixtures
 
-```ts
-{
-  path: string;
-  omitContent?: boolean;
-  content?: 'omit' | 'embed' | 'attach';
-  mode?: 'full' | 'minimal';
-  urlFilter?: string | RegExp;
-}
-```
+Register these in `crate::fixture::builtin_fixtures` (or wherever the
+worker pool seeds defaults):
 
-Behaviour:
+| name | type | source |
+|---|---|---|
+| `browser_name` / `browserName` | `String` | `BrowserConfig.browser` |
+| `browser_version` / `browserVersion` | `String` | `Browser::version()` after launch |
+| `playwright` | factory namespace | NAPI: `{ chromium, firefox, webkit }` getters; QuickJS: same exposed via `install_browser_type` |
+| `request` | `APIRequestContext` | already there as `request` — verify it resolves and that NAPI exposes the right binding |
 
-- Every request/response observed in the context is appended to the
-  HAR's `entries` array.
-- `omitContent: true` drops the response body (matches the legacy
-  Playwright option).
-- `content: 'omit' | 'embed' | 'attach'` — preferred Playwright shape.
-- `mode: 'minimal'` skips request/response bodies and headers smaller
-  than a threshold.
-- `urlFilter` filters by URL pattern.
-- The file is written on `context.close()` (or browser shutdown when
-  the context is the persistent default).
+Both Rust core and NAPI fixture sets need updating. QuickJS exposure
+is opt-in (BDD steps don't usually request these), but the NAPI side
+must resolve them when listed in `requestedFixtures`.
 
-## Implementation sketch
+### §7.19 — `auto: true` enforcement
 
-1. **Core** (`crates/ferridriver/src/har/` — new module):
-   - `HarRecorder` struct holding an `Arc<Mutex<HarLog>>`.
-   - Each context that opts into HAR registers a recorder bound to
-     its composite session key. The recorder hooks the existing
-     network event stream (already piped to `Request` / `Response`
-     handles via the per-context `network_log`).
-   - On `context.close`, flush the log to disk as JSON matching the
-     HAR 1.2 schema. Use `serde_json::Serializer::pretty` since HAR
-     files are commonly hand-inspected.
+TS-side annotation already parses (`packages/ferridriver-test/src/
+test.ts` — search `auto`). Rust `FixturePool::resolve()` ignores the
+annotation today. The fix is in `worker.rs` (or whichever code path
+builds the `requested_fixtures` Vec for each test): for every
+registered fixture marked `auto: true`, force-add its name to the
+request set before the pool resolves.
 
-2. **`BrowserContextOptions::record_har` plumbing**: already shipped
-   in §4.1 — just wire `apply_context_options` to register the
-   recorder when the field is set. The write happens at close time;
-   no per-page configuration needed.
+Definition of `auto: true` in Playwright: "this fixture runs whether
+the test requests it or not." So the resolver must instantiate it
+during the test setup phase and tear it down after, regardless of
+`fixture_requests` containing the name.
 
-3. **Backend reach**: works on every backend that already exposes a
-   `network_log` (CDP, BiDi, WebKit). WebKit's network observability
-   is limited (no main-doc Response, no Set-Cookie) — those gaps
-   surface as missing HAR fields, not failures. Document the
-   limitation under `recordHar` like §4.1's other backend caveats.
+Important: the auto-set must compose with worker-scope vs. test-scope
+correctly. Worker-scope auto fixtures run once per worker; test-scope
+auto fixtures run per test.
 
-4. **NAPI / QuickJS**: no new bindings needed — `recordHar` already
-   parses through the existing `BrowserContextOptions` lowering. Only
-   the core writer changes.
+### Tests (Rule 9)
 
-5. **Tests** (`crates/ferridriver-cli/tests/backends_support/`):
-   - Open a context with `recordHar: { path: tmp/output.har }`.
-   - Drive a request through a page (navigate to a known URL +
-     `page.evaluate(() => fetch(...))`).
-   - Close context.
-   - Read the HAR file, assert the entries array contains the
-     expected request, status, headers, body (or omitted body for
-     `omit` modes).
-   - One test per content-mode + one urlFilter test = 4 tests, run on
-     all 4 backends per Rule 9.
+Add to `crates/ferridriver-node/test/cli-flags.test.ts` or a new
+`builtin-fixtures.test.ts`:
 
-## Alternative picks
+- A test that lists only `["browserName"]` in `requestedFixtures` and
+  asserts `fixtures.browserName === 'chromium'` (assuming default).
+- Same for `browserVersion`, returning a non-empty string starting
+  with a digit.
+- A test that lists no fixtures but registers an auto fixture via
+  `test.use({ ... })` and asserts the auto factory ran (e.g. records
+  to a side-channel).
+- All four backends should pass the browserName/browserVersion test —
+  add a `tests/backends_support/builtin_fixtures.rs` that runs through
+  the QuickJS `run_script` path.
 
-- **§2.3 Tracing** (`context.tracing.start/stop`): bigger lift —
-  needs CDP `Tracing.start`, screencast frames, and a `.zip`
-  packager. Unblocks §4.5 `context.tracing` directly.
-- **§4.1 `clientCertificates`**: needs a TLS-intercepting proxy.
-  Major undertaking — defer until after HAR.
-- **§4.1 `httpCredentials.send`**: needs APIRequestContext
-  preemptive-header wiring. Smaller than HAR but specific to a niche
-  Playwright feature.
-- **§4.1 `strictSelectors`**: needs strict-mode counting threaded
-  through every backend's selector path. Large surface.
-- **§3.17 Auto-waiting deadline parity**: small focused surface —
-  easy win if the next session is short.
+## Ground rules (CLAUDE.md)
 
-## Ground rules (from CLAUDE.md)
-
-- Rule 1/2/3: core is source of truth; three layers update in the
-  same commit; no wire shapes leak.
-- Rule 4: every backend real; typed `Unsupported` for genuine
-  protocol gaps.
-- Rule 6: read `/tmp/playwright/packages/playwright-core/src/server/har/`
-  FIRST before implementing.
-- Rule 9: per-content-mode integration test on each backend.
-- Rule 10: no escape hatches.
+- Rule 1: Rust core defines the fixture registry. NAPI/QuickJS only
+  copy strings out.
+- Rule 2: signatures match Playwright's `PlaywrightTestArgs` —
+  `browserName` not `browser_name` on the JS side.
+- Rule 4: each fixture must work on every backend. `browserVersion`
+  uses `Browser::version()` which already returns real strings on
+  every backend (per §2.15).
+- Rule 9: per-fixture integration test on each backend.
 
 ## Baseline (must stay green)
 
 ```
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test -p ferridriver --lib                                 # 125 pass
-cargo test -p ferridriver-script --lib                          # 13 pass
-cargo test -p ferridriver-mcp --lib                             # 38 pass
-cd crates/ferridriver-node && bun run build:debug
-cd <repo root> && bun test                                      # 859 pass
+cargo test -p ferridriver --lib                                 # 125
+cargo test -p ferridriver-test --lib                            # 11
+cargo test -p ferridriver-script --lib                          # 13
+cargo test -p ferridriver-mcp --lib                             # 38
+cargo test -p ferridriver-test --test new_features_e2e          # 14
+cd crates/ferridriver-node && bun run build:debug && bun test   # 883
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1
-# cdp-pipe 164, cdp-raw 164, bidi 159, webkit 161
+# cdp-pipe 175 / cdp-raw / bidi / webkit (latest matrix sizes from CI)
 ```
 
 ## Prompt for the next session
 
-> Continue ferridriver Playwright parity. Read first, in order:
+> Continue ferridriver Playwright parity — Tier 7 cluster 2 (built-in
+> fixtures + `auto: true` enforcement, §7.18 / §7.19). Read first, in
+> order:
 >
-> 1. `CLAUDE.md` — parity rules (1–10) and consolidated lessons.
-> 2. `PLAYWRIGHT_COMPAT.md` — §2.6 is the target. §4.1
->    `recordHar` is the dependent deferred field (Section B).
-> 3. `HANDOVER.md` — §2.15 session recap.
-> 4. `docs/NEXT_SESSION.md` — this file, for the §2.6 brief +
->    surface.
-> 5. `/tmp/playwright/packages/playwright-core/src/server/har/`
->    — canonical HAR tracer + recorder. Read this BEFORE coding.
-> 6. `/tmp/playwright/packages/har-format/index.d.ts` — HAR 1.2
->    schema.
+> 1. `CLAUDE.md` — rules + lessons.
+> 2. `PLAYWRIGHT_COMPAT.md` — §7.18 / §7.19.
+> 3. `HANDOVER.md` — Cluster 1 recap (last session).
+> 4. `docs/NEXT_SESSION.md` — this file.
+> 5. `/tmp/playwright/packages/playwright/src/index.ts` —
+>    `coreTestFixtures` registration.
+> 6. `/tmp/playwright/packages/playwright/types/test.d.ts` —
+>    `PlaywrightTestArgs` / `PlaywrightWorkerArgs` shapes.
+> 7. `crates/ferridriver-test/src/fixture.rs` and
+>    `crates/ferridriver-test/src/worker.rs` for the current pool path.
+> 8. `crates/ferridriver-node/src/test_runner.rs::STANDARD_FIXTURE_NAMES`
+>    and `crates/ferridriver-node/src/test_fixtures.rs` for the NAPI
+>    binding shape.
 >
-> Task: implement §2.6 **HAR recording**. Add a `crates/ferridriver/src/har/`
-> module exposing `HarRecorder`. Wire it through
-> `apply_context_options` so `browser.newContext({ recordHar: { path,
-> mode?, content?, omitContent?, urlFilter? } })` actually writes a
-> spec-compliant HAR file on `context.close()`. The option field
-> already parses; only the writer needs to ship.
+> Task: register `browserName`, `browserVersion`, `playwright`, and
+> `request` as first-class fixtures in the Rust pool, expose them on
+> NAPI / QuickJS with the exact Playwright field names and types, and
+> make `auto: true` annotations actually resolve regardless of whether
+> the test asked for the fixture.
 >
-> Per-backend defaults: every backend with a `network_log` honours
-> the recorder. WebKit's network observability limits surface as
-> missing HAR fields per the existing §1.4 doc.
+> Per-backend Rule 9: at least one integration test per backend
+> exercising `browserName` and `browserVersion`. The "auto fixture
+> ran" assertion can be NAPI-only (the QuickJS side mirrors the
+> registration but BDD scenarios don't typically declare auto
+> fixtures).
 >
-> NAPI / QuickJS: no new bindings — the `recordHar` field already
-> exists in both `NapiBrowserContextOptions` and the QuickJS
-> `JsBrowserContextOptions`. Just confirm the lowering reaches the
-> new writer.
+> Commit shape: one commit (`feat: built-in test fixtures + auto
+> enforcement (§7.18 / §7.19)`).
 >
-> Rule-9 tests per content-mode + urlFilter (4 tests) on each
-> backend. Read the HAR file post-close and assert the entries array
-> contains the expected request shape — content presence/absence
-> for `embed` vs `omit`, body bytes for `attach`.
+> Baseline that must stay green is in HANDOVER.md.
 >
-> Commit shape: one commit (`feat: HAR recording (§2.6)`).
->
-> Baseline that must stay green:
-> ```
-> cargo clippy --workspace --all-targets -- -D warnings
-> cargo test -p ferridriver --lib                           # 125
-> cargo test -p ferridriver-script --lib                    # 13
-> cargo test -p ferridriver-mcp --lib                       # 38
-> cd crates/ferridriver-node && bun run build:debug && bun test   # 859
-> FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
->   cargo test -p ferridriver-cli --test backends -- --test-threads=1
-> # cdp-pipe 164, cdp-raw 164, bidi 159, webkit 161
-> ```
->
-> Non-negotiables (CLAUDE.md): no grace windows, no timing hacks,
-> no broadcast races. No stubs, no placeholders on any backend —
-> typed `FerriError::Unsupported` only where the protocol genuinely
-> can't. All three layers (Rust core / NAPI / QuickJS) update in
-> the same commit. Rebuild NAPI and diff the generated
-> `index.d.ts` against Playwright's `types.d.ts` before flipping
-> `[x]` in PLAYWRIGHT_COMPAT.md.
->
-> Read `/tmp/playwright/packages/playwright-core/src/server/har/`
-> FIRST. Do not reconstruct HAR fields from memory. Rule 9 is
-> load-bearing: every content-mode shipped needs a per-backend
-> integration test that observes the actual HAR file content.
->
-> No emojis, no AI attribution in commit messages, no task/phase/
-> rule-number annotations in source comments or filenames.
+> Non-negotiables (CLAUDE.md): no shortcuts; if a backend's
+> `Browser::version()` returns a placeholder, fix the backend (§2.15
+> already paid that bill — verify before assuming). All three layers
+> update in the same commit. No emojis, no AI attribution, no
+> task/cluster annotations in source comments.

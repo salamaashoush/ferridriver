@@ -123,6 +123,28 @@ pub struct TestRunnerConfig {
 
   // ── Web server ──
   pub web_server: Option<Vec<NapiWebServerConfig>>,
+
+  // ── Cluster 1 CLI flags ──
+  /// Stop after N test failures. 0 = no limit. Playwright: `maxFailures`.
+  pub max_failures: Option<i32>,
+  /// Run each test N times for flake detection.
+  pub repeat_each: Option<i32>,
+  /// Stop on first failure (`-x`).
+  pub fail_fast: Option<bool>,
+  /// Whole-suite timeout in ms. 0 = unlimited.
+  pub global_timeout: Option<f64>,
+  /// Skip every snapshot comparison.
+  pub ignore_snapshots: Option<bool>,
+  /// Exit 0 instead of 1 when no tests are discovered.
+  pub pass_with_no_tests: Option<bool>,
+  /// Path to a single tsconfig used by the TS loader.
+  pub tsconfig: Option<String>,
+  /// Display name surfaced in reports.
+  pub name: Option<String>,
+  /// Run all tests in parallel regardless of file-level grouping.
+  pub fully_parallel: Option<bool>,
+  /// Snapshot update mode: "all", "changed", "missing", "none".
+  pub update_snapshots: Option<String>,
 }
 
 /// Web server config passed from TS — maps to Rust `WebServerConfig`.
@@ -353,6 +375,13 @@ impl TestRunner {
     }
     // Map NAPI config → CliOverrides and use the single resolve_config() path.
     // This ensures env vars, normalization, and worker auto-detection all work.
+    let update_snapshots_mode = cfg.update_snapshots.as_deref().and_then(|m| match m {
+      "all" => Some(ferridriver_test::config::UpdateSnapshotsMode::All),
+      "changed" => Some(ferridriver_test::config::UpdateSnapshotsMode::Changed),
+      "missing" => Some(ferridriver_test::config::UpdateSnapshotsMode::Missing),
+      "none" => Some(ferridriver_test::config::UpdateSnapshotsMode::None),
+      _ => None,
+    });
     let overrides = ferridriver_test::config::CliOverrides {
       workers: cfg.workers.map(|w| w as u32),
       timeout: cfg.timeout.map(|t| t as u64),
@@ -379,6 +408,16 @@ impl TestRunner {
       locale: cfg.locale.clone(),
       offline: cfg.offline,
       bypass_csp: cfg.bypass_csp,
+      max_failures: cfg.max_failures.map(|n| n as u32),
+      repeat_each: cfg.repeat_each.map(|n| n as u32),
+      fail_fast: cfg.fail_fast.unwrap_or(false),
+      global_timeout: cfg.global_timeout.map(|t| t as u64),
+      ignore_snapshots: cfg.ignore_snapshots.unwrap_or(false),
+      pass_with_no_tests: cfg.pass_with_no_tests.unwrap_or(false),
+      tsconfig: cfg.tsconfig.clone(),
+      name: cfg.name.clone(),
+      fully_parallel: cfg.fully_parallel,
+      update_snapshots: update_snapshots_mode,
       ..Default::default()
     };
     let mut tc =
@@ -969,6 +1008,54 @@ impl TestRunner {
   #[napi]
   pub fn get_locale(&self) -> Option<String> {
     self.config.browser.context.locale.clone()
+  }
+
+  /// Display name from config (Playwright top-level `name`).
+  #[napi]
+  pub fn get_name(&self) -> Option<String> {
+    self.config.name.clone()
+  }
+
+  /// Path to a single tsconfig (Playwright top-level `tsconfig`).
+  #[napi]
+  pub fn get_tsconfig(&self) -> Option<String> {
+    self.config.tsconfig.clone()
+  }
+
+  /// Whether `--ignore-snapshots` is in effect.
+  #[napi]
+  pub fn get_ignore_snapshots(&self) -> bool {
+    self.config.ignore_snapshots
+  }
+
+  /// Whether `--pass-with-no-tests` is in effect.
+  #[napi]
+  pub fn get_pass_with_no_tests(&self) -> bool {
+    self.config.pass_with_no_tests
+  }
+
+  /// Whole-suite timeout in ms (0 = unlimited).
+  #[napi]
+  pub fn get_global_timeout(&self) -> f64 {
+    self.config.global_timeout as f64
+  }
+
+  /// `maxFailures` (0 = unlimited).
+  #[napi]
+  pub fn get_max_failures(&self) -> i32 {
+    self.config.max_failures as i32
+  }
+
+  /// `repeatEach`.
+  #[napi]
+  pub fn get_repeat_each(&self) -> i32 {
+    self.config.repeat_each as i32
+  }
+
+  /// Whether `-x` / fail-fast is in effect.
+  #[napi]
+  pub fn get_fail_fast(&self) -> bool {
+    self.config.fail_fast
   }
 
   /// Discover test files.

@@ -983,7 +983,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.2 `globalTimeout`, `--global-timeout`
 
-- [ ] Top-level timeout across whole run.
+- [x] Top-level timeout across whole run. Added `TestConfig::global_timeout` (ms, 0 = unlimited), env var `FERRIDRIVER_GLOBAL_TIMEOUT`, NAPI `globalTimeout`, TS CLI `--global-timeout`. Implemented in `runner::TestRunner::run` via `tokio::time::timeout`. Rule 9: `crates/ferridriver-node/test/cli-flags.test.ts` exercises a 100ms timeout cancelling a 1500ms test body.
 
 ### 7.3 `--only-changed`
 
@@ -995,11 +995,11 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.5 `--ignore-snapshots`
 
-- [ ] Skip snapshot comparisons at runtime.
+- [x] Skip snapshot comparisons at runtime. Added `TestConfig::ignore_snapshots`, propagated to `TestInfo`, honored by `crate::snapshot::assert_snapshot` (text snapshot path). NAPI `ignoreSnapshots`, TS CLI `--ignore-snapshots`. Screenshot path (`compare_screenshot_png`) lands with §7.17 since the matcher needs the `TestInfo` plumbing as part of the `toHaveScreenshot` rewrite.
 
 ### 7.6 `--tsconfig`
 
-- [ ] Pass through to TS compile step.
+- [x] Pass through to TS compile step. Added `TestConfig::tsconfig`, NAPI `tsconfig`, TS CLI `--tsconfig`. The TS-side loader rebuilds jiti with the user-supplied tsconfig in Node mode; under Bun the loader prints a one-time warning since Bun reads its own `tsconfig.json` from the project root and lacks a programmatic override.
 
 ### 7.7 `--ui` mode
 
@@ -1007,11 +1007,11 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.8 `--update-source-method` + proper `-u [mode]` parsing
 
-- [ ] `mode = all | changed | missing | none`.
+- [x] `mode = all | changed | missing | none`. `-u`/`--update-snapshots` now accepts an optional `[mode]` value via clap-ts `defaultMissingValue: 'changed'` (matches Playwright's preset). NAPI `updateSnapshots: 'all' | 'changed' | 'missing' | 'none'`. `--update-source-method` itself is deferred — it controls how the patch file is rendered (overwrite/3way/patch) and only matters once we ship a Playwright-compatible patch writer.
 
 ### 7.9 `--pass-with-no-tests`, `--repeat-each`, `--max-failures`, `-x` CLI flags
 
-- [ ] Surface existing config fields to CLI.
+- [x] Surface existing config fields to CLI. `--max-failures`, `--repeat-each`, `-x` (alias of `--max-failures 1`), `--pass-with-no-tests`, `--fully-parallel`, `--global-timeout`, `--name`, `--ignore-snapshots`, `--tsconfig` all wired through `packages/ferridriver-test/src/cli.ts` → `TestRunnerConfig` (NAPI) → `TestConfig` (Rust). `dispatcher::Dispatcher` gained a hard-stop `AtomicBool` consumed by the worker loop so `--max-failures` and `-x` actually drop pending queue items rather than draining them. Rule 9 covered by `crates/ferridriver-node/test/cli-flags.test.ts`.
 
 ### 7.10 `TestInfo` helpers
 
@@ -1086,9 +1086,11 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.27 `updateSnapshots` mode parsing
 
-- [ ] `all | changed | missing | none`.
+- [x] `all | changed | missing | none`. Same wiring as §7.8 — `-u`/`--update-snapshots` accepts the optional mode and parses to `UpdateSnapshotsMode`. The TS config schema's `updateSnapshots` field already accepted the union; CLI now does too. `assert_snapshot` already honored every variant (None blocks creation, Changed/All overwrite, Missing creates only).
 
 ### 7.28 Config top-level `name`, `tsconfig`
+
+- [x] Both surfaced. `FerridriverTestConfig.name` already existed; `tsconfig` added. `TestConfig::name` and `TestConfig::tsconfig` mirror in the Rust core. NAPI `name` / `tsconfig` plus accessors `TestRunner::get_name()` / `get_tsconfig()`. The `name` field is metadata only at this point — reporters that surface it (HTML / blob in §7.20) read the same `TestConfig.name`.
 
 ---
 

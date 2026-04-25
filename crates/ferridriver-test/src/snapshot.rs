@@ -23,6 +23,12 @@ use crate::model::{TestFailure, TestInfo};
 pub fn assert_snapshot(test_info: &TestInfo, actual: &str, name: &str, update: bool) -> Result<(), TestFailure> {
   use crate::config::UpdateSnapshotsMode;
 
+  // `--ignore-snapshots`: skip every comparison and write — the test still runs
+  // but never fails on a snapshot mismatch.
+  if test_info.ignore_snapshots && !update {
+    return Ok(());
+  }
+
   let snap_path = if let Some(ref template) = test_info.snapshot_path_template {
     resolve_template_path(
       template,

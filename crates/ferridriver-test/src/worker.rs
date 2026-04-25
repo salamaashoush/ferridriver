@@ -580,6 +580,7 @@ impl Worker {
         .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
       snapshot_path_template: self.config.snapshot_path_template.clone(),
       update_snapshots: self.config.update_snapshots,
+      ignore_snapshots: self.config.ignore_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(Mutex::new(Vec::new())),
@@ -598,6 +599,7 @@ impl Worker {
     custom_fixture_pool: FixturePool,
     rx: async_channel::Receiver<WorkItem>,
     result_tx: mpsc::Sender<WorkerTestResult>,
+    stop_flag: Arc<std::sync::atomic::AtomicBool>,
   ) {
     self
       .event_bus
@@ -609,6 +611,11 @@ impl Worker {
     let mut prepared_page = Some(Self::spawn_prepared_page(Arc::clone(&browser)));
 
     while let Ok(item) = rx.recv().await {
+      // `--max-failures` / `-x` flips this flag; drop any items that were
+      // already buffered in the channel rather than processing them.
+      if stop_flag.load(std::sync::atomic::Ordering::SeqCst) {
+        break;
+      }
       match item {
         WorkItem::Single(assignment) => {
           let result = Box::pin(self.run_single(
@@ -639,6 +646,10 @@ impl Worker {
           }
         },
       }
+      // Yield so the runner can observe the just-sent result and trip the
+      // stop flag (for `--max-failures` / `-x`) before this worker races
+      // to pull the next item out of the buffered channel.
+      tokio::task::yield_now().await;
     }
 
     if let Some(handle) = prepared_page.take() {
@@ -1031,6 +1042,7 @@ impl Worker {
         .unwrap_or_else(|| std::path::PathBuf::from("__snapshots__")),
       snapshot_path_template: self.config.snapshot_path_template.clone(),
       update_snapshots: self.config.update_snapshots,
+      ignore_snapshots: self.config.ignore_snapshots,
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(Mutex::new(Vec::new())),

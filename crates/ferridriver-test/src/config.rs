@@ -137,6 +137,24 @@ pub struct TestConfig {
   /// Stop after N test failures. 0 = no limit. Playwright: `maxFailures`.
   pub max_failures: u32,
 
+  /// Maximum total runtime in ms across the whole test run. 0 = unlimited.
+  /// Playwright: `globalTimeout`.
+  pub global_timeout: u64,
+
+  /// Skip every snapshot comparison at runtime. Playwright: `ignoreSnapshots`.
+  pub ignore_snapshots: bool,
+
+  /// Make the run succeed even when no tests were discovered.
+  /// Playwright CLI: `--pass-with-no-tests`.
+  pub pass_with_no_tests: bool,
+
+  /// Path to a single tsconfig used by the TypeScript loader (jiti / Bun).
+  /// `None` falls back to per-file tsconfig discovery.
+  pub tsconfig: Option<String>,
+
+  /// Display name for the run, surfaced in reports. Playwright top-level `name`.
+  pub name: Option<String>,
+
   /// Snapshot directory path template.
   pub snapshot_dir: Option<String>,
 
@@ -582,6 +600,15 @@ pub struct CliOverrides {
   pub video: Option<String>,
   pub trace: Option<String>,
   pub storage_state: Option<String>,
+  pub max_failures: Option<u32>,
+  pub repeat_each: Option<u32>,
+  pub fail_fast: bool,
+  pub global_timeout: Option<u64>,
+  pub ignore_snapshots: bool,
+  pub pass_with_no_tests: bool,
+  pub tsconfig: Option<String>,
+  pub name: Option<String>,
+  pub fully_parallel: Option<bool>,
   // ── Browser overrides ──
   /// Browser product: "chromium", "firefox", "webkit".
   pub browser: Option<String>,
@@ -660,9 +687,52 @@ pub fn parse_common_cli_args() -> CliOverrides {
         overrides.tag = args.get(i).cloned();
       },
       "--list" => overrides.list_only = true,
-      "--update-snapshots" | "-u" => overrides.update_snapshots = Some(UpdateSnapshotsMode::All),
+      "--update-snapshots" | "-u" => {
+        // Playwright accepts `-u` (defaults to "changed") and `-u <mode>`.
+        // Peek at the next argument: if it parses as a known mode, consume it.
+        let mode = match args.get(i + 1).map(String::as_str) {
+          Some("all") => {
+            i += 1;
+            UpdateSnapshotsMode::All
+          },
+          Some("changed") => {
+            i += 1;
+            UpdateSnapshotsMode::Changed
+          },
+          Some("missing") => {
+            i += 1;
+            UpdateSnapshotsMode::Missing
+          },
+          Some("none") => {
+            i += 1;
+            UpdateSnapshotsMode::None
+          },
+          _ => UpdateSnapshotsMode::All,
+        };
+        overrides.update_snapshots = Some(mode);
+      },
       "--forbid-only" => overrides.forbid_only = true,
       "--last-failed" => overrides.last_failed = true,
+      "--max-failures" => {
+        i += 1;
+        overrides.max_failures = args.get(i).and_then(|v| v.parse().ok());
+      },
+      "--repeat-each" => {
+        i += 1;
+        overrides.repeat_each = args.get(i).and_then(|v| v.parse().ok());
+      },
+      "--global-timeout" => {
+        i += 1;
+        overrides.global_timeout = args.get(i).and_then(|v| v.parse().ok());
+      },
+      "-x" => overrides.fail_fast = true,
+      "--pass-with-no-tests" => overrides.pass_with_no_tests = true,
+      "--ignore-snapshots" => overrides.ignore_snapshots = true,
+      "--tsconfig" => {
+        i += 1;
+        overrides.tsconfig = args.get(i).cloned();
+      },
+      "--fully-parallel" => overrides.fully_parallel = Some(true),
       "--profile" => {
         i += 1;
         overrides.profile = args.get(i).cloned();
@@ -749,6 +819,11 @@ impl Default for TestConfig {
       storage_state: None,
       web_server: Vec::new(),
       max_failures: 0,
+      global_timeout: 0,
+      ignore_snapshots: false,
+      pass_with_no_tests: false,
+      tsconfig: None,
+      name: None,
       report_slow_tests: Some(ReportSlowTestsConfig::default()),
       snapshot_dir: None,
       snapshot_path_template: None,
@@ -919,6 +994,38 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
   }
   if let Some(mode) = overrides.update_snapshots {
     config.update_snapshots = mode;
+  }
+  if let Some(n) = overrides.max_failures {
+    config.max_failures = n;
+  }
+  if let Some(n) = overrides.repeat_each {
+    config.repeat_each = n;
+  }
+  if overrides.fail_fast {
+    config.fail_fast = true;
+  }
+  if let Some(t) = overrides.global_timeout {
+    config.global_timeout = t;
+  }
+  if overrides.ignore_snapshots {
+    config.ignore_snapshots = true;
+  }
+  if overrides.pass_with_no_tests {
+    config.pass_with_no_tests = true;
+  }
+  if let Some(ref ts) = overrides.tsconfig {
+    config.tsconfig = Some(ts.clone());
+  }
+  if let Some(ref n) = overrides.name {
+    config.name = Some(n.clone());
+  }
+  if let Some(p) = overrides.fully_parallel {
+    config.fully_parallel = p;
+  }
+  if let Ok(t) = std::env::var("FERRIDRIVER_GLOBAL_TIMEOUT") {
+    if let Ok(v) = t.parse() {
+      config.global_timeout = v;
+    }
   }
   // Environment variable: FERRIDRIVER_VIDEO=on|off|retain-on-failure
   if let Ok(v) = std::env::var("FERRIDRIVER_VIDEO") {

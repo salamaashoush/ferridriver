@@ -54,17 +54,41 @@ function _printProfile() {
 // ---- TS file loader: jiti on Node, native on Bun ----
 
 let _importTs: (path: string) => Promise<any>;
+let _configureTsLoader: (tsconfigPath: string | undefined) => void;
 
 if (typeof globalThis.Bun !== 'undefined') {
   _importTs = (path: string) => import(path);
+  // Bun honours the project's `tsconfig.json` automatically; the runtime
+  // does not yet expose a programmatic override. When the user passes a
+  // different tsconfig path we surface a one-time warning so the loader
+  // behaviour is predictable rather than silently ignored.
+  let _warned = false;
+  _configureTsLoader = (tsconfigPath) => {
+    if (tsconfigPath && !_warned) {
+      _warned = true;
+      console.warn(
+        `[ferridriver-test] --tsconfig=${tsconfigPath} is honoured only when running under Node (jiti). Bun reads its own tsconfig.json.`,
+      );
+    }
+  };
 } else {
   const { createJiti } = await import('jiti');
-  const jiti = createJiti(import.meta.url, {
+  let _jiti = createJiti(import.meta.url, {
     fsCache: true,        // cache transpiled files to node_modules/.cache/jiti
     moduleCache: true,    // cache loaded modules in memory
     interopDefault: true, // auto-extract default exports
   });
-  _importTs = (path: string) => jiti.import(path);
+  _importTs = (path: string) => _jiti.import(path);
+  _configureTsLoader = (tsconfigPath) => {
+    if (!tsconfigPath) return;
+    _jiti = createJiti(import.meta.url, {
+      fsCache: true,
+      moduleCache: true,
+      interopDefault: true,
+      jsx: { factory: 'React.createElement', fragment: 'React.Fragment' },
+      transformOptions: { ts: { compilerOptions: { tsconfig: tsconfigPath } } },
+    } as any);
+  };
 }
 
 // ---- Config file loading ----
@@ -132,6 +156,16 @@ function mergeConfig(fileConfig: FerridriverTestConfig, cliArgs: Record<string, 
   if (fileConfig.testIgnore) config.testIgnore = fileConfig.testIgnore;
   if (fileConfig.testDir) config.testDir = fileConfig.testDir;
   if (fileConfig.webServer) config.webServer = fileConfig.webServer;
+  if (fileConfig.maxFailures !== undefined) config.maxFailures = fileConfig.maxFailures;
+  if (fileConfig.repeatEach !== undefined) config.repeatEach = fileConfig.repeatEach;
+  if (fileConfig.globalTimeout !== undefined) config.globalTimeout = fileConfig.globalTimeout;
+  if (fileConfig.fullyParallel !== undefined) config.fullyParallel = fileConfig.fullyParallel;
+  if (fileConfig.ignoreSnapshots) config.ignoreSnapshots = true;
+  if (fileConfig.passWithNoTests) config.passWithNoTests = true;
+  if (fileConfig.updateSnapshots) config.updateSnapshots = fileConfig.updateSnapshots;
+  if (fileConfig.tsconfig) config.tsconfig = fileConfig.tsconfig;
+  if (fileConfig.name) config.name = fileConfig.name;
+  if (fileConfig.quiet) config.quiet = true;
 
   // CLI args override everything.
   for (const [key, value] of Object.entries(cliArgs)) {
@@ -165,9 +199,18 @@ function buildCliOverrides(args: Record<string, any>): Record<string, any> {
     }
   }
   if (args.reporter) o.reporter = [args.reporter];
-  if (args['update-snapshots']) o.updateSnapshots = true;
+  if (args['update-snapshots']) o.updateSnapshots = args['update-snapshots'];
   if (args['forbid-only']) o.forbidOnly = true;
   if (args['last-failed']) o.lastFailed = true;
+  if (args['max-failures'] !== undefined) o.maxFailures = args['max-failures'];
+  if (args['repeat-each'] !== undefined) o.repeatEach = args['repeat-each'];
+  if (args.x) o.failFast = true;
+  if (args['pass-with-no-tests']) o.passWithNoTests = true;
+  if (args['ignore-snapshots']) o.ignoreSnapshots = true;
+  if (args.tsconfig) o.tsconfig = args.tsconfig;
+  if (args['global-timeout'] !== undefined) o.globalTimeout = args['global-timeout'];
+  if (args.name) o.name = args.name;
+  if (args['fully-parallel']) o.fullyParallel = true;
   if (args.video) o.video = args.video;
   if (args.trace) o.trace = args.trace;
   if (args['storage-state']) o.storageState = args['storage-state'];
@@ -273,8 +316,12 @@ const runnerArgs = defineArgs({
     valueParser: ['terminal', 'junit', 'json'],
   },
   'update-snapshots': {
-    type: 'boolean',
-    description: 'Update snapshot files',
+    type: 'string',
+    short: 'u',
+    valueName: 'MODE',
+    description: 'Update snapshot files. Optional MODE: all|changed|missing|none (default: changed)',
+    valueParser: ['all', 'changed', 'missing', 'none'],
+    defaultMissingValue: 'changed',
   },
   list: {
     type: 'boolean',
@@ -322,6 +369,49 @@ const runnerArgs = defineArgs({
     valueName: 'PATH',
     description: 'Path to config file (default: auto-detect ferridriver.config.ts)',
     valueHint: 'filePath',
+  },
+  // ── Cluster 1 surface ──
+  'max-failures': {
+    type: 'number',
+    valueName: 'N',
+    description: 'Stop after N failures (0 = unlimited)',
+  },
+  'repeat-each': {
+    type: 'number',
+    valueName: 'N',
+    description: 'Run each test N times for flake detection',
+  },
+  x: {
+    type: 'boolean',
+    description: 'Stop after the first failure (alias of --max-failures 1)',
+  },
+  'pass-with-no-tests': {
+    type: 'boolean',
+    description: 'Make the run succeed even if no tests were discovered',
+  },
+  'ignore-snapshots': {
+    type: 'boolean',
+    description: 'Skip every snapshot comparison at runtime',
+  },
+  tsconfig: {
+    type: 'string',
+    valueName: 'PATH',
+    description: 'Path to a single tsconfig used by the TS loader',
+    valueHint: 'filePath',
+  },
+  'global-timeout': {
+    type: 'number',
+    valueName: 'MS',
+    description: 'Maximum total runtime in ms across the whole test run',
+  },
+  name: {
+    type: 'string',
+    valueName: 'NAME',
+    description: 'Display name for the run, surfaced in reports',
+  },
+  'fully-parallel': {
+    type: 'boolean',
+    description: 'Run all tests in parallel regardless of file-level grouping',
   },
 });
 
@@ -617,6 +707,9 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
     config.webServer = [config.webServer];
   }
 
+  // Re-create the TS loader with the user's tsconfig before any test files are imported.
+  _configureTsLoader(config.tsconfig);
+
   _markPhase('config + discovery');
 
   const runner = TestRunner.create(config);
@@ -652,7 +745,9 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
       viteProcess.stderr?.destroy();
       viteProcess.kill();
     }
-    process.exit(0);
+    // Playwright `--pass-with-no-tests`: exit 0 when no tests are discovered;
+    // otherwise the empty run is treated as a failure (exit 1).
+    process.exit(config.passWithNoTests ? 0 : 1);
   }
 
   // Run — feature files passed to Rust for parsing/translation into the same plan.
@@ -741,7 +836,7 @@ const testCommand = defineCommand({
 
     if (testFiles.length === 0 && featureFiles.length === 0) {
       console.log('  No test files found.');
-      process.exit(0);
+      process.exit(config.passWithNoTests ? 0 : 1);
     }
 
     // Load step definitions if we have feature files.
@@ -785,7 +880,8 @@ const ctCommand = defineCommand({
     });
     if (testFiles.length === 0) {
       console.log('  No component test files found.');
-      process.exit(0);
+      const merged = mergeConfig(fileConfig, buildCliOverrides(args));
+      process.exit(merged.passWithNoTests ? 0 : 1);
     }
     const config = mergeConfig(fileConfig, buildCliOverrides(args));
     await runTests(config, testFiles, true);

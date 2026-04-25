@@ -138,6 +138,8 @@ export interface FerridriverTestConfig {
   preserveOutput?: 'always' | 'never' | 'failures-only';
   quiet?: boolean;
   updateSnapshots?: 'all' | 'changed' | 'missing' | 'none';
+  ignoreSnapshots?: boolean;
+  passWithNoTests?: boolean;
 
   // ── Reporter ──
   reporter?: ReporterConfig | ReporterConfig[];
@@ -165,6 +167,9 @@ export interface FerridriverTestConfig {
   // ── Metadata ──
   metadata?: Record<string, any>;
   name?: string;
+
+  // ── Loader ──
+  tsconfig?: string;
 }
 
 /**

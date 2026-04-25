@@ -349,6 +349,9 @@ pub struct TestInfo {
   pub snapshot_path_template: Option<String>,
   /// Snapshot update mode.
   pub update_snapshots: crate::config::UpdateSnapshotsMode,
+  /// When true, every snapshot comparison short-circuits to a pass.
+  /// Mirrors Playwright's `--ignore-snapshots` CLI flag.
+  pub ignore_snapshots: bool,
   /// Collected attachments.
   pub attachments: Arc<Mutex<Vec<Attachment>>>,
   /// Collected test steps.
@@ -386,6 +389,7 @@ impl TestInfo {
       snapshot_dir: PathBuf::new(),
       snapshot_path_template: None,
       update_snapshots: crate::config::UpdateSnapshotsMode::default(),
+      ignore_snapshots: false,
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(Mutex::new(Vec::new())),

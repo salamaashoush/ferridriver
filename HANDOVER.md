@@ -6,124 +6,140 @@ fresh summary at the end of each block.
 ## Cross-device setup
 
 1. `CLAUDE.md` — rules + lessons.
-2. `PLAYWRIGHT_COMPAT.md` — gap tracker. Tier 1 done. §3.1, §3.12,
-   §2.9, §2.11, §2.10, §2.12, §2.13, §2.14, §4.1 (18/28 fields), and
-   now §2.15 landed.
+2. `PLAYWRIGHT_COMPAT.md` — gap tracker. Tier 1 done. Tier 2.x and 4.x
+   incremental wins through §2.15 BrowserType. Tier 7 (test runner)
+   underway: §7.2 / §7.5 / §7.6 / §7.8 / §7.9 / §7.27 / §7.28 shipped
+   (Cluster 1).
 3. This file — block summary below.
-4. `docs/NEXT_SESSION.md` — next-block brief + prompt.
+4. `docs/NEXT_SESSION.md` — next-cluster brief + prompt.
 
 `git clone https://github.com/microsoft/playwright /tmp/playwright` if missing.
 
-## Landed this session
+## Landed this session — Cluster 1 (CLI flag surfacing)
 
-### Single commit — `feat: BrowserType class (§2.15)`
+Single commit. Mechanical CLI surface for the §7.2/§7.5/§7.6/§7.8/§7.9/
+§7.27/§7.28 group plus a real fix for the underlying `--max-failures`
+behavior (workers used to drain the queue past the threshold).
 
-`Browser::launch` / `Browser::connect` are gone. The Playwright-shaped
-`BrowserType` factory is the sole entry point in all three layers
-(Rust core / NAPI / QuickJS). Three top-level factories — `chromium`,
-`firefox`, `webkit` — mirror Playwright's
-`import { chromium, firefox, webkit } from 'playwright'`.
+### New top-level config fields
 
-#### Public surface (matches Playwright verbatim)
+`crates/ferridriver-test/src/config.rs::TestConfig` gained:
 
-```rust
-use ferridriver::{chromium, firefox, webkit};
-use ferridriver::options::{LaunchOptions, ConnectOverCdpOptions, LaunchPersistentContextOptions};
-
-let browser = chromium().launch(LaunchOptions::default()).await?;
-let firefox_browser = firefox().launch(LaunchOptions::default()).await?;
-let attached = chromium()
-  .connect_over_cdp("ws://127.0.0.1:9222/...", ConnectOverCdpOptions::default())
-  .await?;
-let persistent = chromium()
-  .launch_persistent_context(Path::new("/tmp/profile"), LaunchPersistentContextOptions::default())
-  .await?;
-```
-
-`chromium({ transport: 'ws' })` (NAPI/QuickJS) and
-`BrowserType::chromium_with(BrowserTypeOptions { transport: Some(Ws) })`
-(Rust) drive the CDP-WebSocket transport instead of the pipe default —
-ferridriver's only deviation from Playwright's pipe-only `chromium`,
-required to keep the `cdp-raw` backend coverage matrix usable.
-
-#### Public `LaunchOptions` is now Playwright-shaped
-
-Dropped: `backend`, `browser`, `viewport`, `user_data_dir`,
-`ws_endpoint`, `auto_connect`. Those are now internal — the
-`crate::options::LaunchPlan` struct (consumed only by
-`BrowserState::with_plan`) carries them. Kept (Playwright fields):
-`headless`, `executable_path`, `args`, `channel`, `env`, `slow_mo`,
-`timeout`, `downloads_path`, `ignore_default_args`,
-`handle_sighup`, `handle_sigint`, `handle_sigterm`,
-`chromium_sandbox`, `firefox_user_prefs`, `proxy`, `traces_dir`.
-
-Viewport now lives where Playwright puts it: on
-`BrowserContextOptions::viewport`. `recorder.rs` was the only caller
-that used to pass viewport via `LaunchOptions`; it now constructs a
-`BrowserContextOptions` and passes it to `browser.new_context(...)`.
-
-#### Persistent-context wiring
-
-- `BrowserState::persistent_context: bool` set by
-  `launch_persistent_context`. `ContextRef::close` reads it and calls
-  `state.shutdown()` so closing the persistent default context
-  terminates the underlying browser too — Playwright's contract at
-  `types.d.ts:15199`.
-- `CdpBrowser::launch_with_flags_in_dir` (pipe + ws) accepts a
-  borrowed `&Path` for `--user-data-dir` so the dir survives across
-  re-launches. `state.rs::ensure_instance` switches between the
-  TempDir and explicit-path variants based on `BrowserState.user_data_dir`.
-
-#### Migration scope
-
-| layer | files | sites |
+| field | type | Playwright equivalent |
 |---|---|---|
-| Rust tests / runners / MCP / codegen | ~30 | every `Browser::launch` / `Browser::connect` site |
-| TypeScript bun tests | ~26 | every `Browser.launch({ backend })` site |
-| MCP server | 2 (`server.rs`, `config.rs`) | `BrowserState::with_options` -> `with_plan` |
-| Test runner / fixture | 2 (`runner.rs`, `fixture.rs`) | `build_launch_options` -> `build_launch_plan` |
+| `global_timeout` | `u64` (ms, 0 = unlimited) | `globalTimeout` / `--global-timeout` |
+| `ignore_snapshots` | `bool` | `ignoreSnapshots` / `--ignore-snapshots` |
+| `pass_with_no_tests` | `bool` | `--pass-with-no-tests` |
+| `tsconfig` | `Option<String>` | top-level `tsconfig` / `--tsconfig` |
+| `name` | `Option<String>` | top-level `name` |
 
-Bun tests gained a tiny `_helpers.ts` with `launchForBackend(backend)`
-that maps `cdp-pipe`→`chromium().launch()`,
-`cdp-raw`→`chromium({transport:'ws'}).launch()`,
-`bidi`→`firefox().launch()`, `webkit`→`webkit().launch()` so the
-existing per-backend test matrix keeps working unchanged.
+`CliOverrides` mirror plus `max_failures`, `repeat_each`, `fail_fast`,
+`fully_parallel`, `update_snapshots`. `parse_common_cli_args` now
+recognises `--max-failures`, `--repeat-each`, `--global-timeout`, `-x`,
+`--pass-with-no-tests`, `--ignore-snapshots`, `--tsconfig`,
+`--fully-parallel`, and `-u [all|changed|missing|none]` (with the
+optional value matching Playwright's `preset = 'changed'`).
+
+### Runtime effects
+
+- `global_timeout` is enforced inside `runner::TestRunner::run` via
+  `tokio::time::timeout`. The whole project / single-project pipeline
+  is wrapped; on expiry the runner logs and returns exit code 1.
+- `ignore_snapshots` propagates to `model::TestInfo::ignore_snapshots`
+  (set by the worker) and short-circuits the text path
+  `crate::snapshot::assert_snapshot`. The screenshot path
+  (`compare_screenshot_png`) lands with §7.17 since the matcher needs
+  `TestInfo` plumbing as part of the `toHaveScreenshot` rewrite.
+- `dispatcher::Dispatcher` gained an `Arc<AtomicBool>` `stopped` flag
+  and a new `stop()` method; the worker loop checks the flag after
+  `recv()` and breaks before processing dropped items, plus calls
+  `tokio::task::yield_now()` after each result-send so the runner can
+  observe the result and trip the flag before the worker races to the
+  next item. `runner` now uses `dispatcher.stop()` (not `close()`)
+  when `--max-failures`/`-x` fires.
+
+### NAPI surface
+
+`crates/ferridriver-node/src/test_runner.rs::TestRunnerConfig`
+gained: `maxFailures`, `repeatEach`, `failFast`, `globalTimeout`,
+`ignoreSnapshots`, `passWithNoTests`, `tsconfig`, `name`,
+`fullyParallel`, `updateSnapshots` (string union mode). Accessors:
+`get_name`, `get_tsconfig`, `get_ignore_snapshots`,
+`get_pass_with_no_tests`, `get_global_timeout`, `get_max_failures`,
+`get_repeat_each`, `get_fail_fast`. Generated `index.d.ts` matches
+Playwright's `PlaywrightTestConfig` field names.
+
+### TS surface
+
+`packages/ferridriver-test/src/cli.ts` exposes:
+`--max-failures <N>`, `--repeat-each <N>`, `-x`, `--pass-with-no-tests`,
+`--ignore-snapshots`, `--tsconfig <PATH>`, `--global-timeout <MS>`,
+`--name <NAME>`, `--fully-parallel`, plus `-u`/`--update-snapshots`
+upgraded to accept the optional `[mode]` value. `mergeConfig` reads the
+matching fields from the config file. The TS loader rebuilds `jiti`
+with the user-supplied tsconfig in Node mode; under Bun the runtime
+reads its own `tsconfig.json` and the loader prints a one-time warning
+when the override is set (no programmatic Bun override exists).
+
+`config.ts`: `FerridriverTestConfig` gained `tsconfig?: string`,
+`ignoreSnapshots?: boolean`, `passWithNoTests?: boolean`. `name?` and
+the rest already existed.
+
+### Pass-with-no-tests semantics
+
+Both no-test exit paths in `cli.ts` (`testFiles.length === 0` and the
+post-discovery `tests.length === 0`) now exit `1` by default and `0`
+when `passWithNoTests` is set. Previously they exited `0`
+unconditionally — a parity bug that meant `forbid-only` style CI
+gates couldn't distinguish "no tests selected" from "all tests
+passed".
+
+### Tests (Rule 9)
+
+`crates/ferridriver-node/test/cli-flags.test.ts` — 11 cases driven via
+the `TestRunner` NAPI surface, asserting page-visible / runner-visible
+effects:
+
+- `maxFailures: 2` over 4 failing tests → exactly 2 failures recorded.
+- `failFast` over 1 failing + 2 passing → exactly 1 result.
+- `repeatEach: 3` over 1 test → callback invoked 3×.
+- `globalTimeout: 100` against a 1500ms test body → returns under 1s
+  with exit code 1.
+- Config getters reflect each input value (`getName`, `getTsconfig`,
+  `getIgnoreSnapshots`, `getPassWithNoTests`, `getGlobalTimeout`,
+  `getMaxFailures`, `getRepeatEach`, `getFailFast`).
 
 ### Baseline (must stay green)
 
 ```
 cargo clippy --workspace --all-targets -- -D warnings            # clean
 cargo test -p ferridriver --lib                                   # 125 pass
+cargo test -p ferridriver-test --lib                              # 11 pass
 cargo test -p ferridriver-script --lib                            # 13 pass
 cargo test -p ferridriver-mcp --lib                               # 38 pass
+cargo test -p ferridriver-test --test new_features_e2e            # 14 pass
 cd crates/ferridriver-node && bun run build:debug
-cd <repo root> && bun test                                        # 859 pass
+cd <repo root> && bun test                                        # 883 pass
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1
-# cdp-pipe 164, cdp-raw 164, bidi 159, webkit 161  (+5 §2.15 tests on each chromium-capable backend)
+# previously 164 cdp-pipe / 164 cdp-raw / 159 bidi / 161 webkit
 ```
 
-CI note: a stale-Chrome-process leak from earlier failed runs can
-bind random high ports (e.g. 65531) and make
-`navigation_response::test_goto_network_failure` falsely pass on a
-"refused" goto. Kill leftover `chrome-headless-shell` processes
-between runs if you hit that.
+## Open clusters (in order)
 
-## Next priorities
+| # | scope | status |
+|---|---|---|
+| 1 | CLI flag surfacing (§7.2/§7.5/§7.6/§7.8/§7.9/§7.27/§7.28) | DONE |
+| 2 | Built-in fixtures (`browserName`, `browserVersion`, `playwright`, `request`); `auto: true` enforcement (§7.18 / §7.19) | next |
+| 3 | TestInfo helpers (§7.10) | pending |
+| 4 | Generic + asymmetric matchers, `.resolves` / `.rejects`, `.soft` / `.poll`, `expect.extend`, `toBeOK` (§7.11 – §7.16) | pending |
+| 5 | Locator matcher advanced options (§7.17, includes `compare_screenshot_png` ignore_snapshots wiring) | pending |
+| 6 | Reporters (`dot`, `github`, `blob`, `null`) + `merge-reports` + TS Reporter interface (§7.20 – §7.22) | pending |
+| 7 | Project DAG + git-aware filters + WebServer polish + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26) | pending |
 
-See `docs/NEXT_SESSION.md` for the full next-session prompt.
-
-Top picks (in rough order of unblock-value):
-
-1. **§2.6 HAR recording** — unblocks `BrowserContextOptions::recordHar`
-   (one of the four §4.1 deferred fields).
-2. **§2.3 Tracing** — unblocks `context.tracing` (§4.5).
-3. **§4.1 closing fields**: `recordHar`, `clientCertificates`,
-   `httpCredentials.send`, `strictSelectors` — each its own session.
-4. **§3.17 Auto-waiting deadline parity** — small surface, fully
-   independent.
-5. **`launchServer` / BrowserServer protocol** — ferridriver has no
-   equivalent today; needed only for distributed-test workflows.
+`§7.7 --ui mode`, `§7.23` and `§7.24` (CT adapters / mount API) plus
+the Tier 8 CLI subcommands are deferred — they ride alongside their
+companion subsystem work (HAR / Tracing / CT bring-up).
 
 ## Carried-forward backend gaps (real protocol limits)
 
@@ -139,19 +155,19 @@ Top picks (in rough order of unblock-value):
   download intercept, console args+location, WebError stack frames,
   screencast, multiple browser contexts.
 
-## Key source locations (§2.15)
+## Key source locations (Cluster 1)
 
 | area | path |
 |---|---|
-| `BrowserType` core | `crates/ferridriver/src/browser_type.rs` |
-| Public `LaunchOptions` / `ConnectOptions` / `LaunchPersistentContextOptions` | `crates/ferridriver/src/options.rs` |
-| Internal `LaunchPlan` | `crates/ferridriver/src/options.rs::LaunchPlan` |
-| `BrowserState::with_plan` | `crates/ferridriver/src/state.rs` |
-| `persistent_context` flag + `ContextRef::close` shutdown | `crates/ferridriver/src/state.rs`, `crates/ferridriver/src/context.rs` |
-| CDP `launch_with_flags_in_dir` | `crates/ferridriver/src/backend/cdp/mod.rs` |
-| NAPI `BrowserType` + `chromium`/`firefox`/`webkit` exports | `crates/ferridriver-node/src/browser_type.rs` |
-| NAPI `LaunchOptions` shape | `crates/ferridriver-node/src/types.rs` |
-| QuickJS `BrowserTypeJs` + `install_browser_type` | `crates/ferridriver-script/src/bindings/browser_type.rs` |
-| Rust integration tests | `crates/ferridriver-cli/tests/backends_support/browser_type.rs` (6 tests) |
-| NAPI test helper | `crates/ferridriver-node/test/_helpers.ts::launchForBackend` |
-| Rules + lessons | `CLAUDE.md` |
+| `TestConfig` field additions | `crates/ferridriver-test/src/config.rs` |
+| `CliOverrides` + `parse_common_cli_args` | `crates/ferridriver-test/src/config.rs` |
+| `runner::TestRunner::run` global timeout | `crates/ferridriver-test/src/runner.rs` |
+| `Dispatcher::stop()` + `stop_flag()` | `crates/ferridriver-test/src/dispatcher.rs` |
+| Worker stop check + yield | `crates/ferridriver-test/src/worker.rs` |
+| `TestInfo::ignore_snapshots` propagation | `crates/ferridriver-test/src/model.rs`, `worker.rs`, `expect/locator.rs`, `tests/new_features_e2e.rs` |
+| `assert_snapshot` ignore short-circuit | `crates/ferridriver-test/src/snapshot.rs` |
+| NAPI `TestRunnerConfig` + getters | `crates/ferridriver-node/src/test_runner.rs` |
+| TS CLI flags + `_configureTsLoader` + pass-with-no-tests | `packages/ferridriver-test/src/cli.ts` |
+| TS config types | `packages/ferridriver-test/src/config.ts` |
+| Rule 9 tests | `crates/ferridriver-node/test/cli-flags.test.ts` |
+| Compat tracker updates | `PLAYWRIGHT_COMPAT.md` (§7.2/§7.5/§7.6/§7.8/§7.9/§7.27/§7.28) |

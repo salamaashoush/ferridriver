@@ -647,6 +647,7 @@ fn test_snapshot_create_and_match() {
     snapshot_dir: tmp.join("snaps"),
     snapshot_path_template: None,
     update_snapshots: ferridriver_test::config::UpdateSnapshotsMode::default(),
+    ignore_snapshots: false,
     attachments: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     steps: Arc::new(tokio::sync::Mutex::new(Vec::new())),
     soft_errors: Arc::new(tokio::sync::Mutex::new(Vec::new())),
@@ -682,6 +683,13 @@ fn test_snapshot_create_and_match() {
   // Verify updated.
   let result = ferridriver_test::snapshot::assert_snapshot(&info, "updated content", "greeting", false);
   assert!(result.is_ok(), "should match updated snapshot");
+
+  // ignore_snapshots: short-circuits a real mismatch back to a pass so
+  // a green run survives stale baselines (`--ignore-snapshots`).
+  let mut ignored = info.clone();
+  ignored.ignore_snapshots = true;
+  let result = ferridriver_test::snapshot::assert_snapshot(&ignored, "this would normally fail", "greeting", false);
+  assert!(result.is_ok(), "ignore_snapshots should suppress mismatch");
 
   let _ = std::fs::remove_dir_all(&tmp);
 }

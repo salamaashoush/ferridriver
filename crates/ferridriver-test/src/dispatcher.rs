@@ -39,12 +39,21 @@ pub enum WorkItem {
 pub struct Dispatcher {
   tx: async_channel::Sender<WorkItem>,
   rx: async_channel::Receiver<WorkItem>,
+  /// Hard-stop signal. When set, workers must drop their current `recv()`
+  /// outcome rather than processing it — `close()` alone keeps already-buffered
+  /// items in the queue, which means `--max-failures N` and `-x` would still
+  /// run every test that was enqueued before the threshold tripped.
+  stopped: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl Dispatcher {
   pub fn new() -> Self {
     let (tx, rx) = async_channel::unbounded();
-    Self { tx, rx }
+    Self {
+      tx,
+      rx,
+      stopped: Arc::new(std::sync::atomic::AtomicBool::new(false)),
+    }
   }
 
   /// Enqueue a single parallel test.
@@ -94,6 +103,23 @@ impl Dispatcher {
   /// Signal no more work will be enqueued.
   pub fn close(&self) {
     self.tx.close();
+  }
+
+  /// Trip the hard-stop signal so workers drop any remaining queued items
+  /// instead of processing them. Used by `--max-failures` / `-x`.
+  pub fn stop(&self) {
+    self.stopped.store(true, std::sync::atomic::Ordering::SeqCst);
+    self.tx.close();
+  }
+
+  /// Worker-side check: should the next item be processed or dropped?
+  pub fn is_stopped(&self) -> bool {
+    self.stopped.load(std::sync::atomic::Ordering::SeqCst)
+  }
+
+  /// Worker-side handle to the same atomic flag (cheap clone of the Arc).
+  pub fn stop_flag(&self) -> Arc<std::sync::atomic::AtomicBool> {
+    Arc::clone(&self.stopped)
   }
 }
 
