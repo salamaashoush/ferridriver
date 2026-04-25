@@ -695,6 +695,7 @@ impl Expect<'_, Locator> {
       snapshot_dir: snap_dir,
       snapshot_path_template: None,
       update_snapshots: crate::config::UpdateSnapshotsMode::default(),
+      ignore_snapshots: false,
       attachments: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       steps: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),
       soft_errors: std::sync::Arc::new(tokio::sync::Mutex::new(Vec::new())),

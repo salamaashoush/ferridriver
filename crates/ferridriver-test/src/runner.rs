@@ -61,32 +61,51 @@ impl TestRunner {
   /// and delegates to `execute()`. For real-time external observation (TUI, WebSocket),
   /// use `execute()` directly with a custom bus.
   pub async fn run(&mut self, plan: TestPlan) -> i32 {
-    // ── Multi-project path ──
-    if !self.config.projects.is_empty() {
-      return Box::pin(self.run_projects(plan)).await;
+    let global_timeout = self.config.global_timeout;
+    let inner = async move {
+      // ── Multi-project path ──
+      if !self.config.projects.is_empty() {
+        return Box::pin(self.run_projects(plan)).await;
+      }
+
+      // ── Single-project path ──
+      let mut builder = EventBusBuilder::new();
+      let reporter_sub = builder.subscribe();
+      let bus = builder.build();
+
+      let reporters = std::mem::take(&mut self.reporters);
+      let driver = ReporterDriver::new(reporters, reporter_sub);
+      let driver_handle = tokio::spawn(driver.run());
+
+      let exit_code = self.execute(plan, bus.clone()).await;
+
+      // Explicitly close senders so the driver's recv() returns None.
+      // Cannot rely on Drop — tokio::spawn defers task deallocation,
+      // keeping Arc<EventBusInner> alive after JoinHandle::await returns.
+      bus.close();
+
+      if let Ok(reporters) = driver_handle.await {
+        self.reporters = reporters;
+      }
+
+      exit_code
+    };
+
+    if global_timeout > 0 {
+      if let Ok(code) = tokio::time::timeout(std::time::Duration::from_millis(global_timeout), inner).await {
+        code
+      } else {
+        tracing::error!(
+          target: "ferridriver::runner",
+          global_timeout_ms = global_timeout,
+          "global timeout exceeded — aborting run",
+        );
+        eprintln!("Error: global timeout of {global_timeout}ms exceeded");
+        1
+      }
+    } else {
+      inner.await
     }
-
-    // ── Single-project path ──
-    let mut builder = EventBusBuilder::new();
-    let reporter_sub = builder.subscribe();
-    let bus = builder.build();
-
-    let reporters = std::mem::take(&mut self.reporters);
-    let driver = ReporterDriver::new(reporters, reporter_sub);
-    let driver_handle = tokio::spawn(driver.run());
-
-    let exit_code = self.execute(plan, bus.clone()).await;
-
-    // Explicitly close senders so the driver's recv() returns None.
-    // Cannot rely on Drop — tokio::spawn defers task deallocation,
-    // keeping Arc<EventBusInner> alive after JoinHandle::await returns.
-    bus.close();
-
-    if let Ok(reporters) = driver_handle.await {
-      self.reporters = reporters;
-    }
-
-    exit_code
   }
 
   /// Run multiple projects in dependency order.
@@ -487,6 +506,7 @@ impl TestRunner {
       let custom_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Worker);
       let shared = self.shared_browser.clone();
       let plan = launch_plan.clone();
+      let stop_flag = dispatcher.stop_flag();
 
       let handle = tokio::spawn(async move {
         // Use shared browser (watch mode) or launch a new one per worker.
@@ -501,7 +521,7 @@ impl TestRunner {
             },
           }
         };
-        Box::pin(worker.run(browser, custom_pool, rx, tx)).await;
+        Box::pin(worker.run(browser, custom_pool, rx, tx, stop_flag)).await;
       });
       worker_handles.push(handle);
     }
@@ -547,7 +567,9 @@ impl TestRunner {
         }
       }
 
-      // Stop early if max_failures reached.
+      // Stop early if max_failures reached. Use `stop()` (hard cancel)
+      // rather than `close()` so workers drop the buffered queue instead
+      // of draining it.
       if max_failures > 0 && failure_count >= max_failures {
         tracing::info!(
           target: "ferridriver::runner",
@@ -555,7 +577,7 @@ impl TestRunner {
           max_failures,
           "max failures reached, stopping",
         );
-        dispatcher.close();
+        dispatcher.stop();
       }
 
       if final_count >= total_executions {
