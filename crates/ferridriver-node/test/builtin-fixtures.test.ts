@@ -14,14 +14,15 @@ import { tmpdir } from 'os';
 import { join } from 'path';
 import { TestRunner, type TestMeta, type TestRunnerConfig, type TestFixtures } from '../index.js';
 
-// WebKit is exercised below via a request-only test path because the
-// shared test-runner worker creates per-test isolated contexts via
-// `browser.new_context(None)` — the WebKit backend rejects that since
-// it only exposes the persistent default context. Tracked as the
-// webkit + test-runner integration gap; the MCP path (used by the
-// backends-matrix integration tests) already runs on the persistent
-// default context and is unaffected.
-const BACKENDS_WITH_PAGE = ['cdp-pipe', 'cdp-raw', 'bidi'] as const;
+// WebKit's stock WKWebView only exposes the persistent default
+// context — `Browser::new_context()` returns a handle that the
+// runner's per-test worker now resolves to `default_context()`
+// (state may leak between tests on this backend, mirroring
+// Playwright's launchPersistentContext semantics for non-Chromium
+// browsers without isolated containers). All four backends share
+// the same browserName + browserVersion + page lifecycle through
+// that path.
+const BACKENDS_WITH_PAGE = ['cdp-pipe', 'cdp-raw', 'bidi', 'webkit'] as const;
 
 const META: Omit<TestMeta, 'title' | 'id'> = {
   file: 'builtin-fixtures.test.ts',
@@ -121,11 +122,9 @@ test('playwright fixture exposes chromium / firefox / webkit / request', async (
 });
 
 test('browserName resolves on webkit (request-only path)', async () => {
-  // WebKit can't share the worker's per-test context fixture; this
-  // test only requests the always-available `request` + `test_info`
-  // fixtures, sidestepping the new_context limitation. browserName
-  // still flows from BrowserConfig so we cover Rule 9 across all 4
-  // backend products.
+  // Request-only path retained as a regression check that the always-
+  // available `request` + `test_info` fixtures still resolve without
+  // depending on the per-test page context.
   let observedName: string | undefined;
   const runner = TestRunner.create(makeConfig('webkit'));
   runner.registerTestsBatch([

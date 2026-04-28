@@ -106,7 +106,7 @@ impl TestBrowserResources {
         if let Some(handle) = prepared_page.take() {
           handle.abort();
         }
-        let ctx = Arc::new(self.browser.new_context(None));
+        let ctx = Arc::new(new_test_context(&self.browser));
         *state = TestBrowserState::Context(Arc::clone(&ctx));
         Ok(ctx)
       },
@@ -120,7 +120,7 @@ impl TestBrowserResources {
       TestBrowserState::Failed(err) => Err(err.clone()),
       TestBrowserState::Context(ctx) => {
         let page = create_ready_page(ctx).await?;
-        apply_page_config(&page, &self.effective, &self.output_dir).await?;
+        apply_page_config(&page, &self.effective, &self.output_dir, self.browser.backend_kind()).await?;
         let ctx = Arc::clone(ctx);
         *state = TestBrowserState::Page {
           ctx,
@@ -133,12 +133,12 @@ impl TestBrowserResources {
           if let Ok(prepared) = handle.await {
             prepared
           } else {
-            let ctx = self.browser.new_context(None);
+            let ctx = new_test_context(&self.browser);
             let page_result = ctx.new_page().await.map_err(ferri_err_to_string);
             PreparedPage { ctx, page_result }
           }
         } else {
-          let ctx = self.browser.new_context(None);
+          let ctx = new_test_context(&self.browser);
           let page_result = ctx.new_page().await.map_err(ferri_err_to_string);
           PreparedPage { ctx, page_result }
         };
@@ -148,9 +148,9 @@ impl TestBrowserResources {
             if let Err(err) = ensure_page_alive(&page).await {
               if is_retryable_bidi_page_error(&err) {
                 let _ = prepared.ctx.close().await;
-                let ctx = Arc::new(self.browser.new_context(None));
+                let ctx = Arc::new(new_test_context(&self.browser));
                 let page = create_ready_page(&ctx).await?;
-                apply_page_config(&page, &self.effective, &self.output_dir).await?;
+                apply_page_config(&page, &self.effective, &self.output_dir, self.browser.backend_kind()).await?;
                 *state = TestBrowserState::Page {
                   ctx,
                   page: Arc::clone(&page),
@@ -160,7 +160,7 @@ impl TestBrowserResources {
               *state = TestBrowserState::Failed(err.clone());
               return Err(err);
             }
-            apply_page_config(&page, &self.effective, &self.output_dir).await?;
+            apply_page_config(&page, &self.effective, &self.output_dir, self.browser.backend_kind()).await?;
             let ctx = Arc::new(prepared.ctx);
             *state = TestBrowserState::Page {
               ctx,
@@ -182,14 +182,43 @@ impl TestBrowserResources {
     match std::mem::replace(&mut *state, TestBrowserState::Empty(None)) {
       TestBrowserState::Empty(Some(handle)) => handle.abort(),
       TestBrowserState::Context(ctx) => {
-        let _ = ctx.close().await;
+        close_test_context(&ctx).await;
       },
-      TestBrowserState::Page { ctx, .. } => {
-        let _ = ctx.close().await;
+      TestBrowserState::Page { ctx, page } => {
+        // Close the per-test page first; for backends that share the
+        // default context (webkit) the page is the only per-test
+        // resource we own. Closing the context itself would tear down
+        // the persistent default and break later tests.
+        let _ = page.close(None).await;
+        close_test_context(&ctx).await;
       },
       TestBrowserState::Empty(None) | TestBrowserState::Failed(_) => {},
     }
   }
+}
+
+/// Open a per-test browsing container. Backends that support
+/// isolated contexts (CDP pipe, CDP raw, BiDi/Firefox) get a fresh
+/// `Browser::new_context(None)`. WebKit's stock `WKWebView` doesn't
+/// expose multiple contexts, so we share the persistent default —
+/// state will leak between tests on that backend.
+fn new_test_context(browser: &Arc<ferridriver::Browser>) -> ferridriver::ContextRef {
+  if browser.supports_isolated_contexts() {
+    browser.new_context(None)
+  } else {
+    browser.default_context()
+  }
+}
+
+/// Drop a per-test context. Skips `ctx.close()` when the context is
+/// the shared default container — closing it would tear down the
+/// only browsing context available on backends without isolated
+/// contexts (webkit).
+async fn close_test_context(ctx: &ferridriver::ContextRef) {
+  if ctx.name() == "default" {
+    return;
+  }
+  let _ = ctx.close().await;
 }
 
 fn build_effective_context_config(config: &TestConfig, test: &crate::model::TestCase) -> EffectiveContextConfig {
@@ -331,9 +360,18 @@ async fn apply_page_config(
   page: &Arc<ferridriver::Page>,
   effective: &EffectiveContextConfig,
   output_dir: &std::path::Path,
+  backend_kind: ferridriver::backend::BackendKind,
 ) -> Result<(), String> {
   let ctx_config = &effective.context;
   let mut opts = ferridriver::options::BrowserContextOptions::default();
+  // WebKit (stock WKWebView) rejects several context-options fields
+  // outright; mirror Playwright's launchPersistentContext semantics
+  // and degrade silently when the user hasn't explicitly opted in.
+  #[cfg(target_os = "macos")]
+  let is_webkit = matches!(backend_kind, ferridriver::backend::BackendKind::WebKit);
+  #[cfg(not(target_os = "macos"))]
+  let is_webkit = false;
+  let _ = backend_kind;
 
   let viewport = effective
     .viewport_override
@@ -383,13 +421,13 @@ async fn apply_page_config(
   if !ctx_config.java_script_enabled {
     opts.java_script_enabled = Some(false);
   }
-  if ctx_config.bypass_csp {
+  if ctx_config.bypass_csp && !is_webkit {
     opts.bypass_csp = Some(true);
   }
-  if ctx_config.ignore_https_errors {
+  if ctx_config.ignore_https_errors && !is_webkit {
     opts.ignore_https_errors = Some(true);
   }
-  if ctx_config.accept_downloads {
+  if ctx_config.accept_downloads && !is_webkit {
     // Ensure the downloads directory exists; the backend's
     // `Browser.setDownloadBehavior` command is fired by
     // `apply_context_options` with an empty path, which falls back
@@ -551,7 +589,7 @@ impl Worker {
 
   fn spawn_prepared_page(browser: Arc<ferridriver::Browser>) -> tokio::task::JoinHandle<PreparedPage> {
     tokio::spawn(async move {
-      let ctx = browser.new_context(None);
+      let ctx = new_test_context(&browser);
       let page_result = create_ready_page(&ctx).await;
       PreparedPage { ctx, page_result }
     })

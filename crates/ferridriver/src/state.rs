@@ -259,6 +259,14 @@ impl BrowserState {
     }
   }
 
+  /// The backend kind this state was constructed with. Cached at
+  /// `with_plan` time and never mutated, so callers don't need to
+  /// take the outer `RwLock` read guard to ask the question.
+  #[must_use]
+  pub fn backend_kind(&self) -> BackendKind {
+    self.backend_kind
+  }
+
   /// Mark a context composite-key as having had its storageState
   /// hydrated. Returns `true` if this is the first call (hydration
   /// should run); `false` if already hydrated.

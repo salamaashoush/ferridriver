@@ -32,6 +32,11 @@ pub struct Browser {
   /// `Browser.getVersion().product`. Cached here so `version()` stays
   /// synchronous and `Arc`-shared across cheap `Browser::clone`s.
   version: Arc<str>,
+  /// Backend kind cached at construction (mirrors
+  /// [`BrowserState::backend_kind`]) so `supports_isolated_contexts`
+  /// stays synchronous. The state's `backend_kind` is set once at
+  /// `with_plan` and never mutated, so the cache cannot drift.
+  backend_kind: crate::backend::BackendKind,
   /// Direct handle to [`BrowserState::context_options`] so the sync
   /// `new_context` setter can register the options bag without having
   /// to obtain the outer `RwLock` read guard. Cloned at launch from
@@ -54,12 +59,14 @@ impl Browser {
   pub(crate) fn from_parts(
     state: Arc<RwLock<BrowserState>>,
     version: Arc<str>,
+    backend_kind: crate::backend::BackendKind,
     context_options: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::BrowserContextOptions>>>,
     record_video: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::RecordVideoOptions>>>,
   ) -> Self {
     Self {
       state,
       version,
+      backend_kind,
       context_options,
       record_video,
     }
@@ -84,9 +91,16 @@ impl Browser {
       .default_browser()
       .map(crate::backend::AnyBrowser::version)
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
+    let backend_kind = state.backend_kind();
     let context_options = state.context_options.clone();
     let record_video = state.record_video.clone();
-    Self::from_parts(Arc::new(RwLock::new(state)), version, context_options, record_video)
+    Self::from_parts(
+      Arc::new(RwLock::new(state)),
+      version,
+      backend_kind,
+      context_options,
+      record_video,
+    )
   }
 
   /// Wrap an existing shared state as a Browser handle.
@@ -96,10 +110,11 @@ impl Browser {
   /// the instance has not been launched yet, `version()` returns
   /// `"Unknown"` until a subsequent `ensure_browser` fills it in.
   pub fn from_shared_state(state: Arc<RwLock<BrowserState>>) -> Self {
-    let (version, context_options, record_video) = state.try_read().ok().map_or_else(
+    let (version, backend_kind, context_options, record_video) = state.try_read().ok().map_or_else(
       || {
         (
           Arc::from("Unknown"),
+          crate::backend::BackendKind::CdpPipe,
           Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
           Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
         )
@@ -109,6 +124,7 @@ impl Browser {
           s.default_browser()
             .map(crate::backend::AnyBrowser::version)
             .map_or_else(|| Arc::<str>::from("Unknown"), Arc::from),
+          s.backend_kind(),
           s.context_options.clone(),
           s.record_video.clone(),
         )
@@ -117,6 +133,7 @@ impl Browser {
     Self {
       state,
       version,
+      backend_kind,
       context_options,
       record_video,
     }
@@ -166,6 +183,37 @@ impl Browser {
   #[must_use]
   pub fn default_context(&self) -> ContextRef {
     ContextRef::new(self.state.clone(), "default".to_string())
+  }
+
+  /// Whether this backend exposes isolated browser contexts (i.e.
+  /// `new_context()` actually opens a fresh container vs. silently
+  /// returning a handle that resolves to the persistent default).
+  ///
+  /// Mirrors Playwright's behaviour where `chromium`, `firefox`, and
+  /// `webkit` all support multiple contexts. Stock `WKWebView`
+  /// (ferridriver's `WebKit` backend) only exposes the persistent
+  /// default context — there's no public API for additional
+  /// containers without a private framework or a custom `WKProcessPool`
+  /// fork. Callers that need to share the persistent default in that
+  /// case can branch on this method.
+  #[must_use]
+  pub fn supports_isolated_contexts(&self) -> bool {
+    #[cfg(target_os = "macos")]
+    {
+      !matches!(self.backend_kind, crate::backend::BackendKind::WebKit)
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+      true
+    }
+  }
+
+  /// Backend kind cached at construction. The state's `backend_kind`
+  /// is set once at `with_plan` and never mutated, so this always
+  /// matches the live state.
+  #[must_use]
+  pub fn backend_kind(&self) -> crate::backend::BackendKind {
+    self.backend_kind
   }
 
   /// Shorthand: create a new page in the default context.
