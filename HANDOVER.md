@@ -225,6 +225,78 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 # cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
 ```
 
+### Cluster 6b — TS Reporter interface bridge (§7.22)
+
+Single commit. Closes the cluster-6 follow-up.
+
+#### NAPI
+
+`crates/ferridriver-node/src/js_reporter.rs` (new) holds a
+`JsReporter` Rust struct that implements the core
+`ferridriver_test::reporter::Reporter` trait. It wraps a TSFN built
+from a single dispatcher `Function<serde_json::Value,
+Unknown<'static>>`. Each `ReporterEvent` variant translates into the
+matching Playwright callback (`onBegin`, `onTestBegin`,
+`onStepBegin`, `onStepEnd`, `onTestEnd`, `onEnd`,
+`onWorkerStarted`, `onWorkerFinished`, `onExit`) and dispatches a
+JSON payload `{ event, args }` to the TS side. Payloads use
+Playwright-shaped objects: `TestCase` / `TestResult` / `TestStep` /
+`FullConfig` / `Suite` / `FullResult` — fields ferridriver doesn't
+yet emit (e.g. step `errors[]` chains, full suite hierarchy) are
+omitted rather than stubbed.
+
+`TestRunner.registerJsReporter(dispatcher)` (NAPI method on
+`TestRunner`) builds a `JsReporter` and parks it on the runner
+state. At `run()` time the runner drains the slot and appends each
+reporter to the core runner via `add_reporter` — alongside the
+existing `ResultCollectorReporter`.
+
+#### TS
+
+`packages/ferridriver-test/src/reporter.ts` (new) exports
+`defineReporter(impl: Reporter): ReporterDispatcher`. The helper
+collapses a Playwright-shaped Reporter object (every callback
+optional) into the single dispatcher function shape that
+`registerJsReporter` accepts. Switches on `event` and forwards to
+the matching method on the user's object. The Reporter type plus
+its sub-types (`ReporterFullConfig`, `ReporterSuite`,
+`ReporterTestCase`, `ReporterTestResult`, `ReporterTestStep`,
+`ReporterFullResult`) and `ReporterDispatcher` re-export from
+`@ferridriver/test`.
+
+#### Tests (Rule 9)
+
+`crates/ferridriver-node/test/js-reporter.test.ts` — 3 cases:
+
+- Full lifecycle drive against a 3-test plan (2 passing + 1
+  failing): `onBegin` fires once with non-null config + suite,
+  `onTestBegin` 3×, `onTestEnd` 3× with statuses
+  `passed/passed/failed`, `onEnd` once with totals matching the
+  runner aggregate, `onExit` ≥ 1×.
+- Multiple reporters: register two distinct `defineReporter`
+  outputs on the same `TestRunner`; each receives every event.
+- A `defineReporter({})` with zero methods registered is silently
+  ignored — the run still succeeds.
+
+### Baseline (must stay green)
+
+```
+cargo clippy --workspace --all-targets -- -D warnings            # clean
+cargo test -p ferridriver --lib                                   # 125 pass
+cargo test -p ferridriver-test --lib                              # 12 pass
+cargo test -p ferridriver-script --lib                            # 13 pass
+cargo test -p ferridriver-mcp --lib                               # 38 pass
+cargo test -p ferridriver-test --test new_features_e2e            # 15 pass
+cargo test -p ferridriver-test --test reporters                   # 4 pass
+cargo test -p ferridriver-test --test cluster7                    # 3 pass
+cargo test -p ferridriver-test --test web_server                  # 3 pass
+cd crates/ferridriver-node && bun run build:debug
+cd <repo root> && bun test                                        # 944 pass (+3)
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+# cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
+```
+
 ### Cluster 7-fu2 — WebKit + test-runner `new_context` workaround
 
 Single commit. Closes the cluster-2 carry-forward documented in the
@@ -725,10 +797,11 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 | 4 | Matcher core: generic + asymmetric + `.resolves`/`.rejects`/`.soft`/`.poll`/`expect.extend`/`toBeOK` (§7.11 – §7.16) | DONE |
 | 5 | Locator matcher advanced options (§7.17) | DONE |
 | 6 | Reporters (`dot`, `github`, `blob`, `null`) + `merge-reports` (§7.20 / §7.21) | DONE |
-| 6b | TS Reporter interface (§7.22) | follow-up |
+| 6b | TS Reporter interface (§7.22) | DONE |
 | 7 | Project DAG + git-aware filters + WebServer polish + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26) | DONE |
 | 7-fu1 | WebServer runtime polish (§7.25 graceful_shutdown + ignore_https_errors readiness probe + named log lines) | DONE |
 | 7-fu2 | WebKit + test-runner `new_context` workaround (`Browser::supports_isolated_contexts()` + worker default-context fallback + apply_page_config silent degradation) | DONE |
+| 6b | TS Reporter interface bridge (§7.22 `defineReporter` + NAPI `registerJsReporter` + Playwright-shaped JS payloads) | DONE |
 
 ## Carried-forward backend gaps (real protocol limits)
 

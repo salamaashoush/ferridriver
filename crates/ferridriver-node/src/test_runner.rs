@@ -453,6 +453,10 @@ pub struct TestRunner {
   tests: Mutex<Vec<RegisteredTest>>,
   suites: Mutex<Vec<RegisteredSuite>>,
   hooks: Mutex<Vec<RegisteredHook>>,
+  // TS-authored Reporter dispatchers registered via
+  // `register_js_reporter`. Drained into the core runner's
+  // `add_reporter` slot at the start of `run`.
+  js_reporters: Mutex<Vec<crate::js_reporter::JsReporter>>,
   // BDD state
   bdd: BddRegistry,
 }
@@ -578,6 +582,7 @@ impl TestRunner {
       tests: Mutex::new(Vec::new()),
       suites: Mutex::new(Vec::new()),
       hooks: Mutex::new(Vec::new()),
+      js_reporters: Mutex::new(Vec::new()),
       bdd: BddRegistry::new(),
     })
   }
@@ -803,6 +808,25 @@ impl TestRunner {
     self.bdd.define_parameter_type(name, regex)
   }
 
+  /// Register a TS-authored Reporter via the dispatcher pattern.
+  /// `dispatcher` is built by `defineReporter(impl)` in
+  /// `packages/ferridriver-test/src/reporter.ts`; ferridriver calls it
+  /// once per `ReporterEvent` with `(eventName, args)` so the helper
+  /// can fan out to the right method on the user's Reporter object.
+  #[napi(ts_args_type = "dispatcher: (payload: { event: string, args: unknown[] }) => unknown")]
+  pub fn register_js_reporter(
+    &self,
+    dispatcher: napi::bindgen_prelude::Function<'_, serde_json::Value, napi::bindgen_prelude::Unknown<'static>>,
+  ) -> Result<()> {
+    let reporter = crate::js_reporter::JsReporter::build(dispatcher)?;
+    let mut slot = self
+      .js_reporters
+      .try_lock()
+      .map_err(|_| napi::Error::from_reason("js_reporters lock contended during registration"))?;
+    slot.push(reporter);
+    Ok(())
+  }
+
   /// Run all registered tests (E2E + BDD) through the core TestRunner pipeline.
   ///
   /// Converts registered JS tests into a TestPlan, optionally adds BDD feature
@@ -1017,6 +1041,17 @@ impl TestRunner {
     let exit_code = {
       let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
       runner.add_reporter(Box::new(ResultCollectorReporter(collector_clone)));
+
+      // Drain any TS-authored reporters registered via
+      // `register_js_reporter` and append them to the runner. Drained
+      // (not cloned) so a TestRunner instance reused across runs gets
+      // a clean slate — register_js_reporter must be called per run.
+      {
+        let mut js_reporters = self.js_reporters.lock().await;
+        for jr in std::mem::take(&mut *js_reporters) {
+          runner.add_reporter(Box::new(jr));
+        }
+      }
 
       if watch {
         let cwd = std::env::current_dir().unwrap_or_default();
