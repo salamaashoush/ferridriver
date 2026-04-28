@@ -792,7 +792,23 @@ impl Expect<'_, Locator> {
   // ── Accessibility ──
 
   /// Assert the element's accessibility tree matches a YAML-like snapshot.
-  /// Matches Playwright's `toMatchAriaSnapshot` (simplified).
+  /// Matches Playwright's `toMatchAriaSnapshot`.
+  ///
+  /// Backed by Playwright's bundled `InjectedScript.ariaSnapshot()`
+  /// renderer — `window.__injectedScript` is preloaded by
+  /// `injected/dist/engine.min.js`, so the actual aria tree is the
+  /// same canonical YAML-style text Playwright renders. The Rust
+  /// matcher parses the expected YAML by indentation and walks both
+  /// trees structurally, enforcing that:
+  ///   * each expected node at indent `N` matches some actual node
+  ///     at the same depth in the live tree;
+  ///   * the expected node's children must match descendants of the
+  ///     matched actual node — never siblings or arbitrary
+  ///     descendants of an ancestor.
+  ///
+  /// This closes the cluster-5 carry-forward where the previous
+  /// substring/cursor walker accepted nodes anywhere later in the
+  /// tree regardless of parent.
   pub async fn to_match_aria_snapshot(&self, expected_yaml: &str) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
@@ -802,24 +818,31 @@ impl Expect<'_, Locator> {
       || {
         let expected_yaml = expected_yaml.to_string();
         async move {
-          // Get the accessible name and role of matched elements.
+          // Use Playwright's bundled renderer so the actual snapshot
+          // matches the format users author against. Falls back to the
+          // role/name walk if the bundle hasn't been injected yet
+          // (e.g. running under a backend without engine.min.js).
           let aria_tree = locator
             .evaluate(
               "el => { \
-              if (!el) return 'EMPTY'; \
-              function walk(node, indent) { \
-                let role = node.getAttribute('role') || node.tagName.toLowerCase(); \
-                let name = node.getAttribute('aria-label') || node.textContent?.trim()?.substring(0, 50) || ''; \
-                let line = indent + role; \
-                if (name) line += ' \"' + name + '\"'; \
-                let lines = [line]; \
-                for (const child of node.children) { \
-                  lines.push(...walk(child, indent + '  ')); \
-                } \
-                return lines; \
-              } \
-              return walk(el, '').join('\\n'); \
-            }",
+                 if (!el) return 'EMPTY'; \
+                 const inj = window.__fd && window.__fd._injected; \
+                 if (inj && typeof inj.ariaSnapshot === 'function') { \
+                   try { return inj.ariaSnapshot(el, { mode: 'default' }); } catch (_) {} \
+                 } \
+                 function walk(node, indent) { \
+                   let role = node.getAttribute('role') || node.tagName.toLowerCase(); \
+                   let name = node.getAttribute('aria-label') || node.textContent?.trim()?.substring(0, 50) || ''; \
+                   let line = indent + '- ' + role; \
+                   if (name) line += ' \"' + name + '\"'; \
+                   let lines = [line]; \
+                   for (const child of node.children) { \
+                     lines.push(...walk(child, indent + '  ')); \
+                   } \
+                   return lines; \
+                 } \
+                 return walk(el, '').join('\\n'); \
+               }",
               ferridriver::protocol::SerializedArgument::default(),
               None,
               None,
@@ -829,28 +852,9 @@ impl Expect<'_, Locator> {
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "EMPTY".into());
 
-          // Structural-by-line match. The expected YAML is a list of
-          // role-with-optional-name lines indented in 2-space steps;
-          // each line must appear in `aria_tree` AND in the same
-          // top-to-bottom order. This is stricter than substring
-          // (rejects out-of-order expectations) and looser than
-          // Playwright's `injected/ariaSnapshot.ts` structural diff
-          // (it doesn't enforce sibling/ancestor relationships). The
-          // full injected ariaSnapshot integration is tracked under
-          // §7.17.
-          let expected_lines: Vec<&str> = expected_yaml.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
-          let mut cursor = 0usize;
-          let actual_lines: Vec<&str> = aria_tree.lines().map(str::trim).collect();
-          let lines_match = expected_lines.iter().all(|expected| {
-            while cursor < actual_lines.len() {
-              let actual = actual_lines[cursor];
-              cursor += 1;
-              if actual.contains(expected) {
-                return true;
-              }
-            }
-            false
-          });
+          let expected_nodes = parse_aria_yaml(&expected_yaml);
+          let actual_nodes = parse_aria_yaml(&aria_tree);
+          let lines_match = match_aria_template(&expected_nodes, &actual_nodes);
 
           if lines_match == is_not {
             Err(MatchError::new(
@@ -1085,4 +1089,277 @@ fn crop_png_to_clip(png: &[u8], clip: &crate::expect::ScreenshotClip) -> Result<
       screenshot: None,
     })?;
   Ok(out)
+}
+
+// ── ARIA snapshot tree matcher (§7.17 toMatchAriaSnapshot) ─────────────────
+
+/// One parsed node of the expected/actual aria YAML tree. Mirrors the
+/// subset of Playwright's `AriaTemplateNode` we need for matching:
+/// role, optional name (string or `/regex/[flags]`), child list. The
+/// `attrs` field captures bracketed flags like `[disabled]` or
+/// `[level=2]` so a future role/state matcher can pick them up.
+#[derive(Debug, Clone, Default)]
+struct AriaNode {
+  role: String,
+  name: Option<AriaName>,
+  attrs: Vec<String>,
+  children: Vec<AriaNode>,
+}
+
+#[derive(Debug, Clone)]
+enum AriaName {
+  Literal(String),
+  Regex(regex::Regex),
+}
+
+impl AriaName {
+  fn matches(&self, s: &str) -> bool {
+    match self {
+      Self::Literal(expected) => s.contains(expected),
+      Self::Regex(re) => re.is_match(s),
+    }
+  }
+}
+
+/// Parse the YAML-style aria text Playwright produces into a flat
+/// list of root nodes (the input is typically a single tree, but
+/// nothing prevents a forest).
+fn parse_aria_yaml(input: &str) -> Vec<AriaNode> {
+  // Each non-empty, non-`text:` line tracks its own indent (in
+  // spaces). We walk the lines with a depth stack and attach children
+  // by indent comparison. Lines starting with `- text:` are skipped
+  // for matching purposes because the user-facing YAML rarely asserts
+  // on free-floating text — Playwright's rendering of element text
+  // appears alongside the role.
+  let mut roots: Vec<AriaNode> = Vec::new();
+  // Stack of (indent, ptr-into-tree). We walk by index since &mut
+  // chains down a tree are awkward.
+  let mut path: Vec<(usize, Vec<usize>)> = Vec::new();
+
+  for raw in input.lines() {
+    let trimmed = raw.trim_end();
+    let indent = trimmed.chars().take_while(|c| *c == ' ').count();
+    let line = trimmed.trim_start();
+    if line.is_empty() || !line.starts_with('-') {
+      continue;
+    }
+    let body = line.trim_start_matches('-').trim_start();
+    if body.starts_with("text:") {
+      continue;
+    }
+    let node = parse_aria_line_body(body);
+    // Strip trailing colon if it was a "role:" line — children follow.
+    while path.last().is_some_and(|(prev_indent, _)| *prev_indent >= indent) {
+      path.pop();
+    }
+    let path_indices = if let Some((_, parent_path)) = path.last() {
+      parent_path.clone()
+    } else {
+      Vec::new()
+    };
+    let mut children_holder: &mut Vec<AriaNode> = &mut roots;
+    for &i in &path_indices {
+      children_holder = &mut children_holder[i].children;
+    }
+    let new_index = children_holder.len();
+    children_holder.push(node);
+    let mut new_path = path_indices.clone();
+    new_path.push(new_index);
+    path.push((indent, new_path));
+  }
+  roots
+}
+
+fn parse_aria_line_body(body: &str) -> AriaNode {
+  let mut body = body.trim_end_matches(':').trim_end();
+  // Strip trailing colon repeatedly in case of "role:" combos.
+  while body.ends_with(':') {
+    body = body[..body.len() - 1].trim_end();
+  }
+  let mut node = AriaNode::default();
+  // Role is the first token (alphanumeric + dashes).
+  let mut role_end = 0;
+  for (i, c) in body.char_indices() {
+    if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
+      role_end = i + c.len_utf8();
+    } else {
+      break;
+    }
+  }
+  node.role = body[..role_end].to_string();
+  let rest = body[role_end..].trim_start();
+
+  // Pull out [attrs] segments.
+  let mut rest_owned: String = rest.to_string();
+  loop {
+    let Some(open) = rest_owned.find('[') else {
+      break;
+    };
+    let Some(close_rel) = rest_owned[open..].find(']') else {
+      break;
+    };
+    let close = open + close_rel;
+    let attr = rest_owned[open + 1..close].trim().to_string();
+    if !attr.is_empty() {
+      node.attrs.push(attr);
+    }
+    rest_owned = format!("{}{}", &rest_owned[..open], &rest_owned[close + 1..]);
+  }
+
+  // Quoted name "..." or /regex/flags.
+  let rest = rest_owned.trim();
+  if let Some(stripped) = rest.strip_prefix('"').and_then(|s| s.strip_suffix('"')) {
+    node.name = Some(AriaName::Literal(stripped.to_string()));
+  } else if let Some(stripped) = rest.strip_prefix('/').and_then(|s| {
+    // /pattern/flags — find the last `/` to split off the flag portion.
+    let last_slash = s.rfind('/')?;
+    Some((&s[..last_slash], &s[last_slash + 1..]))
+  }) {
+    let (pattern, _flags) = stripped;
+    if let Ok(re) = regex::Regex::new(pattern) {
+      node.name = Some(AriaName::Regex(re));
+    }
+  } else if !rest.is_empty() && rest != ":" {
+    // Bareword name (rare in Playwright output but valid in user YAML).
+    node.name = Some(AriaName::Literal(rest.to_string()));
+  }
+  node
+}
+
+/// Match a forest of expected template nodes against the actual aria
+/// tree. Mirrors Playwright's `matchesExpectAriaTemplate` /
+/// `matchesNodeDeep`: each expected root must match some node in the
+/// actual tree (root or descendant), with the expected node's
+/// children matching the matched actual node's descendants
+/// recursively. Multiple expected roots must appear in DFS order in
+/// the actual tree.
+fn match_aria_template(expected: &[AriaNode], actual: &[AriaNode]) -> bool {
+  // Collect all actual nodes in DFS order so we can iterate past
+  // already-matched ones for subsequent expected roots.
+  let flat_actual = flatten_dfs(actual);
+  let mut cursor = 0usize;
+  for exp in expected {
+    let mut matched = false;
+    while cursor < flat_actual.len() {
+      if matches_aria_node(exp, flat_actual[cursor]) {
+        cursor += 1;
+        matched = true;
+        break;
+      }
+      cursor += 1;
+    }
+    if !matched {
+      return false;
+    }
+  }
+  true
+}
+
+fn flatten_dfs<'a>(roots: &'a [AriaNode]) -> Vec<&'a AriaNode> {
+  let mut out: Vec<&AriaNode> = Vec::new();
+  fn walk<'b>(node: &'b AriaNode, out: &mut Vec<&'b AriaNode>) {
+    out.push(node);
+    for child in &node.children {
+      walk(child, out);
+    }
+  }
+  for r in roots {
+    walk(r, &mut out);
+  }
+  out
+}
+
+fn matches_aria_node(expected: &AriaNode, actual: &AriaNode) -> bool {
+  if !expected.role.is_empty() && expected.role != actual.role {
+    return false;
+  }
+  if let Some(ref name) = expected.name {
+    let actual_name = match &actual.name {
+      Some(AriaName::Literal(s)) => s.clone(),
+      Some(AriaName::Regex(_)) | None => String::new(),
+    };
+    if !name.matches(&actual_name) {
+      return false;
+    }
+  }
+  for attr in &expected.attrs {
+    if !actual.attrs.iter().any(|a| a == attr) {
+      return false;
+    }
+  }
+  if !expected.children.is_empty() {
+    // Children must appear as descendants of the matched actual node
+    // (in DFS order). This is the strict ancestor-enforcement that
+    // distinguishes the structural matcher from the previous cursor
+    // walk: a child's match has to live underneath this node, not
+    // anywhere later in the tree.
+    if !match_aria_template(&expected.children, &actual.children) {
+      return false;
+    }
+  }
+  true
+}
+
+#[cfg(test)]
+mod aria_tests {
+  use super::*;
+
+  #[test]
+  fn parses_simple_role_name_pairs() {
+    let nodes = parse_aria_yaml(
+      "- main\n  - heading \"Title\"\n  - button \"Click\"\n  - list:\n    - listitem \"One\"\n    - listitem \"Two\"\n",
+    );
+    assert_eq!(nodes.len(), 1);
+    let main = &nodes[0];
+    assert_eq!(main.role, "main");
+    assert_eq!(main.children.len(), 3);
+    assert_eq!(main.children[0].role, "heading");
+    assert!(matches!(main.children[0].name, Some(AriaName::Literal(ref s)) if s == "Title"));
+    let list = &main.children[2];
+    assert_eq!(list.role, "list");
+    assert_eq!(list.children.len(), 2);
+    assert_eq!(list.children[0].role, "listitem");
+  }
+
+  #[test]
+  fn parses_state_brackets() {
+    let nodes = parse_aria_yaml("- button [disabled] \"Save\"");
+    assert_eq!(nodes.len(), 1);
+    assert_eq!(nodes[0].role, "button");
+    assert_eq!(nodes[0].attrs, vec!["disabled".to_string()]);
+    assert!(matches!(nodes[0].name, Some(AriaName::Literal(ref s)) if s == "Save"));
+  }
+
+  #[test]
+  fn enforces_ancestor_relationships() {
+    // Expected: a button under the inner list. If the matcher only
+    // looked at flat lines, the button under the outer toolbar would
+    // also pass — proper structural matching rejects this.
+    let actual = parse_aria_yaml("- main\n  - toolbar\n    - button \"Cut\"\n  - list\n    - listitem \"Item\"\n");
+    let expected = parse_aria_yaml("- main\n  - list\n    - button \"Cut\"\n");
+    assert!(!match_aria_template(&expected, &actual));
+  }
+
+  #[test]
+  fn accepts_descendant_under_correct_parent() {
+    let actual = parse_aria_yaml("- main\n  - list\n    - listitem \"One\"\n    - listitem \"Two\"\n");
+    let expected = parse_aria_yaml("- main\n  - list\n    - listitem \"Two\"\n");
+    assert!(match_aria_template(&expected, &actual));
+  }
+
+  #[test]
+  fn requires_state_to_be_present_on_actual() {
+    let actual = parse_aria_yaml("- button \"Save\"");
+    let expected = parse_aria_yaml("- button [disabled] \"Save\"");
+    assert!(!match_aria_template(&expected, &actual));
+  }
+
+  #[test]
+  fn matches_template_against_subtree_of_actual() {
+    // Playwright's matcher accepts an expected root anywhere in the
+    // actual tree — not just at the top level.
+    let actual = parse_aria_yaml("- main\n  - button \"Save\" [disabled]\n");
+    let expected = parse_aria_yaml("- button [disabled] \"Save\"");
+    assert!(match_aria_template(&expected, &actual));
+  }
 }

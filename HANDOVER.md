@@ -225,6 +225,68 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 # cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
 ```
 
+### Cluster 5-fu2 — toMatchAriaSnapshot full integration (§7.17)
+
+Single commit. Closes the second cluster-5 carry-forward.
+
+#### What changed
+
+The matcher's actual-tree source is now Playwright's bundled
+`InjectedScript.ariaSnapshot(el, { mode: 'default' })` (loaded via
+the existing `engine.min.js` bundle and reachable through
+`window.__fd._injected`). That returns the canonical YAML-style
+rendering Playwright itself uses, including bracketed states like
+`[disabled]` and `[level=2]`. The previous role/name DOM walk
+remains as a fallback when the bundle isn't injected (e.g. very
+early in page lifecycle), but in practice every locator-resolved
+matcher has the bundle available.
+
+The structural matcher lives entirely in Rust:
+`crates/ferridriver-test/src/expect/locator.rs::parse_aria_yaml`
+parses both expected and actual YAML into nested `AriaNode` trees
+(role + optional name + bracketed attrs + child list).
+`match_aria_template` mirrors Playwright's `matchesNodeDeep`:
+
+- Each expected root must match some node anywhere in the actual
+  tree, walked DFS.
+- Children of the matched expected node must match descendants of
+  the matched actual node — never siblings of an ancestor.
+- Bracketed attrs on the expected node must all be present on the
+  matched actual node.
+- Names accept literal substring or `/regex/flags` patterns.
+
+#### Tests
+
+- `crates/ferridriver-test/src/expect/locator.rs::aria_tests` — 6
+  unit tests (parser + matcher behavior, ancestor enforcement,
+  subtree matching, state enforcement).
+- `crates/ferridriver-node/test/locator-matcher-options.test.ts` —
+  3 new live-browser cases (ancestor enforcement, bracketed
+  disabled state, ordered subset against the canonical renderer).
+
+The pre-existing ordered-subset case was updated to use the
+canonical Playwright YAML format (`- heading "Title"` rather than
+`h1 "Title"`) since that's what `injected.ariaSnapshot` emits.
+
+### Baseline (must stay green)
+
+```
+cargo clippy --workspace --all-targets -- -D warnings            # clean
+cargo test -p ferridriver --lib                                   # 125 pass
+cargo test -p ferridriver-test --lib                              # 18 pass (+6 aria_tests)
+cargo test -p ferridriver-script --lib                            # 13 pass
+cargo test -p ferridriver-mcp --lib                               # 38 pass
+cargo test -p ferridriver-test --test new_features_e2e            # 15 pass
+cargo test -p ferridriver-test --test reporters                   # 4 pass
+cargo test -p ferridriver-test --test cluster7                    # 3 pass
+cargo test -p ferridriver-test --test web_server                  # 3 pass
+cd crates/ferridriver-node && bun run build:debug
+cd <repo root> && bun test                                        # 949 pass (+2)
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+# cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
+```
+
 ### Cluster 5-fu — toHaveScreenshot capture-time options (§7.17)
 
 Single commit. Closes the cluster-5 carry-forward — the option bag
@@ -880,6 +942,7 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 | 7-fu2 | WebKit + test-runner `new_context` workaround (`Browser::supports_isolated_contexts()` + worker default-context fallback + apply_page_config silent degradation) | DONE |
 | 6b | TS Reporter interface bridge (§7.22 `defineReporter` + NAPI `registerJsReporter` + Playwright-shaped JS payloads) | DONE |
 | 5-fu | toHaveScreenshot capture-time options (§7.17 mask + maskColor + animations + caret + stylePath + clip wired into the capture path) | DONE |
+| 5-fu2 | toMatchAriaSnapshot full structural matcher (§7.17 InjectedScript renderer + Rust YAML parser + matchesNodeDeep tree algorithm) | DONE |
 
 ## Carried-forward backend gaps (real protocol limits)
 

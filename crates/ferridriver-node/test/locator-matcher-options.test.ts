@@ -97,11 +97,13 @@ test('toMatchAriaSnapshot accepts ordered subset', async () => {
      </main>`,
     async (page) => {
       const loc = page.locator('main');
+      // `<h1 aria-label="Title">` renders as `heading "Title"` in
+      // Playwright's canonical output; `<li>` renders as `listitem`.
       await expect(loc).toMatchAriaSnapshot(`
-        h1 "Title"
-        button "Click"
-        li "One"
-        li "Two"
+        - heading "Title"
+        - button "Click"
+        - listitem "One"
+        - listitem "Two"
       `);
     },
   );
@@ -294,10 +296,51 @@ test('toMatchAriaSnapshot rejects out-of-order expectations', async () => {
       // the default 5s.
       await bunExpect(async () =>
         expect(loc, 500).toMatchAriaSnapshot(`
-          button "Second"
-          h1 "First"
+          - button "Second"
+          - heading "First"
         `),
       ).toThrow();
+    },
+  );
+});
+
+test('toMatchAriaSnapshot enforces ancestor relationships', async () => {
+  await withPage(
+    `<main>
+       <div role="toolbar">
+         <button>Cut</button>
+       </div>
+       <ul>
+         <li>One</li>
+       </ul>
+     </main>`,
+    async (page) => {
+      const loc = page.locator('main');
+      // The button is a child of toolbar, NOT of list. The previous
+      // cursor-walk matcher accepted this because "button" appeared
+      // somewhere later in the flat line stream; the structural
+      // matcher rejects it.
+      await bunExpect(async () =>
+        expect(loc, 500).toMatchAriaSnapshot(`
+          - main:
+            - list:
+              - button "Cut"
+        `),
+      ).toThrow();
+    },
+  );
+});
+
+test('toMatchAriaSnapshot recognises bracketed disabled state', async () => {
+  await withPage(
+    `<main>
+       <button disabled>Save</button>
+     </main>`,
+    async (page) => {
+      const loc = page.locator('main');
+      await expect(loc).toMatchAriaSnapshot(`
+        - button [disabled] "Save"
+      `);
     },
   );
 });
