@@ -350,4 +350,21 @@ impl TestInfo {
   pub async fn annotate(&self, type_name: String, description: String) {
     self.inner.annotate(type_name, description).await;
   }
+
+  /// Append a soft assertion error. Used by `expect.soft(...)` — the
+  /// matcher records the failure and lets the test continue; the
+  /// worker reads `soft_errors` after the body returns and surfaces
+  /// them through `errors`.
+  #[napi(js_name = "pushSoftError")]
+  pub async fn push_soft_error(&self, message: String, stack: Option<String>) {
+    self
+      .inner
+      .add_soft_error(ferridriver_test::model::TestFailure {
+        message,
+        stack,
+        diff: None,
+        screenshot: None,
+      })
+      .await;
+  }
 }

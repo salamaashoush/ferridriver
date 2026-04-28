@@ -225,6 +225,73 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 # cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
 ```
 
+### Cluster 4 — Matcher core (§7.11 – §7.16)
+
+Single commit. `ValueAssertions` class in
+`packages/ferridriver-test/src/expect.ts` ships the full Jest
+generic-matcher set, asymmetric matchers, `.resolves` / `.rejects`,
+`.soft`, `.poll`, `expect.extend`, and `APIResponse.toBeOK`.
+
+Deviation from the original prompt: generic matcher logic lives TS-
+side rather than in Rust core. Reason — Playwright itself routes
+the generics through Jest's `expect` library (pure-value
+comparison, no protocol surface). The Rust-side `Matcher` trait
+still owns the polling matchers (`toBeVisible`, etc.) so the
+"Rust is the source of truth" rule applies where it actually
+matters.
+
+Surface highlights:
+- 22 generic matchers (`toBe`, `toEqual`, `toMatchObject`,
+  `toThrow`, `toHaveProperty(path[, value])`, `toBeCloseTo`, …) plus
+  `toPass(options?)` for the function-subject retry form.
+- Asymmetric matchers as serde-tagged objects
+  (`Symbol.for('ferridriver.asymmetric')`) that the deep-equality
+  engine recognises and dispatches to `match()`. Nesting works.
+- `.not`, `.resolves`, `.rejects` modifiers as getters returning new
+  `ValueAssertions` chains.
+- `expect.soft(...)` calls `testInfo.pushSoftError(message)` (new
+  NAPI binding) via the existing AsyncLocalStorage-backed
+  `_currentTestInfo()`. Outside a test body it silently no-ops.
+- `expect.poll(probe, options?)` retries until match or timeout
+  (5000ms default).
+- `expect.extend({ name: fn })` mutates `ValueAssertions.prototype`
+  so custom matchers compose with `.not`.
+- `expect(response).toBeOK()` reads `ApiResponse.ok()`.
+
+NAPI: `TestInfo.pushSoftError(message, stack?)` added.
+`packages/ferridriver-test/src/test.ts` exports
+`_currentTestInfo()` so the expect facade can read the
+AsyncLocalStorage-backed test info without re-implementing the
+plumbing.
+
+Tests (Rule 9):
+- `crates/ferridriver-node/test/value-matchers.test.ts` — 22 cases
+  covering all generics + asymmetric matchers + `.resolves` /
+  `.rejects` / `.not` / `.soft` (no-op path) / `.poll`. Pos + neg
+  per group.
+- `expect-soft-runner.test.ts` — soft assertions through the live
+  TestRunner: errors[] populates through the NAPI round-trip and
+  the test still fails at the end (matches Playwright).
+- `expect-extend-toBeOK.test.ts` — custom matchers via
+  `expect.extend` compose with `.not`; `toBeOK` against a one-shot
+  `Bun.serve` status server (deterministic, no network round-trip).
+
+### Baseline (must stay green)
+
+```
+cargo clippy --workspace --all-targets -- -D warnings            # clean
+cargo test -p ferridriver --lib                                   # 125 pass
+cargo test -p ferridriver-test --lib                              # 11 pass
+cargo test -p ferridriver-script --lib                            # 13 pass
+cargo test -p ferridriver-mcp --lib                               # 38 pass
+cargo test -p ferridriver-test --test new_features_e2e            # 15 pass
+cd crates/ferridriver-node && bun run build:debug
+cd <repo root> && bun test                                        # 927 pass (+29)
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+# cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
+```
+
 ## Open clusters (in order)
 
 | # | scope | status |
@@ -232,8 +299,8 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 | 1 | CLI flag surfacing (§7.2/§7.5/§7.6/§7.8/§7.9/§7.27/§7.28) | DONE |
 | 2 | Built-in fixtures + auto enforcement (§7.18 / §7.19) | DONE |
 | 3 | TestInfo helpers (§7.10) | DONE |
-| 4 | Generic + asymmetric matchers, `.resolves` / `.rejects`, `.soft` / `.poll`, `expect.extend`, `toBeOK` (§7.11 – §7.16) | next |
-| 5 | Locator matcher advanced options (§7.17) | pending |
+| 4 | Matcher core: generic + asymmetric + `.resolves`/`.rejects`/`.soft`/`.poll`/`expect.extend`/`toBeOK` (§7.11 – §7.16) | DONE |
+| 5 | Locator matcher advanced options (§7.17) | next |
 | 6 | Reporters (`dot`, `github`, `blob`, `null`) + `merge-reports` + TS Reporter interface (§7.20 – §7.22) | pending |
 | 7 | Project DAG + git-aware filters + WebServer polish + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26) | pending |
 
