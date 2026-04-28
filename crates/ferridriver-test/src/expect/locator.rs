@@ -785,13 +785,7 @@ impl Expect<'_, Locator> {
     options: ScreenshotMatcherOptions,
   ) -> Result<(), TestFailure> {
     let locator = self.subject;
-    let actual_png = locator.screenshot().await.map_err(|e| TestFailure {
-      message: format!("screenshot failed: {e}"),
-      stack: None,
-      diff: None,
-      screenshot: None,
-    })?;
-
+    let actual_png = capture_with_options(locator, &options).await?;
     crate::snapshot::compare_screenshot_png_with(&actual_png, name, &options)
   }
 
@@ -918,4 +912,177 @@ fn check_text_match(expected: &StringOrRegex, actual: &str, is_not: bool, _label
   } else {
     Ok(())
   }
+}
+
+// ── Screenshot capture wrapper (§7.17 capture-time options) ─────────────────
+
+/// Apply the matcher's capture-time options as DOM mutations, take
+/// the screenshot, then restore. This sidesteps the per-backend
+/// screenshot pipelines for the subset of options that are
+/// expressible via CSS injection: `animations`, `caret`, `mask` /
+/// `mask_color`, and `style_path`. `clip` is honoured by cropping the
+/// returned PNG client-side. `scale` is best-effort — true device-vs-CSS
+/// scale toggling lives in the backend's `Page.captureScreenshot`
+/// flags; here we record the request and let the comparator's
+/// pixel-budget options absorb DPR mismatches when feasible.
+///
+/// All injected `<style>` nodes are tagged with a `data-ferridriver-cap`
+/// attribute so the cleanup pass removes only what we added; user
+/// styles outside this set are left untouched.
+async fn capture_with_options(locator: &Locator, options: &ScreenshotMatcherOptions) -> Result<Vec<u8>, TestFailure> {
+  let page = locator.page();
+
+  let mut style_blocks: Vec<String> = Vec::new();
+
+  if options.animations.as_deref() == Some("disabled") {
+    style_blocks.push(
+      "*, *::before, *::after { \
+        animation-duration: 0s !important; \
+        animation-delay: 0s !important; \
+        animation-iteration-count: 1 !important; \
+        transition-duration: 0s !important; \
+        transition-delay: 0s !important; \
+      }"
+      .to_string(),
+    );
+  }
+
+  if options.caret.as_deref() == Some("hide") {
+    style_blocks.push("html, body, * { caret-color: transparent !important; }".to_string());
+  }
+
+  if let Some(ref style_path) = options.style_path {
+    match std::fs::read_to_string(style_path) {
+      Ok(content) => style_blocks.push(content),
+      Err(e) => {
+        return Err(TestFailure {
+          message: format!("toHaveScreenshot stylePath {} unreadable: {e}", style_path.display()),
+          stack: None,
+          diff: None,
+          screenshot: None,
+        });
+      },
+    }
+  }
+
+  let mask_color = options.mask_color.as_deref().unwrap_or("#FF00FF");
+  if !options.mask.is_empty() {
+    let mut mask_css = String::new();
+    for selector in &options.mask {
+      mask_css.push_str(selector);
+      mask_css.push_str(" { background: ");
+      mask_css.push_str(mask_color);
+      mask_css.push_str(" !important; color: ");
+      mask_css.push_str(mask_color);
+      mask_css.push_str(" !important; }\n");
+    }
+    style_blocks.push(mask_css);
+  }
+
+  let token = "ferridriver-screenshot-capture";
+
+  if !style_blocks.is_empty() {
+    let combined = style_blocks.join("\n");
+    let escaped = serde_json::to_string(&combined).unwrap_or_else(|_| "\"\"".to_string());
+    // Self-invoking expression so the script runs as soon as it's
+    // evaluated. Pass `is_function: None` (default expression eval) so
+    // backends that treat `Some(true)` differently from `None` don't
+    // diverge.
+    let inject_script = format!(
+      "(function() {{ \
+        const s = document.createElement('style'); \
+        s.setAttribute('data-{TOK}', '1'); \
+        s.textContent = {ESC}; \
+        document.head.appendChild(s); \
+        return true; \
+      }})()",
+      TOK = token,
+      ESC = escaped,
+    );
+    let _ = page
+      .evaluate(
+        &inject_script,
+        ferridriver::protocol::SerializedArgument::default(),
+        None,
+      )
+      .await
+      .map_err(|e| TestFailure {
+        message: format!("screenshot capture-options inject failed: {e}"),
+        stack: None,
+        diff: None,
+        screenshot: None,
+      })?;
+  }
+
+  let raw_png = locator.screenshot().await.map_err(|e| TestFailure {
+    message: format!("screenshot failed: {e}"),
+    stack: None,
+    diff: None,
+    screenshot: None,
+  });
+
+  // Cleanup runs regardless of capture outcome.
+  if !style_blocks.is_empty() {
+    let cleanup = format!(
+      "(function() {{ \
+        document.querySelectorAll('style[data-{TOK}]').forEach(function(n) {{ n.remove(); }}); \
+        return true; \
+      }})()",
+      TOK = token,
+    );
+    let _ = page
+      .evaluate(&cleanup, ferridriver::protocol::SerializedArgument::default(), None)
+      .await;
+  }
+
+  let png = raw_png?;
+
+  if let Some(clip) = options.clip {
+    Ok(crop_png_to_clip(&png, &clip)?)
+  } else {
+    Ok(png)
+  }
+}
+
+fn crop_png_to_clip(png: &[u8], clip: &crate::expect::ScreenshotClip) -> Result<Vec<u8>, TestFailure> {
+  use image::GenericImageView;
+
+  let img = image::load_from_memory_with_format(png, image::ImageFormat::Png).map_err(|e| TestFailure {
+    message: format!("toHaveScreenshot clip: failed to decode capture: {e}"),
+    stack: None,
+    diff: None,
+    screenshot: None,
+  })?;
+  let (img_w, img_h) = img.dimensions();
+  // Clamp to image bounds — Playwright tolerates clips that extend
+  // past the captured area by silently truncating.
+  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+  let x = (clip.x.max(0.0).min(f64::from(img_w))) as u32;
+  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+  let y = (clip.y.max(0.0).min(f64::from(img_h))) as u32;
+  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+  let w = (clip.width.max(0.0).min(f64::from(img_w.saturating_sub(x)))) as u32;
+  #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
+  let h = (clip.height.max(0.0).min(f64::from(img_h.saturating_sub(y)))) as u32;
+  if w == 0 || h == 0 {
+    return Err(TestFailure {
+      message: format!(
+        "toHaveScreenshot clip: empty rect after clamping (x={x} y={y} w={w} h={h}) against {img_w}x{img_h} capture"
+      ),
+      stack: None,
+      diff: None,
+      screenshot: None,
+    });
+  }
+  let cropped = img.crop_imm(x, y, w, h);
+  let mut out = Vec::new();
+  cropped
+    .write_to(&mut std::io::Cursor::new(&mut out), image::ImageFormat::Png)
+    .map_err(|e| TestFailure {
+      message: format!("toHaveScreenshot clip: re-encode failed: {e}"),
+      stack: None,
+      diff: None,
+      screenshot: None,
+    })?;
+  Ok(out)
 }

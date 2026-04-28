@@ -192,6 +192,8 @@ interface ScreenshotOptions {
   animations?: 'allow' | 'disabled';
   caret?: 'hide' | 'initial';
   scale?: 'css' | 'device';
+  stylePath?: string;
+  clip?: { x: number; y: number; width: number; height: number };
 }
 
 // ── APIResponse assertion class ───────────────────────────────────────────

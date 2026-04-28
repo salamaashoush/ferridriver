@@ -225,6 +225,83 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 # cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
 ```
 
+### Cluster 5-fu — toHaveScreenshot capture-time options (§7.17)
+
+Single commit. Closes the cluster-5 carry-forward — the option bag
+shipped with cluster 5 carrying signature parity but the
+capture-time fields (`mask`, `maskColor`, `animations`, `caret`,
+`clip`, `stylePath`) didn't actually flow into the underlying
+screenshot.
+
+#### crates/ferridriver-test/src/expect/locator.rs
+
+`to_have_screenshot_with` delegates to a new
+`capture_with_options(locator, options)` helper. The helper:
+
+- Builds a list of CSS blocks for the active capture-time options
+  (animation disable, caret hide, user `stylePath` content, mask
+  overlays at `maskColor` — default `#FF00FF`).
+- Injects them into the page as a single `<style>` tag tagged with
+  `data-ferridriver-screenshot-capture` so cleanup can find every
+  block we authored without touching user styles.
+- Calls `locator.screenshot()` to capture the element.
+- Removes the injected tags whether the capture succeeded or failed.
+- If `clip` is present, decodes the PNG (the `image` crate, already
+  a dep), crops to the requested rect (clamped to the capture
+  bounds), and re-encodes.
+
+`scale` ('css' vs 'device') flows through the option bag and shows
+up in the matcher; full propagation into CDP
+`Page.captureScreenshot.fromSurface` requires a backend wiring task
+and is left as a Section B follow-up.
+
+#### NAPI
+
+`crates/ferridriver-node/src/locator.rs::parse_screenshot_options`
+gained `stylePath` and `clip` parsers, the `expect_screenshot`
+`ts_args_type` was updated to surface them, and the TS
+`ScreenshotOptions` interface in `packages/ferridriver-test/src/expect.ts`
+was extended in lockstep.
+
+#### Tests (Rule 9)
+
+`crates/ferridriver-node/test/locator-matcher-options.test.ts` —
+3 new cases on top of the existing six:
+
+- `clip` produces an exact 80x80 PNG when capturing a 300x300 div.
+- `mask` over a black inner div paints magenta into the masked
+  region of the recovered RGBA pixels (verified via a hand-rolled
+  PNG decoder that reverse-applies the standard filter algorithms).
+- `stylePath` injects a CSS file before capture (center pixel becomes
+  blue), and the injected `<style>` is removed afterwards (verified
+  via `document.querySelectorAll(...).length === 0`).
+
+The shared `withSnapshotDir` helper sidesteps the Bun
+`process.env`-vs-libc-environ propagation gap by `process.chdir`-ing
+into a temp dir and reading the matcher's default `__snapshots__/`
+output — Bun mutates `process.env` in JS memory only, so
+`std::env::var("SNAPSHOT_DIR")` on the Rust side never sees the test
+override.
+
+### Baseline (must stay green)
+
+```
+cargo clippy --workspace --all-targets -- -D warnings            # clean
+cargo test -p ferridriver --lib                                   # 125 pass
+cargo test -p ferridriver-test --lib                              # 12 pass
+cargo test -p ferridriver-script --lib                            # 13 pass
+cargo test -p ferridriver-mcp --lib                               # 38 pass
+cargo test -p ferridriver-test --test new_features_e2e            # 15 pass
+cargo test -p ferridriver-test --test reporters                   # 4 pass
+cargo test -p ferridriver-test --test cluster7                    # 3 pass
+cargo test -p ferridriver-test --test web_server                  # 3 pass
+cd crates/ferridriver-node && bun run build:debug
+cd <repo root> && bun test                                        # 947 pass (+3)
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+# cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
+```
+
 ### Cluster 6b — TS Reporter interface bridge (§7.22)
 
 Single commit. Closes the cluster-6 follow-up.
@@ -802,6 +879,7 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 | 7-fu1 | WebServer runtime polish (§7.25 graceful_shutdown + ignore_https_errors readiness probe + named log lines) | DONE |
 | 7-fu2 | WebKit + test-runner `new_context` workaround (`Browser::supports_isolated_contexts()` + worker default-context fallback + apply_page_config silent degradation) | DONE |
 | 6b | TS Reporter interface bridge (§7.22 `defineReporter` + NAPI `registerJsReporter` + Playwright-shaped JS payloads) | DONE |
+| 5-fu | toHaveScreenshot capture-time options (§7.17 mask + maskColor + animations + caret + stylePath + clip wired into the capture path) | DONE |
 
 ## Carried-forward backend gaps (real protocol limits)
 

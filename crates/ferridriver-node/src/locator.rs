@@ -793,6 +793,8 @@ impl Locator {
     animations?: 'allow' | 'disabled';
     caret?: 'hide' | 'initial';
     scale?: 'css' | 'device';
+    stylePath?: string;
+    clip?: { x: number; y: number; width: number; height: number };
   }")]
   pub async fn expect_screenshot(&self, name: String, options: Option<serde_json::Value>) -> Result<()> {
     let opts = parse_screenshot_options(options.as_ref());
@@ -827,6 +829,17 @@ fn parse_screenshot_options(value: Option<&serde_json::Value>) -> ferridriver_te
   let Some(obj) = value.and_then(|v| v.as_object()) else {
     return ferridriver_test::expect::ScreenshotMatcherOptions::default();
   };
+  let style_path = obj
+    .get("stylePath")
+    .and_then(|v| v.as_str())
+    .map(std::path::PathBuf::from);
+  let clip = obj.get("clip").and_then(|v| v.as_object()).and_then(|c| {
+    let x = c.get("x").and_then(serde_json::Value::as_f64)?;
+    let y = c.get("y").and_then(serde_json::Value::as_f64)?;
+    let width = c.get("width").and_then(serde_json::Value::as_f64)?;
+    let height = c.get("height").and_then(serde_json::Value::as_f64)?;
+    Some(ferridriver_test::expect::ScreenshotClip { x, y, width, height })
+  });
   ferridriver_test::expect::ScreenshotMatcherOptions {
     threshold: obj.get("threshold").and_then(|v| v.as_f64()),
     max_diff_pixels: obj.get("maxDiffPixels").and_then(|v| v.as_u64()),
@@ -836,8 +849,8 @@ fn parse_screenshot_options(value: Option<&serde_json::Value>) -> ferridriver_te
     animations: obj.get("animations").and_then(|v| v.as_str().map(String::from)),
     caret: obj.get("caret").and_then(|v| v.as_str().map(String::from)),
     scale: obj.get("scale").and_then(|v| v.as_str().map(String::from)),
-    style_path: None,
-    clip: None,
+    style_path,
+    clip,
     mask: obj
       .get("mask")
       .and_then(|v| v.as_array())
