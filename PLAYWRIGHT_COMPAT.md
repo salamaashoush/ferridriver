@@ -1059,15 +1059,15 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.20 Reporters: `dot`, `github`, `blob`, `null`
 
-- [ ] Implement under `crates/ferridriver-test/src/reporter/`.
+- [x] All four ship under `crates/ferridriver-test/src/reporter/`. `dot` writes one glyph per finished test (`·`/`F`/`T`/`S`/`±`/`I`) wrapping at 80 columns. `github` wraps a delegate (the terminal reporter by default; `null` when `quiet` is set) and emits `::error file=...,line=...,title=...::message` lines for every Failed/TimedOut test when `GITHUB_ACTIONS` is set; `with_enabled(true)` forces it on for tests. `blob` writes a `report.zip` with an `events.jsonl` member; the wire format (`WireEvent`) is a serde-tagged mirror of `ReporterEvent` so the schema is stable across runtime-enum changes. `null`/`empty` swallows every event. Factory wires them all in `create_reporters`. Rule 9 in `crates/ferridriver-test/tests/reporters.rs` (4 cases).
 
 ### 7.21 `merge-reports` subcommand
 
-- [ ] Merge blob reports across shards.
+- [x] `ferridriver-test merge-reports <dir> [--reporter NAMES] [--output DIR]` wired in `packages/ferridriver-test/src/cli.ts`. Backed by a NAPI top-level `mergeReports(dir, reporters?, outputDir?)` that calls `blob::read_blob_dir`, replays the merged event stream through the configured reporters, and returns the unified `RunSummary`. Exit code is non-zero when any merged shard had failures. Rule 9 in `crates/ferridriver-node/test/merge-reports.test.ts` (2 cases — the happy path with two shards + a missing-dir error).
 
 ### 7.22 TS `Reporter` interface
 
-- [ ] Allow user-authored JS/TS reporters with `onBegin/onTestBegin/onStepBegin/onStepEnd/onTestEnd/onEnd/onError/onStdOut/onStdErr/onExit/printsToStdio`. Bridge into Rust event bus.
+- [ ] Carry-forward — bridging a TS-authored Reporter into the Rust event bus needs (a) a NAPI `registerJsReporter` shim that wraps the JS callbacks as a `Reporter` implementor, (b) the TS `defineReporter(impl)` helper, (c) lifecycle wiring so the JS callbacks see `onBegin`/`onEnd`/`onError`/`onStdOut`/`onStdErr`/`printsToStdio` payloads in the same shape as Playwright's `Reporter` type. Tracked as the cluster-6 follow-up; the four built-in Rust reporters and `merge-reports` give users a working blob-shard pipeline today.
 
 ### 7.23 CT adapters
 

@@ -2,6 +2,10 @@
 
 pub mod allure;
 pub mod bdd;
+pub mod blob;
+pub mod dot;
+pub mod empty;
+pub mod github;
 pub mod html;
 pub mod json;
 pub mod junit;
@@ -252,6 +256,16 @@ impl ReporterDriver {
 
 /// Unified reporter factory. Creates reporters from config names, routing
 /// mode-dependent reporters (terminal, json, junit) based on `mode`.
+pub fn create_reporters_pub(
+  names: &[crate::config::ReporterConfig],
+  output_dir: &std::path::Path,
+  has_bdd: bool,
+  quiet: bool,
+  report_slow_tests: Option<crate::config::ReportSlowTestsConfig>,
+) -> ReporterSet {
+  create_reporters(names, output_dir, has_bdd, quiet, report_slow_tests)
+}
+
 pub(crate) fn create_reporters(
   names: &[crate::config::ReporterConfig],
   output_dir: &std::path::Path,
@@ -278,6 +292,51 @@ pub(crate) fn create_reporters(
       },
       "junit" => {
         reporters.push(Box::new(junit::JUnitReporter::new(output_dir.join("junit.xml"))));
+      },
+      "dot" => {
+        reporters.push(Box::new(dot::DotReporter::new()));
+      },
+      "null" | "empty" => {
+        reporters.push(Box::new(empty::EmptyReporter));
+      },
+      "blob" => {
+        let path = config
+          .options
+          .get("path")
+          .and_then(|v| v.as_str())
+          .map(std::path::PathBuf::from)
+          .unwrap_or_else(|| output_dir.join("report.zip"));
+        let mut reporter = blob::BlobReporter::new(path);
+        if let (Some(current), Some(total)) = (
+          config
+            .options
+            .get("shard_index")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok()),
+          config
+            .options
+            .get("shard_total")
+            .and_then(|v| v.as_u64())
+            .and_then(|v| u32::try_from(v).ok()),
+        ) {
+          reporter = reporter.with_shard(current, total);
+        }
+        reporters.push(Box::new(reporter));
+      },
+      "github" => {
+        // Wraps the terminal reporter so users see human-readable
+        // output AND the CI annotations from a single flag. The
+        // wrapped reporter respects `quiet`.
+        let inner: Box<dyn Reporter> = if quiet {
+          Box::new(empty::EmptyReporter)
+        } else {
+          Box::new(terminal::TerminalReporter::new().with_slow_tests_config(report_slow_tests.clone()))
+        };
+        let mut reporter = github::GithubReporter::new(inner);
+        if let Some(force) = config.options.get("enabled").and_then(|v| v.as_bool()) {
+          reporter = reporter.with_enabled(force);
+        }
+        reporters.push(Box::new(reporter));
       },
 
       // ── Shared reporters (same for both modes) ──

@@ -336,6 +336,96 @@ struct RegisteredHook {
   callback: Arc<TestCallbackFn>,
 }
 
+/// Replay every blob (`*.zip`) under `dir` through the given list of
+/// reporters and write a unified summary into `output_dir`.
+///
+/// Mirrors Playwright's `npx playwright merge-reports <dir>`. Returns
+/// the run summary (`total`/`passed`/`failed`/...) so the CLI can
+/// surface it. Reporter names map to the same factory the test
+/// runner uses (`terminal`, `dot`, `json`, `junit`, `html`, `github`,
+/// `null`/`empty`, `blob`, ...).
+/// `#[allow(dead_code)]` because the `#[napi]` macro generates the
+/// FFI export but cargo's lib-test build doesn't see the JS-side
+/// caller, so the function reads as unused without a JS consumer.
+#[napi]
+#[allow(dead_code)]
+pub async fn merge_reports(
+  dir: String,
+  reporters: Option<Vec<String>>,
+  output_dir: Option<String>,
+) -> Result<RunSummary> {
+  use ferridriver_test::reporter::{ReporterEvent, blob, create_reporters_pub};
+  use std::path::PathBuf;
+
+  let path = PathBuf::from(dir);
+  if !path.is_dir() {
+    return Err(napi::Error::from_reason(format!(
+      "merge-reports: {} is not a directory",
+      path.display()
+    )));
+  }
+  let events = blob::read_blob_dir(&path).map_err(napi::Error::from_reason)?;
+
+  let output = output_dir.map_or_else(|| PathBuf::from("merged-report"), PathBuf::from);
+  let reporter_names: Vec<ferridriver_test::config::ReporterConfig> = reporters
+    .unwrap_or_else(|| vec!["terminal".into()])
+    .into_iter()
+    .map(|name| ferridriver_test::config::ReporterConfig {
+      name,
+      options: std::collections::BTreeMap::new(),
+    })
+    .collect();
+  let mut set = create_reporters_pub(&reporter_names, &output, false, false, None);
+
+  let mut summary = RunSummary {
+    total: 0,
+    passed: 0,
+    failed: 0,
+    skipped: 0,
+    flaky: 0,
+    duration_ms: 0.0,
+    exit_code: 0,
+    results: Vec::new(),
+  };
+  for event in &events {
+    if let ReporterEvent::TestFinished { test_id, outcome } = event {
+      let status = match outcome.status {
+        ferridriver_test::model::TestStatus::Passed => "passed",
+        ferridriver_test::model::TestStatus::Failed => "failed",
+        ferridriver_test::model::TestStatus::TimedOut => "timed out",
+        ferridriver_test::model::TestStatus::Skipped => "skipped",
+        ferridriver_test::model::TestStatus::Flaky => "flaky",
+        ferridriver_test::model::TestStatus::Interrupted => "interrupted",
+      };
+      summary.total += 1;
+      match status {
+        "passed" => summary.passed += 1,
+        "skipped" => summary.skipped += 1,
+        "flaky" => {
+          summary.flaky += 1;
+          summary.passed += 1;
+        },
+        _ => summary.failed += 1,
+      }
+      summary.results.push(TestResultItem {
+        id: test_id.full_name(),
+        title: test_id.name.clone(),
+        status: status.into(),
+        duration_ms: outcome.duration.as_secs_f64() * 1000.0,
+        attempt: outcome.attempt as i32,
+        error_message: outcome.error.as_ref().map(|e| e.message.clone()),
+      });
+    }
+    set.emit(event).await;
+  }
+  set.finalize().await;
+
+  if summary.failed > 0 {
+    summary.exit_code = 1;
+  }
+  Ok(summary)
+}
+
 /// The test runner. Manages browser pool, dispatches tests to workers,
 /// calls JS callbacks with fixtures, collects results.
 #[napi]

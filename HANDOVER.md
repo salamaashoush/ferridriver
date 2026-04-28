@@ -225,6 +225,83 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 # cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
 ```
 
+### Cluster 6 — Built-in reporters + merge-reports (§7.20 / §7.21)
+
+Single commit. Ships the `dot`, `github`, `blob`, `null`/`empty`
+reporters under `crates/ferridriver-test/src/reporter/` and the
+`merge-reports` subcommand.
+
+#### Reporters
+
+- `dot` — one glyph per finished test (`·` / `F` / `T` / `S` / `±` /
+  `I`), wraps at 80 columns, prints a final summary line.
+- `github` — wraps a delegate (terminal by default; `null` when
+  `quiet` is set) and emits
+  `::error file=...,line=...,title=...::message` annotations for
+  every Failed/TimedOut test when `GITHUB_ACTIONS` is set. Tests
+  force-enable via `with_enabled(true)`.
+- `blob` — writes a `report.zip` containing `events.jsonl`. The
+  wire format is a serde-tagged `WireEvent` that mirrors
+  `ReporterEvent`; keeping it distinct from the runtime enum means
+  adding new event variants doesn't break stored blobs.
+- `null` / `empty` — swallows every event. Useful when a TS-side
+  reporter (Cluster 6b) wants to drive the only visible output.
+
+Factory `create_reporters` (in `reporter/mod.rs`) recognises
+`dot`, `github`, `blob`, `null`, and `empty` reporter names. The
+factory was also re-exported as `create_reporters_pub` so the NAPI
+side can build a `ReporterSet` for the `mergeReports` replay.
+
+#### `merge-reports`
+
+NAPI top-level `mergeReports(dir, reporters?, outputDir?)` reads
+every `*.zip` under `dir` via `blob::read_blob_dir`, replays the
+merged event stream through the configured reporters, and returns
+the unified `RunSummary`. Exit code is non-zero when any merged
+shard had failures.
+
+CLI subcommand `ferridriver-test merge-reports <dir>
+[--reporter NAMES] [--output DIR]` wraps the NAPI call in
+`packages/ferridriver-test/src/cli.ts`.
+
+#### Carry-forward (§7.22)
+
+The TS-authored Reporter interface bridge is left as a follow-up.
+Needs (a) a NAPI `registerJsReporter` shim, (b) a TS
+`defineReporter(impl)` helper, (c) lifecycle wiring so
+`onBegin`/`onEnd`/`onError`/`onStdOut`/`printsToStdio` payloads
+match Playwright's `Reporter` type. Today users get the four
+built-in Rust reporters and the `merge-reports` blob-shard
+pipeline.
+
+#### Tests (Rule 9)
+
+- `crates/ferridriver-test/tests/reporters.rs` — 4 cases:
+  `dot` event drive (smoke + final summary), `null` swallows, `github`
+  with forced-enabled annotations, `blob` round-trip through
+  `read_blob_dir`.
+- `crates/ferridriver-node/test/merge-reports.test.ts` — 2 cases:
+  two-shard happy path (one passing + one failing test → merged
+  summary has total=2, passed=1, failed=1, exit=1), and the
+  missing-dir error path.
+
+### Baseline (must stay green)
+
+```
+cargo clippy --workspace --all-targets -- -D warnings            # clean
+cargo test -p ferridriver --lib                                   # 125 pass
+cargo test -p ferridriver-test --lib                              # 11 pass
+cargo test -p ferridriver-script --lib                            # 13 pass
+cargo test -p ferridriver-mcp --lib                               # 38 pass
+cargo test -p ferridriver-test --test new_features_e2e            # 15 pass
+cargo test -p ferridriver-test --test reporters                   # 4 pass (new)
+cd crates/ferridriver-node && bun run build:debug
+cd <repo root> && bun test                                        # 935 pass (+2)
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+# cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
+```
+
 ### Cluster 5 — Locator matcher advanced options (§7.17)
 
 Single commit. Adds Playwright-shaped option bags to four locator
@@ -413,8 +490,9 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 | 3 | TestInfo helpers (§7.10) | DONE |
 | 4 | Matcher core: generic + asymmetric + `.resolves`/`.rejects`/`.soft`/`.poll`/`expect.extend`/`toBeOK` (§7.11 – §7.16) | DONE |
 | 5 | Locator matcher advanced options (§7.17) | DONE |
-| 6 | Reporters (`dot`, `github`, `blob`, `null`) + `merge-reports` + TS Reporter interface (§7.20 – §7.22) | next |
-| 7 | Project DAG + git-aware filters + WebServer polish + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26) | pending |
+| 6 | Reporters (`dot`, `github`, `blob`, `null`) + `merge-reports` (§7.20 / §7.21) | DONE |
+| 6b | TS Reporter interface (§7.22) | follow-up |
+| 7 | Project DAG + git-aware filters + WebServer polish + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26) | next |
 
 ## Carried-forward backend gaps (real protocol limits)
 

@@ -932,6 +932,36 @@ const codegenCommand = defineCommand({
 
 // ---- Root command ----
 
+const mergeReportsCommand = defineCommand({
+  meta: {
+    name: 'merge-reports',
+    description: 'Merge blob reports (one per shard) into a unified report',
+  },
+  args: {
+    dir: { type: 'positional', valueName: 'DIR', required: true, description: 'Directory containing blob *.zip files' },
+    reporter: {
+      type: 'string',
+      description: 'Reporter to drive with the merged event stream (comma-separated for multiple)',
+      default: 'terminal',
+    },
+    output: {
+      type: 'string',
+      valueName: 'DIR',
+      description: 'Output directory for merged-reporter artefacts (default: ./merged-report)',
+      valueHint: 'filePath',
+    },
+  },
+  async run({ args }) {
+    const { mergeReports } = await import('@ferridriver/node');
+    const reporters = String(args.reporter).split(',').map((s) => s.trim()).filter(Boolean);
+    const summary = await mergeReports(args.dir as string, reporters, args.output as string | undefined);
+    console.log(
+      `merged: ${summary.total} total, ${summary.passed} passed, ${summary.failed} failed, ${summary.skipped} skipped, ${summary.flaky} flaky`,
+    );
+    process.exit(summary.exitCode);
+  },
+});
+
 const installCommand = defineCommand({
   meta: {
     name: 'install',
@@ -996,6 +1026,7 @@ const root = defineCommand({
     ct: ctCommand,
     codegen: codegenCommand,
     install: installCommand,
+    'merge-reports': mergeReportsCommand,
   },
 });
 
