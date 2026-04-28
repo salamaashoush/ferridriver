@@ -551,7 +551,7 @@ impl WebKitPage {
     // returning a value, JSON.stringify the isomorphic wire shape and
     // return `{kind: 'value', payload: <jsonString>}`.
     let body = format!(
-      r"(async function(){{
+      r"(function(){{
         const us = (window.__fd && window.__fd.__us) || (window.__fd.__us = window.__fd.newUtilityScript());
         const isFn = {is_fn_js};
         const retVal = {return_by_value_js};
@@ -560,25 +560,37 @@ impl WebKitPage {
         const serializedArgs = {args_literal};
         const parsed = count > 0 ? JSON.parse(serializedArgs) : [];
         const handles = {handle_list_js};
-        const result = await us.evaluate(isFn, retVal, expr, count, ...parsed, ...handles);
-        if (retVal) {{
-          const encoded = JSON.stringify(result);
-          return JSON.stringify({{kind: 'value', payload: encoded === undefined ? null : encoded}});
+        const result = us.evaluate(isFn, retVal, expr, count, ...parsed, ...handles);
+        // Build the host envelope from a resolved value.
+        function envelope(value) {{
+          if (retVal) {{
+            const encoded = JSON.stringify(value);
+            return JSON.stringify({{kind: 'value', payload: encoded === undefined ? null : encoded}});
+          }}
+          // evaluateHandle: primitive results ride back inline (matching
+          // Playwright's value-backed JSHandle shape); only object-typed
+          // results get a window.__wr entry the host can dispose later.
+          const isRef = value !== null && (typeof value === 'object' || typeof value === 'function');
+          if (!isRef) {{
+            const ty = typeof value === 'undefined' ? 'undefined' : (value === null ? 'null' : 'value');
+            const enc = JSON.stringify(value);
+            return JSON.stringify({{kind: 'valueHandle', ty: ty, payload: enc === undefined ? null : enc}});
+          }}
+          if (!window.__wr) window.__wr = new Map();
+          if (!window.__wr_next) window.__wr_next = 1;
+          const id = window.__wr_next++;
+          window.__wr.set(id, value);
+          return JSON.stringify({{kind: 'handle', ref: id}});
         }}
-        // evaluateHandle: primitive results ride back inline (matching
-        // Playwright's value-backed JSHandle shape); only object-typed
-        // results get a window.__wr entry the host can dispose later.
-        const isRef = result !== null && (typeof result === 'object' || typeof result === 'function');
-        if (!isRef) {{
-          const ty = typeof result === 'undefined' ? 'undefined' : (result === null ? 'null' : 'value');
-          const enc = JSON.stringify(result);
-          return JSON.stringify({{kind: 'valueHandle', ty: ty, payload: enc === undefined ? null : enc}});
+        // Hybrid sync/async: only chain a .then when the user expression
+        // returns a Promise. The host's `callAsyncJavaScript` awaits
+        // whatever the IIFE returns, so a sync return ships back without
+        // microtask overhead. Mirrors Playwright's
+        // `_promiseAwareJsonValueNoThrow` (packages/injected/src/utilityScript.ts).
+        if (result && typeof result.then === 'function') {{
+          return result.then(envelope);
         }}
-        if (!window.__wr) window.__wr = new Map();
-        if (!window.__wr_next) window.__wr_next = 1;
-        const id = window.__wr_next++;
-        window.__wr.set(id, result);
-        return JSON.stringify({{kind: 'handle', ref: id}});
+        return envelope(result);
       }})()"
     );
 

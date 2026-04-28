@@ -926,11 +926,25 @@ impl LifecycleState {
 /// mirrors Playwright's `argCount` to the utility script — the
 /// utility script slices `...argsAndHandles` into the first `count`
 /// as arguments and the remainder as handles.
-pub(crate) const UTILITY_EVAL_WRAPPER: &str = "async function(isFn, retVal, expr, count, serializedArgs, ...handles) {\
+pub(crate) const UTILITY_EVAL_WRAPPER: &str = "function(isFn, retVal, expr, count, serializedArgs, ...handles) {\
     const parsed = count > 0 ? JSON.parse(serializedArgs) : [];\
     const us = (window.__fd && window.__fd.__us) ||\
                (window.__fd.__us = window.__fd.newUtilityScript());\
-    const result = await us.evaluate(isFn, retVal, expr, count, ...parsed, ...handles);\
+    const result = us.evaluate(isFn, retVal, expr, count, ...parsed, ...handles);\
+    /* Hybrid sync/async path: if the user's expression returns a\
+       Promise, chain a .then so CDP's awaitPromise:true picks up the\
+       resolved value; otherwise return the value directly. The async\
+       wrapper imposed Promise + microtask overhead on every call,\
+       which dominates the bench's tight evaluate loop. */\
+    if (result && typeof result.then === 'function') {\
+      return result.then(r => {\
+        if (retVal) {\
+          const encoded = JSON.stringify(r);\
+          return encoded === undefined ? null : encoded;\
+        }\
+        return r;\
+      });\
+    }\
     if (retVal) {\
       const encoded = JSON.stringify(result);\
       return encoded === undefined ? null : encoded;\
