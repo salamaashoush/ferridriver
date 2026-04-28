@@ -225,6 +225,66 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 # cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
 ```
 
+### Cluster 7-fu2 — WebKit + test-runner `new_context` workaround
+
+Single commit. Closes the cluster-2 carry-forward documented in the
+"Carried-forward backend gaps" section.
+
+#### ferridriver core
+
+`Browser` gained a cached `backend_kind` field set at construction
+plus two new methods:
+- `supports_isolated_contexts() -> bool` — true for CDP pipe / CDP
+  raw / BiDi, false for stock `WKWebView`.
+- `backend_kind() -> BackendKind` — sync accessor for callers that
+  want to branch on more than just isolation support.
+
+`BrowserState` gained a sync `backend_kind()` accessor used by
+`Browser::from_state` / `from_shared_state` to seed the cache. The
+state's `backend_kind` is set once at `with_plan` and never mutated,
+so the cache cannot drift.
+
+#### Test-runner worker
+
+`crates/ferridriver-test/src/worker.rs::TestBrowserResources` now
+opens per-test browsing containers via a new `new_test_context`
+helper that returns `Browser::new_context(None)` when the backend
+supports isolated contexts and `Browser::default_context()`
+otherwise. The teardown path (`close_test_context`) skips
+`ContextRef::close()` for the shared default container — closing it
+would tear down the only browsing context available on webkit.
+
+`apply_page_config` accepts the backend kind and silently degrades
+on `acceptDownloads`, `bypassCSP`, and `ignoreHTTPSErrors` when the
+backend is webkit, mirroring Playwright's launchPersistentContext
+semantics for stock `WKWebView`.
+
+#### Tests (Rule 9)
+
+`crates/ferridriver-node/test/builtin-fixtures.test.ts` —
+`BACKENDS_WITH_PAGE` now includes `webkit`, so the
+`browserName + browserVersion + page` lifecycle round-trip runs on
+all four backends.
+
+### Baseline (must stay green)
+
+```
+cargo clippy --workspace --all-targets -- -D warnings            # clean
+cargo test -p ferridriver --lib                                   # 125 pass
+cargo test -p ferridriver-test --lib                              # 12 pass
+cargo test -p ferridriver-script --lib                            # 13 pass
+cargo test -p ferridriver-mcp --lib                               # 38 pass
+cargo test -p ferridriver-test --test new_features_e2e            # 15 pass
+cargo test -p ferridriver-test --test reporters                   # 4 pass
+cargo test -p ferridriver-test --test cluster7                    # 3 pass
+cargo test -p ferridriver-test --test web_server                  # 3 pass
+cd crates/ferridriver-node && bun run build:debug
+cd <repo root> && bun test                                        # 941 pass (+1)
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+# cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
+```
+
 ### Cluster 7-fu1 — WebServer runtime polish (§7.25)
 
 Single commit. Closes the `graceful_shutdown` + `ignore_https_errors`
@@ -668,12 +728,16 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 | 6b | TS Reporter interface (§7.22) | follow-up |
 | 7 | Project DAG + git-aware filters + WebServer polish + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26) | DONE |
 | 7-fu1 | WebServer runtime polish (§7.25 graceful_shutdown + ignore_https_errors readiness probe + named log lines) | DONE |
+| 7-fu2 | WebKit + test-runner `new_context` workaround (`Browser::supports_isolated_contexts()` + worker default-context fallback + apply_page_config silent degradation) | DONE |
 
 ## Carried-forward backend gaps (real protocol limits)
 
-- **WebKit + test runner**: `new_context` not supported — the worker
-  must learn to reuse `default_context()` when launching webkit.
-  Tracked separately from the regular WebKit network/UI gaps.
+- ~~**WebKit + test runner**: `new_context` not supported~~ — closed
+  by 7-fu2. The worker now reuses `default_context()` when
+  `Browser::supports_isolated_contexts()` is false (stock
+  `WKWebView`). State leaks between tests on this backend, mirroring
+  Playwright's persistent-context semantics for non-Chromium
+  browsers without isolated containers.
 - **BiDi**: response body unavailable for non-intercepted responses;
   multi-`Set-Cookie` collapses; `request.postData()` null for
   fetch-with-body; `Download.cancel` typed `Unsupported`; spurious
