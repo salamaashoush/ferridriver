@@ -1078,7 +1078,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.25 WebServer option polish
 
-- [~] `WebServerConfig` gained `ignore_https_errors: bool`, `name: Option<String>`, and `graceful_shutdown: Option<GracefulShutdown> { signal: 'SIGINT'|'SIGTERM', timeout: ms }`. The new fields parse from config files today; runtime honoring of `graceful_shutdown` (send the soft signal first, then SIGKILL after the timeout) and `ignore_https_errors` in the readiness probe lands as a follow-up under §7.25 — the polish here unblocks the config schema for downstream tooling and the NAPI lowering.
+- [x] `WebServerConfig` gained `ignore_https_errors: bool`, `name: Option<String>`, and `graceful_shutdown: Option<GracefulShutdown> { signal: 'SIGINT'|'SIGTERM', timeout: ms }`. Runtime honoring is in: `WebServerManager::stop` reads `graceful_shutdown` and sends the configured signal (SIGINT/SIGTERM, default SIGTERM) via `libc::kill`, waits up to `timeout` ms, then escalates to SIGKILL if the child hasn't exited; the readiness probe is now an HTTP GET via `reqwest` (replacing the TCP-only check) and the `ignore_https_errors` flag flows into `danger_accept_invalid_certs` so self-signed dev servers register as up; the `name` field is surfaced in every `tracing::info!` line so multi-server runs are distinguishable. Rule 9 in `crates/ferridriver-test/tests/web_server.rs` (3 cases — graceful SIGTERM writes a marker and exits 0, no graceful means hard-kill before the trap fires, probe client builds + works under both flag values).
 
 ### 7.26 `captureGitInfo`
 

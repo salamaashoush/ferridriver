@@ -225,6 +225,82 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 # cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
 ```
 
+### Cluster 7-fu1 — WebServer runtime polish (§7.25)
+
+Single commit. Closes the `graceful_shutdown` + `ignore_https_errors`
++ `name` runtime carry-forward documented after cluster 7.
+
+#### server.rs
+
+`WebServerManager::stop` now branches on the per-server
+`graceful_shutdown` value: when present, it sends the configured
+signal (`SIGINT`/`SIGTERM`/`SIGKILL`, default `SIGTERM`) via
+`libc::kill`, waits up to `timeout` ms via `tokio::time::timeout`,
+and escalates to `SIGKILL` if the child hasn't exited. Without the
+field the manager keeps the prior behaviour (immediate
+`Child::kill`).
+
+The readiness probe became HTTP-aware: the previous
+`tokio::net::TcpStream::connect` check is replaced with a
+`reqwest`-based `http_probe` that issues a `GET` and treats any 2xx/3xx
+status as up (with a 404 → `/index.html` fallback to mirror
+Playwright). `WebServerConfig.ignore_https_errors` flows into
+`danger_accept_invalid_certs`, so a self-signed dev server now
+registers as ready instead of TLS-erroring forever. The reuse-existing
+path uses the same probe so reuse + HTTPS work together.
+
+`WebServerConfig.name` is surfaced in every `tracing::info!` /
+`tracing::warn!` line emitted by the manager (`Static server ready`,
+`Dev server ready`, `Sending SIGTERM`, `Process exited gracefully`,
+`escalating to SIGKILL`, `Reusing existing server`), so multi-server
+runs stay readable in logs.
+
+#### Internal cleanups
+
+- `RunningServer` was reshaped into two boxed entries
+  (`Static(Box<StaticEntry>)` / `Command(Box<CommandEntry>)`) so the
+  per-entry metadata (name, graceful policy) doesn't bloat the
+  `WebServerManager::start` future past the
+  `clippy::large_futures` threshold.
+- `build_probe_client` and `http_probe` are exposed publicly for
+  downstream tooling and integration tests.
+
+#### Tests (Rule 9)
+
+`crates/ferridriver-test/tests/web_server.rs` — 3 cases:
+
+- `stop_with_graceful_shutdown_writes_marker_and_exits_clean` — runs
+  a Node trap script that records a marker on SIGTERM and exits 0;
+  the manager stops it with `signal: SIGTERM, timeout: 1000ms` and
+  the marker exists afterwards.
+- `stop_without_graceful_shutdown_hard_kills` — same trap script but
+  no `graceful_shutdown` configured; the marker is absent because
+  `Child::kill()` sends SIGKILL which the trap can't intercept.
+- `probe_client_honours_ignore_https_errors_flag` — builds the
+  probe client both ways and runs `http_probe` against an in-process
+  axum server; happy path passes regardless of the flag (the TLS
+  cert-acceptance half is a runtime feature of `reqwest` and is not
+  re-tested).
+
+### Baseline (must stay green)
+
+```
+cargo clippy --workspace --all-targets -- -D warnings            # clean
+cargo test -p ferridriver --lib                                   # 125 pass
+cargo test -p ferridriver-test --lib                              # 12 pass
+cargo test -p ferridriver-script --lib                            # 13 pass
+cargo test -p ferridriver-mcp --lib                               # 38 pass
+cargo test -p ferridriver-test --test new_features_e2e            # 15 pass
+cargo test -p ferridriver-test --test reporters                   # 4 pass
+cargo test -p ferridriver-test --test cluster7                    # 3 pass
+cargo test -p ferridriver-test --test web_server                  # 3 pass (new)
+cd crates/ferridriver-node && bun run build:debug
+cd <repo root> && bun test                                        # 940 pass
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+# cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
+```
+
 ### Cluster 7 — Project DAG + git-aware filters + WebServer + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26)
 
 Single commit. Wires the existing `ProjectConfig[]` DAG into the
@@ -591,6 +667,7 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 | 6 | Reporters (`dot`, `github`, `blob`, `null`) + `merge-reports` (§7.20 / §7.21) | DONE |
 | 6b | TS Reporter interface (§7.22) | follow-up |
 | 7 | Project DAG + git-aware filters + WebServer polish + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26) | DONE |
+| 7-fu1 | WebServer runtime polish (§7.25 graceful_shutdown + ignore_https_errors readiness probe + named log lines) | DONE |
 
 ## Carried-forward backend gaps (real protocol limits)
 
