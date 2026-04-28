@@ -145,6 +145,21 @@ pub struct TestRunnerConfig {
   pub fully_parallel: Option<bool>,
   /// Snapshot update mode: "all", "changed", "missing", "none".
   pub update_snapshots: Option<String>,
+
+  // ── Cluster 7 CLI flags ──
+  /// Subset of `projects` to run (empty = all).
+  pub project_filter: Option<Vec<String>>,
+  /// Skip dependency resolution for the selected projects.
+  pub no_deps: Option<bool>,
+  /// Override teardown stage for the run.
+  pub teardown_project: Option<String>,
+  /// `--only-changed [ref]` — `Some("")` = uncommitted changes,
+  /// `Some(ref)` = compare against the given ref. `None` = no filter.
+  pub only_changed: Option<String>,
+  /// Make any flaky test cause a non-zero exit.
+  pub fail_on_flaky_tests: Option<bool>,
+  /// Annotate `RunSummary` metadata with git info.
+  pub capture_git_info: Option<bool>,
 }
 
 /// Web server config passed from TS — maps to Rust `WebServerConfig`.
@@ -508,6 +523,11 @@ impl TestRunner {
       name: cfg.name.clone(),
       fully_parallel: cfg.fully_parallel,
       update_snapshots: update_snapshots_mode,
+      project_filter: cfg.project_filter.clone().unwrap_or_default(),
+      no_deps: cfg.no_deps.unwrap_or(false),
+      teardown: cfg.teardown_project.clone(),
+      only_changed: cfg.only_changed.clone(),
+      fail_on_flaky_tests: cfg.fail_on_flaky_tests.unwrap_or(false),
       ..Default::default()
     };
     let mut tc =
@@ -541,6 +561,13 @@ impl TestRunner {
     // Web server config.
     if let Some(ref servers) = cfg.web_server {
       tc.web_server = servers.iter().map(napi_web_server_to_rust).collect();
+    }
+
+    if let Some(flag) = cfg.fail_on_flaky_tests {
+      tc.fail_on_flaky_tests = flag;
+    }
+    if let Some(flag) = cfg.capture_git_info {
+      tc.capture_git_info = flag;
     }
 
     Ok(Self {
@@ -1003,32 +1030,50 @@ impl TestRunner {
 
     // Collect results from the reporter.
     let collected = collector.lock().await;
-    let mut passed = 0i32;
-    let mut failed = 0i32;
-    let mut skipped = 0i32;
-    let mut flaky = 0i32;
-    let mut results = Vec::new();
+    let results: Vec<TestResultItem> = collected.results.clone();
 
-    for r in &collected.results {
-      match r.status.as_str() {
-        "passed" => passed += 1,
-        "skipped" => skipped += 1,
-        "flaky" => {
-          flaky += 1;
-          passed += 1;
-        },
-        _ => failed += 1,
+    // Prefer the runner's RunFinished totals when present — they
+    // already account for retry-flake collapsing. Fall back to per-
+    // attempt sums for paths that don't emit RunFinished (e.g. early
+    // exits before the run started).
+    let (total, passed, failed, skipped, flaky, duration_ms) = if let Some(t) = &collected.run_totals {
+      (
+        t.total as i32,
+        t.passed as i32,
+        t.failed as i32,
+        t.skipped as i32,
+        t.flaky as i32,
+        t.duration.as_secs_f64() * 1000.0,
+      )
+    } else {
+      let mut passed = 0i32;
+      let mut failed = 0i32;
+      let mut skipped = 0i32;
+      let flaky = 0i32;
+      for r in &results {
+        match r.status.as_str() {
+          "passed" => passed += 1,
+          "skipped" => skipped += 1,
+          _ => failed += 1,
+        }
       }
-      results.push(r.clone());
-    }
+      (
+        results.len() as i32,
+        passed,
+        failed,
+        skipped,
+        flaky,
+        duration.as_secs_f64() * 1000.0,
+      )
+    };
 
     Ok(RunSummary {
-      total: results.len() as i32,
+      total,
       passed,
       failed,
       skipped,
       flaky,
-      duration_ms: duration.as_secs_f64() * 1000.0,
+      duration_ms,
       exit_code,
       results,
     })
@@ -1352,11 +1397,28 @@ async fn call_js_test(
 /// In-memory result collector for returning test outcomes to TS.
 struct ResultCollector {
   results: Vec<TestResultItem>,
+  /// Aggregate counts captured from `RunFinished` so the NAPI summary
+  /// surfaces the runner's flaky-detection result rather than a
+  /// per-attempt sum.
+  run_totals: Option<RunTotals>,
+}
+
+#[derive(Debug, Clone)]
+struct RunTotals {
+  total: usize,
+  passed: usize,
+  failed: usize,
+  skipped: usize,
+  flaky: usize,
+  duration: std::time::Duration,
 }
 
 impl ResultCollector {
   fn new() -> Self {
-    Self { results: Vec::new() }
+    Self {
+      results: Vec::new(),
+      run_totals: None,
+    }
   }
 }
 
@@ -1366,24 +1428,45 @@ struct ResultCollectorReporter(Arc<tokio::sync::Mutex<ResultCollector>>);
 #[async_trait::async_trait]
 impl ferridriver_test::reporter::Reporter for ResultCollectorReporter {
   async fn on_event(&mut self, event: &ferridriver_test::reporter::ReporterEvent) {
-    if let ferridriver_test::reporter::ReporterEvent::TestFinished { test_id, outcome } = event {
-      let status = match outcome.status {
-        ferridriver_test::model::TestStatus::Passed => "passed",
-        ferridriver_test::model::TestStatus::Failed => "failed",
-        ferridriver_test::model::TestStatus::TimedOut => "timed out",
-        ferridriver_test::model::TestStatus::Skipped => "skipped",
-        ferridriver_test::model::TestStatus::Flaky => "flaky",
-        ferridriver_test::model::TestStatus::Interrupted => "interrupted",
-      };
-      let mut collector = self.0.lock().await;
-      collector.results.push(TestResultItem {
-        id: test_id.full_name(),
-        title: test_id.name.clone(),
-        status: status.into(),
-        duration_ms: outcome.duration.as_secs_f64() * 1000.0,
-        attempt: outcome.attempt as i32,
-        error_message: outcome.error.as_ref().map(|e| e.message.clone()),
-      });
+    match event {
+      ferridriver_test::reporter::ReporterEvent::TestFinished { test_id, outcome } => {
+        let status = match outcome.status {
+          ferridriver_test::model::TestStatus::Passed => "passed",
+          ferridriver_test::model::TestStatus::Failed => "failed",
+          ferridriver_test::model::TestStatus::TimedOut => "timed out",
+          ferridriver_test::model::TestStatus::Skipped => "skipped",
+          ferridriver_test::model::TestStatus::Flaky => "flaky",
+          ferridriver_test::model::TestStatus::Interrupted => "interrupted",
+        };
+        let mut collector = self.0.lock().await;
+        collector.results.push(TestResultItem {
+          id: test_id.full_name(),
+          title: test_id.name.clone(),
+          status: status.into(),
+          duration_ms: outcome.duration.as_secs_f64() * 1000.0,
+          attempt: outcome.attempt as i32,
+          error_message: outcome.error.as_ref().map(|e| e.message.clone()),
+        });
+      },
+      ferridriver_test::reporter::ReporterEvent::RunFinished {
+        total,
+        passed,
+        failed,
+        skipped,
+        flaky,
+        duration,
+      } => {
+        let mut collector = self.0.lock().await;
+        collector.run_totals = Some(RunTotals {
+          total: *total,
+          passed: *passed,
+          failed: *failed,
+          skipped: *skipped,
+          flaky: *flaky,
+          duration: *duration,
+        });
+      },
+      _ => {},
     }
   }
 

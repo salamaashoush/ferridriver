@@ -130,6 +130,55 @@ impl TestRunner {
       },
     };
 
+    // Resolve `--project NAME` filter into the index set the runner
+    // will execute. When non-empty, also pull in transitive deps
+    // (unless `--no-deps`) and any teardown projects referenced by
+    // the kept set.
+    let allowed_indices: rustc_hash::FxHashSet<usize> = if self.overrides.project_filter.is_empty() {
+      (0..projects.len()).collect()
+    } else {
+      let mut wanted: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
+      for name in &self.overrides.project_filter {
+        if let Some(idx) = projects.iter().position(|p| &p.name == name) {
+          wanted.insert(idx);
+        } else {
+          tracing::warn!(target: "ferridriver::runner", "--project {name}: no matching project");
+        }
+      }
+      // Walk dependencies until fixpoint (unless --no-deps).
+      if !self.overrides.no_deps {
+        let mut frontier: Vec<usize> = wanted.iter().copied().collect();
+        while let Some(idx) = frontier.pop() {
+          for dep_name in &projects[idx].dependencies {
+            if let Some(dep_idx) = projects.iter().position(|p| &p.name == dep_name) {
+              if wanted.insert(dep_idx) {
+                frontier.push(dep_idx);
+              }
+            }
+          }
+        }
+      }
+      // Always pull in declared teardowns of kept projects.
+      let kept: Vec<usize> = wanted.iter().copied().collect();
+      for idx in kept {
+        if let Some(t) = &projects[idx].teardown {
+          if let Some(t_idx) = projects.iter().position(|p| &p.name == t) {
+            wanted.insert(t_idx);
+          }
+        }
+      }
+      wanted
+    };
+    let sorted: Vec<usize> = sorted.into_iter().filter(|idx| allowed_indices.contains(idx)).collect();
+
+    // `--teardown NAME` overrides any project-declared teardown by
+    // forcing it onto the run regardless of explicit project filter.
+    let cli_teardown_idx: Option<usize> = self
+      .overrides
+      .teardown
+      .as_deref()
+      .and_then(|name| projects.iter().position(|p| p.name == name));
+
     tracing::info!(
       target: "ferridriver::runner",
       projects = sorted.len(),
@@ -212,6 +261,24 @@ impl TestRunner {
       let td_exit = self.run_single_project(td_project, &plan).await;
       if td_exit != 0 {
         exit_code = 1;
+      }
+    }
+
+    // Honour `--teardown NAME` — runs once after every selected
+    // project has finished (success or failure), even if no project
+    // declared it as their teardown.
+    if let Some(td_idx) = cli_teardown_idx {
+      let td_project = &projects[td_idx];
+      if !completed_projects.contains(&td_project.name) {
+        tracing::info!(
+          target: "ferridriver::runner",
+          project = td_project.name,
+          "running CLI-supplied teardown project",
+        );
+        let td_exit = self.run_single_project(td_project, &plan).await;
+        if td_exit != 0 {
+          exit_code = 1;
+        }
       }
     }
 
@@ -389,11 +456,27 @@ impl TestRunner {
       None
     };
 
+    // Compose `metadata` with optional git info per `captureGitInfo`.
+    // Cloned once here so each downstream emit sees the same JSON.
+    let mut run_metadata = self.config.metadata.clone();
+    if self.config.capture_git_info {
+      let info = crate::git_info::GitInfo::capture();
+      let git_value = serde_json::to_value(&info).unwrap_or(serde_json::Value::Null);
+      match &mut run_metadata {
+        serde_json::Value::Object(map) => {
+          map.insert("git".into(), git_value);
+        },
+        other => {
+          *other = serde_json::json!({ "git": git_value });
+        },
+      }
+    }
+
     event_bus
       .emit(ReporterEvent::RunStarted {
         total_tests,
         num_workers,
-        metadata: self.config.metadata.clone(),
+        metadata: run_metadata,
       })
       .await;
 
@@ -648,7 +731,19 @@ impl TestRunner {
       })
       .await;
 
-    if failed > 0 { 1 } else { 0 }
+    let exit_code = if failed > 0 || (self.config.fail_on_flaky_tests && flaky > 0) {
+      1
+    } else {
+      0
+    };
+    if exit_code != 0 && failed == 0 && flaky > 0 && self.config.fail_on_flaky_tests {
+      tracing::warn!(
+        target: "ferridriver::runner",
+        flaky,
+        "fail_on_flaky_tests: flagging exit 1 for {flaky} flaky test(s)",
+      );
+    }
+    exit_code
   }
 
   /// Run in watch mode: re-run tests on file changes with interactive keyboard controls.

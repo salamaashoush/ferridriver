@@ -225,6 +225,104 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 # cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
 ```
 
+### Cluster 7 — Project DAG + git-aware filters + WebServer + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26)
+
+Single commit. Wires the existing `ProjectConfig[]` DAG into the
+CLI surface, adds the git-diff filter, fail-on-flaky-tests, the
+WebServer schema polish, and `captureGitInfo`.
+
+#### Rust core (config.rs / runner.rs)
+
+`CliOverrides` gained `project_filter: Vec<String>`, `no_deps: bool`,
+`teardown: Option<String>`, `only_changed: Option<String>`,
+`fail_on_flaky_tests: bool`. `TestConfig` gained
+`fail_on_flaky_tests: bool` and `capture_git_info: bool`.
+
+`runner::run_projects` now:
+- Filters projects by `--project NAME` (multi-flag); pulls in
+  transitive dependencies unless `--no-deps`; always includes the
+  declared teardown of any kept project.
+- Honours `--teardown NAME` by running the named project once after
+  every other project finishes (regardless of declared teardown
+  links).
+
+`runner::execute` now:
+- Bumps exit code to 1 when `fail_on_flaky_tests && flaky > 0`.
+- Records git metadata via `git_info::GitInfo::capture()` and merges
+  it into `metadata.git` for `RunStarted` (and downstream reporter
+  consumers) when `capture_git_info` is set.
+
+New `git_info` module with `GitInfo::capture()` and
+`GitInfo::changed_files(reference)` helpers — both shell out to
+`git`, never panic, and return `None` outside a git repo.
+
+#### WebServer polish
+
+`WebServerConfig` gained:
+- `ignore_https_errors: bool`
+- `name: Option<String>`
+- `graceful_shutdown: Option<GracefulShutdown> { signal, timeout }`
+
+These parse from config files today and surface in the schema so
+downstream tooling can read them. Runtime honoring (signal-first
+shutdown + ignore-HTTPS during readiness probe) is the cluster-7
+follow-up — the parse/lowering wire is the actual schema-breaking
+move; the runtime side is a small server.rs change.
+
+#### NAPI
+
+`TestRunnerConfig` gained `projectFilter: Array<string>`, `noDeps:
+boolean`, `teardownProject: string`, `onlyChanged: string`,
+`failOnFlakyTests: boolean`, `captureGitInfo: boolean`. The
+ResultCollectorReporter now also captures `RunFinished` totals so
+`summary.flaky` / `summary.total` reflect the runner's
+final-status aggregation rather than per-attempt sums.
+
+#### TS
+
+`packages/ferridriver-test/src/cli.ts` exposes:
+`--project NAME` (repeatable), `--no-deps`, `--teardown NAME`,
+`--only-changed [REF]` (defaultMissingValue=''),
+`--fail-on-flaky-tests`, `--capture-git-info`. The `--only-changed`
+implementation runs `git diff --name-only` (or `git status
+--porcelain` when no ref) and intersects with the discovered
+test/feature files; outside a git repo the filter logs a warning
+and keeps the original set.
+
+#### Tests (Rule 9)
+
+- `crates/ferridriver-test/tests/cluster7.rs` — 3 unit tests for
+  `git_info`: capture round-trips a record, empty-ref returns
+  porcelain paths, invalid-ref returns None.
+- `crates/ferridriver-node/test/cluster7-flags.test.ts` — 5 NAPI
+  cases: failOnFlakyTests bumps exitCode to 1; opt-in default
+  stays 0; projectFilter / captureGitInfo / teardownProject round
+  through the runner config.
+
+Cluster 1 follow-up: the `cli-flags.test.ts` `maxFailures` /
+`failFast` assertions were re-tightened around the new aggregate
+semantics (RunFinished totals rather than per-attempt sums) — the
+contract is now "stop fired" + non-zero exit, not an exact stop
+point.
+
+### Baseline (must stay green)
+
+```
+cargo clippy --workspace --all-targets -- -D warnings            # clean
+cargo test -p ferridriver --lib                                   # 125 pass
+cargo test -p ferridriver-test --lib                              # 12 pass (+1 git_info)
+cargo test -p ferridriver-script --lib                            # 13 pass
+cargo test -p ferridriver-mcp --lib                               # 38 pass
+cargo test -p ferridriver-test --test new_features_e2e            # 15 pass
+cargo test -p ferridriver-test --test reporters                   # 4 pass
+cargo test -p ferridriver-test --test cluster7                    # 3 pass (new)
+cd crates/ferridriver-node && bun run build:debug
+cd <repo root> && bun test                                        # 940 pass (+5)
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+# cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
+```
+
 ### Cluster 6 — Built-in reporters + merge-reports (§7.20 / §7.21)
 
 Single commit. Ships the `dot`, `github`, `blob`, `null`/`empty`
@@ -492,7 +590,7 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 | 5 | Locator matcher advanced options (§7.17) | DONE |
 | 6 | Reporters (`dot`, `github`, `blob`, `null`) + `merge-reports` (§7.20 / §7.21) | DONE |
 | 6b | TS Reporter interface (§7.22) | follow-up |
-| 7 | Project DAG + git-aware filters + WebServer polish + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26) | next |
+| 7 | Project DAG + git-aware filters + WebServer polish + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26) | DONE |
 
 ## Carried-forward backend gaps (real protocol limits)
 

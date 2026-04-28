@@ -978,8 +978,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.1 `--project` flag + project-dependency DAG
 
-- [ ] Wire `ProjectConfig[]` (already at `config.rs:431`) through the runner. Add `--project` multi-flag, `dependencies`, `teardown`, `--no-deps`, `--teardown`, `-x`.
-- **Files**: `crates/ferridriver-test/src/config.rs`, `discovery.rs`, `runner.rs`, `bin/*.rs`, `packages/ferridriver-test/src/cli.ts`.
+- [x] `ProjectConfig[]` already had topological sort in `runner::run_projects` (cluster 1 plumbing); cluster 7 wires the CLI surface. New `CliOverrides::project_filter` (multi-flag) narrows execution to the named projects + their transitive dependencies; `no_deps` short-circuits the dep walk; `teardown` overrides the project-declared teardown stage. Filtered projects always pull in their declared teardowns. NAPI fields: `projectFilter: string[]`, `noDeps: boolean`, `teardownProject: string`. TS CLI: `--project NAME` (repeatable), `--no-deps`, `--teardown NAME`. `-x` cross-project semantics piggyback on the cluster-1 dispatcher stop flag.
 
 ### 7.2 `globalTimeout`, `--global-timeout`
 
@@ -987,11 +986,11 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.3 `--only-changed`
 
-- [ ] Git-diff-based file selection.
+- [x] Git-diff-based file selection. New `CliOverrides::only_changed: Option<String>` — `Some("")` falls back to `git status --porcelain` (working tree), `Some(ref)` runs `git diff --name-only ref HEAD`. The TS CLI intersects the diff with the discovered test/feature files before passing to the runner; outside a git repo it logs a warning and keeps the full set. New `git_info::GitInfo::changed_files(reference)` Rust helper used by the same logic in non-CLI callers.
 
 ### 7.4 `--fail-on-flaky-tests`
 
-- [ ] Non-zero exit on any flaky (retried-then-passed) test.
+- [x] New `TestConfig::fail_on_flaky_tests` + `CliOverrides::fail_on_flaky_tests`. Runner's `execute()` already tracks the `flaky` count; cluster 7 makes it bump exit code 1 when any flaky test is observed and the flag is set. NAPI `failOnFlakyTests`. The NAPI summary now also surfaces aggregate counts (passed/failed/skipped/flaky/total) from `RunFinished` rather than per-attempt sums, so consumers see the runner's flaky-detection result in `summary.flaky`. Rule 9 in `crates/ferridriver-node/test/cluster7-flags.test.ts` (flag on → exitCode 1; flag off → exitCode 0).
 
 ### 7.5 `--ignore-snapshots`
 
@@ -1079,11 +1078,11 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.25 WebServer option polish
 
-- [ ] Add `ignore_https_errors`, `graceful_shutdown`, `name` to `WebServerConfig`.
+- [~] `WebServerConfig` gained `ignore_https_errors: bool`, `name: Option<String>`, and `graceful_shutdown: Option<GracefulShutdown> { signal: 'SIGINT'|'SIGTERM', timeout: ms }`. The new fields parse from config files today; runtime honoring of `graceful_shutdown` (send the soft signal first, then SIGKILL after the timeout) and `ignore_https_errors` in the readiness probe lands as a follow-up under §7.25 — the polish here unblocks the config schema for downstream tooling and the NAPI lowering.
 
 ### 7.26 `captureGitInfo`
 
-- [ ] Annotate test results with git metadata.
+- [x] New `TestConfig::capture_git_info: bool` + NAPI `captureGitInfo`. When set, `runner::execute()` invokes the new `git_info::GitInfo::capture()` helper (shells out to `git rev-parse HEAD`, `git symbolic-ref --short HEAD`, `git status --porcelain`) and merges the resulting JSON into the run-level `metadata.git` block. Outside a git repo every field degrades to an empty string rather than failing the run. Rule 9 in `crates/ferridriver-test/tests/cluster7.rs` (smoke + invalid-ref handling) plus `crates/ferridriver-node/test/cluster7-flags.test.ts` (NAPI flag round-trip).
 
 ### 7.27 `updateSnapshots` mode parsing
 

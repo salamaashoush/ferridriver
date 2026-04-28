@@ -211,6 +211,14 @@ function buildCliOverrides(args: Record<string, any>): Record<string, any> {
   if (args['global-timeout'] !== undefined) o.globalTimeout = args['global-timeout'];
   if (args.name) o.name = args.name;
   if (args['fully-parallel']) o.fullyParallel = true;
+  if (args.project) {
+    o.projectFilter = Array.isArray(args.project) ? args.project : [args.project];
+  }
+  if (args['no-deps']) o.noDeps = true;
+  if (args.teardown) o.teardownProject = args.teardown;
+  if (args['only-changed'] !== undefined) o.onlyChanged = args['only-changed'];
+  if (args['fail-on-flaky-tests']) o.failOnFlakyTests = true;
+  if (args['capture-git-info']) o.captureGitInfo = true;
   if (args.video) o.video = args.video;
   if (args.trace) o.trace = args.trace;
   if (args['storage-state']) o.storageState = args['storage-state'];
@@ -412,6 +420,36 @@ const runnerArgs = defineArgs({
   'fully-parallel': {
     type: 'boolean',
     description: 'Run all tests in parallel regardless of file-level grouping',
+  },
+  // ── Cluster 7 surface ──
+  project: {
+    type: 'string',
+    action: 'append',
+    valueName: 'NAME',
+    description: 'Run only the named project(s) — repeatable',
+  },
+  'no-deps': {
+    type: 'boolean',
+    description: 'Skip project dependencies when filtering with --project',
+  },
+  teardown: {
+    type: 'string',
+    valueName: 'NAME',
+    description: 'Run NAME as the run-wide teardown stage',
+  },
+  'only-changed': {
+    type: 'string',
+    valueName: 'REF',
+    description: 'Only run test files changed between HEAD and REF (or working-tree if REF omitted)',
+    defaultMissingValue: '',
+  },
+  'fail-on-flaky-tests': {
+    type: 'boolean',
+    description: 'Exit non-zero when any test passes only after a retry',
+  },
+  'capture-git-info': {
+    type: 'boolean',
+    description: 'Annotate the run summary with git commit / branch / dirty status',
   },
 });
 
@@ -831,8 +869,34 @@ const testCommand = defineCommand({
       baseDir: config.testDir as string | undefined,
     });
 
-    const testFiles = allFiles.filter(f => /\.(spec|test)\.[tj]sx?$/.test(f));
-    const featureFiles = allFiles.filter(f => f.endsWith('.feature'));
+    let testFiles = allFiles.filter(f => /\.(spec|test)\.[tj]sx?$/.test(f));
+    let featureFiles = allFiles.filter(f => f.endsWith('.feature'));
+
+    // `--only-changed [ref]`: intersect discovered files with the
+    // git diff. Empty `onlyChanged` falls back to the working-tree
+    // diff. Outside a git repo we keep the original file set and
+    // emit a warning instead of failing the run.
+    if (typeof config.onlyChanged === 'string') {
+      const { spawnSync } = await import('child_process');
+      const ref = config.onlyChanged as string;
+      const args = ref ? ['diff', '--name-only', ref, 'HEAD'] : ['status', '--porcelain'];
+      const proc = spawnSync('git', args, { encoding: 'utf8' });
+      if (proc.status === 0) {
+        const lines = proc.stdout.split('\n').map((l: string) => l.trim()).filter(Boolean);
+        const changed = new Set<string>();
+        for (const line of lines) {
+          // git status --porcelain prefixes each entry with `XY ` (3 chars).
+          const path = ref ? line : line.length > 3 ? line.slice(3).trim() : '';
+          if (!path) continue;
+          changed.add(resolve(path));
+        }
+        const matches = (file: string) => changed.has(resolve(file));
+        testFiles = testFiles.filter(matches);
+        featureFiles = featureFiles.filter(matches);
+      } else {
+        console.warn('[ferridriver-test] --only-changed: git unavailable or not a repo, ignoring filter');
+      }
+    }
 
     if (testFiles.length === 0 && featureFiles.length === 0) {
       console.log('  No test files found.');

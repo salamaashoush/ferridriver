@@ -155,6 +155,16 @@ pub struct TestConfig {
   /// Display name for the run, surfaced in reports. Playwright top-level `name`.
   pub name: Option<String>,
 
+  /// Make any flaky test (passed-after-retry) cause a non-zero exit
+  /// for the run. Mirrors Playwright's `--fail-on-flaky-tests`.
+  pub fail_on_flaky_tests: bool,
+
+  /// When `true`, the runner shells out at startup to record the
+  /// commit hash, branch, and uncommitted-diff status, and surfaces
+  /// the result on `RunSummary.metadata.git`. Mirrors Playwright's
+  /// `captureGitInfo`.
+  pub capture_git_info: bool,
+
   /// Snapshot directory path template.
   pub snapshot_dir: Option<String>,
 
@@ -550,6 +560,27 @@ pub struct WebServerConfig {
 
   /// Stderr disposition: "pipe" (capture), "ignore", "inherit". Default: "pipe".
   pub stderr: Option<String>,
+
+  /// Treat HTTPS errors as healthy when polling `url`. Mirrors
+  /// Playwright's `webServer.ignoreHTTPSErrors`.
+  pub ignore_https_errors: bool,
+
+  /// Display name surfaced in logs. Mirrors Playwright's
+  /// `webServer.name`.
+  pub name: Option<String>,
+
+  /// Send `signal` first (default `SIGTERM`) and wait `timeout` ms
+  /// before `SIGKILL`. Mirrors Playwright's
+  /// `webServer.gracefulShutdown`.
+  pub graceful_shutdown: Option<GracefulShutdown>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct GracefulShutdown {
+  /// `"SIGINT"` or `"SIGTERM"`. Anything else falls back to SIGTERM.
+  pub signal: String,
+  /// Milliseconds to wait between the soft signal and SIGKILL.
+  pub timeout: u64,
 }
 
 impl Default for WebServerConfig {
@@ -566,6 +597,9 @@ impl Default for WebServerConfig {
       spa: false,
       stdout: None,
       stderr: None,
+      ignore_https_errors: false,
+      name: None,
+      graceful_shutdown: None,
     }
   }
 }
@@ -609,6 +643,18 @@ pub struct CliOverrides {
   pub tsconfig: Option<String>,
   pub name: Option<String>,
   pub fully_parallel: Option<bool>,
+  /// Subset of `TestConfig::projects` to run (empty = all). Mirrors
+  /// Playwright's `--project NAME` (repeatable).
+  pub project_filter: Vec<String>,
+  /// Skip `dependencies` resolution for the selected projects.
+  pub no_deps: bool,
+  /// Project to run as the teardown stage. Mirrors `--teardown`.
+  pub teardown: Option<String>,
+  /// Filter discovered tests to those touched between HEAD and the
+  /// optional ref. `Some("")` falls back to the working-tree diff.
+  pub only_changed: Option<String>,
+  /// Make any flaky test (passed-after-retry) cause a non-zero exit.
+  pub fail_on_flaky_tests: bool,
   // ── Browser overrides ──
   /// Browser product: "chromium", "firefox", "webkit".
   pub browser: Option<String>,
@@ -733,6 +779,30 @@ pub fn parse_common_cli_args() -> CliOverrides {
         overrides.tsconfig = args.get(i).cloned();
       },
       "--fully-parallel" => overrides.fully_parallel = Some(true),
+      "--project" => {
+        i += 1;
+        if let Some(name) = args.get(i) {
+          overrides.project_filter.push(name.clone());
+        }
+      },
+      "--no-deps" => overrides.no_deps = true,
+      "--teardown" => {
+        i += 1;
+        overrides.teardown = args.get(i).cloned();
+      },
+      "--only-changed" => {
+        // Optional ref. If the next arg is a known flag (starts with '-')
+        // or absent, fall back to the working-tree diff.
+        let next = args.get(i + 1).cloned();
+        match next {
+          Some(value) if !value.starts_with('-') => {
+            i += 1;
+            overrides.only_changed = Some(value);
+          },
+          _ => overrides.only_changed = Some(String::new()),
+        }
+      },
+      "--fail-on-flaky-tests" => overrides.fail_on_flaky_tests = true,
       "--profile" => {
         i += 1;
         overrides.profile = args.get(i).cloned();
@@ -824,6 +894,8 @@ impl Default for TestConfig {
       pass_with_no_tests: false,
       tsconfig: None,
       name: None,
+      fail_on_flaky_tests: false,
+      capture_git_info: false,
       report_slow_tests: Some(ReportSlowTestsConfig::default()),
       snapshot_dir: None,
       snapshot_path_template: None,
@@ -1021,6 +1093,9 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
   }
   if let Some(p) = overrides.fully_parallel {
     config.fully_parallel = p;
+  }
+  if overrides.fail_on_flaky_tests {
+    config.fail_on_flaky_tests = true;
   }
   if let Ok(t) = std::env::var("FERRIDRIVER_GLOBAL_TIMEOUT") {
     if let Ok(v) = t.parse() {

@@ -96,6 +96,7 @@ pub mod discovery;
 pub mod dispatcher;
 pub mod expect;
 pub mod fixture;
+pub mod git_info;
 pub mod interactive;
 pub mod logging;
 pub mod model;
