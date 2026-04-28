@@ -42,6 +42,58 @@ use crate::model::TestFailure;
 /// Default expect timeout (5 seconds, matching Playwright).
 pub const DEFAULT_EXPECT_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// Options for `expect(locator).toBeInViewport()`.
+#[derive(Debug, Clone, Default)]
+pub struct InViewportOptions {
+  /// Required intersection ratio in `[0, 1]`. `None` accepts any
+  /// non-zero overlap (Playwright default).
+  pub ratio: Option<f64>,
+}
+
+/// Options for `expect(locator).toHaveCSS()`.
+#[derive(Debug, Clone, Default)]
+pub struct HaveCssOptions {
+  /// Pseudo-element selector (e.g. `"::before"`, `"::after"`).
+  pub pseudo: Option<String>,
+}
+
+/// Options for `expect(locator|page).toHaveScreenshot()`.
+///
+/// Mirrors the option bag in Playwright's
+/// `LocatorAssertions.toHaveScreenshot` / `PageAssertions.toHaveScreenshot`.
+/// Honoured today: `threshold`, `max_diff_pixels`,
+/// `max_diff_pixel_ratio`. The remaining fields are accepted for
+/// signature parity and tracked under §7.17.
+#[derive(Debug, Clone, Default)]
+pub struct ScreenshotMatcherOptions {
+  pub threshold: Option<f64>,
+  pub max_diff_pixels: Option<u64>,
+  pub max_diff_pixel_ratio: Option<f64>,
+  pub mask_color: Option<String>,
+  pub animations: Option<String>,
+  pub caret: Option<String>,
+  pub scale: Option<String>,
+  pub style_path: Option<std::path::PathBuf>,
+  pub clip: Option<ScreenshotClip>,
+  /// Selectors of elements to mask out before comparison. Captured
+  /// by the matcher for parity; the screenshot capture path
+  /// integration is tracked under §7.17.
+  pub mask: Vec<String>,
+  /// When `true`, the matcher short-circuits to a pass without
+  /// touching the baseline. Mirrors `--ignore-snapshots`; the TS
+  /// expect facade reads `testInfo.ignoreSnapshots` and threads it
+  /// through.
+  pub ignore: bool,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+pub struct ScreenshotClip {
+  pub x: f64,
+  pub y: f64,
+  pub width: f64,
+  pub height: f64,
+}
+
 /// Retry intervals matching Playwright: [0, 100, 250, 500, 1000, 1000, ...]
 pub const POLL_INTERVALS: &[u64] = &[100, 250, 500, 1000];
 

@@ -1043,10 +1043,11 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.17 Locator matcher advanced options
 
-- [ ] `toHaveScreenshot`: `mask, mask_color, animations, caret, clip, scale, style_path, max_diff_pixels, max_diff_pixel_ratio, threshold`.
-- [ ] `toBeInViewport { ratio }`.
-- [ ] `toHaveCSS { pseudo }`.
-- [ ] `toMatchAriaSnapshot` — rewrite to call the bundled `injected/ariaSnapshot.ts` YAML generator and structural matcher (currently a naive substring walker at `expect/locator.rs:697`).
+- [~] `toHaveScreenshot(name, options?)` accepts the full Playwright option bag (`mask`, `maskColor`, `animations`, `caret`, `clip`, `scale`, `stylePath`, `maxDiffPixels`, `maxDiffPixelRatio`, `threshold`, `ignore`). Honoured today: `threshold` (mapped from 0–1 to the comparator's 0–255 byte tolerance), `maxDiffPixels`, `maxDiffPixelRatio`, plus `ignore` (auto-set from `testInfo.ignoreSnapshots`). The capture-time options (`mask`, `maskColor`, `animations`, `caret`, `clip`, `scale`, `stylePath`) are accepted on the option struct for parity but not yet plumbed into the screenshot capture path — Section B follow-up. Wire is in `crates/ferridriver-test/src/expect/mod.rs::ScreenshotMatcherOptions` + `snapshot.rs::compare_screenshot_png_with`.
+- [x] `toBeInViewport({ ratio })` — `0` accepts any non-zero overlap (default), `1` requires the full element. Implemented in `expect/locator.rs::to_be_in_viewport_with`.
+- [x] `toHaveCSS(name, value, { pseudo })` — pseudo-element selector flows into `getComputedStyle(el, '::before')`.
+- [~] `toMatchAriaSnapshot` upgraded from naive line-substring to a structural-by-line cursor walk: each expected line must appear in `aria_tree` AND in top-to-bottom order. Rejects out-of-order expectations (covered in Rule 9) — pre-existing impl accepted them. Full `injected/ariaSnapshot.ts` integration (matching role/state/attribute trees with sibling+ancestor enforcement) is tracked as a Section B follow-up since it requires building/injecting the ariaSnapshot bundle into the page context, separate from the matcher core.
+- **Tests** (Rule 9): `crates/ferridriver-node/test/locator-matcher-options.test.ts` — 6 cases against a live cdp-pipe browser exercising default + `{ ratio }` + pseudo-element + `{ ignore }` + ordered + out-of-order aria snapshots.
 
 ### 7.18 Fixtures: `browserName`, `browserVersion`, `playwright`, `request` as first-class
 

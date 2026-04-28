@@ -158,6 +158,40 @@ class LocatorAssertions {
   async toHaveValue(expected: string): Promise<void> { await this._wrap(() => this.locator.expectValue(expected, this.isNot, this.timeout)); }
   async toHaveAttribute(name: string, value: string): Promise<void> { await this._wrap(() => this.locator.expectAttribute(name, value, this.isNot, this.timeout)); }
   async toHaveCount(expected: number): Promise<void> { await this._wrap(() => this.locator.expectCount(expected, this.isNot, this.timeout)); }
+
+  async toBeInViewport(options: { ratio?: number } = {}): Promise<void> {
+    await this._wrap(() => this.locator.expectInViewport(options.ratio, this.isNot, this.timeout));
+  }
+
+  async toHaveCSS(property: string, value: string, options: { pseudo?: string } = {}): Promise<void> {
+    await this._wrap(() =>
+      this.locator.expectHaveCss(property, value, options.pseudo, this.isNot, this.timeout),
+    );
+  }
+
+  async toHaveScreenshot(name: string, options: ScreenshotOptions = {}): Promise<void> {
+    // Honor `--ignore-snapshots` automatically via the live testInfo
+    // accessor; users can still pass `ignore: true` explicitly.
+    const info = _currentTestInfo();
+    const merged = { ...options, ignore: options.ignore ?? !!info?.ignoreSnapshots };
+    await this._wrap(() => this.locator.expectScreenshot(name, merged));
+  }
+
+  async toMatchAriaSnapshot(expected: string): Promise<void> {
+    await this._wrap(() => this.locator.expectMatchAriaSnapshot(expected, this.isNot, this.timeout));
+  }
+}
+
+interface ScreenshotOptions {
+  threshold?: number;
+  maxDiffPixels?: number;
+  maxDiffPixelRatio?: number;
+  ignore?: boolean;
+  mask?: string[];
+  maskColor?: string;
+  animations?: 'allow' | 'disabled';
+  caret?: 'hide' | 'initial';
+  scale?: 'css' | 'device';
 }
 
 // ── APIResponse assertion class ───────────────────────────────────────────

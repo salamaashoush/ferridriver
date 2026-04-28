@@ -2,7 +2,10 @@
 
 use ferridriver::Locator;
 
-use super::{Expect, ExpectContext, MatchError, StringOrRegex, poll_until};
+use super::{
+  Expect, ExpectContext, HaveCssOptions, InViewportOptions, MatchError, ScreenshotMatcherOptions, StringOrRegex,
+  poll_until,
+};
 use crate::model::TestFailure;
 
 /// Build ExpectContext for a locator assertion.
@@ -167,22 +170,38 @@ impl Expect<'_, Locator> {
   }
 
   /// Assert the locator is in the viewport.
+  ///
+  /// Equivalent to [`Self::to_be_in_viewport_with`] with the
+  /// default option bag (any positive intersection counts).
   pub async fn to_be_in_viewport(&self) -> Result<(), TestFailure> {
+    self.to_be_in_viewport_with(InViewportOptions::default()).await
+  }
+
+  /// Playwright `toBeInViewport(options?)` — pass `{ ratio: 0.5 }`
+  /// to require at least half of the element's bounding box to be
+  /// visible. `ratio` is a fraction in `[0, 1]`; `0` accepts any
+  /// non-zero intersection (the default), `1` requires the entire
+  /// element to be in the viewport.
+  pub async fn to_be_in_viewport_with(&self, options: InViewportOptions) -> Result<(), TestFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
+    let ratio = options.ratio.unwrap_or(0.0).clamp(0.0, 1.0);
     poll_until(
       self.timeout,
       locator_ctx(locator, "toBeInViewport", is_not),
       || async move {
+        let js = format!(
+          "el => {{ var r = el.getBoundingClientRect(); \
+           if (r.width === 0 || r.height === 0) return false; \
+           var iw = window.innerWidth, ih = window.innerHeight; \
+           var visW = Math.max(0, Math.min(r.right, iw) - Math.max(r.left, 0)); \
+           var visH = Math.max(0, Math.min(r.bottom, ih) - Math.max(r.top, 0)); \
+           var inter = visW * visH; var area = r.width * r.height; \
+           if (inter <= 0) return false; \
+           return inter / area >= {ratio:.6}; }}"
+        );
         let in_viewport = locator
-          .evaluate(
-            "el => { var r = el.getBoundingClientRect(); \
-           return r.top < window.innerHeight && r.bottom > 0 && \
-           r.left < window.innerWidth && r.right > 0; }",
-            ferridriver::protocol::SerializedArgument::default(),
-            None,
-            None,
-          )
+          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None, None)
           .await
           .ok()
           .and_then(|v| v.as_bool())
@@ -358,17 +377,36 @@ impl Expect<'_, Locator> {
   }
 
   /// Assert the locator has the expected CSS property value.
+  ///
+  /// Equivalent to [`Self::to_have_css_with`] with no pseudo-element.
   pub async fn to_have_css(&self, property: &str, value: impl Into<StringOrRegex>) -> Result<(), TestFailure> {
+    self.to_have_css_with(property, value, HaveCssOptions::default()).await
+  }
+
+  /// Playwright `toHaveCSS(name, value, options?)` — `options.pseudo`
+  /// targets a pseudo-element (`::before`, `::after`, etc).
+  pub async fn to_have_css_with(
+    &self,
+    property: &str,
+    value: impl Into<StringOrRegex>,
+    options: HaveCssOptions,
+  ) -> Result<(), TestFailure> {
     let expected = value.into();
     let locator = self.subject;
     let is_not = self.is_not;
     let prop = property.to_string();
+    let pseudo = options.pseudo.clone();
     poll_until(self.timeout, locator_ctx(locator, "toHaveCSS", is_not), || {
       let expected = expected.clone();
       let prop = prop.clone();
+      let pseudo = pseudo.clone();
       async move {
+        let pseudo_arg = pseudo
+          .as_deref()
+          .map(|p| format!(", '{}'", p.replace('\'', "\\'")))
+          .unwrap_or_default();
         let js = format!(
-          "el => window.getComputedStyle(el).getPropertyValue('{}')",
+          "el => window.getComputedStyle(el{pseudo_arg}).getPropertyValue('{}')",
           prop.replace('\'', "\\'")
         );
         let actual = locator
@@ -724,6 +762,28 @@ impl Expect<'_, Locator> {
   ///
   /// First run creates the baseline. Set `UPDATE_SNAPSHOTS=1` to overwrite.
   pub async fn to_have_screenshot(&self, name: &str) -> Result<(), TestFailure> {
+    self
+      .to_have_screenshot_with(name, ScreenshotMatcherOptions::default())
+      .await
+  }
+
+  /// Playwright `toHaveScreenshot(name, options?)` — captures the
+  /// element screenshot and diffs it against the stored baseline.
+  ///
+  /// Honoured options:
+  /// - `threshold` — per-channel pixel tolerance (0–1, mapped to 0–255).
+  /// - `max_diff_pixels` — absolute pixel-mismatch budget.
+  /// - `max_diff_pixel_ratio` — fractional pixel-mismatch budget.
+  ///
+  /// `mask`, `mask_color`, `animations`, `caret`, `clip`, `scale`,
+  /// and `style_path` are accepted for parity but not yet wired
+  /// into the screenshot capture path; see PLAYWRIGHT_COMPAT.md
+  /// §7.17 for the carry-forward list.
+  pub async fn to_have_screenshot_with(
+    &self,
+    name: &str,
+    options: ScreenshotMatcherOptions,
+  ) -> Result<(), TestFailure> {
     let locator = self.subject;
     let actual_png = locator.screenshot().await.map_err(|e| TestFailure {
       message: format!("screenshot failed: {e}"),
@@ -732,7 +792,7 @@ impl Expect<'_, Locator> {
       screenshot: None,
     })?;
 
-    crate::snapshot::compare_screenshot_png(&actual_png, name)
+    crate::snapshot::compare_screenshot_png_with(&actual_png, name, &options)
   }
 
   // ── Accessibility ──
@@ -775,13 +835,27 @@ impl Expect<'_, Locator> {
             .and_then(|v| v.as_str().map(String::from))
             .unwrap_or_else(|| "EMPTY".into());
 
-          // Simple substring matching against the expected YAML.
-          let lines_match = expected_yaml.lines().all(|expected_line| {
-            let trimmed = expected_line.trim();
-            if trimmed.is_empty() {
-              return true;
+          // Structural-by-line match. The expected YAML is a list of
+          // role-with-optional-name lines indented in 2-space steps;
+          // each line must appear in `aria_tree` AND in the same
+          // top-to-bottom order. This is stricter than substring
+          // (rejects out-of-order expectations) and looser than
+          // Playwright's `injected/ariaSnapshot.ts` structural diff
+          // (it doesn't enforce sibling/ancestor relationships). The
+          // full injected ariaSnapshot integration is tracked under
+          // §7.17.
+          let expected_lines: Vec<&str> = expected_yaml.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
+          let mut cursor = 0usize;
+          let actual_lines: Vec<&str> = aria_tree.lines().map(str::trim).collect();
+          let lines_match = expected_lines.iter().all(|expected| {
+            while cursor < actual_lines.len() {
+              let actual = actual_lines[cursor];
+              cursor += 1;
+              if actual.contains(expected) {
+                return true;
+              }
             }
-            aria_tree.contains(trimmed)
+            false
           });
 
           if lines_match == is_not {

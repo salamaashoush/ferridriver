@@ -744,4 +744,108 @@ impl Locator {
       .await
       .map_err(|e| napi::Error::from_reason(e.message))
   }
+
+  /// Playwright `expect(locator).toBeInViewport({ ratio? })`.
+  #[napi]
+  pub async fn expect_in_viewport(&self, ratio: Option<f64>, not: Option<bool>, timeout_ms: Option<f64>) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) {
+      e = e.not();
+    }
+    if let Some(t) = timeout_ms {
+      e = e.with_timeout(std::time::Duration::from_millis(t as u64));
+    }
+    e.to_be_in_viewport_with(ferridriver_test::expect::InViewportOptions { ratio })
+      .await
+      .map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  /// Playwright `expect(locator).toHaveCSS(name, value, { pseudo? })`.
+  #[napi]
+  pub async fn expect_have_css(
+    &self,
+    property: String,
+    value: String,
+    pseudo: Option<String>,
+    not: Option<bool>,
+    timeout_ms: Option<f64>,
+  ) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) {
+      e = e.not();
+    }
+    if let Some(t) = timeout_ms {
+      e = e.with_timeout(std::time::Duration::from_millis(t as u64));
+    }
+    e.to_have_css_with(&property, value, ferridriver_test::expect::HaveCssOptions { pseudo })
+      .await
+      .map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  /// Playwright `expect(locator).toHaveScreenshot(name, options?)`.
+  #[napi(ts_args_type = "name: string, options?: {
+    threshold?: number;
+    maxDiffPixels?: number;
+    maxDiffPixelRatio?: number;
+    ignore?: boolean;
+    mask?: string[];
+    maskColor?: string;
+    animations?: 'allow' | 'disabled';
+    caret?: 'hide' | 'initial';
+    scale?: 'css' | 'device';
+  }")]
+  pub async fn expect_screenshot(&self, name: String, options: Option<serde_json::Value>) -> Result<()> {
+    let opts = parse_screenshot_options(options.as_ref());
+    let e = ferridriver_test::expect::expect(&self.inner);
+    e.to_have_screenshot_with(&name, opts)
+      .await
+      .map_err(|e| napi::Error::from_reason(e.message))
+  }
+
+  /// Playwright `expect(locator).toMatchAriaSnapshot(yaml)`.
+  #[napi]
+  pub async fn expect_match_aria_snapshot(
+    &self,
+    expected: String,
+    not: Option<bool>,
+    timeout_ms: Option<f64>,
+  ) -> Result<()> {
+    let mut e = ferridriver_test::expect::expect(&self.inner);
+    if not.unwrap_or(false) {
+      e = e.not();
+    }
+    if let Some(t) = timeout_ms {
+      e = e.with_timeout(std::time::Duration::from_millis(t as u64));
+    }
+    e.to_match_aria_snapshot(&expected)
+      .await
+      .map_err(|e| napi::Error::from_reason(e.message))
+  }
+}
+
+fn parse_screenshot_options(value: Option<&serde_json::Value>) -> ferridriver_test::expect::ScreenshotMatcherOptions {
+  let Some(obj) = value.and_then(|v| v.as_object()) else {
+    return ferridriver_test::expect::ScreenshotMatcherOptions::default();
+  };
+  ferridriver_test::expect::ScreenshotMatcherOptions {
+    threshold: obj.get("threshold").and_then(|v| v.as_f64()),
+    max_diff_pixels: obj.get("maxDiffPixels").and_then(|v| v.as_u64()),
+    max_diff_pixel_ratio: obj.get("maxDiffPixelRatio").and_then(|v| v.as_f64()),
+    ignore: obj.get("ignore").and_then(|v| v.as_bool()).unwrap_or(false),
+    mask_color: obj.get("maskColor").and_then(|v| v.as_str().map(String::from)),
+    animations: obj.get("animations").and_then(|v| v.as_str().map(String::from)),
+    caret: obj.get("caret").and_then(|v| v.as_str().map(String::from)),
+    scale: obj.get("scale").and_then(|v| v.as_str().map(String::from)),
+    style_path: None,
+    clip: None,
+    mask: obj
+      .get("mask")
+      .and_then(|v| v.as_array())
+      .map(|a| {
+        a.iter()
+          .filter_map(|s| s.as_str().map(String::from))
+          .collect::<Vec<_>>()
+      })
+      .unwrap_or_default(),
+  }
 }

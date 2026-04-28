@@ -194,6 +194,14 @@ impl TestInfo {
     self.inner.test_id.name.clone()
   }
 
+  /// Whether `--ignore-snapshots` is in effect for this test. Read
+  /// by the expect facade so screenshot matchers can short-circuit
+  /// without touching the baseline.
+  #[napi(getter, js_name = "ignoreSnapshots")]
+  pub fn ignore_snapshots(&self) -> bool {
+    self.inner.ignore_snapshots
+  }
+
   /// Expected status: "passed", "failed", "skipped".
   #[napi(getter, js_name = "expectedStatus")]
   pub fn expected_status(&self) -> String {

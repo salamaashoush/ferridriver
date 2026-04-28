@@ -112,15 +112,50 @@ pub fn assert_snapshot(test_info: &TestInfo, actual: &str, name: &str, update: b
   })
 }
 
-/// Compare a PNG screenshot against a stored baseline, producing pixel-level diff.
-///
-/// If `UPDATE_SNAPSHOTS=1` is set or baseline doesn't exist, saves the actual as baseline.
-/// On mismatch, saves actual and diff images alongside the baseline.
+/// Compare a PNG screenshot against a stored baseline using
+/// environment-variable defaults. Equivalent to
+/// [`compare_screenshot_png_with`] with an empty option bag.
 ///
 /// # Errors
 ///
 /// Returns `TestFailure` with diff details if screenshots don't match.
 pub fn compare_screenshot_png(actual_png: &[u8], name: &str) -> Result<(), TestFailure> {
+  compare_screenshot_png_with(actual_png, name, &crate::expect::ScreenshotMatcherOptions::default())
+}
+
+/// Compare a PNG screenshot against a stored baseline.
+///
+/// Honoured option fields:
+/// - `threshold` — per-channel pixel tolerance in `[0, 1]`. Mapped
+///   to `0–255` for the byte-wise comparison. Falls back to the
+///   `SCREENSHOT_THRESHOLD` env var (raw `0–255` units), then `2`.
+/// - `max_diff_pixels` — accept up to N differing pixels even when
+///   per-pixel deltas exceed the threshold.
+/// - `max_diff_pixel_ratio` — fractional equivalent of the above
+///   (`0.01` = 1% of total pixels).
+///
+/// `mask`, `mask_color`, `animations`, `caret`, `clip`, `scale`,
+/// `style_path` are accepted on the option struct for parity but
+/// not yet wired into the screenshot capture path; see
+/// PLAYWRIGHT_COMPAT.md §7.17 for the carry-forward list.
+///
+/// # Errors
+///
+/// Returns `TestFailure` with diff details if the screenshots differ
+/// beyond the configured budget.
+pub fn compare_screenshot_png_with(
+  actual_png: &[u8],
+  name: &str,
+  options: &crate::expect::ScreenshotMatcherOptions,
+) -> Result<(), TestFailure> {
+  // `--ignore-snapshots`: the matcher succeeds without ever touching
+  // the baseline file. The text-snapshot path already short-circuits
+  // here via `TestInfo::ignore_snapshots`; the screenshot path threads
+  // the flag through `ScreenshotMatcherOptions::ignore` because the
+  // matcher chain doesn't carry a TestInfo reference today.
+  if options.ignore {
+    return Ok(());
+  }
   let snap_dir = std::env::var("SNAPSHOT_DIR")
     .map(PathBuf::from)
     .unwrap_or_else(|_| PathBuf::from("__snapshots__"));
@@ -189,9 +224,12 @@ pub fn compare_screenshot_png(actual_png: &[u8], name: &str) -> Result<(), TestF
     });
   }
 
-  let threshold: u8 = std::env::var("SCREENSHOT_THRESHOLD")
-    .ok()
-    .and_then(|v| v.parse().ok())
+  // Threshold precedence: explicit option `threshold` (0..1 mapped to
+  // 0..255) > SCREENSHOT_THRESHOLD env (raw 0..255) > default 2.
+  let threshold: u8 = options
+    .threshold
+    .map(f64_threshold_to_u8)
+    .or_else(|| std::env::var("SCREENSHOT_THRESHOLD").ok().and_then(|v| v.parse().ok()))
     .unwrap_or(2);
 
   let mut diff_img = image::RgbaImage::new(ew, eh);
@@ -231,6 +269,22 @@ pub fn compare_screenshot_png(actual_png: &[u8], name: &str) -> Result<(), TestF
     return Ok(());
   }
 
+  // Apply the pixel-budget options. A run that exceeds the threshold
+  // can still pass if the absolute or fractional budget is generous.
+  if let Some(max_pixels) = options.max_diff_pixels {
+    if mismatch_count <= max_pixels {
+      return Ok(());
+    }
+  }
+  if let Some(ratio) = options.max_diff_pixel_ratio {
+    let allowed = (ratio.clamp(0.0, 1.0) * total_pixels as f64).round();
+    // After clamp + round, allowed is in [0, total_pixels]. Compare
+    // in f64 to avoid the sign-loss cast lint.
+    if (mismatch_count as f64) <= allowed {
+      return Ok(());
+    }
+  }
+
   let mismatch_pct = (mismatch_count as f64 / total_pixels as f64) * 100.0;
 
   let _ = std::fs::create_dir_all(&snap_dir);
@@ -258,6 +312,23 @@ pub fn compare_screenshot_png(actual_png: &[u8], name: &str) -> Result<(), TestF
     diff: None,
     screenshot: Some(diff_png),
   })
+}
+
+/// Map a Playwright-style `[0, 1]` threshold into the `[0, 255]` per-
+/// channel byte difference the comparator uses internally. Saturating
+/// conversion handled discretely so clippy's lossy/sign-loss casts
+/// don't fire.
+fn f64_threshold_to_u8(t: f64) -> u8 {
+  // `(t.clamp(0.0, 1.0) * 255.0)` is in [0, 255]. Snap to a few u8
+  // bands rather than bit-twiddling; the comparator only cares about
+  // rough granularity.
+  let scaled = (t.clamp(0.0, 1.0) * 255.0).round();
+  for byte in 0u8..=255 {
+    if f64::from(byte) >= scaled {
+      return byte;
+    }
+  }
+  255
 }
 
 /// Compute the snapshot file path.
