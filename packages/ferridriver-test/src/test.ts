@@ -746,3 +746,10 @@ export async function _drainWorkerFixtures(): Promise<void> {
 (testFn as any).describe = describe;
 
 export const test = testFn;
+
+/** Internal: read-only access to the per-test AsyncLocalStorage so the
+ * expect facade can pull `testInfo` for `.soft` push-to-errors and
+ * other modifier hooks. Not part of the public surface. */
+export function _currentTestInfo(): any {
+  return _testInfoStorage.getStore();
+}

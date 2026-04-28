@@ -1019,26 +1019,27 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.11 Generic Jest matchers in TS wrapper
 
-- [ ] Implement `toBe, toBeCloseTo, toBeDefined, toBeFalsy, toBeGreaterThan, toBeGreaterThanOrEqual, toBeInstanceOf, toBeLessThan, toBeLessThanOrEqual, toBeNaN, toBeNull, toBeTruthy, toBeUndefined, toContain, toContainEqual, toEqual, toHaveLength, toHaveProperty, toMatch, toMatchObject, toStrictEqual, toThrow, toThrowError`.
-- **Rule**: core matching logic in Rust (as `Matcher` trait), TS wrapper calls NAPI — do not implement in TS alone.
+- [x] Implemented as a `ValueAssertions` class in `packages/ferridriver-test/src/expect.ts`. Full set: `toBe`, `toBeCloseTo`, `toBeDefined`, `toBeFalsy`, `toBeGreaterThan`, `toBeGreaterThanOrEqual`, `toBeInstanceOf`, `toBeLessThan`, `toBeLessThanOrEqual`, `toBeNaN`, `toBeNull`, `toBeTruthy`, `toBeUndefined`, `toContain`, `toContainEqual`, `toEqual`, `toHaveLength`, `toHaveProperty(path[, value])`, `toMatch`, `toMatchObject`, `toStrictEqual`, `toThrow(string|RegExp|ctor)`, `toThrowError`. Plus `toPass(options?)` for the function-subject retry form. Deviation from the original cluster note: matcher logic stays TS-side because Playwright itself routes generic matchers through Jest's `expect` library (pure-value comparison, no protocol surface to share with Rust). Rust-side `Matcher` trait still owns polling matchers (`toBeVisible`, etc.). Rule 9 in `crates/ferridriver-node/test/value-matchers.test.ts` (22 cases — pos + neg per group).
 
 ### 7.12 Asymmetric matchers
 
-- [ ] `expect.any, anything, arrayContaining, closeTo, objectContaining, stringContaining, stringMatching`.
+- [x] `expect.any(Constructor)`, `expect.anything()`, `expect.arrayContaining(arr)`, `expect.closeTo(num, decimals?)`, `expect.objectContaining(obj)`, `expect.stringContaining(substring)`, `expect.stringMatching(string|RegExp)`. Implemented as serde-tagged objects (`Symbol.for('ferridriver.asymmetric')`) that the deep-equality engine in `toEqual` / `toMatchObject` / `toContainEqual` recognises and dispatches to `match()`. Nesting works (`{ user: { id: expect.any(Number) } }`). Rule 9 in `value-matchers.test.ts`.
 
 ### 7.13 `.resolves` / `.rejects`
 
-- [ ] Promise-unwrapping modifiers.
+- [x] Modifier getters on `ValueAssertions`. `.resolves` awaits the subject and dispatches to the underlying matcher; if the promise rejects, the assertion fails with the rejection. `.rejects` is the inverse — passes only when the promise rejects, then runs the matcher against the rejection value. Rule 9 in `value-matchers.test.ts`.
 
 ### 7.14 `.soft` + `.poll` exposed in TS
 
-- [ ] Rust has them; TS wrapper missing.
+- [x] `expect.soft(...)` returns a `ValueAssertions` / page / locator chain whose failures call `testInfo.pushSoftError(message)` (new NAPI binding) instead of throwing — picks up the AsyncLocalStorage-backed `_currentTestInfo()` so it works inside any test body. `expect.poll(probe, options?)` retries the probe against `toBe` / `toEqual` / `toBeTruthy` / etc until it matches or the timeout (`5000ms` default, configurable `intervals`) elapses. Both modifiers compose with `.not`. Rule 9 in `value-matchers.test.ts` (poll + soft no-op) and `expect-soft-runner.test.ts` (soft routes to `testInfo.errors[]` through the live worker, the test fails at the end but execution continues — matches Playwright).
 
 ### 7.15 `expect.extend`
 
-- [ ] Register custom matchers from TS into NAPI registry.
+- [x] `expect.extend({ name: matcherFn })` mutates the `ValueAssertions` prototype so custom matchers participate in the chain alongside the built-ins. Matcher fn signature matches Jest: `(this: { isNot }, actual, ...args) => { pass, message }`. Custom matchers compose with `.not`. Rule 9 in `expect-extend-toBeOK.test.ts`.
 
 ### 7.16 APIResponse matcher `toBeOK`
+
+- [x] `expect(response).toBeOK()` reads the existing `ApiResponse.ok()` (boolean — `status >= 200 && < 300`). Inversion via `.not`. Rule 9 in `expect-extend-toBeOK.test.ts` against a one-shot `Bun.serve` status server (deterministic, no network round-trip).
 
 ### 7.17 Locator matcher advanced options
 
