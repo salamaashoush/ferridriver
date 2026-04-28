@@ -105,6 +105,95 @@ impl TestInfo {
     self.inner.test_id.line.unwrap_or(0) as i32
   }
 
+  /// Source column number of the test declaration. The current
+  /// discovery layers don't capture columns yet; mirrors
+  /// Playwright's `testInfo.column` so consumers can read it without
+  /// `undefined` checks once the parser learns to populate it.
+  #[napi(getter)]
+  pub fn column(&self) -> i32 {
+    self.inner.column.unwrap_or(0) as i32
+  }
+
+  /// Snapshot of the project this test belongs to. `null` for
+  /// single-project runs (no project DAG yet — see §7.1). Mirrors
+  /// Playwright's `testInfo.project`.
+  #[napi(getter, ts_return_type = "Record<string, unknown> | null")]
+  pub fn project(&self) -> Option<serde_json::Value> {
+    self.inner.project.as_ref().and_then(|p| serde_json::to_value(p).ok())
+  }
+
+  /// Read-only snapshot of the active `TestConfig`. Mirrors
+  /// Playwright's `testInfo.config`.
+  #[napi(getter, ts_return_type = "Record<string, unknown> | null")]
+  pub fn config(&self) -> Option<serde_json::Value> {
+    self
+      .inner
+      .config_snapshot
+      .as_ref()
+      .and_then(|c| serde_json::to_value(&**c).ok())
+  }
+
+  /// Errors collected during test execution. Mirrors Playwright's
+  /// `testInfo.errors` — soft errors plus the primary failure once
+  /// the worker pushes it. During the test body only soft errors are
+  /// visible; afterEach hooks observe the full list.
+  #[napi(getter, ts_return_type = "Array<{ message: string; stack?: string }>")]
+  pub fn errors(&self) -> Vec<serde_json::Value> {
+    let mut out = Vec::new();
+    if let Ok(soft) = self.inner.soft_errors.try_lock() {
+      for e in soft.iter() {
+        out.push(serde_json::json!({
+          "message": e.message,
+          "stack": e.stack,
+        }));
+      }
+    }
+    if let Ok(errs) = self.inner.errors.try_lock() {
+      for e in errs.iter() {
+        out.push(serde_json::json!({
+          "message": e.message,
+          "stack": e.stack,
+        }));
+      }
+    }
+    out
+  }
+
+  /// First error from `errors`, or `null`. Mirrors Playwright's
+  /// `testInfo.error?`.
+  #[napi(getter, ts_return_type = "{ message: string; stack?: string } | null")]
+  pub fn error(&self) -> Option<serde_json::Value> {
+    self.errors().into_iter().next()
+  }
+
+  /// Suffix used to differentiate snapshot files between
+  /// configurations. Mirrors Playwright's `testInfo.snapshotSuffix`
+  /// (read/write).
+  #[napi(getter, js_name = "snapshotSuffix")]
+  pub fn get_snapshot_suffix(&self) -> String {
+    self
+      .inner
+      .snapshot_suffix
+      .try_lock()
+      .map(|s| s.clone())
+      .unwrap_or_default()
+  }
+
+  #[napi(setter, js_name = "snapshotSuffix")]
+  pub fn set_snapshot_suffix(&self, value: String) {
+    if let Ok(mut s) = self.inner.snapshot_suffix.try_lock() {
+      *s = value;
+    }
+  }
+
+  /// Test function name. Mirrors Playwright's `testInfo.fn` —
+  /// Playwright returns the actual JS Function; ferridriver returns
+  /// the test title for parity since the test fn lives in Rust.
+  #[napi(getter, js_name = "fn")]
+  pub fn fn_name(&self) -> String {
+    self.inner.test_id.name.clone()
+  }
+
   /// Expected status: "passed", "failed", "skipped".
   #[napi(getter, js_name = "expectedStatus")]
   pub fn expected_status(&self) -> String {

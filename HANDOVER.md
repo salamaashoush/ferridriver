@@ -152,14 +152,87 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 # cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
 ```
 
+### Cluster 3 — TestInfo helpers (§7.10)
+
+Single commit. Adds the missing read-only and read/write fields on
+`TestInfo` plus reaffirms the existing variadic `outputPath` /
+`snapshotPath` helpers.
+
+#### Rust core changes
+
+`model::TestInfo` gained:
+
+- `errors: Arc<Mutex<Vec<TestFailure>>>` — primary errors pushed by
+  the worker after the body returns; afterEach hooks read the full
+  list. Composes with the existing `soft_errors`.
+- `snapshot_suffix: Arc<Mutex<String>>` — read/write suffix.
+- `column: Option<u32>` — placeholder for the discovery layer's
+  column position. Always `None` today; surfaced for parity.
+- `project: Option<ProjectConfig>` — per-project clone, `None` for
+  single-project runs.
+- `config_snapshot: Option<Arc<TestConfig>>` — cloned config so the
+  `testInfo.config` accessor stays cheap.
+
+The worker constructs both the per-suite and per-test `TestInfo`
+with `config_snapshot: Some(Arc::clone(&self.config))` so the
+accessor surfaces the live config for any test that asks.
+
+#### NAPI surface
+
+`crates/ferridriver-node/src/test_info.rs` gained accessors:
+
+| accessor | TS type | source |
+|---|---|---|
+| `column` | `number` | `inner.column` |
+| `project` | `Record<string, unknown> \| null` | serialised `ProjectConfig` |
+| `config` | `Record<string, unknown> \| null` | serialised `TestConfig` |
+| `errors` | `Array<{ message; stack? }>` | soft + primary errors |
+| `error` | `{ message; stack? } \| null` | first of `errors` |
+| `snapshotSuffix` (get/set) | `string` | `inner.snapshot_suffix` |
+| `fn` | `string` | test title (JS Function placeholder) |
+
+#### Why no `pause()`
+
+Playwright's `TestInfo` interface has no `pause()` method
+(`page.pause()` is the related API). Cluster prompt suggested it,
+but adding it would diverge from Playwright. Real pause-on-debug
+integration belongs to the `--ui` mode work (§7.7) and is omitted
+here.
+
+#### Tests (Rule 9)
+
+`crates/ferridriver-node/test/test-info.test.ts` — 9 NAPI cases
+exercising `outputPath` (variadic + nested), `snapshotPath`,
+`errors` (empty when no soft errors pushed), `error` (null when
+empty), `snapshotSuffix` (default empty + read-after-write),
+`config` (surfaces `name` and structural fields), `project` (null
+for single-project), `fn` (test title), and `column` (defaults to
+0).
+
+### Baseline (must stay green)
+
+```
+cargo clippy --workspace --all-targets -- -D warnings            # clean
+cargo test -p ferridriver --lib                                   # 125 pass
+cargo test -p ferridriver-test --lib                              # 11 pass
+cargo test -p ferridriver-script --lib                            # 13 pass
+cargo test -p ferridriver-mcp --lib                               # 38 pass
+cargo test -p ferridriver-test --test new_features_e2e            # 15 pass
+cd crates/ferridriver-node && bun run build:debug
+cd <repo root> && bun test                                        # 898 pass (+9)
+FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
+  cargo test -p ferridriver-cli --test backends -- --test-threads=1
+# cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
+```
+
 ## Open clusters (in order)
 
 | # | scope | status |
 |---|---|---|
 | 1 | CLI flag surfacing (§7.2/§7.5/§7.6/§7.8/§7.9/§7.27/§7.28) | DONE |
 | 2 | Built-in fixtures + auto enforcement (§7.18 / §7.19) | DONE |
-| 3 | TestInfo helpers (§7.10) | next |
-| 4 | Generic + asymmetric matchers, `.resolves` / `.rejects`, `.soft` / `.poll`, `expect.extend`, `toBeOK` (§7.11 – §7.16) | pending |
+| 3 | TestInfo helpers (§7.10) | DONE |
+| 4 | Generic + asymmetric matchers, `.resolves` / `.rejects`, `.soft` / `.poll`, `expect.extend`, `toBeOK` (§7.11 – §7.16) | next |
 | 5 | Locator matcher advanced options (§7.17) | pending |
 | 6 | Reporters (`dot`, `github`, `blob`, `null`) + `merge-reports` + TS Reporter interface (§7.20 – §7.22) | pending |
 | 7 | Project DAG + git-aware filters + WebServer polish + git metadata (§7.1 / §7.3 / §7.4 / §7.25 / §7.26) | pending |

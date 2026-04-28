@@ -587,6 +587,11 @@ impl Worker {
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(Mutex::new(Vec::new())),
+      errors: Arc::new(Mutex::new(Vec::new())),
+      snapshot_suffix: Arc::new(Mutex::new(String::new())),
+      column: None,
+      project: None,
+      config_snapshot: Some(Arc::clone(&self.config)),
       timeout: Duration::from_millis(self.config.timeout),
       tags: Vec::new(),
       start_time: Instant::now(),
@@ -1056,6 +1061,11 @@ impl Worker {
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(Mutex::new(Vec::new())),
+      errors: Arc::new(Mutex::new(Vec::new())),
+      snapshot_suffix: Arc::new(Mutex::new(String::new())),
+      column: None,
+      project: None,
+      config_snapshot: Some(Arc::clone(&self.config)),
       timeout: timeout_dur,
       tags: test
         .annotations

@@ -1,103 +1,138 @@
-# Next session — Cluster 3 (TestInfo helpers, §7.10)
+# Next session — Cluster 4 (generic + asymmetric matchers, §7.11 – §7.16)
 
-Cluster 1 (CLI flags) and Cluster 2 (built-in fixtures + auto
-enforcement) are shipped. Cluster 3 adds the missing surface on
-`TestInfo`: `output_path()`, `snapshot_path()`, `pause()`, `fn`,
-`project`, `config`, `errors[]`, `snapshot_suffix`, plus a `column`
-field on `location`.
+Cluster 3 (TestInfo helpers) is shipped. Cluster 4 is the matcher
+work: bring `expect()` up to Playwright/Jest parity by adding the
+generic value matchers (toBe, toEqual, toContain, toMatchObject,
+toThrow, etc.), the asymmetric-matcher namespace (`expect.any`,
+`expect.objectContaining`, …), `.resolves` / `.rejects` modifiers,
+TS-side exposure of the existing `.soft` / `.poll`, `expect.extend`
+for custom matchers, and `toBeOK` for `APIResponse`.
 
-## Why §7.10 next
+Two-commit landing is acceptable per the original cluster guidance:
+(a) generic + asymmetric + modifiers; (b) `expect.extend` + `toBeOK`.
 
-The matcher work (Clusters 4 + 5) reads several `TestInfo` fields
-that don't exist yet:
+## Why §7.11 – §7.16 next
 
-- `errors[]` — soft assertions accumulate here in Playwright.
-  Without it, `expect.soft` can't surface the running list.
-- `snapshot_path` — `toMatchSnapshot` / `toHaveScreenshot` resolve
-  paths via this method.
-- `outputPath` — `toHaveScreenshot` writes diff/actual artefacts via
-  this method.
-
-Shipping §7.10 first means the matcher work in Clusters 4 and 5 can
-read real fields rather than reaching into `model::TestInfo`
-directly.
+Cluster 3 wired `errors[]` and `snapshotSuffix`; cluster 5
+(`toHaveScreenshot` / `toMatchAriaSnapshot` rewrites) wants
+`expect.extend` registered and the asymmetric matchers in place
+because `toMatchAriaSnapshot` accepts asymmetric matchers as values.
+Shipping the matcher core first keeps cluster 5 from re-doing the
+plumbing.
 
 ## Read-first
 
 1. `CLAUDE.md` — rules + lessons.
-2. `PLAYWRIGHT_COMPAT.md` — §7.10 entry.
-3. `HANDOVER.md` — Cluster 2 recap.
-4. `/tmp/playwright/packages/playwright/types/test.d.ts` — search for
-   `interface TestInfo` and copy the canonical signatures into
-   `crates/ferridriver-node/src/test_info.rs` doc comments before
-   implementing.
-5. `crates/ferridriver-test/src/model.rs::TestInfo` — current struct.
-   Several Cluster-3 fields can compose from existing data
-   (`title_path`, `output_dir`, etc.).
-6. `crates/ferridriver-node/src/test_info.rs` — NAPI binding shape.
+2. `PLAYWRIGHT_COMPAT.md` — §7.11 – §7.16 entries.
+3. `HANDOVER.md` — Cluster 3 recap (TestInfo).
+4. `/tmp/playwright/packages/playwright/src/matchers/` — Playwright's
+   matcher implementations. `matchers.ts` registers each matcher;
+   `expect.ts` is the entry point; `asymmetricMatchers.ts` defines
+   the `expect.any`/etc. set.
+5. `/tmp/playwright/packages/playwright/types/test.d.ts` — search
+   `interface Expect` (the chainable side) and `interface Matchers`
+   (the generic side).
+6. `crates/ferridriver-test/src/expect/` — current Rust matcher
+   trait. `mod.rs` defines `MatchError`, `Matcher`, `MatcherResult`;
+   `page.rs` and `locator.rs` are matcher impls.
+7. `packages/ferridriver-test/src/expect.ts` — TS facade. Today only
+   exposes `toHaveTitle`, `toHaveURL`, `toBeVisible`, etc.
 
 ## Cluster scope
 
-### Methods (NAPI)
+### §7.11 — generic Jest matchers
 
-- `outputPath(...paths: string[]): string` — joins onto
-  `test_info.output_dir`. The variadic form accepts any number of
-  path segments.
-- `snapshotPath(...paths: string[]): string` — joins onto
-  `test_info.snapshot_dir`, optionally honoring
-  `snapshot_path_template`.
-- `pause(): Promise<void>` — Playwright's pause-on-debug. For
-  ferridriver the simplest semantics: log a tracing event and
-  return. Real pause-on-keypress is `--ui` work (§7.7) — out of
-  scope for this cluster.
+Add to `crates/ferridriver-test/src/expect/`:
 
-### Fields (NAPI)
+- `toBe`, `toEqual` (deep equality via `serde_json::Value` comparison
+  for JS values).
+- `toBeCloseTo`, `toBeDefined`, `toBeFalsy`, `toBeGreaterThan`,
+  `toBeGreaterThanOrEqual`, `toBeInstanceOf`, `toBeLessThan`,
+  `toBeLessThanOrEqual`, `toBeNaN`, `toBeNull`, `toBeTruthy`,
+  `toBeUndefined`.
+- `toContain`, `toContainEqual`, `toHaveLength`, `toHaveProperty`,
+  `toMatch`, `toMatchObject`, `toStrictEqual`, `toThrow`,
+  `toThrowError`.
 
-- `fn` — pointer back to the test function. JS-only; expose as a
-  string (test name) or a thunk that throws when called twice.
-  Playwright surfaces this for trace viewer integration.
-- `project: { name, use, ... }` — cloned from
-  `TestConfig::projects[currentProject]`. Until §7.1 lands the
-  project DAG, `project` can return the active config's metadata
-  (or null).
-- `config: { rootDir, ... }` — read-only snapshot of `TestConfig`
-  fields the user is likely to inspect.
-- `errors: TestError[]` — concat of `soft_errors` (existing) plus
-  the primary error if the test failed. Already collected; just
-  expose.
-- `snapshotSuffix?: string` — optional suffix for snapshot
-  filenames. New field on `model::TestInfo`; default `None`.
-- `location.column?: number` — already storing line; expose column
-  too. Plumbing depends on whether the test discovery layer parses
-  it. Default to `null`/`undefined` until the parser learns column
-  positions.
+Each matcher's matching logic lives in Rust (`Matcher` trait) so
+the TS facade is a thin call into NAPI. The TS surface is generic
+over arbitrary values, so the entry point is something like
+`expect(actual: any)` returning a `ValueAssertions` chain.
 
-### Tests (Rule 9)
+### §7.12 — asymmetric matchers
 
-`crates/ferridriver-node/test/test-info.test.ts`:
+`expect.any(Constructor)`, `expect.anything()`,
+`expect.arrayContaining(arr)`, `expect.closeTo(num, decimals)`,
+`expect.objectContaining(obj)`, `expect.stringContaining(substring)`,
+`expect.stringMatching(regex)`. These don't run an assertion on
+their own — they encode a partial-match predicate that other
+matchers (like `toEqual`, `toMatchObject`) recognize.
 
-- `outputPath('foo.json')` returns `<output_dir>/<test_name>/foo.json`.
-- `snapshotPath('snap.png')` returns the resolved snapshot dir +
-  filename.
-- `errors` returns soft errors collected via
-  `expect.soft(...).toBe(...)` (cluster 4 will add the matchers; for
-  this cluster, simulate by pushing to `soft_errors` directly via a
-  custom fixture).
-- `pause()` resolves quickly without hanging.
-- `project` / `config` are non-null and surface known field values.
+Implementation: a serde-tagged struct (`{ "$asym": "objectContaining", "value": ... }`)
+that the deep-equality engine in §7.11 detects and dispatches to
+the right predicate.
 
-These don't need a per-backend matrix — TestInfo is backend-agnostic.
+### §7.13 — `.resolves` / `.rejects`
+
+Promise-unwrapping modifiers. JS-side wrappers that `await` the
+subject before delegating to the underlying matcher.
+
+### §7.14 — `.soft` / `.poll` exposure
+
+Rust core already supports `add_soft_error`. TS facade needs:
+
+- `expect.soft(...)` returning a chain whose matchers push to
+  `testInfo.soft_errors` instead of throwing. (§7.10 errors[] now
+  reads them.)
+- `expect.poll(probeFn, options?)` for retry-until-true polling.
+
+### §7.15 — `expect.extend`
+
+Register custom TS matchers into the NAPI registry. Approach:
+
+- TS `expect.extend({ name: factoryFn })` stores the factory in a
+  TS-side map and registers the name in the NAPI registry.
+- When `expect(value).custom(...)` runs, the NAPI router dispatches
+  by name to either the built-in Rust matcher or the TS factory.
+
+The TS factory runs in JS (returning `{ pass, message }`) and the
+result flows back to the chain's pass/fail logic.
+
+### §7.16 — APIResponse `toBeOK`
+
+`expect(response).toBeOK()` — pass if `response.status()` is in the
+2xx range. APIResponse already exists; just add the matcher.
+
+## Tests (Rule 9)
+
+Per matcher group, a Bun test that:
+
+- Creates a value, runs the matcher, asserts pass.
+- Negates and asserts fail with the right error message.
+- For asymmetric matchers, embed inside `toEqual` / `toMatchObject`
+  and assert the deep-equality engine matches.
+- For `.soft`, push 2 soft failures, assert `testInfo.errors` has 2
+  entries and the test still passes.
+- For `.poll`, return `false` 3 times then `true`; assert the chain
+  resolves on the 4th attempt.
+- For `expect.extend`, register a custom matcher and assert it
+  participates in the chain.
+- For `toBeOK`, hit a known 200 endpoint (httpbin or similar) and
+  assert pass; hit a 500 and assert fail.
+
+These don't need a per-backend matrix — matcher logic is
+backend-agnostic.
 
 ## Ground rules (CLAUDE.md)
 
-- Rule 1: Rust core defines the canonical fields; NAPI is a thin
-  mirror.
-- Rule 2: `outputPath`, `snapshotPath`, etc. match Playwright's
-  signatures verbatim — variadic strings, not `(name?: string)`.
-- Rule 7: rebuild NAPI and diff `crates/ferridriver-node/index.d.ts`
-  against `/tmp/playwright/packages/playwright/types/test.d.ts`
-  before flipping `[x]`.
-- Rule 9: per-method NAPI test exercising the page-visible effect.
+- Rule 1: Rust core defines the matcher logic. TS is a thin
+  delegator.
+- Rule 2: signature shapes match Playwright/Jest verbatim
+  (`expect(actual).toBe(expected)`, not `expectEq`).
+- Rule 7: rebuild NAPI and diff `index.d.ts` against
+  `/tmp/playwright/packages/playwright/types/test.d.ts` (especially
+  the `Matchers` and `Expect` interfaces).
+- Rule 9: every matcher gets a positive + negative test.
 
 ## Baseline (must stay green)
 
@@ -108,7 +143,7 @@ cargo test -p ferridriver-test --lib                            # 11
 cargo test -p ferridriver-script --lib                          # 13
 cargo test -p ferridriver-mcp --lib                             # 38
 cargo test -p ferridriver-test --test new_features_e2e          # 15
-cd crates/ferridriver-node && bun run build:debug && bun test   # 889
+cd crates/ferridriver-node && bun run build:debug && bun test   # 898
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1
 # cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
@@ -116,33 +151,28 @@ FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
 
 ## Prompt for the next session
 
-> Continue ferridriver Playwright parity — Tier 7 cluster 3
-> (`TestInfo` helpers, §7.10). Read first, in order:
+> Continue ferridriver Playwright parity — Tier 7 cluster 4 (generic
+> + asymmetric matchers, `.resolves` / `.rejects`, `.soft` / `.poll`,
+> `expect.extend`, `toBeOK`, §7.11 – §7.16). Read first, in order:
 >
 > 1. `CLAUDE.md` — rules + lessons.
-> 2. `PLAYWRIGHT_COMPAT.md` — §7.10 entry.
-> 3. `HANDOVER.md` — Cluster 2 recap.
+> 2. `PLAYWRIGHT_COMPAT.md` — §7.11 – §7.16.
+> 3. `HANDOVER.md` — Cluster 3 recap.
 > 4. `docs/NEXT_SESSION.md` — this file.
-> 5. `/tmp/playwright/packages/playwright/types/test.d.ts` —
->    `interface TestInfo`. Copy the canonical signatures verbatim
->    into Rust doc comments before implementing.
-> 6. `crates/ferridriver-test/src/model.rs::TestInfo` and
->    `crates/ferridriver-node/src/test_info.rs`.
+> 5. `/tmp/playwright/packages/playwright/src/matchers/` and
+>    `/tmp/playwright/packages/playwright/types/test.d.ts::Matchers`.
+> 6. `crates/ferridriver-test/src/expect/` and
+>    `packages/ferridriver-test/src/expect.ts`.
 >
-> Task: ship `outputPath`, `snapshotPath`, `pause`, plus the
-> `errors`, `snapshotSuffix`, `project`, `config`, `fn` fields and a
-> `column` field on `location` (default null where the discovery
-> layer doesn't parse it yet). Errors compose from `soft_errors` +
-> primary error. `project` / `config` mirror enough of the active
-> `TestConfig` for inspection without leaking internal flags.
+> Task: ship the generic Jest matchers, asymmetric-matcher namespace,
+> `.resolves` / `.rejects` modifiers, TS-side `.soft` / `.poll`,
+> `expect.extend`, and `APIResponse.toBeOK`. Two commits acceptable:
+> (a) generics + asymmetrics + modifiers; (b) extend + toBeOK.
 >
-> Rule 9 in `crates/ferridriver-node/test/test-info.test.ts` —
-> backend-agnostic, just NAPI.
->
-> Commit shape: one commit (`feat: TestInfo helpers (§7.10)`).
+> Rule 9 per matcher group (positive + negative).
 >
 > Baseline that must stay green is in HANDOVER.md.
 >
-> Non-negotiables (CLAUDE.md): match Playwright's signatures
-> verbatim; rebuild NAPI and diff index.d.ts; no shortcuts; no
-> emojis; no AI attribution.
+> Non-negotiables: matcher logic in Rust core; TS delegates; signature
+> shapes match Playwright/Jest verbatim; rebuild NAPI and diff
+> index.d.ts; no shortcuts; no emojis; no AI attribution.

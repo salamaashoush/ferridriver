@@ -1015,8 +1015,7 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.10 `TestInfo` helpers
 
-- [ ] Add `output_path(...)`, `snapshot_path(...)`, `pause()`, `fn`, `project`, `config`, `errors[]`, `snapshot_suffix`, column on location.
-- **Files**: `crates/ferridriver-test/src/model.rs`; NAPI `test_info.rs`.
+- [x] Existing `outputPath` / `snapshotPath` (variadic, matches Playwright's `(...pathSegments) => string`) reaffirmed; new fields and accessors added — `column` (defaults to 0 until the discovery layer parses columns), `snapshotSuffix` (read/write string), `errors: Array<{ message; stack? }>` (composes soft errors + post-run primary failure), `error` (first of `errors`, or `null`), `fn` (test title — Playwright surfaces the JS Function but the body lives in Rust here), `project` (cloned `ProjectConfig` snapshot — `null` for single-project runs until §7.1 lands the DAG), `config` (cloned `TestConfig` snapshot). `pause()` is intentionally not exposed: Playwright's `TestInfo` interface has no `pause()` (it's `page.pause()`); ferridriver's UI mode (§7.7) will own that wiring. Rule 9 in `crates/ferridriver-node/test/test-info.test.ts` (9 cases).
 
 ### 7.11 Generic Jest matchers in TS wrapper
 

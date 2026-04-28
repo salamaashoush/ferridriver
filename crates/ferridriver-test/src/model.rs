@@ -358,6 +358,26 @@ pub struct TestInfo {
   pub steps: Arc<Mutex<Vec<TestStep>>>,
   /// Soft assertion errors (collected, not thrown).
   pub soft_errors: Arc<Mutex<Vec<TestFailure>>>,
+  /// Hard errors collected during test execution. The worker pushes
+  /// the primary failure here after the test body returns; afterEach
+  /// hooks observe the full list. Mirrors Playwright's
+  /// `testInfo.errors`.
+  pub errors: Arc<Mutex<Vec<TestFailure>>>,
+  /// Optional suffix used to differentiate snapshot files between
+  /// configurations. Mirrors Playwright's `testInfo.snapshotSuffix`.
+  pub snapshot_suffix: Arc<Mutex<String>>,
+  /// Source column number where the test is declared. The TS / Rust
+  /// discovery layers don't parse columns yet, so this is `None` in
+  /// practice; surfaced for parity with Playwright's
+  /// `testInfo.column`.
+  pub column: Option<u32>,
+  /// Snapshot of the project entry the test belongs to. Each test in
+  /// a multi-project run sees its own project; single-project runs
+  /// see `None` since there's no per-project context.
+  pub project: Option<crate::config::ProjectConfig>,
+  /// Snapshot of the active `TestConfig`. Cloned at test-info
+  /// construction time so the `testInfo.config` accessor is cheap.
+  pub config_snapshot: Option<Arc<crate::config::TestConfig>>,
   /// Test timeout.
   pub timeout: Duration,
   /// Tags from annotations.
@@ -393,6 +413,11 @@ impl TestInfo {
       attachments: Arc::new(Mutex::new(Vec::new())),
       steps: Arc::new(Mutex::new(Vec::new())),
       soft_errors: Arc::new(Mutex::new(Vec::new())),
+      errors: Arc::new(Mutex::new(Vec::new())),
+      snapshot_suffix: Arc::new(Mutex::new(String::new())),
+      column: None,
+      project: None,
+      config_snapshot: None,
       timeout: Duration::from_secs(30),
       tags: Vec::new(),
       start_time: Instant::now(),
