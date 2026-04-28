@@ -147,26 +147,43 @@ interface NapiAnnotation {
   description: string | null;
 }
 
-const FIXTURE_NAME_MAP: Record<string, string> = {
-  page: 'page',
-  context: 'context',
-  request: 'request',
-  browser: 'browser',
+// Each Playwright JS-side fixture name maps to the set of underlying
+// pool fixtures the worker must pre-resolve so the NAPI getter has
+// data to return. browserName / playwright are static metadata so
+// they need no pool entry; browserVersion needs a launched browser.
+const FIXTURE_NAME_MAP: Record<string, string[]> = {
+  page: ['page'],
+  context: ['context'],
+  request: ['request'],
+  browser: ['browser'],
+  browserName: [],
+  browserVersion: ['browser'],
+  playwright: [],
 };
 
-function inferRequestedFixtures(body: TestBody): string[] | undefined {
+function destructuredKeys(body: Function): string[] | null {
   const src = body.toString();
   const match = src.match(/^\s*(?:async\s*)?(?:function\b[^(]*)?\(\s*\{([^}]*)\}/s);
-  if (!match) return undefined;
-
-  const fixtures = new Set<string>();
+  if (!match) return null;
+  const out: string[] = [];
   for (const rawPart of match[1].split(',')) {
     const part = rawPart.trim();
     if (!part) continue;
-    if (part.startsWith('...')) return undefined;
+    if (part.startsWith('...')) return null;
     const key = part.split(':', 1)[0].split('=', 1)[0].trim();
-    const fixture = FIXTURE_NAME_MAP[key];
-    if (fixture) fixtures.add(fixture);
+    out.push(key);
+  }
+  return out;
+}
+
+function inferRequestedFixtures(body: TestBody): string[] | undefined {
+  const keys = destructuredKeys(body);
+  if (!keys) return undefined;
+
+  const fixtures = new Set<string>();
+  for (const key of keys) {
+    const mapped = FIXTURE_NAME_MAP[key];
+    if (mapped) for (const m of mapped) fixtures.add(m);
   }
 
   return [...fixtures];

@@ -1,116 +1,103 @@
-# Next session — Cluster 2 (built-in fixtures + auto enforcement)
+# Next session — Cluster 3 (TestInfo helpers, §7.10)
 
-Cluster 1 (CLI flag surfacing) is shipped. Cluster 2 is the next-lowest-
-risk piece in the Tier 7 push: register the four first-class Playwright
-fixtures (`browserName`, `browserVersion`, `playwright`, `request`) in
-the Rust core fixture pool, and make the `auto: true` annotation that
-the TS layer parses actually do its job in the resolver.
+Cluster 1 (CLI flags) and Cluster 2 (built-in fixtures + auto
+enforcement) are shipped. Cluster 3 adds the missing surface on
+`TestInfo`: `output_path()`, `snapshot_path()`, `pause()`, `fn`,
+`project`, `config`, `errors[]`, `snapshot_suffix`, plus a `column`
+field on `location`.
 
-## Why Cluster 2 next
+## Why §7.10 next
 
-The `browserName` fixture in particular keeps cropping up — a lot of
-Playwright fixture conventions (`test.skip(({ browserName }) => ...)`,
-conditional `use` blocks) read it directly. Today a test that requests
-`browserName` gets a "fixture not found" error from the pool because
-the standard fixture set in `crates/ferridriver-test/src/fixture.rs`
-only registers `browser`, `context`, `page`, `test_info`, `request`
-(and `request` itself isn't auto-resolved as a top-level alias to
-`APIRequestContext` the way Playwright wires it). `auto: true` fixtures
-that the TS macro records get stripped at the boundary instead of
-resolving regardless of the test's requested set.
+The matcher work (Clusters 4 + 5) reads several `TestInfo` fields
+that don't exist yet:
+
+- `errors[]` — soft assertions accumulate here in Playwright.
+  Without it, `expect.soft` can't surface the running list.
+- `snapshot_path` — `toMatchSnapshot` / `toHaveScreenshot` resolve
+  paths via this method.
+- `outputPath` — `toHaveScreenshot` writes diff/actual artefacts via
+  this method.
+
+Shipping §7.10 first means the matcher work in Clusters 4 and 5 can
+read real fields rather than reaching into `model::TestInfo`
+directly.
 
 ## Read-first
 
 1. `CLAUDE.md` — rules + lessons.
-2. `PLAYWRIGHT_COMPAT.md` — §7.18 / §7.19 entries.
-3. `HANDOVER.md` — Cluster 1 recap (CLI flag surface).
-4. `/tmp/playwright/packages/playwright/src/index.ts` — the canonical
-   built-in fixtures table (the part that registers
-   `browserName`, `browserVersion`, `playwright`, `request`,
-   `_combinedContextOptions`, etc. — search for `coreTestFixtures`).
-5. `/tmp/playwright/packages/playwright/types/test.d.ts` — see the
-   `PlaywrightTestArgs` / `PlaywrightWorkerArgs` interfaces for the
-   exact field shapes (`browserName: 'chromium' | 'firefox' | 'webkit'`,
-   `browserVersion: string`, `playwright: typeof import('playwright-core')`,
-   `request: APIRequestContext`).
-6. `crates/ferridriver-test/src/fixture.rs` — current pool / scope /
-   `builtin_fixtures` registry. Look at how `browser` / `context` /
-   `page` are registered today.
-7. `crates/ferridriver-test/src/worker.rs::request_fixture_set` —
-   the standard fixture list `STANDARD_FIXTURE_NAMES` is shadowed in
-   `crates/ferridriver-node/src/test_runner.rs` (search the file for
-   `STANDARD_FIXTURE_NAMES`); both must include the new auto-resolved
-   names.
-8. `crates/ferridriver-node/src/test_fixtures.rs` — how the TS-side
-   `TestFixtures` struct exposes fields. The new fixtures need:
-   - `browserName` and `browserVersion` as plain strings.
-   - `playwright` reference (likely the `BrowserType` factory namespace
-     `{ chromium, firefox, webkit }`).
-   - `request` as a real `APIRequestContext` (already in NAPI as
-     `ApiRequestContext` — verify the binding is exposed).
+2. `PLAYWRIGHT_COMPAT.md` — §7.10 entry.
+3. `HANDOVER.md` — Cluster 2 recap.
+4. `/tmp/playwright/packages/playwright/types/test.d.ts` — search for
+   `interface TestInfo` and copy the canonical signatures into
+   `crates/ferridriver-node/src/test_info.rs` doc comments before
+   implementing.
+5. `crates/ferridriver-test/src/model.rs::TestInfo` — current struct.
+   Several Cluster-3 fields can compose from existing data
+   (`title_path`, `output_dir`, etc.).
+6. `crates/ferridriver-node/src/test_info.rs` — NAPI binding shape.
 
 ## Cluster scope
 
-### §7.18 — first-class fixtures
+### Methods (NAPI)
 
-Register these in `crate::fixture::builtin_fixtures` (or wherever the
-worker pool seeds defaults):
+- `outputPath(...paths: string[]): string` — joins onto
+  `test_info.output_dir`. The variadic form accepts any number of
+  path segments.
+- `snapshotPath(...paths: string[]): string` — joins onto
+  `test_info.snapshot_dir`, optionally honoring
+  `snapshot_path_template`.
+- `pause(): Promise<void>` — Playwright's pause-on-debug. For
+  ferridriver the simplest semantics: log a tracing event and
+  return. Real pause-on-keypress is `--ui` work (§7.7) — out of
+  scope for this cluster.
 
-| name | type | source |
-|---|---|---|
-| `browser_name` / `browserName` | `String` | `BrowserConfig.browser` |
-| `browser_version` / `browserVersion` | `String` | `Browser::version()` after launch |
-| `playwright` | factory namespace | NAPI: `{ chromium, firefox, webkit }` getters; QuickJS: same exposed via `install_browser_type` |
-| `request` | `APIRequestContext` | already there as `request` — verify it resolves and that NAPI exposes the right binding |
+### Fields (NAPI)
 
-Both Rust core and NAPI fixture sets need updating. QuickJS exposure
-is opt-in (BDD steps don't usually request these), but the NAPI side
-must resolve them when listed in `requestedFixtures`.
-
-### §7.19 — `auto: true` enforcement
-
-TS-side annotation already parses (`packages/ferridriver-test/src/
-test.ts` — search `auto`). Rust `FixturePool::resolve()` ignores the
-annotation today. The fix is in `worker.rs` (or whichever code path
-builds the `requested_fixtures` Vec for each test): for every
-registered fixture marked `auto: true`, force-add its name to the
-request set before the pool resolves.
-
-Definition of `auto: true` in Playwright: "this fixture runs whether
-the test requests it or not." So the resolver must instantiate it
-during the test setup phase and tear it down after, regardless of
-`fixture_requests` containing the name.
-
-Important: the auto-set must compose with worker-scope vs. test-scope
-correctly. Worker-scope auto fixtures run once per worker; test-scope
-auto fixtures run per test.
+- `fn` — pointer back to the test function. JS-only; expose as a
+  string (test name) or a thunk that throws when called twice.
+  Playwright surfaces this for trace viewer integration.
+- `project: { name, use, ... }` — cloned from
+  `TestConfig::projects[currentProject]`. Until §7.1 lands the
+  project DAG, `project` can return the active config's metadata
+  (or null).
+- `config: { rootDir, ... }` — read-only snapshot of `TestConfig`
+  fields the user is likely to inspect.
+- `errors: TestError[]` — concat of `soft_errors` (existing) plus
+  the primary error if the test failed. Already collected; just
+  expose.
+- `snapshotSuffix?: string` — optional suffix for snapshot
+  filenames. New field on `model::TestInfo`; default `None`.
+- `location.column?: number` — already storing line; expose column
+  too. Plumbing depends on whether the test discovery layer parses
+  it. Default to `null`/`undefined` until the parser learns column
+  positions.
 
 ### Tests (Rule 9)
 
-Add to `crates/ferridriver-node/test/cli-flags.test.ts` or a new
-`builtin-fixtures.test.ts`:
+`crates/ferridriver-node/test/test-info.test.ts`:
 
-- A test that lists only `["browserName"]` in `requestedFixtures` and
-  asserts `fixtures.browserName === 'chromium'` (assuming default).
-- Same for `browserVersion`, returning a non-empty string starting
-  with a digit.
-- A test that lists no fixtures but registers an auto fixture via
-  `test.use({ ... })` and asserts the auto factory ran (e.g. records
-  to a side-channel).
-- All four backends should pass the browserName/browserVersion test —
-  add a `tests/backends_support/builtin_fixtures.rs` that runs through
-  the QuickJS `run_script` path.
+- `outputPath('foo.json')` returns `<output_dir>/<test_name>/foo.json`.
+- `snapshotPath('snap.png')` returns the resolved snapshot dir +
+  filename.
+- `errors` returns soft errors collected via
+  `expect.soft(...).toBe(...)` (cluster 4 will add the matchers; for
+  this cluster, simulate by pushing to `soft_errors` directly via a
+  custom fixture).
+- `pause()` resolves quickly without hanging.
+- `project` / `config` are non-null and surface known field values.
+
+These don't need a per-backend matrix — TestInfo is backend-agnostic.
 
 ## Ground rules (CLAUDE.md)
 
-- Rule 1: Rust core defines the fixture registry. NAPI/QuickJS only
-  copy strings out.
-- Rule 2: signatures match Playwright's `PlaywrightTestArgs` —
-  `browserName` not `browser_name` on the JS side.
-- Rule 4: each fixture must work on every backend. `browserVersion`
-  uses `Browser::version()` which already returns real strings on
-  every backend (per §2.15).
-- Rule 9: per-fixture integration test on each backend.
+- Rule 1: Rust core defines the canonical fields; NAPI is a thin
+  mirror.
+- Rule 2: `outputPath`, `snapshotPath`, etc. match Playwright's
+  signatures verbatim — variadic strings, not `(name?: string)`.
+- Rule 7: rebuild NAPI and diff `crates/ferridriver-node/index.d.ts`
+  against `/tmp/playwright/packages/playwright/types/test.d.ts`
+  before flipping `[x]`.
+- Rule 9: per-method NAPI test exercising the page-visible effect.
 
 ## Baseline (must stay green)
 
@@ -120,52 +107,42 @@ cargo test -p ferridriver --lib                                 # 125
 cargo test -p ferridriver-test --lib                            # 11
 cargo test -p ferridriver-script --lib                          # 13
 cargo test -p ferridriver-mcp --lib                             # 38
-cargo test -p ferridriver-test --test new_features_e2e          # 14
-cd crates/ferridriver-node && bun run build:debug && bun test   # 883
+cargo test -p ferridriver-test --test new_features_e2e          # 15
+cd crates/ferridriver-node && bun run build:debug && bun test   # 889
 FERRIDRIVER_BIN=$(pwd)/target/debug/ferridriver \
   cargo test -p ferridriver-cli --test backends -- --test-threads=1
-# cdp-pipe 175 / cdp-raw / bidi / webkit (latest matrix sizes from CI)
+# cdp-pipe 175 / cdp-raw 175 / bidi 170 / webkit 171
 ```
 
 ## Prompt for the next session
 
-> Continue ferridriver Playwright parity — Tier 7 cluster 2 (built-in
-> fixtures + `auto: true` enforcement, §7.18 / §7.19). Read first, in
-> order:
+> Continue ferridriver Playwright parity — Tier 7 cluster 3
+> (`TestInfo` helpers, §7.10). Read first, in order:
 >
 > 1. `CLAUDE.md` — rules + lessons.
-> 2. `PLAYWRIGHT_COMPAT.md` — §7.18 / §7.19.
-> 3. `HANDOVER.md` — Cluster 1 recap (last session).
+> 2. `PLAYWRIGHT_COMPAT.md` — §7.10 entry.
+> 3. `HANDOVER.md` — Cluster 2 recap.
 > 4. `docs/NEXT_SESSION.md` — this file.
-> 5. `/tmp/playwright/packages/playwright/src/index.ts` —
->    `coreTestFixtures` registration.
-> 6. `/tmp/playwright/packages/playwright/types/test.d.ts` —
->    `PlaywrightTestArgs` / `PlaywrightWorkerArgs` shapes.
-> 7. `crates/ferridriver-test/src/fixture.rs` and
->    `crates/ferridriver-test/src/worker.rs` for the current pool path.
-> 8. `crates/ferridriver-node/src/test_runner.rs::STANDARD_FIXTURE_NAMES`
->    and `crates/ferridriver-node/src/test_fixtures.rs` for the NAPI
->    binding shape.
+> 5. `/tmp/playwright/packages/playwright/types/test.d.ts` —
+>    `interface TestInfo`. Copy the canonical signatures verbatim
+>    into Rust doc comments before implementing.
+> 6. `crates/ferridriver-test/src/model.rs::TestInfo` and
+>    `crates/ferridriver-node/src/test_info.rs`.
 >
-> Task: register `browserName`, `browserVersion`, `playwright`, and
-> `request` as first-class fixtures in the Rust pool, expose them on
-> NAPI / QuickJS with the exact Playwright field names and types, and
-> make `auto: true` annotations actually resolve regardless of whether
-> the test asked for the fixture.
+> Task: ship `outputPath`, `snapshotPath`, `pause`, plus the
+> `errors`, `snapshotSuffix`, `project`, `config`, `fn` fields and a
+> `column` field on `location` (default null where the discovery
+> layer doesn't parse it yet). Errors compose from `soft_errors` +
+> primary error. `project` / `config` mirror enough of the active
+> `TestConfig` for inspection without leaking internal flags.
 >
-> Per-backend Rule 9: at least one integration test per backend
-> exercising `browserName` and `browserVersion`. The "auto fixture
-> ran" assertion can be NAPI-only (the QuickJS side mirrors the
-> registration but BDD scenarios don't typically declare auto
-> fixtures).
+> Rule 9 in `crates/ferridriver-node/test/test-info.test.ts` —
+> backend-agnostic, just NAPI.
 >
-> Commit shape: one commit (`feat: built-in test fixtures + auto
-> enforcement (§7.18 / §7.19)`).
+> Commit shape: one commit (`feat: TestInfo helpers (§7.10)`).
 >
 > Baseline that must stay green is in HANDOVER.md.
 >
-> Non-negotiables (CLAUDE.md): no shortcuts; if a backend's
-> `Browser::version()` returns a placeholder, fix the backend (§2.15
-> already paid that bill — verify before assuming). All three layers
-> update in the same commit. No emojis, no AI attribution, no
-> task/cluster annotations in source comments.
+> Non-negotiables (CLAUDE.md): match Playwright's signatures
+> verbatim; rebuild NAPI and diff index.d.ts; no shortcuts; no
+> emojis; no AI attribution.

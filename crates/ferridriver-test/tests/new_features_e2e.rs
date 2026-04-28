@@ -695,6 +695,73 @@ fn test_snapshot_create_and_match() {
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
+// AUTO FIXTURES
+// ═══════════════════════════════════════════════════════════════════════════
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn test_auto_fixture_runs_without_explicit_request() {
+  use ferridriver_test::fixture::{FixtureDef, FixturePool, FixtureScope};
+  use std::sync::atomic::{AtomicU32, Ordering};
+
+  static AUTO_COUNT: AtomicU32 = AtomicU32::new(0);
+  AUTO_COUNT.store(0, Ordering::SeqCst);
+
+  let mut defs = rustc_hash::FxHashMap::default();
+  defs.insert(
+    "auto_marker".into(),
+    FixtureDef {
+      name: "auto_marker".into(),
+      scope: FixtureScope::Test,
+      dependencies: vec![],
+      setup: Arc::new(|_pool| {
+        Box::pin(async {
+          AUTO_COUNT.fetch_add(1, Ordering::SeqCst);
+          Ok(Arc::new(()) as Arc<dyn std::any::Any + Send + Sync>)
+        })
+      }),
+      teardown: None,
+      timeout: std::time::Duration::from_secs(1),
+      auto: true,
+    },
+  );
+
+  let pool = FixturePool::new(defs, FixtureScope::Test);
+
+  // The test never asks for "auto_marker" but the auto-walker should
+  // surface it so the worker pre-resolves it before the body runs.
+  let names = pool.auto_fixture_names_for(FixtureScope::Test);
+  assert_eq!(names, vec!["auto_marker".to_string()]);
+  for name in names {
+    pool.resolve(&name).await.expect("auto fixture must resolve");
+  }
+  assert_eq!(
+    AUTO_COUNT.load(Ordering::SeqCst),
+    1,
+    "auto fixture should have run exactly once"
+  );
+
+  // auto: false fixtures must NOT show up in the auto walker.
+  let mut defs2 = rustc_hash::FxHashMap::default();
+  defs2.insert(
+    "lazy_marker".into(),
+    FixtureDef {
+      name: "lazy_marker".into(),
+      scope: FixtureScope::Test,
+      dependencies: vec![],
+      setup: Arc::new(|_pool| Box::pin(async { Ok(Arc::new(()) as Arc<dyn std::any::Any + Send + Sync>) })),
+      teardown: None,
+      timeout: std::time::Duration::from_secs(1),
+      auto: false,
+    },
+  );
+  let pool2 = FixturePool::new(defs2, FixtureScope::Test);
+  assert!(
+    pool2.auto_fixture_names_for(FixtureScope::Test).is_empty(),
+    "auto: false fixtures must not be returned"
+  );
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
 // HTML REPORTER
 // ═══════════════════════════════════════════════════════════════════════════
 

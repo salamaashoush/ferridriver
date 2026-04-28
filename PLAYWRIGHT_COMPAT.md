@@ -1050,11 +1050,11 @@ Canonical gap tracker, derived from a full sweep of Playwright v1.x (`/tmp/playw
 
 ### 7.18 Fixtures: `browserName`, `browserVersion`, `playwright`, `request` as first-class
 
-- [ ] Register in `fixture.rs` built-ins.
+- [x] First-class on `TestFixtures`. `browserName` already came from `BrowserConfig`; added `browserVersion` (sync getter pulling `Browser::version()` from the cached pool entry) and `playwright` returning a `PlaywrightNamespace` class with `chromium` / `firefox` / `webkit` `BrowserType` accessors plus a `request` namespace whose `newContext()` builds an `APIRequestContext`. `request` was already registered in the worker's per-test fixture pool. TS-side `inferRequestedFixtures` learned the new names — `browserVersion` brings in `browser`; `browserName` and `playwright` resolve without pool entries. Rule 9 covered by `crates/ferridriver-node/test/builtin-fixtures.test.ts` (`browserName`/`browserVersion` on cdp-pipe / cdp-raw / bidi, `browserName` on webkit via the request-only path, `playwright` namespace + `request.newContext`). The webkit page path itself is blocked by the test-runner ↔ webkit `new_context` gap (Section B item — `Browser::new_context(None)` allocates a fresh `ContextRef` whose first `new_page` fires `backend.new_context` which webkit rejects).
 
 ### 7.19 Fixture `auto: true` enforcement
 
-- [ ] TS parses it; Rust pool ignores it (`fixture.rs`). Must resolve auto fixtures regardless of test request.
+- [x] `FixtureDef` gained an `auto: bool` field. `FixturePool::auto_fixture_names_for(scope)` walks the def graph (including parent pools) and returns every auto-marked entry whose scope matches or is narrower than the argument. The worker calls it once per suite-pool (Worker scope) before the first `beforeAll`, and once per test-pool (Test scope) before `beforeEach`/test body, resolving each via `pool.resolve(name)`. TS-side `extend()` already runs every custom factory unconditionally — that satisfies Playwright's `auto: true` semantics for JS-defined fixtures; the pool change makes the same guarantee for any future Rust-side auto fixtures (e.g. trace recorders / artifact hooks). Rule 9 in `crates/ferridriver-test/tests/new_features_e2e.rs::test_auto_fixture_runs_without_explicit_request`.
 
 ### 7.20 Reporters: `dot`, `github`, `blob`, `null`
 

@@ -55,6 +55,12 @@ pub struct FixtureDef {
   pub teardown: Option<TeardownFn>,
   /// Timeout for setup.
   pub timeout: Duration,
+  /// Playwright `auto: true` semantic — the fixture must resolve for
+  /// every test (and every hook at the matching scope) regardless of
+  /// whether the body asks for it. The worker enumerates all auto
+  /// fixtures at scope-entry time and resolves them before the test
+  /// body runs.
+  pub auto: bool,
 }
 
 // ── Fixture Pool ──
@@ -218,6 +224,30 @@ impl FixturePool {
   /// Resolve a fixture by name without knowing its concrete type.
   pub async fn resolve(&self, name: &str) -> Result<(), String> {
     ensure_resolved(self, name).await
+  }
+
+  /// Names of every fixture marked `auto: true` whose scope matches the
+  /// argument or any narrower scope (Test fixtures get included for
+  /// Test pools; Worker auto fixtures get included for Worker pools).
+  /// Walks the parent chain so worker-scope auto fixtures are visible
+  /// from a test-scope child pool.
+  #[must_use]
+  pub fn auto_fixture_names_for(&self, scope: FixtureScope) -> Vec<String> {
+    let mut names: Vec<String> = Vec::new();
+    let want_rank = scope_rank(scope);
+    for (name, def) in self.inner.defs.iter() {
+      if def.auto && scope_rank(def.scope) <= want_rank {
+        names.push(name.clone());
+      }
+    }
+    if let Some(parent) = &self.inner.parent {
+      for n in parent.auto_fixture_names_for(scope) {
+        if !names.contains(&n) {
+          names.push(n);
+        }
+      }
+    }
+    names
   }
 
   /// Tear down all fixtures in this pool (reverse order).
@@ -396,6 +426,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
         })
       })),
       timeout: Duration::from_secs(30),
+      auto: false,
     },
   );
 
@@ -421,6 +452,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
         })
       })),
       timeout: Duration::from_secs(10),
+      auto: false,
     },
   );
 
@@ -443,6 +475,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
       }),
       teardown: None,
       timeout: Duration::from_secs(10),
+      auto: false,
     },
   );
 

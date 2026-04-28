@@ -455,6 +455,7 @@ fn build_browser_fixture_defs(
       }),
       teardown: None,
       timeout: Duration::from_secs(10),
+      auto: false,
     },
   );
 
@@ -476,6 +477,7 @@ fn build_browser_fixture_defs(
       }),
       teardown: None,
       timeout: Duration::from_secs(10),
+      auto: false,
     },
   );
 
@@ -501,6 +503,7 @@ fn build_browser_fixture_defs(
       }),
       teardown: None,
       timeout: Duration::from_secs(10),
+      auto: false,
     },
   );
 
@@ -846,6 +849,13 @@ impl Worker {
       }
     });
 
+    // Worker-scope `auto: true` fixtures resolve once before beforeAll runs.
+    for name in suite_state.fixture_pool.auto_fixture_names_for(FixtureScope::Worker) {
+      if let Err(e) = suite_state.fixture_pool.resolve(&name).await {
+        tracing::warn!(target: "ferridriver::worker", "auto fixture '{name}' (suite) failed: {e}");
+      }
+    }
+
     if !suite_state.before_all_ran && !hooks.before_all.is_empty() {
       for (i, hook) in hooks.before_all.iter().enumerate() {
         let step_title = if hooks.before_all.len() == 1 {
@@ -1067,6 +1077,15 @@ impl Worker {
     ));
     let test_pool = custom_pool.child_with_defs(build_test_fixture_defs(Arc::clone(&resources)), FixtureScope::Test);
     test_pool.inject("test_info", Arc::clone(&test_info));
+
+    // Playwright `auto: true` fixtures resolve regardless of whether
+    // the test body destructured them. Walk the full def graph for
+    // this scope (and any narrower parents) and pre-resolve.
+    for name in test_pool.auto_fixture_names_for(FixtureScope::Test) {
+      if let Err(e) = test_pool.resolve(&name).await {
+        tracing::warn!(target: "ferridriver::worker", "auto fixture '{name}' failed: {e}");
+      }
+    }
 
     enum VideoHandle {
       Eager(ferridriver::video::VideoRecordingHandle),

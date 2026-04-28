@@ -71,6 +71,7 @@ mod js_handle;
 mod locator;
 mod network;
 mod page;
+mod playwright_namespace;
 mod route;
 mod serialize_out;
 mod step_handle;

@@ -114,6 +114,25 @@ impl TestFixtures {
     self.browser_config.browser.clone()
   }
 
+  /// Playwright `browserVersion` worker fixture — version string of
+  /// the browser the worker launched. Mirrors `Browser.version()`.
+  /// Returns `null` when the `browser` fixture has not been resolved
+  /// yet (e.g. tests that explicitly opt out via `requestedFixtures`).
+  #[napi(getter, js_name = "browserVersion")]
+  pub fn browser_version(&self) -> Option<String> {
+    self
+      .pool
+      .try_get_cached::<ferridriver::Browser>("browser")
+      .map(|b| b.version().to_string())
+  }
+
+  /// Playwright `playwright` worker fixture — namespace exposing
+  /// `chromium`, `firefox`, `webkit`, and `request`.
+  #[napi(getter)]
+  pub fn playwright(&self) -> crate::playwright_namespace::PlaywrightNamespace {
+    crate::playwright_namespace::PlaywrightNamespace
+  }
+
   #[napi(getter)]
   pub fn headless(&self) -> bool {
     self.browser_config.headless

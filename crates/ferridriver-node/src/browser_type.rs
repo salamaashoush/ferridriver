@@ -26,7 +26,7 @@ pub struct BrowserType {
 }
 
 impl BrowserType {
-  fn wrap(inner: ferridriver::BrowserType) -> Self {
+  pub(crate) fn wrap(inner: ferridriver::BrowserType) -> Self {
     Self { inner }
   }
 }
