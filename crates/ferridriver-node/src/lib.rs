@@ -68,6 +68,7 @@ mod frame_locator;
 #[allow(dead_code)]
 mod install;
 mod js_handle;
+mod js_reporter;
 mod locator;
 mod network;
 mod page;
