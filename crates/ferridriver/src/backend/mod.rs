@@ -734,6 +734,37 @@ impl AnyPage {
     }
   }
 
+  /// Idempotently fire the backend command that turns on
+  /// file-chooser interception. Lazy parity with Playwright's
+  /// `_updateFileChooserInterception` — the page-level listener
+  /// loop is already subscribed to events, but the underlying
+  /// browser only emits `fileChooserOpened` after we ask it to.
+  /// Called from `Page::wait_for_file_chooser` and
+  /// `Page::on('filechooser', ...)`.
+  pub async fn enable_file_chooser_intercept(&self) -> Result<(), String> {
+    match self {
+      AnyPage::CdpPipe(p) => p.enable_file_chooser_intercept().await,
+      AnyPage::CdpRaw(p) => p.enable_file_chooser_intercept().await,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(_) => Ok(()),
+      AnyPage::Bidi(_) => Ok(()),
+    }
+  }
+
+  /// Idempotently fire the backend command that turns on download
+  /// reporting. Lazy parity with Playwright's per-context
+  /// `Browser.setDownloadBehavior` (`crBrowser.ts:354`). Called from
+  /// `Page::wait_for_download` and `Page::on('download', ...)`.
+  pub async fn enable_download_behavior(&self) -> Result<(), String> {
+    match self {
+      AnyPage::CdpPipe(p) => p.enable_download_behavior().await,
+      AnyPage::CdpRaw(p) => p.enable_download_behavior().await,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(_) => Ok(()),
+      AnyPage::Bidi(_) => Ok(()),
+    }
+  }
+
   /// Populate the weak back-reference to the outer `Arc<Page>`.
   /// Called by [`crate::page::Page::new`] / `Page::with_context`
   /// every time a new `Arc<Page>` is constructed — callers like the

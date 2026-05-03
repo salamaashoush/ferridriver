@@ -19,6 +19,13 @@ RUNS=3  # Average over N runs
 
 mkdir -p "$SCRIPT_DIR/results"
 
+# Pre-bench: kill any orphan Chromes from a prior run so worker 0
+# doesn't start with file-descriptor pressure or background
+# scheduling contention. Quiet failure when nothing matches.
+pkill -f "ferridriver-pipe-" 2>/dev/null || true
+pkill -f "playwright_chromium" 2>/dev/null || true
+sleep 0.5
+
 calc_ratio() {
   local numerator="$1"
   local denominator="$2"
@@ -36,7 +43,11 @@ fi
 
 # Ensure ferridriver NAPI is built
 echo "Building ferridriver..."
-(cd "$ROOT_DIR/crates/ferridriver-node" && bun run build:debug 2>/dev/null)
+# Release build for fair head-to-head against shipped Playwright JS.
+# Debug NAPI is ~30–60% slower on the CDP dispatch hot path because
+# of overflow checks + no LTO. The release binary is ~10–15 MB vs
+# ~140 MB debug — also faster cold-start (dyld load + page-in).
+(cd "$ROOT_DIR/crates/ferridriver-node" && bun run build 2>/dev/null)
 
 # Detect the regular Chrome binary from Playwright's CfT install
 REGULAR_CHROME=""
@@ -70,6 +81,12 @@ fi
 echo ""
 
 # Helper: run N times in a subshell, return average ms.
+#
+# Kill leaked Chromes between runs so resource state doesn't
+# accumulate across the bench's 24+ invocations. Without this,
+# 8w runs late in the bench fight orphaned chromes from prior
+# 8w runs (we saw 12s 8w results that were really 2s once
+# isolated — the rest was Chrome contention).
 run_avg() {
   local cmd="$1"
   local dir="$2"
@@ -89,6 +106,13 @@ run_avg() {
     fi
     total=$((total + elapsed))
     ok=$((ok + 1))
+    # Kill any leaked test-driven Chromes before the next run.
+    # `pkill -f` matches the command line so we hit ferridriver-pipe
+    # tempdirs and Playwright's user-data-dir paths without touching
+    # the user's regular Chrome.
+    pkill -f "ferridriver-pipe-" 2>/dev/null || true
+    pkill -f "playwright_chromium" 2>/dev/null || true
+    sleep 0.2
   done
   echo $((total / ok))
 }
@@ -125,7 +149,11 @@ export default defineConfig({
 EOF
 }
 
-FD_CMD="node $ROOT_DIR/packages/ferridriver-test/dist/cli.js test"
+# Bun has ~2-3x faster cold start than Node (~30-50ms vs ~150-200ms
+# with the .node addon load) AND a marginally faster NAPI hot path.
+# The TS runner already detects Bun (cli.ts:59-92) and uses faster
+# import paths there. Free win — no behavior change.
+FD_CMD="bun $ROOT_DIR/packages/ferridriver-test/dist/cli.js test"
 FD_SPEC="$FD_DIR/bench_compare.spec.ts"
 
 # ── Headless Shell mode ───────────────────────────────────────────

@@ -151,7 +151,7 @@ impl super::transport::CdpTransport for WsTransport {
     self.dispatcher.register_nav_waiter(session_id, target)
   }
 
-  fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<serde_json::Value> {
+  fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<std::sync::Arc<serde_json::Value>> {
     self.dispatcher.subscribe_events()
   }
 

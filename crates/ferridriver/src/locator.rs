@@ -44,8 +44,8 @@ macro_rules! retry_resolve {
       .await
       .map_err($crate::error::FerriError::from)?;
     let __fd = "window.__fd";
-    let __sel_js =
-      $crate::selectors::build_selone_js(&$self.selector, &__fd).map_err($crate::error::FerriError::from)?;
+    let __sel_js = $crate::selectors::build_selone_js(&$self.selector, &__fd, $self.strict)
+      .map_err($crate::error::FerriError::from)?;
     // Pass `None` for main-frame locators so the backend skips a
     // `frame_contexts` lookup; child frames thread their cached id.
     let __frame_id: ::std::option::Option<&str> = if $self.frame.is_main_frame() {
@@ -93,26 +93,17 @@ macro_rules! retry_resolve {
         }
       }
 
-      // Strict mode (Playwright default): resolve via `query_all` and bail
-      // with [`crate::error::FerriError::StrictModeViolation`] if the
-      // selector matches more than one element. We do the strict check on
-      // every attempt so transient duplicates (e.g. during SSR rehydration)
-      // still trigger the retry loop rather than failing immediately.
-      if $self.strict {
-        match $crate::selectors::query_all($page, &$self.selector, __frame_id).await {
-          ::std::result::Result::Ok(ref __matches) if __matches.len() > 1 => {
-            $crate::selectors::cleanup_tags($page).await;
-            return ::std::result::Result::Err($crate::error::FerriError::strict(
-              $self.selector.clone(),
-              __matches.len(),
-            ));
-          },
-          ::std::result::Result::Ok(_) | ::std::result::Result::Err(_) => {
-            $crate::selectors::cleanup_tags($page).await;
-          },
-        }
-      }
-
+      // Strict mode (Playwright default) is folded into the same
+      // engine-side `selOne(parts, strict)` call below — the JS
+      // throws `strict mode violation: <count>` when the selector
+      // matches more than one element, the host catches the
+      // exception and converts to a typed
+      // `FerriError::StrictModeViolation`. Saves the separate
+      // `query_all` + `cleanup_tags` round-trips the previous
+      // implementation paid on every retry attempt (~2 RTTs).
+      // Mirrors Playwright's `injected.querySelector(parsed, root,
+      // strict)` pattern in
+      // `/tmp/playwright/packages/injected/src/injectedScript.ts:276`.
       match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
         ::std::result::Result::Ok($el) => match ($body).await {
           ::std::result::Result::Ok(val) => return ::std::result::Result::Ok(val),
@@ -129,8 +120,14 @@ macro_rules! retry_resolve {
           },
           ::std::result::Result::Err(e) => return ::std::result::Result::Err($crate::error::FerriError::from(e)),
         },
-        ::std::result::Result::Err(_) => {
-          // Element not found this iteration; retry until deadline.
+        ::std::result::Result::Err(__err) => {
+          // Strict-mode violation: the engine threw
+          // `strict mode violation: <count>` from inside `selOne`.
+          // Surface it as a typed error rather than a retry signal.
+          if let ::std::option::Option::Some(__count) = $crate::selectors::parse_strict_violation_count(&__err) {
+            return ::std::result::Result::Err($crate::error::FerriError::strict($self.selector.clone(), __count));
+          }
+          // Otherwise: element not found this iteration; retry until deadline.
         },
       }
     }
@@ -1684,7 +1681,7 @@ impl Locator {
   pub async fn resolve(&self) -> Result<AnyElement> {
     self.frame.page_arc().inner().ensure_engine_injected().await?;
     let fd = "window.__fd";
-    let sel_js = selectors::build_selone_js(&self.selector, fd)?;
+    let sel_js = selectors::build_selone_js(&self.selector, fd, self.strict)?;
     let frame_id: Option<&str> = if self.frame.is_main_frame() {
       None
     } else {

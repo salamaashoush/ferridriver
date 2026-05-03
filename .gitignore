@@ -33,3 +33,6 @@ trace-*.json
 # Claude Code local state
 .claude/
 .DS_Store
+bench/_legacy/go-bench/chromedp-bench
+bench/_legacy/go-bench/rod-bench
+bench/results/

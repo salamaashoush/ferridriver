@@ -463,6 +463,8 @@ impl BrowserState {
           use crate::backend::bidi::BidiBrowser;
           let mut flags = all_extra.clone();
           if self.headless {
+            // Firefox doesn't accept `--headless=new`; bare flag is
+            // correct on this BiDi/Firefox path.
             flags.push("--headless".into());
           }
           AnyBrowser::Bidi(Box::pin(BidiBrowser::launch_with_flags(&self.chromium_path, &flags)).await?)
@@ -1160,7 +1162,11 @@ pub fn chrome_flags(headless: bool, extra_args: &[String]) -> Vec<String> {
   // 2. Always added after base switches
   flags.push("--enable-unsafe-swiftshader".into());
 
-  // 3. Headless flags (Playwright adds these when headless=true)
+  // 3. Headless flags (Playwright adds these when headless=true).
+  // Playwright passes bare `--headless` too — Chrome maps to
+  // `--headless=old` on full chrome. The 2x perf gap on Regular
+  // Chrome lives elsewhere, not in this flag (verified via
+  // playwright-core/lib/server/chromium/chromium.js:288).
   if headless {
     flags.push("--headless".into());
     flags.push("--hide-scrollbars".into());

@@ -68,16 +68,34 @@ fn is_retryable_bidi_page_error(err: &str) -> bool {
 }
 
 async fn ensure_page_alive(page: &Arc<ferridriver::Page>) -> Result<(), String> {
-  page
-    .evaluate("1", ferridriver::protocol::SerializedArgument::default(), None)
-    .await
-    .map(|_| ())
-    .map_err(ferri_err_to_string)
+  // Health check via raw `Runtime.evaluate("1")` — only fired when
+  // [`needs_alive_check`] returns true. CDP backends don't need it:
+  // `Target.attachedToTarget` only fires after the renderer's V8
+  // context is up, and the per-page `enable_domains` parallel batch
+  // (Page.enable + Runtime.enable) returns only when the V8 context
+  // is ready to accept commands. Keep the check for BiDi where the
+  // startup sequence is genuinely racy (Firefox occasionally returns
+  // `BrowsingContext` before its underlying `Window` is fully wired
+  // up — observed in `is_retryable_bidi_page_error`).
+  page.inner().evaluate("1").await.map(|_| ())
 }
 
-async fn create_ready_page(ctx: &ferridriver::ContextRef) -> Result<Arc<ferridriver::Page>, String> {
+/// Returns true when [`ensure_page_alive`] should fire on a freshly
+/// created page. CDP-backed pages skip the check (~1 CDP RTT per
+/// test saved); WebKit shares the default context so per-test pages
+/// don't get created at all on that backend.
+fn needs_alive_check(backend: ferridriver::backend::BackendKind) -> bool {
+  matches!(backend, ferridriver::backend::BackendKind::Bidi)
+}
+
+async fn create_ready_page(
+  ctx: &ferridriver::ContextRef,
+  backend: ferridriver::backend::BackendKind,
+) -> Result<Arc<ferridriver::Page>, String> {
   let page = ctx.new_page().await.map_err(ferri_err_to_string)?;
-  ensure_page_alive(&page).await?;
+  if needs_alive_check(backend) {
+    ensure_page_alive(&page).await?;
+  }
   Ok(page)
 }
 
@@ -119,8 +137,9 @@ impl TestBrowserResources {
       TestBrowserState::Page { page, .. } => Ok(Arc::clone(page)),
       TestBrowserState::Failed(err) => Err(err.clone()),
       TestBrowserState::Context(ctx) => {
-        let page = create_ready_page(ctx).await?;
-        apply_page_config(&page, &self.effective, &self.output_dir, self.browser.backend_kind()).await?;
+        let backend = self.browser.backend_kind();
+        let page = create_ready_page(ctx, backend).await?;
+        apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
         let ctx = Arc::clone(ctx);
         *state = TestBrowserState::Page {
           ctx,
@@ -129,6 +148,7 @@ impl TestBrowserResources {
         Ok(page)
       },
       TestBrowserState::Empty(prepared_page) => {
+        let backend = self.browser.backend_kind();
         let prepared = if let Some(handle) = prepared_page.take() {
           if let Ok(prepared) = handle.await {
             prepared
@@ -145,12 +165,20 @@ impl TestBrowserResources {
 
         match prepared.page_result {
           Ok(page) => {
-            if let Err(err) = ensure_page_alive(&page).await {
+            // Only run the health check on backends that need it
+            // (BiDi). For CDP / WebKit the page is already
+            // guaranteed alive by the per-page bootstrap path.
+            let alive_check = if needs_alive_check(backend) {
+              ensure_page_alive(&page).await
+            } else {
+              Ok(())
+            };
+            if let Err(err) = alive_check {
               if is_retryable_bidi_page_error(&err) {
                 let _ = prepared.ctx.close().await;
                 let ctx = Arc::new(new_test_context(&self.browser));
-                let page = create_ready_page(&ctx).await?;
-                apply_page_config(&page, &self.effective, &self.output_dir, self.browser.backend_kind()).await?;
+                let page = create_ready_page(&ctx, backend).await?;
+                apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
                 *state = TestBrowserState::Page {
                   ctx,
                   page: Arc::clone(&page),
@@ -160,7 +188,7 @@ impl TestBrowserResources {
               *state = TestBrowserState::Failed(err.clone());
               return Err(err);
             }
-            apply_page_config(&page, &self.effective, &self.output_dir, self.browser.backend_kind()).await?;
+            apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
             let ctx = Arc::new(prepared.ctx);
             *state = TestBrowserState::Page {
               ctx,
@@ -185,11 +213,19 @@ impl TestBrowserResources {
         close_test_context(&ctx).await;
       },
       TestBrowserState::Page { ctx, page } => {
-        // Close the per-test page first; for backends that share the
-        // default context (webkit) the page is the only per-test
-        // resource we own. Closing the context itself would tear down
-        // the persistent default and break later tests.
-        let _ = page.close(None).await;
+        // For backends that share the default context (webkit) the
+        // page is the only per-test resource we own — closing the
+        // context itself would tear down the persistent default and
+        // break later tests. For isolated-context backends (CDP /
+        // BiDi) the context's `Target.disposeBrowserContext` already
+        // closes every page in it, so an explicit `page.close()`
+        // would only add a redundant `Target.closeTarget` round-trip
+        // per test (~3-5ms each on the bench's tight loop).
+        if ctx.name() == "default" {
+          let _ = page.close(None).await;
+        } else {
+          drop(page);
+        }
         close_test_context(&ctx).await;
       },
       TestBrowserState::Empty(None) | TestBrowserState::Failed(_) => {},
@@ -418,6 +454,15 @@ async fn apply_page_config(
     );
   }
   opts.user_agent = ctx_config.user_agent.clone();
+  // Plumb the test config's `baseURL` into the BrowserContext bag so
+  // `page.goto('/route')` resolves against it. Previously the value
+  // was only stored as `request_base_url` for the API-request
+  // fixture, leaving relative `page.goto` paths to fail with "Cannot
+  // navigate to invalid URL" — Playwright resolves these via the
+  // context's baseURL option, mirror that.
+  if opts.base_url.is_none() {
+    opts.base_url = effective.request_base_url.clone();
+  }
   if !ctx_config.java_script_enabled {
     opts.java_script_enabled = Some(false);
   }
@@ -427,13 +472,21 @@ async fn apply_page_config(
   if ctx_config.ignore_https_errors && !is_webkit {
     opts.ignore_https_errors = Some(true);
   }
+  // Note: `ctx_config.accept_downloads` defaults to `true` (Playwright
+  // parity). We deliberately don't pass that through to
+  // `BrowserContextOptions.accept_downloads` here — doing so makes
+  // `apply_context_options` fire `Browser.setDownloadBehavior` on
+  // every per-test page, which is ~3-5ms per test on the bench's
+  // tight loop. The page-level lazy `enable_download_behavior` (fired
+  // on first `wait_for_download` / `page.on('download')`) handles the
+  // CDP command when a test actually needs it. Tests that opt OUT
+  // (`acceptDownloads: false`) still flow through, since opts.deny is
+  // an explicit decision the bag has to encode.
+  if !ctx_config.accept_downloads && !is_webkit {
+    opts.accept_downloads = Some(false);
+  }
   if ctx_config.accept_downloads && !is_webkit {
-    // Ensure the downloads directory exists; the backend's
-    // `Browser.setDownloadBehavior` command is fired by
-    // `apply_context_options` with an empty path, which falls back
-    // to Chrome's default per-context downloads dir.
     let _ = std::fs::create_dir_all(output_dir.join("downloads"));
-    opts.accept_downloads = Some(true);
   }
   if let Some(ref creds) = ctx_config.http_credentials {
     opts.http_credentials = Some(ferridriver::options::HttpCredentials {
@@ -589,8 +642,9 @@ impl Worker {
 
   fn spawn_prepared_page(browser: Arc<ferridriver::Browser>) -> tokio::task::JoinHandle<PreparedPage> {
     tokio::spawn(async move {
+      let backend = browser.backend_kind();
       let ctx = new_test_context(&browser);
-      let page_result = create_ready_page(&ctx).await;
+      let page_result = create_ready_page(&ctx, backend).await;
       PreparedPage { ctx, page_result }
     })
   }

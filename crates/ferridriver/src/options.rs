@@ -934,7 +934,7 @@ pub struct DragAndDropOptions {
 
 /// Viewport configuration -- consistent across all backends.
 /// Matches Playwright's viewport options.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct ViewportConfig {
   /// CSS pixel width of the viewport.
   pub width: i64,
