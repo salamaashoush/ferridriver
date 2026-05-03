@@ -175,6 +175,60 @@ function clickGuard(el: Element): string {
   return '';
 }
 
+/**
+ * Combined click pre-flight check. Replaces FOUR sequential
+ * `Runtime.callFunctionOn` round-trips (clickGuard + isActionable +
+ * scrollIntoView + resolveClickPoint) with a single call:
+ *
+ * 1. `clickGuard` — reject `<select>` / file inputs page-side so the
+ *    Rust action helper can dispatch a typed error.
+ * 2. `isActionable` — returns `actionable: true` only when the
+ *    element is connected, visible, and not aria-disabled.
+ * 3. `scrollIntoViewIfNeeded` — non-standard Chromium primitive;
+ *    falls back to W3C `scrollIntoView({block:'center'})` on
+ *    Firefox/BiDi.
+ * 4. Iframe-chain accumulated bounding-box → click point.
+ *
+ * Returns a flat object so the host can branch on `guard`/`reason`
+ * without further parsing. `point` is `null` when the element is
+ * not actionable (caller short-circuits on guard / reason before
+ * touching point). Mirrors Playwright's `evaluateInUtility` pattern
+ * in `dom.ts::_performPointerAction` which similarly batches these
+ * checks into one CDP RTT.
+ */
+function clickPrep(
+  el: Element,
+  position: { x: number; y: number } | null,
+): {
+  guard: string;
+  actionable: boolean;
+  reason?: string;
+  point: { x: number; y: number } | null;
+} {
+  const guard = clickGuard(el);
+  if (guard) return { guard, actionable: false, point: null };
+  const act = isActionable(el);
+  if (!act.actionable) {
+    return { guard: '', actionable: false, reason: act.reason, point: null };
+  }
+  if (typeof (el as any).scrollIntoViewIfNeeded === 'function') {
+    (el as any).scrollIntoViewIfNeeded();
+  } else {
+    el.scrollIntoView({ block: 'center', inline: 'center' });
+  }
+  const r = el.getBoundingClientRect();
+  let x = position ? r.x + position.x : r.x + r.width / 2;
+  let y = position ? r.y + position.y : r.y + r.height / 2;
+  let win: any = (el.ownerDocument as Document).defaultView;
+  while (win && win !== win.parent && win.frameElement) {
+    const fr = (win.frameElement as Element).getBoundingClientRect();
+    x += fr.x;
+    y += fr.y;
+    win = win.parent;
+  }
+  return { guard: '', actionable: true, point: { x, y } };
+}
+
 // ── Actions (delegates to Playwright where possible) ──
 
 function clearAndDispatch(el: HTMLInputElement | HTMLTextAreaElement, value?: string) {
@@ -543,7 +597,25 @@ if (!window.__fd) {
         }));
       } catch (e: any) { return JSON.stringify({ error: e.message }); }
     },
-    selOne(parts: SelectorPart[]) { const r = executeSelector(parts, document); return r.length > 0 ? r[0] : null; },
+    /**
+     * Resolve `parts` to a single element. When `strict` is true and the
+     * selector matches more than one element, throw a recognisable
+     * `strict mode violation: <count>` error so the host (Rust) can
+     * convert it to a typed `FerriError::StrictModeViolation` without a
+     * separate `query_all` round-trip. Mirrors Playwright's
+     * `injected.querySelector(selector, root, strict)` pattern in
+     * `/tmp/playwright/packages/injected/src/injectedScript.ts:276`.
+     */
+    selOne(parts: SelectorPart[], strict?: boolean) {
+      const r = executeSelector(parts, document);
+      if (strict && r.length > 1) {
+        // Encode the count in a parseable token. Rust regexes
+        // `strict mode violation: <count>` to extract the hit count
+        // and build a typed StrictModeViolation error.
+        throw new Error('strict mode violation: ' + r.length);
+      }
+      return r.length > 0 ? r[0] : null;
+    },
     selAll(parts: SelectorPart[]) { return executeSelector(parts, document); },
     selCount(parts: SelectorPart[]) { return executeSelector(parts, document).length; },
 
@@ -563,6 +635,7 @@ if (!window.__fd) {
     clearAndDispatch,
     dispatchInputEvents,
     clickGuard,
+    clickPrep,
     selectOption,
     selectOptions,
     getOptions,

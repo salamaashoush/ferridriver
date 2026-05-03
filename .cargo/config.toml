@@ -10,3 +10,10 @@ release-fast = "build --profile release-fast --bin ferridriver"
 # The cc crate passes -D to ar, but Apple's ar does not support it.
 AR_aarch64_apple_darwin = "/opt/homebrew/opt/llvm/bin/llvm-ar"
 AR_x86_64_apple_darwin = "/opt/homebrew/opt/llvm/bin/llvm-ar"
+
+# Per-target rustflags. M-series gets the `apple-m1` cpu floor so
+# autovectorization tunes for NEON / LSE atomics; x86_64 stays at
+# the conservative default (let Linux / CI builders pick `-C
+# target-cpu` themselves via RUSTFLAGS if they want).
+[target.aarch64-apple-darwin]
+rustflags = ["-C", "target-cpu=apple-m1"]

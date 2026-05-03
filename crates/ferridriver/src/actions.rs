@@ -226,6 +226,96 @@ pub async fn check_click_guard(element: &AnyElement, page: &AnyPage) -> Result<(
   }
 }
 
+// ─── Click Pre-flight (combined) ────────────────────────────────────────────
+
+/// Outcome of [`click_prep`] — the merged
+/// `clickGuard` + `isActionable` + `scrollIntoView` + `clickPoint`
+/// pre-flight that replaces 4 sequential CDP RTTs with one
+/// `Runtime.callFunctionOn`. Mirrors Playwright's
+/// `evaluateInUtility` pattern in
+/// `/tmp/playwright/packages/playwright-core/src/server/dom.ts`.
+#[derive(Debug)]
+pub enum ClickPrep {
+  /// Element is actionable; cursor target is `(x, y)`.
+  Ready { x: f64, y: f64 },
+  /// Element is `<select>` — caller should redispatch via select-option helper.
+  IsSelect,
+  /// Element is `<input type=file>` — caller should redispatch via file-chooser path.
+  IsFileInput,
+  /// Element exists but is not currently actionable. Carries the
+  /// reason marker (`notvisible` / `notconnected` / `disabled`),
+  /// formatted as a Playwright-style `error:not<state>` string so
+  /// the retry loop treats it as retriable.
+  NotActionable { reason: String },
+}
+
+/// Combined pre-click pre-flight. ONE `Runtime.callFunctionOn`
+/// returning `{guard, actionable, reason, point}`. Replaces 4
+/// separate calls (`clickGuard`, `isActionable`, `scrollIntoView`,
+/// `getBoundingClientRect`) — saves 3 CDP RTTs per click. Caller
+/// branches on the [`ClickPrep`] variant. The injected helper
+/// (`__fd.clickPrep`) lives in
+/// `crates/ferridriver/src/injected/index.ts::clickPrep`.
+///
+/// # Errors
+///
+/// Returns an error only on protocol-level failure (the engine is
+/// not injected, the element handle is no longer connected, JSON
+/// parse failure on the response). Element-state failures
+/// (not-visible, disabled, file/select) are encoded as
+/// [`ClickPrep`] variants, not errors.
+pub async fn click_prep(
+  element: &AnyElement,
+  page: &AnyPage,
+  position: Option<crate::options::Point>,
+) -> Result<ClickPrep, String> {
+  let _ = page.ensure_engine_injected().await;
+  let position_lit = match position {
+    Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
+    None => "null".to_string(),
+  };
+  let js = format!("function() {{ return JSON.stringify(window.__fd.clickPrep(this, {position_lit})); }}");
+  let raw = element
+    .call_js_fn_value(&js)
+    .await?
+    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+    .unwrap_or_default();
+  if raw.is_empty() {
+    return Err("click_prep: empty response from page-side helper".into());
+  }
+  let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("click_prep: parse: {e}"))?;
+  let guard = parsed.get("guard").and_then(|v| v.as_str()).unwrap_or("");
+  match guard {
+    "select" => return Ok(ClickPrep::IsSelect),
+    "file" => return Ok(ClickPrep::IsFileInput),
+    _ => {},
+  }
+  let actionable = parsed
+    .get("actionable")
+    .and_then(serde_json::Value::as_bool)
+    .unwrap_or(false);
+  if !actionable {
+    let reason = parsed
+      .get("reason")
+      .and_then(|v| v.as_str())
+      .unwrap_or("notconnected")
+      .to_string();
+    return Ok(ClickPrep::NotActionable {
+      reason: format!("error:not{reason}"),
+    });
+  }
+  let point = parsed.get("point").ok_or("click_prep: missing point")?;
+  let x = point
+    .get("x")
+    .and_then(serde_json::Value::as_f64)
+    .ok_or("click_prep: bad x")?;
+  let y = point
+    .get("y")
+    .and_then(serde_json::Value::as_f64)
+    .ok_or("click_prep: bad y")?;
+  Ok(ClickPrep::Ready { x, y })
+}
+
 // ─── Fill ───────────────────────────────────────────────────────────────────
 
 /// Fill an input element: when `force` is `false`, run Playwright's
@@ -262,6 +352,16 @@ pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool
     }
   }
   let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
+  // Use the prototype's native `value` setter — React (and other
+  // controlled-input frameworks) wrap the descriptor on the element
+  // instance to track changes. Setting `this.value = '…'` directly
+  // bypasses React's tracker and the controlled component never sees
+  // the new value, so onChange never fires and component state stays
+  // stale (the input visually shows the new text but useState() keeps
+  // the old). Calling the prototype setter via `setter.call(el, v)`
+  // restores the change-detection signal — this is the same trick
+  // Playwright uses (`packages/injected/src/injectedScript.ts::fill`
+  // → keyboard typing path) and React DevTools.
   element
     .call_js_fn(&format!(
       "function() {{ \
@@ -271,8 +371,16 @@ pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool
               this.textContent = '{escaped}'; \
               this.dispatchEvent(new InputEvent('input', {{bubbles: true}})); \
             }} else {{ \
-              this.value = ''; \
-              this.value = '{escaped}'; \
+              var proto = Object.getPrototypeOf(this); \
+              var desc = Object.getOwnPropertyDescriptor(proto, 'value'); \
+              var setter = desc && desc.set; \
+              if (setter) {{ \
+                setter.call(this, ''); \
+                setter.call(this, '{escaped}'); \
+              }} else {{ \
+                this.value = ''; \
+                this.value = '{escaped}'; \
+              }} \
               this.dispatchEvent(new Event('input', {{bubbles: true}})); \
               this.dispatchEvent(new Event('change', {{bubbles: true}})); \
             }} \
@@ -748,19 +856,33 @@ pub async fn click_with_opts(
   page: &AnyPage,
   opts: &crate::options::ClickOptions,
 ) -> Result<(), String> {
-  if !opts.is_force() {
-    check_click_guard(element, page).await.map_err(|e| e.to_string())?;
-    wait_for_actionable(element, page).await.ok();
-  }
   let args = crate::backend::BackendClickArgs::from_options(opts);
+  // Single combined pre-flight: `clickGuard` + `isActionable` +
+  // `scrollIntoView` + `clickPoint` in ONE callFunctionOn.
+  // Replaces 4 sequential RTTs (the prior `check_click_guard +
+  // wait_for_actionable + resolve_click_point` chain). When `force`
+  // is set the actionability check is skipped page-side; we still
+  // pay one RTT for the click point + scroll, which is unavoidable.
+  // When `trial` is set we skip the dispatch but still pay the
+  // pre-flight (Playwright parity — `trial` reports actionability).
+  let (x, y) = if opts.is_force() {
+    // Force path: skip clickGuard + isActionable, but still need
+    // the click point + scroll. Use the single-RTT helper bypassing
+    // both checks via the existing path.
+    resolve_click_point(element, opts.position).await?
+  } else {
+    match click_prep(element, page, opts.position).await? {
+      ClickPrep::Ready { x, y } => (x, y),
+      ClickPrep::IsSelect => return Err(ClickGuardError::IsSelect.to_string()),
+      ClickPrep::IsFileInput => return Err(ClickGuardError::IsFileInput.to_string()),
+      ClickPrep::NotActionable { reason } => return Err(reason),
+    }
+  };
   page.press_modifiers(&opts.modifiers).await?;
   let result = if opts.is_trial() {
     Ok(())
   } else {
-    match resolve_click_point(element, opts.position).await {
-      Ok((x, y)) => page.click_at_with(x, y, &args).await,
-      Err(e) => Err(e),
-    }
+    page.click_at_with(x, y, &args).await
   };
   // Always release modifiers so page state doesn't leak.
   let _ = page.release_modifiers(&opts.modifiers).await;

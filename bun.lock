@@ -8,6 +8,14 @@
         "@ferridriver/test": "workspace:*",
       },
     },
+    "bench/fd-tests": {
+      "name": "ferridriver-bench-fd-tests",
+      "version": "0.0.1",
+      "dependencies": {
+        "@ferridriver/node": "workspace:*",
+        "@ferridriver/test": "workspace:*",
+      },
+    },
     "crates/ferridriver-node": {
       "name": "@ferridriver/node",
       "version": "0.1.0",
@@ -887,6 +895,8 @@
     "fast-wrap-ansi": ["fast-wrap-ansi@0.2.0", "", { "dependencies": { "fast-string-width": "^3.0.2" } }, "sha512-rLV8JHxTyhVmFYhBJuMujcrHqOT2cnO5Zxj37qROj23CP39GXubJRBUFF0z8KFK77Uc0SukZUf7JZhsVEQ6n8w=="],
 
     "fdir": ["fdir@6.5.0", "", { "peerDependencies": { "picomatch": "^3 || ^4" }, "optionalPeers": ["picomatch"] }, "sha512-tIbYtZbucOs0BRGqPJkshJUYdL+SDH7dVM8gjy+ERp3WAUjLEFJE+02kanyHtwjWOnwrKYBiwAmM0p4kLJAnXg=="],
+
+    "ferridriver-bench-fd-tests": ["ferridriver-bench-fd-tests@workspace:bench/fd-tests"],
 
     "ferridriver-docs": ["ferridriver-docs@workspace:site"],
 

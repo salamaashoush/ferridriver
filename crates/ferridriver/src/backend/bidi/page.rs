@@ -596,7 +596,11 @@ impl BidiPage {
 
   pub async fn find_element(&self, selector: &str) -> Result<AnyElement, String> {
     self.ensure_engine_injected().await?;
-    let sel_js = crate::selectors::build_selone_js(selector, "window.__fd")?;
+    // `find_element` is a non-strict path (used by raw page.locator
+    // resolution + a few engine-internal callers); pass strict=false
+    // so the engine returns first-match instead of throwing on
+    // multi-match.
+    let sel_js = crate::selectors::build_selone_js(selector, "window.__fd", false)?;
     self
       .evaluate_to_element(&sel_js, None)
       .await

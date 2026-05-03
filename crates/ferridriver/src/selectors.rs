@@ -511,13 +511,43 @@ pub async fn query_one_prebuilt(
 /// Build the JS expression for `selOne` from a selector string.
 /// Call once, then pass to `query_one_prebuilt` in a retry loop.
 ///
+/// `strict = true` makes the engine throw a recognisable
+/// `strict mode violation: <count>` error when the selector matches
+/// more than one element — mirrors Playwright's
+/// `injected.querySelector(parsed, root, strict)` pattern. The host
+/// catches the exception and converts it to a typed
+/// `FerriError::StrictModeViolation`. Skipping the separate
+/// `query_all` + `cleanup_tags` round-trips that the strict check
+/// would otherwise need (~2 RTTs per locator action).
+///
 /// # Errors
 ///
 /// Returns an error if the selector string cannot be parsed.
-pub fn build_selone_js(selector: &str, fd: &str) -> Result<String, String> {
+pub fn build_selone_js(selector: &str, fd: &str, strict: bool) -> Result<String, String> {
   let parsed = parse(selector)?;
   let parts_json = build_parts_json(&parsed);
-  Ok(format!("{fd}.selOne({parts_json})"))
+  let strict_lit = if strict { "true" } else { "false" };
+  Ok(format!("{fd}.selOne({parts_json},{strict_lit})"))
+}
+
+/// Parse a `strict mode violation: <count>` exception message thrown
+/// by the engine-side `selOne(parts, strict=true)` and return the
+/// match count. Used by [`crate::locator::Locator`] to convert a
+/// page-side strict violation into a typed
+/// [`crate::error::FerriError::StrictModeViolation`] without paying
+/// the separate `query_all` round-trip the previous implementation
+/// did up-front. Mirrors Playwright's exception flow from
+/// `injected.querySelector(parsed, root, strict)` —
+/// `/tmp/playwright/packages/injected/src/injectedScript.ts:278`.
+#[must_use]
+pub fn parse_strict_violation_count(message: &str) -> Option<usize> {
+  let needle = "strict mode violation:";
+  let idx = message.find(needle)?;
+  let tail = message[idx + needle.len()..].trim();
+  // The tail starts with the count, optionally followed by other
+  // tokens — take the leading run of digits.
+  let count_str: String = tail.chars().take_while(char::is_ascii_digit).collect();
+  count_str.parse().ok()
 }
 
 /// Clean up any leftover selector tags (call after operations).

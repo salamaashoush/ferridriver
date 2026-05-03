@@ -1,0 +1,13 @@
+{
+  "name": "ferridriver-bench-fd-tests",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "node ../../packages/ferridriver-test/dist/cli.js test"
+  },
+  "dependencies": {
+    "@ferridriver/test": "workspace:*",
+    "@ferridriver/node": "workspace:*"
+  }
+}

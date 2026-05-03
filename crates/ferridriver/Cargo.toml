@@ -29,6 +29,9 @@ rustc-hash = "2"
 arc-swap = { workspace = true }
 reqwest = { version = "0.13", default-features = false, features = ["json", "multipart", "cookies", "rustls", "stream", "query", "form"] }
 bytes = "1"
+dashmap = { workspace = true }
+parking_lot = "0.12"
+memchr = "2"
 thiserror = { workspace = true }
 zip = { version = "8", default-features = false, features = ["deflate"] }
 tokio-stream = "0.1"

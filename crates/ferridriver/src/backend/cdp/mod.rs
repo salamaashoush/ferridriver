@@ -97,40 +97,55 @@ impl<T: CdpTransport> Clone for CdpBrowser<T> {
   }
 }
 
+/// Build the `Emulation.setDeviceMetricsOverride` params object for
+/// `config`. Shared between the per-page `enable_domains` parallel
+/// batch (which seeds `last_metrics_params` with the value it just
+/// shipped) and `emulate_viewport` (which compares against that
+/// seed to skip redundant RTTs). Mirrors Playwright's
+/// `_metricsOverride` shape in `crPage.ts:920`.
+fn metrics_params_for(config: &crate::options::ViewportConfig) -> serde_json::Value {
+  let is_landscape = config.is_landscape || config.width > config.height;
+  let orientation = if config.is_mobile {
+    if is_landscape {
+      serde_json::json!({"angle": 90, "type": "landscapePrimary"})
+    } else {
+      serde_json::json!({"angle": 0, "type": "portraitPrimary"})
+    }
+  } else {
+    serde_json::json!({"angle": 0, "type": "landscapePrimary"})
+  };
+  serde_json::json!({
+    "width": config.width,
+    "height": config.height,
+    "deviceScaleFactor": config.device_scale_factor,
+    "mobile": config.is_mobile,
+    "screenWidth": config.width,
+    "screenHeight": config.height,
+    "screenOrientation": orientation,
+  })
+}
+
 impl<T: CdpWrap> CdpBrowser<T> {
   /// Enable required CDP domains on a session so events and queries work.
   /// If `viewport` is provided, sets viewport in the same parallel batch.
   /// If `unpause` is true, sends `Runtime.runIfWaitingForDebugger` in the same
   /// batch (for targets created with `waitForDebuggerOnStart`).
+  ///
+  /// Mirrors Playwright's `FrameSession._initialize()`
+  /// (`/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:495-549`):
+  /// every per-page setup CDP command rides one `Promise.all` /
+  /// `tokio::join!` so Chrome amortises ordering over a single
+  /// receive-loop pass instead of paying one full RTT per command.
   async fn enable_domains(
     transport: &T,
     session_id: Option<&str>,
     viewport: Option<&crate::options::ViewportConfig>,
     unpause: bool,
-  ) -> Result<(), String> {
+    init_script: Option<&str>,
+  ) -> Result<Option<Vec<super::FrameInfo>>, String> {
     let ep = super::empty_params();
 
-    let vp_params = viewport.map(|vp| {
-      let is_landscape = vp.is_landscape || vp.width > vp.height;
-      let orientation = if vp.is_mobile {
-        if is_landscape {
-          serde_json::json!({"angle": 90, "type": "landscapePrimary"})
-        } else {
-          serde_json::json!({"angle": 0, "type": "portraitPrimary"})
-        }
-      } else {
-        serde_json::json!({"angle": 0, "type": "landscapePrimary"})
-      };
-      serde_json::json!({
-        "width": vp.width,
-        "height": vp.height,
-        "deviceScaleFactor": vp.device_scale_factor,
-        "mobile": vp.is_mobile,
-        "screenWidth": vp.width,
-        "screenHeight": vp.height,
-        "screenOrientation": orientation,
-      })
-    });
+    let vp_params = viewport.map(metrics_params_for);
 
     // Fire all CDP commands in parallel — matches Playwright's FrameSession._initialize().
     // Keep default page bootstrap minimal. Domains for logging and explicit focus
@@ -159,7 +174,33 @@ impl<T: CdpWrap> CdpBrowser<T> {
       }
     };
 
-    let (r1, r2, r3, r4, r5, r6, r7) = tokio::join!(
+    // Pre-register the lazy-inject IIFE in the same batch when supplied.
+    // CDP processes commands on a single session in send-order, so
+    // `Page.enable` lands first; `addScriptToEvaluateOnNewDocument`
+    // with `runImmediately:true` then runs the IIFE in the existing
+    // about:blank context AND every future document (including
+    // navigations and child frames). Saves the per-page sequential
+    // RTT that the lazy `ensure_engine_injected` path otherwise pays
+    // on the first selector use.
+    let inject_fut = async {
+      if let Some(src) = init_script {
+        transport
+          .send_command(
+            session_id,
+            "Page.addScriptToEvaluateOnNewDocument",
+            serde_json::json!({
+              "source": src,
+              "runImmediately": true,
+            }),
+          )
+          .await
+          .map(|_| ())
+      } else {
+        Ok(())
+      }
+    };
+
+    let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep.clone()),
       transport.send_command(session_id, "Runtime.enable", ep.clone()),
       transport.send_command(session_id, "Network.enable", ep.clone()),
@@ -174,6 +215,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
         serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true})
       ),
       vp_fut,
+      inject_fut,
+      transport.send_command(session_id, "Page.getFrameTree", super::empty_params()),
       unpause_fut,
     );
     r1?;
@@ -183,7 +226,13 @@ impl<T: CdpWrap> CdpBrowser<T> {
     r5?;
     r6?;
     r7?;
-    Ok(())
+    r9?;
+    let tree = r8?;
+    let mut frames = Vec::new();
+    if let Some(frame_tree) = tree.get("frameTree") {
+      collect_frames(frame_tree, &mut frames);
+    }
+    Ok(Some(frames))
   }
 
   /// Internal constructor for after transport + child process setup.
@@ -288,7 +337,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
           .map_err(|e| format!("Lock poisoned: {e}"))?
           .insert(target_id.clone(), sid.clone());
 
-        Self::enable_domains(&self.transport, sid.as_deref(), None, false).await?;
+        Self::enable_domains(&self.transport, sid.as_deref(), None, false, None).await?;
 
         sid
       };
@@ -309,13 +358,18 @@ impl<T: CdpWrap> CdpBrowser<T> {
         fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
         main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
+        last_metrics_params: Arc::new(std::sync::Mutex::new(None)),
+        seeded_frame_tree: Arc::new(std::sync::Mutex::new(None)),
+        last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
         lifecycle: lc_state.clone(),
         lifecycle_notify: lc_notify.clone(),
         injected_script: Arc::new(InjectedScriptManager::new()),
         nav_request_slot: crate::network::NavRequestSlot::new(),
         dialog_manager: crate::dialog::DialogManager::new(),
         file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+        file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         download_manager: crate::download::DownloadManager::new(),
+        download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
         downloads_dir: Arc::new(
           tempfile::Builder::new()
             .prefix("ferridriver-downloads-")
@@ -426,10 +480,31 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .insert(target_id.clone(), sid.clone());
 
     // Enable domains + unpause in one parallel batch (saves a round-trip).
-    Self::enable_domains(&self.transport, sid.as_deref(), viewport, true).await?;
+    // Eager-inject the lazy `window.__fd` selector engine in the same
+    // parallel batch as the per-page enables. Mirrors Playwright's
+    // `_evaluateOnNewDocument(initScript, 'main', runImmediately:true)`
+    // call inside `FrameSession._initialize` (crPage.ts:545). Saves
+    // the sequential RTT that an on-demand `ensure_engine_injected`
+    // otherwise pays before the first locator/selector use — the
+    // bench's `locator(...).click()` etc. fire immediately so the
+    // first selector lookup almost always finds the engine missing.
+    //
+    // The same parallel batch also pulls `Page.getFrameTree`, so the
+    // page-level `seed_frame_cache` reads it from the seeded slot
+    // below instead of paying a sequential RTT after enables return.
+    let inject_src = crate::selectors::build_lazy_inject_js();
+    let frame_tree_seed =
+      Self::enable_domains(&self.transport, sid.as_deref(), viewport, true, Some(&inject_src)).await?;
 
     let lc_state = Arc::new(std::sync::Mutex::new(LifecycleState::new()));
     let lc_notify = Arc::new(tokio::sync::Notify::new());
+    let injected_script = Arc::new(InjectedScriptManager::new());
+    // The init script rode the parallel batch above — flag the
+    // manager as already-injected so subsequent
+    // `ensure_engine_injected` calls become no-ops.
+    injected_script
+      .injected
+      .store(true, std::sync::atomic::Ordering::Relaxed);
     let page = CdpPage {
       transport: self.transport.clone(),
       session_id: sid.map(Arc::from),
@@ -444,13 +519,22 @@ impl<T: CdpWrap> CdpBrowser<T> {
       fetch_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       http_credentials: Arc::new(tokio::sync::RwLock::new(None)),
       main_frame_id: Arc::new(tokio::sync::OnceCell::new()),
+      // Seed the metrics cache with the exact params `enable_domains`
+      // just shipped, so the first `apply_context_options` call
+      // skips the redundant `setDeviceMetricsOverride` RTT when the
+      // bag carries the same default size.
+      last_metrics_params: Arc::new(std::sync::Mutex::new(viewport.map(metrics_params_for))),
+      seeded_frame_tree: Arc::new(std::sync::Mutex::new(frame_tree_seed)),
+      last_cursor_pos: Arc::new(std::sync::Mutex::new(None)),
       lifecycle: lc_state.clone(),
       lifecycle_notify: lc_notify.clone(),
-      injected_script: Arc::new(InjectedScriptManager::new()),
+      injected_script,
       nav_request_slot: crate::network::NavRequestSlot::new(),
       dialog_manager: crate::dialog::DialogManager::new(),
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
+      file_chooser_intercept_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       download_manager: crate::download::DownloadManager::new(),
+      download_behavior_enabled: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       downloads_dir: Arc::new(
         tempfile::Builder::new()
           .prefix("ferridriver-downloads-")
@@ -623,7 +707,7 @@ impl CdpBrowser<ws::WsTransport> {
             .get("sessionId")
             .and_then(|v| v.as_str())
             .map(std::string::ToString::to_string);
-          Self::enable_domains(&transport, sid.as_deref(), None, false).await?;
+          Box::pin(Self::enable_domains(&transport, sid.as_deref(), None, false, None)).await?;
           attached.insert(target_id, sid);
           found_page = true;
           break; // take first page
@@ -652,7 +736,7 @@ impl CdpBrowser<ws::WsTransport> {
         .get("sessionId")
         .and_then(|v| v.as_str())
         .map(std::string::ToString::to_string);
-      Self::enable_domains(&transport, sid.as_deref(), None, false).await?;
+      Box::pin(Self::enable_domains(&transport, sid.as_deref(), None, false, None)).await?;
       attached.insert(target_id, sid);
     }
 
@@ -976,6 +1060,32 @@ pub struct CdpPage<T: CdpTransport> {
   http_credentials: Arc<tokio::sync::RwLock<Option<crate::options::HttpCredentials>>>,
   /// Cached main frame ID to avoid repeated `Page.getFrameTree` calls.
   main_frame_id: Arc<tokio::sync::OnceCell<String>>,
+  /// Most recently applied `Emulation.setDeviceMetricsOverride`
+  /// params. Used by `emulate_viewport` to skip the redundant
+  /// `setDeviceMetricsOverride` RTT that `apply_context_options`
+  /// would otherwise pay re-applying the same size+orientation
+  /// `enable_domains` already sent at page-init time. Cached as the
+  /// exact JSON `Value` we'd ship — mirrors Playwright's
+  /// `_metricsOverride` JSON-string equality check
+  /// (`/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:932`).
+  /// Touch emulation lives in a separate command and runs through its
+  /// own idempotent path so changing `has_touch` doesn't get masked
+  /// by a metrics-only cache hit.
+  last_metrics_params: Arc<std::sync::Mutex<Option<serde_json::Value>>>,
+  /// Frame tree captured during the per-page `enable_domains` parallel
+  /// batch — `Page::with_context::seed_frame_cache` consumes this
+  /// instead of paying a sequential `Page.getFrameTree` RTT once
+  /// per new page. `None` for backends/paths that didn't pre-seed
+  /// (e.g. attach-to-existing); callers fall back to a fresh fetch.
+  seeded_frame_tree: Arc<std::sync::Mutex<Option<Vec<super::FrameInfo>>>>,
+  /// Last known cursor position. Updated by every `mousePressed` /
+  /// `mouseMoved` we ship; consulted by `click_at_with` to skip the
+  /// pre-press `mouseMoved` when the cursor is already at the
+  /// target (Playwright tracks this as `_lastPosition`). Saves one
+  /// CDP RTT per click on tight loops where the cursor stays put
+  /// between clicks (the common bench shape: click → assert → click
+  /// the same button again).
+  last_cursor_pos: Arc<std::sync::Mutex<Option<(f64, f64)>>>,
   /// Lifecycle state for current document — tracks loaderId + fired events.
   /// Updated synchronously by the transport reader task. Checked synchronously by `goto()`.
   lifecycle: Arc<std::sync::Mutex<LifecycleState>>,
@@ -1004,6 +1114,14 @@ pub struct CdpPage<T: CdpTransport> {
   /// handler claims, the element handle is disposed — mirrors
   /// `/tmp/playwright/packages/playwright-core/src/server/page.ts::_onFileChooserOpened`.
   pub file_chooser_manager: crate::file_chooser::FileChooserManager,
+  /// Idempotency latch for `Page.setInterceptFileChooserDialog`.
+  /// Mirrors Playwright's `_updateFileChooserInterception` lazy
+  /// enabling: the CDP command fires once, the first time a user
+  /// shows interest (`page.on('filechooser', ...)`,
+  /// `wait_for_file_chooser`, etc.). With no listener registered the
+  /// command is never sent — saves one RTT per page in workloads
+  /// that don't use file pickers.
+  pub file_chooser_intercept_enabled: Arc<std::sync::atomic::AtomicBool>,
   /// Per-page download handler registry. Backend download listener
   /// builds a live [`crate::download::Download`] on
   /// `Browser.downloadWillBegin` and synchronously calls
@@ -1012,6 +1130,15 @@ pub struct CdpPage<T: CdpTransport> {
   /// watch. Mirrors
   /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts::_onDownloadWillBegin`.
   pub download_manager: crate::download::DownloadManager,
+  /// Idempotency latch for `Browser.setDownloadBehavior`. Lazy
+  /// enabling: the CDP command fires once, the first time a user
+  /// shows interest in downloads (`page.on('download', ...)`,
+  /// `wait_for_download`, etc.). Saves one RTT per page on workloads
+  /// that don't trigger downloads. Note: `apply_context_options`
+  /// still fires the command when `accept_downloads` is explicitly
+  /// set in the bag, so opt-in callers keep working without needing
+  /// to register a listener first.
+  pub download_behavior_enabled: Arc<std::sync::atomic::AtomicBool>,
   /// Per-page temp directory that Chrome is configured to write
   /// downloads into (via `Browser.setDownloadBehavior({ behavior:
   /// 'allowAndName', downloadPath, eventsEnabled: true })`). Held as
@@ -1046,9 +1173,10 @@ impl InjectedScriptManager {
     }
   }
 
-  fn reset(&self) {
-    self.injected.store(false, std::sync::atomic::Ordering::Relaxed);
-  }
+  // `reset()` was removed — init scripts registered via
+  // `Page.addScriptToEvaluateOnNewDocument` persist for the page's
+  // lifetime, so we never need to re-register on navigation /
+  // context-cleared events.
 
   async fn ensure<T: CdpWrap>(&self, page: &CdpPage<T>) -> Result<(), String> {
     if self.injected.load(std::sync::atomic::Ordering::Relaxed) {
@@ -1096,13 +1224,18 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       fetch_enabled: self.fetch_enabled.clone(),
       http_credentials: self.http_credentials.clone(),
       main_frame_id: self.main_frame_id.clone(),
+      last_metrics_params: self.last_metrics_params.clone(),
+      seeded_frame_tree: self.seeded_frame_tree.clone(),
+      last_cursor_pos: self.last_cursor_pos.clone(),
       lifecycle: self.lifecycle.clone(),
       lifecycle_notify: self.lifecycle_notify.clone(),
       injected_script: self.injected_script.clone(),
       nav_request_slot: self.nav_request_slot.clone(),
       dialog_manager: self.dialog_manager.clone(),
       file_chooser_manager: self.file_chooser_manager.clone(),
+      file_chooser_intercept_enabled: self.file_chooser_intercept_enabled.clone(),
       download_manager: self.download_manager.clone(),
+      download_behavior_enabled: self.download_behavior_enabled.clone(),
       downloads_dir: self.downloads_dir.clone(),
       page_backref: self.page_backref.clone(),
     }
@@ -1127,7 +1260,12 @@ impl<T: CdpWrap> CdpPage<T> {
     timeout_ms: u64,
     referer: Option<&str>,
   ) -> Result<Option<Response>, String> {
-    self.injected_script.reset();
+    // No `injected_script.reset()` here. The init script registered via
+    // `Page.addScriptToEvaluateOnNewDocument` persists for the page's
+    // lifetime, so every post-navigation document already runs the
+    // self-guarded `window.__fd` IIFE. Resetting the manager triggers
+    // a redundant `Page.addScriptToEvaluateOnNewDocument` RTT on every
+    // `goto()` — this code used to pay it once per nav for nothing.
     let target_event = match lifecycle {
       crate::backend::NavLifecycle::Commit => "commit",
       crate::backend::NavLifecycle::DomContentLoaded => "domcontentloaded",
@@ -1209,7 +1347,8 @@ impl<T: CdpWrap> CdpPage<T> {
     lifecycle: crate::backend::NavLifecycle,
     timeout_ms: u64,
   ) -> Result<Option<Response>, String> {
-    self.injected_script.reset();
+    // See `goto`: the registered init script persists across reloads;
+    // no need to reset and re-fire `Page.addScriptToEvaluateOnNewDocument`.
     self.nav_request_slot.clear();
     let rx = self
       .transport
@@ -1329,6 +1468,57 @@ impl<T: CdpWrap> CdpPage<T> {
     self.injected_script.ensure(self).await
   }
 
+  /// Idempotently fire `Page.setInterceptFileChooserDialog({enabled:true})`.
+  /// Mirrors Playwright's `_updateFileChooserInterception`
+  /// (`/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:1009`):
+  /// the CDP command is a no-op until any test path needs file
+  /// chooser events, at which point this method is called and the
+  /// command fires once. Subsequent calls are no-ops.
+  pub async fn enable_file_chooser_intercept(&self) -> Result<(), String> {
+    if self
+      .file_chooser_intercept_enabled
+      .swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+      return Ok(());
+    }
+    let _ = self
+      .cmd(
+        "Page.setInterceptFileChooserDialog",
+        serde_json::json!({ "enabled": true }),
+      )
+      .await;
+    Ok(())
+  }
+
+  /// Idempotently fire `Browser.setDownloadBehavior` so download
+  /// events flow. Mirrors Playwright's per-context download config
+  /// (`/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts:354`)
+  /// but lazy: not fired until a test path actually needs downloads.
+  pub async fn enable_download_behavior(&self) -> Result<(), String> {
+    if self
+      .download_behavior_enabled
+      .swap(true, std::sync::atomic::Ordering::Relaxed)
+    {
+      return Ok(());
+    }
+    let params = if let Some(ref ctx) = self.browser_context_id {
+      serde_json::json!({
+        "behavior": "allowAndName",
+        "browserContextId": &**ctx,
+        "downloadPath": self.downloads_dir.path().to_string_lossy(),
+        "eventsEnabled": true,
+      })
+    } else {
+      serde_json::json!({
+        "behavior": "allowAndName",
+        "downloadPath": self.downloads_dir.path().to_string_lossy(),
+        "eventsEnabled": true,
+      })
+    };
+    let _ = self.cmd("Browser.setDownloadBehavior", params).await;
+    Ok(())
+  }
+
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
     let result = self
       .cmd(
@@ -1408,37 +1598,92 @@ impl<T: CdpWrap> CdpPage<T> {
       }
     }
 
-    let mut params = serde_json::json!({
-      "functionDeclaration": UTILITY_EVAL_WRAPPER,
-      "arguments": arguments,
-      "returnByValue": return_by_value,
-      "awaitPromise": true,
-    });
+    // Anchor strategy:
+    //  1. `executionContextId` (frame_contexts cache hit) — best,
+    //     unambiguous, no extra RTT.
+    //  2. First handle's `objectId` — Chrome runs the function with
+    //     `this` bound to that handle, IN that handle's context. The
+    //     wrapper ignores `this`, so this just gives us a free
+    //     context anchor without an extra RTT.
+    //  3. `Runtime.evaluate` IIFE fallback — avoids `callFunctionOn`
+    //     entirely (which needs an anchor) by inlining literal args
+    //     into the wrapper expression. Chrome picks the default
+    //     execution context for an `evaluate` call without
+    //     `contextId`, so no `globalThis` lookup needed.
+    //
+    //  Prior behaviour fired `Runtime.evaluate("globalThis")` to
+    //  obtain an anchoring objectId — costs 1 extra RTT per
+    //  evaluate. Path 3 below replaces that with a single
+    //  `Runtime.evaluate` (the user's wrapper invocation), saving
+    //  one RTT per evaluate that has no handles AND no cached
+    //  contextId — i.e. the bench's `page.evaluate(string)` shape.
     if let Some(ctx_id) = context_id {
-      params["executionContextId"] = serde_json::json!(ctx_id);
-    } else {
-      // CDP requires an anchoring objectId or executionContextId.
-      // Default to `globalThis` in the main context.
-      let r = self
-        .cmd(
-          "Runtime.evaluate",
-          serde_json::json!({
-            "expression": "globalThis",
-            "returnByValue": false,
-          }),
-        )
-        .await?;
-      let obj_id = r
-        .get("result")
-        .and_then(|r| r.get("objectId"))
-        .and_then(|v| v.as_str())
-        .ok_or("call_utility_evaluate: could not obtain globalThis objectId")?
-        .to_string();
-      params["objectId"] = serde_json::json!(obj_id);
+      let params = serde_json::json!({
+        "functionDeclaration": UTILITY_EVAL_WRAPPER,
+        "arguments": arguments,
+        "returnByValue": return_by_value,
+        "awaitPromise": true,
+        "executionContextId": ctx_id,
+      });
+      let response = self.cmd("Runtime.callFunctionOn", params).await?;
+      return Self::parse_eval_response(&response, return_by_value);
     }
 
-    let response = self.cmd("Runtime.callFunctionOn", params).await?;
+    if !handles.is_empty() {
+      // Anchor on the first handle's objectId — gives Chrome the
+      // execution context for free, no extra RTT.
+      let anchor = match &handles[0] {
+        crate::protocol::HandleId::Cdp(obj_id) => obj_id.clone(),
+        _ => return Err("call_utility_evaluate: non-CDP handle in arg.handles on CDP backend".into()),
+      };
+      let params = serde_json::json!({
+        "functionDeclaration": UTILITY_EVAL_WRAPPER,
+        "arguments": arguments,
+        "returnByValue": return_by_value,
+        "awaitPromise": true,
+        "objectId": anchor,
+      });
+      let response = self.cmd("Runtime.callFunctionOn", params).await?;
+      return Self::parse_eval_response(&response, return_by_value);
+    }
 
+    // No contextId, no handles — use Runtime.evaluate IIFE. Chrome
+    // picks the default execution context. Wrap as
+    // `(WRAPPER)(literal_args...)`. Args are JS-literal-safe via
+    // `serde_json::to_string` (a valid JSON string is a valid JS
+    // string literal too).
+    let is_fn_lit = match is_function {
+      Some(true) => "true",
+      Some(false) => "false",
+      None => "null",
+    };
+    let return_by_value_lit = if return_by_value { "true" } else { "false" };
+    let fn_source_lit = serde_json::to_string(fn_source).map_err(|e| e.to_string())?;
+    let args_json_lit = serde_json::to_string(&args_json).map_err(|e| e.to_string())?;
+    let expression =
+      format!("({UTILITY_EVAL_WRAPPER})({is_fn_lit},{return_by_value_lit},{fn_source_lit},{count},{args_json_lit})",);
+    let response = self
+      .cmd(
+        "Runtime.evaluate",
+        serde_json::json!({
+          "expression": expression,
+          "returnByValue": return_by_value,
+          "awaitPromise": true,
+        }),
+      )
+      .await?;
+    Self::parse_eval_response(&response, return_by_value)
+  }
+
+  /// Decode a `Runtime.evaluate` / `Runtime.callFunctionOn` response
+  /// produced by the `UtilityScript` wrapper (`UTILITY_EVAL_WRAPPER`
+  /// callFunctionOn path).
+  /// Both shapes return the same `{ result: { value, objectId, type,
+  /// subtype, ... } }` envelope, so the decoder is shared.
+  fn parse_eval_response(
+    response: &serde_json::Value,
+    return_by_value: bool,
+  ) -> Result<crate::js_handle::EvaluateResult, String> {
     if let Some(exception) = response.get("exceptionDetails") {
       let text = exception
         .get("text")
@@ -1501,6 +1746,23 @@ impl<T: CdpWrap> CdpPage<T> {
   // ---- Frames ----
 
   pub async fn get_frame_tree(&self) -> Result<Vec<super::FrameInfo>, String> {
+    // Consume the seeded tree captured during the per-page parallel
+    // `enable_domains` batch. Skips the per-call `Page.getFrameTree`
+    // RTT for the first read after `new_page` — every subsequent read
+    // (e.g. after a navigation or iframe attach) goes back to the
+    // network. Mirrors Playwright's `frameManager._frameTree` which
+    // is seeded from the `Page.getFrameTree` it fires inside
+    // `FrameSession._initialize` and then maintained via events
+    // (`/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:495-549`).
+    {
+      let mut guard = match self.seeded_frame_tree.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+      };
+      if let Some(tree) = guard.take() {
+        return Ok(tree);
+      }
+    }
     let result = self.cmd("Page.getFrameTree", super::empty_params()).await?;
 
     let mut frames = Vec::new();
@@ -1603,7 +1865,13 @@ impl<T: CdpWrap> CdpPage<T> {
   /// element. Used by `Locator` to scope action-method resolution to
   /// the locator's bound `Frame` — Playwright parity.
   pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement, String> {
-    let _ = self.cmd("DOM.getDocument", serde_json::json!({"depth": 0})).await;
+    // Note: previously fired `DOM.getDocument` here but discarded the
+    // result. It was a leftover from when this path used
+    // `DOM.querySelector` (which DOES require the agent's DOM tree
+    // to be populated). The current `Runtime.evaluate` path returns
+    // a `RemoteObjectId` directly from the renderer's V8 context,
+    // independent of the DOM agent state — no priming needed.
+    // Saves 1 RTT per locator action / element handle resolve.
 
     // Resolve the frame's execution context id (None → main page).
     let context_id = match frame_id {
@@ -2176,21 +2444,39 @@ impl<T: CdpWrap> CdpPage<T> {
     // emitting a `mouseMoved` at the target before press so the page
     // sees the move even when we can't track the prior cursor.
     let steps = args.steps.max(1);
-    for i in 1..=steps {
-      let t = f64::from(i) / f64::from(steps);
-      let sx = x * t; // conservative: interpolate from (0,0) when we lack prior-pos state
-      let sy = y * t;
-      self
-        .cmd(
-          "Input.dispatchMouseEvent",
-          serde_json::json!({
-            "type": "mouseMoved",
-            "x": if i == steps { x } else { sx },
-            "y": if i == steps { y } else { sy },
-            "modifiers": mods,
-          }),
-        )
-        .await?;
+    // Read the prior cursor position synchronously. When `steps == 1`
+    // and the prior position is already at the click target, the
+    // pre-press `mouseMoved` is a no-op event-wise (Chrome treats
+    // identical-position consecutive moves as a single hover state),
+    // but the RTT itself still costs ~1 CDP RTT. Skip it on the
+    // common bench shape (back-to-back clicks at the same button).
+    // Mirrors Playwright's `_lastPosition` short-circuit in
+    // `/tmp/playwright/packages/playwright-core/src/server/chromium/crInput.ts`
+    // (Mouse class). The short-circuit is bypassed when `steps > 1`
+    // (caller asked for an animated move) or when no prior position
+    // is known (first click — must seed cursor in the renderer).
+    let skip_move = steps == 1
+      && match self.last_cursor_pos.lock() {
+        Ok(g) => matches!(*g, Some((px, py)) if (px - x).abs() < 0.5 && (py - y).abs() < 0.5),
+        Err(_) => false,
+      };
+    if !skip_move {
+      for i in 1..=steps {
+        let t = f64::from(i) / f64::from(steps);
+        let sx = x * t; // conservative: interpolate from (0,0) when we lack prior-pos state
+        let sy = y * t;
+        self
+          .cmd(
+            "Input.dispatchMouseEvent",
+            serde_json::json!({
+              "type": "mouseMoved",
+              "x": if i == steps { x } else { sx },
+              "y": if i == steps { y } else { sy },
+              "modifiers": mods,
+            }),
+          )
+          .await?;
+      }
     }
     for n in 1..=args.click_count {
       self
@@ -2223,6 +2509,11 @@ impl<T: CdpWrap> CdpPage<T> {
         )
         .await?;
     }
+    // Record final cursor position for the next click's
+    // skip-redundant-mouseMoved short-circuit.
+    if let Ok(mut guard) = self.last_cursor_pos.lock() {
+      *guard = Some((x, y));
+    }
     Ok(())
   }
 
@@ -2232,21 +2523,31 @@ impl<T: CdpWrap> CdpPage<T> {
   pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::BackendHoverArgs) -> Result<(), String> {
     let mods = args.modifiers_bitmask;
     let steps = args.steps.max(1);
-    for i in 1..=steps {
-      let t = f64::from(i) / f64::from(steps);
-      let sx = if i == steps { x } else { x * t };
-      let sy = if i == steps { y } else { y * t };
-      self
-        .cmd(
-          "Input.dispatchMouseEvent",
-          serde_json::json!({
-            "type": "mouseMoved",
-            "x": sx,
-            "y": sy,
-            "modifiers": mods,
-          }),
-        )
-        .await?;
+    let skip_move = steps == 1
+      && match self.last_cursor_pos.lock() {
+        Ok(g) => matches!(*g, Some((px, py)) if (px - x).abs() < 0.5 && (py - y).abs() < 0.5),
+        Err(_) => false,
+      };
+    if !skip_move {
+      for i in 1..=steps {
+        let t = f64::from(i) / f64::from(steps);
+        let sx = if i == steps { x } else { x * t };
+        let sy = if i == steps { y } else { y * t };
+        self
+          .cmd(
+            "Input.dispatchMouseEvent",
+            serde_json::json!({
+              "type": "mouseMoved",
+              "x": sx,
+              "y": sy,
+              "modifiers": mods,
+            }),
+          )
+          .await?;
+      }
+    }
+    if let Ok(mut guard) = self.last_cursor_pos.lock() {
+      *guard = Some((x, y));
     }
     Ok(())
   }
@@ -2862,26 +3163,29 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
-    let is_landscape = config.is_landscape || config.width > config.height;
-    let orientation = if config.is_mobile {
-      if is_landscape {
-        serde_json::json!({"angle": 90, "type": "landscapePrimary"})
-      } else {
-        serde_json::json!({"angle": 0, "type": "portraitPrimary"})
-      }
-    } else {
-      serde_json::json!({"angle": 0, "type": "landscapePrimary"})
+    let params = metrics_params_for(config);
+
+    // Skip the `setDeviceMetricsOverride` RTT when params match the
+    // last shipped value (Playwright `_metricsOverride` JSON-equality
+    // pattern, `crPage.ts:932`). Touch emulation is a separate
+    // command and runs through its own idempotent path below — a
+    // metrics cache hit must not mask a `has_touch` change.
+    let metrics_unchanged = {
+      let last = match self.last_metrics_params.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+      };
+      last.as_ref() == Some(&params)
     };
-    let params = serde_json::json!({
-        "width": config.width,
-        "height": config.height,
-        "deviceScaleFactor": config.device_scale_factor,
-        "mobile": config.is_mobile,
-        "screenWidth": config.width,
-        "screenHeight": config.height,
-        "screenOrientation": orientation,
-    });
-    self.cmd("Emulation.setDeviceMetricsOverride", params).await?;
+    if !metrics_unchanged {
+      self.cmd("Emulation.setDeviceMetricsOverride", params.clone()).await?;
+      let mut last = match self.last_metrics_params.lock() {
+        Ok(g) => g,
+        Err(p) => p.into_inner(),
+      };
+      *last = Some(params);
+    }
+
     if config.has_touch {
       // Pass `maxTouchPoints` explicitly so `navigator.maxTouchPoints`
       // reports a non-zero value (Chrome leaves it at 0 when the
@@ -3101,7 +3405,6 @@ impl<T: CdpWrap> CdpPage<T> {
       self.session_id.clone(),
       self.frame_contexts.clone(),
       self.events.clone(),
-      self.injected_script.clone(),
     );
   }
 
@@ -3410,18 +3713,16 @@ impl<T: CdpWrap> CdpPage<T> {
       // test can trigger the picker before our enable-intercept
       // reply lands. `transport.subscribe_events()` is synchronous
       // and cheap.
+      //
+      // We do NOT fire `Page.setInterceptFileChooserDialog` here.
+      // Mirrors Playwright's `_updateFileChooserInterception` lazy
+      // pattern (`/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:1009`):
+      // interception is enabled only when a `filechooser` listener
+      // is registered. The CDP command is fired by
+      // `update_file_chooser_intercept` from the page's
+      // `on('filechooser', ...)` registration path. Saves one RTT per
+      // newly-opened page (~5ms) when no test uses file pickers.
       let mut rx = transport.subscribe_events();
-
-      // Enable the intercept. Errors are swallowed — the target may
-      // have closed before we got here, and the command is
-      // best-effort (Playwright also `.catch(() => {})`s it).
-      let _ = transport
-        .send_command(
-          session_id.as_deref(),
-          "Page.setInterceptFileChooserDialog",
-          serde_json::json!({ "enabled": true }),
-        )
-        .await;
 
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
@@ -3515,32 +3816,18 @@ impl<T: CdpWrap> CdpPage<T> {
     page_backref: crate::backend::PageBackref,
   ) {
     tokio::spawn(async move {
-      // Subscribe FIRST to avoid racing the enable reply.
+      // Subscribe FIRST to avoid racing any future enable reply.
+      // We do NOT fire `Browser.setDownloadBehavior` here. Mirrors
+      // Playwright's lazy pattern: download behaviour is configured
+      // when a `download` listener registers (`page.on('download', ...)`,
+      // `wait_for_download`) — see `enable_download_behavior` below.
+      // Saves one RTT per page when no test uses downloads. Note:
+      // `apply_context_options` still fires `setDownloadBehavior` when
+      // the `BrowserContextOptions.accept_downloads` field is
+      // explicitly set, so opt-in callers keep working.
+      let _ = browser_context_id;
+      let _ = downloads_dir;
       let mut rx = transport.subscribe_events();
-
-      // Configure the download behaviour at the browser session via
-      // our page's session. Per-browser-context where we have a
-      // context id, browser-wide default otherwise. Errors are
-      // swallowed — the command is best-effort (Playwright's own
-      // `browser.setDownloadBehavior` caller also has error-tolerant
-      // semantics in test harnesses).
-      let params = if let Some(ref ctx) = browser_context_id {
-        serde_json::json!({
-          "behavior": "allowAndName",
-          "browserContextId": &**ctx,
-          "downloadPath": downloads_dir.path().to_string_lossy(),
-          "eventsEnabled": true,
-        })
-      } else {
-        serde_json::json!({
-          "behavior": "allowAndName",
-          "downloadPath": downloads_dir.path().to_string_lossy(),
-          "eventsEnabled": true,
-        })
-      };
-      let _ = transport
-        .send_command(session_id.as_deref(), "Browser.setDownloadBehavior", params)
-        .await;
 
       while let Ok(event) = rx.recv().await {
         // `Browser.downloadWillBegin` / `Browser.downloadProgress` fire
@@ -3645,7 +3932,6 @@ impl<T: CdpWrap> CdpPage<T> {
     session_id: Option<Arc<str>>,
     frame_contexts: Arc<tokio::sync::RwLock<FxHashMap<String, i64>>>,
     emitter: crate::events::EventEmitter,
-    injected_script: Arc<InjectedScriptManager>,
   ) {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_events();
@@ -3686,7 +3972,11 @@ impl<T: CdpWrap> CdpPage<T> {
           },
           "Runtime.executionContextsCleared" => {
             frame_contexts.write().await.clear();
-            injected_script.reset();
+            // Init scripts registered via `Page.addScriptToEvaluateOnNewDocument`
+            // are page-session-scoped, not context-scoped — they
+            // survive context clears (which happen on every navigation
+            // in Chrome). Resetting here forced a redundant
+            // re-registration RTT on every page navigation.
           },
           "Page.frameAttached" => {
             if let Some(params) = event.get("params") {
@@ -3715,10 +4005,15 @@ impl<T: CdpWrap> CdpPage<T> {
           },
           "Page.frameNavigated" => {
             if let Some(frame) = event.get("params").and_then(|p| p.get("frame")) {
-              let is_main = frame.get("parentId").is_none();
-              if is_main {
-                injected_script.reset();
-              }
+              // Note: we previously called `injected_script.reset()`
+              // on main-frame navigation. That was wrong:
+              // `Page.addScriptToEvaluateOnNewDocument` registers the
+              // source for ALL future documents on this target, so
+              // every post-navigation document already runs the
+              // self-guarded `window.__fd` IIFE on its own. Resetting
+              // forced a redundant `addScriptToEvaluateOnNewDocument`
+              // RTT on every navigation — the bench's 100×nav workload
+              // was paying ~5ms per test for nothing.
               emitter.emit(crate::events::PageEvent::FrameNavigated(super::FrameInfo {
                 frame_id: frame.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                 parent_frame_id: frame

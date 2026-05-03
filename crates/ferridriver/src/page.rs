@@ -1242,7 +1242,41 @@ impl Page {
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     Box::pin(self.inner.apply_context_options(opts))
       .await
-      .map_err(Into::into)
+      .map_err(Into::<crate::error::FerriError>::into)?;
+    // Also stash the bag in shared state so subsequent reads (e.g.
+    // `page.goto` resolving against the context's `baseURL`,
+    // `request` fixture's per-request base URL) see the same values
+    // the test runner just applied. Without this, calls like
+    // `apply_page_config` would dispatch the CDP commands but the
+    // bag stored at `BrowserContext` creation time stays empty,
+    // leaving relative `page.goto('/route')` to fail with "Cannot
+    // navigate to invalid URL".
+    if let Some(ctx) = self.context_ref.as_ref() {
+      let composite = ctx.key.to_composite();
+      let state = ctx.state.read().await;
+      let mut bag = state.get_context_options(&composite).unwrap_or_default();
+      // Merge: keep prior fields the bag may carry; overwrite the
+      // ones the caller specified. For now the merge is "callers
+      // pass a fully populated bag" so a wholesale replace is fine
+      // — keep this simple unless a real use-case needs deep merge.
+      if opts.base_url.is_some() {
+        bag.base_url = opts.base_url.clone();
+      }
+      if opts.user_agent.is_some() {
+        bag.user_agent = opts.user_agent.clone();
+      }
+      if opts.viewport != crate::options::ViewportOption::default() {
+        bag.viewport = opts.viewport.clone();
+      }
+      if opts.locale.is_some() {
+        bag.locale = opts.locale.clone();
+      }
+      if opts.timezone_id.is_some() {
+        bag.timezone_id = opts.timezone_id.clone();
+      }
+      state.set_context_options(&composite, bag);
+    }
+    Ok(())
   }
 
   // Context-level setters (setUserAgent, setLocale, setTimezone,
@@ -1703,12 +1737,39 @@ impl Page {
   /// }));
   /// ```
   pub fn on(&self, event_name: &str, callback: crate::events::EventCallback) -> crate::events::ListenerId {
+    self.lazy_enable_for_event(event_name);
     self.inner.events().on(event_name, callback)
   }
 
   /// Subscribe to a single event, then auto-remove the listener.
   pub fn once(&self, event_name: &str, callback: crate::events::EventCallback) -> crate::events::ListenerId {
+    self.lazy_enable_for_event(event_name);
     self.inner.events().once(event_name, callback)
+  }
+
+  /// Some events depend on a backend command being fired (file
+  /// chooser interception, download behaviour). When the user
+  /// expresses interest, fire-and-forget the command in the
+  /// background — best-effort; failure is silently swallowed and
+  /// would surface via the user not getting the event. Mirrors
+  /// Playwright's `_updateFileChooserInterception(false)` pattern
+  /// where the command is async but fire-and-forget around listener
+  /// registration (`crPage.ts:199`).
+  fn lazy_enable_for_event(&self, event_name: &str) {
+    let needs_filechooser = event_name == "filechooser";
+    let needs_download = event_name == "download";
+    if !needs_filechooser && !needs_download {
+      return;
+    }
+    let inner_for_task: AnyPage = self.inner.clone();
+    tokio::spawn(async move {
+      if needs_filechooser {
+        let _ = inner_for_task.enable_file_chooser_intercept().await;
+      }
+      if needs_download {
+        let _ = inner_for_task.enable_download_behavior().await;
+      }
+    });
   }
 
   /// Remove an event listener by ID.
@@ -2106,6 +2167,10 @@ impl Page {
   /// before a chooser arrives.
   pub async fn wait_for_file_chooser(&self, timeout_ms: u64) -> Result<crate::file_chooser::FileChooser> {
     use std::sync::Mutex;
+    // Lazy-enable file chooser interception. Idempotent — first
+    // call fires `Page.setInterceptFileChooserDialog`, subsequent
+    // are no-ops.
+    self.inner.enable_file_chooser_intercept().await?;
     let (tx, rx) = tokio::sync::oneshot::channel::<crate::file_chooser::FileChooser>();
     let tx = Arc::new(Mutex::new(Some(tx)));
     let tx_clone = tx.clone();
@@ -2170,6 +2235,9 @@ impl Page {
   /// before a download begins.
   pub async fn wait_for_download(&self, timeout_ms: u64) -> Result<crate::download::Download> {
     use std::sync::Mutex;
+    // Lazy-enable download behaviour. Idempotent — first call fires
+    // `Browser.setDownloadBehavior`, subsequent are no-ops.
+    self.inner.enable_download_behavior().await?;
     let (tx, rx) = tokio::sync::oneshot::channel::<crate::download::Download>();
     let tx = Arc::new(Mutex::new(Some(tx)));
     let tx_clone = tx.clone();

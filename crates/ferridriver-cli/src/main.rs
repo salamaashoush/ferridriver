@@ -4,6 +4,13 @@
 //! Test running is handled by the TS CLI (`ferridriver-test`) or Rust
 //! macros (`main!()`, `bdd_main!()`) via `cargo test`.
 
+// mimalloc as the global allocator. ~10–20% faster than system malloc
+// on small thread-local allocs (the dominant per-RTT pattern in CDP
+// dispatch). The NAPI binding crate already does this; the CLI/MCP
+// binary should too — bench previously shipped without it.
+#[global_allocator]
+static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
 mod cli;
 
 use std::sync::Arc;
