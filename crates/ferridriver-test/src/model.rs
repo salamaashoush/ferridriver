@@ -141,6 +141,31 @@ pub type HookFn = Arc<
   dyn Fn(FixturePool, Arc<TestInfo>) -> Pin<Box<dyn Future<Output = Result<(), TestFailure>> + Send>> + Send + Sync,
 >;
 
+/// Programmatic suite-level hooks supplied by the test author at runtime.
+///
+/// Lives separately from `TestConfig` because the closure types close over
+/// runtime fixture and failure values defined in this crate, which cannot be
+/// expressed in the data-only `ferridriver-config` schema.
+#[derive(Clone, Default)]
+pub struct TestHooks {
+  /// Hooks invoked once before any tests run, per worker.
+  pub global_setup_fns: Vec<SuiteHookFn>,
+  /// Hooks invoked once after all tests finish, per worker.
+  pub global_teardown_fns: Vec<SuiteHookFn>,
+}
+
+impl std::fmt::Debug for TestHooks {
+  fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+    f.debug_struct("TestHooks")
+      .field("global_setup_fns", &format!("[{} fn(s)]", self.global_setup_fns.len()))
+      .field(
+        "global_teardown_fns",
+        &format!("[{} fn(s)]", self.global_teardown_fns.len()),
+      )
+      .finish()
+  }
+}
+
 // ── Test Plan ──
 
 /// The full test plan after discovery + filtering + sharding.

@@ -1,19 +1,22 @@
 //! CLI argument definitions.
 //!
-//! The ferridriver binary is dedicated to running the MCP server.
-//! Test running (E2E, BDD, CT) is handled by the TS CLI (`ferridriver-test`)
-//! or by Rust macros (`main!()`, `bdd_main!()`) via `cargo test`.
+//! ferridriver is a single binary with subcommands:
+//! - `mcp`     -- MCP server (stdio or HTTP) for browser automation agents
+//! - `bdd`     -- run Gherkin/Cucumber feature files via the Rust test runner
+//! - `test`    -- wrap `cargo nextest` (or `cargo test`) for unit/integration tests
+//! - `codegen` -- generate test scaffolding
+//! - `config`  -- inspect resolved configuration
 
 use std::path::PathBuf;
 
-use clap::{Args, Parser, ValueEnum};
+use clap::{Args, Parser, Subcommand, ValueEnum};
 use ferridriver::backend::BackendKind;
 use ferridriver::state::ConnectMode;
 
 #[derive(Parser)]
 #[command(
   name = "ferridriver",
-  about = "High-performance browser automation -- MCP server",
+  about = "Rust-based browser automation: MCP server, BDD runner, test wrapper",
   version,
   propagate_version = true
 )]
@@ -22,10 +25,37 @@ pub struct Cli {
   #[arg(short, long, action = clap::ArgAction::Count, global = true)]
   pub verbose: u8,
 
-  /// Config file path (YAML, TOML, or JSON). Auto-searches if not specified.
+  /// Config file path. Auto-searches `ferridriver.toml` (TOML/YAML/JSON
+  /// inferred from extension) if not specified.
   #[arg(short, long, global = true)]
   pub config: Option<PathBuf>,
 
+  #[command(subcommand)]
+  pub command: Command,
+}
+
+#[derive(Subcommand)]
+pub enum Command {
+  /// Run the MCP server.
+  Mcp(McpArgs),
+
+  /// Run BDD/Cucumber feature files via the Rust test runner.
+  Bdd(BddArgs),
+
+  /// Run cargo unit/integration tests via nextest (or cargo test).
+  Test(TestArgs),
+
+  /// Generate test scaffolding from recorded interactions.
+  Codegen(CodegenArgs),
+
+  /// Print the resolved configuration and exit.
+  Config(ConfigArgs),
+}
+
+// ── mcp subcommand ──────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct McpArgs {
   #[command(flatten)]
   pub browser: BrowserArgs,
 
@@ -33,35 +63,146 @@ pub struct Cli {
   pub transport: TransportArgs,
 }
 
-// ── Browser / transport args ────────────────────────────────────────────
+// ── bdd subcommand ──────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct BddArgs {
+  /// Feature file globs. Overrides `[bdd].features` from config.
+  pub features: Vec<String>,
+
+  /// Tag filter expression, e.g. `@smoke and not @wip`.
+  #[arg(long)]
+  pub tags: Option<String>,
+
+  /// Parse and report scenarios without executing steps.
+  #[arg(long)]
+  pub dry_run: bool,
+
+  /// Stop after the first failing scenario.
+  #[arg(long)]
+  pub fail_fast: bool,
+
+  /// Treat undefined or pending steps as failures.
+  #[arg(long)]
+  pub strict: bool,
+
+  /// Per-step timeout in milliseconds.
+  #[arg(long)]
+  pub step_timeout: Option<u64>,
+
+  /// Scenario execution order: `defined`, `random`, or `random:<seed>`.
+  #[arg(long)]
+  pub order: Option<String>,
+
+  /// Gherkin keyword language (e.g. `en`, `de`, `fr`).
+  #[arg(long)]
+  pub language: Option<String>,
+
+  /// Number of parallel workers.
+  #[arg(long)]
+  pub workers: Option<usize>,
+
+  /// Reporter spec list, e.g. `terminal,junit:target/junit.xml`.
+  #[arg(long)]
+  pub reporter: Vec<String>,
+
+  #[command(flatten)]
+  pub browser: BrowserArgs,
+}
+
+// ── test subcommand ─────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct TestArgs {
+  /// Test name filter passed through to the underlying runner.
+  pub filter: Option<String>,
+
+  /// Cargo package filter (`-p <name>`). May be repeated.
+  #[arg(short = 'p', long = "package")]
+  pub packages: Vec<String>,
+
+  /// Force a specific runner backend regardless of config.
+  #[arg(long, value_enum)]
+  pub runner: Option<TestRunner>,
+
+  /// nextest profile name.
+  #[arg(long)]
+  pub profile: Option<String>,
+
+  /// Pass remaining arguments through to the underlying runner.
+  #[arg(last = true)]
+  pub passthrough: Vec<String>,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum TestRunner {
+  Nextest,
+  Cargo,
+}
+
+// ── codegen subcommand ──────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct CodegenArgs {
+  /// URL to open in the codegen browser.
+  pub url: Option<String>,
+
+  /// Output file for generated test code.
+  #[arg(short, long)]
+  pub output: Option<PathBuf>,
+
+  /// Output language: `ts`, `js`, `rust`.
+  #[arg(long, default_value = "ts")]
+  pub language: String,
+
+  #[command(flatten)]
+  pub browser: BrowserArgs,
+}
+
+// ── config subcommand ───────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct ConfigArgs {
+  /// Output format: `toml`, `json`, `yaml`.
+  #[arg(long, default_value = "toml")]
+  pub format: ConfigFormat,
+}
+
+#[derive(Clone, Copy, ValueEnum)]
+pub enum ConfigFormat {
+  Toml,
+  Json,
+  Yaml,
+}
+
+// ── Shared browser / transport args ─────────────────────────────────────
 
 /// Browser backend and connection options.
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct BrowserArgs {
-  /// Browser backend to use
+  /// Browser backend to use.
   #[arg(long, default_value = "cdp-pipe")]
   pub backend: Backend,
 
   /// Run the browser without a visible window. Off by default because
   /// MCP's canonical use case is an interactive debugging / agent
-  /// session where the user wants to watch the browser. CI and batch
-  /// callers should opt into `--headless` explicitly.
+  /// session where the user wants to watch the browser.
   #[arg(long)]
   pub headless: bool,
 
-  /// Path to Chrome/Chromium binary
+  /// Path to Chrome/Chromium binary.
   #[arg(long)]
   pub executable_path: Option<String>,
 
-  /// Connect to running browser at WebSocket URL
+  /// Connect to a running browser at the given WebSocket URL.
   #[arg(long)]
   pub connect: Option<String>,
 
-  /// Auto-connect to running Chrome (by channel name)
+  /// Auto-connect to a running Chrome by channel name.
   #[arg(long)]
   pub auto_connect: Option<String>,
 
-  /// User data directory for auto-connect
+  /// User data directory used by `--auto-connect`.
   #[arg(long)]
   pub user_data_dir: Option<String>,
 }
@@ -76,13 +217,13 @@ impl BrowserArgs {
   }
 }
 
-#[derive(Args)]
+#[derive(Args, Clone)]
 pub struct TransportArgs {
-  /// Transport protocol: stdio (default) or http
+  /// Transport protocol: stdio (default) or http.
   #[arg(long, default_value = "stdio")]
   pub transport: Transport,
 
-  /// Port for HTTP transport
+  /// Port for HTTP transport.
   #[arg(long, default_value = "8080")]
   pub port: u16,
 }
@@ -102,7 +243,6 @@ pub enum Transport {
   Http,
 }
 
-/// Convert Backend enum to BackendKind.
 pub fn backend_to_kind(b: &Backend) -> BackendKind {
   match b {
     Backend::CdpPipe => BackendKind::CdpPipe,
@@ -113,7 +253,6 @@ pub fn backend_to_kind(b: &Backend) -> BackendKind {
   }
 }
 
-/// Resolve the connect mode from CLI arguments.
 pub fn resolve_connect_mode(args: &BrowserArgs) -> ConnectMode {
   if let Some(ref url) = args.connect {
     ConnectMode::ConnectUrl(url.clone())

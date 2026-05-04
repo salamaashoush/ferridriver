@@ -17,50 +17,34 @@ alias c := check
 alias t := test
 alias tf := test-fast
 
-# Check compilation
+# Check compilation (default-members; ferridriver-node excluded)
 check:
-  cargo check --workspace --all-targets
+  cargo check --all-targets
 
-# Run all tests: build binary + NAPI, all Rust crates (incl. all backends), TS tests, BDD features
+# Run all tests: build CLI binary, run all Rust crates (incl. all backends), BDD features
 test:
   cargo build --bin ferridriver
-  cd crates/ferridriver-node && bun run build:debug
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace
-  cd crates/ferridriver-node && bun test
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" bun run packages/ferridriver-test/src/cli.ts test
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo run --bin ferridriver -- bdd tests/features/
 
 # Run all tests with maximum parallelism
 test-fast:
   cargo build --bin ferridriver
-  cd crates/ferridriver-node && bun run build:debug
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --workspace --exclude ferridriver-cli & \
+  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test --exclude ferridriver-cli & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_pipe" & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_raw" & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_bidi" & \
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_webkit" & \
-  cd crates/ferridriver-node && bun test & \
   wait
-  FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" bun run packages/ferridriver-test/src/cli.ts test
 
 # Run specific backend test (use underscores: cdp_ws, cdp_pipe, webkit, bidi)
 test-backend backend:
   cargo build --bin ferridriver
   FERRIDRIVER_BIN="{{justfile_directory()}}/target/debug/ferridriver" cargo test -p ferridriver-cli --test backends -- "all_tests_{{backend}}" --nocapture
 
-# Run NAPI/TypeScript tests with parallel backends
-test-ts:
-  cd crates/ferridriver-node && bun test
-
-# Run all NAPI tests per backend in parallel processes
-test-ts-fast:
-  cd crates/ferridriver-node && \
-  FERRIDRIVER_BACKEND=cdp-pipe bun test & \
-  FERRIDRIVER_BACKEND=cdp-raw bun test & \
-  wait
-
-# Lint
+# Lint (default-members; ferridriver-node excluded)
 lint:
-  cargo clippy --workspace --all-targets -- -D warnings
+  cargo clippy --all-targets -- -D warnings
 
 # Format check
 fmt:
@@ -70,9 +54,9 @@ fmt:
 fmt-fix:
   cargo fmt --all
 
-# Fix lint + format
+# Fix lint + format (default-members; ferridriver-node excluded)
 fix: fmt-fix
-  cargo clippy --workspace --all-targets --fix --allow-dirty
+  cargo clippy --all-targets --fix --allow-dirty
 
 # Build release
 build:
@@ -90,13 +74,14 @@ run *args:
 run-http port="8080":
   cargo run --bin ferridriver -- --transport http --port {{port}}
 
-# Run BDD feature tests (via TS CLI)
+# Run BDD feature tests via the Rust CLI
 bdd *args:
-  bun run packages/ferridriver-test/src/cli.ts test {{args}} tests/features/
+  cargo run --bin ferridriver -- bdd {{args}} tests/features/
 
-# Build + run BDD feature tests (via TS CLI)
+# Build CLI then run BDD feature tests
 test-bdd *args:
-  bun run packages/ferridriver-test/src/cli.ts test {{args}} tests/features/
+  cargo build --bin ferridriver
+  ./target/debug/ferridriver bdd {{args}} tests/features/
 
 # Bump version everywhere, commit, tag, and push to trigger release CI.
 # Usage: just release 0.3.0

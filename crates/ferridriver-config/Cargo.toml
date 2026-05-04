@@ -1,0 +1,26 @@
+[package]
+name = "ferridriver-config"
+description = "Unified configuration loader for ferridriver: composes mcp + test sections from a single ferridriver.toml"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferridriver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "1.1"
+serde_yaml = "0.9"
+anyhow = { workspace = true }
+dirs = { workspace = true }
+tracing = { workspace = true }
+shellexpand = { workspace = true }
+config = { workspace = true }

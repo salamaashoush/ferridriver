@@ -160,8 +160,6 @@ macro_rules! bdd_main {
 /// and runs via the core `TestRunner` with full parallel execution,
 /// retries, sharding, and reporter support.
 pub fn run_bdd_harness() {
-  use std::sync::Arc;
-
   ferridriver_test::logging::init_from_env();
 
   let rt = tokio::runtime::Builder::new_multi_thread()
@@ -170,84 +168,93 @@ pub fn run_bdd_harness() {
     .expect("failed to build tokio runtime");
 
   let exit_code = rt.block_on(async {
-    // Parse CLI args (shared parser from ferridriver-test).
     let overrides = ferridriver_test::parse_common_cli_args();
-
-    // Resolve config.
-    let mut config = ferridriver_test::config::resolve_config(&overrides).unwrap_or_else(|e| {
+    let config = ferridriver_test::config::resolve_config(&overrides).unwrap_or_else(|e| {
       eprintln!("config error: {e}");
       std::process::exit(1);
     });
-
-    // BDD-specific config from env vars.
-    let feature_patterns = std::env::var("FERRIDRIVER_FEATURES")
-      .ok()
-      .map(|s| s.split(',').map(String::from).collect::<Vec<_>>())
-      .unwrap_or_else(|| vec!["features/**/*.feature".to_string()]);
-
-    if config.features.is_empty() {
-      config.features = feature_patterns;
-    }
-
-    if let Ok(tags) = std::env::var("FERRIDRIVER_TAGS") {
-      if config.tags.is_none() {
-        config.tags = Some(tags);
-      }
-    }
-
-    // Apply BDD-specific CLI overrides.
-    if let Some(ref tags) = overrides.bdd_tags {
-      config.tags = Some(tags.clone());
-    }
-    if overrides.bdd_dry_run {
-      config.dry_run = true;
-    }
-    if overrides.bdd_fail_fast {
-      config.fail_fast = true;
-    }
-    if let Some(t) = overrides.bdd_step_timeout {
-      config.timeout = t;
-    }
-    if overrides.bdd_strict {
-      config.strict = true;
-    }
-    if let Some(ref order) = overrides.bdd_order {
-      config.order = order.clone();
-    }
-    if overrides.bdd_language.is_some() {
-      config.language = overrides.bdd_language.clone();
-    }
-
-    // Discover and parse .feature files.
-    let feature_set = match feature::FeatureSet::discover_and_parse(&config.features, &config.test_ignore) {
-      Ok(fs) => fs,
-      Err(e) => {
-        eprintln!("feature discovery error: {e}");
-        return 1;
-      },
-    };
-
-    if feature_set.features.is_empty() {
-      eprintln!("no feature files found matching: {:?}", config.features);
-      return 0;
-    }
-
-    // Build step registry (collects all steps from this binary via inventory).
-    let registry = Arc::new(registry::StepRegistry::build());
-
-    // Translate features to TestPlan.
-    let plan = translate::translate_features(&feature_set, registry, &config);
-
-    if plan.total_tests == 0 {
-      eprintln!("no scenarios found");
-      return 0;
-    }
-
-    // Run via core TestRunner.
-    config.has_bdd = true;
-    let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
-    runner.run(plan).await
+    run_bdd_with(config, overrides).await
   });
 
   std::process::exit(exit_code);
+}
+
+/// Run BDD scenarios against a pre-resolved `TestConfig` and `CliOverrides`.
+///
+/// Used by both [`run_bdd_harness`] (for `bdd_main!()` binaries) and the
+/// unified `ferridriver bdd` CLI subcommand. The caller is responsible for
+/// loading `FerridriverConfig` and applying any subcommand-specific overrides
+/// before calling this function.
+///
+/// Returns the exit code for the run (0 = success).
+pub async fn run_bdd_with(
+  mut config: ferridriver_test::config::TestConfig,
+  overrides: ferridriver_test::config::CliOverrides,
+) -> i32 {
+  use std::sync::Arc;
+
+  // BDD-specific feature glob defaults from env vars (used by the macro entry
+  // point; the CLI subcommand sets `config.features` explicitly).
+  let feature_patterns = std::env::var("FERRIDRIVER_FEATURES")
+    .ok()
+    .map(|s| s.split(',').map(String::from).collect::<Vec<_>>())
+    .unwrap_or_else(|| vec!["features/**/*.feature".to_string()]);
+
+  if config.features.is_empty() {
+    config.features = feature_patterns;
+  }
+
+  if let Ok(tags) = std::env::var("FERRIDRIVER_TAGS") {
+    if config.tags.is_none() {
+      config.tags = Some(tags);
+    }
+  }
+
+  // BDD-specific CLI overrides.
+  if let Some(ref tags) = overrides.bdd_tags {
+    config.tags = Some(tags.clone());
+  }
+  if overrides.bdd_dry_run {
+    config.dry_run = true;
+  }
+  if overrides.bdd_fail_fast {
+    config.fail_fast = true;
+  }
+  if let Some(t) = overrides.bdd_step_timeout {
+    config.timeout = t;
+  }
+  if overrides.bdd_strict {
+    config.strict = true;
+  }
+  if let Some(ref order) = overrides.bdd_order {
+    config.order = order.clone();
+  }
+  if overrides.bdd_language.is_some() {
+    config.language = overrides.bdd_language.clone();
+  }
+
+  let feature_set = match feature::FeatureSet::discover_and_parse(&config.features, &config.test_ignore) {
+    Ok(fs) => fs,
+    Err(e) => {
+      eprintln!("feature discovery error: {e}");
+      return 1;
+    },
+  };
+
+  if feature_set.features.is_empty() {
+    eprintln!("no feature files found matching: {:?}", config.features);
+    return 0;
+  }
+
+  let registry = Arc::new(registry::StepRegistry::build());
+  let plan = translate::translate_features(&feature_set, registry, &config);
+
+  if plan.total_tests == 0 {
+    eprintln!("no scenarios found");
+    return 0;
+  }
+
+  config.has_bdd = true;
+  let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
+  runner.run(plan).await
 }

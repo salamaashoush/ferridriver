@@ -37,6 +37,9 @@ pub struct Browser {
   /// stays synchronous. The state's `backend_kind` is set once at
   /// `with_plan` and never mutated, so the cache cannot drift.
   backend_kind: crate::backend::BackendKind,
+  /// Headless flag cached at construction so `is_headless()` stays sync
+  /// without needing to grab the outer `RwLock`.
+  headless: bool,
   /// Direct handle to [`BrowserState::context_options`] so the sync
   /// `new_context` setter can register the options bag without having
   /// to obtain the outer `RwLock` read guard. Cloned at launch from
@@ -60,6 +63,7 @@ impl Browser {
     state: Arc<RwLock<BrowserState>>,
     version: Arc<str>,
     backend_kind: crate::backend::BackendKind,
+    headless: bool,
     context_options: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::BrowserContextOptions>>>,
     record_video: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::RecordVideoOptions>>>,
   ) -> Self {
@@ -67,6 +71,7 @@ impl Browser {
       state,
       version,
       backend_kind,
+      headless,
       context_options,
       record_video,
     }
@@ -92,12 +97,14 @@ impl Browser {
       .map(crate::backend::AnyBrowser::version)
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
     let backend_kind = state.backend_kind();
+    let headless = state.headless;
     let context_options = state.context_options.clone();
     let record_video = state.record_video.clone();
     Self::from_parts(
       Arc::new(RwLock::new(state)),
       version,
       backend_kind,
+      headless,
       context_options,
       record_video,
     )
@@ -110,11 +117,12 @@ impl Browser {
   /// the instance has not been launched yet, `version()` returns
   /// `"Unknown"` until a subsequent `ensure_browser` fills it in.
   pub fn from_shared_state(state: Arc<RwLock<BrowserState>>) -> Self {
-    let (version, backend_kind, context_options, record_video) = state.try_read().ok().map_or_else(
+    let (version, backend_kind, headless, context_options, record_video) = state.try_read().ok().map_or_else(
       || {
         (
           Arc::from("Unknown"),
           crate::backend::BackendKind::CdpPipe,
+          true,
           Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
           Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
         )
@@ -125,6 +133,7 @@ impl Browser {
             .map(crate::backend::AnyBrowser::version)
             .map_or_else(|| Arc::<str>::from("Unknown"), Arc::from),
           s.backend_kind(),
+          s.headless,
           s.context_options.clone(),
           s.record_video.clone(),
         )
@@ -134,6 +143,7 @@ impl Browser {
       state,
       version,
       backend_kind,
+      headless,
       context_options,
       record_video,
     }
@@ -214,6 +224,13 @@ impl Browser {
   #[must_use]
   pub fn backend_kind(&self) -> crate::backend::BackendKind {
     self.backend_kind
+  }
+
+  /// Whether the browser was launched in headless mode. Cached at
+  /// construction; the launch plan never flips this after the fact.
+  #[must_use]
+  pub fn is_headless(&self) -> bool {
+    self.headless
   }
 
   /// Shorthand: create a new page in the default context.
