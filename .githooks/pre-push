@@ -10,9 +10,11 @@ if ! cargo fmt --all -- --check 2>/dev/null; then
   exit 1
 fi
 
-# Clippy (workspace, excluding broken examples)
+# Clippy (default-members; ferridriver-node is excluded from default-members
+# while the pure-Rust CLI is being validated. Examples that pull in heavy
+# component-test deps are excluded too.)
 echo "[pre-push] cargo clippy..."
-if ! cargo clippy --workspace --all-targets \
+if ! cargo clippy --all-targets \
   --exclude ct-dioxus-todomvc \
   --exclude ct-leptos-todomvc \
   --exclude bdd-example 2>&1 | grep -q "^error"; then
@@ -22,9 +24,10 @@ else
   exit 1
 fi
 
-# Unit tests (lib only, fast)
+# Unit tests (lib only, fast). Uses default-members so ferridriver-node is
+# skipped while it's not in the active build set.
 echo "[pre-push] cargo test --lib..."
-if ! cargo test --workspace --lib 2>/dev/null; then
+if ! cargo test --lib 2>/dev/null; then
   echo "[pre-push] FAILED: unit tests failed"
   exit 1
 fi
