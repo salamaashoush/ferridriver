@@ -24,11 +24,6 @@ use crate::model::{
 };
 use crate::reporter::{EventBus, ReporterEvent};
 
-struct PreparedPage {
-  ctx: ferridriver::ContextRef,
-  page_result: Result<Arc<ferridriver::Page>, String>,
-}
-
 /// Bridge from the core's typed [`FerriError`] to the runner's legacy String
 /// error channel. Removed when tasks migrate the runner.
 fn ferri_err_to_string(e: ferridriver::FerriError) -> String {
@@ -44,7 +39,7 @@ struct EffectiveContextConfig {
 }
 
 enum TestBrowserState {
-  Empty(Option<tokio::task::JoinHandle<PreparedPage>>),
+  Empty,
   Context(Arc<ferridriver::ContextRef>),
   Page {
     ctx: Arc<ferridriver::ContextRef>,
@@ -104,13 +99,12 @@ impl TestBrowserResources {
     browser: Arc<ferridriver::Browser>,
     effective: EffectiveContextConfig,
     output_dir: std::path::PathBuf,
-    prepared_page: Option<tokio::task::JoinHandle<PreparedPage>>,
   ) -> Self {
     Self {
       browser,
       effective,
       output_dir,
-      state: Mutex::new(TestBrowserState::Empty(prepared_page)),
+      state: Mutex::new(TestBrowserState::Empty),
     }
   }
 
@@ -120,10 +114,7 @@ impl TestBrowserResources {
       TestBrowserState::Context(ctx) => Ok(Arc::clone(ctx)),
       TestBrowserState::Page { ctx, .. } => Ok(Arc::clone(ctx)),
       TestBrowserState::Failed(err) => Err(err.clone()),
-      TestBrowserState::Empty(prepared_page) => {
-        if let Some(handle) = prepared_page.take() {
-          handle.abort();
-        }
+      TestBrowserState::Empty => {
         let ctx = Arc::new(new_test_context(&self.browser));
         *state = TestBrowserState::Context(Arc::clone(&ctx));
         Ok(ctx)
@@ -147,56 +138,30 @@ impl TestBrowserResources {
         };
         Ok(page)
       },
-      TestBrowserState::Empty(prepared_page) => {
+      TestBrowserState::Empty => {
         let backend = self.browser.backend_kind();
-        let prepared = if let Some(handle) = prepared_page.take() {
-          if let Ok(prepared) = handle.await {
-            prepared
-          } else {
-            let ctx = new_test_context(&self.browser);
-            let page_result = ctx.new_page().await.map_err(ferri_err_to_string);
-            PreparedPage { ctx, page_result }
-          }
-        } else {
-          let ctx = new_test_context(&self.browser);
-          let page_result = ctx.new_page().await.map_err(ferri_err_to_string);
-          PreparedPage { ctx, page_result }
-        };
-
-        match prepared.page_result {
+        let ctx = Arc::new(new_test_context(&self.browser));
+        match create_ready_page(&ctx, backend).await {
           Ok(page) => {
-            // Only run the health check on backends that need it
-            // (BiDi). For CDP / WebKit the page is already
-            // guaranteed alive by the per-page bootstrap path.
-            let alive_check = if needs_alive_check(backend) {
-              ensure_page_alive(&page).await
-            } else {
-              Ok(())
-            };
-            if let Err(err) = alive_check {
-              if is_retryable_bidi_page_error(&err) {
-                let _ = prepared.ctx.close().await;
-                let ctx = Arc::new(new_test_context(&self.browser));
-                let page = create_ready_page(&ctx, backend).await?;
-                apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
-                *state = TestBrowserState::Page {
-                  ctx,
-                  page: Arc::clone(&page),
-                };
-                return Ok(page);
-              }
-              *state = TestBrowserState::Failed(err.clone());
-              return Err(err);
-            }
             apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
-            let ctx = Arc::new(prepared.ctx);
             *state = TestBrowserState::Page {
-              ctx,
+              ctx: Arc::clone(&ctx),
               page: Arc::clone(&page),
             };
             Ok(page)
           },
           Err(err) => {
+            if is_retryable_bidi_page_error(&err) {
+              let _ = ctx.close().await;
+              let ctx = Arc::new(new_test_context(&self.browser));
+              let page = create_ready_page(&ctx, backend).await?;
+              apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
+              *state = TestBrowserState::Page {
+                ctx,
+                page: Arc::clone(&page),
+              };
+              return Ok(page);
+            }
             *state = TestBrowserState::Failed(err.clone());
             Err(err)
           },
@@ -207,8 +172,7 @@ impl TestBrowserResources {
 
   async fn close(&self) {
     let mut state = self.state.lock().await;
-    match std::mem::replace(&mut *state, TestBrowserState::Empty(None)) {
-      TestBrowserState::Empty(Some(handle)) => handle.abort(),
+    match std::mem::replace(&mut *state, TestBrowserState::Empty) {
       TestBrowserState::Context(ctx) => {
         close_test_context(&ctx).await;
       },
@@ -228,7 +192,7 @@ impl TestBrowserResources {
         }
         close_test_context(&ctx).await;
       },
-      TestBrowserState::Empty(None) | TestBrowserState::Failed(_) => {},
+      TestBrowserState::Empty | TestBrowserState::Failed(_) => {},
     }
   }
 }
@@ -640,15 +604,6 @@ impl Worker {
     Self { id, config, event_bus }
   }
 
-  fn spawn_prepared_page(browser: Arc<ferridriver::Browser>) -> tokio::task::JoinHandle<PreparedPage> {
-    tokio::spawn(async move {
-      let backend = browser.backend_kind();
-      let ctx = new_test_context(&browser);
-      let page_result = create_ready_page(&ctx, backend).await;
-      PreparedPage { ctx, page_result }
-    })
-  }
-
   fn create_suite_test_info(&self, suite_key: &str) -> Arc<TestInfo> {
     Arc::new(TestInfo {
       test_id: crate::model::TestId {
@@ -708,7 +663,6 @@ impl Worker {
     custom_fixture_pool.inject("browser", Arc::clone(&browser));
 
     let mut active_suites: FxHashMap<String, SuiteState> = FxHashMap::default();
-    let mut prepared_page = Some(Self::spawn_prepared_page(Arc::clone(&browser)));
 
     while let Ok(item) = rx.recv().await {
       // `--max-failures` / `-x` flips this flag; drop any items that were
@@ -718,27 +672,14 @@ impl Worker {
       }
       match item {
         WorkItem::Single(assignment) => {
-          let result = Box::pin(self.run_single(
-            &browser,
-            &custom_fixture_pool,
-            &mut active_suites,
-            &mut prepared_page,
-            assignment,
-          ))
-          .await;
+          let result = Box::pin(self.run_single(&browser, &custom_fixture_pool, &mut active_suites, assignment)).await;
           if result_tx.send(result).await.is_err() {
             break;
           }
         },
         WorkItem::Serial(batch) => {
-          let results = Box::pin(self.run_serial_batch(
-            &browser,
-            &custom_fixture_pool,
-            &mut active_suites,
-            &mut prepared_page,
-            batch,
-          ))
-          .await;
+          let results =
+            Box::pin(self.run_serial_batch(&browser, &custom_fixture_pool, &mut active_suites, batch)).await;
           for result in results {
             if result_tx.send(result).await.is_err() {
               break;
@@ -750,12 +691,6 @@ impl Worker {
       // stop flag (for `--max-failures` / `-x`) before this worker races
       // to pull the next item out of the buffered channel.
       tokio::task::yield_now().await;
-    }
-
-    if let Some(handle) = prepared_page.take() {
-      if let Ok(prepared) = handle.await {
-        let _ = prepared.ctx.close().await;
-      }
     }
 
     // Run afterAll for every suite that had beforeAll on this worker.
@@ -838,7 +773,6 @@ impl Worker {
     browser: &Arc<ferridriver::Browser>,
     custom_pool: &FixturePool,
     active_suites: &mut FxHashMap<String, SuiteState>,
-    prepared_page: &mut Option<tokio::task::JoinHandle<PreparedPage>>,
     batch: SerialBatch,
   ) -> Vec<WorkerTestResult> {
     let mut results = Vec::with_capacity(batch.assignments.len());
@@ -886,7 +820,7 @@ impl Worker {
         continue;
       }
 
-      let result = Box::pin(self.run_single(browser, custom_pool, active_suites, prepared_page, assignment)).await;
+      let result = Box::pin(self.run_single(browser, custom_pool, active_suites, assignment)).await;
       if result.outcome.status == TestStatus::Failed || result.outcome.status == TestStatus::TimedOut {
         serial_failed = true;
       }
@@ -903,7 +837,6 @@ impl Worker {
     browser: &Arc<ferridriver::Browser>,
     custom_pool: &FixturePool,
     active_suites: &mut FxHashMap<String, SuiteState>,
-    prepared_page: &mut Option<tokio::task::JoinHandle<PreparedPage>>,
     assignment: TestAssignment,
   ) -> WorkerTestResult {
     let test = &assignment.test;
@@ -933,7 +866,6 @@ impl Worker {
         Arc::clone(browser),
         build_suite_effective_context_config(&self.config),
         suite_test_info.output_dir.clone(),
-        None,
       ));
       let suite_pool = custom_pool.child_with_defs(build_suite_fixture_defs(suite_resources), FixtureScope::Worker);
       suite_pool.inject("test_info", suite_test_info);
@@ -1121,8 +1053,6 @@ impl Worker {
 
     let start = Instant::now();
     let effective_config = build_effective_context_config(&self.config, test);
-    let current_prepared_page = prepared_page.take();
-    *prepared_page = Some(Self::spawn_prepared_page(Arc::clone(browser)));
 
     // Create TestInfo for this test execution.
     let test_info = Arc::new(TestInfo {
@@ -1175,7 +1105,6 @@ impl Worker {
       Arc::clone(browser),
       effective_config,
       test_info.output_dir.clone(),
-      current_prepared_page,
     ));
     let test_pool = custom_pool.child_with_defs(build_test_fixture_defs(Arc::clone(&resources)), FixtureScope::Test);
     test_pool.inject("test_info", Arc::clone(&test_info));

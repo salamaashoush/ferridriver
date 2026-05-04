@@ -10,7 +10,7 @@ use tokio::sync::mpsc;
 use crate::config::{CliOverrides, ProjectConfig, TestConfig};
 use crate::dispatcher::Dispatcher;
 use crate::fixture::{FixturePool, FixtureScope, builtin_fixtures, validate_dag};
-use crate::model::{Hooks, TestPlan, TestStatus};
+use crate::model::{Hooks, TestHooks, TestPlan, TestStatus};
 use crate::reporter::{EventBus, EventBusBuilder, ReporterDriver, ReporterEvent, ReporterSet};
 use crate::shard;
 use crate::worker::{Worker, WorkerTestResult};
@@ -23,6 +23,7 @@ use ferridriver::state::{BrowserState, ConnectMode};
 /// Top-level test runner.
 pub struct TestRunner {
   config: Arc<TestConfig>,
+  hooks: TestHooks,
   reporters: ReporterSet,
   overrides: CliOverrides,
   /// Shared browser for watch mode (persists across runs).
@@ -30,7 +31,14 @@ pub struct TestRunner {
 }
 
 impl TestRunner {
+  /// Build a runner with no programmatic suite hooks. For runners that need
+  /// `before_all` / `after_all` closures, use [`TestRunner::with_hooks`].
   pub fn new(config: TestConfig, overrides: CliOverrides) -> Self {
+    Self::with_hooks(config, TestHooks::default(), overrides)
+  }
+
+  /// Build a runner with programmatic suite hooks supplied at construction.
+  pub fn with_hooks(config: TestConfig, hooks: TestHooks, overrides: CliOverrides) -> Self {
     let reporters = crate::reporter::create_reporters(
       &config.reporter,
       &config.output_dir,
@@ -40,6 +48,7 @@ impl TestRunner {
     );
     Self {
       config: Arc::new(config),
+      hooks,
       reporters,
       overrides,
       shared_browser: None,
@@ -322,6 +331,7 @@ impl TestRunner {
     // Build a temporary runner with the merged config.
     let sub_runner = TestRunner {
       config: Arc::new(merged_config),
+      hooks: self.hooks.clone(),
       reporters: ReporterSet::default(),
       overrides: self.overrides.clone(),
       shared_browser: self.shared_browser.clone(),
@@ -483,9 +493,9 @@ impl TestRunner {
     let start = Instant::now();
 
     // ── Global setup ──
-    if !self.config.global_setup_fns.is_empty() {
+    if !self.hooks.global_setup_fns.is_empty() {
       let global_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Global);
-      for setup_fn in &self.config.global_setup_fns {
+      for setup_fn in &self.hooks.global_setup_fns {
         if let Err(e) = setup_fn(global_pool.clone()).await {
           tracing::error!(target: "ferridriver::runner", "global setup failed: {e}");
           event_bus
@@ -673,9 +683,9 @@ impl TestRunner {
     }
 
     // ── Global teardown (always runs, even if tests failed) ──
-    if !self.config.global_teardown_fns.is_empty() {
+    if !self.hooks.global_teardown_fns.is_empty() {
       let global_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Global);
-      for teardown_fn in &self.config.global_teardown_fns {
+      for teardown_fn in &self.hooks.global_teardown_fns {
         if let Err(e) = teardown_fn(global_pool.clone()).await {
           tracing::error!(target: "ferridriver::runner", "global teardown error: {e}");
         }

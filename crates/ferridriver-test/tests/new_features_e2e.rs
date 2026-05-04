@@ -66,7 +66,11 @@ fn noop_test(name: &str) -> TestCase {
 }
 
 async fn run_plan(plan: TestPlan, config: TestConfig) -> i32 {
-  let mut runner = TestRunner::new(config, CliOverrides::default());
+  run_plan_with_hooks(plan, config, ferridriver_test::model::TestHooks::default()).await
+}
+
+async fn run_plan_with_hooks(plan: TestPlan, config: TestConfig, hooks: ferridriver_test::model::TestHooks) -> i32 {
+  let mut runner = TestRunner::with_hooks(config, hooks, CliOverrides::default());
   runner.run(plan).await
 }
 
@@ -490,15 +494,18 @@ async fn test_global_setup_runs_before_tests() {
     shard: None,
   };
 
-  let mut config = default_config(1);
-  config.global_setup_fns = vec![Arc::new(|_pool| {
-    Box::pin(async {
-      SETUP_RAN.fetch_add(1, Ordering::SeqCst);
-      Ok(())
-    })
-  })];
+  let config = default_config(1);
+  let hooks = ferridriver_test::model::TestHooks {
+    global_setup_fns: vec![Arc::new(|_pool| {
+      Box::pin(async {
+        SETUP_RAN.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+      })
+    })],
+    ..Default::default()
+  };
 
-  let exit = Box::pin(run_plan(plan, config)).await;
+  let exit = Box::pin(run_plan_with_hooks(plan, config, hooks)).await;
   assert_eq!(exit, 0);
   assert_eq!(SETUP_RAN.load(Ordering::SeqCst), 1, "global setup should run once");
   assert_eq!(
@@ -525,10 +532,13 @@ async fn test_global_setup_failure_aborts_run() {
     shard: None,
   };
 
-  let mut config = default_config(1);
-  config.global_setup_fns = vec![Arc::new(|_pool| Box::pin(async { Err(fail("global setup crashed")) }))];
+  let config = default_config(1);
+  let hooks = ferridriver_test::model::TestHooks {
+    global_setup_fns: vec![Arc::new(|_pool| Box::pin(async { Err(fail("global setup crashed")) }))],
+    ..Default::default()
+  };
 
-  let exit = Box::pin(run_plan(plan, config)).await;
+  let exit = Box::pin(run_plan_with_hooks(plan, config, hooks)).await;
   assert_eq!(exit, 1, "global setup failure should abort with exit code 1");
 }
 

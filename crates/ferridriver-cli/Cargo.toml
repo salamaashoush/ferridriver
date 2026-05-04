@@ -18,7 +18,10 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
-ferridriver-mcp = { path = "../ferridriver-mcp", version = "0.1.0" }
+ferridriver-mcp = { workspace = true }
+ferridriver-config = { workspace = true }
+ferridriver-test = { workspace = true }
+ferridriver-bdd = { workspace = true }
 ferridriver = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }

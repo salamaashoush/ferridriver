@@ -24,63 +24,11 @@ use std::io::Write;
 use std::path::Path;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
+
+pub use ferridriver_config::test::TraceMode;
 
 use crate::model::TestStep;
-
-/// Trace recording mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
-#[serde(rename_all = "kebab-case")]
-pub enum TraceMode {
-  #[default]
-  Off,
-  On,
-  RetainOnFailure,
-  OnFirstRetry,
-}
-
-impl TraceMode {
-  /// Parse from string (config/CLI).
-  #[must_use]
-  pub fn from_str(s: &str) -> Self {
-    match s {
-      "on" => Self::On,
-      "retain-on-failure" => Self::RetainOnFailure,
-      "on-first-retry" => Self::OnFirstRetry,
-      _ => Self::Off,
-    }
-  }
-
-  /// Should we record for this test attempt?
-  #[must_use]
-  pub fn should_record(self, attempt: u32, _failed: bool) -> bool {
-    match self {
-      Self::Off => false,
-      Self::On => true,
-      Self::RetainOnFailure => true, // record always, discard if passed
-      Self::OnFirstRetry => attempt == 2,
-    }
-  }
-
-  /// Should we keep the trace after the test finished?
-  #[must_use]
-  pub fn should_retain(self, failed: bool) -> bool {
-    match self {
-      Self::Off => false,
-      Self::On => true,
-      Self::RetainOnFailure => failed,
-      Self::OnFirstRetry => true, // if we're recording, keep it
-    }
-  }
-
-  /// Combined check: should we actually write a trace file?
-  /// For `RetainOnFailure`, we skip the write entirely for passing tests
-  /// since trace data comes from already-collected steps (unlike video which is live).
-  #[must_use]
-  pub fn should_write(self, attempt: u32, failed: bool) -> bool {
-    self.should_record(attempt, failed) && self.should_retain(failed)
-  }
-}
 
 /// A single trace event (Playwright format v8).
 ///
