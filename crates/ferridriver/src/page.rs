@@ -73,17 +73,14 @@ impl Drop for Page {
 }
 
 impl Page {
-  /// Construct a Page (no `BrowserContext`). Always async because the
-  /// frame-tree cache is seeded before the Page is handed out — that
-  /// invariant is what lets `main_frame()` return `Frame` (not
-  /// `Option<Frame>`) and removes the need for any `expect`/panic at
-  /// the action API.
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend's `get_frame_tree()` call fails
-  /// while seeding the frame cache.
-  pub async fn new(inner: AnyPage) -> Result<Arc<Self>> {
+  /// Construct a Page (no `BrowserContext`). Synchronous — only
+  /// spawns the frame-cache listener; the eager `Page.getFrameTree`
+  /// RTT was dropped (see `PERF_AUDIT` §M.4). The listener seeds
+  /// the cache on the first frame event, and
+  /// [`Self::ensure_frame_cache_seeded`] does an on-demand fetch
+  /// only when a sync accessor fires before any navigation.
+  #[must_use]
+  pub fn new(inner: AnyPage) -> Arc<Self> {
     let page = Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(30000),
@@ -102,25 +99,21 @@ impl Page {
     // `attach_listeners`) reads this slot per event and silently
     // drops events that arrive before the page is addressable.
     page.inner.set_page_backref(Arc::downgrade(&page));
-    page.seed_frame_cache().await?;
-    Ok(page)
+    page.seed_frame_cache();
+    page
   }
 
-  /// Construct a Page bound to a `BrowserContext`. Same async-init
+  /// Construct a Page bound to a `BrowserContext`. Same init
   /// contract as [`Self::new`].
-  ///
-  /// # Errors
-  ///
-  /// Returns an error if the backend's `get_frame_tree()` call fails
-  /// while seeding the frame cache.
-  pub async fn with_context(inner: AnyPage, context: crate::context::ContextRef) -> Result<Arc<Self>> {
+  #[must_use]
+  pub fn with_context(inner: AnyPage, context: crate::context::ContextRef) -> Arc<Self> {
     let page = Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(30000),
       default_navigation_timeout: AtomicU64::new(u64::MAX),
       snapshot_tracker: Arc::new(AsyncMutex::new(snapshot::SnapshotTracker::new())),
       mouse_position: Mutex::new((0.0, 0.0)),
-      context_ref: Some(context.clone()),
+      context_ref: Some(context),
       close_reason: Mutex::new(None),
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
       frame_cache: Arc::new(Mutex::new(FrameCache::default())),
@@ -128,8 +121,8 @@ impl Page {
       video: Mutex::new(None),
     });
     page.inner.set_page_backref(Arc::downgrade(&page));
-    page.seed_frame_cache().await?;
-    Ok(page)
+    page.seed_frame_cache();
+    page
   }
 
   // ── Frame cache plumbing (Playwright-parity sync frame accessors) ─────
@@ -142,20 +135,20 @@ impl Page {
     }
   }
 
-  /// Internal: seed the frame cache from the backend and spawn the
-  /// `FrameAttached`/`FrameDetached`/`FrameNavigated` listener. Called
-  /// from the constructors so every Page is fully initialized before
-  /// any sync accessor can run.
-  async fn seed_frame_cache(self: &Arc<Self>) -> Result<()> {
-    let infos = self.inner.get_frame_tree().await?;
-    {
-      let mut guard = match self.frame_cache.lock() {
-        Ok(g) => g,
-        Err(p) => p.into_inner(),
-      };
-      guard.seed(infos);
-    }
-
+  /// Internal: spawn the `FrameAttached` / `FrameDetached` /
+  /// `FrameNavigated` listener that keeps the page's frame cache
+  /// fresh. Called from the constructors.
+  ///
+  /// Does NOT fire the eager `Page.getFrameTree` RTT that the
+  /// bootstrap previously paid (`PERF_AUDIT` §L.3.4 / §M.4). The
+  /// listener seeds the cache on the first frame event — the user's
+  /// first `page.goto` emits `Page.frameNavigated` for the main
+  /// frame, and `FrameCache::navigated` sets `main_id` when a
+  /// top-level frame is first seen. For tests that touch a frame
+  /// accessor BEFORE navigating, [`Self::ensure_frame_cache_seeded`]
+  /// fetches the tree on demand and is the only path that pays the
+  /// `Page.getFrameTree` RTT — exactly once per page lifetime.
+  fn seed_frame_cache(self: &Arc<Self>) {
     let cache = Arc::clone(&self.frame_cache);
     let mut rx = self.inner.events().subscribe();
     let handle = tokio::spawn(async move {
@@ -182,6 +175,48 @@ impl Page {
     });
     if let Ok(mut guard) = self.frame_listener.lock() {
       *guard = Some(handle.abort_handle());
+    }
+  }
+
+  /// Lazy frame-cache seed. Returns immediately when the cache
+  /// already has a main frame (populated either by a prior
+  /// `Page.frameNavigated` event or by an earlier call). Otherwise:
+  ///
+  /// 1. Tries the backend's cached `peek_main_frame_id()` first
+  ///    (populated for free from the `Page.navigate` response when
+  ///    the user has already called `goto`) — seeds a synthetic
+  ///    `FrameInfo` with that id and an empty url, no RTT.
+  /// 2. Falls back to `Page.getFrameTree` if the backend has no
+  ///    cached frame id (no prior navigation).
+  ///
+  /// Called from [`Self::goto`] after `inner.goto` returns to
+  /// guarantee `main_frame()` works for the synchronous accessor
+  /// the user is about to invoke. The RTT path fires at most once
+  /// per page lifetime and is skipped entirely for the common case
+  /// (navigate-then-query test flows — the bench's 100% case).
+  pub(crate) async fn ensure_frame_cache_seeded(self: &Arc<Self>) -> Result<()> {
+    let already_seeded = self.with_frame_cache(|c| c.main_frame_id().is_some());
+    if already_seeded {
+      return Ok(());
+    }
+    if let Some(fid) = self.inner.peek_main_frame_id() {
+      if let Ok(mut g) = self.frame_cache.lock() {
+        if g.main_frame_id().is_none() {
+          g.attach(crate::backend::FrameInfo {
+            frame_id: fid,
+            parent_frame_id: None,
+            name: String::new(),
+            url: String::new(),
+          });
+        }
+      }
+      return Ok(());
+    }
+    let infos = self.inner.get_frame_tree().await?;
+    if let Ok(mut g) = self.frame_cache.lock() {
+      if g.main_frame_id().is_none() {
+        g.seed(infos);
+      }
     }
     Ok(())
   }
@@ -280,7 +315,11 @@ impl Page {
   ///
   /// Returns an error if the navigation fails or the wait condition times out.
   #[tracing::instrument(skip(self, opts), fields(url))]
-  pub async fn goto(&self, url: &str, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
+  pub async fn goto(
+    self: &Arc<Self>,
+    url: &str,
+    opts: Option<GotoOptions>,
+  ) -> Result<Option<crate::network::Response>> {
     // Resolve against the context's `baseURL` option when set —
     // mirrors Playwright's `constructURLBasedOnBaseURL` applied in
     // `Page._goto` (`/tmp/playwright/packages/playwright-core/src/client/page.ts`).
@@ -289,11 +328,20 @@ impl Page {
     tracing::debug!(target: "ferridriver::action", action = "goto", url = %resolved, "page.goto");
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
     let referer = opts.as_ref().and_then(|o| o.referer.as_deref());
-    self
-      .inner
-      .goto(&resolved, lifecycle, timeout, referer)
-      .await
-      .map_err(Into::into)
+    let result = self.inner.goto(&resolved, lifecycle, timeout, referer).await;
+    // PERF_AUDIT.md §M.4 — bootstrap no longer fetches `Page.getFrameTree`,
+    // so the wrapper's frame cache is empty on a fresh page until the
+    // first navigation event lands. The CDP backend captures the
+    // top-level `frameId` from `Page.navigate`'s response and we read
+    // it here via `peek_main_frame_id()` to seed the cache without
+    // an extra RTT — the synchronous `main_frame()` call the user is
+    // about to make then sees a populated cache. `ensure_frame_cache_seeded`
+    // is a no-op when a `Page.frameNavigated` event has already
+    // populated the cache via the listener (the common path on
+    // network-light tests where the listener task gets scheduled
+    // before goto returns).
+    let _ = self.ensure_frame_cache_seeded().await;
+    result.map_err(Into::into)
   }
 
   /// Resolve a user-supplied URL against the owning context's
@@ -1260,19 +1308,19 @@ impl Page {
       // pass a fully populated bag" so a wholesale replace is fine
       // — keep this simple unless a real use-case needs deep merge.
       if opts.base_url.is_some() {
-        bag.base_url = opts.base_url.clone();
+        bag.base_url.clone_from(&opts.base_url);
       }
       if opts.user_agent.is_some() {
-        bag.user_agent = opts.user_agent.clone();
+        bag.user_agent.clone_from(&opts.user_agent);
       }
       if opts.viewport != crate::options::ViewportOption::default() {
-        bag.viewport = opts.viewport.clone();
+        bag.viewport.clone_from(&opts.viewport);
       }
       if opts.locale.is_some() {
-        bag.locale = opts.locale.clone();
+        bag.locale.clone_from(&opts.locale);
       }
       if opts.timezone_id.is_some() {
-        bag.timezone_id = opts.timezone_id.clone();
+        bag.timezone_id.clone_from(&opts.timezone_id);
       }
       state.set_context_options(&composite, bag);
     }

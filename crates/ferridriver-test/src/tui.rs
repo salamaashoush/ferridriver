@@ -611,13 +611,11 @@ impl WatchTui {
                 self.render();
                 continue;
               }
-              KeyCode::Char('c') => {
+              KeyCode::Char('c') if self.active_filter.is_some() => {
                 // Clear active filter.
-                if self.active_filter.is_some() {
-                  self.active_filter = None;
-                  self.render();
-                  return Some(WatchCommand::RunAll);
-                }
+                self.active_filter = None;
+                self.render();
+                return Some(WatchCommand::RunAll);
               }
               _ => {}
             }

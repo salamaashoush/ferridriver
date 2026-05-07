@@ -81,10 +81,18 @@ impl FrameCache {
   }
 
   /// Apply a `Page.frameNavigated` event — update name/url but preserve
-  /// the cached id and `detached` flag.
+  /// the cached id and `detached` flag. Sets `main_id` when the
+  /// navigated frame is a top-level frame (`parent_frame_id == None`)
+  /// and no main frame is yet recorded — covers the bootstrap path
+  /// where the eager `Page.getFrameTree` RTT was dropped (`PERF_AUDIT`
+  /// §L.3.4 / §M.4): the user's first `page.goto` emits this event
+  /// for the main frame, populating the cache without an extra RTT.
   pub(crate) fn navigated(&mut self, info: FrameInfo) {
     let id: Arc<str> = Arc::from(info.frame_id.as_str());
     let detached = self.by_id.get(&id).is_some_and(|r| r.detached);
+    if info.parent_frame_id.is_none() && self.main_id.is_none() {
+      self.main_id = Some(Arc::clone(&id));
+    }
     if !self.by_id.contains_key(&id) {
       self.order.push(Arc::clone(&id));
     }

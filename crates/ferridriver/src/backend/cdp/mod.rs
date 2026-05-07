@@ -175,13 +175,10 @@ impl<T: CdpWrap> CdpBrowser<T> {
     };
 
     // Pre-register the lazy-inject IIFE in the same batch when supplied.
-    // CDP processes commands on a single session in send-order, so
-    // `Page.enable` lands first; `addScriptToEvaluateOnNewDocument`
-    // with `runImmediately:true` then runs the IIFE in the existing
-    // about:blank context AND every future document (including
-    // navigations and child frames). Saves the per-page sequential
-    // RTT that the lazy `ensure_engine_injected` path otherwise pays
-    // on the first selector use.
+    // `runImmediately:true` runs the script in the existing
+    // about:blank context AND every future document, so the first
+    // selector op finds `window.__fd` already injected and skips
+    // the lazy `ensure_engine_injected` RTT.
     let inject_fut = async {
       if let Some(src) = init_script {
         transport
@@ -200,7 +197,18 @@ impl<T: CdpWrap> CdpBrowser<T> {
       }
     };
 
-    let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = tokio::join!(
+    // PERF_AUDIT.md §L.3.4 + §M.4 — drop `Page.getFrameTree` from the
+    // parallel bootstrap batch. Chrome processes commands on a single
+    // CDP session strictly serially, so each command in the batch
+    // adds its own processing time (~7-15ms) to the wall-clock floor.
+    //
+    // The frame tree is now seeded lazily in
+    // [`crate::Page::ensure_frame_cache_seeded`] (called from
+    // `Page::goto` after the navigate response carries the
+    // top-level frame_id) — no RTT for the navigate-then-query flow
+    // that all bench / typical tests follow. `peek_main_frame_id()`
+    // exposes the cached id from `Page.navigate`'s response.
+    let (r1, r2, r3, r4, r5, r6, r7, r9) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep.clone()),
       transport.send_command(session_id, "Runtime.enable", ep.clone()),
       transport.send_command(session_id, "Network.enable", ep.clone()),
@@ -216,7 +224,6 @@ impl<T: CdpWrap> CdpBrowser<T> {
       ),
       vp_fut,
       inject_fut,
-      transport.send_command(session_id, "Page.getFrameTree", super::empty_params()),
       unpause_fut,
     );
     r1?;
@@ -227,12 +234,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     r6?;
     r7?;
     r9?;
-    let tree = r8?;
-    let mut frames = Vec::new();
-    if let Some(frame_tree) = tree.get("frameTree") {
-      collect_frames(frame_tree, &mut frames);
-    }
-    Ok(Some(frames))
+    Ok(None)
   }
 
   /// Internal constructor for after transport + child process setup.
@@ -489,9 +491,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // bench's `locator(...).click()` etc. fire immediately so the
     // first selector lookup almost always finds the engine missing.
     //
-    // The same parallel batch also pulls `Page.getFrameTree`, so the
-    // page-level `seed_frame_cache` reads it from the seeded slot
-    // below instead of paying a sequential RTT after enables return.
+    // The same parallel batch also pulls the IIFE engine inject, so
+    // `ensure_engine_injected` becomes a no-op for first selector
+    // use. Page.getFrameTree is intentionally NOT in the batch —
+    // see PERF_AUDIT §M.4: the post-`Page.navigate` path seeds the
+    // frame cache via `peek_main_frame_id()` for free.
     let inject_src = crate::selectors::build_lazy_inject_js();
     let frame_tree_seed =
       Self::enable_domains(&self.transport, sid.as_deref(), viewport, true, Some(&inject_src)).await?;
@@ -1299,6 +1303,17 @@ impl<T: CdpWrap> CdpPage<T> {
       }
     }
 
+    // Page.navigate returns the navigated frame's `frameId`. PERF_AUDIT
+    // §M.4 — eagerly seed the lazy `main_frame_id` cache from this
+    // response so the wrapper-level [`crate::Page`] frame cache can be
+    // populated without paying a separate `Page.getFrameTree` RTT
+    // (the bootstrap previously paid that RTT inside `enable_domains`;
+    // dropping it shifted the cost into per-action paths if not seeded
+    // here).
+    if let Some(fid) = nav_result.get("frameId").and_then(|v| v.as_str()) {
+      let _ = self.main_frame_id.set(fid.to_string());
+    }
+
     let nav_loader_id = nav_result.get("loaderId").and_then(|v| v.as_str()).unwrap_or("");
 
     // Sync check: if the lifecycle event for THIS navigation's document already
@@ -1415,6 +1430,18 @@ impl<T: CdpWrap> CdpPage<T> {
       Ok(Ok(Ok(())) | Err(_)) | Err(_) => Ok(self.await_nav_response().await),
       Ok(Ok(Err(e))) => Err(e),
     }
+  }
+
+  /// Backend-level synchronous accessor for the cached top-level
+  /// `frameId`. Populated by `CdpPage::goto` from the
+  /// `Page.navigate` response (see `nav_result.frameId`) and by the
+  /// lazy `set_content` path. Used by [`crate::Page::ensure_frame_cache_seeded`]
+  /// to seed the wrapper's frame cache without a separate
+  /// `Page.getFrameTree` round-trip when the bootstrap batch no
+  /// longer fetches it (`PERF_AUDIT` §M.4).
+  #[must_use]
+  pub fn peek_main_frame_id(&self) -> Option<String> {
+    self.main_frame_id.get().cloned()
   }
 
   pub async fn url(&self) -> Result<Option<String>, String> {
@@ -1661,7 +1688,7 @@ impl<T: CdpWrap> CdpPage<T> {
     let fn_source_lit = serde_json::to_string(fn_source).map_err(|e| e.to_string())?;
     let args_json_lit = serde_json::to_string(&args_json).map_err(|e| e.to_string())?;
     let expression =
-      format!("({UTILITY_EVAL_WRAPPER})({is_fn_lit},{return_by_value_lit},{fn_source_lit},{count},{args_json_lit})",);
+      format!("({UTILITY_EVAL_WRAPPER})({is_fn_lit},{return_by_value_lit},{fn_source_lit},{count},{args_json_lit})");
     let response = self
       .cmd(
         "Runtime.evaluate",

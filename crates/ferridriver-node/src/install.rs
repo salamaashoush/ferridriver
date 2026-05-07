@@ -5,6 +5,18 @@ use napi_derive::napi;
 
 use ferridriver::install::BrowserInstaller;
 
+/// Print the per-method CDP RTT stats table to stderr.
+///
+/// Only emits when `FERRIDRIVER_RTT_STATS=1` was set at process start
+/// (the global aggregator only ticks under that env). Bun and Node
+/// process exits do not reliably trigger libc `atexit`, so the CLI
+/// bridge calls this just before `process.exit` to make the stats
+/// dump appear deterministically.
+#[napi]
+pub fn dump_rtt_stats() {
+  ferridriver::backend::cdp::transport::dump_global_rtt_stats();
+}
+
 /// Install the latest stable Chromium browser.
 /// Returns the path to the installed chrome executable.
 #[napi]

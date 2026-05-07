@@ -333,13 +333,12 @@ impl ContextRef {
       state.register_opened_page(&self.key, any_page.clone(), browser_context_id)?;
     }
 
-    // `Page::with_context` is async — it seeds the frame cache and spawns
-    // the FrameAttached/Detached/Navigated listener inside the constructor
-    // so sync accessors (`main_frame`, `frames`, `parent_frame`,
-    // `child_frames`, `is_detached`, `name`, `url`) see live state on the
-    // very first call. Mirrors Playwright's client always receiving the
-    // main frame via the channel initializer.
-    let page = Page::with_context(any_page, self.clone()).await?;
+    // `Page::with_context` spawns the FrameAttached/Detached/Navigated
+    // listener so sync accessors (`main_frame`, `frames`, `parent_frame`,
+    // `child_frames`, `is_detached`, `name`, `url`) see live state via
+    // the listener. Sync after the eager `Page.getFrameTree` RTT was
+    // dropped (`PERF_AUDIT` §M.4).
+    let page = Page::with_context(any_page, self.clone());
 
     // Apply the BrowserContextOptions bag to the fresh page. Fields
     // without a backend implementation are silently skipped;
@@ -403,7 +402,7 @@ impl ContextRef {
     };
     let mut pages = Vec::with_capacity(inner_pages.len());
     for inner in inner_pages {
-      pages.push(Page::with_context(inner, self.clone()).await?);
+      pages.push(Page::with_context(inner, self.clone()));
     }
     Ok(pages)
   }

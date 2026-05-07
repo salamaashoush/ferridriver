@@ -797,8 +797,7 @@ impl Locator {
           .map_err(|e| crate::error::FerriError::Other(format!("failed to create upload temp dir: {e}")))?;
         let upload_id = std::time::SystemTime::now()
           .duration_since(std::time::UNIX_EPOCH)
-          .map(|d| d.as_nanos())
-          .unwrap_or(0);
+          .map_or(0, |d| d.as_nanos());
         let mut paths: Vec<String> = Vec::new();
         for (i, p) in payloads.iter().enumerate() {
           let sub = tmp_root.join(format!("{upload_id}-{i}"));

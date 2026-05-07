@@ -28,7 +28,7 @@ pub enum TraceMode {
 impl TraceMode {
   /// Parse from string (config/CLI).
   #[must_use]
-  pub fn from_str(s: &str) -> Self {
+  pub fn parse_label(s: &str) -> Self {
     match s {
       "on" => Self::On,
       "retain-on-failure" => Self::RetainOnFailure,
@@ -42,8 +42,7 @@ impl TraceMode {
   pub fn should_record(self, attempt: u32, _failed: bool) -> bool {
     match self {
       Self::Off => false,
-      Self::On => true,
-      Self::RetainOnFailure => true,
+      Self::On | Self::RetainOnFailure => true,
       Self::OnFirstRetry => attempt == 2,
     }
   }
@@ -53,9 +52,8 @@ impl TraceMode {
   pub fn should_retain(self, failed: bool) -> bool {
     match self {
       Self::Off => false,
-      Self::On => true,
+      Self::On | Self::OnFirstRetry => true,
       Self::RetainOnFailure => failed,
-      Self::OnFirstRetry => true,
     }
   }
 
@@ -79,7 +77,9 @@ pub enum VideoMode {
 }
 
 impl VideoMode {
-  pub fn from_str(s: &str) -> Self {
+  /// Parse from string (config/CLI).
+  #[must_use]
+  pub fn parse_label(s: &str) -> Self {
     match s {
       "on" => Self::On,
       "retain-on-failure" => Self::RetainOnFailure,
@@ -110,6 +110,9 @@ impl Default for VideoConfig {
 // ── Test config ─────────────────────────────────────────────────────────────
 
 /// Test runner configuration.
+// Each bool field is an independent feature flag set in user TOML —
+// grouping into enums would be ceremony, not a real state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct TestConfig {
@@ -186,6 +189,9 @@ pub struct BrowserConfig {
   pub context: ContextConfig,
 }
 
+// Each bool field is an independent feature flag set in user TOML —
+// grouping into enums would be ceremony, not a real state machine.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ContextConfig {
@@ -271,8 +277,8 @@ impl BrowserConfig {
   /// is the single source of truth and the protocol is implicit.
   ///
   /// Rules:
-  /// - `backend = "bidi"` implies `browser = "firefox"` (BiDi is Firefox-only)
-  /// - `browser = "firefox"` implies `backend = "bidi"` (Firefox only speaks BiDi)
+  /// - `backend = "bidi"` implies `browser = "firefox"` (`BiDi` is Firefox-only)
+  /// - `browser = "firefox"` implies `backend = "bidi"` (Firefox only speaks `BiDi`)
   /// - `browser = "webkit"` implies `backend = "webkit"` on macOS
   /// - Everything else defaults to `browser = "chromium"`, `backend = "cdp-pipe"`
   pub fn normalize(&mut self) {
@@ -467,6 +473,12 @@ pub struct ShardArg {
 
 impl ShardArg {
   /// Parse `"X/N"` format.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error string when the input is malformed, when either
+  /// component fails to parse as `u32`, or when `current` is outside
+  /// `1..=total`.
   pub fn parse(s: &str) -> Result<Self, String> {
     let parts: Vec<&str> = s.split('/').collect();
     if parts.len() != 2 {
@@ -482,6 +494,9 @@ impl ShardArg {
 }
 
 /// CLI overrides that take highest priority.
+// Independent bool flags from `clap` parse — grouping into enums adds
+// no value; each flag has its own --foo.
+#[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Default)]
 pub struct CliOverrides {
   pub workers: Option<u32>,

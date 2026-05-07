@@ -21,8 +21,9 @@
 //! Worker matrix: 1, 2, 4, 8.
 //!
 //! Run with:
-//!   cargo test -p ferridriver-test --release --test bench_napi_compare -- --ignored --nocapture
+//!   `cargo test -p ferridriver-test --release --test bench_napi_compare -- --ignored --nocapture`
 
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -36,7 +37,9 @@ fn data_url(html: &str) -> String {
   for b in html.bytes() {
     match b {
       b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
-      _ => out.push_str(&format!("%{:02X}", b)),
+      _ => {
+        let _ = write!(out, "%{b:02X}");
+      },
     }
   }
   out

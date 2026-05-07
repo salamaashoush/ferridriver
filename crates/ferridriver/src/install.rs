@@ -784,7 +784,6 @@ fn headless_shell_executable_path(install_dir: &Path, platform: &str) -> PathBuf
 #[cfg(target_os = "linux")]
 fn detect_linux_distro() -> String {
   let arch_suffix = match std::env::consts::ARCH {
-    "x86_64" => "-x64",
     "aarch64" => "-arm64",
     _ => "-x64",
   };
@@ -794,9 +793,7 @@ fn detect_linux_distro() -> String {
   match id.as_str() {
     "ubuntu" | "pop" | "neon" | "tuxedo" => {
       let major: u32 = version.split('.').next().and_then(|s| s.parse().ok()).unwrap_or(24);
-      if major < 20 {
-        format!("ubuntu20.04{arch_suffix}")
-      } else if major < 22 {
+      if major < 22 {
         format!("ubuntu20.04{arch_suffix}")
       } else if major < 24 {
         format!("ubuntu22.04{arch_suffix}")
@@ -828,7 +825,7 @@ fn detect_linux_distro() -> String {
   }
 }
 
-/// Read /etc/os-release and return (ID, VERSION_ID).
+/// Read `/etc/os-release` and return (ID, `VERSION_ID`).
 #[cfg(target_os = "linux")]
 fn read_os_release() -> Option<(String, String)> {
   let content = std::fs::read_to_string("/etc/os-release").ok()?;

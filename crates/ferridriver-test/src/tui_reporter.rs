@@ -64,34 +64,32 @@ impl crate::reporter::Reporter for TuiReporter {
         self.send(TuiMessage::TestStarted { name });
       },
 
-      ReporterEvent::StepStarted(step) => {
-        if step.category.is_visible() || self.has_bdd {
-          let test_name = self.display_name(&step.test_id);
-          self.send(TuiMessage::StepUpdate {
-            test_name,
-            step_title: step.title.clone(),
-            status: EntryStatus::Running,
-            duration_ms: None,
-          });
-        }
+      ReporterEvent::StepStarted(step) if step.category.is_visible() || self.has_bdd => {
+        let test_name = self.display_name(&step.test_id);
+        self.send(TuiMessage::StepUpdate {
+          test_name,
+          step_title: step.title.clone(),
+          status: EntryStatus::Running,
+          duration_ms: None,
+        });
       },
+      ReporterEvent::StepStarted(_) => {},
 
-      ReporterEvent::StepFinished(step) => {
-        if step.category.is_visible() || self.has_bdd {
-          let test_name = self.display_name(&step.test_id);
-          let status = if step.error.is_some() {
-            EntryStatus::Failed
-          } else {
-            EntryStatus::Passed
-          };
-          self.send(TuiMessage::StepUpdate {
-            test_name,
-            step_title: step.title.clone(),
-            status,
-            duration_ms: Some(step.duration.as_millis() as u64),
-          });
-        }
+      ReporterEvent::StepFinished(step) if step.category.is_visible() || self.has_bdd => {
+        let test_name = self.display_name(&step.test_id);
+        let status = if step.error.is_some() {
+          EntryStatus::Failed
+        } else {
+          EntryStatus::Passed
+        };
+        self.send(TuiMessage::StepUpdate {
+          test_name,
+          step_title: step.title.clone(),
+          status,
+          duration_ms: Some(step.duration.as_millis() as u64),
+        });
       },
+      ReporterEvent::StepFinished(_) => {},
 
       ReporterEvent::TestFinished { test_id, outcome } => {
         let name = self.display_name(test_id);

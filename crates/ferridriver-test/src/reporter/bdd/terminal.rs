@@ -84,7 +84,7 @@ impl Reporter for BddTerminalReporter {
             println!();
           }
           if let Some(suite) = &test_id.suite {
-            println!("  {} {}", s_feature().apply_to("Feature:"), s_bold().apply_to(suite),);
+            println!("  {} {}", s_feature().apply_to("Feature:"), s_bold().apply_to(suite));
           }
           self.current_suite.clone_from(&test_id.suite);
         }
@@ -166,19 +166,15 @@ impl Reporter for BddTerminalReporter {
         }
       },
 
-      ReporterEvent::TestFinished { outcome, .. } => {
-        // Re-print the scenario line with final status (overwrite the running indicator).
-        // Move cursor up past the steps + the original scenario line, then reprint.
-        // Actually, for simplicity in a streaming terminal, we just print the skipped indicator.
-        if outcome.status == TestStatus::Skipped {
-          // For skipped scenarios that had no steps printed.
-          println!(
-            "      {} {}",
-            s_skip().apply_to("\u{2212}"), // minus
-            s_skip().apply_to("skipped"),
-          );
-        }
+      ReporterEvent::TestFinished { outcome, .. } if outcome.status == TestStatus::Skipped => {
+        // For skipped scenarios that had no steps printed.
+        println!(
+          "      {} {}",
+          s_skip().apply_to("\u{2212}"), // minus
+          s_skip().apply_to("skipped"),
+        );
       },
+      ReporterEvent::TestFinished { .. } => {},
 
       ReporterEvent::RunFinished {
         total,

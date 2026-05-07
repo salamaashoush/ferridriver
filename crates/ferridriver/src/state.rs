@@ -1503,8 +1503,10 @@ fn find_playwright_firefox() -> Option<String> {
   let cache_base = std::path::PathBuf::from(&home).join("Library/Caches/ms-playwright");
   #[cfg(target_os = "linux")]
   let cache_base = std::env::var("XDG_CACHE_HOME")
-    .map(std::path::PathBuf::from)
-    .unwrap_or_else(|_| std::path::PathBuf::from(&home).join(".cache"))
+    .map_or_else(
+      |_| std::path::PathBuf::from(&home).join(".cache"),
+      std::path::PathBuf::from,
+    )
     .join("ms-playwright");
   #[cfg(target_os = "windows")]
   let cache_base = std::env::var("LOCALAPPDATA")

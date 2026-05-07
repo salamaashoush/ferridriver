@@ -1191,10 +1191,7 @@ fn parse_aria_line_body(body: &str) -> AriaNode {
 
   // Pull out [attrs] segments.
   let mut rest_owned: String = rest.to_string();
-  loop {
-    let Some(open) = rest_owned.find('[') else {
-      break;
-    };
+  while let Some(open) = rest_owned.find('[') {
     let Some(close_rel) = rest_owned[open..].find(']') else {
       break;
     };
