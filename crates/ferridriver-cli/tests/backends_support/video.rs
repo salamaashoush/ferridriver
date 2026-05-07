@@ -109,7 +109,7 @@ pub fn test_video_recording_lifecycle(c: &mut McpClient) {
       let file_path = v["filePath"].as_str().expect("filePath is a string");
       let p = std::path::Path::new(file_path);
       assert!(p.exists(), "CDP recorded file must exist: {file_path}");
-      let size = std::fs::metadata(p).map(|m| m.len()).unwrap_or(0);
+      let size = std::fs::metadata(p).map_or(0, |m| m.len());
       assert!(
         size > 0,
         "CDP recorded file must be non-empty: size={size} path={file_path}"

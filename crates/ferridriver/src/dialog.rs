@@ -398,7 +398,7 @@ impl DialogManager {
   /// Used by tests and by [`Self::remove_handler`]'s drain path.
   #[must_use]
   pub fn open_dialog_count(&self) -> usize {
-    self.inner.open.lock().map(|g| g.len()).unwrap_or(0)
+    self.inner.open.lock().map_or(0, |g| g.len())
   }
 
   /// Register the default emitter-bridge handler: every page installs

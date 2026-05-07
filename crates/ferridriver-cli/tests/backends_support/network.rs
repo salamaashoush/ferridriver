@@ -578,7 +578,7 @@ pub fn test_network_websocket(c: &mut McpClient) {
     ws_url = ws_url,
   );
   let v = c.script_value(&script);
-  assert!(v["url"].as_str().is_some_and(|s| s.starts_with("ws://")), "ws url: {v}",);
+  assert!(v["url"].as_str().is_some_and(|s| s.starts_with("ws://")), "ws url: {v}");
   assert_eq!(v["payload"].as_str(), Some("hello-ws"), "echoed payload: {v}");
   let _ = stop.send(());
 }

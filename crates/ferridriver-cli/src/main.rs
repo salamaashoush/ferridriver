@@ -37,15 +37,15 @@ async fn main() -> anyhow::Result<()> {
   let config = FerridriverConfig::load(args.config.as_deref())?;
 
   match args.command {
-    cli::Command::Mcp(mcp_args) => run_mcp(config, mcp_args).await,
-    cli::Command::Bdd(bdd_args) => run_bdd(config, bdd_args).await,
-    cli::Command::Test(test_args) => run_test(test_args).await,
+    cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,
+    cli::Command::Bdd(bdd_args) => Box::pin(run_bdd(config, bdd_args)).await,
+    cli::Command::Test(test_args) => run_test(&test_args),
     cli::Command::Codegen(_) => anyhow::bail!("`codegen` subcommand not yet implemented"),
     cli::Command::Config(_) => anyhow::bail!("`config` subcommand not yet implemented"),
   }
 }
 
-async fn run_test(args: cli::TestArgs) -> anyhow::Result<()> {
+fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
   use std::process::{Command, Stdio};
 
   let chosen_runner = args.runner.unwrap_or(detect_test_runner());
@@ -120,16 +120,18 @@ fn chosen_runner_name(r: cli::TestRunner) -> &'static str {
 }
 
 async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Result<()> {
-  let mut overrides = ferridriver_test::config::CliOverrides::default();
-  overrides.bdd_tags = args.tags;
-  overrides.bdd_dry_run = args.dry_run;
-  overrides.bdd_fail_fast = args.fail_fast;
-  overrides.bdd_strict = args.strict;
-  overrides.bdd_step_timeout = args.step_timeout;
-  overrides.bdd_order = args.order;
-  overrides.bdd_language = args.language;
-  overrides.workers = args.workers.map(|n| n as u32);
-  overrides.reporter = args.reporter;
+  let mut overrides = ferridriver_test::config::CliOverrides {
+    bdd_tags: args.tags,
+    bdd_dry_run: args.dry_run,
+    bdd_fail_fast: args.fail_fast,
+    bdd_strict: args.strict,
+    bdd_step_timeout: args.step_timeout,
+    bdd_order: args.order,
+    bdd_language: args.language,
+    workers: args.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
+    reporter: args.reporter,
+    ..Default::default()
+  };
   // `--headless` opts into headless. Default config is headed, so leaving
   // the flag unset means visible windows -- matching the new CLI
   // convention where the user watches tests run by default.
@@ -158,7 +160,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
     test_config.features = args.features;
   }
 
-  let exit_code = ferridriver_bdd::run_bdd_with(test_config, overrides).await;
+  let exit_code = Box::pin(ferridriver_bdd::run_bdd_with(test_config, overrides)).await;
   if exit_code == 0 {
     Ok(())
   } else {

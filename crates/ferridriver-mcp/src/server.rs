@@ -536,9 +536,10 @@ impl McpServer {
   /// for the given context cannot be retrieved.
   pub async fn page(&self, context: &str) -> Result<Arc<Page>, ErrorData> {
     let any_page = Box::pin(self.ensure_active_page(context)).await?;
-    // `Page::new` is async — it seeds the frame cache and spawns the
-    // FrameAttached/Navigated/Detached listener inside the constructor.
-    Page::new(any_page).await.map_err(Self::err)
+    // `Page::new` spawns the FrameAttached/Navigated/Detached listener
+    // and is sync after the eager `Page.getFrameTree` RTT was dropped
+    // (see `PERF_AUDIT` §M.4).
+    Ok(Page::new(any_page))
   }
 
   /// Get raw `AnyPage` (for low-level ops that Page doesn't cover yet).
@@ -567,7 +568,7 @@ impl McpServer {
     context: &str,
   ) -> Result<(Arc<Page>, ferridriver::context::ContextRef), ErrorData> {
     let any_page = Box::pin(self.ensure_active_page(context)).await?;
-    let page = Page::new(any_page).await.map_err(Self::err)?;
+    let page = Page::new(any_page);
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
     Ok((page, ctx_ref))
   }

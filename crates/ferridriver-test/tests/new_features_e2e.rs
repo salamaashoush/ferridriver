@@ -66,7 +66,12 @@ fn noop_test(name: &str) -> TestCase {
 }
 
 async fn run_plan(plan: TestPlan, config: TestConfig) -> i32 {
-  run_plan_with_hooks(plan, config, ferridriver_test::model::TestHooks::default()).await
+  Box::pin(run_plan_with_hooks(
+    plan,
+    config,
+    ferridriver_test::model::TestHooks::default(),
+  ))
+  .await
 }
 
 async fn run_plan_with_hooks(plan: TestPlan, config: TestConfig, hooks: ferridriver_test::model::TestHooks) -> i32 {

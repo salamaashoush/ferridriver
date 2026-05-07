@@ -495,7 +495,7 @@ impl TestRunner {
       workers: cfg.workers.map(|w| w as u32),
       timeout: cfg.timeout.map(|t| t as u64),
       retries: cfg.retries.map(|r| r as u32),
-      headed: cfg.headed.unwrap_or(false),
+      headless: !cfg.headed.unwrap_or(false),
       browser: cfg.browser.clone(),
       backend: cfg.backend.clone(),
       channel: cfg.channel.clone(),

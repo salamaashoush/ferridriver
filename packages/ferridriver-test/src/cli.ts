@@ -806,6 +806,16 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
   if (summary.exitCode !== 0 && summary.total === 0) {
     console.error('  Test run failed before executing any tests.');
   }
+  // FERRIDRIVER_RTT_STATS dump — Bun / some Node configurations exit
+  // without firing libc atexit (per-dispatcher Drops also leak via
+  // tokio reader/writer tasks), so explicit dump avoids losing the
+  // table. No-op when the env var is unset.
+  try {
+    const { dumpRttStats } = await import('@ferridriver/node');
+    if (typeof dumpRttStats === 'function') dumpRttStats();
+  } catch {
+    /* native addon may not yet expose the helper on older builds */
+  }
   const exitCode = summary.exitCode !== 0 ? summary.exitCode : (summary.failed > 0 ? 1 : 0);
   process.exit(exitCode);
 }
@@ -977,7 +987,7 @@ const codegenCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const { Codegen } = await import('ferridriver');
+    const { Codegen } = await import('@ferridriver/node');
 
     const config: Record<string, any> = { url: args.url as string };
     if (args.language) config.language = args.language;

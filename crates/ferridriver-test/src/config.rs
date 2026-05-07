@@ -292,10 +292,10 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
     config.forbid_only = true;
   }
   if let Some(video) = &overrides.video {
-    config.video.mode = VideoMode::from_str(video);
+    config.video.mode = VideoMode::parse_label(video);
   }
   if let Some(trace) = &overrides.trace {
-    config.trace = TraceMode::from_str(trace);
+    config.trace = TraceMode::parse_label(trace);
   }
   if let Some(ref ss) = overrides.storage_state {
     config.storage_state = Some(ss.clone());
@@ -339,10 +339,10 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
     }
   }
   if let Ok(v) = std::env::var("FERRIDRIVER_VIDEO") {
-    config.video.mode = VideoMode::from_str(&v);
+    config.video.mode = VideoMode::parse_label(&v);
   }
   if let Ok(t) = std::env::var("FERRIDRIVER_TRACE") {
-    config.trace = TraceMode::from_str(&t);
+    config.trace = TraceMode::parse_label(&t);
   }
 
   // Auto-detect worker count.

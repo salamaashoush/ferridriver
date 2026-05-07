@@ -30,8 +30,7 @@ fn detect_encoder() -> &'static str {
       .stdout(Stdio::piped())
       .stderr(Stdio::null())
       .output()
-      .map(|o| String::from_utf8_lossy(&o.stdout).contains("libvpx"))
-      .unwrap_or(false);
+      .is_ok_and(|o| String::from_utf8_lossy(&o.stdout).contains("libvpx"));
     if has_vpx { "vpx" } else { "h264" }
   })
 }

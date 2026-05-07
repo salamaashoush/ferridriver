@@ -500,7 +500,7 @@ Timeout:  {timeout_ms}ms\
     received = err.received,
   );
 
-  let diff = format!("Expected: {}\nReceived: {}", err.expected, err.received,);
+  let diff = format!("Expected: {}\nReceived: {}", err.expected, err.received);
 
   Err(TestFailure {
     message,

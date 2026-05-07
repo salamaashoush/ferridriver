@@ -803,6 +803,24 @@ impl AnyPage {
     page_dispatch!(self, get_frame_tree())
   }
 
+  /// Backend's cached top-level `frameId`, if a prior op (page-init
+  /// or navigation) populated it without a `Page.getFrameTree`
+  /// round-trip. Used by [`crate::Page::ensure_frame_cache_seeded`]
+  /// to seed the wrapper's frame cache for free after a `goto`,
+  /// avoiding the extra RTT that would otherwise fire when the
+  /// frameNavigated event hadn't propagated through the listener
+  /// yet by goto-return time.
+  #[must_use]
+  pub fn peek_main_frame_id(&self) -> Option<String> {
+    match self {
+      Self::CdpPipe(p) => p.peek_main_frame_id(),
+      Self::CdpRaw(p) => p.peek_main_frame_id(),
+      #[cfg(target_os = "macos")]
+      Self::WebKit(_) => None,
+      Self::Bidi(_) => None,
+    }
+  }
+
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>, String> {
     page_dispatch!(self, evaluate_in_frame(expression, frame_id))
   }

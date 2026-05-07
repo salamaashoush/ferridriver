@@ -43,14 +43,14 @@ pub(crate) struct PendingEntry {
 ///
 /// Sharded via [`dashmap::DashMap`] so concurrent senders don't
 /// serialise on a single global mutex. Each shard has its own
-/// internal RwLock; insert/remove on different keys are wait-free
+/// internal `RwLock`; insert/remove on different keys are wait-free
 /// vs each other. Replaced `Arc<std::sync::Mutex<FxHashMap>>` —
-/// uncontended insert went from ~100ns (mutex acq + HashMap insert)
+/// uncontended insert went from ~100ns (mutex acq + `HashMap` insert)
 /// to ~50ns (shard lookup + per-shard insert), and contention at
 /// 4+ concurrent senders no longer serialises. The per-key mutex
 /// model would be even cheaper but requires `parking_lot::Mutex`
 /// per entry which complicates the lifetime story for one-shot
-/// senders. DashMap is the right balance.
+/// senders. `DashMap` is the right balance.
 pub(crate) type PendingMap = DashMap<u64, PendingEntry>;
 
 /// Aggregated per-CDP-method round-trip statistics. Updated when a
@@ -62,6 +62,35 @@ struct RttBucket {
   count: u64,
   total_ns: u128,
   max_ns: u128,
+}
+
+/// Format nanoseconds as fixed-point milliseconds with 2 decimals,
+/// using integer arithmetic to dodge the `u128 -> f64` precision-loss
+/// lint without suppressions.
+fn fmt_ms2(ns: u128) -> String {
+  let ms = ns / 1_000_000;
+  let dec = (ns % 1_000_000) / 10_000;
+  format!("{ms}.{dec:02}")
+}
+
+/// Format nanoseconds as fixed-point microseconds with 1 decimal.
+fn fmt_us1(ns: u128) -> String {
+  let us = ns / 1_000;
+  let dec = (ns % 1_000) / 100;
+  format!("{us}.{dec}")
+}
+
+/// Average microseconds with 1 decimal — `total_ns / count / 1000`
+/// in integer space to dodge precision-loss lint.
+fn fmt_avg_us1(total_ns: u128, count: u64) -> String {
+  if count == 0 {
+    return "0.0".to_string();
+  }
+  let total_us10 = total_ns * 10 / 1_000;
+  let avg_us10 = total_us10 / u128::from(count);
+  let us = avg_us10 / 10;
+  let dec = avg_us10 % 10;
+  format!("{us}.{dec}")
 }
 
 #[derive(Default)]
@@ -79,31 +108,41 @@ impl RttStats {
     }
   }
 
+  fn merge(&mut self, other: &RttStats) {
+    for (method, b) in &other.buckets {
+      let entry = self.buckets.entry(method.clone()).or_default();
+      entry.count += b.count;
+      entry.total_ns += b.total_ns;
+      if b.max_ns > entry.max_ns {
+        entry.max_ns = b.max_ns;
+      }
+    }
+  }
+
   fn dump(&self) {
     if self.buckets.is_empty() {
       return;
     }
     let mut rows: Vec<(&String, &RttBucket)> = self.buckets.iter().collect();
-    rows.sort_by(|a, b| b.1.total_ns.cmp(&a.1.total_ns));
+    rows.sort_by_key(|r| std::cmp::Reverse(r.1.total_ns));
     let total_count: u64 = self.buckets.values().map(|b| b.count).sum();
     let total_ns: u128 = self.buckets.values().map(|b| b.total_ns).sum();
     eprintln!(
-      "─── ferridriver CDP RTT stats ─── total_calls={total_count}  total_time={:.1}ms",
-      total_ns as f64 / 1_000_000.0
+      "─── ferridriver CDP RTT stats ─── total_calls={total_count}  total_time={}ms",
+      fmt_ms2(total_ns)
     );
     eprintln!(
       "  {:<48}  {:>7}  {:>10}  {:>10}  {:>10}",
       "method", "count", "total_ms", "avg_us", "max_us"
     );
     for (method, bucket) in rows {
-      let avg_us = bucket.total_ns as f64 / bucket.count as f64 / 1000.0;
       eprintln!(
-        "  {:<48}  {:>7}  {:>10.2}  {:>10.1}  {:>10.1}",
+        "  {:<48}  {:>7}  {:>10}  {:>10}  {:>10}",
         method,
         bucket.count,
-        bucket.total_ns as f64 / 1_000_000.0,
-        avg_us,
-        bucket.max_ns as f64 / 1000.0,
+        fmt_ms2(bucket.total_ns),
+        fmt_avg_us1(bucket.total_ns, bucket.count),
+        fmt_us1(bucket.max_ns),
       );
     }
   }
@@ -111,14 +150,59 @@ impl RttStats {
 
 /// Returns true when the `FERRIDRIVER_RTT_STATS` env var is set to
 /// any truthy value (`1`, `true`, `yes`). Cached via [`std::sync::OnceLock`]
-/// so the env-var lookup happens once per process.
+/// so the env-var lookup happens once per process. First truthy
+/// observation also registers a libc-level `atexit` hook that dumps
+/// the aggregated [`global_rtt_stats`] — covers process-exit paths
+/// (NAPI / cargo-test harness) where individual dispatcher Drops do
+/// not run because reader/writer tokio tasks still hold Arc clones.
 fn rtt_stats_enabled() -> bool {
   static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
   *ENABLED.get_or_init(|| {
-    std::env::var("FERRIDRIVER_RTT_STATS")
-      .map(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"))
-      .unwrap_or(false)
+    let on = std::env::var("FERRIDRIVER_RTT_STATS").is_ok_and(|v| matches!(v.as_str(), "1" | "true" | "yes" | "on"));
+    if on {
+      // SAFETY: atexit takes a `extern "C" fn()` and stores it in a
+      // process-global list. The handler reads from a `Mutex<RttStats>`
+      // owned by a `OnceLock` so its lifetime spans process exit.
+      #[allow(unsafe_code)]
+      unsafe {
+        libc::atexit(rtt_atexit_dump);
+      }
+    }
+    on
   })
+}
+
+/// Process-global aggregate of every [`CdpDispatcher`]'s RTT buckets.
+/// Each dispatcher merges its local stats here on drop; the libc
+/// atexit hook registered by [`rtt_stats_enabled`] dumps the global
+/// table on process exit (covers `process::exit` / NAPI paths where
+/// per-task dispatcher drops never run).
+fn global_rtt_stats() -> &'static std::sync::Mutex<RttStats> {
+  static GLOBAL: std::sync::OnceLock<std::sync::Mutex<RttStats>> = std::sync::OnceLock::new();
+  GLOBAL.get_or_init(|| std::sync::Mutex::new(RttStats::default()))
+}
+
+extern "C" fn rtt_atexit_dump() {
+  if let Ok(stats) = global_rtt_stats().lock() {
+    if !stats.buckets.is_empty() {
+      stats.dump();
+    }
+  }
+}
+
+/// Explicit dump entry-point for runtimes whose process-exit path
+/// doesn't trigger libc `atexit` (Bun + some Node configurations).
+/// CLI bridges call this just before `process.exit` so the
+/// `FERRIDRIVER_RTT_STATS=1` table prints reliably.
+pub fn dump_global_rtt_stats() {
+  if !rtt_stats_enabled() {
+    return;
+  }
+  if let Ok(stats) = global_rtt_stats().lock() {
+    if !stats.buckets.is_empty() {
+      stats.dump();
+    }
+  }
 }
 
 /// Trait abstracting CDP transport medium (pipes vs WebSocket).
@@ -163,11 +247,11 @@ pub(crate) struct CdpDispatcher {
   pub next_id: AtomicU64,
   pub pending: Arc<PendingMap>,
   /// Per-session navigation waiters (keyed by sessionId). Sharded
-  /// via DashMap so events firing on N sessions don't contend on
+  /// via `DashMap` so events firing on N sessions don't contend on
   /// the same mutex.
   nav_waiters: Arc<DashMap<String, NavWaiter>>,
   /// Per-session lifecycle trackers (keyed by sessionId). Sharded
-  /// via DashMap; same reasoning as `nav_waiters`.
+  /// via `DashMap`; same reasoning as `nav_waiters`.
   lifecycle_trackers: Arc<DashMap<String, LifecycleTracker>>,
   /// Per-message broadcast channel. Wraps the message in `Arc` so
   /// fanout to N subscribers is N refcount bumps (~5ns each)
@@ -301,7 +385,13 @@ impl CdpDispatcher {
       if let Some((_, entry)) = self.pending.remove(&id) {
         if rtt_stats_enabled() {
           let elapsed = entry.send_at.elapsed().as_nanos();
+          // Record into both the per-dispatcher bucket (dump on
+          // graceful Drop) AND the process-global bucket (dump via
+          // libc atexit — covers `process::exit` paths where Drop
+          // never runs because reader/writer tokio tasks still hold
+          // dispatcher Arc clones).
           lock_or_recover(&self.rtt_stats).record(&entry.method, elapsed);
+          lock_or_recover(global_rtt_stats()).record(&entry.method, elapsed);
         }
         let _ = entry.tx.send(payload);
       }
@@ -437,12 +527,17 @@ impl CdpDispatcher {
 impl Drop for CdpDispatcher {
   fn drop(&mut self) {
     // Dump per-method RTT stats on transport teardown when stats
-    // collection is enabled. Catches both clean shutdowns and
-    // process-exit drops via the transport's `Arc` chain. When stats
-    // collection is off the bucket map is empty and `dump` is a
-    // no-op.
+    // collection is enabled. Catches clean shutdowns where the
+    // dispatcher Arc reaches zero before process exit. NAPI / cargo
+    // test paths typically exit via `process::exit()` while reader /
+    // writer tokio tasks still hold dispatcher clones — for those,
+    // [`global_rtt_stats`] aggregates per-dispatcher buckets and is
+    // dumped via the libc atexit hook registered in
+    // [`rtt_stats_enabled`].
     if rtt_stats_enabled() {
-      lock_or_recover(&self.rtt_stats).dump();
+      let local = lock_or_recover(&self.rtt_stats);
+      lock_or_recover(global_rtt_stats()).merge(&local);
+      local.dump();
     }
   }
 }

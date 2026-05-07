@@ -65,7 +65,7 @@ pub fn test_goto_returns_response(c: &mut McpClient) {
     assert_eq!(v["responded"].as_bool(), Some(true), "goto should return Response: {v}");
     assert_eq!(v["status"].as_i64(), Some(200), "status: {v}");
     assert_eq!(v["ok"].as_bool(), Some(true), "ok: {v}");
-    assert!(v["url"].as_str().is_some_and(|u| u.ends_with("/landed")), "url: {v}",);
+    assert!(v["url"].as_str().is_some_and(|u| u.ends_with("/landed")), "url: {v}");
   });
 }
 
@@ -189,7 +189,7 @@ pub fn test_reload_returns_response(c: &mut McpClient) {
     );
     assert_eq!(v["status"].as_i64(), Some(200), "status: {v}");
     assert_eq!(v["ok"].as_bool(), Some(true), "ok: {v}");
-    assert!(v["url"].as_str().is_some_and(|u| u.ends_with("/landed")), "url: {v}",);
+    assert!(v["url"].as_str().is_some_and(|u| u.ends_with("/landed")), "url: {v}");
   });
 }
 

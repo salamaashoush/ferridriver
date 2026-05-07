@@ -1,9 +1,6 @@
 [workspace]
 resolver = "2"
 members = ["crates/*", "examples/ct-leptos-todomvc", "examples/ct-dioxus-todomvc", "examples/bdd-example"]
-# ferridriver-node (NAPI bindings) is excluded from default cargo commands
-# while we focus on the pure-Rust CLI. Build it explicitly with
-# `cargo build -p ferridriver-node` when needed; otherwise it is unmaintained.
 default-members = [
   "crates/ferridriver",
   "crates/ferridriver-config",
@@ -14,6 +11,7 @@ default-members = [
   "crates/ferridriver-test",
   "crates/ferridriver-test-macros",
   "crates/ferridriver-script",
+  "crates/ferridriver-node",
   "examples/ct-leptos-todomvc",
   "examples/ct-dioxus-todomvc",
   "examples/bdd-example",

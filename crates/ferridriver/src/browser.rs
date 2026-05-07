@@ -208,13 +208,12 @@ impl Browser {
   /// case can branch on this method.
   #[must_use]
   pub fn supports_isolated_contexts(&self) -> bool {
-    #[cfg(target_os = "macos")]
-    {
-      !matches!(self.backend_kind, crate::backend::BackendKind::WebKit)
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-      true
+    match self.backend_kind {
+      crate::backend::BackendKind::CdpPipe
+      | crate::backend::BackendKind::CdpRaw
+      | crate::backend::BackendKind::Bidi => true,
+      #[cfg(target_os = "macos")]
+      crate::backend::BackendKind::WebKit => false,
     }
   }
 
