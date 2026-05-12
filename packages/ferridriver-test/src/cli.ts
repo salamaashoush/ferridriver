@@ -719,9 +719,22 @@ async function runTests(
 
   _markPhase('config + discovery');
 
-  const runner = TestRunner.create(JSON.stringify({ test: fileConfig }));
+  // Function-form hooks (`globalSetupFn` / `globalTeardownFn`) can't ride in
+  // the serialised config payload, so strip them out before JSON.stringify
+  // and register the callbacks on the runner separately.
+  const { globalSetupFn, globalTeardownFn, ...serialisableConfig } = fileConfig as
+    & UserTestConfig
+    & { globalSetupFn?: () => void | Promise<void>; globalTeardownFn?: () => void | Promise<void> };
+
+  const runner = TestRunner.create(JSON.stringify({ test: serialisableConfig }));
   runner.applyOverrides(buildOverrides(args));
   applyRuntimeFlags(runner, args);
+  if (typeof globalSetupFn === 'function') {
+    runner.registerGlobalSetup(async () => { await globalSetupFn(); });
+  }
+  if (typeof globalTeardownFn === 'function') {
+    runner.registerGlobalTeardown(async () => { await globalTeardownFn(); });
+  }
   _setRunner(runner);
   _markPhase('TestRunner.create (NAPI)');
 
