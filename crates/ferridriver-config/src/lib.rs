@@ -18,7 +18,7 @@
 //! headless = true
 //!
 //! [test]
-//! test_match = ["**/*.spec.ts"]
+//! testMatch = ["**/*.spec.ts"]
 //! workers = 4
 //!
 //! [test.browser]
@@ -41,8 +41,8 @@ use ts_rs::TS;
 
 /// Top-level configuration document.
 #[derive(Debug, Default, Deserialize, Serialize, TS)]
-#[serde(default)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct FerridriverConfig {
   /// MCP server configuration.
   pub mcp: mcp::McpConfig,
@@ -152,7 +152,7 @@ headless = true
 
 [test]
 workers = 7
-test_match = ["tests/**/*.spec.ts"]
+testMatch = ["tests/**/*.spec.ts"]
 
 [test.browser]
 browser = "chromium"

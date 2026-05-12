@@ -4,9 +4,8 @@
 // after the body returns.
 
 import { test, expect } from 'bun:test';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { TestRunner, type TestMeta, type TestRunnerConfig, type TestFixtures } from '../index.js';
+import { type TestMeta, type TestFixtures } from '../index.js';
+import { createRunner } from './_test-helpers.js';
 import { expect as ferriExpect } from '../../../packages/ferridriver-test/src/expect';
 import { _runWithFile, _setRunner } from '../../../packages/ferridriver-test/src/test';
 
@@ -20,17 +19,8 @@ function makeMeta(title: string): TestMeta {
   return { ...META, id: title, title };
 }
 
-function makeConfig(): TestRunnerConfig {
-  return {
-    workers: 1,
-    reporter: ['json'],
-    outputDir: join(tmpdir(), `ferri-cluster4-${process.pid}-${Date.now()}`),
-    screenshotOnFailure: false,
-  };
-}
-
 test('expect.soft pushes to testInfo.errors and lets the test continue', async () => {
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner();
   // The test()/runner() machinery wires _testInfoStorage via wrapBody.
   // Use registerTestsBatch directly to bypass test()'s registration
   // path — we'll wire the testInfo manually inside the body so the

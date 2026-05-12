@@ -7,9 +7,8 @@
 // covered alongside the passing path.
 
 import { test, expect } from 'bun:test';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { TestRunner, type TestMeta, type TestRunnerConfig } from '../index.js';
+import { type TestMeta } from '../index.js';
+import { createRunner } from './_test-helpers.js';
 import {
   defineReporter,
   type Reporter,
@@ -28,16 +27,6 @@ const META: Omit<TestMeta, 'title' | 'id'> = {
 
 function makeMeta(title: string): TestMeta {
   return { ...META, id: title, title };
-}
-
-function makeConfig(overrides: Partial<TestRunnerConfig> = {}): TestRunnerConfig {
-  return {
-    workers: 1,
-    reporter: ['null'],
-    outputDir: join(tmpdir(), `ferri-js-reporter-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`),
-    screenshotOnFailure: false,
-    ...overrides,
-  };
 }
 
 interface CallLog {
@@ -76,7 +65,7 @@ test('TS Reporter dispatcher receives every lifecycle callback with Playwright-s
   const log = makeLog();
   const dispatcher = defineReporter(makeRecordingReporter(log));
 
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner({ reporter: ['null'] });
   runner.registerJsReporter(dispatcher);
   runner.registerTestsBatch([
     {
@@ -141,7 +130,7 @@ test('TS Reporter dispatcher receives every lifecycle callback with Playwright-s
 test('registerJsReporter accepts multiple reporters and fans events to all of them', async () => {
   const logA = makeLog();
   const logB = makeLog();
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner({ reporter: ['null'] });
   runner.registerJsReporter(defineReporter(makeRecordingReporter(logA)));
   runner.registerJsReporter(defineReporter(makeRecordingReporter(logB)));
   runner.registerTestsBatch([
@@ -161,7 +150,7 @@ test('registerJsReporter accepts multiple reporters and fans events to all of th
 });
 
 test('A Reporter with no methods registered is silently ignored', async () => {
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner({ reporter: ['null'] });
   runner.registerJsReporter(defineReporter({}));
   runner.registerTestsBatch([
     {

@@ -2245,6 +2245,7 @@ dependencies = [
  "base64 0.22.1",
  "ferridriver",
  "ferridriver-bdd",
+ "ferridriver-config",
  "ferridriver-test",
  "mimalloc",
  "napi",

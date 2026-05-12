@@ -5,9 +5,9 @@
 // because TestInfo data is identical across backends.
 
 import { test, expect } from 'bun:test';
-import { tmpdir } from 'os';
-import { join, basename, sep } from 'path';
-import { TestRunner, type TestMeta, type TestRunnerConfig, type TestFixtures } from '../index.js';
+import { basename, sep } from 'path';
+import { type TestMeta, type TestFixtures } from '../index.js';
+import { createRunner } from './_test-helpers.js';
 
 const META: Omit<TestMeta, 'title' | 'id'> = {
   file: 'test-info.test.ts',
@@ -19,19 +19,9 @@ function makeMeta(title: string): TestMeta {
   return { ...META, id: title, title };
 }
 
-function makeConfig(overrides: Partial<TestRunnerConfig> = {}): TestRunnerConfig {
-  return {
-    workers: 1,
-    reporter: ['json'],
-    outputDir: join(tmpdir(), `ferri-cluster3-${process.pid}-${Date.now()}`),
-    screenshotOnFailure: false,
-    ...overrides,
-  };
-}
-
 test('outputPath joins onto the per-test output directory', async () => {
   let observed: { plain?: string; nested?: string } = {};
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner();
   runner.registerTestsBatch([
     {
       meta: makeMeta('inspect-output'),
@@ -52,7 +42,7 @@ test('outputPath joins onto the per-test output directory', async () => {
 
 test('snapshotPath joins onto the snapshot directory', async () => {
   let observed: string | undefined;
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner();
   runner.registerTestsBatch([
     {
       meta: makeMeta('inspect-snapshot'),
@@ -68,7 +58,7 @@ test('snapshotPath joins onto the snapshot directory', async () => {
 
 test('errors / error read soft assertions live', async () => {
   let observed: { errors: any[]; firstError: any } | undefined;
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner();
   runner.registerTestsBatch([
     {
       meta: makeMeta('inspect-errors'),
@@ -95,7 +85,7 @@ test('errors / error read soft assertions live', async () => {
 test('snapshotSuffix is a read/write field', async () => {
   let observedDefault: string | undefined;
   let observedSet: string | undefined;
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner();
   runner.registerTestsBatch([
     {
       meta: makeMeta('inspect-suffix'),
@@ -115,7 +105,7 @@ test('snapshotSuffix is a read/write field', async () => {
 
 test('config accessor surfaces TestConfig snapshot', async () => {
   let cfg: any;
-  const runner = TestRunner.create(makeConfig({ name: 'my-suite' }));
+  const runner = createRunner({ name: 'my-suite' });
   runner.registerTestsBatch([
     {
       meta: makeMeta('inspect-config'),
@@ -130,12 +120,12 @@ test('config accessor surfaces TestConfig snapshot', async () => {
   expect(cfg.name).toBe('my-suite');
   // Some structural sanity checks against the cloned snapshot.
   expect(typeof cfg.timeout).toBe('number');
-  expect(Array.isArray(cfg.test_match)).toBe(true);
+  expect(Array.isArray(cfg.testMatch)).toBe(true);
 });
 
 test('project accessor is null in single-project runs', async () => {
   let project: any;
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner();
   runner.registerTestsBatch([
     {
       meta: makeMeta('inspect-project'),
@@ -151,7 +141,7 @@ test('project accessor is null in single-project runs', async () => {
 
 test('fn returns the test title', async () => {
   let observed: string | undefined;
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner();
   runner.registerTestsBatch([
     {
       meta: makeMeta('my-test'),
@@ -167,7 +157,7 @@ test('fn returns the test title', async () => {
 
 test('column defaults to zero when the discovery layer does not parse it', async () => {
   let observed: number | undefined;
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner();
   runner.registerTestsBatch([
     {
       meta: makeMeta('inspect-column'),
@@ -183,7 +173,7 @@ test('column defaults to zero when the discovery layer does not parse it', async
 
 test('outputPath actually contains the per-test output dir basename', async () => {
   let observed: string | undefined;
-  const runner = TestRunner.create(makeConfig());
+  const runner = createRunner();
   runner.registerTestsBatch([
     {
       meta: makeMeta('basename-test'),

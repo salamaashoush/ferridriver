@@ -8,9 +8,8 @@
 // crates/ferridriver-test/tests/cluster7.rs).
 
 import { test, expect } from 'bun:test';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { TestRunner, type TestMeta, type TestRunnerConfig, type NapiProjectConfig } from '../index.js';
+import { type TestMeta } from '../index.js';
+import { createRunner } from './_test-helpers.js';
 
 const META: Omit<TestMeta, 'title' | 'id'> = {
   file: 'cluster7-flags.test.ts',
@@ -22,25 +21,16 @@ function makeMeta(title: string): TestMeta {
   return { ...META, id: title, title };
 }
 
-function makeConfig(overrides: Partial<TestRunnerConfig> = {}): TestRunnerConfig {
-  return {
-    workers: 1,
-    reporter: ['null'],
-    outputDir: join(tmpdir(), `ferri-cluster7-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2)}`),
-    screenshotOnFailure: false,
-    ...overrides,
-  };
-}
-
-const projectA: NapiProjectConfig = { name: 'A' } as NapiProjectConfig;
-const projectB: NapiProjectConfig = { name: 'B', dependencies: ['A'] } as NapiProjectConfig;
+const projectA = { name: 'A', dependencies: [] };
+const projectB = { name: 'B', dependencies: ['A'] };
 
 test('failOnFlakyTests bumps the exit code when every test passes on retry', async () => {
   const state = { attempts: 0 };
-  const runner = TestRunner.create(makeConfig({
+  const runner = createRunner({
     failOnFlakyTests: true,
     retries: 2,
-  }));
+    reporter: ['null'],
+  });
   runner.registerTestsBatch([
     {
       meta: { ...makeMeta('flaky'), retries: 2 },
@@ -64,7 +54,7 @@ test('failOnFlakyTests bumps the exit code when every test passes on retry', asy
 
 test('failOnFlakyTests is opt-in — exit stays 0 by default', async () => {
   const state = { attempts: 0 };
-  const runner = TestRunner.create(makeConfig({ retries: 2 }));
+  const runner = createRunner({ retries: 2, reporter: ['null'] });
   runner.registerTestsBatch([
     {
       meta: { ...makeMeta('flaky-default'), retries: 2 },
@@ -83,25 +73,25 @@ test('projectFilter narrows to the named project', () => {
   // The runner's project DAG filter is exercised by run_projects, which
   // requires multi-project plan setup. The NAPI surface accepts the
   // override and threads it; we assert the field round-trips cleanly.
-  const runner = TestRunner.create(makeConfig({
-    projectFilter: ['A'],
-    projects: [projectA, projectB],
-  }));
+  const runner = createRunner(
+    { projects: [projectA, projectB], reporter: ['null'] },
+    { projectFilter: ['A'] },
+  );
   // No public getter for project_filter, but we can verify the runner
   // built without erroring and the configured projects are visible.
   expect(runner.workerCount()).toBeGreaterThan(0);
 });
 
 test('captureGitInfo enables git metadata collection', () => {
-  const runner = TestRunner.create(makeConfig({ captureGitInfo: true }));
+  const runner = createRunner({ captureGitInfo: true, reporter: ['null'] });
   // No public getter; the smoke test asserts the flag is accepted.
   expect(runner.workerCount()).toBeGreaterThan(0);
 });
 
 test('teardownProject overrides the run-wide teardown stage', () => {
-  const runner = TestRunner.create(makeConfig({
-    projects: [projectA, projectB],
-    teardownProject: 'A',
-  }));
+  const runner = createRunner(
+    { projects: [projectA, projectB], reporter: ['null'] },
+    { teardown: 'A' },
+  );
   expect(runner.workerCount()).toBeGreaterThan(0);
 });
