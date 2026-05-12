@@ -17,7 +17,7 @@ import type { MountFunction } from './test.js';
 import { isAbsolute, join, relative, resolve } from 'path';
 import { existsSync, statSync } from 'fs';
 
-import type { FerridriverTestConfig } from './config.js';
+import type { UserTestConfig } from './config.js';
 
 // ---- Profiling timers (enabled with --profile or FERRIDRIVER_PROFILE=cli) ----
 
@@ -100,7 +100,7 @@ const CONFIG_CANDIDATES = [
   'ferridriver.config.mts',
 ];
 
-async function loadConfig(explicitPath?: string): Promise<FerridriverTestConfig> {
+async function loadConfig(explicitPath?: string): Promise<UserTestConfig> {
   const candidates = explicitPath
     ? [resolve(explicitPath)]
     : CONFIG_CANDIDATES.map((f) => resolve(f));
@@ -120,42 +120,50 @@ async function loadConfig(explicitPath?: string): Promise<FerridriverTestConfig>
   return {};
 }
 
-/** Merge config file values with CLI arg overrides. CLI always wins. */
-function mergeConfig(fileConfig: FerridriverTestConfig, cliArgs: Record<string, any>): Record<string, any> {
+/** Merge config file values with CLI arg overrides. CLI always wins.
+ *
+ * Consumes the unified `TestConfig` shape generated from the Rust schema (so
+ * Playwright's top-level `use:` block lives under `browser.use` here). The
+ * output object is the legacy flat dict expected by `TestRunner.create()`;
+ * step 6 of the unification plan replaces this with a single JSON pipe. */
+function mergeConfig(fileConfig: UserTestConfig, cliArgs: Record<string, any>): Record<string, any> {
   const config: Record<string, any> = {};
+  const browser = fileConfig.browser;
+  const use = browser?.use;
 
-  // Flatten file config's `use` block into top-level config (Playwright convention).
-  if (fileConfig.use) {
-    if (fileConfig.use.browserName) config.browser = fileConfig.use.browserName;
-    if (fileConfig.use.headless !== undefined) config.headed = !fileConfig.use.headless;
-    if (fileConfig.use.viewport) {
-      config.viewportWidth = fileConfig.use.viewport.width;
-      config.viewportHeight = fileConfig.use.viewport.height;
-    }
-    if (fileConfig.use.locale) config.locale = fileConfig.use.locale;
-    if (fileConfig.use.colorScheme) config.colorScheme = fileConfig.use.colorScheme;
-    if (fileConfig.use.isMobile !== undefined) config.isMobile = fileConfig.use.isMobile;
-    if (fileConfig.use.hasTouch !== undefined) config.hasTouch = fileConfig.use.hasTouch;
-    if (fileConfig.use.baseURL) config.baseUrl = fileConfig.use.baseURL;
-    if (fileConfig.use.storageState) config.storageState = typeof fileConfig.use.storageState === 'string' ? fileConfig.use.storageState : undefined;
-    if (fileConfig.use.channel) config.channel = fileConfig.use.channel;
+  if (browser?.browser) config.browser = browser.browser;
+  if (browser?.backend) config.backend = browser.backend;
+  if (browser?.channel) config.channel = browser.channel;
+  if (browser?.executablePath) config.executablePath = browser.executablePath;
+  if (browser?.headless !== undefined) config.headed = !browser.headless;
+  if (browser?.args && browser.args.length > 0) config.browserArgs = browser.args;
+  if (browser?.viewport) {
+    config.viewportWidth = browser.viewport.width;
+    config.viewportHeight = browser.viewport.height;
   }
 
-  // Map file config top-level fields.
+  if (use?.locale) config.locale = use.locale;
+  if (use?.colorScheme) config.colorScheme = use.colorScheme;
+  if (use?.isMobile !== undefined) config.isMobile = use.isMobile;
+  if (use?.hasTouch !== undefined) config.hasTouch = use.hasTouch;
+  if (use?.offline !== undefined) config.offline = use.offline;
+  if (use?.bypassCsp !== undefined) config.bypassCsp = use.bypassCsp;
+  if (use?.storageState) config.storageState = use.storageState;
+
+  if (fileConfig.baseUrl) config.baseUrl = fileConfig.baseUrl;
   if (fileConfig.workers !== undefined) config.workers = fileConfig.workers;
   if (fileConfig.retries !== undefined) config.retries = fileConfig.retries;
   if (fileConfig.timeout !== undefined) config.timeout = fileConfig.timeout;
   if (fileConfig.forbidOnly) config.forbidOnly = true;
   if (fileConfig.outputDir) config.outputDir = fileConfig.outputDir;
-  if (fileConfig.reporter) {
-    const reporters = Array.isArray(fileConfig.reporter) ? fileConfig.reporter : [fileConfig.reporter];
-    config.reporter = reporters.map((r) => (typeof r === 'string' ? r : r[0]));
+  if (fileConfig.reporter && fileConfig.reporter.length > 0) {
+    config.reporter = fileConfig.reporter.map((r: any) => (typeof r === 'string' ? r : r.name));
   }
   if (fileConfig.projects) config.projects = fileConfig.projects;
   if (fileConfig.testMatch) config.testMatch = fileConfig.testMatch;
   if (fileConfig.testIgnore) config.testIgnore = fileConfig.testIgnore;
   if (fileConfig.testDir) config.testDir = fileConfig.testDir;
-  if (fileConfig.webServer) config.webServer = fileConfig.webServer;
+  if (fileConfig.webServer && fileConfig.webServer.length > 0) config.webServer = fileConfig.webServer;
   if (fileConfig.maxFailures !== undefined) config.maxFailures = fileConfig.maxFailures;
   if (fileConfig.repeatEach !== undefined) config.repeatEach = fileConfig.repeatEach;
   if (fileConfig.globalTimeout !== undefined) config.globalTimeout = fileConfig.globalTimeout;

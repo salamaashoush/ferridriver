@@ -1,194 +1,74 @@
 /**
- * defineConfig() — Playwright-compatible configuration helper.
+ * defineConfig() — type-safe configuration helper.
+ *
+ * The full schema is generated from the Rust source of truth in
+ * `crates/ferridriver-config` via ts-rs; see `./config-types/`. Users
+ * typically supply a partial config and rely on defaults filled in by the
+ * Rust runner.
  *
  * Usage:
- *   import { defineConfig } from '@ferridriver/test';
+ *   import { defineConfig } from '@ferridriver/test/config';
  *   export default defineConfig({
  *     workers: 4,
- *     use: { browserName: 'chromium', headless: true },
+ *     browser: { browser: 'chromium', headless: true },
  *     projects: [
- *       { name: 'chromium', use: { browserName: 'chromium' } },
- *       { name: 'firefox', use: { browserName: 'firefox' } },
+ *       { name: 'chromium', browser: { browser: 'chromium', backend: 'cdp-pipe' } },
  *     ],
  *   });
  */
 
-import type { TestRunnerConfig } from '@ferridriver/node';
+export type * from './config-types/index.js';
 
-/** Context / fixture options — matches Playwright's `use` block. */
-export interface UseOptions {
-  browserName?: 'chromium' | 'firefox' | 'webkit';
-  headless?: boolean;
-  channel?: string;
-  viewport?: { width: number; height: number } | null;
-  locale?: string;
-  timezoneId?: string;
-  geolocation?: { latitude: number; longitude: number; accuracy?: number };
-  permissions?: string[];
-  colorScheme?: 'light' | 'dark' | 'no-preference' | null;
-  isMobile?: boolean;
-  hasTouch?: boolean;
-  javaScriptEnabled?: boolean;
-  bypassCSP?: boolean;
-  offline?: boolean;
-  acceptDownloads?: boolean;
-  userAgent?: string;
-  extraHTTPHeaders?: Record<string, string>;
-  httpCredentials?: { username: string; password: string; origin?: string };
-  ignoreHTTPSErrors?: boolean;
-  proxy?: { server: string; bypass?: string; username?: string; password?: string };
-  storageState?: string | { cookies: any[]; origins: any[] };
-  baseURL?: string;
-  deviceScaleFactor?: number;
-  reducedMotion?: 'reduce' | 'no-preference' | null;
-  forcedColors?: 'active' | 'none' | null;
-  serviceWorkers?: 'allow' | 'block';
-  actionTimeout?: number;
-  navigationTimeout?: number;
-  testIdAttribute?: string;
-  launchOptions?: Record<string, any>;
-  connectOptions?: { wsEndpoint: string; headers?: Record<string, string>; timeout?: number };
-}
+import type { TestConfig, ProjectConfig, BrowserConfig, ContextConfig, FerridriverConfig } from './config-types/index.js';
 
-/** Project configuration — matches Playwright's TestProject. */
-export interface ProjectConfig {
-  name: string;
-  use?: UseOptions;
-  testDir?: string;
-  testMatch?: string | string[];
-  testIgnore?: string | string[];
-  outputDir?: string;
-  snapshotDir?: string;
-  snapshotPathTemplate?: string;
-  timeout?: number;
-  retries?: number;
-  repeatEach?: number;
-  fullyParallel?: boolean;
-  grep?: RegExp | string;
-  grepInvert?: RegExp | string;
-  dependencies?: string[];
-  teardown?: string;
-  metadata?: Record<string, any>;
-  tag?: string | string[];
-}
+/** Recursively mark every field as optional. User configs fill only what they need. */
+export type DeepPartial<T> = T extends (...args: any[]) => any
+  ? T
+  : T extends ReadonlyArray<infer U>
+    ? ReadonlyArray<DeepPartial<U>>
+    : T extends Array<infer U>
+      ? Array<DeepPartial<U>>
+      : T extends object
+        ? { [K in keyof T]?: DeepPartial<T[K]> }
+        : T;
 
-/** Web server configuration — matches Playwright's webServer. */
-export interface WebServerConfig {
-  command?: string;
-  url?: string;
-  port?: number;
-  timeout?: number;
-  reuseExistingServer?: boolean;
-  cwd?: string;
-  env?: Record<string, string>;
-  stdout?: 'pipe' | 'ignore' | 'inherit';
-  stderr?: 'pipe' | 'ignore' | 'inherit';
-  // Static file serving (ferridriver extension).
-  staticDir?: string;
-  spa?: boolean;
-}
+/** User-supplied test runner config: partial of the generated `TestConfig`. */
+export type UserTestConfig = DeepPartial<TestConfig>;
 
-/** Reporter configuration. */
-export type ReporterConfig =
-  | string
-  | [string, Record<string, any>];
-
-/** Expect configuration. */
-export interface ExpectConfig {
-  timeout?: number;
-  toHaveScreenshot?: {
-    maxDiffPixels?: number;
-    maxDiffPixelRatio?: number;
-    threshold?: number;
-    animations?: 'allow' | 'disabled';
-  };
-  toMatchSnapshot?: {
-    maxDiffPixels?: number;
-    maxDiffPixelRatio?: number;
-    threshold?: number;
-  };
-}
-
-/** Full test configuration — matches Playwright's PlaywrightTestConfig. */
-export interface FerridriverTestConfig {
-  // ── Test discovery ──
-  testDir?: string;
-  testMatch?: string | string[];
-  testIgnore?: string | string[];
-
-  // ── Execution ──
-  timeout?: number;
-  workers?: number | string;
-  retries?: number;
-  repeatEach?: number;
-  fullyParallel?: boolean;
-  forbidOnly?: boolean;
-  maxFailures?: number;
-  globalTimeout?: number;
-
-  // ── Filtering ──
-  grep?: RegExp | string;
-  grepInvert?: RegExp | string;
-  tag?: string | string[];
-
-  // ── Output ──
-  outputDir?: string;
-  snapshotDir?: string;
-  snapshotPathTemplate?: string;
-  preserveOutput?: 'always' | 'never' | 'failures-only';
-  quiet?: boolean;
-  updateSnapshots?: 'all' | 'changed' | 'missing' | 'none';
-  ignoreSnapshots?: boolean;
-  passWithNoTests?: boolean;
-
-  // ── Reporter ──
-  reporter?: ReporterConfig | ReporterConfig[];
-  reportSlowTests?: null | { max: number; threshold: number };
-
-  // ── Browser / fixture options ──
-  use?: UseOptions;
-
-  // ── Projects ──
-  projects?: ProjectConfig[];
-
-  // ── Lifecycle ──
-  globalSetup?: string | string[];
-  globalTeardown?: string | string[];
-
-  // ── Web server ──
-  webServer?: WebServerConfig | WebServerConfig[];
-
-  // ── Expect ──
-  expect?: ExpectConfig;
-
-  // ── Sharding ──
-  shard?: { total: number; current: number };
-
-  // ── Metadata ──
-  metadata?: Record<string, any>;
-  name?: string;
-
-  // ── Loader ──
-  tsconfig?: string;
-}
+/** User-supplied unified config: partial of the root `FerridriverConfig`. */
+export type UserFerridriverConfig = DeepPartial<FerridriverConfig>;
 
 /**
- * defineConfig — type-safe configuration builder.
- *
- * Supports single config or merging multiple configs (like Playwright).
+ * Backwards-compatible alias. Older imports referenced `FerridriverTestConfig`;
+ * the canonical name is `UserTestConfig`. Both resolve to the same partial type.
  */
-export function defineConfig(config: FerridriverTestConfig): FerridriverTestConfig;
-export function defineConfig(config: FerridriverTestConfig, ...overrides: FerridriverTestConfig[]): FerridriverTestConfig;
-export function defineConfig(config: FerridriverTestConfig, ...overrides: FerridriverTestConfig[]): FerridriverTestConfig {
+export type FerridriverTestConfig = UserTestConfig;
+
+/**
+ * defineConfig — type-safe builder for the `[test]` section.
+ *
+ * Supports merging multiple configs (later overrides earlier; `projects` arrays
+ * are concatenated).
+ */
+export function defineConfig(config: UserTestConfig): UserTestConfig;
+export function defineConfig(config: UserTestConfig, ...overrides: UserTestConfig[]): UserTestConfig;
+export function defineConfig(config: UserTestConfig, ...overrides: UserTestConfig[]): UserTestConfig {
   if (overrides.length === 0) return config;
-  // Shallow merge — later configs override earlier ones. Projects are concatenated.
-  let merged = { ...config };
+  let merged: UserTestConfig = { ...config };
   for (const override of overrides) {
     const { projects: overrideProjects, ...rest } = override;
     merged = { ...merged, ...rest };
     if (overrideProjects) {
-      merged.projects = [...(merged.projects ?? []), ...overrideProjects];
+      merged.projects = [...(merged.projects ?? []), ...overrideProjects] as ProjectConfig[];
     }
   }
   return merged;
 }
+
+/** Same as `defineConfig` but accepts the unified `[mcp] + [test]` shape. */
+export function defineFerridriver(config: UserFerridriverConfig): UserFerridriverConfig {
+  return config;
+}
+
+// Re-export common nested type aliases for ergonomic imports.
+export type { BrowserConfig, ContextConfig, ProjectConfig, TestConfig, FerridriverConfig };

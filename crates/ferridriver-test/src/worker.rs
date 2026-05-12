@@ -222,7 +222,7 @@ async fn close_test_context(ctx: &ferridriver::ContextRef) {
 }
 
 fn build_effective_context_config(config: &TestConfig, test: &crate::model::TestCase) -> EffectiveContextConfig {
-  let mut ctx_config = config.browser.context.clone();
+  let mut ctx_config = config.browser.use_options.clone();
   if let Some(ref opts) = test.use_options {
     if let Some(v) = opts.get("locale").and_then(|v| v.as_str()) {
       ctx_config.locale = Some(v.to_string());
@@ -343,7 +343,7 @@ fn build_effective_context_config(config: &TestConfig, test: &crate::model::Test
 }
 
 fn build_suite_effective_context_config(config: &TestConfig) -> EffectiveContextConfig {
-  let mut ctx_config = config.browser.context.clone();
+  let mut ctx_config = config.browser.use_options.clone();
   if ctx_config.storage_state.is_none() {
     ctx_config.storage_state.clone_from(&config.storage_state);
   }
@@ -1619,12 +1619,12 @@ fn evaluate_condition(condition: &str, browser: &crate::config::BrowserConfig) -
     "headless" => browser.headless,
 
     // Context options (Playwright's use block fixtures).
-    "mobile" => browser.context.is_mobile,
-    "touch" => browser.context.has_touch,
-    "dark" => browser.context.color_scheme.as_deref() == Some("dark"),
-    "light" => browser.context.color_scheme.as_deref() == Some("light"),
-    "offline" => browser.context.offline,
-    "bypass-csp" => browser.context.bypass_csp,
+    "mobile" => browser.use_options.is_mobile,
+    "touch" => browser.use_options.has_touch,
+    "dark" => browser.use_options.color_scheme.as_deref() == Some("dark"),
+    "light" => browser.use_options.color_scheme.as_deref() == Some("light"),
+    "offline" => browser.use_options.offline,
+    "bypass-csp" => browser.use_options.bypass_csp,
 
     // Environment.
     "ci" => std::env::var("CI").is_ok(),
