@@ -35,6 +35,20 @@ type TestCallbackFn = ThreadsafeFunction<
   0,
 >;
 
+/// Threadsafe function for nullary JS callbacks (no args, returns Promise<void>).
+/// Used for `globalSetup` / `globalTeardown` function-form hooks supplied via
+/// `defineConfig({ globalSetupFn: ... })`. The pool argument from the core
+/// runner is ignored -- these hooks don't have fixture access.
+type GlobalHookFn = ThreadsafeFunction<
+  (),
+  napi::bindgen_prelude::Promise<()>,
+  (),
+  Status,
+  false,
+  true,
+  0,
+>;
+
 /// Static fixture names shared across all test registrations.
 /// Avoids per-test String allocations for the standard fixture set.
 const STANDARD_FIXTURE_NAMES: &[&str] = &["browser", "context", "page", "test_info", "request"];
@@ -446,6 +460,12 @@ pub struct TestRunner {
   // `register_js_reporter`. Drained into the core runner's
   // `add_reporter` slot at the start of `run`.
   js_reporters: Mutex<Vec<crate::js_reporter::JsReporter>>,
+  // Function-form global setup/teardown hooks supplied by the TS config.
+  // Drained into the core runner's `TestHooks` when `run()` builds the
+  // underlying runner. The string-form `globalSetup` / `globalTeardown`
+  // file paths in `TestConfig` still flow through the data schema.
+  global_setup_fns: Mutex<Vec<Arc<GlobalHookFn>>>,
+  global_teardown_fns: Mutex<Vec<Arc<GlobalHookFn>>>,
   // BDD state
   bdd: BddRegistry,
 }
@@ -481,6 +501,8 @@ impl TestRunner {
       suites: Mutex::new(Vec::new()),
       hooks: Mutex::new(Vec::new()),
       js_reporters: Mutex::new(Vec::new()),
+      global_setup_fns: Mutex::new(Vec::new()),
+      global_teardown_fns: Mutex::new(Vec::new()),
       bdd: BddRegistry::new(),
     })
   }
@@ -534,6 +556,50 @@ impl TestRunner {
     unsafe {
       std::env::set_var("FERRIDRIVER_DEBUG", categories);
     }
+  }
+
+  /// Register a function-form global setup hook. Runs once before any test
+  /// starts, ahead of the file-path `globalSetup` entries in `TestConfig`.
+  /// The callback takes no arguments and must return a `Promise<void>`.
+  #[napi(ts_args_type = "callback: () => Promise<void>")]
+  pub fn register_global_setup(
+    &self,
+    callback: napi::bindgen_prelude::Function<'_, (), napi::bindgen_prelude::Promise<()>>,
+  ) -> Result<()> {
+    let tsfn = callback
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+    let mut slot = self
+      .global_setup_fns
+      .try_lock()
+      .map_err(|_| napi::Error::from_reason("global_setup_fns lock contended"))?;
+    slot.push(Arc::new(tsfn));
+    Ok(())
+  }
+
+  /// Register a function-form global teardown hook. Runs once after every
+  /// test finishes, ahead of the file-path `globalTeardown` entries.
+  /// The callback takes no arguments and must return a `Promise<void>`.
+  #[napi(ts_args_type = "callback: () => Promise<void>")]
+  pub fn register_global_teardown(
+    &self,
+    callback: napi::bindgen_prelude::Function<'_, (), napi::bindgen_prelude::Promise<()>>,
+  ) -> Result<()> {
+    let tsfn = callback
+      .build_threadsafe_function()
+      .callee_handled::<false>()
+      .weak::<true>()
+      .max_queue_size::<0>()
+      .build()?;
+    let mut slot = self
+      .global_teardown_fns
+      .try_lock()
+      .map_err(|_| napi::Error::from_reason("global_teardown_fns lock contended"))?;
+    slot.push(Arc::new(tsfn));
+    Ok(())
   }
 
   /// Register a test. The callback receives fixtures (page, testInfo, browserName, etc.).
@@ -987,8 +1053,25 @@ impl TestRunner {
     let watch = self.watch;
     let collector_clone = Arc::clone(&collector);
 
+    // Drain function-form global setup/teardown hooks and wrap each into a
+    // SuiteHookFn that ignores its FixturePool argument (the JS function
+    // signature is `() => Promise<void>`).
+    let mut hooks = ferridriver_test::model::TestHooks::default();
+    {
+      let mut setups = self.global_setup_fns.lock().await;
+      for tsfn in std::mem::take(&mut *setups) {
+        hooks.global_setup_fns.push(make_global_hook(tsfn));
+      }
+    }
+    {
+      let mut teardowns = self.global_teardown_fns.lock().await;
+      for tsfn in std::mem::take(&mut *teardowns) {
+        hooks.global_teardown_fns.push(make_global_hook(tsfn));
+      }
+    }
+
     let exit_code = {
-      let mut runner = ferridriver_test::runner::TestRunner::new(config, overrides);
+      let mut runner = ferridriver_test::runner::TestRunner::with_hooks(config, hooks, overrides);
       runner.add_reporter(Box::new(ResultCollectorReporter(collector_clone)));
 
       // Drain any TS-authored reporters registered via
@@ -1209,6 +1292,27 @@ fn make_each_hook(
           diff: None,
           screenshot: None,
         })
+    })
+  })
+}
+
+/// Wrap a nullary JS function (registered via `registerGlobalSetup` /
+/// `registerGlobalTeardown`) into a SuiteHookFn the core runner can drive.
+/// The pool argument is dropped -- global hooks don't have fixture access.
+fn make_global_hook(tsfn: Arc<GlobalHookFn>) -> ferridriver_test::model::SuiteHookFn {
+  Arc::new(move |_pool| {
+    let tsfn = Arc::clone(&tsfn);
+    Box::pin(async move {
+      let result = match tsfn.call_async(()).await {
+        Ok(promise) => promise.await.map_err(|e| format!("{e}")),
+        Err(e) => Err(format!("{e}")),
+      };
+      result.map_err(|message| ferridriver_test::TestFailure {
+        message,
+        stack: None,
+        diff: None,
+        screenshot: None,
+      })
     })
   })
 }

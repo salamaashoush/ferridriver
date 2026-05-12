@@ -32,8 +32,19 @@ export type DeepPartial<T> = T extends (...args: any[]) => any
         ? { [K in keyof T]?: DeepPartial<T[K]> }
         : T;
 
-/** User-supplied test runner config: partial of the generated `TestConfig`. */
-export type UserTestConfig = DeepPartial<TestConfig>;
+/** Function-form lifecycle hooks. `TestConfig.globalSetup` /
+ *  `TestConfig.globalTeardown` accept file paths (which serialise into the
+ *  unified config JSON); function-form callbacks ride alongside on these
+ *  out-of-band fields and are registered with the runner via
+ *  `runner.registerGlobalSetup(fn)` rather than the JSON pipe. */
+export interface UserHooks {
+  globalSetupFn?: () => void | Promise<void>;
+  globalTeardownFn?: () => void | Promise<void>;
+}
+
+/** User-supplied test runner config: partial of the generated `TestConfig`
+ *  plus the function-form hooks that can't be serialised. */
+export type UserTestConfig = DeepPartial<TestConfig> & UserHooks;
 
 /** User-supplied unified config: partial of the root `FerridriverConfig`. */
 export type UserFerridriverConfig = DeepPartial<FerridriverConfig>;
