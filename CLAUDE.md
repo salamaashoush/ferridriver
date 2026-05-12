@@ -34,6 +34,7 @@ Cargo aliases: `cargo ck`, `cargo lint`, `cargo lintfix`, `cargo release`, `carg
 
 ```
 ferridriver              Core library: Browser, Page, Locator, Frame, backends
+ferridriver-config       Unified config schema (Rust source of truth; ts-rs generates TS types)
 ferridriver-mcp          MCP server library (rmcp-based, stdio + HTTP transports)
 ferridriver-cli          CLI binary (MCP server only: stdio + HTTP transports)
 ferridriver-node         Node.js/Bun native addon via NAPI-RS (thin target over core)
@@ -64,6 +65,22 @@ Rust is the source of truth. NAPI is a thin target. TS is a thin wrapper.
 - The NAPI test runner delegates to `TestRunner::run()` — no separate execution loop
 - `TestAnnotation` is shared between Rust and TS via serde serialization
 - Never duplicate logic in NAPI/TS that exists in Rust core
+
+### Configuration
+
+`ferridriver-config` owns the canonical `FerridriverConfig` schema (`[mcp]` +
+`[test]` sections). TOML / YAML / JSON keys are **camelCase** on the wire
+(serde `rename_all = "camelCase"`). ts-rs generates matching TypeScript
+declarations into `packages/ferridriver-test/src/config-types/` (regenerate
+with `just config-types`; CI gates drift via `just check-config-types`).
+
+The NAPI `TestRunner.create(configJson: string)` takes a serialized
+`FerridriverConfig`; CLI overrides ride on `runner.applyOverrides(overrides)`
+(typed `NapiCliOverrides`), and runtime-only flags (`grep`, `lastFailed`,
+`watch`, `verbose`, `debug`) use dedicated setters. Function-form
+`globalSetupFn` / `globalTeardownFn` hooks register through
+`runner.registerGlobalSetup(...)` because they can't ride in the JSON
+payload. There is no flat NAPI config struct -- the schema is single-source.
 
 ### Backend System (enum dispatch, not trait objects)
 

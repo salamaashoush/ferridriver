@@ -132,7 +132,7 @@ function buildOverrides(args: Record<string, any>): NapiCliOverrides {
   if (args.workers !== undefined) o.workers = args.workers;
   if (args.retries !== undefined) o.retries = args.retries;
   if (args.timeout !== undefined) o.timeout = args.timeout;
-  if (args.headed) o.headless = false;
+  if (args.headless) o.headless = true;
   if (args['grep-invert']) o.grepInvert = args['grep-invert'];
   if (args.shard) {
     const m = String(args.shard).match(/^(\d+)\/(\d+)$/);
@@ -224,9 +224,9 @@ const runnerArgs = defineArgs({
     type: 'number',
     description: 'Test timeout in milliseconds',
   },
-  headed: {
+  headless: {
     type: 'boolean',
-    description: 'Run browser in headed mode (visible window)',
+    description: 'Run browser in headless mode (default: headed / visible window)',
   },
   grep: {
     type: 'string',
@@ -1071,7 +1071,7 @@ const root = defineCommand({
     afterHelp:
       'Examples:\n' +
       '  ferridriver-test test                                    # Run all .spec.ts + .feature\n' +
-      '  ferridriver-test test --headed -j 4                      # 4 workers, headed browser\n' +
+      '  ferridriver-test test --headless -j 4                    # 4 workers, headless browser\n' +
       '  ferridriver-test test tests/smoke.spec.ts                # Run specific E2E test\n' +
       '  ferridriver-test test tests/features/*.feature --tags "@smoke"  # BDD with tag filter\n' +
       '  ferridriver-test test tests/ --steps steps/              # Mixed E2E + BDD\n' +
