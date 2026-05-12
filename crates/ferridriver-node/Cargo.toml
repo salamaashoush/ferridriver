@@ -13,6 +13,7 @@ crate-type = ["cdylib"]
 ferridriver = { workspace = true }
 ferridriver-test = { workspace = true }
 ferridriver-bdd = { workspace = true }
+ferridriver-config = { workspace = true }
 
 napi = { version = "3", features = ["async", "napi9", "serde-json"] }
 napi-derive = "3"

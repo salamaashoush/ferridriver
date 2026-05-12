@@ -18,7 +18,7 @@ use ts_rs::TS;
 /// Trace recording mode. Mirrors Playwright's `trace`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
-#[ts(export, export_to = "./", rename_all = "kebab-case")]
+#[ts(export, export_to = "./")]
 pub enum TraceMode {
   #[default]
   Off,
@@ -71,7 +71,7 @@ impl TraceMode {
 /// Video recording mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "kebab-case")]
-#[ts(export, export_to = "./", rename_all = "kebab-case")]
+#[ts(export, export_to = "./")]
 pub enum VideoMode {
   #[default]
   Off,
@@ -93,8 +93,8 @@ impl VideoMode {
 
 /// Video recording configuration.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(default)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct VideoConfig {
   pub mode: VideoMode,
   pub width: u32,
@@ -118,8 +118,8 @@ impl Default for VideoConfig {
 // grouping into enums would be ceremony, not a real state machine.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Clone, Serialize, Deserialize, TS)]
-#[serde(default)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct TestConfig {
   pub test_match: Vec<String>,
   #[ts(optional)]
@@ -195,8 +195,8 @@ pub struct TestConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(default)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct BrowserConfig {
   pub browser: String,
   pub backend: String,
@@ -220,8 +220,8 @@ pub struct BrowserConfig {
 // grouping into enums would be ceremony, not a real state machine.
 #[allow(clippy::struct_excessive_bools)]
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(default)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct ContextConfig {
   pub is_mobile: bool,
   pub has_touch: bool,
@@ -261,7 +261,8 @@ pub struct ContextConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct HttpCredentialsConfig {
   pub username: String,
   pub password: String,
@@ -270,7 +271,8 @@ pub struct HttpCredentialsConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct ProxyConfig {
   pub server: String,
   #[ts(optional)]
@@ -310,7 +312,8 @@ impl Default for ContextConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct GeolocationConfig {
   pub latitude: f64,
   pub longitude: f64,
@@ -368,7 +371,8 @@ impl Default for BrowserConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct ViewportConfig {
   pub width: i64,
   pub height: i64,
@@ -384,7 +388,8 @@ impl Default for ViewportConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct ReporterConfig {
   pub name: String,
   #[serde(default)]
@@ -394,7 +399,7 @@ pub struct ReporterConfig {
 /// Snapshot update mode. Playwright: `updateSnapshots`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
 #[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "./", rename_all = "lowercase")]
+#[ts(export, export_to = "./")]
 pub enum UpdateSnapshotsMode {
   All,
   Changed,
@@ -405,8 +410,8 @@ pub enum UpdateSnapshotsMode {
 
 /// Configuration for slow test reporting. Playwright: `reportSlowTests`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(default)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct ReportSlowTestsConfig {
   pub max: usize,
   #[ts(type = "number")]
@@ -424,8 +429,8 @@ impl Default for ReportSlowTestsConfig {
 
 /// Project configuration -- matches Playwright's `TestProject`.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(default)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct ProjectConfig {
   pub name: String,
   #[ts(optional)]
@@ -487,8 +492,8 @@ impl Default for ProjectConfig {
 
 /// Web server configuration -- matches Playwright's `webServer` option.
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[serde(default)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct WebServerConfig {
   #[ts(optional)]
   pub command: Option<String>,
@@ -517,7 +522,8 @@ pub struct WebServerConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct GracefulShutdown {
   pub signal: String,
   #[ts(type = "number")]

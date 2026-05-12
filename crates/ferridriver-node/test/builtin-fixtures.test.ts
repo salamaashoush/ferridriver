@@ -10,9 +10,8 @@
 // the body never destructures it.
 
 import { test, expect } from 'bun:test';
-import { tmpdir } from 'os';
-import { join } from 'path';
-import { TestRunner, type TestMeta, type TestRunnerConfig, type TestFixtures } from '../index.js';
+import { type TestMeta, type TestFixtures } from '../index.js';
+import { createRunner } from './_test-helpers.js';
 
 // WebKit's stock WKWebView only exposes the persistent default
 // context — `Browser::new_context()` returns a handle that the
@@ -36,20 +35,8 @@ function makeMeta(title: string): TestMeta {
   return { ...META, id: title, title };
 }
 
-function makeConfig(backend: string, overrides: Partial<TestRunnerConfig> = {}): TestRunnerConfig {
-  const browser =
-    backend === 'bidi' ? 'firefox' :
-    backend === 'webkit' ? 'webkit' :
-    'chromium';
-  return {
-    workers: 1,
-    backend,
-    browser,
-    reporter: ['json'],
-    outputDir: join(tmpdir(), `ferri-cluster2-${process.pid}-${Date.now()}-${backend}`),
-    screenshotOnFailure: false,
-    ...overrides,
-  };
+function browserForBackend(backend: string): string {
+  return backend === 'bidi' ? 'firefox' : backend === 'webkit' ? 'webkit' : 'chromium';
 }
 
 for (const backend of BACKENDS_WITH_PAGE) {
@@ -57,7 +44,7 @@ for (const backend of BACKENDS_WITH_PAGE) {
     let observedName: string | undefined;
     let observedVersion: string | null | undefined;
 
-    const runner = TestRunner.create(makeConfig(backend));
+    const runner = createRunner({ browser: { backend, browser: browserForBackend(backend) } });
     runner.registerTestsBatch([
       {
         meta: makeMeta('inspect-browser'),
@@ -91,7 +78,7 @@ for (const backend of BACKENDS_WITH_PAGE) {
 test('playwright fixture exposes chromium / firefox / webkit / request', async () => {
   let snapshot: { types: string[]; requestType: string } | undefined;
 
-  const runner = TestRunner.create(makeConfig('cdp-pipe'));
+  const runner = createRunner({ browser: { backend: 'cdp-pipe', browser: 'chromium' } });
   runner.registerTestsBatch([
     {
       meta: makeMeta('inspect-playwright'),
@@ -126,7 +113,7 @@ test('browserName resolves on webkit (request-only path)', async () => {
   // available `request` + `test_info` fixtures still resolve without
   // depending on the per-test page context.
   let observedName: string | undefined;
-  const runner = TestRunner.create(makeConfig('webkit'));
+  const runner = createRunner({ browser: { backend: 'webkit', browser: 'webkit' } });
   runner.registerTestsBatch([
     {
       meta: { ...makeMeta('inspect-name'), requestedFixtures: ['request', 'test_info'] },
@@ -142,7 +129,7 @@ test('browserName resolves on webkit (request-only path)', async () => {
 
 test('request fixture is a usable APIRequestContext', async () => {
   let getMethodPresent = false;
-  const runner = TestRunner.create(makeConfig('cdp-pipe'));
+  const runner = createRunner({ browser: { backend: 'cdp-pipe', browser: 'chromium' } });
   runner.registerTestsBatch([
     {
       meta: { ...makeMeta('inspect-request'), requestedFixtures: ['request', 'test_info'] },

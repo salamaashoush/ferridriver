@@ -5,10 +5,11 @@
 // summary aggregates both shards.
 
 import { test, expect } from 'bun:test';
-import { mkdtempSync, rmSync, readdirSync, statSync } from 'fs';
+import { mkdtempSync, rmSync, readdirSync } from 'fs';
 import { tmpdir } from 'os';
 import { join } from 'path';
-import { TestRunner, mergeReports, type TestMeta, type TestRunnerConfig } from '../index.js';
+import { mergeReports, type TestMeta } from '../index.js';
+import { createRunner } from './_test-helpers.js';
 
 const META: Omit<TestMeta, 'title' | 'id'> = {
   file: 'merge-reports.test.ts',
@@ -21,13 +22,7 @@ function makeMeta(title: string): TestMeta {
 }
 
 async function runShard(outputDir: string, label: string, shouldFail: boolean): Promise<void> {
-  const config: TestRunnerConfig = {
-    workers: 1,
-    reporter: ['blob'],
-    outputDir,
-    screenshotOnFailure: false,
-  };
-  const runner = TestRunner.create(config);
+  const runner = createRunner({ reporter: ['blob'], outputDir });
   runner.registerTestsBatch([
     {
       meta: makeMeta(label),

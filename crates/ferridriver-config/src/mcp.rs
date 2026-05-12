@@ -29,8 +29,8 @@ pub const DEFAULT_SERVER_NAME: &str = "ferridriver";
 /// Root MCP-section configuration loaded from a unified `ferridriver.{toml,yaml,json}`
 /// file under the `[mcp]` table.
 #[derive(Debug, Default, Deserialize, Serialize, TS)]
-#[serde(default)]
-#[ts(export, export_to = "./", rename_all = "camelCase")]
+#[serde(default, rename_all = "camelCase")]
+#[ts(export, export_to = "./")]
 pub struct McpConfig {
   /// MCP server metadata.
   pub server: ServerConfig,

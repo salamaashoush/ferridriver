@@ -53,157 +53,146 @@ pub struct TestBatchEntry<'a> {
     napi::bindgen_prelude::Function<'a, crate::test_fixtures::TestFixtures, napi::bindgen_prelude::Promise<()>>,
 }
 
-/// Test runner configuration from TypeScript.
+/// CLI argument overrides applied on top of a `FerridriverConfig` already
+/// passed to `TestRunner.create()`. Mirrors `ferridriver_test::config::CliOverrides`
+/// field-for-field; conversion is `to_core`.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
-pub struct TestRunnerConfig {
+pub struct NapiCliOverrides {
   pub workers: Option<i32>,
-  pub timeout: Option<f64>,
   pub retries: Option<i32>,
-  pub headed: Option<bool>,
-  /// Browser name: "chromium" (default), "firefox", "webkit".
+  pub timeout: Option<f64>,
+  pub reporter: Option<Vec<String>>,
+  pub grep: Option<String>,
+  pub grep_invert: Option<String>,
+  pub tag: Option<String>,
+  pub headless: Option<bool>,
+  pub shard_current: Option<i32>,
+  pub shard_total: Option<i32>,
+  pub config_path: Option<String>,
+  pub output_dir: Option<String>,
+  pub test_files: Option<Vec<String>>,
+  pub test_match: Option<Vec<String>>,
+  pub list_only: Option<bool>,
+  pub update_snapshots: Option<String>,
+  pub profile: Option<String>,
+  pub forbid_only: Option<bool>,
+  pub last_failed: Option<bool>,
+  pub video: Option<String>,
+  pub trace: Option<String>,
+  pub storage_state: Option<String>,
+  pub max_failures: Option<i32>,
+  pub repeat_each: Option<i32>,
+  pub fail_fast: Option<bool>,
+  pub global_timeout: Option<f64>,
+  pub ignore_snapshots: Option<bool>,
+  pub pass_with_no_tests: Option<bool>,
+  pub tsconfig: Option<String>,
+  pub name: Option<String>,
+  pub fully_parallel: Option<bool>,
+  pub project_filter: Option<Vec<String>>,
+  pub no_deps: Option<bool>,
+  pub teardown: Option<String>,
+  pub only_changed: Option<String>,
+  pub fail_on_flaky_tests: Option<bool>,
   pub browser: Option<String>,
-  /// Backend protocol: "cdp-pipe", "cdp-raw", "bidi", "webkit".
   pub backend: Option<String>,
-  /// Browser channel: "chrome", "chrome-beta", "msedge", etc.
   pub channel: Option<String>,
   pub executable_path: Option<String>,
   pub browser_args: Option<Vec<String>>,
   pub base_url: Option<String>,
-  pub reporter: Option<Vec<String>>,
-  pub output_dir: Option<String>,
-  pub test_match: Option<Vec<String>>,
   pub viewport_width: Option<i32>,
   pub viewport_height: Option<i32>,
-  pub forbid_only: Option<bool>,
-  pub last_failed: Option<bool>,
-  /// Verbose logging level: 0=off, 1=debug, 2=trace
-  pub verbose: Option<i32>,
-  /// Debug categories (e.g. "cdp", "steps", "cdp,action"). Same as FERRIDRIVER_DEBUG env var.
-  pub debug: Option<String>,
-  /// Grep pattern to filter tests by name.
-  pub grep: Option<String>,
-  /// Video recording mode: "off", "on", "retain-on-failure".
-  pub video: Option<String>,
-  /// Trace recording mode: "off", "on", "retain-on-failure", "on-first-retry".
-  pub trace: Option<String>,
-  /// Path to storage state JSON file (pre-authenticated session).
-  pub storage_state: Option<String>,
-  /// Watch mode: re-run tests on file changes.
-  pub watch: Option<bool>,
-  // ── Context options (Playwright `use` block) ──
-  /// Simulate mobile device (isMobile). Condition: "mobile".
   pub is_mobile: Option<bool>,
-  /// Enable touch events (hasTouch). Condition: "touch".
   pub has_touch: Option<bool>,
-  /// Color scheme: "light", "dark", "no-preference". Condition: "dark", "light".
   pub color_scheme: Option<String>,
-  /// Browser locale (e.g. "en-US", "de-DE").
   pub locale: Option<String>,
-  /// Simulate offline mode. Condition: "offline".
   pub offline: Option<bool>,
-  /// Bypass CSP. Condition: "bypass-csp".
   pub bypass_csp: Option<bool>,
-  /// Project configurations — matches Playwright's `projects` array.
-  pub projects: Option<Vec<NapiProjectConfig>>,
-
-  // ── BDD config ──
-  /// Tag filter expression (BDD).
-  pub tags: Option<String>,
-  /// Strict mode: undefined/pending steps cause failure (BDD).
-  pub strict: Option<bool>,
-  /// Execution order: "defined" | "random" | "random:SEED" (BDD).
-  pub order: Option<String>,
-  /// Gherkin keyword language (BDD).
-  pub language: Option<String>,
-  /// Feature file glob patterns (BDD).
-  pub features: Option<Vec<String>>,
-  /// Screenshot on failure.
-  pub screenshot_on_failure: Option<bool>,
-
-  // ── Web server ──
-  pub web_server: Option<Vec<NapiWebServerConfig>>,
-
-  // ── Cluster 1 CLI flags ──
-  /// Stop after N test failures. 0 = no limit. Playwright: `maxFailures`.
-  pub max_failures: Option<i32>,
-  /// Run each test N times for flake detection.
-  pub repeat_each: Option<i32>,
-  /// Stop on first failure (`-x`).
-  pub fail_fast: Option<bool>,
-  /// Whole-suite timeout in ms. 0 = unlimited.
-  pub global_timeout: Option<f64>,
-  /// Skip every snapshot comparison.
-  pub ignore_snapshots: Option<bool>,
-  /// Exit 0 instead of 1 when no tests are discovered.
-  pub pass_with_no_tests: Option<bool>,
-  /// Path to a single tsconfig used by the TS loader.
-  pub tsconfig: Option<String>,
-  /// Display name surfaced in reports.
-  pub name: Option<String>,
-  /// Run all tests in parallel regardless of file-level grouping.
-  pub fully_parallel: Option<bool>,
-  /// Snapshot update mode: "all", "changed", "missing", "none".
-  pub update_snapshots: Option<String>,
-
-  // ── Cluster 7 CLI flags ──
-  /// Subset of `projects` to run (empty = all).
-  pub project_filter: Option<Vec<String>>,
-  /// Skip dependency resolution for the selected projects.
-  pub no_deps: Option<bool>,
-  /// Override teardown stage for the run.
-  pub teardown_project: Option<String>,
-  /// `--only-changed [ref]` — `Some("")` = uncommitted changes,
-  /// `Some(ref)` = compare against the given ref. `None` = no filter.
-  pub only_changed: Option<String>,
-  /// Make any flaky test cause a non-zero exit.
-  pub fail_on_flaky_tests: Option<bool>,
-  /// Annotate `RunSummary` metadata with git info.
-  pub capture_git_info: Option<bool>,
+  pub bdd_tags: Option<String>,
+  pub bdd_dry_run: Option<bool>,
+  pub bdd_strict: Option<bool>,
+  pub bdd_fail_fast: Option<bool>,
+  pub bdd_step_timeout: Option<f64>,
+  pub bdd_order: Option<String>,
+  pub bdd_language: Option<String>,
 }
 
-/// Web server config passed from TS — maps to Rust `WebServerConfig`.
-#[napi(object)]
-#[derive(Debug, Clone, Default)]
-pub struct NapiWebServerConfig {
-  pub command: Option<String>,
-  pub static_dir: Option<String>,
-  pub url: Option<String>,
-  pub port: Option<i32>,
-  pub timeout: Option<f64>,
-  pub cwd: Option<String>,
-}
-
-/// Project config passed from TS — maps to Rust `ProjectConfig`.
-#[napi(object)]
-#[derive(Debug, Clone, Default)]
-pub struct NapiProjectConfig {
-  pub name: String,
-  pub test_match: Option<Vec<String>>,
-  pub test_ignore: Option<Vec<String>>,
-  pub test_dir: Option<String>,
-  pub grep: Option<String>,
-  pub grep_invert: Option<String>,
-  pub timeout: Option<f64>,
-  pub retries: Option<i32>,
-  pub repeat_each: Option<i32>,
-  pub fully_parallel: Option<bool>,
-  pub output_dir: Option<String>,
-  pub snapshot_dir: Option<String>,
-  pub dependencies: Option<Vec<String>>,
-  pub teardown: Option<String>,
-  pub tag: Option<Vec<String>>,
-  /// Browser/context config (Playwright's `use` block).
-  pub browser: Option<String>,
-  pub backend: Option<String>,
-  pub channel: Option<String>,
-  pub headed: Option<bool>,
-  pub viewport_width: Option<i32>,
-  pub viewport_height: Option<i32>,
-  pub is_mobile: Option<bool>,
-  pub has_touch: Option<bool>,
-  pub color_scheme: Option<String>,
-  pub locale: Option<String>,
+impl NapiCliOverrides {
+  fn to_core(&self) -> ferridriver_test::config::CliOverrides {
+    let update_snapshots = self.update_snapshots.as_deref().and_then(|m| match m {
+      "all" => Some(ferridriver_test::config::UpdateSnapshotsMode::All),
+      "changed" => Some(ferridriver_test::config::UpdateSnapshotsMode::Changed),
+      "missing" => Some(ferridriver_test::config::UpdateSnapshotsMode::Missing),
+      "none" => Some(ferridriver_test::config::UpdateSnapshotsMode::None),
+      _ => None,
+    });
+    let shard = match (self.shard_current, self.shard_total) {
+      (Some(c), Some(t)) if c > 0 && t > 0 => Some(ferridriver_test::config::ShardArg {
+        current: c as u32,
+        total: t as u32,
+      }),
+      _ => None,
+    };
+    ferridriver_test::config::CliOverrides {
+      workers: self.workers.map(|w| w as u32),
+      retries: self.retries.map(|r| r as u32),
+      timeout: self.timeout.map(|t| t as u64),
+      reporter: self.reporter.clone().unwrap_or_default(),
+      grep: self.grep.clone(),
+      grep_invert: self.grep_invert.clone(),
+      tag: self.tag.clone(),
+      headless: self.headless.unwrap_or(false),
+      shard,
+      config_path: self.config_path.clone(),
+      output_dir: self.output_dir.clone(),
+      test_files: self.test_files.clone().unwrap_or_default(),
+      test_match: self.test_match.clone(),
+      list_only: self.list_only.unwrap_or(false),
+      update_snapshots,
+      profile: self.profile.clone(),
+      forbid_only: self.forbid_only.unwrap_or(false),
+      last_failed: self.last_failed.unwrap_or(false),
+      video: self.video.clone(),
+      trace: self.trace.clone(),
+      storage_state: self.storage_state.clone(),
+      max_failures: self.max_failures.map(|n| n as u32),
+      repeat_each: self.repeat_each.map(|n| n as u32),
+      fail_fast: self.fail_fast.unwrap_or(false),
+      global_timeout: self.global_timeout.map(|t| t as u64),
+      ignore_snapshots: self.ignore_snapshots.unwrap_or(false),
+      pass_with_no_tests: self.pass_with_no_tests.unwrap_or(false),
+      tsconfig: self.tsconfig.clone(),
+      name: self.name.clone(),
+      fully_parallel: self.fully_parallel,
+      project_filter: self.project_filter.clone().unwrap_or_default(),
+      no_deps: self.no_deps.unwrap_or(false),
+      teardown: self.teardown.clone(),
+      only_changed: self.only_changed.clone(),
+      fail_on_flaky_tests: self.fail_on_flaky_tests.unwrap_or(false),
+      browser: self.browser.clone(),
+      backend: self.backend.clone(),
+      channel: self.channel.clone(),
+      executable_path: self.executable_path.clone(),
+      browser_args: self.browser_args.clone().unwrap_or_default(),
+      base_url: self.base_url.clone(),
+      viewport_width: self.viewport_width.map(|v| v as i64),
+      viewport_height: self.viewport_height.map(|v| v as i64),
+      is_mobile: self.is_mobile,
+      has_touch: self.has_touch,
+      color_scheme: self.color_scheme.clone(),
+      locale: self.locale.clone(),
+      offline: self.offline,
+      bypass_csp: self.bypass_csp,
+      bdd_tags: self.bdd_tags.clone(),
+      bdd_dry_run: self.bdd_dry_run.unwrap_or(false),
+      bdd_strict: self.bdd_strict.unwrap_or(false),
+      bdd_fail_fast: self.bdd_fail_fast.unwrap_or(false),
+      bdd_step_timeout: self.bdd_step_timeout.map(|t| t as u64),
+      bdd_order: self.bdd_order.clone(),
+      bdd_language: self.bdd_language.clone(),
+    }
+  }
 }
 
 /// Flattened annotation passed from TS — avoids serde_json round-trip.
@@ -463,128 +452,88 @@ pub struct TestRunner {
 
 #[napi]
 impl TestRunner {
-  /// Create a new test runner.
-  /// Sync factory -- no async work needed. Avoids NAPI async overhead (~60ms thread hop).
+  /// Create a new test runner from a serialized `FerridriverConfig`.
+  ///
+  /// `config_json` is the JSON representation of `ferridriver_config::FerridriverConfig`
+  /// (typically produced by `JSON.stringify({ test: userConfig })` in TS). The
+  /// payload owns the schema -- no per-field flat NAPI struct, no manual mapper.
+  /// CLI argument overrides are layered later via `apply_overrides()`; runtime-
+  /// only state (grep/last_failed/watch/verbose/debug) uses dedicated setters.
   #[napi(factory)]
-  pub fn create(config: Option<TestRunnerConfig>) -> Result<Self> {
-    let cfg = config.unwrap_or_default();
-    // Inject debug config as env var so the centralized logging picks it up.
-    // This works around Bun not propagating process.env to std::env::var.
-    if let Some(ref debug) = cfg.debug {
-      #[allow(unused_unsafe)]
-      unsafe {
-        std::env::set_var("FERRIDRIVER_DEBUG", debug);
-      }
-    }
-    let verbose = cfg.verbose.unwrap_or(0) as u8;
-    if verbose > 0 {
-      ferridriver_test::logging::init(verbose);
-    } else {
-      ferridriver_test::logging::init_from_env();
-    }
-    // Map NAPI config → CliOverrides and use the single resolve_config() path.
-    // This ensures env vars, normalization, and worker auto-detection all work.
-    let update_snapshots_mode = cfg.update_snapshots.as_deref().and_then(|m| match m {
-      "all" => Some(ferridriver_test::config::UpdateSnapshotsMode::All),
-      "changed" => Some(ferridriver_test::config::UpdateSnapshotsMode::Changed),
-      "missing" => Some(ferridriver_test::config::UpdateSnapshotsMode::Missing),
-      "none" => Some(ferridriver_test::config::UpdateSnapshotsMode::None),
-      _ => None,
-    });
-    let overrides = ferridriver_test::config::CliOverrides {
-      workers: cfg.workers.map(|w| w as u32),
-      timeout: cfg.timeout.map(|t| t as u64),
-      retries: cfg.retries.map(|r| r as u32),
-      headless: !cfg.headed.unwrap_or(false),
-      browser: cfg.browser.clone(),
-      backend: cfg.backend.clone(),
-      channel: cfg.channel.clone(),
-      executable_path: cfg.executable_path.clone(),
-      browser_args: cfg.browser_args.clone().unwrap_or_default(),
-      base_url: cfg.base_url.clone(),
-      reporter: cfg.reporter.clone().unwrap_or_default(),
-      output_dir: cfg.output_dir.clone(),
-      test_match: cfg.test_match.clone(),
-      viewport_width: cfg.viewport_width.map(|v| v as i64),
-      viewport_height: cfg.viewport_height.map(|v| v as i64),
-      forbid_only: cfg.forbid_only.unwrap_or(false),
-      video: cfg.video.clone(),
-      trace: cfg.trace.clone(),
-      storage_state: cfg.storage_state.clone(),
-      is_mobile: cfg.is_mobile,
-      has_touch: cfg.has_touch,
-      color_scheme: cfg.color_scheme.clone(),
-      locale: cfg.locale.clone(),
-      offline: cfg.offline,
-      bypass_csp: cfg.bypass_csp,
-      max_failures: cfg.max_failures.map(|n| n as u32),
-      repeat_each: cfg.repeat_each.map(|n| n as u32),
-      fail_fast: cfg.fail_fast.unwrap_or(false),
-      global_timeout: cfg.global_timeout.map(|t| t as u64),
-      ignore_snapshots: cfg.ignore_snapshots.unwrap_or(false),
-      pass_with_no_tests: cfg.pass_with_no_tests.unwrap_or(false),
-      tsconfig: cfg.tsconfig.clone(),
-      name: cfg.name.clone(),
-      fully_parallel: cfg.fully_parallel,
-      update_snapshots: update_snapshots_mode,
-      project_filter: cfg.project_filter.clone().unwrap_or_default(),
-      no_deps: cfg.no_deps.unwrap_or(false),
-      teardown: cfg.teardown_project.clone(),
-      only_changed: cfg.only_changed.clone(),
-      fail_on_flaky_tests: cfg.fail_on_flaky_tests.unwrap_or(false),
-      ..Default::default()
-    };
-    let mut tc =
-      ferridriver_test::config::resolve_config(&overrides).map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
+  pub fn create(config_json: String) -> Result<Self> {
+    let unified: ferridriver_config::FerridriverConfig =
+      serde_json::from_str(&config_json).map_err(|e| napi::Error::new(Status::GenericFailure, format!("invalid config json: {e}")))?;
 
-    // Wire NAPI projects into Rust config.
-    if let Some(ref napi_projects) = cfg.projects {
-      tc.projects = napi_projects.iter().map(napi_project_to_rust).collect();
-    }
+    // Initialise tracing from environment by default; explicit verbose is set
+    // post-create via `set_verbose()` when the CLI parses --verbose.
+    ferridriver_test::logging::init_from_env();
 
-    // BDD overrides.
-    if let Some(ref t) = cfg.tags {
-      tc.tags = Some(t.clone());
-    }
-    if let Some(s) = cfg.strict {
-      tc.strict = s;
-    }
-    if let Some(ref o) = cfg.order {
-      tc.order.clone_from(o);
-    }
-    if let Some(ref l) = cfg.language {
-      tc.language = Some(l.clone());
-    }
-    if let Some(ref f) = cfg.features {
-      tc.features.clone_from(f);
-    }
-    if let Some(ss) = cfg.screenshot_on_failure {
-      tc.screenshot_on_failure = ss;
-    }
-
-    // Web server config.
-    if let Some(ref servers) = cfg.web_server {
-      tc.web_server = servers.iter().map(napi_web_server_to_rust).collect();
-    }
-
-    if let Some(flag) = cfg.fail_on_flaky_tests {
-      tc.fail_on_flaky_tests = flag;
-    }
-    if let Some(flag) = cfg.capture_git_info {
-      tc.capture_git_info = flag;
-    }
+    // Apply env vars + auto-detect workers + normalize, with no CLI overrides.
+    let tc = ferridriver_test::config::resolve_config_from(unified.test, &ferridriver_test::config::CliOverrides::default())
+      .map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
 
     Ok(Self {
       config: tc,
-      last_failed: cfg.last_failed.unwrap_or(false),
-      watch: cfg.watch.unwrap_or(false),
-      grep: cfg.grep.clone(),
+      last_failed: false,
+      watch: false,
+      grep: None,
       tests: Mutex::new(Vec::new()),
       suites: Mutex::new(Vec::new()),
       hooks: Mutex::new(Vec::new()),
       js_reporters: Mutex::new(Vec::new()),
       bdd: BddRegistry::new(),
     })
+  }
+
+  /// Layer CLI argument overrides on top of the loaded config.
+  ///
+  /// Runs the standard `resolve_config_from` pipeline (env vars + overrides +
+  /// auto-detect + normalize). Designed to be called once after `create()`,
+  /// before `run()`.
+  #[napi]
+  pub fn apply_overrides(&mut self, overrides: NapiCliOverrides) -> Result<()> {
+    let core = overrides.to_core();
+    let new_config = ferridriver_test::config::resolve_config_from(self.config.clone(), &core)
+      .map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
+    self.config = new_config;
+    Ok(())
+  }
+
+  /// Grep pattern used to filter tests by name. Runtime-only -- not part of the
+  /// serialized config schema.
+  #[napi]
+  pub fn set_grep(&mut self, pattern: String) {
+    self.grep = if pattern.is_empty() { None } else { Some(pattern) };
+  }
+
+  /// Re-run only tests that failed on the previous run.
+  #[napi]
+  pub fn set_last_failed(&mut self, enabled: bool) {
+    self.last_failed = enabled;
+  }
+
+  /// Watch mode: re-run tests on file changes.
+  #[napi]
+  pub fn set_watch(&mut self, enabled: bool) {
+    self.watch = enabled;
+  }
+
+  /// Verbose tracing level: 0 = off (default), 1 = debug, 2 = trace.
+  #[napi]
+  pub fn set_verbose(&mut self, level: u32) {
+    if level > 0 {
+      ferridriver_test::logging::init(level as u8);
+    }
+  }
+
+  /// Debug category filter -- same syntax as the `FERRIDRIVER_DEBUG` env var.
+  /// Stored on the process env so the centralised tracing subscriber picks it up.
+  #[napi]
+  pub fn set_debug(&mut self, categories: String) {
+    #[allow(unused_unsafe)]
+    unsafe {
+      std::env::set_var("FERRIDRIVER_DEBUG", categories);
+    }
   }
 
   /// Register a test. The callback receives fixtures (page, testInfo, browserName, etc.).
@@ -1510,86 +1459,3 @@ impl ferridriver_test::reporter::Reporter for ResultCollectorReporter {
   }
 }
 
-/// Convert NAPI project config to Rust `ProjectConfig`.
-fn napi_project_to_rust(napi: &NapiProjectConfig) -> ferridriver_test::config::ProjectConfig {
-  let browser_config = if napi.browser.is_some()
-    || napi.backend.is_some()
-    || napi.channel.is_some()
-    || napi.headed.is_some()
-    || napi.viewport_width.is_some()
-    || napi.is_mobile.is_some()
-    || napi.has_touch.is_some()
-    || napi.color_scheme.is_some()
-    || napi.locale.is_some()
-  {
-    let mut bc = ferridriver_test::config::BrowserConfig::default();
-    if let Some(ref b) = napi.browser {
-      bc.browser.clone_from(b);
-    }
-    if let Some(ref b) = napi.backend {
-      bc.backend.clone_from(b);
-    }
-    if let Some(ref ch) = napi.channel {
-      bc.channel = Some(ch.clone());
-    }
-    if let Some(headed) = napi.headed {
-      bc.headless = !headed;
-    }
-    if let Some(w) = napi.viewport_width {
-      if let Some(h) = napi.viewport_height {
-        bc.viewport = Some(ferridriver_test::config::ViewportConfig {
-          width: w as i64,
-          height: h as i64,
-        });
-      }
-    }
-    if let Some(m) = napi.is_mobile {
-      bc.use_options.is_mobile = m;
-    }
-    if let Some(t) = napi.has_touch {
-      bc.use_options.has_touch = t;
-    }
-    if let Some(ref cs) = napi.color_scheme {
-      bc.use_options.color_scheme = Some(cs.clone());
-    }
-    if let Some(ref l) = napi.locale {
-      bc.use_options.locale = Some(l.clone());
-    }
-    Some(bc)
-  } else {
-    None
-  };
-
-  ferridriver_test::config::ProjectConfig {
-    name: napi.name.clone(),
-    test_match: napi.test_match.clone(),
-    test_ignore: napi.test_ignore.clone(),
-    test_dir: napi.test_dir.clone(),
-    browser: browser_config,
-    output_dir: napi.output_dir.clone(),
-    snapshot_dir: napi.snapshot_dir.clone(),
-    retries: napi.retries.map(|r| r as u32),
-    timeout: napi.timeout.map(|t| t as u64),
-    repeat_each: napi.repeat_each.map(|r| r as u32),
-    fully_parallel: napi.fully_parallel,
-    grep: napi.grep.clone(),
-    grep_invert: napi.grep_invert.clone(),
-    dependencies: napi.dependencies.clone().unwrap_or_default(),
-    teardown: napi.teardown.clone(),
-    tag: napi.tag.clone(),
-    ..Default::default()
-  }
-}
-
-/// Convert NAPI web server config to Rust `WebServerConfig`.
-fn napi_web_server_to_rust(napi: &NapiWebServerConfig) -> ferridriver_test::config::WebServerConfig {
-  ferridriver_test::config::WebServerConfig {
-    command: napi.command.clone(),
-    static_dir: napi.static_dir.clone(),
-    url: napi.url.clone(),
-    port: napi.port.map(|p| p as u16).unwrap_or(0),
-    timeout: napi.timeout.map(|t| t as u64).unwrap_or(30000),
-    cwd: napi.cwd.clone(),
-    ..Default::default()
-  }
-}

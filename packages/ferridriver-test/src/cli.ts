@@ -11,7 +11,7 @@ import { defineCommand, defineArgs, runMain, withCompletions } from 'clap-ts';
 import type { CommandDef } from 'clap-ts';
 
 import { TestRunner } from '@ferridriver/node';
-import type { Page } from '@ferridriver/node';
+import type { Page, NapiCliOverrides } from '@ferridriver/node';
 import { _setCurrentFile, _runWithFile, _drainTests, _hasOnly, _setCtMountFactory, _setRunner, _drainWorkerFixtures } from './test.js';
 import type { MountFunction } from './test.js';
 import { isAbsolute, join, relative, resolve } from 'path';
@@ -120,81 +120,27 @@ async function loadConfig(explicitPath?: string): Promise<UserTestConfig> {
   return {};
 }
 
-/** Merge config file values with CLI arg overrides. CLI always wins.
+/** Map CLI flags to the typed `NapiCliOverrides` consumed by the Rust runner.
  *
- * Consumes the unified `TestConfig` shape generated from the Rust schema (so
- * Playwright's top-level `use:` block lives under `browser.use` here). The
- * output object is the legacy flat dict expected by `TestRunner.create()`;
- * step 6 of the unification plan replaces this with a single JSON pipe. */
-function mergeConfig(fileConfig: UserTestConfig, cliArgs: Record<string, any>): Record<string, any> {
-  const config: Record<string, any> = {};
-  const browser = fileConfig.browser;
-  const use = browser?.use;
-
-  if (browser?.browser) config.browser = browser.browser;
-  if (browser?.backend) config.backend = browser.backend;
-  if (browser?.channel) config.channel = browser.channel;
-  if (browser?.executablePath) config.executablePath = browser.executablePath;
-  if (browser?.headless !== undefined) config.headed = !browser.headless;
-  if (browser?.args && browser.args.length > 0) config.browserArgs = browser.args;
-  if (browser?.viewport) {
-    config.viewportWidth = browser.viewport.width;
-    config.viewportHeight = browser.viewport.height;
-  }
-
-  if (use?.locale) config.locale = use.locale;
-  if (use?.colorScheme) config.colorScheme = use.colorScheme;
-  if (use?.isMobile !== undefined) config.isMobile = use.isMobile;
-  if (use?.hasTouch !== undefined) config.hasTouch = use.hasTouch;
-  if (use?.offline !== undefined) config.offline = use.offline;
-  if (use?.bypassCsp !== undefined) config.bypassCsp = use.bypassCsp;
-  if (use?.storageState) config.storageState = use.storageState;
-
-  if (fileConfig.baseUrl) config.baseUrl = fileConfig.baseUrl;
-  if (fileConfig.workers !== undefined) config.workers = fileConfig.workers;
-  if (fileConfig.retries !== undefined) config.retries = fileConfig.retries;
-  if (fileConfig.timeout !== undefined) config.timeout = fileConfig.timeout;
-  if (fileConfig.forbidOnly) config.forbidOnly = true;
-  if (fileConfig.outputDir) config.outputDir = fileConfig.outputDir;
-  if (fileConfig.reporter && fileConfig.reporter.length > 0) {
-    config.reporter = fileConfig.reporter.map((r: any) => (typeof r === 'string' ? r : r.name));
-  }
-  if (fileConfig.projects) config.projects = fileConfig.projects;
-  if (fileConfig.testMatch) config.testMatch = fileConfig.testMatch;
-  if (fileConfig.testIgnore) config.testIgnore = fileConfig.testIgnore;
-  if (fileConfig.testDir) config.testDir = fileConfig.testDir;
-  if (fileConfig.webServer && fileConfig.webServer.length > 0) config.webServer = fileConfig.webServer;
-  if (fileConfig.maxFailures !== undefined) config.maxFailures = fileConfig.maxFailures;
-  if (fileConfig.repeatEach !== undefined) config.repeatEach = fileConfig.repeatEach;
-  if (fileConfig.globalTimeout !== undefined) config.globalTimeout = fileConfig.globalTimeout;
-  if (fileConfig.fullyParallel !== undefined) config.fullyParallel = fileConfig.fullyParallel;
-  if (fileConfig.ignoreSnapshots) config.ignoreSnapshots = true;
-  if (fileConfig.passWithNoTests) config.passWithNoTests = true;
-  if (fileConfig.updateSnapshots) config.updateSnapshots = fileConfig.updateSnapshots;
-  if (fileConfig.tsconfig) config.tsconfig = fileConfig.tsconfig;
-  if (fileConfig.name) config.name = fileConfig.name;
-  if (fileConfig.quiet) config.quiet = true;
-
-  // CLI args override everything.
-  for (const [key, value] of Object.entries(cliArgs)) {
-    if (value !== undefined && value !== false && value !== null) {
-      config[key] = value;
-    }
-  }
-
-  return config;
-}
-
-/** Map CLI args to runner config overrides. Single source of truth — no duplication. */
-function buildCliOverrides(args: Record<string, any>): Record<string, any> {
-  const o: Record<string, any> = {};
+ * The file-loaded config (a partial `TestConfig`) is passed verbatim to
+ * `TestRunner.create()` as JSON; CLI flags layer on top via
+ * `runner.applyOverrides(buildOverrides(args))`. Runtime-only flags
+ * (`grep`, `last-failed`, `watch`, `verbose`, `debug`) use dedicated
+ * setters because they don't belong to the serialised schema. */
+function buildOverrides(args: Record<string, any>): NapiCliOverrides {
+  const o: NapiCliOverrides = {};
   if (args.workers !== undefined) o.workers = args.workers;
   if (args.retries !== undefined) o.retries = args.retries;
   if (args.timeout !== undefined) o.timeout = args.timeout;
-  if (args.headed) o.headed = true;
-  if (args.grep) o.grep = args.grep;
+  if (args.headed) o.headless = false;
   if (args['grep-invert']) o.grepInvert = args['grep-invert'];
-  if (args.shard) o.shard = args.shard;
+  if (args.shard) {
+    const m = String(args.shard).match(/^(\d+)\/(\d+)$/);
+    if (m) {
+      o.shardCurrent = Number(m[1]);
+      o.shardTotal = Number(m[2]);
+    }
+  }
   if (args.tag) o.tag = args.tag;
   if (args.output) o.outputDir = args.output;
   if (args.profile) o.profile = args.profile;
@@ -209,7 +155,6 @@ function buildCliOverrides(args: Record<string, any>): Record<string, any> {
   if (args.reporter) o.reporter = [args.reporter];
   if (args['update-snapshots']) o.updateSnapshots = args['update-snapshots'];
   if (args['forbid-only']) o.forbidOnly = true;
-  if (args['last-failed']) o.lastFailed = true;
   if (args['max-failures'] !== undefined) o.maxFailures = args['max-failures'];
   if (args['repeat-each'] !== undefined) o.repeatEach = args['repeat-each'];
   if (args.x) o.failFast = true;
@@ -223,24 +168,32 @@ function buildCliOverrides(args: Record<string, any>): Record<string, any> {
     o.projectFilter = Array.isArray(args.project) ? args.project : [args.project];
   }
   if (args['no-deps']) o.noDeps = true;
-  if (args.teardown) o.teardownProject = args.teardown;
+  if (args.teardown) o.teardown = args.teardown;
   if (args['only-changed'] !== undefined) o.onlyChanged = args['only-changed'];
   if (args['fail-on-flaky-tests']) o.failOnFlakyTests = true;
-  if (args['capture-git-info']) o.captureGitInfo = true;
   if (args.video) o.video = args.video;
   if (args.trace) o.trace = args.trace;
   if (args['storage-state']) o.storageState = args['storage-state'];
-  if (args['web-server-dir'] || args['web-server-cmd']) {
-    o.webServer = {
-      staticDir: args['web-server-dir'] || undefined,
-      command: args['web-server-cmd'] || undefined,
-      url: args['web-server-url'] || undefined,
-    };
-  }
-  if (args.watch) o.watch = true;
-  if (args.verbose) { o.verbose = 1; if (!args.debug) o.debug = '*'; }
-  if (args.debug) o.debug = args.debug;
   return o;
+}
+
+/** Apply runtime-only flags via dedicated NAPI setters (these aren't part of
+ *  the serialised config schema). */
+function applyRuntimeFlags(runner: TestRunner, args: Record<string, any>) {
+  if (args.grep) runner.setGrep(args.grep);
+  if (args['last-failed']) runner.setLastFailed(true);
+  if (args.watch) runner.setWatch(true);
+  if (args.verbose) {
+    runner.setVerbose(1);
+    if (!args.debug) runner.setDebug('*');
+  }
+  if (args.debug) runner.setDebug(args.debug);
+}
+
+/** Read a resolved value from the file config plus a CLI override, with CLI
+ *  winning. Used by cli.ts for its own (non-runner) bookkeeping. */
+function effective<T>(fileValue: T | undefined, cliValue: T | undefined): T | undefined {
+  return cliValue !== undefined && cliValue !== false && cliValue !== null ? cliValue : fileValue;
 }
 
 // ---- Glob abstraction: use Bun.Glob if available, fall back to node:fs glob ----
@@ -675,7 +628,14 @@ async function discoverStepFiles(stepsGlobs: string[]): Promise<string[]> {
 
 // ---- E2E test runner (shared by default and ct modes) ----
 
-async function runTests(config: Record<string, any>, testFiles: string[], ctMode: boolean, featureFiles: string[] = [], stepFiles: string[] = []) {
+async function runTests(
+  fileConfig: UserTestConfig,
+  args: Record<string, any>,
+  testFiles: string[],
+  ctMode: boolean,
+  featureFiles: string[] = [],
+  stepFiles: string[] = [],
+) {
   _phaseStart = performance.now(); // reset so config+discovery captures time since CLI start
   let viteProcess: any = null;
 
@@ -742,23 +702,26 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
     }
     console.log(`[ct] Vite warmed in ${Date.now() - warmStart}ms`);
 
-    config.baseUrl = viteUrl;
-    if (!config.workers) config.workers = 4;
+    fileConfig.baseUrl = viteUrl;
+    if (!fileConfig.workers) fileConfig.workers = 4;
     setupCtMount();
     console.log(`[ct] Serving at ${viteUrl}`);
   }
 
-  // Normalize webServer to array for NAPI.
-  if (config.webServer && !Array.isArray(config.webServer)) {
-    config.webServer = [config.webServer];
+  // Normalize webServer to array for NAPI / config schema.
+  if (fileConfig.webServer && !Array.isArray(fileConfig.webServer)) {
+    fileConfig.webServer = [fileConfig.webServer as any];
   }
 
   // Re-create the TS loader with the user's tsconfig before any test files are imported.
-  _configureTsLoader(config.tsconfig);
+  const tsconfig = effective<string>(fileConfig.tsconfig, args.tsconfig);
+  _configureTsLoader(tsconfig);
 
   _markPhase('config + discovery');
 
-  const runner = TestRunner.create(config);
+  const runner = TestRunner.create(JSON.stringify({ test: fileConfig }));
+  runner.applyOverrides(buildOverrides(args));
+  applyRuntimeFlags(runner, args);
   _setRunner(runner);
   _markPhase('TestRunner.create (NAPI)');
 
@@ -793,7 +756,7 @@ async function runTests(config: Record<string, any>, testFiles: string[], ctMode
     }
     // Playwright `--pass-with-no-tests`: exit 0 when no tests are discovered;
     // otherwise the empty run is treated as a failure (exit 1).
-    process.exit(config.passWithNoTests ? 0 : 1);
+    process.exit(effective(fileConfig.passWithNoTests, args['pass-with-no-tests']) ? 0 : 1);
   }
 
   // Run — feature files passed to Rust for parsing/translation into the same plan.
@@ -866,39 +829,41 @@ const testCommand = defineCommand({
   },
   async run({ args }) {
     const fileConfig = await loadConfig(args.config);
-    const overrides = buildCliOverrides(args);
-    const config = mergeConfig(fileConfig, overrides);
 
-    // Wire BDD config from CLI args.
-    if (args.tags) config.tags = args.tags;
-    if (args.strict) config.strict = true;
-    if (args.order) config.order = args.order;
-    if (args.language) config.language = args.language;
+    // BDD config rides on the unified config schema (test.tags / strict / order
+    // / language). CLI flags overwrite whatever the file declared so the
+    // resolved JSON shipped to the runner already reflects --tags etc.
+    if (args.tags) fileConfig.tags = args.tags;
+    if (args.strict) fileConfig.strict = true;
+    if (args.order) fileConfig.order = args.order;
+    if (args.language) fileConfig.language = args.language;
 
     // Discover all files — use testMatch from config, or default patterns.
     const fileList = asCliList(args.files as string[] | string | undefined);
     const defaultPatterns = ['**/*.spec.ts', '**/*.test.ts', '**/*.feature'];
-    const patterns = asStringArray(config.testMatch).length > 0 ? asStringArray(config.testMatch) : defaultPatterns;
-    const ignorePatterns = asStringArray(config.testIgnore);
+    const patterns = asStringArray(fileConfig.testMatch).length > 0
+      ? asStringArray(fileConfig.testMatch)
+      : defaultPatterns;
+    const ignorePatterns = asStringArray(fileConfig.testIgnore);
     const allFiles = await discoverFiles({
       entries: fileList,
       matchPatterns: patterns,
       ignorePatterns,
-      baseDir: config.testDir as string | undefined,
+      baseDir: fileConfig.testDir,
     });
 
     let testFiles = allFiles.filter(f => /\.(spec|test)\.[tj]sx?$/.test(f));
     let featureFiles = allFiles.filter(f => f.endsWith('.feature'));
 
     // `--only-changed [ref]`: intersect discovered files with the
-    // git diff. Empty `onlyChanged` falls back to the working-tree
-    // diff. Outside a git repo we keep the original file set and
-    // emit a warning instead of failing the run.
-    if (typeof config.onlyChanged === 'string') {
+    // git diff. Empty value falls back to the working-tree diff.
+    // Outside a git repo we keep the original file set and emit a warning.
+    const onlyChanged = args['only-changed'];
+    if (typeof onlyChanged === 'string') {
       const { spawnSync } = await import('child_process');
-      const ref = config.onlyChanged as string;
-      const args = ref ? ['diff', '--name-only', ref, 'HEAD'] : ['status', '--porcelain'];
-      const proc = spawnSync('git', args, { encoding: 'utf8' });
+      const ref = onlyChanged;
+      const gitArgs = ref ? ['diff', '--name-only', ref, 'HEAD'] : ['status', '--porcelain'];
+      const proc = spawnSync('git', gitArgs, { encoding: 'utf8' });
       if (proc.status === 0) {
         const lines = proc.stdout.split('\n').map((l: string) => l.trim()).filter(Boolean);
         const changed = new Set<string>();
@@ -918,14 +883,14 @@ const testCommand = defineCommand({
 
     if (testFiles.length === 0 && featureFiles.length === 0) {
       console.log('  No test files found.');
-      process.exit(config.passWithNoTests ? 0 : 1);
+      process.exit(effective(fileConfig.passWithNoTests, args['pass-with-no-tests']) ? 0 : 1);
     }
 
     // Load step definitions if we have feature files.
     const stepsGlobs = asCliList(args.steps as string[] | string | undefined);
     const stepFiles = featureFiles.length > 0 ? await discoverStepFiles(stepsGlobs) : [];
 
-    await runTests(config, testFiles, false, featureFiles, stepFiles);
+    await runTests(fileConfig, args, testFiles, false, featureFiles, stepFiles);
   },
 });
 
@@ -962,11 +927,9 @@ const ctCommand = defineCommand({
     });
     if (testFiles.length === 0) {
       console.log('  No component test files found.');
-      const merged = mergeConfig(fileConfig, buildCliOverrides(args));
-      process.exit(merged.passWithNoTests ? 0 : 1);
+      process.exit(effective(fileConfig.passWithNoTests, args['pass-with-no-tests']) ? 0 : 1);
     }
-    const config = mergeConfig(fileConfig, buildCliOverrides(args));
-    await runTests(config, testFiles, true);
+    await runTests(fileConfig, args, testFiles, true);
   },
 });
 
