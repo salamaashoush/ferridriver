@@ -1,8 +1,8 @@
-//! Option structs for the Playwright-compatible Page and Locator API.
+//! Option structs for the Page and Locator API.
 
-/// A string or a regular expression — mirrors Playwright's
-/// `string | RegExp` union accepted by every `getBy*` matcher,
-/// `page.waitForURL`, and similar selector inputs.
+/// A string or a regular expression — the `string | RegExp` union accepted
+/// by every `getBy*` matcher, `page.waitForURL`, and similar selector
+/// inputs.
 ///
 /// Construction:
 /// * `StringOrRegex::from("foo")` — literal string (substring match
@@ -12,7 +12,7 @@
 ///   JS `RegExp` instance; `QuickJS` similarly reads `source`/`flags`
 ///   getters off a `RegExp` via prototype-chain access. Wire-shape
 ///   inputs like `{ regexSource, regexFlags }` are never exposed to
-///   the user — Rule 3.
+///   the user.
 #[derive(Debug, Clone)]
 pub enum StringOrRegex {
   String(String),
@@ -137,9 +137,8 @@ impl From<&String> for LocatorLike {
 }
 
 /// Script argument shape for [`crate::page::Page::add_init_script`] and
-/// [`crate::context::ContextRef::add_init_script`]. Mirrors Playwright's
-/// `Function | string | { path?, content? }` union from
-/// `/tmp/playwright/packages/playwright-core/src/client/page.ts:520`.
+/// [`crate::context::ContextRef::add_init_script`]. Accepts the
+/// `Function | string | { path?, content? }` union.
 ///
 /// The binding layer (NAPI / `QuickJS`) is responsible for the engine-local
 /// step of extracting a JS function's source via `.toString()`; everything
@@ -154,15 +153,15 @@ pub enum InitScriptSource {
   /// renders as the literal `undefined`.
   Function { body: String },
   /// Script source code used verbatim. Passing `arg` alongside this form
-  /// errors with Playwright's "Cannot evaluate a string with arguments".
+  /// errors with "Cannot evaluate a string with arguments".
   Source(String),
   /// Path to an on-disk script file. Read at [`evaluation_script`] call
-  /// time; a `//# sourceURL=<path>` comment is appended per Playwright's
-  /// `addSourceUrlToScript` helper. Passing `arg` alongside errors.
+  /// time; a `//# sourceURL=<path>` comment is appended. Passing `arg`
+  /// alongside errors.
   Path(std::path::PathBuf),
   /// Literal script content (from the `{ content }` bag variant).
   /// Semantically equivalent to [`Self::Source`]; kept as a distinct
-  /// variant so callers can route the Playwright object shape losslessly.
+  /// variant so callers can route the object shape losslessly.
   /// Passing `arg` alongside errors.
   Content(String),
 }
@@ -186,15 +185,12 @@ impl From<std::path::PathBuf> for InitScriptSource {
 }
 
 /// Lower an [`InitScriptSource`] + optional JSON argument into the
-/// wire-level source string the backend receives. Mirrors Playwright's
-/// client-side `evaluationScript` in
-/// `/tmp/playwright/packages/playwright-core/src/client/clientHelper.ts:31`.
+/// wire-level source string the backend receives.
 ///
 /// Semantics:
 /// - [`InitScriptSource::Function`] + `arg` → `(body)(JSON.stringify(arg))`.
-///   Absent `arg` renders as `undefined` per Playwright's
-///   `Object.is(arg, undefined)` check. Playwright passes `null` through as
-///   `"null"` — this function does the same.
+///   Absent `arg` renders as `undefined` (matches `Object.is(arg, undefined)`).
+///   `null` passes through as `"null"`.
 /// - [`InitScriptSource::Source`] / [`InitScriptSource::Content`] →
 ///   the raw source; `arg.is_some()` rejects with
 ///   `FerriError::InvalidArgument` ("Cannot evaluate a string with
@@ -243,10 +239,9 @@ pub fn evaluation_script(
   }
 }
 
-/// Options for filtering locators — mirrors Playwright's `LocatorOptions`
-/// used by both `Locator::filter(options)` and the `Locator` constructor.
-/// Every field maps directly to a corresponding injected-selector clause
-/// per `/tmp/playwright/packages/playwright-core/src/client/locator.ts`:
+/// Options for filtering locators — used by both
+/// `Locator::filter(options)` and the `Locator` constructor. Every field
+/// maps directly to a corresponding injected-selector clause:
 ///
 /// * `has_text` → ` >> internal:has-text=<escaped>`
 /// * `has_not_text` → ` >> internal:has-not-text=<escaped>`
@@ -272,17 +267,14 @@ pub struct WaitOptions {
   pub timeout: Option<u64>,
 }
 
-/// Playwright `LocatorEvaluateOptions` — only the `timeout` field today.
-/// Mirrors `client/locator.ts::evaluate` / `evaluateHandle`'s
-/// `options?: TimeoutOptions`.
+/// `LocatorEvaluateOptions` — only the `timeout` field today.
 #[derive(Debug, Clone, Default)]
 pub struct EvaluateOptions {
   pub timeout: Option<u64>,
 }
 
-/// Full Playwright `PageScreenshotOptions` surface — 13 fields. Mirrors
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:23280` plus
-/// the `LocatorScreenshotOptions` subset for `Locator.screenshot()` (which
+/// Full `PageScreenshotOptions` surface — 13 fields. Includes the
+/// `LocatorScreenshotOptions` subset for `Locator.screenshot()` (which
 /// omits `full_page` and `clip` — the locator takes the screenshot of its
 /// own element, not a pixel rectangle).
 ///
@@ -311,10 +303,10 @@ pub struct EvaluateOptions {
 /// - `style` — raw CSS injected via `addStyleTag` before capture and
 ///   removed afterwards. Pierces shadow DOM and applies to subframes.
 /// - `timeout` — max ms for the capture. `0` = no timeout.
-/// - `format` — `"png"` (default), `"jpeg"`, or `"webp"`. Mirrors
-///   Playwright's `type` field (renamed because `type` is reserved in
-///   Rust). For CDP both `jpeg` and `webp` honour `quality`; `webp`
-///   additionally supports transparency.
+/// - `format` — `"png"` (default), `"jpeg"`, or `"webp"`. Renamed from
+///   the JS `type` field because `type` is reserved in Rust. For CDP
+///   both `jpeg` and `webp` honour `quality`; `webp` additionally
+///   supports transparency.
 #[derive(Debug, Clone, Default)]
 pub struct ScreenshotOptions {
   pub animations: Option<String>,
@@ -354,17 +346,16 @@ pub struct BoundingBox {
 /// A 2D point, relative to the top-left corner of an element's padding box
 /// (when used as [`DragAndDropOptions::source_position`] or
 /// [`DragAndDropOptions::target_position`]), or in viewport coordinates in
-/// other contexts. Mirrors Playwright's `{ x: number; y: number }` point
-/// object used by `sourcePosition`, `targetPosition`, and click `position`.
+/// other contexts. Used by `sourcePosition`, `targetPosition`, and click
+/// `position`.
 #[derive(Debug, Clone, Copy, Default, PartialEq)]
 pub struct Point {
   pub x: f64,
   pub y: f64,
 }
 
-/// Mouse button for click/dblclick/mousedown/mouseup. Mirrors Playwright's
-/// `"left" | "right" | "middle"` union per
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12990`.
+/// Mouse button for click/dblclick/mousedown/mouseup. The `"left" |
+/// "right" | "middle"` union.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum MouseButton {
   /// Primary button (default).
@@ -412,9 +403,9 @@ impl MouseButton {
     }
   }
 
-  /// Parse from Playwright's string form. Returns `None` on unknown input
-  /// so callers can raise a typed `FerriError::InvalidArgument` at the
-  /// binding boundary.
+  /// Parse from string form. Returns `None` on unknown input so callers
+  /// can raise a typed `FerriError::InvalidArgument` at the binding
+  /// boundary.
   #[must_use]
   pub fn parse(s: &str) -> Option<Self> {
     match s {
@@ -426,10 +417,9 @@ impl MouseButton {
   }
 }
 
-/// Single keyboard modifier. Mirrors Playwright's `Alt | Control |
-/// ControlOrMeta | Meta | Shift` union per
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13012`.
-/// `ControlOrMeta` resolves at call time — see [`Self::cdp_bit`].
+/// Single keyboard modifier. The `Alt | Control | ControlOrMeta | Meta |
+/// Shift` union. `ControlOrMeta` resolves at call time — see
+/// [`Self::cdp_bit`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Modifier {
   Alt,
@@ -440,7 +430,7 @@ pub enum Modifier {
 }
 
 impl Modifier {
-  /// Parse from Playwright's string form. Returns `None` on unknown input.
+  /// Parse from string form. Returns `None` on unknown input.
   #[must_use]
   pub fn parse(s: &str) -> Option<Self> {
     match s {
@@ -454,8 +444,7 @@ impl Modifier {
   }
 
   /// CDP `Input.dispatchMouseEvent.modifiers` bitmask bit.
-  /// `Alt=1`, `Control=2`, `Meta=4`, `Shift=8` (per CDP docs and
-  /// `/tmp/playwright/packages/playwright-core/src/server/input.ts`).
+  /// `Alt=1`, `Control=2`, `Meta=4`, `Shift=8` (per CDP docs).
   /// `ControlOrMeta` collapses to `Meta` on macOS, `Control` elsewhere.
   #[must_use]
   pub fn cdp_bit(self) -> u8 {
@@ -528,14 +517,11 @@ pub fn modifiers_bitmask(mods: &[Modifier]) -> u32 {
 }
 
 /// Full click option bag shared by Page/Locator/Frame click methods.
-/// Mirrors Playwright's `LocatorClickOptions` /
-/// `PageClickOptions` / `FrameClickOptions` — all three expose the same
-/// 10-field surface per
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
+/// All three expose the same 10-field surface.
 ///
 /// Every option is `Option<T>`: callers omit fields and the backend
-/// applies Playwright's documented defaults (`button: Left`,
-/// `click_count: 1`, `delay: 0`, `steps: 1`, etc.).
+/// applies the documented defaults (`button: Left`, `click_count: 1`,
+/// `delay: 0`, `steps: 1`, etc.).
 #[derive(Debug, Clone, Default)]
 pub struct ClickOptions {
   /// Mouse button. Default: [`MouseButton::Left`].
@@ -550,21 +536,20 @@ pub struct ClickOptions {
   /// Modifier keys held during the click. Pressed before the mouse
   /// events and released after, regardless of `trial`.
   pub modifiers: Vec<Modifier>,
-  /// Deprecated per Playwright — accepted for signature parity; no
-  /// effect in ferridriver (we don't implicitly wait for navigation
-  /// after click).
+  /// Deprecated — accepted for signature parity; no effect in
+  /// ferridriver (we don't implicitly wait for navigation after click).
   pub no_wait_after: Option<bool>,
   /// Click position relative to the element's padding-box top-left.
   /// `None` → element's visible center.
   pub position: Option<Point>,
   /// Interpolated `mousemove` events between the current cursor and
-  /// the click point. Playwright default: `1` (single move at dest).
+  /// the click point. Default: `1` (single move at dest).
   pub steps: Option<u32>,
   /// Maximum time in ms for the operation (actionability + click).
   /// `0` means "no timeout". `None` means "use page/context default".
   pub timeout: Option<u64>,
   /// Run actionability checks only; skip the mouse events. Modifiers
-  /// are still pressed/released around the no-op per Playwright.
+  /// are still pressed/released around the no-op.
   pub trial: Option<bool>,
 }
 
@@ -606,8 +591,7 @@ impl ClickOptions {
   }
 }
 
-/// Options for `fill` (set an input's value). Mirrors Playwright's
-/// `LocatorFillOptions` per `types.d.ts` — three fields.
+/// Options for `fill` (set an input's value). Three fields.
 /// `no_wait_after` is accepted for signature parity; `force` skips the
 /// fillable / editable actionability check.
 #[derive(Debug, Clone, Default)]
@@ -624,7 +608,7 @@ impl FillOptions {
   }
 }
 
-/// Options for `press` (single key press). Mirrors Playwright's
+/// Options for `press` (single key press).
 /// `LocatorPressOptions` — three fields.
 #[derive(Debug, Clone, Default)]
 pub struct PressOptions {
@@ -642,7 +626,7 @@ impl PressOptions {
 }
 
 /// Options for `type` / `press_sequentially` (type text character-by-
-/// character). Mirrors Playwright's `LocatorTypeOptions` — three fields.
+/// character). `LocatorTypeOptions` — three fields.
 #[derive(Debug, Clone, Default)]
 pub struct TypeOptions {
   /// Milliseconds between consecutive `keydown` + `keyup` pairs.
@@ -658,7 +642,7 @@ impl TypeOptions {
   }
 }
 
-/// Options for `check` / `uncheck` / `setChecked`. Mirrors Playwright's
+/// Options for `check` / `uncheck` / `setChecked`.
 /// `LocatorCheckOptions` / `LocatorSetCheckedOptions` — five fields.
 /// Internally a check is a click on a checkbox/radio; these options
 /// mirror [`ClickOptions`] minus `button`, `click_count`, `delay`,
@@ -703,12 +687,9 @@ impl CheckOptions {
   }
 }
 
-/// A single descriptor used by `selectOption`. Mirrors Playwright's
-/// `SelectOptionValues` element shape per
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` — at
-/// least one of `value`, `label`, or `index` must be set. An array of
-/// these descriptors selects every `<option>` matching any descriptor
-/// (multi-select).
+/// A single descriptor used by `selectOption`. At least one of `value`,
+/// `label`, or `index` must be set. An array of these descriptors
+/// selects every `<option>` matching any descriptor (multi-select).
 #[derive(Debug, Clone, Default, serde::Serialize)]
 pub struct SelectOptionValue {
   #[serde(skip_serializing_if = "Option::is_none")]
@@ -749,7 +730,7 @@ impl SelectOptionValue {
   }
 }
 
-/// Options for `selectOption`. Mirrors Playwright's
+/// Options for `selectOption`.
 /// `LocatorSelectOptionOptions` — three fields.
 #[derive(Debug, Clone, Default)]
 pub struct SelectOptionOptions {
@@ -758,7 +739,7 @@ pub struct SelectOptionOptions {
   pub timeout: Option<u64>,
 }
 
-/// Options for `setInputFiles`. Mirrors Playwright's
+/// Options for `setInputFiles`.
 /// `LocatorSetInputFilesOptions` — two fields.
 #[derive(Debug, Clone, Default)]
 pub struct SetInputFilesOptions {
@@ -766,7 +747,7 @@ pub struct SetInputFilesOptions {
   pub timeout: Option<u64>,
 }
 
-/// File payload for `setInputFiles`. Mirrors Playwright's
+/// File payload for `setInputFiles`.
 /// `FilePayload` — caller supplies raw bytes plus the filename and MIME
 /// type that the page should see, avoiding any on-disk write.
 #[derive(Debug, Clone)]
@@ -776,7 +757,7 @@ pub struct FilePayload {
   pub buffer: Vec<u8>,
 }
 
-/// Input-file argument for [`setInputFiles`]. Mirrors Playwright's
+/// Input-file argument for [`setInputFiles`].
 /// `string | string[] | FilePayload | FilePayload[]` union from
 /// `types.d.ts` under `setInputFiles`.
 #[derive(Debug, Clone)]
@@ -787,18 +768,16 @@ pub enum InputFiles {
   Payloads(Vec<FilePayload>),
 }
 
-/// Options for `dispatchEvent`. Mirrors Playwright's
+/// Options for `dispatchEvent`.
 /// `LocatorDispatchEventOptions` — single field (`timeout`).
 #[derive(Debug, Clone, Default)]
 pub struct DispatchEventOptions {
   pub timeout: Option<u64>,
 }
 
-/// Options for hover actions. Mirrors Playwright's
-/// `LocatorHoverOptions` / `PageHoverOptions` / `FrameHoverOptions` —
-/// see `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
-/// `hover`. Shape is [`ClickOptions`] minus `button`, `click_count`,
-/// `delay` (no press/release — just a `mousemove` at the target).
+/// Options for hover actions. Shape is [`ClickOptions`] minus `button`,
+/// `click_count`, `delay` (no press/release — just a `mousemove` at the
+/// target).
 #[derive(Debug, Clone, Default)]
 pub struct HoverOptions {
   pub force: Option<bool>,
@@ -823,11 +802,9 @@ impl HoverOptions {
   }
 }
 
-/// Options for tap actions (touch input). Mirrors Playwright's
-/// `LocatorTapOptions` / `PageTapOptions` / `FrameTapOptions` —
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` under
-/// `tap`. Distinct from [`HoverOptions`] so future tap-only divergence
-/// (e.g. native touch options) has a stable home.
+/// Options for tap actions (touch input). Distinct from [`HoverOptions`]
+/// so future tap-only divergence (e.g. native touch options) has a stable
+/// home.
 #[derive(Debug, Clone, Default)]
 pub struct TapOptions {
   pub force: Option<bool>,
@@ -852,11 +829,8 @@ impl TapOptions {
   }
 }
 
-/// Options for double-click actions. Mirrors Playwright's
-/// `LocatorDblClickOptions` / `PageDblClickOptions` /
-/// `FrameDblClickOptions` — identical to [`ClickOptions`] minus
+/// Options for double-click actions. Identical to [`ClickOptions`] minus
 /// `click_count` (which is forced to `2` at dispatch time).
-/// See `/tmp/playwright/packages/playwright-core/types/types.d.ts:13116`.
 #[derive(Debug, Clone, Default)]
 pub struct DblClickOptions {
   pub button: Option<MouseButton>,
@@ -873,8 +847,7 @@ pub struct DblClickOptions {
 impl DblClickOptions {
   /// Lower to [`ClickOptions`] with `click_count` forced to `2`. The
   /// shared click dispatch path then emits two `mousedown`/`mouseup`
-  /// pairs with `clickCount=1` then `clickCount=2` (matches Playwright's
-  /// `server/dom.ts::ElementHandle._dblclick`).
+  /// pairs with `clickCount=1` then `clickCount=2`.
   #[must_use]
   pub fn into_click_options(self) -> ClickOptions {
     ClickOptions {
@@ -893,20 +866,13 @@ impl DblClickOptions {
 }
 
 /// Options for [`crate::page::Page::drag_and_drop`] and
-/// [`crate::locator::Locator::drag_to`]. Mirrors Playwright's
-/// `FrameDragAndDropOptions & TimeoutOptions` surface per
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts` (public
-/// `page.dragAndDrop` / `locator.dragTo` signatures) and the internal
-/// `FrameDragAndDropOptions` type at
-/// `/tmp/playwright/packages/protocol/src/channels.d.ts:3012`.
+/// [`crate::locator::Locator::drag_to`].
 ///
 /// `strict` is meaningful only on [`crate::page::Page::drag_and_drop`] (which
 /// accepts bare selectors); [`crate::locator::Locator::drag_to`] ignores it
 /// because the source locator already carries its own strict flag.
 ///
-/// `no_wait_after` is accepted for Playwright signature parity but has no
-/// effect (deprecated in upstream, tagged `@deprecated This option has no
-/// effect.`).
+/// `no_wait_after` is accepted for signature parity but has no effect.
 #[derive(Debug, Clone, Default)]
 pub struct DragAndDropOptions {
   /// Bypass actionability checks.
@@ -920,7 +886,7 @@ pub struct DragAndDropOptions {
   /// When absent, the target element's center is used.
   pub target_position: Option<Point>,
   /// Number of interpolated `mousemove` events between press and release.
-  /// Playwright default is `1` (a single move at the destination).
+  /// default is `1` (a single move at the destination).
   pub steps: Option<u32>,
   /// Strict-mode override for resolving the source/target selector.
   /// Meaningful only on `page.drag_and_drop`; ignored by `locator.drag_to`.
@@ -933,7 +899,7 @@ pub struct DragAndDropOptions {
 }
 
 /// Viewport configuration -- consistent across all backends.
-/// Matches Playwright's viewport options.
+/// Matches viewport options.
 #[derive(Debug, Clone, PartialEq)]
 pub struct ViewportConfig {
   /// CSS pixel width of the viewport.
@@ -951,7 +917,7 @@ pub struct ViewportConfig {
 }
 
 /// Three-state override for a single media-emulation field. Mirrors the
-/// Playwright TS shape `T | null | undefined`:
+/// TS shape `T | null | undefined`:
 ///
 /// * [`MediaOverride::Unchanged`] — the caller omitted this field; leave
 ///   the page's existing override (if any) in place.
@@ -992,10 +958,9 @@ impl From<Option<String>> for MediaOverride {
   }
 }
 
-/// Media emulation options — matches Playwright's `page.emulateMedia()` per
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:2580`.
-/// Each field uses [`MediaOverride`] to distinguish *unspecified* (leave
-/// current state alone) from *null* (clear any existing override) from a
+/// Media emulation options — matches `page.emulateMedia()`. Each field
+/// uses [`MediaOverride`] to distinguish *unspecified* (leave current
+/// state alone) from *null* (clear any existing override) from a
 /// *concrete value*.
 #[derive(Debug, Clone, Default)]
 pub struct EmulateMediaOptions {
@@ -1011,13 +976,12 @@ pub struct EmulateMediaOptions {
   pub contrast: MediaOverride,
 }
 
-/// PDF page-size dimension as accepted by Playwright's `PDFOptions.width`,
+/// PDF page-size dimension as accepted by `PDFOptions.width`,
 /// `PDFOptions.height`, and `PDFOptions.margin.*` fields.
 ///
-/// Playwright TS accepts `string | number`. A bare number is interpreted as
-/// CSS pixels; a string must end with one of the unit suffixes `px`, `in`,
-/// `cm`, `mm`. Conversion rules match
-/// `/tmp/playwright/packages/playwright-core/src/server/chromium/crPdf.ts::convertPrintParameterToInches`.
+/// TS accepts `string | number`. A bare number is interpreted as CSS
+/// pixels; a string must end with one of the unit suffixes `px`, `in`,
+/// `cm`, `mm`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum PdfSize {
   /// Pixels — either from a bare numeric input or from a `"Npx"` string.
@@ -1031,10 +995,10 @@ pub enum PdfSize {
 }
 
 impl PdfSize {
-  /// Convert to inches. Playwright's CDP `Page.printToPDF` expects inches
+  /// Convert to inches. CDP `Page.printToPDF` expects inches
   /// for `paperWidth` / `paperHeight` / `marginTop` / etc.
   ///
-  /// Conversion constants mirror crPdf.ts exactly: `px÷96`, `in`, `cm·37.8/96`, `mm·3.78/96`.
+  /// Conversion constants: `px÷96`, `in`, `cm·37.8/96`, `mm·3.78/96`.
   #[must_use]
   pub fn to_inches(&self) -> f64 {
     match *self {
@@ -1045,9 +1009,8 @@ impl PdfSize {
     }
   }
 
-  /// Parse a Playwright-style size string (`"10px"`, `"2in"`, `"5cm"`,
-  /// `"15mm"`). Unknown suffix — or no suffix — is treated as bare pixels,
-  /// matching Playwright's fallback for Phantom-compatibility.
+  /// Parse a size string (`"10px"`, `"2in"`, `"5cm"`, `"15mm"`). Unknown
+  /// suffix — or no suffix — is treated as bare pixels.
   ///
   /// # Errors
   ///
@@ -1089,13 +1052,11 @@ pub struct PdfMargin {
   pub left: Option<PdfSize>,
 }
 
-/// Full Playwright `PDFOptions` surface (15 fields). Mirrors
-/// `/tmp/playwright/packages/playwright-core/src/client/page.ts::PDFOptions`
-/// and the CDP `Page.printToPDF` plumbing in
-/// `/tmp/playwright/packages/playwright-core/src/server/chromium/crPdf.ts`.
+/// Full `PDFOptions` surface (15 fields). Routes through the CDP
+/// `Page.printToPDF` plumbing.
 ///
-/// Defaults: every field is `None`/empty; the CDP layer applies Playwright's
-/// own defaults (`scale = 1`, `landscape = false`, `pageRanges = ""`, ...).
+/// Defaults: every field is `None`/empty; the CDP layer applies its own
+/// defaults (`scale = 1`, `landscape = false`, `pageRanges = ""`, ...).
 /// Only `path` is Rust-side: if set, the generated PDF bytes are written
 /// there by `Page::pdf` (the bytes are also returned).
 #[derive(Debug, Clone, Default)]
@@ -1106,7 +1067,7 @@ pub struct PdfOptions {
   pub format: Option<String>,
   /// Filesystem path to additionally write the generated PDF to.
   pub path: Option<std::path::PathBuf>,
-  /// Scale factor. Playwright's default is `1.0` (applied by CDP backend
+  /// Scale factor. default is `1.0` (applied by CDP backend
   /// when `None`). Valid range per Chrome: `0.1..=2.0`.
   pub scale: Option<f64>,
   /// Render header/footer.
@@ -1136,9 +1097,7 @@ pub struct PdfOptions {
   pub tagged: Option<bool>,
 }
 
-/// Paper-format size lookup. Case-insensitive. Sizes are in inches, matching
-/// the canonical table at
-/// `/tmp/playwright/packages/playwright-core/src/server/chromium/crPdf.ts::PagePaperFormats`.
+/// Paper-format size lookup. Case-insensitive. Sizes are in inches.
 ///
 /// Returns `(width, height)` in inches, or `None` if the format is unknown.
 #[must_use]
@@ -1159,7 +1118,7 @@ pub fn pdf_paper_format_size(format: &str) -> Option<(f64, f64)> {
   }
 }
 
-/// Options for [`crate::page::Page::close`]. Mirrors Playwright's
+/// Options for [`crate::page::Page::close`].
 /// `page.close({ runBeforeUnload, reason })`.
 #[derive(Debug, Clone, Default)]
 pub struct PageCloseOptions {
@@ -1172,7 +1131,7 @@ pub struct PageCloseOptions {
   pub reason: Option<String>,
 }
 
-/// Options for [`crate::browser::Browser::close`]. Mirrors Playwright's
+/// Options for [`crate::browser::Browser::close`].
 /// `browser.close({ reason })`.
 #[derive(Debug, Clone, Default)]
 pub struct BrowserCloseOptions {
@@ -1190,15 +1149,13 @@ pub struct GotoOptions {
   /// Maximum navigation timeout in milliseconds.
   pub timeout: Option<u64>,
   /// HTTP `Referer` header to send with the navigation request. Mirrors
-  /// Playwright's `page.goto(url, { referer })`. If both this and
+  /// `page.goto(url, { referer })`. If both this and
   /// `extraHTTPHeaders.referer` are set, this wins.
   pub referer: Option<String>,
 }
 
-/// Which browser product. Mirrors Playwright's three `BrowserType`
-/// instances exposed as `chromium`, `firefox`, and `webkit` on the
-/// top-level Playwright module
-/// (`/tmp/playwright/packages/playwright-core/src/client/browserType.ts`).
+/// Which browser product. Three `BrowserType` instances exposed as
+/// `chromium`, `firefox`, and `webkit` on the top-level module.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BrowserKind {
   /// Google Chrome / Chromium
@@ -1210,9 +1167,8 @@ pub enum BrowserKind {
 }
 
 impl BrowserKind {
-  /// Playwright product name string: `"chromium"` / `"firefox"` /
-  /// `"webkit"`. Matches `BrowserType.name()` in
-  /// `/tmp/playwright/packages/playwright-core/src/client/browserType.ts:60`.
+  /// Product name string: `"chromium"` / `"firefox"` / `"webkit"`.
+  /// Matches `BrowserType.name()`.
   #[must_use]
   pub fn name(self) -> &'static str {
     match self {
@@ -1238,15 +1194,13 @@ impl BrowserKind {
   }
 }
 
-/// Public launch options bag. Mirrors Playwright's `LaunchOptions` —
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:15192`
-/// (the `browserType.launch(options)` parameter). Selection of which
-/// browser to launch happens via the `BrowserType` instance you call
-/// `.launch(...)` on (`chromium()`, `firefox()`, `webkit()`); this bag
-/// only carries the per-launch knobs.
+/// Public launch options bag, the `browserType.launch(options)`
+/// parameter. Selection of which browser to launch happens via the
+/// `BrowserType` instance you call `.launch(...)` on (`chromium()`,
+/// `firefox()`, `webkit()`); this bag only carries the per-launch knobs.
 #[derive(Debug, Clone, Default)]
 pub struct LaunchOptions {
-  /// Run in headless mode. Defaults to `true` (Playwright default).
+  /// Run in headless mode. Defaults to `true` (default).
   pub headless: Option<bool>,
   /// Path to a browser executable to run instead of the bundled one.
   pub executable_path: Option<String>,
@@ -1271,7 +1225,7 @@ pub struct LaunchOptions {
   /// strings, filter out the named default args. Currently surface-only
   /// — wired through to [`LaunchPlan`] for future filtering work.
   pub ignore_default_args: Option<IgnoreDefaultArgs>,
-  /// Per-process signal handling — Playwright defaults all three to
+  /// Per-process signal handling — defaults all three to
   /// `true` (close the browser on SIGHUP / SIGINT / SIGTERM).
   pub handle_sighup: Option<bool>,
   pub handle_sigint: Option<bool>,
@@ -1286,7 +1240,7 @@ pub struct LaunchOptions {
   pub traces_dir: Option<std::path::PathBuf>,
 }
 
-/// Playwright's `ignoreDefaultArgs?: boolean | string[]` shape.
+/// `ignoreDefaultArgs?: boolean | string[]` shape.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IgnoreDefaultArgs {
   /// `true` — drop ALL default args.
@@ -1295,9 +1249,7 @@ pub enum IgnoreDefaultArgs {
   Some(Vec<String>),
 }
 
-/// Connect-to-server options bag. Playwright:
-/// `browserType.connect(wsEndpoint, options)` —
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:15112`.
+/// Connect-to-server options bag for `browserType.connect(wsEndpoint, options)`.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectOptions {
   pub headers: Option<rustc_hash::FxHashMap<String, String>>,
@@ -1306,9 +1258,7 @@ pub struct ConnectOptions {
   pub expose_network: Option<String>,
 }
 
-/// Connect-over-CDP options bag. Playwright:
-/// `browserType.connectOverCDP(endpointURL, options)` —
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:15072`.
+/// Connect-over-CDP options bag for `browserType.connectOverCDP(endpointURL, options)`.
 /// Chromium-only.
 #[derive(Debug, Clone, Default)]
 pub struct ConnectOverCdpOptions {
@@ -1317,11 +1267,10 @@ pub struct ConnectOverCdpOptions {
   pub timeout: Option<u64>,
 }
 
-/// Persistent-context launch options bag. Playwright:
-/// `browserType.launchPersistentContext(userDataDir, options)` —
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:15218`.
-/// Composed of the launch knobs plus a full
-/// [`BrowserContextOptions`] applied to the implicit default context.
+/// Persistent-context launch options bag for
+/// `browserType.launchPersistentContext(userDataDir, options)`. Composed
+/// of the launch knobs plus a full [`BrowserContextOptions`] applied to
+/// the implicit default context.
 #[derive(Debug, Clone, Default)]
 pub struct LaunchPersistentContextOptions {
   /// Per-launch knobs (mirror [`LaunchOptions`] exactly).
@@ -1333,7 +1282,7 @@ pub struct LaunchPersistentContextOptions {
 
 /// Per-`BrowserType` instance configuration carried by `chromium()` /
 /// `firefox()` / `webkit()` factories. The single field that varies
-/// today is `transport` for Chromium — Playwright's `chromium` is
+/// today is `transport` for Chromium — `chromium` is
 /// always pipe-only; ferridriver lets callers override to the
 /// `WebSocket` transport (`CdpRaw`) for backend-coverage testing.
 #[derive(Debug, Clone, Default)]
@@ -1353,7 +1302,7 @@ pub enum ChromiumTransport {
 }
 
 /// Internal launch plan. Carries fields that are NOT exposed on the
-/// public [`LaunchOptions`] (which mirrors Playwright verbatim) but
+/// public [`LaunchOptions`] (which mirrors verbatim) but
 /// that the runtime needs in order to launch / connect to the right
 /// backend. Constructed by `BrowserType` from the public options bag
 /// and the per-instance kind/transport, then handed to
@@ -1420,9 +1369,9 @@ impl Default for LaunchPlan {
 }
 
 impl LaunchPlan {
-  /// Build a launch plan from the public Playwright-shaped
-  /// [`LaunchOptions`] plus the per-`BrowserType` selection
-  /// (`kind` + optional Chromium transport override).
+  /// Build a launch plan from the public [`LaunchOptions`] plus the
+  /// per-`BrowserType` selection (`kind` + optional Chromium transport
+  /// override).
   #[must_use]
   pub fn from_public(kind: BrowserKind, transport: Option<ChromiumTransport>, opts: LaunchOptions) -> Self {
     let backend = match (kind, transport) {
@@ -1469,30 +1418,26 @@ impl Default for ViewportConfig {
   }
 }
 
-/// Per-context video-recording configuration. Mirrors Playwright's
-/// `recordVideo: { dir, size? }` option on `browserType.launch` +
-/// `browser.newContext` (see
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:10150`
-/// and `:22483`). Enabling it starts `CDP` screencast / `BiDi`
-/// polyfill recording on every new page in the context; the file is
-/// finalised when the page closes and surfaced via
-/// `page.video().path()`.
+/// Per-context video-recording configuration: `recordVideo: { dir,
+/// size? }` option on `browserType.launch` + `browser.newContext`.
+/// Enabling it starts `CDP` screencast / `BiDi` polyfill recording on
+/// every new page in the context; the file is finalised when the page
+/// closes and surfaced via `page.video().path()`.
 #[derive(Debug, Clone)]
 pub struct RecordVideoOptions {
   /// Directory where the video file is written. One file per page.
   /// Filenames are derived from the page's created-at timestamp.
   pub dir: std::path::PathBuf,
-  /// Optional explicit video dimensions. When `None`, Playwright's
-  /// contract is to scale `viewport` down to fit 800x800; ferridriver
-  /// defaults to `800x450` (Playwright's fallback when no viewport is
-  /// set) unless the caller supplies a size. Values are forced to an
-  /// even number of pixels so `libx264` accepts them without
-  /// `yuv420p`-conversion warnings.
+  /// Optional explicit video dimensions. When `None`, ferridriver
+  /// defaults to `800x450` (fallback when no viewport is set) unless the
+  /// caller supplies a size. Values are forced to an even number of
+  /// pixels so `libx264` accepts them without `yuv420p`-conversion
+  /// warnings.
   pub size: Option<VideoSize>,
 }
 
 /// Video frame dimensions for [`RecordVideoOptions::size`]. Matches
-/// Playwright's `recordVideo.size: { width, height }` shape.
+/// `recordVideo.size: { width, height }` shape.
 #[derive(Debug, Clone, Copy)]
 pub struct VideoSize {
   pub width: u32,
@@ -1508,15 +1453,13 @@ impl Default for VideoSize {
   }
 }
 
-/// Resolve a user-supplied URL against an optional base URL. Mirrors
-/// Playwright's `constructURLBasedOnBaseURL`
-/// (`/tmp/playwright/packages/isomorphic/urlMatch.ts:253`): delegates
+/// Resolve a user-supplied URL against an optional base URL. Delegates
 /// to the standard URL `new URL(given, base)` resolution rule.
 ///
 /// - Absolute URLs (with scheme) are returned verbatim.
 /// - Relative paths (`/foo`, `./foo`, `foo`) resolve against `base`.
 /// - Invalid inputs fall through to the given URL unchanged —
-///   matches Playwright's try/catch fallback.
+///   matches try/catch fallback.
 #[must_use]
 pub fn construct_url_with_base(base: Option<&str>, given: &str) -> String {
   // No base, or already absolute (scheme present) → passthrough.
@@ -1558,16 +1501,15 @@ fn split_origin_and_path(url: &str) -> (&str, &str) {
 
 // ── BrowserContextOptions ──────────────────────────────────────────────────
 
-/// Geographic location emulation. Mirrors Playwright's
-/// `Geolocation { latitude, longitude, accuracy? }` — see
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22678`.
+/// Geographic location emulation: `Geolocation { latitude, longitude,
+/// accuracy? }`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Geolocation {
   /// Latitude between -90 and 90.
   pub latitude: f64,
   /// Longitude between -180 and 180.
   pub longitude: f64,
-  /// Non-negative accuracy value. Playwright defaults to 0.
+  /// Non-negative accuracy value. defaults to 0.
   pub accuracy: f64,
 }
 
@@ -1581,9 +1523,8 @@ impl Default for Geolocation {
   }
 }
 
-/// HTTP basic/digest credentials. Mirrors Playwright's
-/// `HTTPCredentials { username, password, origin?, send? }` —
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22658`.
+/// HTTP basic/digest credentials: `HTTPCredentials { username, password,
+/// origin?, send? }`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct HttpCredentials {
   pub username: String,
@@ -1592,21 +1533,21 @@ pub struct HttpCredentials {
   /// origin. `None` sends on any 401 response.
   pub origin: Option<String>,
   /// `"always"` sends credentials on every `APIRequest`; `"unauthorized"`
-  /// (default) waits for a 401. Playwright default: unauthorized.
+  /// (default) waits for a 401. default: unauthorized.
   pub send: Option<HttpCredentialsSend>,
 }
 
 /// Send policy for [`HttpCredentials`].
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum HttpCredentialsSend {
-  /// Only on 401 responses (Playwright default).
+  /// Only on 401 responses (default).
   #[default]
   Unauthorized,
   /// On every request (`APIRequestContext` only).
   Always,
 }
 
-/// Network proxy configuration. Mirrors Playwright's
+/// Network proxy configuration.
 /// `{ server, bypass?, username?, password? }` — types.d.ts:22412.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ProxyConfig {
@@ -1617,7 +1558,7 @@ pub struct ProxyConfig {
   pub password: Option<String>,
 }
 
-/// `recordHar` options bag. Mirrors Playwright's `recordHar` shape —
+/// `recordHar` options bag. `recordHar` shape —
 /// types.d.ts:22441.
 #[derive(Debug, Clone)]
 pub struct RecordHarOptions {
@@ -1626,7 +1567,7 @@ pub struct RecordHarOptions {
   pub content: Option<RecordHarContent>,
   /// `full`/`minimal`. Default: full.
   pub mode: Option<RecordHarMode>,
-  /// Legacy alias for `content: "omit"`. Playwright flags this deprecated
+  /// Legacy alias for `content: "omit"`. flags this deprecated
   /// but still accepts it.
   pub omit_content: Option<bool>,
   /// Glob/regex filter for stored requests.
@@ -1651,7 +1592,7 @@ pub enum RecordHarMode {
 /// null → opt out of viewport emulation), or `Size(w,h)`.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub enum ViewportOption {
-  /// Field absent — Playwright default 1280x720.
+  /// Field absent — default 1280x720.
   #[default]
   Default,
   /// Field explicitly `null` — opt out of fixed viewport.
@@ -1661,7 +1602,7 @@ pub enum ViewportOption {
 }
 
 /// `window.screen` size emulation (when viewport is set). Mirrors
-/// Playwright's `screen: { width, height }` — types.d.ts:22539.
+/// `screen: { width, height }` — types.d.ts:22539.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ScreenSize {
   pub width: i64,
@@ -1669,7 +1610,7 @@ pub struct ScreenSize {
 }
 
 /// Storage state bag — cookies + per-origin localStorage snapshot.
-/// Mirrors Playwright's `storageState: string | { cookies, origins }` —
+/// `storageState: string | { cookies, origins }` —
 /// types.d.ts:22566.
 #[derive(Debug, Clone)]
 pub enum StorageStateInput {
@@ -1679,7 +1620,7 @@ pub enum StorageStateInput {
   Inline(serde_json::Value),
 }
 
-/// Service-worker policy. Mirrors Playwright's
+/// Service-worker policy.
 /// `serviceWorkers: "allow" | "block"` — types.d.ts:22557.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub enum ServiceWorkerPolicy {
@@ -1689,25 +1630,13 @@ pub enum ServiceWorkerPolicy {
 }
 
 /// `BrowserContextOptions` — the option bag accepted by
-/// `Browser::new_context`. Mirrors Playwright's full 28-field shape per
-/// `/tmp/playwright/packages/playwright-core/types/types.d.ts:22229`.
+/// `Browser::new_context`. Full 28-field shape.
 ///
 /// Every field is optional. `None` means "browser default"; an explicit
 /// value applies the corresponding emulation at every page opened in
 /// the context. Several fields have sub-options that distinguish
 /// explicit `null` from absent (e.g. `viewport: null` to disable
 /// viewport emulation vs. omitted).
-///
-/// Field coverage on the current implementation cluster:
-/// * **applied now**: `viewport`, `user_agent`, `locale`, `timezone_id`,
-///   `geolocation`, `permissions`, `extra_http_headers`, `offline`,
-///   `color_scheme`, `reduced_motion`, `forced_colors`, `contrast`,
-///   `device_scale_factor`, `has_touch`, `is_mobile`,
-///   `java_script_enabled`, `record_video`, `bypass_csp`,
-///   `ignore_https_errors`, `service_workers`, `http_credentials`,
-///   `accept_downloads`, `strict_selectors`, `base_url`.
-/// * **deferred** (stored but not yet applied; follow-up session):
-///   `proxy`, `record_har`, `storage_state`, `screen`.
 ///
 /// Construction: use [`BrowserContextOptions::default`] and set fields
 /// field-by-field, or use any of the dedicated builder helpers defined
@@ -1753,7 +1682,7 @@ impl BrowserContextOptions {
   /// caller passed `viewport: null` — the page inherits the backend's
   /// native window size. `ViewportOption::Default` folds in
   /// `device_scale_factor`, `is_mobile`, and `has_touch` into the
-  /// Playwright default 1280x720; explicit `Size(w,h)` likewise.
+  /// default 1280x720; explicit `Size(w,h)` likewise.
   #[must_use]
   pub fn resolved_viewport(&self) -> Option<ViewportConfig> {
     let (width, height) = match self.viewport {
@@ -1794,15 +1723,14 @@ impl BrowserContextOptions {
   }
 }
 
-/// Selector for [`crate::Page::frame`]. Mirrors Playwright's
-/// `page.frame(frameSelector)` union type
-/// `string | { name?: string; url?: string|RegExp|URLPattern|(url => bool) }`
-/// (`/tmp/playwright/packages/playwright-core/types/types.d.ts:2755`).
+/// Selector for [`crate::Page::frame`]. The `page.frame(frameSelector)`
+/// union type `string | { name?: string; url?:
+/// string|RegExp|URLPattern|(url => bool) }`.
 ///
-/// For ferridriver 3.8 we accept the string form + `{ name, url }` with
-/// both fields being plain strings (exact match). Task **3.12** extends
-/// `url` to the full `StringOrRegex` matcher; matching rules will remain
-/// behind this struct so callers don't rebind.
+/// Today we accept the string form + `{ name, url }` with both fields
+/// being plain strings (exact match). Future work extends `url` to the
+/// full `StringOrRegex` matcher; matching rules will remain behind this
+/// struct so callers don't rebind.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct FrameSelector {
   /// Match against the frame's `name` attribute (exact).
@@ -1830,8 +1758,7 @@ impl FrameSelector {
     }
   }
 
-  /// Returns `true` when neither `name` nor `url` is set — Playwright's
-  /// `assert(name || url, 'Either name or url matcher should be specified')`.
+  /// Returns `true` when neither `name` nor `url` is set.
   #[must_use]
   pub fn is_empty(&self) -> bool {
     self.name.is_none() && self.url.is_none()
@@ -1886,18 +1813,18 @@ mod pdf_option_tests {
 
   #[test]
   fn bare_number_falls_back_to_pixels() {
-    // Playwright parity: Phantom-compatible fallback to px if no known unit.
+    // parity: Phantom-compatible fallback to px if no known unit.
     assert_eq!(PdfSize::parse("42").unwrap(), PdfSize::Pixels(42.0));
   }
 
   #[test]
   fn unknown_suffix_falls_back_to_pixels() {
-    // `em` is not in the table — Playwright treats the whole string as px.
+    // `em` is not in the table — treats the whole string as px.
     // The numeric value here is "42" (with "em" treated as suffix but then
-    // falling through to the default "px" branch). Match Playwright: it
-    // slices the last 2 chars, sees "em" (unknown), then parses the WHOLE
-    // original string as a number. "42em" isn't a number → error.
-    // We mirror that: unknown suffix + non-numeric body ⇒ InvalidArgument.
+    // falling through to the default "px" branch). The parser slices the
+    // last 2 chars, sees "em" (unknown), then parses the WHOLE original
+    // string as a number. "42em" isn't a number → error. Unknown suffix
+    // + non-numeric body ⇒ InvalidArgument.
     assert!(PdfSize::parse("42em").is_err());
   }
 
@@ -1926,14 +1853,14 @@ mod pdf_option_tests {
   }
 
   #[test]
-  fn centimeters_convert_per_playwright_constants() {
-    // 37.8 / 96 (Playwright's exact constant).
+  fn centimeters_convert_using_table_constants() {
+    // 37.8 / 96 (exact constant).
     let expected = 10.0 * 37.8 / 96.0;
     assert!((PdfSize::Centimeters(10.0).to_inches() - expected).abs() < 1e-9);
   }
 
   #[test]
-  fn millimeters_convert_per_playwright_constants() {
+  fn millimeters_convert_using_table_constants() {
     let expected = 25.0 * 3.78 / 96.0;
     assert!((PdfSize::Millimeters(25.0).to_inches() - expected).abs() < 1e-9);
   }
@@ -2074,7 +2001,7 @@ mod init_script_tests {
 
   #[test]
   fn function_with_undefined_arg_renders_literal_undefined() {
-    // Playwright: `Object.is(arg, undefined) ? 'undefined' : JSON.stringify(arg)`.
+    // `Object.is(arg, undefined) ? 'undefined' : JSON.stringify(arg)`.
     let src = evaluation_script(
       InitScriptSource::Function {
         body: "(x) => x + 1".to_string(),
@@ -2269,7 +2196,7 @@ mod click_option_tests {
 
   #[test]
   fn click_options_steps_coerces_zero_to_one() {
-    // Playwright defaults to 1 and uses `Math.max(1, steps)`; mirror
+    // defaults to 1 and uses `Math.max(1, steps)`; mirror
     // the clamp so callers passing `0` still emit one mousemove.
     let opts = ClickOptions {
       steps: Some(0),
