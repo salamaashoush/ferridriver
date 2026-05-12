@@ -1,4 +1,4 @@
-//! Lazy element locator -- mirrors Playwright's Locator interface.
+//! Lazy element locator.
 //!
 //! A Locator stores a selector string and a reference to its Page.
 //! It does NOT query the DOM when created. Resolution happens lazily
@@ -30,12 +30,11 @@ use crate::selectors;
 /// `$timeout_ms` is an `Option<u64>` — the per-call override from the action's
 /// option bag. `None` falls back to `page.default_timeout()` (set via
 /// `page.setDefaultTimeout`). A resolved value of `0` means "no timeout" and
-/// loops forever (matches Playwright's behavior). `$op` is a `&str` used in the
-/// timeout-error message (Playwright's `TimeoutError { while $op }`).
+/// loops forever. `$op` is a `&str` used in the timeout-error message
+/// (`TimeoutError { while $op }`).
 ///
-/// Polling schedule mirrors Playwright's `retryWithProgressAndTimeouts`:
-/// `[0, 0, 20, 50, 100, 100, 500]`, clamped at the last value on overflow. See
-/// `/tmp/playwright/packages/playwright-core/src/server/frames.ts:1102`.
+/// Polling schedule: `[0, 0, 20, 50, 100, 100, 500]`, clamped at the last
+/// value on overflow.
 macro_rules! retry_resolve {
   ($self:expr, $timeout_ms:expr, $op:expr, |$el:ident, $page:ident| $body:expr) => {{
     let $page: &$crate::backend::AnyPage = $self.frame.page_arc().inner();
@@ -93,17 +92,13 @@ macro_rules! retry_resolve {
         }
       }
 
-      // Strict mode (Playwright default) is folded into the same
-      // engine-side `selOne(parts, strict)` call below — the JS
-      // throws `strict mode violation: <count>` when the selector
-      // matches more than one element, the host catches the
-      // exception and converts to a typed
-      // `FerriError::StrictModeViolation`. Saves the separate
-      // `query_all` + `cleanup_tags` round-trips the previous
+      // Strict mode (the default) is folded into the same engine-side
+      // `selOne(parts, strict)` call below — the JS throws
+      // `strict mode violation: <count>` when the selector matches more
+      // than one element, the host catches the exception and converts
+      // to a typed `FerriError::StrictModeViolation`. Saves the
+      // separate `query_all` + `cleanup_tags` round-trips the previous
       // implementation paid on every retry attempt (~2 RTTs).
-      // Mirrors Playwright's `injected.querySelector(parsed, root,
-      // strict)` pattern in
-      // `/tmp/playwright/packages/injected/src/injectedScript.ts:276`.
       match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
         ::std::result::Result::Ok($el) => match ($body).await {
           ::std::result::Result::Ok(val) => return ::std::result::Result::Ok(val),
@@ -113,10 +108,10 @@ macro_rules! retry_resolve {
               || e.contains("detached")
               || e.starts_with("error:not") =>
           {
-            // Retriable — matches Playwright's `_retryAction` contract
-            // where `checkElementStates` returns `error:notvisible` /
-            // `error:notenabled` / `error:noteditable` etc. as signals to
-            // keep polling until the deadline.
+            // Retriable: `checkElementStates` returns
+            // `error:notvisible` / `error:notenabled` /
+            // `error:noteditable` etc. as signals to keep polling until
+            // the deadline.
           },
           ::std::result::Result::Err(e) => return ::std::result::Result::Err($crate::error::FerriError::from(e)),
         },
@@ -134,10 +129,9 @@ macro_rules! retry_resolve {
   }};
 }
 
-/// A lazy element locator bound to a [`crate::Frame`]. Mirrors
-/// Playwright's `client/locator.ts::Locator` — every Locator carries a
-/// Frame reference, and all DOM resolution and action dispatch happens
-/// in that frame's execution context. Chaining (`.locator()`,
+/// A lazy element locator bound to a [`crate::Frame`]. Every Locator
+/// carries a Frame reference, and all DOM resolution and action dispatch
+/// happens in that frame's execution context. Chaining (`.locator()`,
 /// `.filter()`, `.first()`, etc.) returns a new Locator on the same
 /// Frame; the Frame itself is cheap to clone (two `Arc`s).
 #[derive(Clone)]
@@ -147,14 +141,14 @@ pub struct Locator {
   pub(crate) frame: crate::frame::Frame,
   pub(crate) selector: String,
   /// Strict mode: error with [`crate::error::FerriError::StrictModeViolation`]
-  /// if the selector resolves to multiple elements. Playwright enables strict
-  /// mode on every Locator action by default; `first()` / `last()` / `nth()` /
+  /// if the selector resolves to multiple elements. Every Locator action
+  /// runs in strict mode by default; `first()` / `last()` / `nth()` /
   /// `strict(false)` opt out.
   pub(crate) strict: bool,
 }
 
 impl Locator {
-  /// Construct a Locator with Playwright-default strict mode enabled.
+  /// Construct a Locator with strict mode enabled (the default).
   #[must_use]
   pub(crate) fn new(frame: crate::frame::Frame, selector: String) -> Self {
     Self {
@@ -168,8 +162,8 @@ impl Locator {
   ///
   /// In strict mode (default), any action on a locator that matches more than
   /// one element raises [`crate::error::FerriError::StrictModeViolation`].
-  /// Pass `false` to explicitly allow multi-match (Playwright's behaviour
-  /// under `locator.first()` / `.last()` / `.nth()`).
+  /// Pass `false` to explicitly allow multi-match (the behaviour of
+  /// `locator.first()` / `.last()` / `.nth()`).
   #[must_use]
   pub fn strict(&self, strict: bool) -> Locator {
     Locator {
@@ -182,16 +176,14 @@ impl Locator {
 
   /// Narrow this locator's scope.
   ///
-  /// Playwright:
   /// `locator(selectorOrLocator: string | Locator,
-  ///          options?: Omit<LocatorOptions, 'visible'>): Locator`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
+  ///          options?: Omit<LocatorOptions, 'visible'>): Locator`.
   ///
-  /// Infallible by design — matches Playwright's chainable Locator API.
-  /// A cross-page inner locator encodes a sentinel clause that the
-  /// selector engine rejects at resolve time; JSON encoding never fails
-  /// for a valid UTF-8 selector. `visible` is stripped from the option
-  /// bag (Playwright restricts it to `filter()` and the constructor).
+  /// Infallible by design — chainable Locator API. A cross-page inner
+  /// locator encodes a sentinel clause that the selector engine rejects
+  /// at resolve time; JSON encoding never fails for a valid UTF-8
+  /// selector. `visible` is stripped from the option bag (only
+  /// `filter()` and the constructor accept it).
   #[must_use]
   pub fn locator(
     &self,
@@ -207,16 +199,15 @@ impl Locator {
         } else {
           // Encoded sentinel — the selector engine rejects it, so the
           // caller sees an explicit InvalidSelector at the first action
-          // rather than a silently-wrong filter. Playwright throws
-          // synchronously in JS; we defer to resolve time to keep the
-          // Locator chain API infallible.
+          // rather than a silently-wrong filter. Deferred to resolve
+          // time to keep the Locator chain API infallible.
           self.chain("internal:cross-frame-error=true")
         }
       },
     };
     match options {
       Some(mut opts) => {
-        opts.visible = None; // Playwright's Omit<LocatorOptions, 'visible'>
+        opts.visible = None; // Omit<LocatorOptions, 'visible'>
         base.filter(&opts)
       },
       None => base,
@@ -224,9 +215,8 @@ impl Locator {
   }
 
   /// Locate elements by ARIA role, optionally filtered by role options.
-  /// `options.name` accepts `string | RegExp` per Playwright's
-  /// `getByRole(role, { name })` — passing a regex matches the
-  /// accessible name with its full JS regex semantics (flags
+  /// `options.name` accepts `string | RegExp` — passing a regex matches
+  /// the accessible name with its full JS regex semantics (flags
   /// preserved), while a literal string matches case-insensitively
   /// unless `exact: true`.
   #[must_use]
@@ -242,36 +232,36 @@ impl Locator {
   }
 
   /// Locate form elements by their associated label text. Accepts
-  /// `string | RegExp` per Playwright's `getByLabel`.
+  /// `string | RegExp` — the `getByLabel` form.
   #[must_use]
   pub fn get_by_label(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
     self.chain(&build_text_like_selector("internal:label", text, opts))
   }
 
   /// Locate input elements by their placeholder text. Accepts
-  /// `string | RegExp` per Playwright's `getByPlaceholder`.
+  /// `string | RegExp` — the `getByPlaceholder` form.
   #[must_use]
   pub fn get_by_placeholder(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
     self.chain(&build_attr_selector("placeholder", text, opts))
   }
 
   /// Locate elements by their `alt` attribute text. Accepts
-  /// `string | RegExp` per Playwright's `getByAltText`.
+  /// `string | RegExp` — the `getByAltText` form.
   #[must_use]
   pub fn get_by_alt_text(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
     self.chain(&build_attr_selector("alt", text, opts))
   }
 
   /// Locate elements by their `title` attribute text. Accepts
-  /// `string | RegExp` per Playwright's `getByTitle`.
+  /// `string | RegExp` — the `getByTitle` form.
   #[must_use]
   pub fn get_by_title(&self, text: &StringOrRegex, opts: &TextOptions) -> Locator {
     self.chain(&build_attr_selector("title", text, opts))
   }
 
   /// Locate elements by their `data-testid` (or the configured
-  /// test-id attribute). Accepts `string | RegExp` per Playwright's
-  /// `getByTestId`. Matches are always exact per Playwright.
+  /// test-id attribute). Accepts `string | RegExp` — the `getByTestId`
+  /// form. Matches are always exact.
   #[must_use]
   pub fn get_by_test_id(&self, test_id: &StringOrRegex) -> Locator {
     self.chain(&build_testid_selector("data-testid", test_id))
@@ -297,11 +287,7 @@ impl Locator {
   }
 
   /// Filter this locator by text content, inner-locator presence/absence,
-  /// or visibility.
-  ///
-  /// Mirrors Playwright's
-  /// `/tmp/playwright/packages/playwright-core/src/client/locator.ts::Locator#constructor`
-  /// option-to-selector encoding:
+  /// or visibility. Option-to-selector encoding:
   ///
   /// * `has_text` → ` >> internal:has-text=<escaped>` (plain-text clause).
   /// * `has_not_text` → ` >> internal:has-not-text=<escaped>`.
@@ -309,12 +295,11 @@ impl Locator {
   /// * `has_not` (inner [`Locator`]) → ` >> internal:has-not=<JSON inner selector>`.
   /// * `visible: Some(b)` → ` >> visible=true|false`.
   ///
-  /// Inner locators must belong to the same page as `self`; otherwise this
-  /// returns a locator whose selector contains an explicit error marker
-  /// — when resolved, the selector engine rejects it and the caller sees
-  /// an [`crate::error::FerriError::InvalidSelector`]. This matches
-  /// Playwright's behavior of throwing at construction time in JS while
-  /// still keeping this method infallible in Rust.
+  /// Inner locators must belong to the same page as `self`; otherwise
+  /// this returns a locator whose selector contains an explicit error
+  /// marker — when resolved, the selector engine rejects it and the
+  /// caller sees an [`crate::error::FerriError::InvalidSelector`]. The
+  /// method itself stays infallible.
   #[must_use]
   pub fn filter(&self, opts: &FilterOptions) -> Locator {
     use std::fmt::Write as _;
@@ -380,9 +365,8 @@ impl Locator {
   //   3. Borrows `&str` parameters directly — zero String clones
   //   4. Expands inline — no closure/future type-erasure overhead
 
-  /// Click the element matched by this locator with the full Playwright
-  /// [`crate::options::ClickOptions`] surface. Mirrors
-  /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:12986`.
+  /// Click the element matched by this locator with the full
+  /// [`crate::options::ClickOptions`] surface.
   ///
   /// All options (`button`, `click_count`, `delay`, `force`, `modifiers`,
   /// `position`, `steps`, `trial`, `timeout`) are honored across all
@@ -413,9 +397,9 @@ impl Locator {
   ///
   /// Returns an error if the element cannot be found or the double-click fails.
   pub async fn dblclick(&self, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
-    // `dblclick` is a click pair with `clickCount` = 1 then 2 — Playwright's
-    // `server/dom.ts::ElementHandle._dblclick` does the same; our shared
-    // `click_with_opts` honors that when `click_count` is set to `2`.
+    // `dblclick` is a click pair with `clickCount` = 1 then 2. The
+    // shared `click_with_opts` honors that when `click_count` is set
+    // to `2`.
     let click_opts = opts.unwrap_or_default().into_click_options();
     let click_opts_ref = &click_opts;
     retry_resolve!(self, click_opts_ref.timeout, "dblclick", |el, page| async move {
@@ -458,11 +442,10 @@ impl Locator {
     let force = opts.is_force();
     let opts_ref = &opts;
     retry_resolve!(self, opts_ref.timeout, "fill", |el, page| async move {
-      // `actions::fill(..., force)` runs Playwright's
-      // `checkElementStates(['visible','enabled','editable'])` internally
-      // when `force` is false and returns the `error:not<state>` marker
-      // the retry loop knows to keep polling on. `force=true` jumps
-      // straight to the DOM write, matching Playwright's `_fill(force)`.
+      // `actions::fill(..., force)` runs `checkElementStates(['visible',
+      // 'enabled','editable'])` internally when `force` is false and
+      // returns the `error:not<state>` marker the retry loop knows to
+      // keep polling on. `force=true` jumps straight to the DOM write.
       actions::fill(&el, page, value, force).await
     })
   }
@@ -503,8 +486,7 @@ impl Locator {
       actions::wait_for_actionable(&el, page).await.ok();
       if delay_ms > 0 {
         // With a per-char delay, fall back to the character-by-character
-        // keyboard dispatch (same code path Playwright uses for
-        // `pressSequentially`).
+        // keyboard dispatch (same code path `pressSequentially` uses).
         for ch in text.chars() {
           page.press_key(&ch.to_string()).await?;
           tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
@@ -527,12 +509,11 @@ impl Locator {
     let timeout_ms = opts.timeout;
     retry_resolve!(self, timeout_ms, "press", |el, page| async move {
       actions::wait_for_actionable(&el, page).await.ok();
-      // Playwright's server-side press focuses the element before
-      // dispatching keys so the event lands at the intended target
-      // (`/tmp/playwright/packages/playwright-core/src/server/dom.ts`
-      // `_press` → `_focus` → `keyboard.press`). Without this the
-      // key dispatches to whatever's currently focused, usually the
-      // body, and the element under the locator never sees it.
+      // Focus the element before dispatching keys so the event lands at
+      // the intended target (`_press` → `_focus` → `keyboard.press`).
+      // Without this the key dispatches to whatever's currently focused,
+      // usually the body, and the element under the locator never sees
+      // it.
       el.call_js_fn("function() { this.focus(); }").await?;
       if delay_ms > 0 {
         // With a delay, press is equivalent to keyDown + sleep(delay)
@@ -585,8 +566,7 @@ impl Locator {
     self.set_checked(true, opts).await
   }
 
-  /// Uncheck a checkbox if it is currently checked. Mirrors Playwright's
-  /// `LocatorUncheckOptions`.
+  /// Uncheck a checkbox if it is currently checked.
   ///
   /// # Errors
   ///
@@ -596,11 +576,11 @@ impl Locator {
   }
 
   /// Set the checked state of a checkbox or radio button to match
-  /// `checked`. Playwright-parity: reads the element's current
-  /// `checked` property; if it already matches the target state, the
-  /// call is a no-op (but actionability checks still run). Otherwise
-  /// dispatches a real click via [`actions::click_with_opts`] so the
-  /// page sees `input` / `change` events with the correct timing.
+  /// `checked`. Reads the element's current `checked` property; if it
+  /// already matches the target state, the call is a no-op (but
+  /// actionability checks still run). Otherwise dispatches a real click
+  /// via [`actions::click_with_opts`] so the page sees `input` /
+  /// `change` events with the correct timing.
   ///
   /// # Errors
   ///
@@ -614,7 +594,7 @@ impl Locator {
     let click_opts = opts.into_click_options();
     let click_opts_ref = &click_opts;
     retry_resolve!(self, click_opts_ref.timeout, "check", |el, page| async move {
-      // Playwright's `_setChecked` flow (server/dom.ts:758):
+      // setChecked flow:
       //   1. Read current checked state (via `fd.getChecked`, which
       //      understands `input[type=checkbox|radio]` AND ARIA
       //      `aria-checked` roles — `this.checked` alone misses the
