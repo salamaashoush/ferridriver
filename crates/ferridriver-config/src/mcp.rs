@@ -14,7 +14,8 @@ use std::time::{Duration, Instant};
 
 use ferridriver::backend::BackendKind;
 use ferridriver::state::ConnectMode;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// Default TTL for cached command outputs (5 minutes).
 pub const DEFAULT_CACHE_TTL: Duration = Duration::from_secs(300);
@@ -27,8 +28,9 @@ pub const DEFAULT_SERVER_NAME: &str = "ferridriver";
 
 /// Root MCP-section configuration loaded from a unified `ferridriver.{toml,yaml,json}`
 /// file under the `[mcp]` table.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize, TS)]
 #[serde(default)]
+#[ts(export, export_to = "./", rename_all = "camelCase")]
 pub struct McpConfig {
   /// MCP server metadata.
   pub server: ServerConfig,
@@ -38,72 +40,93 @@ pub struct McpConfig {
   // -- runtime fields (not deserialized) --
   /// Cached command outputs (populated at runtime).
   #[serde(skip)]
+  #[ts(skip)]
   command_cache: CommandCache,
   /// Pre-built combined instructions string.
   #[serde(skip)]
+  #[ts(skip)]
   instructions_cache: std::sync::OnceLock<String>,
 }
 
 /// MCP server metadata configuration.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize, TS)]
 #[serde(default)]
+#[ts(export, export_to = "./", rename = "McpServerConfig", rename_all = "camelCase")]
 pub struct ServerConfig {
   /// Server name for MCP `get_info` (default: "ferridriver").
+  #[ts(optional)]
   pub name: Option<String>,
   /// Full override of server instructions. If set, replaces the default instructions entirely.
+  #[ts(optional)]
   pub instructions: Option<String>,
   /// Additional instructions appended to the default ferridriver instructions.
   /// Ignored if `instructions` is set.
+  #[ts(optional)]
   pub extra_instructions: Option<String>,
 }
 
 /// Browser launch and per-instance configuration.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize, TS)]
 #[serde(default)]
+#[ts(export, export_to = "./", rename = "McpBrowserConfig", rename_all = "camelCase")]
 pub struct BrowserConfig {
   /// Browser backend: "cdp-pipe" (default), "cdp-raw", "bidi".
+  #[ts(optional)]
   pub backend: Option<String>,
   /// Run browsers in headless mode.
+  #[ts(optional)]
   pub headless: Option<bool>,
   /// Path to Chrome/Chromium executable.
+  #[ts(optional)]
   pub executable_path: Option<String>,
   /// Default viewport dimensions for new pages.
+  #[ts(optional)]
   pub viewport: Option<ViewportDef>,
   /// Base Chrome arguments applied to ALL browser instances.
   pub chrome_args: Vec<String>,
   /// External command to get per-instance Chrome args.
   /// `${INSTANCE}` is replaced with the instance name.
   /// Output: one arg per line, or JSON array of strings.
+  #[ts(optional)]
   pub instance_args_command: Option<String>,
   /// External command to discover a running browser instance.
   /// `${INSTANCE}` is replaced with the instance name.
   /// Output: a `ws://` URL on the first line, or empty for "not found".
+  #[ts(optional)]
   pub instance_discover_command: Option<String>,
   /// Cache TTL in seconds for command outputs (default: 300).
+  #[ts(optional, type = "number")]
   pub command_cache_ttl: Option<u64>,
   /// Static per-instance overrides (keyed by instance name).
   pub instances: HashMap<String, InstanceConfig>,
   /// Default config for instances not listed in `instances`.
+  #[ts(optional)]
   pub default_instance: Option<InstanceConfig>,
 }
 
 /// Per-instance configuration.
-#[derive(Debug, Default, Clone, Deserialize)]
+#[derive(Debug, Default, Clone, Deserialize, Serialize, TS)]
 #[serde(default)]
+#[ts(export, export_to = "./", rename = "McpInstanceConfig", rename_all = "camelCase")]
 pub struct InstanceConfig {
   /// Additional Chrome arguments for this instance.
   pub chrome_args: Vec<String>,
   /// Explicit WebSocket URL to connect to (skip launch).
+  #[ts(optional)]
   pub connect_url: Option<String>,
   /// Path to Chrome profile directory for `DevToolsActivePort` discovery.
   /// `${INSTANCE}` is replaced with the instance name. Supports `~` expansion.
+  #[ts(optional)]
   pub discover_profile: Option<String>,
 }
 
 /// Viewport dimensions.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, Serialize, TS)]
+#[ts(export, export_to = "./", rename = "McpViewportDef", rename_all = "camelCase")]
 pub struct ViewportDef {
+  #[ts(optional)]
   pub width: Option<i64>,
+  #[ts(optional)]
   pub height: Option<i64>,
 }
 

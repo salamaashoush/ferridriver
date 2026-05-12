@@ -1159,25 +1159,25 @@ impl TestRunner {
   /// Whether isMobile is set.
   #[napi]
   pub fn get_is_mobile(&self) -> bool {
-    self.config.browser.context.is_mobile
+    self.config.browser.use_options.is_mobile
   }
 
   /// Whether hasTouch is set.
   #[napi]
   pub fn get_has_touch(&self) -> bool {
-    self.config.browser.context.has_touch
+    self.config.browser.use_options.has_touch
   }
 
   /// Color scheme: "light", "dark", or null.
   #[napi]
   pub fn get_color_scheme(&self) -> Option<String> {
-    self.config.browser.context.color_scheme.clone()
+    self.config.browser.use_options.color_scheme.clone()
   }
 
   /// Locale (e.g. "en-US").
   #[napi]
   pub fn get_locale(&self) -> Option<String> {
-    self.config.browser.context.locale.clone()
+    self.config.browser.use_options.locale.clone()
   }
 
   /// Display name from config (Playwright top-level `name`).
@@ -1544,16 +1544,16 @@ fn napi_project_to_rust(napi: &NapiProjectConfig) -> ferridriver_test::config::P
       }
     }
     if let Some(m) = napi.is_mobile {
-      bc.context.is_mobile = m;
+      bc.use_options.is_mobile = m;
     }
     if let Some(t) = napi.has_touch {
-      bc.context.has_touch = t;
+      bc.use_options.has_touch = t;
     }
     if let Some(ref cs) = napi.color_scheme {
-      bc.context.color_scheme = Some(cs.clone());
+      bc.use_options.color_scheme = Some(cs.clone());
     }
     if let Some(ref l) = napi.locale {
-      bc.context.locale = Some(l.clone());
+      bc.use_options.locale = Some(l.clone());
     }
     Some(bc)
   } else {

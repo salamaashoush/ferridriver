@@ -10,6 +10,9 @@ release-fast = "build --profile release-fast --bin ferridriver"
 # The cc crate passes -D to ar, but Apple's ar does not support it.
 AR_aarch64_apple_darwin = "/opt/homebrew/opt/llvm/bin/llvm-ar"
 AR_x86_64_apple_darwin = "/opt/homebrew/opt/llvm/bin/llvm-ar"
+# Pin where ts-rs writes the generated TypeScript config types: into the TS
+# package that consumes them, not the Rust crate that defines the schema.
+TS_RS_EXPORT_DIR = { value = "packages/ferridriver-test/src/config-types", relative = true }
 
 # Per-target rustflags. M-series gets the `apple-m1` cpu floor so
 # autovectorization tunes for NEON / LSE atomics; x86_64 stays at

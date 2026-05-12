@@ -265,22 +265,22 @@ pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> 
     }
   }
   if let Some(m) = overrides.is_mobile {
-    config.browser.context.is_mobile = m;
+    config.browser.use_options.is_mobile = m;
   }
   if let Some(t) = overrides.has_touch {
-    config.browser.context.has_touch = t;
+    config.browser.use_options.has_touch = t;
   }
   if let Some(ref cs) = overrides.color_scheme {
-    config.browser.context.color_scheme = Some(cs.clone());
+    config.browser.use_options.color_scheme = Some(cs.clone());
   }
   if let Some(ref l) = overrides.locale {
-    config.browser.context.locale = Some(l.clone());
+    config.browser.use_options.locale = Some(l.clone());
   }
   if let Some(o) = overrides.offline {
-    config.browser.context.offline = o;
+    config.browser.use_options.offline = o;
   }
   if let Some(b) = overrides.bypass_csp {
-    config.browser.context.bypass_csp = b;
+    config.browser.use_options.bypass_csp = b;
   }
   if let Some(dir) = &overrides.output_dir {
     config.output_dir = PathBuf::from(dir);

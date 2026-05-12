@@ -36,11 +36,13 @@ pub mod test;
 
 use std::path::{Path, PathBuf};
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+use ts_rs::TS;
 
 /// Top-level configuration document.
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Default, Deserialize, Serialize, TS)]
 #[serde(default)]
+#[ts(export, export_to = "./", rename_all = "camelCase")]
 pub struct FerridriverConfig {
   /// MCP server configuration.
   pub mcp: mcp::McpConfig,
@@ -130,7 +132,7 @@ mod tests {
   fn default_root_is_empty() {
     let root = FerridriverConfig::default();
     assert_eq!(root.mcp.server_name(), "ferridriver");
-    assert!(root.test.test_match.contains(&"**/*.spec.rs".to_string()));
+    assert!(root.test.test_match.is_empty());
   }
 
   #[test]
@@ -214,6 +216,42 @@ test:
 
     assert_eq!(root.mcp.server_name(), "json-unified");
     assert_eq!(root.test.workers, 9);
+  }
+
+  #[test]
+  fn serde_json_roundtrip_default() {
+    let root = FerridriverConfig::default();
+    let json = serde_json::to_value(&root).expect("serialize default");
+    let parsed: FerridriverConfig = serde_json::from_value(json.clone()).expect("deserialize back");
+    let json2 = serde_json::to_value(&parsed).expect("serialize parsed");
+    assert_eq!(json, json2, "default config should round-trip cleanly through JSON");
+  }
+
+  #[test]
+  fn serde_json_roundtrip_populated() {
+    let mut root = FerridriverConfig::default();
+    root.mcp.server.name = Some("custom".into());
+    root.mcp.browser.backend = Some("cdp-raw".into());
+    root.mcp.browser.headless = Some(true);
+    root.mcp.browser.chrome_args = vec!["--no-sandbox".into()];
+    root.test.workers = 4;
+    root.test.timeout = 60_000;
+    root.test.test_match = vec!["custom/**/*.spec.ts".into()];
+    root.test.browser.headless = true;
+    root.test.browser.use_options.is_mobile = true;
+    root.test.browser.use_options.locale = Some("en-GB".into());
+
+    let json = serde_json::to_value(&root).expect("serialize populated");
+    let parsed: FerridriverConfig = serde_json::from_value(json.clone()).expect("deserialize populated");
+    let json2 = serde_json::to_value(&parsed).expect("serialize roundtripped");
+    assert_eq!(json, json2, "populated config should round-trip");
+
+    assert_eq!(parsed.mcp.server.name.as_deref(), Some("custom"));
+    assert_eq!(parsed.mcp.browser.backend.as_deref(), Some("cdp-raw"));
+    assert_eq!(parsed.mcp.browser.headless, Some(true));
+    assert_eq!(parsed.test.workers, 4);
+    assert!(parsed.test.browser.headless);
+    assert!(parsed.test.browser.use_options.is_mobile);
   }
 
   #[test]

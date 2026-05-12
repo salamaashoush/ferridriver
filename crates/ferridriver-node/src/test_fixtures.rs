@@ -145,22 +145,22 @@ impl TestFixtures {
 
   #[napi(getter, js_name = "isMobile")]
   pub fn is_mobile(&self) -> bool {
-    self.browser_config.context.is_mobile
+    self.browser_config.use_options.is_mobile
   }
 
   #[napi(getter, js_name = "hasTouch")]
   pub fn has_touch(&self) -> bool {
-    self.browser_config.context.has_touch
+    self.browser_config.use_options.has_touch
   }
 
   #[napi(getter, js_name = "colorScheme")]
   pub fn color_scheme(&self) -> Option<String> {
-    self.browser_config.context.color_scheme.clone()
+    self.browser_config.use_options.color_scheme.clone()
   }
 
   #[napi(getter)]
   pub fn locale(&self) -> Option<String> {
-    self.browser_config.context.locale.clone()
+    self.browser_config.use_options.locale.clone()
   }
 
   #[napi(getter, ts_return_type = "unknown[] | null")]

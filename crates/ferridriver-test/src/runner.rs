@@ -1130,14 +1130,14 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPla
 
   let mut args = browser_config.args.clone();
   // Proxy launch args.
-  if let Some(ref proxy) = browser_config.context.proxy {
+  if let Some(ref proxy) = browser_config.use_options.proxy {
     args.push(format!("--proxy-server={}", proxy.server));
     if let Some(ref bypass) = proxy.bypass {
       args.push(format!("--proxy-bypass-list={bypass}"));
     }
   }
   // Ignore HTTPS errors launch arg.
-  if browser_config.context.ignore_https_errors {
+  if browser_config.use_options.ignore_https_errors {
     args.push("--ignore-certificate-errors".to_string());
   }
 
