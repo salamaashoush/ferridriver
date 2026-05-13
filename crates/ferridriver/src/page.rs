@@ -1706,25 +1706,47 @@ impl Page {
   // [`Page::init_frame_cache`] and kept fresh by the listener task.
 
   /// Main frame of this page. Mirrors Playwright's `page.mainFrame():
-  /// Frame` (non-null) — every Page's frame cache is seeded inside
-  /// [`Self::new`] / [`Self::with_context`] before the Page is handed
-  /// out, so the main frame id is always present.
+  /// Frame` (non-null).
+  ///
+  /// The cache is seeded one of three ways:
+  /// 1. The frame listener spawned in `seed_frame_cache` picks up a
+  ///    `FrameNavigated` event and writes `main_id`.
+  /// 2. `goto` calls `ensure_frame_cache_seeded` after the
+  ///    `Page.navigate` response lands, which seeds via the backend's
+  ///    `peek_main_frame_id()` (no RTT).
+  /// 3. Below: when this accessor is reached without (1) or (2) — for
+  ///    example, an MCP tool that constructs a fresh `Page` wrapper
+  ///    over an already-navigated inner page — we synchronously seed
+  ///    from `peek_main_frame_id()` so the user-visible API never
+  ///    panics on a live, navigated page.
   ///
   /// # Panics
   ///
-  /// Panics only if the construction-path invariant is broken (cache
-  /// empty after `Self::new`); not reachable through public API.
+  /// Panics only when the cache is empty AND the backend has never
+  /// observed a top-level frame (i.e. no navigation has ever occurred
+  /// on this inner page). This is genuine API misuse — Playwright
+  /// itself can't return a `Frame` either before the first navigation.
   #[must_use]
   pub fn main_frame(self: &Arc<Self>) -> Frame {
-    let id = self
-      .with_frame_cache(crate::frame_cache::FrameCache::main_frame_id)
-      .unwrap_or_else(|| {
-        // Constructor invariant: seed_frame_cache always populates the
-        // main frame id. Reaching this branch means the constructor was
-        // bypassed.
-        unreachable!("Page::main_frame called before seed_frame_cache populated the cache")
-      });
-    Frame::new(Arc::clone(self), id)
+    if let Some(id) = self.with_frame_cache(crate::frame_cache::FrameCache::main_frame_id) {
+      return Frame::new(Arc::clone(self), id);
+    }
+    if let Some(fid) = self.inner.peek_main_frame_id() {
+      if let Ok(mut g) = self.frame_cache.lock() {
+        if g.main_frame_id().is_none() {
+          g.attach(crate::backend::FrameInfo {
+            frame_id: fid.clone(),
+            parent_frame_id: None,
+            name: String::new(),
+            url: String::new(),
+          });
+        }
+      }
+      return Frame::new(Arc::clone(self), Arc::from(fid));
+    }
+    panic!(
+      "Page::main_frame called before any navigation has occurred (no main frame id available from frame cache or backend)"
+    )
   }
 
   /// All non-detached frames attached to the page, main-frame first.
@@ -2461,7 +2483,10 @@ impl Page {
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>> {
+  ) -> Result<(
+    tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>,
+    tokio::sync::oneshot::Sender<()>,
+  )> {
     self
       .inner
       .start_screencast(quality, max_width, max_height)

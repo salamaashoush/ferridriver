@@ -11,14 +11,24 @@ use std::io::{BufRead, BufReader, Write};
 use std::os::unix::process::CommandExt;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::mpsc;
+use std::time::Duration;
 
 static GLOBAL_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Hard timeout per JSON-RPC request — if no matching reply arrives
+/// within this window the client panics so the test surfaces the
+/// hang with method+id instead of stalling libtest indefinitely.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Stdio-connected MCP client. Owns the child process and tears it
 /// down on drop.
 pub struct McpClient {
   child: Child,
-  reader: BufReader<std::process::ChildStdout>,
+  /// Background-thread receiver: every stdout line the child emits is
+  /// forwarded here. `recv_timeout` lets the main test thread bound
+  /// the wait so a hung MCP doesn't deadlock libtest.
+  rx: mpsc::Receiver<String>,
   /// `Option` so `Drop` can close the write end of the pipe *before* killing
   /// the child — closing stdin lets the CLI's MCP transport return from
   /// `svc.waiting()` and drop its `BrowserState` cleanly (which in turn kills
@@ -42,14 +52,29 @@ impl McpClient {
       }
     });
     let mut cmd = Command::new(&binary);
-    cmd.arg("--backend").arg(backend);
+    cmd.arg("mcp").arg("--backend").arg(backend);
     if std::env::var("FERRIDRIVER_HEADED").is_err() {
       cmd.arg("--headless");
     }
+    let stderr_target = match std::env::var("FERRIDRIVER_MCP_STDERR_LOG") {
+      Ok(path) => {
+        let f = std::fs::OpenOptions::new()
+          .create(true)
+          .append(true)
+          .open(&path)
+          .unwrap_or_else(|e| panic!("open MCP stderr log {path}: {e}"));
+        Stdio::from(f)
+      },
+      Err(_) => Stdio::null(),
+    };
     let mut child = cmd
       .stdin(Stdio::piped())
       .stdout(Stdio::piped())
-      .stderr(Stdio::null())
+      .stderr(stderr_target)
+      .env(
+        "RUST_LOG",
+        std::env::var("RUST_LOG").unwrap_or_else(|_| "ferridriver=debug,ferridriver_mcp=debug".into()),
+      )
       // Put the MCP child (and every Chrome / Firefox / WebKit host
       // it spawns) into its own process group, with the child as
       // group leader. `Drop` then `kill(-pgid, …)`s the whole tree
@@ -65,9 +90,32 @@ impl McpClient {
       .unwrap_or_else(|e| panic!("Failed to start: {binary}: {e}"));
     let stdout = child.stdout.take().unwrap();
     let stdin = child.stdin.take().unwrap();
+    let (tx, rx) = mpsc::channel();
+    let backend_for_thread = backend.to_string();
+    std::thread::Builder::new()
+      .name(format!("mcp-stdout-reader-{backend}"))
+      .spawn(move || {
+        let mut reader = BufReader::new(stdout);
+        loop {
+          let mut line = String::new();
+          match reader.read_line(&mut line) {
+            Ok(0) => break,
+            Ok(_) => {
+              if tx.send(line).is_err() {
+                break;
+              }
+            },
+            Err(e) => {
+              let _ = tx.send(format!("__READ_ERR__ backend={backend_for_thread}: {e}"));
+              break;
+            },
+          }
+        }
+      })
+      .expect("spawn mcp stdout reader thread");
     let mut c = McpClient {
       child,
-      reader: BufReader::new(stdout),
+      rx,
       stdin: Some(stdin),
       backend: backend.to_string(),
     };
@@ -82,27 +130,63 @@ impl McpClient {
     stdin.flush().unwrap();
   }
 
-  fn read_response(&mut self) -> Value {
+  fn read_response_with_deadline(&mut self, ctx: &str, deadline: std::time::Instant) -> Value {
     loop {
-      let mut line = String::new();
-      self.reader.read_line(&mut line).expect("read stdout");
+      let remaining = deadline.saturating_duration_since(std::time::Instant::now());
+      assert!(
+        !remaining.is_zero(),
+        "MCP request timed out after {REQUEST_TIMEOUT:?} (backend={}, {ctx})",
+        self.backend
+      );
+      let line = match self.rx.recv_timeout(remaining) {
+        Ok(l) => l,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+          panic!(
+            "MCP request timed out after {REQUEST_TIMEOUT:?} (backend={}, {ctx})",
+            self.backend
+          );
+        },
+        Err(mpsc::RecvTimeoutError::Disconnected) => {
+          panic!(
+            "ferridriver MCP child closed stdout before responding (backend={}, {ctx}). \
+             Check $FERRIDRIVER_MCP_STDERR_LOG for child stderr.",
+            self.backend
+          );
+        },
+      };
+      assert!(
+        !line.starts_with("__READ_ERR__"),
+        "MCP stdout read error (backend={}, {ctx}): {}",
+        self.backend,
+        line.trim()
+      );
       let trimmed = line.trim();
       if trimmed.is_empty() {
         continue;
       }
-      // Skip non-JSON lines (e.g. tracing log output from rmcp).
       if let Ok(val) = serde_json::from_str::<Value>(trimmed) {
         return val;
       }
+      // non-JSON line (tracing log etc.) — keep reading
     }
   }
 
   pub fn send_request(&mut self, method: &str, params: Value) -> Value {
     let id = GLOBAL_ID.fetch_add(1, Ordering::SeqCst);
+    let tool = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
+    let start = std::time::Instant::now();
+    let deadline = start + REQUEST_TIMEOUT;
+    eprintln!(">>> [{}] id={id} method={method} tool={tool}", self.backend);
     self.send_raw(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
     loop {
-      let resp = self.read_response();
+      let ctx = format!("id={id} method={method} tool={tool}");
+      let resp = self.read_response_with_deadline(&ctx, deadline);
       if resp.get("id").and_then(|v| v.as_u64()) == Some(id) {
+        eprintln!(
+          "<<< [{}] id={id} method={method} tool={tool} ms={}",
+          self.backend,
+          start.elapsed().as_millis()
+        );
         return resp;
       }
     }

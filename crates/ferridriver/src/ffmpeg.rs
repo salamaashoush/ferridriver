@@ -175,6 +175,64 @@ fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
     .map_err(|e| format!("failed to spawn ffmpeg: {e}"))
 }
 
+/// Encode a 1-second white video at the requested `width x height` with no
+/// piped input. Used as the fallback when the screencast produced zero
+/// frames so the output file still exists, has the right dimensions,
+/// and matches Playwright's `_stop` whitespace-frame behaviour.
+fn encode_blank(output_path: &Path, width: u32, height: u32, fps: u32) -> Result<(), String> {
+  let ffmpeg = find_ffmpeg()?;
+  let w = width & !1;
+  let h = height & !1;
+  let mut args: Vec<String> = vec![
+    "-loglevel".into(),
+    "error".into(),
+    "-y".into(),
+    "-f".into(),
+    "lavfi".into(),
+    "-i".into(),
+    format!("color=c=white:s={w}x{h}:d=1:r={fps}"),
+    "-an".into(),
+  ];
+  if detect_encoder() == "vpx" {
+    args.extend(
+      [
+        "-c:v",
+        "vp8",
+        "-qmin",
+        "0",
+        "-qmax",
+        "50",
+        "-crf",
+        "8",
+        "-deadline",
+        "realtime",
+        "-speed",
+        "8",
+        "-b:v",
+        "1M",
+        "-threads",
+        "1",
+      ]
+      .map(String::from),
+    );
+  } else {
+    args.extend(["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-threads", "1"].map(String::from));
+  }
+  args.push(output_path.to_string_lossy().into_owned());
+  let output = Command::new(ffmpeg)
+    .args(&args)
+    .stdin(Stdio::null())
+    .stdout(Stdio::null())
+    .stderr(Stdio::piped())
+    .output()
+    .map_err(|e| format!("failed to spawn ffmpeg (blank): {e}"))?;
+  if !output.status.success() {
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    return Err(format!("ffmpeg blank-encode exited with {}: {stderr}", output.status));
+  }
+  Ok(())
+}
+
 /// Channel-driven encoding: pipe JPEG frames to ffmpeg subprocess as they arrive.
 /// Runs on a blocking thread concurrently with the test.
 ///
@@ -188,6 +246,20 @@ pub fn encode_stream(
   height: u32,
   fps: u32,
 ) -> Result<(), String> {
+  // Wait for the first frame before spawning the image2pipe encoder.
+  // If the channel closes empty (short recording on a page that never
+  // produced a compositor frame, e.g. data: URL closed immediately
+  // after navigation), ffmpeg's image2pipe input would exit with
+  // "Output file does not contain any stream". Playwright handles
+  // this in `videoRecorder.ts::_stop` by writing a synthesised
+  // white frame before closing stdin; we do the equivalent through
+  // ffmpeg's `lavfi color=` source which produces a 1-second
+  // constant-colour clip at the requested dimensions -- no extra
+  // dependency, no fake bitmap.
+  let Some(first_frame) = rx.blocking_recv() else {
+    return encode_blank(output_path, width, height, fps);
+  };
+
   let mut child = spawn_ffmpeg(output_path, width, height, fps)?;
   let mut stdin = child.stdin.take().ok_or("failed to open ffmpeg stdin")?;
 
@@ -195,7 +267,9 @@ pub fn encode_stream(
   let mut last_frame: Option<Vec<u8>> = None;
   let mut last_frame_number: i64 = -1;
 
-  while let Some((jpeg_bytes, ts)) = rx.blocking_recv() {
+  // Re-enter the same processing loop with the first frame already in hand.
+  let mut next = Some(first_frame);
+  while let Some((jpeg_bytes, ts)) = next.take().or_else(|| rx.blocking_recv()) {
     let first = *first_ts.get_or_insert(ts);
     let frame_number = f64_to_i64(((ts - first) * f64::from(fps)).floor());
 

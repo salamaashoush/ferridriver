@@ -208,10 +208,19 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // top-level frame_id) — no RTT for the navigate-then-query flow
     // that all bench / typical tests follow. `peek_main_frame_id()`
     // exposes the cached id from `Page.navigate`'s response.
-    let (r1, r2, r3, r4, r5, r6, r7, r9) = tokio::join!(
+    // `DOM.enable` rides the parallel batch so `DOM.requestNode` /
+    // `DOM.getBoxModel` / `DOM.scrollIntoViewIfNeeded` (used by the
+    // element-handle action path: scrollIntoViewIfNeeded, screenshot,
+    // setFileInputFiles) return real nodeIds. Without it, those CDP
+    // calls return `nodeId: 0` and every "Element not found" error
+    // bubbles back to the user even when the page-side selector lookup
+    // succeeded. Mirrors Playwright's `_initialize`
+    // (`crPage.ts`) which also fires `DOM.enable` per session.
+    let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = tokio::join!(
       transport.send_command(session_id, "Page.enable", ep.clone()),
       transport.send_command(session_id, "Runtime.enable", ep.clone()),
       transport.send_command(session_id, "Network.enable", ep.clone()),
+      transport.send_command(session_id, "DOM.enable", ep.clone()),
       transport.send_command(
         session_id,
         "Page.setLifecycleEventsEnabled",
@@ -233,6 +242,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     r5?;
     r6?;
     r7?;
+    r8?;
     r9?;
     Ok(None)
   }
@@ -554,6 +564,16 @@ impl<T: CdpWrap> CdpBrowser<T> {
       page.lifecycle.clone(),
       page.lifecycle_notify.clone(),
     );
+
+    // Seed `main_frame_id` from `target_id`. For regular page targets
+    // (everything we create here), Chrome's top-level frameId equals
+    // the targetId — Playwright relies on the same identity
+    // (`crPage.ts` reads `targetInfo.targetId` and treats it as the
+    // main frame). Without this, a page that is never `goto`'d (e.g.
+    // the default about:blank opened by the MCP server before the
+    // user issues any navigation) leaves `main_frame_id` empty, and
+    // `Page::main_frame()` panics.
+    let _ = page.main_frame_id.set(page.target_id.to_string());
 
     if url != "about:blank" && !url.is_empty() {
       page.goto(url, crate::backend::NavLifecycle::Load, 30_000, None).await?;
@@ -1920,11 +1940,28 @@ impl<T: CdpWrap> CdpPage<T> {
     let result = self.cmd("Runtime.evaluate", params).await?;
 
     if let Some(exception) = result.get("exceptionDetails") {
-      let text = exception
-        .get("text")
-        .and_then(|v| v.as_str())
-        .unwrap_or("Evaluation error");
-      return Err(text.to_string());
+      // `text` is typically the short prefix Chrome attaches
+      // ("Uncaught"); the real message lives on
+      // `exception.exception.description` (V8 format) or
+      // `exception.exception.value`. Combine so the caller's
+      // `err.contains("strict mode violation")` / similar checks
+      // actually see the engine-thrown payload.
+      let text = exception.get("text").and_then(|v| v.as_str()).unwrap_or("");
+      let inner = exception
+        .get("exception")
+        .and_then(|e| {
+          e.get("description")
+            .and_then(|v| v.as_str())
+            .or_else(|| e.get("value").and_then(|v| v.as_str()))
+        })
+        .unwrap_or("");
+      let combined = match (text.is_empty(), inner.is_empty()) {
+        (false, false) => format!("{text}: {inner}"),
+        (false, true) => text.to_string(),
+        (true, false) => inner.to_string(),
+        (true, true) => "Evaluation error".to_string(),
+      };
+      return Err(combined);
     }
 
     let object_id = result
@@ -2173,12 +2210,35 @@ impl<T: CdpWrap> CdpPage<T> {
   // ---- Screencast (video recording) ----
 
   /// Start CDP screencast. Chrome will emit `Page.screencastFrame` events with JPEG data.
+  ///
+  /// Returns `(frame_rx, shutdown_tx)`. The caller drives shutdown by
+  /// sending `()` on `shutdown_tx` — the listener drains any in-flight
+  /// `screencastFrame` events that arrived between
+  /// `Page.stopScreencast` and the shutdown signal, then drops the
+  /// frame sender so the consumer's `recv()` returns `None`. This is
+  /// deterministic: no `sleep` hack to "give frames time to arrive".
   pub async fn start_screencast(
     &self,
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>, String> {
+  ) -> Result<
+    (
+      tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>,
+      tokio::sync::oneshot::Sender<()>,
+    ),
+    String,
+  > {
+    // Subscribe to the event stream BEFORE firing `Page.startScreencast`
+    // so the very first `Page.screencastFrame` event isn't lost in the
+    // gap between the command being sent and the listener subscribing.
+    // For short recordings (fast goto+close) that single missed frame
+    // is the difference between ffmpeg producing a valid file and
+    // exiting with "Output file does not contain any stream".
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+    Self::spawn_screencast_listener(self.transport.clone(), self.session_id.clone(), tx, shutdown_rx);
+
     self
       .cmd(
         "Page.startScreencast",
@@ -2192,10 +2252,7 @@ impl<T: CdpWrap> CdpPage<T> {
       )
       .await?;
 
-    // Spawn listener that decodes frames and acks them.
-    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
-    Self::spawn_screencast_listener(self.transport.clone(), self.session_id.clone(), tx);
-    Ok(rx)
+    Ok((rx, shutdown_tx))
   }
 
   /// Stop CDP screencast.
@@ -2209,64 +2266,91 @@ impl<T: CdpWrap> CdpPage<T> {
   /// Passes raw JPEG frames to the channel. Frame interpolation (gap-filling) is handled
   /// by the video recorder layer, not here. ACK is sent immediately and non-blocking
   /// (matching Playwright's approach) so Chrome sends the next frame ASAP.
+  ///
+  /// `shutdown_rx` provides cooperative teardown. The select loop is
+  /// `biased` so any event already buffered in the broadcast channel
+  /// is processed before the shutdown signal is observed — that's
+  /// what keeps short recordings from losing the trailing frames
+  /// Chrome emitted just before `Page.stopScreencast` landed.
   fn spawn_screencast_listener(
     transport: Arc<T>,
     session_id: Option<Arc<str>>,
     frame_tx: tokio::sync::mpsc::UnboundedSender<(Vec<u8>, f64)>,
+    shutdown_rx: tokio::sync::oneshot::Receiver<()>,
   ) {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_events();
-      while let Ok(event) = rx.recv().await {
-        // Filter by CDP session.
-        if let Some(ref expected_sid) = session_id {
-          let event_sid = event.get("sessionId").and_then(|v| v.as_str());
-          if event_sid != Some(&**expected_sid) {
-            continue;
-          }
-        }
-
-        if event.get("method").and_then(|m| m.as_str()) != Some("Page.screencastFrame") {
-          continue;
-        }
-
-        let Some(params) = event.get("params") else { continue };
-
-        // Extract Chrome's frame timestamp (seconds since epoch).
-        // Falls back to wall clock if metadata is missing.
-        let timestamp = params
-          .get("metadata")
-          .and_then(|m| m.get("timestamp"))
-          .and_then(serde_json::Value::as_f64)
-          .unwrap_or_else(|| {
-            std::time::SystemTime::now()
-              .duration_since(std::time::UNIX_EPOCH)
-              .unwrap_or_default()
-              .as_secs_f64()
-          });
-
-        // Decode base64 JPEG frame data and forward with timestamp.
-        if let Some(data_str) = params.get("data").and_then(|v| v.as_str()) {
-          if let Ok(jpeg_bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_str) {
-            if frame_tx.send((jpeg_bytes, timestamp)).is_err() {
-              break;
+      let mut shutdown_rx = shutdown_rx;
+      loop {
+        let event = tokio::select! {
+          biased;
+          ev = rx.recv() => match ev {
+            Ok(ev) => ev,
+            Err(_) => break,
+          },
+          _ = &mut shutdown_rx => {
+            // Drain any events already buffered in the broadcast
+            // subscription -- those are the frames Chrome shipped
+            // before `Page.stopScreencast` returned. Once the
+            // subscription is empty, drop `frame_tx` so the consumer
+            // sees end-of-stream.
+            while let Ok(ev) = rx.try_recv() {
+              Self::process_screencast_event(&ev, &session_id, &transport, &frame_tx);
             }
-          }
-        }
-
-        // Acknowledge immediately (non-blocking) so Chrome sends the next frame ASAP.
-        let ack_id = params.get("sessionId").and_then(serde_json::Value::as_i64).unwrap_or(0);
-        let t = transport.clone();
-        let sid = session_id.clone();
-        tokio::spawn(async move {
-          let _ = t
-            .send_command(
-              sid.as_deref(),
-              "Page.screencastFrameAck",
-              serde_json::json!({ "sessionId": ack_id }),
-            )
-            .await;
-        });
+            break;
+          },
+        };
+        Self::process_screencast_event(&event, &session_id, &transport, &frame_tx);
       }
+    });
+  }
+
+  #[allow(
+    clippy::ref_option,
+    reason = "matches caller signature inside spawn_screencast_listener"
+  )]
+  fn process_screencast_event(
+    event: &serde_json::Value,
+    session_id: &Option<Arc<str>>,
+    transport: &Arc<T>,
+    frame_tx: &tokio::sync::mpsc::UnboundedSender<(Vec<u8>, f64)>,
+  ) {
+    if let Some(expected_sid) = session_id {
+      let event_sid = event.get("sessionId").and_then(|v| v.as_str());
+      if event_sid != Some(&**expected_sid) {
+        return;
+      }
+    }
+    if event.get("method").and_then(|m| m.as_str()) != Some("Page.screencastFrame") {
+      return;
+    }
+    let Some(params) = event.get("params") else { return };
+    let timestamp = params
+      .get("metadata")
+      .and_then(|m| m.get("timestamp"))
+      .and_then(serde_json::Value::as_f64)
+      .unwrap_or_else(|| {
+        std::time::SystemTime::now()
+          .duration_since(std::time::UNIX_EPOCH)
+          .unwrap_or_default()
+          .as_secs_f64()
+      });
+    if let Some(data_str) = params.get("data").and_then(|v| v.as_str()) {
+      if let Ok(jpeg_bytes) = base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data_str) {
+        let _ = frame_tx.send((jpeg_bytes, timestamp));
+      }
+    }
+    let ack_id = params.get("sessionId").and_then(serde_json::Value::as_i64).unwrap_or(0);
+    let t = transport.clone();
+    let sid = session_id.clone();
+    tokio::spawn(async move {
+      let _ = t
+        .send_command(
+          sid.as_deref(),
+          "Page.screencastFrameAck",
+          serde_json::json!({ "sessionId": ack_id }),
+        )
+        .await;
     });
   }
 
@@ -3230,29 +3314,33 @@ impl<T: CdpWrap> CdpPage<T> {
 
   pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
     use crate::options::MediaOverride;
-    // CDP's `Emulation.setEmulatedMedia` replaces all emulation state per
-    // call — any feature not included in the `features` array is cleared.
-    // Mirror Playwright's `_updateEmulateMedia` at
-    // `/tmp/playwright/packages/playwright-core/src/server/chromium/crPage.ts:975`:
-    // always send all four features with an empty-string value for the
-    // "no override" case. `Unchanged` and `Disabled` both map to empty
-    // string — the Page layer has already merged the caller's partial
-    // update with its persistent state, so an `Unchanged` reaching this
-    // layer truly means "never configured".
-    fn feature_value(o: &MediaOverride) -> &str {
-      match o {
-        MediaOverride::Set(v) => v.as_str(),
-        MediaOverride::Disabled | MediaOverride::Unchanged => "",
+    // `Emulation.setEmulatedMedia` replaces the emulation state per call.
+    // Chrome treats a feature listed in `features` with `value: ""` as
+    // *still overridden* (the value just happens to be the empty string)
+    // — to actually clear an override the feature must be *omitted* from
+    // the array. Tested empirically against Chrome 147; the legacy
+    // "always include all four features" path Playwright still uses
+    // does not reset the override on current Chromium builds and breaks
+    // `page.emulateMedia({colorScheme: null})`.
+    //
+    // Strategy: include features only when they're actively `Set`.
+    // `Disabled` and `Unchanged` drop out of the array so the override
+    // is cleared. `media` ships an empty string to clear (still
+    // honoured by Chrome).
+    let mut features: Vec<serde_json::Value> = Vec::with_capacity(4);
+    let push_if_set = |features: &mut Vec<serde_json::Value>, name: &str, o: &MediaOverride| {
+      if let MediaOverride::Set(v) = o {
+        features.push(serde_json::json!({ "name": name, "value": v }));
       }
-    }
-    let features = serde_json::json!([
-      { "name": "prefers-color-scheme", "value": feature_value(&opts.color_scheme) },
-      { "name": "prefers-reduced-motion", "value": feature_value(&opts.reduced_motion) },
-      { "name": "forced-colors", "value": feature_value(&opts.forced_colors) },
-      { "name": "prefers-contrast", "value": feature_value(&opts.contrast) },
-    ]);
-    // Media type: empty string disables, "screen"/"print" sets.
-    let media = feature_value(&opts.media);
+    };
+    push_if_set(&mut features, "prefers-color-scheme", &opts.color_scheme);
+    push_if_set(&mut features, "prefers-reduced-motion", &opts.reduced_motion);
+    push_if_set(&mut features, "forced-colors", &opts.forced_colors);
+    push_if_set(&mut features, "prefers-contrast", &opts.contrast);
+    let media = match &opts.media {
+      MediaOverride::Set(v) => v.as_str(),
+      MediaOverride::Disabled | MediaOverride::Unchanged => "",
+    };
     let params = serde_json::json!({"features": features, "media": media});
     self.cmd("Emulation.setEmulatedMedia", params).await?;
     Ok(())
@@ -3336,22 +3424,18 @@ impl<T: CdpWrap> CdpPage<T> {
       .and_then(|v| v.as_str())
       .ok_or_else(|| format!("Ref '{ref_id}' no longer valid."))?;
 
-    let node_id = self
-      .cmd("DOM.requestNode", serde_json::json!({"objectId": object_id}))
-      .await?
-      .get("nodeId")
-      .and_then(serde_json::Value::as_i64)
-      .ok_or_else(|| format!("Ref '{ref_id}' no longer valid."))?;
-
-    if node_id == 0 {
-      return Err(format!("Ref '{ref_id}' no longer valid."));
-    }
-
+    // We intentionally do NOT call `DOM.requestNode` here. Without an
+    // explicit `DOM.getDocument` first (skipped by the lazy bootstrap),
+    // Chrome reports `nodeId: 0` for nodes not in the DOM-agent's
+    // current document. Element paths that genuinely need a nodeId
+    // (e.g. `DOM.setFileInputFiles`) lazily request one via
+    // `CdpElement::node_id()`; everywhere else, the cached
+    // `Runtime` objectId is sufficient and bypasses the DOM agent.
     Ok(T::wrap_element(CdpElement {
       transport: self.transport.clone(),
       session_id: self.session_id.clone(),
       handles: Arc::new(tokio::sync::Mutex::new(CdpElementHandles {
-        node_id: Some(node_id),
+        node_id: None,
         object_id: Some(Arc::from(object_id)),
       })),
     }))
@@ -4840,17 +4924,33 @@ impl<T: CdpTransport> CdpElement<T> {
   }
 
   pub async fn scroll_into_view(&self) -> Result<(), String> {
-    let node_id = self.node_id().await?;
+    // Prefer `objectId` over `nodeId`. CDP's `DOM.scrollIntoViewIfNeeded`
+    // accepts either, but the DOM agent's `nodeId` map is keyed on the
+    // current document version returned by `DOM.getDocument`. Lazy
+    // bootstrap (PERF_AUDIT §M.4) skips that call to save an RTT, so
+    // `DOM.requestNode` reports `nodeId: 0` on a fresh page and the
+    // caller sees a spurious "Element not found". Routing through
+    // the Runtime `objectId` (already resolved by the page-side
+    // selector engine) bypasses the DOM-agent state entirely.
+    let object_id = self.object_id().await?;
     self
-      .cmd("DOM.scrollIntoViewIfNeeded", serde_json::json!({"nodeId": node_id}))
+      .cmd(
+        "DOM.scrollIntoViewIfNeeded",
+        serde_json::json!({"objectId": &*object_id}),
+      )
       .await?;
     Ok(())
   }
 
   pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>, String> {
-    let node_id = self.node_id().await?;
+    // Prefer `objectId` over `nodeId` for the same reason as
+    // [`Self::scroll_into_view`]: the DOM-agent nodeId map relies on
+    // a prior `DOM.getDocument`, which the lazy bootstrap skips
+    // (PERF_AUDIT §M.4). `DOM.getBoxModel` accepts `objectId`
+    // directly.
+    let object_id = self.object_id().await?;
     let result = self
-      .cmd("DOM.getBoxModel", serde_json::json!({"nodeId": node_id}))
+      .cmd("DOM.getBoxModel", serde_json::json!({"objectId": &*object_id}))
       .await?;
     let content = result
       .get("model")

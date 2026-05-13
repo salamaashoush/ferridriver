@@ -2125,6 +2125,7 @@ fn run_all_tests(backend: &str) {
     ($name:path) => {{
       let name = stringify!($name);
       if filter.as_deref().is_none_or(|f| name.contains(f)) {
+        eprintln!("=== RUN {backend} {name}");
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $name(&mut c))) {
           Ok(()) => {
             passed += 1;

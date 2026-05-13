@@ -1590,9 +1590,90 @@ impl BidiPage {
 
     tokio::spawn(async move {
       while let Ok(event) = rx.recv().await {
-        // Filter events for this context
+        // Filter events for this context. Accepts events targeting this
+        // top-level context directly, events with no `context` field
+        // (session-wide), and events whose `parent` matches us — the
+        // latter covers `browsingContext.contextCreated` for child
+        // iframes that BiDi reports under the child's own id.
         let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
-        if event_ctx != &*ctx && !event_ctx.is_empty() {
+        let event_parent = event.params.get("parent").and_then(|v| v.as_str()).unwrap_or("");
+        let child_of_this = !event_parent.is_empty() && event_parent == &*ctx;
+        if event_ctx != &*ctx && !event_ctx.is_empty() && !child_of_this {
+          continue;
+        }
+
+        // `browsingContext.contextCreated` events for child iframes
+        // surface here with their own (child) `context` id and the
+        // top-level `parent` set to our context. Emit a `FrameAttached`
+        // so the page-level frame cache (used by `page.frame(name)`,
+        // `page.frames()`) sees the iframe. Without this BiDi pages
+        // expose no child-frame metadata at all.
+        //
+        // BiDi's `contextCreated` payload does not carry the
+        // iframe's `name` attribute. Spawn a follow-up
+        // `browsingContext.getTree` to enrich the cache record with
+        // name + final url once Firefox has wired the iframe up.
+        if event.method == "browsingContext.contextCreated" && child_of_this {
+          let frame_id = event_ctx.to_string();
+          let url = event
+            .params
+            .get("url")
+            .and_then(|v| v.as_str())
+            .unwrap_or("")
+            .to_string();
+          let parent_id = (*ctx).to_string();
+          emitter.emit(PageEvent::FrameAttached(crate::backend::FrameInfo {
+            frame_id: frame_id.clone(),
+            parent_frame_id: Some(parent_id.clone()),
+            name: String::new(),
+            url: url.clone(),
+          }));
+          // Async refresh: fetch the iframe's `name` (and updated `url`)
+          // via `browsingContext.getTree`. Firefox populates `name` once
+          // the iframe element is parsed; we re-emit a `FrameNavigated`
+          // with the enriched info so the cache lookup picks up
+          // `page.frame('target')` matches.
+          let session_for_refresh = session.clone();
+          let emitter_for_refresh = emitter.clone();
+          let parent_for_refresh = parent_id.clone();
+          let child_for_refresh = frame_id.clone();
+          tokio::spawn(async move {
+            let result = session_for_refresh
+              .transport
+              .send_command(
+                "browsingContext.getTree",
+                json!({"root": &parent_for_refresh, "maxDepth": 1}),
+              )
+              .await;
+            let Ok(tree) = result else { return };
+            let Some(contexts) = tree.get("contexts").and_then(|v| v.as_array()) else {
+              return;
+            };
+            // The returned array has the parent at index 0; its
+            // `children` array contains the iframe entries with `name`.
+            let Some(children) = contexts
+              .first()
+              .and_then(|p| p.get("children"))
+              .and_then(|v| v.as_array())
+            else {
+              return;
+            };
+            for child in children {
+              let cid = child.get("context").and_then(|v| v.as_str()).unwrap_or("");
+              if cid != child_for_refresh {
+                continue;
+              }
+              let cname = child.get("name").and_then(|v| v.as_str()).unwrap_or("").to_string();
+              let curl = child.get("url").and_then(|v| v.as_str()).unwrap_or("").to_string();
+              emitter_for_refresh.emit(PageEvent::FrameNavigated(crate::backend::FrameInfo {
+                frame_id: cid.to_string(),
+                parent_frame_id: Some(parent_for_refresh.clone()),
+                name: cname,
+                url: curl,
+              }));
+              break;
+            }
+          });
           continue;
         }
 
