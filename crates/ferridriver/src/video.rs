@@ -44,6 +44,12 @@ pub struct VideoRecordingHandle {
   pump_task: tokio::task::JoinHandle<()>,
   /// Encoder task: channel -> ffmpeg encode (blocking thread).
   encoder_task: tokio::task::JoinHandle<Result<(), String>>,
+  /// Cooperative shutdown signal to the CDP screencast listener.
+  /// Sending `()` causes the listener to drain any buffered
+  /// `screencastFrame` events, forward them through the pump, then
+  /// drop the sender so the encoder sees end-of-stream. No sleep,
+  /// no abort, no lost frames.
+  shutdown_tx: tokio::sync::oneshot::Sender<()>,
   output_path: PathBuf,
 }
 
@@ -65,8 +71,9 @@ pub async fn start_recording(
   // Bounded channel: CDP pump -> encoder. Backpressure prevents unbounded buffering.
   let (frame_tx, frame_rx) = mpsc::channel::<(Vec<u8>, f64)>(64);
 
-  // Start CDP screencast.
-  let cdp_rx = page.start_screencast(quality, w, h).await?;
+  // Start CDP screencast. `shutdown_tx` drives cooperative teardown
+  // of the listener; we hold onto it until `stop()` is called.
+  let (cdp_rx, shutdown_tx) = page.start_screencast(quality, w, h).await?;
 
   // Pump task: forwards CDP frames (with Chrome timestamps) to encoder channel.
   let pump_task = tokio::spawn(async move {
@@ -86,6 +93,7 @@ pub async fn start_recording(
   Ok(VideoRecordingHandle {
     pump_task,
     encoder_task,
+    shutdown_tx,
     output_path,
   })
 }
@@ -97,15 +105,23 @@ impl VideoRecordingHandle {
   ///
   /// Returns an error if the encoder fails or the join handle panics.
   pub async fn stop(self, page: &Page) -> Result<PathBuf, String> {
-    // Stop CDP screencast. This makes Chrome stop sending frames.
+    // 1. Tell Chrome to stop emitting `Page.screencastFrame`. Once
+    //    this response lands, no further events for this session.
     let _ = page.stop_screencast().await;
 
-    // Pump task will exit because cdp_rx closes (no more screencastFrame events).
-    // When pump exits, frame_tx drops, encoder sees channel close and drains.
-    // Abort pump in case it's stuck waiting on a frame that'll never come.
-    self.pump_task.abort();
+    // 2. Signal the listener to drain any events already buffered in
+    //    its broadcast subscription (frames Chrome shipped just
+    //    before the stop took effect). When the listener finishes
+    //    draining, it drops the channel sender.
+    let _ = self.shutdown_tx.send(());
 
-    // Wait for encoder to finish encoding remaining frames + trailing pad.
+    // 3. The pump's `rx.recv()` returns `None` once the listener
+    //    drops its sender. Await the pump rather than aborting -- no
+    //    frames lost, no arbitrary sleeps.
+    let _ = self.pump_task.await;
+
+    // 4. Pump exit drops `frame_tx`, encoder drains the bounded
+    //    channel and finishes.
     self.encoder_task.await.map_err(|e| format!("encoder join: {e}"))??;
 
     Ok(self.output_path)
@@ -120,6 +136,7 @@ type FrameBuffer = Arc<Mutex<Vec<(Vec<u8>, f64)>>>;
 pub struct BufferedRecordingHandle {
   frames: FrameBuffer,
   pump_task: tokio::task::JoinHandle<()>,
+  shutdown_tx: tokio::sync::oneshot::Sender<()>,
   width: u32,
   height: u32,
 }
@@ -138,7 +155,7 @@ pub async fn start_buffered_recording(
   let w = width & !1;
   let h = height & !1;
 
-  let cdp_rx = page.start_screencast(quality, w, h).await?;
+  let (cdp_rx, shutdown_tx) = page.start_screencast(quality, w, h).await?;
   let frames: FrameBuffer = Arc::new(Mutex::new(Vec::with_capacity(64)));
 
   let frames_clone = Arc::clone(&frames);
@@ -152,6 +169,7 @@ pub async fn start_buffered_recording(
   Ok(BufferedRecordingHandle {
     frames,
     pump_task,
+    shutdown_tx,
     width: w,
     height: h,
   })
@@ -165,7 +183,7 @@ impl BufferedRecordingHandle {
   /// Returns an error if no frames were captured, encoding fails, or the join handle panics.
   pub async fn encode(self, page: &Page, output_path: PathBuf) -> Result<PathBuf, String> {
     let _ = page.stop_screencast().await;
-    self.pump_task.abort();
+    let _ = self.shutdown_tx.send(());
     let _ = self.pump_task.await;
 
     let frames = self.frames.lock().await;
@@ -189,7 +207,7 @@ impl BufferedRecordingHandle {
   /// Stop capturing and discard frames. Zero encoding cost.
   pub async fn discard(self, page: &Page) {
     let _ = page.stop_screencast().await;
-    self.pump_task.abort();
+    let _ = self.shutdown_tx.send(());
     let _ = self.pump_task.await;
   }
 }

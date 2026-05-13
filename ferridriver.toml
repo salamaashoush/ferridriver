@@ -1,5 +1,5 @@
 [test]
-test_match = ["tests/**/*.spec.ts", "tests/**/*.test.ts", "tests/**/*.feature"]
+testMatch = ["tests/**/*.spec.ts", "tests/**/*.test.ts", "tests/**/*.feature"]
 
-[[test.web_server]]
-static_dir = "tests/assets"
+[[test.webServer]]
+staticDir = "tests/assets"

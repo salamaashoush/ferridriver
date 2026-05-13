@@ -1423,7 +1423,12 @@ impl PageJs {
       )
     })?;
     ctx.globals().set("__fdScreencast", callback)?;
-    let mut rx = self
+    // `start_screencast` returns `(rx, shutdown_tx)`. The QuickJS
+    // binding doesn't expose a stop hook here; the shutdown signal is
+    // dropped (which Chrome's stop-screencast path will subsequently
+    // see via teardown), and we forward frames until the listener
+    // exits on its own.
+    let (mut rx, _shutdown) = self
       .inner
       .start_screencast(quality, max_width, max_height)
       .await

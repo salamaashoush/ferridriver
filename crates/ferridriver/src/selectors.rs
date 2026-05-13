@@ -502,10 +502,20 @@ pub async fn query_one_prebuilt(
   selector_display: &str,
   frame_id: Option<&str>,
 ) -> Result<AnyElement, String> {
-  page
-    .evaluate_to_element(sel_js, frame_id)
-    .await
-    .map_err(|_| format!("No element found for selector: {selector_display}"))
+  // Surface the underlying error verbatim when it carries
+  // recognisable signal — most notably `strict mode violation: <N>`
+  // thrown by the engine's `selOne(parts, strict=true)`. Falling back
+  // to a generic "No element found" message would swallow that signal
+  // and the locator retry loop would spin until timeout instead of
+  // converting the strict-mode breach into a typed
+  // `FerriError::StrictModeViolation`.
+  page.evaluate_to_element(sel_js, frame_id).await.map_err(|err| {
+    if err.contains("strict mode violation") {
+      err
+    } else {
+      format!("No element found for selector: {selector_display}")
+    }
+  })
 }
 
 /// Build the JS expression for `selOne` from a selector string.
@@ -541,11 +551,12 @@ pub fn build_selone_js(selector: &str, fd: &str, strict: bool) -> Result<String,
 /// `/tmp/playwright/packages/injected/src/injectedScript.ts:278`.
 #[must_use]
 pub fn parse_strict_violation_count(message: &str) -> Option<usize> {
+  // Engine output (ferridriver's bundled selOne): `strict mode
+  // violation: <N>` — `<N>` is the match count and appears immediately
+  // after the colon.
   let needle = "strict mode violation:";
   let idx = message.find(needle)?;
   let tail = message[idx + needle.len()..].trim();
-  // The tail starts with the count, optionally followed by other
-  // tokens — take the leading run of digits.
   let count_str: String = tail.chars().take_while(char::is_ascii_digit).collect();
   count_str.parse().ok()
 }

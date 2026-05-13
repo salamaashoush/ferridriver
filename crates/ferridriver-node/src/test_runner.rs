@@ -39,15 +39,7 @@ type TestCallbackFn = ThreadsafeFunction<
 /// Used for `globalSetup` / `globalTeardown` function-form hooks supplied via
 /// `defineConfig({ globalSetupFn: ... })`. The pool argument from the core
 /// runner is ignored -- these hooks don't have fixture access.
-type GlobalHookFn = ThreadsafeFunction<
-  (),
-  napi::bindgen_prelude::Promise<()>,
-  (),
-  Status,
-  false,
-  true,
-  0,
->;
+type GlobalHookFn = ThreadsafeFunction<(), napi::bindgen_prelude::Promise<()>, (), Status, false, true, 0>;
 
 /// Static fixture names shared across all test registrations.
 /// Avoids per-test String allocations for the standard fixture set.
@@ -481,16 +473,17 @@ impl TestRunner {
   /// only state (grep/last_failed/watch/verbose/debug) uses dedicated setters.
   #[napi(factory)]
   pub fn create(config_json: String) -> Result<Self> {
-    let unified: ferridriver_config::FerridriverConfig =
-      serde_json::from_str(&config_json).map_err(|e| napi::Error::new(Status::GenericFailure, format!("invalid config json: {e}")))?;
+    let unified: ferridriver_config::FerridriverConfig = serde_json::from_str(&config_json)
+      .map_err(|e| napi::Error::new(Status::GenericFailure, format!("invalid config json: {e}")))?;
 
     // Initialise tracing from environment by default; explicit verbose is set
     // post-create via `set_verbose()` when the CLI parses --verbose.
     ferridriver_test::logging::init_from_env();
 
     // Apply env vars + auto-detect workers + normalize, with no CLI overrides.
-    let tc = ferridriver_test::config::resolve_config_from(unified.test, &ferridriver_test::config::CliOverrides::default())
-      .map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
+    let tc =
+      ferridriver_test::config::resolve_config_from(unified.test, &ferridriver_test::config::CliOverrides::default())
+        .map_err(|e| napi::Error::new(Status::GenericFailure, e))?;
 
     Ok(Self {
       config: tc,
@@ -1562,4 +1555,3 @@ impl ferridriver_test::reporter::Reporter for ResultCollectorReporter {
     Ok(())
   }
 }
-

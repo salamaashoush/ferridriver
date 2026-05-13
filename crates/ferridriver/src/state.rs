@@ -1171,8 +1171,18 @@ pub fn chrome_flags(headless: bool, extra_args: &[String]) -> Vec<String> {
     flags.push("--headless".into());
     flags.push("--hide-scrollbars".into());
     flags.push("--mute-audio".into());
+    // `preferredColorScheme=1` pins Blink's "no override" baseline to
+    // light. Without it, headless Chrome inherits the host's GTK / KDE
+    // dark-mode setting, which causes `matchMedia('(prefers-color-scheme:
+    // dark)').matches` to stay `true` even after
+    // `page.emulateMedia({colorScheme: null})` clears the override —
+    // the override is gone but the system fallback is still dark.
+    // Tests that rely on "null reset returns to light" only pass on
+    // light-mode hosts otherwise. Playwright's own chromiumSwitches
+    // skip this because their CI runs on light-mode hosts; we cover
+    // both.
     flags.push(
-      "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4".into(),
+      "--blink-settings=primaryHoverType=2,availableHoverTypes=2,primaryPointerType=4,availablePointerTypes=4,preferredColorScheme=1".into(),
     );
   }
 

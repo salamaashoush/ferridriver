@@ -817,7 +817,12 @@ impl AnyPage {
       Self::CdpRaw(p) => p.peek_main_frame_id(),
       #[cfg(target_os = "macos")]
       Self::WebKit(_) => None,
-      Self::Bidi(_) => None,
+      // BiDi's top-level browsing context id IS the page's main-frame
+      // identifier — `browsingContext.navigate` / `browsingContext.tree`
+      // all key off the same value. Surface it through the same peek
+      // hook so `Page::main_frame()` can seed the frame cache without
+      // an extra `browsingContext.getTree` RTT.
+      Self::Bidi(p) => Some(p.context_id.to_string()),
     }
   }
 
@@ -1165,14 +1170,27 @@ impl AnyPage {
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>, String> {
+  ) -> Result<
+    (
+      tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>,
+      tokio::sync::oneshot::Sender<()>,
+    ),
+    String,
+  > {
     match self {
       AnyPage::CdpPipe(p) => p.start_screencast(quality, max_width, max_height).await,
       AnyPage::CdpRaw(p) => p.start_screencast(quality, max_width, max_height).await,
       #[cfg(target_os = "macos")]
       AnyPage::WebKit(_) => Err("Video recording is not supported on WebKit backend".into()),
-
-      AnyPage::Bidi(p) => p.start_screencast(quality, max_width, max_height).await,
+      AnyPage::Bidi(p) => {
+        // BiDi backend does not yet expose a cooperative shutdown
+        // channel; synthesise one so the unified return shape holds.
+        // The signal is dropped (recorder doesn't use it for BiDi);
+        // BiDi's own teardown drives the pump via `stop_screencast`.
+        let rx = p.start_screencast(quality, max_width, max_height).await?;
+        let (tx, _rx_shutdown) = tokio::sync::oneshot::channel();
+        Ok((rx, tx))
+      },
     }
   }
 
