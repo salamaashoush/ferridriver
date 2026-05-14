@@ -166,6 +166,52 @@ function expectHitTarget(hitPoint: { x: number; y: number }, targetElement: Elem
   return injected.expectHitTarget(hitPoint, targetElement);
 }
 
+/**
+ * Wrap Playwright's `setupHitTargetInterceptor` (defined in the bundled
+ * `injectedScript.ts`) so the Rust click path can install + finalize
+ * without managing a JS handle round-trip. State lives on
+ * `window.__fd._hitInterceptor` for the duration of one click.
+ *
+ * Mirrors `_performPointerAction` in
+ * `/tmp/playwright/packages/playwright-core/src/server/dom.ts:393`:
+ * Playwright sets up the interceptor before the CDP mouse events,
+ * dispatches the events, then calls `handle.stop()` to read the
+ * captured hit target. We do the same — `installHitInterceptor`
+ * before mouseMoved, `finalizeHitInterceptor` after mouseReleased.
+ *
+ * Returns `'ok'` on successful install (or the preliminary
+ * `hitTargetDescription` string if the requested point is already
+ * occluded), and `'done'` / `{ hitTargetDescription }` on finalize.
+ */
+function installHitInterceptor(
+  el: Element,
+  hitPoint: { x: number; y: number },
+  action: 'hover' | 'tap' | 'mouse' | 'drag' = 'mouse',
+): 'ok' | string {
+  const w: any = window;
+  // Tear down any previous interceptor; a stuck listener from a prior
+  // miss-retry would otherwise swallow the next click's events.
+  if (w.__fd && w.__fd._hitInterceptor) {
+    try {
+      w.__fd._hitInterceptor.stop();
+    } catch {}
+    w.__fd._hitInterceptor = null;
+  }
+  const r = injected.setupHitTargetInterceptor(el, action, hitPoint, false);
+  if (typeof r === 'string') return r;
+  if (r === 'error:notconnected') return r;
+  w.__fd._hitInterceptor = r;
+  return 'ok';
+}
+
+function finalizeHitInterceptor(): 'done' | { hitTargetDescription: string } {
+  const w: any = window;
+  const it = w.__fd && w.__fd._hitInterceptor;
+  if (!it) return 'done';
+  w.__fd._hitInterceptor = null;
+  return it.stop();
+}
+
 // ── Click Guard ──
 
 function clickGuard(el: Element): string {
@@ -630,6 +676,8 @@ if (!window.__fd) {
     isActionable,
     isVisible: isElementVisible,
     expectHitTarget,
+    installHitInterceptor,
+    finalizeHitInterceptor,
 
     // Actions (Playwright-ported)
     clearAndDispatch,

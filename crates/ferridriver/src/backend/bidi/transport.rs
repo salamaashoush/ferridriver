@@ -81,8 +81,13 @@ impl BidiTransport {
       }
     });
 
-    // Event broadcast channel (256 buffer -- events are filtered by receivers)
-    let (event_tx, _) = broadcast::channel::<BidiEvent>(256);
+    // Event broadcast channel — sized to absorb a worst-case page
+    // load fan-out so slow subscribers don't get `RecvError::Lagged`
+    // (which would, e.g., make the frame-cache listener miss a
+    // `browsingContext.contextDestroyed` and leak stale frames). See
+    // `EVENT_BROADCAST_CAPACITY` in the CDP transport for the same
+    // rationale.
+    let (event_tx, _) = broadcast::channel::<BidiEvent>(4096);
     let event_tx2 = event_tx.clone();
 
     // Reader task -- hot path uses json_scan for zero-alloc field extraction

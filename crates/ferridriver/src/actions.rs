@@ -857,36 +857,145 @@ pub async fn click_with_opts(
   opts: &crate::options::ClickOptions,
 ) -> Result<(), String> {
   let args = crate::backend::BackendClickArgs::from_options(opts);
-  // Single combined pre-flight: `clickGuard` + `isActionable` +
-  // `scrollIntoView` + `clickPoint` in ONE callFunctionOn.
-  // Replaces 4 sequential RTTs (the prior `check_click_guard +
-  // wait_for_actionable + resolve_click_point` chain). When `force`
-  // is set the actionability check is skipped page-side; we still
-  // pay one RTT for the click point + scroll, which is unavoidable.
-  // When `trial` is set we skip the dispatch but still pay the
-  // pre-flight (Playwright parity — `trial` reports actionability).
-  let (x, y) = if opts.is_force() {
-    // Force path: skip clickGuard + isActionable, but still need
-    // the click point + scroll. Use the single-RTT helper bypassing
-    // both checks via the existing path.
-    resolve_click_point(element, opts.position).await?
-  } else {
-    match click_prep(element, page, opts.position).await? {
-      ClickPrep::Ready { x, y } => (x, y),
-      ClickPrep::IsSelect => return Err(ClickGuardError::IsSelect.to_string()),
-      ClickPrep::IsFileInput => return Err(ClickGuardError::IsFileInput.to_string()),
-      ClickPrep::NotActionable { reason } => return Err(reason),
+  // Retry the entire pointer action when the hit-target interceptor
+  // reports another element captured the click — mirrors Playwright's
+  // `_retryAction` loop in
+  // `/tmp/playwright/packages/playwright-core/src/server/dom.ts:310`.
+  // The most common reason in headed-mode tests: the page mutates
+  // (onload `setTimeout` fires, dynamic ad slot lays out) between
+  // `clickPrep` resolving the point and Chrome dispatching the
+  // queued `Input.dispatchMouseEvent`, so the click lands on whatever
+  // element flowed into that pixel position. Re-resolving the point
+  // on retry resyncs us to the current layout.
+  let retry_backoff_ms: [u64; 5] = [0, 20, 100, 100, 500];
+  let mut attempt: usize = 0;
+  loop {
+    if attempt > 0 {
+      let wait_ms = retry_backoff_ms[attempt.min(retry_backoff_ms.len() - 1)];
+      if wait_ms > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(wait_ms)).await;
+      }
     }
-  };
-  page.press_modifiers(&opts.modifiers).await?;
-  let result = if opts.is_trial() {
-    Ok(())
-  } else {
-    page.click_at_with(x, y, &args).await
-  };
-  // Always release modifiers so page state doesn't leak.
-  let _ = page.release_modifiers(&opts.modifiers).await;
-  result
+
+    // Single combined pre-flight: `clickGuard` + `isActionable` +
+    // `scrollIntoView` + `clickPoint` in ONE callFunctionOn.
+    let (x, y) = if opts.is_force() {
+      resolve_click_point(element, opts.position).await?
+    } else {
+      match click_prep(element, page, opts.position).await? {
+        ClickPrep::Ready { x, y } => (x, y),
+        ClickPrep::IsSelect => return Err(ClickGuardError::IsSelect.to_string()),
+        ClickPrep::IsFileInput => return Err(ClickGuardError::IsFileInput.to_string()),
+        ClickPrep::NotActionable { reason } => return Err(reason),
+      }
+    };
+
+    // Install Playwright's `setupHitTargetInterceptor` page-side
+    // BEFORE dispatching the mouse events. Skipped on force=true and
+    // trial=true to match Playwright's `_performPointerAction`
+    // (force bypasses actionability checks; trial does not click at
+    // all). Skipped also when the backend has no functioning JS
+    // injection bridge — `install_hit_interceptor` falls back to
+    // `'ok'` in that case so the click still attempts.
+    let interceptor_installed = if opts.is_force() || opts.is_trial() {
+      false
+    } else {
+      // Either branch (preliminary miss OR protocol failure) skips
+      // arming so we don't gate the click on a finalize that has no
+      // listener to wake. `Ok(false)` lets the retry loop re-resolve
+      // the point; `Err` falls through to the dispatch which surfaces
+      // the underlying CDP / BiDi error on its own.
+      matches!(install_hit_interceptor(element, x, y).await, Ok(true))
+    };
+
+    page.press_modifiers(&opts.modifiers).await?;
+    let dispatch = if opts.is_trial() {
+      Ok(())
+    } else {
+      page.click_at_with(x, y, &args).await
+    };
+    let _ = page.release_modifiers(&opts.modifiers).await;
+
+    if let Err(e) = dispatch {
+      // Clean up any installed interceptor on dispatch failure so the
+      // next attempt isn't poisoned by a stale listener.
+      if interceptor_installed {
+        let _ = finalize_hit_interceptor(element).await;
+      }
+      return Err(e);
+    }
+
+    if !interceptor_installed {
+      return Ok(());
+    }
+
+    // `Err` from `finalize_hit_interceptor` means the page-side
+    // helper round-trip itself failed (target navigated away, JS
+    // engine torn down, ...). The mouse events have already
+    // dispatched at that point; treat it as success so the action
+    // doesn't error on a teardown race. A real action-result failure
+    // would have surfaced from `click_at_with` earlier.
+    let Ok(hit) = finalize_hit_interceptor(element).await else {
+      return Ok(());
+    };
+    match hit {
+      HitResult::Done => return Ok(()),
+      HitResult::Missed { description } => {
+        attempt += 1;
+        if attempt >= retry_backoff_ms.len() + 2 {
+          return Err(format!(
+            "{description} intercepts pointer events after {attempt} attempts"
+          ));
+        }
+        // Loop continues — re-resolve + retry.
+      },
+    }
+  }
+}
+
+/// Outcome of the page-side hit-target interceptor — see
+/// `crates/ferridriver/src/injected/index.ts::finalizeHitInterceptor`.
+enum HitResult {
+  /// The captured mousedown / mouseup events landed on the target
+  /// element (or one of its descendants); the click succeeded.
+  Done,
+  /// Another element (or no element) was at the hit point when the
+  /// mouse events fired. The retry loop in [`click_with_opts`]
+  /// recomputes the click point and tries again.
+  Missed { description: String },
+}
+
+/// Install Playwright's `setupHitTargetInterceptor` for the click
+/// about to be dispatched. Returns `Ok(true)` when the interceptor is
+/// armed, `Ok(false)` when the preliminary hit-target check already
+/// reports a miss (the caller should retry without dispatching), and
+/// `Err(_)` on protocol failure.
+async fn install_hit_interceptor(element: &AnyElement, x: f64, y: f64) -> Result<bool, String> {
+  let js = format!("function() {{ return window.__fd.installHitInterceptor(this, {{x: {x}, y: {y}}}, 'mouse'); }}");
+  let val = element.call_js_fn_value(&js).await?;
+  let s = val.and_then(|v| v.as_str().map(std::string::ToString::to_string));
+  Ok(matches!(s.as_deref(), Some("ok")))
+}
+
+/// Tear down the interceptor and read the captured outcome.
+async fn finalize_hit_interceptor(element: &AnyElement) -> Result<HitResult, String> {
+  let js = "function() { return JSON.stringify(window.__fd.finalizeHitInterceptor()); }";
+  let val = element.call_js_fn_value(js).await?;
+  let raw = val
+    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+    .unwrap_or_default();
+  if raw.is_empty() || raw == "\"done\"" {
+    return Ok(HitResult::Done);
+  }
+  // Object form: { hitTargetDescription: "..." }.
+  if let Ok(parsed) = serde_json::from_str::<serde_json::Value>(&raw) {
+    if let Some(desc) = parsed.get("hitTargetDescription").and_then(|v| v.as_str()) {
+      return Ok(HitResult::Missed {
+        description: desc.to_string(),
+      });
+    }
+  }
+  Ok(HitResult::Done)
 }
 
 /// Dispatch a hover with the full [`crate::options::HoverOptions`]

@@ -270,9 +270,28 @@ fn lock_or_recover<T>(m: &std::sync::Mutex<T>) -> std::sync::MutexGuard<'_, T> {
   m.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
+/// Broadcast capacity for the per-transport event channel.
+///
+/// Every event subscriber (frame-cache listener, console drain,
+/// network tracker, file-chooser listener, screencast tap, NAPI
+/// `page.on(...)` registrations, ...) shares this single fan-out
+/// queue. A slow subscriber that lags behind the producer makes
+/// `tokio::sync::broadcast` drop the oldest queued message and
+/// surface `RecvError::Lagged` to that subscriber. The frame
+/// listener cannot recover from a dropped `Page.frameNavigated` —
+/// the page's frame cache stays stale, and every subsequent
+/// `locator(...)` waits for an element on the wrong frame.
+///
+/// 4096 is large enough to absorb a worst-case page load
+/// (network requests + lifecycle + DOM events) for multiple
+/// concurrent subscribers without dropping events. The memory
+/// cost is bounded by `Arc<serde_json::Value>` * capacity per
+/// transport, i.e. <1MB even at full saturation.
+const EVENT_BROADCAST_CAPACITY: usize = 4096;
+
 impl CdpDispatcher {
   pub fn new() -> Self {
-    let (event_tx, _) = broadcast::channel(256);
+    let (event_tx, _) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
     Self {
       next_id: AtomicU64::new(1),
       pending: Arc::new(DashMap::default()),
