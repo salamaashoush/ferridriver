@@ -27,6 +27,10 @@ export function buildConfigJson(opts: TestOpts = {}): string {
   const { reporter, ...rest } = opts;
   const test = {
     workers: 1,
+    // 120s per-test budget so cold Chromium launches on CI debug builds
+    // (which can exceed the FerridriverConfig 30s default) don't trip the
+    // inner runner before the browser is up.
+    timeout: 120_000,
     reporter: normaliseReporter(reporter) ?? [{ name: 'json', options: {} }],
     outputDir: join(tmpdir(), `ferri-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`),
     screenshotOnFailure: false,
