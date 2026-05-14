@@ -4892,6 +4892,13 @@ impl<T: CdpTransport> CdpElement<T> {
             "objectId": &*object_id,
             "functionDeclaration": function,
             "returnByValue": true,
+            // Allow `function` to be an async function or return a
+            // Promise — CDP awaits the resolution before returning so
+            // callers don't have to wrap the page-side helper in a
+            // synthetic synchronous shell. Synchronous returns pay no
+            // extra RTT; Chrome short-circuits when the result is not
+            // a Promise.
+            "awaitPromise": true,
         }),
       )
       .await?;
