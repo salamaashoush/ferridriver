@@ -289,7 +289,7 @@ struct DialogHandlerEntry {
 /// synchronously calls [`Self::did_open`]. That method iterates every
 /// registered handler in insertion order, calls each with the dialog,
 /// and checks if ANY returned `true`. If none did, the manager calls
-/// [`Dialog::auto_close`] on a detached task — accept for
+/// `Dialog::auto_close` on a detached task — accept for
 /// `beforeunload`, dismiss otherwise, matching Playwright's
 /// `Dialog._close`.
 ///
@@ -386,7 +386,7 @@ impl DialogManager {
   /// scheduled notification — removes the dialog from the open set so
   /// `remove_handler` / `has_open_dialogs` stay accurate. Backends
   /// that don't call through [`Dialog::accept`] (e.g. auto-close via
-  /// [`Dialog::auto_close`]) skip this; the open set is informational
+  /// `Dialog::auto_close`) skip this; the open set is informational
   /// and not load-bearing.
   pub fn dialog_will_close(&self, dialog: &Dialog) {
     if let Ok(mut open) = self.inner.open.lock() {

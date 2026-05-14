@@ -38,7 +38,7 @@ impl BrowserJs {
 impl BrowserJs {
   /// Playwright: `browser.newContext(options?)` —
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:9851`.
-  /// Accepts the full [`BrowserContextOptions`] bag via the
+  /// Accepts the full `BrowserContextOptions` bag via the
   /// isomorphic serde lowering.
   #[qjs(rename = "newContext")]
   pub fn new_context<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {

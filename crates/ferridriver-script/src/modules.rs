@@ -12,7 +12,7 @@
 //!    root for inline scripts with no base).
 //! 2. Validated against the [`PathSandbox`] just like `fs.readFile` — absolute
 //!    paths, `..` components, and symlink escapes are rejected.
-//! 3. Loaded from disk via rquickjs's built-in [`ScriptLoader`] (`.js` by
+//! 3. Loaded from disk via rquickjs's built-in `ScriptLoader` (`.js` by
 //!    default; `.mjs` also accepted).
 //!
 //! Bare specifiers (e.g. `import lodash from 'lodash'`) are rejected — there
