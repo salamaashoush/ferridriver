@@ -72,6 +72,21 @@ pub fn find_installed_headless_shell() -> Option<String> {
   BrowserInstaller::new().find_installed_headless_shell()
 }
 
+/// Install the latest stable Firefox.
+/// Returns the path to the installed firefox executable.
+#[napi]
+pub async fn install_firefox() -> Result<String> {
+  let installer = BrowserInstaller::new();
+  installer.install_firefox(|_| {}).await.map_err(Error::from_reason)
+}
+
+/// Find an installed Firefox in the ferridriver cache.
+/// Returns the path to the executable or null if not found.
+#[napi]
+pub fn find_installed_firefox() -> Option<String> {
+  BrowserInstaller::new().find_installed_firefox()
+}
+
 /// Get the browser cache directory path.
 #[napi]
 pub fn get_browser_cache_dir() -> String {

@@ -340,7 +340,18 @@ impl Page {
     // the wrapper's cache directly — `BidiPage::get_frame_tree` already
     // does the parallel `window.name` resolution for unnamed children,
     // so the wrapper sees a fully-populated cache.
-    if matches!(self.inner.kind(), crate::backend::BackendKind::Bidi) {
+    // Backends without per-frame attach/navigate events on the wire need an
+    // explicit cache seed after navigation so synchronous `page.frame(...)`
+    // / `page.frames()` calls see the iframes the test just navigated to.
+    // - BiDi: `browsingContext.contextCreated` arrives async with empty
+    //   `name`; the cache won't reflect the DOM until our `getTree` probe
+    //   runs.
+    // - WebKit (WKWebView, macOS-only): no FrameAttached events at all —
+    //   the cache is populated solely by `get_frame_tree`'s DOM probe.
+    let needs_sync = matches!(self.inner.kind(), crate::backend::BackendKind::Bidi);
+    #[cfg(target_os = "macos")]
+    let needs_sync = needs_sync || matches!(self.inner.kind(), crate::backend::BackendKind::WebKit);
+    if needs_sync {
       let _ = self.sync_frames().await;
     }
     result.map_err(Into::into)

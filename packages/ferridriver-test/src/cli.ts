@@ -1038,7 +1038,7 @@ const installCommand = defineCommand({
     },
   },
   async run({ args }) {
-    const { installChromium, installChromiumHeadlessShell, installSystemDeps, getBrowserCacheDir } = await import('@ferridriver/node');
+    const { installChromium, installChromiumHeadlessShell, installFirefox, installSystemDeps, getBrowserCacheDir } = await import('@ferridriver/node');
     const browser = (args.browser as string) || 'chromium';
     if (!['chromium', 'chrome', 'chromium-headless-shell', 'firefox'].includes(browser)) {
       console.error(`Unsupported browser: ${browser}. Supported: chromium, chromium-headless-shell, firefox.`);
@@ -1054,6 +1054,10 @@ const installCommand = defineCommand({
       console.log('Installing Chrome Headless Shell...');
       const path = await installChromiumHeadlessShell();
       console.log(`Chrome Headless Shell installed: ${path}`);
+    } else if (browser === 'firefox') {
+      console.log('Installing Firefox...');
+      const path = await installFirefox();
+      console.log(`Firefox installed: ${path}`);
     } else {
       console.log('Installing Chromium...');
       const path = await installChromium();

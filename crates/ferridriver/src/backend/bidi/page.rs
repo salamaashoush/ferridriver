@@ -383,7 +383,13 @@ impl BidiPage {
     }
 
     // BiDi doesn't include frame names in the context tree.
-    // Resolve names in parallel by evaluating `window.name` in each child frame.
+    // Resolve names by locating the iframe element in the PARENT context via
+    // `browsingContext.locateNodes` — same path Playwright uses
+    // (`bidiBrowser.ts:154` -> `_getFrameNode`). This reads `name`/`id` from
+    // the iframe element's HTML attributes, which are populated as soon as
+    // the parent parses the `<iframe>` tag — unlike `window.name` on the
+    // child, which Firefox can leave empty on srcdoc iframes until the
+    // child's global object initialises.
     let child_indices: Vec<usize> = frames
       .iter()
       .enumerate()
@@ -393,14 +399,40 @@ impl BidiPage {
     if !child_indices.is_empty() {
       let futs: Vec<_> = child_indices
         .iter()
-        .map(|&i| self.eval_internal("window.name", &frames[i].frame_id))
+        .map(|&i| {
+          let frame_id = frames[i].frame_id.clone();
+          let parent_id = frames[i].parent_frame_id.clone().unwrap_or_default();
+          async move {
+            self
+              .cmd(
+                "browsingContext.locateNodes",
+                json!({
+                  "context": parent_id,
+                  "locator": { "type": "context", "value": { "context": frame_id } },
+                  "maxNodeCount": 1,
+                }),
+              )
+              .await
+          }
+        })
         .collect();
       let results = futures::future::join_all(futs).await;
       for (idx, result) in child_indices.into_iter().zip(results) {
-        if let Ok(Some(val)) = result {
-          if let Some(name) = val.as_str() {
-            frames[idx].name = name.to_string();
-          }
+        let Ok(value) = result else { continue };
+        let Some(node) = value.get("nodes").and_then(|v| v.as_array()).and_then(|a| a.first()) else {
+          continue;
+        };
+        // The locator returns a `NodeRemoteValue`; the iframe element's
+        // attributes live in `value.attributes` (Bidi `Script.NodeProperties`).
+        let attrs = node.get("value").and_then(|v| v.get("attributes"));
+        let name = attrs
+          .and_then(|a| a.get("name"))
+          .and_then(|v| v.as_str())
+          .filter(|s| !s.is_empty())
+          .or_else(|| attrs.and_then(|a| a.get("id")).and_then(|v| v.as_str()))
+          .unwrap_or("");
+        if !name.is_empty() {
+          frames[idx].name = name.to_string();
         }
       }
     }
