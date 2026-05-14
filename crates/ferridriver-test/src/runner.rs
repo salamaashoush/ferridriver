@@ -1134,10 +1134,18 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPla
     args.push("--ignore-certificate-errors".to_string());
   }
 
+  // Force headless under CI even if the config left the default
+  // (`false`) in place. Headed Chrome / Firefox on a runner with no
+  // DISPLAY hangs the launch handshake past the per-command timeout.
+  // Matches Playwright's `process.env.CI` handling in
+  // `packages/playwright/src/index.ts` (the `headless` option fixture
+  // defaults to `!process.env.PWDEBUG`).
+  let headless = browser_config.headless || std::env::var("CI").is_ok();
+
   LaunchPlan {
     backend,
     kind,
-    headless: browser_config.headless,
+    headless,
     executable_path: browser_config.executable_path.clone(),
     args,
     default_viewport: browser_config
