@@ -138,14 +138,6 @@ impl super::transport::CdpTransport for PipeTransport {
     }
   }
 
-  fn register_nav_waiter(
-    &self,
-    session_id: &str,
-    target: crate::backend::NavLifecycle,
-  ) -> tokio::sync::oneshot::Receiver<Result<(), String>> {
-    self.dispatcher.register_nav_waiter(session_id, target)
-  }
-
   fn subscribe_events(&self) -> tokio::sync::broadcast::Receiver<std::sync::Arc<serde_json::Value>> {
     self.dispatcher.subscribe_events()
   }

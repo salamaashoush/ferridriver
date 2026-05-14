@@ -1,8 +1,19 @@
 //! Transport trait and shared CDP message dispatch logic.
 //!
-//! The dispatch logic (response correlation, nav waiters, lifecycle tracking,
-//! event broadcast) is identical for pipe and WebSocket transports. It lives
-//! here as `CdpDispatcher` — both transports embed it and call `dispatch_message`.
+//! The dispatch logic (response correlation, document-accurate lifecycle
+//! tracking, event broadcast) is identical for pipe and WebSocket
+//! transports. It lives here as `CdpDispatcher` — both transports embed
+//! it and call `dispatch_message`.
+//!
+//! Navigation waits are driven entirely off the per-session
+//! [`super::LifecycleState`] (commit + lifecycle, both gated on the
+//! navigation's `loaderId`). `Page.loadEventFired` / `Page.domContentEventFired`
+//! are deliberately ignored — they're page-level events with no
+//! loaderId, so a late-arriving `loadEventFired` from a previous
+//! document can resolve a fresh wait before the new document has even
+//! committed (see `Frame.gotoImpl` in
+//! `/tmp/playwright/packages/playwright-core/src/server/frames.ts` —
+//! Playwright likewise drives navigation off `Page.lifecycleEvent` only).
 
 use dashmap::DashMap;
 use rustc_hash::FxHashMap;
@@ -214,12 +225,6 @@ pub trait CdpTransport: Send + Sync + 'static {
     params: serde_json::Value,
   ) -> impl std::future::Future<Output = Result<serde_json::Value, String>> + Send;
 
-  fn register_nav_waiter(
-    &self,
-    session_id: &str,
-    target: crate::backend::NavLifecycle,
-  ) -> oneshot::Receiver<Result<(), String>>;
-
   fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>>;
 
   fn register_lifecycle_tracker(
@@ -232,11 +237,6 @@ pub trait CdpTransport: Send + Sync + 'static {
 
 // ── Shared dispatch state ──────────────────────────────────────────────────
 
-struct NavWaiter {
-  target: crate::backend::NavLifecycle,
-  tx: oneshot::Sender<Result<(), String>>,
-}
-
 pub(crate) struct LifecycleTracker {
   pub state: Arc<std::sync::Mutex<super::LifecycleState>>,
   pub notify: Arc<tokio::sync::Notify>,
@@ -246,12 +246,9 @@ pub(crate) struct LifecycleTracker {
 pub(crate) struct CdpDispatcher {
   pub next_id: AtomicU64,
   pub pending: Arc<PendingMap>,
-  /// Per-session navigation waiters (keyed by sessionId). Sharded
+  /// Per-session lifecycle trackers (keyed by sessionId). Sharded
   /// via `DashMap` so events firing on N sessions don't contend on
   /// the same mutex.
-  nav_waiters: Arc<DashMap<String, NavWaiter>>,
-  /// Per-session lifecycle trackers (keyed by sessionId). Sharded
-  /// via `DashMap`; same reasoning as `nav_waiters`.
   lifecycle_trackers: Arc<DashMap<String, LifecycleTracker>>,
   /// Per-message broadcast channel. Wraps the message in `Arc` so
   /// fanout to N subscribers is N refcount bumps (~5ns each)
@@ -279,23 +276,10 @@ impl CdpDispatcher {
     Self {
       next_id: AtomicU64::new(1),
       pending: Arc::new(DashMap::default()),
-      nav_waiters: Arc::new(DashMap::default()),
       lifecycle_trackers: Arc::new(DashMap::default()),
       event_tx,
       rtt_stats: Arc::new(std::sync::Mutex::new(RttStats::default())),
     }
-  }
-
-  pub fn register_nav_waiter(
-    &self,
-    session_id: &str,
-    target: crate::backend::NavLifecycle,
-  ) -> oneshot::Receiver<Result<(), String>> {
-    let (tx, rx) = oneshot::channel();
-    self
-      .nav_waiters
-      .insert(session_id.to_string(), NavWaiter { target, tx });
-    rx
   }
 
   pub fn register_lifecycle_tracker(
@@ -403,62 +387,6 @@ impl CdpDispatcher {
       let sid_str = std::str::from_utf8(session_id).unwrap_or("");
       let key = sid_str.to_string();
 
-      // Nav waiter dispatch. DashMap pattern: lookup target via
-      // `get` (returns a guard that holds the shard read-lock for
-      // the lookup window only), then `remove` if matched. We don't
-      // hold the get-guard across the remove — pattern below clones
-      // the matched target via `Copy` so the read guard drops
-      // immediately, then `remove` takes the write lock cleanly.
-      {
-        use crate::backend::NavLifecycle;
-        let target_now = self.nav_waiters.get(&key).map(|g| g.target);
-        let take_if = |want: bool| -> Option<NavWaiter> {
-          if want {
-            self.nav_waiters.remove(&key).map(|(_, v)| v)
-          } else {
-            None
-          }
-        };
-        match method_str {
-          "Page.frameNavigated" => {
-            if let Some(w) = take_if(matches!(target_now, Some(NavLifecycle::Commit))) {
-              let _ = w.tx.send(Ok(()));
-            }
-          },
-          "Page.lifecycleEvent" => {
-            let params = json_scan::json_field(raw, b"params");
-            let name = json_scan::json_string(json_scan::json_field(params, b"name"));
-            let name_str = std::str::from_utf8(name).unwrap_or("");
-            let resolve = matches!(
-              (name_str, target_now),
-              ("DOMContentLoaded", Some(NavLifecycle::DomContentLoaded))
-                | ("load", Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded))
-            );
-            if let Some(w) = take_if(resolve) {
-              let _ = w.tx.send(Ok(()));
-            }
-          },
-          "Page.loadEventFired" => {
-            let resolve = matches!(target_now, Some(NavLifecycle::Load | NavLifecycle::DomContentLoaded));
-            if let Some(w) = take_if(resolve) {
-              let _ = w.tx.send(Ok(()));
-            }
-          },
-          "Page.domContentEventFired" => {
-            let resolve = matches!(target_now, Some(NavLifecycle::DomContentLoaded));
-            if let Some(w) = take_if(resolve) {
-              let _ = w.tx.send(Ok(()));
-            }
-          },
-          "Inspector.targetCrashed" => {
-            if let Some((_, w)) = self.nav_waiters.remove(&key) {
-              let _ = w.tx.send(Err("Target crashed".into()));
-            }
-          },
-          _ => {},
-        }
-      }
-
       self.dispatch_lifecycle(raw, method_str, &key);
 
       tracing::trace!(
@@ -482,13 +410,28 @@ impl CdpDispatcher {
     }
   }
 
-  /// Lifecycle tracker dispatch -- tracks `loaderId` for document-accurate lifecycle.
+  /// Lifecycle tracker dispatch -- tracks `loaderId` for document-accurate
+  /// lifecycle. Only main-frame events update the tracker: a subframe's
+  /// `Page.frameNavigated` carries a `parentId` (mirrors Playwright's
+  /// `_eventBelongsToStaleFrame` filter — main-frame and subframe nav
+  /// states have independent lifecycle in
+  /// `/tmp/playwright/packages/playwright-core/src/server/frames.ts`),
+  /// and a subframe's `Page.lifecycleEvent` carries a `loaderId` that
+  /// will not match the main frame's `current_loader_id`.
+  ///
+  /// `Inspector.targetCrashed` sets `crashed` and wakes waiters so
+  /// goto/reload return immediately instead of stalling until timeout.
   fn dispatch_lifecycle(&self, raw: &[u8], method_str: &str, key: &str) {
     if let Some(tracker) = self.lifecycle_trackers.get(key) {
       match method_str {
         "Page.frameNavigated" => {
           let params = json_scan::json_field(raw, b"params");
           let frame = json_scan::json_field(params, b"frame");
+          let parent_id = json_scan::json_field(frame, b"parentId");
+          if !parent_id.is_empty() {
+            // Subframe commit — leave main-frame lifecycle untouched.
+            return;
+          }
           let loader_id = json_scan::json_string(json_scan::json_field(frame, b"loaderId"));
           let loader_id_str = std::str::from_utf8(loader_id).unwrap_or("");
           let mut state = lock_or_recover(&tracker.state);
@@ -511,12 +454,28 @@ impl CdpDispatcher {
           };
           if let Some(event_name) = event_name {
             let mut state = lock_or_recover(&tracker.state);
-            if state.current_loader_id == loader_id_str || state.current_loader_id.is_empty() {
+            // Strict loaderId match. A subframe lifecycle event carries
+            // the subframe's loaderId, which never matches the main
+            // frame's `current_loader_id`. The previous "or is_empty()"
+            // relaxation was a workaround for the initial-nav case
+            // where `current_loader_id` is unset before the first
+            // `Page.frameNavigated` lands; we drop it because the
+            // wrapper now seeds `current_loader_id` from the
+            // `Page.navigate` response (see
+            // `crates/ferridriver/src/backend/cdp/mod.rs::CdpPage::goto`)
+            // before awaiting any lifecycle event.
+            if state.current_loader_id == loader_id_str {
               state.fired.insert(event_name.to_string());
               drop(state);
               tracker.notify.notify_waiters();
             }
           }
+        },
+        "Inspector.targetCrashed" => {
+          let mut state = lock_or_recover(&tracker.state);
+          state.crashed = true;
+          drop(state);
+          tracker.notify.notify_waiters();
         },
         _ => {},
       }

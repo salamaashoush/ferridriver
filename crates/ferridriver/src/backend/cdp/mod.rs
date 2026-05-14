@@ -1008,6 +1008,12 @@ pub struct LifecycleState {
   pub current_loader_id: String,
   /// Lifecycle events fired for the current document.
   pub fired: std::collections::HashSet<String>,
+  /// Set by the transport dispatcher when `Inspector.targetCrashed`
+  /// fires for the page's session. Goto/reload/wait-for-navigation
+  /// observe this and bail out with a typed error instead of stalling
+  /// until the lifecycle timeout. Mirrors Playwright's
+  /// `Page.openScope` cancellation in `raceNavigationAction`.
+  pub crashed: bool,
 }
 
 impl LifecycleState {
@@ -1015,6 +1021,7 @@ impl LifecycleState {
     Self {
       current_loader_id: String::new(),
       fired: std::collections::HashSet::new(),
+      crashed: false,
     }
   }
 }
@@ -1277,6 +1284,18 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Navigation ----
 
+  /// Map an [`NavLifecycle`] to the [`LifecycleState::fired`] key the
+  /// dispatcher writes for it. Centralised so `goto` / `reload` /
+  /// `history_go` / `wait_for_navigation` all read the same vocabulary
+  /// the transport produces.
+  fn lifecycle_key(lifecycle: crate::backend::NavLifecycle) -> &'static str {
+    match lifecycle {
+      crate::backend::NavLifecycle::Commit => "commit",
+      crate::backend::NavLifecycle::DomContentLoaded => "domcontentloaded",
+      crate::backend::NavLifecycle::Load => "load",
+    }
+  }
+
   pub async fn goto(
     &self,
     url: &str,
@@ -1290,22 +1309,13 @@ impl<T: CdpWrap> CdpPage<T> {
     // self-guarded `window.__fd` IIFE. Resetting the manager triggers
     // a redundant `Page.addScriptToEvaluateOnNewDocument` RTT on every
     // `goto()` — this code used to pay it once per nav for nothing.
-    let target_event = match lifecycle {
-      crate::backend::NavLifecycle::Commit => "commit",
-      crate::backend::NavLifecycle::DomContentLoaded => "domcontentloaded",
-      crate::backend::NavLifecycle::Load => "load",
-    };
+    let target_event = Self::lifecycle_key(lifecycle);
 
     // Clear any previous main-doc request slot so a same-document
     // navigation (no new request) resolves as "no response" per
     // Playwright's `Response | null` contract. The network listener
     // refills the slot when it observes the next navigation request.
     self.nav_request_slot.clear();
-
-    // Register nav waiter BEFORE navigate.
-    let rx = self
-      .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
 
     // Send navigation command. Response includes loaderId for this navigation.
     // `referrer` mirrors the CDP `Page.navigate` param (note the CDP
@@ -1334,25 +1344,25 @@ impl<T: CdpWrap> CdpPage<T> {
       let _ = self.main_frame_id.set(fid.to_string());
     }
 
-    let nav_loader_id = nav_result.get("loaderId").and_then(|v| v.as_str()).unwrap_or("");
+    let nav_loader_id = nav_result
+      .get("loaderId")
+      .and_then(|v| v.as_str())
+      .unwrap_or("")
+      .to_string();
 
-    // Sync check: if the lifecycle event for THIS navigation's document already
-    // fired (reader processed frameNavigated + lifecycle events during the navigate
-    // command), return immediately. The loaderId match ensures we don't return
-    // early with stale data from a previous navigation.
-    let already_fired = {
-      let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      state.current_loader_id == nav_loader_id && state.fired.contains(target_event)
-    };
-    if already_fired {
-      return Ok(self.await_nav_response().await);
-    }
-
-    // Async wait for the lifecycle event via oneshot.
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
-      Ok(Ok(Ok(())) | Err(_)) | Err(_) => Ok(self.await_nav_response().await),
-      Ok(Ok(Err(e))) => Err(e),
-    }
+    // Mirrors Playwright's `Frame.gotoImpl`
+    // (`/tmp/playwright/packages/playwright-core/src/server/frames.ts:644`):
+    // wait for the InternalNavigation whose `documentId === navigateResult.newDocumentId`,
+    // then for the AddLifecycle event matching the wait target. Both
+    // gates use the same loaderId, so a late `Page.loadEventFired`
+    // from a previous document cannot prematurely satisfy a fresh
+    // navigation (the failure mode that produced "Not attached to an
+    // active page" when `Page.reload` was sent in the middle of a
+    // cross-origin RFH swap).
+    self
+      .await_loader_lifecycle(&nav_loader_id, target_event, timeout_ms)
+      .await?;
+    Ok(self.await_nav_response().await)
   }
 
   /// Resolve the main-document `Response` captured by the network
@@ -1365,16 +1375,11 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn wait_for_navigation(&self) -> Result<(), String> {
-    let rx = self.transport.register_nav_waiter(
-      self.session_id.as_deref().unwrap_or(""),
-      crate::backend::NavLifecycle::Load,
-    );
-
-    match tokio::time::timeout(Duration::from_secs(30), rx).await {
-      Ok(Ok(result)) => result,
-      Ok(Err(_)) => Err("Navigation waiter dropped".into()),
-      Err(_) => Ok(()),
-    }
+    let pre_loader_id = {
+      let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      state.current_loader_id.clone()
+    };
+    self.await_loader_change(&pre_loader_id, "load", 30_000).await
   }
 
   pub async fn reload(
@@ -1385,14 +1390,21 @@ impl<T: CdpWrap> CdpPage<T> {
     // See `goto`: the registered init script persists across reloads;
     // no need to reset and re-fire `Page.addScriptToEvaluateOnNewDocument`.
     self.nav_request_slot.clear();
-    let rx = self
-      .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
+    let target_event = Self::lifecycle_key(lifecycle);
+    // Snapshot the pre-reload `current_loader_id`. The reload command
+    // does not return the new loaderId, so we wait for any commit
+    // whose loaderId differs from this snapshot (mirrors
+    // Playwright's `Page.reload` calling `waitForNavigation(requiresNewDocument: true)`
+    // — `/tmp/playwright/packages/playwright-core/src/server/page.ts:447`).
+    let pre_loader_id = {
+      let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      state.current_loader_id.clone()
+    };
     self.cmd("Page.reload", super::empty_params()).await?;
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
-      Ok(Ok(Ok(())) | Err(_)) | Err(_) => Ok(self.await_nav_response().await),
-      Ok(Ok(Err(e))) => Err(e),
-    }
+    self
+      .await_loader_change(&pre_loader_id, target_event, timeout_ms)
+      .await?;
+    Ok(self.await_nav_response().await)
   }
 
   pub async fn go_back(
@@ -1440,15 +1452,91 @@ impl<T: CdpWrap> CdpPage<T> {
       .unwrap_or(0);
 
     self.nav_request_slot.clear();
-    let rx = self
-      .transport
-      .register_nav_waiter(self.session_id.as_deref().unwrap_or(""), lifecycle);
+    let target_event = Self::lifecycle_key(lifecycle);
+    let pre_loader_id = {
+      let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      state.current_loader_id.clone()
+    };
     self
       .cmd("Page.navigateToHistoryEntry", serde_json::json!({"entryId": entry_id}))
       .await?;
-    match tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), rx).await {
-      Ok(Ok(Ok(())) | Err(_)) | Err(_) => Ok(self.await_nav_response().await),
-      Ok(Ok(Err(e))) => Err(e),
+    self
+      .await_loader_change(&pre_loader_id, target_event, timeout_ms)
+      .await?;
+    Ok(self.await_nav_response().await)
+  }
+
+  /// Wait until the page's main-frame [`LifecycleState`] has both
+  /// committed the supplied `expected_loader_id` AND fired
+  /// `target_event` for that loader.
+  ///
+  /// `Page.navigate` returns the navigation's `loaderId` synchronously
+  /// (Chrome 90+), so [`Self::goto`] uses this strict gate. Returns
+  /// permissively on timeout (`Ok(())`) to preserve the prior
+  /// "navigate-returns-with-whatever-we-have" semantics on hostile
+  /// pages; the caller's response wait surfaces real failures.
+  async fn await_loader_lifecycle(
+    &self,
+    expected_loader_id: &str,
+    target_event: &str,
+    timeout_ms: u64,
+  ) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+      let notified = self.lifecycle_notify.notified();
+      tokio::pin!(notified);
+      // `Notified::enable` arms the future before the state check so
+      // a `notify_waiters` racing between check and await is observed.
+      // Without this the dispatcher could fire its notify, the check
+      // could still see the pre-notify state, and the subsequent await
+      // would miss the wake.
+      notified.as_mut().enable();
+      {
+        let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.crashed {
+          return Err("Target crashed".into());
+        }
+        if state.current_loader_id == expected_loader_id && state.fired.contains(target_event) {
+          return Ok(());
+        }
+      }
+      if tokio::time::timeout_at(deadline, notified).await.is_err() {
+        return Ok(());
+      }
+    }
+  }
+
+  /// Variant of [`Self::await_loader_lifecycle`] for navigations whose
+  /// `loaderId` is unknown ahead of time (`Page.reload`,
+  /// `Page.navigateToHistoryEntry`, generic `page.waitForNavigation`).
+  /// Waits for the main frame's `current_loader_id` to change away
+  /// from `pre_loader_id` AND fire `target_event` for the new loader.
+  async fn await_loader_change(
+    &self,
+    pre_loader_id: &str,
+    target_event: &str,
+    timeout_ms: u64,
+  ) -> Result<(), String> {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+      let notified = self.lifecycle_notify.notified();
+      tokio::pin!(notified);
+      notified.as_mut().enable();
+      {
+        let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if state.crashed {
+          return Err("Target crashed".into());
+        }
+        if state.current_loader_id != pre_loader_id
+          && !state.current_loader_id.is_empty()
+          && state.fired.contains(target_event)
+        {
+          return Ok(());
+        }
+      }
+      if tokio::time::timeout_at(deadline, notified).await.is_err() {
+        return Ok(());
+      }
     }
   }
 
