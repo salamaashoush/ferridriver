@@ -505,7 +505,12 @@ fn build_worker_browser_def(handle: Arc<crate::runner::BrowserHandle>) -> Fixtur
       })
     }),
     teardown: None,
-    timeout: Duration::from_secs(30),
+    // Cold Chromium launch on CI debug builds routinely exceeds 30s
+    // (debug binary cost + cold cache). Match Playwright's
+    // `timeout: 0` (no timeout) on the browser fixture
+    // (`packages/playwright/src/index.ts:135`) with a generous 120s
+    // cap so a genuinely-stuck launch still surfaces an error.
+    timeout: Duration::from_secs(120),
     auto: false,
   }
 }
