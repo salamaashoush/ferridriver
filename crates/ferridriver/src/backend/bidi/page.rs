@@ -426,6 +426,15 @@ impl BidiPage {
                   "context": parent_id,
                   "locator": { "type": "context", "value": { "context": frame_id } },
                   "maxNodeCount": 1,
+                  // Firefox returns a NodeRemoteValue with empty `attributes`
+                  // unless we ask for a deep serialisation. maxObjectDepth: 1
+                  // is enough to pull the iframe element's HTML attributes
+                  // map. Matches Playwright's locator request shape.
+                  "serializationOptions": {
+                    "maxObjectDepth": 1,
+                    "maxDomDepth": 0,
+                    "includeShadowTree": "none",
+                  },
                 }),
               )
               .await
