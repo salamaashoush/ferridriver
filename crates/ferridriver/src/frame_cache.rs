@@ -60,15 +60,49 @@ impl FrameCache {
   }
 
   /// Apply a `Page.frameAttached`-equivalent event.
+  ///
+  /// A `FrameAttached` event carries `name` only when the backend can fill
+  /// it from the attach payload itself. `BiDi`'s
+  /// `browsingContext.contextCreated` does NOT carry the iframe's `name`
+  /// attribute (it lives in the DOM, not in the `BiDi`-level metadata) —
+  /// the backend emits an empty `name` and refreshes via a follow-up
+  /// `browsingContext.getTree` / `window.name` eval. If a separate code
+  /// path (e.g. `Page::sync_frames` on goto-return) has already seeded
+  /// the cache with a populated `name`, we must NOT clobber it with the
+  /// empty one from the attach event. Same applies to a clobbered `url`:
+  /// keep the prior value when the new one is empty.
   pub(crate) fn attach(&mut self, info: FrameInfo) {
     let id: Arc<str> = Arc::from(info.frame_id.as_str());
     if info.parent_frame_id.is_none() && self.main_id.is_none() {
       self.main_id = Some(Arc::clone(&id));
     }
-    if !self.by_id.contains_key(&id) {
+    let existing = self.by_id.get(&id);
+    let merged_name = if info.name.is_empty() {
+      existing.map(|r| r.info.name.clone()).unwrap_or_default()
+    } else {
+      info.name.clone()
+    };
+    let merged_url = if info.url.is_empty() {
+      existing.map(|r| r.info.url.clone()).unwrap_or_default()
+    } else {
+      info.url.clone()
+    };
+    if existing.is_none() {
       self.order.push(Arc::clone(&id));
     }
-    self.by_id.insert(id, FrameRecord { info, detached: false });
+    let merged = FrameInfo {
+      frame_id: info.frame_id,
+      parent_frame_id: info.parent_frame_id,
+      name: merged_name,
+      url: merged_url,
+    };
+    self.by_id.insert(
+      id,
+      FrameRecord {
+        info: merged,
+        detached: false,
+      },
+    );
   }
 
   /// Apply a `Page.frameDetached` event — flip the `detached` flag. Keep
@@ -89,14 +123,34 @@ impl FrameCache {
   /// for the main frame, populating the cache without an extra RTT.
   pub(crate) fn navigated(&mut self, info: FrameInfo) {
     let id: Arc<str> = Arc::from(info.frame_id.as_str());
-    let detached = self.by_id.get(&id).is_some_and(|r| r.detached);
+    let existing = self.by_id.get(&id);
+    let detached = existing.is_some_and(|r| r.detached);
     if info.parent_frame_id.is_none() && self.main_id.is_none() {
       self.main_id = Some(Arc::clone(&id));
     }
-    if !self.by_id.contains_key(&id) {
+    // Preserve a previously-resolved `name` when this navigation
+    // arrives with an empty one (same reasoning as `attach` — BiDi's
+    // navigation events do not carry the iframe's DOM-side name).
+    let merged_name = if info.name.is_empty() {
+      existing.map(|r| r.info.name.clone()).unwrap_or_default()
+    } else {
+      info.name.clone()
+    };
+    let merged_url = if info.url.is_empty() {
+      existing.map(|r| r.info.url.clone()).unwrap_or_default()
+    } else {
+      info.url.clone()
+    };
+    if existing.is_none() {
       self.order.push(Arc::clone(&id));
     }
-    self.by_id.insert(id, FrameRecord { info, detached });
+    let merged = FrameInfo {
+      frame_id: info.frame_id,
+      parent_frame_id: info.parent_frame_id,
+      name: merged_name,
+      url: merged_url,
+    };
+    self.by_id.insert(id, FrameRecord { info: merged, detached });
   }
 
   /// Snapshot of the main frame record (`None` only before the first
