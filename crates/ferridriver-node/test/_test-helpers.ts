@@ -24,7 +24,11 @@ function normaliseReporter(rep: TestOpts['reporter']) {
  *  overrides. The default test config is single-worker + json reporter +
  *  isolated output dir so bun-test runs stay deterministic and clean. */
 export function buildConfigJson(opts: TestOpts = {}): string {
-  const { reporter, ...rest } = opts;
+  const { reporter, browser, ...rest } = opts;
+  // Default the browser to headless so CI runners (no DISPLAY) launch
+  // Chromium successfully. Tests can pass `browser: { headless: false }`
+  // when they need headed behaviour.
+  const browserDef = browser && typeof browser === 'object' ? (browser as Record<string, unknown>) : {};
   const test = {
     workers: 1,
     // 120s per-test budget so cold Chromium launches on CI debug builds
@@ -34,6 +38,7 @@ export function buildConfigJson(opts: TestOpts = {}): string {
     reporter: normaliseReporter(reporter) ?? [{ name: 'json', options: {} }],
     outputDir: join(tmpdir(), `ferri-${process.pid}-${Date.now()}-${Math.floor(Math.random() * 1e6)}`),
     screenshotOnFailure: false,
+    browser: { headless: true, ...browserDef },
     ...rest,
   };
   return JSON.stringify({ test });
