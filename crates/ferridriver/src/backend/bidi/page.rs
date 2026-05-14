@@ -382,14 +382,19 @@ impl BidiPage {
       collect_frames(ctx, None, &mut frames);
     }
 
-    // BiDi doesn't include frame names in the context tree.
-    // Resolve names by locating the iframe element in the PARENT context via
-    // `browsingContext.locateNodes` — same path Playwright uses
-    // (`bidiBrowser.ts:154` -> `_getFrameNode`). This reads `name`/`id` from
-    // the iframe element's HTML attributes, which are populated as soon as
-    // the parent parses the `<iframe>` tag — unlike `window.name` on the
-    // child, which Firefox can leave empty on srcdoc iframes until the
-    // child's global object initialises.
+    // BiDi doesn't include frame names in the context tree. Resolve names
+    // two ways in parallel per child frame and take the first non-empty:
+    //
+    // 1. `browsingContext.locateNodes` — reads `name`/`id` off the iframe
+    //    element in the PARENT context. Same path Playwright uses
+    //    (`bidiBrowser.ts:154` -> `_getFrameNode`). Works the moment the
+    //    parent parses the `<iframe>` tag, even for srcdoc iframes whose
+    //    child window hasn't initialised.
+    // 2. `window.name` evaluated in the child context — picks up the
+    //    iframe name once the child's global object is wired up. Catches
+    //    cases where locateNodes returns no nodes (cross-origin frames,
+    //    races where the parent's element collection hasn't reached the
+    //    new iframe yet).
     let child_indices: Vec<usize> = frames
       .iter()
       .enumerate()
@@ -397,7 +402,7 @@ impl BidiPage {
       .map(|(i, _)| i)
       .collect();
     if !child_indices.is_empty() {
-      let futs: Vec<_> = child_indices
+      let locate_futs: Vec<_> = child_indices
         .iter()
         .map(|&i| {
           let frame_id = frames[i].frame_id.clone();
@@ -416,23 +421,35 @@ impl BidiPage {
           }
         })
         .collect();
-      let results = futures::future::join_all(futs).await;
-      for (idx, result) in child_indices.into_iter().zip(results) {
-        let Ok(value) = result else { continue };
-        let Some(node) = value.get("nodes").and_then(|v| v.as_array()).and_then(|a| a.first()) else {
-          continue;
-        };
-        // The locator returns a `NodeRemoteValue`; the iframe element's
-        // attributes live in `value.attributes` (Bidi `Script.NodeProperties`).
-        let attrs = node.get("value").and_then(|v| v.get("attributes"));
-        let name = attrs
-          .and_then(|a| a.get("name"))
-          .and_then(|v| v.as_str())
-          .filter(|s| !s.is_empty())
-          .or_else(|| attrs.and_then(|a| a.get("id")).and_then(|v| v.as_str()))
-          .unwrap_or("");
-        if !name.is_empty() {
-          frames[idx].name = name.to_string();
+      let eval_futs: Vec<_> = child_indices
+        .iter()
+        .map(|&i| self.eval_internal("window.name", &frames[i].frame_id))
+        .collect();
+      let (locate_results, eval_results) =
+        futures::future::join(futures::future::join_all(locate_futs), futures::future::join_all(eval_futs)).await;
+      for ((idx, locate), eval) in child_indices.into_iter().zip(locate_results).zip(eval_results) {
+        let locate_name = locate
+          .ok()
+          .and_then(|v| {
+            v.get("nodes")
+              .and_then(|n| n.as_array())
+              .and_then(|a| a.first().cloned())
+          })
+          .and_then(|node| {
+            let attrs = node.get("value").and_then(|v| v.get("attributes")).cloned()?;
+            attrs
+              .get("name")
+              .and_then(|v| v.as_str())
+              .filter(|s| !s.is_empty())
+              .or_else(|| attrs.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
+              .map(std::string::ToString::to_string)
+          });
+        let eval_name = eval
+          .ok()
+          .flatten()
+          .and_then(|v| v.as_str().filter(|s| !s.is_empty()).map(std::string::ToString::to_string));
+        if let Some(name) = locate_name.or(eval_name) {
+          frames[idx].name = name;
         }
       }
     }
