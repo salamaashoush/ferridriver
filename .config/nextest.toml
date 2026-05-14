@@ -1,0 +1,13 @@
+# Each integration test in ferridriver-test and ferridriver-cli launches
+# a Chromium (or Firefox) process. Default nextest parallelism × the
+# per-test browser footprint exhausts CI runners (2-4 cores, ~7GB RAM)
+# and tests pile up on the per-test 30s tokio deadline. Cap concurrency
+# to one for the browser-heavy integration test bins; smaller library
+# unit tests still parallelise on the global slot pool.
+[[profile.default.overrides]]
+filter = 'package(ferridriver-test) and kind(test)'
+threads-required = 'num-cpus'
+
+[[profile.default.overrides]]
+filter = 'package(ferridriver-cli) and binary(backends)'
+threads-required = 'num-cpus'

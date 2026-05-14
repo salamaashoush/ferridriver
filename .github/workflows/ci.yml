@@ -142,11 +142,11 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libclang-dev pkg-config
+            libclang-dev pkg-config ffmpeg
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
-        run: brew install pkg-config llvm
+        run: brew install pkg-config llvm ffmpeg
 
       - name: Build ferridriver binary
         run: cargo build --bin ferridriver
@@ -164,8 +164,13 @@ jobs:
       - name: Run unit + integration tests
         env:
           FERRIDRIVER_BIN: ${{ github.workspace }}/target/debug/ferridriver
+          # Limit nextest parallelism — many integration tests spawn a
+          # browser per test, so running N at once on a 2-4 core
+          # runner exhausts memory and they all hit the per-test
+          # 30s deadline. `-j 2` keeps the lib-test fan-out reasonable
+          # while serialising the browser-heavy ones.
         run: |
-          cargo nextest run --workspace --no-fail-fast \
+          cargo nextest run --workspace --no-fail-fast -j 2 \
             --exclude ct-dioxus-todomvc \
             --exclude ct-leptos-todomvc \
             --exclude bdd-example
