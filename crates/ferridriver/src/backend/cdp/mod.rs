@@ -2561,10 +2561,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
     // Release the RemoteObject so the renderer can GC it.
     let _ = self
-      .cmd(
-        "Runtime.releaseObject",
-        serde_json::json!({ "objectId": object_id }),
-      )
+      .cmd("Runtime.releaseObject", serde_json::json!({ "objectId": object_id }))
       .await;
 
     set_result?;
