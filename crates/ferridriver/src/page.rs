@@ -352,22 +352,11 @@ impl Page {
     #[cfg(target_os = "macos")]
     let needs_sync = needs_sync || matches!(self.inner.kind(), crate::backend::BackendKind::WebKit);
     if needs_sync {
-      // Iframes finish attaching to their parent browsing context AFTER the
-      // main-document `load` event under heavy CI contention. Poll the
-      // tree up to ~500ms, stopping as soon as the count stops growing —
-      // single-pass sync_frames produced empty iframe slots in CI.
-      let mut last_count: usize = 0;
-      for _ in 0..5 {
-        if self.sync_frames().await.is_err() {
-          break;
-        }
-        let count = self.with_frame_cache(|c| c.all_frame_ids().len());
-        if count == last_count {
-          break;
-        }
-        last_count = count;
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-      }
+      // Single pass — extra sync rounds would push past the
+      // `setTimeout(confirm, 80)` window dialog tests rely on between
+      // goto-returning and the user subscribing to `waitForEvent`.
+      // Stragglers get picked up via the live FrameAttached listener.
+      let _ = self.sync_frames().await;
     }
     result.map_err(Into::into)
   }
