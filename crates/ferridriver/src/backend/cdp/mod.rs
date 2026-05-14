@@ -2521,45 +2521,53 @@ impl<T: CdpWrap> CdpPage<T> {
   // ---- File upload ----
 
   pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<(), String> {
-    let doc = self.cmd("DOM.getDocument", super::empty_params()).await?;
-    let root_id = doc
-      .get("root")
-      .and_then(|r| r.get("nodeId"))
-      .and_then(serde_json::Value::as_i64)
-      .ok_or("No document root")?;
-
-    let query = self
+    // Resolve the selector to a Runtime.RemoteObjectId via Runtime.evaluate
+    // — `DOM.nodeId` is invalidated by document lifecycle events (e.g. the
+    // page re-issuing `DOM.setChildNodes`), so a getDocument → querySelector
+    // → describeNode pipeline races against the renderer and produces
+    // `Could not find node with given id` under CI load.
+    // Playwright's `setInputFilePaths` (crPage.ts:312) passes
+    // `objectId: handle._objectId` for exactly this reason — the
+    // RemoteObject handle stays valid for as long as the JS reference is
+    // reachable.
+    let escaped = selector.replace('\\', "\\\\").replace('"', "\\\"");
+    let expression = format!("document.querySelector(\"{escaped}\")");
+    let result = self
       .cmd(
-        "DOM.querySelector",
+        "Runtime.evaluate",
         serde_json::json!({
-            "nodeId": root_id,
-            "selector": selector
+            "expression": expression,
+            "returnByValue": false,
+            "awaitPromise": false,
         }),
       )
       .await?;
-    let node_id = query
-      .get("nodeId")
-      .and_then(serde_json::Value::as_i64)
-      .ok_or("Element not found")?;
+    let object_id = result
+      .get("result")
+      .and_then(|r| r.get("objectId"))
+      .and_then(serde_json::Value::as_str)
+      .ok_or("Element not found")?
+      .to_string();
 
-    let desc = self
-      .cmd("DOM.describeNode", serde_json::json!({"nodeId": node_id}))
-      .await?;
-    let backend_node_id = desc
-      .get("node")
-      .and_then(|n| n.get("backendNodeId"))
-      .and_then(serde_json::Value::as_i64)
-      .ok_or("No backendNodeId")?;
-
-    self
+    let set_result = self
       .cmd(
         "DOM.setFileInputFiles",
         serde_json::json!({
             "files": paths,
-            "backendNodeId": backend_node_id
+            "objectId": object_id,
         }),
       )
-      .await?;
+      .await;
+
+    // Release the RemoteObject so the renderer can GC it.
+    let _ = self
+      .cmd(
+        "Runtime.releaseObject",
+        serde_json::json!({ "objectId": object_id }),
+      )
+      .await;
+
+    set_result?;
     Ok(())
   }
 
