@@ -18,7 +18,7 @@ use crate::page::Page;
 /// [Frame interface](https://playwright.dev/docs/api/class-frame).
 ///
 /// Frame instances are thin handles — the authoritative name/url/parent
-/// state lives in [`crate::frame_cache::FrameCache`] on the owning Page.
+/// state lives in `crate::frame_cache::FrameCache` on the owning Page.
 /// Cloning a Frame is cheap (`Arc<Page>` + `Arc<str>`) and multiple
 /// clones see the same live state.
 #[derive(Clone)]

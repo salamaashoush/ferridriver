@@ -16,7 +16,7 @@
 //! ```
 //!
 //! The Chromium factory accepts an optional
-//! [`BrowserTypeOptions`](crate::options::BrowserTypeOptions) that
+//! [`crate::options::BrowserTypeOptions`] that
 //! switches the wire transport — `chromium()` defaults to CDP-pipe;
 //! `chromium_with(BrowserTypeOptions { transport: Some(Ws), .. })`
 //! drives CDP over WebSocket. This is an explicit ferridriver

@@ -20,6 +20,18 @@ ba = "ba"
 bui = "bui"
 # "mis" appears as a prefix in identifiers
 mis = "mis"
+# `Box::pin`ned — `pin` + `ned` participle, not the word "ned"
+ned = "ned"
+# "Nin" is a CSS unit identifier — "inches" abbreviation per spec
+Nin = "Nin"
+# "Paeth" is the name of a PNG image filter algorithm
+Paeth = "Paeth"
+# "invokable" — UK/CS variant, matches Playwright/JS-idiomatic usage
+invokable = "invokable"
+# "tempory" appears in a PR title quoted in PLAYWRIGHT_COMPAT.md (history note, not our prose)
+tempory = "tempory"
+# "caf" appears as the first three chars of a git short-sha
+caf = "caf"
 
 [default.extend-identifiers]
 # Intentional misspelling in Playwright-ported code

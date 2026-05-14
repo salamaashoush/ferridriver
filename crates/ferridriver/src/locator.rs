@@ -1218,14 +1218,14 @@ impl Locator {
   /// `Locator.dragTo(target, options)` signature per
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:13293`.
   ///
-  /// When [`DragAndDropOptions::source_position`] is set, the press point is
+  /// When `DragAndDropOptions::source_position` is set, the press point is
   /// the source element's padding-box origin offset by that point; otherwise
   /// the source element's center is used. Same for `target_position` on the
-  /// release point. [`DragAndDropOptions::steps`] controls how many
+  /// release point. `DragAndDropOptions::steps` controls how many
   /// interpolated `mousemove` events are emitted between press and release
-  /// (Playwright default: `1`). [`DragAndDropOptions::trial`] skips the
+  /// (Playwright default: `1`). `DragAndDropOptions::trial` skips the
   /// actual mouse action, returning after both elements resolve.
-  /// [`DragAndDropOptions::strict`] is ignored here (per Playwright) because
+  /// `DragAndDropOptions::strict` is ignored here (per Playwright) because
   /// this locator already carries its own strict flag.
   ///
   /// # Errors
@@ -1731,7 +1731,7 @@ impl std::fmt::Debug for Locator {
 ///
 /// `/tmp/playwright/packages/playwright-core/src/client/locator.ts::FrameLocatorImpl`
 ///
-/// Holds the parent [`Frame`] (the one whose document contains the
+/// Holds the parent [`crate::Frame`] (the one whose document contains the
 /// `<iframe>` element) and the iframe's CSS-selector chain. Every
 /// builder method composes a Locator selector with
 /// `>> internal:control=enter-frame >>` so the iframe traversal is
