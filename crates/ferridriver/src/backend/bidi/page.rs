@@ -395,24 +395,13 @@ impl BidiPage {
     //    cases where locateNodes returns no nodes (cross-origin frames,
     //    races where the parent's element collection hasn't reached the
     //    new iframe yet).
-    let mut child_indices: Vec<usize> = frames
+    let child_indices: Vec<usize> = frames
       .iter()
       .enumerate()
       .filter(|(_, f)| f.parent_frame_id.is_some() && f.name.is_empty())
       .map(|(i, _)| i)
       .collect();
-    // Up to 3 rounds (each ~50ms apart). Under CI contention the parent's
-    // element collection or the child's window object can lag the
-    // contextCreated event, leaving both name probes empty on the first
-    // pass. Halving the missing-name set each round keeps the worst case
-    // around 150ms while letting late-arriving iframes still resolve.
-    for attempt in 0..3 {
-      if child_indices.is_empty() {
-        break;
-      }
-      if attempt > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-      }
+    if !child_indices.is_empty() {
       let locate_futs: Vec<_> = child_indices
         .iter()
         .map(|&i| {
@@ -427,9 +416,8 @@ impl BidiPage {
                   "locator": { "type": "context", "value": { "context": frame_id } },
                   "maxNodeCount": 1,
                   // Firefox returns a NodeRemoteValue with empty `attributes`
-                  // unless we ask for a deep serialisation. maxObjectDepth: 1
-                  // is enough to pull the iframe element's HTML attributes
-                  // map. Matches Playwright's locator request shape.
+                  // unless serialisation depth is explicit. maxObjectDepth=1
+                  // pulls the iframe element's HTML attributes map directly.
                   "serializationOptions": {
                     "maxObjectDepth": 1,
                     "maxDomDepth": 0,
@@ -441,18 +429,9 @@ impl BidiPage {
           }
         })
         .collect();
-      let eval_futs: Vec<_> = child_indices
-        .iter()
-        .map(|&i| self.eval_internal("window.name", &frames[i].frame_id))
-        .collect();
-      let (locate_results, eval_results) = futures::future::join(
-        futures::future::join_all(locate_futs),
-        futures::future::join_all(eval_futs),
-      )
-      .await;
-      let mut still_missing: Vec<usize> = Vec::new();
-      for ((idx, locate), eval) in child_indices.iter().copied().zip(locate_results).zip(eval_results) {
-        let locate_name = locate
+      let results = futures::future::join_all(locate_futs).await;
+      for (idx, locate) in child_indices.into_iter().zip(results) {
+        let name = locate
           .ok()
           .and_then(|v| {
             v.get("nodes")
@@ -468,18 +447,10 @@ impl BidiPage {
               .or_else(|| attrs.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
               .map(std::string::ToString::to_string)
           });
-        let eval_name = eval.ok().flatten().and_then(|v| {
-          v.as_str()
-            .filter(|s| !s.is_empty())
-            .map(std::string::ToString::to_string)
-        });
-        if let Some(name) = locate_name.or(eval_name) {
+        if let Some(name) = name {
           frames[idx].name = name;
-        } else {
-          still_missing.push(idx);
         }
       }
-      child_indices = still_missing;
     }
     Ok(frames)
   }

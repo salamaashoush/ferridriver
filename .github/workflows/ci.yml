@@ -228,10 +228,7 @@ jobs:
         run: bun run packages/ferridriver-test/src/cli.ts install firefox
       - name: Run TypeScript tests
         working-directory: crates/ferridriver-node
-        # 120s per-test budget — Chromium's first cold launch on a CI
-        # debug build can exceed 30s, and the browser-needing tests
-        # need headroom past that for the actual assertions to run.
-        run: bun test --timeout 120000
+        run: bun test --timeout 30000
 
   # ---------------------------------------------------------------------------
   # Security: audit dependencies for known vulnerabilities
