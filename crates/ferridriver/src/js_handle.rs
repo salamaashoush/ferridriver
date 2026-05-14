@@ -78,9 +78,9 @@ pub enum JSHandleBacking {
 /// Outcome of calling the utility script's `evaluate()` method through
 /// one of the backends. When the caller requested `returnByValue=true`
 /// (or Playwright parity's `page.evaluate(fn, arg)`), the backend parses
-/// the returned `RemoteObject.value` into a [`Value`] variant.
+/// the returned `RemoteObject.value` into a [`EvaluateResult::Value`] variant.
 /// When `returnByValue=false` (Playwright's `page.evaluateHandle`), the
-/// result wraps in a [`Handle`] variant whose backing is either a
+/// result wraps in a [`EvaluateResult::Handle`] variant whose backing is either a
 /// retained remote reference or an inline primitive value — matching
 /// Playwright's dual `JSHandle` shape.
 #[derive(Debug, Clone)]

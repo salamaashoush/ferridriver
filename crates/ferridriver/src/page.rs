@@ -64,7 +64,7 @@ impl Page {
   /// spawns the frame-cache listener; the eager `Page.getFrameTree`
   /// RTT was dropped (see `PERF_AUDIT` §M.4). The listener seeds
   /// the cache on the first frame event, and
-  /// [`Self::ensure_frame_cache_seeded`] does an on-demand fetch
+  /// `Self::ensure_frame_cache_seeded` does an on-demand fetch
   /// only when a sync accessor fires before any navigation.
   #[must_use]
   pub fn new(inner: AnyPage) -> Arc<Self> {

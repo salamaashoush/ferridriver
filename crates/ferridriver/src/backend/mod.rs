@@ -405,7 +405,7 @@ pub struct MetricData {
 }
 
 /// Backend-ready click arguments. Produced by
-/// [`crate::actions::resolve_click_args`] from the user's
+/// `BackendClickArgs::from_options` from the user's
 /// [`crate::options::ClickOptions`]. Every per-backend `click_at_with`
 /// receives this struct — keeps the wire-level per-backend impls free
 /// of `ClickOptions` parsing and defaulting logic.
@@ -836,7 +836,7 @@ impl AnyPage {
 
   /// Backend's cached top-level `frameId`, if a prior op (page-init
   /// or navigation) populated it without a `Page.getFrameTree`
-  /// round-trip. Used by [`crate::Page::ensure_frame_cache_seeded`]
+  /// round-trip. Used by `crate::Page::ensure_frame_cache_seeded`
   /// to seed the wrapper's frame cache for free after a `goto`,
   /// avoiding the extra RTT that would otherwise fire when the
   /// frameNavigated event hadn't propagated through the listener
@@ -1304,7 +1304,7 @@ impl AnyPage {
 
   // ── Handle lifecycle ──
 
-  /// Release the backend object the given [`HandleRemote`] refers to.
+  /// Release the backend object the given [`crate::js_handle::HandleRemote`] refers to.
   ///
   /// Each backend uses its native release primitive:
   ///
@@ -1394,7 +1394,7 @@ impl AnyPage {
 
 /// Extract a [`crate::js_handle::HandleRemote`] from a backend `AnyElement`.
 ///
-/// Called by [`crate::element_handle::ElementHandle::from_any_element`]
+/// Called by `crate::element_handle::ElementHandle::from_any_element`
 /// when wrapping a backend element into a public `ElementHandle`. Each
 /// backend exposes its native wire reference (CDP `objectId` string,
 /// `BiDi` `sharedId`, `WebKit` `ref_id`); this helper maps them into

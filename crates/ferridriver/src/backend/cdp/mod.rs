@@ -1177,7 +1177,7 @@ pub struct CdpPage<T: CdpTransport> {
   /// Per-page temp directory that Chrome is configured to write
   /// downloads into (via `Browser.setDownloadBehavior({ behavior:
   /// 'allowAndName', downloadPath, eventsEnabled: true })`). Held as
-  /// `Arc<TempDir>` so the directory lives as long as any [`Download`]
+  /// `Arc<TempDir>` so the directory lives as long as any [`crate::download::Download`]
   /// referencing a file under it — drop cleans up orphaned files
   /// (matches Playwright's per-context `_downloadsPath` cleanup on
   /// close).
@@ -1559,7 +1559,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// Backend-level synchronous accessor for the cached top-level
   /// `frameId`. Populated by `CdpPage::goto` from the
   /// `Page.navigate` response (see `nav_result.frameId`) and by the
-  /// lazy `set_content` path. Used by [`crate::Page::ensure_frame_cache_seeded`]
+  /// lazy `set_content` path. Used by `crate::Page::ensure_frame_cache_seeded`
   /// to seed the wrapper's frame cache without a separate
   /// `Page.getFrameTree` round-trip when the bootstrap batch no
   /// longer fetches it (`PERF_AUDIT` §M.4).

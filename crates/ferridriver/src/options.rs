@@ -79,7 +79,7 @@ pub struct TextOptions {
 /// constructing options programmatically) or a raw selector string
 /// (NAPI/BDD callers that have already extracted the inner selector). Both
 /// variants produce the same encoded `internal:has=` clause —
-/// [`Locator`] additionally enables frame-equality checking at filter
+/// [`crate::locator::Locator`] additionally enables frame-equality checking at filter
 /// construction time.
 #[derive(Debug, Clone)]
 pub enum LocatorLike {
@@ -87,7 +87,7 @@ pub enum LocatorLike {
   /// checks in [`crate::locator::Locator::filter`].
   Locator(crate::locator::Locator),
   /// Inner selector string verbatim. Used by NAPI/BDD where a full
-  /// [`Locator`] cannot be materialized across the binding boundary.
+  /// [`crate::locator::Locator`] cannot be materialized across the binding boundary.
   Selector(String),
 }
 
@@ -757,7 +757,7 @@ pub struct FilePayload {
   pub buffer: Vec<u8>,
 }
 
-/// Input-file argument for [`setInputFiles`].
+/// Input-file argument for `setInputFiles`.
 /// `string | string[] | FilePayload | FilePayload[]` union from
 /// `types.d.ts` under `setInputFiles`.
 #[derive(Debug, Clone)]
