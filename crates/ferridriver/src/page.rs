@@ -352,7 +352,22 @@ impl Page {
     #[cfg(target_os = "macos")]
     let needs_sync = needs_sync || matches!(self.inner.kind(), crate::backend::BackendKind::WebKit);
     if needs_sync {
-      let _ = self.sync_frames().await;
+      // Iframes finish attaching to their parent browsing context AFTER the
+      // main-document `load` event under heavy CI contention. Poll the
+      // tree up to ~500ms, stopping as soon as the count stops growing —
+      // single-pass sync_frames produced empty iframe slots in CI.
+      let mut last_count: usize = 0;
+      for _ in 0..5 {
+        if self.sync_frames().await.is_err() {
+          break;
+        }
+        let count = self.with_frame_cache(|c| c.all_frame_ids().len());
+        if count == last_count {
+          break;
+        }
+        last_count = count;
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+      }
     }
     result.map_err(Into::into)
   }
