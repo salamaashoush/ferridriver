@@ -49,7 +49,7 @@ enum TestBrowserState {
 }
 
 struct TestBrowserResources {
-  browser: Arc<ferridriver::Browser>,
+  handle: Arc<crate::runner::BrowserHandle>,
   effective: EffectiveContextConfig,
   output_dir: std::path::PathBuf,
   state: Mutex<TestBrowserState>,
@@ -96,12 +96,12 @@ async fn create_ready_page(
 
 impl TestBrowserResources {
   fn new(
-    browser: Arc<ferridriver::Browser>,
+    handle: Arc<crate::runner::BrowserHandle>,
     effective: EffectiveContextConfig,
     output_dir: std::path::PathBuf,
   ) -> Self {
     Self {
-      browser,
+      handle,
       effective,
       output_dir,
       state: Mutex::new(TestBrowserState::Empty),
@@ -115,7 +115,8 @@ impl TestBrowserResources {
       TestBrowserState::Page { ctx, .. } => Ok(Arc::clone(ctx)),
       TestBrowserState::Failed(err) => Err(err.clone()),
       TestBrowserState::Empty => {
-        let ctx = Arc::new(new_test_context(&self.browser));
+        let browser = self.handle.get().await?;
+        let ctx = Arc::new(new_test_context(&browser));
         *state = TestBrowserState::Context(Arc::clone(&ctx));
         Ok(ctx)
       },
@@ -128,7 +129,8 @@ impl TestBrowserResources {
       TestBrowserState::Page { page, .. } => Ok(Arc::clone(page)),
       TestBrowserState::Failed(err) => Err(err.clone()),
       TestBrowserState::Context(ctx) => {
-        let backend = self.browser.backend_kind();
+        let browser = self.handle.get().await?;
+        let backend = browser.backend_kind();
         let page = create_ready_page(ctx, backend).await?;
         apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
         let ctx = Arc::clone(ctx);
@@ -139,8 +141,9 @@ impl TestBrowserResources {
         Ok(page)
       },
       TestBrowserState::Empty => {
-        let backend = self.browser.backend_kind();
-        let ctx = Arc::new(new_test_context(&self.browser));
+        let browser = self.handle.get().await?;
+        let backend = browser.backend_kind();
+        let ctx = Arc::new(new_test_context(&browser));
         match create_ready_page(&ctx, backend).await {
           Ok(page) => {
             apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
@@ -153,7 +156,7 @@ impl TestBrowserResources {
           Err(err) => {
             if is_retryable_bidi_page_error(&err) {
               let _ = ctx.close().await;
-              let ctx = Arc::new(new_test_context(&self.browser));
+              let ctx = Arc::new(new_test_context(&browser));
               let page = create_ready_page(&ctx, backend).await?;
               apply_page_config(&page, &self.effective, &self.output_dir, backend).await?;
               *state = TestBrowserState::Page {
@@ -486,6 +489,27 @@ async fn apply_page_config(
   page.apply_context_options(&opts).await.map_err(|e| e.to_string())
 }
 
+/// Worker-scope `browser` fixture backed by `BrowserHandle`. Added to the
+/// custom_fixture_pool so every child suite/test pool can resolve it via
+/// the parent chain. Lazy: launches on first `get("browser")`.
+fn build_worker_browser_def(handle: Arc<crate::runner::BrowserHandle>) -> FixtureDef {
+  FixtureDef {
+    name: "browser".into(),
+    scope: FixtureScope::Worker,
+    dependencies: vec![],
+    setup: Arc::new(move |_pool| {
+      let handle = Arc::clone(&handle);
+      Box::pin(async move {
+        let browser = handle.get().await?;
+        Ok(browser as Arc<dyn std::any::Any + Send + Sync>)
+      })
+    }),
+    teardown: None,
+    timeout: Duration::from_secs(30),
+    auto: false,
+  }
+}
+
 fn build_browser_fixture_defs(
   resources: Arc<TestBrowserResources>,
   scope: FixtureScope,
@@ -650,7 +674,7 @@ impl Worker {
   #[tracing::instrument(skip_all, fields(worker_id = self.id))]
   pub async fn run(
     &self,
-    browser: Arc<ferridriver::Browser>,
+    browser_handle: Arc<crate::runner::BrowserHandle>,
     custom_fixture_pool: FixturePool,
     rx: async_channel::Receiver<WorkItem>,
     result_tx: mpsc::Sender<WorkerTestResult>,
@@ -660,7 +684,13 @@ impl Worker {
       .event_bus
       .emit(ReporterEvent::WorkerStarted { worker_id: self.id })
       .await;
-    custom_fixture_pool.inject("browser", Arc::clone(&browser));
+
+    // Register the worker-scope `browser` fixture on the custom pool so
+    // child suite/test pools resolve it via the parent chain. The
+    // backing `BrowserHandle` makes the launch lazy.
+    let mut worker_defs: FxHashMap<String, FixtureDef> = FxHashMap::default();
+    worker_defs.insert("browser".into(), build_worker_browser_def(Arc::clone(&browser_handle)));
+    let custom_fixture_pool = custom_fixture_pool.child_with_defs(worker_defs, FixtureScope::Worker);
 
     let mut active_suites: FxHashMap<String, SuiteState> = FxHashMap::default();
 
@@ -672,14 +702,15 @@ impl Worker {
       }
       match item {
         WorkItem::Single(assignment) => {
-          let result = Box::pin(self.run_single(&browser, &custom_fixture_pool, &mut active_suites, assignment)).await;
+          let result =
+            Box::pin(self.run_single(&browser_handle, &custom_fixture_pool, &mut active_suites, assignment)).await;
           if result_tx.send(result).await.is_err() {
             break;
           }
         },
         WorkItem::Serial(batch) => {
           let results =
-            Box::pin(self.run_serial_batch(&browser, &custom_fixture_pool, &mut active_suites, batch)).await;
+            Box::pin(self.run_serial_batch(&browser_handle, &custom_fixture_pool, &mut active_suites, batch)).await;
           for result in results {
             if result_tx.send(result).await.is_err() {
               break;
@@ -753,13 +784,11 @@ impl Worker {
     }
     custom_fixture_pool.teardown_all().await;
 
-    // Graceful browser close. `custom_fixture_pool.teardown_all()` above
-    // releases the `browser` fixture clone injected at the top of `run`;
-    // calling `close` here ensures the CDP `Browser.close` handshake runs
-    // before the `Arc<Browser>` drops — without it the browser stays up
-    // until the tokio task unwinds, which can keep Chrome alive for the
-    // whole runner process.
-    let _ = browser.close(None).await;
+    // Graceful browser close — only fires when the worker actually
+    // launched a browser via `BrowserHandle::get`. Tests that never
+    // touched a browser-dependent fixture skip the close handshake
+    // because no browser was launched in the first place.
+    browser_handle.close().await;
 
     self
       .event_bus
@@ -770,7 +799,7 @@ impl Worker {
   /// Run a serial batch: all tests in order, skip rest on failure.
   async fn run_serial_batch(
     &self,
-    browser: &Arc<ferridriver::Browser>,
+    browser: &Arc<crate::runner::BrowserHandle>,
     custom_pool: &FixturePool,
     active_suites: &mut FxHashMap<String, SuiteState>,
     batch: SerialBatch,
@@ -834,7 +863,7 @@ impl Worker {
   #[tracing::instrument(skip_all, fields(worker_id = self.id, test, attempt = assignment.attempt))]
   async fn run_single(
     &self,
-    browser: &Arc<ferridriver::Browser>,
+    browser: &Arc<crate::runner::BrowserHandle>,
     custom_pool: &FixturePool,
     active_suites: &mut FxHashMap<String, SuiteState>,
     assignment: TestAssignment,

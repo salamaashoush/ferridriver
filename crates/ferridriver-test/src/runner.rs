@@ -582,11 +582,11 @@ impl TestRunner {
       }
     }
 
-    // ── Spawn workers with overlapped browser launch ──
-    // Each worker launches its own browser and immediately starts processing tests.
-    // This overlaps browser launch with test execution — workers that launch faster
-    // start running tests while slower workers are still launching.
-    // This saves ~80-100ms vs launching all browsers before dispatching.
+    // ── Spawn workers with lazy browser launch ──
+    // Each worker holds a `BrowserHandle` that launches the browser on first
+    // fixture access. Tests that never resolve `browser`/`context`/`page`
+    // (config-only tests, request-only tests) skip the launch entirely —
+    // critical in CI where Chromium's first-launch can exceed 30s.
     let (result_tx, mut result_rx) = mpsc::channel::<WorkerTestResult>(256);
 
     let mut worker_handles = Vec::new();
@@ -602,19 +602,12 @@ impl TestRunner {
       let stop_flag = dispatcher.stop_flag();
 
       let handle = tokio::spawn(async move {
-        // Use shared browser (watch mode) or launch a new one per worker.
-        let browser = if let Some(b) = shared {
-          b
+        let browser_handle = if let Some(b) = shared {
+          Arc::new(BrowserHandle::from_shared(b))
         } else {
-          match launch_with_plan(plan).await {
-            Ok(b) => Arc::new(b),
-            Err(e) => {
-              tracing::error!(target: "ferridriver::worker", "worker {worker_id}: browser launch failed: {e}");
-              return;
-            },
-          }
+          Arc::new(BrowserHandle::new(plan))
         };
-        Box::pin(worker.run(browser, custom_pool, rx, tx, stop_flag)).await;
+        Box::pin(worker.run(browser_handle, custom_pool, rx, tx, stop_flag)).await;
       });
       worker_handles.push(handle);
     }
@@ -1162,8 +1155,63 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPla
 /// Launch a browser using the runner's internal `LaunchPlan`. Wraps
 /// `BrowserState::with_plan` + `Browser::from_state` so callers don't
 /// need to repeat the handshake-await dance.
-async fn launch_with_plan(plan: LaunchPlan) -> Result<Browser, String> {
+pub(crate) async fn launch_with_plan(plan: LaunchPlan) -> Result<Browser, String> {
   let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
   Box::pin(state.ensure_browser()).await?;
   Ok(Browser::from_state(state))
+}
+
+/// Lazy-launch handle for a worker's browser. The browser is launched
+/// on first `get()` call and cached. Workers that never access the
+/// browser (e.g. config-only tests) skip the launch entirely — under
+/// CI conditions where Chromium first-launch can take >30s, this
+/// keeps non-browser tests inside the per-test deadline.
+pub struct BrowserHandle {
+  plan: LaunchPlan,
+  cell: tokio::sync::OnceCell<Arc<Browser>>,
+  shared: bool,
+}
+
+impl BrowserHandle {
+  pub fn new(plan: LaunchPlan) -> Self {
+    Self {
+      plan,
+      cell: tokio::sync::OnceCell::new(),
+      shared: false,
+    }
+  }
+
+  /// Wrap a pre-launched browser (watch-mode shared) — `close()` is a
+  /// no-op so the shared browser survives across runs.
+  pub fn from_shared(browser: Arc<Browser>) -> Self {
+    let cell = tokio::sync::OnceCell::new();
+    let _ = cell.set(browser);
+    Self {
+      plan: LaunchPlan::default(),
+      cell,
+      shared: true,
+    }
+  }
+
+  pub async fn get(&self) -> Result<Arc<Browser>, String> {
+    let plan = self.plan.clone();
+    self
+      .cell
+      .get_or_try_init(|| async move { launch_with_plan(plan).await.map(Arc::new) })
+      .await
+      .cloned()
+  }
+
+  pub fn try_get(&self) -> Option<Arc<Browser>> {
+    self.cell.get().cloned()
+  }
+
+  pub async fn close(&self) {
+    if self.shared {
+      return;
+    }
+    if let Some(b) = self.cell.get() {
+      let _ = b.close(None).await;
+    }
+  }
 }
