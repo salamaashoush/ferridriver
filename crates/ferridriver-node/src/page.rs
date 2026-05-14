@@ -23,6 +23,22 @@ pub(crate) fn build_serialized_argument(arg: Option<crate::types::NapiEvaluateAr
   arg.map(|a| a.0).unwrap_or_default()
 }
 
+/// Return type of `Page::wait_for_event` — Playwright's overloaded
+/// `Promise<Request | Response | WebSocket | ...>` union materialised
+/// as a 9-way `Either`. Aliased so the `wait_for_event` signature
+/// fits under clippy's `type_complexity` ceiling.
+pub type PageWaitForEventResult = napi::bindgen_prelude::Either9<
+  crate::network::Request,
+  crate::network::Response,
+  crate::network::WebSocket,
+  crate::dialog::Dialog,
+  crate::file_chooser::FileChooser,
+  crate::download::Download,
+  crate::console_message::ConsoleMessage,
+  crate::web_error::JsErrorValue,
+  serde_json::Value,
+>;
+
 /// High-level page API, mirrors Playwright's Page interface.
 #[napi]
 pub struct Page {
@@ -415,101 +431,134 @@ impl Page {
     ts_args_type = "event: 'console' | 'request' | 'response' | 'requestfinished' | 'requestfailed' | 'websocket' | 'dialog' | 'filechooser' | 'download' | 'frameattached' | 'framedetached' | 'framenavigated' | 'load' | 'domcontentloaded' | 'close' | 'pageerror', timeoutMs?: number",
     ts_return_type = "Promise<Request | Response | WebSocket | Dialog | FileChooser | Download | ConsoleMessage | Error | Record<string, any>>"
   )]
-  pub async fn wait_for_event(
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn wait_for_event(
     &self,
+    env: &napi::Env,
     event: String,
     timeout_ms: Option<f64>,
-  ) -> Result<
-    napi::bindgen_prelude::Either9<
-      crate::network::Request,
-      crate::network::Response,
-      crate::network::WebSocket,
-      crate::dialog::Dialog,
-      crate::file_chooser::FileChooser,
-      crate::download::Download,
-      crate::console_message::ConsoleMessage,
-      crate::web_error::JsErrorValue,
-      serde_json::Value,
-    >,
-  > {
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<PageWaitForEventResult>> {
     let timeout = crate::types::f64_to_u64(timeout_ms.unwrap_or(30000.0));
+    let event_lc = event.to_ascii_lowercase();
+    let page = self.inner.clone();
 
-    // `dialog` bypasses the broadcast — it registers a one-shot
-    // handler on the per-page `DialogManager` so the claim is
-    // synchronous at `did_open` time (mirrors Playwright's
-    // `addDialogHandler` flow verbatim).
-    if event.eq_ignore_ascii_case("dialog") {
-      let dialog = self.inner.wait_for_dialog(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either9::D(crate::dialog::Dialog::from_core(
-        dialog,
-      )));
-    }
-    // Same pattern for `filechooser` — one-shot handler on the
-    // per-page `FileChooserManager` delivers the live handle.
-    if event.eq_ignore_ascii_case("filechooser") {
-      let chooser = self.inner.wait_for_file_chooser(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either9::E(
-        crate::file_chooser::FileChooser::from_core(chooser),
-      ));
-    }
-    // Same pattern for `download` — one-shot handler on the per-page
-    // `DownloadManager` delivers the live handle synchronously with
-    // the protocol's download-begin event.
-    if event.eq_ignore_ascii_case("download") {
-      let download = self.inner.wait_for_download(timeout).await.into_napi()?;
-      return Ok(napi::bindgen_prelude::Either9::F(crate::download::Download::from_core(
-        download,
-      )));
+    // `dialog` / `filechooser` / `download` bypass the broadcast —
+    // they register a one-shot handler on the per-page manager. The
+    // registration in `wait_for_dialog` etc. is itself synchronous on
+    // the first poll, so a sync pre-arm is not required here.
+    if matches!(event_lc.as_str(), "dialog" | "filechooser" | "download") {
+      return napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+        match event_lc.as_str() {
+          "dialog" => {
+            let d = page.wait_for_dialog(timeout).await.into_napi()?;
+            Ok(napi::bindgen_prelude::Either9::D(crate::dialog::Dialog::from_core(d)))
+          },
+          "filechooser" => {
+            let fc = page.wait_for_file_chooser(timeout).await.into_napi()?;
+            Ok(napi::bindgen_prelude::Either9::E(
+              crate::file_chooser::FileChooser::from_core(fc),
+            ))
+          },
+          _ => {
+            let d = page.wait_for_download(timeout).await.into_napi()?;
+            Ok(napi::bindgen_prelude::Either9::F(crate::download::Download::from_core(
+              d,
+            )))
+          },
+        }
+      })
+      .build(env);
     }
 
-    let ev = self.inner.events().wait_for_event(&event, timeout).await.into_napi()?;
-    use ferridriver::events::PageEvent;
-    Ok(match ev {
-      PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => {
-        napi::bindgen_prelude::Either9::A(crate::network::Request::from_core_with_page(r, self.inner.clone()))
-      },
-      PageEvent::Response(r) => {
-        napi::bindgen_prelude::Either9::B(crate::network::Response::from_core_with_page(r, self.inner.clone()))
-      },
-      PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either9::C(crate::network::WebSocket::from_core(ws)),
-      PageEvent::Dialog(d) => napi::bindgen_prelude::Either9::D(crate::dialog::Dialog::from_core(d)),
-      PageEvent::FileChooser(fc) => napi::bindgen_prelude::Either9::E(crate::file_chooser::FileChooser::from_core(fc)),
-      PageEvent::Download(d) => napi::bindgen_prelude::Either9::F(crate::download::Download::from_core(d)),
-      PageEvent::Console(msg) => {
-        napi::bindgen_prelude::Either9::G(crate::console_message::ConsoleMessage::from_core(msg))
-      },
-      // Playwright's `page.waitForEvent('pageerror')` resolves to a
-      // native JS `Error` directly (not a `WebError` wrapper — that
-      // class only exists for the context-scoped `'weberror'` surface).
-      // `JsErrorValue::to_napi_value` constructs a real `Error`
-      // instance inside the JS thread so `instanceof Error === true`.
-      PageEvent::PageError(err) => {
-        napi::bindgen_prelude::Either9::H(crate::web_error::JsErrorValue::from_details(err.error()))
-      },
-      other => napi::bindgen_prelude::Either9::I(page_event_to_value(&other)),
+    // Broadcast-backed events: subscribe synchronously so the JS
+    // caller's subsequent triggering line can't race past us. See
+    // `wait_for_response` for the same pattern.
+    let mut rx = self.inner.events().subscribe();
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      let ev = ferridriver::events::drain_until(
+        &mut rx,
+        move |e| ferridriver::events::event_name_matches(&event_lc, e),
+        timeout,
+      )
+      .await
+      .into_napi()?;
+      use ferridriver::events::PageEvent;
+      Ok(match ev {
+        PageEvent::Request(r) | PageEvent::RequestFinished(r) | PageEvent::RequestFailed(r) => {
+          napi::bindgen_prelude::Either9::A(crate::network::Request::from_core_with_page(r, page.clone()))
+        },
+        PageEvent::Response(r) => {
+          napi::bindgen_prelude::Either9::B(crate::network::Response::from_core_with_page(r, page.clone()))
+        },
+        PageEvent::WebSocket(ws) => napi::bindgen_prelude::Either9::C(crate::network::WebSocket::from_core(ws)),
+        PageEvent::Dialog(d) => napi::bindgen_prelude::Either9::D(crate::dialog::Dialog::from_core(d)),
+        PageEvent::FileChooser(fc) => {
+          napi::bindgen_prelude::Either9::E(crate::file_chooser::FileChooser::from_core(fc))
+        },
+        PageEvent::Download(d) => napi::bindgen_prelude::Either9::F(crate::download::Download::from_core(d)),
+        PageEvent::Console(msg) => {
+          napi::bindgen_prelude::Either9::G(crate::console_message::ConsoleMessage::from_core(msg))
+        },
+        // Playwright's `page.waitForEvent('pageerror')` resolves to a
+        // native JS `Error` directly (not a `WebError` wrapper — that
+        // class only exists for the context-scoped `'weberror'` surface).
+        // `JsErrorValue::to_napi_value` constructs a real `Error`
+        // instance inside the JS thread so `instanceof Error === true`.
+        PageEvent::PageError(err) => {
+          napi::bindgen_prelude::Either9::H(crate::web_error::JsErrorValue::from_details(err.error()))
+        },
+        other => napi::bindgen_prelude::Either9::I(page_event_to_value(&other)),
+      })
     })
+    .build(env)
   }
 
   /// Wait for a network response matching a URL pattern.
   /// Playwright API: `page.waitForResponse(urlOrPredicate)`.
   /// `url` accepts a glob string or a native JS `RegExp`.
   /// Returns the live `Response` object (Playwright parity).
+  ///
+  /// Listener registration is synchronous: the broadcast receiver is
+  /// acquired before the JS `Promise` is constructed, so a follow-up
+  /// `page.evaluate("fetch(...)")` on the JS caller side cannot race
+  /// past the listener and fire the matching response before we are
+  /// subscribed. Without this, an `async fn` boundary would defer the
+  /// subscribe to the first poll of the future — which under heavy
+  /// parallel load (bun's parallel runner) can land after the
+  /// triggering event has already flown. Mirrors
+  /// `helper.waitForEvent` in
+  /// `/tmp/playwright/packages/playwright-core/src/server/helper.ts:58`.
   #[napi(
     ts_args_type = "url: string | RegExp, timeoutMs?: number",
     ts_return_type = "Promise<Response>"
   )]
-  pub async fn wait_for_response(
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn wait_for_response(
     &self,
+    env: &napi::Env,
     url: napi::Either<String, crate::types::JsRegExpLike>,
     timeout_ms: Option<f64>,
-  ) -> Result<crate::network::Response> {
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::network::Response>> {
     let matcher = crate::types::string_or_regex_to_rust(url)?;
-    let r = self
-      .inner
-      .wait_for_response(matcher, timeout_ms.map(crate::types::f64_to_u64))
+    let mut rx = self.inner.events().subscribe();
+    let timeout = timeout_ms
+      .map(crate::types::f64_to_u64)
+      .unwrap_or_else(|| self.inner.default_timeout());
+    let page = self.inner.clone();
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      let event = ferridriver::events::drain_until(
+        &mut rx,
+        move |e| matches!(e, ferridriver::events::PageEvent::Response(r) if matcher.matches(r.url())),
+        timeout,
+      )
       .await
-      .map_err(napi::Error::from_reason)?;
-    Ok(crate::network::Response::from_core_with_page(r, self.inner.clone()))
+      .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+      match event {
+        ferridriver::events::PageEvent::Response(r) => Ok(crate::network::Response::from_core_with_page(r, page)),
+        _ => Err(napi::Error::from_reason("Unexpected event type")),
+      }
+    })
+    .build(env)
   }
 
   // ── Page-level actions ──────────────────────────────────────────────────
@@ -1352,22 +1401,42 @@ impl Page {
   /// Playwright API: `page.waitForRequest(urlOrPredicate)`.
   /// `url` accepts a glob string or a native JS `RegExp`.
   /// Returns the live `Request` object (Playwright parity).
+  ///
+  /// See `wait_for_response` for the rationale behind the sync
+  /// subscribe + `AsyncBlock` return — the JS caller's next line is
+  /// typically the `page.evaluate("fetch(...)")` that triggers the
+  /// request, and the listener must be armed before that line runs.
   #[napi(
     ts_args_type = "url: string | RegExp, timeoutMs?: number",
     ts_return_type = "Promise<Request>"
   )]
-  pub async fn wait_for_request(
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn wait_for_request(
     &self,
+    env: &napi::Env,
     url: napi::Either<String, crate::types::JsRegExpLike>,
     timeout_ms: Option<f64>,
-  ) -> Result<crate::network::Request> {
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::network::Request>> {
     let matcher = crate::types::string_or_regex_to_rust(url)?;
-    let req = self
-      .inner
-      .wait_for_request(matcher, timeout_ms.map(crate::types::f64_to_u64))
+    let mut rx = self.inner.events().subscribe();
+    let timeout = timeout_ms
+      .map(crate::types::f64_to_u64)
+      .unwrap_or_else(|| self.inner.default_timeout());
+    let page = self.inner.clone();
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      let event = ferridriver::events::drain_until(
+        &mut rx,
+        move |e| matches!(e, ferridriver::events::PageEvent::Request(r) if matcher.matches(r.url())),
+        timeout,
+      )
       .await
-      .map_err(napi::Error::from_reason)?;
-    Ok(crate::network::Request::from_core_with_page(req, self.inner.clone()))
+      .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+      match event {
+        ferridriver::events::PageEvent::Request(r) => Ok(crate::network::Request::from_core_with_page(r, page)),
+        _ => Err(napi::Error::from_reason("Unexpected event type")),
+      }
+    })
+    .build(env)
   }
 
   #[napi(getter)]
