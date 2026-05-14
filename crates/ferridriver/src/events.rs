@@ -96,7 +96,54 @@ pub struct ListenerId(pub u64);
 // handles. See that module for the new API.
 
 /// Check if an event matches a named event type.
-fn event_name_matches(name: &str, event: &PageEvent) -> bool {
+/// Drain a pre-acquired broadcast receiver until `predicate` matches an
+/// event, the channel closes, or `timeout_ms` elapses.
+///
+/// Pairs with [`EventEmitter::subscribe`]: callers that need a
+/// synchronous subscription point (so a downstream `.await` in JS
+/// can't race the listener registration) call `subscribe()` first
+/// and then `drain_until` inside the spawned future. Playwright
+/// implements `helper.waitForEvent` with the same shape — listener
+/// registered before the Promise is returned to JS, see
+/// `/tmp/playwright/packages/playwright-core/src/server/helper.ts:58`.
+///
+/// # Errors
+///
+/// Returns an error if the timeout elapses or the event channel is closed.
+pub async fn drain_until<F>(
+  rx: &mut tokio::sync::broadcast::Receiver<PageEvent>,
+  predicate: F,
+  timeout_ms: u64,
+) -> crate::error::Result<PageEvent>
+where
+  F: Fn(&PageEvent) -> bool,
+{
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+  loop {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+      return Err(crate::error::FerriError::timeout("waiting for event", timeout_ms));
+    }
+    match tokio::time::timeout(remaining, rx.recv()).await {
+      Ok(Ok(event)) if predicate(&event) => return Ok(event),
+      Ok(Ok(_)) => {},
+      Ok(Err(_)) => {
+        return Err(crate::error::FerriError::target_closed(Some(
+          "event channel closed".into(),
+        )));
+      },
+      Err(_) => return Err(crate::error::FerriError::timeout("waiting for event", timeout_ms)),
+    }
+  }
+}
+
+/// Whether `event` matches `name` under Playwright's lowercase
+/// page-event vocabulary (`'request'`, `'response'`, `'pageerror'`, …).
+/// Exposed so NAPI / `QuickJS` bindings that need a synchronous
+/// listener pre-arm (see [`drain_until`]) can pass the predicate in
+/// without re-implementing the match.
+#[must_use]
+pub fn event_name_matches(name: &str, event: &PageEvent) -> bool {
   matches!(
     (name, event),
     ("console", PageEvent::Console(_))
@@ -227,29 +274,20 @@ impl EventEmitter {
   /// ```ignore
   /// let response = emitter.wait_for(|e| matches!(e, PageEvent::Response(r) if r.url.contains("/api")), 5000).await?;
   /// ```
+  ///
+  /// The subscription to the broadcast channel happens when this
+  /// future is first polled, which on `async fn` boundaries can be
+  /// AFTER the caller's next line — long enough for the triggering
+  /// event to fire and be missed. Callers that need a synchronous
+  /// subscription point (NAPI's `Promise` construction, BDD step
+  /// pre-arming) should call [`Self::subscribe`] first and then
+  /// [`drain_until`] with the pre-acquired receiver.
   pub async fn wait_for<F>(&self, predicate: F, timeout_ms: u64) -> crate::error::Result<PageEvent>
   where
     F: Fn(&PageEvent) -> bool,
   {
     let mut rx = self.tx.subscribe();
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
-
-    loop {
-      let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
-      if remaining.is_zero() {
-        return Err(crate::error::FerriError::timeout("waiting for event", timeout_ms));
-      }
-      match tokio::time::timeout(remaining, rx.recv()).await {
-        Ok(Ok(event)) if predicate(&event) => return Ok(event),
-        Ok(Ok(_)) => {},
-        Ok(Err(_)) => {
-          return Err(crate::error::FerriError::target_closed(Some(
-            "event channel closed".into(),
-          )));
-        },
-        Err(_) => return Err(crate::error::FerriError::timeout("waiting for event", timeout_ms)),
-      }
-    }
+    drain_until(&mut rx, predicate, timeout_ms).await
   }
 
   /// Wait for the next event of a specific type, with timeout.
