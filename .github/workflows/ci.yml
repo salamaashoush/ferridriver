@@ -222,7 +222,10 @@ jobs:
         run: bun run packages/ferridriver-test/src/cli.ts install --with-deps chromium
       - name: Run TypeScript tests
         working-directory: crates/ferridriver-node
-        run: bun test
+        # `--timeout 30000` mirrors `bunfig.toml [test] timeout` — pass
+        # it explicitly so CI's slower runners don't hit bun's 5s
+        # default before the per-test workload completes.
+        run: bun test --timeout 30000
 
   # ---------------------------------------------------------------------------
   # Security: audit dependencies for known vulnerabilities
