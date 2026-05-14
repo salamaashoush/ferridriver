@@ -1214,7 +1214,7 @@ const CHROMIUM_SWITCHES: &[&str] = &[
   "--disable-dev-shm-usage",
   "--disable-edgeupdater",
   "--disable-extensions",
-  "--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion",
+  "--disable-features=AvoidUnnecessaryBeforeUnloadCheckSync,BlockInsecurePrivateNetworkRequests,BoundaryEventDispatchTracksNodeRemoval,DestroyProfileOnBrowserClose,DialMediaRouteProvider,GlobalMediaControls,HttpsUpgrades,LensOverlay,MediaRouter,PaintHolding,PrivateNetworkAccessSendPreflights,ThirdPartyStoragePartitioning,Translate,AutoDeElevate,RenderDocument,OptimizationHints,msForceBrowserSignIn,msEdgeUpdateLaunchServicesPreferredVersion",
   "--enable-features=CDPScreenshotNewSurface",
   "--allow-pre-commit-input",
   "--disable-hang-monitor",
