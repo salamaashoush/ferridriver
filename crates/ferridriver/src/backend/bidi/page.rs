@@ -425,8 +425,11 @@ impl BidiPage {
         .iter()
         .map(|&i| self.eval_internal("window.name", &frames[i].frame_id))
         .collect();
-      let (locate_results, eval_results) =
-        futures::future::join(futures::future::join_all(locate_futs), futures::future::join_all(eval_futs)).await;
+      let (locate_results, eval_results) = futures::future::join(
+        futures::future::join_all(locate_futs),
+        futures::future::join_all(eval_futs),
+      )
+      .await;
       for ((idx, locate), eval) in child_indices.into_iter().zip(locate_results).zip(eval_results) {
         let locate_name = locate
           .ok()
@@ -444,10 +447,11 @@ impl BidiPage {
               .or_else(|| attrs.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
               .map(std::string::ToString::to_string)
           });
-        let eval_name = eval
-          .ok()
-          .flatten()
-          .and_then(|v| v.as_str().filter(|s| !s.is_empty()).map(std::string::ToString::to_string));
+        let eval_name = eval.ok().flatten().and_then(|v| {
+          v.as_str()
+            .filter(|s| !s.is_empty())
+            .map(std::string::ToString::to_string)
+        });
         if let Some(name) = locate_name.or(eval_name) {
           frames[idx].name = name;
         }
