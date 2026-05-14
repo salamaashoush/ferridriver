@@ -127,9 +127,22 @@ impl BidiSession {
       .tempdir()
       .map_err(|e| format!("tempdir: {e}"))?;
 
+    // Pre-create the per-profile downloads dir and pin Firefox to it
+    // via `browser.download.dir` + `folderList=2`. Without these prefs
+    // Firefox falls back to the user's `~/Downloads` for the
+    // `suggestedFilename` calculation it ships in
+    // `browsingContext.downloadWillBegin`, so a `Content-Disposition:
+    // filename="x.txt"` payload comes back as `x(NN).txt` whenever
+    // `~/Downloads/x.txt` already exists on the host (it picks the
+    // first free suffix). `browser.setDownloadBehavior`'s
+    // `destinationFolder` only redirects the on-disk write, not the
+    // suggested-filename deduplication scan.
+    let downloads_dir = profile_dir.path().join("downloads");
+    std::fs::create_dir_all(&downloads_dir).map_err(|e| format!("downloads dir: {e}"))?;
+
     // Write automation preferences to user.js in the profile directory.
     // Matches Playwright's firefoxPreferences + Puppeteer's essentials.
-    write_firefox_prefs(profile_dir.path()).map_err(|e| format!("write prefs: {e}"))?;
+    write_firefox_prefs(profile_dir.path(), &downloads_dir).map_err(|e| format!("write prefs: {e}"))?;
 
     let mut command = tokio::process::Command::new(firefox_path);
     command.arg("--remote-debugging-port").arg("0");
@@ -266,11 +279,13 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
 
 /// Write Firefox automation preferences to `user.js` in the given profile directory.
 /// Based on Playwright's `playwright.cfg` and Puppeteer's Firefox defaults.
-fn write_firefox_prefs(profile_dir: &std::path::Path) -> std::io::Result<()> {
+fn write_firefox_prefs(profile_dir: &std::path::Path, downloads_dir: &std::path::Path) -> std::io::Result<()> {
   use std::io::Write;
 
   let prefs_path = profile_dir.join("user.js");
   let mut f = std::fs::File::create(prefs_path)?;
+
+  write_firefox_download_prefs(&mut f, downloads_dir)?;
 
   // Each line: user_pref("key", value);
   // Organised by category matching Playwright's structure.
@@ -388,4 +403,27 @@ user_pref("screenshots.browser.component.enabled", false);
   )?;
 
   Ok(())
+}
+
+/// Append download-related preferences to `user.js` so Firefox routes
+/// downloads to a profile-scoped folder. Without these prefs Firefox
+/// falls back to the host user's `~/Downloads` when computing the
+/// `suggestedFilename` it ships in `browsingContext.downloadWillBegin`,
+/// which makes the value depend on whichever leftover files happen to
+/// be lying around in the developer's downloads dir.
+fn write_firefox_download_prefs(f: &mut std::fs::File, downloads_dir: &std::path::Path) -> std::io::Result<()> {
+  use std::io::Write;
+  let dir = downloads_dir.to_string_lossy();
+  writeln!(
+    f,
+    "// ── Downloads (profile-scoped to keep suggestedFilename deterministic)\n\
+user_pref(\"browser.download.folderList\", 2);\n\
+user_pref(\"browser.download.dir\", {dir:?});\n\
+user_pref(\"browser.download.lastDir\", {dir:?});\n\
+user_pref(\"browser.download.useDownloadDir\", true);\n\
+user_pref(\"browser.download.manager.showWhenStarting\", false);\n\
+user_pref(\"browser.download.alwaysOpenPanel\", false);\n\
+user_pref(\"browser.helperApps.alwaysAsk.force\", false);\n\
+user_pref(\"browser.helperApps.neverAsk.saveToDisk\", \"application/octet-stream, application/pdf\");"
+  )
 }
