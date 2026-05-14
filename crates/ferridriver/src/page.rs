@@ -45,14 +45,11 @@ pub struct Page {
   /// date via wire-level `frameAttached`/`frameDetached`/`frameNavigated`
   /// events so that sync accessors (`mainFrame`, `frames`, `frame`,
   /// `parentFrame`, `childFrames`, `name`, `url`, `isDetached`) never
-  /// await. ferridriver does the same: the cache is seeded in
-  /// [`Page::init_frame_cache`] and kept fresh by the listener task
-  /// spawned there.
+  /// await. ferridriver does the same. The actual storage lives on the
+  /// backend (`AnyPage::frame_cache()`) so it outlives short-lived
+  /// `Arc<Page>` wrappers — see `Page::seed_frame_cache` for the
+  /// idempotent listener that keeps it fresh.
   frame_cache: Arc<Mutex<FrameCache>>,
-  /// Abort handle for the frame-event listener task spawned by
-  /// [`Page::init_frame_cache`]. Aborted on [`Page::drop`] so no listener
-  /// outlives its Page.
-  frame_listener: Mutex<Option<tokio::task::AbortHandle>>,
   /// Live [`crate::video::Video`] handle when this page was opened
   /// inside a context with `record_video` enabled. `None` otherwise
   /// (matches Playwright's `page.video(): null | Video` —
@@ -60,16 +57,6 @@ pub struct Page {
   /// [`crate::state::BrowserState::register_opened_page`] at page
   /// registration time, when the recording runtime is spawned.
   video: Mutex<Option<Arc<crate::video::Video>>>,
-}
-
-impl Drop for Page {
-  fn drop(&mut self) {
-    if let Ok(mut guard) = self.frame_listener.lock() {
-      if let Some(h) = guard.take() {
-        h.abort();
-      }
-    }
-  }
 }
 
 impl Page {
@@ -81,6 +68,7 @@ impl Page {
   /// only when a sync accessor fires before any navigation.
   #[must_use]
   pub fn new(inner: AnyPage) -> Arc<Self> {
+    let frame_cache = inner.frame_cache().clone();
     let page = Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(30000),
@@ -90,8 +78,7 @@ impl Page {
       context_ref: None,
       close_reason: Mutex::new(None),
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
-      frame_cache: Arc::new(Mutex::new(FrameCache::default())),
-      frame_listener: Mutex::new(None),
+      frame_cache,
       video: Mutex::new(None),
     });
     // Wire the backend's weak back-reference before the frame cache
@@ -107,6 +94,7 @@ impl Page {
   /// contract as [`Self::new`].
   #[must_use]
   pub fn with_context(inner: AnyPage, context: crate::context::ContextRef) -> Arc<Self> {
+    let frame_cache = inner.frame_cache().clone();
     let page = Arc::new(Self {
       inner,
       default_timeout: AtomicU64::new(30000),
@@ -116,8 +104,7 @@ impl Page {
       context_ref: Some(context),
       close_reason: Mutex::new(None),
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
-      frame_cache: Arc::new(Mutex::new(FrameCache::default())),
-      frame_listener: Mutex::new(None),
+      frame_cache,
       video: Mutex::new(None),
     });
     page.inner.set_page_backref(Arc::downgrade(&page));
@@ -136,22 +123,25 @@ impl Page {
   }
 
   /// Internal: spawn the `FrameAttached` / `FrameDetached` /
-  /// `FrameNavigated` listener that keeps the page's frame cache
-  /// fresh. Called from the constructors.
-  ///
-  /// Does NOT fire the eager `Page.getFrameTree` RTT that the
-  /// bootstrap previously paid (`PERF_AUDIT` §L.3.4 / §M.4). The
-  /// listener seeds the cache on the first frame event — the user's
-  /// first `page.goto` emits `Page.frameNavigated` for the main
-  /// frame, and `FrameCache::navigated` sets `main_id` when a
-  /// top-level frame is first seen. For tests that touch a frame
-  /// accessor BEFORE navigating, [`Self::ensure_frame_cache_seeded`]
-  /// fetches the tree on demand and is the only path that pays the
-  /// `Page.getFrameTree` RTT — exactly once per page lifetime.
+  /// `FrameNavigated` listener that keeps the backend's frame cache
+  /// fresh. Idempotent — only the first wrapper for a given backend
+  /// spawns the listener; subsequent wrappers see the latch set and
+  /// skip the spawn so we don't end up with N listeners all writing
+  /// the same cache. The listener task holds `Arc` clones of the
+  /// cache + event emitter, so it lives until the backend page is
+  /// dropped (broadcast sender drops → recv returns Err → task
+  /// exits).
   fn seed_frame_cache(self: &Arc<Self>) {
+    if self
+      .inner
+      .frame_listener_started()
+      .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+      return;
+    }
     let cache = Arc::clone(&self.frame_cache);
     let mut rx = self.inner.events().subscribe();
-    let handle = tokio::spawn(async move {
+    tokio::spawn(async move {
       while let Ok(event) = rx.recv().await {
         match event {
           PageEvent::FrameAttached(info) => {
@@ -173,9 +163,6 @@ impl Page {
         }
       }
     });
-    if let Ok(mut guard) = self.frame_listener.lock() {
-      *guard = Some(handle.abort_handle());
-    }
   }
 
   /// Lazy frame-cache seed. Returns immediately when the cache
@@ -341,6 +328,21 @@ impl Page {
     // network-light tests where the listener task gets scheduled
     // before goto returns).
     let _ = self.ensure_frame_cache_seeded().await;
+    // BiDi subframe seeding: WebDriver BiDi's `browsingContext.contextCreated`
+    // fires asynchronously for child iframes after `browsingContext.navigate`
+    // completes, and the iframe's `name` attribute lives in the DOM —
+    // not in the contextCreated payload. The listener-driven cache
+    // therefore lags any synchronous `page.frame(name)` / `page.frames()`
+    // call made right after `goto` returns. Mirror Playwright's
+    // `bidiBrowser._onBrowsingContextCreated`
+    // (`/tmp/playwright/packages/playwright-core/src/server/bidi/bidiBrowser.ts:146`)
+    // by fetching the full subtree on the goto-return path and seeding
+    // the wrapper's cache directly — `BidiPage::get_frame_tree` already
+    // does the parallel `window.name` resolution for unnamed children,
+    // so the wrapper sees a fully-populated cache.
+    if matches!(self.inner.kind(), crate::backend::BackendKind::Bidi) {
+      let _ = self.sync_frames().await;
+    }
     result.map_err(Into::into)
   }
 

@@ -782,6 +782,37 @@ impl AnyPage {
     slot.set(weak);
   }
 
+  /// Backend-owned frame cache shared across `Arc<crate::page::Page>`
+  /// wrappers. MCP tool handlers construct a fresh wrapper per call,
+  /// so storing the cache on the wrapper would reset it between
+  /// `navigate` and the next `run_script` — losing the subframe
+  /// entries the navigate's frame-event listener wrote. Pinning the
+  /// cache to the backend keeps it alive for the lifetime of the
+  /// underlying browser page.
+  pub(crate) fn frame_cache(&self) -> &std::sync::Arc<std::sync::Mutex<crate::frame_cache::FrameCache>> {
+    match self {
+      AnyPage::CdpPipe(p) => &p.frame_cache,
+      AnyPage::CdpRaw(p) => &p.frame_cache,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(p) => &p.frame_cache,
+      AnyPage::Bidi(p) => &p.frame_cache,
+    }
+  }
+
+  /// Atomic latch consulted by `Page::new` to spawn the frame-event
+  /// listener exactly once per backend page (instead of once per
+  /// wrapper). Subsequent wrappers see the latch set and skip the
+  /// spawn — see `Page::seed_frame_cache`.
+  pub(crate) fn frame_listener_started(&self) -> &std::sync::Arc<std::sync::atomic::AtomicBool> {
+    match self {
+      AnyPage::CdpPipe(p) => &p.frame_listener_started,
+      AnyPage::CdpRaw(p) => &p.frame_listener_started,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(p) => &p.frame_listener_started,
+      AnyPage::Bidi(p) => &p.frame_listener_started,
+    }
+  }
+
   /// The backend kind this page lives on. Used by action paths that
   /// branch per-backend (e.g. `tap` needs a CDP-only native touch API
   /// and returns `FerriError::Unsupported` on `BiDi` / `WebKit` where

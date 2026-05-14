@@ -389,6 +389,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
             .map_err(|e| format!("downloads tempdir: {e}"))?,
         ),
         page_backref: crate::backend::PageBackref::new(),
+        frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+        frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       }));
     }
     Ok(pages)
@@ -556,6 +558,8 @@ impl<T: CdpWrap> CdpBrowser<T> {
           .map_err(|e| format!("downloads tempdir: {e}"))?,
       ),
       page_backref: crate::backend::PageBackref::new(),
+      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      frame_listener_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
 
     // Register lifecycle tracker in the transport reader (synchronous update, zero overhead)
@@ -1191,6 +1195,21 @@ pub struct CdpPage<T: CdpTransport> {
   /// as the first tool call returns. Stored as `Weak` so the listener
   /// task never keeps the outer page alive after the user drops it.
   pub page_backref: crate::backend::PageBackref,
+  /// Shared frame cache. The cache lives on the backend page so it
+  /// outlives the short-lived `Arc<crate::page::Page>` wrappers that
+  /// MCP tool handlers spin up per call — each wrapper would
+  /// otherwise reset the cache and lose state populated by the
+  /// previous tool call. `page.frame(name)` / `page.frames()` /
+  /// `frame.childFrames()` all read this cache synchronously, so
+  /// every wrapper hands them the same `Arc<Mutex<FrameCache>>`.
+  pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  /// Idempotent latch for the frame-event listener task. The first
+  /// `Arc<crate::page::Page>` constructed for this backend page
+  /// spawns the listener that subscribes to `FrameAttached` /
+  /// `FrameDetached` / `FrameNavigated` and updates `frame_cache`;
+  /// successive wrappers see the latch set and skip the spawn so we
+  /// don't end up with N listeners writing the same cache.
+  pub(crate) frame_listener_started: Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct InjectedScriptManager {
@@ -1269,6 +1288,8 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
       download_behavior_enabled: self.download_behavior_enabled.clone(),
       downloads_dir: self.downloads_dir.clone(),
       page_backref: self.page_backref.clone(),
+      frame_cache: self.frame_cache.clone(),
+      frame_listener_started: self.frame_listener_started.clone(),
     }
   }
 }
@@ -1511,12 +1532,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `Page.navigateToHistoryEntry`, generic `page.waitForNavigation`).
   /// Waits for the main frame's `current_loader_id` to change away
   /// from `pre_loader_id` AND fire `target_event` for the new loader.
-  async fn await_loader_change(
-    &self,
-    pre_loader_id: &str,
-    target_event: &str,
-    timeout_ms: u64,
-  ) -> Result<(), String> {
+  async fn await_loader_change(&self, pre_loader_id: &str, target_event: &str, timeout_ms: u64) -> Result<(), String> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
       let notified = self.lifecycle_notify.notified();

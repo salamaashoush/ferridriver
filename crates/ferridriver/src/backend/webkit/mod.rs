@@ -128,6 +128,8 @@ impl WebKitBrowser {
               download_manager: crate::download::DownloadManager::new(),
               page_backref: crate::backend::PageBackref::new(),
               exposed_fns: std::sync::Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
+              frame_cache: std::sync::Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+              frame_listener_started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
             })
           })
           .collect(),
@@ -159,6 +161,8 @@ impl WebKitBrowser {
           download_manager: crate::download::DownloadManager::new(),
           page_backref: crate::backend::PageBackref::new(),
           exposed_fns: std::sync::Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
+          frame_cache: std::sync::Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+          frame_listener_started: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false)),
         };
         Ok(AnyPage::WebKit(page))
       },
@@ -247,6 +251,14 @@ pub struct WebKitPage {
   /// `Runtime.addBinding` analogue so the console-side channel is
   /// the available transport, same approach as `BiDi`.
   exposed_fns: std::sync::Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
+  /// Shared frame cache — see `CdpPage::frame_cache`. WebKit has no
+  /// real OOPIF support today and `get_frame_tree` returns just the
+  /// main frame, but we still want the cache to persist across MCP
+  /// tool-call wrappers so `page.main_frame()` doesn't lose its
+  /// `peek_main_frame_id()`-seeded entry between calls.
+  pub(crate) frame_cache: std::sync::Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  /// Idempotent latch for the frame-event listener.
+  pub(crate) frame_listener_started: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 pub struct InjectedScriptManager {

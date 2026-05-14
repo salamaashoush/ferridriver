@@ -223,6 +223,13 @@ pub struct BidiPage {
   /// purpose as the CDP page's field — the file-chooser listener
   /// upgrades it to build the `ElementHandle`.
   pub page_backref: crate::backend::PageBackref,
+  /// Shared frame cache (see `CdpPage::frame_cache` for the rationale —
+  /// MCP tool handlers wrap the same backend page in successive
+  /// `Arc<crate::page::Page>` instances, so the cache lives on the
+  /// backend to outlive them).
+  pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
+  /// Idempotent latch for the frame-event listener.
+  pub(crate) frame_listener_started: Arc<AtomicBool>,
 }
 
 pub struct InjectedScriptManager {
@@ -285,6 +292,8 @@ impl BidiPage {
       download_manager: crate::download::DownloadManager::new(),
       downloads_dir: Arc::new(downloads_dir),
       page_backref: crate::backend::PageBackref::new(),
+      frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
+      frame_listener_started: Arc::new(AtomicBool::new(false)),
     })
   }
 
