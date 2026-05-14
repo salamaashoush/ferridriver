@@ -395,13 +395,24 @@ impl BidiPage {
     //    cases where locateNodes returns no nodes (cross-origin frames,
     //    races where the parent's element collection hasn't reached the
     //    new iframe yet).
-    let child_indices: Vec<usize> = frames
+    let mut child_indices: Vec<usize> = frames
       .iter()
       .enumerate()
       .filter(|(_, f)| f.parent_frame_id.is_some() && f.name.is_empty())
       .map(|(i, _)| i)
       .collect();
-    if !child_indices.is_empty() {
+    // Up to 3 rounds (each ~50ms apart). Under CI contention the parent's
+    // element collection or the child's window object can lag the
+    // contextCreated event, leaving both name probes empty on the first
+    // pass. Halving the missing-name set each round keeps the worst case
+    // around 150ms while letting late-arriving iframes still resolve.
+    for attempt in 0..3 {
+      if child_indices.is_empty() {
+        break;
+      }
+      if attempt > 0 {
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+      }
       let locate_futs: Vec<_> = child_indices
         .iter()
         .map(|&i| {
@@ -430,7 +441,8 @@ impl BidiPage {
         futures::future::join_all(eval_futs),
       )
       .await;
-      for ((idx, locate), eval) in child_indices.into_iter().zip(locate_results).zip(eval_results) {
+      let mut still_missing: Vec<usize> = Vec::new();
+      for ((idx, locate), eval) in child_indices.iter().copied().zip(locate_results).zip(eval_results) {
         let locate_name = locate
           .ok()
           .and_then(|v| {
@@ -454,8 +466,11 @@ impl BidiPage {
         });
         if let Some(name) = locate_name.or(eval_name) {
           frames[idx].name = name;
+        } else {
+          still_missing.push(idx);
         }
       }
+      child_indices = still_missing;
     }
     Ok(frames)
   }
