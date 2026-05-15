@@ -39,12 +39,7 @@ fn make_nav_test(i: usize) -> TestCase {
     },
     test_fn: Arc::new(move |pool| {
       Box::pin(async move {
-        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
-          message: e,
-          stack: None,
-          diff: None,
-          screenshot: None,
-        })?;
+        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let html = format!("<title>Test {i}</title><body><h1>Page {i}</h1></body>");
         page.goto(&data_url(&html), None).await.map_err(|e| TestFailure {
           message: e.to_string(),
@@ -81,12 +76,7 @@ fn make_interaction_test(i: usize) -> TestCase {
     },
     test_fn: Arc::new(move |pool| {
       Box::pin(async move {
-        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
-          message: e,
-          stack: None,
-          diff: None,
-          screenshot: None,
-        })?;
+        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let html = format!("<button id='btn' onclick=\"this.textContent='done {i}'\">Click {i}</button>");
         page.goto(&data_url(&html), None).await.map_err(|e| TestFailure {
           message: e.to_string(),

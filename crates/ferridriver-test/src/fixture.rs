@@ -39,7 +39,7 @@ type ArcValue = Arc<dyn Any + Send + Sync>;
 
 /// Async setup function: receives the `FixturePool` (to resolve deps), returns the value.
 pub type SetupFn =
-  Arc<dyn Fn(FixturePool) -> Pin<Box<dyn Future<Output = Result<ArcValue, String>> + Send>> + Send + Sync>;
+  Arc<dyn Fn(FixturePool) -> Pin<Box<dyn Future<Output = ferridriver::error::Result<ArcValue>> + Send>> + Send + Sync>;
 
 /// Async teardown function: receives the Arc value to clean up.
 pub type TeardownFn = Arc<dyn Fn(ArcValue) -> Pin<Box<dyn Future<Output = ()> + Send>> + Send + Sync>;
@@ -138,17 +138,21 @@ impl FixturePool {
   ///
   /// Returns `Arc<T>` since fixture values are shared and not cloneable.
   /// Resolves dependencies recursively (DAG walk).
-  pub fn get<T: Any + Send + Sync>(&self, name: &str) -> Pin<Box<dyn Future<Output = Result<Arc<T>, String>> + Send>> {
+  pub fn get<T: Any + Send + Sync>(
+    &self,
+    name: &str,
+  ) -> Pin<Box<dyn Future<Output = ferridriver::error::Result<Arc<T>>> + Send>> {
     let pool = self.clone();
     let name = name.to_string();
     Box::pin(async move {
+      use ferridriver::FerriError;
       // Check local cache first (lock-free read).
       if let Some(val) = pool.inner.values.get(name.as_str()) {
         return val
           .value()
           .clone()
           .downcast::<T>()
-          .map_err(|_| format!("fixture '{name}' type mismatch"));
+          .map_err(|_| FerriError::backend(format!("fixture '{name}' type mismatch")));
       }
 
       // Check if this fixture belongs to a parent scope.
@@ -174,7 +178,7 @@ impl FixturePool {
         .inner
         .defs
         .get(name.as_str())
-        .ok_or_else(|| format!("fixture '{name}' not defined"))?;
+        .ok_or_else(|| FerriError::backend(format!("fixture '{name}' not defined")))?;
 
       let setup = Arc::clone(&def.setup);
       let teardown = def.teardown.as_ref().map(Arc::clone);
@@ -183,8 +187,8 @@ impl FixturePool {
       tracing::debug!(target: "ferridriver::fixture", fixture = name, "setting up fixture");
       let arc_val = tokio::time::timeout(timeout, setup(pool.clone()))
         .await
-        .map_err(|_| format!("fixture '{name}' setup timed out after {timeout:?}"))?
-        .map_err(|e| format!("fixture '{name}' setup failed: {e}"))?;
+        .map_err(|_| FerriError::timeout(format!("fixture '{name}' setup"), timeout.as_millis() as u64))?
+        .map_err(|e| FerriError::backend(format!("fixture '{name}' setup failed: {e}")))?;
 
       // Cache (lock-free insert).
       pool.inner.values.insert(name.to_string(), Arc::clone(&arc_val));
@@ -197,7 +201,7 @@ impl FixturePool {
 
       arc_val
         .downcast::<T>()
-        .map_err(|_| format!("fixture '{name}' type mismatch"))
+        .map_err(|_| FerriError::backend(format!("fixture '{name}' type mismatch")))
     })
   }
 
@@ -222,7 +226,7 @@ impl FixturePool {
   }
 
   /// Resolve a fixture by name without knowing its concrete type.
-  pub async fn resolve(&self, name: &str) -> Result<(), String> {
+  pub async fn resolve(&self, name: &str) -> ferridriver::error::Result<()> {
     ensure_resolved(self, name).await
   }
 
@@ -268,7 +272,10 @@ impl FixturePool {
 }
 
 /// Ensure a fixture is resolved (trigger creation without needing a concrete type).
-fn ensure_resolved(pool: &FixturePool, name: &str) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> {
+fn ensure_resolved(
+  pool: &FixturePool,
+  name: &str,
+) -> Pin<Box<dyn Future<Output = ferridriver::error::Result<()>> + Send>> {
   let pool = pool.clone();
   let name = name.to_string();
   Box::pin(async move {
@@ -296,19 +303,20 @@ fn ensure_resolved(pool: &FixturePool, name: &str) -> Pin<Box<dyn Future<Output 
     }
 
     // Set up.
+    use ferridriver::FerriError;
     let def = pool
       .inner
       .defs
       .get(name.as_str())
-      .ok_or_else(|| format!("fixture '{name}' not defined"))?;
+      .ok_or_else(|| FerriError::backend(format!("fixture '{name}' not defined")))?;
     let setup = Arc::clone(&def.setup);
     let teardown = def.teardown.as_ref().map(Arc::clone);
     let timeout = def.timeout;
 
     let arc_val = tokio::time::timeout(timeout, setup(pool.clone()))
       .await
-      .map_err(|_| format!("fixture '{name}' setup timed out after {timeout:?}"))?
-      .map_err(|e| format!("fixture '{name}' setup failed: {e}"))?;
+      .map_err(|_| FerriError::timeout(format!("fixture '{name}' setup"), timeout.as_millis() as u64))?
+      .map_err(|e| FerriError::backend(format!("fixture '{name}' setup failed: {e}")))?;
 
     pool.inner.values.insert(name.to_string(), arc_val);
     if let Some(td) = teardown {
@@ -328,7 +336,8 @@ fn scope_rank(scope: FixtureScope) -> u8 {
 }
 
 /// Validate that fixture definitions form a DAG (no cycles).
-pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> Result<(), String> {
+pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> ferridriver::error::Result<()> {
+  use ferridriver::FerriError;
   use std::collections::HashSet;
 
   fn visit(
@@ -336,12 +345,15 @@ pub fn validate_dag(defs: &FxHashMap<String, FixtureDef>) -> Result<(), String> 
     defs: &FxHashMap<String, FixtureDef>,
     visiting: &mut HashSet<String>,
     visited: &mut HashSet<String>,
-  ) -> Result<(), String> {
+  ) -> ferridriver::error::Result<()> {
     if visited.contains(name) {
       return Ok(());
     }
     if !visiting.insert(name.to_string()) {
-      return Err(format!("circular fixture dependency involving '{name}'"));
+      return Err(FerriError::invalid_argument(
+        "fixture",
+        format!("circular fixture dependency involving '{name}'"),
+      ));
     }
     if let Some(def) = defs.get(name) {
       for dep in &def.dependencies {
@@ -411,9 +423,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
             ..Default::default()
           };
           let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
-          Box::pin(state.ensure_browser())
-            .await
-            .map_err(|e| format!("failed to launch browser: {e}"))?;
+          Box::pin(state.ensure_browser()).await?;
           let browser = Browser::from_state(state);
           Ok(Arc::new(browser) as ArcValue)
         })
@@ -466,10 +476,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
       setup: Arc::new(|pool| {
         Box::pin(async move {
           let context: Arc<ferridriver::ContextRef> = pool.get("context").await?;
-          let page = context
-            .new_page()
-            .await
-            .map_err(|e| format!("failed to create page: {e}"))?;
+          let page = context.new_page().await?;
           Ok(Arc::new(page) as ArcValue)
         })
       }),

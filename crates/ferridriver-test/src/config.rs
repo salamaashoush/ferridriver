@@ -163,11 +163,12 @@ pub fn parse_common_cli_args() -> CliOverrides {
 /// # Errors
 ///
 /// Returns an error if a config file is found but cannot be read or parsed.
-pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
+pub fn resolve_config(overrides: &CliOverrides) -> ferridriver::error::Result<TestConfig> {
+  use ferridriver::FerriError;
   let cfg = if let Some(path) = &overrides.config_path {
-    ferridriver_config::FerridriverConfig::load_from(Path::new(path)).map_err(|e| format!("{e}"))?
+    ferridriver_config::FerridriverConfig::load_from(Path::new(path)).map_err(|e| FerriError::backend(e.to_string()))?
   } else {
-    ferridriver_config::FerridriverConfig::load(None).map_err(|e| format!("{e}"))?
+    ferridriver_config::FerridriverConfig::load(None).map_err(|e| FerriError::backend(e.to_string()))?
   };
   resolve_config_from(cfg.test, overrides)
 }
@@ -181,15 +182,19 @@ pub fn resolve_config(overrides: &CliOverrides) -> Result<TestConfig, String> {
 /// # Errors
 ///
 /// Returns an error if the named profile cannot be applied.
-pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> Result<TestConfig, String> {
+pub fn resolve_config_from(mut config: TestConfig, overrides: &CliOverrides) -> ferridriver::error::Result<TestConfig> {
+  use ferridriver::FerriError;
   // Apply profile overrides.
   if let Some(profile_name) = &overrides.profile {
     if let Some(profile_value) = config.profiles.get(profile_name) {
-      let mut base = serde_json::to_value(&config).map_err(|e| format!("serialize config: {e}"))?;
+      let mut base = serde_json::to_value(&config)?;
       json_merge(&mut base, profile_value);
-      config = serde_json::from_value(base).map_err(|e| format!("apply profile '{profile_name}': {e}"))?;
+      config = serde_json::from_value(base)?;
     } else {
-      return Err(format!("profile '{profile_name}' not found in config"));
+      return Err(FerriError::invalid_argument(
+        "profile",
+        format!("profile '{profile_name}' not found in config"),
+      ));
     }
   }
 

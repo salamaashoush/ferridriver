@@ -38,12 +38,7 @@ fn make_navigation_test() -> TestCase {
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
-        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
-          message: e,
-          stack: None,
-          diff: None,
-          screenshot: None,
-        })?;
+        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let url = data_url("<title>Test Page</title><body><h1>Hello World</h1></body>");
         page.goto(&url, None).await.map_err(|e| TestFailure {
           message: format!("goto failed: {e}"),
@@ -88,12 +83,7 @@ fn make_click_test() -> TestCase {
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
-        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
-          message: e,
-          stack: None,
-          diff: None,
-          screenshot: None,
-        })?;
+        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let url = data_url("<button id='btn' onclick=\"this.textContent='clicked'\">Click Me</button>");
         page.goto(&url, None).await.map_err(|e| TestFailure {
           message: format!("goto failed: {e}"),
@@ -149,12 +139,7 @@ fn make_fill_test() -> TestCase {
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
-        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
-          message: e,
-          stack: None,
-          diff: None,
-          screenshot: None,
-        })?;
+        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let url = data_url("<input id='inp' type='text' />");
         page.goto(&url, None).await.map_err(|e| TestFailure {
           message: format!("goto failed: {e}"),
@@ -213,12 +198,7 @@ fn make_expect_test() -> TestCase {
     },
     test_fn: Arc::new(|pool| {
       Box::pin(async move {
-        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(|e| TestFailure {
-          message: e,
-          stack: None,
-          diff: None,
-          screenshot: None,
-        })?;
+        let page: Arc<ferridriver::Page> = pool.get("page").await.map_err(TestFailure::from)?;
         let url = data_url(
           "<title>Expect Test</title>\
            <div id='msg'>Initial</div>\

@@ -1163,9 +1163,9 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPla
 /// Launch a browser using the runner's internal `LaunchPlan`. Wraps
 /// `BrowserState::with_plan` + `Browser::from_state` so callers don't
 /// need to repeat the handshake-await dance.
-pub(crate) async fn launch_with_plan(plan: LaunchPlan) -> Result<Browser, String> {
+pub(crate) async fn launch_with_plan(plan: LaunchPlan) -> ferridriver::error::Result<Browser> {
   let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
-  Box::pin(state.ensure_browser()).await.map_err(|e| e.to_string())?;
+  Box::pin(state.ensure_browser()).await?;
   Ok(Browser::from_state(state))
 }
 
@@ -1201,7 +1201,7 @@ impl BrowserHandle {
     }
   }
 
-  pub async fn get(&self) -> Result<Arc<Browser>, String> {
+  pub async fn get(&self) -> ferridriver::error::Result<Arc<Browser>> {
     let plan = self.plan.clone();
     self
       .cell

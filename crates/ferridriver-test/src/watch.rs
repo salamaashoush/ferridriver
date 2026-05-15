@@ -58,7 +58,8 @@ impl FileWatcher {
   /// * `root` — Directory to watch recursively.
   /// * `test_globs` — Glob patterns that identify test files (from `test_match` config).
   /// * `ignore_patterns` — Extra directory names to ignore (merged with defaults).
-  pub fn new(root: &Path, test_globs: &[String], ignore_patterns: &[String]) -> Result<Self, String> {
+  pub fn new(root: &Path, test_globs: &[String], ignore_patterns: &[String]) -> ferridriver::error::Result<Self> {
+    use ferridriver::FerriError;
     let (tx, rx) = async_channel::bounded(256);
     let compiled_globs: Vec<glob::Pattern> = test_globs.iter().filter_map(|g| glob::Pattern::new(g).ok()).collect();
     let root_owned = root.to_path_buf();
@@ -102,12 +103,12 @@ impl FileWatcher {
         }
       },
     )
-    .map_err(|e| format!("create file watcher: {e}"))?;
+    .map_err(|e| FerriError::backend(format!("create file watcher: {e}")))?;
 
     debouncer
       .watcher()
       .watch(root, notify::RecursiveMode::Recursive)
-      .map_err(|e| format!("watch {}: {e}", root.display()))?;
+      .map_err(|e| FerriError::backend(format!("watch {}: {e}", root.display())))?;
 
     Ok(Self {
       rx,
