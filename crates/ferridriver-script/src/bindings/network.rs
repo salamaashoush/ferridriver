@@ -286,10 +286,10 @@ impl ResponseJs {
   pub async fn finished<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     match self.inner.finished().await {
       Ok(()) => Ok(Value::new_null(ctx.clone())),
-      Err(message) => Err(rquickjs::Error::new_from_js_message(
+      Err(e) => Err(rquickjs::Error::new_from_js_message(
         "Response.finished failure",
         "Error",
-        message,
+        e.to_string(),
       )),
     }
   }

@@ -454,7 +454,7 @@ impl Response {
   pub async fn finished(&self) -> Result<Null> {
     match self.inner.finished().await {
       Ok(()) => Ok(Null),
-      Err(message) => Err(napi::Error::from_reason(message)),
+      Err(e) => Err(crate::error::to_napi(e)),
     }
   }
 

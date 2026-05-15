@@ -25,6 +25,12 @@ use reqwest::Client;
 use serde::Deserialize;
 use tokio::io::AsyncWriteExt;
 
+use crate::error::{FerriError, Result};
+
+fn backend_err(context: impl std::fmt::Display) -> FerriError {
+  FerriError::backend(context.to_string())
+}
+
 // ---------------------------------------------------------------------------
 // Chrome for Testing API types
 // ---------------------------------------------------------------------------
@@ -159,7 +165,7 @@ impl BrowserInstaller {
   ///
   /// Returns an error if the Chrome for Testing API is unreachable, the download
   /// fails after all retries, extraction fails, or the platform is unsupported.
-  pub async fn install_chromium<F>(&self, progress: F) -> Result<String, String>
+  pub async fn install_chromium<F>(&self, progress: F) -> Result<String>
   where
     F: Fn(InstallProgress),
   {
@@ -171,10 +177,10 @@ impl BrowserInstaller {
       .get(CFT_VERSIONS_URL)
       .send()
       .await
-      .map_err(|e| format!("failed to fetch Chrome for Testing versions: {e}"))?
+      .map_err(|e| backend_err(format!("failed to fetch Chrome for Testing versions: {e}")))?
       .json()
       .await
-      .map_err(|e| format!("failed to parse Chrome for Testing response: {e}"))?;
+      .map_err(|e| backend_err(format!("failed to parse Chrome for Testing response: {e}")))?;
 
     let version = &cft.channels.stable.version;
     let platform = current_platform();
@@ -187,7 +193,7 @@ impl BrowserInstaller {
       .chrome
       .iter()
       .find(|d| d.platform == platform)
-      .ok_or_else(|| format!("no Chrome for Testing build for platform: {platform}"))?;
+      .ok_or_else(|| FerriError::unsupported(format!("no Chrome for Testing build for platform: {platform}")))?;
 
     // Check if already installed via marker file (matches Playwright's .downloaded marker)
     let install_dir = self.cache_dir.join(format!("chromium-{version}"));
@@ -210,9 +216,7 @@ impl BrowserInstaller {
 
     // Download with retries (matching Playwright's 5-attempt strategy)
     let tmp_dir = self.cache_dir.join(".tmp");
-    tokio::fs::create_dir_all(&tmp_dir)
-      .await
-      .map_err(|e| format!("failed to create temp dir: {e}"))?;
+    tokio::fs::create_dir_all(&tmp_dir).await?;
 
     let zip_path = tmp_dir.join(format!("chrome-{version}-{platform}.zip"));
     let mut last_error = String::new();
@@ -232,9 +236,9 @@ impl BrowserInstaller {
           last_error = format!("attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
           let _ = tokio::fs::remove_file(&zip_path).await;
           if attempt == DOWNLOAD_RETRIES {
-            return Err(format!(
+            return Err(backend_err(format!(
               "download failed after {DOWNLOAD_RETRIES} attempts: {last_error}"
-            ));
+            )));
           }
         },
       }
@@ -243,16 +247,13 @@ impl BrowserInstaller {
     // Extract
     progress(InstallProgress::Extracting);
 
-    tokio::fs::create_dir_all(&install_dir)
-      .await
-      .map_err(|e| format!("failed to create install dir: {e}"))?;
+    tokio::fs::create_dir_all(&install_dir).await?;
 
     let install_dir_clone = install_dir.clone();
     let zip_path_clone = zip_path.clone();
     tokio::task::spawn_blocking(move || extract_zip(&zip_path_clone, &install_dir_clone))
       .await
-      .map_err(|e| format!("extract task failed: {e}"))?
-      .map_err(|e| format!("extraction failed: {e}"))?;
+      .map_err(|e| backend_err(format!("extract task failed: {e}")))??;
 
     // Clean up temp file
     let _ = tokio::fs::remove_file(&zip_path).await;
@@ -268,9 +269,9 @@ impl BrowserInstaller {
 
     let path = executable.to_string_lossy().to_string();
     if !executable.exists() {
-      return Err(format!(
+      return Err(backend_err(format!(
         "extraction completed but chrome executable not found at: {path}"
-      ));
+      )));
     }
 
     // Write marker file (matches Playwright's .downloaded marker)
@@ -285,7 +286,7 @@ impl BrowserInstaller {
   }
 
   /// Download a file with streaming progress.
-  async fn download_file<F>(&self, url: &str, dest: &Path, progress: &F) -> Result<(), String>
+  async fn download_file<F>(&self, url: &str, dest: &Path, progress: &F) -> Result<()>
   where
     F: Fn(InstallProgress),
   {
@@ -294,30 +295,28 @@ impl BrowserInstaller {
       .get(url)
       .send()
       .await
-      .map_err(|e| format!("request failed: {e}"))?;
+      .map_err(|e| backend_err(format!("request failed: {e}")))?;
 
     if !response.status().is_success() {
-      return Err(format!("HTTP {}: {url}", response.status()));
+      return Err(backend_err(format!("HTTP {}: {url}", response.status())));
     }
 
     let total_bytes = response.content_length();
     let mut bytes_downloaded: u64 = 0;
 
-    let mut file = tokio::fs::File::create(dest)
-      .await
-      .map_err(|e| format!("failed to create file: {e}"))?;
+    let mut file = tokio::fs::File::create(dest).await?;
 
     let mut stream = response.bytes_stream();
     while let Some(chunk) = stream.next().await {
-      let chunk = chunk.map_err(|e| format!("download error: {e}"))?;
-      file.write_all(&chunk).await.map_err(|e| format!("write error: {e}"))?;
+      let chunk = chunk.map_err(|e| backend_err(format!("download error: {e}")))?;
+      file.write_all(&chunk).await?;
       bytes_downloaded += chunk.len() as u64;
       progress(InstallProgress::Downloading {
         bytes_downloaded,
         total_bytes,
       });
     }
-    file.flush().await.map_err(|e| format!("flush error: {e}"))?;
+    file.flush().await?;
 
     Ok(())
   }
@@ -334,7 +333,7 @@ impl BrowserInstaller {
   ///
   /// Returns an error if the Linux distribution is unsupported or `apt-get`/`pacman` fails.
   #[allow(clippy::unused_async)] // async needed on linux cfg, not on macOS/Windows
-  pub async fn install_system_deps<F>(&self, progress: F) -> Result<(), String>
+  pub async fn install_system_deps<F>(&self, progress: F) -> Result<()>
   where
     F: Fn(InstallProgress),
   {
@@ -350,9 +349,9 @@ impl BrowserInstaller {
       let (pkg_manager, packages) = system_packages_for_distro(&distro);
 
       if packages.is_empty() {
-        return Err(format!(
-          "unsupported Linux distribution: {distro}. Cannot determine required packages."
-        ));
+        return Err(FerriError::unsupported(format!(
+          "Linux distribution {distro}: cannot determine required packages"
+        )));
       }
 
       progress(InstallProgress::InstallingDeps { distro: distro.clone() });
@@ -384,11 +383,13 @@ impl BrowserInstaller {
         .stdout(std::process::Stdio::inherit())
         .stderr(std::process::Stdio::inherit())
         .status()
-        .await
-        .map_err(|e| format!("failed to run apt-get: {e}"))?;
+        .await?;
 
       if !status.success() {
-        return Err(format!("apt-get exited with code: {}", status.code().unwrap_or(-1)));
+        return Err(backend_err(format!(
+          "apt-get exited with code: {}",
+          status.code().unwrap_or(-1)
+        )));
       }
 
       progress(InstallProgress::DepsInstalled);
@@ -431,7 +432,7 @@ impl BrowserInstaller {
   ///
   /// Returns an error if the Chrome for Testing API is unreachable, the download
   /// fails after all retries, extraction fails, or the platform is unsupported.
-  pub async fn install_chromium_headless_shell<F>(&self, progress: F) -> Result<String, String>
+  pub async fn install_chromium_headless_shell<F>(&self, progress: F) -> Result<String>
   where
     F: Fn(InstallProgress),
   {
@@ -442,10 +443,10 @@ impl BrowserInstaller {
       .get(CFT_VERSIONS_URL)
       .send()
       .await
-      .map_err(|e| format!("failed to fetch Chrome for Testing versions: {e}"))?
+      .map_err(|e| backend_err(format!("failed to fetch Chrome for Testing versions: {e}")))?
       .json()
       .await
-      .map_err(|e| format!("failed to parse Chrome for Testing response: {e}"))?;
+      .map_err(|e| backend_err(format!("failed to parse Chrome for Testing response: {e}")))?;
 
     let version = &cft.channels.stable.version;
     let platform = current_platform();
@@ -457,7 +458,7 @@ impl BrowserInstaller {
       .chrome_headless_shell
       .iter()
       .find(|d| d.platform == platform)
-      .ok_or_else(|| format!("no Chrome Headless Shell build for platform: {platform}"))?;
+      .ok_or_else(|| FerriError::unsupported(format!("no Chrome Headless Shell build for platform: {platform}")))?;
 
     let install_dir = self.cache_dir.join(format!("chromium-headless-shell-{version}"));
     let marker_file = install_dir.join(".downloaded");
@@ -477,9 +478,7 @@ impl BrowserInstaller {
     }
 
     let tmp_dir = self.cache_dir.join(".tmp");
-    tokio::fs::create_dir_all(&tmp_dir)
-      .await
-      .map_err(|e| format!("failed to create temp dir: {e}"))?;
+    tokio::fs::create_dir_all(&tmp_dir).await?;
 
     let zip_path = tmp_dir.join(format!("chrome-headless-shell-{version}-{platform}.zip"));
     let mut last_error = String::new();
@@ -499,9 +498,9 @@ impl BrowserInstaller {
           last_error = format!("attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
           let _ = tokio::fs::remove_file(&zip_path).await;
           if attempt == DOWNLOAD_RETRIES {
-            return Err(format!(
+            return Err(backend_err(format!(
               "download failed after {DOWNLOAD_RETRIES} attempts: {last_error}"
-            ));
+            )));
           }
         },
       }
@@ -509,16 +508,13 @@ impl BrowserInstaller {
 
     progress(InstallProgress::Extracting);
 
-    tokio::fs::create_dir_all(&install_dir)
-      .await
-      .map_err(|e| format!("failed to create install dir: {e}"))?;
+    tokio::fs::create_dir_all(&install_dir).await?;
 
     let install_dir_clone = install_dir.clone();
     let zip_path_clone = zip_path.clone();
     tokio::task::spawn_blocking(move || extract_zip(&zip_path_clone, &install_dir_clone))
       .await
-      .map_err(|e| format!("extract task failed: {e}"))?
-      .map_err(|e| format!("extraction failed: {e}"))?;
+      .map_err(|e| backend_err(format!("extract task failed: {e}")))??;
 
     let _ = tokio::fs::remove_file(&zip_path).await;
 
@@ -532,9 +528,9 @@ impl BrowserInstaller {
 
     let path = executable.to_string_lossy().to_string();
     if !executable.exists() {
-      return Err(format!(
+      return Err(backend_err(format!(
         "extraction completed but chrome-headless-shell executable not found at: {path}"
-      ));
+      )));
     }
 
     let _ = tokio::fs::write(&marker_file, version.as_bytes()).await;
@@ -580,7 +576,7 @@ impl BrowserInstaller {
   ///
   /// Returns an error if the Mozilla API is unreachable, the download
   /// fails after all retries, extraction fails, or the platform is unsupported.
-  pub async fn install_firefox<F>(&self, progress: F) -> Result<String, String>
+  pub async fn install_firefox<F>(&self, progress: F) -> Result<String>
   where
     F: Fn(InstallProgress),
   {
@@ -592,14 +588,14 @@ impl BrowserInstaller {
       .get(FIREFOX_VERSIONS_URL)
       .send()
       .await
-      .map_err(|e| format!("failed to fetch Firefox versions: {e}"))?
+      .map_err(|e| backend_err(format!("failed to fetch Firefox versions: {e}")))?
       .json()
       .await
-      .map_err(|e| format!("failed to parse Firefox versions: {e}"))?;
+      .map_err(|e| backend_err(format!("failed to parse Firefox versions: {e}")))?;
 
     let version = versions
       .get("LATEST_FIREFOX_VERSION")
-      .ok_or("Firefox versions response missing LATEST_FIREFOX_VERSION")?
+      .ok_or_else(|| backend_err("Firefox versions response missing LATEST_FIREFOX_VERSION"))?
       .clone();
 
     let (platform_dir, archive_name, archive_ext) = firefox_archive_info(&version)?;
@@ -629,9 +625,7 @@ impl BrowserInstaller {
 
     // Download with retries
     let tmp_dir = self.cache_dir.join(".tmp");
-    tokio::fs::create_dir_all(&tmp_dir)
-      .await
-      .map_err(|e| format!("failed to create temp dir: {e}"))?;
+    tokio::fs::create_dir_all(&tmp_dir).await?;
 
     let archive_path = tmp_dir.join(format!("firefox-{version}{archive_ext}"));
     let mut last_error = String::new();
@@ -651,9 +645,9 @@ impl BrowserInstaller {
           last_error = format!("attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
           let _ = tokio::fs::remove_file(&archive_path).await;
           if attempt == DOWNLOAD_RETRIES {
-            return Err(format!(
+            return Err(backend_err(format!(
               "Firefox download failed after {DOWNLOAD_RETRIES} attempts: {last_error}"
-            ));
+            )));
           }
         },
       }
@@ -662,16 +656,13 @@ impl BrowserInstaller {
     // Extract
     progress(InstallProgress::Extracting);
 
-    tokio::fs::create_dir_all(&install_dir)
-      .await
-      .map_err(|e| format!("failed to create install dir: {e}"))?;
+    tokio::fs::create_dir_all(&install_dir).await?;
 
     let install_dir_clone = install_dir.clone();
     let archive_path_clone = archive_path.clone();
     tokio::task::spawn_blocking(move || extract_firefox_archive(&archive_path_clone, &install_dir_clone))
       .await
-      .map_err(|e| format!("extract task failed: {e}"))?
-      .map_err(|e| format!("Firefox extraction failed: {e}"))?;
+      .map_err(|e| backend_err(format!("extract task failed: {e}")))??;
 
     // Clean up temp file
     let _ = tokio::fs::remove_file(&archive_path).await;
@@ -687,9 +678,9 @@ impl BrowserInstaller {
 
     let path = executable.to_string_lossy().to_string();
     if !executable.exists() {
-      return Err(format!(
+      return Err(backend_err(format!(
         "extraction completed but firefox executable not found at: {path}"
-      ));
+      )));
     }
 
     // Write marker file
@@ -1003,7 +994,7 @@ fn arch_chromium_packages() -> Vec<&'static str> {
 
 /// Return (`platform_dir`, `archive_filename`, `archive_extension`) for Firefox downloads.
 /// Matches Puppeteer's `archive()` and `platformName()` for stable channel.
-fn firefox_archive_info(version: &str) -> Result<(String, String, String), String> {
+fn firefox_archive_info(version: &str) -> Result<(String, String, String)> {
   let os = std::env::consts::OS;
   let arch = std::env::consts::ARCH;
 
@@ -1024,7 +1015,9 @@ fn firefox_archive_info(version: &str) -> Result<(String, String, String), Strin
     ("macos", "x86_64" | "aarch64") => Ok(("mac".into(), format!("Firefox {version}.dmg"), ".dmg".into())),
     ("windows", "x86_64") => Ok(("win64".into(), format!("Firefox Setup {version}.exe"), ".exe".into())),
     ("windows", "x86") => Ok(("win32".into(), format!("Firefox Setup {version}.exe"), ".exe".into())),
-    _ => Err(format!("unsupported platform for Firefox: {os}-{arch}")),
+    _ => Err(FerriError::unsupported(format!(
+      "unsupported platform for Firefox: {os}-{arch}"
+    ))),
   }
 }
 
@@ -1041,7 +1034,7 @@ fn firefox_executable_path(install_dir: &Path) -> PathBuf {
 }
 
 /// Extract a Firefox archive (tar.bz2, tar.xz, or DMG).
-fn extract_firefox_archive(archive_path: &Path, dest: &Path) -> Result<(), String> {
+fn extract_firefox_archive(archive_path: &Path, dest: &Path) -> Result<()> {
   let path_str = archive_path.to_string_lossy();
 
   if path_str.ends_with(".tar.bz2") {
@@ -1051,45 +1044,44 @@ fn extract_firefox_archive(archive_path: &Path, dest: &Path) -> Result<(), Strin
   } else if path_str.ends_with(".dmg") {
     extract_dmg(archive_path, dest)
   } else {
-    Err(format!("unsupported Firefox archive format: {path_str}"))
+    Err(FerriError::unsupported(format!(
+      "unsupported Firefox archive format: {path_str}"
+    )))
   }
 }
 
 /// Extract a .tar.bz2 archive.
-fn extract_tar_bz2(archive_path: &Path, dest: &Path) -> Result<(), String> {
-  let file = std::fs::File::open(archive_path).map_err(|e| format!("failed to open tar.bz2: {e}"))?;
+fn extract_tar_bz2(archive_path: &Path, dest: &Path) -> Result<()> {
+  let file = std::fs::File::open(archive_path)?;
   let decoder = bzip2::read::BzDecoder::new(file);
   let mut archive = tar::Archive::new(decoder);
-  archive
-    .unpack(dest)
-    .map_err(|e| format!("failed to extract tar.bz2: {e}"))
+  archive.unpack(dest)?;
+  Ok(())
 }
 
 /// Extract a .tar.xz archive.
-fn extract_tar_xz(archive_path: &Path, dest: &Path) -> Result<(), String> {
-  let file = std::fs::File::open(archive_path).map_err(|e| format!("failed to open tar.xz: {e}"))?;
+fn extract_tar_xz(archive_path: &Path, dest: &Path) -> Result<()> {
+  let file = std::fs::File::open(archive_path)?;
   let decoder = xz2::read::XzDecoder::new(file);
   let mut archive = tar::Archive::new(decoder);
-  archive
-    .unpack(dest)
-    .map_err(|e| format!("failed to extract tar.xz: {e}"))
+  archive.unpack(dest)?;
+  Ok(())
 }
 
 /// Extract a .dmg (macOS disk image) by mounting, copying, and unmounting.
 /// Same approach as Puppeteer: hdiutil attach -> cp -R -> hdiutil detach.
-fn extract_dmg(dmg_path: &Path, dest: &Path) -> Result<(), String> {
+fn extract_dmg(dmg_path: &Path, dest: &Path) -> Result<()> {
   // Mount the DMG
   let output = std::process::Command::new("hdiutil")
     .args(["attach", "-nobrowse", "-noautoopen"])
     .arg(dmg_path)
-    .output()
-    .map_err(|e| format!("hdiutil attach failed: {e}"))?;
+    .output()?;
 
   if !output.status.success() {
-    return Err(format!(
+    return Err(backend_err(format!(
       "hdiutil attach failed: {}",
       String::from_utf8_lossy(&output.stderr)
-    ));
+    )));
   }
 
   let stdout = String::from_utf8_lossy(&output.stdout);
@@ -1100,15 +1092,15 @@ fn extract_dmg(dmg_path: &Path, dest: &Path) -> Result<(), String> {
       parts.last().map(|p| p.trim().to_string())
     })
     .find(|p| p.starts_with("/Volumes/"))
-    .ok_or("could not find volume mount path in hdiutil output")?;
+    .ok_or_else(|| backend_err("could not find volume mount path in hdiutil output"))?;
 
   // Find the .app directory inside the mount
-  let result = (|| -> Result<(), String> {
-    let entries = std::fs::read_dir(&mount_path).map_err(|e| format!("failed to read mounted volume: {e}"))?;
+  let result = (|| -> Result<()> {
+    let entries = std::fs::read_dir(&mount_path)?;
     let app_name = entries
       .filter_map(std::result::Result::ok)
       .find(|e| e.file_name().to_string_lossy().ends_with(".app"))
-      .ok_or("no .app found in mounted DMG")?;
+      .ok_or_else(|| backend_err("no .app found in mounted DMG"))?;
 
     let source = std::path::Path::new(&mount_path).join(app_name.file_name());
 
@@ -1117,11 +1109,10 @@ fn extract_dmg(dmg_path: &Path, dest: &Path) -> Result<(), String> {
       .args(["-R"])
       .arg(&source)
       .arg(dest)
-      .status()
-      .map_err(|e| format!("cp -R failed: {e}"))?;
+      .status()?;
 
     if !status.success() {
-      return Err("cp -R failed to copy Firefox.app".into());
+      return Err(backend_err("cp -R failed to copy Firefox.app"));
     }
     Ok(())
   })();
@@ -1138,27 +1129,26 @@ fn extract_dmg(dmg_path: &Path, dest: &Path) -> Result<(), String> {
 // Zip extraction (for Chrome)
 // ---------------------------------------------------------------------------
 
-fn extract_zip(zip_path: &Path, dest: &Path) -> Result<(), String> {
-  let file = std::fs::File::open(zip_path).map_err(|e| format!("failed to open zip: {e}"))?;
-  let mut archive = zip::ZipArchive::new(file).map_err(|e| format!("failed to read zip archive: {e}"))?;
+fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
+  let file = std::fs::File::open(zip_path)?;
+  let mut archive = zip::ZipArchive::new(file).map_err(|e| backend_err(format!("failed to read zip archive: {e}")))?;
 
   for i in 0..archive.len() {
     let mut entry = archive
       .by_index(i)
-      .map_err(|e| format!("failed to read zip entry {i}: {e}"))?;
+      .map_err(|e| backend_err(format!("failed to read zip entry {i}: {e}")))?;
 
     let name = entry.name().to_string();
     let out_path = dest.join(&name);
 
     if entry.is_dir() {
-      std::fs::create_dir_all(&out_path).map_err(|e| format!("failed to create dir {}: {e}", out_path.display()))?;
+      std::fs::create_dir_all(&out_path)?;
     } else {
       if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| format!("failed to create parent dir: {e}"))?;
+        std::fs::create_dir_all(parent)?;
       }
-      let mut out_file =
-        std::fs::File::create(&out_path).map_err(|e| format!("failed to create file {}: {e}", out_path.display()))?;
-      std::io::copy(&mut entry, &mut out_file).map_err(|e| format!("failed to write {}: {e}", out_path.display()))?;
+      let mut out_file = std::fs::File::create(&out_path)?;
+      std::io::copy(&mut entry, &mut out_file)?;
 
       // Preserve executable permissions on Unix
       #[cfg(unix)]

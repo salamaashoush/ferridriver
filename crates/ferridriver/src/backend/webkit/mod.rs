@@ -181,7 +181,7 @@ impl WebKitBrowser {
   ///
   /// This function currently always succeeds; errors from killing or waiting
   /// on the child process are silently ignored.
-  pub fn close(&mut self) -> impl std::future::Future<Output = Result<(), String>> {
+  pub fn close(&mut self) -> impl std::future::Future<Output = crate::error::Result<()>> {
     // OP_SHUTDOWN calls _exit(0) immediately -- no response comes back.
     // Kill the host subprocess via the shared guard; `WebKitChildGuard::Drop`
     // also runs when the last clone of the `Arc` goes, so this is the graceful
@@ -935,11 +935,17 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Always returns an error because PDF generation requires a CDP backend.
-  pub fn pdf(&self, _opts: crate::options::PdfOptions) -> impl std::future::Future<Output = Result<Vec<u8>, String>> {
+  pub fn pdf(
+    &self,
+    _opts: crate::options::PdfOptions,
+  ) -> impl std::future::Future<Output = crate::error::Result<Vec<u8>>> {
+    use crate::FerriError;
     let result = if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
-      Err("Page is closed".into())
+      Err(FerriError::target_closed(Some("page is closed".into())))
     } else {
-      Err("PDF generation requires CDP backend (cdp-ws, cdp-pipe, or cdp-raw)".into())
+      Err(FerriError::unsupported(
+        "PDF generation requires CDP backend (cdp-ws, cdp-pipe, or cdp-raw)",
+      ))
     };
     std::future::ready(result)
   }
@@ -1714,9 +1720,10 @@ impl WebKitPage {
     &self,
     _permissions: &[String],
     _origin: Option<&str>,
-  ) -> impl std::future::Future<Output = Result<(), String>> {
+  ) -> impl std::future::Future<Output = crate::error::Result<()>> {
+    use crate::FerriError;
     let result = if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
-      Err("Page is closed".into())
+      Err(FerriError::target_closed(Some("page is closed".into())))
     } else {
       Ok(())
     };
@@ -1729,9 +1736,10 @@ impl WebKitPage {
   /// # Errors
   ///
   /// This function currently always succeeds.
-  pub fn reset_permissions(&self) -> impl std::future::Future<Output = Result<(), String>> {
+  pub fn reset_permissions(&self) -> impl std::future::Future<Output = crate::error::Result<()>> {
+    use crate::FerriError;
     let result = if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
-      Err("Page is closed".into())
+      Err(FerriError::target_closed(Some("page is closed".into())))
     } else {
       Ok(())
     };
@@ -1965,10 +1973,11 @@ impl WebKitPage {
   /// # Errors
   ///
   /// This function currently always succeeds (no-op).
-  pub fn remove_init_script(&self, _identifier: &str) -> impl std::future::Future<Output = Result<(), String>> {
+  pub fn remove_init_script(&self, _identifier: &str) -> impl std::future::Future<Output = crate::error::Result<()>> {
+    use crate::FerriError;
     // WKWebView limitation: individual WKUserScript removal is not supported.
     let result = if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
-      Err("Page is closed".into())
+      Err(FerriError::target_closed(Some("page is closed".into())))
     } else {
       Ok(())
     };

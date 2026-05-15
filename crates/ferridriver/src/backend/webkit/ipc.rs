@@ -377,14 +377,18 @@ impl IpcClient {
   /// 3. `~/.cache/ferridriver/fd_webkit_host` (survives cargo clean)
   /// 4. Compile-time baked path from build.rs (dev builds)
   #[cfg(target_os = "macos")]
-  fn resolve_host_binary() -> Result<std::path::PathBuf, String> {
+  fn resolve_host_binary() -> crate::error::Result<std::path::PathBuf> {
+    use crate::FerriError;
     // Priority 1: Environment variable override
     if let Ok(path) = std::env::var("FERRIDRIVER_WEBKIT_HOST") {
       let p = std::path::PathBuf::from(&path);
       if p.exists() {
         return Ok(p);
       }
-      return Err(format!("FERRIDRIVER_WEBKIT_HOST={path} does not exist"));
+      return Err(FerriError::invalid_argument(
+        "FERRIDRIVER_WEBKIT_HOST",
+        format!("path {path:?} does not exist"),
+      ));
     }
 
     // Priority 2: Sibling to the running executable
@@ -418,7 +422,7 @@ impl IpcClient {
       return Ok(baked);
     }
 
-    Err(format!(
+    Err(FerriError::backend(format!(
       "WebKit host binary not found. Checked:\n  \
        1. $FERRIDRIVER_WEBKIT_HOST (not set)\n  \
        2. sibling to current executable\n  \
@@ -426,7 +430,7 @@ impl IpcClient {
        4. ~/.cache/ferridriver/{HOST_BINARY_NAME}\n  \
        5. {HOST_BINARY_PATH}\n\
        Set FERRIDRIVER_WEBKIT_HOST or rebuild with `cargo build`."
-    ))
+    )))
   }
 
   /// Spawn the `WebKit` host subprocess and establish IPC communication.
@@ -436,16 +440,16 @@ impl IpcClient {
   /// Returns an error if the Unix socketpair cannot be created, the host binary
   /// cannot be found or spawned, or the subprocess fails to become ready within
   /// the probe timeout.
-  pub async fn spawn(headless: bool) -> Result<(Self, std::process::Child), String> {
+  pub async fn spawn(headless: bool) -> crate::error::Result<(Self, std::process::Child)> {
     use std::os::unix::io::IntoRawFd;
 
-    let (parent_sock, child_sock) = std::os::unix::net::UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+    let (parent_sock, child_sock) = std::os::unix::net::UnixStream::pair()?;
     let child_fd = child_sock.into_raw_fd();
     let exe = Self::resolve_host_binary()?;
 
     let child = Self::spawn_host_process(&exe, child_fd, headless)?;
 
-    let read_sock = parent_sock.try_clone().map_err(|e| format!("clone: {e}"))?;
+    let read_sock = parent_sock.try_clone()?;
     let write_sock = parent_sock;
 
     let pending: Arc<StdMutex<FxHashMap<u64, oneshot::Sender<IpcResponse>>>> =
@@ -454,9 +458,7 @@ impl IpcClient {
     let dialog_log: Arc<StdMutex<Vec<(String, String, String)>>> = Arc::new(StdMutex::new(Vec::new()));
     let network_log: Arc<StdMutex<Vec<NetworkEvent>>> = Arc::new(StdMutex::new(Vec::new()));
     let route_handler: Arc<StdMutex<Option<RouteCallback>>> = Arc::new(StdMutex::new(None));
-    let writer_for_reader = Arc::new(StdMutex::new(
-      write_sock.try_clone().map_err(|e| format!("clone writer: {e}"))?,
-    ));
+    let writer_for_reader = Arc::new(StdMutex::new(write_sock.try_clone()?));
     let event_notify = Arc::new(tokio::sync::Notify::new());
 
     // Reader thread: blocking reads of binary frames
@@ -499,7 +501,7 @@ impl IpcClient {
     exe: &std::path::Path,
     child_fd: std::os::unix::io::RawFd,
     _headless: bool,
-  ) -> Result<std::process::Child, String> {
+  ) -> crate::error::Result<std::process::Child> {
     // SAFETY: pre_exec runs in the forked child before exec. We manipulate
     // file descriptors to pass the IPC socket as fd 3 to the host subprocess.
     // The child_fd is valid (from IntoRawFd above) and only used in the child.
@@ -529,7 +531,7 @@ impl IpcClient {
       });
       cmd
         .spawn()
-        .map_err(|e| format!("spawn webkit host ({}): {e}", exe.display()))?
+        .map_err(|e| crate::FerriError::backend(format!("spawn webkit host ({}): {e}", exe.display())))?
     };
     Ok(child)
   }
@@ -656,27 +658,33 @@ impl IpcClient {
   ///
   /// Returns an error if the response channel is dropped (subprocess crashed),
   /// the request times out after 30 seconds, or the mutex is poisoned.
-  pub async fn send(&self, op: Op, payload: &[u8]) -> Result<IpcResponse, String> {
+  pub async fn send(&self, op: Op, payload: &[u8]) -> crate::error::Result<IpcResponse> {
+    use crate::FerriError;
     #[allow(clippy::cast_possible_truncation)] // request IDs wrap around at u32::MAX, which is acceptable
     let rid = self.next_id.fetch_add(1, Ordering::Relaxed) as u32;
     let (tx, rx) = oneshot::channel();
     self
       .pending
       .lock()
-      .map_err(|e| format!("pending lock poisoned: {e}"))?
+      .map_err(|e| FerriError::backend(format!("pending lock poisoned: {e}")))?
       .insert(u64::from(rid), tx);
     {
-      let mut w = self.writer.lock().map_err(|e| format!("writer lock poisoned: {e}"))?;
+      let mut w = self
+        .writer
+        .lock()
+        .map_err(|e| FerriError::backend(format!("writer lock poisoned: {e}")))?;
       frame_write(&mut *w, rid, op as u8, payload);
     }
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(r)) => Ok(r),
-      Ok(Err(_)) => Err("dropped".into()),
+      Ok(Err(_)) => Err(FerriError::target_closed(Some(
+        "webkit host response channel dropped".into(),
+      ))),
       Err(_) => {
         if let Ok(mut guard) = self.pending.lock() {
           guard.remove(&u64::from(rid));
         }
-        Err("timeout".into())
+        Err(FerriError::timeout(format!("webkit ipc op {op:?}"), 30_000))
       },
     }
   }
@@ -687,7 +695,7 @@ impl IpcClient {
   ///
   /// Returns an error if the underlying `send` call fails (timeout, channel dropped,
   /// or mutex poisoned).
-  pub async fn send_str(&self, op: Op, s: &str) -> Result<IpcResponse, String> {
+  pub async fn send_str(&self, op: Op, s: &str) -> crate::error::Result<IpcResponse> {
     let mut p = Vec::new();
     str_encode(&mut p, s);
     self.send(op, &p).await
@@ -699,7 +707,7 @@ impl IpcClient {
   ///
   /// Returns an error if the underlying `send` call fails (timeout, channel dropped,
   /// or mutex poisoned).
-  pub async fn send_str_vid(&self, op: Op, s: &str, vid: u64) -> Result<IpcResponse, String> {
+  pub async fn send_str_vid(&self, op: Op, s: &str, vid: u64) -> crate::error::Result<IpcResponse> {
     let mut p = Vec::new();
     str_encode(&mut p, s);
     p.extend_from_slice(&vid.to_le_bytes());
@@ -712,7 +720,7 @@ impl IpcClient {
   ///
   /// Returns an error if the underlying `send` call fails (timeout, channel dropped,
   /// or mutex poisoned).
-  pub async fn send_vid(&self, op: Op, vid: u64) -> Result<IpcResponse, String> {
+  pub async fn send_vid(&self, op: Op, vid: u64) -> crate::error::Result<IpcResponse> {
     self.send(op, &vid.to_le_bytes()).await
   }
 
@@ -722,7 +730,7 @@ impl IpcClient {
   ///
   /// Returns an error if the underlying `send` call fails (timeout, channel dropped,
   /// or mutex poisoned).
-  pub async fn send_empty(&self, op: Op) -> Result<IpcResponse, String> {
+  pub async fn send_empty(&self, op: Op) -> crate::error::Result<IpcResponse> {
     self.send(op, &[]).await
   }
 }

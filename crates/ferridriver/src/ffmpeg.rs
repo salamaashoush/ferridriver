@@ -12,6 +12,8 @@ use std::path::Path;
 use std::process::{Child, Command, Stdio};
 use std::sync::OnceLock;
 
+use crate::error::{FerriError, Result};
+
 /// Safely convert f64 to i64 via string formatting (avoids clippy `cast_possible_truncation`).
 fn f64_to_i64(v: f64) -> i64 {
   if !v.is_finite() {
@@ -56,8 +58,8 @@ pub fn video_content_type() -> &'static str {
 /// # Errors
 ///
 /// Returns an error if ffmpeg is not found on PATH.
-fn find_ffmpeg() -> Result<&'static str, String> {
-  static FFMPEG: OnceLock<Result<&'static str, String>> = OnceLock::new();
+fn find_ffmpeg() -> Result<&'static str> {
+  static FFMPEG: OnceLock<Result<&'static str>> = OnceLock::new();
   FFMPEG
     .get_or_init(|| {
       // Check if ffmpeg is available
@@ -68,13 +70,13 @@ fn find_ffmpeg() -> Result<&'static str, String> {
         .status()
       {
         Ok(s) if s.success() => Ok("ffmpeg"),
-        _ => Err(
+        _ => Err(FerriError::Unsupported(
           "ffmpeg not found. Install ffmpeg to enable video recording:\n  \
            macOS:  brew install ffmpeg\n  \
            Linux:  apt install ffmpeg\n  \
            Windows: winget install ffmpeg"
             .into(),
-        ),
+        )),
       }
     })
     .clone()
@@ -82,7 +84,7 @@ fn find_ffmpeg() -> Result<&'static str, String> {
 
 /// Spawn an ffmpeg process that reads JPEG frames from stdin and writes video.
 /// Uses the same codec settings as Playwright.
-fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result<Child, String> {
+fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result<Child> {
   let ffmpeg = find_ffmpeg()?;
   let w = width & !1;
   let h = height & !1;
@@ -172,14 +174,14 @@ fn spawn_ffmpeg(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
     .stdout(Stdio::null())
     .stderr(Stdio::piped())
     .spawn()
-    .map_err(|e| format!("failed to spawn ffmpeg: {e}"))
+    .map_err(|e| FerriError::backend(format!("failed to spawn ffmpeg: {e}")))
 }
 
 /// Encode a 1-second white video at the requested `width x height` with no
 /// piped input. Used as the fallback when the screencast produced zero
 /// frames so the output file still exists, has the right dimensions,
 /// and matches Playwright's `_stop` whitespace-frame behaviour.
-fn encode_blank(output_path: &Path, width: u32, height: u32, fps: u32) -> Result<(), String> {
+fn encode_blank(output_path: &Path, width: u32, height: u32, fps: u32) -> Result<()> {
   let ffmpeg = find_ffmpeg()?;
   let w = width & !1;
   let h = height & !1;
@@ -225,10 +227,13 @@ fn encode_blank(output_path: &Path, width: u32, height: u32, fps: u32) -> Result
     .stdout(Stdio::null())
     .stderr(Stdio::piped())
     .output()
-    .map_err(|e| format!("failed to spawn ffmpeg (blank): {e}"))?;
+    .map_err(|e| FerriError::backend(format!("failed to spawn ffmpeg (blank): {e}")))?;
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format!("ffmpeg blank-encode exited with {}: {stderr}", output.status));
+    return Err(FerriError::backend(format!(
+      "ffmpeg blank-encode exited with {}: {stderr}",
+      output.status
+    )));
   }
   Ok(())
 }
@@ -245,7 +250,7 @@ pub fn encode_stream(
   width: u32,
   height: u32,
   fps: u32,
-) -> Result<(), String> {
+) -> Result<()> {
   // Wait for the first frame before spawning the image2pipe encoder.
   // If the channel closes empty (short recording on a page that never
   // produced a compositor frame, e.g. data: URL closed immediately
@@ -261,7 +266,10 @@ pub fn encode_stream(
   };
 
   let mut child = spawn_ffmpeg(output_path, width, height, fps)?;
-  let mut stdin = child.stdin.take().ok_or("failed to open ffmpeg stdin")?;
+  let mut stdin = child
+    .stdin
+    .take()
+    .ok_or_else(|| FerriError::backend("failed to open ffmpeg stdin"))?;
 
   let mut first_ts: Option<f64> = None;
   let mut last_frame: Option<Vec<u8>> = None;
@@ -300,10 +308,15 @@ pub fn encode_stream(
 
   // Close stdin to signal EOF, then wait for ffmpeg to finish
   drop(stdin);
-  let output = child.wait_with_output().map_err(|e| format!("ffmpeg wait: {e}"))?;
+  let output = child
+    .wait_with_output()
+    .map_err(|e| FerriError::backend(format!("ffmpeg wait: {e}")))?;
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format!("ffmpeg exited with {}: {stderr}", output.status));
+    return Err(FerriError::backend(format!(
+      "ffmpeg exited with {}: {stderr}",
+      output.status
+    )));
   }
   Ok(())
 }
@@ -313,15 +326,12 @@ pub fn encode_stream(
 /// # Errors
 ///
 /// Returns an error if ffmpeg cannot be spawned or exits with an error.
-pub fn encode_frames(
-  frames: &[(Vec<u8>, f64)],
-  output_path: &Path,
-  width: u32,
-  height: u32,
-  fps: u32,
-) -> Result<(), String> {
+pub fn encode_frames(frames: &[(Vec<u8>, f64)], output_path: &Path, width: u32, height: u32, fps: u32) -> Result<()> {
   let mut child = spawn_ffmpeg(output_path, width, height, fps)?;
-  let mut stdin = child.stdin.take().ok_or("failed to open ffmpeg stdin")?;
+  let mut stdin = child
+    .stdin
+    .take()
+    .ok_or_else(|| FerriError::backend("failed to open ffmpeg stdin"))?;
 
   let mut first_ts: Option<f64> = None;
   let mut last_frame: Option<&[u8]> = None;
@@ -357,10 +367,15 @@ pub fn encode_frames(
   }
 
   drop(stdin);
-  let output = child.wait_with_output().map_err(|e| format!("ffmpeg wait: {e}"))?;
+  let output = child
+    .wait_with_output()
+    .map_err(|e| FerriError::backend(format!("ffmpeg wait: {e}")))?;
   if !output.status.success() {
     let stderr = String::from_utf8_lossy(&output.stderr);
-    return Err(format!("ffmpeg exited with {}: {stderr}", output.status));
+    return Err(FerriError::backend(format!(
+      "ffmpeg exited with {}: {stderr}",
+      output.status
+    )));
   }
   Ok(())
 }

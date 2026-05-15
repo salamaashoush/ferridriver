@@ -613,7 +613,7 @@ struct ResponseMutState {
   body_cache: Option<Vec<u8>>,
   remote_addr: Option<RemoteAddr>,
   security_details: Option<SecurityDetails>,
-  finished: Option<std::result::Result<(), String>>,
+  finished: Option<std::result::Result<(), FerriError>>,
 }
 
 impl Response {
@@ -758,7 +758,7 @@ impl Response {
   ///
   /// Returns the backend-reported failure text when the underlying
   /// load failed (e.g. `loadingFailed.errorText` on CDP).
-  pub async fn finished(&self) -> std::result::Result<(), String> {
+  pub async fn finished(&self) -> std::result::Result<(), FerriError> {
     loop {
       let waiter = self.inner.finished_notify.notified();
       tokio::pin!(waiter);
@@ -843,9 +843,9 @@ impl Response {
     self.inner.finished_notify.notify_waiters();
   }
 
-  pub async fn finish_failure(&self, error: String) {
+  pub async fn finish_failure(&self, error: impl Into<FerriError>) {
     let mut state = self.inner.state.write().await;
-    state.finished = Some(Err(error));
+    state.finished = Some(Err(error.into()));
     drop(state);
     self.inner.finished_notify.notify_waiters();
   }
