@@ -59,7 +59,7 @@ pub use locator::LocatorJs;
 pub use mouse::MouseJs;
 pub use network::{RequestJs, ResponseJs, RouteJs, WebSocketJs};
 pub use page::PageJs;
-pub use plugins::{PluginBinding, PluginCommandsJs, install_plugins};
+pub use plugins::{PluginBinding, PluginCommandsJs, PluginToolBinding, install_plugins};
 pub use video::VideoJs;
 pub use web_error::WebErrorJs;
 

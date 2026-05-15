@@ -3,13 +3,23 @@
 //! At server startup each configured plugin path is read and evaluated in
 //! a throwaway `QuickJS` runtime (the same `ScriptEngine` that powers
 //! `run_script`, just with no live browser bindings). The plugin must
-//! assign its manifest to `globalThis.exports`. The loader strips the
-//! `handler` function and serialises the remainder as JSON, which then
-//! deserialises into [`PluginManifest`].
+//! assign its manifest(s) to `globalThis.exports`. Three shapes are
+//! accepted, in order of recognition:
 //!
-//! The full source text is retained on [`LoadedPlugin`] -- it gets
-//! re-evaluated inside each `run_script` invocation so the handler closure
-//! captures the live `page`/`context`/`request` globals.
+//! 1. **Multiple tools, with shared metadata** -- `globalThis.exports = {
+//!    tools: [ {...}, {...} ] }`. The outer object may carry future
+//!    bundle-level fields; only `tools` is consumed today.
+//! 2. **Multiple tools, plain array** -- `globalThis.exports = [ {...},
+//!    {...} ]`. Equivalent to (1) with no outer metadata.
+//! 3. **Single tool** -- `globalThis.exports = { name, description,
+//!    inputSchema, allow, exposeAsTool, handler }`. Back-compat with
+//!    the original single-tool format. Treated as `tools: [exports]`.
+//!
+//! The loader strips every `handler` (functions aren't JSON-serialisable)
+//! and serialises the rest, which then deserialises into a `Vec<PluginManifest>`.
+//! The full source text is retained on [`LoadedPlugin`] so the binding-
+//! install path can re-evaluate the file ONCE inside each `run_script`
+//! invocation and register every tool the file declares.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -18,13 +28,15 @@ use ferridriver_script::{InMemoryVars, Outcome, PathSandbox, RunContext, RunOpti
 
 use super::manifest::PluginManifest;
 
-/// A plugin that has been discovered, parsed, and validated.
+/// A plugin source file that has been discovered, parsed, and validated.
 ///
-/// Carries the manifest plus the original source so the binding-install
-/// path can re-evaluate the file inside the live script context.
+/// Carries every tool declared in the file plus the original source so
+/// the binding-install path can re-evaluate the file inside the live
+/// script context once and bind each tool under `plugins.<name>`.
 #[derive(Debug, Clone)]
 pub struct LoadedPlugin {
-  pub manifest: PluginManifest,
+  /// One manifest per tool declared in the source file. At least one.
+  pub tools: Vec<PluginManifest>,
   pub source: String,
   pub path: PathBuf,
 }
@@ -36,6 +48,7 @@ pub enum PluginLoadError {
   Eval { path: PathBuf, message: String },
   ManifestMissing { path: PathBuf },
   ManifestInvalid { path: PathBuf, error: serde_json::Error },
+  ManifestNoTools { path: PathBuf },
   SandboxInit { error: String },
 }
 
@@ -46,6 +59,7 @@ impl std::fmt::Display for PluginLoadError {
       Self::Eval { path, message } => write!(f, "eval {}: {message}", path.display()),
       Self::ManifestMissing { path } => write!(f, "{}: globalThis.exports not set after eval", path.display()),
       Self::ManifestInvalid { path, error } => write!(f, "{}: manifest invalid: {error}", path.display()),
+      Self::ManifestNoTools { path } => write!(f, "{}: no tools declared in globalThis.exports", path.display()),
       Self::SandboxInit { error } => write!(f, "sandbox init: {error}"),
     }
   }
@@ -53,8 +67,9 @@ impl std::fmt::Display for PluginLoadError {
 
 impl std::error::Error for PluginLoadError {}
 
-/// Load a single plugin file: read source, eval to capture the manifest,
-/// return both. The handler is NOT evaluated here -- only the manifest fields.
+/// Load a single plugin file: read source, eval to capture every tool
+/// manifest, return [`LoadedPlugin`] with `tools.len() >= 1`. Handler
+/// functions are NOT evaluated here -- only the metadata fields.
 ///
 /// `engine` is the live script engine the rest of the server uses; we
 /// reuse its config (timeout, memory limits) so plugin authors get the
@@ -64,7 +79,8 @@ impl std::error::Error for PluginLoadError {}
 ///
 /// Returns [`PluginLoadError`] if the file cannot be read, the manifest
 /// extractor script fails to evaluate, `globalThis.exports` is missing
-/// after eval, or the captured JSON cannot be deserialised into a manifest.
+/// after eval, the captured JSON cannot be deserialised, or no tools
+/// were declared.
 pub async fn load_plugin(path: &Path, engine: &ScriptEngine) -> Result<LoadedPlugin, PluginLoadError> {
   let source = std::fs::read_to_string(path).map_err(|error| PluginLoadError::Io {
     path: path.to_path_buf(),
@@ -89,15 +105,24 @@ pub async fn load_plugin(path: &Path, engine: &ScriptEngine) -> Result<LoadedPlu
     plugins: Vec::new(),
   };
 
-  // Eval the plugin source, then synthesise an extractor that strips the
-  // handler (functions aren't JSON-serialisable) and returns the rest as
-  // a JSON string. The `return` flows back through ScriptResult::value.
+  // Eval the plugin source, then normalise `globalThis.exports` into an
+  // array of tool manifests. Three shapes are accepted -- see module
+  // docs. Each manifest gets its `handler` stripped before JSON
+  // serialisation (functions don't survive JSON).
   let extractor = format!(
     "{source}\n\
-     if (typeof globalThis.exports !== 'object' || globalThis.exports === null) {{ return null; }}\n\
-     const m = {{ ...globalThis.exports }};\n\
-     delete m.handler;\n\
-     return JSON.stringify(m);\n"
+     const __exp = globalThis.exports;\n\
+     if (typeof __exp !== 'object' || __exp === null) {{ return null; }}\n\
+     let __tools;\n\
+     if (Array.isArray(__exp)) {{ __tools = __exp; }}\n\
+     else if (Array.isArray(__exp.tools)) {{ __tools = __exp.tools; }}\n\
+     else {{ __tools = [__exp]; }}\n\
+     const __clean = __tools.map((t) => {{\n\
+       const m = {{ ...t }};\n\
+       delete m.handler;\n\
+       return m;\n\
+     }});\n\
+     return JSON.stringify(__clean);\n"
   );
 
   let result = engine.run(&extractor, &[], RunOptions::default(), ctx).await;
@@ -120,14 +145,20 @@ pub async fn load_plugin(path: &Path, engine: &ScriptEngine) -> Result<LoadedPlu
     },
   };
 
-  let manifest: PluginManifest =
+  let tools: Vec<PluginManifest> =
     serde_json::from_str(&manifest_json).map_err(|error| PluginLoadError::ManifestInvalid {
       path: path.to_path_buf(),
       error,
     })?;
 
+  if tools.is_empty() {
+    return Err(PluginLoadError::ManifestNoTools {
+      path: path.to_path_buf(),
+    });
+  }
+
   Ok(LoadedPlugin {
-    manifest,
+    tools,
     source,
     path: path.to_path_buf(),
   })
