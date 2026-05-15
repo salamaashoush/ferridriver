@@ -39,11 +39,14 @@ impl BrowserContextJs {
 
   /// Append cookies to this context.
   ///
-  /// `cookies` is an array matching Playwright's `SetNetworkCookieParam[]`.
+  /// `cookies` is an array matching Playwright's `SetNetworkCookieParam[]`:
+  /// only `name` + `value` are required, plus either `url` OR `domain`+`path`.
+  /// `secure`, `httpOnly`, `sameSite`, `expires` all default when absent.
   #[qjs(rename = "addCookies")]
   pub async fn add_cookies<'js>(&self, ctx: Ctx<'js>, cookies: Value<'js>) -> rquickjs::Result<()> {
-    let parsed: Vec<ferridriver::backend::CookieData> = serde_from_js(&ctx, cookies)?;
-    self.inner.add_cookies(parsed).await.into_js()
+    let parsed: Vec<ferridriver::backend::SetCookieParams> = serde_from_js(&ctx, cookies)?;
+    let cookies: Vec<ferridriver::backend::CookieData> = parsed.into_iter().map(Into::into).collect();
+    self.inner.add_cookies(cookies).await.into_js()
   }
 
   /// Playwright: `context.clearCookies(options?)`. Without options

@@ -549,6 +549,11 @@ impl McpServer {
       .get("session")
       .and_then(|v| v.as_str())
       .map_or_else(|| "default".into(), str::to_string);
+    // Serialize per-session tool calls so concurrent run_script and plugin
+    // invocations on the same session don't race against each other's
+    // browser state (cookies, navigation, page identity). Matches the
+    // pattern other tool routers use.
+    let _guard = self.session_guard(&session).await;
 
     let Some(sandbox) = self.script_sandbox.clone() else {
       return Err(Self::err(
@@ -698,21 +703,17 @@ impl McpServer {
   /// Fast path (instance exists): shared read lock -- concurrent reads allowed.
   /// Slow path (cold start): exclusive write lock -- only when launching a new browser.
   async fn ensure_active_page(&self, context: &str) -> Result<AnyPage, ErrorData> {
-    // Fast path: instance already exists and has a page, read lock only.
     {
       let state = self.state.read().await;
       if let Ok(any_page) = state.active_page(context) {
         return Ok(any_page.clone());
       }
     }
-    // Slow path: need to create instance and/or default page (write lock).
     let key = ferridriver::state::SessionKey::parse(context);
     let mut state = self.state.write().await;
     Box::pin(state.ensure_instance(&key.instance))
       .await
       .map_err(Self::err)?;
-    // Instance exists but may have no pages yet (fresh launch).
-    // Create a default blank page so callers always get a usable page.
     if state.active_page(context).is_err() {
       Box::pin(state.open_page_keyed(&key, "about:blank"))
         .await

@@ -96,6 +96,9 @@ impl McpServer {
   )]
   async fn run_script(&self, Parameters(p): Parameters<RunScriptParams>) -> Result<CallToolResult, ErrorData> {
     let session = sess(p.session.as_ref()).to_string();
+    // Serialize per-session: a concurrent run_script / plugin / navigation
+    // call on the same session must not interleave browser state.
+    let _guard = self.session_guard(&session).await;
 
     let Some(sandbox) = self.script_sandbox.clone() else {
       return Err(McpServer::err(
