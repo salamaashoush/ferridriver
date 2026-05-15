@@ -135,8 +135,8 @@ impl WebKitBrowser {
           })
           .collect(),
       ),
-      IpcResponse::Error(e) => Err(e),
-      _ => Err("unexpected".into()),
+      IpcResponse::Error(e) => Err(FerriError::protocol("ListViews", e)),
+      _ => Err(FerriError::protocol("ListViews", "unexpected response")),
     }
   }
 
@@ -167,8 +167,8 @@ impl WebKitBrowser {
         };
         Ok(AnyPage::WebKit(page))
       },
-      IpcResponse::Error(e) => Err(e),
-      _ => Err("unexpected".into()),
+      IpcResponse::Error(e) => Err(FerriError::protocol("CreateView", e)),
+      _ => Err(FerriError::protocol("CreateView", "unexpected response")),
     }
   }
 
@@ -303,7 +303,7 @@ impl WebKitPage {
       | IpcResponse::ViewCreated(_)
       | IpcResponse::ViewList(_)
       | IpcResponse::Binary(_) => Ok(()),
-      IpcResponse::Error(e) => Err(e),
+      IpcResponse::Error(e) => Err(FerriError::backend(e)),
     }
   }
 
@@ -397,7 +397,7 @@ impl WebKitPage {
     let r = self.client.send_vid(Op::GetUrl, self.vid()).await?;
     match r {
       IpcResponse::Value(v) => Ok(v.as_str().map(std::string::ToString::to_string)),
-      IpcResponse::Error(e) => Err(e),
+      IpcResponse::Error(e) => Err(FerriError::protocol("GetUrl", e)),
       _ => Ok(None),
     }
   }
@@ -411,7 +411,7 @@ impl WebKitPage {
     let r = self.client.send_vid(Op::GetTitle, self.vid()).await?;
     match r {
       IpcResponse::Value(v) => Ok(v.as_str().map(std::string::ToString::to_string)),
-      IpcResponse::Error(e) => Err(e),
+      IpcResponse::Error(e) => Err(FerriError::protocol("GetTitle", e)),
       _ => Ok(None),
     }
   }
@@ -442,7 +442,7 @@ impl WebKitPage {
           Ok(Some(v))
         }
       },
-      IpcResponse::Error(e) => Err(e),
+      IpcResponse::Error(e) => Err(FerriError::protocol("Evaluate", e)),
       _ => Ok(None),
     }
   }
@@ -460,7 +460,7 @@ impl WebKitPage {
     let r = self.evaluate(&js).await?;
     let ref_id = r
       .and_then(|v| v.as_u64())
-      .ok_or_else(|| format!("'{selector}' not found"))?;
+      .ok_or_else(|| FerriError::invalid_selector(selector, "no element found"))?;
     Ok(AnyElement::WebKit(WebKitElement {
       client: self.client.clone(),
       view_id: self.view_id,
@@ -532,7 +532,12 @@ impl WebKitPage {
     for handle in handles {
       match handle {
         HandleId::WebKit(r) => handle_refs.push(*r),
-        _ => return Err("call_utility_evaluate: non-WebKit handle in arg.handles on WebKit backend".into()),
+        _ => {
+          return Err(FerriError::invalid_argument(
+            "handles",
+            "call_utility_evaluate: non-WebKit handle in arg.handles on WebKit backend",
+          ));
+        },
       }
     }
 
@@ -609,23 +614,25 @@ impl WebKitPage {
 
     let raw = self.evaluate(&body).await?;
     let Some(raw_val) = raw else {
-      return Err("call_utility_evaluate: WebKit evaluate returned null".into());
+      return Err(FerriError::protocol(
+        "Evaluate",
+        "call_utility_evaluate: WebKit evaluate returned null",
+      ));
     };
     // WebKit's evaluate returns a JSON-parsed value OR a stringified
     // JSON (depending on path). Our wrapper always returns a string,
     // so the value here will be a String (from JSON.stringify) —
     // unless WebKit already parsed it to an object. Handle both.
     let envelope: serde_json::Value = match raw_val {
-      serde_json::Value::String(s) => {
-        serde_json::from_str(&s).map_err(|e| format!("call_utility_evaluate: envelope parse: {e}"))?
-      },
+      serde_json::Value::String(s) => serde_json::from_str(&s)
+        .map_err(|e| FerriError::protocol("Evaluate", format!("call_utility_evaluate: envelope parse: {e}")))?,
       other => other,
     };
 
     let kind = envelope
       .get("kind")
       .and_then(|v| v.as_str())
-      .ok_or("call_utility_evaluate: missing envelope.kind")?
+      .ok_or_else(|| FerriError::protocol("Evaluate", "call_utility_evaluate: missing envelope.kind"))?
       .to_string();
 
     match kind.as_str() {
@@ -636,11 +643,13 @@ impl WebKitPage {
             crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined)
           },
           serde_json::Value::String(s) => {
-            let inner: serde_json::Value =
-              serde_json::from_str(&s).map_err(|e| format!("call_utility_evaluate: payload parse: {e}"))?;
-            serde_json::from_value(inner).map_err(|e| format!("call_utility_evaluate: parse result: {e}"))?
+            let inner: serde_json::Value = serde_json::from_str(&s)
+              .map_err(|e| FerriError::protocol("Evaluate", format!("call_utility_evaluate: payload parse: {e}")))?;
+            serde_json::from_value(inner)
+              .map_err(|e| FerriError::protocol("Evaluate", format!("call_utility_evaluate: parse result: {e}")))?
           },
-          other => serde_json::from_value(other).map_err(|e| format!("call_utility_evaluate: parse result: {e}"))?,
+          other => serde_json::from_value(other)
+            .map_err(|e| FerriError::protocol("Evaluate", format!("call_utility_evaluate: parse result: {e}")))?,
         };
         Ok(FdEvalResult::Value(parsed))
       },
@@ -648,7 +657,7 @@ impl WebKitPage {
         let ref_id = envelope
           .get("ref")
           .and_then(serde_json::Value::as_u64)
-          .ok_or("call_utility_evaluate: missing envelope.ref")?;
+          .ok_or_else(|| FerriError::protocol("Evaluate", "call_utility_evaluate: missing envelope.ref"))?;
         Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Remote(
           HandleRemote::WebKit(ref_id),
         )))
@@ -665,9 +674,9 @@ impl WebKitPage {
           crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Null)
         } else {
           let inner: serde_json::Value = match payload {
-            serde_json::Value::String(s) => {
-              serde_json::from_str(&s).map_err(|e| format!("call_utility_evaluate: valueHandle parse: {e}"))?
-            },
+            serde_json::Value::String(s) => serde_json::from_str(&s).map_err(|e| {
+              FerriError::protocol("Evaluate", format!("call_utility_evaluate: valueHandle parse: {e}"))
+            })?,
             serde_json::Value::Null => serde_json::Value::Null,
             other => other,
           };
@@ -678,7 +687,10 @@ impl WebKitPage {
           serialized,
         )))
       },
-      other => Err(format!("call_utility_evaluate: unknown envelope kind {other}")),
+      other => Err(FerriError::protocol(
+        "Evaluate",
+        format!("call_utility_evaluate: unknown envelope kind {other}"),
+      )),
     }
   }
 
@@ -698,7 +710,9 @@ impl WebKitPage {
       r"(function(){{var e=({js});if(!e)return null;if(!window.__wr)window.__wr=new Map();if(!window.__wr_next)window.__wr_next=1;var id=window.__wr_next++;window.__wr.set(id,e);return id}})()"
     );
     let r = self.evaluate(&wrap).await?;
-    let ref_id = r.and_then(|v| v.as_u64()).ok_or("JS did not return a DOM element")?;
+    let ref_id = r
+      .and_then(|v| v.as_u64())
+      .ok_or_else(|| FerriError::protocol("Evaluate", "JS did not return a DOM element"))?;
     Ok(AnyElement::WebKit(WebKitElement {
       client: self.client.clone(),
       view_id: self.view_id,
@@ -810,19 +824,19 @@ impl WebKitPage {
   pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>> {
     // WebKit-specific refusals for knobs WKWebView can't express.
     if opts.clip.is_some() {
-      return Err(
-        "WebKit backend does not support `clip` screenshots yet — WKWebView's takeSnapshotWithConfiguration: has no clip parameter. Use `page.locator(selector).screenshot()` for element-scoped capture.".into(),
-      );
+      return Err(FerriError::unsupported(
+        "WebKit backend does not support `clip` screenshots yet — WKWebView's takeSnapshotWithConfiguration: has no clip parameter. Use `page.locator(selector).screenshot()` for element-scoped capture.",
+      ));
     }
     if matches!(opts.scale, Some(crate::backend::ScreenshotScale::Css)) {
-      return Err(
-        "WebKit backend does not support `scale: \"css\"` screenshots yet — WKWebView always captures at device-pixel scale.".into(),
-      );
+      return Err(FerriError::unsupported(
+        "WebKit backend does not support `scale: \"css\"` screenshots yet — WKWebView always captures at device-pixel scale.",
+      ));
     }
     if opts.omit_background {
-      return Err(
-        "WebKit backend does not support `omitBackground` screenshots yet — WKWebView's snapshot API always composites against the view background.".into(),
-      );
+      return Err(FerriError::unsupported(
+        "WebKit backend does not support `omitBackground` screenshots yet — WKWebView's snapshot API always composites against the view background.",
+      ));
     }
 
     // Pre-capture DOM setup via shared helpers.
@@ -865,8 +879,8 @@ impl WebKitPage {
 
     match r? {
       IpcResponse::Binary(d) => Ok(d),
-      IpcResponse::Error(e) => Err(e),
-      _ => Err("no data".into()),
+      IpcResponse::Error(e) => Err(FerriError::protocol("Screenshot", e)),
+      _ => Err(FerriError::protocol("Screenshot", "no image data returned")),
     }
   }
 
@@ -888,15 +902,19 @@ impl WebKitPage {
     let bbox = self.evaluate(&js).await?;
     let bbox_str = bbox
       .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .ok_or_else(|| format!("Element '{sel}' not found"))?;
-    let bbox_val: serde_json::Value = serde_json::from_str(&bbox_str).map_err(|e| format!("bbox parse: {e}"))?;
+      .ok_or_else(|| FerriError::invalid_selector(sel, "no element found"))?;
+    let bbox_val: serde_json::Value =
+      serde_json::from_str(&bbox_str).map_err(|e| FerriError::protocol("Evaluate", format!("bbox parse: {e}")))?;
     let bx = bbox_val.get("x").and_then(serde_json::Value::as_i64).unwrap_or(0);
     let by = bbox_val.get("y").and_then(serde_json::Value::as_i64).unwrap_or(0);
     let bw = bbox_val.get("w").and_then(serde_json::Value::as_i64).unwrap_or(0);
     let bh = bbox_val.get("h").and_then(serde_json::Value::as_i64).unwrap_or(0);
 
     if bw <= 0 || bh <= 0 {
-      return Err(format!("Element '{sel}' has zero dimensions"));
+      return Err(FerriError::protocol(
+        "Evaluate",
+        format!("Element '{sel}' has zero dimensions"),
+      ));
     }
 
     // Take full page screenshot
@@ -925,9 +943,9 @@ impl WebKitPage {
     let cropped = self.evaluate(&crop_js).await?;
     let cropped_b64 = cropped
       .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .ok_or("crop failed")?;
+      .ok_or_else(|| FerriError::protocol("Evaluate", "crop failed"))?;
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, &cropped_b64)
-      .map_err(|e| format!("decode cropped: {e}"))
+      .map_err(|e| FerriError::protocol("Evaluate", format!("decode cropped: {e}")))
   }
 
   /// Generate a PDF of the page. Not supported on `WebKit` backend.
@@ -958,7 +976,7 @@ impl WebKitPage {
   /// Returns an error if no paths are provided or any IPC call fails.
   pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<()> {
     if paths.is_empty() {
-      return Err("No file paths provided".into());
+      return Err(FerriError::invalid_argument("paths", "no file paths provided"));
     }
     // Clear any previously-assigned files so this call replaces the
     // selection rather than appending (matches Playwright's
@@ -1015,8 +1033,8 @@ impl WebKitPage {
           v.to_string()
         }
       },
-      IpcResponse::Error(e) => return Err(e),
-      _ => return Err("unexpected response".into()),
+      IpcResponse::Error(e) => return Err(FerriError::protocol("AccessibilityTree", e)),
+      _ => return Err(FerriError::protocol("AccessibilityTree", "unexpected response")),
     };
     let raw: Vec<serde_json::Value> = serde_json::from_str(&json_str)?;
     Ok(
@@ -1407,8 +1425,8 @@ impl WebKitPage {
         // Deserialize directly from the parsed Value.
         Ok(serde_json::from_value(v).unwrap_or_default())
       },
-      ipc::IpcResponse::Error(e) => Err(e),
-      _ => Err("unexpected response".into()),
+      ipc::IpcResponse::Error(e) => Err(FerriError::protocol("GetCookies", e)),
+      _ => Err(FerriError::protocol("GetCookies", "unexpected response")),
     }
   }
 
@@ -2003,7 +2021,7 @@ impl WebKitPage {
   /// `add_init_script` / `evaluate` calls.
   pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
     if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
-      return Err("Page is closed".into());
+      return Err(FerriError::target_closed(Some("page is closed".into())));
     }
     let escaped = crate::steps::js_escape(name);
     let shim = format!(
@@ -2036,7 +2054,7 @@ impl WebKitPage {
   /// `evaluate` fails.
   pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
     if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
-      return Err("Page is closed".into());
+      return Err(FerriError::target_closed(Some("page is closed".into())));
     }
     self.exposed_fns.write().await.remove(name);
     let escaped = crate::steps::js_escape(name);
@@ -2066,7 +2084,7 @@ impl WebKitPage {
     self
       .routes
       .write()
-      .map_err(|e| format!("routes write lock poisoned: {e}"))?
+      .map_err(|e| FerriError::backend(format!("routes write lock poisoned: {e}")))?
       .push(crate::route::RegisteredRoute { matcher, handler });
 
     // Set up the IPC route callback (once) to dispatch to our routes list
@@ -2075,7 +2093,7 @@ impl WebKitPage {
         .client
         .route_handler
         .lock()
-        .map_err(|e| format!("route_handler lock poisoned: {e}"))?;
+        .map_err(|e| FerriError::backend(format!("route_handler lock poisoned: {e}")))?;
       if rh.is_none() {
         let routes_ref = self.routes.clone();
         *rh = Some(std::sync::Arc::new(
@@ -2158,7 +2176,7 @@ impl WebKitPage {
     self
       .routes
       .write()
-      .map_err(|e| format!("routes write lock poisoned: {e}"))?
+      .map_err(|e| FerriError::backend(format!("routes write lock poisoned: {e}")))?
       .retain(|r| !r.matcher.equivalent(matcher));
 
     // Remove from JS-side pattern list
@@ -2378,7 +2396,7 @@ impl WebKitElement {
     p.extend_from_slice(&self.view_id.to_le_bytes());
     let r = self.client.send(Op::Type, &p).await?;
     match r {
-      IpcResponse::Error(e) => Err(e),
+      IpcResponse::Error(e) => Err(FerriError::protocol("Type", e)),
       _ => Ok(()),
     }
   }
@@ -2406,7 +2424,7 @@ impl WebKitElement {
     match r {
       ipc::IpcResponse::Value(serde_json::Value::String(s)) => Ok(serde_json::from_str(&s).ok()),
       ipc::IpcResponse::Value(v) => Ok(Some(v)),
-      ipc::IpcResponse::Error(e) => Err(e),
+      ipc::IpcResponse::Error(e) => Err(FerriError::protocol("Evaluate", e)),
       _ => Ok(None),
     }
   }
@@ -2444,8 +2462,8 @@ impl WebKitElement {
     let r = self.client.send(Op::Screenshot, &p).await?;
     match r {
       IpcResponse::Binary(d) => Ok(d),
-      IpcResponse::Error(e) => Err(e),
-      _ => Err("no data".into()),
+      IpcResponse::Error(e) => Err(FerriError::protocol("Screenshot", e)),
+      _ => Err(FerriError::protocol("Screenshot", "no image data returned")),
     }
   }
 }

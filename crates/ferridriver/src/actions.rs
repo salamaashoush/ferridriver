@@ -307,15 +307,17 @@ pub async fn click_prep(
       reason: format!("error:not{reason}"),
     });
   }
-  let point = parsed.get("point").ok_or("click_prep: missing point")?;
+  let point = parsed
+    .get("point")
+    .ok_or_else(|| FerriError::evaluation("click_prep: missing point"))?;
   let x = point
     .get("x")
     .and_then(serde_json::Value::as_f64)
-    .ok_or("click_prep: bad x")?;
+    .ok_or_else(|| FerriError::evaluation("click_prep: bad x"))?;
   let y = point
     .get("y")
     .and_then(serde_json::Value::as_f64)
-    .ok_or("click_prep: bad y")?;
+    .ok_or_else(|| FerriError::evaluation("click_prep: bad y"))?;
   Ok(ClickPrep::Ready { x, y })
 }
 

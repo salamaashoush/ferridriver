@@ -1731,7 +1731,12 @@ impl<T: CdpWrap> CdpPage<T> {
         crate::protocol::HandleId::Cdp(obj_id) => {
           arguments.push(serde_json::json!({"objectId": obj_id}));
         },
-        _ => return Err("call_utility_evaluate: non-CDP handle in arg.handles on CDP backend".into()),
+        _ => {
+          return Err(FerriError::invalid_argument(
+            "handles",
+            "call_utility_evaluate: non-CDP handle in arg.handles on CDP backend",
+          ));
+        },
       }
     }
 
@@ -1771,7 +1776,12 @@ impl<T: CdpWrap> CdpPage<T> {
       // execution context for free, no extra RTT.
       let anchor = match &handles[0] {
         crate::protocol::HandleId::Cdp(obj_id) => obj_id.clone(),
-        _ => return Err("call_utility_evaluate: non-CDP handle in arg.handles on CDP backend".into()),
+        _ => {
+          return Err(FerriError::invalid_argument(
+            "handles",
+            "call_utility_evaluate: non-CDP handle in arg.handles on CDP backend",
+          ));
+        },
       };
       let params = serde_json::json!({
         "functionDeclaration": UTILITY_EVAL_WRAPPER,
@@ -1829,7 +1839,9 @@ impl<T: CdpWrap> CdpPage<T> {
       return Err(FerriError::Backend(text.to_string()));
     }
 
-    let result_obj = response.get("result").ok_or("call_utility_evaluate: no result")?;
+    let result_obj = response
+      .get("result")
+      .ok_or_else(|| FerriError::protocol("Runtime.callFunctionOn", "call_utility_evaluate: no result"))?;
 
     if return_by_value {
       // The wrapper JSON.stringified the isomorphic wire shape so
@@ -1983,7 +1995,7 @@ impl<T: CdpWrap> CdpPage<T> {
       .get("root")
       .and_then(|r| r.get("nodeId"))
       .and_then(serde_json::Value::as_i64)
-      .ok_or_else(|| "No document root".to_string())?;
+      .ok_or_else(|| FerriError::protocol("DOM.getDocument", "No document root"))?;
 
     let result = self
       .cmd(
@@ -1995,7 +2007,7 @@ impl<T: CdpWrap> CdpPage<T> {
     let node_id = result
       .get("nodeId")
       .and_then(serde_json::Value::as_i64)
-      .ok_or_else(|| format!("'{selector}' not found"))?;
+      .ok_or_else(|| FerriError::protocol("DOM.querySelector", format!("'{selector}' not found")))?;
 
     if node_id == 0 {
       return Err(FerriError::invalid_selector(selector, "not found"));
@@ -2090,7 +2102,7 @@ impl<T: CdpWrap> CdpPage<T> {
       .get("result")
       .and_then(|r| r.get("objectId"))
       .and_then(|v| v.as_str())
-      .ok_or("JS did not return a DOM element")?;
+      .ok_or_else(|| FerriError::protocol("Runtime.evaluate", "JS did not return a DOM element"))?;
 
     Ok(T::wrap_element(CdpElement {
       transport: self.transport.clone(),
@@ -2570,7 +2582,7 @@ impl<T: CdpWrap> CdpPage<T> {
       .get("result")
       .and_then(|r| r.get("objectId"))
       .and_then(serde_json::Value::as_str)
-      .ok_or("Element not found")?
+      .ok_or_else(|| FerriError::protocol("Runtime.evaluate", "Element not found"))?
       .to_string();
 
     let set_result = self
@@ -2603,7 +2615,10 @@ impl<T: CdpWrap> CdpPage<T> {
       .cmd("Accessibility.getFullAXTree", serde_json::json!({"depth": depth}))
       .await?;
 
-    let nodes = result.get("nodes").and_then(|n| n.as_array()).ok_or("No a11y nodes")?;
+    let nodes = result
+      .get("nodes")
+      .and_then(|n| n.as_array())
+      .ok_or_else(|| FerriError::protocol("Accessibility.getFullAXTree", "No a11y nodes"))?;
 
     Ok(
       nodes
@@ -3552,7 +3567,7 @@ impl<T: CdpWrap> CdpPage<T> {
       .get("object")
       .and_then(|o| o.get("objectId"))
       .and_then(|v| v.as_str())
-      .ok_or_else(|| format!("Ref '{ref_id}' no longer valid."))?;
+      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", format!("Ref '{ref_id}' no longer valid.")))?;
 
     // We intentionally do NOT call `DOM.requestNode` here. Without an
     // explicit `DOM.getDocument` first (skipped by the lazy bootstrap),
@@ -4815,9 +4830,9 @@ impl<T: CdpTransport> CdpElement<T> {
     let node_id = node_result
       .get("nodeId")
       .and_then(serde_json::Value::as_i64)
-      .ok_or("Could not resolve element nodeId")?;
+      .ok_or_else(|| FerriError::protocol("DOM.requestNode", "Could not resolve element nodeId"))?;
     if node_id == 0 {
-      return Err("Element not found".into());
+      return Err(FerriError::protocol("DOM.requestNode", "Element not found"));
     }
     Ok(node_id)
   }
@@ -4831,7 +4846,7 @@ impl<T: CdpTransport> CdpElement<T> {
       .and_then(|o| o.get("objectId"))
       .and_then(|v| v.as_str())
       .map(Arc::from)
-      .ok_or("Cannot resolve element".into())
+      .ok_or_else(|| FerriError::protocol("DOM.resolveNode", "Cannot resolve element"))
   }
 
   async fn node_id(&self) -> Result<i64> {
@@ -4844,7 +4859,7 @@ impl<T: CdpTransport> CdpElement<T> {
     };
 
     let Some(object_id) = object_id else {
-      return Err("Element handle has neither nodeId nor objectId".into());
+      return Err(FerriError::backend("Element handle has neither nodeId nor objectId"));
     };
     let node_id = self.resolve_node_id_from_object(&object_id).await?;
     let mut handles = self.handles.lock().await;
@@ -4862,7 +4877,7 @@ impl<T: CdpTransport> CdpElement<T> {
     };
 
     let Some(node_id) = node_id else {
-      return Err("Element handle has neither nodeId nor objectId".into());
+      return Err(FerriError::backend("Element handle has neither nodeId nor objectId"));
     };
     let object_id = self.resolve_object_id_from_node(node_id).await?;
     let mut handles = self.handles.lock().await;
@@ -4896,10 +4911,10 @@ impl<T: CdpTransport> CdpElement<T> {
       .get("model")
       .and_then(|m| m.get("content"))
       .and_then(|c| c.as_array())
-      .ok_or("No box model")?;
+      .ok_or_else(|| FerriError::protocol("DOM.getBoxModel", "No box model"))?;
 
     if content.len() < 8 {
-      return Err("Invalid box model".into());
+      return Err(FerriError::protocol("DOM.getBoxModel", "Invalid box model"));
     }
     let x1 = content[0].as_f64().unwrap_or(0.0);
     let y1 = content[1].as_f64().unwrap_or(0.0);
@@ -5093,10 +5108,10 @@ impl<T: CdpTransport> CdpElement<T> {
       .get("model")
       .and_then(|m| m.get("content"))
       .and_then(|c| c.as_array())
-      .ok_or("No box model")?;
+      .ok_or_else(|| FerriError::protocol("DOM.getBoxModel", "No box model"))?;
 
     if content.len() < 8 {
-      return Err("Invalid box model".into());
+      return Err(FerriError::protocol("DOM.getBoxModel", "Invalid box model"));
     }
 
     let x = content[0].as_f64().unwrap_or(0.0);

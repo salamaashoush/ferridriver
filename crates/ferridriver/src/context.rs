@@ -98,7 +98,7 @@ impl BrowserContext {
   ///
   /// Returns an error if no page exists or if setting a cookie fails.
   pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<()> {
-    let page = self.active_page().ok_or("No page in context")?;
+    let page = self.active_page().ok_or(crate::error::FerriError::NotConnected)?;
     for cookie in cookies {
       page.set_cookie(cookie).await?;
     }

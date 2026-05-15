@@ -67,7 +67,7 @@ impl BidiBrowser {
     let contexts = result
       .get("contexts")
       .and_then(|v| v.as_array())
-      .ok_or("browsingContext.getTree: missing contexts array")?;
+      .ok_or_else(|| FerriError::protocol("browsingContext.getTree", "missing contexts array"))?;
 
     Ok(
       contexts
@@ -140,7 +140,7 @@ impl BidiBrowser {
       .get("userContext")
       .and_then(|v| v.as_str())
       .map(ToOwned::to_owned)
-      .ok_or("browser.createUserContext: missing userContext id".into())
+      .ok_or_else(|| FerriError::protocol("browser.createUserContext", "missing userContext id"))
   }
 
   /// Dispose an isolated user context.
@@ -178,14 +178,14 @@ impl BidiBrowser {
     let contexts = result
       .get("contexts")
       .and_then(|v| v.as_array())
-      .ok_or("browsingContext.getTree: missing contexts array")?;
+      .ok_or_else(|| FerriError::protocol("browsingContext.getTree", "missing contexts array"))?;
 
     let mut pages = Vec::with_capacity(contexts.len());
     for ctx in contexts {
       let context_id = ctx
         .get("context")
         .and_then(|v| v.as_str())
-        .ok_or("browsingContext.getTree: context missing 'context' field")?;
+        .ok_or_else(|| FerriError::protocol("browsingContext.getTree", "context missing 'context' field"))?;
       pages.push(AnyPage::Bidi(BidiPage::create(
         self.session.clone(),
         context_id.to_string(),
@@ -214,7 +214,7 @@ impl BidiBrowser {
     let context_id = result
       .get("context")
       .and_then(|v| v.as_str())
-      .ok_or("browsingContext.create: missing context id")?
+      .ok_or_else(|| FerriError::protocol("browsingContext.create", "missing context id"))?
       .to_string();
 
     let wait_for_created = async {

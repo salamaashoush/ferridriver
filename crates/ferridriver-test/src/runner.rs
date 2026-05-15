@@ -1032,7 +1032,7 @@ fn build_plan_for_changes(
 /// Topologically sort projects by `dependencies`. Returns indices in execution order.
 ///
 /// Uses Kahn's algorithm. Returns `Err` if there's a cycle or a missing dependency.
-fn topo_sort_projects(projects: &[ProjectConfig]) -> Result<Vec<usize>, String> {
+fn topo_sort_projects(projects: &[ProjectConfig]) -> Result<Vec<usize>, ferridriver::FerriError> {
   let name_to_idx: FxHashMap<&str, usize> = projects.iter().enumerate().map(|(i, p)| (p.name.as_str(), i)).collect();
 
   // Build adjacency list + in-degree.
@@ -1042,9 +1042,12 @@ fn topo_sort_projects(projects: &[ProjectConfig]) -> Result<Vec<usize>, String> 
 
   for (i, project) in projects.iter().enumerate() {
     for dep_name in &project.dependencies {
-      let &dep_idx = name_to_idx
-        .get(dep_name.as_str())
-        .ok_or_else(|| format!("project '{}' depends on unknown project '{dep_name}'", project.name))?;
+      let &dep_idx = name_to_idx.get(dep_name.as_str()).ok_or_else(|| {
+        ferridriver::FerriError::invalid_argument(
+          "dependencies",
+          format!("project '{}' depends on unknown project '{dep_name}'", project.name),
+        )
+      })?;
       adj[dep_idx].push(i);
       in_degree[i] += 1;
     }
@@ -1070,7 +1073,10 @@ fn topo_sort_projects(projects: &[ProjectConfig]) -> Result<Vec<usize>, String> 
   }
 
   if order.len() != n {
-    return Err("circular dependency detected among projects".into());
+    return Err(ferridriver::FerriError::invalid_argument(
+      "dependencies",
+      "circular dependency detected among projects",
+    ));
   }
 
   Ok(order)

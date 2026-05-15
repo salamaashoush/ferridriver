@@ -92,7 +92,10 @@ step!(FillForm {
     description: "Fill multiple form fields via data table",
     example: "When I fill the form:\n  | #name | Alice |\n  | #email | alice@test.com |",
     execute(page, _caps, table, _vars) {
-        let rows = table.ok_or("'I fill the form' requires a data table")?;
+        let rows = table.ok_or_else(|| crate::error::FerriError::invalid_argument(
+            "table",
+            "'I fill the form' requires a data table",
+        ))?;
         for row in rows {
             if row.len() >= 2 {
                 let sel = &row[0];
@@ -126,7 +129,9 @@ step!(SelectOption {
     execute(page, caps, _table, _vars) {
         let val = q(&caps[1]);
         let sel = q(&caps[2]);
-        let el = super::find(page, &sel).await.map_err(|e| format!("'{sel}': {e}"))?;
+        let el = super::find(page, &sel)
+            .await
+            .map_err(|e| crate::error::FerriError::backend(format!("'{sel}': {e}")))?;
         crate::actions::select_option(&el, page.inner(), &val).await?;
         Ok(None)
     }

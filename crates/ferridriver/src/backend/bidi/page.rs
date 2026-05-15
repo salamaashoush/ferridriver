@@ -276,7 +276,7 @@ impl BidiPage {
     let downloads_dir = tempfile::Builder::new()
       .prefix("ferridriver-downloads-")
       .tempdir()
-      .map_err(|e| format!("downloads tempdir: {e}"))?;
+      .map_err(|e| FerriError::backend(format!("downloads tempdir: {e}")))?;
     Ok(Self {
       session,
       context_id: Arc::from(context_id),
@@ -378,7 +378,7 @@ impl BidiPage {
     let contexts = result
       .get("contexts")
       .and_then(|v| v.as_array())
-      .ok_or("getTree: missing contexts")?;
+      .ok_or_else(|| FerriError::protocol("browsingContext.getTree", "missing contexts"))?;
 
     let mut frames = Vec::new();
     for ctx in contexts {
@@ -548,7 +548,7 @@ impl BidiPage {
     match result {
       Ok(Ok(_)) => Ok(self.await_nav_response().await),
       Ok(Err(e)) => Err(e),
-      Err(_) => Err("go_back timed out".into()),
+      Err(_) => Err(FerriError::timeout("go_back", timeout_ms)),
     }
   }
 
@@ -569,7 +569,7 @@ impl BidiPage {
     match result {
       Ok(Ok(_)) => Ok(self.await_nav_response().await),
       Ok(Err(e)) => Err(e),
-      Err(_) => Err("go_forward timed out".into()),
+      Err(_) => Err(FerriError::timeout("go_forward", timeout_ms)),
     }
   }
 
@@ -656,14 +656,14 @@ impl BidiPage {
         .await?
     };
 
-    let eval_result: EvaluateResult =
-      serde_json::from_value(result).map_err(|e| format!("BiDi evaluate_to_element parse: {e}"))?;
+    let eval_result: EvaluateResult = serde_json::from_value(result)
+      .map_err(|e| FerriError::protocol("script.callFunction", format!("BiDi evaluate_to_element parse: {e}")))?;
 
     match eval_result {
       EvaluateResult::Success { result: remote_val } => {
-        let shared_ref = remote_val
-          .as_shared_reference()
-          .ok_or("evaluate_to_element: result is not a DOM node")?;
+        let shared_ref = remote_val.as_shared_reference().ok_or_else(|| {
+          FerriError::protocol("script.callFunction", "evaluate_to_element: result is not a DOM node")
+        })?;
         // Element belongs to the realm we evaluated in.
         let owning_ctx: Arc<str> = match frame_id {
           Some(fid) => Arc::from(fid),
@@ -712,13 +712,14 @@ impl BidiPage {
   pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>> {
     // BiDi-specific refusals for knobs Firefox has no protocol for.
     if opts.omit_background {
-      return Err("BiDi/Firefox does not support `omitBackground` screenshots — no BiDi command exposes the transparent-background override.".into());
+      return Err(FerriError::unsupported(
+        "BiDi/Firefox does not support `omitBackground` screenshots — no BiDi command exposes the transparent-background override.",
+      ));
     }
     if matches!(opts.scale, Some(crate::backend::ScreenshotScale::Css)) {
-      return Err(
-        "BiDi/Firefox does not support `scale: \"css\"` screenshots — BiDi always captures at device-pixel scale."
-          .into(),
-      );
+      return Err(FerriError::unsupported(
+        "BiDi/Firefox does not support `scale: \"css\"` screenshots — BiDi always captures at device-pixel scale.",
+      ));
     }
 
     // Pre-capture DOM setup (caret, style, mask, CSS-animation pause) —
@@ -826,7 +827,11 @@ impl BidiPage {
     let elem = self.find_element(selector).await?;
     let shared_id = match &elem {
       AnyElement::Bidi(e) => &e.shared_id,
-      _ => return Err("Unexpected element type".into()),
+      _ => {
+        return Err(FerriError::backend(
+          "screenshot_element: non-BiDi element on BiDi backend",
+        ));
+      },
     };
 
     let format_type = match format {
@@ -876,8 +881,8 @@ impl BidiPage {
     let json_str = result
       .and_then(|v| v.as_str().map(String::from))
       .unwrap_or_else(|| "[]".into());
-    let arr: Vec<serde_json::Value> =
-      serde_json::from_str(&json_str).map_err(|e| format!("accessibility_tree parse: {e}"))?;
+    let arr: Vec<serde_json::Value> = serde_json::from_str(&json_str)
+      .map_err(|e| FerriError::protocol("script.evaluate", format!("accessibility_tree parse: {e}")))?;
 
     let mut nodes = Vec::with_capacity(arr.len());
     for item in &arr {
@@ -1132,7 +1137,7 @@ impl BidiPage {
     let cookies = result
       .get("cookies")
       .and_then(|v| v.as_array())
-      .ok_or("getCookies: missing cookies array")?;
+      .ok_or_else(|| FerriError::protocol("storage.getCookies", "missing cookies array"))?;
 
     let mut out = Vec::with_capacity(cookies.len());
     for c in cookies {
@@ -1429,20 +1434,24 @@ impl BidiPage {
     // Rather than silently pretending they worked, we error out with a
     // typed Unsupported so the caller knows Firefox can't honor that knob.
     if opts.media.is_specified() {
-      return Err("BiDi/Firefox does not support `media` emulation — no BiDi protocol command exists for it".into());
+      return Err(FerriError::unsupported(
+        "BiDi/Firefox does not support `media` emulation — no BiDi protocol command exists for it",
+      ));
     }
     if opts.reduced_motion.is_specified() {
-      return Err(
-        "BiDi/Firefox does not support `reducedMotion` emulation — no BiDi protocol command exists for it".into(),
-      );
+      return Err(FerriError::unsupported(
+        "BiDi/Firefox does not support `reducedMotion` emulation — no BiDi protocol command exists for it",
+      ));
     }
     if opts.forced_colors.is_specified() {
-      return Err(
-        "BiDi/Firefox does not support `forcedColors` emulation — no BiDi protocol command exists for it".into(),
-      );
+      return Err(FerriError::unsupported(
+        "BiDi/Firefox does not support `forcedColors` emulation — no BiDi protocol command exists for it",
+      ));
     }
     if opts.contrast.is_specified() {
-      return Err("BiDi/Firefox does not support `contrast` emulation — no BiDi protocol command exists for it".into());
+      return Err(FerriError::unsupported(
+        "BiDi/Firefox does not support `contrast` emulation — no BiDi protocol command exists for it",
+      ));
     }
     // Color scheme: `emulation.setForcedColorsModeThemeOverride` accepts
     // `{ theme: 'light' | 'dark' | null }`. Treat Disabled as null.
@@ -1522,7 +1531,9 @@ impl BidiPage {
 
   pub fn metrics(&self) -> impl std::future::Future<Output = Result<Vec<MetricData>>> {
     let _ = &self.context_id;
-    std::future::ready(Err("Performance metrics not supported on BiDi backend".into()))
+    std::future::ready(Err(FerriError::unsupported(
+      "Performance metrics not supported on BiDi backend",
+    )))
   }
 
   // ── Ref resolution ──────────────────────────────────────────────────────
@@ -2208,7 +2219,7 @@ impl BidiPage {
     let elem = self.find_element(selector).await?;
     let shared_id = match &elem {
       AnyElement::Bidi(e) => e.shared_id.clone(),
-      _ => return Err("Unexpected element type".into()),
+      _ => return Err(FerriError::backend("set_file_input: non-BiDi element on BiDi backend")),
     };
 
     self
@@ -2249,7 +2260,7 @@ impl BidiPage {
       let intercept_id = result
         .get("intercept")
         .and_then(|v| v.as_str())
-        .ok_or("addIntercept: missing intercept id")?
+        .ok_or_else(|| FerriError::protocol("network.addIntercept", "missing intercept id"))?
         .to_string();
 
       self.intercept_ids.write().await.push(intercept_id);
@@ -2397,7 +2408,7 @@ impl BidiPage {
     let bidi_id = result
       .get("script")
       .and_then(|v| v.as_str())
-      .ok_or("addPreloadScript: missing script id")?
+      .ok_or_else(|| FerriError::protocol("script.addPreloadScript", "missing script id"))?
       .to_string();
 
     // Generate our own stable identifier
@@ -2413,7 +2424,7 @@ impl BidiPage {
       .write()
       .await
       .remove(identifier)
-      .ok_or(format!("Init script '{identifier}' not found"))?;
+      .ok_or_else(|| FerriError::invalid_argument("identifier", format!("init script '{identifier}' not found")))?;
 
     self
       .cmd("script.removePreloadScript", json!({"script": bidi_id}))
@@ -2509,10 +2520,18 @@ impl BidiPage {
           } else if !shared_id.is_empty() {
             arguments.push(json!({"type": "sharedReference", "sharedId": shared_id}));
           } else {
-            return Err("BiDi handle carries neither sharedId nor handle".into());
+            return Err(FerriError::invalid_argument(
+              "handles",
+              "BiDi handle carries neither sharedId nor handle",
+            ));
           }
         },
-        _ => return Err("call_utility_evaluate: non-BiDi handle in arg.handles on BiDi backend".into()),
+        _ => {
+          return Err(FerriError::invalid_argument(
+            "handles",
+            "call_utility_evaluate: non-BiDi handle in arg.handles on BiDi backend",
+          ));
+        },
       }
     }
 

@@ -565,7 +565,9 @@ impl AnyBrowser {
       Self::CdpPipe(b) => b.new_context(proxy).await,
       Self::CdpRaw(b) => b.new_context(proxy).await,
       #[cfg(target_os = "macos")]
-      Self::WebKit(_) => Err("WebKit does not support multiple browser contexts".into()),
+      Self::WebKit(_) => Err(crate::error::FerriError::unsupported(
+        "WebKit does not support multiple browser contexts",
+      )),
       Self::Bidi(b) => b.new_context(proxy).await,
     }
   }
@@ -1191,7 +1193,9 @@ impl AnyPage {
       AnyPage::CdpPipe(p) => p.start_screencast(quality, max_width, max_height).await,
       AnyPage::CdpRaw(p) => p.start_screencast(quality, max_width, max_height).await,
       #[cfg(target_os = "macos")]
-      AnyPage::WebKit(_) => Err("Video recording is not supported on WebKit backend".into()),
+      AnyPage::WebKit(_) => Err(crate::error::FerriError::unsupported(
+        "Video recording is not supported on WebKit backend",
+      )),
       AnyPage::Bidi(p) => {
         // BiDi backend does not yet expose a cooperative shutdown
         // channel; synthesise one so the unified return shape holds.

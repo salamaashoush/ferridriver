@@ -1155,7 +1155,7 @@ impl Page {
     *self
       .mouse_position
       .lock()
-      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (x, y);
+      .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))? = (x, y);
     Ok(())
   }
 
@@ -1169,7 +1169,7 @@ impl Page {
     *self
       .mouse_position
       .lock()
-      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (x, y);
+      .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))? = (x, y);
     Ok(())
   }
 
@@ -1183,7 +1183,7 @@ impl Page {
     *self
       .mouse_position
       .lock()
-      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (x, y);
+      .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))? = (x, y);
     Ok(())
   }
 
@@ -1197,7 +1197,7 @@ impl Page {
     *self
       .mouse_position
       .lock()
-      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (to_x, to_y);
+      .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))? = (to_x, to_y);
     Ok(())
   }
 
@@ -1669,7 +1669,7 @@ impl Page {
     *self
       .mouse_position
       .lock()
-      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (x, y);
+      .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))? = (x, y);
     Ok(())
   }
 
@@ -1683,7 +1683,7 @@ impl Page {
     *self
       .mouse_position
       .lock()
-      .map_err(|e| format!("mouse position lock poisoned: {e}"))? = (x, y);
+      .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))? = (x, y);
     Ok(())
   }
 
@@ -1895,7 +1895,9 @@ impl Page {
         .await?;
       match event {
         PageEvent::Response(r) => Ok(r),
-        _ => Err("Unexpected event type".into()),
+        _ => Err(crate::error::FerriError::backend(
+          "event wait returned unexpected event type",
+        )),
       }
     }
   }
@@ -1922,7 +1924,9 @@ impl Page {
         .await?;
       match event {
         PageEvent::Request(r) => Ok(r),
-        _ => Err("Unexpected event type".into()),
+        _ => Err(crate::error::FerriError::backend(
+          "event wait returned unexpected event type",
+        )),
       }
     }
   }
@@ -1960,7 +1964,9 @@ impl Page {
       .await?;
     match event {
       PageEvent::Request(r) => Ok(r),
-      _ => Err("Unexpected event type".into()),
+      _ => Err(crate::error::FerriError::backend(
+        "event wait returned unexpected event type",
+      )),
     }
   }
 
@@ -1984,7 +1990,9 @@ impl Page {
       .await?;
     match event {
       PageEvent::Response(r) => Ok(r),
-      _ => Err("Unexpected event type".into()),
+      _ => Err(crate::error::FerriError::backend(
+        "event wait returned unexpected event type",
+      )),
     }
   }
 
@@ -2096,7 +2104,10 @@ impl Page {
         crate::steps::js_escape(t), crate::steps::js_escape(content)
       )).await?;
     } else {
-      return Err("Provide either 'url' or 'content'".into());
+      return Err(crate::error::FerriError::invalid_argument(
+        "url-or-content",
+        "Provide either 'url' or 'content'",
+      ));
     }
     Ok(())
   }
@@ -2124,7 +2135,10 @@ impl Page {
         ))
         .await?;
     } else {
-      return Err("Provide either 'url' or 'content'".into());
+      return Err(crate::error::FerriError::invalid_argument(
+        "url-or-content",
+        "Provide either 'url' or 'content'",
+      ));
     }
     Ok(())
   }
@@ -2602,7 +2616,7 @@ impl Mouse<'_> {
           .page
           .mouse_position
           .lock()
-          .map_err(|e| format!("mouse position lock poisoned: {e}"))?;
+          .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))?;
         self.page.move_mouse_smooth(from_x, from_y, x, y, step_count).await
       },
       None => self.page.move_mouse(x, y).await,
@@ -2635,7 +2649,7 @@ impl Mouse<'_> {
       .page
       .mouse_position
       .lock()
-      .map_err(|e| format!("mouse position lock poisoned: {e}"))?;
+      .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))?;
     self.page.mouse_down(x, y, button).await
   }
 
@@ -2650,7 +2664,7 @@ impl Mouse<'_> {
       .page
       .mouse_position
       .lock()
-      .map_err(|e| format!("mouse position lock poisoned: {e}"))?;
+      .map_err(|e| crate::error::FerriError::backend(format!("mouse position lock poisoned: {e}")))?;
     self.page.mouse_up(x, y, button).await
   }
 
