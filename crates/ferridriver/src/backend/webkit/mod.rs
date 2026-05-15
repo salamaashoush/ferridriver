@@ -1219,7 +1219,7 @@ impl WebKitPage {
       "unsupported: tap is not available on the WebKit backend — WKWebView has no public touch-input \
          synthesis API (AppKit lacks NSTouchEvent synthesis and the private _sendTouchDownAtLocation: \
          SPI is marked unavailable on macOS). Use the cdp-pipe or cdp-raw backend for tap."
-        .to_string(),
+        .into(),
     )
   }
 
@@ -1640,7 +1640,11 @@ impl WebKitPage {
       }
     }
 
-    if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
+    if errs.is_empty() {
+      Ok(())
+    } else {
+      Err(errs.join("; ").into())
+    }
   }
 
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
@@ -1933,8 +1937,8 @@ impl WebKitPage {
               let responder: crate::dialog::DialogResponder = Arc::new(move |_response| {
                 Box::pin(async move {
                   Err(
-                    "Dialog.accept/dismiss is not supported on the WebKit backend: stock WKWebView decides the response in the host's WKUIDelegate before the event reaches Rust"
-                      .to_string(),
+                    "unsupported: Dialog.accept/dismiss on the WebKit backend — stock WKWebView decides the response in the host's WKUIDelegate before the event reaches Rust"
+                      .into(),
                   )
                 })
               });
@@ -2298,7 +2302,7 @@ impl WebKitElement {
         let cy = obj.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
         Ok((cx, cy))
       },
-      IpcResponse::Error(err) => Err(err),
+      IpcResponse::Error(err) => Err(err.into()),
       _ => Ok((0.0, 0.0)),
     }
   }
@@ -2314,7 +2318,7 @@ impl WebKitElement {
     payload.extend_from_slice(&self.view_id.to_le_bytes());
     let result = self.client.send(ipc::Op::MouseEvent, &payload).await?;
     match result {
-      IpcResponse::Error(err) => Err(err),
+      IpcResponse::Error(err) => Err(err.into()),
       _ => Ok(()),
     }
   }
