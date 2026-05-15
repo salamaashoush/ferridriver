@@ -108,13 +108,15 @@ impl From<Vec<Vec<String>>> for DataTable {
 
 /// Trait for converting a DataTable into typed rows.
 pub trait FromDataTable: Sized {
-  fn from_row(headers: &[String], row: &[String]) -> Result<Self, String>;
+  fn from_row(headers: &[String], row: &[String]) -> ferridriver::error::Result<Self>;
 }
 
 impl DataTable {
   /// Convert data rows to typed structs using the `FromDataTable` trait.
-  pub fn as_type<T: FromDataTable>(&self) -> Result<Vec<T>, String> {
-    let headers = self.headers().ok_or_else(|| "table has no header row".to_string())?;
+  pub fn as_type<T: FromDataTable>(&self) -> ferridriver::error::Result<Vec<T>> {
+    let headers = self
+      .headers()
+      .ok_or_else(|| ferridriver::FerriError::invalid_argument("data-table", "table has no header row"))?;
     self.data_rows().iter().map(|row| T::from_row(headers, row)).collect()
   }
 }

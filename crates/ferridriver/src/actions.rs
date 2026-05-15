@@ -1,6 +1,6 @@
 //! Core automation primitives -- shared by MCP tools, BDD steps, and library consumers.
 //!
-//! All functions take `&AnyPage` or `&AnyElement` and return `Result<T, String>`.
+//! All functions take `&AnyPage` or `&AnyElement` and return [`crate::error::Result<T>`].
 //! No MCP types, no server state -- pure browser automation logic.
 //!
 //! All JS operations go through the unified `window.__fd` runtime

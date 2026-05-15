@@ -967,8 +967,10 @@ impl fmt::Display for TestFailure {
 
 impl std::error::Error for TestFailure {}
 
-/// Enables `?` on any `Result<T, String>` inside test functions.
-/// Locator methods (click, fill, press, etc.) return `Result<T, String>`.
+/// Legacy bridge: kept so test bodies that hand-build a `String` error
+/// (logging helpers, manual panic messages) keep `?`-propagating through
+/// `TestFailure`. Locator methods now return `Result<T, FerriError>` and
+/// flow through the dedicated [`From<ferridriver::FerriError>`] impl below.
 impl From<String> for TestFailure {
   fn from(message: String) -> Self {
     Self {

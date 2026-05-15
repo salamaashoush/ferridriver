@@ -2,7 +2,14 @@
 //!
 //! Supports: `@tag`, `not @tag`, `@a and @b`, `@a or @b`, `(@a or @b) and not @c`.
 
+use ferridriver::FerriError;
+use ferridriver::error::Result;
+
 use crate::scenario::ScenarioExecution;
+
+fn invalid(reason: impl Into<String>) -> FerriError {
+  FerriError::invalid_argument("tag-expression", reason)
+}
 
 /// AST for tag filter expressions.
 #[derive(Debug, Clone)]
@@ -28,12 +35,12 @@ impl TagExpression {
   /// not_expr = "not" not_expr | atom
   /// atom     = "@" IDENT | "(" expr ")"
   /// ```
-  pub fn parse(input: &str) -> Result<Self, String> {
+  pub fn parse(input: &str) -> Result<Self> {
     let tokens = tokenize(input)?;
     let mut pos = 0;
     let result = parse_or(&tokens, &mut pos)?;
     if pos < tokens.len() {
-      return Err(format!("unexpected token: {:?}", tokens[pos]));
+      return Err(invalid(format!("unexpected token: {:?}", tokens[pos])));
     }
     Ok(result)
   }
@@ -61,7 +68,7 @@ enum Token {
   RParen,
 }
 
-fn tokenize(input: &str) -> Result<Vec<Token>, String> {
+fn tokenize(input: &str) -> Result<Vec<Token>> {
   let mut tokens = Vec::new();
   let mut chars = input.chars().peekable();
 
@@ -90,7 +97,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
           }
         }
         if name.is_empty() {
-          return Err("expected tag name after '@'".to_string());
+          return Err(invalid("expected tag name after '@'"));
         }
         tokens.push(Token::Tag(format!("@{name}")));
       },
@@ -108,8 +115,8 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
           "and" => tokens.push(Token::And),
           "or" => tokens.push(Token::Or),
           "not" => tokens.push(Token::Not),
-          "" => return Err(format!("unexpected character: '{c}'")),
-          _ => return Err(format!("unexpected word: '{word}'")),
+          "" => return Err(invalid(format!("unexpected character: '{c}'"))),
+          _ => return Err(invalid(format!("unexpected word: '{word}'"))),
         }
       },
     }
@@ -120,7 +127,7 @@ fn tokenize(input: &str) -> Result<Vec<Token>, String> {
 
 // ── Recursive descent parser ──
 
-fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<TagExpression, String> {
+fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<TagExpression> {
   let mut left = parse_and(tokens, pos)?;
   while *pos < tokens.len() && tokens[*pos] == Token::Or {
     *pos += 1;
@@ -130,7 +137,7 @@ fn parse_or(tokens: &[Token], pos: &mut usize) -> Result<TagExpression, String> 
   Ok(left)
 }
 
-fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<TagExpression, String> {
+fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<TagExpression> {
   let mut left = parse_not(tokens, pos)?;
   while *pos < tokens.len() && tokens[*pos] == Token::And {
     *pos += 1;
@@ -140,7 +147,7 @@ fn parse_and(tokens: &[Token], pos: &mut usize) -> Result<TagExpression, String>
   Ok(left)
 }
 
-fn parse_not(tokens: &[Token], pos: &mut usize) -> Result<TagExpression, String> {
+fn parse_not(tokens: &[Token], pos: &mut usize) -> Result<TagExpression> {
   if *pos < tokens.len() && tokens[*pos] == Token::Not {
     *pos += 1;
     let inner = parse_not(tokens, pos)?;
@@ -149,9 +156,9 @@ fn parse_not(tokens: &[Token], pos: &mut usize) -> Result<TagExpression, String>
   parse_atom(tokens, pos)
 }
 
-fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<TagExpression, String> {
+fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<TagExpression> {
   if *pos >= tokens.len() {
-    return Err("unexpected end of expression".to_string());
+    return Err(invalid("unexpected end of expression"));
   }
 
   match &tokens[*pos] {
@@ -164,12 +171,12 @@ fn parse_atom(tokens: &[Token], pos: &mut usize) -> Result<TagExpression, String
       *pos += 1;
       let inner = parse_or(tokens, pos)?;
       if *pos >= tokens.len() || tokens[*pos] != Token::RParen {
-        return Err("expected closing ')'".to_string());
+        return Err(invalid("expected closing ')'"));
       }
       *pos += 1;
       Ok(inner)
     },
-    other => Err(format!("unexpected token: {other:?}")),
+    other => Err(invalid(format!("unexpected token: {other:?}"))),
   }
 }
 
