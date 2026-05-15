@@ -1708,7 +1708,7 @@ impl<T: CdpWrap> CdpPage<T> {
       None => None,
     };
 
-    let args_json = serde_json::to_string(args).map_err(|e| e.to_string())?;
+    let args_json = serde_json::to_string(args)?;
     let is_fn_json: serde_json::Value = match is_function {
       Some(true) => serde_json::Value::Bool(true),
       Some(false) => serde_json::Value::Bool(false),
@@ -1793,8 +1793,8 @@ impl<T: CdpWrap> CdpPage<T> {
       None => "null",
     };
     let return_by_value_lit = if return_by_value { "true" } else { "false" };
-    let fn_source_lit = serde_json::to_string(fn_source).map_err(|e| e.to_string())?;
-    let args_json_lit = serde_json::to_string(&args_json).map_err(|e| e.to_string())?;
+    let fn_source_lit = serde_json::to_string(fn_source)?;
+    let args_json_lit = serde_json::to_string(&args_json)?;
     let expression =
       format!("({UTILITY_EVAL_WRAPPER})({is_fn_lit},{return_by_value_lit},{fn_source_lit},{count},{args_json_lit})");
     let response = self
@@ -2126,20 +2126,16 @@ impl<T: CdpWrap> CdpPage<T> {
     let frame_id = self
       .main_frame_id
       .get_or_try_init(|| async {
-        let tree = self
-          .cmd("Page.getFrameTree", super::empty_params())
-          .await
-          .map_err(|e| e.to_string())?;
+        let tree = self.cmd("Page.getFrameTree", super::empty_params()).await?;
         tree
           .get("frameTree")
           .and_then(|f| f.get("frame"))
           .and_then(|f| f.get("id"))
           .and_then(|v| v.as_str())
           .map(std::string::ToString::to_string)
-          .ok_or_else(|| "No main frame".to_string())
+          .ok_or_else(|| FerriError::protocol("Page.getFrameTree", "no main frame"))
       })
-      .await
-      .map_err(FerriError::Backend)?;
+      .await?;
 
     // Selector engine is already injected via Page.addScriptToEvaluateOnNewDocument
     // during page setup, so setDocumentContent triggers it automatically.

@@ -2477,7 +2477,7 @@ impl BidiPage {
 
     let target_ctx: &str = frame_id.unwrap_or(&self.context_id);
 
-    let args_json = serde_json::to_string(args).map_err(|e| e.to_string())?;
+    let args_json = serde_json::to_string(args)?;
     let count = args.len();
 
     let is_fn_local = match is_function {

@@ -1391,14 +1391,11 @@ impl Locator {
     let fn_source = fn_source.to_string();
     retry_resolve!(self, timeout_ms, "evaluate", |el, _page| async {
       let page_arc = Arc::clone(self.frame.page_arc());
-      let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el)
-        .await
-        .map_err(|e| e.to_string())?;
+      let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el).await?;
       let result = handle
         .as_js_handle()
         .evaluate(&fn_source, arg.clone(), is_function)
-        .await
-        .map_err(|e| e.to_string());
+        .await;
       let _ = handle.dispose().await;
       result
     })
@@ -1427,14 +1424,11 @@ impl Locator {
     let fn_source = fn_source.to_string();
     retry_resolve!(self, timeout_ms, "evaluateHandle", |el, _page| async {
       let page_arc = Arc::clone(self.frame.page_arc());
-      let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el)
-        .await
-        .map_err(|e| e.to_string())?;
+      let handle = crate::element_handle::ElementHandle::from_any_element(page_arc, el).await?;
       let result = handle
         .as_js_handle()
         .evaluate_handle(&fn_source, arg.clone(), is_function)
-        .await
-        .map_err(|e| e.to_string());
+        .await;
       let _ = handle.dispose().await;
       result
     })

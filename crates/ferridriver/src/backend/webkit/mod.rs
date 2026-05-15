@@ -525,7 +525,7 @@ impl WebKitPage {
 
     self.ensure_engine_injected().await?;
 
-    let args_json = serde_json::to_string(args).map_err(|e| e.to_string())?;
+    let args_json = serde_json::to_string(args)?;
     let count = args.len();
 
     let mut handle_refs = Vec::with_capacity(handles.len());
@@ -556,8 +556,8 @@ impl WebKitPage {
     // string literal — the utility-script wrapper JSON.parses it
     // back on the page, then spreads the resulting array into the
     // utility script's variadic argsAndHandles slot.
-    let args_literal = serde_json::to_string(&args_json).map_err(|e| e.to_string())?;
-    let fn_source_literal = serde_json::to_string(fn_source).map_err(|e| e.to_string())?;
+    let args_literal = serde_json::to_string(&args_json)?;
+    let fn_source_literal = serde_json::to_string(fn_source)?;
 
     // When returning a handle, we need ref_id allocation. Include the
     // allocator inline and return `{kind: 'handle', ref: id}`. When

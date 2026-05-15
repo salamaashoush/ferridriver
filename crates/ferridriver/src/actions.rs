@@ -444,11 +444,11 @@ pub async fn navigate_with_health_check(page: &AnyPage, url: &str) -> Result<()>
 /// Returns an error if JS evaluation fails or the search pattern is invalid.
 ///
 pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchResult> {
-  let pattern = serde_json::to_string(&opts.pattern).map_err(|e| e.to_string())?;
+  let pattern = serde_json::to_string(&opts.pattern)?;
   let is_regex = if opts.regex { "true" } else { "false" };
   let case_sensitive = if opts.case_sensitive { "true" } else { "false" };
   let context_chars = opts.context_chars;
-  let css_scope = serde_json::to_string(&opts.css_scope).map_err(|e| e.to_string())?;
+  let css_scope = serde_json::to_string(&opts.css_scope)?;
   let max_results = opts.max_results;
 
   let fd = page.injected_script().await?;
@@ -545,8 +545,8 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
   }
 
   // Plain CSS: use runtime's findElementsCSS
-  let selector = serde_json::to_string(&opts.selector).map_err(|e| e.to_string())?;
-  let attributes = serde_json::to_string(&opts.attributes).map_err(|e| e.to_string())?;
+  let selector = serde_json::to_string(&opts.selector)?;
+  let attributes = serde_json::to_string(&opts.attributes)?;
   let max_results = opts.max_results;
   let include_text = if opts.include_text { "true" } else { "false" };
 
