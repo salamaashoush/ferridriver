@@ -895,12 +895,7 @@ impl TestRunner {
                   bcfg.clone(),
                 );
 
-                call_js_test(&cb, fixtures).await.map_err(|e| TestFailure {
-                  message: e,
-                  stack: None,
-                  diff: None,
-                  screenshot: None,
-                })
+                call_js_test(&cb, fixtures).await.map_err(TestFailure::from)
               })
             }
           }),
@@ -1279,12 +1274,7 @@ fn make_each_hook(
       let fixtures = crate::test_fixtures::TestFixtures::from_pool(pool.clone(), test_info, modifiers, bcfg.clone());
       call_js_test(&cb, fixtures)
         .await
-        .map_err(|e| ferridriver_test::TestFailure {
-          message: e,
-          stack: None,
-          diff: None,
-          screenshot: None,
-        })
+        .map_err(ferridriver_test::TestFailure::from)
     })
   })
 }
@@ -1332,12 +1322,7 @@ fn make_suite_hook(
       let fixtures = crate::test_fixtures::TestFixtures::from_pool(pool.clone(), test_info, modifiers, bcfg.clone());
       call_js_test(&cb, fixtures)
         .await
-        .map_err(|e| ferridriver_test::TestFailure {
-          message: e,
-          stack: None,
-          diff: None,
-          screenshot: None,
-        })
+        .map_err(ferridriver_test::TestFailure::from)
     })
   })
 }
@@ -1456,7 +1441,7 @@ pub(crate) fn fixtures_with_bdd_params(
 async fn resolve_requested_fixtures(
   pool: &ferridriver_test::fixture::FixturePool,
   requested_fixtures: &[String],
-) -> std::result::Result<(), String> {
+) -> ferridriver::error::Result<()> {
   for name in requested_fixtures {
     pool.resolve(name).await?;
   }
@@ -1467,11 +1452,13 @@ async fn resolve_requested_fixtures(
 async fn call_js_test(
   tsfn: &TestCallbackFn,
   fixtures: crate::test_fixtures::TestFixtures,
-) -> std::result::Result<(), String> {
+) -> ferridriver::error::Result<()> {
   let t = std::time::Instant::now();
   let result = match tsfn.call_async(fixtures).await {
-    Ok(promise) => promise.await.map_err(|e| format!("{e}")),
-    Err(e) => Err(format!("{e}")),
+    Ok(promise) => promise
+      .await
+      .map_err(|e| ferridriver::FerriError::backend(e.to_string())),
+    Err(e) => Err(ferridriver::FerriError::backend(e.to_string())),
   };
   tracing::debug!(target: "ferridriver::napi", elapsed_us = t.elapsed().as_micros() as u64, "call_js_test");
   result
