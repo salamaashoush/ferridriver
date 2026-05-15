@@ -105,9 +105,17 @@ impl VideoRecordingHandle {
   ///
   /// Returns an error if the encoder fails or the join handle panics.
   pub async fn stop(self, page: &Page) -> Result<PathBuf, String> {
-    // 1. Tell Chrome to stop emitting `Page.screencastFrame`. Once
-    //    this response lands, no further events for this session.
-    let _ = page.stop_screencast().await;
+    // 1. Tell Chrome to stop emitting `Page.screencastFrame`. The
+    //    recording task only runs `stop()` after `page.is_closed()`
+    //    returns true, so the target is already gone here on most
+    //    callers — the send_command would either error fast or, on
+    //    cdp-raw, sit on the response-waiting oneshot until the per-
+    //    command 30s transport timeout. Skip the round-trip when the
+    //    page is already closed; the shutdown_tx + pump tear-down
+    //    below makes the stop deterministic regardless.
+    if !page.is_closed() {
+      let _ = page.stop_screencast().await;
+    }
 
     // 2. Signal the listener to drain any events already buffered in
     //    its broadcast subscription (frames Chrome shipped just
