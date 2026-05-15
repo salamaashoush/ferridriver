@@ -44,18 +44,17 @@ pub(crate) struct FrameCache {
 }
 
 impl FrameCache {
-  /// Replace the tree from a fresh `get_frame_tree` response.
+  /// Merge a fresh `get_frame_tree` response into the cache. Adds any
+  /// frame the tree carries that we didn't already have and updates
+  /// the name/url for frames whose record was previously attached with
+  /// an empty placeholder. Does NOT remove frames present in the cache
+  /// but missing from the tree — those may have been added via an
+  /// in-flight `FrameAttached` event the seeding caller's underlying
+  /// `getTree` round-trip raced. Detach is a separate explicit step
+  /// via [`Self::detach`].
   pub(crate) fn seed(&mut self, infos: Vec<FrameInfo>) {
-    self.order.clear();
-    self.by_id.clear();
-    self.main_id = None;
     for info in infos {
-      let id: Arc<str> = Arc::from(info.frame_id.as_str());
-      if info.parent_frame_id.is_none() && self.main_id.is_none() {
-        self.main_id = Some(Arc::clone(&id));
-      }
-      self.order.push(Arc::clone(&id));
-      self.by_id.insert(id, FrameRecord { info, detached: false });
+      self.attach(info);
     }
   }
 
