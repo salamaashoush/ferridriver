@@ -161,8 +161,6 @@ jobs:
 
       - name: Install Chromium with system deps
         run: bun run packages/ferridriver-test/src/cli.ts install --with-deps chromium
-      - name: Install Firefox
-        run: bun run packages/ferridriver-test/src/cli.ts install firefox
 
       - name: Run unit + integration tests
         env:
@@ -224,8 +222,6 @@ jobs:
         run: bun run build:debug
       - name: Install Chromium with system deps
         run: bun run packages/ferridriver-test/src/cli.ts install --with-deps chromium
-      - name: Install Firefox
-        run: bun run packages/ferridriver-test/src/cli.ts install firefox
       - name: Run TypeScript tests
         working-directory: crates/ferridriver-node
         run: bun test --timeout 30000
