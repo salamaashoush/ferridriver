@@ -252,7 +252,7 @@ pub struct WebKitPage {
   /// `Runtime.addBinding` analogue so the console-side channel is
   /// the available transport, same approach as `BiDi`.
   exposed_fns: std::sync::Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
-  /// Shared frame cache — see `CdpPage::frame_cache`. WebKit has no
+  /// Shared frame cache — see `CdpPage::frame_cache`. `WebKit` has no
   /// real OOPIF support today and `get_frame_tree` returns just the
   /// main frame, but we still want the cache to persist across MCP
   /// tool-call wrappers so `page.main_frame()` doesn't lose its

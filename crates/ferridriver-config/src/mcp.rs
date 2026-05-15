@@ -36,6 +36,11 @@ pub struct McpConfig {
   pub server: ServerConfig,
   /// Browser launch and instance configuration.
   pub browser: BrowserConfig,
+  /// Plugin source paths -- single `.js`/`.mjs` files or directories
+  /// scanned for `*.js`/`*.mjs`. Relative paths resolve against the
+  /// directory containing the loaded config file (or cwd when the config
+  /// was passed inline).
+  pub plugins: Vec<String>,
 
   // -- runtime fields (not deserialized) --
   /// Cached command outputs (populated at runtime).
@@ -331,9 +336,11 @@ impl CommandCache {
 
 /// Execute a shell command and return its stdout lines.
 ///
-/// Supports two output formats:
+/// Supported output formats (probed in order):
 /// - JSON array of strings: `["--flag1", "--flag2"]`
-/// - Plain text: one arg per line
+/// - JSON object with an `args` field holding the array: `{"args": ["--flag1"], ...}`
+///   (matches the shape emitted by `box-dev-gate browser args --json`).
+/// - Plain text: one arg per line.
 fn exec_command(command: &str) -> Result<Vec<String>, String> {
   let output = Command::new("sh")
     .args(["-c", command])
@@ -352,9 +359,19 @@ fn exec_command(command: &str) -> Result<Vec<String>, String> {
     return Ok(Vec::new());
   }
 
-  if trimmed.starts_with('[') {
-    if let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed) {
-      return Ok(arr);
+  if trimmed.starts_with('[')
+    && let Ok(arr) = serde_json::from_str::<Vec<String>>(trimmed)
+  {
+    return Ok(arr);
+  }
+
+  if trimmed.starts_with('{')
+    && let Ok(value) = serde_json::from_str::<serde_json::Value>(trimmed)
+    && let Some(arr) = value.get("args").and_then(|v| v.as_array())
+  {
+    let strs: Option<Vec<String>> = arr.iter().map(|v| v.as_str().map(str::to_string)).collect();
+    if let Some(strs) = strs {
+      return Ok(strs);
     }
   }
 
@@ -501,6 +518,20 @@ mod tests {
     config.browser.instance_args_command = Some(r#"printf '["--dns-prefetch-disable","--tag=dev"]'"#.into());
     let args = config.chrome_args_for_instance("dev");
     assert_eq!(args, vec!["--dns-prefetch-disable", "--tag=dev"]);
+  }
+
+  #[test]
+  fn instance_args_command_json_object_with_args_field() {
+    let mut config = McpConfig::default();
+    config.browser.instance_args_command = Some(
+      r#"printf '{"environment":"staging","args":["--no-first-run","--host-resolver-rules=MAP a.box.com 1.2.3.4"]}'"#
+        .into(),
+    );
+    let args = config.chrome_args_for_instance("staging");
+    assert_eq!(
+      args,
+      vec!["--no-first-run", "--host-resolver-rules=MAP a.box.com 1.2.3.4"]
+    );
   }
 
   #[test]

@@ -35,6 +35,10 @@ impl McpServerConfig for McpConfig {
   fn server_instructions(&self) -> &str {
     McpConfig::server_instructions(self, DEFAULT_INSTRUCTIONS)
   }
+
+  fn plugin_paths(&self) -> Vec<std::path::PathBuf> {
+    self.plugins.iter().map(std::path::PathBuf::from).collect()
+  }
 }
 
 #[cfg(test)]

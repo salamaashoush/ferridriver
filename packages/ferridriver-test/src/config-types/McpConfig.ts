@@ -15,4 +15,11 @@ export type McpConfig = {
    * Browser launch and instance configuration.
    */
   browser: McpBrowserConfig;
+  /**
+   * Plugin source paths -- single `.js`/`.mjs` files or directories
+   * scanned for `*.js`/`*.mjs`. Relative paths resolve against the
+   * directory containing the loaded config file (or cwd when the config
+   * was passed inline).
+   */
+  plugins: Array<string>;
 };

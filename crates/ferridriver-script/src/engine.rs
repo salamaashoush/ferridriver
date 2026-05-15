@@ -79,6 +79,9 @@ pub struct RunContext {
   /// `browser.newContext(BrowserContextOptions)` — the natural
   /// Playwright entry point that §4.1's options bag attaches to.
   pub browser: Option<Arc<ferridriver::Browser>>,
+  /// Plugin bindings to install on the `plugins` global. Empty means no
+  /// `plugins` global is exposed beyond the singleton commands runner.
+  pub plugins: Vec<crate::bindings::PluginBinding>,
 }
 
 /// Sandboxed `QuickJS` scripting engine.
@@ -196,6 +199,7 @@ impl ScriptEngine {
       browser_context: context.browser_context.clone(),
       request: context.request.clone(),
       browser: context.browser.clone(),
+      plugins: context.plugins.clone(),
       async_ctx: ctx.clone(),
     };
     let source_owned = source.to_string();
@@ -254,6 +258,7 @@ struct GlobalsInstall {
   browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
   browser: Option<Arc<ferridriver::Browser>>,
+  plugins: Vec<crate::bindings::PluginBinding>,
   /// `AsyncContext` driving the script — passed to `install_page` so
   /// `page.route` callbacks can dispatch back into JS from a separate
   /// tokio task. Always present (cloned from the engine's context).
@@ -296,6 +301,11 @@ fn install_globals(ctx: &Ctx<'_>, args_json: &str, inst: GlobalsInstall) -> rqui
   // `import { chromium } from 'playwright'`, which is universally
   // accessible once the package is loaded.
   crate::bindings::install_browser_type(ctx)?;
+
+  // Plugin bindings (and the singleton commands runner) come last so
+  // wrappers can dereference `globalThis.page` / `globalThis.context`
+  // / `globalThis.request` if those were installed above.
+  crate::bindings::install_plugins(ctx, &inst.plugins)?;
 
   Ok(())
 }
