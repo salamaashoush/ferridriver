@@ -1477,9 +1477,7 @@ pub fn detect_firefox() -> Result<String, String> {
       if !p.exists() {
         continue;
       }
-      let resolved = std::fs::canonicalize(p)
-        .map(|c| c.to_string_lossy().to_string())
-        .unwrap_or_else(|_| path.to_string());
+      let resolved = std::fs::canonicalize(p).map_or_else(|_| path.to_string(), |c| c.to_string_lossy().to_string());
       if resolved.contains("/snap/") {
         continue;
       }
