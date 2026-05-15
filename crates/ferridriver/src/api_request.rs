@@ -371,7 +371,7 @@ impl APIRequestContext {
 
     // Fail on status code if requested.
     if opts.fail_on_status_code.unwrap_or(false) && !api_response.ok() {
-      return Err(crate::error::FerriError::Other(format!(
+      return Err(crate::error::FerriError::Backend(format!(
         "{} {resolved_url} failed: {} {}",
         method_str,
         api_response.status(),

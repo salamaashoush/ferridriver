@@ -31,7 +31,7 @@ macro_rules! step {
                 $caps: &::regex::Captures<'_>,
                 $table: Option<&[Vec<String>]>,
                 $vars: &mut ::rustc_hash::FxHashMap<String, String>,
-            ) -> Result<Option<::serde_json::Value>, String> $body
+            ) -> $crate::error::Result<Option<::serde_json::Value>> $body
         }
     };
 }

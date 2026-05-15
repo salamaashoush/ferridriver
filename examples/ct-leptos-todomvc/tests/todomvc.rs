@@ -12,7 +12,7 @@ use ferridriver_test_macros::ferritest;
 
 const APP_URL: &str = "http://127.0.0.1:8787";
 
-async fn add_todo(page: &std::sync::Arc<Page>, text: &str) -> Result<(), String> {
+async fn add_todo(page: &std::sync::Arc<Page>, text: &str) -> ferridriver::Result<()> {
   page.locator("#new-todo", None).fill(text, None).await?;
   page.locator("#new-todo", None).press("Enter", None).await?;
   Ok(())
@@ -24,7 +24,9 @@ async fn add_todo(page: &std::sync::Arc<Page>, text: &str) -> Result<(), String>
 async fn add_single_todo(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "Buy milk").await.map_err(TestFailure::from)?;
+  add_todo(&page, "Buy milk")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   expect(&page.locator(".todo-list li", None)).to_have_count(1).await?;
   expect(&page.locator(".todo-list li label", None))
     .to_have_text("Buy milk")
@@ -35,9 +37,15 @@ async fn add_single_todo(ctx: TestContext) {
 async fn add_multiple_todos(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "Buy milk").await.map_err(TestFailure::from)?;
-  add_todo(&page, "Walk the dog").await.map_err(TestFailure::from)?;
-  add_todo(&page, "Write tests").await.map_err(TestFailure::from)?;
+  add_todo(&page, "Buy milk")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
+  add_todo(&page, "Walk the dog")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
+  add_todo(&page, "Write tests")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   expect(&page.locator(".todo-list li", None)).to_have_count(3).await?;
 }
 
@@ -53,7 +61,9 @@ async fn empty_input_does_not_add(ctx: TestContext) {
 async fn input_clears_after_add(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "Test").await.map_err(TestFailure::from)?;
+  add_todo(&page, "Test")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   expect(&page.locator("#new-todo", None)).to_have_value("").await?;
 }
 
@@ -63,11 +73,15 @@ async fn input_clears_after_add(ctx: TestContext) {
 async fn shows_item_count(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "One").await.map_err(TestFailure::from)?;
+  add_todo(&page, "One")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   expect(&page.locator("#todo-count", None))
     .to_have_text("1 item left")
     .await?;
-  add_todo(&page, "Two").await.map_err(TestFailure::from)?;
+  add_todo(&page, "Two")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   expect(&page.locator("#todo-count", None))
     .to_have_text("2 items left")
     .await?;
@@ -79,7 +93,9 @@ async fn shows_item_count(ctx: TestContext) {
 async fn toggle_todo_complete(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "Buy milk").await.map_err(TestFailure::from)?;
+  add_todo(&page, "Buy milk")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   page
     .locator(".todo-list li:nth-child(1) .toggle", None)
     .click(None)
@@ -98,8 +114,12 @@ async fn toggle_todo_complete(ctx: TestContext) {
 async fn delete_todo(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "Delete me").await.map_err(TestFailure::from)?;
-  add_todo(&page, "Keep me").await.map_err(TestFailure::from)?;
+  add_todo(&page, "Delete me")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
+  add_todo(&page, "Keep me")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   page
     .locator(".todo-list li:nth-child(1) .destroy", None)
     .click(None)
@@ -116,8 +136,12 @@ async fn delete_todo(ctx: TestContext) {
 async fn filter_active(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "Active todo").await.map_err(TestFailure::from)?;
-  add_todo(&page, "Completed todo").await.map_err(TestFailure::from)?;
+  add_todo(&page, "Active todo")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
+  add_todo(&page, "Completed todo")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   page
     .locator(".todo-list li:nth-child(2) .toggle", None)
     .click(None)
@@ -133,8 +157,12 @@ async fn filter_active(ctx: TestContext) {
 async fn filter_completed(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "Active todo").await.map_err(TestFailure::from)?;
-  add_todo(&page, "Completed todo").await.map_err(TestFailure::from)?;
+  add_todo(&page, "Active todo")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
+  add_todo(&page, "Completed todo")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   page
     .locator(".todo-list li:nth-child(2) .toggle", None)
     .click(None)
@@ -152,8 +180,12 @@ async fn filter_completed(ctx: TestContext) {
 async fn clear_completed(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "Keep").await.map_err(TestFailure::from)?;
-  add_todo(&page, "Remove").await.map_err(TestFailure::from)?;
+  add_todo(&page, "Keep")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
+  add_todo(&page, "Remove")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   page
     .locator(".todo-list li:nth-child(2) .toggle", None)
     .click(None)
@@ -171,9 +203,15 @@ async fn clear_completed(ctx: TestContext) {
 async fn toggle_all_completes_all(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "One").await.map_err(TestFailure::from)?;
-  add_todo(&page, "Two").await.map_err(TestFailure::from)?;
-  add_todo(&page, "Three").await.map_err(TestFailure::from)?;
+  add_todo(&page, "One")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
+  add_todo(&page, "Two")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
+  add_todo(&page, "Three")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   page.locator("#toggle-all", None).click(None).await?;
   expect(&page.locator("#todo-count", None))
     .to_have_text("0 items left")
@@ -186,7 +224,9 @@ async fn toggle_all_completes_all(ctx: TestContext) {
 async fn edit_todo_on_double_click(ctx: TestContext) {
   let page = ctx.page().await?;
   page.goto(APP_URL, None).await?;
-  add_todo(&page, "Original text").await.map_err(TestFailure::from)?;
+  add_todo(&page, "Original text")
+    .await
+    .map_err(|e| TestFailure::from(e.to_string()))?;
   page
     .locator(".todo-list li:nth-child(1) label", None)
     .dblclick(None)

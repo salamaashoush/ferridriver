@@ -132,7 +132,7 @@ impl Page {
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn goto(&self, url: String, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    let resp = self.inner.goto(&url, opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.goto(&url, opts).await.map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
@@ -141,7 +141,7 @@ impl Page {
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn go_back(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    let resp = self.inner.go_back(opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.go_back(opts).await.map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
@@ -150,7 +150,7 @@ impl Page {
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn go_forward(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    let resp = self.inner.go_forward(opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.go_forward(opts).await.map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
@@ -159,18 +159,18 @@ impl Page {
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn reload(&self, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
-    let resp = self.inner.reload(opts).await.map_err(napi::Error::from_reason)?;
+    let resp = self.inner.reload(opts).await.map_err(crate::error::to_napi)?;
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
   #[napi]
   pub async fn url(&self) -> Result<String> {
-    self.inner.url().await.map_err(napi::Error::from_reason)
+    self.inner.url().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn title(&self) -> Result<String> {
-    self.inner.title().await.map_err(napi::Error::from_reason)
+    self.inner.title().await.map_err(crate::error::to_napi)
   }
 
   /// Playwright: `page.video(): null | Video` —
@@ -569,11 +569,7 @@ impl Page {
   #[napi]
   pub async fn click(&self, selector: String, options: Option<crate::types::ClickOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self
-      .inner
-      .click(&selector, opts)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.click(&selector, opts).await.map_err(crate::error::to_napi)
   }
 
   /// Double-click the first element matching `selector`. Accepts
@@ -585,7 +581,7 @@ impl Page {
       .inner
       .dblclick(&selector, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Fill the first element matching `selector`. Accepts Playwright's
@@ -597,7 +593,7 @@ impl Page {
       .inner
       .fill(&selector, &value, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Type `text` into the first element matching `selector`. Accepts
@@ -614,7 +610,7 @@ impl Page {
       .inner
       .r#type(&selector, &text, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Press `key` on the first element matching `selector`. Accepts
@@ -626,7 +622,7 @@ impl Page {
       .inner
       .press(&selector, &key, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Hover the first element matching `selector`. Accepts Playwright's
@@ -634,11 +630,7 @@ impl Page {
   #[napi]
   pub async fn hover(&self, selector: String, options: Option<crate::types::HoverOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self
-      .inner
-      .hover(&selector, opts)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.hover(&selector, opts).await.map_err(crate::error::to_napi)
   }
 
   /// Select options on the `<select>` matching `selector`. Accepts
@@ -655,7 +647,7 @@ impl Page {
       .inner
       .select_option(&selector, values.0, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Check a checkbox matching `selector`. Accepts Playwright's full
@@ -663,11 +655,7 @@ impl Page {
   #[napi]
   pub async fn check(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self
-      .inner
-      .check(&selector, opts)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.check(&selector, opts).await.map_err(crate::error::to_napi)
   }
 
   /// Uncheck a checkbox matching `selector`. Accepts Playwright's full
@@ -675,11 +663,7 @@ impl Page {
   #[napi]
   pub async fn uncheck(&self, selector: String, options: Option<crate::types::CheckOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self
-      .inner
-      .uncheck(&selector, opts)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.uncheck(&selector, opts).await.map_err(crate::error::to_napi)
   }
 
   /// Set the checked state of a checkbox or radio matching `selector`.
@@ -696,7 +680,7 @@ impl Page {
       .inner
       .set_checked(&selector, checked, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Tap (touch) the element matched by `selector`. Mirrors Playwright's
@@ -704,43 +688,39 @@ impl Page {
   #[napi]
   pub async fn tap(&self, selector: String, options: Option<crate::types::TapOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.tap(&selector, opts).await.map_err(napi::Error::from_reason)
+    self.inner.tap(&selector, opts).await.map_err(crate::error::to_napi)
   }
 
   // ── Content ─────────────────────────────────────────────────────────────
 
   #[napi]
   pub async fn content(&self) -> Result<String> {
-    self.inner.content().await.map_err(napi::Error::from_reason)
+    self.inner.content().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn set_content(&self, html: String) -> Result<()> {
-    self.inner.set_content(&html).await.map_err(napi::Error::from_reason)
+    self.inner.set_content(&html).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn markdown(&self) -> Result<String> {
-    self.inner.markdown().await.map_err(napi::Error::from_reason)
+    self.inner.markdown().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn text_content(&self, selector: String) -> Result<Option<String>> {
-    self
-      .inner
-      .text_content(&selector)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.text_content(&selector).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn inner_text(&self, selector: String) -> Result<String> {
-    self.inner.inner_text(&selector).await.map_err(napi::Error::from_reason)
+    self.inner.inner_text(&selector).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn inner_html(&self, selector: String) -> Result<String> {
-    self.inner.inner_html(&selector).await.map_err(napi::Error::from_reason)
+    self.inner.inner_html(&selector).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -749,56 +729,44 @@ impl Page {
       .inner
       .get_attribute(&selector, &name)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn input_value(&self, selector: String) -> Result<String> {
-    self
-      .inner
-      .input_value(&selector)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.input_value(&selector).await.map_err(crate::error::to_napi)
   }
 
   // ── State checks ────────────────────────────────────────────────────────
 
   #[napi]
   pub async fn is_visible(&self, selector: String) -> Result<bool> {
-    self.inner.is_visible(&selector).await.map_err(napi::Error::from_reason)
+    self.inner.is_visible(&selector).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_hidden(&self, selector: String) -> Result<bool> {
-    self.inner.is_hidden(&selector).await.map_err(napi::Error::from_reason)
+    self.inner.is_hidden(&selector).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_enabled(&self, selector: String) -> Result<bool> {
-    self.inner.is_enabled(&selector).await.map_err(napi::Error::from_reason)
+    self.inner.is_enabled(&selector).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_disabled(&self, selector: String) -> Result<bool> {
-    self
-      .inner
-      .is_disabled(&selector)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.is_disabled(&selector).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_checked(&self, selector: String) -> Result<bool> {
-    self.inner.is_checked(&selector).await.map_err(napi::Error::from_reason)
+    self.inner.is_checked(&selector).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_editable(&self, selector: String) -> Result<bool> {
-    self
-      .inner
-      .is_editable(&selector)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.is_editable(&selector).await.map_err(crate::error::to_napi)
   }
 
   // ── Evaluation ──────────────────────────────────────────────────────────
@@ -852,7 +820,7 @@ impl Page {
       .inner
       .wait_for_selector(&selector, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Wait for the page URL to match. Accepts a glob string or a native JS `RegExp`.
@@ -860,7 +828,7 @@ impl Page {
   #[napi(ts_args_type = "url: string | RegExp")]
   pub async fn wait_for_url(&self, url: napi::Either<String, crate::types::JsRegExpLike>) -> Result<()> {
     let matcher = crate::types::string_or_regex_to_rust(url)?;
-    self.inner.wait_for_url(matcher).await.map_err(napi::Error::from_reason)
+    self.inner.wait_for_url(matcher).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -874,7 +842,7 @@ impl Page {
       .inner
       .wait_for_load_state(state.as_deref())
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -883,7 +851,7 @@ impl Page {
       .inner
       .wait_for_function(&expression, timeout_ms.map(crate::types::f64_to_u64))
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -892,7 +860,7 @@ impl Page {
       .inner
       .wait_for_navigation(timeout_ms.map(crate::types::f64_to_u64))
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   // ── Screenshots ─────────────────────────────────────────────────────────
@@ -900,7 +868,7 @@ impl Page {
   #[napi]
   pub async fn screenshot(&self, options: Option<ScreenshotOptions>) -> Result<Buffer> {
     let opts: ferridriver::options::ScreenshotOptions = options.map_or_else(Default::default, Into::into);
-    let bytes = self.inner.screenshot(opts).await.map_err(napi::Error::from_reason)?;
+    let bytes = self.inner.screenshot(opts).await.map_err(crate::error::to_napi)?;
     Ok(bytes.into())
   }
 
@@ -910,7 +878,7 @@ impl Page {
       .inner
       .screenshot_element(&selector)
       .await
-      .map_err(napi::Error::from_reason)?;
+      .map_err(crate::error::to_napi)?;
     Ok(bytes.into())
   }
 
@@ -938,14 +906,14 @@ impl Page {
       .inner
       .set_viewport_size(i64::from(width), i64::from(height))
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   // ── Input devices ───────────────────────────────────────────────────────
 
   #[napi]
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
-    self.inner.click_at(x, y).await.map_err(napi::Error::from_reason)?;
+    self.inner.click_at(x, y).await.map_err(crate::error::to_napi)?;
     *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -960,7 +928,7 @@ impl Page {
       .inner
       .click_at_opts(x, y, &button, count)
       .await
-      .map_err(napi::Error::from_reason)?;
+      .map_err(crate::error::to_napi)?;
     *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -973,7 +941,7 @@ impl Page {
       .mouse()
       .r#move(x, y, None)
       .await
-      .map_err(napi::Error::from_reason)?;
+      .map_err(crate::error::to_napi)?;
     *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -994,7 +962,7 @@ impl Page {
       .inner
       .move_mouse_smooth(from_x, from_y, to_x, to_y, step_count)
       .await
-      .map_err(napi::Error::from_reason)?;
+      .map_err(crate::error::to_napi)?;
     *self.mouse_position.lock().expect("mouse position lock poisoned") = (to_x, to_y);
     Ok(())
   }
@@ -1011,22 +979,12 @@ impl Page {
 
   #[napi]
   pub async fn type_str(&self, text: String) -> Result<()> {
-    self
-      .inner
-      .keyboard()
-      .r#type(&text)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.keyboard().r#type(&text).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn press_key(&self, key: String) -> Result<()> {
-    self
-      .inner
-      .keyboard()
-      .press(&key)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.inner.keyboard().press(&key).await.map_err(crate::error::to_napi)
   }
 
   // ── Emulation ───────────────────────────────────────────────────────────
@@ -1049,14 +1007,14 @@ impl Page {
   #[napi]
   pub async fn emulate_media(&self, options: Option<crate::types::EmulateMediaOptions>) -> Result<()> {
     let opts: ferridriver::options::EmulateMediaOptions = options.map(Into::into).unwrap_or_default();
-    self.inner.emulate_media(&opts).await.map_err(napi::Error::from_reason)
+    self.inner.emulate_media(&opts).await.map_err(crate::error::to_napi)
   }
 
   // ── Focus / dispatch ────────────────────────────────────────────────────
 
   #[napi]
   pub async fn focus(&self, selector: String) -> Result<()> {
-    self.inner.focus(&selector).await.map_err(napi::Error::from_reason)
+    self.inner.focus(&selector).await.map_err(crate::error::to_napi)
   }
 
   /// Dispatch a DOM event of `type` on the element matching `selector`.
@@ -1073,24 +1031,24 @@ impl Page {
       .inner
       .dispatch_event(&selector, &event_type, event_init, options.map(Into::into))
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   // ── Tracing ─────────────────────────────────────────────────────────────
 
   #[napi]
   pub async fn start_tracing(&self) -> Result<()> {
-    self.inner.start_tracing().await.map_err(napi::Error::from_reason)
+    self.inner.start_tracing().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn stop_tracing(&self) -> Result<()> {
-    self.inner.stop_tracing().await.map_err(napi::Error::from_reason)
+    self.inner.stop_tracing().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn metrics(&self) -> Result<Vec<MetricData>> {
-    let metrics = self.inner.metrics().await.map_err(napi::Error::from_reason)?;
+    let metrics = self.inner.metrics().await.map_err(crate::error::to_napi)?;
     Ok(metrics.iter().map(MetricData::from).collect())
   }
 
@@ -1098,7 +1056,7 @@ impl Page {
 
   #[napi]
   pub async fn bring_to_front(&self) -> Result<()> {
-    self.inner.bring_to_front().await.map_err(napi::Error::from_reason)
+    self.inner.bring_to_front().await.map_err(crate::error::to_napi)
   }
 
   /// Close the page. Accepts the Playwright-identical
@@ -1122,7 +1080,7 @@ impl Page {
 
   #[napi]
   pub async fn viewport_size(&self) -> Result<Vec<i32>> {
-    let (w, h) = self.inner.viewport_size().await.map_err(napi::Error::from_reason)?;
+    let (w, h) = self.inner.viewport_size().await.map_err(crate::error::to_napi)?;
     let w32 = i32::try_from(w).map_err(|_| napi::Error::from_reason(format!("viewport width {w} exceeds i32::MAX")))?;
     let h32 =
       i32::try_from(h).map_err(|_| napi::Error::from_reason(format!("viewport height {h} exceeds i32::MAX")))?;
@@ -1131,7 +1089,7 @@ impl Page {
 
   #[napi]
   pub async fn storage_state(&self) -> Result<serde_json::Value> {
-    self.inner.storage_state().await.map_err(napi::Error::from_reason)
+    self.inner.storage_state().await.map_err(crate::error::to_napi)
   }
 
   /// Register a JS snippet to run on every new document (main frame and
@@ -1160,7 +1118,7 @@ impl Page {
       .inner
       .add_init_script(script.into(), arg.0)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -1169,7 +1127,7 @@ impl Page {
       .inner
       .remove_init_script(&identifier)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Playwright: `page.exposeFunction(name, callback)`. Registers a
@@ -1206,7 +1164,7 @@ impl Page {
     });
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
-      inner.expose_function(&name, cb).await.map_err(napi::Error::from_reason)
+      inner.expose_function(&name, cb).await.map_err(crate::error::to_napi)
     })
     .build(env)
   }
@@ -1228,11 +1186,7 @@ impl Page {
   )]
   pub async fn snapshot_for_ai(&self, options: Option<SnapshotForAiOptions>) -> Result<serde_json::Value> {
     let opts = options.map(Into::into).unwrap_or_default();
-    let snap = self
-      .inner
-      .snapshot_for_ai(opts)
-      .await
-      .map_err(napi::Error::from_reason)?;
+    let snap = self.inner.snapshot_for_ai(opts).await.map_err(crate::error::to_napi)?;
     let mut obj = serde_json::Map::new();
     obj.insert("full".to_string(), serde_json::Value::String(snap.full));
     if let Some(inc) = snap.incremental {
@@ -1282,7 +1236,7 @@ impl Page {
       let (mut rx, _shutdown) = inner
         .start_screencast(q, max_width, max_height)
         .await
-        .map_err(napi::Error::from_reason)?;
+        .map_err(crate::error::to_napi)?;
       tokio::spawn(async move {
         while let Some((bytes, ts)) = rx.recv().await {
           let payload = ScreencastFrame {
@@ -1303,7 +1257,7 @@ impl Page {
   /// Stop the screencast started by `startScreencast`.
   #[napi]
   pub async fn stop_screencast(&self) -> Result<()> {
-    self.inner.stop_screencast().await.map_err(napi::Error::from_reason)
+    self.inner.stop_screencast().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -1317,7 +1271,7 @@ impl Page {
       .inner
       .add_script_tag(url.as_deref(), content.as_deref(), script_type.as_deref())
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -1326,7 +1280,7 @@ impl Page {
       .inner
       .add_style_tag(url.as_deref(), content.as_deref())
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -1339,7 +1293,7 @@ impl Page {
       .inner
       .set_extra_http_headers(&fx)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -1349,18 +1303,18 @@ impl Page {
       .mouse()
       .wheel(delta_x, delta_y)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn mouse_down(&self, x: f64, y: f64, button: Option<String>) -> Result<()> {
     let mouse = self.inner.mouse();
-    mouse.r#move(x, y, None).await.map_err(napi::Error::from_reason)?;
+    mouse.r#move(x, y, None).await.map_err(crate::error::to_napi)?;
     let opts = ferridriver::page::MouseDownOptions {
       button,
       click_count: None,
     };
-    mouse.down(Some(opts)).await.map_err(napi::Error::from_reason)?;
+    mouse.down(Some(opts)).await.map_err(crate::error::to_napi)?;
     *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -1368,12 +1322,12 @@ impl Page {
   #[napi]
   pub async fn mouse_up(&self, x: f64, y: f64, button: Option<String>) -> Result<()> {
     let mouse = self.inner.mouse();
-    mouse.r#move(x, y, None).await.map_err(napi::Error::from_reason)?;
+    mouse.r#move(x, y, None).await.map_err(crate::error::to_napi)?;
     let opts = ferridriver::page::MouseUpOptions {
       button,
       click_count: None,
     };
-    mouse.up(Some(opts)).await.map_err(napi::Error::from_reason)?;
+    mouse.up(Some(opts)).await.map_err(crate::error::to_napi)?;
     *self.mouse_position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -1394,7 +1348,7 @@ impl Page {
       .inner
       .set_input_files(&selector, files.0, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Wait for a network request matching a URL pattern.
@@ -1504,7 +1458,7 @@ impl Page {
       .inner
       .route(matcher, rust_handler)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Remove all route handlers matching the given URL matcher.
@@ -1512,7 +1466,7 @@ impl Page {
   #[napi(ts_args_type = "url: string | RegExp")]
   pub async fn unroute(&self, url: napi::Either<String, crate::types::JsRegExpLike>) -> Result<()> {
     let matcher = crate::types::string_or_regex_to_rust(url)?;
-    self.inner.unroute(&matcher).await.map_err(napi::Error::from_reason)
+    self.inner.unroute(&matcher).await.map_err(crate::error::to_napi)
   }
 
   // ── Expect assertions (delegates to Rust core, all polling in Rust) ──
@@ -1562,27 +1516,22 @@ pub struct Keyboard {
 impl Keyboard {
   #[napi]
   pub async fn down(&self, key: String) -> Result<()> {
-    self.page.keyboard().down(&key).await.map_err(napi::Error::from_reason)
+    self.page.keyboard().down(&key).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn up(&self, key: String) -> Result<()> {
-    self.page.keyboard().up(&key).await.map_err(napi::Error::from_reason)
+    self.page.keyboard().up(&key).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn press(&self, key: String) -> Result<()> {
-    self.page.keyboard().press(&key).await.map_err(napi::Error::from_reason)
+    self.page.keyboard().press(&key).await.map_err(crate::error::to_napi)
   }
 
   #[napi(js_name = "type")]
   pub async fn type_text(&self, text: String) -> Result<()> {
-    self
-      .page
-      .keyboard()
-      .r#type(&text)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.page.keyboard().r#type(&text).await.map_err(crate::error::to_napi)
   }
 
   #[napi(js_name = "insertText")]
@@ -1592,7 +1541,7 @@ impl Keyboard {
       .keyboard()
       .insert_text(&text)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 }
 
@@ -1618,7 +1567,7 @@ impl Mouse {
       .mouse()
       .click(x, y, Some(opts))
       .await
-      .map_err(napi::Error::from_reason)?;
+      .map_err(crate::error::to_napi)?;
     *self.position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -1633,7 +1582,7 @@ impl Mouse {
       .mouse()
       .r#move(x, y, step_count)
       .await
-      .map_err(napi::Error::from_reason)?;
+      .map_err(crate::error::to_napi)?;
     *self.position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -1649,7 +1598,7 @@ impl Mouse {
       .mouse()
       .dblclick(x, y, Some(opts))
       .await
-      .map_err(napi::Error::from_reason)?;
+      .map_err(crate::error::to_napi)?;
     *self.position.lock().expect("mouse position lock poisoned") = (x, y);
     Ok(())
   }
@@ -1660,12 +1609,7 @@ impl Mouse {
       button,
       click_count: None,
     };
-    self
-      .page
-      .mouse()
-      .down(Some(opts))
-      .await
-      .map_err(napi::Error::from_reason)
+    self.page.mouse().down(Some(opts)).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -1674,7 +1618,7 @@ impl Mouse {
       button,
       click_count: None,
     };
-    self.page.mouse().up(Some(opts)).await.map_err(napi::Error::from_reason)
+    self.page.mouse().up(Some(opts)).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -1684,7 +1628,7 @@ impl Mouse {
       .mouse()
       .wheel(delta_x, delta_y)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 }
 
@@ -1710,12 +1654,7 @@ impl Touchscreen {
   /// stock `WKWebView` on macOS).
   #[napi]
   pub async fn tap(&self, x: f64, y: f64) -> Result<()> {
-    self
-      .page
-      .touchscreen()
-      .tap(x, y)
-      .await
-      .map_err(napi::Error::from_reason)
+    self.page.touchscreen().tap(x, y).await.map_err(crate::error::to_napi)
   }
 }
 

@@ -216,7 +216,7 @@ impl Locator {
   #[napi]
   pub async fn click(&self, options: Option<crate::types::ClickOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.click(opts).await.map_err(napi::Error::from_reason)
+    self.inner.click(opts).await.map_err(crate::error::to_napi)
   }
 
   /// Double-click the element matched by this locator. Accepts
@@ -224,7 +224,7 @@ impl Locator {
   #[napi]
   pub async fn dblclick(&self, options: Option<crate::types::DblClickOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.dblclick(opts).await.map_err(napi::Error::from_reason)
+    self.inner.dblclick(opts).await.map_err(crate::error::to_napi)
   }
 
   /// Fill an input with `value`. Accepts Playwright's full
@@ -232,12 +232,12 @@ impl Locator {
   #[napi]
   pub async fn fill(&self, value: String, options: Option<crate::types::FillOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.fill(&value, opts).await.map_err(napi::Error::from_reason)
+    self.inner.fill(&value, opts).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn clear(&self) -> Result<()> {
-    self.inner.clear().await.map_err(napi::Error::from_reason)
+    self.inner.clear().await.map_err(crate::error::to_napi)
   }
 
   /// Type `text` character-by-character. Accepts Playwright's full
@@ -246,13 +246,13 @@ impl Locator {
   #[napi]
   pub async fn type_text(&self, text: String, options: Option<crate::types::TypeOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.r#type(&text, opts).await.map_err(napi::Error::from_reason)
+    self.inner.r#type(&text, opts).await.map_err(crate::error::to_napi)
   }
 
   #[napi(js_name = "type")]
   pub async fn type_alias(&self, text: String, options: Option<crate::types::TypeOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.r#type(&text, opts).await.map_err(napi::Error::from_reason)
+    self.inner.r#type(&text, opts).await.map_err(crate::error::to_napi)
   }
 
   /// Press a key or key combination. Accepts Playwright's full
@@ -260,7 +260,7 @@ impl Locator {
   #[napi]
   pub async fn press(&self, key: String, options: Option<crate::types::PressOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.press(&key, opts).await.map_err(napi::Error::from_reason)
+    self.inner.press(&key, opts).await.map_err(crate::error::to_napi)
   }
 
   /// Hover over the element matched by this locator. Accepts
@@ -268,17 +268,17 @@ impl Locator {
   #[napi]
   pub async fn hover(&self, options: Option<crate::types::HoverOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.hover(opts).await.map_err(napi::Error::from_reason)
+    self.inner.hover(opts).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn focus(&self) -> Result<()> {
-    self.inner.focus().await.map_err(napi::Error::from_reason)
+    self.inner.focus().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn blur(&self) -> Result<()> {
-    self.inner.blur().await.map_err(napi::Error::from_reason)
+    self.inner.blur().await.map_err(crate::error::to_napi)
   }
 
   /// Check a checkbox or radio. Accepts Playwright's full
@@ -286,14 +286,14 @@ impl Locator {
   #[napi]
   pub async fn check(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.check(opts).await.map_err(napi::Error::from_reason)
+    self.inner.check(opts).await.map_err(crate::error::to_napi)
   }
 
   /// Uncheck a checkbox. Accepts Playwright's full `LocatorUncheckOptions` bag.
   #[napi]
   pub async fn uncheck(&self, options: Option<crate::types::CheckOptions>) -> Result<()> {
     let opts = options.map(Into::into);
-    self.inner.uncheck(opts).await.map_err(napi::Error::from_reason)
+    self.inner.uncheck(opts).await.map_err(crate::error::to_napi)
   }
 
   /// Select options on a `<select>` element. Accepts Playwright's
@@ -310,7 +310,7 @@ impl Locator {
       .inner
       .select_option(values.0, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -319,7 +319,7 @@ impl Locator {
       .inner
       .scroll_into_view_if_needed()
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi(js_name = "scrollIntoViewIfNeeded")]
@@ -341,7 +341,7 @@ impl Locator {
       .inner
       .dispatch_event(&event_type, event_init, options.map(Into::into))
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Type `text` character-by-character. Accepts Playwright's full
@@ -353,80 +353,80 @@ impl Locator {
       .inner
       .press_sequentially(&text, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   // ── Content & state ─────────────────────────────────────────────────────
 
   #[napi]
   pub async fn text_content(&self) -> Result<Option<String>> {
-    self.inner.text_content().await.map_err(napi::Error::from_reason)
+    self.inner.text_content().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn inner_text(&self) -> Result<String> {
-    self.inner.inner_text().await.map_err(napi::Error::from_reason)
+    self.inner.inner_text().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn inner_html(&self) -> Result<String> {
-    self.inner.inner_html().await.map_err(napi::Error::from_reason)
+    self.inner.inner_html().await.map_err(crate::error::to_napi)
   }
 
   #[napi(js_name = "innerHTML")]
   pub async fn inner_html_alias(&self) -> Result<String> {
-    self.inner.inner_html().await.map_err(napi::Error::from_reason)
+    self.inner.inner_html().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn get_attribute(&self, name: String) -> Result<Option<String>> {
-    self.inner.get_attribute(&name).await.map_err(napi::Error::from_reason)
+    self.inner.get_attribute(&name).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn input_value(&self) -> Result<String> {
-    self.inner.input_value().await.map_err(napi::Error::from_reason)
+    self.inner.input_value().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_visible(&self) -> Result<bool> {
-    self.inner.is_visible().await.map_err(napi::Error::from_reason)
+    self.inner.is_visible().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_hidden(&self) -> Result<bool> {
-    self.inner.is_hidden().await.map_err(napi::Error::from_reason)
+    self.inner.is_hidden().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_enabled(&self) -> Result<bool> {
-    self.inner.is_enabled().await.map_err(napi::Error::from_reason)
+    self.inner.is_enabled().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_disabled(&self) -> Result<bool> {
-    self.inner.is_disabled().await.map_err(napi::Error::from_reason)
+    self.inner.is_disabled().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_checked(&self) -> Result<bool> {
-    self.inner.is_checked().await.map_err(napi::Error::from_reason)
+    self.inner.is_checked().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_editable(&self) -> Result<bool> {
-    self.inner.is_editable().await.map_err(napi::Error::from_reason)
+    self.inner.is_editable().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn count(&self) -> Result<i32> {
-    let n = self.inner.count().await.map_err(napi::Error::from_reason)?;
+    let n = self.inner.count().await.map_err(crate::error::to_napi)?;
     i32::try_from(n).map_err(|_| napi::Error::from_reason(format!("element count {n} exceeds i32::MAX")))
   }
 
   #[napi]
   pub async fn bounding_box(&self) -> Result<Option<BoundingBox>> {
-    let bb = self.inner.bounding_box().await.map_err(napi::Error::from_reason)?;
+    let bb = self.inner.bounding_box().await.map_err(crate::error::to_napi)?;
     Ok(bb.map(|b| BoundingBox {
       x: b.x,
       y: b.y,
@@ -449,14 +449,14 @@ impl Locator {
   #[napi]
   pub async fn wait_for(&self, options: Option<WaitOptions>) -> Result<()> {
     let opts: ferridriver::options::WaitOptions = options.map_or_else(Default::default, Into::into);
-    self.inner.wait_for(opts).await.map_err(napi::Error::from_reason)
+    self.inner.wait_for(opts).await.map_err(crate::error::to_napi)
   }
 
   // ── Screenshot ──────────────────────────────────────────────────────────
 
   #[napi]
   pub async fn screenshot(&self) -> Result<Buffer> {
-    let bytes = self.inner.screenshot().await.map_err(napi::Error::from_reason)?;
+    let bytes = self.inner.screenshot().await.map_err(crate::error::to_napi)?;
     Ok(bytes.into())
   }
 
@@ -464,19 +464,19 @@ impl Locator {
 
   #[napi]
   pub async fn all_text_contents(&self) -> Result<Vec<String>> {
-    self.inner.all_text_contents().await.map_err(napi::Error::from_reason)
+    self.inner.all_text_contents().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn all_inner_texts(&self) -> Result<Vec<String>> {
-    self.inner.all_inner_texts().await.map_err(napi::Error::from_reason)
+    self.inner.all_inner_texts().await.map_err(crate::error::to_napi)
   }
 
   // ── Missing methods ─────────────────────────────────────────────────────
 
   #[napi]
   pub async fn right_click(&self) -> Result<()> {
-    self.inner.right_click().await.map_err(napi::Error::from_reason)
+    self.inner.right_click().await.map_err(crate::error::to_napi)
   }
 
   /// Tap (touch event) the element matched by this locator. Accepts
@@ -484,12 +484,12 @@ impl Locator {
   #[napi]
   pub async fn tap(&self, options: Option<crate::types::TapOptions>) -> Result<()> {
     let opts = options.map(TryInto::try_into).transpose()?;
-    self.inner.tap(opts).await.map_err(napi::Error::from_reason)
+    self.inner.tap(opts).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn select_text(&self) -> Result<()> {
-    self.inner.select_text().await.map_err(napi::Error::from_reason)
+    self.inner.select_text().await.map_err(crate::error::to_napi)
   }
 
   #[napi]
@@ -499,7 +499,7 @@ impl Locator {
       .inner
       .set_checked(checked, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   /// Set files on a `<input type=file>` element. Accepts Playwright's
@@ -516,12 +516,12 @@ impl Locator {
       .inner
       .set_input_files(files.0, opts)
       .await
-      .map_err(napi::Error::from_reason)
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn is_attached(&self) -> Result<bool> {
-    self.inner.is_attached().await.map_err(napi::Error::from_reason)
+    self.inner.is_attached().await.map_err(crate::error::to_napi)
   }
 
   /// Playwright: `locator.evaluate(pageFunction, arg?, options?): Promise<R>`
@@ -601,7 +601,7 @@ impl Locator {
 
   #[napi]
   pub async fn all(&self) -> Result<Vec<Locator>> {
-    let locators = self.inner.all().await.map_err(napi::Error::from_reason)?;
+    let locators = self.inner.all().await.map_err(crate::error::to_napi)?;
     Ok(locators.into_iter().map(|l| Locator { inner: l }).collect())
   }
 

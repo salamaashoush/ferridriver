@@ -64,7 +64,7 @@ pub async fn start_recording(
   width: u32,
   height: u32,
   quality: u8,
-) -> Result<VideoRecordingHandle, String> {
+) -> crate::error::Result<VideoRecordingHandle> {
   let w = width & !1;
   let h = height & !1;
 
@@ -104,7 +104,7 @@ impl VideoRecordingHandle {
   /// # Errors
   ///
   /// Returns an error if the encoder fails or the join handle panics.
-  pub async fn stop(self, page: &Page) -> Result<PathBuf, String> {
+  pub async fn stop(self, page: &Page) -> crate::error::Result<PathBuf> {
     // 1. Tell Chrome to stop emitting `Page.screencastFrame`. The
     //    recording task only runs `stop()` after `page.is_closed()`
     //    returns true, so the target is already gone here on most
@@ -130,7 +130,10 @@ impl VideoRecordingHandle {
 
     // 4. Pump exit drops `frame_tx`, encoder drains the bounded
     //    channel and finishes.
-    self.encoder_task.await.map_err(|e| format!("encoder join: {e}"))??;
+    self
+      .encoder_task
+      .await
+      .map_err(|e| FerriError::Backend(format!("encoder join: {e}")))??;
 
     Ok(self.output_path)
   }
@@ -159,7 +162,7 @@ pub async fn start_buffered_recording(
   width: u32,
   height: u32,
   quality: u8,
-) -> Result<BufferedRecordingHandle, String> {
+) -> crate::error::Result<BufferedRecordingHandle> {
   let w = width & !1;
   let h = height & !1;
 
@@ -278,12 +281,12 @@ impl Video {
   /// * If the terminal state carries an error from the encoder / a
   ///   backend that cannot record, the error is returned verbatim as
   ///   [`FerriError::Unsupported`] (encoder path) or the raw reason
-  ///   string wrapped in [`FerriError::Other`].
+  ///   string wrapped in [`FerriError::Backend`].
   /// * If the owning page is dropped without ever finishing the
   ///   recording, returns [`FerriError::target_closed`].
   pub async fn path(&self) -> crate::error::Result<PathBuf> {
     let value = self.await_terminal_state().await?;
-    value.map_err(FerriError::Other)
+    value.map_err(FerriError::Backend)
   }
 
   /// Playwright: `video.saveAs(path): Promise<void>`. Blocks until the
@@ -297,20 +300,20 @@ impl Video {
   /// * Propagates any finalise-time error (same shape as
   ///   [`Self::path`]).
   /// * Wraps I/O errors from [`std::fs::copy`] in
-  ///   [`FerriError::Other`].
+  ///   [`FerriError::Backend`].
   pub async fn save_as(&self, dest: impl AsRef<Path>) -> crate::error::Result<()> {
     let source = self.path().await?;
     let dest = dest.as_ref().to_path_buf();
     if let Some(parent) = dest.parent() {
       if !parent.as_os_str().is_empty() {
         std::fs::create_dir_all(parent)
-          .map_err(|e| FerriError::Other(format!("video.saveAs create parent {}: {e}", parent.display())))?;
+          .map_err(|e| FerriError::Backend(format!("video.saveAs create parent {}: {e}", parent.display())))?;
       }
     }
     tokio::task::spawn_blocking(move || std::fs::copy(&source, &dest).map(|_| ()))
       .await
-      .map_err(|e| FerriError::Other(format!("video.saveAs join: {e}")))?
-      .map_err(|e| FerriError::Other(format!("video.saveAs copy: {e}")))
+      .map_err(|e| FerriError::Backend(format!("video.saveAs join: {e}")))?
+      .map_err(|e| FerriError::Backend(format!("video.saveAs copy: {e}")))
   }
 
   /// Playwright: `video.delete(): Promise<void>`. Blocks until the
@@ -320,7 +323,7 @@ impl Video {
   /// # Errors
   ///
   /// Wraps I/O errors from [`std::fs::remove_file`] in
-  /// [`FerriError::Other`]; silences `NotFound` (idempotent delete).
+  /// [`FerriError::Backend`]; silences `NotFound` (idempotent delete).
   pub async fn delete(&self) -> crate::error::Result<()> {
     let Ok(path) = self.path().await else {
       // Finalisation failed; nothing to delete.
@@ -332,8 +335,8 @@ impl Video {
       Err(e) => Err(format!("video.delete remove {}: {e}", path.display())),
     })
     .await
-    .map_err(|e| FerriError::Other(format!("video.delete join: {e}")))?
-    .map_err(FerriError::Other)
+    .map_err(|e| FerriError::Backend(format!("video.delete join: {e}")))?
+    .map_err(FerriError::Backend)
   }
 
   async fn await_terminal_state(&self) -> crate::error::Result<FinalPath> {

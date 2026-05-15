@@ -85,7 +85,7 @@ pub enum DialogResponse {
 
 /// Backend-supplied async responder. Returns `Ok(())` on success; an
 /// `Err(String)` propagates back through [`Dialog::accept`] /
-/// [`Dialog::dismiss`] as [`FerriError::Other`].
+/// [`Dialog::dismiss`] as [`FerriError::Backend`].
 pub type DialogResponder = Arc<
   dyn Fn(DialogResponse) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>
     + Send
@@ -184,10 +184,10 @@ impl Dialog {
   ///
   /// # Errors
   ///
-  /// * Returns [`FerriError::Other`] with the assertion message
+  /// * Returns [`FerriError::Backend`] with the assertion message
   ///   `"Cannot accept dialog which is already handled!"` if called
   ///   after the dialog was already accepted or dismissed.
-  /// * Returns [`FerriError::Other`] wrapping the backend error if the
+  /// * Returns [`FerriError::Backend`] wrapping the backend error if the
   ///   underlying protocol call fails.
   pub async fn accept(&self, prompt_text: Option<String>) -> Result<()> {
     self.mark_handled_or_error()?;
@@ -196,7 +196,7 @@ impl Dialog {
     }
     (self.inner.responder)(DialogResponse::Accept { prompt_text })
       .await
-      .map_err(FerriError::Other)
+      .map_err(FerriError::Backend)
   }
 
   /// Dismiss the dialog. Playwright: `dialog.dismiss(): Promise<void>`.
@@ -211,7 +211,7 @@ impl Dialog {
     }
     (self.inner.responder)(DialogResponse::Dismiss)
       .await
-      .map_err(FerriError::Other)
+      .map_err(FerriError::Backend)
   }
 
   /// Backend-internal: auto-close the dialog when no listener is
@@ -237,7 +237,7 @@ impl Dialog {
 
   fn mark_handled_or_error(&self) -> Result<()> {
     if self.inner.handled.swap(true, Ordering::AcqRel) {
-      return Err(FerriError::Other(
+      return Err(FerriError::Backend(
         "Cannot accept dialog which is already handled!".into(),
       ));
     }

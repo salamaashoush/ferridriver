@@ -36,7 +36,7 @@ pub trait StepDef: Send + Sync {
     caps: &regex::Captures<'_>,
     data_table: Option<&[Vec<String>]>,
     vars: &mut HashMap<String, String>,
-  ) -> Result<Option<serde_json::Value>, String>;
+  ) -> crate::error::Result<Option<serde_json::Value>>;
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize)]

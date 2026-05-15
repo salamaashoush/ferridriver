@@ -361,9 +361,9 @@ impl ContextRef {
             crate::options::StorageStateInput::Inline(v) => v.clone(),
             crate::options::StorageStateInput::Path(p) => {
               let text = std::fs::read_to_string(p)
-                .map_err(|e| crate::error::FerriError::Other(format!("storageState: read {}: {e}", p.display())))?;
+                .map_err(|e| crate::error::FerriError::Backend(format!("storageState: read {}: {e}", p.display())))?;
               serde_json::from_str(&text).map_err(|e| {
-                crate::error::FerriError::Other(format!("storageState: parse JSON from {}: {e}", p.display()))
+                crate::error::FerriError::Backend(format!("storageState: parse JSON from {}: {e}", p.display()))
               })?
             },
           };

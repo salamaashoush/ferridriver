@@ -240,20 +240,20 @@ impl Download {
 
   /// Local filesystem path the browser wrote to. Playwright:
   /// `download.path(): Promise<string>`. Blocks until the download
-  /// finishes; surfaces the failure as [`FerriError::Other`] if the
+  /// finishes; surfaces the failure as [`FerriError::Backend`] if the
   /// download failed (mirrors Playwright's `throw this._failureErrorValue`).
   ///
   /// # Errors
   ///
-  /// Returns [`FerriError::Other`] when the download failed or was
+  /// Returns [`FerriError::Backend`] when the download failed or was
   /// canceled.
   pub async fn path(&self) -> Result<PathBuf> {
     match self.wait_finished().await {
-      DownloadStatus::Pending => Err(FerriError::Other(
+      DownloadStatus::Pending => Err(FerriError::Backend(
         "download watch closed before reaching terminal state".into(),
       )),
       DownloadStatus::Finished { path } => Ok(path),
-      DownloadStatus::Failed { error } => Err(FerriError::Other(error)),
+      DownloadStatus::Failed { error } => Err(FerriError::Backend(error)),
     }
   }
 
@@ -274,7 +274,7 @@ impl Download {
   ///
   /// # Errors
   ///
-  /// Returns [`FerriError::Other`] if the download failed, or a
+  /// Returns [`FerriError::Backend`] if the download failed, or a
   /// filesystem error if the copy fails.
   pub async fn save_as(&self, target: &Path) -> Result<()> {
     let src = self.path().await?;
@@ -293,7 +293,7 @@ impl Download {
   ///
   /// # Errors
   ///
-  /// Returns [`FerriError::Other`] if the download failed, or a
+  /// Returns [`FerriError::Backend`] if the download failed, or a
   /// filesystem error if opening the file fails.
   pub async fn create_read_stream(&self) -> Result<tokio::fs::File> {
     let path = self.path().await?;
@@ -336,7 +336,7 @@ impl Download {
     match tokio::fs::remove_file(&path).await {
       Ok(()) => Ok(()),
       Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
-      Err(e) => Err(FerriError::Io(e)),
+      Err(e) => Err(FerriError::from(e)),
     }
   }
 }

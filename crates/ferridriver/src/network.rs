@@ -294,7 +294,7 @@ impl Request {
     }
     serde_json::from_str(&body)
       .map(Some)
-      .map_err(|_| FerriError::Other(format!("POST data is not a valid JSON object: {body}")))
+      .map_err(|_| FerriError::Backend(format!("POST data is not a valid JSON object: {body}")))
   }
 
   /// Provisional headers (matches Playwright's deprecated `headers()`).
@@ -458,7 +458,7 @@ impl Request {
   pub async fn sizes(&self) -> Result<RequestSizes> {
     let state = self.inner.state.read().await;
     if state.response.is_none() {
-      return Err(FerriError::Other("Unable to fetch sizes for failed request".into()));
+      return Err(FerriError::Backend("Unable to fetch sizes for failed request".into()));
     }
     Ok(**self.inner.sizes.load())
   }
@@ -804,7 +804,7 @@ impl Response {
   /// Returns an error if the body fetch fails or the bytes are not UTF-8.
   pub async fn text(&self) -> Result<String> {
     let bytes = self.body().await?;
-    String::from_utf8(bytes).map_err(|e| FerriError::Other(format!("response body is not UTF-8: {e}")))
+    String::from_utf8(bytes).map_err(|e| FerriError::Backend(format!("response body is not UTF-8: {e}")))
   }
 
   /// Body parsed as JSON.

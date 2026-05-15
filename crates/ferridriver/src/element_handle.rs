@@ -587,7 +587,7 @@ impl ElementHandle {
   ) -> Result<SerializedValue> {
     self.ensure_live()?;
     let sel_escaped =
-      serde_json::to_string(selector).map_err(|e| FerriError::Other(format!("$eval selector escape: {e}")))?;
+      serde_json::to_string(selector).map_err(|e| FerriError::Backend(format!("$eval selector escape: {e}")))?;
     // Probe expression returns the matched element as a handle or
     // throws — identical error shape to Playwright's server-side
     // evalOnSelector handler.
@@ -626,7 +626,7 @@ impl ElementHandle {
   ) -> Result<SerializedValue> {
     self.ensure_live()?;
     let sel_escaped =
-      serde_json::to_string(selector).map_err(|e| FerriError::Other(format!("$$eval selector escape: {e}")))?;
+      serde_json::to_string(selector).map_err(|e| FerriError::Backend(format!("$$eval selector escape: {e}")))?;
     let probe = format!("el => Array.from(el.querySelectorAll({sel_escaped}))");
     let array_handle = self
       .js_handle
@@ -848,7 +848,7 @@ impl ElementHandle {
     };
 
     let sel_escaped =
-      serde_json::to_string(selector).map_err(|e| FerriError::Other(format!("wait_for_selector escape: {e}")))?;
+      serde_json::to_string(selector).map_err(|e| FerriError::Backend(format!("wait_for_selector escape: {e}")))?;
     let probe_expr = format!("el => el.querySelector({sel_escaped})");
 
     let backoffs_ms: [u64; 7] = [0, 0, 20, 50, 100, 100, 500];

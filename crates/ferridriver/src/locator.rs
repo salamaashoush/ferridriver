@@ -774,7 +774,7 @@ impl Locator {
         // indefinitely across a test run.
         let tmp_root = std::env::temp_dir().join(format!("ferridriver-files-{}", std::process::id()));
         std::fs::create_dir_all(&tmp_root)
-          .map_err(|e| crate::error::FerriError::Other(format!("failed to create upload temp dir: {e}")))?;
+          .map_err(|e| crate::error::FerriError::Backend(format!("failed to create upload temp dir: {e}")))?;
         let upload_id = std::time::SystemTime::now()
           .duration_since(std::time::UNIX_EPOCH)
           .map_or(0, |d| d.as_nanos());
@@ -782,11 +782,11 @@ impl Locator {
         for (i, p) in payloads.iter().enumerate() {
           let sub = tmp_root.join(format!("{upload_id}-{i}"));
           std::fs::create_dir_all(&sub)
-            .map_err(|e| crate::error::FerriError::Other(format!("failed to create payload subdir: {e}")))?;
+            .map_err(|e| crate::error::FerriError::Backend(format!("failed to create payload subdir: {e}")))?;
           let safe_name = p.name.replace(['/', '\\', '\0'], "_");
           let path = sub.join(&safe_name);
           std::fs::write(&path, &p.buffer)
-            .map_err(|e| crate::error::FerriError::Other(format!("failed to write upload payload: {e}")))?;
+            .map_err(|e| crate::error::FerriError::Backend(format!("failed to write upload payload: {e}")))?;
           paths.push(path.display().to_string());
         }
         actions::upload_file(self.frame.page_arc().inner(), &self.selector, &paths)
@@ -1251,8 +1251,8 @@ impl Locator {
       ),
     );
 
-    let src = src_result?.ok_or_else(|| crate::error::FerriError::Other("no source bounding box".into()))?;
-    let tgt = tgt_result?.ok_or_else(|| crate::error::FerriError::Other("no target bounding box".into()))?;
+    let src = src_result?.ok_or_else(|| crate::error::FerriError::Backend("no source bounding box".into()))?;
+    let tgt = tgt_result?.ok_or_else(|| crate::error::FerriError::Backend("no target bounding box".into()))?;
 
     let from = rect_point(&src, opts.source_position);
     let to = rect_point(&tgt, opts.target_position);
