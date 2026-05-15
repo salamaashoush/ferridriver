@@ -1383,16 +1383,18 @@ fn register_bdd_hooks(registry: &mut ferridriver_bdd::registry::StepRegistry, ho
 /// Async callback that receives a mutable `BrowserWorld` reference — used for BDD scenario hooks.
 type BddScenarioHookFn = dyn for<'a> Fn(
     &'a mut ferridriver_bdd::world::BrowserWorld,
-  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send + 'a>>
-  + Send
+  ) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = std::result::Result<(), ferridriver::FerriError>> + Send + 'a>,
+  > + Send
   + Sync;
 
 /// Async callback that receives a mutable `BrowserWorld` reference and step text — used for BDD step hooks.
 type BddStepHookFn = dyn for<'a> Fn(
     &'a mut ferridriver_bdd::world::BrowserWorld,
     &'a str,
-  ) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send + 'a>>
-  + Send
+  ) -> std::pin::Pin<
+    Box<dyn std::future::Future<Output = std::result::Result<(), ferridriver::FerriError>> + Send + 'a>,
+  > + Send
   + Sync;
 
 fn make_bdd_scenario_hook(cb: Arc<TestCallbackFn>) -> Arc<BddScenarioHookFn> {
@@ -1403,9 +1405,9 @@ fn make_bdd_scenario_hook(cb: Arc<TestCallbackFn>) -> Arc<BddScenarioHookFn> {
       let napi_fixtures = crate::test_fixtures::TestFixtures::from_resolved(fixtures);
       cb.call_async(napi_fixtures)
         .await
-        .map_err(|e| format!("{e}"))?
+        .map_err(|e| ferridriver::FerriError::backend(e.to_string()))?
         .await
-        .map_err(|e| format!("{e}"))
+        .map_err(|e| ferridriver::FerriError::backend(e.to_string()))
     })
   })
 }
@@ -1418,9 +1420,9 @@ fn make_bdd_step_hook(cb: Arc<TestCallbackFn>) -> Arc<BddStepHookFn> {
       let napi_fixtures = crate::test_fixtures::TestFixtures::from_resolved(fixtures);
       cb.call_async(napi_fixtures)
         .await
-        .map_err(|e| format!("{e}"))?
+        .map_err(|e| ferridriver::FerriError::backend(e.to_string()))?
         .await
-        .map_err(|e| format!("{e}"))
+        .map_err(|e| ferridriver::FerriError::backend(e.to_string()))
     })
   })
 }

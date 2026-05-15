@@ -4,6 +4,8 @@ use std::future::Future;
 use std::pin::Pin;
 use std::sync::Arc;
 
+use ferridriver::error::Result;
+
 use crate::filter::TagExpression;
 use crate::step::StepLocation;
 use crate::world::BrowserWorld;
@@ -28,19 +30,15 @@ pub enum HookPoint {
 /// The actual hook function, typed by scope.
 pub enum HookHandler {
   /// Global hooks (BeforeAll/AfterAll): no world context.
-  Global(Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<(), String>> + Send>> + Send + Sync>),
+  Global(Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>),
   /// Scenario-scoped hooks (BeforeScenario/AfterScenario, BeforeFeature/AfterFeature).
   Scenario(
-    Arc<
-      dyn for<'a> Fn(&'a mut BrowserWorld) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>
-        + Send
-        + Sync,
-    >,
+    Arc<dyn for<'a> Fn(&'a mut BrowserWorld) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>> + Send + Sync>,
   ),
   /// Step-scoped hooks (BeforeStep/AfterStep): receive step text.
   Step(
     Arc<
-      dyn for<'a> Fn(&'a mut BrowserWorld, &'a str) -> Pin<Box<dyn Future<Output = Result<(), String>> + Send + 'a>>
+      dyn for<'a> Fn(&'a mut BrowserWorld, &'a str) -> Pin<Box<dyn Future<Output = Result<()>> + Send + 'a>>
         + Send
         + Sync,
     >,
@@ -105,7 +103,7 @@ impl HookRegistry {
   }
 
   /// Run all global hooks for a given point.
-  pub async fn run_global(&self, point: HookPoint) -> Result<(), String> {
+  pub async fn run_global(&self, point: HookPoint) -> Result<()> {
     for hook in self.get_global(point) {
       if let HookHandler::Global(handler) = &hook.handler {
         handler().await?;
@@ -115,7 +113,7 @@ impl HookRegistry {
   }
 
   /// Run all scenario hooks for a given point with the given world and tags.
-  pub async fn run_scenario(&self, point: HookPoint, world: &mut BrowserWorld, tags: &[String]) -> Result<(), String> {
+  pub async fn run_scenario(&self, point: HookPoint, world: &mut BrowserWorld, tags: &[String]) -> Result<()> {
     for hook in self.get(point, tags) {
       if let HookHandler::Scenario(handler) = &hook.handler {
         handler(world).await?;
@@ -128,7 +126,7 @@ impl HookRegistry {
   ///
   /// `BeforeAll` / `AfterAll` may come from either a world-aware TS hook or
   /// a world-less Rust hook, so this dispatch supports both variants.
-  pub async fn run_suite(&self, point: HookPoint, world: &mut BrowserWorld, tags: &[String]) -> Result<(), String> {
+  pub async fn run_suite(&self, point: HookPoint, world: &mut BrowserWorld, tags: &[String]) -> Result<()> {
     for hook in self.get(point, tags) {
       match &hook.handler {
         HookHandler::Scenario(handler) => handler(world).await?,
@@ -146,7 +144,7 @@ impl HookRegistry {
     world: &mut BrowserWorld,
     step_text: &str,
     tags: &[String],
-  ) -> Result<(), String> {
+  ) -> Result<()> {
     for hook in self.get(point, tags) {
       match &hook.handler {
         HookHandler::Step(handler) => handler(world, step_text).await?,
