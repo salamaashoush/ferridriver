@@ -805,7 +805,10 @@ fn start_video_recording(page: &Arc<Page>, opts: &crate::options::RecordVideoOpt
   // Errors here funnel into the sink so the user-facing `path()`
   // rejects with a clear reason instead of the test hanging.
   if let Err(e) = std::fs::create_dir_all(&opts.dir) {
-    sink.finish_err(format!("failed to create recordVideo.dir {}: {e}", opts.dir.display()));
+    sink.finish_err(crate::FerriError::backend(format!(
+      "failed to create recordVideo.dir {}: {e}",
+      opts.dir.display()
+    )));
     return;
   }
 
@@ -816,7 +819,7 @@ fn start_video_recording(page: &Arc<Page>, opts: &crate::options::RecordVideoOpt
     let handle = match crate::video::start_recording(&page_for_task, output_path.clone(), width, height, 90).await {
       Ok(h) => h,
       Err(e) => {
-        sink.finish_err(format!("start_recording: {e}"));
+        sink.finish_err(crate::FerriError::backend(format!("start_recording: {e}")));
         return;
       },
     };
@@ -830,7 +833,7 @@ fn start_video_recording(page: &Arc<Page>, opts: &crate::options::RecordVideoOpt
     }
     match handle.stop(&page_for_task).await {
       Ok(path) => sink.finish_ok(path),
-      Err(e) => sink.finish_err(format!("stop recording: {e}")),
+      Err(e) => sink.finish_err(crate::FerriError::backend(format!("stop recording: {e}"))),
     }
   });
 }

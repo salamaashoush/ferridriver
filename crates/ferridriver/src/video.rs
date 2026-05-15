@@ -43,7 +43,7 @@ pub struct VideoRecordingHandle {
   /// Pump task: CDP screencast -> channel.
   pump_task: tokio::task::JoinHandle<()>,
   /// Encoder task: channel -> ffmpeg encode (blocking thread).
-  encoder_task: tokio::task::JoinHandle<Result<(), String>>,
+  encoder_task: tokio::task::JoinHandle<crate::error::Result<()>>,
   /// Cooperative shutdown signal to the CDP screencast listener.
   /// Sending `()` causes the listener to drain any buffered
   /// `screencastFrame` events, forward them through the pump, then
@@ -192,14 +192,14 @@ impl BufferedRecordingHandle {
   /// # Errors
   ///
   /// Returns an error if no frames were captured, encoding fails, or the join handle panics.
-  pub async fn encode(self, page: &Page, output_path: PathBuf) -> Result<PathBuf, String> {
+  pub async fn encode(self, page: &Page, output_path: PathBuf) -> crate::error::Result<PathBuf> {
     let _ = page.stop_screencast().await;
     let _ = self.shutdown_tx.send(());
     let _ = self.pump_task.await;
 
     let frames = self.frames.lock().await;
     if frames.is_empty() {
-      return Err("no frames captured".into());
+      return Err(FerriError::backend("no frames captured"));
     }
 
     let w = self.width;
@@ -210,7 +210,7 @@ impl BufferedRecordingHandle {
     let path = output_path.clone();
     tokio::task::spawn_blocking(move || crate::ffmpeg::encode_frames(&frames_owned, &path, w, h, FPS))
       .await
-      .map_err(|e| format!("encode join: {e}"))??;
+      .map_err(|e| FerriError::backend(format!("encode join: {e}")))??;
 
     Ok(output_path)
   }
@@ -228,7 +228,7 @@ impl BufferedRecordingHandle {
 /// Terminal state of a recording: either the finalised file path, or a
 /// typed error explaining why finalisation failed (backend does not
 /// support recording, encoder crashed, page never closed, …).
-type FinalPath = std::result::Result<PathBuf, String>;
+type FinalPath = std::result::Result<PathBuf, FerriError>;
 
 /// Live [`Video`] handle returned by [`crate::Page::video`]. Matches
 /// Playwright's `page.video(): null | Video` (types.d.ts:4756) and the
@@ -285,8 +285,7 @@ impl Video {
   /// * If the owning page is dropped without ever finishing the
   ///   recording, returns [`FerriError::target_closed`].
   pub async fn path(&self) -> crate::error::Result<PathBuf> {
-    let value = self.await_terminal_state().await?;
-    value.map_err(FerriError::Backend)
+    self.await_terminal_state().await?
   }
 
   /// Playwright: `video.saveAs(path): Promise<void>`. Blocks until the
@@ -379,7 +378,7 @@ impl VideoSink {
   /// a process-level failure, not a JS exception) is the typical
   /// caller: a `WebKit` page's `page.video()` accessor still returns
   /// a [`Video`], but its accessors all resolve with a reason string.
-  pub fn finish_err(self, reason: impl Into<String>) {
-    let _ = self.tx.send_replace(Some(Err(reason.into())));
+  pub fn finish_err(self, error: FerriError) {
+    let _ = self.tx.send_replace(Some(Err(error)));
   }
 }
