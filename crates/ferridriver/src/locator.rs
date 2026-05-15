@@ -108,7 +108,7 @@ macro_rules! retry_resolve {
             if __msg.contains("not connected")
               || __msg.contains("not found")
               || __msg.contains("detached")
-              || __msg.starts_with("error:not")
+              || __msg.contains("error:not")
             {
               // Retriable: `checkElementStates` returns
               // `error:notvisible` / `error:notenabled` /
@@ -649,7 +649,7 @@ impl Locator {
       if !checked && is_radio {
         return Err(crate::error::FerriError::invalid_argument(
           "element",
-          "cannot uncheck radio button. Radio buttons can only be unchecked by selecting another radio button in the same group.",
+          "Cannot uncheck radio button. Radio buttons can only be unchecked by selecting another radio button in the same group.",
         ));
       }
       actions::click_with_opts(&el, page, click_opts_ref).await?;
