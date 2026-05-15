@@ -8,6 +8,7 @@
 //! or after navigation on `WebKit`).
 
 use crate::backend::{AnyElement, AnyPage};
+use crate::error::{FerriError, Result};
 use crate::selectors;
 use rustc_hash::FxHashMap;
 
@@ -128,12 +129,12 @@ pub struct ScrollInfo {
 // ─── Runtime helper ─────────────────────────────────────────────────────────
 
 /// Ensure the unified runtime is injected, then evaluate JS.
-async fn rt_eval(page: &AnyPage, js: &str) -> Result<Option<serde_json::Value>, String> {
+async fn rt_eval(page: &AnyPage, js: &str) -> Result<Option<serde_json::Value>> {
   page.evaluate(js).await
 }
 
 /// Ensure runtime + evaluate, return string result.
-async fn rt_eval_str(page: &AnyPage, js: &str) -> Result<String, String> {
+async fn rt_eval_str(page: &AnyPage, js: &str) -> Result<String> {
   let val = rt_eval(page, js).await?;
   Ok(
     val
@@ -158,15 +159,16 @@ pub async fn resolve_element<S: std::hash::BuildHasher>(
   ref_map: &std::collections::HashMap<String, i64, S>,
   r#ref: Option<&str>,
   selector: Option<&str>,
-) -> Result<AnyElement, String> {
+) -> Result<AnyElement> {
   if let Some(r) = r#ref {
     let backend_id = ref_map
       .get(r)
-      .ok_or_else(|| format!("Unknown ref '{r}'. Take a new snapshot."))?;
+      .ok_or_else(|| FerriError::invalid_argument("ref", format!("unknown ref '{r}'. Take a new snapshot.")))?;
     return page.resolve_backend_node(*backend_id, r).await;
   }
 
-  let sel = selector.ok_or("Provide 'ref' (from snapshot) or 'selector'.")?;
+  let sel = selector
+    .ok_or_else(|| FerriError::invalid_argument("ref-or-selector", "provide 'ref' (from snapshot) or 'selector'"))?;
 
   // ALL selectors go through the engine (treats bare CSS as default).
   // `actions::resolve_element` is the page-level escape hatch used by
@@ -208,7 +210,7 @@ pub async fn suggest_selectors(page: &AnyPage) -> Vec<String> {
 ///
 /// Returns `ClickGuardError::IsSelect` or `ClickGuardError::IsFileInput` if the element
 /// should not be clicked directly.
-pub async fn check_click_guard(element: &AnyElement, page: &AnyPage) -> Result<(), ClickGuardError> {
+pub async fn check_click_guard(element: &AnyElement, page: &AnyPage) -> std::result::Result<(), ClickGuardError> {
   let _ = page.ensure_engine_injected().await;
   let fd = "window.__fd";
   let guard = element
@@ -268,7 +270,7 @@ pub async fn click_prep(
   element: &AnyElement,
   page: &AnyPage,
   position: Option<crate::options::Point>,
-) -> Result<ClickPrep, String> {
+) -> Result<ClickPrep> {
   let _ = page.ensure_engine_injected().await;
   let position_lit = match position {
     Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
@@ -281,9 +283,10 @@ pub async fn click_prep(
     .and_then(|v| v.as_str().map(std::string::ToString::to_string))
     .unwrap_or_default();
   if raw.is_empty() {
-    return Err("click_prep: empty response from page-side helper".into());
+    return Err(FerriError::backend("click_prep: empty response from page-side helper"));
   }
-  let parsed: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("click_prep: parse: {e}"))?;
+  let parsed: serde_json::Value =
+    serde_json::from_str(&raw).map_err(|e| FerriError::Backend(format!("click_prep: parse: {e}")))?;
   let guard = parsed.get("guard").and_then(|v| v.as_str()).unwrap_or("");
   match guard {
     "select" => return Ok(ClickPrep::IsSelect),
@@ -334,7 +337,7 @@ pub async fn click_prep(
 /// Returns `error:not<state>` when the non-force pre-check fails (the
 /// retry loop treats it as retriable), or a generic fill error when
 /// the JS `.value` / `.textContent` assignment fails.
-pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool) -> Result<(), String> {
+pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool) -> Result<()> {
   if !force {
     let fd = page.injected_script().await?;
     let state_raw = element
@@ -348,7 +351,7 @@ pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool
       // Playwright-style retriable marker: `error:notvisible`,
       // `error:notenabled`, `error:noteditable`, or `error:notconnected`.
       // `retry_resolve!` treats `error:not*` as retry-until-deadline.
-      return Err(state_raw);
+      return Err(FerriError::backend(state_raw));
     }
   }
   let escaped = value.replace('\\', "\\\\").replace('\'', "\\'");
@@ -387,7 +390,7 @@ pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool
         }}"
     ))
     .await
-    .map_err(|e| format!("Fill: {e}"))
+    .map_err(|e| FerriError::Backend(format!("Fill: {e}")))
 }
 
 // ─── Navigation ─────────────────────────────────────────────────────────────
@@ -397,7 +400,7 @@ pub async fn fill(element: &AnyElement, page: &AnyPage, value: &str, force: bool
 /// # Errors
 ///
 /// Returns an error if navigation fails or the page DOM remains empty after retries.
-pub async fn navigate_with_health_check(page: &AnyPage, url: &str) -> Result<(), String> {
+pub async fn navigate_with_health_check(page: &AnyPage, url: &str) -> Result<()> {
   page.goto(url, crate::backend::NavLifecycle::Load, 30_000, None).await?;
 
   let url_lower = url.to_lowercase();
@@ -440,7 +443,7 @@ pub async fn navigate_with_health_check(page: &AnyPage, url: &str) -> Result<(),
 ///
 /// Returns an error if JS evaluation fails or the search pattern is invalid.
 ///
-pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchResult, String> {
+pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchResult> {
   let pattern = serde_json::to_string(&opts.pattern).map_err(|e| e.to_string())?;
   let is_regex = if opts.regex { "true" } else { "false" };
   let case_sensitive = if opts.case_sensitive { "true" } else { "false" };
@@ -456,7 +459,7 @@ pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchR
   let data: serde_json::Value = serde_json::from_str(&result_str).unwrap_or(serde_json::json!({}));
 
   if let Some(err) = data["error"].as_str() {
-    return Err(err.to_string());
+    return Err(FerriError::Backend(err.to_string()));
   }
 
   let total = usize::try_from(data["total"].as_u64().unwrap_or(0)).unwrap_or(0);
@@ -521,7 +524,7 @@ pub fn format_search_results(result: &SearchResult, pattern: &str) -> String {
 ///
 /// Returns an error if JS evaluation fails or the selector is invalid.
 ///
-pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result<FindResult, String> {
+pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result<FindResult> {
   // Rich selectors go through the selector engine
   if selectors::is_rich_selector(&opts.selector) {
     let matched = selectors::query_all(page, &opts.selector, None).await?;
@@ -554,7 +557,7 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
   let data: serde_json::Value = serde_json::from_str(&result_str).unwrap_or(serde_json::json!({}));
 
   if let Some(err) = data["error"].as_str() {
-    return Err(err.to_string());
+    return Err(FerriError::Backend(err.to_string()));
   }
 
   let total = usize::try_from(data["total"].as_u64().unwrap_or(0)).unwrap_or(0);
@@ -634,7 +637,7 @@ pub fn format_find_results(result: &FindResult, selector: &str) -> String {
 /// # Errors
 ///
 /// Returns an error if the element is not a select or the target option is not found.
-pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -> Result<SelectResult, String> {
+pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -> Result<SelectResult> {
   let escaped = target.replace('\\', "\\\\").replace('\'', "\\'");
   let fd = page.injected_script().await?;
   let result_json = element
@@ -655,7 +658,7 @@ pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -
       let opts: Vec<&str> = avail.iter().filter_map(|v| v.as_str()).collect();
       let _ = std::fmt::Write::write_fmt(&mut msg, format_args!(" Available options: {}", opts.join(", ")));
     }
-    return Err(msg);
+    return Err(FerriError::Backend(msg));
   }
 
   Ok(SelectResult {
@@ -669,7 +672,7 @@ pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -
 /// # Errors
 ///
 /// Returns an error if the element is not a select or options cannot be retrieved.
-pub async fn get_dropdown_options(element: &AnyElement, page: &AnyPage) -> Result<Vec<DropdownOption>, String> {
+pub async fn get_dropdown_options(element: &AnyElement, page: &AnyPage) -> Result<Vec<DropdownOption>> {
   let fd = page.injected_script().await?;
   let result_json = element
     .call_js_fn_value(&format!(
@@ -684,7 +687,7 @@ pub async fn get_dropdown_options(element: &AnyElement, page: &AnyPage) -> Resul
   let result: serde_json::Value = serde_json::from_str(&result_json).unwrap_or(serde_json::json!({}));
 
   if let Some(err) = result["error"].as_str() {
-    return Err(err.to_string());
+    return Err(FerriError::Backend(err.to_string()));
   }
 
   let opts = result["options"]
@@ -712,7 +715,7 @@ pub async fn get_dropdown_options(element: &AnyElement, page: &AnyPage) -> Resul
 /// # Errors
 ///
 /// Returns an error if JS evaluation fails.
-pub async fn scroll_info(page: &AnyPage) -> Result<ScrollInfo, String> {
+pub async fn scroll_info(page: &AnyPage) -> Result<ScrollInfo> {
   let fd = page.injected_script().await?;
   let result = rt_eval_str(page, &format!("{fd}.scrollInfo()")).await?;
   let parsed: serde_json::Value = serde_json::from_str(&result).unwrap_or(serde_json::json!({}));
@@ -746,7 +749,7 @@ pub async fn console_error_count(page: &AnyPage) -> i64 {
 /// # Errors
 ///
 /// Returns an error if JS evaluation fails.
-pub async fn extract_markdown(page: &AnyPage) -> Result<String, String> {
+pub async fn extract_markdown(page: &AnyPage) -> Result<String> {
   let fd = page.injected_script().await?;
   rt_eval_str(page, &format!("{fd}.extractMarkdown()")).await
 }
@@ -759,7 +762,7 @@ pub async fn extract_markdown(page: &AnyPage) -> Result<String, String> {
 /// # Errors
 ///
 /// Returns an error if the file input element is not found or the files cannot be set.
-pub async fn upload_file(page: &AnyPage, selector: &str, paths: &[String]) -> Result<(), String> {
+pub async fn upload_file(page: &AnyPage, selector: &str, paths: &[String]) -> Result<()> {
   page.set_file_input(selector, paths).await
 }
 
@@ -779,10 +782,7 @@ pub async fn upload_file(page: &AnyPage, selector: &str, paths: &[String]) -> Re
 /// # Errors
 ///
 /// Returns an error if the JS evaluation fails or the element has no box.
-pub async fn resolve_click_point(
-  element: &AnyElement,
-  position: Option<crate::options::Point>,
-) -> Result<(f64, f64), String> {
+pub async fn resolve_click_point(element: &AnyElement, position: Option<crate::options::Point>) -> Result<(f64, f64)> {
   let position_js = match position {
     Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
     None => "null".to_string(),
@@ -821,7 +821,7 @@ pub async fn resolve_click_point(
       let y = v.get("y").and_then(serde_json::Value::as_f64)?;
       Some((x, y))
     })
-    .ok_or_else(|| "could not compute click point".to_string())
+    .ok_or_else(|| FerriError::backend("could not compute click point"))
 }
 
 /// Dispatch a click with the full Playwright [`crate::options::ClickOptions`]
@@ -851,11 +851,7 @@ pub async fn resolve_click_point(
 /// Returns an error from actionability, point resolution, or the
 /// per-backend click dispatch. Modifier release is best-effort and does
 /// not override the primary error.
-pub async fn click_with_opts(
-  element: &AnyElement,
-  page: &AnyPage,
-  opts: &crate::options::ClickOptions,
-) -> Result<(), String> {
+pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::options::ClickOptions) -> Result<()> {
   let args = crate::backend::BackendClickArgs::from_options(opts);
   // Retry the entire pointer action when the hit-target interceptor
   // reports another element captured the click — mirrors Playwright's
@@ -884,9 +880,9 @@ pub async fn click_with_opts(
     } else {
       match click_prep(element, page, opts.position).await? {
         ClickPrep::Ready { x, y } => (x, y),
-        ClickPrep::IsSelect => return Err(ClickGuardError::IsSelect.to_string()),
-        ClickPrep::IsFileInput => return Err(ClickGuardError::IsFileInput.to_string()),
-        ClickPrep::NotActionable { reason } => return Err(reason),
+        ClickPrep::IsSelect => return Err(FerriError::Backend(ClickGuardError::IsSelect.to_string())),
+        ClickPrep::IsFileInput => return Err(FerriError::Backend(ClickGuardError::IsFileInput.to_string())),
+        ClickPrep::NotActionable { reason } => return Err(FerriError::Backend(reason)),
       }
     };
 
@@ -943,9 +939,9 @@ pub async fn click_with_opts(
       HitResult::Missed { description } => {
         attempt += 1;
         if attempt >= retry_backoff_ms.len() + 2 {
-          return Err(format!(
+          return Err(FerriError::Backend(format!(
             "{description} intercepts pointer events after {attempt} attempts"
-          ));
+          )));
         }
         // Loop continues — re-resolve + retry.
       },
@@ -970,7 +966,7 @@ enum HitResult {
 /// armed, `Ok(false)` when the preliminary hit-target check already
 /// reports a miss (the caller should retry without dispatching), and
 /// `Err(_)` on protocol failure.
-async fn install_hit_interceptor(element: &AnyElement, x: f64, y: f64) -> Result<bool, String> {
+async fn install_hit_interceptor(element: &AnyElement, x: f64, y: f64) -> Result<bool> {
   let js = format!("function() {{ return window.__fd.installHitInterceptor(this, {{x: {x}, y: {y}}}, 'mouse'); }}");
   let val = element.call_js_fn_value(&js).await?;
   let s = val.and_then(|v| v.as_str().map(std::string::ToString::to_string));
@@ -978,7 +974,7 @@ async fn install_hit_interceptor(element: &AnyElement, x: f64, y: f64) -> Result
 }
 
 /// Tear down the interceptor and read the captured outcome.
-async fn finalize_hit_interceptor(element: &AnyElement) -> Result<HitResult, String> {
+async fn finalize_hit_interceptor(element: &AnyElement) -> Result<HitResult> {
   let js = "function() { return JSON.stringify(window.__fd.finalizeHitInterceptor()); }";
   let val = element.call_js_fn_value(js).await?;
   let raw = val
@@ -1010,16 +1006,12 @@ async fn finalize_hit_interceptor(element: &AnyElement) -> Result<HitResult, Str
 ///
 /// Returns an error from actionability, point resolution, or the
 /// per-backend mouse-move dispatch.
-pub async fn hover_with_opts(
-  element: &AnyElement,
-  page: &AnyPage,
-  opts: &crate::options::HoverOptions,
-) -> Result<(), String> {
+pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::options::HoverOptions) -> Result<()> {
   if !opts.is_force() {
     wait_for_actionable(element, page).await.ok();
   }
   page.press_modifiers(&opts.modifiers).await?;
-  let result: Result<(), String> = if opts.is_trial() {
+  let result: Result<()> = if opts.is_trial() {
     Ok(())
   } else {
     match resolve_click_point(element, opts.position).await {
@@ -1061,16 +1053,12 @@ pub async fn hover_with_opts(
 ///
 /// Returns an error from actionability, point resolution, or the
 /// backend's native `tap_at_with` dispatch.
-pub async fn tap_with_opts(
-  element: &AnyElement,
-  page: &AnyPage,
-  opts: &crate::options::TapOptions,
-) -> Result<(), String> {
+pub async fn tap_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::options::TapOptions) -> Result<()> {
   if !opts.is_force() {
     wait_for_actionable(element, page).await.ok();
   }
   page.press_modifiers(&opts.modifiers).await?;
-  let result: Result<(), String> = if opts.is_trial() {
+  let result: Result<()> = if opts.is_trial() {
     Ok(())
   } else {
     match resolve_click_point(element, opts.position).await {
@@ -1105,9 +1093,10 @@ pub async fn select_options(
   element: &AnyElement,
   page: &AnyPage,
   values: &[crate::options::SelectOptionValue],
-) -> Result<Vec<String>, String> {
+) -> Result<Vec<String>> {
   let fd = page.injected_script().await?;
-  let values_json = serde_json::to_string(values).map_err(|e| format!("select_option serialize: {e}"))?;
+  let values_json =
+    serde_json::to_string(values).map_err(|e| FerriError::Backend(format!("select_option serialize: {e}")))?;
   // The injected `selectOptions` wrapper takes `(el, ...descriptors)`
   // via rest args — spread the descriptor array into positional args.
   let js = format!(
@@ -1125,7 +1114,7 @@ pub async fn select_options(
     .unwrap_or_default();
   let parsed: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({}));
   if let Some(err) = parsed.get("error").and_then(|v| v.as_str()) {
-    return Err(err.to_string());
+    return Err(FerriError::Backend(err.to_string()));
   }
   Ok(
     parsed
@@ -1143,7 +1132,7 @@ pub async fn select_options(
 /// # Errors
 ///
 /// Returns an error if the element is not actionable within the timeout.
-pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result<(), String> {
+pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result<()> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
   let _ = page.ensure_engine_injected().await;
   let fd = "window.__fd";

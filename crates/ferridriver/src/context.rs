@@ -86,7 +86,7 @@ impl BrowserContext {
   /// Returns an error if cookies cannot be retrieved from the active page.
   pub async fn cookies(&self) -> Result<Vec<CookieData>> {
     if let Some(page) = self.active_page() {
-      page.get_cookies().await.map_err(Into::into)
+      page.get_cookies().await
     } else {
       Ok(Vec::new())
     }

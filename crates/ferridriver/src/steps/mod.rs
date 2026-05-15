@@ -94,7 +94,7 @@ pub fn js_escape(s: &str) -> String {
 ///
 /// Returns an error if the element cannot be found using the given selector,
 /// or if the underlying browser query fails.
-pub async fn find(page: &Arc<Page>, selector: &str) -> Result<crate::backend::AnyElement, String> {
+pub async fn find(page: &Arc<Page>, selector: &str) -> crate::error::Result<crate::backend::AnyElement> {
   let inner = page.inner();
   if crate::selectors::is_rich_selector(selector) {
     // BDD step `find` is page-level: always main frame.

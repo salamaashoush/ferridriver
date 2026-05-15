@@ -492,7 +492,7 @@ impl ElementHandle {
   /// Forwards the backend's click error.
   pub async fn click(&self) -> Result<()> {
     self.ensure_live()?;
-    self.any_element().click().await.map_err(FerriError::from)
+    self.any_element().click().await
   }
 
   /// Playwright: `elementHandle.dblclick()`. Delegates to the
@@ -503,7 +503,7 @@ impl ElementHandle {
   /// Forwards the backend's click error.
   pub async fn dblclick(&self) -> Result<()> {
     self.ensure_live()?;
-    self.any_element().dblclick().await.map_err(FerriError::from)
+    self.any_element().dblclick().await
   }
 
   /// Playwright: `elementHandle.hover()`. Delegates to the backend's
@@ -514,7 +514,7 @@ impl ElementHandle {
   /// Forwards the backend's hover error.
   pub async fn hover(&self) -> Result<()> {
     self.ensure_live()?;
-    self.any_element().hover().await.map_err(FerriError::from)
+    self.any_element().hover().await
   }
 
   /// Playwright: `elementHandle.type(text)`. Delegates to the
@@ -527,7 +527,7 @@ impl ElementHandle {
   /// Forwards the backend's type error.
   pub async fn type_str(&self, text: &str) -> Result<()> {
     self.ensure_live()?;
-    self.any_element().type_str(text).await.map_err(FerriError::from)
+    self.any_element().type_str(text).await
   }
 
   /// Playwright: `elementHandle.focus()`. JS `el.focus()`.
@@ -552,7 +552,7 @@ impl ElementHandle {
   /// Forwards the backend's scroll error.
   pub async fn scroll_into_view_if_needed(&self) -> Result<()> {
     self.ensure_live()?;
-    self.any_element().scroll_into_view().await.map_err(FerriError::from)
+    self.any_element().scroll_into_view().await
   }
 
   /// Playwright: `elementHandle.screenshot(opts?): Promise<Buffer>`.
@@ -564,7 +564,7 @@ impl ElementHandle {
   /// Forwards the backend's screenshot error.
   pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>> {
     self.ensure_live()?;
-    self.any_element().screenshot(format).await.map_err(FerriError::from)
+    self.any_element().screenshot(format).await
   }
 
   // ── $eval / $$eval (Playwright: elementHandle.$eval / $$eval) ──────────
@@ -1134,11 +1134,7 @@ impl ElementHandle {
     // this layer for API parity with Playwright and are honoured
     // transparently when the backend grows support (tracked as a
     // locator-level parity gap in Section B of PLAYWRIGHT_COMPAT.md).
-    self
-      .any_element()
-      .screenshot(opts.format)
-      .await
-      .map_err(FerriError::from)
+    self.any_element().screenshot(opts.format).await
   }
 }
 

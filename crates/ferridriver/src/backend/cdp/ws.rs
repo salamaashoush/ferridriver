@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio_tungstenite::tungstenite::Message;
 
 use super::transport::CdpDispatcher;
+use crate::error::{FerriError, Result};
 
 pub struct WsTransport {
   write_tx: tokio::sync::mpsc::Sender<Message>,
@@ -21,30 +22,27 @@ impl WsTransport {
   /// # Errors
   ///
   /// Returns an error if the WebSocket connection fails.
-  pub async fn connect(ws_url: &str) -> Result<Self, String> {
+  pub async fn connect(ws_url: &str) -> Result<Self> {
     Box::pin(Self::connect_with_headers(ws_url, &std::collections::HashMap::new())).await
   }
 
   /// Connect with custom HTTP headers (Playwright's `connectOptions.headers`).
-  pub async fn connect_with_headers(
-    ws_url: &str,
-    headers: &std::collections::HashMap<String, String>,
-  ) -> Result<Self, String> {
+  pub async fn connect_with_headers(ws_url: &str, headers: &std::collections::HashMap<String, String>) -> Result<Self> {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest;
     use tokio_tungstenite::tungstenite::http;
     let mut request = ws_url
       .into_client_request()
-      .map_err(|e| format!("WebSocket request build: {e}"))?;
+      .map_err(|e| FerriError::Backend(format!("WebSocket request build: {e}")))?;
     for (key, value) in headers {
       let header_name = http::header::HeaderName::from_bytes(key.as_bytes())
-        .map_err(|e| format!("invalid header name '{key}': {e}"))?;
-      let header_value =
-        http::header::HeaderValue::from_str(value).map_err(|e| format!("invalid header value for '{key}': {e}"))?;
+        .map_err(|e| FerriError::Backend(format!("invalid header name '{key}': {e}")))?;
+      let header_value = http::header::HeaderValue::from_str(value)
+        .map_err(|e| FerriError::Backend(format!("invalid header value for '{key}': {e}")))?;
       request.headers_mut().insert(header_name, header_value);
     }
     let (ws_stream, _) = Box::pin(tokio_tungstenite::connect_async(request))
       .await
-      .map_err(|e| format!("WebSocket connect to {ws_url}: {e}"))?;
+      .map_err(|e| FerriError::Backend(format!("WebSocket connect to {ws_url}: {e}")))?;
 
     let (write, read) = ws_stream.split();
     let dispatcher = Arc::new(CdpDispatcher::new());
@@ -80,7 +78,7 @@ impl WsTransport {
     chromium_path: &str,
     user_data_dir: &Path,
     extra_flags: &[String],
-  ) -> Result<(Self, tokio::process::Child), String> {
+  ) -> Result<(Self, tokio::process::Child)> {
     let mut command = tokio::process::Command::new(chromium_path);
     command.arg(format!("--user-data-dir={}", user_data_dir.display()));
     command.arg("--remote-debugging-port=0");
@@ -107,7 +105,9 @@ impl WsTransport {
       command.pre_exec(super::super::process::setsid_pre_exec());
     }
 
-    let mut child = command.spawn().map_err(|e| format!("Chrome launch: {e}"))?;
+    let mut child = command
+      .spawn()
+      .map_err(|e| FerriError::Backend(format!("Chrome launch: {e}")))?;
 
     let port_file = user_data_dir.join("DevToolsActivePort");
     let ws_url = discover_ws_url(&port_file, &mut child).await?;
@@ -124,22 +124,22 @@ impl super::transport::CdpTransport for WsTransport {
     session_id: Option<&str>,
     method: &str,
     params: serde_json::Value,
-  ) -> Result<serde_json::Value, String> {
+  ) -> Result<serde_json::Value> {
     let (mut data, rx) = self.dispatcher.build_command(session_id, method, &params)?;
     // Remove NUL terminator — WebSocket doesn't need it
     if data.last() == Some(&0) {
       data.pop();
     }
-    let text = String::from_utf8(data).map_err(|e| format!("UTF-8: {e}"))?;
+    let text = String::from_utf8(data).map_err(|e| FerriError::Backend(format!("UTF-8: {e}")))?;
     self
       .write_tx
       .send(Message::Text(text.into()))
       .await
-      .map_err(|_| "WS writer closed".to_string())?;
+      .map_err(|_| FerriError::backend("WS writer closed"))?;
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
-      Ok(Err(_)) => Err(format!("Response channel dropped for {method}")),
-      Err(_) => Err(format!("Timeout waiting for {method} response")),
+      Ok(Err(_)) => Err(FerriError::Backend(format!("Response channel dropped for {method}"))),
+      Err(_) => Err(FerriError::timeout(format!("waiting for {method} response"), 30_000)),
     }
   }
 
@@ -157,11 +157,11 @@ impl super::transport::CdpTransport for WsTransport {
   }
 }
 
-async fn discover_ws_url(port_file: &Path, child: &mut tokio::process::Child) -> Result<String, String> {
+async fn discover_ws_url(port_file: &Path, child: &mut tokio::process::Child) -> Result<String> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
   loop {
     if tokio::time::Instant::now() >= deadline {
-      return Err("Timeout waiting for DevToolsActivePort".into());
+      return Err(FerriError::timeout("waiting for DevToolsActivePort", 10_000));
     }
     if let Ok(contents) = tokio::fs::read_to_string(port_file).await {
       let lines: Vec<&str> = contents.lines().collect();
@@ -172,9 +172,9 @@ async fn discover_ws_url(port_file: &Path, child: &mut tokio::process::Child) ->
       }
     }
     if let Ok(Some(status)) = child.try_wait() {
-      return Err(format!(
+      return Err(FerriError::Backend(format!(
         "Chrome exited with status {status} before providing DevToolsActivePort"
-      ));
+      )));
     }
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
   }

@@ -9,6 +9,7 @@ use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 
 use super::transport::CdpDispatcher;
+use crate::error::{FerriError, Result};
 
 type BoxReader = Box<dyn AsyncRead + Send + Unpin>;
 type BoxWriter = Box<dyn AsyncWrite + Send + Unpin>;
@@ -28,7 +29,7 @@ impl PipeTransport {
     chromium_path: &str,
     user_data_dir: &Path,
     extra_flags: &[String],
-  ) -> Result<(Self, tokio::process::Child), String> {
+  ) -> Result<(Self, tokio::process::Child)> {
     let mut command = tokio::process::Command::new(chromium_path);
     command.arg(format!("--user-data-dir={}", user_data_dir.display()));
     command.arg("--remote-debugging-pipe");
@@ -124,7 +125,7 @@ impl super::transport::CdpTransport for PipeTransport {
     session_id: Option<&str>,
     method: &str,
     params: serde_json::Value,
-  ) -> Result<serde_json::Value, String> {
+  ) -> Result<serde_json::Value> {
     let (data, rx) = self.dispatcher.build_command(session_id, method, &params)?;
     self
       .write_tx
@@ -133,8 +134,8 @@ impl super::transport::CdpTransport for PipeTransport {
       .map_err(|_| "Pipe writer closed".to_string())?;
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
-      Ok(Err(_)) => Err(format!("Response channel dropped for {method}")),
-      Err(_) => Err(format!("Timeout waiting for {method} response")),
+      Ok(Err(_)) => Err(FerriError::Backend(format!("Response channel dropped for {method}"))),
+      Err(_) => Err(FerriError::timeout(format!("waiting for {method} response"), 30_000)),
     }
   }
 
@@ -158,10 +159,11 @@ impl super::transport::CdpTransport for PipeTransport {
 fn spawn_with_pipes(
   command: &mut tokio::process::Command,
   _chromium_path: &str,
-) -> Result<(tokio::process::Child, BoxReader, BoxWriter), String> {
+) -> Result<(tokio::process::Child, BoxReader, BoxWriter)> {
   use std::os::unix::io::IntoRawFd;
 
-  let (parent_sock, child_sock) = std::os::unix::net::UnixStream::pair().map_err(|e| format!("socketpair: {e}"))?;
+  let (parent_sock, child_sock) =
+    std::os::unix::net::UnixStream::pair().map_err(|e| FerriError::Backend(format!("socketpair: {e}")))?;
   let child_fd = child_sock.into_raw_fd();
 
   #[allow(unsafe_code)]
@@ -190,12 +192,13 @@ fn spawn_with_pipes(
 
   let child = command
     .spawn()
-    .map_err(|e| format!("Failed to launch Chrome with --remote-debugging-pipe: {e}"))?;
+    .map_err(|e| FerriError::Backend(format!("Failed to launch Chrome with --remote-debugging-pipe: {e}")))?;
 
   parent_sock
     .set_nonblocking(true)
-    .map_err(|e| format!("set_nonblocking: {e}"))?;
-  let stream = tokio::net::UnixStream::from_std(parent_sock).map_err(|e| format!("tokio stream: {e}"))?;
+    .map_err(|e| FerriError::Backend(format!("set_nonblocking: {e}")))?;
+  let stream =
+    tokio::net::UnixStream::from_std(parent_sock).map_err(|e| FerriError::Backend(format!("tokio stream: {e}")))?;
   let (reader, writer) = tokio::io::split(stream);
   Ok((child, Box::new(reader) as BoxReader, Box::new(writer) as BoxWriter))
 }
@@ -204,7 +207,7 @@ fn spawn_with_pipes(
 fn spawn_with_pipes(
   command: &mut tokio::process::Command,
   _chromium_path: &str,
-) -> Result<(tokio::process::Child, BoxReader, BoxWriter), String> {
+) -> Result<(tokio::process::Child, BoxReader, BoxWriter)> {
   use std::os::windows::io::RawHandle;
   use std::ptr;
 
@@ -301,16 +304,18 @@ fn spawn_with_pipes(
       client_in as u32, client_out as u32,
     ));
 
-    let child = command.spawn().map_err(|e| format!("Failed to launch Chrome: {e}"))?;
+    let child = command
+      .spawn()
+      .map_err(|e| FerriError::Backend(format!("Failed to launch Chrome: {e}")))?;
 
     CloseHandle(client_in);
     CloseHandle(client_out);
 
     let reader = tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(server_out as RawHandle)
-      .map_err(|e| format!("tokio NamedPipeServer (read): {e}"))?;
+      .map_err(|e| FerriError::Backend(format!("tokio NamedPipeServer (read): {e}")))?;
 
     let writer = tokio::net::windows::named_pipe::NamedPipeServer::from_raw_handle(server_in as RawHandle)
-      .map_err(|e| format!("tokio NamedPipeServer (write): {e}"))?;
+      .map_err(|e| FerriError::Backend(format!("tokio NamedPipeServer (write): {e}")))?;
 
     Ok((child, Box::new(reader) as BoxReader, Box::new(writer) as BoxWriter))
   }

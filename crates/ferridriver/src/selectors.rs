@@ -17,6 +17,7 @@
 //! Chaining with `>>` narrows scope: each part's results become the next part's search roots.
 
 use crate::backend::{AnyElement, AnyPage};
+use crate::error::{FerriError, Result};
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -173,10 +174,10 @@ pub fn is_rich_selector(s: &str) -> bool {
 /// # Errors
 ///
 /// Returns an error if the selector string is empty or has an invalid chain.
-pub fn parse(selector: &str) -> Result<Selector, String> {
+pub fn parse(selector: &str) -> Result<Selector> {
   let selector = selector.trim();
   if selector.is_empty() {
-    return Err("Selector cannot be empty".into());
+    return Err(FerriError::invalid_selector(selector, "selector cannot be empty"));
   }
 
   // Split by >> respecting quoted strings
@@ -186,7 +187,7 @@ pub fn parse(selector: &str) -> Result<Selector, String> {
   for raw in raw_parts {
     let raw = raw.trim();
     if raw.is_empty() {
-      return Err("Empty selector part in chain".into());
+      return Err(FerriError::invalid_selector(selector, "empty selector part in chain"));
     }
     parts.push(parse_part(raw));
   }
@@ -413,7 +414,7 @@ const ENGINE_JS: &str = include_str!("injected/dist/engine.min.js");
 /// # Errors
 ///
 /// Returns an error if selector parsing or JS evaluation fails.
-pub async fn query_all(page: &AnyPage, selector: &str, frame_id: Option<&str>) -> Result<Vec<MatchedElement>, String> {
+pub async fn query_all(page: &AnyPage, selector: &str, frame_id: Option<&str>) -> Result<Vec<MatchedElement>> {
   let parsed = parse(selector)?;
   page.ensure_engine_injected().await?;
   let fd = "window.__fd";
@@ -428,12 +429,12 @@ pub async fn query_all(page: &AnyPage, selector: &str, frame_id: Option<&str>) -
   // Check for error
   if let Ok(val) = serde_json::from_str::<serde_json::Value>(&result_str) {
     if let Some(err) = val.get("error").and_then(|e| e.as_str()) {
-      return Err(err.to_string());
+      return Err(FerriError::evaluation(err.to_string()));
     }
   }
 
   let elements: Vec<MatchedElement> =
-    serde_json::from_str(&result_str).map_err(|e| format!("Parse selector results: {e}"))?;
+    serde_json::from_str(&result_str).map_err(|e| FerriError::Backend(format!("Parse selector results: {e}")))?;
   Ok(elements)
 }
 
@@ -444,26 +445,18 @@ pub async fn query_all(page: &AnyPage, selector: &str, frame_id: Option<&str>) -
 ///
 /// Returns an error if selector parsing fails, no element is found, or (in strict mode)
 /// multiple elements match.
-pub async fn query_one(
-  page: &AnyPage,
-  selector: &str,
-  strict: bool,
-  frame_id: Option<&str>,
-) -> Result<AnyElement, String> {
+pub async fn query_one(page: &AnyPage, selector: &str, strict: bool, frame_id: Option<&str>) -> Result<AnyElement> {
   let parsed = parse(selector)?;
   let parts_json = build_parts_json(&parsed);
 
   if strict {
     let matches = query_all(page, selector, frame_id).await?;
     if matches.is_empty() {
-      return Err(format!("No element found for selector: {selector}"));
+      return Err(FerriError::invalid_selector(selector, "no element found"));
     }
     if matches.len() > 1 {
       cleanup_tags(page).await;
-      return Err(format!(
-        "Selector \"{selector}\" resolved to {} elements. Use a more specific selector.",
-        matches.len()
-      ));
+      return Err(FerriError::strict(selector, matches.len()));
     }
     // The query_all JS tags the match with `data-fd-sel='0'`; we resolve
     // that tag in the SAME frame so we get an element bound to the right
@@ -473,7 +466,7 @@ pub async fn query_one(
     let el = page
       .evaluate_to_element(&tagged_js, frame_id)
       .await
-      .map_err(|_| format!("Could not resolve matched element for: {selector}"))?;
+      .map_err(|_| FerriError::invalid_selector(selector, "could not resolve matched element"))?;
     cleanup_tags(page).await;
     return Ok(el);
   }
@@ -484,7 +477,7 @@ pub async fn query_one(
   page
     .evaluate_to_element(&js, frame_id)
     .await
-    .map_err(|_| format!("No element found for selector: {selector}"))
+    .map_err(|_| FerriError::invalid_selector(selector, "no element found"))
 }
 
 /// Query a single element using pre-built JS (avoids re-parsing the selector).
@@ -501,7 +494,7 @@ pub async fn query_one_prebuilt(
   sel_js: &str,
   selector_display: &str,
   frame_id: Option<&str>,
-) -> Result<AnyElement, String> {
+) -> Result<AnyElement> {
   // Surface the underlying error verbatim when it carries
   // recognisable signal — most notably `strict mode violation: <N>`
   // thrown by the engine's `selOne(parts, strict=true)`. Falling back
@@ -510,10 +503,11 @@ pub async fn query_one_prebuilt(
   // converting the strict-mode breach into a typed
   // `FerriError::StrictModeViolation`.
   page.evaluate_to_element(sel_js, frame_id).await.map_err(|err| {
-    if err.contains("strict mode violation") {
+    let msg = err.to_string();
+    if msg.contains("strict mode violation") {
       err
     } else {
-      format!("No element found for selector: {selector_display}")
+      FerriError::invalid_selector(selector_display, "no element found")
     }
   })
 }
@@ -533,7 +527,7 @@ pub async fn query_one_prebuilt(
 /// # Errors
 ///
 /// Returns an error if the selector string cannot be parsed.
-pub fn build_selone_js(selector: &str, fd: &str, strict: bool) -> Result<String, String> {
+pub fn build_selone_js(selector: &str, fd: &str, strict: bool) -> Result<String> {
   let parsed = parse(selector)?;
   let parts_json = build_parts_json(&parsed);
   let strict_lit = if strict { "true" } else { "false" };
@@ -550,10 +544,11 @@ pub fn build_selone_js(selector: &str, fd: &str, strict: bool) -> Result<String,
 /// `injected.querySelector(parsed, root, strict)` —
 /// `/tmp/playwright/packages/injected/src/injectedScript.ts:278`.
 #[must_use]
-pub fn parse_strict_violation_count(message: &str) -> Option<usize> {
+pub fn parse_strict_violation_count<E: std::fmt::Display + ?Sized>(err: &E) -> Option<usize> {
   // Engine output (ferridriver's bundled selOne): `strict mode
   // violation: <N>` — `<N>` is the match count and appears immediately
   // after the colon.
+  let message = err.to_string();
   let needle = "strict mode violation:";
   let idx = message.find(needle)?;
   let tail = message[idx + needle.len()..].trim();

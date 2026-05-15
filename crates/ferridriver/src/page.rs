@@ -358,7 +358,7 @@ impl Page {
       // Stragglers get picked up via the live FrameAttached listener.
       let _ = self.sync_frames().await;
     }
-    result.map_err(Into::into)
+    result
   }
 
   /// Resolve a user-supplied URL against the owning context's
@@ -386,7 +386,7 @@ impl Page {
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn go_back(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
-    self.inner.go_back(lifecycle, timeout).await.map_err(Into::into)
+    self.inner.go_back(lifecycle, timeout).await
   }
 
   /// Navigate forward in history. Returns the main-document `Response`
@@ -397,7 +397,7 @@ impl Page {
   /// Returns an error if the navigation fails or the wait condition times out.
   pub async fn go_forward(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
-    self.inner.go_forward(lifecycle, timeout).await.map_err(Into::into)
+    self.inner.go_forward(lifecycle, timeout).await
   }
 
   /// Reload the current page. Returns the main-document `Response` on
@@ -408,7 +408,7 @@ impl Page {
   /// Returns an error if the reload fails or the wait condition times out.
   pub async fn reload(&self, opts: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let (lifecycle, timeout) = Self::resolve_nav_opts(opts.as_ref(), self.default_navigation_timeout());
-    self.inner.reload(lifecycle, timeout).await.map_err(Into::into)
+    self.inner.reload(lifecycle, timeout).await
   }
 
   /// Parse `GotoOptions` into backend `NavLifecycle` + timeout.
@@ -424,12 +424,7 @@ impl Page {
   ///
   /// Returns an error if the URL cannot be retrieved from the backend.
   pub async fn url(&self) -> Result<String> {
-    self
-      .inner
-      .url()
-      .await
-      .map(std::option::Option::unwrap_or_default)
-      .map_err(Into::into)
+    self.inner.url().await.map(std::option::Option::unwrap_or_default)
   }
 
   /// Get the current page title.
@@ -438,12 +433,7 @@ impl Page {
   ///
   /// Returns an error if the title cannot be retrieved from the backend.
   pub async fn title(&self) -> Result<String> {
-    self
-      .inner
-      .title()
-      .await
-      .map(std::option::Option::unwrap_or_default)
-      .map_err(Into::into)
+    self.inner.title().await.map(std::option::Option::unwrap_or_default)
   }
 
   // ── Locators (delegate to mainFrame — Playwright parity) ───────────
@@ -534,7 +524,7 @@ impl Page {
         Ok(Some(handle))
       },
       Err(err) if is_element_not_found(&err) => Ok(None),
-      Err(err) => Err(crate::error::FerriError::from(err)),
+      Err(err) => Err(err),
     }
   }
 
@@ -556,9 +546,7 @@ impl Page {
     self: &Arc<Self>,
     selector: &str,
   ) -> Result<Vec<crate::element_handle::ElementHandle>> {
-    let matches = crate::selectors::query_all(&self.inner, selector, None)
-      .await
-      .map_err(crate::error::FerriError::from)?;
+    let matches = crate::selectors::query_all(&self.inner, selector, None).await?;
     let count = matches.len();
     let mut handles = Vec::with_capacity(count);
     for i in 0..count {
@@ -569,7 +557,7 @@ impl Page {
         },
         Err(err) => {
           crate::selectors::cleanup_tags(&self.inner).await;
-          return Err(crate::error::FerriError::from(err));
+          return Err(err);
         },
       }
     }
@@ -775,7 +763,7 @@ impl Page {
   ///
   /// Returns an error if the content cannot be retrieved.
   pub async fn content(&self) -> Result<String> {
-    self.inner.content().await.map_err(Into::into)
+    self.inner.content().await
   }
 
   /// Set the page's HTML content.
@@ -784,7 +772,7 @@ impl Page {
   ///
   /// Returns an error if the content cannot be set.
   pub async fn set_content(&self, html: &str) -> Result<()> {
-    self.inner.set_content(html).await.map_err(Into::into)
+    self.inner.set_content(html).await
   }
 
   /// Extract the page content as markdown.
@@ -793,7 +781,7 @@ impl Page {
   ///
   /// Returns an error if the markdown extraction fails.
   pub async fn markdown(&self) -> Result<String> {
-    actions::extract_markdown(&self.inner).await.map_err(Into::into)
+    actions::extract_markdown(&self.inner).await
   }
 
   /// Get the text content of an element matching the selector.
@@ -1050,13 +1038,7 @@ impl Page {
       mask_color: opts.mask_color.clone(),
       style: opts.style.clone(),
     };
-    let capture = async {
-      self
-        .inner
-        .screenshot(wire)
-        .await
-        .map_err(crate::error::FerriError::from)
-    };
+    let capture = async { self.inner.screenshot(wire).await };
     let bytes = match opts.timeout {
       Some(ms) if ms > 0 => {
         let fut = tokio::time::timeout(std::time::Duration::from_millis(ms), capture);
@@ -1104,7 +1086,7 @@ impl Page {
   /// unknown, if CDP rejects the parameters, or if writing to `path` fails.
   pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
     let path = opts.path.clone();
-    let bytes = self.inner.pdf(opts).await.map_err(crate::error::FerriError::from)?;
+    let bytes = self.inner.pdf(opts).await?;
     if let Some(path) = path {
       if let Some(parent) = path.parent() {
         if !parent.as_os_str().is_empty() {
@@ -1136,9 +1118,7 @@ impl Page {
   /// Returns an error if the accessibility snapshot cannot be built.
   pub async fn snapshot_for_ai(&self, opts: snapshot::SnapshotOptions) -> Result<snapshot::SnapshotForAI> {
     let mut tracker = self.snapshot_tracker.lock().await;
-    snapshot::build_snapshot_for_ai(&self.inner, &opts, &mut tracker)
-      .await
-      .map_err(Into::into)
+    snapshot::build_snapshot_for_ai(&self.inner, &opts, &mut tracker).await
   }
 
   // ── Viewport ────────────────────────────────────────────────────────────
@@ -1157,7 +1137,6 @@ impl Page {
         ..Default::default()
       })
       .await
-      .map_err(Into::into)
   }
 
   // ── Input devices ───────────────────────────────────────────────────────
@@ -1255,7 +1234,7 @@ impl Page {
   ///
   /// Returns an error if the key down dispatch fails.
   pub(crate) async fn key_down(&self, key: &str) -> Result<()> {
-    self.inner.key_down(key).await.map_err(Into::into)
+    self.inner.key_down(key).await
   }
 
   /// Dispatch a keyUp event for a single key.
@@ -1264,7 +1243,7 @@ impl Page {
   ///
   /// Returns an error if the key up dispatch fails.
   pub(crate) async fn key_up(&self, key: &str) -> Result<()> {
-    self.inner.key_up(key).await.map_err(Into::into)
+    self.inner.key_up(key).await
   }
 
   /// Press a key or combo (e.g., "Enter", "Control+a").
@@ -1273,7 +1252,7 @@ impl Page {
   ///
   /// Returns an error if the key press dispatch fails.
   pub(crate) async fn press_key(&self, key: &str) -> Result<()> {
-    self.inner.press_key(key).await.map_err(Into::into)
+    self.inner.press_key(key).await
   }
 
   /// Find element by CSS selector (raw backend access).
@@ -1282,7 +1261,7 @@ impl Page {
   ///
   /// Returns an error if the element is not found.
   pub async fn find_element(&self, selector: &str) -> Result<crate::backend::AnyElement> {
-    self.inner.find_element(selector).await.map_err(Into::into)
+    self.inner.find_element(selector).await
   }
 
   // ── Emulation ───────────────────────────────────────────────────────────
@@ -1305,9 +1284,7 @@ impl Page {
   /// Returns an aggregated error when one or more fields fail to
   /// apply. The aggregated message lists each failing field by name.
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
-    Box::pin(self.inner.apply_context_options(opts))
-      .await
-      .map_err(Into::<crate::error::FerriError>::into)?;
+    Box::pin(self.inner.apply_context_options(opts)).await?;
     // Also stash the bag in shared state so subsequent reads (e.g.
     // `page.goto` resolving against the context's `baseURL`,
     // `request` fixture's per-request base URL) see the same values
@@ -1392,7 +1369,7 @@ impl Page {
       }
       state.clone()
     };
-    self.inner.emulate_media(&merged).await.map_err(Into::into)
+    self.inner.emulate_media(&merged).await
   }
 
   /// Enable or disable JavaScript execution.
@@ -1405,7 +1382,7 @@ impl Page {
   ///
   /// Returns an error if the headers cannot be set.
   pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
-    self.inner.set_extra_http_headers(headers).await.map_err(Into::into)
+    self.inner.set_extra_http_headers(headers).await
   }
 
   // ── Tracing ─────────────────────────────────────────────────────────────
@@ -1416,7 +1393,7 @@ impl Page {
   ///
   /// Returns an error if tracing cannot be started.
   pub async fn start_tracing(&self) -> Result<()> {
-    self.inner.start_tracing().await.map_err(Into::into)
+    self.inner.start_tracing().await
   }
 
   /// Stop performance tracing.
@@ -1425,7 +1402,7 @@ impl Page {
   ///
   /// Returns an error if tracing cannot be stopped.
   pub async fn stop_tracing(&self) -> Result<()> {
-    self.inner.stop_tracing().await.map_err(Into::into)
+    self.inner.stop_tracing().await
   }
 
   /// Get performance metrics from the page.
@@ -1434,7 +1411,7 @@ impl Page {
   ///
   /// Returns an error if metrics cannot be retrieved.
   pub async fn metrics(&self) -> Result<Vec<crate::backend::MetricData>> {
-    self.inner.metrics().await.map_err(Into::into)
+    self.inner.metrics().await
   }
 
   // ── Storage State ──────────────────────────────────────────────────────
@@ -1675,7 +1652,7 @@ impl Page {
   ///
   /// Returns an error if the wheel event dispatch fails.
   pub(crate) async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
-    self.inner.mouse_wheel(delta_x, delta_y).await.map_err(Into::into)
+    self.inner.mouse_wheel(delta_x, delta_y).await
   }
 
   /// Mouse button down (without up). For custom drag sequences.
@@ -2046,7 +2023,7 @@ impl Page {
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
   ) -> Result<()> {
-    self.inner.route(matcher, handler).await.map_err(Into::into)
+    self.inner.route(matcher, handler).await
   }
 
   /// Remove all route handlers whose matcher is
@@ -2056,7 +2033,7 @@ impl Page {
   ///
   /// Returns an error if the route handlers cannot be removed.
   pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
-    self.inner.unroute(matcher).await.map_err(Into::into)
+    self.inner.unroute(matcher).await
   }
 
   // ── Exposed Functions ───────────────────────────────────────────────────
@@ -2081,7 +2058,7 @@ impl Page {
   ///
   /// Returns an error if the function cannot be exposed to the page.
   pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
-    self.inner.expose_function(name, func).await.map_err(Into::into)
+    self.inner.expose_function(name, func).await
   }
 
   /// Remove a previously exposed function.
@@ -2090,7 +2067,7 @@ impl Page {
   ///
   /// Returns an error if the function cannot be removed.
   pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
-    self.inner.remove_exposed_function(name).await.map_err(Into::into)
+    self.inner.remove_exposed_function(name).await
   }
 
   // ── Script / Style injection ────────────────────────────────────────────
@@ -2377,7 +2354,7 @@ impl Page {
     arg: Option<serde_json::Value>,
   ) -> Result<String> {
     let source = crate::options::evaluation_script(script, arg.as_ref())?;
-    self.inner.add_init_script(&source).await.map_err(Into::into)
+    self.inner.add_init_script(&source).await
   }
 
   /// Remove a previously injected init script by identifier.
@@ -2386,7 +2363,7 @@ impl Page {
   ///
   /// Returns an error if the init script cannot be removed.
   pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
-    self.inner.remove_init_script(identifier).await.map_err(Into::into)
+    self.inner.remove_init_script(identifier).await
   }
 
   // ── Lifecycle ───────────────────────────────────────────────────────────
@@ -2504,11 +2481,7 @@ impl Page {
     tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>,
     tokio::sync::oneshot::Sender<()>,
   )> {
-    self
-      .inner
-      .start_screencast(quality, max_width, max_height)
-      .await
-      .map_err(Into::into)
+    self.inner.start_screencast(quality, max_width, max_height).await
   }
 
   /// Stop CDP screencast.
@@ -2517,7 +2490,7 @@ impl Page {
   ///
   /// Returns an error if screencast cannot be stopped on the backend.
   pub async fn stop_screencast(&self) -> Result<()> {
-    self.inner.stop_screencast().await.map_err(Into::into)
+    self.inner.stop_screencast().await
   }
 }
 
@@ -2595,7 +2568,7 @@ impl Keyboard<'_> {
   ///
   /// Returns an error if the text insertion fails.
   pub async fn insert_text(&self, text: &str) -> Result<()> {
-    self.page.inner.insert_text(text).await.map_err(Into::into)
+    self.page.inner.insert_text(text).await
   }
 }
 
@@ -2760,8 +2733,11 @@ impl Touchscreen<'_> {
 ///
 /// Other backend errors (protocol detach, target closed, invalid
 /// selector) bubble up unmodified.
-fn is_element_not_found(err: &str) -> bool {
-  let lower = err.to_ascii_lowercase();
+fn is_element_not_found(err: &crate::error::FerriError) -> bool {
+  if let crate::error::FerriError::InvalidSelector { .. } = err {
+    return true;
+  }
+  let lower = err.to_string().to_ascii_lowercase();
   lower.contains("not found") || lower.contains("no element found")
 }
 
@@ -2771,14 +2747,23 @@ mod tests {
 
   #[test]
   fn is_element_not_found_matches_every_backend_message() {
-    // CDP + WebKit message shape.
-    assert!(is_element_not_found("'button#primary' not found"));
+    use crate::error::FerriError;
+    // CDP + WebKit message shape — typed InvalidSelector.
+    assert!(is_element_not_found(&FerriError::invalid_selector(
+      "button#primary",
+      "not found"
+    )));
     // BiDi message shape.
-    assert!(is_element_not_found("No element found for selector: button#primary"));
-    // Case-insensitive so future backend variants don't regress.
-    assert!(is_element_not_found("NO ELEMENT FOUND FOR SELECTOR: x"));
+    assert!(is_element_not_found(&FerriError::invalid_selector(
+      "button#primary",
+      "no element found"
+    )));
+    // Free-form backend strings still classify if message matches.
+    assert!(is_element_not_found(&FerriError::backend(
+      "NO ELEMENT FOUND FOR SELECTOR: x"
+    )));
     // Other errors bubble up unchanged.
-    assert!(!is_element_not_found("session detached"));
-    assert!(!is_element_not_found("Timeout 30000ms exceeded"));
+    assert!(!is_element_not_found(&FerriError::backend("session detached")));
+    assert!(!is_element_not_found(&FerriError::timeout_plain(30_000)));
   }
 }

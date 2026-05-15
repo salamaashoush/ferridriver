@@ -533,7 +533,7 @@ pub async fn build_snapshot_for_ai(
   page: &AnyPage,
   opts: &SnapshotOptions,
   tracker: &mut SnapshotTracker,
-) -> Result<SnapshotForAI, String> {
+) -> crate::error::Result<SnapshotForAI> {
   use std::fmt::Write;
 
   let depth = opts.depth.unwrap_or(-1);

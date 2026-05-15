@@ -12,6 +12,7 @@ use super::{
   AnyElement, AnyPage, Arc, AxNodeData, AxProperty, ConsoleMessage, CookieData, ImageFormat, MetricData,
   NetworkRequest, RwLock, ScreenshotOpts,
 };
+use crate::error::{FerriError, Result};
 use crate::network::{self, Headers, RequestInit, Response as NetworkResponse, ResponseInit, body_unsupported};
 use ipc::{IpcClient, IpcResponse, Op};
 
@@ -72,7 +73,7 @@ impl WebKitBrowser {
   ///
   /// Returns an error if the host binary cannot be found or the subprocess
   /// fails to start or become ready.
-  pub async fn launch() -> Result<Self, String> {
+  pub async fn launch() -> Result<Self> {
     Self::launch_with_options(true).await
   }
 
@@ -82,7 +83,7 @@ impl WebKitBrowser {
   ///
   /// Returns an error if the host binary cannot be found or the subprocess
   /// fails to start or become ready.
-  pub async fn launch_with_options(headless: bool) -> Result<Self, String> {
+  pub async fn launch_with_options(headless: bool) -> Result<Self> {
     let (client, child) = IpcClient::spawn(headless).await?;
     let client = Arc::new(client);
     // Handshake: query the real WebKit framework version so
@@ -109,7 +110,7 @@ impl WebKitBrowser {
   /// # Errors
   ///
   /// Returns an error if the IPC call to list views fails or times out.
-  pub async fn pages(&self) -> Result<Vec<AnyPage>, String> {
+  pub async fn pages(&self) -> Result<Vec<AnyPage>> {
     let r = self.client.send_empty(Op::ListViews).await?;
     match r {
       IpcResponse::ViewList(ids) => Ok(
@@ -145,7 +146,7 @@ impl WebKitBrowser {
   ///
   /// Returns an error if the IPC call to create the view fails or the host
   /// subprocess returns an unexpected response.
-  pub async fn new_page(&self, url: &str) -> Result<AnyPage, String> {
+  pub async fn new_page(&self, url: &str) -> Result<AnyPage> {
     let r = self.client.send_str(Op::CreateView, url).await?;
     match r {
       IpcResponse::ViewCreated(id) => {
@@ -276,7 +277,7 @@ impl InjectedScriptManager {
     self.injected.store(false, std::sync::atomic::Ordering::Relaxed);
   }
 
-  async fn ensure(&self, page: &WebKitPage) -> Result<(), String> {
+  async fn ensure(&self, page: &WebKitPage) -> Result<()> {
     if !self.injected.load(std::sync::atomic::Ordering::Relaxed) {
       let full_check_js = crate::selectors::build_lazy_inject_js();
       let r = page
@@ -295,7 +296,7 @@ impl WebKitPage {
     self.view_id
   }
 
-  fn ok(r: IpcResponse) -> Result<(), String> {
+  fn ok(r: IpcResponse) -> Result<()> {
     match r {
       IpcResponse::Ok
       | IpcResponse::Value(_)
@@ -317,7 +318,7 @@ impl WebKitPage {
     _lifecycle: crate::backend::NavLifecycle,
     _timeout_ms: u64,
     referer: Option<&str>,
-  ) -> Result<Option<crate::network::Response>, String> {
+  ) -> Result<Option<crate::network::Response>> {
     // WebKit backend: WKWebView navigation delegate fires on load complete.
     // Lifecycle granularity (commit vs domcontentloaded vs load) is not
     // distinguishable via the native API — all waits resolve on load.
@@ -346,7 +347,7 @@ impl WebKitPage {
   }
 
   /// Wait for the current navigation to complete.
-  pub async fn wait_for_navigation(&self) -> Result<(), String> {
+  pub async fn wait_for_navigation(&self) -> Result<()> {
     let r = self.client.send_vid(Op::WaitNav, self.vid()).await?;
     Self::ok(r)
   }
@@ -355,7 +356,7 @@ impl WebKitPage {
     &self,
     _lifecycle: crate::backend::NavLifecycle,
     _timeout_ms: u64,
-  ) -> Result<Option<crate::network::Response>, String> {
+  ) -> Result<Option<crate::network::Response>> {
     let r = self.client.send_vid(Op::Reload, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
@@ -367,7 +368,7 @@ impl WebKitPage {
     &self,
     _lifecycle: crate::backend::NavLifecycle,
     _timeout_ms: u64,
-  ) -> Result<Option<crate::network::Response>, String> {
+  ) -> Result<Option<crate::network::Response>> {
     let r = self.client.send_vid(Op::GoBack, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
@@ -379,7 +380,7 @@ impl WebKitPage {
     &self,
     _lifecycle: crate::backend::NavLifecycle,
     _timeout_ms: u64,
-  ) -> Result<Option<crate::network::Response>, String> {
+  ) -> Result<Option<crate::network::Response>> {
     let r = self.client.send_vid(Op::GoForward, self.vid()).await?;
     Self::ok(r)?;
     let r2 = self.client.send_vid(Op::WaitNav, self.vid()).await?;
@@ -392,7 +393,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the IPC call to retrieve the URL fails.
-  pub async fn url(&self) -> Result<Option<String>, String> {
+  pub async fn url(&self) -> Result<Option<String>> {
     let r = self.client.send_vid(Op::GetUrl, self.vid()).await?;
     match r {
       IpcResponse::Value(v) => Ok(v.as_str().map(std::string::ToString::to_string)),
@@ -406,7 +407,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the IPC call to retrieve the title fails.
-  pub async fn title(&self) -> Result<Option<String>, String> {
+  pub async fn title(&self) -> Result<Option<String>> {
     let r = self.client.send_vid(Op::GetTitle, self.vid()).await?;
     match r {
       IpcResponse::Value(v) => Ok(v.as_str().map(std::string::ToString::to_string)),
@@ -415,14 +416,14 @@ impl WebKitPage {
     }
   }
 
-  pub async fn injected_script(&self) -> Result<String, String> {
+  pub async fn injected_script(&self) -> Result<String> {
     self.ensure_engine_injected().await?;
     Ok("window.__fd".to_string())
   }
 
   /// Ensures the selector engine is injected into the current execution context.
   /// Idempotent and navigation-aware.
-  pub async fn ensure_engine_injected(&self) -> Result<(), String> {
+  pub async fn ensure_engine_injected(&self) -> Result<()> {
     self.injected_script.ensure(self).await
   }
 
@@ -431,7 +432,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails or the IPC call times out.
-  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     let r = self.client.send_str_vid(Op::Evaluate, expression, self.vid()).await?;
     match r {
       IpcResponse::Value(v) => {
@@ -451,7 +452,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if no element matches the selector or the JS evaluation fails.
-  pub async fn find_element(&self, selector: &str) -> Result<AnyElement, String> {
+  pub async fn find_element(&self, selector: &str) -> Result<AnyElement> {
     let js = format!(
       r"(function(){{var e=document.querySelector('{}');if(!e)return null;if(!window.__wr)window.__wr=new Map();if(!window.__wr_next)window.__wr_next=1;var id=window.__wr_next++;window.__wr.set(id,e);return id}})()",
       selector.replace('\\', "\\\\").replace('\'', "\\'")
@@ -518,7 +519,7 @@ impl WebKitPage {
     _frame_id: Option<&str>,
     is_function: Option<bool>,
     return_by_value: bool,
-  ) -> Result<crate::js_handle::EvaluateResult, String> {
+  ) -> Result<crate::js_handle::EvaluateResult> {
     use crate::js_handle::{EvaluateResult as FdEvalResult, HandleRemote};
     use crate::protocol::HandleId;
 
@@ -692,7 +693,7 @@ impl WebKitPage {
   /// element points at the main-frame DOM — frame-scoped element
   /// actions on `WebKit` are tracked as a known gap in Section B of
   /// `PLAYWRIGHT_COMPAT.md` until `WKFrameInfo`-based evaluation lands.
-  pub async fn evaluate_to_element(&self, js: &str, _frame_id: Option<&str>) -> Result<AnyElement, String> {
+  pub async fn evaluate_to_element(&self, js: &str, _frame_id: Option<&str>) -> Result<AnyElement> {
     let wrap = format!(
       r"(function(){{var e=({js});if(!e)return null;if(!window.__wr)window.__wr=new Map();if(!window.__wr_next)window.__wr_next=1;var id=window.__wr_next++;window.__wr.set(id,e);return id}})()"
     );
@@ -718,7 +719,7 @@ impl WebKitPage {
   ///
   /// Returns an error if the DOM probe fails. The main-frame entry is
   /// always included (never empty).
-  pub async fn get_frame_tree(&self) -> Result<Vec<super::FrameInfo>, String> {
+  pub async fn get_frame_tree(&self) -> Result<Vec<super::FrameInfo>> {
     let main_url = self.url().await?.unwrap_or_default();
     let main_id = format!("main-{}", self.view_id);
     let mut frames = vec![super::FrameInfo {
@@ -768,11 +769,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails.
-  pub async fn evaluate_in_frame(
-    &self,
-    expression: &str,
-    _frame_id: &str,
-  ) -> Result<Option<serde_json::Value>, String> {
+  pub async fn evaluate_in_frame(&self, expression: &str, _frame_id: &str) -> Result<Option<serde_json::Value>> {
     // WebKit: evaluate in main frame only for now.
     // Full iframe support would need WKFrameInfo-based evaluation.
     self.evaluate(expression).await
@@ -783,7 +780,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation to read outerHTML fails.
-  pub async fn content(&self) -> Result<String, String> {
+  pub async fn content(&self) -> Result<String> {
     let r = self.evaluate("document.documentElement.outerHTML").await?;
     Ok(
       r.and_then(|v| v.as_str().map(std::string::ToString::to_string))
@@ -796,7 +793,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the `LoadHtml` IPC call fails.
-  pub async fn set_content(&self, html: &str) -> Result<(), String> {
+  pub async fn set_content(&self, html: &str) -> Result<()> {
     let mut p = Vec::new();
     p.extend_from_slice(&self.vid().to_le_bytes());
     ipc::str_encode(&mut p, html);
@@ -810,7 +807,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the screenshot IPC call fails or no image data is returned.
-  pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>, String> {
+  pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>> {
     // WebKit-specific refusals for knobs WKWebView can't express.
     if opts.clip.is_some() {
       return Err(
@@ -879,7 +876,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the element is not found, screenshot fails, or cropping fails.
-  pub async fn screenshot_element(&self, sel: &str, fmt: ImageFormat) -> Result<Vec<u8>, String> {
+  pub async fn screenshot_element(&self, sel: &str, fmt: ImageFormat) -> Result<Vec<u8>> {
     let esc = sel.replace('\\', "\\\\").replace('\'', "\\'");
     // Get bounding box after scrolling into view (single evaluate)
     let js = format!(
@@ -953,7 +950,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if no paths are provided or any IPC call fails.
-  pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<(), String> {
+  pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<()> {
     if paths.is_empty() {
       return Err("No file paths provided".into());
     }
@@ -984,7 +981,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the accessibility tree IPC call fails or response parsing fails.
-  pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>, String> {
+  pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>> {
     self.accessibility_tree_with_depth(-1).await
   }
 
@@ -994,7 +991,7 @@ impl WebKitPage {
   ///
   /// Returns an error if the IPC call fails, returns an unexpected response type,
   /// or the JSON response cannot be parsed.
-  pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>, String> {
+  pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>> {
     // Use native NSAccessibility tree via IPC (not JavaScript)
     let mut p = Vec::new();
     p.extend_from_slice(&self.vid().to_le_bytes());
@@ -1003,7 +1000,7 @@ impl WebKitPage {
     Self::parse_ax_response(r)
   }
 
-  fn parse_ax_response(r: IpcResponse) -> Result<Vec<AxNodeData>, String> {
+  fn parse_ax_response(r: IpcResponse) -> Result<Vec<AxNodeData>> {
     let json_str = match r {
       IpcResponse::Value(v) => {
         if let Some(s) = v.as_str() {
@@ -1063,7 +1060,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the mouse event IPC call fails.
-  pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
+  pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     self.click_at_opts(x, y, "left", 1).await
   }
 
@@ -1072,7 +1069,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if any of the mouse down/up IPC calls fail.
-  pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
+  pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     let btn: u8 = match button {
       "right" => 1,
       "middle" => 2,
@@ -1095,7 +1092,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if any IPC call fails.
-  pub async fn click_at_with(&self, x: f64, y: f64, args: &super::BackendClickArgs) -> Result<(), String> {
+  pub async fn click_at_with(&self, x: f64, y: f64, args: &super::BackendClickArgs) -> Result<()> {
     let btn: u8 = args.button.as_webkit();
     let steps = args.steps.max(1);
     // Interpolated mousemoves. Conservative start-from-origin (we don't
@@ -1149,7 +1146,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if any IPC call fails.
-  pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::BackendHoverArgs) -> Result<(), String> {
+  pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::BackendHoverArgs) -> Result<()> {
     let steps = args.steps.max(1);
     for i in 1..=steps {
       let t = f64::from(i) / f64::from(steps);
@@ -1193,7 +1190,7 @@ impl WebKitPage {
   /// Returns a typed `unsupported:` error for the caller to surface as
   /// [`crate::error::FerriError::Unsupported`].
   #[allow(clippy::unused_async, clippy::unused_self)]
-  pub async fn tap_at_with(&self, _x: f64, _y: f64, _args: &super::BackendTapArgs) -> Result<(), String> {
+  pub async fn tap_at_with(&self, _x: f64, _y: f64, _args: &super::BackendTapArgs) -> Result<()> {
     Err(
       "unsupported: tap is not available on the WebKit backend — WKWebView has no public touch-input \
          synthesis API (AppKit lacks NSTouchEvent synthesis and the private _sendTouchDownAtLocation: \
@@ -1209,7 +1206,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if any IPC call fails.
-  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
     for md in mods {
       self.key_down(md.key_name()).await?;
     }
@@ -1222,7 +1219,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if any IPC call fails.
-  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
     for md in mods.iter().rev() {
       self.key_up(md.key_name()).await?;
     }
@@ -1237,7 +1234,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the native mouse event or JS evaluation fails.
-  pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
+  pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     let _ = self.send_mouse_event(0, 0, 0, x, y).await;
     let js = format!(
       "document.elementFromPoint({x},{y})?.dispatchEvent(new MouseEvent('mousemove',{{clientX:{x},clientY:{y},bubbles:true,view:window}}))"
@@ -1254,14 +1251,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if any native mouse event or JS evaluation fails.
-  pub async fn move_mouse_smooth(
-    &self,
-    from_x: f64,
-    from_y: f64,
-    to_x: f64,
-    to_y: f64,
-    steps: u32,
-  ) -> Result<(), String> {
+  pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     let steps = steps.max(1);
     for i in 0..=steps {
       let t = f64::from(i) / f64::from(steps);
@@ -1282,7 +1272,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails.
-  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
+  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
     self.evaluate(&format!("window.scrollBy({delta_x},{delta_y})")).await?;
     Ok(())
   }
@@ -1292,7 +1282,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the mouse event IPC call fails.
-  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
     let btn: u8 = match button {
       "right" => 1,
       "middle" => 2,
@@ -1306,7 +1296,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the mouse event IPC call fails.
-  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
     let btn: u8 = match button {
       "right" => 1,
       "middle" => 2,
@@ -1320,7 +1310,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if any of the mouse down/move/up IPC calls fail.
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<(), String> {
+  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
     self.send_mouse_event(1, 0, 1, from.0, from.1).await?; // down
     // Playwright default is `1` — a single `mousemove` at the destination.
     // For steps > 1, interpolate with a cubic ease between press and release.
@@ -1341,7 +1331,7 @@ impl WebKitPage {
   /// Send a native mouse event via IPC.
   /// `mouse_type`: 0=move, 1=down, 2=up
   /// button: 0=left, 1=right, 2=middle
-  async fn send_mouse_event(&self, mouse_type: u8, button: u8, click_count: u32, x: f64, y: f64) -> Result<(), String> {
+  async fn send_mouse_event(&self, mouse_type: u8, button: u8, click_count: u32, x: f64, y: f64) -> Result<()> {
     let mut p = Vec::with_capacity(27);
     p.push(mouse_type);
     p.push(button);
@@ -1358,7 +1348,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the type IPC call fails.
-  pub async fn type_str(&self, text: &str) -> Result<(), String> {
+  pub async fn type_str(&self, text: &str) -> Result<()> {
     let mut p = Vec::new();
     ipc::str_encode(&mut p, text);
     p.extend_from_slice(&self.vid().to_le_bytes());
@@ -1371,7 +1361,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the key press IPC call fails.
-  pub async fn key_down(&self, key: &str) -> Result<(), String> {
+  pub async fn key_down(&self, key: &str) -> Result<()> {
     let mut p = Vec::new();
     ipc::str_encode(&mut p, key);
     p.extend_from_slice(&self.vid().to_le_bytes());
@@ -1379,7 +1369,7 @@ impl WebKitPage {
     Self::ok(r)
   }
 
-  pub async fn key_up(&self, key: &str) -> Result<(), String> {
+  pub async fn key_up(&self, key: &str) -> Result<()> {
     let mut p = Vec::new();
     ipc::str_encode(&mut p, key);
     p.extend_from_slice(&self.vid().to_le_bytes());
@@ -1387,7 +1377,7 @@ impl WebKitPage {
     Self::ok(r)
   }
 
-  pub async fn press_key(&self, key: &str) -> Result<(), String> {
+  pub async fn press_key(&self, key: &str) -> Result<()> {
     let mut p = Vec::new();
     ipc::str_encode(&mut p, key);
     p.extend_from_slice(&self.vid().to_le_bytes());
@@ -1401,7 +1391,7 @@ impl WebKitPage {
   ///
   /// Returns an error if the cookie retrieval IPC call fails or the response
   /// cannot be deserialized.
-  pub async fn get_cookies(&self) -> Result<Vec<CookieData>, String> {
+  pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
     let mut p = Vec::new();
     p.extend_from_slice(&self.vid().to_le_bytes());
     let r = self.client.send(ipc::Op::GetCookies, &p).await?;
@@ -1421,7 +1411,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the set cookie IPC call fails.
-  pub async fn set_cookie(&self, c: CookieData) -> Result<(), String> {
+  pub async fn set_cookie(&self, c: CookieData) -> Result<()> {
     let mut p = Vec::new();
     p.extend_from_slice(&self.vid().to_le_bytes());
     ipc::str_encode(&mut p, &c.name);
@@ -1444,7 +1434,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the delete cookie IPC call fails.
-  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
+  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
     let mut p = Vec::new();
     p.extend_from_slice(&self.vid().to_le_bytes());
     ipc::str_encode(&mut p, name);
@@ -1458,7 +1448,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the clear cookies IPC call fails.
-  pub async fn clear_cookies(&self) -> Result<(), String> {
+  pub async fn clear_cookies(&self) -> Result<()> {
     let mut p = Vec::new();
     p.extend_from_slice(&self.vid().to_le_bytes());
     let r = self.client.send(ipc::Op::ClearCookies, &p).await?;
@@ -1477,7 +1467,7 @@ impl WebKitPage {
   /// Playwright's `wkPage.ts:200` context-options init sequence.
   /// Unsupported fields return a typed error per field, aggregated.
   #[allow(clippy::too_many_lines)]
-  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<(), String> {
+  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     use futures::future::OptionFuture;
 
     let viewport_fut: OptionFuture<_> = opts
@@ -1629,7 +1619,7 @@ impl WebKitPage {
     if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
   }
 
-  pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
+  pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
     // Native resize + scale via IPC -- sets window backingScaleFactor,
     // resizes NSWindow and WKWebView frame. Affects actual rendering.
     #[allow(clippy::cast_precision_loss)]
@@ -1648,7 +1638,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the emulate media IPC call fails.
-  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
+  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
     use crate::options::MediaOverride;
     // Wire format: per-field pair of (action-byte, value-string). The
     // action byte is `0` = unchanged (host leaves this override alone),
@@ -1687,7 +1677,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails.
-  pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
+  pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
     use std::fmt::Write;
     // Intercept fetch/XMLHttpRequest to add custom headers via WKUserScript.
     // This covers JS-initiated requests. Navigation requests need NSURLProtocol.
@@ -1753,7 +1743,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails.
-  pub async fn start_tracing(&self) -> Result<(), String> {
+  pub async fn start_tracing(&self) -> Result<()> {
     // Mark the start time for performance measurement
     self.evaluate("window.__fd_trace_start = performance.now()").await?;
     Ok(())
@@ -1764,7 +1754,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails.
-  pub async fn stop_tracing(&self) -> Result<(), String> {
+  pub async fn stop_tracing(&self) -> Result<()> {
     self.evaluate("window.__fd_trace_end = performance.now()").await?;
     Ok(())
   }
@@ -1774,7 +1764,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation to read performance entries fails.
-  pub async fn metrics(&self) -> Result<Vec<MetricData>, String> {
+  pub async fn metrics(&self) -> Result<Vec<MetricData>> {
     let js = r"(function(){var p=performance.getEntriesByType('navigation')[0];if(!p)return'[]';return JSON.stringify([{name:'DOMContentLoaded',value:p.domContentLoadedEventEnd},{name:'Load',value:p.loadEventEnd},{name:'TTFB',value:p.responseStart}])})()";
     let r = self.evaluate(js).await?;
     let s = r
@@ -1788,7 +1778,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if no element with the given `data-cref` attribute is found.
-  pub async fn resolve_backend_node(&self, _id: i64, ref_id: &str) -> Result<AnyElement, String> {
+  pub async fn resolve_backend_node(&self, _id: i64, ref_id: &str) -> Result<AnyElement> {
     self.find_element(&format!("[data-cref='{ref_id}']")).await
   }
 
@@ -1953,7 +1943,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the `AddInitScript` IPC call fails.
-  pub async fn add_init_script(&self, source: &str) -> Result<String, String> {
+  pub async fn add_init_script(&self, source: &str) -> Result<String> {
     use std::collections::hash_map::DefaultHasher;
     use std::hash::{Hash, Hasher};
     let mut p = Vec::new();
@@ -2002,7 +1992,7 @@ impl WebKitPage {
   ///
   /// Returns an error if the page is closed or the host rejects the
   /// `add_init_script` / `evaluate` calls.
-  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<(), String> {
+  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
     if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
       return Err("Page is closed".into());
     }
@@ -2035,7 +2025,7 @@ impl WebKitPage {
   ///
   /// Returns an error if the page is closed or the deregister
   /// `evaluate` fails.
-  pub async fn remove_exposed_function(&self, name: &str) -> Result<(), String> {
+  pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
     if self.closed.load(std::sync::atomic::Ordering::Relaxed) {
       return Err("Page is closed".into());
     }
@@ -2060,7 +2050,7 @@ impl WebKitPage {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
-  ) -> Result<(), String> {
+  ) -> Result<()> {
     let prefilter_regex_src = matcher.regex_source_for_prefilter();
 
     // Add route to Rust-side list (write lock -- cold path)
@@ -2152,7 +2142,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the route lock is poisoned or the JavaScript cleanup fails.
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<(), String> {
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
     let prefilter_regex_src = matcher.regex_source_for_prefilter();
 
     // Remove from Rust-side list (write lock -- cold path)
@@ -2182,7 +2172,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns the transport error if the IPC call fails.
-  pub async fn release_ref(&self, ref_id: u64) -> Result<(), String> {
+  pub async fn release_ref(&self, ref_id: u64) -> Result<()> {
     let mut payload = Vec::with_capacity(16);
     payload.extend_from_slice(&ref_id.to_le_bytes());
     payload.extend_from_slice(&self.vid().to_le_bytes());
@@ -2204,7 +2194,7 @@ impl WebKitPage {
   /// # Errors
   ///
   /// Returns an error if the close IPC call fails.
-  pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<(), String> {
+  pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {
     if opts.run_before_unload.unwrap_or(false) {
       // Best-effort: dispatch the event so page-registered handlers run.
       // We intentionally ignore the return — page code may legitimately
@@ -2250,7 +2240,7 @@ impl WebKitElement {
     self.ref_id
   }
 
-  async fn eval(&self, js: &str) -> Result<(), String> {
+  async fn eval(&self, js: &str) -> Result<()> {
     let mut p = Vec::new();
     ipc::str_encode(&mut p, js);
     p.extend_from_slice(&self.view_id.to_le_bytes());
@@ -2261,7 +2251,7 @@ impl WebKitElement {
   /// Get the center coordinates of this element after scrolling it into view.
   /// Returns (x, y) or falls back to (0, 0).
   #[allow(clippy::many_single_char_names)]
-  async fn get_center(&self) -> Result<(f64, f64), String> {
+  async fn get_center(&self) -> Result<(f64, f64)> {
     let js = format!(
       "(function(){{var e={el};e.scrollIntoViewIfNeeded?e.scrollIntoViewIfNeeded():e.scrollIntoView({{block:'center'}});var r=e.getBoundingClientRect();return JSON.stringify({{x:r.x+r.width/2,y:r.y+r.height/2}})}})()",
       el = self.el()
@@ -2287,14 +2277,7 @@ impl WebKitElement {
   }
 
   /// Send a native mouse event for this element's view.
-  async fn send_mouse(
-    &self,
-    mouse_type: u8,
-    button: u8,
-    click_count: u32,
-    pos_x: f64,
-    pos_y: f64,
-  ) -> Result<(), String> {
+  async fn send_mouse(&self, mouse_type: u8, button: u8, click_count: u32, pos_x: f64, pos_y: f64) -> Result<()> {
     let mut payload = Vec::with_capacity(27);
     payload.push(mouse_type);
     payload.push(button);
@@ -2315,7 +2298,7 @@ impl WebKitElement {
   /// # Errors
   ///
   /// Returns an error if coordinate extraction or the native click IPC call fails.
-  pub async fn click(&self) -> Result<(), String> {
+  pub async fn click(&self) -> Result<()> {
     let (x, y) = self.get_center().await?;
     if x == 0.0 && y == 0.0 {
       return self.eval(&format!("{}.click()", self.el())).await;
@@ -2330,7 +2313,7 @@ impl WebKitElement {
   /// # Errors
   ///
   /// Returns an error if coordinate extraction or native mouse IPC calls fail.
-  pub async fn dblclick(&self) -> Result<(), String> {
+  pub async fn dblclick(&self) -> Result<()> {
     let (x, y) = self.get_center().await?;
     if x == 0.0 && y == 0.0 {
       return self
@@ -2355,7 +2338,7 @@ impl WebKitElement {
   /// # Errors
   ///
   /// Returns an error if coordinate extraction, native mouse IPC, or JS eval fails.
-  pub async fn hover(&self) -> Result<(), String> {
+  pub async fn hover(&self) -> Result<()> {
     let (x, y) = self.get_center().await?;
     // Native mouse move for CSS :hover state
     let _ = self.send_mouse(0, 0, 0, x, y).await;
@@ -2377,7 +2360,7 @@ impl WebKitElement {
   /// # Errors
   ///
   /// Returns an error if focusing or the native type IPC call fails.
-  pub async fn type_str(&self, text: &str) -> Result<(), String> {
+  pub async fn type_str(&self, text: &str) -> Result<()> {
     // Focus the element first via click (matches CDP element type_str behavior)
     self.click().await?;
     // Use native OP_TYPE for trusted input events
@@ -2396,7 +2379,7 @@ impl WebKitElement {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails.
-  pub async fn call_js_fn(&self, func: &str) -> Result<(), String> {
+  pub async fn call_js_fn(&self, func: &str) -> Result<()> {
     self.eval(&format!("({}).call({})", func, self.el())).await
   }
 
@@ -2405,7 +2388,7 @@ impl WebKitElement {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation or IPC call fails.
-  pub async fn call_js_fn_value(&self, func: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn call_js_fn_value(&self, func: &str) -> Result<Option<serde_json::Value>> {
     let js = format!("JSON.stringify(({}).call({}))", func, self.el());
     let mut p = Vec::new();
     ipc::str_encode(&mut p, &js);
@@ -2424,7 +2407,7 @@ impl WebKitElement {
   /// # Errors
   ///
   /// Returns an error if the JavaScript evaluation fails.
-  pub async fn scroll_into_view(&self) -> Result<(), String> {
+  pub async fn scroll_into_view(&self) -> Result<()> {
     self
       .eval(&format!(
         "{}.scrollIntoView({{behavior:'instant',block:'center'}})",
@@ -2438,7 +2421,7 @@ impl WebKitElement {
   /// # Errors
   ///
   /// Returns an error if the screenshot IPC call fails or no image data is returned.
-  pub async fn screenshot(&self, fmt: ImageFormat) -> Result<Vec<u8>, String> {
+  pub async fn screenshot(&self, fmt: ImageFormat) -> Result<Vec<u8>> {
     // Must match page screenshot payload: u8 format + u8 quality + u64 vid
     let mut p = Vec::new();
     let fmt_byte: u8 = match fmt {

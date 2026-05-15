@@ -23,6 +23,7 @@ pub(crate) fn empty_params() -> serde_json::Value {
 }
 
 use crate::console_message::ConsoleMessage;
+use crate::error::Result;
 use crate::events::EventEmitter;
 use crate::network::Request as NetworkRequest;
 use std::sync::Arc;
@@ -123,7 +124,7 @@ impl SameSite {
 impl std::str::FromStr for SameSite {
   type Err = ();
 
-  fn from_str(s: &str) -> Result<Self, Self::Err> {
+  fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
     match s {
       "Strict" => Ok(Self::Strict),
       "Lax" => Ok(Self::Lax),
@@ -543,7 +544,7 @@ impl AnyBrowser {
   /// # Errors
   ///
   /// Returns an error if the backend fails to enumerate targets or pages.
-  pub async fn pages(&self) -> Result<Vec<AnyPage>, String> {
+  pub async fn pages(&self) -> Result<Vec<AnyPage>> {
     match self {
       Self::CdpPipe(b) => Box::pin(b.pages()).await,
       Self::CdpRaw(b) => Box::pin(b.pages()).await,
@@ -559,7 +560,7 @@ impl AnyBrowser {
   /// # Errors
   ///
   /// Returns an error if context creation fails.
-  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String, String> {
+  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
     match self {
       Self::CdpPipe(b) => b.new_context(proxy).await,
       Self::CdpRaw(b) => b.new_context(proxy).await,
@@ -574,7 +575,7 @@ impl AnyBrowser {
   /// # Errors
   ///
   /// Returns an error if context disposal fails.
-  pub async fn dispose_context(&self, browser_context_id: &str) -> Result<(), String> {
+  pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
     match self {
       Self::CdpPipe(b) => b.dispose_context(browser_context_id).await,
       Self::CdpRaw(b) => b.dispose_context(browser_context_id).await,
@@ -594,7 +595,7 @@ impl AnyBrowser {
     url: &str,
     browser_context_id: Option<&str>,
     viewport: Option<&crate::options::ViewportConfig>,
-  ) -> Result<AnyPage, String> {
+  ) -> Result<AnyPage> {
     match self {
       Self::CdpPipe(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
       Self::CdpRaw(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
@@ -609,7 +610,7 @@ impl AnyBrowser {
   /// # Errors
   ///
   /// Returns an error if the browser process fails to shut down cleanly.
-  pub async fn close(&mut self) -> Result<(), String> {
+  pub async fn close(&mut self) -> Result<()> {
     match self {
       Self::CdpPipe(b) => b.close().await,
       Self::CdpRaw(b) => b.close().await,
@@ -741,7 +742,7 @@ impl AnyPage {
   /// browser only emits `fileChooserOpened` after we ask it to.
   /// Called from `Page::wait_for_file_chooser` and
   /// `Page::on('filechooser', ...)`.
-  pub async fn enable_file_chooser_intercept(&self) -> Result<(), String> {
+  pub async fn enable_file_chooser_intercept(&self) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.enable_file_chooser_intercept().await,
       AnyPage::CdpRaw(p) => p.enable_file_chooser_intercept().await,
@@ -755,7 +756,7 @@ impl AnyPage {
   /// reporting. Lazy parity with Playwright's per-context
   /// `Browser.setDownloadBehavior` (`crBrowser.ts:354`). Called from
   /// `Page::wait_for_download` and `Page::on('download', ...)`.
-  pub async fn enable_download_behavior(&self) -> Result<(), String> {
+  pub async fn enable_download_behavior(&self) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.enable_download_behavior().await,
       AnyPage::CdpRaw(p) => p.enable_download_behavior().await,
@@ -830,7 +831,7 @@ impl AnyPage {
 
   // ── Frames ──
 
-  pub async fn get_frame_tree(&self) -> Result<Vec<FrameInfo>, String> {
+  pub async fn get_frame_tree(&self) -> Result<Vec<FrameInfo>> {
     page_dispatch!(self, get_frame_tree())
   }
 
@@ -857,7 +858,7 @@ impl AnyPage {
     }
   }
 
-  pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
     page_dispatch!(self, evaluate_in_frame(expression, frame_id))
   }
 
@@ -869,43 +870,31 @@ impl AnyPage {
     lifecycle: NavLifecycle,
     timeout_ms: u64,
     referer: Option<&str>,
-  ) -> Result<Option<crate::network::Response>, String> {
+  ) -> Result<Option<crate::network::Response>> {
     page_dispatch!(self, goto(url, lifecycle, timeout_ms, referer))
   }
 
-  pub async fn wait_for_navigation(&self) -> Result<(), String> {
+  pub async fn wait_for_navigation(&self) -> Result<()> {
     page_dispatch!(self, wait_for_navigation())
   }
 
-  pub async fn reload(
-    &self,
-    lifecycle: NavLifecycle,
-    timeout_ms: u64,
-  ) -> Result<Option<crate::network::Response>, String> {
+  pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<crate::network::Response>> {
     page_dispatch!(self, reload(lifecycle, timeout_ms))
   }
 
-  pub async fn go_back(
-    &self,
-    lifecycle: NavLifecycle,
-    timeout_ms: u64,
-  ) -> Result<Option<crate::network::Response>, String> {
+  pub async fn go_back(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<crate::network::Response>> {
     page_dispatch!(self, go_back(lifecycle, timeout_ms))
   }
 
-  pub async fn go_forward(
-    &self,
-    lifecycle: NavLifecycle,
-    timeout_ms: u64,
-  ) -> Result<Option<crate::network::Response>, String> {
+  pub async fn go_forward(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<crate::network::Response>> {
     page_dispatch!(self, go_forward(lifecycle, timeout_ms))
   }
 
-  pub async fn url(&self) -> Result<Option<String>, String> {
+  pub async fn url(&self) -> Result<Option<String>> {
     page_dispatch!(self, url())
   }
 
-  pub async fn title(&self) -> Result<Option<String>, String> {
+  pub async fn title(&self) -> Result<Option<String>> {
     page_dispatch!(self, title())
   }
 
@@ -913,21 +902,21 @@ impl AnyPage {
 
   /// Returns a script that ensures the selector engine is injected.
   /// Mirrored after Playwright's `injectedScript()`.
-  pub async fn injected_script(&self) -> Result<String, String> {
+  pub async fn injected_script(&self) -> Result<String> {
     page_dispatch!(self, injected_script())
   }
 
-  pub async fn ensure_engine_injected(&self) -> Result<(), String> {
+  pub async fn ensure_engine_injected(&self) -> Result<()> {
     page_dispatch!(self, ensure_engine_injected())
   }
 
-  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     page_dispatch!(self, evaluate(expression))
   }
 
   // ── Elements ──
 
-  pub async fn find_element(&self, selector: &str) -> Result<AnyElement, String> {
+  pub async fn find_element(&self, selector: &str) -> Result<AnyElement> {
     page_dispatch!(self, find_element(selector))
   }
 
@@ -941,43 +930,43 @@ impl AnyPage {
   /// non-main `frame_id` values fall back to the main page (DOM access
   /// via `WKFrameInfo` is a separate gap tracked in Section B of
   /// `PLAYWRIGHT_COMPAT.md`).
-  pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement, String> {
+  pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {
     page_dispatch!(self, evaluate_to_element(js, frame_id))
   }
 
   // ── Content ──
 
-  pub async fn content(&self) -> Result<String, String> {
+  pub async fn content(&self) -> Result<String> {
     page_dispatch!(self, content())
   }
 
-  pub async fn set_content(&self, html: &str) -> Result<(), String> {
+  pub async fn set_content(&self, html: &str) -> Result<()> {
     page_dispatch!(self, set_content(html))
   }
 
   // ── Screenshots ──
 
-  pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>, String> {
+  pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>> {
     page_dispatch!(self, screenshot(opts))
   }
 
   // ── Accessibility ──
 
-  pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>, String> {
+  pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>> {
     page_dispatch!(self, accessibility_tree())
   }
 
-  pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>, String> {
+  pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>> {
     page_dispatch!(self, accessibility_tree_with_depth(depth))
   }
 
   // ── Input ──
 
-  pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
+  pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     page_dispatch!(self, click_at(x, y))
   }
 
-  pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
+  pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     page_dispatch!(self, click_at_opts(x, y, button, click_count))
   }
 
@@ -988,14 +977,14 @@ impl AnyPage {
   /// is the caller's responsibility — use [`Self::press_modifiers`] /
   /// [`Self::release_modifiers`] around this call when
   /// `!args.modifiers.is_empty()`.
-  pub async fn click_at_with(&self, x: f64, y: f64, args: &BackendClickArgs) -> Result<(), String> {
+  pub async fn click_at_with(&self, x: f64, y: f64, args: &BackendClickArgs) -> Result<()> {
     page_dispatch!(self, click_at_with(x, y, args))
   }
 
   /// Dispatch a hover (no press/release) at `(x, y)` with `steps`
   /// interpolated `mousemove` events and the caller's modifier bitmask
   /// on each. Modifier keydown/keyup is the caller's responsibility.
-  pub async fn hover_at_with(&self, x: f64, y: f64, args: &BackendHoverArgs) -> Result<(), String> {
+  pub async fn hover_at_with(&self, x: f64, y: f64, args: &BackendHoverArgs) -> Result<()> {
     page_dispatch!(self, hover_at_with(x, y, args))
   }
 
@@ -1005,7 +994,7 @@ impl AnyPage {
   /// `WebKit` do not expose a public touch injection primitive and
   /// return a backend-level error with the `unsupported:` prefix;
   /// callers should surface it as [`crate::error::FerriError::Unsupported`].
-  pub async fn tap_at_with(&self, x: f64, y: f64, args: &BackendTapArgs) -> Result<(), String> {
+  pub async fn tap_at_with(&self, x: f64, y: f64, args: &BackendTapArgs) -> Result<()> {
     page_dispatch!(self, tap_at_with(x, y, args))
   }
 
@@ -1013,89 +1002,82 @@ impl AnyPage {
   /// protocol (CDP `Input.dispatchKeyEvent { type: "keyDown" }`, `BiDi`
   /// `input.performActions`, or `WebKit` host IPC). Idempotent for empty
   /// lists. Callers pair this with [`Self::release_modifiers`].
-  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
     page_dispatch!(self, press_modifiers(mods))
   }
 
   /// Release all modifiers in `mods`. See [`Self::press_modifiers`].
-  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
     page_dispatch!(self, release_modifiers(mods))
   }
 
-  pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
+  pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     page_dispatch!(self, move_mouse(x, y))
   }
 
-  pub async fn move_mouse_smooth(
-    &self,
-    from_x: f64,
-    from_y: f64,
-    to_x: f64,
-    to_y: f64,
-    steps: u32,
-  ) -> Result<(), String> {
+  pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     page_dispatch!(self, move_mouse_smooth(from_x, from_y, to_x, to_y, steps))
   }
 
-  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
+  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
     page_dispatch!(self, mouse_wheel(delta_x, delta_y))
   }
 
-  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
     page_dispatch!(self, mouse_down(x, y, button))
   }
 
-  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
     page_dispatch!(self, mouse_up(x, y, button))
   }
 
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<(), String> {
+  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
     page_dispatch!(self, click_and_drag(from, to, steps))
   }
 
-  pub async fn type_str(&self, text: &str) -> Result<(), String> {
+  pub async fn type_str(&self, text: &str) -> Result<()> {
     page_dispatch!(self, type_str(text))
   }
 
   /// Insert text without emitting keyboard events (only `input` event).
   /// This is Playwright's `keyboard.insertText()` semantic.
-  pub async fn insert_text(&self, text: &str) -> Result<(), String> {
+  pub async fn insert_text(&self, text: &str) -> Result<()> {
     // type_str on all backends uses Input.insertText / equivalent
     self.type_str(text).await
   }
 
-  pub async fn key_down(&self, key: &str) -> Result<(), String> {
+  pub async fn key_down(&self, key: &str) -> Result<()> {
     page_dispatch!(self, key_down(key))
   }
 
-  pub async fn key_up(&self, key: &str) -> Result<(), String> {
+  pub async fn key_up(&self, key: &str) -> Result<()> {
     page_dispatch!(self, key_up(key))
   }
 
-  pub async fn press_key(&self, key: &str) -> Result<(), String> {
+  pub async fn press_key(&self, key: &str) -> Result<()> {
     page_dispatch!(self, press_key(key))
   }
 
   // ── Cookies ──
 
-  pub async fn get_cookies(&self) -> Result<Vec<CookieData>, String> {
+  pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
     page_dispatch!(self, get_cookies())
   }
 
-  pub async fn set_cookie(&self, cookie: CookieData) -> Result<(), String> {
+  pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
     page_dispatch!(self, set_cookie(cookie))
   }
 
-  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
+  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
     page_dispatch!(self, delete_cookie(name, domain))
   }
 
-  pub async fn clear_cookies(&self) -> Result<(), String> {
+  pub async fn clear_cookies(&self) -> Result<()> {
     page_dispatch!(self, clear_cookies())
   }
 
   /// Clear cookies matching the given filters. If no filters, clears all.
-  pub async fn clear_cookies_filtered(&self, options: &ClearCookieOptions) -> Result<(), String> {
+  pub async fn clear_cookies_filtered(&self, options: &ClearCookieOptions) -> Result<()> {
     if options.name.is_none() && options.domain.is_none() && options.path.is_none() {
       return self.clear_cookies().await;
     }
@@ -1121,46 +1103,46 @@ impl AnyPage {
   /// `ContextRef::new_page` and the context-level public setters
   /// (`setOffline`, `setGeolocation`, etc.) mutate the bag and
   /// re-apply.
-  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<(), String> {
+  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     page_dispatch!(self, apply_context_options(opts))
   }
 
-  pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
+  pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
     page_dispatch!(self, emulate_viewport(config))
   }
 
-  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
+  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
     page_dispatch!(self, emulate_media(opts))
   }
 
-  pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<(), String> {
+  pub async fn set_extra_http_headers(&self, headers: &rustc_hash::FxHashMap<String, String>) -> Result<()> {
     page_dispatch!(self, set_extra_http_headers(headers))
   }
 
   /// Reset any context-granted permissions. Backs
   /// [`crate::ContextRef::clear_permissions`] (Playwright
   /// `browserContext.clearPermissions`).
-  pub async fn reset_permissions(&self) -> Result<(), String> {
+  pub async fn reset_permissions(&self) -> Result<()> {
     page_dispatch!(self, reset_permissions())
   }
 
   // ── Tracing ──
 
-  pub async fn start_tracing(&self) -> Result<(), String> {
+  pub async fn start_tracing(&self) -> Result<()> {
     page_dispatch!(self, start_tracing())
   }
 
-  pub async fn stop_tracing(&self) -> Result<(), String> {
+  pub async fn stop_tracing(&self) -> Result<()> {
     page_dispatch!(self, stop_tracing())
   }
 
-  pub async fn metrics(&self) -> Result<Vec<MetricData>, String> {
+  pub async fn metrics(&self) -> Result<Vec<MetricData>> {
     page_dispatch!(self, metrics())
   }
 
   // ── Ref resolution ──
 
-  pub async fn resolve_backend_node(&self, backend_node_id: i64, ref_id: &str) -> Result<AnyElement, String> {
+  pub async fn resolve_backend_node(&self, backend_node_id: i64, ref_id: &str) -> Result<AnyElement> {
     page_dispatch!(self, resolve_backend_node(backend_node_id, ref_id))
   }
 
@@ -1184,13 +1166,13 @@ impl AnyPage {
 
   // ── Element screenshot (by selector) ──
 
-  pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>, String> {
+  pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>> {
     page_dispatch!(self, screenshot_element(selector, format))
   }
 
   // ── PDF generation ──
 
-  pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>, String> {
+  pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
     page_dispatch!(self, pdf(opts))
   }
 
@@ -1201,13 +1183,10 @@ impl AnyPage {
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<
-    (
-      tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>,
-      tokio::sync::oneshot::Sender<()>,
-    ),
-    String,
-  > {
+  ) -> Result<(
+    tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>,
+    tokio::sync::oneshot::Sender<()>,
+  )> {
     match self {
       AnyPage::CdpPipe(p) => p.start_screencast(quality, max_width, max_height).await,
       AnyPage::CdpRaw(p) => p.start_screencast(quality, max_width, max_height).await,
@@ -1225,7 +1204,7 @@ impl AnyPage {
     }
   }
 
-  pub async fn stop_screencast(&self) -> Result<(), String> {
+  pub async fn stop_screencast(&self) -> Result<()> {
     match self {
       AnyPage::CdpPipe(p) => p.stop_screencast().await,
       AnyPage::CdpRaw(p) => p.stop_screencast().await,
@@ -1238,7 +1217,7 @@ impl AnyPage {
 
   // ── File upload ──
 
-  pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<(), String> {
+  pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<()> {
     page_dispatch!(self, set_file_input(selector, paths))
   }
 
@@ -1256,17 +1235,17 @@ impl AnyPage {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
-  ) -> Result<(), String> {
+  ) -> Result<()> {
     page_dispatch!(self, route(matcher, handler))
   }
 
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<(), String> {
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
     page_dispatch!(self, unroute(matcher))
   }
 
   // ── Lifecycle ──
 
-  pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<(), String> {
+  pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {
     page_dispatch!(self, close_page(opts))
   }
 
@@ -1284,21 +1263,21 @@ impl AnyPage {
 
   // ── Exposed Functions ──
 
-  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<(), String> {
+  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
     page_dispatch!(self, expose_function(name, func))
   }
 
-  pub async fn remove_exposed_function(&self, name: &str) -> Result<(), String> {
+  pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
     page_dispatch!(self, remove_exposed_function(name))
   }
 
   // ── Init Scripts ──
 
-  pub async fn add_init_script(&self, source: &str) -> Result<String, String> {
+  pub async fn add_init_script(&self, source: &str) -> Result<String> {
     page_dispatch!(self, add_init_script(source))
   }
 
-  pub async fn remove_init_script(&self, identifier: &str) -> Result<(), String> {
+  pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
     page_dispatch!(self, remove_init_script(identifier))
   }
 
@@ -1351,36 +1330,34 @@ impl AnyPage {
     return_by_value: bool,
   ) -> crate::error::Result<crate::js_handle::EvaluateResult> {
     match self {
-      Self::CdpPipe(p) => p
-        .call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
-        .await
-        .map_err(Into::into),
-      Self::CdpRaw(p) => p
-        .call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
-        .await
-        .map_err(Into::into),
+      Self::CdpPipe(p) => {
+        p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
+          .await
+      },
+      Self::CdpRaw(p) => {
+        p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
+          .await
+      },
       #[cfg(target_os = "macos")]
       Self::WebKit(p) => p
         .call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
         .await
         .map_err(Into::into),
-      Self::Bidi(p) => p
-        .call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
-        .await
-        .map_err(Into::into),
+      Self::Bidi(p) => {
+        p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
+          .await
+      },
     }
   }
 
   pub async fn release_handle(&self, remote: &crate::js_handle::HandleRemote) -> crate::error::Result<()> {
     use crate::js_handle::HandleRemote;
     match (self, remote) {
-      (Self::CdpPipe(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await.map_err(Into::into),
-      (Self::CdpRaw(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await.map_err(Into::into),
+      (Self::CdpPipe(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await,
+      (Self::CdpRaw(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await,
       #[cfg(target_os = "macos")]
       (Self::WebKit(p), HandleRemote::WebKit(ref_id)) => p.release_ref(*ref_id).await.map_err(Into::into),
-      (Self::Bidi(p), HandleRemote::Bidi { shared_id, handle }) => {
-        p.release_handle(shared_id, handle.as_deref()).await.map_err(Into::into)
-      },
+      (Self::Bidi(p), HandleRemote::Bidi { shared_id, handle }) => p.release_handle(shared_id, handle.as_deref()).await,
       // A HandleRemote shape that doesn't match the backend kind is a
       // programming error — mixed-backend handle use.
       (page, remote) => Err(crate::error::FerriError::Backend(format!(
@@ -1449,11 +1426,11 @@ pub async fn element_handle_remote(element: &AnyElement) -> crate::error::Result
   use crate::js_handle::HandleRemote;
   match element {
     AnyElement::CdpPipe(e) => {
-      let obj = e.ensure_object_id().await.map_err(crate::error::FerriError::from)?;
+      let obj = e.ensure_object_id().await?;
       Ok(HandleRemote::Cdp(obj))
     },
     AnyElement::CdpRaw(e) => {
-      let obj = e.ensure_object_id().await.map_err(crate::error::FerriError::from)?;
+      let obj = e.ensure_object_id().await?;
       Ok(HandleRemote::Cdp(obj))
     },
     #[cfg(target_os = "macos")]
@@ -1491,35 +1468,35 @@ macro_rules! element_dispatch {
 }
 
 impl AnyElement {
-  pub async fn click(&self) -> Result<(), String> {
+  pub async fn click(&self) -> Result<()> {
     element_dispatch!(self, click())
   }
 
-  pub async fn dblclick(&self) -> Result<(), String> {
+  pub async fn dblclick(&self) -> Result<()> {
     element_dispatch!(self, dblclick())
   }
 
-  pub async fn hover(&self) -> Result<(), String> {
+  pub async fn hover(&self) -> Result<()> {
     element_dispatch!(self, hover())
   }
 
-  pub async fn type_str(&self, text: &str) -> Result<(), String> {
+  pub async fn type_str(&self, text: &str) -> Result<()> {
     element_dispatch!(self, type_str(text))
   }
 
-  pub async fn call_js_fn(&self, function: &str) -> Result<(), String> {
+  pub async fn call_js_fn(&self, function: &str) -> Result<()> {
     element_dispatch!(self, call_js_fn(function))
   }
 
-  pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>> {
     element_dispatch!(self, call_js_fn_value(function))
   }
 
-  pub async fn scroll_into_view(&self) -> Result<(), String> {
+  pub async fn scroll_into_view(&self) -> Result<()> {
     element_dispatch!(self, scroll_into_view())
   }
 
-  pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>, String> {
+  pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>> {
     element_dispatch!(self, screenshot(format))
   }
 }

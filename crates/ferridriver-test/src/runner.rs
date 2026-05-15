@@ -1165,7 +1165,7 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPla
 /// need to repeat the handshake-await dance.
 pub(crate) async fn launch_with_plan(plan: LaunchPlan) -> Result<Browser, String> {
   let mut state = BrowserState::with_plan(ConnectMode::Launch, plan);
-  Box::pin(state.ensure_browser()).await?;
+  Box::pin(state.ensure_browser()).await.map_err(|e| e.to_string())?;
   Ok(Browser::from_state(state))
 }
 

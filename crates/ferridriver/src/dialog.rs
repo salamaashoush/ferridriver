@@ -87,7 +87,7 @@ pub enum DialogResponse {
 /// `Err(String)` propagates back through [`Dialog::accept`] /
 /// [`Dialog::dismiss`] as [`FerriError::Backend`].
 pub type DialogResponder = Arc<
-  dyn Fn(DialogResponse) -> std::pin::Pin<Box<dyn std::future::Future<Output = std::result::Result<(), String>> + Send>>
+  dyn Fn(DialogResponse) -> std::pin::Pin<Box<dyn std::future::Future<Output = crate::error::Result<()>> + Send>>
     + Send
     + Sync,
 >;
@@ -194,9 +194,7 @@ impl Dialog {
     if let Some(mgr) = &self.inner.manager {
       mgr.dialog_will_close(self);
     }
-    (self.inner.responder)(DialogResponse::Accept { prompt_text })
-      .await
-      .map_err(FerriError::Backend)
+    (self.inner.responder)(DialogResponse::Accept { prompt_text }).await
   }
 
   /// Dismiss the dialog. Playwright: `dialog.dismiss(): Promise<void>`.
@@ -209,9 +207,7 @@ impl Dialog {
     if let Some(mgr) = &self.inner.manager {
       mgr.dialog_will_close(self);
     }
-    (self.inner.responder)(DialogResponse::Dismiss)
-      .await
-      .map_err(FerriError::Backend)
+    (self.inner.responder)(DialogResponse::Dismiss).await
   }
 
   /// Backend-internal: auto-close the dialog when no listener is
