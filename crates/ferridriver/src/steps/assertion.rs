@@ -45,7 +45,7 @@ step!(PageHasText {
         let loc = page.locator("body", None);
         let content = loc.text_content().await?.unwrap_or_default();
         if !content.contains(&text) {
-            return Err(format!("Page does not contain text '{text}'"));
+            return Err(crate::error::FerriError::backend(format!("Page does not contain text '{text}'")));
         }
         Ok(None)
     }
@@ -61,7 +61,7 @@ step!(PageNotHasText {
         let loc = page.locator("body", None);
         let content = loc.text_content().await?.unwrap_or_default();
         if content.contains(&text) {
-            return Err(format!("Page contains text '{text}' but should not"));
+            return Err(crate::error::FerriError::backend(format!("Page contains text '{text}' but should not")));
         }
         Ok(None)
     }
@@ -78,7 +78,7 @@ step!(UrlContains {
         let expected = q(&caps[1]);
         let url = page.url().await.unwrap_or_default();
         if !url.contains(&expected) {
-            return Err(format!("URL '{url}' does not contain '{expected}'"));
+            return Err(crate::error::FerriError::backend(format!("URL '{url}' does not contain '{expected}'")));
         }
         Ok(None)
     }
@@ -93,7 +93,7 @@ step!(UrlExact {
         let expected = q(&caps[1]);
         let url = page.url().await.unwrap_or_default();
         if url != expected {
-            return Err(format!("URL is '{url}', expected '{expected}'"));
+            return Err(crate::error::FerriError::backend(format!("URL is '{url}', expected '{expected}'")));
         }
         Ok(None)
     }
@@ -108,7 +108,7 @@ step!(TitleContains {
         let expected = q(&caps[1]);
         let title = page.title().await.unwrap_or_default();
         if !title.contains(&expected) {
-            return Err(format!("Title '{title}' does not contain '{expected}'"));
+            return Err(crate::error::FerriError::backend(format!("Title '{title}' does not contain '{expected}'")));
         }
         Ok(None)
     }
@@ -123,7 +123,7 @@ step!(TitleExact {
         let expected = q(&caps[1]);
         let title = page.title().await.unwrap_or_default();
         if title != expected {
-            return Err(format!("Title is '{title}', expected '{expected}'"));
+            return Err(crate::error::FerriError::backend(format!("Title is '{title}', expected '{expected}'")));
         }
         Ok(None)
     }
@@ -141,7 +141,7 @@ step!(Visible {
         let loc = page.locator(&sel, None);
         let visible = loc.is_visible().await.unwrap_or(false);
         if !visible {
-            return Err(format!("'{sel}' is not visible"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' is not visible")));
         }
         Ok(None)
     }
@@ -157,7 +157,7 @@ step!(NotVisible {
         let loc = page.locator(&sel, None);
         let hidden = loc.is_hidden().await.unwrap_or(true);
         if !hidden {
-            return Err(format!("'{sel}' is visible but should not be"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' is visible but should not be")));
         }
         Ok(None)
     }
@@ -176,7 +176,7 @@ step!(ContainsText {
         let loc = page.locator(&sel, None);
         let text = loc.inner_text().await.map_err(|_| format!("'{sel}' not found"))?;
         if !text.contains(&expected) {
-            return Err(format!("'{sel}' text is '{text}', does not contain '{expected}'"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' text is '{text}', does not contain '{expected}'")));
         }
         Ok(None)
     }
@@ -193,7 +193,7 @@ step!(NotContainsText {
         let loc = page.locator(&sel, None);
         let text = loc.inner_text().await.map_err(|_| format!("'{sel}' not found"))?;
         if text.contains(&expected) {
-            return Err(format!("'{sel}' text '{text}' contains '{expected}' but should not"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' text '{text}' contains '{expected}' but should not")));
         }
         Ok(None)
     }
@@ -210,7 +210,7 @@ step!(TextExact {
         let loc = page.locator(&sel, None);
         let text = loc.inner_text().await.map_err(|_| format!("'{sel}' not found"))?;
         if text.trim() != expected.trim() {
-            return Err(format!("'{sel}' text is '{text}', expected '{expected}'"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' text is '{text}', expected '{expected}'")));
         }
         Ok(None)
     }
@@ -227,7 +227,7 @@ step!(ValueExact {
         let loc = page.locator(&sel, None);
         let val = loc.input_value().await.map_err(|_| format!("'{sel}' not found"))?;
         if val != expected {
-            return Err(format!("'{sel}' value is '{val}', expected '{expected}'"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' value is '{val}', expected '{expected}'")));
         }
         Ok(None)
     }
@@ -249,7 +249,7 @@ step!(HasAttrValue {
             .map_err(|_| format!("'{sel}' not found"))?
             .unwrap_or_default();
         if val != expected {
-            return Err(format!("'{sel}' attribute '{attr}' is '{val}', expected '{expected}'"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' attribute '{attr}' is '{val}', expected '{expected}'")));
         }
         Ok(None)
     }
@@ -267,7 +267,7 @@ step!(HasAttr {
         let val = loc.get_attribute(&attr).await
             .map_err(|_| format!("'{sel}' not found"))?;
         if val.is_none() {
-            return Err(format!("'{sel}' does not have attribute '{attr}'"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' does not have attribute '{attr}'")));
         }
         Ok(None)
     }
@@ -285,7 +285,7 @@ step!(NotHasAttr {
         let val = loc.get_attribute(&attr).await
             .map_err(|_| format!("'{sel}' not found"))?;
         if val.is_some() {
-            return Err(format!("'{sel}' has attribute '{attr}' but should not"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' has attribute '{attr}' but should not")));
         }
         Ok(None)
     }
@@ -304,7 +304,7 @@ step!(HasClass {
             .map_err(|_| format!("'{sel}' not found"))?
             .unwrap_or_default();
         if !classes.split_whitespace().any(|c| c == cls) {
-            return Err(format!("'{sel}' does not have class '{cls}'"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' does not have class '{cls}'")));
         }
         Ok(None)
     }
@@ -323,7 +323,7 @@ step!(NotHasClass {
             .map_err(|_| format!("'{sel}' not found"))?
             .unwrap_or_default();
         if classes.split_whitespace().any(|c| c == cls) {
-            return Err(format!("'{sel}' has class '{cls}' but should not"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' has class '{cls}' but should not")));
         }
         Ok(None)
     }
@@ -341,7 +341,7 @@ step!(Enabled {
         let loc = page.locator(&sel, None);
         let enabled = loc.is_enabled().await.map_err(|_| format!("'{sel}' not found"))?;
         if !enabled {
-            return Err(format!("'{sel}' is disabled"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' is disabled")));
         }
         Ok(None)
     }
@@ -357,7 +357,7 @@ step!(Disabled {
         let loc = page.locator(&sel, None);
         let disabled = loc.is_disabled().await.map_err(|_| format!("'{sel}' not found"))?;
         if !disabled {
-            return Err(format!("'{sel}' is not disabled"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' is not disabled")));
         }
         Ok(None)
     }
@@ -373,7 +373,7 @@ step!(Checked {
         let loc = page.locator(&sel, None);
         let checked = loc.is_checked().await.map_err(|_| format!("'{sel}' not found"))?;
         if !checked {
-            return Err(format!("'{sel}' is not checked"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' is not checked")));
         }
         Ok(None)
     }
@@ -389,7 +389,7 @@ step!(NotChecked {
         let loc = page.locator(&sel, None);
         let checked = loc.is_checked().await.map_err(|_| format!("'{sel}' not found"))?;
         if checked {
-            return Err(format!("'{sel}' is checked but should not be"));
+            return Err(crate::error::FerriError::backend(format!("'{sel}' is checked but should not be")));
         }
         Ok(None)
     }
@@ -406,7 +406,7 @@ step!(ElementCount {
         let loc = page.locator(&sel, None);
         let actual = loc.count().await?;
         if actual != expected {
-            return Err(format!("Found {actual} '{sel}', expected {expected}"));
+            return Err(crate::error::FerriError::backend(format!("Found {actual} '{sel}', expected {expected}")));
         }
         Ok(None)
     }

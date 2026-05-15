@@ -53,12 +53,14 @@ impl Dialog {
   /// `"Cannot accept dialog which is already handled!"`.
   #[napi]
   pub async fn accept(&self, prompt_text: Option<String>) -> Result<()> {
-    self.inner.accept(prompt_text).await.map_err(napi::Error::from_reason)
+    use crate::error::IntoNapi;
+    self.inner.accept(prompt_text).await.into_napi()
   }
 
   /// Playwright: `dialog.dismiss(): Promise<void>`.
   #[napi]
   pub async fn dismiss(&self) -> Result<()> {
-    self.inner.dismiss().await.map_err(napi::Error::from_reason)
+    use crate::error::IntoNapi;
+    self.inner.dismiss().await.into_napi()
   }
 }

@@ -2975,7 +2975,7 @@ impl BidiNetworkTracker {
         let data = bytes.unwrap_or("");
         base64::engine::general_purpose::STANDARD
           .decode(data)
-          .map_err(|e| crate::error::FerriError::Other(format!("base64 decode: {e}")))
+          .map_err(|e| crate::error::FerriError::Backend(format!("base64 decode: {e}")))
       })
     })
   }

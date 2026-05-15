@@ -89,11 +89,14 @@ async fn wait_for_selector(
   page: &std::sync::Arc<crate::page::Page>,
   selector: &str,
   timeout_ms: u64,
-) -> Result<(), String> {
+) -> crate::error::Result<()> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
   loop {
     if tokio::time::Instant::now() >= deadline {
-      return Err(format!("Timeout ({timeout_ms}ms) waiting for '{selector}'"));
+      return Err(crate::error::FerriError::timeout(
+        format!("waiting for {selector:?}"),
+        timeout_ms,
+      ));
     }
     if super::find(page, selector).await.is_ok() {
       return Ok(());
@@ -102,12 +105,19 @@ async fn wait_for_selector(
   }
 }
 
-async fn wait_for_text(page: &std::sync::Arc<crate::page::Page>, text: &str, timeout_ms: u64) -> Result<(), String> {
+async fn wait_for_text(
+  page: &std::sync::Arc<crate::page::Page>,
+  text: &str,
+  timeout_ms: u64,
+) -> crate::error::Result<()> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
   let loc = page.locator("body", None);
   loop {
     if tokio::time::Instant::now() >= deadline {
-      return Err(format!("Timeout ({timeout_ms}ms) waiting for text '{text}'"));
+      return Err(crate::error::FerriError::timeout(
+        format!("waiting for text {text:?}"),
+        timeout_ms,
+      ));
     }
     if let Ok(Some(content)) = loc.text_content().await {
       if content.contains(text) {

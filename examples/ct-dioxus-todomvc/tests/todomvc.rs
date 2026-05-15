@@ -11,7 +11,7 @@ use ferridriver_test_macros::ferritest;
 
 const APP_URL: &str = "http://127.0.0.1:8787";
 
-async fn add_todo(page: &std::sync::Arc<Page>, text: &str) -> Result<(), String> {
+async fn add_todo(page: &std::sync::Arc<Page>, text: &str) -> ferridriver::Result<()> {
   page.locator("#new-todo", None).fill(text, None).await?;
   page.locator("#new-todo", None).press("Enter", None).await?;
   Ok(())
@@ -25,7 +25,7 @@ async fn add_single_todo(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Buy milk")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   expect(&page.locator(".todo-list li", None)).to_have_count(1).await?;
   expect(&page.locator(".todo-list li label", None))
     .to_have_text("Buy milk")
@@ -38,13 +38,13 @@ async fn add_multiple_todos(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Buy milk")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   add_todo(&page, "Walk the dog")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   add_todo(&page, "Write tests")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   expect(&page.locator(".todo-list li", None)).to_have_count(3).await?;
 }
 
@@ -64,7 +64,7 @@ async fn toggle_todo_complete(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Buy milk")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   page
     .locator(".todo-list li:nth-child(1) .toggle", None)
     .click(None)
@@ -82,10 +82,10 @@ async fn delete_todo(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Delete me")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   add_todo(&page, "Keep me")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   page
     .locator(".todo-list li:nth-child(1) .destroy", None)
     .click(None)
@@ -104,10 +104,10 @@ async fn filter_active(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Active todo")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   add_todo(&page, "Completed todo")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   page
     .locator(".todo-list li:nth-child(2) .toggle", None)
     .click(None)
@@ -127,10 +127,10 @@ async fn clear_completed(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "Keep")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   add_todo(&page, "Remove")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   page
     .locator(".todo-list li:nth-child(2) .toggle", None)
     .click(None)
@@ -150,13 +150,13 @@ async fn toggle_all_completes_all(ctx: TestContext) {
   page.goto(APP_URL, None).await?;
   add_todo(&page, "One")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   add_todo(&page, "Two")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   add_todo(&page, "Three")
     .await
-    .map_err(ferridriver_test::model::TestFailure::from)?;
+    .map_err(|e| ferridriver_test::model::TestFailure::from(e.to_string()))?;
   page.locator("#toggle-all", None).click(None).await?;
   expect(&page.locator("#todo-count", None))
     .to_have_text("0 items left")

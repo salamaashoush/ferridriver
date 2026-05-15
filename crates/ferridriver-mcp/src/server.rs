@@ -451,8 +451,8 @@ impl McpServer {
     self.extensions.downcast_ref::<T>()
   }
 
-  pub fn err(msg: impl Into<String>) -> ErrorData {
-    ErrorData::internal_error(msg.into(), None)
+  pub fn err(msg: impl std::fmt::Display) -> ErrorData {
+    ErrorData::internal_error(msg.to_string(), None)
   }
 
   /// Build the JSON snapshot returned by the `network` MCP resource.

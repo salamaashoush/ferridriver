@@ -16,7 +16,7 @@ use thiserror::Error;
 /// `error.message` on the NAPI surface; NAPI consumers use [`FerriError::name`]
 /// to dispatch on error class. Keep the message wording aligned with Playwright
 /// wherever possible so error-matching tests ported from Playwright keep working.
-#[derive(Debug, Error)]
+#[derive(Debug, Error, Clone)]
 pub enum FerriError {
   /// Operation did not complete within its deadline. Mirrors Playwright's
   /// `TimeoutError` — message format `"Timeout {timeout_ms}ms exceeded"` with
@@ -81,19 +81,15 @@ pub enum FerriError {
   #[error("snapshot error: {0}")]
   Snapshot(String),
 
-  /// Filesystem / non-CDP I/O error.
+  /// Filesystem / non-CDP I/O error. The original `std::io::Error` is
+  /// stringified at conversion time so [`FerriError`] stays `Clone`.
   #[error("io error: {0}")]
-  Io(#[from] std::io::Error),
+  Io(String),
 
-  /// JSON (de)serialization error from the protocol layer.
+  /// JSON (de)serialization error from the protocol layer. Stringified at
+  /// conversion time so [`FerriError`] stays `Clone`.
   #[error("json error: {0}")]
-  Json(#[from] serde_json::Error),
-
-  /// Escape hatch used only while migrating existing `Result<T, String>`
-  /// signatures. Replace every `Other` construction with a typed variant
-  /// before the parity work lands.
-  #[error("{0}")]
-  Other(String),
+  Json(String),
 }
 
 impl FerriError {
@@ -194,22 +190,73 @@ impl FerriError {
   pub fn evaluation(message: impl Into<String>) -> Self {
     Self::Evaluation(message.into())
   }
+
+  /// Builder for [`FerriError::Backend`].
+  #[must_use]
+  pub fn backend(message: impl Into<String>) -> Self {
+    Self::Backend(message.into())
+  }
+
+  /// Builder for [`FerriError::Unsupported`].
+  #[must_use]
+  pub fn unsupported(reason: impl Into<String>) -> Self {
+    Self::Unsupported(reason.into())
+  }
+
+  /// Builder for [`FerriError::Interrupted`].
+  #[must_use]
+  pub fn interrupted(reason: impl Into<String>) -> Self {
+    Self::Interrupted(reason.into())
+  }
+
+  /// Builder for [`FerriError::Navigation`].
+  #[must_use]
+  pub fn navigation(url: impl Into<String>, message: impl Into<String>) -> Self {
+    Self::Navigation {
+      url: url.into(),
+      message: message.into(),
+    }
+  }
+
+  /// Builder for [`FerriError::Snapshot`].
+  #[must_use]
+  pub fn snapshot(message: impl Into<String>) -> Self {
+    Self::Snapshot(message.into())
+  }
+
+  /// True for any [`FerriError::Unsupported`] variant.
+  #[must_use]
+  pub fn is_unsupported(&self) -> bool {
+    matches!(self, Self::Unsupported(_))
+  }
 }
 
-/// Transitional — lets modules still returning `Result<T, String>` interop via
-/// `?`. Every call site should be migrated to a typed variant; this impl will
-/// be removed once task #1 closes out.
+impl From<std::io::Error> for FerriError {
+  fn from(e: std::io::Error) -> Self {
+    Self::Io(e.to_string())
+  }
+}
+
+impl From<serde_json::Error> for FerriError {
+  fn from(e: serde_json::Error) -> Self {
+    Self::Json(e.to_string())
+  }
+}
+
+/// Unrouted string errors (subprocess stderr, third-party libraries surfacing
+/// `String` errors via `?`) land in [`FerriError::Backend`]. This conversion
+/// is permanent — it routes raw strings to a typed variant rather than
+/// keeping an `Other`-shaped escape hatch. Modules that can classify their
+/// errors (timeouts, protocol failures, unsupported features) build the
+/// matching variant explicitly. The `"unsupported:"` prefix is recognised
+/// and upgraded to [`FerriError::Unsupported`] so legacy backend code that
+/// emitted that sentinel keeps producing the right typed variant.
 impl From<String> for FerriError {
   fn from(s: String) -> Self {
-    // Backend-level String errors carrying the `unsupported:` prefix are
-    // upgraded to a typed [`FerriError::Unsupported`] so callers can
-    // `is_unsupported()`-dispatch without string-sniffing. Matches Rule 4
-    // in CLAUDE.md: "return a typed FerriError::Unsupported { reason }
-    // with a clear explanation".
     if let Some(reason) = s.strip_prefix("unsupported:") {
       return Self::Unsupported(reason.trim().to_string());
     }
-    Self::Other(s)
+    Self::Backend(s)
   }
 }
 
@@ -218,17 +265,7 @@ impl From<&str> for FerriError {
     if let Some(reason) = s.strip_prefix("unsupported:") {
       return Self::Unsupported(reason.trim().to_string());
     }
-    Self::Other(s.to_string())
-  }
-}
-
-/// Transitional — lets unmigrated modules (BDD step macros, backend glue)
-/// continue to use `Result<_, String>`. Lossy: the variant is discarded and
-/// only the `Display` output is preserved. This impl will be removed once
-/// every caller uses `FerriError` natively.
-impl From<FerriError> for String {
-  fn from(e: FerriError) -> Self {
-    e.to_string()
+    Self::Backend(s.to_string())
   }
 }
 
@@ -294,11 +331,24 @@ mod tests {
   }
 
   #[test]
-  fn from_string_and_str_bridge_stays_available_for_migration() {
+  fn from_string_routes_to_backend_variant() {
     let from_string: FerriError = String::from("legacy").into();
     let from_str: FerriError = "legacy".into();
-    assert!(matches!(from_string, FerriError::Other(ref s) if s == "legacy"));
-    assert!(matches!(from_str, FerriError::Other(ref s) if s == "legacy"));
+    assert!(matches!(from_string, FerriError::Backend(ref s) if s == "legacy"));
+    assert!(matches!(from_str, FerriError::Backend(ref s) if s == "legacy"));
+  }
+
+  #[test]
+  fn from_string_unsupported_prefix_routes_to_unsupported_variant() {
+    let err: FerriError = String::from("unsupported: pdf on webkit").into();
+    assert!(matches!(err, FerriError::Unsupported(ref s) if s == "pdf on webkit"));
+  }
+
+  #[test]
+  fn ferri_error_is_clone() {
+    let err = FerriError::backend("oops");
+    let cloned = err.clone();
+    assert_eq!(err.to_string(), cloned.to_string());
   }
 
   #[test]

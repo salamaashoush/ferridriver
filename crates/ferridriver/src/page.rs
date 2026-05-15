@@ -1074,7 +1074,7 @@ impl Page {
         let _ = std::fs::create_dir_all(parent);
       }
       std::fs::write(path, &bytes)
-        .map_err(|e| crate::error::FerriError::Other(format!("screenshot write {}: {e}", path.display())))?;
+        .map_err(|e| crate::error::FerriError::Backend(format!("screenshot write {}: {e}", path.display())))?;
     }
     Ok(bytes)
   }
@@ -1374,7 +1374,7 @@ impl Page {
       let mut state = self
         .emulated_media
         .lock()
-        .map_err(|e| crate::error::FerriError::Other(format!("emulated_media lock poisoned: {e}")))?;
+        .map_err(|e| crate::error::FerriError::Backend(format!("emulated_media lock poisoned: {e}")))?;
       if opts.media.is_specified() {
         state.media = opts.media.clone();
       }

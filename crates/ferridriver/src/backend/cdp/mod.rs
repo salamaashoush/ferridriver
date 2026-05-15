@@ -5535,7 +5535,7 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
         if base64_encoded {
           base64::engine::general_purpose::STANDARD
             .decode(body)
-            .map_err(|e| crate::error::FerriError::Other(format!("base64 decode: {e}")))
+            .map_err(|e| crate::error::FerriError::Backend(format!("base64 decode: {e}")))
         } else {
           Ok(body.as_bytes().to_vec())
         }
