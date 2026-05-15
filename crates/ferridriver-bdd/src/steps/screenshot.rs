@@ -10,7 +10,7 @@ async fn take_screenshot(world: &mut BrowserWorld) {
     .page()
     .screenshot(ferridriver::options::ScreenshotOptions::default())
     .await
-    .map_err(|e| StepError::from(format!("screenshot: {e}")))?;
+    .map_err(|e| StepError::wrap("screenshot", e))?;
 }
 
 #[step("I take a screenshot of {string}")]
@@ -20,7 +20,7 @@ async fn take_screenshot_of(world: &mut BrowserWorld, selector: String) {
     .locator(&selector, None)
     .screenshot()
     .await
-    .map_err(|e| StepError::from(format!("screenshot of \"{selector}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("screenshot of \"{selector}\""), e))?;
 }
 
 #[step("I take a snapshot")]
@@ -32,5 +32,5 @@ async fn take_snapshot(world: &mut BrowserWorld) {
       track: None,
     })
     .await
-    .map_err(|e| StepError::from(format!("snapshot: {e}")))?;
+    .map_err(|e| StepError::wrap("snapshot", e))?;
 }

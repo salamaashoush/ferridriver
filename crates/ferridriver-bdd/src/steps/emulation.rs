@@ -18,7 +18,7 @@ async fn apply(
     .page()
     .apply_context_options(&opts)
     .await
-    .map_err(|e| StepError::from(format!("{label}: {e}")))
+    .map_err(|e| StepError::wrap(label, e))
 }
 
 #[given("I set timezone to {string}")]
@@ -57,7 +57,7 @@ async fn emulate_color_scheme(world: &mut BrowserWorld, scheme: String) {
     .page()
     .emulate_media(&opts)
     .await
-    .map_err(|e| StepError::from(format!("emulate color scheme: {e}")))?;
+    .map_err(|e| StepError::wrap("emulate color scheme", e))?;
 }
 
 #[step("I set user agent to {string}")]

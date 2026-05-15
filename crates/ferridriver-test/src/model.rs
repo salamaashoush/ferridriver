@@ -975,13 +975,8 @@ impl TestFailure {
   /// that match on `TimeoutError:` still see the marker after the prefix.
   #[must_use]
   pub fn wrap(prefix: impl std::fmt::Display, err: ferridriver::FerriError) -> Self {
-    let name = err.name();
-    let inner = match name {
-      "TimeoutError" | "TargetClosedError" => format!("{name}: {err}"),
-      _ => err.to_string(),
-    };
     Self {
-      message: format!("{prefix}: {inner}"),
+      message: format!("{prefix}: {}", err.display_named()),
       stack: None,
       diff: None,
       screenshot: None,
@@ -1018,13 +1013,8 @@ impl From<&str> for TestFailure {
 /// uses on the NAPI surface. Unnamed variants pass through verbatim.
 impl From<ferridriver::FerriError> for TestFailure {
   fn from(err: ferridriver::FerriError) -> Self {
-    let name = err.name();
-    let message = match name {
-      "TimeoutError" | "TargetClosedError" => format!("{name}: {err}"),
-      _ => err.to_string(),
-    };
     Self {
-      message,
+      message: err.display_named(),
       stack: None,
       diff: None,
       screenshot: None,

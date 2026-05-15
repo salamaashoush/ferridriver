@@ -11,7 +11,7 @@ async fn press_key(world: &mut BrowserWorld, key: String) {
     .keyboard()
     .press(&key)
     .await
-    .map_err(|e| StepError::from(format!("press \"{key}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("press \"{key}\""), e))?;
 }
 
 #[when("I press {string} on {string}")]
@@ -21,7 +21,7 @@ async fn press_key_on(world: &mut BrowserWorld, key: String, selector: String) {
     .locator(&selector, None)
     .press(&key, None)
     .await
-    .map_err(|e| StepError::from(format!("press \"{key}\" on \"{selector}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("press \"{key}\" on \"{selector}\""), e))?;
 }
 
 #[when("I type {string}")]
@@ -31,7 +31,7 @@ async fn type_text(world: &mut BrowserWorld, text: String) {
     .keyboard()
     .r#type(&text)
     .await
-    .map_err(|e| StepError::from(format!("type \"{text}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("type \"{text}\""), e))?;
 }
 
 #[when("I press {string} with modifier {string}")]
@@ -42,5 +42,5 @@ async fn press_with_modifier(world: &mut BrowserWorld, key: String, modifier: St
     .keyboard()
     .press(&combo)
     .await
-    .map_err(|e| StepError::from(format!("press \"{combo}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("press \"{combo}\""), e))?;
 }

@@ -723,79 +723,116 @@ impl<'de> Visitor<'de> for SerializedValueVisitor {
   }
 }
 
-fn decode_tagged_object(mut bag: serde_json::Map<String, serde_json::Value>) -> Result<SerializedValue, String> {
+/// Typed decode-error for the Playwright tagged-object wire shape. Lives
+/// private to the serializer because the only consumer is a
+/// `serde::Deserialize` Visitor which forwards through
+/// `de::Error::custom(...)` and only needs `Display`. Using a dedicated
+/// enum (rather than `String`) gives matchable variants if a future
+/// caller wants to programmatically distinguish "missing id companion"
+/// from "unknown tag".
+#[derive(Debug, thiserror::Error)]
+enum DecodeError {
+  #[error("invalid tag {tag:?}: {reason}")]
+  InvalidTag {
+    tag: &'static str,
+    reason: std::string::String,
+  },
+  #[error("id companion out of range: {0}")]
+  IdRange(#[from] std::num::TryFromIntError),
+  #[error("nested decode: {0}")]
+  Nested(#[from] serde_json::Error),
+  #[error("no recognised tag in object (keys: {0:?})")]
+  UnknownShape(Vec<std::string::String>),
+}
+
+impl DecodeError {
+  fn tag(tag: &'static str, reason: impl Into<std::string::String>) -> Self {
+    Self::InvalidTag {
+      tag,
+      reason: reason.into(),
+    }
+  }
+}
+
+fn decode_tagged_object(mut bag: serde_json::Map<String, serde_json::Value>) -> Result<SerializedValue, DecodeError> {
   // The tag precedence mirrors Playwright's own deserializer
   // (`ref` > `v` > rich types > `a` / `o` > `h` > typed / array
   // buffer). See
   // `/tmp/playwright/packages/injected/src/utilityScriptSerializers.ts:124`.
   if let Some(v) = bag.remove("ref") {
-    let id = v.as_u64().ok_or_else(|| format!("ref must be a u64, got {v}"))?;
-    return Ok(SerializedValue::Reference(
-      u32::try_from(id).map_err(|e| e.to_string())?,
-    ));
+    let id = v
+      .as_u64()
+      .ok_or_else(|| DecodeError::tag("ref", format!("must be a u64, got {v}")))?;
+    return Ok(SerializedValue::Reference(u32::try_from(id)?));
   }
   if let Some(v) = bag.remove("v") {
-    let special: SpecialValue = serde_json::from_value(v).map_err(|e| e.to_string())?;
+    let special: SpecialValue = serde_json::from_value(v)?;
     return Ok(SerializedValue::Special(special));
   }
   if let Some(v) = bag.remove("d") {
-    let iso = v.as_str().ok_or("d must be string")?.to_string();
+    let iso = v
+      .as_str()
+      .ok_or_else(|| DecodeError::tag("d", "must be string"))?
+      .to_string();
     return Ok(SerializedValue::Date(iso));
   }
   if let Some(v) = bag.remove("u") {
-    let s = v.as_str().ok_or("u must be string")?.to_string();
+    let s = v
+      .as_str()
+      .ok_or_else(|| DecodeError::tag("u", "must be string"))?
+      .to_string();
     return Ok(SerializedValue::Url(s));
   }
   if let Some(v) = bag.remove("bi") {
-    let s = v.as_str().ok_or("bi must be string")?.to_string();
+    let s = v
+      .as_str()
+      .ok_or_else(|| DecodeError::tag("bi", "must be string"))?
+      .to_string();
     return Ok(SerializedValue::BigInt(s));
   }
   if let Some(v) = bag.remove("e") {
-    let e: ErrorValue = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    let e: ErrorValue = serde_json::from_value(v)?;
     return Ok(SerializedValue::Error(e));
   }
   if let Some(v) = bag.remove("r") {
-    let r: RegExpValue = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    let r: RegExpValue = serde_json::from_value(v)?;
     return Ok(SerializedValue::RegExp(r));
   }
   if let Some(v) = bag.remove("a") {
-    let items: Vec<SerializedValue> = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    let items: Vec<SerializedValue> = serde_json::from_value(v)?;
     let id = bag
       .remove("id")
       .and_then(|v| v.as_u64())
-      .ok_or("a must be paired with numeric id")?;
+      .ok_or_else(|| DecodeError::tag("a", "must be paired with numeric id"))?;
     return Ok(SerializedValue::Array {
-      id: u32::try_from(id).map_err(|e| e.to_string())?,
+      id: u32::try_from(id)?,
       items,
     });
   }
   if let Some(v) = bag.remove("o") {
-    let entries: Vec<PropertyEntry> = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    let entries: Vec<PropertyEntry> = serde_json::from_value(v)?;
     let id = bag
       .remove("id")
       .and_then(|v| v.as_u64())
-      .ok_or("o must be paired with numeric id")?;
+      .ok_or_else(|| DecodeError::tag("o", "must be paired with numeric id"))?;
     return Ok(SerializedValue::Object {
-      id: u32::try_from(id).map_err(|e| e.to_string())?,
+      id: u32::try_from(id)?,
       entries,
     });
   }
   if let Some(v) = bag.remove("h") {
-    let idx = v.as_u64().ok_or("h must be u64")?;
-    return Ok(SerializedValue::Handle(u32::try_from(idx).map_err(|e| e.to_string())?));
+    let idx = v.as_u64().ok_or_else(|| DecodeError::tag("h", "must be u64"))?;
+    return Ok(SerializedValue::Handle(u32::try_from(idx)?));
   }
   if let Some(v) = bag.remove("ta") {
-    let ta: TypedArrayValue = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    let ta: TypedArrayValue = serde_json::from_value(v)?;
     return Ok(SerializedValue::TypedArray(ta));
   }
   if let Some(v) = bag.remove("ab") {
-    let ab: ArrayBufferValue = serde_json::from_value(v).map_err(|err| err.to_string())?;
+    let ab: ArrayBufferValue = serde_json::from_value(v)?;
     return Ok(SerializedValue::ArrayBuffer(ab));
   }
-  Err(format!(
-    "SerializedValue: no recognized tag in object (keys: {:?})",
-    bag.keys().collect::<Vec<_>>()
-  ))
+  Err(DecodeError::UnknownShape(bag.keys().cloned().collect()))
 }
 
 // ── SerializationContext ────────────────────────────────────────────────────
@@ -1190,7 +1227,7 @@ mod tests {
   fn rejects_empty_tagged_object() {
     let err = serde_json::from_value::<SerializedValue>(json!({})).unwrap_err();
     assert!(
-      err.to_string().contains("no recognized tag"),
+      err.to_string().contains("no recognised tag"),
       "unexpected error message: {err}"
     );
   }

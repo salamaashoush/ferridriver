@@ -26,7 +26,7 @@ async fn open_new_tab(world: &mut BrowserWorld) {
     .context()
     .new_page()
     .await
-    .map_err(|e| StepError::from(format!("open new tab: {e}")))?;
+    .map_err(|e| StepError::wrap("open new tab", e))?;
 
   // Replace the active page with the newly opened tab.
   world.set_page(page);
@@ -38,7 +38,7 @@ async fn switch_to_tab(world: &mut BrowserWorld, index: i64) {
     .context()
     .pages()
     .await
-    .map_err(|e| StepError::from(format!("list tabs: {e}")))?;
+    .map_err(|e| StepError::wrap("list tabs", e))?;
 
   let idx = index as usize;
   let page = pages
@@ -49,7 +49,7 @@ async fn switch_to_tab(world: &mut BrowserWorld, index: i64) {
   page
     .bring_to_front()
     .await
-    .map_err(|e| StepError::from(format!("bring tab {idx} to front: {e}")))?;
+    .map_err(|e| StepError::wrap(format!("bring tab {idx} to front"), e))?;
 
   world.set_page(page);
 }
@@ -60,14 +60,14 @@ async fn close_current_tab(world: &mut BrowserWorld) {
     .page()
     .close(None)
     .await
-    .map_err(|e| StepError::from(format!("close tab: {e}")))?;
+    .map_err(|e| StepError::wrap("close tab", e))?;
 
   // After closing, switch to the first remaining page if available.
   let pages = world
     .context()
     .pages()
     .await
-    .map_err(|e| StepError::from(format!("list tabs after close: {e}")))?;
+    .map_err(|e| StepError::wrap("list tabs after close", e))?;
 
   if let Some(page) = pages.into_iter().next() {
     world.set_page(page);
@@ -96,5 +96,5 @@ async fn bring_to_front(world: &mut BrowserWorld) {
     .page()
     .bring_to_front()
     .await
-    .map_err(|e| StepError::from(format!("bring tab to front: {e}")))?;
+    .map_err(|e| StepError::wrap("bring tab to front", e))?;
 }

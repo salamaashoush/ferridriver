@@ -97,6 +97,29 @@ impl StepError {
       pending: true,
     }
   }
+
+  /// Wrap a [`ferridriver::FerriError`] with a contextual prefix while
+  /// keeping the Playwright-style class name visible (`TimeoutError:` /
+  /// `TargetClosedError:`). Identical convention to
+  /// [`ferridriver_test::TestFailure::wrap`].
+  #[must_use]
+  pub fn wrap(prefix: impl std::fmt::Display, err: ferridriver::FerriError) -> Self {
+    Self {
+      message: format!("{prefix}: {}", err.display_named()),
+      diff: None,
+      pending: false,
+    }
+  }
+}
+
+impl From<ferridriver::FerriError> for StepError {
+  fn from(err: ferridriver::FerriError) -> Self {
+    Self {
+      message: err.display_named(),
+      diff: None,
+      pending: false,
+    }
+  }
 }
 
 impl fmt::Display for StepError {

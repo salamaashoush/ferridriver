@@ -18,17 +18,9 @@
 
 use ferridriver::FerriError;
 
-const NAMED_PREFIX_VARIANTS: &[&str] = &["TimeoutError", "TargetClosedError"];
-
 #[must_use]
 pub fn to_napi(err: FerriError) -> napi::Error {
-  let name = err.name();
-  let msg = if NAMED_PREFIX_VARIANTS.contains(&name) {
-    format!("{name}: {err}")
-  } else {
-    err.to_string()
-  };
-  napi::Error::from_reason(msg)
+  napi::Error::from_reason(err.display_named())
 }
 
 /// Extension trait to convert `Result<T, FerriError>` into `napi::Result<T>`

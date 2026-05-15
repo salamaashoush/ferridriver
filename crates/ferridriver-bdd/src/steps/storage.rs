@@ -18,7 +18,7 @@ async fn set_local_storage(world: &mut BrowserWorld, key: String, value: String)
       None,
     )
     .await
-    .map_err(|e| StepError::from(format!("set localStorage \"{key}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("set localStorage \"{key}\""), e))?;
 }
 
 #[when("I remove local storage {string}")]
@@ -31,7 +31,7 @@ async fn remove_local_storage(world: &mut BrowserWorld, key: String) {
       None,
     )
     .await
-    .map_err(|e| StepError::from(format!("remove localStorage \"{key}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("remove localStorage \"{key}\""), e))?;
 }
 
 #[step("I clear local storage")]
@@ -44,7 +44,7 @@ async fn clear_local_storage(world: &mut BrowserWorld) {
       None,
     )
     .await
-    .map_err(|e| StepError::from(format!("clear localStorage: {e}")))?;
+    .map_err(|e| StepError::wrap("clear localStorage", e))?;
 }
 
 #[when("I set session storage {string} to {string}")]
@@ -61,7 +61,7 @@ async fn set_session_storage(world: &mut BrowserWorld, key: String, value: Strin
       None,
     )
     .await
-    .map_err(|e| StepError::from(format!("set sessionStorage \"{key}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("set sessionStorage \"{key}\""), e))?;
 }
 
 #[when("I remove session storage {string}")]
@@ -74,7 +74,7 @@ async fn remove_session_storage(world: &mut BrowserWorld, key: String) {
       None,
     )
     .await
-    .map_err(|e| StepError::from(format!("remove sessionStorage \"{key}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("remove sessionStorage \"{key}\""), e))?;
 }
 
 #[step("I clear session storage")]
@@ -87,7 +87,7 @@ async fn clear_session_storage(world: &mut BrowserWorld) {
       None,
     )
     .await
-    .map_err(|e| StepError::from(format!("clear sessionStorage: {e}")))?;
+    .map_err(|e| StepError::wrap("clear sessionStorage", e))?;
 }
 
 // ── Storage State save/load (Playwright auth pattern) ──────────────────
@@ -99,7 +99,7 @@ async fn save_storage_state(world: &mut BrowserWorld, file_path: String) {
     .page()
     .storage_state()
     .await
-    .map_err(|e| StepError::from(format!("save storage state: {e}")))?;
+    .map_err(|e| StepError::wrap("save storage state", e))?;
 
   let json =
     serde_json::to_string_pretty(&state).map_err(|e| StepError::from(format!("serialize storage state: {e}")))?;
@@ -124,5 +124,5 @@ async fn load_storage_state(world: &mut BrowserWorld, file_path: String) {
     .page()
     .set_storage_state(&state)
     .await
-    .map_err(|e| StepError::from(format!("load storage state: {e}")))?;
+    .map_err(|e| StepError::wrap("load storage state", e))?;
 }
