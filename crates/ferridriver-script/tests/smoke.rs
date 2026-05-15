@@ -21,6 +21,7 @@ fn make_engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
     browser_context: None,
     request: None,
     browser: None,
+    plugins: Vec::new(),
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
   (engine, tmp, context)
@@ -40,6 +41,7 @@ fn make_engine_with_artifacts() -> (ScriptEngine, tempfile::TempDir, tempfile::T
     browser_context: None,
     request: None,
     browser: None,
+    plugins: Vec::new(),
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
   (engine, scripts_tmp, artifacts_tmp, context)

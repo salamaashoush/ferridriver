@@ -186,7 +186,8 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   };
   let connect_mode = args.browser.connect_mode();
 
-  let server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp));
+  let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp));
+  server.load_plugins().await;
   match args.transport.transport {
     cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio_with(server).await,
     cli::Transport::Http => ferridriver_mcp::mcp::serve_http_with(server, args.transport.port).await,

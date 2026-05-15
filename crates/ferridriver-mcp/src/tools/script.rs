@@ -153,6 +153,16 @@ impl McpServer {
     ));
 
     let browser_handle = std::sync::Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
+    let plugin_bindings = self
+      .plugins
+      .plugins()
+      .iter()
+      .map(|p| ferridriver_script::PluginBinding {
+        name: p.manifest.name.clone(),
+        source: p.source.clone(),
+        allowed_commands: p.manifest.allow.commands.clone(),
+      })
+      .collect();
     let context = RunContext {
       vars,
       sandbox,
@@ -161,6 +171,7 @@ impl McpServer {
       browser_context: Some(std::sync::Arc::new(ctx_ref)),
       request: Some(request),
       browser: Some(browser_handle),
+      plugins: plugin_bindings,
     };
 
     let result = self.script_engine.run(&source, &args, options, context).await;

@@ -210,6 +210,16 @@ pub trait McpServerConfig: Send + Sync + 'static {
   fn server_instructions(&self) -> &str {
     DEFAULT_INSTRUCTIONS
   }
+
+  /// Paths to plugin files or directories to load at startup.
+  ///
+  /// Each path is either a single `.js`/`.mjs` file or a directory scanned
+  /// shallowly for those extensions. Plugins are loaded once and registered
+  /// as `run_script` bindings; manifests marked `exposeAsTool: true` are
+  /// additionally surfaced in `tools/list`. Default: no plugins.
+  fn plugin_paths(&self) -> Vec<std::path::PathBuf> {
+    Vec::new()
+  }
 }
 
 /// Default server name for MCP `get_info`.
@@ -305,6 +315,9 @@ pub struct McpServer {
   /// Per-session variable stores exposed to scripts via the `vars` global.
   /// Lazily created on first `run_script` for a given session name.
   pub(crate) session_vars: Arc<DashMap<String, Arc<ferridriver_script::InMemoryVars>>>,
+  /// Plugins discovered + parsed at startup. Empty by default; populated
+  /// by [`McpServer::load_plugins`].
+  pub(crate) plugins: crate::plugin::PluginRegistry,
 }
 
 impl std::fmt::Debug for McpServer {
@@ -415,7 +428,177 @@ impl McpServer {
       script_sandbox,
       artifacts_sandbox,
       session_vars: Arc::new(DashMap::new()),
+      plugins: crate::plugin::PluginRegistry::default(),
     }
+  }
+
+  /// Discover and load every plugin configured via [`McpServerConfig::plugin_paths`].
+  ///
+  /// Failed plugins are logged and skipped -- one broken file should not
+  /// prevent the server from starting. Successfully loaded plugins are
+  /// stored in `self.plugins` and become available as `run_script` bindings
+  /// (and, when promoted, as MCP tools) on the next invocation.
+  pub async fn load_plugins(&mut self) {
+    let paths = self.config.plugin_paths();
+    if paths.is_empty() {
+      return;
+    }
+
+    let mut loaded = Vec::new();
+    for root in paths {
+      let files = match crate::plugin::loader::discover(&root) {
+        Ok(v) => v,
+        Err(e) => {
+          tracing::warn!(path = %root.display(), error = %e, "plugin discovery failed; skipping path");
+          continue;
+        },
+      };
+
+      for file in files {
+        match crate::plugin::load_plugin(&file, &self.script_engine).await {
+          Ok(plugin) => {
+            tracing::info!(name = %plugin.manifest.name, path = %plugin.path.display(), "loaded plugin");
+            loaded.push(plugin);
+          },
+          Err(e) => {
+            tracing::warn!(path = %file.display(), error = %e, "plugin load failed; skipping");
+          },
+        }
+      }
+    }
+
+    self.plugins = crate::plugin::PluginRegistry::new(loaded);
+    self.promote_plugins();
+  }
+
+  /// Register a dynamic tool route for each plugin manifest that declares
+  /// `exposeAsTool: true`. The tool's name, description, and `inputSchema`
+  /// come from the manifest. The dispatcher synthesises a one-line script
+  /// that awaits the matching binding (`await plugins['<name>'](args[0])`)
+  /// so the tool path and the `run_script` binding path share one handler.
+  fn promote_plugins(&mut self) {
+    use rmcp::handler::server::router::tool::ToolRoute;
+    use rmcp::model::Tool;
+
+    let promoted: Vec<_> = self
+      .plugins
+      .promoted_tools()
+      .map(|p| {
+        let name = p.manifest.name.clone();
+        let desc = p.manifest.description.clone().unwrap_or_default();
+        let schema_value = p
+          .manifest
+          .input_schema
+          .clone()
+          .unwrap_or_else(|| serde_json::json!({"type":"object","properties":{}}));
+        let schema_obj = match schema_value {
+          serde_json::Value::Object(m) => m,
+          _ => serde_json::Map::new(),
+        };
+        (name, desc, Arc::new(schema_obj))
+      })
+      .collect();
+
+    for (name, desc, schema_obj) in promoted {
+      let tool = Tool::new(name.clone(), desc, schema_obj);
+      let plugin_name = name.clone();
+
+      let route = ToolRoute::<Self>::new_dyn(tool, move |ctx| {
+        let plugin_name = plugin_name.clone();
+        Box::pin(async move {
+          let args_obj = ctx.arguments.clone().unwrap_or_default();
+          let args_value = serde_json::Value::Object(args_obj);
+          ctx.service.invoke_plugin(&plugin_name, args_value).await
+        })
+      });
+      self.tool_router.add_route(route);
+      tracing::info!(name = %name, "promoted plugin to MCP tool");
+    }
+  }
+
+  /// Invoke a plugin by manifest name with the given argument object.
+  /// Backs both the `exposeAsTool` registration and any direct caller
+  /// that wants to dispatch a plugin without writing JS by hand.
+  ///
+  /// `args_obj` is wrapped into a single positional `args[0]` for the
+  /// underlying script run. The plugin's `session` argument (if present)
+  /// is honoured for browser context selection.
+  ///
+  /// # Errors
+  ///
+  /// Returns an [`ErrorData`] if the plugin name is unknown, scripting
+  /// is disabled (no usable script root), the underlying browser
+  /// session cannot be established, or the final result fails to
+  /// serialise.
+  pub async fn invoke_plugin(
+    &self,
+    plugin_name: &str,
+    args_obj: serde_json::Value,
+  ) -> Result<rmcp::model::CallToolResult, ErrorData> {
+    use rmcp::model::{CallToolResult, Content};
+
+    if self.plugins.get(plugin_name).is_none() {
+      return Err(Self::err(format!("unknown plugin: {plugin_name}")));
+    }
+
+    let session = args_obj
+      .get("session")
+      .and_then(|v| v.as_str())
+      .map_or_else(|| "default".into(), str::to_string);
+
+    let Some(sandbox) = self.script_sandbox.clone() else {
+      return Err(Self::err(
+        "scripting is disabled: the configured script_root could not be prepared at server startup.",
+      ));
+    };
+
+    let vars = self.session_vars(&session);
+
+    // Resolve live browser handles -- same path the run_script tool uses.
+    let (page, ctx_ref) = Box::pin(self.page_and_context(&session)).await?;
+    let request = Arc::new(ferridriver::api_request::APIRequestContext::new(
+      ferridriver::api_request::RequestContextOptions::default(),
+    ));
+    let browser_handle = Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
+
+    let plugin_bindings = self
+      .plugins
+      .plugins()
+      .iter()
+      .map(|p| ferridriver_script::PluginBinding {
+        name: p.manifest.name.clone(),
+        source: p.source.clone(),
+        allowed_commands: p.manifest.allow.commands.clone(),
+      })
+      .collect();
+
+    let context = ferridriver_script::RunContext {
+      vars,
+      sandbox,
+      artifacts: self.artifacts_sandbox.clone(),
+      page: Some(page),
+      browser_context: Some(Arc::new(ctx_ref)),
+      request: Some(request),
+      browser: Some(browser_handle),
+      plugins: plugin_bindings,
+    };
+
+    let name_literal = serde_json::to_string(plugin_name).unwrap_or_else(|_| "\"\"".into());
+    let source = format!("return await plugins[{name_literal}](args[0]);");
+    let args = vec![args_obj];
+
+    let result = self
+      .script_engine
+      .run(&source, &args, ferridriver_script::RunOptions::default(), context)
+      .await;
+
+    let json = serde_json::to_string_pretty(&result).map_err(|e| Self::err(format!("serialize result: {e}")))?;
+    let mut contents = vec![Content::text(json)];
+    if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
+      let summary = format!("[{:?}] {} ({}ms)", error.kind, error.message, result.duration_ms);
+      contents.insert(0, Content::text(summary));
+    }
+    Ok(CallToolResult::success(contents))
   }
 
   /// Get-or-create the `InMemoryVars` store for a given session name.
