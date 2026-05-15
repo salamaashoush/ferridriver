@@ -131,7 +131,7 @@ impl super::transport::CdpTransport for PipeTransport {
       .write_tx
       .send(data)
       .await
-      .map_err(|_| "Pipe writer closed".to_string())?;
+      .map_err(|_| FerriError::target_closed(Some("Pipe writer closed".into())))?;
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(result)) => result,
       Ok(Err(_)) => Err(FerriError::Backend(format!("Response channel dropped for {method}"))),
@@ -250,7 +250,7 @@ fn spawn_with_pipes(
       ptr::null_mut(),
     );
     if server_in == INVALID_HANDLE_VALUE {
-      return Err("CreateNamedPipe failed for input pipe".into());
+      return Err(FerriError::backend("CreateNamedPipe failed for input pipe"));
     }
 
     let server_out = CreateNamedPipeW(
@@ -265,7 +265,7 @@ fn spawn_with_pipes(
     );
     if server_out == INVALID_HANDLE_VALUE {
       CloseHandle(server_in);
-      return Err("CreateNamedPipe failed for output pipe".into());
+      return Err(FerriError::backend("CreateNamedPipe failed for output pipe"));
     }
 
     let client_in = CreateFileW(
@@ -280,7 +280,7 @@ fn spawn_with_pipes(
     if client_in == INVALID_HANDLE_VALUE {
       CloseHandle(server_in);
       CloseHandle(server_out);
-      return Err("CreateFile failed for Chrome input pipe".into());
+      return Err(FerriError::backend("CreateFile failed for Chrome input pipe"));
     }
 
     let client_out = CreateFileW(
@@ -296,7 +296,7 @@ fn spawn_with_pipes(
       CloseHandle(server_in);
       CloseHandle(server_out);
       CloseHandle(client_in);
-      return Err("CreateFile failed for Chrome output pipe".into());
+      return Err(FerriError::backend("CreateFile failed for Chrome output pipe"));
     }
 
     command.arg(format!(

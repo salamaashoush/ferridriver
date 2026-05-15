@@ -55,8 +55,8 @@ impl BidiElement {
   /// Call a JS function and parse the evaluate result to a JSON value.
   async fn call_fn_value(&self, func: &str) -> Result<Option<serde_json::Value>> {
     let result = self.call_fn(func).await?;
-    let eval_result: EvaluateResult =
-      serde_json::from_value(result).map_err(|e| format!("BiDi element call_fn parse: {e}"))?;
+    let eval_result: EvaluateResult = serde_json::from_value(result)
+      .map_err(|e| FerriError::protocol("script.callFunction", format!("BiDi element call_fn parse: {e}")))?;
 
     match eval_result {
       EvaluateResult::Success { result } => Ok(result.to_json()),
@@ -74,7 +74,7 @@ impl BidiElement {
         "(el) => { const r = el.getBoundingClientRect(); return {x: r.x, y: r.y, w: r.width, h: r.height}; }",
       )
       .await?
-      .ok_or("Element bounding box returned null")?;
+      .ok_or_else(|| FerriError::protocol("script.callFunction", "Element bounding box returned null"))?;
 
     tracing::debug!(target: "ferridriver::bidi", bbox_json = %result, "BiDi bounding box result");
 
@@ -142,8 +142,8 @@ impl BidiElement {
 
   pub async fn call_js_fn(&self, function: &str) -> Result<()> {
     let result = self.call_fn(function).await?;
-    let eval_result: EvaluateResult =
-      serde_json::from_value(result).map_err(|e| format!("BiDi element call_js_fn parse: {e}"))?;
+    let eval_result: EvaluateResult = serde_json::from_value(result)
+      .map_err(|e| FerriError::protocol("script.callFunction", format!("BiDi element call_js_fn parse: {e}")))?;
 
     match eval_result {
       EvaluateResult::Success { .. } => Ok(()),

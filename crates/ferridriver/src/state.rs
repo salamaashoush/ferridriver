@@ -835,7 +835,10 @@ impl BrowserState {
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut_checked(&key.context)?;
     if ctx.pages.len() <= 1 {
-      return Err("Cannot close the last page in a context".into());
+      return Err(FerriError::invalid_argument(
+        "page",
+        "Cannot close the last page in a context",
+      ));
     }
     if page_idx >= ctx.pages.len() {
       return Err(FerriError::Backend(format!("Page index {page_idx} out of range")));
@@ -1020,17 +1023,17 @@ async fn discover_ws_from_http(http_url: &str) -> Result<String> {
   let url = http_url.trim_end_matches('/');
   let host_port = url
     .strip_prefix("http://")
-    .ok_or_else(|| format!("Expected http:// URL, got {http_url}"))?;
+    .ok_or_else(|| FerriError::invalid_argument("url", format!("Expected http:// URL, got {http_url}")))?;
 
   let stream = tokio::net::TcpStream::connect(host_port)
     .await
-    .map_err(|e| format!("Cannot connect to {host_port}: {e}"))?;
+    .map_err(|e| FerriError::backend(format!("Cannot connect to {host_port}: {e}")))?;
   let (reader, mut writer) = stream.into_split();
   let req = format!("GET /json/version HTTP/1.1\r\nHost: {host_port}\r\nConnection: close\r\n\r\n");
   writer
     .write_all(req.as_bytes())
     .await
-    .map_err(|e| format!("Write: {e}"))?;
+    .map_err(|e| FerriError::backend(format!("Write: {e}")))?;
 
   let mut buf_reader = BufReader::new(reader);
   let mut content_length: usize = 0;
@@ -1039,7 +1042,7 @@ async fn discover_ws_from_http(http_url: &str) -> Result<String> {
     buf_reader
       .read_line(&mut line)
       .await
-      .map_err(|e| format!("Read header: {e}"))?;
+      .map_err(|e| FerriError::backend(format!("Read header: {e}")))?;
     let trimmed = line.trim();
     if trimmed.is_empty() {
       break;
@@ -1056,7 +1059,7 @@ async fn discover_ws_from_http(http_url: &str) -> Result<String> {
   let n = buf_reader
     .read(&mut body)
     .await
-    .map_err(|e| format!("Read body: {e}"))?;
+    .map_err(|e| FerriError::backend(format!("Read body: {e}")))?;
   let body_str = String::from_utf8_lossy(&body[..n]);
 
   let json: serde_json::Value =
@@ -1532,7 +1535,9 @@ pub fn detect_firefox() -> Result<String> {
     }
   }
 
-  Err("Firefox not found. Install with `ferridriver install firefox` or set FIREFOX_PATH.".into())
+  Err(FerriError::backend(
+    "Firefox not found. Install with `ferridriver install firefox` or set FIREFOX_PATH.",
+  ))
 }
 
 /// Search Playwright's cache for an installed Firefox binary.
