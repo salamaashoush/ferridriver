@@ -967,6 +967,28 @@ impl fmt::Display for TestFailure {
 
 impl std::error::Error for TestFailure {}
 
+impl TestFailure {
+  /// Wrap a [`ferridriver::FerriError`] with a contextual prefix while
+  /// preserving the Playwright-style typed class name. The resulting
+  /// message reads `"<prefix>: <Name>: <message>"` for distinguishable
+  /// variants and `"<prefix>: <message>"` for unnamed ones, so consumers
+  /// that match on `TimeoutError:` still see the marker after the prefix.
+  #[must_use]
+  pub fn wrap(prefix: impl std::fmt::Display, err: ferridriver::FerriError) -> Self {
+    let name = err.name();
+    let inner = match name {
+      "TimeoutError" | "TargetClosedError" => format!("{name}: {err}"),
+      _ => err.to_string(),
+    };
+    Self {
+      message: format!("{prefix}: {inner}"),
+      stack: None,
+      diff: None,
+      screenshot: None,
+    }
+  }
+}
+
 /// Legacy bridge: kept so test bodies that hand-build a `String` error
 /// (logging helpers, manual panic messages) keep `?`-propagating through
 /// `TestFailure`. Locator methods now return `Result<T, FerriError>` and
@@ -989,12 +1011,20 @@ impl From<&str> for TestFailure {
 }
 
 /// Enables `?` on any `Result<T, FerriError>` inside test functions after
-/// the migration to structured errors (task #1). Preserves `Display` output;
-/// diff / screenshot are populated by the matcher layer, not here.
+/// the migration to structured errors. Prepends the typed class name for
+/// the variants Playwright distinguishes (`TimeoutError` / `TargetClosedError`)
+/// so the TS bridge can re-hydrate a real class instance from the
+/// `<Name>: <message>` shape — same convention `ferridriver-node::error::to_napi`
+/// uses on the NAPI surface. Unnamed variants pass through verbatim.
 impl From<ferridriver::FerriError> for TestFailure {
   fn from(err: ferridriver::FerriError) -> Self {
+    let name = err.name();
+    let message = match name {
+      "TimeoutError" | "TargetClosedError" => format!("{name}: {err}"),
+      _ => err.to_string(),
+    };
     Self {
-      message: err.to_string(),
+      message,
       stack: None,
       diff: None,
       screenshot: None,
@@ -1036,4 +1066,46 @@ pub struct TestFixtures {
   pub bdd_args: Option<Vec<serde_json::Value>>,
   pub bdd_data_table: Option<Vec<Vec<String>>>,
   pub bdd_doc_string: Option<String>,
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use ferridriver::FerriError;
+
+  #[test]
+  fn testfailure_from_timeout_keeps_class_prefix() {
+    let tf = TestFailure::from(FerriError::timeout("navigating", 30_000));
+    assert_eq!(tf.message, "TimeoutError: Timeout 30000ms exceeded while navigating");
+  }
+
+  #[test]
+  fn testfailure_from_target_closed_keeps_class_prefix() {
+    let tf = TestFailure::from(FerriError::target_closed(Some("crashed".into())));
+    assert_eq!(
+      tf.message,
+      "TargetClosedError: Target page, context or browser has been closed: crashed"
+    );
+  }
+
+  #[test]
+  fn testfailure_from_backend_has_no_prefix() {
+    let tf = TestFailure::from(FerriError::backend("launch failed"));
+    assert_eq!(tf.message, "backend error: launch failed");
+  }
+
+  #[test]
+  fn testfailure_wrap_preserves_timeout_class_after_prefix() {
+    let tf = TestFailure::wrap("fixture 'browser' failed", FerriError::timeout("launch", 30_000));
+    assert_eq!(
+      tf.message,
+      "fixture 'browser' failed: TimeoutError: Timeout 30000ms exceeded while launch"
+    );
+  }
+
+  #[test]
+  fn testfailure_wrap_unnamed_keeps_message_only() {
+    let tf = TestFailure::wrap("fixture 'page' failed", FerriError::backend("oops"));
+    assert_eq!(tf.message, "fixture 'page' failed: backend error: oops");
+  }
 }

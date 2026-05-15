@@ -1206,7 +1206,7 @@ impl Worker {
               duration,
               attempt,
               max_attempts,
-              error: Some(TestFailure::from(format!("failed to create page: {e}"))),
+              error: Some(TestFailure::wrap("failed to create page", e)),
               attachments: Vec::new(),
               steps: Vec::new(),
               stdout: String::new(),

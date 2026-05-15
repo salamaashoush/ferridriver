@@ -1018,7 +1018,7 @@ impl WebKitPage {
       IpcResponse::Error(e) => return Err(e),
       _ => return Err("unexpected response".into()),
     };
-    let raw: Vec<serde_json::Value> = serde_json::from_str(&json_str).map_err(|e| format!("{e}"))?;
+    let raw: Vec<serde_json::Value> = serde_json::from_str(&json_str)?;
     Ok(
       raw
         .iter()
