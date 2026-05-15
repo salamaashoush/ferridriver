@@ -1459,6 +1459,12 @@ pub fn detect_firefox() -> Result<String, String> {
 
   #[cfg(target_os = "linux")]
   {
+    // Skip snap-wrapped Firefox builds: Ubuntu 24.04+ ships a snap as
+    // /usr/bin/firefox (and the explicit /snap/bin/firefox). Snap's
+    // confinement blocks the WebDriver BiDi remote-debugging port and the
+    // shim never prints the WebSocket URL on stderr, so detection hangs
+    // until the 15s discovery timeout. Treat snap wrappers as
+    // "not installed" so callers fall back to ferridriver's own download.
     let paths = [
       "/usr/bin/firefox",
       "/usr/bin/firefox-esr",
@@ -1467,9 +1473,17 @@ pub fn detect_firefox() -> Result<String, String> {
       "/usr/lib64/firefox/firefox",
     ];
     for path in &paths {
-      if std::path::Path::new(path).exists() {
-        return Ok(path.to_string());
+      let p = std::path::Path::new(path);
+      if !p.exists() {
+        continue;
       }
+      let resolved = std::fs::canonicalize(p)
+        .map(|c| c.to_string_lossy().to_string())
+        .unwrap_or_else(|_| path.to_string());
+      if resolved.contains("/snap/") {
+        continue;
+      }
+      return Ok(path.to_string());
     }
   }
 
