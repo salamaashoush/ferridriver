@@ -132,12 +132,12 @@ impl Reporter for CucumberJsonReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     if let Some(parent) = self.output_path.parent() {
       let _ = std::fs::create_dir_all(parent);
     }
-    let json = serde_json::to_string_pretty(&self.features).map_err(|e| format!("JSON serialize: {e}"))?;
-    std::fs::write(&self.output_path, json).map_err(|e| format!("write {}: {e}", self.output_path.display()))?;
+    let json = serde_json::to_string_pretty(&self.features)?;
+    std::fs::write(&self.output_path, json)?;
     Ok(())
   }
 }

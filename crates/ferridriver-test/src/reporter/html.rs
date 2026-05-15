@@ -124,7 +124,7 @@ impl Reporter for HtmlReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     let report = HtmlReport {
       tests: std::mem::take(&mut self.tests),
       total: self.total,
@@ -135,13 +135,13 @@ impl Reporter for HtmlReporter {
       duration_ms: self.duration.as_millis() as u64,
     };
 
-    let json = serde_json::to_string(&report).map_err(|e| format!("JSON serialize: {e}"))?;
+    let json = serde_json::to_string(&report)?;
     let html = HTML_TEMPLATE.replace("/*REPORT_DATA*/", &json);
 
     if let Some(parent) = self.output_path.parent() {
-      std::fs::create_dir_all(parent).map_err(|e| format!("create dir: {e}"))?;
+      std::fs::create_dir_all(parent)?;
     }
-    std::fs::write(&self.output_path, html).map_err(|e| format!("write HTML report: {e}"))?;
+    std::fs::write(&self.output_path, html)?;
 
     tracing::info!("HTML report: {}", self.output_path.display());
     Ok(())

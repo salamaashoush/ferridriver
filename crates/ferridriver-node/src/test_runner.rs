@@ -1553,7 +1553,7 @@ impl ferridriver_test::reporter::Reporter for ResultCollectorReporter {
     }
   }
 
-  async fn finalize(&mut self) -> std::result::Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     Ok(())
   }
 }

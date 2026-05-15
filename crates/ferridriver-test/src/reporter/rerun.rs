@@ -29,7 +29,7 @@ impl Reporter for RerunReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     if self.failed.is_empty() {
       return Ok(());
     }
@@ -42,8 +42,7 @@ impl Reporter for RerunReporter {
     if let Some(parent) = self.output_path.parent() {
       std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&self.output_path, content)
-      .map_err(|e| format!("cannot write {}: {e}", self.output_path.display()))?;
+    std::fs::write(&self.output_path, content)?;
 
     tracing::info!(
       "Rerun file written to {} ({} failed)",

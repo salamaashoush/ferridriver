@@ -14,7 +14,7 @@ pub struct EmptyReporter;
 impl Reporter for EmptyReporter {
   async fn on_event(&mut self, _event: &ReporterEvent) {}
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     Ok(())
   }
 }

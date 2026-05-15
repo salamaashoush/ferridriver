@@ -85,7 +85,7 @@ pub trait Reporter: Send + Sync {
   async fn on_event(&mut self, event: &ReporterEvent);
 
   /// Called after the run to finalize output (write files, close streams).
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     Ok(())
   }
 }

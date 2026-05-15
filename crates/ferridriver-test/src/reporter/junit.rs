@@ -36,7 +36,7 @@ impl Reporter for JUnitReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     use std::fmt::Write;
 
     let failures = self
@@ -152,7 +152,7 @@ impl Reporter for JUnitReporter {
     if let Some(parent) = self.output_path.parent() {
       std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&self.output_path, xml).map_err(|e| format!("cannot write {}: {e}", self.output_path.display()))?;
+    std::fs::write(&self.output_path, xml)?;
 
     tracing::info!("JUnit report written to {}", self.output_path.display());
     Ok(())

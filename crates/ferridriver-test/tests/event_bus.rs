@@ -167,7 +167,7 @@ impl ferridriver_test::reporter::Reporter for CollectorReporter {
     self.events.lock().await.push(tag.to_string());
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     self.events.lock().await.push("Finalized".to_string());
     Ok(())
   }
