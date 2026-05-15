@@ -1864,8 +1864,7 @@ impl Page {
     async move {
       events
         .wait_for(|e| matches!(e, PageEvent::Load | PageEvent::DomContentLoaded), timeout)
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
       Ok(())
     }
   }
@@ -1889,8 +1888,7 @@ impl Page {
           move |e| matches!(e, PageEvent::Response(r) if r.url().contains(&pattern)),
           timeout,
         )
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
       match event {
         PageEvent::Response(r) => Ok(r),
         _ => Err("Unexpected event type".into()),
@@ -1917,8 +1915,7 @@ impl Page {
           move |e| matches!(e, PageEvent::Request(r) if r.url().contains(&pattern)),
           timeout,
         )
-        .await
-        .map_err(|e| e.to_string())?;
+        .await?;
       match event {
         PageEvent::Request(r) => Ok(r),
         _ => Err("Unexpected event type".into()),
@@ -1956,8 +1953,7 @@ impl Page {
         move |e| matches!(e, PageEvent::Request(r) if matcher.matches(r.url())),
         timeout_ms.unwrap_or(self.default_timeout()),
       )
-      .await
-      .map_err(|e| e.to_string())?;
+      .await?;
     match event {
       PageEvent::Request(r) => Ok(r),
       _ => Err("Unexpected event type".into()),
@@ -1981,8 +1977,7 @@ impl Page {
         move |e| matches!(e, PageEvent::Response(r) if matcher.matches(r.url())),
         timeout_ms.unwrap_or(self.default_timeout()),
       )
-      .await
-      .map_err(|e| e.to_string())?;
+      .await?;
     match event {
       PageEvent::Response(r) => Ok(r),
       _ => Err("Unexpected event type".into()),
