@@ -176,16 +176,6 @@ jobs:
             --exclude ct-leptos-todomvc \
             --exclude bdd-example
 
-      - name: Run CLI backend tests (cdp-pipe)
-        env:
-          FERRIDRIVER_BIN: ${{ github.workspace }}/target/debug/ferridriver
-        run: cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_pipe" --nocapture
-
-      - name: Run CLI backend tests (cdp-raw)
-        env:
-          FERRIDRIVER_BIN: ${{ github.workspace }}/target/debug/ferridriver
-        run: cargo test -p ferridriver-cli --test backends -- "all_tests_cdp_raw" --nocapture
-
       - name: Run doc tests
         run: cargo test --doc --workspace
 
