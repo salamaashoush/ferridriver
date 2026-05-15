@@ -180,17 +180,25 @@ for (const backend of BACKENDS) {
     });
 
     it("WebSocket frameSent / frameReceived round-trip", async () => {
-      await page.goto("about:blank", null);
+      // Navigate to a real http origin first. Chromium 100+ enforces
+      // PrivateNetworkAccess: connections from opaque-origin pages
+      // (about:blank, data:) to loopback hang the WS handshake under
+      // CI sandboxing even with the feature disabled at startup.
+      // Sharing the test http origin satisfies the same-origin path.
+      await page.goto(`${baseUrl}/landed`, null);
       const wsPromise = page.waitForEvent("websocket", 10_000);
       await page.evaluate(
         `window.__ws = new WebSocket(${JSON.stringify(wsUrl)});
-         window.__opened = new Promise((res) => { window.__ws.onopen = () => res(); });`
+         window.__opened = new Promise((res) => { window.__ws.onopen = () => res(); });
+         null`
       );
       const ws = (await wsPromise) as any;
       expect(typeof ws.url).toBe("function");
       expect(ws.url()).toContain("ws://");
       const recvPromise = ws.waitForEvent("framereceived", 10_000);
-      await page.evaluate("window.__opened.then(() => window.__ws.send('hello-ws'))");
+      await page.evaluate(
+        "window.__opened.then(() => window.__ws.send('hello-ws')); null"
+      );
       const frame = (await recvPromise) as { event: string; payload: string | null };
       expect(frame.event).toBe("framereceived");
       expect(frame.payload).toBe("hello-ws");
