@@ -1935,7 +1935,10 @@ impl<T: CdpWrap> CdpPage<T> {
       .collect();
     if !child_indices.is_empty() {
       let frame_ids: Vec<String> = child_indices.iter().map(|&i| frames[i].frame_id.clone()).collect();
-      let futs: Vec<_> = frame_ids.iter().map(|fid| self.evaluate_in_frame("window.name", fid)).collect();
+      let futs: Vec<_> = frame_ids
+        .iter()
+        .map(|fid| self.evaluate_in_frame("window.name", fid))
+        .collect();
       let results = futures::future::join_all(futs).await;
       for (idx, result) in child_indices.into_iter().zip(results) {
         if let Ok(Some(val)) = result {
