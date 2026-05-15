@@ -1343,10 +1343,10 @@ impl AnyPage {
           .await
       },
       #[cfg(target_os = "macos")]
-      Self::WebKit(p) => p
-        .call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
-        .await
-        .map_err(Into::into),
+      Self::WebKit(p) => {
+        p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
+          .await
+      },
       Self::Bidi(p) => {
         p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
           .await
@@ -1360,7 +1360,7 @@ impl AnyPage {
       (Self::CdpPipe(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await,
       (Self::CdpRaw(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await,
       #[cfg(target_os = "macos")]
-      (Self::WebKit(p), HandleRemote::WebKit(ref_id)) => p.release_ref(*ref_id).await.map_err(Into::into),
+      (Self::WebKit(p), HandleRemote::WebKit(ref_id)) => p.release_ref(*ref_id).await,
       (Self::Bidi(p), HandleRemote::Bidi { shared_id, handle }) => p.release_handle(shared_id, handle.as_deref()).await,
       // A HandleRemote shape that doesn't match the backend kind is a
       // programming error — mixed-backend handle use.
