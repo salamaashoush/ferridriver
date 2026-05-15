@@ -24,12 +24,6 @@ use crate::model::{
 };
 use crate::reporter::{EventBus, ReporterEvent};
 
-/// Bridge from the core's typed [`FerriError`] to the runner's legacy String
-/// error channel. Removed when tasks migrate the runner.
-fn ferri_err_to_string(e: ferridriver::FerriError) -> String {
-  e.to_string()
-}
-
 #[derive(Clone)]
 struct EffectiveContextConfig {
   context: ContextConfig,
@@ -45,7 +39,7 @@ enum TestBrowserState {
     ctx: Arc<ferridriver::ContextRef>,
     page: Arc<ferridriver::Page>,
   },
-  Failed(String),
+  Failed(ferridriver::FerriError),
 }
 
 struct TestBrowserResources {
@@ -55,11 +49,12 @@ struct TestBrowserResources {
   state: Mutex<TestBrowserState>,
 }
 
-fn is_retryable_bidi_page_error(err: &str) -> bool {
-  err.contains("DiscardedBrowsingContextError")
-    || err.contains("BrowsingContext does no longer exist")
-    || err.contains("BiDi error 'no such frame'")
-    || err.contains("BiDi error 'no such window'")
+fn is_retryable_bidi_page_error(err: &ferridriver::FerriError) -> bool {
+  let s = err.to_string();
+  s.contains("DiscardedBrowsingContextError")
+    || s.contains("BrowsingContext does no longer exist")
+    || s.contains("BiDi error 'no such frame'")
+    || s.contains("BiDi error 'no such window'")
 }
 
 async fn ensure_page_alive(page: &Arc<ferridriver::Page>) -> ferridriver::Result<()> {
@@ -86,10 +81,10 @@ fn needs_alive_check(backend: ferridriver::backend::BackendKind) -> bool {
 async fn create_ready_page(
   ctx: &ferridriver::ContextRef,
   backend: ferridriver::backend::BackendKind,
-) -> Result<Arc<ferridriver::Page>, String> {
-  let page = ctx.new_page().await.map_err(ferri_err_to_string)?;
+) -> ferridriver::error::Result<Arc<ferridriver::Page>> {
+  let page = ctx.new_page().await?;
   if needs_alive_check(backend) {
-    ensure_page_alive(&page).await.map_err(|e| e.to_string())?;
+    ensure_page_alive(&page).await?;
   }
   Ok(page)
 }
@@ -108,7 +103,7 @@ impl TestBrowserResources {
     }
   }
 
-  async fn context(&self) -> Result<Arc<ferridriver::ContextRef>, String> {
+  async fn context(&self) -> ferridriver::error::Result<Arc<ferridriver::ContextRef>> {
     let mut state = self.state.lock().await;
     match &mut *state {
       TestBrowserState::Context(ctx) => Ok(Arc::clone(ctx)),
@@ -123,7 +118,7 @@ impl TestBrowserResources {
     }
   }
 
-  async fn page(&self) -> Result<Arc<ferridriver::Page>, String> {
+  async fn page(&self) -> ferridriver::error::Result<Arc<ferridriver::Page>> {
     let mut state = self.state.lock().await;
     match &mut *state {
       TestBrowserState::Page { page, .. } => Ok(Arc::clone(page)),
@@ -364,7 +359,7 @@ async fn apply_page_config(
   effective: &EffectiveContextConfig,
   output_dir: &std::path::Path,
   backend_kind: ferridriver::backend::BackendKind,
-) -> Result<(), String> {
+) -> ferridriver::error::Result<()> {
   let ctx_config = &effective.context;
   let mut opts = ferridriver::options::BrowserContextOptions::default();
   // WebKit (stock WKWebView) rejects several context-options fields
@@ -486,7 +481,7 @@ async fn apply_page_config(
     }
   }
 
-  page.apply_context_options(&opts).await.map_err(|e| e.to_string())
+  page.apply_context_options(&opts).await
 }
 
 /// Worker-scope `browser` fixture backed by `BrowserHandle`. Added to the

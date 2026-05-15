@@ -104,7 +104,8 @@ impl DevServer {
 ///
 /// Returns an error if the command fails to spawn, the URL is not found
 /// within the timeout, or the process exits early.
-pub async fn start(config: &DevServerConfig) -> Result<DevServer, String> {
+pub async fn start(config: &DevServerConfig) -> ferridriver::error::Result<DevServer> {
+  use ferridriver::FerriError;
   let mut child = tokio::process::Command::new(&config.cmd)
     .args(&config.args)
     .current_dir(&config.cwd)
@@ -112,11 +113,11 @@ pub async fn start(config: &DevServerConfig) -> Result<DevServer, String> {
     .stderr(Stdio::piped())
     .spawn()
     .map_err(|e| {
-      format!(
+      FerriError::backend(format!(
         "failed to spawn `{}` — is it installed? ({e})\nInstall: {}",
         config.cmd,
         install_hint(&config.cmd),
-      )
+      ))
     })?;
 
   let stdout = child.stdout.take();
@@ -136,7 +137,8 @@ async fn discover_url(
   stdout: Option<tokio::process::ChildStdout>,
   stderr: Option<tokio::process::ChildStderr>,
   timeout_secs: u64,
-) -> Result<String, String> {
+) -> ferridriver::error::Result<String> {
+  use ferridriver::FerriError;
   let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
 
   if let Some(out) = stdout {
@@ -165,10 +167,10 @@ async fn discover_url(
     let line = tokio::select! {
       line = rx.recv() => match line {
         Some(l) => l,
-        None => return Err("dev server exited without providing a URL".into()),
+        None => return Err(FerriError::backend("dev server exited without providing a URL")),
       },
       () = tokio::time::sleep_until(deadline) => {
-        return Err(format!("timeout ({timeout_secs}s) waiting for dev server URL"));
+        return Err(FerriError::timeout("waiting for dev server URL", timeout_secs * 1000));
       }
     };
 

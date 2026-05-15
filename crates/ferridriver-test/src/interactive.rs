@@ -41,9 +41,11 @@ impl KeyHandler {
   /// # Errors
   ///
   /// Returns an error if the terminal doesn't support raw mode (non-TTY).
-  pub fn new() -> Result<Self, String> {
+  pub fn new() -> ferridriver::error::Result<Self> {
+    use ferridriver::FerriError;
     // Verify TTY support by briefly enabling/disabling raw mode.
-    crossterm::terminal::enable_raw_mode().map_err(|e| format!("raw mode not supported: {e}"))?;
+    crossterm::terminal::enable_raw_mode()
+      .map_err(|e| FerriError::unsupported(format!("raw mode not supported: {e}")))?;
     let _ = crossterm::terminal::disable_raw_mode();
 
     let (tx, rx) = async_channel::bounded(16);
@@ -53,7 +55,7 @@ impl KeyHandler {
     let handle = std::thread::Builder::new()
       .name("ferridriver-keyhandler".into())
       .spawn(move || key_poll_loop(&tx, &active_clone))
-      .map_err(|e| format!("spawn key handler: {e}"))?;
+      .map_err(|e| FerriError::backend(format!("spawn key handler: {e}")))?;
 
     Ok(Self {
       rx,

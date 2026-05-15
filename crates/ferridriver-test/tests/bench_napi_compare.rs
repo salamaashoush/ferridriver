@@ -45,9 +45,9 @@ fn data_url(html: &str) -> String {
   out
 }
 
-fn fail(msg: impl Into<String>) -> TestFailure {
+fn fail<T: std::fmt::Display>(msg: T) -> TestFailure {
   TestFailure {
-    message: msg.into(),
+    message: msg.to_string(),
     stack: None,
     diff: None,
     screenshot: None,

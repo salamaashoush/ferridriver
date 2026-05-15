@@ -108,22 +108,22 @@ impl TestServer {
   /// # Errors
   ///
   /// Returns an error if the server fails to bind.
-  pub async fn start(assets_dir: impl Into<PathBuf>) -> Result<Self, String> {
+  pub async fn start(assets_dir: impl Into<PathBuf>) -> ferridriver::error::Result<Self> {
     Self::start_with_options(assets_dir.into(), 0, false).await
   }
 
   /// Start with SPA fallback: unmatched routes serve `index.html`.
-  pub async fn start_spa(assets_dir: impl Into<PathBuf>) -> Result<Self, String> {
+  pub async fn start_spa(assets_dir: impl Into<PathBuf>) -> ferridriver::error::Result<Self> {
     Self::start_with_options(assets_dir.into(), 0, true).await
   }
 
   /// Start from a `WebServerConfig`.
-  pub async fn from_config(config: &crate::config::WebServerConfig) -> Result<Self, String> {
+  pub async fn from_config(config: &crate::config::WebServerConfig) -> ferridriver::error::Result<Self> {
     let dir = config.static_dir.as_deref().unwrap_or(".");
     Self::start_with_options(PathBuf::from(dir), config.port, config.spa).await
   }
 
-  async fn start_with_options(assets_dir: PathBuf, port: u16, spa: bool) -> Result<Self, String> {
+  async fn start_with_options(assets_dir: PathBuf, port: u16, spa: bool) -> ferridriver::error::Result<Self> {
     let state = Arc::new(ServerState {
       routes: RwLock::new(HashMap::new()),
       requests: RwLock::new(Vec::new()),
@@ -141,10 +141,8 @@ impl TestServer {
       .fallback_service(fallback);
 
     let bind_addr = format!("127.0.0.1:{port}");
-    let listener = tokio::net::TcpListener::bind(&bind_addr)
-      .await
-      .map_err(|e| format!("bind {bind_addr}: {e}"))?;
-    let addr = listener.local_addr().map_err(|e| format!("local_addr: {e}"))?;
+    let listener = tokio::net::TcpListener::bind(&bind_addr).await?;
+    let addr = listener.local_addr()?;
     let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel::<()>();
 
     let handle = tokio::spawn(async move {
@@ -357,7 +355,7 @@ impl WebServerManager {
   /// # Errors
   ///
   /// Returns an error if any server fails to start or become ready.
-  pub async fn start(configs: &[crate::config::WebServerConfig]) -> Result<Self, String> {
+  pub async fn start(configs: &[crate::config::WebServerConfig]) -> ferridriver::error::Result<Self> {
     let mut servers = Vec::with_capacity(configs.len());
     for config in configs {
       let display_name = config.name.clone().unwrap_or_else(|| "WebServer".to_string());
@@ -369,10 +367,12 @@ impl WebServerManager {
           name: display_name,
         })));
       } else if let Some(ref command) = config.command {
-        let url = config
-          .url
-          .as_deref()
-          .ok_or_else(|| format!("webServer command requires 'url' to wait for: {command}"))?;
+        let url = config.url.as_deref().ok_or_else(|| {
+          ferridriver::FerriError::invalid_argument(
+            "webServer.url",
+            format!("webServer command requires 'url' to wait for: {command}"),
+          )
+        })?;
 
         // Check if server is already running (reuse). The reuse probe
         // honours `ignore_https_errors` so that a self-signed dev
@@ -384,9 +384,7 @@ impl WebServerManager {
           // the prior behaviour but tags the entry with the name and
           // configured graceful-shutdown so logs stay informative.
           servers.push(RunningServer::Command(Box::new(CommandEntry {
-            child: tokio::process::Command::new("true")
-              .spawn()
-              .map_err(|e| e.to_string())?,
+            child: tokio::process::Command::new("true").spawn()?,
             url: url.to_string(),
             name: display_name,
             graceful: config.graceful_shutdown.clone(),
@@ -405,7 +403,10 @@ impl WebServerManager {
           graceful: config.graceful_shutdown.clone(),
         })));
       } else {
-        return Err("webServer config must have either 'command' or 'staticDir'".into());
+        return Err(ferridriver::FerriError::invalid_argument(
+          "webServer",
+          "webServer config must have either 'command' or 'staticDir'",
+        ));
       }
     }
     Ok(Self { servers })
@@ -525,7 +526,7 @@ fn spawn_command(
   command: &str,
   cwd: &str,
   env: &std::collections::BTreeMap<String, String>,
-) -> Result<tokio::process::Child, String> {
+) -> ferridriver::error::Result<tokio::process::Child> {
   let mut cmd = if cfg!(target_os = "windows") {
     let mut c = tokio::process::Command::new("cmd");
     c.args(["/C", command]);
@@ -548,7 +549,9 @@ fn spawn_command(
     .stdin(std::process::Stdio::null())
     .stdout(std::process::Stdio::piped())
     .stderr(std::process::Stdio::piped());
-  cmd.spawn().map_err(|e| format!("spawn '{command}': {e}"))
+  cmd
+    .spawn()
+    .map_err(|e| ferridriver::FerriError::backend(format!("spawn '{command}': {e}")))
 }
 
 /// Build the readiness-probe HTTP client, optionally accepting
@@ -592,7 +595,12 @@ async fn probe_status(client: &reqwest::Client, url: &str) -> Option<u16> {
 }
 
 /// Wait for a URL to become reachable with logarithmic backoff (matching Playwright).
-async fn wait_for_url(url: &str, timeout_ms: u64, ignore_https_errors: bool, name: &str) -> Result<(), String> {
+async fn wait_for_url(
+  url: &str,
+  timeout_ms: u64,
+  ignore_https_errors: bool,
+  name: &str,
+) -> ferridriver::error::Result<()> {
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
   // Logarithmic backoff: 100ms, 250ms, 500ms, then 1000ms thereafter.
@@ -600,8 +608,9 @@ async fn wait_for_url(url: &str, timeout_ms: u64, ignore_https_errors: bool, nam
 
   loop {
     if tokio::time::Instant::now() >= deadline {
-      return Err(format!(
-        "[{name}] webServer timeout: {url} not reachable after {timeout_ms}ms"
+      return Err(ferridriver::FerriError::timeout(
+        format!("[{name}] webServer {url}"),
+        timeout_ms,
       ));
     }
     if http_probe(url, ignore_https_errors).await {

@@ -175,9 +175,10 @@ impl<'a> TraceRecorder<'a> {
 /// # Errors
 ///
 /// Returns an error if file I/O fails.
-pub fn write_trace_file(path: &Path, data: &[u8]) -> Result<(), String> {
+pub fn write_trace_file(path: &Path, data: &[u8]) -> ferridriver::error::Result<()> {
   if let Some(parent) = path.parent() {
-    std::fs::create_dir_all(parent).map_err(|e| format!("create trace dir: {e}"))?;
+    std::fs::create_dir_all(parent)?;
   }
-  std::fs::write(path, data).map_err(|e| format!("write trace zip {}: {e}", path.display()))
+  std::fs::write(path, data)?;
+  Ok(())
 }
