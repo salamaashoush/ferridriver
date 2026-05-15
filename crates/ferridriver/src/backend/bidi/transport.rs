@@ -12,6 +12,7 @@ use tokio_tungstenite::tungstenite::Message;
 use tracing::{debug, trace, warn};
 
 use crate::backend::json_scan;
+use crate::error::{FerriError, Result};
 
 // ── Types ──────────────────────────────────────────────────────────────────
 
@@ -28,7 +29,7 @@ impl std::fmt::Display for BidiError {
   }
 }
 
-type BidiResult = Result<serde_json::Value, BidiError>;
+type BidiResult = std::result::Result<serde_json::Value, BidiError>;
 
 /// A `BiDi` event received from the browser.
 #[derive(Debug, Clone)]
@@ -60,12 +61,12 @@ pub(crate) struct BidiTransport {
 
 impl BidiTransport {
   /// Connect to a `BiDi` WebSocket endpoint.
-  pub async fn connect(ws_url: &str) -> Result<Self, String> {
+  pub async fn connect(ws_url: &str) -> Result<Self> {
     debug!("BiDi connecting to {ws_url}");
 
     let (ws_stream, _) = tokio_tungstenite::connect_async(ws_url)
       .await
-      .map_err(|e| format!("BiDi WebSocket connect to {ws_url}: {e}"))?;
+      .map_err(|e| FerriError::Backend(format!("BiDi WebSocket connect to {ws_url}: {e}")))?;
 
     let (write, read) = ws_stream.split();
     let pending: Arc<std::sync::Mutex<PendingMap>> = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
@@ -152,7 +153,7 @@ impl BidiTransport {
   }
 
   /// Send a `BiDi` command and await the response.
-  pub async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+  pub async fn send_command(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
     let (tx, rx) = oneshot::channel();
 
@@ -170,17 +171,17 @@ impl BidiTransport {
     if self.write_tx.send(Message::Text(cmd.into())).await.is_err() {
       let mut map = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
       map.remove(&id);
-      return Err("BiDi WebSocket connection closed".into());
+      return Err(FerriError::backend("BiDi WebSocket connection closed"));
     }
 
     // Await response with timeout
     match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-      Ok(Ok(result)) => result.map_err(|e| e.to_string()),
-      Ok(Err(_)) => Err("BiDi command response channel dropped".into()),
+      Ok(Ok(result)) => result.map_err(|e| FerriError::protocol(method, e.to_string())),
+      Ok(Err(_)) => Err(FerriError::backend("BiDi command response channel dropped")),
       Err(_) => {
         let mut map = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         map.remove(&id);
-        Err(format!("BiDi command '{method}' timed out after 60s"))
+        Err(FerriError::timeout(format!("BiDi command '{method}'"), 60_000))
       },
     }
   }
@@ -189,7 +190,7 @@ impl BidiTransport {
   #[allow(dead_code)]
   /// Commands are written to the channel sequentially (they batch naturally),
   /// then all responses are awaited concurrently.
-  pub async fn send_batch(&self, commands: &[(&str, serde_json::Value)]) -> Vec<Result<serde_json::Value, String>> {
+  pub async fn send_batch(&self, commands: &[(&str, serde_json::Value)]) -> Vec<Result<serde_json::Value>> {
     let mut receivers = Vec::with_capacity(commands.len());
 
     for (method, params) in commands {
@@ -206,20 +207,20 @@ impl BidiTransport {
       trace!("BiDi batch send id={id}: {method}");
 
       if self.write_tx.send(Message::Text(cmd.into())).await.is_err() {
-        receivers.push(Err("BiDi WebSocket connection closed".into()));
+        receivers.push(Err(FerriError::backend("BiDi WebSocket connection closed")));
         continue;
       }
 
-      receivers.push(Ok(rx));
+      receivers.push(Ok((method.to_string(), rx)));
     }
 
     let mut results = Vec::with_capacity(receivers.len());
     for recv in receivers {
       match recv {
-        Ok(rx) => match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
-          Ok(Ok(result)) => results.push(result.map_err(|e| e.to_string())),
-          Ok(Err(_)) => results.push(Err("BiDi batch response channel dropped".into())),
-          Err(_) => results.push(Err("BiDi batch command timed out after 60s".into())),
+        Ok((m, rx)) => match tokio::time::timeout(std::time::Duration::from_secs(60), rx).await {
+          Ok(Ok(result)) => results.push(result.map_err(|e| FerriError::protocol(m.clone(), e.to_string()))),
+          Ok(Err(_)) => results.push(Err(FerriError::backend("BiDi batch response channel dropped"))),
+          Err(_) => results.push(Err(FerriError::timeout(format!("BiDi batch command '{m}'"), 60_000))),
         },
         Err(e) => results.push(Err(e)),
       }

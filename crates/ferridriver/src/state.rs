@@ -12,6 +12,7 @@ use std::sync::Arc;
 
 use crate::backend::{AnyBrowser, AnyPage, BackendKind};
 use crate::context::BrowserContext;
+use crate::error::{FerriError, Result};
 use rustc_hash::FxHashMap as HashMap;
 
 /// Default viewport dimensions -- consistent across all backends.
@@ -90,11 +91,11 @@ pub struct PageOpenPlan {
 }
 
 impl BrowserInstance {
-  fn context(&self, name: &str) -> Result<&BrowserContext, String> {
+  fn context(&self, name: &str) -> Result<&BrowserContext> {
     self
       .contexts
       .get(name)
-      .ok_or_else(|| format!("Context '{name}' not found in this instance."))
+      .ok_or_else(|| FerriError::invalid_argument("context", format!("'{name}' not found in this instance")))
   }
 
   fn context_mut(&mut self, name: &str) -> &mut BrowserContext {
@@ -104,11 +105,11 @@ impl BrowserInstance {
       .or_insert_with(|| BrowserContext::new(name.to_string()))
   }
 
-  fn context_mut_checked(&mut self, name: &str) -> Result<&mut BrowserContext, String> {
+  fn context_mut_checked(&mut self, name: &str) -> Result<&mut BrowserContext> {
     self
       .contexts
       .get_mut(name)
-      .ok_or_else(|| format!("Context '{name}' not found."))
+      .ok_or_else(|| FerriError::invalid_argument("context", format!("'{name}' not found")))
   }
 
   fn remove_context(&mut self, name: &str) {
@@ -377,7 +378,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the browser process fails to start or connection fails.
-  pub async fn ensure_instance(&mut self, instance_name: &str) -> Result<(), String> {
+  pub async fn ensure_instance(&mut self, instance_name: &str) -> Result<()> {
     if self.instances.contains_key(instance_name) {
       return Ok(());
     }
@@ -505,7 +506,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the browser process fails to start.
-  pub async fn ensure_browser(&mut self) -> Result<(), String> {
+  pub async fn ensure_browser(&mut self) -> Result<()> {
     Box::pin(self.ensure_instance("default")).await
   }
 
@@ -515,7 +516,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the WebSocket connection or page discovery fails.
-  pub async fn connect_to_url(&mut self, instance_name: &str, url: &str) -> Result<usize, String> {
+  pub async fn connect_to_url(&mut self, instance_name: &str, url: &str) -> Result<usize> {
     use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
 
     // Drop existing instance if any
@@ -567,7 +568,7 @@ impl BrowserState {
     instance_name: &str,
     channel: &str,
     user_data_dir: Option<&str>,
-  ) -> Result<usize, String> {
+  ) -> Result<usize> {
     if let Some(resolved) = self.resolve_via_instance_fn(instance_name) {
       return self.connect_with_resolved_mode(instance_name, resolved).await;
     }
@@ -596,7 +597,7 @@ impl BrowserState {
   }
 
   /// Connect using a resolved mode from the instance resolver.
-  async fn connect_with_resolved_mode(&mut self, instance_name: &str, mode: ConnectMode) -> Result<usize, String> {
+  async fn connect_with_resolved_mode(&mut self, instance_name: &str, mode: ConnectMode) -> Result<usize> {
     match mode {
       ConnectMode::ConnectUrl(url) => Box::pin(self.connect_to_url(instance_name, &url)).await,
       ConnectMode::AutoConnect { channel, user_data_dir } => {
@@ -605,19 +606,21 @@ impl BrowserState {
       },
       // Launch mode is not meaningful for connect_auto -- the caller should
       // launch a browser separately and use ConnectUrl for the result.
-      ConnectMode::Launch => Err(format!(
+      ConnectMode::Launch => Err(FerriError::Backend(format!(
         "Instance resolver returned Launch mode for '{instance_name}', expected ConnectUrl"
-      )),
+      ))),
     }
   }
 
   // ── Routing helpers ─────────────────────────────────────────────────────
 
-  fn instance(&self, name: &str) -> Result<&BrowserInstance, String> {
-    self
-      .instances
-      .get(name)
-      .ok_or_else(|| format!("Browser instance '{name}' not found. It will be created on first use."))
+  fn instance(&self, name: &str) -> Result<&BrowserInstance> {
+    self.instances.get(name).ok_or_else(|| {
+      FerriError::invalid_argument(
+        "instance",
+        format!("'{name}' not found. It will be created on first use."),
+      )
+    })
   }
 
   /// Access the default instance's backend browser handle. Used by
@@ -626,11 +629,11 @@ impl BrowserState {
     self.instances.get("default").map(|i| &i.browser)
   }
 
-  fn instance_mut(&mut self, name: &str) -> Result<&mut BrowserInstance, String> {
+  fn instance_mut(&mut self, name: &str) -> Result<&mut BrowserInstance> {
     self
       .instances
       .get_mut(name)
-      .ok_or_else(|| format!("Browser instance '{name}' not found."))
+      .ok_or_else(|| FerriError::invalid_argument("instance", format!("'{name}' not found")))
   }
 
   // ── Public methods (all parse composite keys) ───────────────────────────
@@ -642,7 +645,7 @@ impl BrowserState {
   /// Returns an error if the instance or page creation fails.
   /// Create a new page in the given context. Returns the `AnyPage` directly
   /// (no second lookup needed).
-  pub async fn open_page(&mut self, context: &str, url: &str) -> Result<AnyPage, String> {
+  pub async fn open_page(&mut self, context: &str, url: &str) -> Result<AnyPage> {
     let key = SessionKey::parse(context);
     Box::pin(self.open_page_keyed(&key, url)).await
   }
@@ -653,7 +656,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the browser instance does not exist.
-  pub fn page_open_plan(&self, key: &SessionKey) -> Result<PageOpenPlan, String> {
+  pub fn page_open_plan(&self, key: &SessionKey) -> Result<PageOpenPlan> {
     let inst = self.instance(&key.instance)?;
     let browser_context_id = if &*key.context == "default" {
       None
@@ -681,7 +684,7 @@ impl BrowserState {
     key: &SessionKey,
     page: AnyPage,
     browser_context_id: Option<String>,
-  ) -> Result<(), String> {
+  ) -> Result<()> {
     // Pull the context-event emitter for this session key BEFORE
     // taking the mutable instance borrow, so we can hand it to the
     // per-page → per-context `PageError` → `WebError` bridge spawned
@@ -723,7 +726,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the browser instance or page creation fails.
-  pub async fn open_page_keyed(&mut self, key: &SessionKey, url: &str) -> Result<AnyPage, String> {
+  pub async fn open_page_keyed(&mut self, key: &SessionKey, url: &str) -> Result<AnyPage> {
     if !self.instances.contains_key(&*key.instance) {
       Box::pin(self.ensure_instance(&key.instance)).await?;
     }
@@ -766,19 +769,19 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the instance, context, or page does not exist.
-  pub fn active_page(&self, context: &str) -> Result<&AnyPage, String> {
+  pub fn active_page(&self, context: &str) -> Result<&AnyPage> {
     let key = SessionKey::parse(context);
     let inst = self.instance(&key.instance)?;
     let ctx = inst.context(&key.context)?;
     ctx
       .active_page()
-      .ok_or_else(|| format!("No pages in context '{context}'"))
+      .ok_or_else(|| FerriError::invalid_argument("context", format!("no pages in context '{context}'")))
   }
 
   /// # Errors
   ///
   /// Returns an error if the instance or context does not exist.
-  pub fn context(&self, context: &str) -> Result<&BrowserContext, String> {
+  pub fn context(&self, context: &str) -> Result<&BrowserContext> {
     let key = SessionKey::parse(context);
     let inst = self.instance(&key.instance)?;
     inst.context(&key.context)
@@ -787,7 +790,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the instance or context does not exist.
-  pub fn context_mut_checked(&mut self, context: &str) -> Result<&mut BrowserContext, String> {
+  pub fn context_mut_checked(&mut self, context: &str) -> Result<&mut BrowserContext> {
     let key = SessionKey::parse(context);
     let inst = self.instance_mut(&key.instance)?;
     inst.context_mut_checked(&key.context)
@@ -810,15 +813,15 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the context does not exist or the page index is out of range.
-  pub fn select_page(&mut self, context: &str, page_idx: usize) -> Result<(), String> {
+  pub fn select_page(&mut self, context: &str, page_idx: usize) -> Result<()> {
     let key = SessionKey::parse(context);
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut_checked(&key.context)?;
     if page_idx >= ctx.pages.len() {
-      return Err(format!(
+      return Err(FerriError::Backend(format!(
         "Page index {page_idx} out of range (context '{context}' has {} pages)",
         ctx.pages.len()
-      ));
+      )));
     }
     ctx.active_page_idx = page_idx;
     Ok(())
@@ -827,7 +830,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if this is the last page, context does not exist, or index is out of range.
-  pub fn close_page(&mut self, context: &str, page_idx: usize) -> Result<(), String> {
+  pub fn close_page(&mut self, context: &str, page_idx: usize) -> Result<()> {
     let key = SessionKey::parse(context);
     let inst = self.instance_mut(&key.instance)?;
     let ctx = inst.context_mut_checked(&key.context)?;
@@ -835,7 +838,7 @@ impl BrowserState {
       return Err("Cannot close the last page in a context".into());
     }
     if page_idx >= ctx.pages.len() {
-      return Err(format!("Page index {page_idx} out of range"));
+      return Err(FerriError::Backend(format!("Page index {page_idx} out of range")));
     }
     ctx.pages.remove(page_idx);
     if ctx.active_page_idx >= ctx.pages.len() {
@@ -932,7 +935,7 @@ impl BrowserState {
     context: &str,
     level: Option<&str>,
     limit: usize,
-  ) -> Result<Vec<ConsoleMessage>, String> {
+  ) -> Result<Vec<ConsoleMessage>> {
     let key = SessionKey::parse(context);
     let inst = self.instance(&key.instance)?;
     let ctx = inst.context(&key.context)?;
@@ -942,7 +945,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the instance or context does not exist.
-  pub async fn network_requests(&self, context: &str, limit: usize) -> Result<Vec<Request>, String> {
+  pub async fn network_requests(&self, context: &str, limit: usize) -> Result<Vec<Request>> {
     let key = SessionKey::parse(context);
     let inst = self.instance(&key.instance)?;
     let ctx = inst.context(&key.context)?;
@@ -952,7 +955,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the instance or context does not exist, or page discovery fails.
-  pub async fn refresh_pages(&mut self, context: &str) -> Result<usize, String> {
+  pub async fn refresh_pages(&mut self, context: &str) -> Result<usize> {
     let key = SessionKey::parse(context);
     let inst = self.instance_mut(&key.instance)?;
     let current_pages = Box::pin(inst.browser.pages()).await?;
@@ -971,7 +974,7 @@ impl BrowserState {
   /// # Errors
   ///
   /// Returns an error if the instance or context does not exist.
-  pub async fn dialog_messages(&self, context: &str, limit: usize) -> Result<Vec<DialogEvent>, String> {
+  pub async fn dialog_messages(&self, context: &str, limit: usize) -> Result<Vec<DialogEvent>> {
     let key = SessionKey::parse(context);
     let inst = self.instance(&key.instance)?;
     let ctx = inst.context(&key.context)?;
@@ -1011,7 +1014,7 @@ pub struct PageInfo {
 }
 
 /// Discover the WebSocket URL from an HTTP debug endpoint.
-async fn discover_ws_from_http(http_url: &str) -> Result<String, String> {
+async fn discover_ws_from_http(http_url: &str) -> Result<String> {
   use tokio::io::{AsyncBufReadExt, AsyncReadExt, AsyncWriteExt, BufReader};
 
   let url = http_url.trim_end_matches('/');
@@ -1056,17 +1059,18 @@ async fn discover_ws_from_http(http_url: &str) -> Result<String, String> {
     .map_err(|e| format!("Read body: {e}"))?;
   let body_str = String::from_utf8_lossy(&body[..n]);
 
-  let json: serde_json::Value = serde_json::from_str(&body_str).map_err(|e| format!("Parse /json/version: {e}"))?;
+  let json: serde_json::Value =
+    serde_json::from_str(&body_str).map_err(|e| FerriError::Backend(format!("Parse /json/version: {e}")))?;
 
   json
     .get("webSocketDebuggerUrl")
     .and_then(|v| v.as_str())
     .map(std::string::ToString::to_string)
-    .ok_or_else(|| "No webSocketDebuggerUrl in /json/version".to_string())
+    .ok_or_else(|| FerriError::backend("No webSocketDebuggerUrl in /json/version"))
 }
 
 /// Discover a running Chrome instance by reading its `DevToolsActivePort` file.
-fn discover_chrome_ws(channel: &str, explicit_user_data_dir: Option<&str>) -> Result<String, String> {
+fn discover_chrome_ws(channel: &str, explicit_user_data_dir: Option<&str>) -> Result<String> {
   let user_data_dir = if let Some(dir) = explicit_user_data_dir {
     std::path::PathBuf::from(dir)
   } else {
@@ -1084,21 +1088,23 @@ fn discover_chrome_ws(channel: &str, explicit_user_data_dir: Option<&str>) -> Re
 
   let lines: Vec<&str> = content.lines().map(str::trim).filter(|l| !l.is_empty()).collect();
   if lines.len() < 2 {
-    return Err(format!("Invalid DevToolsActivePort content: {content:?}"));
+    return Err(FerriError::Backend(format!(
+      "Invalid DevToolsActivePort content: {content:?}"
+    )));
   }
 
   let port: u16 = lines[0]
     .parse()
-    .map_err(|_| format!("Invalid port '{}' in DevToolsActivePort", lines[0]))?;
+    .map_err(|_| FerriError::Backend(format!("Invalid port '{}' in DevToolsActivePort", lines[0])))?;
   let path = lines[1];
 
   Ok(format!("ws://127.0.0.1:{port}{path}"))
 }
 
-fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf, String> {
+fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf> {
   let home = std::env::var("HOME")
     .or_else(|_| std::env::var("USERPROFILE"))
-    .map_err(|_| "Cannot determine home directory".to_string())?;
+    .map_err(|_| FerriError::backend("Cannot determine home directory"))?;
 
   let os = std::env::consts::OS;
   let suffix = match channel {
@@ -1106,7 +1112,12 @@ fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf, Str
     "beta" => " Beta",
     "dev" => " Dev",
     "canary" => " Canary",
-    other => return Err(format!("Unknown Chrome channel: {other}")),
+    other => {
+      return Err(FerriError::invalid_argument(
+        "channel",
+        format!("unknown Chrome channel: {other}"),
+      ));
+    },
   };
 
   let path = match os {
@@ -1125,23 +1136,30 @@ fn chrome_default_user_data_dir(channel: &str) -> Result<std::path::PathBuf, Str
       let local_app_data = std::env::var("LOCALAPPDATA").unwrap_or_else(|_| format!("{home}/AppData/Local"));
       std::path::PathBuf::from(local_app_data).join(format!("Google/Chrome{suffix}/User Data"))
     },
-    _ => return Err(format!("Unsupported OS: {os}")),
+    _ => {
+      return Err(FerriError::unsupported(format!("OS: {os}")));
+    },
   };
 
   if !path.exists() {
     let chromium_path = match os {
       "linux" => std::path::PathBuf::from(&home).join(".config/chromium"),
       "macos" => std::path::PathBuf::from(&home).join("Library/Application Support/Chromium"),
-      _ => return Err(format!("Chrome user data dir not found: {}", path.display())),
+      _ => {
+        return Err(FerriError::Backend(format!(
+          "Chrome user data dir not found: {}",
+          path.display()
+        )));
+      },
     };
     if chromium_path.exists() {
       return Ok(chromium_path);
     }
-    return Err(format!(
+    return Err(FerriError::Backend(format!(
       "Chrome user data dir not found at {} or {}",
       path.display(),
       chromium_path.display()
-    ));
+    )));
   }
 
   Ok(path)
@@ -1424,7 +1442,7 @@ pub fn detect_chromium() -> String {
 /// # Errors
 ///
 /// Returns an error if no Firefox binary can be found.
-pub fn detect_firefox() -> Result<String, String> {
+pub fn detect_firefox() -> Result<String> {
   // 1. Env var (highest priority)
   if let Ok(p) = std::env::var("FIREFOX_PATH") {
     if std::path::Path::new(&p).exists() {
@@ -1793,7 +1811,7 @@ mod tests {
       result.is_err(),
       "Should fail with connection refused, proving resolver was invoked"
     );
-    let err = result.unwrap_err();
+    let err = result.unwrap_err().to_string();
     assert!(
       !err.contains("not found") && !err.contains("No such file"),
       "Error should be connection-related, not binary-not-found: {err}"

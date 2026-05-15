@@ -62,7 +62,7 @@ fn is_retryable_bidi_page_error(err: &str) -> bool {
     || err.contains("BiDi error 'no such window'")
 }
 
-async fn ensure_page_alive(page: &Arc<ferridriver::Page>) -> Result<(), String> {
+async fn ensure_page_alive(page: &Arc<ferridriver::Page>) -> ferridriver::Result<()> {
   // Health check via raw `Runtime.evaluate("1")` — only fired when
   // [`needs_alive_check`] returns true. CDP backends don't need it:
   // `Target.attachedToTarget` only fires after the renderer's V8
@@ -89,7 +89,7 @@ async fn create_ready_page(
 ) -> Result<Arc<ferridriver::Page>, String> {
   let page = ctx.new_page().await.map_err(ferri_err_to_string)?;
   if needs_alive_check(backend) {
-    ensure_page_alive(&page).await?;
+    ensure_page_alive(&page).await.map_err(|e| e.to_string())?;
   }
   Ok(page)
 }

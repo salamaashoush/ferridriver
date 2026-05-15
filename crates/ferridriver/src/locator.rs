@@ -102,18 +102,21 @@ macro_rules! retry_resolve {
       match $crate::selectors::query_one_prebuilt($page, &__sel_js, &$self.selector, __frame_id).await {
         ::std::result::Result::Ok($el) => match ($body).await {
           ::std::result::Result::Ok(val) => return ::std::result::Result::Ok(val),
-          ::std::result::Result::Err(e)
-            if e.contains("not connected")
-              || e.contains("not found")
-              || e.contains("detached")
-              || e.starts_with("error:not") =>
-          {
-            // Retriable: `checkElementStates` returns
-            // `error:notvisible` / `error:notenabled` /
-            // `error:noteditable` etc. as signals to keep polling until
-            // the deadline.
+          ::std::result::Result::Err(e) => {
+            let __msg = e.to_string();
+            if __msg.contains("not connected")
+              || __msg.contains("not found")
+              || __msg.contains("detached")
+              || __msg.starts_with("error:not")
+            {
+              // Retriable: `checkElementStates` returns
+              // `error:notvisible` / `error:notenabled` /
+              // `error:noteditable` etc. as signals to keep polling until
+              // the deadline.
+            } else {
+              return ::std::result::Result::Err($crate::error::FerriError::from(e));
+            }
           },
-          ::std::result::Result::Err(e) => return ::std::result::Result::Err($crate::error::FerriError::from(e)),
         },
         ::std::result::Result::Err(__err) => {
           // Strict-mode violation: the engine threw
@@ -427,7 +430,7 @@ impl Locator {
           let y = c.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
           page.click_at_opts(x, y, "right", 1).await?;
         }
-        Ok::<(), String>(())
+        Ok::<(), crate::error::FerriError>(())
       }
     )
   }
@@ -468,7 +471,7 @@ impl Locator {
       }",
         )
         .await?;
-        Ok::<(), String>(())
+        Ok::<(), crate::error::FerriError>(())
       }
     )
   }
@@ -552,7 +555,7 @@ impl Locator {
       "focus",
       |el, _page| async move {
         el.call_js_fn("function() { this.focus(); }").await?;
-        Ok::<(), String>(())
+        Ok::<(), crate::error::FerriError>(())
       }
     )
   }
@@ -614,7 +617,7 @@ impl Locator {
            return JSON.stringify({{ state: r, isRadio: isRadio }}); \
          }}"
       );
-      let read_state = async || -> ::std::result::Result<(Option<bool>, bool), String> {
+      let read_state = async || -> crate::error::Result<(Option<bool>, bool)> {
         let raw = el
           .call_js_fn_value(&state_js)
           .await?
@@ -634,27 +637,31 @@ impl Locator {
 
       let (current, is_radio) = read_state().await?;
       let Some(current) = current else {
-        return Err("Not a checkbox, radio button, or ARIA-checkable element — cannot check/uncheck".to_string());
+        return Err(crate::error::FerriError::invalid_argument(
+          "element",
+          "not a checkbox, radio button, or ARIA-checkable element",
+        ));
       };
       if current == checked {
-        return Ok::<(), String>(());
+        return Ok::<(), crate::error::FerriError>(());
       }
       if !checked && is_radio {
-        return Err(
-          "Cannot uncheck radio button. Radio buttons can only be unchecked by selecting another \
-           radio button in the same group."
-            .to_string(),
-        );
+        return Err(crate::error::FerriError::invalid_argument(
+          "element",
+          "cannot uncheck radio button. Radio buttons can only be unchecked by selecting another radio button in the same group.",
+        ));
       }
       actions::click_with_opts(&el, page, click_opts_ref).await?;
       if trial {
-        return Ok::<(), String>(());
+        return Ok::<(), crate::error::FerriError>(());
       }
       let (new_state, _) = read_state().await?;
       if new_state != Some(checked) {
-        return Err("Clicking the checkbox did not change its state".to_string());
+        return Err(crate::error::FerriError::backend(
+          "clicking the checkbox did not change its state",
+        ));
       }
-      Ok::<(), String>(())
+      Ok::<(), crate::error::FerriError>(())
     })
   }
 
@@ -688,7 +695,6 @@ impl Locator {
     }",
     )
     .await
-    .map_err(Into::into)
   }
 
   /// Select an `<option>` by value within a `<select>` element.
@@ -722,7 +728,7 @@ impl Locator {
           .and_then(|v| v.as_str().map(std::string::ToString::to_string))
           .unwrap_or_else(|| "error:notconnected".to_string());
         if state_raw != "done" {
-          return Err(state_raw);
+          return Err(crate::error::FerriError::backend(state_raw));
         }
       }
       actions::select_options(&el, page, values_ref).await
@@ -748,9 +754,7 @@ impl Locator {
     match files {
       crate::options::InputFiles::Paths(paths) => {
         let strs: Vec<String> = paths.into_iter().map(|p| p.display().to_string()).collect();
-        actions::upload_file(self.frame.page_arc().inner(), &self.selector, &strs)
-          .await
-          .map_err(Into::into)
+        actions::upload_file(self.frame.page_arc().inner(), &self.selector, &strs).await
       },
       crate::options::InputFiles::Payloads(payloads) => {
         // Each payload gets its own subdirectory so the filename on
@@ -789,9 +793,7 @@ impl Locator {
             .map_err(|e| crate::error::FerriError::Backend(format!("failed to write upload payload: {e}")))?;
           paths.push(path.display().to_string());
         }
-        actions::upload_file(self.frame.page_arc().inner(), &self.selector, &paths)
-          .await
-          .map_err(Into::into)
+        actions::upload_file(self.frame.page_arc().inner(), &self.selector, &paths).await
       },
     }
   }
@@ -803,7 +805,7 @@ impl Locator {
   /// Returns an error if the element cannot be found or scroll fails.
   pub async fn scroll_into_view_if_needed(&self) -> Result<()> {
     let el = self.resolve().await?;
-    el.scroll_into_view().await.map_err(Into::into)
+    el.scroll_into_view().await
   }
 
   /// Dispatch a DOM event of the given type on the element. Mirrors
@@ -1168,9 +1170,7 @@ impl Locator {
   /// Returns an error if the element cannot be found or screenshot capture fails.
   pub async fn screenshot(&self) -> Result<Vec<u8>> {
     let el = self.resolve().await?;
-    el.screenshot(crate::backend::ImageFormat::Png)
-      .await
-      .map_err(Into::into)
+    el.screenshot(crate::backend::ImageFormat::Png).await
   }
 
   // ── Editable check ───────────────────────────────────────────────────────
@@ -1265,13 +1265,7 @@ impl Locator {
     }
 
     let steps = opts.steps.unwrap_or(1);
-    self
-      .frame
-      .page_arc()
-      .inner()
-      .click_and_drag(from, to, steps)
-      .await
-      .map_err(Into::into)
+    self.frame.page_arc().inner().click_and_drag(from, to, steps).await
   }
 
   // ── Combinators ─────────────────────────────────────────────────────────
@@ -1482,9 +1476,9 @@ impl Locator {
   async fn evaluate_in_frame_js(&self, js: &str) -> Result<Option<serde_json::Value>> {
     let inner = self.frame.page_arc().inner();
     if self.frame.is_main_frame() {
-      inner.evaluate(js).await.map_err(Into::into)
+      inner.evaluate(js).await
     } else {
-      inner.evaluate_in_frame(js, self.frame.id()).await.map_err(Into::into)
+      inner.evaluate_in_frame(js, self.frame.id()).await
     }
   }
 
@@ -1553,19 +1547,13 @@ impl Locator {
   /// missing match, or strict-mode violation.
   pub async fn element_handle(&self) -> crate::error::Result<crate::element_handle::ElementHandle> {
     let page = self.frame.page_arc();
-    page
-      .inner()
-      .ensure_engine_injected()
-      .await
-      .map_err(crate::error::FerriError::from)?;
+    page.inner().ensure_engine_injected().await?;
     let frame_id: Option<&str> = if self.frame.is_main_frame() {
       None
     } else {
       Some(self.frame.id())
     };
-    let element = crate::selectors::query_one(page.inner(), &self.selector, self.strict, frame_id)
-      .await
-      .map_err(crate::error::FerriError::from)?;
+    let element = crate::selectors::query_one(page.inner(), &self.selector, self.strict, frame_id).await?;
     crate::element_handle::ElementHandle::from_any_element(Arc::clone(page), element).await
   }
 
@@ -1578,19 +1566,13 @@ impl Locator {
   /// failure.
   pub async fn element_handles(&self) -> crate::error::Result<Vec<crate::element_handle::ElementHandle>> {
     let page = self.frame.page_arc();
-    page
-      .inner()
-      .ensure_engine_injected()
-      .await
-      .map_err(crate::error::FerriError::from)?;
+    page.inner().ensure_engine_injected().await?;
     let frame_id: Option<&str> = if self.frame.is_main_frame() {
       None
     } else {
       Some(self.frame.id())
     };
-    let matches = crate::selectors::query_all(page.inner(), &self.selector, frame_id)
-      .await
-      .map_err(crate::error::FerriError::from)?;
+    let matches = crate::selectors::query_all(page.inner(), &self.selector, frame_id).await?;
     let count = matches.len();
     let mut handles = Vec::with_capacity(count);
     for i in 0..count {
@@ -1601,7 +1583,7 @@ impl Locator {
         },
         Err(err) => {
           crate::selectors::cleanup_tags(page.inner()).await;
-          return Err(crate::error::FerriError::from(err));
+          return Err(err);
         },
       }
     }
@@ -1666,9 +1648,7 @@ impl Locator {
     } else {
       Some(self.frame.id())
     };
-    selectors::query_one_prebuilt(self.frame.page_arc().inner(), &sel_js, &self.selector, frame_id)
-      .await
-      .map_err(Into::into)
+    selectors::query_one_prebuilt(self.frame.page_arc().inner(), &sel_js, &self.selector, frame_id).await
   }
 
   fn chain(&self, sub: &str) -> Locator {

@@ -19,6 +19,7 @@ use super::{
   AnyElement, AnyPage, Arc, AxNodeData, AxProperty, ConsoleMessage, CookieData, ImageFormat, MetricData,
   NetworkRequest, RwLock, ScreenshotOpts,
 };
+use crate::error::{FerriError, Result};
 use crate::network::{
   self, BodyFn, HeaderEntry, Headers, RawHeadersFn, RemoteAddr, RequestInit, RequestSizes, RequestTiming, Response,
   ResponseInit, SecurityDetails, WebSocket, WebSocketPayload,
@@ -142,7 +143,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     viewport: Option<&crate::options::ViewportConfig>,
     unpause: bool,
     init_script: Option<&str>,
-  ) -> Result<Option<Vec<super::FrameInfo>>, String> {
+  ) -> Result<Option<Vec<super::FrameInfo>>> {
     let ep = super::empty_params();
 
     let vp_params = viewport.map(metrics_params_for);
@@ -258,7 +259,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     transport: Arc<T>,
     child: Option<super::process::ChildGroup>,
     user_data_dir: Option<tempfile::TempDir>,
-  ) -> Result<Self, String> {
+  ) -> Result<Self> {
     let version_resp = transport
       .send_command(None, "Browser.getVersion", super::empty_params())
       .await?;
@@ -291,7 +292,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   }
 
   /// Retrieve all open page targets, attaching to any not yet tracked.
-  pub async fn pages(&self) -> Result<Vec<AnyPage>, String> {
+  pub async fn pages(&self) -> Result<Vec<AnyPage>> {
     let result = self
       .transport
       .send_command(None, "Target.getTargets", super::empty_params())
@@ -319,7 +320,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         self
           .attached_targets
           .lock()
-          .map_err(|e| format!("Lock poisoned: {e}"))?
+          .map_err(|e| FerriError::Backend(format!("Lock poisoned: {e}")))?
           .get(&target_id)
           .cloned()
       };
@@ -346,7 +347,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         self
           .attached_targets
           .lock()
-          .map_err(|e| format!("Lock poisoned: {e}"))?
+          .map_err(|e| FerriError::Backend(format!("Lock poisoned: {e}")))?
           .insert(target_id.clone(), sid.clone());
 
         Self::enable_domains(&self.transport, sid.as_deref(), None, false, None).await?;
@@ -386,7 +387,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
           tempfile::Builder::new()
             .prefix("ferridriver-downloads-")
             .tempdir()
-            .map_err(|e| format!("downloads tempdir: {e}"))?,
+            .map_err(|e| FerriError::Backend(format!("downloads tempdir: {e}")))?,
         ),
         page_backref: crate::backend::PageBackref::new(),
         frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
@@ -401,7 +402,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   /// Per-context `proxy` wires through `proxyServer` + `proxyBypassList`
   /// mirroring `crBrowser.ts::doCreateNewContext` at
   /// `/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts:121`.
-  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String, String> {
+  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
     let mut params = serde_json::json!({"disposeOnDetach": true});
     if let Some(p) = proxy {
       params["proxyServer"] = serde_json::json!(p.server);
@@ -418,11 +419,11 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .get("browserContextId")
       .and_then(|v| v.as_str())
       .map(String::from)
-      .ok_or_else(|| "No browserContextId".to_string())
+      .ok_or_else(|| FerriError::backend("No browserContextId"))
   }
 
   /// Dispose a browser context. Matches Playwright's `context.close()`.
-  pub async fn dispose_context(&self, browser_context_id: &str) -> Result<(), String> {
+  pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
     self
       .transport
       .send_command(
@@ -443,7 +444,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     url: &str,
     browser_context_id: Option<&str>,
     viewport: Option<&crate::options::ViewportConfig>,
-  ) -> Result<AnyPage, String> {
+  ) -> Result<AnyPage> {
     // Subscribe to events BEFORE createTarget so we don't miss the auto-attach.
     let mut event_rx = self.transport.subscribe_events();
 
@@ -490,7 +491,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     self
       .attached_targets
       .lock()
-      .map_err(|e| format!("Lock poisoned: {e}"))?
+      .map_err(|e| FerriError::Backend(format!("Lock poisoned: {e}")))?
       .insert(target_id.clone(), sid.clone());
 
     // Enable domains + unpause in one parallel batch (saves a round-trip).
@@ -555,7 +556,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
         tempfile::Builder::new()
           .prefix("ferridriver-downloads-")
           .tempdir()
-          .map_err(|e| format!("downloads tempdir: {e}"))?,
+          .map_err(|e| FerriError::Backend(format!("downloads tempdir: {e}")))?,
       ),
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
@@ -587,7 +588,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   }
 
   /// Close the browser process and release resources.
-  pub async fn close(&mut self) -> Result<(), String> {
+  pub async fn close(&mut self) -> Result<()> {
     let _ = self
       .transport
       .send_command(None, "Browser.close", super::empty_params())
@@ -607,12 +608,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
 
 impl CdpBrowser<pipe::PipeTransport> {
   /// Launch Chrome with `--remote-debugging-pipe` and communicate over fd 3/4.
-  pub async fn launch(chromium_path: &str) -> Result<Self, String> {
+  pub async fn launch(chromium_path: &str) -> Result<Self> {
     Self::launch_with_flags(chromium_path, &crate::state::chrome_flags(true, &[])).await
   }
 
   /// Launch Chrome with custom flags and communicate over fd 3/4.
-  pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self, String> {
+  pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self> {
     // Hold the user-data-dir as a `TempDir` so it's removed from disk when the
     // browser handle drops. The Child owned by the CDP browser has
     // `kill_on_drop(true)` set in `pipe::PipeTransport::spawn`, so the Chrome
@@ -620,7 +621,7 @@ impl CdpBrowser<pipe::PipeTransport> {
     let user_data_dir = tempfile::Builder::new()
       .prefix("ferridriver-pipe-")
       .tempdir()
-      .map_err(|e| format!("create user-data-dir: {e}"))?;
+      .map_err(|e| FerriError::Backend(format!("create user-data-dir: {e}")))?;
 
     let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir.path(), flags)?;
     Self::init(
@@ -641,7 +642,7 @@ impl CdpBrowser<pipe::PipeTransport> {
     chromium_path: &str,
     flags: &[String],
     user_data_dir: &std::path::Path,
-  ) -> Result<Self, String> {
+  ) -> Result<Self> {
     let (transport, child) = pipe::PipeTransport::spawn(chromium_path, user_data_dir, flags)?;
     Self::init(Arc::new(transport), Some(super::process::ChildGroup::new(child)), None).await
   }
@@ -651,7 +652,7 @@ impl CdpBrowser<pipe::PipeTransport> {
 
 impl CdpBrowser<ws::WsTransport> {
   /// Launch Chrome with `--remote-debugging-port` and communicate over WebSocket.
-  pub async fn launch(chromium_path: &str) -> Result<Self, String> {
+  pub async fn launch(chromium_path: &str) -> Result<Self> {
     Box::pin(Self::launch_with_flags(
       chromium_path,
       &crate::state::chrome_flags(true, &[]),
@@ -660,14 +661,14 @@ impl CdpBrowser<ws::WsTransport> {
   }
 
   /// Launch Chrome with custom flags and communicate over WebSocket.
-  pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self, String> {
+  pub async fn launch_with_flags(chromium_path: &str, flags: &[String]) -> Result<Self> {
     // Held as a `TempDir` so the dir is removed from disk when the browser
     // handle drops. The Child spawned by `WsTransport::spawn` has
     // `kill_on_drop(true)` set, so Chrome dies before the directory vanishes.
     let user_data_dir = tempfile::Builder::new()
       .prefix("ferridriver-raw-")
       .tempdir()
-      .map_err(|e| format!("create user-data-dir: {e}"))?;
+      .map_err(|e| FerriError::Backend(format!("create user-data-dir: {e}")))?;
 
     let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir.path(), flags)).await?;
     Self::init(
@@ -685,13 +686,13 @@ impl CdpBrowser<ws::WsTransport> {
     chromium_path: &str,
     flags: &[String],
     user_data_dir: &std::path::Path,
-  ) -> Result<Self, String> {
+  ) -> Result<Self> {
     let (transport, child) = Box::pin(ws::WsTransport::spawn(chromium_path, user_data_dir, flags)).await?;
     Self::init(Arc::new(transport), Some(super::process::ChildGroup::new(child)), None).await
   }
 
   /// Connect to a running Chrome instance via WebSocket URL.
-  pub async fn connect(ws_url: &str) -> Result<Self, String> {
+  pub async fn connect(ws_url: &str) -> Result<Self> {
     let transport = Arc::new(Box::pin(ws::WsTransport::connect(ws_url)).await?);
 
     // Capture product version for `browser.version()` — same handshake
@@ -1228,7 +1229,7 @@ impl InjectedScriptManager {
   // lifetime, so we never need to re-register on navigation /
   // context-cleared events.
 
-  async fn ensure<T: CdpWrap>(&self, page: &CdpPage<T>) -> Result<(), String> {
+  async fn ensure<T: CdpWrap>(&self, page: &CdpPage<T>) -> Result<()> {
     if self.injected.load(std::sync::atomic::Ordering::Relaxed) {
       return Ok(());
     }
@@ -1296,7 +1297,7 @@ impl<T: CdpTransport> Clone for CdpPage<T> {
 
 impl<T: CdpWrap> CdpPage<T> {
   /// Send a CDP command to this page's session.
-  async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+  async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     self
       .transport
       .send_command(self.session_id.as_deref(), method, params)
@@ -1323,7 +1324,7 @@ impl<T: CdpWrap> CdpPage<T> {
     lifecycle: crate::backend::NavLifecycle,
     timeout_ms: u64,
     referer: Option<&str>,
-  ) -> Result<Option<Response>, String> {
+  ) -> Result<Option<Response>> {
     // No `injected_script.reset()` here. The init script registered via
     // `Page.addScriptToEvaluateOnNewDocument` persists for the page's
     // lifetime, so every post-navigation document already runs the
@@ -1350,7 +1351,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
     if let Some(error_text) = nav_result.get("errorText").and_then(|v| v.as_str()) {
       if !error_text.is_empty() {
-        return Err(format!("Navigation failed: {error_text}"));
+        return Err(FerriError::Backend(format!("Navigation failed: {error_text}")));
       }
     }
 
@@ -1395,7 +1396,7 @@ impl<T: CdpWrap> CdpPage<T> {
     req.response().await.ok().flatten()
   }
 
-  pub async fn wait_for_navigation(&self) -> Result<(), String> {
+  pub async fn wait_for_navigation(&self) -> Result<()> {
     let pre_loader_id = {
       let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
       state.current_loader_id.clone()
@@ -1403,11 +1404,7 @@ impl<T: CdpWrap> CdpPage<T> {
     self.await_loader_change(&pre_loader_id, "load", 30_000).await
   }
 
-  pub async fn reload(
-    &self,
-    lifecycle: crate::backend::NavLifecycle,
-    timeout_ms: u64,
-  ) -> Result<Option<Response>, String> {
+  pub async fn reload(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     // See `goto`: the registered init script persists across reloads;
     // no need to reset and re-fire `Page.addScriptToEvaluateOnNewDocument`.
     self.nav_request_slot.clear();
@@ -1428,19 +1425,11 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(self.await_nav_response().await)
   }
 
-  pub async fn go_back(
-    &self,
-    lifecycle: crate::backend::NavLifecycle,
-    timeout_ms: u64,
-  ) -> Result<Option<Response>, String> {
+  pub async fn go_back(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.history_go(-1, lifecycle, timeout_ms).await
   }
 
-  pub async fn go_forward(
-    &self,
-    lifecycle: crate::backend::NavLifecycle,
-    timeout_ms: u64,
-  ) -> Result<Option<Response>, String> {
+  pub async fn go_forward(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.history_go(1, lifecycle, timeout_ms).await
   }
 
@@ -1449,7 +1438,7 @@ impl<T: CdpWrap> CdpPage<T> {
     delta: i32,
     lifecycle: crate::backend::NavLifecycle,
     timeout_ms: u64,
-  ) -> Result<Option<Response>, String> {
+  ) -> Result<Option<Response>> {
     let hist = self.cmd("Page.getNavigationHistory", super::empty_params()).await?;
     let current_i64 = hist
       .get("currentIndex")
@@ -1496,12 +1485,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// permissively on timeout (`Ok(())`) to preserve the prior
   /// "navigate-returns-with-whatever-we-have" semantics on hostile
   /// pages; the caller's response wait surfaces real failures.
-  async fn await_loader_lifecycle(
-    &self,
-    expected_loader_id: &str,
-    target_event: &str,
-    timeout_ms: u64,
-  ) -> Result<(), String> {
+  async fn await_loader_lifecycle(&self, expected_loader_id: &str, target_event: &str, timeout_ms: u64) -> Result<()> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
       let notified = self.lifecycle_notify.notified();
@@ -1532,7 +1516,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `Page.navigateToHistoryEntry`, generic `page.waitForNavigation`).
   /// Waits for the main frame's `current_loader_id` to change away
   /// from `pre_loader_id` AND fire `target_event` for the new loader.
-  async fn await_loader_change(&self, pre_loader_id: &str, target_event: &str, timeout_ms: u64) -> Result<(), String> {
+  async fn await_loader_change(&self, pre_loader_id: &str, target_event: &str, timeout_ms: u64) -> Result<()> {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
     loop {
       let notified = self.lifecycle_notify.notified();
@@ -1568,7 +1552,7 @@ impl<T: CdpWrap> CdpPage<T> {
     self.main_frame_id.get().cloned()
   }
 
-  pub async fn url(&self) -> Result<Option<String>, String> {
+  pub async fn url(&self) -> Result<Option<String>> {
     let result = self
       .cmd(
         "Runtime.evaluate",
@@ -1587,7 +1571,7 @@ impl<T: CdpWrap> CdpPage<T> {
     )
   }
 
-  pub async fn title(&self) -> Result<Option<String>, String> {
+  pub async fn title(&self) -> Result<Option<String>> {
     let result = self
       .cmd(
         "Runtime.evaluate",
@@ -1608,14 +1592,14 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- JavaScript ----
 
-  pub async fn injected_script(&self) -> Result<String, String> {
+  pub async fn injected_script(&self) -> Result<String> {
     self.ensure_engine_injected().await?;
     Ok("window.__fd".to_string())
   }
 
   /// Ensures the selector engine is injected into the current execution context.
   /// Idempotent and navigation-aware.
-  pub async fn ensure_engine_injected(&self) -> Result<(), String> {
+  pub async fn ensure_engine_injected(&self) -> Result<()> {
     self.injected_script.ensure(self).await
   }
 
@@ -1625,7 +1609,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// the CDP command is a no-op until any test path needs file
   /// chooser events, at which point this method is called and the
   /// command fires once. Subsequent calls are no-ops.
-  pub async fn enable_file_chooser_intercept(&self) -> Result<(), String> {
+  pub async fn enable_file_chooser_intercept(&self) -> Result<()> {
     if self
       .file_chooser_intercept_enabled
       .swap(true, std::sync::atomic::Ordering::Relaxed)
@@ -1645,7 +1629,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// events flow. Mirrors Playwright's per-context download config
   /// (`/tmp/playwright/packages/playwright-core/src/server/chromium/crBrowser.ts:354`)
   /// but lazy: not fired until a test path actually needs downloads.
-  pub async fn enable_download_behavior(&self) -> Result<(), String> {
+  pub async fn enable_download_behavior(&self) -> Result<()> {
     if self
       .download_behavior_enabled
       .swap(true, std::sync::atomic::Ordering::Relaxed)
@@ -1670,7 +1654,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     let result = self
       .cmd(
         "Runtime.evaluate",
@@ -1687,7 +1671,7 @@ impl<T: CdpWrap> CdpPage<T> {
         .get("text")
         .and_then(|v| v.as_str())
         .unwrap_or("Evaluation error");
-      return Err(text.to_string());
+      return Err(FerriError::Backend(text.to_string()));
     }
 
     Ok(result.get("result").and_then(|r| r.get("value")).cloned())
@@ -1716,7 +1700,7 @@ impl<T: CdpWrap> CdpPage<T> {
     frame_id: Option<&str>,
     is_function: Option<bool>,
     return_by_value: bool,
-  ) -> Result<crate::js_handle::EvaluateResult, String> {
+  ) -> Result<crate::js_handle::EvaluateResult> {
     self.ensure_engine_injected().await?;
 
     let context_id = match frame_id {
@@ -1834,13 +1818,13 @@ impl<T: CdpWrap> CdpPage<T> {
   fn parse_eval_response(
     response: &serde_json::Value,
     return_by_value: bool,
-  ) -> Result<crate::js_handle::EvaluateResult, String> {
+  ) -> Result<crate::js_handle::EvaluateResult> {
     if let Some(exception) = response.get("exceptionDetails") {
       let text = exception
         .get("text")
         .and_then(|v| v.as_str())
         .unwrap_or("Evaluation error");
-      return Err(text.to_string());
+      return Err(FerriError::Backend(text.to_string()));
     }
 
     let result_obj = response.get("result").ok_or("call_utility_evaluate: no result")?;
@@ -1855,11 +1839,13 @@ impl<T: CdpWrap> CdpPage<T> {
       let parsed: crate::protocol::SerializedValue = match wire {
         serde_json::Value::Null => crate::protocol::SerializedValue::Special(crate::protocol::SpecialValue::Undefined),
         serde_json::Value::String(ref s) => {
-          let inner: serde_json::Value =
-            serde_json::from_str(s).map_err(|e| format!("call_utility_evaluate: parse inner JSON: {e}"))?;
-          serde_json::from_value(inner).map_err(|e| format!("call_utility_evaluate: parse result: {e}"))?
+          let inner: serde_json::Value = serde_json::from_str(s)
+            .map_err(|e| FerriError::Backend(format!("call_utility_evaluate: parse inner JSON: {e}")))?;
+          serde_json::from_value(inner)
+            .map_err(|e| FerriError::Backend(format!("call_utility_evaluate: parse result: {e}")))?
         },
-        other => serde_json::from_value(other).map_err(|e| format!("call_utility_evaluate: parse result: {e}"))?,
+        other => serde_json::from_value(other)
+          .map_err(|e| FerriError::Backend(format!("call_utility_evaluate: parse result: {e}")))?,
       };
       Ok(crate::js_handle::EvaluateResult::Value(parsed))
     } else if let Some(obj_id) = result_obj.get("objectId").and_then(|v| v.as_str()) {
@@ -1896,7 +1882,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Frames ----
 
-  pub async fn get_frame_tree(&self) -> Result<Vec<super::FrameInfo>, String> {
+  pub async fn get_frame_tree(&self) -> Result<Vec<super::FrameInfo>> {
     // Consume the seeded tree captured during the per-page parallel
     // `enable_domains` batch. Skips the per-call `Page.getFrameTree`
     // RTT for the first read after `new_page` — every subsequent read
@@ -1953,7 +1939,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(frames)
   }
 
-  pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
     let context_id = {
       let contexts = self.frame_contexts.read().await;
       contexts.get(frame_id).copied()
@@ -1977,19 +1963,19 @@ impl<T: CdpWrap> CdpPage<T> {
           .get("text")
           .and_then(|v| v.as_str())
           .unwrap_or("Evaluation error");
-        return Err(text.to_string());
+        return Err(FerriError::Backend(text.to_string()));
       }
       Ok(result.get("result").and_then(|r| r.get("value")).cloned())
     } else {
-      Err(format!(
+      Err(FerriError::Backend(format!(
         "No execution context found for frame '{frame_id}'. Frame may not be loaded yet."
-      ))
+      )))
     }
   }
 
   // ---- Elements ----
 
-  pub async fn find_element(&self, selector: &str) -> Result<AnyElement, String> {
+  pub async fn find_element(&self, selector: &str) -> Result<AnyElement> {
     let doc = self.cmd("DOM.getDocument", serde_json::json!({"depth": 0})).await?;
     let root_id = doc
       .get("root")
@@ -2010,7 +1996,7 @@ impl<T: CdpWrap> CdpPage<T> {
       .ok_or_else(|| format!("'{selector}' not found"))?;
 
     if node_id == 0 {
-      return Err(format!("'{selector}' not found"));
+      return Err(FerriError::invalid_selector(selector, "not found"));
     }
 
     Ok(T::wrap_element(CdpElement {
@@ -2045,7 +2031,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// page when `frame_id` is `None`) and return the resulting DOM
   /// element. Used by `Locator` to scope action-method resolution to
   /// the locator's bound `Frame` — Playwright parity.
-  pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement, String> {
+  pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {
     // Note: previously fired `DOM.getDocument` here but discarded the
     // result. It was a leftover from when this path used
     // `DOM.querySelector` (which DOES require the agent's DOM tree
@@ -2095,7 +2081,7 @@ impl<T: CdpWrap> CdpPage<T> {
         (true, false) => inner.to_string(),
         (true, true) => "Evaluation error".to_string(),
       };
-      return Err(combined);
+      return Err(FerriError::evaluation(combined));
     }
 
     let object_id = result
@@ -2116,7 +2102,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Content ----
 
-  pub async fn content(&self) -> Result<String, String> {
+  pub async fn content(&self) -> Result<String> {
     let result = self
       .cmd(
         "Runtime.evaluate",
@@ -2136,11 +2122,14 @@ impl<T: CdpWrap> CdpPage<T> {
     )
   }
 
-  pub async fn set_content(&self, html: &str) -> Result<(), String> {
+  pub async fn set_content(&self, html: &str) -> Result<()> {
     let frame_id = self
       .main_frame_id
       .get_or_try_init(|| async {
-        let tree = self.cmd("Page.getFrameTree", super::empty_params()).await?;
+        let tree = self
+          .cmd("Page.getFrameTree", super::empty_params())
+          .await
+          .map_err(|e| e.to_string())?;
         tree
           .get("frameTree")
           .and_then(|f| f.get("frame"))
@@ -2149,7 +2138,8 @@ impl<T: CdpWrap> CdpPage<T> {
           .map(std::string::ToString::to_string)
           .ok_or_else(|| "No main frame".to_string())
       })
-      .await?;
+      .await
+      .map_err(FerriError::Backend)?;
 
     // Selector engine is already injected via Page.addScriptToEvaluateOnNewDocument
     // during page setup, so setDocumentContent triggers it automatically.
@@ -2164,7 +2154,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Screenshots ----
 
-  pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>, String> {
+  pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>> {
     // Pre-capture: set up per-field state and collect teardown tokens.
     let (style_installed, mask_installed) = self.screenshot_install_dom(&opts).await?;
     let bg_installed = self.screenshot_install_transparent_bg(&opts).await?;
@@ -2192,16 +2182,16 @@ impl<T: CdpWrap> CdpPage<T> {
     let data = result?
       .get("data")
       .and_then(|v| v.as_str().map(String::from))
-      .ok_or("No screenshot data")?;
+      .ok_or_else(|| FerriError::backend("No screenshot data"))?;
     base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
-      .map_err(|e| format!("Decode screenshot: {e}"))
+      .map_err(|e| FerriError::Backend(format!("Decode screenshot: {e}")))
   }
 
   /// Install the DOM-side screenshot overrides (caret hide, user style,
   /// animation pause, mask overlays) via `Runtime.evaluate`. Returns
   /// `(style_installed, mask_installed)` so the caller knows which
   /// teardown calls to make.
-  async fn screenshot_install_dom(&self, opts: &ScreenshotOpts) -> Result<(bool, bool), String> {
+  async fn screenshot_install_dom(&self, opts: &ScreenshotOpts) -> Result<(bool, bool)> {
     let css = crate::backend::screenshot_js::build_css(opts);
     let style_installed = if css.is_empty() {
       false
@@ -2224,7 +2214,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `Emulation.setDefaultBackgroundColorOverride` when
   /// `opts.omit_background` is set. Returns `true` if the override
   /// was installed (caller must reverse it).
-  async fn screenshot_install_transparent_bg(&self, opts: &ScreenshotOpts) -> Result<bool, String> {
+  async fn screenshot_install_transparent_bg(&self, opts: &ScreenshotOpts) -> Result<bool> {
     if !opts.omit_background {
       return Ok(false);
     }
@@ -2241,7 +2231,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `opts.format`, `opts.quality`, `opts.clip`, `opts.full_page`,
   /// and `opts.scale`. Caller-supplied clips win over full-page
   /// computation; CSS scale translates to `clip.scale = 1 / devicePixelRatio`.
-  async fn screenshot_build_params(&self, opts: &ScreenshotOpts) -> Result<serde_json::Value, String> {
+  async fn screenshot_build_params(&self, opts: &ScreenshotOpts) -> Result<serde_json::Value> {
     use crate::backend::ScreenshotScale;
     let format_str = match opts.format {
       ImageFormat::Png => "png",
@@ -2294,12 +2284,12 @@ impl<T: CdpWrap> CdpPage<T> {
   /// translate the `scale: "css"` option into CDP's per-clip scale
   /// multiplier — `clip.scale = 1/DPR` means "one image pixel per
   /// CSS pixel" even on Retina.
-  async fn device_pixel_ratio(&self) -> Result<f64, String> {
+  async fn device_pixel_ratio(&self) -> Result<f64> {
     let v = self.evaluate("window.devicePixelRatio || 1").await?;
     Ok(v.and_then(|v| v.as_f64()).unwrap_or(1.0))
   }
 
-  pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>, String> {
+  pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>> {
     let js = format!(
       r"(function(){{
                 const el = document.querySelector('{}');
@@ -2312,8 +2302,9 @@ impl<T: CdpWrap> CdpPage<T> {
     let result = self.evaluate(&js).await?;
     let rect_str = result
       .and_then(|v| v.as_str().map(std::string::ToString::to_string))
-      .ok_or_else(|| format!("'{selector}' not found"))?;
-    let rect: serde_json::Value = serde_json::from_str(&rect_str).map_err(|e| format!("Parse rect: {e}"))?;
+      .ok_or_else(|| FerriError::invalid_selector(selector, "not found"))?;
+    let rect: serde_json::Value =
+      serde_json::from_str(&rect_str).map_err(|e| FerriError::Backend(format!("Parse rect: {e}")))?;
 
     let format_str = match format {
       ImageFormat::Png => "png",
@@ -2337,8 +2328,9 @@ impl<T: CdpWrap> CdpPage<T> {
     let data = result
       .get("data")
       .and_then(|v| v.as_str())
-      .ok_or("No screenshot data")?;
-    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).map_err(|e| format!("Decode: {e}"))
+      .ok_or_else(|| FerriError::backend("No screenshot data"))?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+      .map_err(|e| FerriError::Backend(format!("Decode: {e}")))
   }
 
   // ---- Screencast (video recording) ----
@@ -2356,13 +2348,10 @@ impl<T: CdpWrap> CdpPage<T> {
     quality: u8,
     max_width: u32,
     max_height: u32,
-  ) -> Result<
-    (
-      tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>,
-      tokio::sync::oneshot::Sender<()>,
-    ),
-    String,
-  > {
+  ) -> Result<(
+    tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>,
+    tokio::sync::oneshot::Sender<()>,
+  )> {
     // Subscribe to the event stream BEFORE firing `Page.startScreencast`
     // so the very first `Page.screencastFrame` event isn't lost in the
     // gap between the command being sent and the listener subscribing.
@@ -2390,7 +2379,7 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   /// Stop CDP screencast.
-  pub async fn stop_screencast(&self) -> Result<(), String> {
+  pub async fn stop_screencast(&self) -> Result<()> {
     self.cmd("Page.stopScreencast", serde_json::json!({})).await?;
     Ok(())
   }
@@ -2499,7 +2488,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// to inches via [`crate::options::PdfSize::to_inches`]. Margins default
   /// to `0` per side and are converted the same way. Every optional field
   /// falls back to Playwright's default when `None`.
-  pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>, String> {
+  pub async fn pdf(&self, opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
     let mut paper_width = 8.5_f64;
     let mut paper_height = 11.0_f64;
     if let Some(ref format) = opts.format {
@@ -2507,7 +2496,10 @@ impl<T: CdpWrap> CdpPage<T> {
         paper_width = w;
         paper_height = h;
       } else {
-        return Err(format!("Unknown paper format: {format}"));
+        return Err(FerriError::invalid_argument(
+          "format",
+          format!("unknown paper format: {format}"),
+        ));
       }
     } else {
       if let Some(ref w) = opts.width {
@@ -2544,13 +2536,17 @@ impl<T: CdpWrap> CdpPage<T> {
     });
 
     let result = self.cmd("Page.printToPDF", params).await?;
-    let data = result.get("data").and_then(|v| v.as_str()).ok_or("No PDF data")?;
-    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).map_err(|e| format!("Decode PDF: {e}"))
+    let data = result
+      .get("data")
+      .and_then(|v| v.as_str())
+      .ok_or_else(|| FerriError::backend("No PDF data"))?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+      .map_err(|e| FerriError::Backend(format!("Decode PDF: {e}")))
   }
 
   // ---- File upload ----
 
-  pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<(), String> {
+  pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<()> {
     // Resolve the selector to a Runtime.RemoteObjectId via Runtime.evaluate
     // — `DOM.nodeId` is invalidated by document lifecycle events (e.g. the
     // page re-issuing `DOM.setChildNodes`), so a getDocument → querySelector
@@ -2600,11 +2596,11 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Accessibility ----
 
-  pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>, String> {
+  pub async fn accessibility_tree(&self) -> Result<Vec<AxNodeData>> {
     self.accessibility_tree_with_depth(-1).await
   }
 
-  pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>, String> {
+  pub async fn accessibility_tree_with_depth(&self, depth: i32) -> Result<Vec<AxNodeData>> {
     let result = self
       .cmd("Accessibility.getFullAXTree", serde_json::json!({"depth": depth}))
       .await?;
@@ -2660,11 +2656,11 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Input ----
 
-  pub async fn click_at(&self, x: f64, y: f64) -> Result<(), String> {
+  pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
     self.click_at_opts(x, y, "left", 1).await
   }
 
-  pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<(), String> {
+  pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
@@ -2686,7 +2682,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// cursor position to the target. Modifier keydown/keyup is done by
   /// the caller via [`Self::press_modifiers`] /
   /// [`Self::release_modifiers`].
-  pub async fn click_at_with(&self, x: f64, y: f64, args: &super::BackendClickArgs) -> Result<(), String> {
+  pub async fn click_at_with(&self, x: f64, y: f64, args: &super::BackendClickArgs) -> Result<()> {
     let button = args.button.as_cdp();
     let mods = args.modifiers_bitmask;
     // Steps-1 intermediate mousemoves + one final at (x,y). Playwright
@@ -2770,7 +2766,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// Dispatch a hover at `(x, y)`: `steps` interpolated `mouseMoved`
   /// events with the caller's CDP `modifiers` bitmask on each, ending
   /// at `(x, y)` exactly. No `mousePressed` / `mouseReleased`.
-  pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::BackendHoverArgs) -> Result<(), String> {
+  pub async fn hover_at_with(&self, x: f64, y: f64, args: &super::BackendHoverArgs) -> Result<()> {
     let mods = args.modifiers_bitmask;
     let steps = args.steps.max(1);
     let skip_move = steps == 1
@@ -2818,7 +2814,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// listener fires. Playwright's `BrowserContextOptions.hasTouch` wires
   /// this on context creation; we opt in lazily on first tap so callers
   /// who never tap pay nothing.
-  pub async fn tap_at_with(&self, x: f64, y: f64, args: &super::BackendTapArgs) -> Result<(), String> {
+  pub async fn tap_at_with(&self, x: f64, y: f64, args: &super::BackendTapArgs) -> Result<()> {
     let mods = args.modifiers_bitmask;
     self
       .cmd(
@@ -2853,7 +2849,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `Input.dispatchKeyEvent { type: "keyDown" }`. `key` is the
   /// platform-resolved key name (e.g. `"Meta"` on macOS for
   /// `ControlOrMeta`) and `code` is the DOM `KeyboardEvent.code`.
-  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+  pub async fn press_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
     for md in mods {
       self
         .cmd(
@@ -2874,7 +2870,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `Input.dispatchKeyEvent { type: "keyUp" }`. Iterates in reverse
   /// order to match Playwright's unwind behavior in
   /// `/tmp/playwright/packages/playwright-core/src/server/input.ts`.
-  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<(), String> {
+  pub async fn release_modifiers(&self, mods: &[crate::options::Modifier]) -> Result<()> {
     for md in mods.iter().rev() {
       self
         .cmd(
@@ -2890,7 +2886,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn move_mouse(&self, x: f64, y: f64) -> Result<(), String> {
+  pub async fn move_mouse(&self, x: f64, y: f64) -> Result<()> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
@@ -2900,14 +2896,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn move_mouse_smooth(
-    &self,
-    from_x: f64,
-    from_y: f64,
-    to_x: f64,
-    to_y: f64,
-    steps: u32,
-  ) -> Result<(), String> {
+  pub async fn move_mouse_smooth(&self, from_x: f64, from_y: f64, to_x: f64, to_y: f64, steps: u32) -> Result<()> {
     let steps = steps.max(1);
     for i in 0..=steps {
       let t = f64::from(i) / f64::from(steps);
@@ -2924,7 +2913,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<(), String> {
+  pub async fn click_and_drag(&self, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
@@ -2958,7 +2947,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<(), String> {
+  pub async fn mouse_wheel(&self, delta_x: f64, delta_y: f64) -> Result<()> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
@@ -2968,7 +2957,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+  pub async fn mouse_down(&self, x: f64, y: f64, button: &str) -> Result<()> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
@@ -2978,7 +2967,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<(), String> {
+  pub async fn mouse_up(&self, x: f64, y: f64, button: &str) -> Result<()> {
     self
       .cmd(
         "Input.dispatchMouseEvent",
@@ -2988,7 +2977,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn type_str(&self, text: &str) -> Result<(), String> {
+  pub async fn type_str(&self, text: &str) -> Result<()> {
     self.cmd("Input.insertText", serde_json::json!({"text": text})).await?;
     Ok(())
   }
@@ -3032,7 +3021,7 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   /// Dispatch a keyDown event for a single key (does NOT release it).
-  pub async fn key_down(&self, key: &str) -> Result<(), String> {
+  pub async fn key_down(&self, key: &str) -> Result<()> {
     let (dom_key, vk, text) = Self::resolve_key(key);
     let down_type = if text.is_some() { "keyDown" } else { "rawKeyDown" };
     let mut params = serde_json::json!({
@@ -3047,7 +3036,7 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   /// Dispatch a keyUp event for a single key.
-  pub async fn key_up(&self, key: &str) -> Result<(), String> {
+  pub async fn key_up(&self, key: &str) -> Result<()> {
     let (dom_key, vk, _) = Self::resolve_key(key);
     self
       .cmd(
@@ -3061,7 +3050,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn press_key(&self, key: &str) -> Result<(), String> {
+  pub async fn press_key(&self, key: &str) -> Result<()> {
     self.key_down(key).await?;
     self.key_up(key).await?;
     Ok(())
@@ -3069,7 +3058,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Cookies ----
 
-  pub async fn get_cookies(&self) -> Result<Vec<CookieData>, String> {
+  pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
     let result = self.cmd("Network.getCookies", super::empty_params()).await?;
     let cookies = result
       .get("cookies")
@@ -3096,7 +3085,7 @@ impl<T: CdpWrap> CdpPage<T> {
     )
   }
 
-  pub async fn set_cookie(&self, cookie: CookieData) -> Result<(), String> {
+  pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
     let mut params = serde_json::json!({
         "name": cookie.name,
         "value": cookie.value,
@@ -3119,7 +3108,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<(), String> {
+  pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
     let mut params = serde_json::json!({"name": name});
     if let Some(d) = domain {
       params["domain"] = serde_json::json!(d);
@@ -3130,7 +3119,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn clear_cookies(&self) -> Result<(), String> {
+  pub async fn clear_cookies(&self) -> Result<()> {
     // Use Network.getCookies + Network.deleteCookies (session-scoped)
     // instead of Storage.clearCookies (browser-scoped) to correctly
     // clear cookies for this page's context.
@@ -3166,7 +3155,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// field that failed — matches Playwright's `Promise.all` failure
   /// mode.
   #[allow(clippy::too_many_lines)]
-  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<(), String> {
+  pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     use futures::future::OptionFuture;
 
     // `viewport` and `media` compose over `EmulateMediaOptions` /
@@ -3409,10 +3398,14 @@ impl<T: CdpWrap> CdpPage<T> {
         errs.push(format!("{label}: {e}"));
       }
     }
-    if errs.is_empty() { Ok(()) } else { Err(errs.join("; ")) }
+    if errs.is_empty() {
+      Ok(())
+    } else {
+      Err(FerriError::Backend(errs.join("; ")))
+    }
   }
 
-  pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<(), String> {
+  pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
     let params = metrics_params_for(config);
 
     // Skip the `setDeviceMetricsOverride` RTT when params match the
@@ -3451,7 +3444,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<(), String> {
+  pub async fn emulate_media(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
     use crate::options::MediaOverride;
     // `Emulation.setEmulatedMedia` replaces the emulation state per call.
     // Chrome treats a feature listed in `features` with `value: ""` as
@@ -3489,7 +3482,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `grantPermissions` — called from
   /// [`crate::ContextRef::clear_permissions`] (`Playwright
   /// browserContext.clearPermissions`).
-  pub async fn reset_permissions(&self) -> Result<(), String> {
+  pub async fn reset_permissions(&self) -> Result<()> {
     // Scope to this page's CDP browser context (see `apply_context_options`
     // for why grant must ship `browserContextId`). `Browser.resetPermissions`
     // is browser-level too.
@@ -3509,7 +3502,7 @@ impl<T: CdpWrap> CdpPage<T> {
   /// `page.setExtraHTTPHeaders(headers)`). The `apply_context_options`
   /// path inlines the same command separately so both entry points
   /// land independently.
-  pub async fn set_extra_http_headers(&self, headers: &FxHashMap<String, String>) -> Result<(), String> {
+  pub async fn set_extra_http_headers(&self, headers: &FxHashMap<String, String>) -> Result<()> {
     let pairs: serde_json::Map<String, serde_json::Value> = headers
       .iter()
       .map(|(k, v)| (k.clone(), serde_json::Value::String(v.clone())))
@@ -3522,17 +3515,17 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Tracing ----
 
-  pub async fn start_tracing(&self) -> Result<(), String> {
+  pub async fn start_tracing(&self) -> Result<()> {
     self.cmd("Tracing.start", super::empty_params()).await?;
     Ok(())
   }
 
-  pub async fn stop_tracing(&self) -> Result<(), String> {
+  pub async fn stop_tracing(&self) -> Result<()> {
     self.cmd("Tracing.end", super::empty_params()).await?;
     Ok(())
   }
 
-  pub async fn metrics(&self) -> Result<Vec<MetricData>, String> {
+  pub async fn metrics(&self) -> Result<Vec<MetricData>> {
     let result = self.cmd("Performance.getMetrics", super::empty_params()).await?;
     let metrics = result
       .get("metrics")
@@ -3552,7 +3545,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Ref resolution ----
 
-  pub async fn resolve_backend_node(&self, backend_node_id: i64, ref_id: &str) -> Result<AnyElement, String> {
+  pub async fn resolve_backend_node(&self, backend_node_id: i64, ref_id: &str) -> Result<AnyElement> {
     let resolve_result = self
       .cmd("DOM.resolveNode", serde_json::json!({"backendNodeId": backend_node_id}))
       .await?;
@@ -4133,7 +4126,7 @@ impl<T: CdpWrap> CdpPage<T> {
                   .send_command(session.as_deref(), "Browser.cancelDownload", params)
                   .await
                   .map(|_| ())
-                  .map_err(|e| crate::error::FerriError::protocol("Browser.cancelDownload", e))
+                  .map_err(|e| crate::error::FerriError::protocol("Browser.cancelDownload", e.to_string()))
               })
             });
 
@@ -4283,7 +4276,7 @@ impl<T: CdpWrap> CdpPage<T> {
 
   // ---- Init Scripts ----
 
-  pub async fn add_init_script(&self, source: &str) -> Result<String, String> {
+  pub async fn add_init_script(&self, source: &str) -> Result<String> {
     let result = self
       .cmd(
         "Page.addScriptToEvaluateOnNewDocument",
@@ -4298,7 +4291,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(id)
   }
 
-  pub async fn remove_init_script(&self, identifier: &str) -> Result<(), String> {
+  pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
     self
       .cmd(
         "Page.removeScriptToEvaluateOnNewDocument",
@@ -4330,7 +4323,7 @@ bc.resolve=function(seq,val){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.r(val)
 bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new Error(err))}};
 })()";
 
-  async fn ensure_binding_channel(&self) -> Result<(), String> {
+  async fn ensure_binding_channel(&self) -> Result<()> {
     if self.binding_initialized.swap(true, std::sync::atomic::Ordering::SeqCst) {
       return Ok(());
     }
@@ -4402,7 +4395,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     Ok(())
   }
 
-  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<(), String> {
+  pub async fn expose_function(&self, name: &str, func: crate::events::ExposedFn) -> Result<()> {
     self.ensure_binding_channel().await?;
     self.exposed_fns.write().await.insert(name.to_string(), func);
     let register_js = format!("globalThis.__fd_bc.add('{}')", crate::steps::js_escape(name));
@@ -4411,7 +4404,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     Ok(())
   }
 
-  pub async fn remove_exposed_function(&self, name: &str) -> Result<(), String> {
+  pub async fn remove_exposed_function(&self, name: &str) -> Result<()> {
     self.exposed_fns.write().await.remove(name);
     let js = format!(
       "if(globalThis.__fd_bc)globalThis.__fd_bc.del('{}')",
@@ -4423,7 +4416,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
   // ---- Lifecycle ----
 
-  pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<(), String> {
+  pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {
     if self.closed.swap(true, std::sync::atomic::Ordering::SeqCst) {
       return Ok(());
     }
@@ -4460,7 +4453,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
   // ---- Network Interception ----
 
-  async fn ensure_fetch_enabled(&self) -> Result<(), String> {
+  async fn ensure_fetch_enabled(&self) -> Result<()> {
     let has_creds = self.http_credentials.read().await.is_some();
     if self.fetch_enabled.swap(true, std::sync::atomic::Ordering::SeqCst) {
       // Already enabled — but may need to re-enable with auth handling.
@@ -4745,7 +4738,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
-  ) -> Result<(), String> {
+  ) -> Result<()> {
     self
       .routes
       .write()
@@ -4754,7 +4747,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     self.ensure_fetch_enabled().await
   }
 
-  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<(), String> {
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
     let mut routes = self.routes.write().await;
     routes.retain(|r| !r.matcher.equivalent(matcher));
     if routes.is_empty() && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
@@ -4778,7 +4771,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
   /// as success — the dispose path here forwards the error as-is so
   /// idempotence is handled client-side by the `disposed` flag, not by
   /// swallowing protocol failures.
-  pub async fn release_object(&self, object_id: &str) -> Result<(), String> {
+  pub async fn release_object(&self, object_id: &str) -> Result<()> {
     self
       .cmd("Runtime.releaseObject", serde_json::json!({"objectId": object_id}))
       .await
@@ -4810,14 +4803,14 @@ impl<T: CdpTransport> Clone for CdpElement<T> {
 }
 
 impl<T: CdpTransport> CdpElement<T> {
-  async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+  async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     self
       .transport
       .send_command(self.session_id.as_deref(), method, params)
       .await
   }
 
-  async fn resolve_node_id_from_object(&self, object_id: &str) -> Result<i64, String> {
+  async fn resolve_node_id_from_object(&self, object_id: &str) -> Result<i64> {
     let node_result = self
       .cmd("DOM.requestNode", serde_json::json!({"objectId": object_id}))
       .await?;
@@ -4831,7 +4824,7 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok(node_id)
   }
 
-  async fn resolve_object_id_from_node(&self, node_id: i64) -> Result<Arc<str>, String> {
+  async fn resolve_object_id_from_node(&self, node_id: i64) -> Result<Arc<str>> {
     let resolved = self
       .cmd("DOM.resolveNode", serde_json::json!({"nodeId": node_id}))
       .await?;
@@ -4843,7 +4836,7 @@ impl<T: CdpTransport> CdpElement<T> {
       .ok_or("Cannot resolve element".into())
   }
 
-  async fn node_id(&self) -> Result<i64, String> {
+  async fn node_id(&self) -> Result<i64> {
     let object_id = {
       let handles = self.handles.lock().await;
       if let Some(node_id) = handles.node_id {
@@ -4861,7 +4854,7 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok(node_id)
   }
 
-  async fn object_id(&self) -> Result<Arc<str>, String> {
+  async fn object_id(&self) -> Result<Arc<str>> {
     let node_id = {
       let handles = self.handles.lock().await;
       if let Some(object_id) = &handles.object_id {
@@ -4891,12 +4884,12 @@ impl<T: CdpTransport> CdpElement<T> {
   /// Returns an error if the element carries neither a cached `node_id`
   /// nor an `object_id` — should not happen for elements freshly
   /// returned from `find_element` / `evaluate_to_element`.
-  pub async fn ensure_object_id(&self) -> Result<Arc<str>, String> {
+  pub async fn ensure_object_id(&self) -> Result<Arc<str>> {
     self.object_id().await
   }
 
   /// Get element center coordinates for clicking.
-  async fn get_center(&self) -> Result<(f64, f64), String> {
+  async fn get_center(&self) -> Result<(f64, f64)> {
     let node_id = self.node_id().await?;
     let result = self
       .cmd("DOM.getBoxModel", serde_json::json!({"nodeId": node_id}))
@@ -4918,7 +4911,7 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok((f64::midpoint(x1, x3), f64::midpoint(y1, y3)))
   }
 
-  pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>, String> {
+  pub async fn call_js_fn_value(&self, function: &str) -> Result<Option<serde_json::Value>> {
     let object_id = self.object_id().await?;
     let result = self
       .cmd(
@@ -4940,7 +4933,7 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok(result.get("result").and_then(|r| r.get("value")).cloned())
   }
 
-  pub async fn click(&self) -> Result<(), String> {
+  pub async fn click(&self) -> Result<()> {
     // `Input.dispatchMouseEvent` uses top-level page coordinates. Walk
     // up the frame chain (`window.frameElement.getBoundingClientRect()`)
     // and accumulate per-iframe offsets so a button inside an iframe
@@ -4990,7 +4983,7 @@ impl<T: CdpTransport> CdpElement<T> {
     }
   }
 
-  pub async fn dblclick(&self) -> Result<(), String> {
+  pub async fn dblclick(&self) -> Result<()> {
     let center = self.call_js_fn_value(
             "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
         ).await?;
@@ -5037,7 +5030,7 @@ impl<T: CdpTransport> CdpElement<T> {
     }
   }
 
-  pub async fn hover(&self) -> Result<(), String> {
+  pub async fn hover(&self) -> Result<()> {
     self.scroll_into_view().await?;
     let (x, y) = self.get_center().await?;
     self
@@ -5049,13 +5042,13 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok(())
   }
 
-  pub async fn type_str(&self, text: &str) -> Result<(), String> {
+  pub async fn type_str(&self, text: &str) -> Result<()> {
     self.click().await?;
     self.cmd("Input.insertText", serde_json::json!({"text": text})).await?;
     Ok(())
   }
 
-  pub async fn call_js_fn(&self, function: &str) -> Result<(), String> {
+  pub async fn call_js_fn(&self, function: &str) -> Result<()> {
     let object_id = self.object_id().await?;
     self
       .cmd(
@@ -5069,7 +5062,7 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok(())
   }
 
-  pub async fn scroll_into_view(&self) -> Result<(), String> {
+  pub async fn scroll_into_view(&self) -> Result<()> {
     // Prefer `objectId` over `nodeId`. CDP's `DOM.scrollIntoViewIfNeeded`
     // accepts either, but the DOM agent's `nodeId` map is keyed on the
     // current document version returned by `DOM.getDocument`. Lazy
@@ -5088,7 +5081,7 @@ impl<T: CdpTransport> CdpElement<T> {
     Ok(())
   }
 
-  pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>, String> {
+  pub async fn screenshot(&self, format: ImageFormat) -> Result<Vec<u8>> {
     // Prefer `objectId` over `nodeId` for the same reason as
     // [`Self::scroll_into_view`]: the DOM-agent nodeId map relies on
     // a prior `DOM.getDocument`, which the lazy bootstrap skips
@@ -5131,8 +5124,9 @@ impl<T: CdpTransport> CdpElement<T> {
     let data = result
       .get("data")
       .and_then(|v| v.as_str())
-      .ok_or("No screenshot data")?;
-    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data).map_err(|e| format!("Decode: {e}"))
+      .ok_or_else(|| FerriError::backend("No screenshot data"))?;
+    base64::Engine::decode(&base64::engine::general_purpose::STANDARD, data)
+      .map_err(|e| FerriError::Backend(format!("Decode: {e}")))
   }
 }
 
@@ -5525,7 +5519,7 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
           .await
           .map_err(|e| crate::error::FerriError::Protocol {
             method: "Network.getResponseBody".into(),
-            message: e,
+            message: e.to_string(),
           })?;
         let body = resp.get("body").and_then(|v| v.as_str()).unwrap_or("");
         let base64_encoded = resp

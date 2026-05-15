@@ -176,14 +176,9 @@ impl Frame {
   /// [`Self::evaluate`] with a function literal.
   async fn backend_eval_expr(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     if self.is_main_frame() {
-      self.page.inner.evaluate(expression).await.map_err(Into::into)
+      self.page.inner.evaluate(expression).await
     } else {
-      self
-        .page
-        .inner
-        .evaluate_in_frame(expression, &self.id)
-        .await
-        .map_err(Into::into)
+      self.page.inner.evaluate_in_frame(expression, &self.id).await
     }
   }
 

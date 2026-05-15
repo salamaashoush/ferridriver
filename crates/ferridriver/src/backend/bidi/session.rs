@@ -10,6 +10,7 @@ use serde_json::json;
 use tracing::{debug, info};
 
 use super::transport::BidiTransport;
+use crate::error::{FerriError, Result};
 
 /// A `BiDi` session -- holds the transport and session metadata.
 #[derive(Clone)]
@@ -34,7 +35,7 @@ impl BidiSession {
   /// 1. Connect WebSocket to `ws://host:port/session`
   /// 2. Send `session.new` to create a session
   /// 3. Subscribe to all events
-  pub async fn connect(ws_url: &str) -> Result<Self, String> {
+  pub async fn connect(ws_url: &str) -> Result<Self> {
     info!("Connecting BiDi session to {ws_url}");
 
     let transport = Arc::new(BidiTransport::connect(ws_url).await?);
@@ -100,7 +101,7 @@ impl BidiSession {
   /// Connect to a `BiDi` endpoint at the given port.
   /// Constructs `ws://127.0.0.1:{port}/session` and connects.
   #[allow(dead_code, reason = "public library API for external consumers")]
-  pub async fn connect_to_port(port: u16) -> Result<Self, String> {
+  pub async fn connect_to_port(port: u16) -> Result<Self> {
     Self::connect(&format!("ws://127.0.0.1:{port}/session")).await
   }
 
@@ -117,7 +118,7 @@ impl BidiSession {
     firefox_path: &str,
     flags: &[String],
     headless: bool,
-  ) -> Result<(Self, tokio::process::Child, tempfile::TempDir), String> {
+  ) -> Result<(Self, tokio::process::Child, tempfile::TempDir)> {
     // Prefix the profile dir so test-harness cleanup can `pkill -f`
     // any leaked Firefox processes by their `--profile` arg —
     // mirrors the `ferridriver-pipe-` / `ferridriver-raw-` prefixes
@@ -203,22 +204,22 @@ impl BidiSession {
     browser_path: &str,
     flags: &[String],
     headless: bool,
-  ) -> Result<(Self, tokio::process::Child, tempfile::TempDir), String> {
+  ) -> Result<(Self, tokio::process::Child, tempfile::TempDir)> {
     let path_lower = browser_path.to_lowercase();
     if path_lower.contains("firefox") {
       Box::pin(Self::launch_firefox(browser_path, flags, headless)).await
     } else {
-      Err(format!(
+      Err(FerriError::unsupported(format!(
         "BiDi backend requires Firefox (found: {browser_path}). \
          Chrome does not have built-in BiDi support -- use the CDP backend for Chrome. \
          Set FIREFOX_PATH or install Firefox."
-      ))
+      )))
     }
   }
 
   /// End the `BiDi` session gracefully.
   #[allow(dead_code)]
-  pub async fn end(&self) -> Result<(), String> {
+  pub async fn end(&self) -> Result<()> {
     let _ = self.transport.send_command("session.end", json!({})).await;
     Ok(())
   }
@@ -226,17 +227,23 @@ impl BidiSession {
 
 /// Read Firefox stderr to find the `BiDi` WebSocket URL.
 /// Firefox prints: "`WebDriver` `BiDi` listening on ws://127.0.0.1:PORT"
-async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<String, String> {
+async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<String> {
   use tokio::io::AsyncBufReadExt;
 
-  let stderr = child.stderr.take().ok_or("Firefox: no stderr handle")?;
+  let stderr = child
+    .stderr
+    .take()
+    .ok_or_else(|| FerriError::backend("Firefox: no stderr handle"))?;
   let mut reader = tokio::io::BufReader::new(stderr);
   let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(15);
 
   let mut line = String::new();
   loop {
     if tokio::time::Instant::now() >= deadline {
-      return Err("Timeout waiting for Firefox BiDi WebSocket URL in stderr".into());
+      return Err(FerriError::timeout(
+        "waiting for Firefox BiDi WebSocket URL in stderr",
+        15_000,
+      ));
     }
 
     line.clear();
@@ -246,7 +253,9 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
       Ok(Ok(0)) => {
         // EOF
         if let Ok(Some(status)) = child.try_wait() {
-          return Err(format!("Firefox exited during startup with status: {status}"));
+          return Err(FerriError::Backend(format!(
+            "Firefox exited during startup with status: {status}"
+          )));
         }
       },
       Ok(Ok(_)) => {
@@ -266,11 +275,13 @@ async fn discover_bidi_ws_url(child: &mut tokio::process::Child) -> Result<Strin
           return Ok(ws_url);
         }
       },
-      Ok(Err(e)) => return Err(format!("Firefox stderr read error: {e}")),
+      Ok(Err(e)) => return Err(FerriError::Backend(format!("Firefox stderr read error: {e}"))),
       Err(_) => {
         // Timeout on this read, check if process died
         if let Ok(Some(status)) = child.try_wait() {
-          return Err(format!("Firefox exited during startup with status: {status}"));
+          return Err(FerriError::Backend(format!(
+            "Firefox exited during startup with status: {status}"
+          )));
         }
       },
     }

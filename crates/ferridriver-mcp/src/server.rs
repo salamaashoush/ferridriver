@@ -584,7 +584,7 @@ impl McpServer {
     ref_map: &rustc_hash::FxHashMap<String, i64>,
     r#ref: Option<&String>,
     selector: Option<&String>,
-  ) -> Result<AnyElement, String> {
+  ) -> ferridriver::Result<AnyElement> {
     actions::resolve_element(
       page.inner(),
       ref_map,
