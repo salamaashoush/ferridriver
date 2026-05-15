@@ -343,7 +343,7 @@ fn generate_hook(prefix: &str, attr: TokenStream, item: TokenStream) -> TokenStr
   let (fn_sig, handler_factory) = if is_global {
     (
       quote! {
-        #vis async fn #fn_name() -> Result<(), String> {
+        #vis async fn #fn_name() -> ::std::result::Result<(), ::ferridriver::FerriError> {
           #block
           Ok(())
         }
@@ -362,7 +362,7 @@ fn generate_hook(prefix: &str, attr: TokenStream, item: TokenStream) -> TokenStr
         #(#attrs)*
         #vis async fn #fn_name(
           world: &mut ferridriver_bdd::world::BrowserWorld,
-        ) -> Result<(), String> {
+        ) -> ::std::result::Result<(), ::ferridriver::FerriError> {
           #block
           Ok(())
         }
@@ -379,7 +379,7 @@ fn generate_hook(prefix: &str, attr: TokenStream, item: TokenStream) -> TokenStr
     (
       quote! {
         #(#attrs)*
-        #vis async fn #fn_name() -> Result<(), String> {
+        #vis async fn #fn_name() -> ::std::result::Result<(), ::ferridriver::FerriError> {
           #block
           Ok(())
         }
