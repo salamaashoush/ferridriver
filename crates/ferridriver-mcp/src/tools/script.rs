@@ -155,12 +155,18 @@ impl McpServer {
     let browser_handle = std::sync::Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
     let plugin_bindings = self
       .plugins
-      .plugins()
+      .files()
       .iter()
-      .map(|p| ferridriver_script::PluginBinding {
-        name: p.manifest.name.clone(),
-        source: p.source.clone(),
-        allowed_commands: p.manifest.allow.commands.clone(),
+      .map(|f| ferridriver_script::PluginBinding {
+        source: f.source.clone(),
+        tools: f
+          .tools
+          .iter()
+          .map(|t| ferridriver_script::PluginToolBinding {
+            name: t.name.clone(),
+            allowed_commands: t.allow.commands.clone(),
+          })
+          .collect(),
       })
       .collect();
     let context = RunContext {

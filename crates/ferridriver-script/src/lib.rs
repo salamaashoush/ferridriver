@@ -43,7 +43,7 @@ pub mod vars;
 
 pub use bindings::{
   APIRequestContextJs, APIResponseJs, ArtifactsJs, BrowserContextJs, KeyboardJs, LocatorJs, MouseJs, PageJs,
-  PluginBinding, PluginCommandsJs, install_plugins,
+  PluginBinding, PluginCommandsJs, PluginToolBinding, install_plugins,
 };
 pub use console::ConsoleCapture;
 pub use engine::{RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};

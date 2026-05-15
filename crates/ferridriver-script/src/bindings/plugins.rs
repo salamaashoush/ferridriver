@@ -21,14 +21,27 @@ use serde::{Deserialize, Serialize};
 
 use crate::bindings::convert::{serde_from_js, serde_to_js};
 
-/// Snapshot of one loaded plugin handed to the script engine at
-/// `install_plugins` time. Lives in `ferridriver-script` so the crate
-/// stays self-contained -- the MCP crate maps its `LoadedPlugin` into
-/// this shape before invoking `engine.run`.
+/// Snapshot of one plugin source file handed to the script engine at
+/// `install_plugins` time. A file may contribute one or more tools.
+/// Lives in `ferridriver-script` so the crate stays self-contained --
+/// the MCP crate maps its `LoadedPlugin` files into this shape before
+/// invoking `engine.run`.
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct PluginBinding {
-  pub name: String,
+  /// Source text of the plugin file. Evaluated ONCE per `run_script`
+  /// invocation regardless of how many tools the file declares.
   pub source: String,
+  /// Tools the file declares, in source order. Each maps onto a
+  /// separate `plugins.<name>` binding.
+  pub tools: Vec<PluginToolBinding>,
+}
+
+/// One tool declared inside a plugin file. The allow-list is per-tool
+/// so a handler can only invoke commands the manifest explicitly
+/// authorises, even when sibling tools in the same file grant more.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct PluginToolBinding {
+  pub name: String,
   /// Allowed command templates, keyed by the name the handler uses with
   /// `commands.run(name, vars)`. Each value is a shell command template
   /// with `${var}` placeholders substituted from the call-time `vars`.
@@ -111,9 +124,15 @@ fn parse_command_output(s: &str) -> serde_json::Value {
 }
 
 /// Install the `plugins` global and the hidden `__ferri_plugin_commands`
-/// runner. `plugins` is an object keyed by manifest name; each value is
-/// an async function `(args) => result`.
-pub fn install_plugins(ctx: &Ctx<'_>, plugins: &[PluginBinding]) -> rquickjs::Result<()> {
+/// runner. `plugins` is an object keyed by tool name; each value is an
+/// async function `(args) => result`.
+///
+/// One source file may declare several tools. The source is eval'd
+/// exactly once per file (under `globalThis.__ferri_plugin_files[i]`),
+/// then each tool gets its own wrapper that looks the handler up by
+/// index. Sibling tools in the same file share globals (helpers,
+/// constants) without re-evaluation overhead.
+pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Result<()> {
   let globals = ctx.globals();
 
   // Always install the runner -- even with zero plugins -- so handlers
@@ -125,43 +144,76 @@ pub fn install_plugins(ctx: &Ctx<'_>, plugins: &[PluginBinding]) -> rquickjs::Re
   let plugins_obj = Object::new(ctx.clone())?;
   globals.set("plugins", plugins_obj.clone())?;
 
-  for binding in plugins {
-    let allowed_json = serde_json::to_string(&binding.allowed_commands).unwrap_or_else(|_| "{}".into());
-    let source_literal = serde_json::to_string(&binding.source).unwrap_or_else(|_| "\"\"".into());
-    let name_literal = serde_json::to_string(&binding.name).unwrap_or_else(|_| "\"\"".into());
+  // Storage for per-file tool arrays (the eval'd manifests, with their
+  // live handler closures). Indexed by file position; the per-tool
+  // wrapper closes over (fileIndex, toolIndex) to look up its handler.
+  ctx.eval::<(), _>(b"globalThis.__ferri_plugin_files = [];".as_slice())?;
 
-    let wrapper = format!(
+  for (file_idx, file) in files.iter().enumerate() {
+    let source_literal = serde_json::to_string(&file.source).unwrap_or_else(|_| "\"\"".into());
+
+    // 1. Eval the file source once, normalise `globalThis.exports` into
+    //    an array, store under `globalThis.__ferri_plugin_files[file_idx]`.
+    //    The bookkeeping mirrors the loader's extraction logic so tool
+    //    indices match.
+    let eval_file = format!(
       "(() => {{\n\
-         const ALLOWED = {allowed_json};\n\
-         const PLUGIN_NAME = {name_literal};\n\
-         const commands = {{\n\
-           run: async (cmdName, vars) => {{\n\
-             const tpl = ALLOWED[cmdName];\n\
-             if (!tpl) throw new Error('commands.run: \"' + cmdName + '\" is not in the allow-list for plugin ' + PLUGIN_NAME);\n\
-             return await globalThis.__ferri_plugin_commands.exec(tpl, vars || {{}});\n\
-           }},\n\
-         }};\n\
-         const __pluginExports = {{}};\n\
-         globalThis.exports = __pluginExports;\n\
+         const __exp_before = globalThis.exports;\n\
+         globalThis.exports = undefined;\n\
          (0, eval)({source_literal});\n\
-         const exp = globalThis.exports || __pluginExports;\n\
-         delete globalThis.exports;\n\
-         const handler = exp && exp.handler;\n\
-         if (typeof handler !== 'function') {{\n\
-           throw new Error('plugin ' + PLUGIN_NAME + ' missing handler');\n\
+         const __exp = globalThis.exports;\n\
+         globalThis.exports = __exp_before;\n\
+         if (typeof __exp !== 'object' || __exp === null) {{\n\
+           throw new Error('plugin file index {file_idx} did not set globalThis.exports');\n\
          }}\n\
-         return async (callArgs) => handler({{\n\
-           args: callArgs,\n\
-           page: globalThis.page,\n\
-           context: globalThis.context,\n\
-           request: globalThis.request,\n\
-           commands,\n\
-         }});\n\
+         let __tools;\n\
+         if (Array.isArray(__exp)) __tools = __exp;\n\
+         else if (Array.isArray(__exp.tools)) __tools = __exp.tools;\n\
+         else __tools = [__exp];\n\
+         globalThis.__ferri_plugin_files[{file_idx}] = __tools;\n\
        }})()\n"
     );
+    ctx.eval::<(), _>(eval_file.as_bytes())?;
 
-    let fn_value: Value<'_> = ctx.eval(wrapper.as_bytes())?;
-    plugins_obj.set(binding.name.as_str(), fn_value)?;
+    // 2. For each tool, install a wrapper that locates its handler by
+    //    (fileIndex, toolIndex) and binds the per-tool allow-list.
+    for (tool_idx, tool) in file.tools.iter().enumerate() {
+      let allowed_json = serde_json::to_string(&tool.allowed_commands).unwrap_or_else(|_| "{}".into());
+      let name_literal = serde_json::to_string(&tool.name).unwrap_or_else(|_| "\"\"".into());
+
+      let wrapper = format!(
+        "(() => {{\n\
+           const ALLOWED = {allowed_json};\n\
+           const PLUGIN_NAME = {name_literal};\n\
+           const FILE_IDX = {file_idx};\n\
+           const TOOL_IDX = {tool_idx};\n\
+           const commands = {{\n\
+             run: async (cmdName, vars) => {{\n\
+               const tpl = ALLOWED[cmdName];\n\
+               if (!tpl) throw new Error('commands.run: \"' + cmdName + '\" is not in the allow-list for plugin ' + PLUGIN_NAME);\n\
+               return await globalThis.__ferri_plugin_commands.exec(tpl, vars || {{}});\n\
+             }},\n\
+           }};\n\
+           return async (callArgs) => {{\n\
+             const tool = globalThis.__ferri_plugin_files[FILE_IDX][TOOL_IDX];\n\
+             const handler = tool && tool.handler;\n\
+             if (typeof handler !== 'function') {{\n\
+               throw new Error('plugin ' + PLUGIN_NAME + ' missing handler');\n\
+             }}\n\
+             return handler({{\n\
+               args: callArgs,\n\
+               page: globalThis.page,\n\
+               context: globalThis.context,\n\
+               request: globalThis.request,\n\
+               commands,\n\
+             }});\n\
+           }};\n\
+         }})()\n"
+      );
+
+      let fn_value: Value<'_> = ctx.eval(wrapper.as_bytes())?;
+      plugins_obj.set(tool.name.as_str(), fn_value)?;
+    }
   }
 
   Ok(())

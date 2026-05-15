@@ -457,7 +457,12 @@ impl McpServer {
       for file in files {
         match crate::plugin::load_plugin(&file, &self.script_engine).await {
           Ok(plugin) => {
-            tracing::info!(name = %plugin.manifest.name, path = %plugin.path.display(), "loaded plugin");
+            let tool_names: Vec<&str> = plugin.tools.iter().map(|t| t.name.as_str()).collect();
+            tracing::info!(
+              path = %plugin.path.display(),
+              tools = ?tool_names,
+              "loaded plugin file"
+            );
             loaded.push(plugin);
           },
           Err(e) => {
@@ -483,11 +488,10 @@ impl McpServer {
     let promoted: Vec<_> = self
       .plugins
       .promoted_tools()
-      .map(|p| {
-        let name = p.manifest.name.clone();
-        let desc = p.manifest.description.clone().unwrap_or_default();
-        let schema_value = p
-          .manifest
+      .map(|t| {
+        let name = t.name.clone();
+        let desc = t.description.clone().unwrap_or_default();
+        let schema_value = t
           .input_schema
           .clone()
           .unwrap_or_else(|| serde_json::json!({"type":"object","properties":{}}));
@@ -537,7 +541,7 @@ impl McpServer {
   ) -> Result<rmcp::model::CallToolResult, ErrorData> {
     use rmcp::model::{CallToolResult, Content};
 
-    if self.plugins.get(plugin_name).is_none() {
+    if self.plugins.get_tool(plugin_name).is_none() {
       return Err(Self::err(format!("unknown plugin: {plugin_name}")));
     }
 
@@ -563,12 +567,18 @@ impl McpServer {
 
     let plugin_bindings = self
       .plugins
-      .plugins()
+      .files()
       .iter()
-      .map(|p| ferridriver_script::PluginBinding {
-        name: p.manifest.name.clone(),
-        source: p.source.clone(),
-        allowed_commands: p.manifest.allow.commands.clone(),
+      .map(|f| ferridriver_script::PluginBinding {
+        source: f.source.clone(),
+        tools: f
+          .tools
+          .iter()
+          .map(|t| ferridriver_script::PluginToolBinding {
+            name: t.name.clone(),
+            allowed_commands: t.allow.commands.clone(),
+          })
+          .collect(),
       })
       .collect();
 
