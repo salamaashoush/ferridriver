@@ -562,18 +562,29 @@ impl ShardArg {
   ///
   /// # Errors
   ///
-  /// Returns an error string when the input is malformed, when either
-  /// component fails to parse as `u32`, or when `current` is outside
-  /// `1..=total`.
-  pub fn parse(s: &str) -> Result<Self, String> {
+  /// Returns `FerriError::InvalidArgument` when the input is malformed,
+  /// when either component fails to parse as `u32`, or when `current` is
+  /// outside `1..=total`.
+  pub fn parse(s: &str) -> ferridriver::error::Result<Self> {
+    use ferridriver::FerriError;
     let parts: Vec<&str> = s.split('/').collect();
     if parts.len() != 2 {
-      return Err(format!("invalid shard format: {s:?} (expected X/N)"));
+      return Err(FerriError::invalid_argument(
+        "shard",
+        format!("invalid shard format: {s:?} (expected X/N)"),
+      ));
     }
-    let current: u32 = parts[0].parse().map_err(|e| format!("invalid shard current: {e}"))?;
-    let total: u32 = parts[1].parse().map_err(|e| format!("invalid shard total: {e}"))?;
+    let current: u32 = parts[0]
+      .parse()
+      .map_err(|e| FerriError::invalid_argument("shard", format!("invalid shard current: {e}")))?;
+    let total: u32 = parts[1]
+      .parse()
+      .map_err(|e| FerriError::invalid_argument("shard", format!("invalid shard total: {e}")))?;
     if current == 0 || current > total {
-      return Err(format!("shard {current}/{total}: current must be 1..={total}"));
+      return Err(FerriError::invalid_argument(
+        "shard",
+        format!("shard {current}/{total}: current must be 1..={total}"),
+      ));
     }
     Ok(Self { current, total })
   }
