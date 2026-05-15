@@ -880,7 +880,7 @@ impl TestRunner {
                 let test_info: Arc<ferridriver_test::model::TestInfo> = pool
                   .get("test_info")
                   .await
-                  .map_err(|e| TestFailure::from(format!("fixture 'test_info': {e}")))?;
+                  .map_err(|e| TestFailure::wrap("fixture 'test_info'", e))?;
 
                 let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
                 pool.inject("__test_modifiers", Arc::clone(&modifiers));

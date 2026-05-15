@@ -139,23 +139,23 @@ async fn build_world_from_pool(
   let browser: Arc<ferridriver::Browser> = pool
     .get("browser")
     .await
-    .map_err(|e| TestFailure::from(format!("fixture 'browser' failed: {e}")))?;
+    .map_err(|e| TestFailure::wrap("fixture 'browser' failed", e))?;
   let page: Arc<ferridriver::Page> = pool
     .get("page")
     .await
-    .map_err(|e| TestFailure::from(format!("fixture 'page' failed: {e}")))?;
+    .map_err(|e| TestFailure::wrap("fixture 'page' failed", e))?;
   let context: Arc<ferridriver::context::ContextRef> = pool
     .get("context")
     .await
-    .map_err(|e| TestFailure::from(format!("fixture 'context' failed: {e}")))?;
+    .map_err(|e| TestFailure::wrap("fixture 'context' failed", e))?;
   let request: Arc<ferridriver::api_request::APIRequestContext> = pool
     .get("request")
     .await
-    .map_err(|e| TestFailure::from(format!("fixture 'request' failed: {e}")))?;
+    .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
   let test_info: Arc<TestInfo> = pool
     .get("test_info")
     .await
-    .map_err(|e| TestFailure::from(format!("fixture 'test_info' failed: {e}")))?;
+    .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", e))?;
 
   let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
   pool.inject("__test_modifiers", Arc::clone(&modifiers));
@@ -192,23 +192,23 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
       let browser: Arc<ferridriver::Browser> = pool
         .get("browser")
         .await
-        .map_err(|e| TestFailure::from(format!("fixture 'browser' failed: {e}")))?;
+        .map_err(|e| TestFailure::wrap("fixture 'browser' failed", e))?;
       let page: Arc<ferridriver::Page> = pool
         .get("page")
         .await
-        .map_err(|e| TestFailure::from(format!("fixture 'page' failed: {e}")))?;
+        .map_err(|e| TestFailure::wrap("fixture 'page' failed", e))?;
       let context: Arc<ferridriver::context::ContextRef> = pool
         .get("context")
         .await
-        .map_err(|e| TestFailure::from(format!("fixture 'context' failed: {e}")))?;
+        .map_err(|e| TestFailure::wrap("fixture 'context' failed", e))?;
       let test_info: Arc<TestInfo> = pool
         .get("test_info")
         .await
-        .map_err(|e| TestFailure::from(format!("fixture 'test_info' failed: {e}")))?;
+        .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", e))?;
       let request: Arc<ferridriver::api_request::APIRequestContext> = pool
         .get("request")
         .await
-        .map_err(|e| TestFailure::from(format!("fixture 'request' failed: {e}")))?;
+        .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
 
       // Create shared modifiers — worker reads these after callback returns.
       let modifiers = Arc::new(ferridriver_test::model::TestModifiers::default());
