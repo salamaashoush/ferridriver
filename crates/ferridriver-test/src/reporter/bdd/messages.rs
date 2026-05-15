@@ -74,15 +74,14 @@ impl Reporter for CucumberMessagesReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     if let Some(parent) = self.output_path.parent() {
       std::fs::create_dir_all(parent).ok();
     }
-    let mut file = std::fs::File::create(&self.output_path)
-      .map_err(|e| format!("cannot create {}: {e}", self.output_path.display()))?;
+    let mut file = std::fs::File::create(&self.output_path)?;
     for msg in &self.messages {
-      serde_json::to_writer(&mut file, msg).map_err(|e| format!("JSON write error: {e}"))?;
-      writeln!(file).map_err(|e| format!("write error: {e}"))?;
+      serde_json::to_writer(&mut file, msg)?;
+      writeln!(file)?;
     }
     tracing::info!("Cucumber Messages written to {}", self.output_path.display());
     Ok(())

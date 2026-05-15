@@ -61,7 +61,7 @@ impl Reporter for GithubReporter {
     self.delegate.on_event(event).await;
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     self.delegate.finalize().await
   }
 }

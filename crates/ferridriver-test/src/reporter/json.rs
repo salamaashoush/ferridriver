@@ -134,7 +134,7 @@ impl Reporter for JsonReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     let passed = self.results.iter().filter(|r| r.status == "passed").count();
     let failed = self
       .results
@@ -154,12 +154,12 @@ impl Reporter for JsonReporter {
       tests: self.results.clone(),
     };
 
-    let json = serde_json::to_string_pretty(&report).map_err(|e| format!("JSON serialize error: {e}"))?;
+    let json = serde_json::to_string_pretty(&report)?;
 
     if let Some(parent) = self.output_path.parent() {
       std::fs::create_dir_all(parent).ok();
     }
-    std::fs::write(&self.output_path, json).map_err(|e| format!("cannot write {}: {e}", self.output_path.display()))?;
+    std::fs::write(&self.output_path, json)?;
 
     tracing::info!("JSON report written to {}", self.output_path.display());
     Ok(())

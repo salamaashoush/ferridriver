@@ -35,7 +35,7 @@ impl Reporter for BddJunitReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     use std::fmt::Write;
 
     let mut suites: rustc_hash::FxHashMap<String, Vec<&TestOutcome>> = rustc_hash::FxHashMap::default();
@@ -120,7 +120,7 @@ impl Reporter for BddJunitReporter {
     if let Some(parent) = self.output_path.parent() {
       let _ = std::fs::create_dir_all(parent);
     }
-    std::fs::write(&self.output_path, xml).map_err(|e| format!("write {}: {e}", self.output_path.display()))?;
+    std::fs::write(&self.output_path, xml)?;
     Ok(())
   }
 }

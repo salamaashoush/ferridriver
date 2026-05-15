@@ -178,28 +178,26 @@ impl Reporter for AllureReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
-    std::fs::create_dir_all(&self.output_dir).map_err(|e| format!("cannot create allure output dir: {e}"))?;
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
+    std::fs::create_dir_all(&self.output_dir)?;
 
     // Write each test result.
     for pending in &self.results {
       let filename = format!("{}-result.json", pending.result.uuid);
       let path = self.output_dir.join(&filename);
-      let json = serde_json::to_string_pretty(&pending.result).map_err(|e| format!("allure serialize error: {e}"))?;
-      std::fs::write(&path, json).map_err(|e| format!("cannot write {}: {e}", path.display()))?;
+      let json = serde_json::to_string_pretty(&pending.result)?;
+      std::fs::write(&path, json)?;
 
       // Write attachments.
       for attach in &pending.attachments {
         let attach_path = self.output_dir.join(&attach.filename);
         match &attach.body {
           AttachmentBody::Bytes(bytes) => {
-            std::fs::write(&attach_path, bytes)
-              .map_err(|e| format!("cannot write attachment {}: {e}", attach_path.display()))?;
+            std::fs::write(&attach_path, bytes)?;
           },
           AttachmentBody::Path(src) => {
             if src.exists() {
-              std::fs::copy(src, &attach_path)
-                .map_err(|e| format!("cannot copy attachment {}: {e}", attach_path.display()))?;
+              std::fs::copy(src, &attach_path)?;
             }
           },
         }
@@ -235,8 +233,7 @@ impl Reporter for AllureReporter {
         message_regex: None,
       },
     ];
-    let cats_json =
-      serde_json::to_string_pretty(&categories).map_err(|e| format!("allure categories serialize: {e}"))?;
+    let cats_json = serde_json::to_string_pretty(&categories)?;
     std::fs::write(self.output_dir.join("categories.json"), cats_json).ok();
 
     let count = self.results.len();

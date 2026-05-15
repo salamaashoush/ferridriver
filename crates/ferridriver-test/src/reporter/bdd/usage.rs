@@ -55,7 +55,7 @@ impl Reporter for UsageReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     if self.stats.is_empty() {
       return Ok(());
     }

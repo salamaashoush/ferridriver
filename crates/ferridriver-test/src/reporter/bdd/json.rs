@@ -92,7 +92,7 @@ impl Reporter for BddJsonReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     let passed = self.results.iter().filter(|r| r.status == "passed").count();
     let failed = self
       .results
@@ -113,8 +113,8 @@ impl Reporter for BddJsonReporter {
     if let Some(parent) = self.output_path.parent() {
       let _ = std::fs::create_dir_all(parent);
     }
-    let json = serde_json::to_string_pretty(&output).map_err(|e| format!("JSON serialize: {e}"))?;
-    std::fs::write(&self.output_path, json).map_err(|e| format!("write {}: {e}", self.output_path.display()))?;
+    let json = serde_json::to_string_pretty(&output)?;
+    std::fs::write(&self.output_path, json)?;
     Ok(())
   }
 }

@@ -368,20 +368,24 @@ impl Reporter for BlobReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
+    use ferridriver::FerriError;
     if let Some(parent) = self.out_path.parent() {
-      std::fs::create_dir_all(parent).map_err(|e| format!("create blob dir: {e}"))?;
+      std::fs::create_dir_all(parent)?;
     }
-    let file =
-      std::fs::File::create(&self.out_path).map_err(|e| format!("open blob {}: {e}", self.out_path.display()))?;
+    let file = std::fs::File::create(&self.out_path)?;
     let mut zip = zip::ZipWriter::new(file);
     let opts: zip::write::SimpleFileOptions =
       zip::write::SimpleFileOptions::default().compression_method(zip::CompressionMethod::Deflated);
     zip
       .start_file("events.jsonl", opts)
-      .map_err(|e| format!("zip start_file: {e}"))?;
-    zip.write_all(&self.buffer).map_err(|e| format!("zip write: {e}"))?;
-    zip.finish().map_err(|e| format!("zip finish: {e}"))?;
+      .map_err(|e| FerriError::backend(format!("zip start_file: {e}")))?;
+    zip
+      .write_all(&self.buffer)
+      .map_err(|e| FerriError::backend(format!("zip write: {e}")))?;
+    zip
+      .finish()
+      .map_err(|e| FerriError::backend(format!("zip finish: {e}")))?;
     Ok(())
   }
 }

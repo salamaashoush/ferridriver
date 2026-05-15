@@ -72,7 +72,7 @@ impl Reporter for DotReporter {
     }
   }
 
-  async fn finalize(&mut self) -> Result<(), String> {
+  async fn finalize(&mut self) -> ferridriver::error::Result<()> {
     Ok(())
   }
 }
