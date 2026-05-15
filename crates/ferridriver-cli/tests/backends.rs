@@ -2120,12 +2120,15 @@ fn run_all_tests(backend: &str) {
   // silently skipped. Lets developers re-run a single group without
   // editing the test harness.
   let filter = std::env::var("FERRIDRIVER_TEST_FILTER").ok();
+  let verbose = std::env::var("FERRIDRIVER_TEST_VERBOSE").is_ok();
 
   macro_rules! run {
     ($name:path) => {{
       let name = stringify!($name);
       if filter.as_deref().is_none_or(|f| name.contains(f)) {
-        eprintln!("=== RUN {backend} {name}");
+        if verbose {
+          eprintln!("=== RUN {backend} {name}");
+        }
         match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $name(&mut c))) {
           Ok(()) => {
             passed += 1;

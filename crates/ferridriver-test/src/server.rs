@@ -531,8 +531,13 @@ fn spawn_command(
     c.args(["/C", command]);
     c
   } else {
+    // `exec` replaces the sh process with the user's command so signals
+    // sent to the child PID land on the real process (e.g. node) rather
+    // than dying in the sh wrapper. Without it, SIGTERM kills sh and
+    // leaves node orphaned with no chance to run its trap handler — the
+    // graceful_shutdown contract becomes a silent SIGKILL.
     let mut c = tokio::process::Command::new("sh");
-    c.args(["-c", command]);
+    c.args(["-c", &format!("exec {command}")]);
     c
   };
   cmd.current_dir(cwd);
