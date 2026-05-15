@@ -1139,7 +1139,7 @@ pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result
 
   loop {
     if tokio::time::Instant::now() >= deadline {
-      return Err("Timeout: element not actionable".into());
+      return Err(FerriError::timeout("element not actionable", 5_000));
     }
 
     let val = element

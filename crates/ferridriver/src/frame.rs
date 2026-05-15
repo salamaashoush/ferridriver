@@ -427,7 +427,10 @@ impl Frame {
       let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(30);
       loop {
         if tokio::time::Instant::now() >= deadline {
-          return Err("Timeout waiting for frame load state".into());
+          return Err(crate::error::FerriError::timeout(
+            "waiting for frame load state",
+            30_000,
+          ));
         }
         if let Ok(Some(v)) = self.backend_eval_expr("document.readyState").await {
           if v.as_str() == Some("complete") {

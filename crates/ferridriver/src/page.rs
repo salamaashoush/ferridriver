@@ -927,12 +927,16 @@ impl Page {
   /// Returns an error if the wait times out before the load state is reached.
   pub async fn wait_for_load_state(&self, state: Option<&str>) -> Result<()> {
     let state = state.unwrap_or("load");
-    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(self.default_timeout());
+    let timeout_ms = self.default_timeout();
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
 
     match state {
       "domcontentloaded" => loop {
         if tokio::time::Instant::now() >= deadline {
-          return Err("Timeout waiting for domcontentloaded".into());
+          return Err(crate::error::FerriError::timeout(
+            "waiting for domcontentloaded",
+            timeout_ms,
+          ));
         }
         if let Ok(Some(v)) = self.inner.evaluate("document.readyState").await {
           let s = v.as_str().unwrap_or("loading");
@@ -949,7 +953,7 @@ impl Page {
         let idle_threshold = std::time::Duration::from_millis(500);
         loop {
           if tokio::time::Instant::now() >= deadline {
-            return Err("Timeout waiting for networkidle".into());
+            return Err(crate::error::FerriError::timeout("waiting for networkidle", timeout_ms));
           }
           // Check if there are pending resource loads
           let has_pending = self
@@ -974,7 +978,7 @@ impl Page {
         // "load" -- wait for document.readyState === "complete"
         loop {
           if tokio::time::Instant::now() >= deadline {
-            return Err("Timeout waiting for load state".into());
+            return Err(crate::error::FerriError::timeout("waiting for load state", timeout_ms));
           }
           if let Ok(Some(v)) = self.inner.evaluate("document.readyState").await {
             if v.as_str() == Some("complete") {
@@ -1634,7 +1638,7 @@ impl Page {
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
     loop {
       if tokio::time::Instant::now() >= deadline {
-        return Err("Timeout waiting for navigation".into());
+        return Err(crate::error::FerriError::timeout("waiting for navigation", timeout));
       }
       let now = self.url().await.unwrap_or_default();
       if now != current {

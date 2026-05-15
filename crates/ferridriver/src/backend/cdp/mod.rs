@@ -462,7 +462,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let target_id = result
       .get("targetId")
       .and_then(|v| v.as_str())
-      .ok_or("No targetId")?
+      .ok_or_else(|| FerriError::protocol("Target.createTarget", "response missing targetId"))?
       .to_string();
 
     // Wait for Target.attachedToTarget event (from setAutoAttach in init).
@@ -483,10 +483,12 @@ impl<T: CdpWrap> CdpBrowser<T> {
           }
         }
       }
-      Err("Event channel closed".to_string())
+      Err(FerriError::target_closed(Some(
+        "CDP event channel closed while waiting for Target.attachedToTarget".into(),
+      )))
     })
     .await
-    .map_err(|_| format!("Timeout waiting for auto-attach of {target_id}"))??;
+    .map_err(|_| FerriError::timeout(format!("auto-attach of target {target_id}"), 30_000))??;
 
     self
       .attached_targets
@@ -1499,7 +1501,7 @@ impl<T: CdpWrap> CdpPage<T> {
       {
         let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.crashed {
-          return Err("Target crashed".into());
+          return Err(FerriError::target_closed(Some("target crashed".into())));
         }
         if state.current_loader_id == expected_loader_id && state.fired.contains(target_event) {
           return Ok(());
@@ -1525,7 +1527,7 @@ impl<T: CdpWrap> CdpPage<T> {
       {
         let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         if state.crashed {
-          return Err("Target crashed".into());
+          return Err(FerriError::target_closed(Some("target crashed".into())));
         }
         if state.current_loader_id != pre_loader_id
           && !state.current_loader_id.is_empty()
