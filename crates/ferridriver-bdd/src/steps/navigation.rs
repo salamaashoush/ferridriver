@@ -21,7 +21,7 @@ async fn navigate(world: &mut BrowserWorld, url: String) {
     .page()
     .goto(&resolved, None)
     .await
-    .map_err(|e| StepError::from(format!("navigate to \"{resolved}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("navigate to \"{resolved}\""), e))?;
 }
 
 /// Resolve relative URLs against FERRIDRIVER_BASE_URL or config base_url.
@@ -43,7 +43,7 @@ async fn go_back(world: &mut BrowserWorld) {
     .page()
     .go_back(None)
     .await
-    .map_err(|e| StepError::from(format!("go back: {e}")))?;
+    .map_err(|e| StepError::wrap("go back", e))?;
 }
 
 #[given("I go forward")]
@@ -52,7 +52,7 @@ async fn go_forward(world: &mut BrowserWorld) {
     .page()
     .go_forward(None)
     .await
-    .map_err(|e| StepError::from(format!("go forward: {e}")))?;
+    .map_err(|e| StepError::wrap("go forward", e))?;
 }
 
 #[step("I reload the page")]
@@ -61,7 +61,7 @@ async fn reload(world: &mut BrowserWorld) {
     .page()
     .reload(None)
     .await
-    .map_err(|e| StepError::from(format!("reload: {e}")))?;
+    .map_err(|e| StepError::wrap("reload", e))?;
 }
 
 #[then("the URL should contain {string}")]

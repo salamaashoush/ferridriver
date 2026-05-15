@@ -125,6 +125,29 @@ impl FerriError {
     }
   }
 
+  /// True for variants whose JS-side counterpart is a dedicated class
+  /// instance (`TimeoutError`, `TargetClosedError`). Drives the
+  /// `"<Name>: <message>"` prefix convention used at every error boundary
+  /// (NAPI, `QuickJS`, reporter strings) so the TS bridge can re-hydrate
+  /// the typed class from the prefix.
+  #[must_use]
+  pub fn has_named_prefix(&self) -> bool {
+    matches!(self, Self::Timeout { .. } | Self::TargetClosed { .. })
+  }
+
+  /// Render the error message with the Playwright-style class prefix
+  /// for distinguishable variants, plain `Display` output otherwise.
+  /// Single source of truth — every boundary helper (`to_napi`,
+  /// `to_rq_error`, `TestFailure::from`/`wrap`) routes through this.
+  #[must_use]
+  pub fn display_named(&self) -> String {
+    if self.has_named_prefix() {
+      format!("{}: {self}", self.name())
+    } else {
+      self.to_string()
+    }
+  }
+
   /// Builder for [`FerriError::Timeout`] with an operation description.
   #[must_use]
   pub fn timeout(operation: impl Into<String>, timeout_ms: u64) -> Self {
@@ -393,5 +416,37 @@ mod tests {
   fn invalid_selector_quotes_selector() {
     let err = FerriError::invalid_selector("???", "unknown engine");
     assert_eq!(err.to_string(), r#"invalid selector "???": unknown engine"#);
+  }
+
+  #[test]
+  fn display_named_prepends_class_for_distinguishable_variants() {
+    assert_eq!(
+      FerriError::timeout("navigating", 30_000).display_named(),
+      "TimeoutError: Timeout 30000ms exceeded while navigating"
+    );
+    assert_eq!(
+      FerriError::target_closed(Some("crashed".into())).display_named(),
+      "TargetClosedError: Target page, context or browser has been closed: crashed"
+    );
+  }
+
+  #[test]
+  fn display_named_passes_unnamed_through_verbatim() {
+    assert_eq!(
+      FerriError::backend("launch failed").display_named(),
+      "backend error: launch failed"
+    );
+    assert_eq!(
+      FerriError::strict("button", 3).display_named(),
+      r#"strict mode violation: selector "button" resolved to 3 elements"#
+    );
+  }
+
+  #[test]
+  fn has_named_prefix_matches_name() {
+    assert!(FerriError::timeout_plain(1).has_named_prefix());
+    assert!(FerriError::target_closed(None).has_named_prefix());
+    assert!(!FerriError::backend("x").has_named_prefix());
+    assert!(!FerriError::strict("s", 2).has_named_prefix());
   }
 }

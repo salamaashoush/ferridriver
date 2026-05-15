@@ -16,7 +16,7 @@ async fn attach_file(world: &mut BrowserWorld, file_path: String, selector: Stri
       None,
     )
     .await
-    .map_err(|e| StepError::from(format!("attach file \"{file_path}\" to \"{selector}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("attach file \"{file_path}\" to \"{selector}\""), e))?;
 }
 
 #[when("I attach files to {string}")]
@@ -39,5 +39,5 @@ async fn attach_files(world: &mut BrowserWorld, selector: String, table: Option<
     .locator(&selector, None)
     .set_input_files(ferridriver::options::InputFiles::Paths(paths), None)
     .await
-    .map_err(|e| StepError::from(format!("attach files to \"{selector}\": {e}")))?;
+    .map_err(|e| StepError::wrap(format!("attach files to \"{selector}\""), e))?;
 }

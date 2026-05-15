@@ -93,7 +93,7 @@ async fn evaluate_in_frame(world: &mut BrowserWorld, expression: String) {
     .0
     .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
-    .map_err(|e| StepError::from(format!("evaluate in frame: {e}")))?;
+    .map_err(|e| StepError::wrap("evaluate in frame", e))?;
 }
 
 #[then("I evaluate {string} in the active frame and expect {string}")]
@@ -105,7 +105,7 @@ async fn evaluate_in_frame_expect(world: &mut BrowserWorld, expression: String, 
     .0
     .evaluate(&expression, ferridriver::protocol::SerializedArgument::default(), None)
     .await
-    .map_err(|e| StepError::from(format!("evaluate in frame: {e}")))?;
+    .map_err(|e| StepError::wrap("evaluate in frame", e))?;
 
   let actual = result.as_string_lossy();
 

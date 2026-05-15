@@ -44,7 +44,7 @@ async fn send_get(world: &mut BrowserWorld, url: String) {
   let resp = ctx
     .get(&url, None)
     .await
-    .map_err(|e| StepError::from(format!("GET {url}: {e}")))?;
+    .map_err(|e| StepError::wrap(format!("GET {url}"), e))?;
   world.set_state(LastAPIResponse(resp));
 }
 
@@ -54,7 +54,7 @@ async fn send_post_no_body(world: &mut BrowserWorld, url: String) {
   let resp = ctx
     .post(&url, None)
     .await
-    .map_err(|e| StepError::from(format!("POST {url}: {e}")))?;
+    .map_err(|e| StepError::wrap(format!("POST {url}"), e))?;
   world.set_state(LastAPIResponse(resp));
 }
 
@@ -74,7 +74,7 @@ async fn send_post_with_body(world: &mut BrowserWorld, url: String, docstring: O
   let resp = ctx
     .post(&url, Some(opts))
     .await
-    .map_err(|e| StepError::from(format!("POST {url}: {e}")))?;
+    .map_err(|e| StepError::wrap(format!("POST {url}"), e))?;
   world.set_state(LastAPIResponse(resp));
 }
 
@@ -94,7 +94,7 @@ async fn send_put_with_body(world: &mut BrowserWorld, url: String, docstring: Op
   let resp = ctx
     .put(&url, Some(opts))
     .await
-    .map_err(|e| StepError::from(format!("PUT {url}: {e}")))?;
+    .map_err(|e| StepError::wrap(format!("PUT {url}"), e))?;
   world.set_state(LastAPIResponse(resp));
 }
 
@@ -104,7 +104,7 @@ async fn send_delete(world: &mut BrowserWorld, url: String) {
   let resp = ctx
     .delete(&url, None)
     .await
-    .map_err(|e| StepError::from(format!("DELETE {url}: {e}")))?;
+    .map_err(|e| StepError::wrap(format!("DELETE {url}"), e))?;
   world.set_state(LastAPIResponse(resp));
 }
 
@@ -124,7 +124,7 @@ async fn send_patch_with_body(world: &mut BrowserWorld, url: String, docstring: 
   let resp = ctx
     .patch(&url, Some(opts))
     .await
-    .map_err(|e| StepError::from(format!("PATCH {url}: {e}")))?;
+    .map_err(|e| StepError::wrap(format!("PATCH {url}"), e))?;
   world.set_state(LastAPIResponse(resp));
 }
 
@@ -157,7 +157,7 @@ async fn api_response_ok(world: &mut BrowserWorld) {
 #[then("the API response body should contain {string}")]
 async fn api_response_body_contains(world: &mut BrowserWorld, expected: String) {
   let resp = last_api_response(world)?;
-  let body = resp.text().map_err(|e| StepError::from(e.to_string()))?;
+  let body = resp.text()?;
   if !body.contains(&expected) {
     return Err(StepError {
       message: format!("API response body does not contain \"{expected}\""),
@@ -170,7 +170,7 @@ async fn api_response_body_contains(world: &mut BrowserWorld, expected: String) 
 #[then("the API response body should equal {string}")]
 async fn api_response_body_equals(world: &mut BrowserWorld, expected: String) {
   let resp = last_api_response(world)?;
-  let body = resp.text().map_err(|e| StepError::from(e.to_string()))?;
+  let body = resp.text()?;
   if body.trim() != expected.trim() {
     return Err(StepError {
       message: "API response body does not match expected".to_string(),

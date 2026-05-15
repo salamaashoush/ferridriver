@@ -10,24 +10,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ferridriver::FerriError;
-
 use crate::hook::HookPoint;
 use crate::registry::StepRegistry;
 use crate::scenario::{ScenarioExecution, ScenarioResult, ScenarioStatus, ScenarioStep, StepResult, StepStatus};
 use crate::translate::execute_bdd_step;
 use crate::world::BrowserWorld;
-
-/// Render a `FerriError` with its Playwright-style class prefix for the
-/// distinguishable variants (`TimeoutError`, `TargetClosedError`) so reporter
-/// strings keep the typed name visible. Mirrors `ferridriver-node::error::to_napi`
-/// and `ferridriver-test::TestFailure::from(FerriError)`.
-fn format_ferri(err: &FerriError) -> String {
-  match err.name() {
-    name @ ("TimeoutError" | "TargetClosedError") => format!("{name}: {err}"),
-    _ => err.to_string(),
-  }
-}
 
 // ── Step observer ───────────────────────────────────────────────────────────
 
@@ -142,7 +129,7 @@ impl ScenarioExecutor {
         duration: start.elapsed(),
         attempt: 1,
         tags: scenario.tags.clone(),
-        error: Some(format!("BeforeScenario hook failed: {}", format_ferri(&e))),
+        error: Some(format!("BeforeScenario hook failed: {}", e.display_named())),
         failure_screenshot: None,
       };
     }
@@ -178,7 +165,7 @@ impl ScenarioExecutor {
         .run_step(HookPoint::BeforeStep, world, &text, &scenario.tags)
         .await
       {
-        tracing::warn!("BeforeStep hook failed: {}", format_ferri(&e));
+        tracing::warn!("BeforeStep hook failed: {}", e.display_named());
       }
 
       // Match and execute.
@@ -231,7 +218,7 @@ impl ScenarioExecutor {
         .run_step(HookPoint::AfterStep, world, &text, &scenario.tags)
         .await
       {
-        tracing::warn!("AfterStep hook failed: {}", format_ferri(&e));
+        tracing::warn!("AfterStep hook failed: {}", e.display_named());
       }
     }
 
@@ -242,7 +229,7 @@ impl ScenarioExecutor {
       .run_scenario(HookPoint::AfterScenario, world, &scenario.tags)
       .await
     {
-      tracing::warn!("AfterScenario hook failed: {}", format_ferri(&e));
+      tracing::warn!("AfterScenario hook failed: {}", e.display_named());
     }
 
     // Screenshot on failure.
