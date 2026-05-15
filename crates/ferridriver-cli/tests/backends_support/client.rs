@@ -176,17 +176,22 @@ impl McpClient {
     let tool = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
     let start = std::time::Instant::now();
     let deadline = start + REQUEST_TIMEOUT;
-    eprintln!(">>> [{}] id={id} method={method} tool={tool}", self.backend);
+    let trace = std::env::var("FERRIDRIVER_TEST_VERBOSE").is_ok();
+    if trace {
+      eprintln!(">>> [{}] id={id} method={method} tool={tool}", self.backend);
+    }
     self.send_raw(&json!({"jsonrpc":"2.0","id":id,"method":method,"params":params}));
     loop {
       let ctx = format!("id={id} method={method} tool={tool}");
       let resp = self.read_response_with_deadline(&ctx, deadline);
       if resp.get("id").and_then(|v| v.as_u64()) == Some(id) {
-        eprintln!(
-          "<<< [{}] id={id} method={method} tool={tool} ms={}",
-          self.backend,
-          start.elapsed().as_millis()
-        );
+        if trace {
+          eprintln!(
+            "<<< [{}] id={id} method={method} tool={tool} ms={}",
+            self.backend,
+            start.elapsed().as_millis()
+          );
+        }
         return resp;
       }
     }
