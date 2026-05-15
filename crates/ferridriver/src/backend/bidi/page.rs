@@ -382,19 +382,8 @@ impl BidiPage {
       collect_frames(ctx, None, &mut frames);
     }
 
-    // BiDi doesn't include frame names in the context tree. Resolve names
-    // two ways in parallel per child frame and take the first non-empty:
-    //
-    // 1. `browsingContext.locateNodes` — reads `name`/`id` off the iframe
-    //    element in the PARENT context. Same path Playwright uses
-    //    (`bidiBrowser.ts:154` -> `_getFrameNode`). Works the moment the
-    //    parent parses the `<iframe>` tag, even for srcdoc iframes whose
-    //    child window hasn't initialised.
-    // 2. `window.name` evaluated in the child context — picks up the
-    //    iframe name once the child's global object is wired up. Catches
-    //    cases where locateNodes returns no nodes (cross-origin frames,
-    //    races where the parent's element collection hasn't reached the
-    //    new iframe yet).
+    // BiDi doesn't include frame names in the context tree.
+    // Resolve names in parallel by evaluating `window.name` in each child frame.
     let child_indices: Vec<usize> = frames
       .iter()
       .enumerate()
@@ -402,53 +391,16 @@ impl BidiPage {
       .map(|(i, _)| i)
       .collect();
     if !child_indices.is_empty() {
-      let locate_futs: Vec<_> = child_indices
+      let futs: Vec<_> = child_indices
         .iter()
-        .map(|&i| {
-          let frame_id = frames[i].frame_id.clone();
-          let parent_id = frames[i].parent_frame_id.clone().unwrap_or_default();
-          async move {
-            self
-              .cmd(
-                "browsingContext.locateNodes",
-                json!({
-                  "context": parent_id,
-                  "locator": { "type": "context", "value": { "context": frame_id } },
-                  "maxNodeCount": 1,
-                  // Firefox returns a NodeRemoteValue with empty `attributes`
-                  // unless serialisation depth is explicit. maxObjectDepth=1
-                  // pulls the iframe element's HTML attributes map directly.
-                  "serializationOptions": {
-                    "maxObjectDepth": 1,
-                    "maxDomDepth": 0,
-                    "includeShadowTree": "none",
-                  },
-                }),
-              )
-              .await
-          }
-        })
+        .map(|&i| self.eval_internal("window.name", &frames[i].frame_id))
         .collect();
-      let results = futures::future::join_all(locate_futs).await;
-      for (idx, locate) in child_indices.into_iter().zip(results) {
-        let name = locate
-          .ok()
-          .and_then(|v| {
-            v.get("nodes")
-              .and_then(|n| n.as_array())
-              .and_then(|a| a.first().cloned())
-          })
-          .and_then(|node| {
-            let attrs = node.get("value").and_then(|v| v.get("attributes")).cloned()?;
-            attrs
-              .get("name")
-              .and_then(|v| v.as_str())
-              .filter(|s| !s.is_empty())
-              .or_else(|| attrs.get("id").and_then(|v| v.as_str()).filter(|s| !s.is_empty()))
-              .map(std::string::ToString::to_string)
-          });
-        if let Some(name) = name {
-          frames[idx].name = name;
+      let results = futures::future::join_all(futs).await;
+      for (idx, result) in child_indices.into_iter().zip(results) {
+        if let Ok(Some(val)) = result {
+          if let Some(name) = val.as_str() {
+            frames[idx].name = name.to_string();
+          }
         }
       }
     }
