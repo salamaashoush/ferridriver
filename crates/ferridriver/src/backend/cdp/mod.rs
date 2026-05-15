@@ -1920,6 +1920,33 @@ impl<T: CdpWrap> CdpPage<T> {
     if let Some(tree) = result.get("frameTree") {
       collect_frames(tree, &mut frames);
     }
+
+    // Chrome's `Page.getFrameTree` returns the iframe's HTML `name`
+    // attribute on the `frame.name` field, but srcdoc iframes can
+    // report an empty `name` until the child document settles — the
+    // attribute is populated on the parent's element but not yet on
+    // the CDP-side frame metadata. Fill in the missing names by
+    // evaluating `window.name` in each empty-named child frame.
+    let child_indices: Vec<usize> = frames
+      .iter()
+      .enumerate()
+      .filter(|(_, f)| f.parent_frame_id.is_some() && f.name.is_empty())
+      .map(|(i, _)| i)
+      .collect();
+    if !child_indices.is_empty() {
+      let frame_ids: Vec<String> = child_indices.iter().map(|&i| frames[i].frame_id.clone()).collect();
+      let futs: Vec<_> = frame_ids.iter().map(|fid| self.evaluate_in_frame("window.name", fid)).collect();
+      let results = futures::future::join_all(futs).await;
+      for (idx, result) in child_indices.into_iter().zip(results) {
+        if let Ok(Some(val)) = result {
+          if let Some(name) = val.as_str() {
+            if !name.is_empty() {
+              frames[idx].name = name.to_string();
+            }
+          }
+        }
+      }
+    }
     Ok(frames)
   }
 
