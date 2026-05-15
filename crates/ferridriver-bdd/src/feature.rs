@@ -2,6 +2,9 @@
 
 use std::path::PathBuf;
 
+use ferridriver::FerriError;
+use ferridriver::error::Result;
+
 /// A parsed `.feature` file.
 pub struct ParsedFeature {
   /// File path.
@@ -21,7 +24,7 @@ impl FeatureSet {
   /// If a pattern is a directory path (no glob chars, exists as dir), it is
   /// automatically expanded to `<dir>/**/*.feature` so users can pass bare
   /// directory paths like `tests/features/` or `tests/features`.
-  pub fn discover(patterns: &[String], ignore: &[String]) -> Result<Vec<PathBuf>, String> {
+  pub fn discover(patterns: &[String], ignore: &[String]) -> Result<Vec<PathBuf>> {
     let mut files = Vec::new();
 
     for raw_pattern in patterns {
@@ -33,7 +36,8 @@ impl FeatureSet {
         raw_pattern.clone()
       };
 
-      let entries = glob::glob(&pattern).map_err(|e| format!("invalid glob pattern \"{pattern}\": {e}"))?;
+      let entries = glob::glob(&pattern)
+        .map_err(|e| FerriError::invalid_argument("pattern", format!("invalid glob pattern \"{pattern}\": {e}")))?;
 
       for entry in entries {
         match entry {
@@ -63,22 +67,23 @@ impl FeatureSet {
   ///
   /// When `language` is `Some("fr")`, all features default to that language's keywords.
   /// Individual features can still override via `# language: xx` comments.
-  pub fn parse(files: Vec<PathBuf>) -> Result<Self, String> {
+  pub fn parse(files: Vec<PathBuf>) -> Result<Self> {
     Self::parse_with_language(files, None)
   }
 
   /// Parse feature files with an optional default language for i18n keyword support.
-  pub fn parse_with_language(files: Vec<PathBuf>, language: Option<&str>) -> Result<Self, String> {
+  pub fn parse_with_language(files: Vec<PathBuf>, language: Option<&str>) -> Result<Self> {
     let mut features = Vec::with_capacity(files.len());
 
     for path in files {
       let env = if let Some(lang) = language {
-        gherkin::GherkinEnv::new(lang).map_err(|e| format!("unsupported language \"{lang}\": {e}"))?
+        gherkin::GherkinEnv::new(lang)
+          .map_err(|e| FerriError::unsupported(format!("unsupported language \"{lang}\": {e}")))?
       } else {
         gherkin::GherkinEnv::default()
       };
-      let mut feature =
-        gherkin::Feature::parse_path(&path, env).map_err(|e| format!("failed to parse {}: {e}", path.display()))?;
+      let mut feature = gherkin::Feature::parse_path(&path, env)
+        .map_err(|e| FerriError::backend(format!("failed to parse {}: {e}", path.display())))?;
 
       // parse_path may not set the path field, ensure it is set.
       if feature.path.is_none() {
@@ -92,9 +97,10 @@ impl FeatureSet {
   }
 
   /// Parse inline Gherkin text into a `FeatureSet`.
-  pub fn parse_text(text: &str) -> Result<Self, String> {
+  pub fn parse_text(text: &str) -> Result<Self> {
     let env = gherkin::GherkinEnv::default();
-    let feature = gherkin::Feature::parse(text, env).map_err(|e| format!("failed to parse Gherkin text: {e}"))?;
+    let feature = gherkin::Feature::parse(text, env)
+      .map_err(|e| FerriError::backend(format!("failed to parse Gherkin text: {e}")))?;
     Ok(Self {
       features: vec![ParsedFeature {
         path: PathBuf::from("<inline>"),
@@ -104,7 +110,7 @@ impl FeatureSet {
   }
 
   /// Discover and parse in one step.
-  pub fn discover_and_parse(patterns: &[String], ignore: &[String]) -> Result<Self, String> {
+  pub fn discover_and_parse(patterns: &[String], ignore: &[String]) -> Result<Self> {
     let files = Self::discover(patterns, ignore)?;
     if files.is_empty() {
       tracing::warn!("no .feature files found matching patterns: {patterns:?}");

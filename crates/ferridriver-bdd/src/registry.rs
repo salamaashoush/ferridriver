@@ -142,7 +142,7 @@ impl StepRegistry {
     expr: &str,
     handler: StepHandler,
     location: StepLocation,
-  ) -> Result<(), String> {
+  ) -> ferridriver::error::Result<()> {
     let compiled = expression::compile_with_custom(expr, &self.param_types)?;
     self.steps.push(StepDef {
       kind,
@@ -164,8 +164,9 @@ impl StepRegistry {
     pattern: &str,
     handler: StepHandler,
     location: StepLocation,
-  ) -> Result<(), String> {
-    let regex = regex::Regex::new(pattern).map_err(|e| format!("invalid regex \"{pattern}\": {e}"))?;
+  ) -> ferridriver::error::Result<()> {
+    let regex = regex::Regex::new(pattern)
+      .map_err(|e| ferridriver::FerriError::invalid_argument("regex", format!("invalid regex \"{pattern}\": {e}")))?;
     let num_groups = regex.captures_len().saturating_sub(1);
     self.steps.push(StepDef {
       kind,

@@ -23,9 +23,10 @@ use crate::selectors;
 /// body without any `AnyPage` cloning — the page reference is borrowed from `self`
 /// for the entire retry loop.
 ///
-/// The body must be an `async move { ... }` block returning `Result<R, String>`
-/// (the underlying backend error type). The macro converts every error into
-/// [`crate::error::FerriError`] so call sites declare `-> crate::error::Result<R>`.
+/// The body must be an `async move { ... }` block returning
+/// [`crate::error::Result<R>`]. The macro forwards every error through
+/// the [`crate::error::FerriError`] taxonomy so call sites declare
+/// `-> crate::error::Result<R>`.
 ///
 /// `$timeout_ms` is an `Option<u64>` — the per-call override from the action's
 /// option bag. `None` falls back to `page.default_timeout()` (set via

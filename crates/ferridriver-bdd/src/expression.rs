@@ -4,10 +4,16 @@
 //! to compile patterns like `"I have {int} item(s) in my cart"` into regex.
 
 use cucumber_expressions::Expression;
+use ferridriver::FerriError;
+use ferridriver::error::Result;
 use regex::Regex;
 
 use crate::param_type::ParameterTypeRegistry;
 use crate::step::StepParam;
+
+fn invalid_expr(reason: impl Into<String>) -> FerriError {
+  FerriError::invalid_argument("cucumber-expression", reason)
+}
 
 /// Parameter type expected from a cucumber expression capture group.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -47,20 +53,17 @@ pub struct CompiledExpression {
 ///
 /// When `custom_types` is provided, unknown parameter names are looked up in the
 /// registry and their regex patterns are substituted before compilation.
-pub fn compile(expression: &str) -> Result<CompiledExpression, String> {
+pub fn compile(expression: &str) -> Result<CompiledExpression> {
   static EMPTY_REGISTRY: std::sync::LazyLock<ParameterTypeRegistry> =
     std::sync::LazyLock::new(ParameterTypeRegistry::new);
   compile_with_custom(expression, &EMPTY_REGISTRY)
 }
 
 /// Compile a cucumber expression with a custom parameter type registry.
-pub fn compile_with_custom(
-  expression: &str,
-  custom_types: &ParameterTypeRegistry,
-) -> Result<CompiledExpression, String> {
+pub fn compile_with_custom(expression: &str, custom_types: &ParameterTypeRegistry) -> Result<CompiledExpression> {
   // Parse the expression AST to extract parameter types and IDs.
-  let parsed =
-    Expression::parse(expression).map_err(|e| format!("invalid cucumber expression \"{expression}\": {e}"))?;
+  let parsed = Expression::parse(expression)
+    .map_err(|e| invalid_expr(format!("invalid cucumber expression \"{expression}\": {e}")))?;
 
   let mut param_infos = Vec::new();
   extract_param_types(&parsed, custom_types, &mut param_infos);
@@ -96,10 +99,11 @@ pub fn compile_with_custom(
       .or_else(|_| {
         // Build the regex by hand: anchor the processed expression.
         Regex::new(&format!("^{processed}$"))
-          .map_err(|e| format!("failed to compile processed expression \"{processed}\": {e}"))
+          .map_err(|e| invalid_expr(format!("failed to compile processed expression \"{processed}\": {e}")))
       })?
   } else {
-    Expression::regex(expression).map_err(|e| format!("failed to compile expression \"{expression}\": {e}"))?
+    Expression::regex(expression)
+      .map_err(|e| invalid_expr(format!("failed to compile expression \"{expression}\": {e}")))?
   };
 
   Ok(CompiledExpression {
@@ -149,7 +153,7 @@ pub fn extract_params(
   captures: &regex::Captures<'_>,
   types: &[ParamType],
   infos: &[ParamInfo],
-) -> Result<Vec<StepParam>, String> {
+) -> Result<Vec<StepParam>> {
   extract_params_with_custom(captures, types, infos, None)
 }
 
@@ -160,7 +164,7 @@ pub fn extract_params_with_custom(
   types: &[ParamType],
   infos: &[ParamInfo],
   custom_types: Option<&ParameterTypeRegistry>,
-) -> Result<Vec<StepParam>, String> {
+) -> Result<Vec<StepParam>> {
   let mut params = Vec::with_capacity(types.len());
 
   // Track positional group index. For non-string params each param uses one
@@ -194,7 +198,7 @@ pub fn extract_params_with_custom(
         positional_index += 1;
         let val = cap
           .parse::<i64>()
-          .map_err(|e| format!("failed to parse int param \"{cap}\": {e}"))?;
+          .map_err(|e| invalid_expr(format!("failed to parse int param \"{cap}\": {e}")))?;
         StepParam::Int(val)
       },
       ParamType::Float => {
@@ -202,7 +206,7 @@ pub fn extract_params_with_custom(
         positional_index += 1;
         let val = cap
           .parse::<f64>()
-          .map_err(|e| format!("failed to parse float param \"{cap}\": {e}"))?;
+          .map_err(|e| invalid_expr(format!("failed to parse float param \"{cap}\": {e}")))?;
         StepParam::Float(val)
       },
       ParamType::Word | ParamType::Anonymous => {
