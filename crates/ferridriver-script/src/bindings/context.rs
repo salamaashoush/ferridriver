@@ -185,7 +185,7 @@ impl BrowserContextJs {
   pub async fn new_page<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     use rquickjs::class::Class;
     let page = self.inner.new_page().await.into_js()?;
-    let wrapper = crate::bindings::page::PageJs::new(page);
+    let wrapper = crate::bindings::page::pagejs_for_ctx(&ctx, page);
     let instance = Class::instance(ctx.clone(), wrapper)?;
     rquickjs::IntoJs::into_js(instance, &ctx)
   }

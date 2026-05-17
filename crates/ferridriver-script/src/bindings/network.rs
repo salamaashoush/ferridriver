@@ -104,8 +104,8 @@ impl RequestJs {
   }
 
   #[qjs(rename = "failure")]
-  pub async fn failure<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    match self.inner.failure().await {
+  pub fn failure<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    match self.inner.failure() {
       Some(error_text) => serde_to_js(&ctx, &serde_json::json!({"errorText": error_text})),
       None => Ok(Value::new_null(ctx.clone())),
     }

@@ -13,21 +13,27 @@
   clippy::missing_fields_in_debug,
   // rquickjs method wrappers intentionally produce new Locator instances that
   // JS is free to discard (e.g. fluent chains like `loc.nth(0)` used directly).
-  clippy::return_self_not_must_use
+  clippy::return_self_not_must_use,
+  // Some web-API classes (TextEncoder, etc.) are legitimately stateless per
+  // their WHATWG spec, but `#[rquickjs::methods]` instance methods must still
+  // take `&self` to be callable on `new TextEncoder()` — not a fixable smell.
+  clippy::unused_self
 )]
 //! ferridriver-script: sandboxed `QuickJS` scripting engine.
 //!
 //! Exposes a `ScriptEngine` that runs user-provided JS against ferridriver's
 //! Page/Browser/Context API with:
 //!
-//! - Per-call context isolation (fresh `rquickjs::Context` per `run`).
+//! - One-shot isolation via [`ScriptEngine::run`] (fresh VM per call) or
+//!   REPL-style continuity via a persistent [`Session`] whose `globalThis`
+//!   survives across [`Session::execute`] calls.
 //! - Bound args (never interpolated into source) to prevent prompt injection.
 //! - Wall-clock and memory quotas enforced by the `QuickJS` runtime.
 //! - Sandboxed globals: scoped `fs`, captured `console`, session `vars`.
 //! - Module loader rooted at a configured `scripts/` directory with path
 //!   sanitization (rejects `..`, absolute paths, symlinks escaping root).
-//! - Event listeners registered inside a script are scoped to that script's
-//!   runtime and cleaned up on completion.
+//! - A poisoning timeout/OOM discards the session VM so the next
+//!   execution transparently gets a fresh one.
 //!
 //! Scripting is independent of the BDD step registry — scripts drive the
 //! browser through the `page` / `context` / `request` bindings directly.
@@ -43,10 +49,10 @@ pub mod vars;
 
 pub use bindings::{
   APIRequestContextJs, APIResponseJs, ArtifactsJs, BrowserContextJs, KeyboardJs, LocatorJs, MouseJs, PageJs,
-  PluginBinding, PluginCommandsJs, PluginToolBinding, install_plugins,
+  PluginBinding, PluginCommandsJs, PluginToolBinding, compile_plugin_bytecode, install_plugins,
 };
 pub use console::ConsoleCapture;
-pub use engine::{RunContext, RunOptions, ScriptEngine, ScriptEngineConfig};
+pub use engine::{RunContext, RunOptions, ScriptEngine, ScriptEngineConfig, Session, SessionRun};
 pub use error::{ScriptError, ScriptErrorKind};
 pub use fs::PathSandbox;
 pub use result::{ConsoleEntry, ConsoleLevel, Outcome, ScriptResult, ScriptSuccess};

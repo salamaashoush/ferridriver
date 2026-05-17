@@ -330,12 +330,12 @@ impl LocatorJs {
     crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(&selector))
   }
 
-  /// Playwright: `locator.page(): Page`. See `frame.page()` notes —
-  /// returned handle does not carry the script engine's
-  /// `AsyncContext`.
+  /// Playwright: `locator.page(): Page`. Carries the session's
+  /// `AsyncContext` (via userdata) so `page.route` /
+  /// `page.exposeFunction` work on the returned handle.
   #[qjs(rename = "page")]
-  pub fn page(&self) -> crate::bindings::page::PageJs {
-    crate::bindings::page::PageJs::new(self.inner.page().clone())
+  pub fn page(&self, ctx: rquickjs::Ctx<'_>) -> crate::bindings::page::PageJs {
+    crate::bindings::page::pagejs_for_ctx(&ctx, self.inner.page().clone())
   }
 
   #[qjs(rename = "first")]
