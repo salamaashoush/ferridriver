@@ -116,16 +116,19 @@ async fn globals_persist_across_executions() {
     .expect("session create");
 
   let r1 = session
-    .execute("globalThis.h = () => 42; return null;", &[], RunOptions::default(), &ctx)
+    .execute(
+      "globalThis.h = () => 42; return null;",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
     .await;
   assert!(r1.result.is_ok(), "{:?}", r1.result);
   assert!(!r1.poisoned);
 
   // Second execution sees the function defined by the first (the user's
   // own chosen contract: `globalThis.h = () => 42` then `h()`).
-  let r2 = session
-    .execute("return h();", &[], RunOptions::default(), &ctx)
-    .await;
+  let r2 = session.execute("return h();", &[], RunOptions::default(), &ctx).await;
   match r2.result.outcome {
     Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!(42)),
     Outcome::Error { error } => panic!("expected 42, got error: {error:?}"),
@@ -334,11 +337,19 @@ async fn web_polyfills_text_codec_base64_microtask() {
     .await;
   match r.result.outcome {
     Outcome::Ok { success } => {
-      assert_eq!(success.value["len"], serde_json::json!(5), "hi€ = 5 UTF-8 bytes: {success:?}");
+      assert_eq!(
+        success.value["len"],
+        serde_json::json!(5),
+        "hi€ = 5 UTF-8 bytes: {success:?}"
+      );
       assert_eq!(success.value["dec"], serde_json::json!("hi€"));
       assert_eq!(success.value["b64"], serde_json::json!("aGk="));
       assert_eq!(success.value["round"], serde_json::json!("xy"));
-      assert_eq!(success.value["mt"], serde_json::json!(1), "queueMicrotask must have run");
+      assert_eq!(
+        success.value["mt"],
+        serde_json::json!(1),
+        "queueMicrotask must have run"
+      );
     },
     Outcome::Error { error } => panic!("web polyfills failed: {error:?}"),
   }

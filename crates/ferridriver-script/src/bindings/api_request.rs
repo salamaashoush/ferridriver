@@ -9,7 +9,7 @@ use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use serde::Deserialize;
 
-use crate::bindings::convert::{FerriResultExt, serde_from_js, serde_to_js};
+use crate::bindings::convert::{FerriResultExt, serde_from_js};
 
 /// Shape of per-request options accepted from JS.
 ///
@@ -224,7 +224,11 @@ impl APIResponseJs {
   /// Response body parsed as JSON.
   #[qjs(rename = "json")]
   pub fn json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let value = self.inner.json_value().into_js()?;
-    serde_to_js(&ctx, &value)
+    // Parse the raw body straight into a JS value with QuickJS's C JSON
+    // parser — no serde_json::Value middle allocation. `json_parse`
+    // does not touch the JS `JSON` global, so a reassigned
+    // `globalThis.JSON` cannot affect it.
+    let text = self.inner.text().into_js()?;
+    ctx.json_parse(text)
   }
 }

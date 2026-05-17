@@ -40,10 +40,7 @@ pub fn serde_to_js<'js, T: Serialize>(ctx: &Ctx<'js>, value: &T) -> rquickjs::Re
 /// via `rquickjs-serde` — no `serde_json::json!` / `serde_json::Value`
 /// middle allocation. Used by `request`/`response`/`apiResponse`
 /// `headersArray()`.
-pub fn name_value_array_to_js<'js, S: AsRef<str>>(
-  ctx: &Ctx<'js>,
-  pairs: &[(S, S)],
-) -> rquickjs::Result<Value<'js>> {
+pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S)]) -> rquickjs::Result<Value<'js>> {
   #[derive(Serialize)]
   struct NameValue<'a> {
     name: &'a str,
@@ -512,26 +509,37 @@ pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
     let s: String = value.get()?;
     return Ok(ferridriver::options::InputFiles::Paths(vec![s.into()]));
   }
-  if value.is_array() {
-    let arr: Vec<serde_json::Value> = serde_from_js(ctx, value)?;
-    if arr.is_empty() {
+  if let Some(arr) = value.as_array() {
+    let len = arr.len();
+    if len == 0 {
       return Ok(ferridriver::options::InputFiles::Paths(Vec::new()));
     }
-    if arr[0].is_string() {
-      let mut paths = Vec::with_capacity(arr.len());
-      for el in arr {
-        let s = el.as_str().ok_or_else(|| {
-          rquickjs::Error::new_from_js_message("ferridriver", "setInputFiles", "array elements must be strings")
-        })?;
+    // Probe the first element directly on the JS value (no
+    // serde_json::Value middle-hop): all-strings -> paths, else
+    // FilePayload objects.
+    let first: Value<'js> = arr.get(0)?;
+    if first.is_string() {
+      let mut paths = Vec::with_capacity(len);
+      for idx in 0..len {
+        let el: Value<'js> = arr.get(idx)?;
+        let s: String = el.into_string().map_or_else(
+          || {
+            Err(rquickjs::Error::new_from_js_message(
+              "ferridriver",
+              "setInputFiles",
+              "array elements must be strings",
+            ))
+          },
+          |s| s.to_string(),
+        )?;
         paths.push(std::path::PathBuf::from(s));
       }
       return Ok(ferridriver::options::InputFiles::Paths(paths));
     }
-    let mut payloads = Vec::with_capacity(arr.len());
-    for el in arr {
-      let p: JsFilePayload = serde_json::from_value(el).map_err(|e| {
-        rquickjs::Error::new_from_js_message("ferridriver", "setInputFiles", format!("FilePayload parse: {e}"))
-      })?;
+    let mut payloads = Vec::with_capacity(len);
+    for idx in 0..len {
+      let el: Value<'js> = arr.get(idx)?;
+      let p: JsFilePayload = serde_from_js(ctx, el)?;
       payloads.push(p.into());
     }
     return Ok(ferridriver::options::InputFiles::Payloads(payloads));
@@ -602,25 +610,24 @@ pub fn parse_select_option_values<'js>(
     let s: String = value.get()?;
     return Ok(vec![ferridriver::options::SelectOptionValue::by_value(s)]);
   }
-  if value.is_array() {
-    let arr: Vec<serde_json::Value> = serde_from_js(ctx, value)?;
-    let mut out = Vec::new();
-    for el in arr {
-      match el {
-        serde_json::Value::String(s) => out.push(ferridriver::options::SelectOptionValue::by_value(s)),
-        serde_json::Value::Object(_) => {
-          let desc: JsSelectOptionValue = serde_json::from_value(el).map_err(|e| {
-            rquickjs::Error::new_from_js_message("ferridriver", "selectOption", format!("descriptor parse: {e}"))
-          })?;
-          out.push(desc.into());
-        },
-        _ => {
-          return Err(rquickjs::Error::new_from_js_message(
-            "ferridriver",
-            "selectOption",
-            "array entries must be string or { value?, label?, index? } object",
-          ));
-        },
+  if let Some(arr) = value.as_array() {
+    let len = arr.len();
+    let mut out = Vec::with_capacity(len);
+    for idx in 0..len {
+      let el: Value<'js> = arr.get(idx)?;
+      if el.is_string() {
+        let s: String = el.get()?;
+        out.push(ferridriver::options::SelectOptionValue::by_value(s));
+      } else if el.is_object() {
+        // Direct rquickjs-serde (no serde_json::Value middle-hop).
+        let desc: JsSelectOptionValue = serde_from_js(ctx, el)?;
+        out.push(desc.into());
+      } else {
+        return Err(rquickjs::Error::new_from_js_message(
+          "ferridriver",
+          "selectOption",
+          "array entries must be string or { value?, label?, index? } object",
+        ));
       }
     }
     return Ok(out);
