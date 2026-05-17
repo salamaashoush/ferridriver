@@ -56,15 +56,12 @@ impl JSHandle {
     self.inner.dispose().await.into_napi()
   }
 
-  /// Playwright: `jsHandle.asElement(): ElementHandle | null`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:65`).
-  /// Inspects the remote value; returns a fresh `ElementHandle`
-  /// (sharing this handle's dispose flag) when the value is a DOM
-  /// Node, otherwise `null`.
+  /// Playwright: `jsHandle.asElement(): ElementHandle | null` (sync).
+  /// Returns a fresh `ElementHandle` (sharing this handle's dispose
+  /// flag) when the value is a DOM Node, otherwise `null`.
   #[napi]
-  pub async fn as_element(&self) -> Result<Option<crate::element_handle::ElementHandle>> {
-    let maybe = self.inner.as_element().await.into_napi()?;
-    Ok(maybe.map(crate::element_handle::ElementHandle::wrap))
+  pub fn as_element(&self) -> Option<crate::element_handle::ElementHandle> {
+    self.inner.as_element().map(crate::element_handle::ElementHandle::wrap)
   }
 
   /// Playwright: `jsHandle.jsonValue(): Promise<T>`. Projects the
