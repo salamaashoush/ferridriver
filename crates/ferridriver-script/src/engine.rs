@@ -11,7 +11,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rquickjs::function::{Async, Func};
-use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Function, Object, Value, async_with};
+use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Object, Value, async_with};
 
 use crate::console::{ConsoleCapture, strip_ansi};
 use crate::error::{ScriptError, ScriptErrorKind};
@@ -218,8 +218,7 @@ impl Session {
   /// loader is bound to `context.sandbox` for the VM's lifetime, so a
   /// session must always be driven with the same `script_root`.
   pub async fn create(config: ScriptEngineConfig, context: &RunContext) -> Result<Self, ScriptError> {
-    let runtime =
-      AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("rquickjs runtime init: {e}")))?;
+    let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("rquickjs runtime init: {e}")))?;
 
     runtime.set_memory_limit(config.default_memory_limit).await;
     runtime.set_max_stack_size(config.default_stack_size).await;
@@ -269,18 +268,10 @@ impl Session {
           b"globalThis.__fdRoutes ||= new Map(); globalThis.__fdRoutePreds ||= new Map();".as_slice(),
         )
         .map_err(|e| ScriptError::internal(format!("init route registry: {e}")))?;
-      // Capture the pristine JSON intrinsic BEFORE any plugin or user
-      // code runs, frozen + non-configurable. In a persistent (REPL) VM
-      // a script could reassign `globalThis.JSON`; the framework's
-      // result serialisation must stay immune across later calls.
-      ctx
-        .eval::<(), _>(
-          b"Object.defineProperty(globalThis, '__ferriJSON', { value: \
-             Object.freeze({ stringify: JSON.stringify, parse: JSON.parse }), \
-             writable: false, configurable: false, enumerable: false });"
-            .as_slice(),
-        )
-        .map_err(|e| ScriptError::internal(format!("capture intrinsic JSON: {e}")))?;
+      // (No `__ferriJSON` intrinsic capture any more: result
+      // serialisation walks the JS value directly in Rust and never
+      // touches the JS `JSON` global, so a script reassigning
+      // `globalThis.JSON` in a persistent VM cannot affect it.)
       install_runtime_shims(&ctx).map_err(|e| ScriptError::internal(format!("failed to install runtime shims: {e}")))?;
 
       // Session-stable bindings: install ONCE, not per `execute`. Class
@@ -495,7 +486,6 @@ fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: Globals
   Ok(())
 }
 
-
 fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs::Result<()> {
   use std::fmt::Write as _;
 
@@ -699,15 +689,24 @@ fn to_rq_error(err: &ScriptError) -> rquickjs::Error {
   rquickjs::Error::new_from_js_message("fs", "sandbox", err.message.clone())
 }
 
-fn value_to_json<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
-  // Round-trip through the intrinsic JSON.stringify captured at session
-  // creation (`__ferriJSON`) — handles arrays/objects/primitives and
-  // honours `toJSON()` (Date, etc.) like the JS engine, while staying
-  // immune to a script reassigning `globalThis.JSON` in a persistent VM.
-  let json_global: Object<'js> = ctx.globals().get("__ferriJSON").ok()?;
-  let stringify: Function<'js> = json_global.get("stringify").ok()?;
-  let serialized: Option<String> = stringify.call((value,)).ok();
-  serialized.and_then(|s| serde_json::from_str(&s).ok())
+/// Convert the script's return value to `serde_json::Value`.
+///
+/// Uses `rquickjs-serde` (`from_value`) — the same standard, direct
+/// `rquickjs::Value` → serde deserializer every other binding already
+/// uses (`convert::serde_from_js`). No `JSON.stringify` string
+/// round-trip, no `serde_json::Value` middle hop beyond the target
+/// itself, no custom walker, and no dependence on the JS `JSON` global
+/// (immune to a script reassigning it). `rquickjs-serde`'s `de.rs` is
+/// `JSON.stringify`-equivalent: it invokes `toJSON()` / `valueOf()`
+/// (so a returned `Date` still serialises as its ISO string), coerces
+/// whole f64 in the safe-integer range to `i64` (so result fields read
+/// back through `serde_json::Value::as_u64()` / `as_i64()`), drops
+/// `undefined` / function / symbol, and renders non-finite as null —
+/// behaviourally the same as the old `JSON.stringify` path, minus the
+/// round-trip and the custom walker. Cycles / non-serialisable values
+/// error → `None` → `null`, matching the old swallow-on-throw.
+fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
+  rquickjs_serde::from_value(value).ok()
 }
 
 fn caught_to_script_error(caught: rquickjs::CaughtError<'_>, source: &str) -> ScriptError {

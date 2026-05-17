@@ -106,8 +106,9 @@ impl Url {
       Some(b) => url::Url::parse(&b)
         .and_then(|base| base.join(&url))
         .map_err(|e| rquickjs::Error::new_from_js_message("URL", "TypeError", e.to_string()))?,
-      None => url::Url::parse(&url)
-        .map_err(|e| rquickjs::Error::new_from_js_message("URL", "TypeError", e.to_string()))?,
+      None => {
+        url::Url::parse(&url).map_err(|e| rquickjs::Error::new_from_js_message("URL", "TypeError", e.to_string()))?
+      },
     };
     Ok(Self { inner: parsed })
   }

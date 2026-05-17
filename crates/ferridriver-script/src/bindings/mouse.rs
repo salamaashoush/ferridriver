@@ -82,9 +82,7 @@ impl MouseJs {
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
     let steps = match options.0 {
-      Some(val) if !val.is_undefined() && !val.is_null() => {
-        serde_from_js::<JsMouseMoveOptions>(&ctx, val)?.steps
-      },
+      Some(val) if !val.is_undefined() && !val.is_null() => serde_from_js::<JsMouseMoveOptions>(&ctx, val)?.steps,
       _ => None,
     };
     self.page.mouse().r#move(x, y, steps).await.into_js()
@@ -110,11 +108,7 @@ impl MouseJs {
 
   /// `mouse.down(options?: { button?, clickCount? })`.
   #[qjs(rename = "down")]
-  pub async fn down<'js>(
-    &self,
-    ctx: rquickjs::Ctx<'js>,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
+  pub async fn down<'js>(&self, ctx: rquickjs::Ctx<'js>, options: Opt<rquickjs::Value<'js>>) -> rquickjs::Result<()> {
     let o = parse_click_options(&ctx, options)?;
     let opts = ferridriver::page::MouseDownOptions {
       button: o.button,
@@ -125,11 +119,7 @@ impl MouseJs {
 
   /// `mouse.up(options?: { button?, clickCount? })`.
   #[qjs(rename = "up")]
-  pub async fn up<'js>(
-    &self,
-    ctx: rquickjs::Ctx<'js>,
-    options: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<()> {
+  pub async fn up<'js>(&self, ctx: rquickjs::Ctx<'js>, options: Opt<rquickjs::Value<'js>>) -> rquickjs::Result<()> {
     let o = parse_click_options(&ctx, options)?;
     let opts = ferridriver::page::MouseUpOptions {
       button: o.button,

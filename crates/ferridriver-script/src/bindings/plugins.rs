@@ -18,8 +18,8 @@ use std::process::Command;
 use std::sync::Arc;
 
 use rquickjs::{
-  AsyncContext, AsyncRuntime, Ctx, JsLifetime, Module, Object, Value, WriteOptions, WriteOptionsEndianness,
-  async_with, class::Class, class::Trace, function::Opt,
+  AsyncContext, AsyncRuntime, Ctx, JsLifetime, Module, Object, Value, WriteOptions, WriteOptionsEndianness, async_with,
+  class::Class, class::Trace, function::Opt,
 };
 
 use crate::bindings::convert::{serde_from_js, serde_to_js};
@@ -276,8 +276,7 @@ pub async fn compile_plugin_bytecode(file_idx: usize, source: &str, module_name:
   let source_literal = serde_json::to_string(source).unwrap_or_else(|_| "\"\"".into());
   let wrapper = plugin_file_wrapper(file_idx, &source_literal);
 
-  let runtime =
-    AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("bytecode runtime init: {e}")))?;
+  let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("bytecode runtime init: {e}")))?;
   let ctx = AsyncContext::full(&runtime)
     .await
     .map_err(|e| ScriptError::internal(format!("bytecode context init: {e}")))?;

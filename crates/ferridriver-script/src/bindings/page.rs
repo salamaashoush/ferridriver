@@ -16,7 +16,7 @@ use rquickjs::function::Opt;
 use serde::Deserialize;
 
 use crate::bindings::convert::{
-  FerriResultExt, extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js, serde_to_js,
+  FerriResultExt, extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js,
   serialized_value_to_quickjs,
 };
 use crate::bindings::keyboard::KeyboardJs;
@@ -1333,10 +1333,7 @@ impl PageJs {
       ferridriver::events::PageEvent::PageError(err) => {
         crate::bindings::web_error::build_native_error(&ctx, err.error())
       },
-      other => {
-        let json = page_event_json(&other);
-        serde_to_js(&ctx, &json)
-      },
+      other => page_event_to_js(&ctx, &other),
     }
   }
 
@@ -1770,49 +1767,78 @@ fn match_event_name(name: &str, ev: &ferridriver::events::PageEvent) -> bool {
   )
 }
 
-fn page_event_json(ev: &ferridriver::events::PageEvent) -> serde_json::Value {
+/// Build the `page.waitForEvent` payload JS object directly — no
+/// serde_json::Value middle allocation. `FrameAttached`/`Navigated`
+/// serialise their `FrameInfo` through rquickjs-serde (also direct).
+fn page_event_to_js<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  ev: &ferridriver::events::PageEvent,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
   use ferridriver::events::PageEvent;
+  let obj = || rquickjs::Object::new(ctx.clone());
   match ev {
     PageEvent::Console(msg) => {
       let loc = msg.location();
-      serde_json::json!({
-        "type": msg.type_str(),
-        "text": msg.text(),
-        "location": {
-          "url": loc.url,
-          "lineNumber": loc.line_number,
-          "columnNumber": loc.column_number,
-        },
-        "timestamp": msg.timestamp(),
-        "argsCount": msg.args().len(),
-      })
+      let o = obj()?;
+      o.set("type", msg.type_str())?;
+      o.set("text", msg.text())?;
+      let l = obj()?;
+      l.set("url", loc.url.as_str())?;
+      l.set("lineNumber", f64::from(loc.line_number))?;
+      l.set("columnNumber", f64::from(loc.column_number))?;
+      o.set("location", l)?;
+      o.set("timestamp", msg.timestamp())?;
+      o.set("argsCount", msg.args().len() as f64)?;
+      Ok(o.into_value())
     },
-    PageEvent::Dialog(d) => serde_json::json!({
-      "type": d.dialog_type().as_str(),
-      "message": d.message(),
-      "defaultValue": d.default_value(),
-    }),
-    PageEvent::FileChooser(fc) => serde_json::json!({
-      "isMultiple": fc.is_multiple(),
-    }),
-    PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
-    PageEvent::FrameDetached { frame_id } => serde_json::json!({ "frameId": frame_id }),
-    PageEvent::Download(d) => serde_json::json!({
-      "url": d.url(),
-      "suggestedFilename": d.suggested_filename(),
-    }),
-    PageEvent::Load => serde_json::json!({ "type": "load" }),
-    PageEvent::DomContentLoaded => serde_json::json!({ "type": "domcontentloaded" }),
-    PageEvent::Close => serde_json::json!({ "type": "close" }),
+    PageEvent::Dialog(d) => {
+      let o = obj()?;
+      o.set("type", d.dialog_type().as_str())?;
+      o.set("message", d.message())?;
+      o.set("defaultValue", d.default_value())?;
+      Ok(o.into_value())
+    },
+    PageEvent::FileChooser(fc) => {
+      let o = obj()?;
+      o.set("isMultiple", fc.is_multiple())?;
+      Ok(o.into_value())
+    },
+    PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => crate::bindings::convert::serde_to_js(ctx, f),
+    PageEvent::FrameDetached { frame_id } => {
+      let o = obj()?;
+      o.set("frameId", frame_id.as_str())?;
+      Ok(o.into_value())
+    },
+    PageEvent::Download(d) => {
+      let o = obj()?;
+      o.set("url", d.url())?;
+      o.set("suggestedFilename", d.suggested_filename())?;
+      Ok(o.into_value())
+    },
+    PageEvent::Load => {
+      let o = obj()?;
+      o.set("type", "load")?;
+      Ok(o.into_value())
+    },
+    PageEvent::DomContentLoaded => {
+      let o = obj()?;
+      o.set("type", "domcontentloaded")?;
+      Ok(o.into_value())
+    },
+    PageEvent::Close => {
+      let o = obj()?;
+      o.set("type", "close")?;
+      Ok(o.into_value())
+    },
     PageEvent::PageError(err) => {
       let details = err.error();
-      serde_json::json!({
-        "name": details.name,
-        "message": details.message,
-        "stack": details.stack,
-      })
+      let o = obj()?;
+      o.set("name", details.name.as_str())?;
+      o.set("message", details.message.as_str())?;
+      o.set("stack", details.stack.as_str())?;
+      Ok(o.into_value())
     },
-    _ => serde_json::Value::Null,
+    _ => Ok(rquickjs::Value::new_null(ctx.clone())),
   }
 }
 

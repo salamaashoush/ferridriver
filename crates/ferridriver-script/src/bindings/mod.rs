@@ -123,9 +123,7 @@ pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, async_ctx: Asyn
   // pay any setup cost beyond installing the global.
   // Idempotent: a session-created `__fdRoutes` (for script-launched
   // pages) must NOT be wiped when the MCP-prebound page reinstalls.
-  ctx.eval::<(), _>(
-    b"globalThis.__fdRoutes ||= new Map(); globalThis.__fdRoutePreds ||= new Map();".as_slice(),
-  )?;
+  ctx.eval::<(), _>(b"globalThis.__fdRoutes ||= new Map(); globalThis.__fdRoutePreds ||= new Map();".as_slice())?;
   Ok(())
 }
 
