@@ -62,6 +62,7 @@ const HTML = `<!doctype html><html><head><title>Cov</title></head><body>
   <div id="drag" draggable="true">drag</div><div id="drop">drop</div>
   <div id="hidden" style="display:none">secret</div>
   <iframe id="if" srcdoc="<button id='ibtn'>inner</button><p id='ip'>innerpara</p>"></iframe>
+  <iframe id="ifn" srcdoc="<iframe id='deep' src='data:text/html,<b id=dx>DEEP</b>'></iframe>"></iframe>
 </body></html>`;
 
 let browser, context, page;
@@ -324,6 +325,12 @@ ok('frameLocator.last', flo.last() != null);
 ok('frameLocator.nth', flo.nth(0) != null);
 ok('frameLocator.owner', flo.owner() != null);
 ok('frameLocator.frameLocator', flo.frameLocator('#none') != null);
+// nested frame (iframe-in-iframe, srcdoc -> data: src): two enter-frame
+// hops must resolve the deep element.
+ok('frameLocator.nested', (await page.frameLocator('#ifn').frameLocator('#deep').locator('#dx').textContent()) === 'DEEP');
+// re-attached frame: remove + re-add #if, frameLocator must re-resolve.
+await page.evaluate("(()=>{const f=document.getElementById('if');const p=f.parentNode;f.remove();const n=document.createElement('iframe');n.id='if';n.srcdoc=\"<button id='ibtn'>inner</button><p id='ip'>innerpara</p>\";p.appendChild(n)})()");
+ok('frameLocator.reattached', (await page.frameLocator('#if').locator('#ibtn').textContent()) === 'inner');
 ok('frameLocator.getByText', (await flo.getByText('innerpara').textContent()).includes('innerpara'));
 ok('frameLocator.getByRole', (await flo.getByRole('button').textContent()) === 'inner');
 ok('frameLocator.getByLabel', flo.getByLabel('x') != null);
