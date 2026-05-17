@@ -232,6 +232,16 @@ ok('locator.getAttribute', (await page.locator('#lnk').getAttribute('href')) ===
 ok('locator.textContent', (await page.locator('#para').textContent()) === 'FindThisText');
 ok('locator.innerText', (await page.locator('#h').innerText()) === 'Heading');
 ok('locator.innerHTML', typeof (await page.locator('#h').innerHTML()) === 'string');
+// locator.ariaSnapshot: subtree rooted at the matched element. The
+// snapshot must include the element's own accessible content and
+// EXCLUDE siblings outside the locator (scoping proof, both ways).
+{
+  const sH = await page.locator('#h').ariaSnapshot();
+  const sP = await page.locator('#para').ariaSnapshot();
+  ok('locator.ariaSnapshot', typeof sH === 'string' && sH.length > 0
+    && /Heading/.test(sH) && !/FindThisText/.test(sH)
+    && /FindThisText/.test(sP) && !/Heading/.test(sP) && !/Press/.test(sP));
+}
 const cb = page.locator('#cb');
 await cb.check(); ok('locator.check', (await cb.isChecked()) === true);
 await cb.uncheck(); ok('locator.uncheck', (await cb.isChecked()) === false);

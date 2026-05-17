@@ -714,6 +714,14 @@ if (!window.__fd) {
     // Accessibility tree (shared by BiDi + WebKit)
     accessibilityTree,
 
+    // Playwright's aria snapshot (locator/page scoped). `node` is the
+    // root element resolved by Rust (strict resolution + auto-wait done
+    // host-side — source of truth); delegates to the vendored
+    // InjectedScript.ariaSnapshot so the rendered YAML is byte-for-byte
+    // Playwright. Mirrors server `ariaSnapshotForFrame` (mode default).
+    ariaSnapshot: (node: Node, options?: { mode?: 'ai' | 'default'; depth?: number }) =>
+      injected.ariaSnapshot(node, { mode: options?.mode || 'default', depth: options?.depth }),
+
     // ── Evaluate(fn, arg) plumbing ──
     //
     // Playwright's utility-script machinery, lifted verbatim from

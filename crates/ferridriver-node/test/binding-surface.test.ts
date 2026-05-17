@@ -107,6 +107,28 @@ for (const backend of BACKENDS) {
       expect(typeof snap.refMap).toBe("object");
     });
 
+    it("locator.ariaSnapshot is scoped to the element subtree", async () => {
+      await page.setContent(
+        "<main><h1 id='h'>Heading</h1><p id='p'>FindThisText</p>" +
+          "<button id='b'>PressMe</button></main>",
+      );
+      const sH = await page.locator("#h").ariaSnapshot();
+      const sP = await page.locator("#p").ariaSnapshot();
+      expect(typeof sH).toBe("string");
+      expect(sH.length).toBeGreaterThan(0);
+      // Heading subtree: its own content, none of the siblings.
+      expect(sH).toContain("Heading");
+      expect(sH).not.toContain("FindThisText");
+      expect(sH).not.toContain("PressMe");
+      // Paragraph subtree: complementary scoping check.
+      expect(sP).toContain("FindThisText");
+      expect(sP).not.toContain("Heading");
+      // mode: 'ai' adds [ref=eN] labels (Playwright parity).
+      const sAi = await page.locator("#b").ariaSnapshot({ mode: "ai" });
+      expect(sAi).toContain("PressMe");
+      expect(sAi).toMatch(/\[ref=/);
+    });
+
     it("page.frameLocator works at page scope", async () => {
       await page.setContent("<iframe srcdoc='<p>x</p>'></iframe>");
       const fl = page.frameLocator("iframe");
