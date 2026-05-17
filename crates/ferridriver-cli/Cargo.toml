@@ -19,6 +19,7 @@ workspace = true
 
 [dependencies]
 ferridriver-mcp = { workspace = true }
+ferridriver-script = { workspace = true }
 ferridriver-config = { workspace = true }
 ferridriver-test = { workspace = true }
 ferridriver-bdd = { workspace = true }
@@ -26,6 +27,7 @@ ferridriver = { workspace = true }
 clap = { workspace = true }
 tokio = { workspace = true }
 anyhow = { workspace = true }
+serde_json = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 mimalloc = { workspace = true }

@@ -73,12 +73,12 @@ pub fn test_video_recording_lifecycle(c: &mut McpClient) {
     // disrupted.
     const recPage = await context.newPage();
     // Two navigations give the screencast encoder a visible state
-    // transition to capture — QuickJS doesn't have `setTimeout`, so
-    // we can't `await sleep(...)`. Each `goto` blocks until the
-    // lifecycle event fires, which is enough for the CDP screencast
-    // pump to flush at least one frame + a trailing pad.
+    // transition to capture; the explicit setTimeout pad (real timer
+    // via rquickjs-extra-timers) lets the CDP screencast pump flush a
+    // trailing frame deterministically rather than racing goto timing.
     await recPage.goto('data:text/html,<h1>rec-1</h1>');
     await recPage.goto('data:text/html,<h1>rec-2</h1>');
+    await new Promise((r) => setTimeout(r, 250));
     const video = recPage.video();
     const hasVideo = video !== null;
     if (!hasVideo) {

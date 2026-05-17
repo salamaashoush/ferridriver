@@ -1916,7 +1916,7 @@ fn test_script_user_agent(c: &mut McpClient) {
 fn test_script_viewport(c: &mut McpClient) {
   c.nav("<body></body>");
   let v = c.script_value(
-    "await page.setViewportSize(375, 812); \
+    "await page.setViewportSize({ width: 375, height: 812 }); \
        const w = await page.evaluate('window.innerWidth'); \
        const h = await page.evaluate('window.innerHeight'); \
        return { w: w, h: h };",
@@ -2079,6 +2079,54 @@ fn test_script_vars_persist_across_calls(c: &mut McpClient) {
   let _ = c.script_value("vars.set('k', 'v1'); return null;");
   let v = c.script_value("return vars.get('k');");
   assert_eq!(v, json!("v1"), "vars should persist across run_script calls");
+}
+
+fn test_script_globals_persist_across_calls(c: &mut McpClient) {
+  c.nav("<body></body>");
+  let _ = c.script_value("globalThis.counter = 41; return null;");
+  // The user's headline contract: `globalThis` state carries forward
+  // across separate run_script calls in the same session.
+  let v = c.script_value("return ++globalThis.counter;");
+  assert_eq!(v, json!(42), "globalThis state must persist across run_script calls");
+}
+
+fn test_script_throw_keeps_session_state(c: &mut McpClient) {
+  c.nav("<body></body>");
+  let _ = c.script_value("globalThis.keep = 'alive'; return null;");
+  let err = c.script("throw new Error('boom');");
+  assert_eq!(err["status"].as_str(), Some("error"), "expected error: {err}");
+  // A plain JS throw must NOT poison the session — state survives.
+  let v = c.script_value("return globalThis.keep;");
+  assert_eq!(v, json!("alive"), "plain throw must not drop session state");
+}
+
+fn test_script_session_recovers_after_timeout(c: &mut McpClient) {
+  c.nav("<body></body>");
+  let _ = c.script_value("globalThis.keep = 'alive'; return 'ok';");
+  // Force a poisoning timeout (interrupt halts the interpreter mid-run).
+  let timed = c.script_with_timeout("while (true) { /* spin */ }", 500);
+  assert_eq!(timed["status"].as_str(), Some("error"), "expected timeout error: {timed}");
+  // Next call must transparently get a fresh VM and just work.
+  let v = c.script_value("return 1 + 1;");
+  assert_eq!(v, json!(2), "session must recover after a poisoning timeout");
+  // The rebuilt VM correctly discarded the poisoned VM's state.
+  let gone = c.script_value("return typeof globalThis.keep;");
+  assert_eq!(gone, json!("undefined"), "rebuilt VM must not carry poisoned state");
+}
+
+fn test_script_timers_and_web_globals(c: &mut McpClient) {
+  c.nav("<body></body>");
+  // setTimeout/await (was unsupported before rquickjs-extra-timers),
+  // plus URL + TextEncoder/btoa wired at Session::create.
+  let v = c.script_value(
+    "const t = await new Promise((r) => setTimeout(() => r('tick'), 20)); \
+     const host = new URL('https://ex.com/p?x=1').host; \
+     return { t, host, b64: btoa('hi'), bytes: new TextEncoder().encode('ok').length };",
+  );
+  assert_eq!(v["t"], json!("tick"), "setTimeout/await resolved: {v}");
+  assert_eq!(v["host"], json!("ex.com"), "URL parsed: {v}");
+  assert_eq!(v["b64"], json!("aGk="), "btoa: {v}");
+  assert_eq!(v["bytes"], json!(2), "TextEncoder: {v}");
 }
 
 fn test_script_console_captured(c: &mut McpClient) {
@@ -2299,6 +2347,10 @@ fn run_all_tests(backend: &str) {
   // run_script: args + vars + console + errors
   run!(test_script_bound_args);
   run!(test_script_vars_persist_across_calls);
+  run!(test_script_globals_persist_across_calls);
+  run!(test_script_throw_keeps_session_state);
+  run!(test_script_session_recovers_after_timeout);
+  run!(test_script_timers_and_web_globals);
   run!(test_script_console_captured);
   run!(test_script_error_surfaces_structured);
 

@@ -2182,6 +2182,7 @@ dependencies = [
  "ferridriver-bdd",
  "ferridriver-config",
  "ferridriver-mcp",
+ "ferridriver-script",
  "ferridriver-test",
  "futures",
  "libc",
@@ -2267,6 +2268,10 @@ dependencies = [
  "ferridriver",
  "futures",
  "rquickjs",
+ "rquickjs-extra-console",
+ "rquickjs-extra-timers",
+ "rquickjs-extra-url",
+ "rquickjs-serde",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
@@ -2274,6 +2279,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -5048,6 +5054,7 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c50dc6d6c587c339edb4769cf705867497a2baf0eca8b4645fa6ecd22f02c77a"
 dependencies = [
+ "either",
  "rquickjs-core",
  "rquickjs-macro",
 ]
@@ -5059,9 +5066,41 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8bf7840285c321c3ab20e752a9afb95548c75cd7f4632a0627cea3507e310c1"
 dependencies = [
  "async-lock",
+ "either",
  "hashbrown 0.16.1",
  "relative-path",
  "rquickjs-sys",
+]
+
+[[package]]
+name = "rquickjs-extra-console"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf3db7865177c3e3454099155514248d21f21a24a9f5dacdf3e5baf1e5d619d5"
+dependencies = [
+ "log",
+ "rquickjs",
+]
+
+[[package]]
+name = "rquickjs-extra-timers"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "345b35e379c7816bab3c1a6ad34ef4dc56852a2836d6f7ffa1c1bea867f8286f"
+dependencies = [
+ "log",
+ "rquickjs",
+ "tokio",
+]
+
+[[package]]
+name = "rquickjs-extra-url"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ccd9433952bef09f62d6df9a809fd0d36b49a269bf20eabc7b266572947fc25"
+dependencies = [
+ "either",
+ "rquickjs",
 ]
 
 [[package]]
@@ -5079,6 +5118,16 @@ dependencies = [
  "quote",
  "rquickjs-core",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "rquickjs-serde"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9382258c8bd1cc5c555887e5e379ab1491ff0287ca68ceb07be39ea561beb23"
+dependencies = [
+ "rquickjs",
+ "serde",
 ]
 
 [[package]]
