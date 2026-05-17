@@ -58,9 +58,11 @@ impl JSHandleJs {
   /// (sharing this handle's dispose flag) when the value is a DOM
   /// Node, otherwise `null`.
   #[qjs(rename = "asElement")]
-  pub async fn as_element(&self) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
-    let maybe = self.inner.as_element().await.into_js()?;
-    Ok(maybe.map(crate::bindings::element_handle::ElementHandleJs::new))
+  pub fn as_element(&self) -> Option<crate::bindings::element_handle::ElementHandleJs> {
+    self
+      .inner
+      .as_element()
+      .map(crate::bindings::element_handle::ElementHandleJs::new)
   }
 
   /// Playwright: `jsHandle.jsonValue(): Promise<T>`. Rich types

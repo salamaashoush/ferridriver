@@ -27,25 +27,31 @@ impl<T> FerriResultExt<T> for Result<T, FerriError> {
   }
 }
 
-/// Convert any `serde::Serialize` value into a JS value by round-tripping
-/// through `JSON.parse(JSON.stringify(...))`. Used for binding methods that
-/// return complex Rust structures (cookies, storage state, JSON response
-/// bodies) without writing per-type FFI.
+/// Convert any `serde::Serialize` value into a JS value via
+/// `rquickjs-serde` — direct `T` -> `rquickjs::Value`, no JSON string
+/// and no `serde_json::Value` middle allocation. Used for binding
+/// returns (cookies, storage state, parsed JSON bodies).
 pub fn serde_to_js<'js, T: Serialize>(ctx: &Ctx<'js>, value: &T) -> rquickjs::Result<Value<'js>> {
-  let json = serde_json::to_string(value)
-    .map_err(|e| rquickjs::Error::new_from_js_message("serde", "serialize", e.to_string()))?;
-  let json_global: Object<'js> = ctx.globals().get("JSON")?;
-  let parse: Function<'js> = json_global.get("parse")?;
-  parse.call((json,))
+  rquickjs_serde::to_value(ctx.clone(), value)
+    .map_err(|e| rquickjs::Error::new_from_js_message("serde", "serialize", e.to_string()))
 }
 
-/// Inverse of [`serde_to_js`] — accept a JS value and deserialize into a
-/// Rust type via `JSON.stringify` → `serde_json::from_str`.
-pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
-  let json_global: Object<'js> = ctx.globals().get("JSON")?;
-  let stringify: Function<'js> = json_global.get("stringify")?;
-  let json: String = stringify.call((value,))?;
-  serde_json::from_str(&json).map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
+/// Inverse of [`serde_to_js`] — deserialize a JS value into a Rust type
+/// via `rquickjs-serde` (direct `Value` -> `T`). Integral-float ->
+/// integer coercion, `undefined`/function-property drop, Proxy and
+/// cycle handling all hold (covered by the rquickjs-serde test suite),
+/// so the option-bag call sites keep their prior semantics without our
+/// own hand-rolled walker.
+pub fn serde_from_js<'js, T: DeserializeOwned>(_ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
+  rquickjs_serde::from_value(value)
+    .map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
+}
+
+/// Build an `rquickjs::Value` from a `serde_json::Value`. Thin wrapper
+/// over [`serde_to_js`], kept for the script-args call site in
+/// `engine.rs`.
+pub(crate) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs::Result<Value<'js>> {
+  serde_to_js(ctx, v)
 }
 
 // ── evaluate(fn, arg) wire bridge (Phase D) ───────────────────────────

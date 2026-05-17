@@ -252,8 +252,11 @@ fn webkit_factory(ctx: Ctx<'_>) -> rquickjs::Result<Class<'_, BrowserTypeJs>> {
 }
 
 /// Install the top-level `chromium`, `firefox`, and `webkit` globals.
-/// Mirrors Playwright's `import { chromium, firefox, webkit }` —
-/// scripts call `await chromium().launch()` exactly like Playwright TS.
+/// Mirrors Playwright's `import { chromium, firefox, webkit }` exactly:
+/// `chromium()` is ALWAYS Chromium, `firefox()` ALWAYS Firefox,
+/// `webkit()` ALWAYS WebKit. The wire backend is a per-product detail
+/// (Chromium pipe vs `chromium({transport:'ws'})`; Firefox speaks
+/// BiDi) — never a product swap.
 pub fn install_browser_type(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<BrowserTypeJs>::define(&ctx.globals())?;
 

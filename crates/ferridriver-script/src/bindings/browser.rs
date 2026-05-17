@@ -64,6 +64,12 @@ impl BrowserJs {
     self.inner.version().to_string()
   }
 
+  /// Playwright: `browser.isConnected(): boolean` (sync).
+  #[qjs(rename = "isConnected")]
+  pub fn is_connected(&self) -> bool {
+    self.inner.is_connected()
+  }
+
   /// Playwright: `browser.close()`. Accepts no options here — the
   /// `BrowserCloseOptions { reason }` form can be added once a script
   /// case demands it.
@@ -80,8 +86,8 @@ impl BrowserJs {
   /// Playwright: `browser.contexts()`. Returns the list of contexts as
   /// JS handles.
   #[qjs(rename = "contexts")]
-  pub async fn contexts<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let contexts = self.inner.contexts().await;
+  pub fn contexts<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let contexts = self.inner.contexts();
     let arr = rquickjs::Array::new(ctx.clone())?;
     for (i, c) in contexts.into_iter().enumerate() {
       let wrapper = BrowserContextJs::new(std::sync::Arc::new(c));

@@ -45,4 +45,16 @@ impl KeyboardJs {
   pub async fn press(&self, key: String) -> rquickjs::Result<()> {
     self.page.keyboard().press(&key).await.into_js()
   }
+
+  /// `keyboard.type(text)` — full key events per character.
+  #[qjs(rename = "type")]
+  pub async fn type_(&self, text: String) -> rquickjs::Result<()> {
+    self.page.keyboard().r#type(&text).await.into_js()
+  }
+
+  /// `keyboard.insertText(text)` — `input` event only, no key events.
+  #[qjs(rename = "insertText")]
+  pub async fn insert_text(&self, text: String) -> rquickjs::Result<()> {
+    self.page.keyboard().insert_text(&text).await.into_js()
+  }
 }
