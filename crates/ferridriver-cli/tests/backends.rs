@@ -2105,7 +2105,11 @@ fn test_script_session_recovers_after_timeout(c: &mut McpClient) {
   let _ = c.script_value("globalThis.keep = 'alive'; return 'ok';");
   // Force a poisoning timeout (interrupt halts the interpreter mid-run).
   let timed = c.script_with_timeout("while (true) { /* spin */ }", 500);
-  assert_eq!(timed["status"].as_str(), Some("error"), "expected timeout error: {timed}");
+  assert_eq!(
+    timed["status"].as_str(),
+    Some("error"),
+    "expected timeout error: {timed}"
+  );
   // Next call must transparently get a fresh VM and just work.
   let v = c.script_value("return 1 + 1;");
   assert_eq!(v, json!(2), "session must recover after a poisoning timeout");

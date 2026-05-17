@@ -1219,8 +1219,5 @@ async fn quick_wins_tests() {
   assert!(page2.is_closed());
 
   browser.close(None).await.unwrap();
-  assert!(
-    !browser.is_connected(),
-    "browser should be disconnected after close"
-  );
+  assert!(!browser.is_connected(), "browser should be disconnected after close");
 }

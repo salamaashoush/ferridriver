@@ -686,8 +686,7 @@ impl McpServer {
   /// `session_vars` keying. Enforces the warm-VM cap by evicting the
   /// least-recently-used idle session before admitting a new one.
   fn session_slot(&self, session: &str) -> Arc<Mutex<SessionSlot>> {
-    if !self.session_vms.contains_key(session)
-      && self.session_vms.len() >= self.script_engine.config().max_session_vms
+    if !self.session_vms.contains_key(session) && self.session_vms.len() >= self.script_engine.config().max_session_vms
     {
       self.evict_lru_session();
     }

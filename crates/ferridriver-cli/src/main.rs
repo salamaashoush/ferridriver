@@ -184,9 +184,7 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
       std::io::stdin().read_to_string(&mut s)?;
       s
     },
-    (None, Some(path)) => {
-      std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("read {path}: {e}"))?
-    },
+    (None, Some(path)) => std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("read {path}: {e}"))?,
     (None, None) => anyhow::bail!("provide a script path, `-` for stdin, or --eval <code>"),
   };
 
@@ -213,8 +211,7 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     stack_size: None,
     gc_threshold: None,
   };
-  let script_args: Vec<serde_json::Value> =
-    args.script_args.into_iter().map(serde_json::Value::String).collect();
+  let script_args: Vec<serde_json::Value> = args.script_args.into_iter().map(serde_json::Value::String).collect();
 
   let session = ferridriver_script::Session::create(ferridriver_script::ScriptEngineConfig::default(), &ctx)
     .await

@@ -47,8 +47,8 @@ macro_rules! retry_resolve {
       .await
       .map_err($crate::error::FerriError::from)?;
     let __fd = "window.__fd";
-    let __sel_js = $crate::selectors::build_selone_js(&__rsel, &__fd, $self.strict)
-      .map_err($crate::error::FerriError::from)?;
+    let __sel_js =
+      $crate::selectors::build_selone_js(&__rsel, &__fd, $self.strict).map_err($crate::error::FerriError::from)?;
     // Pass `None` for main-frame locators so the backend skips a
     // `frame_contexts` lookup; child frames thread their cached id.
     let __frame_id: ::std::option::Option<&str> = if __rframe.is_main_frame() {

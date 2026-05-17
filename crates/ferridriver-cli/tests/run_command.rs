@@ -26,7 +26,12 @@ fn bin() -> String {
 /// (success, stdout, stderr).
 fn run(extra: &[&str], stdin: Option<&str>) -> (bool, String, String) {
   let mut cmd = Command::new(bin());
-  cmd.arg("run").args(extra).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped());
+  cmd
+    .arg("run")
+    .args(extra)
+    .stdin(Stdio::piped())
+    .stdout(Stdio::piped())
+    .stderr(Stdio::piped());
   let mut child = cmd.spawn().expect("spawn ferridriver run");
   if let Some(s) = stdin {
     child.stdin.take().unwrap().write_all(s.as_bytes()).unwrap();
@@ -94,7 +99,9 @@ fn factories_match_playwright_chromium_is_chromium_firefox_is_firefox() {
   // The Playwright contract: `chromium()` ALWAYS launches Chromium,
   // `firefox()` ALWAYS Firefox. No flag turns one into the other.
   let mk = |factory: &str| {
-    format!("const b = await {factory}().launch({{ headless: true }}); const v = await b.version(); await b.close(); return v;")
+    format!(
+      "const b = await {factory}().launch({{ headless: true }}); const v = await b.version(); await b.close(); return v;"
+    )
   };
 
   let (ok, stdout, stderr) = run(&["-e", &mk("chromium")], None);

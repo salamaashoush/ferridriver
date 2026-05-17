@@ -658,7 +658,10 @@ impl WebKitPage {
           .get("ref")
           .and_then(serde_json::Value::as_u64)
           .ok_or_else(|| FerriError::protocol("Evaluate", "call_utility_evaluate: missing envelope.ref"))?;
-        let is_node = envelope.get("isNode").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let is_node = envelope
+          .get("isNode")
+          .and_then(serde_json::Value::as_bool)
+          .unwrap_or(false);
         Ok(FdEvalResult::Handle(
           crate::js_handle::JSHandleBacking::Remote(HandleRemote::WebKit(ref_id)),
           is_node,

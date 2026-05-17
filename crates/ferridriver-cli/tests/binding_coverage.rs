@@ -415,12 +415,7 @@ fn binding_coverage_page_locator_frame_chromium() {
   assert_eq!(v["status"], "ok", "coverage script must run clean: {v}");
   let val = &v["value"];
   let failed = val["failed"].as_array().expect("failed array");
-  assert!(
-    failed.is_empty(),
-    "{} binding(s) failed: {:#?}",
-    failed.len(),
-    failed
-  );
+  assert!(failed.is_empty(), "{} binding(s) failed: {:#?}", failed.len(), failed);
   // Sanity: we exercised a large surface, not a trivial subset.
   assert!(
     val["passed"].as_u64().unwrap_or(0) >= 150,
