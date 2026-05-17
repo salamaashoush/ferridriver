@@ -869,15 +869,16 @@ impl PageJs {
     KeyboardJs::new(self.inner.clone())
   }
 
-  /// Click at viewport coordinates without a selector.
+  /// ferridriver-specific (NOT Playwright): click at viewport
+  /// coordinates without a selector. Playwright equivalent: `mouse.click(x, y)`.
   #[qjs(rename = "clickAt")]
   pub async fn click_at(&self, x: f64, y: f64) -> rquickjs::Result<()> {
     self.inner.click_at(x, y).await.into_js()
   }
 
-  /// Interpolated mouse move from `(fromX, fromY)` to `(toX, toY)` in `steps`
-  /// intermediate points. Used for coordinate-based drag: `mouse.down()` →
-  /// `moveMouseSmooth(...)` → `mouse.up()`.
+  /// ferridriver-specific (NOT Playwright): interpolated mouse move
+  /// from `(fromX, fromY)` to `(toX, toY)` in `steps` points. Playwright
+  /// equivalent: `mouse.move(x, y, { steps })`.
   #[qjs(rename = "moveMouseSmooth")]
   pub async fn move_mouse_smooth(
     &self,
@@ -1553,9 +1554,10 @@ impl PageJs {
     self.inner.expose_function(&name, cb).await.into_js()
   }
 
-  /// Playwright internal: `page.startScreencast(quality, maxWidth,
-  /// maxHeight, callback)`. Callback receives `{ frame: Uint8Array,
-  /// timestamp: number }` for each frame.
+  /// ferridriver-specific (NOT Playwright): `startScreencast(quality,
+  /// maxWidth, maxHeight, callback)`. Callback receives `{ frame:
+  /// Uint8Array, timestamp: number }` per frame. Backed by CDP
+  /// `Page.startScreencast`; no Playwright client equivalent.
   #[qjs(rename = "startScreencast")]
   pub async fn start_screencast<'js>(
     &self,
@@ -1600,7 +1602,8 @@ impl PageJs {
     Ok(())
   }
 
-  /// Stop the screencast started by `startScreencast`.
+  /// ferridriver-specific (NOT Playwright): stop the screencast
+  /// started by `startScreencast`.
   #[qjs(rename = "stopScreencast")]
   pub async fn stop_screencast(&self) -> rquickjs::Result<()> {
     self.inner.stop_screencast().await.into_js()
