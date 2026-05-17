@@ -67,6 +67,21 @@ impl BidiElement {
     }
   }
 
+  /// Deterministic content-frame resolution for an `<iframe>` /
+  /// `<frame>`: its `contentWindow` serialises as a `window`
+  /// `RemoteValue` whose `context` is the child browsing-context id.
+  /// Robust for `srcdoc` / `data:` / nested / re-attached frames
+  /// (the name/url heuristic is not). `None` if the element hosts no
+  /// frame.
+  pub(crate) async fn content_frame_context(&self) -> Result<Option<String>> {
+    let v = self
+      .call_fn_value(
+        "(el) => (el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME')) ? el.contentWindow : null",
+      )
+      .await?;
+    Ok(v.and_then(|j| j.get("context").and_then(|c| c.as_str()).map(String::from)))
+  }
+
   /// Get the element's bounding box.
   async fn bounding_box(&self) -> Result<(f64, f64, f64, f64)> {
     let result = self

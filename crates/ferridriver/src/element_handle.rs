@@ -708,6 +708,17 @@ impl ElementHandle {
         std::sync::Arc::from(fid.as_str()),
       )));
     }
+    // BiDi deterministic path: the iframe's `contentWindow` serialises
+    // with its child browsing-context id (works for srcdoc / data: /
+    // nested / re-attached, unlike the name/url heuristic).
+    if let AnyElement::Bidi(be) = &*self.element
+      && let Ok(Some(ctx)) = be.content_frame_context().await
+    {
+      return Ok(Some(crate::frame::Frame::new(
+        std::sync::Arc::clone(self.page()),
+        std::sync::Arc::from(ctx.as_str()),
+      )));
+    }
     let probe = self
       .js_handle
       .evaluate(
