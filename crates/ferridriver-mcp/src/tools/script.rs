@@ -113,6 +113,7 @@ impl McpServer {
       timeout: p.timeout_ms.map(Duration::from_millis),
       memory_limit: p.memory_limit_mb.and_then(|mb| usize::try_from(mb * 1024 * 1024).ok()),
       stack_size: None,
+      gc_threshold: None,
     };
 
     let args = p.args.unwrap_or_default();

@@ -211,6 +211,7 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     timeout: args.timeout_ms.map(std::time::Duration::from_millis),
     memory_limit: None,
     stack_size: None,
+    gc_threshold: None,
   };
   let script_args: Vec<serde_json::Value> =
     args.script_args.into_iter().map(serde_json::Value::String).collect();
