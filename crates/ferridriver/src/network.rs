@@ -167,6 +167,9 @@ pub(crate) struct RequestState {
   timing: ArcSwap<RequestTiming>,
   sizes: ArcSwap<RequestSizes>,
   redirected_to: ArcSwapOption<RequestState>,
+  // Set once when `requestfailed` fires; Playwright's `request.failure()`
+  // is a sync getter of this cached value.
+  failure: ArcSwapOption<String>,
 
   // Async-only mutable state (guarded by `state`).
   state: RwLock<RequestMutState>,
@@ -182,7 +185,6 @@ pub(crate) struct RequestState {
 struct RequestMutState {
   raw_headers: Option<Vec<HeaderEntry>>,
   response: Option<Arc<ResponseState>>,
-  failure: Option<String>,
 }
 
 impl Request {
@@ -205,10 +207,10 @@ impl Request {
       timing: ArcSwap::from_pointee(init.timing.unwrap_or_default()),
       sizes: ArcSwap::from_pointee(RequestSizes::default()),
       redirected_to: ArcSwapOption::const_empty(),
+      failure: ArcSwapOption::const_empty(),
       state: RwLock::new(RequestMutState {
         raw_headers: None,
         response: None,
-        failure: None,
       }),
       outcome_notify: Notify::new(),
       headers_notify: Notify::new(),
@@ -394,8 +396,10 @@ impl Request {
   // -- Outcome -------------------------------------------------------------
 
   /// Failure text, if the request failed before producing a response.
-  pub async fn failure(&self) -> Option<String> {
-    self.inner.state.read().await.failure.clone()
+  /// Sync — mirrors Playwright's `request.failure()` getter.
+  #[must_use]
+  pub fn failure(&self) -> Option<String> {
+    self.inner.failure.load_full().map(|s| (*s).clone())
   }
 
   /// Wait for the response (or failure) to be recorded. Mirrors
@@ -418,7 +422,7 @@ impl Request {
         if let Some(r) = state.response.clone() {
           return Ok(Some(Response { inner: r }));
         }
-        if state.failure.is_some() {
+        if self.inner.failure.load().is_some() {
           return Ok(None);
         }
       }
@@ -488,10 +492,8 @@ impl Request {
     self.inner.outcome_notify.notify_waiters();
   }
 
-  pub async fn set_failure(&self, error_text: String) {
-    let mut state = self.inner.state.write().await;
-    state.failure = Some(error_text);
-    drop(state);
+  pub fn set_failure(&self, error_text: String) {
+    self.inner.failure.store(Some(Arc::new(error_text)));
     self.inner.outcome_notify.notify_waiters();
   }
 
@@ -515,7 +517,7 @@ impl Request {
         .and_then(|r| r.provisional_headers.get("content-type").cloned()),
       "headers": self.inner.provisional_headers,
       "postData": self.post_data(),
-      "failure": state.failure,
+      "failure": self.failure(),
     })
   }
 }

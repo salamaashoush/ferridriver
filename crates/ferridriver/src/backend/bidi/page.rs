@@ -1826,7 +1826,8 @@ impl BidiPage {
             let mut args: Vec<crate::js_handle::JSHandle> = Vec::with_capacity(args_json.len());
             for arg in &args_json {
               let backing = bidi_remote_value_to_backing(arg);
-              args.push(crate::js_handle::JSHandle::from_backing(page.clone(), backing));
+              let is_node = arg.get("type").and_then(|v| v.as_str()) == Some("node");
+              args.push(crate::js_handle::JSHandle::from_backing(page.clone(), backing, is_node));
             }
             let location = bidi_stack_trace_to_location(event.params.get("stackTrace"), event.params.get("source"));
             let timestamp = event
@@ -2582,12 +2583,14 @@ impl BidiPage {
           // a primitive (inline value — no page-side retention).
           // Playwright's `JSHandle` has both shapes; mirror that here.
           if let Some(shared) = result.as_shared_reference() {
-            Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Remote(
-              HandleRemote::Bidi {
+            // sharedReference is BiDi's DOM-node shape.
+            Ok(FdEvalResult::Handle(
+              crate::js_handle::JSHandleBacking::Remote(HandleRemote::Bidi {
                 shared_id: shared.shared_id,
                 handle: shared.handle,
-              },
-            )))
+              }),
+              true,
+            ))
           } else {
             let non_node_handle = match &result {
               super::types::RemoteValue::Array { handle, .. }
@@ -2610,12 +2613,13 @@ impl BidiPage {
               // sharedId}` (the old mistake) causes BiDi to reject
               // with "no such node" because the handle-string was
               // never registered as a node sharedId.
-              Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Remote(
-                HandleRemote::Bidi {
+              Ok(FdEvalResult::Handle(
+                crate::js_handle::JSHandleBacking::Remote(HandleRemote::Bidi {
                   shared_id: String::new(),
                   handle: Some(h),
-                },
-              )))
+                }),
+                false,
+              ))
             } else {
               // Primitive result from evaluateHandle — wrap the
               // inline value as a value-backed JSHandle. BiDi maps
@@ -2643,9 +2647,10 @@ impl BidiPage {
                   crate::protocol::SerializedValue::from_json(&as_json, &mut ctx)
                 },
               };
-              Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Value(
-                serialized,
-              )))
+              Ok(FdEvalResult::Handle(
+                crate::js_handle::JSHandleBacking::Value(serialized),
+                false,
+              ))
             }
           }
         }
@@ -2930,7 +2935,7 @@ impl BidiNetworkTracker {
       .and_then(|v| v.as_str())
       .unwrap_or("net::ERR_FAILED")
       .to_string();
-    req.set_failure(error_text.clone()).await;
+    req.set_failure(error_text.clone());
     if let Some(resp) = self.responses.lock().await.get(&request_id).cloned() {
       resp.finish_failure(error_text).await;
     }

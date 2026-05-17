@@ -38,20 +38,23 @@ use crate::selectors;
 /// value on overflow.
 macro_rules! retry_resolve {
   ($self:expr, $timeout_ms:expr, $op:expr, |$el:ident, $page:ident| $body:expr) => {{
-    let $page: &$crate::backend::AnyPage = $self.frame.page_arc().inner();
+    // Resolve `frameLocator` enter-frame hops to the real child frame
+    // + trailing selector (no-op for plain selectors).
+    let (__rframe, __rsel) = $self.resolved().await.map_err($crate::error::FerriError::from)?;
+    let $page: &$crate::backend::AnyPage = __rframe.page_arc().inner();
     $page
       .ensure_engine_injected()
       .await
       .map_err($crate::error::FerriError::from)?;
     let __fd = "window.__fd";
-    let __sel_js = $crate::selectors::build_selone_js(&$self.selector, &__fd, $self.strict)
+    let __sel_js = $crate::selectors::build_selone_js(&__rsel, &__fd, $self.strict)
       .map_err($crate::error::FerriError::from)?;
     // Pass `None` for main-frame locators so the backend skips a
     // `frame_contexts` lookup; child frames thread their cached id.
-    let __frame_id: ::std::option::Option<&str> = if $self.frame.is_main_frame() {
+    let __frame_id: ::std::option::Option<&str> = if __rframe.is_main_frame() {
       ::std::option::Option::None
     } else {
-      ::std::option::Option::Some($self.frame.id())
+      ::std::option::Option::Some(__rframe.id())
     };
 
     let __op_name: &str = $op;
@@ -160,6 +163,44 @@ impl Locator {
       selector,
       strict: true,
     }
+  }
+
+  /// Resolve any `internal:control=enter-frame` hops embedded in
+  /// `self.selector` into the actual child [`Frame`], returning the
+  /// deepest frame plus the trailing selector to run inside it. A
+  /// no-op clone for selectors without a frame hop.
+  ///
+  /// `FrameLocator` builds a selector chain like
+  /// `#if >> internal:control=enter-frame >> #btn`. The injected
+  /// engine's `enter-frame` control returns `[]` by design — the
+  /// boundary is resolved HERE (server side), mirroring Playwright's
+  /// frame chunking: query the `<iframe>` in the current frame, hop to
+  /// its content frame, continue with the next chunk. Re-resolved on
+  /// every action attempt so a re-attached iframe is picked up.
+  pub(crate) async fn resolved(&self) -> Result<(crate::frame::Frame, String)> {
+    const MARK: &str = ">> internal:control=enter-frame >>";
+    if !self.selector.contains("internal:control=enter-frame") {
+      return Ok((self.frame.clone(), self.selector.clone()));
+    }
+    let mut parts = self.selector.split(MARK).map(str::trim);
+    let mut cur = self.frame.clone();
+    let mut pending = parts.next().unwrap_or("").to_string();
+    for next in parts {
+      let page_arc = std::sync::Arc::clone(cur.page_arc());
+      let fid: Option<String> = if cur.is_main_frame() {
+        None
+      } else {
+        Some(cur.id().to_string())
+      };
+      let el = crate::selectors::query_one(page_arc.inner(), &pending, false, fid.as_deref()).await?;
+      let handle = crate::element_handle::ElementHandle::from_any_element(std::sync::Arc::clone(&page_arc), el).await?;
+      cur = handle
+        .content_frame()
+        .await?
+        .ok_or_else(|| crate::error::FerriError::protocol("frameLocator", "<iframe> has no content frame"))?;
+      pending = next.to_string();
+    }
+    Ok((cur, pending))
   }
 
   /// Returns a copy of this locator with strict-mode toggled.
@@ -1015,15 +1056,21 @@ impl Locator {
   ///
   /// Returns an error if selector parsing or JS evaluation fails.
   pub async fn count(&self) -> Result<usize> {
-    let parsed = selectors::parse(&self.selector)?;
+    // Resolve frameLocator enter-frame hops, then count the trailing
+    // selector inside the resolved frame (no-op for plain selectors).
+    let (rf, rsel) = self.resolved().await?;
+    let parsed = selectors::parse(&rsel)?;
     let parts_json = selectors::build_parts_json(&parsed);
-    let fd = self.frame.page_arc().inner().injected_script().await?;
+    let inner = rf.page_arc().inner();
+    let fd = inner.injected_script().await?;
     let js = format!("{fd}.selCount({parts_json})");
-    let val = self
-      .evaluate_in_frame_js(&js)
-      .await?
-      .and_then(|v| v.as_u64())
-      .unwrap_or(0);
+    let val = if rf.is_main_frame() {
+      inner.evaluate(&js).await
+    } else {
+      inner.evaluate_in_frame(&js, rf.id()).await
+    }?
+    .and_then(|v| v.as_u64())
+    .unwrap_or(0);
     Ok(usize::try_from(val).unwrap_or(usize::MAX))
   }
 
@@ -1606,19 +1653,32 @@ impl Locator {
   /// Used by: innerText, textContent, innerHTML, getAttribute, inputValue, isVisible, etc.
   /// Matches Playwright's `_callOnElementOnceMatches`.
   async fn retry_eval_on_element(&self, js_body: &str) -> Result<Option<serde_json::Value>> {
-    let parsed = selectors::parse(&self.selector)?;
-    let parts_json = selectors::build_parts_json(&parsed);
-    self.frame.page_arc().inner().ensure_engine_injected().await?;
-    let fd = "window.__fd";
-    let js = format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
-
     for (i, &delay_ms) in Self::RETRY_BACKOFFS_MS.iter().enumerate() {
       if delay_ms > 0 {
         tokio::time::sleep(std::time::Duration::from_millis(delay_ms)).await;
       }
-      let result = self.evaluate_in_frame_js(&js).await;
-      match result {
-        // Element not found or evaluation failed -- retry if attempts remain.
+      // Re-resolve frameLocator enter-frame hops EVERY attempt so a
+      // child frame that wasn't loaded / had no execution context yet
+      // (or got re-attached) is picked up on a later retry. No-op for
+      // plain selectors.
+      let attempt: Result<Option<serde_json::Value>> = async {
+        let (rf, rsel) = self.resolved().await?;
+        let parsed = selectors::parse(&rsel)?;
+        let parts_json = selectors::build_parts_json(&parsed);
+        let inner = rf.page_arc().inner();
+        inner.ensure_engine_injected().await?;
+        let fd = "window.__fd";
+        let js = format!("(function() {{ var el = {fd}.selOne({parts_json}); if (!el) return null; {js_body} }})()");
+        if rf.is_main_frame() {
+          inner.evaluate(&js).await
+        } else {
+          inner.evaluate_in_frame(&js, rf.id()).await
+        }
+      }
+      .await;
+      match attempt {
+        // Element not found, frame not ready, or eval failed -- retry
+        // if attempts remain.
         Ok(Some(serde_json::Value::Null) | None) | Err(_) if i < Self::RETRY_BACKOFFS_MS.len() - 1 => {},
         Ok(val) => return Ok(val),
         Err(e) => return Err(e),
