@@ -1281,8 +1281,10 @@ impl Page {
     .build(env)
   }
 
-  /// Playwright: `page.snapshotForAI(options?)`. Returns a structured
-  /// accessibility snapshot tuned for LLM consumption.
+  /// ferridriver-specific (NOT Playwright). Playwright's public
+  /// accessibility API is `ariaSnapshot` (returns a string); this
+  /// richer structured shape backs the MCP server's incremental
+  /// tracking.
   ///
   /// Returns `{ full, incremental?, refMap }`:
   /// - `full` — always present, the complete accessibility tree as
@@ -1311,6 +1313,17 @@ impl Page {
       .collect();
     obj.insert("refMap".to_string(), serde_json::Value::Object(ref_map));
     Ok(serde_json::Value::Object(obj))
+  }
+
+  /// Playwright: `page.ariaSnapshot(options?): Promise<string>`.
+  #[napi(
+    js_name = "ariaSnapshot",
+    ts_args_type = "options?: { depth?: number, track?: string }",
+    ts_return_type = "Promise<string>"
+  )]
+  pub async fn aria_snapshot(&self, options: Option<SnapshotForAiOptions>) -> Result<String> {
+    let opts = options.map(Into::into).unwrap_or_default();
+    self.inner.aria_snapshot(opts).await.map_err(crate::error::to_napi)
   }
 
   /// Playwright internal: `page.startScreencast(quality, maxWidth, maxHeight, callback)`.

@@ -1145,6 +1145,17 @@ impl Page {
     snapshot::build_snapshot_for_ai(&self.inner, &opts, &mut tracker).await
   }
 
+  /// Playwright `page.ariaSnapshot(options?): Promise<string>` — the
+  /// full accessibility-tree text (the `full` field of the structured
+  /// snapshot).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the accessibility snapshot cannot be built.
+  pub async fn aria_snapshot(&self, opts: snapshot::SnapshotOptions) -> Result<String> {
+    Ok(self.snapshot_for_ai(opts).await?.full)
+  }
+
   // ── Viewport ────────────────────────────────────────────────────────────
 
   /// Set the viewport size by width and height.
