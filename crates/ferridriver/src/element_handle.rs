@@ -696,6 +696,18 @@ impl ElementHandle {
   /// Forwards backend error on protocol failure / page-side exception.
   pub async fn content_frame(&self) -> Result<Option<crate::frame::Frame>> {
     self.ensure_live()?;
+    // Deterministic first: CDP `DOM.describeNode` maps the iframe
+    // element to its real content-frame id (robust for unnamed /
+    // `srcdoc` / churned iframes). Backends without it return `None`
+    // and we fall through to the name/url cache heuristic below.
+    if let Some(crate::js_handle::HandleRemote::Cdp(obj)) = self.js_handle.remote()
+      && let Ok(Some(fid)) = self.page().inner().content_frame_id(obj).await
+    {
+      return Ok(Some(crate::frame::Frame::new(
+        std::sync::Arc::clone(self.page()),
+        std::sync::Arc::from(fid.as_str()),
+      )));
+    }
     let probe = self
       .js_handle
       .evaluate(
@@ -885,7 +897,7 @@ impl ElementHandle {
         .js_handle
         .evaluate_handle(&probe_expr, SerializedArgument::default(), Some(true))
         .await?;
-      if let Some(eh) = result.as_element().await? {
+      if let Some(eh) = result.as_element() {
         return Ok(Some(eh));
       }
       let _ = result.dispose().await;

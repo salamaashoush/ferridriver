@@ -182,6 +182,10 @@ pub struct BrowserState {
   /// every fresh page. Sync mutex so non-async construction paths
   /// can write without owning a tokio guard.
   pub context_options: Arc<std::sync::Mutex<HashMap<String, crate::options::BrowserContextOptions>>>,
+  /// Sync-readable connection flag mirroring `!instances.is_empty()`.
+  /// Set true when an instance is ensured, false on `shutdown`, so
+  /// `Browser::is_connected()` stays sync like Playwright's.
+  pub connected: Arc<std::sync::atomic::AtomicBool>,
   /// Per-context `storageState` hydration flag. Set the first time a
   /// page opens in a context whose options bag carries a
   /// `storageState` — subsequent pages in the same context skip the
@@ -255,6 +259,7 @@ impl BrowserState {
       context_events: Arc::new(std::sync::Mutex::new(HashMap::default())),
       record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
+      connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
     }
@@ -498,6 +503,7 @@ impl BrowserState {
     }
 
     self.instances.insert(instance_name.to_string(), inst);
+    self.connected.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
   }
 
@@ -545,6 +551,7 @@ impl BrowserState {
     }
 
     self.instances.insert(instance_name.to_string(), inst);
+    self.connected.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(page_count)
   }
 
@@ -985,6 +992,7 @@ impl BrowserState {
   }
 
   pub async fn shutdown(&mut self) {
+    self.connected.store(false, std::sync::atomic::Ordering::Relaxed);
     for (_, mut inst) in self.instances.drain() {
       inst.contexts.clear();
       let _ = inst.browser.close().await;

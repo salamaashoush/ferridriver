@@ -76,7 +76,7 @@ step!(UrlContains {
     example: "Then the URL should contain \"/dashboard\"",
     execute(page, caps, _table, _vars) {
         let expected = q(&caps[1]);
-        let url = page.url().await.unwrap_or_default();
+        let url = page.url();
         if !url.contains(&expected) {
             return Err(crate::error::FerriError::backend(format!("URL '{url}' does not contain '{expected}'")));
         }
@@ -91,7 +91,7 @@ step!(UrlExact {
     example: "Then the URL should be \"https://example.com/\"",
     execute(page, caps, _table, _vars) {
         let expected = q(&caps[1]);
-        let url = page.url().await.unwrap_or_default();
+        let url = page.url();
         if url != expected {
             return Err(crate::error::FerriError::backend(format!("URL is '{url}', expected '{expected}'")));
         }

@@ -126,7 +126,7 @@ impl Frame {
       .await?;
     match result {
       crate::js_handle::EvaluateResult::Value(v) => Ok(v),
-      crate::js_handle::EvaluateResult::Handle(_) => Err(crate::error::FerriError::Evaluation(
+      crate::js_handle::EvaluateResult::Handle(..) => Err(crate::error::FerriError::Evaluation(
         "Frame::evaluate: backend returned handle but returnByValue=true was requested".into(),
       )),
     }
@@ -159,9 +159,10 @@ impl Frame {
       .call_utility_evaluate(fn_source, args_slice, &arg.handles, frame_id, is_function, false)
       .await?;
     match result {
-      crate::js_handle::EvaluateResult::Handle(backing) => Ok(crate::js_handle::JSHandle::from_backing(
+      crate::js_handle::EvaluateResult::Handle(backing, is_node) => Ok(crate::js_handle::JSHandle::from_backing(
         Arc::clone(&self.page),
         backing,
+        is_node,
       )),
       crate::js_handle::EvaluateResult::Value(_) => Err(crate::error::FerriError::Evaluation(
         "Frame::evaluate_handle: backend returned value but returnByValue=false was requested".into(),

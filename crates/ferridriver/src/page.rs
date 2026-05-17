@@ -418,13 +418,19 @@ impl Page {
     (crate::backend::NavLifecycle::parse_lifecycle(wait_until), timeout)
   }
 
-  /// Get the current page URL.
+  /// Get the current page URL — the main frame's URL.
   ///
-  /// # Errors
-  ///
-  /// Returns an error if the URL cannot be retrieved from the backend.
-  pub async fn url(&self) -> Result<String> {
-    self.inner.url().await.map(std::option::Option::unwrap_or_default)
+  /// Playwright: [`page.url()`](https://playwright.dev/docs/api/class-page#page-url)
+  /// is **synchronous** (`url(): string`). It reads the locally-tracked
+  /// main-frame URL (kept current by navigation/lifecycle events), the
+  /// same source [`Frame::url`] uses — no backend round-trip.
+  #[must_use]
+  pub fn url(&self) -> String {
+    self.with_frame_cache(|c| {
+      c.main_frame_id()
+        .and_then(|id| c.record(&id).map(|r| r.info.url.clone()))
+        .unwrap_or_default()
+    })
   }
 
   /// Get the current page title.
@@ -772,7 +778,21 @@ impl Page {
   ///
   /// Returns an error if the content cannot be set.
   pub async fn set_content(&self, html: &str) -> Result<()> {
-    self.inner.set_content(html).await
+    self.inner.set_content(html).await?;
+    // Playwright `page.setContent` defaults to `waitUntil: 'load'`.
+    // Wait for the injected document to finish loading so its
+    // subframes attach, then refresh the frame cache from the live
+    // tree: the `FrameAttached` listener can miss iframes inserted via
+    // `Page.setDocumentContent` on a never-navigated page (the parent
+    // main frame was never event-seeded), so `frames()` /
+    // `frameLocator` would otherwise never see them.
+    let _ = self.wait_for_load_state(Some("load")).await;
+    if let Ok(infos) = self.inner.get_frame_tree().await
+      && let Ok(mut g) = self.frame_cache.lock()
+    {
+      g.seed(infos);
+    }
+    Ok(())
   }
 
   /// Extract the page content as markdown.
@@ -905,7 +925,7 @@ impl Page {
           timeout_ms,
         ));
       }
-      let current = self.url().await.unwrap_or_default();
+      let current = self.url();
       if matcher.matches(&current) {
         return Ok(());
       }
@@ -1634,13 +1654,13 @@ impl Page {
   /// Returns an error if the wait times out.
   pub async fn wait_for_navigation(&self, timeout_ms: Option<u64>) -> Result<()> {
     let timeout = timeout_ms.unwrap_or(self.default_timeout());
-    let current = self.url().await.unwrap_or_default();
+    let current = self.url();
     let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
     loop {
       if tokio::time::Instant::now() >= deadline {
         return Err(crate::error::FerriError::timeout("waiting for navigation", timeout));
       }
-      let now = self.url().await.unwrap_or_default();
+      let now = self.url();
       if now != current {
         return Ok(());
       }

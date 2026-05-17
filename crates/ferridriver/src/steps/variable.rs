@@ -63,7 +63,7 @@ step!(StoreUrl {
     example: "When I store the URL as $url",
     execute(page, caps, _table, vars) {
         let var = caps[1].to_string();
-        let url = page.url().await.unwrap_or_default();
+        let url = page.url();
         vars.insert(var, url);
         Ok(None)
     }

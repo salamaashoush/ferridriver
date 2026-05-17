@@ -1863,8 +1863,10 @@ impl<T: CdpWrap> CdpPage<T> {
       };
       Ok(crate::js_handle::EvaluateResult::Value(parsed))
     } else if let Some(obj_id) = result_obj.get("objectId").and_then(|v| v.as_str()) {
+      let is_node = result_obj.get("subtype").and_then(|v| v.as_str()) == Some("node");
       Ok(crate::js_handle::EvaluateResult::Handle(
         crate::js_handle::JSHandleBacking::Remote(crate::js_handle::HandleRemote::Cdp(Arc::from(obj_id))),
+        is_node,
       ))
     } else {
       // No objectId — the CDP result is a primitive (number, string,
@@ -1890,6 +1892,7 @@ impl<T: CdpWrap> CdpPage<T> {
       };
       Ok(crate::js_handle::EvaluateResult::Handle(
         crate::js_handle::JSHandleBacking::Value(serialized),
+        false,
       ))
     }
   }
@@ -1951,6 +1954,22 @@ impl<T: CdpWrap> CdpPage<T> {
       }
     }
     Ok(frames)
+  }
+
+  /// Deterministic iframe-element -> content-frame id via
+  /// `DOM.describeNode` on the element's remote object. Replaces the
+  /// fragile name/url cache heuristic for unnamed / `srcdoc` iframes.
+  pub async fn content_frame_id(&self, object_id: &str) -> Result<Option<String>> {
+    let res = self
+      .cmd("DOM.describeNode", serde_json::json!({ "objectId": object_id }))
+      .await?;
+    Ok(
+      res
+        .get("node")
+        .and_then(|n| n.get("frameId"))
+        .and_then(|v| v.as_str())
+        .map(std::string::ToString::to_string),
+    )
   }
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
@@ -3704,7 +3723,8 @@ impl<T: CdpWrap> CdpPage<T> {
         let mut args: Vec<crate::js_handle::JSHandle> = Vec::with_capacity(args_json.len());
         for arg in &args_json {
           let backing = cdp_remote_object_to_backing(arg);
-          args.push(crate::js_handle::JSHandle::from_backing(page.clone(), backing));
+          let is_node = arg.get("subtype").and_then(|v| v.as_str()) == Some("node");
+          args.push(crate::js_handle::JSHandle::from_backing(page.clone(), backing, is_node));
         }
         let location = cdp_stack_trace_to_location(params.get("stackTrace"));
         let timestamp = params
@@ -5381,7 +5401,7 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
       .and_then(|v| v.as_str())
       .unwrap_or("net::ERR_FAILED")
       .to_string();
-    req.set_failure(error_text.clone()).await;
+    req.set_failure(error_text.clone());
     if let Some(resp) = self.responses.lock().await.get(request_id).cloned() {
       resp.finish_failure(error_text).await;
     }

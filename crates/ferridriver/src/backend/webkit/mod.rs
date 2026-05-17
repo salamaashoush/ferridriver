@@ -598,7 +598,7 @@ impl WebKitPage {
           if (!window.__wr_next) window.__wr_next = 1;
           const id = window.__wr_next++;
           window.__wr.set(id, value);
-          return JSON.stringify({{kind: 'handle', ref: id}});
+          return JSON.stringify({{kind: 'handle', ref: id, isNode: (typeof Node !== 'undefined') && (value instanceof Node)}});
         }}
         // Hybrid sync/async: only chain a .then when the user expression
         // returns a Promise. The host's `callAsyncJavaScript` awaits
@@ -658,9 +658,11 @@ impl WebKitPage {
           .get("ref")
           .and_then(serde_json::Value::as_u64)
           .ok_or_else(|| FerriError::protocol("Evaluate", "call_utility_evaluate: missing envelope.ref"))?;
-        Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Remote(
-          HandleRemote::WebKit(ref_id),
-        )))
+        let is_node = envelope.get("isNode").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        Ok(FdEvalResult::Handle(
+          crate::js_handle::JSHandleBacking::Remote(HandleRemote::WebKit(ref_id)),
+          is_node,
+        ))
       },
       "valueHandle" => {
         // Primitive result from evaluateHandle. Parse the inline JSON
@@ -683,9 +685,10 @@ impl WebKitPage {
           let mut ctx = crate::protocol::SerializationContext::default();
           crate::protocol::SerializedValue::from_json(&inner, &mut ctx)
         };
-        Ok(FdEvalResult::Handle(crate::js_handle::JSHandleBacking::Value(
-          serialized,
-        )))
+        Ok(FdEvalResult::Handle(
+          crate::js_handle::JSHandleBacking::Value(serialized),
+          false,
+        ))
       },
       other => Err(FerriError::protocol(
         "Evaluate",
@@ -2689,7 +2692,7 @@ async fn drain_network_events(
       },
       NetworkEvent::Failure { id, error_text } => {
         let Some(req) = by_id.get(&id).cloned() else { continue };
-        req.set_failure(error_text).await;
+        req.set_failure(error_text);
         emitter.emit(crate::events::PageEvent::RequestFailed(req));
       },
     }
