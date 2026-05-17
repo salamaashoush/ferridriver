@@ -1091,12 +1091,22 @@ impl Page {
 
   #[napi]
   pub async fn type_str(&self, text: String) -> Result<()> {
-    self.inner.keyboard().r#type(&text, None).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .keyboard()
+      .r#type(&text, None)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn press_key(&self, key: String) -> Result<()> {
-    self.inner.keyboard().press(&key, None).await.map_err(crate::error::to_napi)
+    self
+      .inner
+      .keyboard()
+      .press(&key, None)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   // ── Emulation ───────────────────────────────────────────────────────────
@@ -1826,7 +1836,12 @@ impl Keyboard {
       .map(|d| ferridriver::page::KeyboardPressOptions {
         delay: Some(crate::types::f64_to_u64(d)),
       });
-    self.page.keyboard().press(&key, opts).await.map_err(crate::error::to_napi)
+    self
+      .page
+      .keyboard()
+      .press(&key, opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   /// Playwright: `keyboard.type(text, options?: { delay? })`.
@@ -1837,7 +1852,12 @@ impl Keyboard {
       .map(|d| ferridriver::page::KeyboardTypeOptions {
         delay: Some(crate::types::f64_to_u64(d)),
       });
-    self.page.keyboard().r#type(&text, opts).await.map_err(crate::error::to_napi)
+    self
+      .page
+      .keyboard()
+      .r#type(&text, opts)
+      .await
+      .map_err(crate::error::to_napi)
   }
 
   #[napi(js_name = "insertText")]

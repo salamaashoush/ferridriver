@@ -75,9 +75,7 @@ impl BidiElement {
   /// frame.
   pub(crate) async fn content_frame_context(&self) -> Result<Option<String>> {
     let v = self
-      .call_fn_value(
-        "(el) => (el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME')) ? el.contentWindow : null",
-      )
+      .call_fn_value("(el) => (el && (el.tagName === 'IFRAME' || el.tagName === 'FRAME')) ? el.contentWindow : null")
       .await?;
     Ok(v.and_then(|j| j.get("context").and_then(|c| c.as_str()).map(String::from)))
   }

@@ -348,9 +348,7 @@ impl JSHandle {
       .call_utility_evaluate(fn_source, &args, &handles, None, is_function, false)
       .await?;
     match result {
-      EvaluateResult::Handle(backing, is_node) => {
-        Ok(JSHandle::from_backing(Arc::clone(&self.page), backing, is_node))
-      },
+      EvaluateResult::Handle(backing, is_node) => Ok(JSHandle::from_backing(Arc::clone(&self.page), backing, is_node)),
       EvaluateResult::Value(_) => Err(crate::error::FerriError::Evaluation(
         "JSHandle::evaluate_handle: backend returned value in returnByValue=false mode".into(),
       )),
@@ -455,10 +453,7 @@ impl JSHandle {
     }
     let remote = self.remote()?;
     let any_element = crate::backend::element_from_remote(self.any_page(), remote).ok()?;
-    Some(ElementHandle::from_js_handle_and_element(
-      self.clone(),
-      any_element,
-    ))
+    Some(ElementHandle::from_js_handle_and_element(self.clone(), any_element))
   }
 }
 
