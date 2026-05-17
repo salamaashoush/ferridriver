@@ -204,13 +204,9 @@ impl APIResponseJs {
   /// `headersArray` shape).
   #[qjs(rename = "headersArray")]
   pub fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let headers: Vec<serde_json::Value> = self
-      .inner
-      .headers()
-      .iter()
-      .map(|(n, v)| serde_json::json!({ "name": n, "value": v }))
-      .collect();
-    serde_to_js(&ctx, &headers)
+    let h = self.inner.headers();
+    let pairs: Vec<(&str, &str)> = h.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
   }
 
   /// Value of a single header, or `null` if absent.

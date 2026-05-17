@@ -85,11 +85,8 @@ impl RequestJs {
   #[qjs(rename = "headersArray")]
   pub async fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let arr = self.inner.headers_array().await;
-    let json: Vec<serde_json::Value> = arr
-      .into_iter()
-      .map(|h| serde_json::json!({"name": h.name, "value": h.value}))
-      .collect();
-    serde_to_js(&ctx, &json)
+    let pairs: Vec<(String, String)> = arr.into_iter().map(|h| (h.name, h.value)).collect();
+    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
   }
 
   #[qjs(rename = "allHeaders")]
@@ -243,11 +240,8 @@ impl ResponseJs {
   #[qjs(rename = "headersArray")]
   pub async fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let arr = self.inner.headers_array().await;
-    let json: Vec<serde_json::Value> = arr
-      .into_iter()
-      .map(|h| serde_json::json!({"name": h.name, "value": h.value}))
-      .collect();
-    serde_to_js(&ctx, &json)
+    let pairs: Vec<(String, String)> = arr.into_iter().map(|h| (h.name, h.value)).collect();
+    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
   }
 
   #[qjs(rename = "headerValue")]
