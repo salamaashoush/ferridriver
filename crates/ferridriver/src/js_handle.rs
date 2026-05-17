@@ -96,8 +96,10 @@ pub enum EvaluateResult {
   /// [`JSHandleBacking::Remote`] or a primitive
   /// [`JSHandleBacking::Value`] when the result has no object identity.
   /// Callers typically wrap this in a [`JSHandle`] /
-  /// [`crate::element_handle::ElementHandle`].
-  Handle(JSHandleBacking),
+  /// [`crate::element_handle::ElementHandle`]. The `bool` is
+  /// backend-decoded node-ness, captured at creation so
+  /// [`JSHandle::as_element`] stays sync.
+  Handle(JSHandleBacking, bool),
 }
 
 impl HandleRemote {
@@ -171,24 +173,29 @@ pub struct JSHandle {
   page: Arc<Page>,
   backing: JSHandleBacking,
   disposed: Arc<AtomicBool>,
+  /// Backend-decoded node-ness, captured at creation so
+  /// [`Self::as_element`] stays sync (Playwright parity).
+  is_node: bool,
 }
 
 impl JSHandle {
   /// Construct a remote-backed handle. Internal — callers go through
   /// page factories like `Page::query_selector` (`ElementHandle`) or
-  /// `Page::evaluate_handle` (`JSHandle`).
+  /// `Page::evaluate_handle` (`JSHandle`). Element factories always
+  /// wrap a DOM node, so `is_node` is `true`.
   pub(crate) fn new(page: Arc<Page>, remote: HandleRemote) -> Self {
-    Self::from_backing(page, JSHandleBacking::Remote(remote))
+    Self::from_backing(page, JSHandleBacking::Remote(remote), true)
   }
 
   /// Construct directly from an already-built [`JSHandleBacking`] —
-  /// the shape produced by `EvaluateResult::Handle(..)`. Callers that
-  /// need a value-backed handle pass `JSHandleBacking::Value(..)` here.
-  pub(crate) fn from_backing(page: Arc<Page>, backing: JSHandleBacking) -> Self {
+  /// the shape produced by `EvaluateResult::Handle(..)`. `is_node` is
+  /// the backend-decoded node-ness for that result.
+  pub(crate) fn from_backing(page: Arc<Page>, backing: JSHandleBacking, is_node: bool) -> Self {
     Self {
       page,
       backing,
       disposed: Arc::new(AtomicBool::new(false)),
+      is_node,
     }
   }
 
@@ -312,7 +319,7 @@ impl JSHandle {
       .await?;
     match result {
       EvaluateResult::Value(v) => Ok(v),
-      EvaluateResult::Handle(_) => Err(crate::error::FerriError::Evaluation(
+      EvaluateResult::Handle(..) => Err(crate::error::FerriError::Evaluation(
         "JSHandle::evaluate: backend returned handle in returnByValue=true mode".into(),
       )),
     }
@@ -341,7 +348,7 @@ impl JSHandle {
       .call_utility_evaluate(fn_source, &args, &handles, None, is_function, false)
       .await?;
     match result {
-      EvaluateResult::Handle(backing) => Ok(JSHandle::from_backing(Arc::clone(&self.page), backing)),
+      EvaluateResult::Handle(backing, is_node) => Ok(JSHandle::from_backing(Arc::clone(&self.page), backing, is_node)),
       EvaluateResult::Value(_) => Err(crate::error::FerriError::Evaluation(
         "JSHandle::evaluate_handle: backend returned value in returnByValue=false mode".into(),
       )),
@@ -435,46 +442,18 @@ impl JSHandle {
     Ok(out)
   }
 
-  /// Playwright: `jsHandle.asElement(): ElementHandle | null`
-  /// (`/tmp/playwright/packages/playwright-core/src/client/jsHandle.ts:65`).
-  /// Inspects the remote value — returns `Some(ElementHandle)` if it
-  /// is a DOM `Node`, `None` otherwise. Implemented via an
-  /// `h => h instanceof Node` probe so every backend resolves the
-  /// check page-side uniformly; on a true result the handle's remote
-  /// is re-wrapped into a backend `AnyElement` and packaged as a
-  /// [`ElementHandle`].
-  ///
-  /// # Errors
-  ///
-  /// Forwards backend error on protocol failure / page-side exception,
-  /// and [`crate::error::FerriError::TargetClosed`] when this handle
-  /// is already disposed.
-  pub async fn as_element(&self) -> Result<Option<ElementHandle>> {
-    if self.is_disposed() {
-      return Ok(None);
+  /// `jsHandle.asElement(): ElementHandle | null` — sync, like
+  /// Playwright. Node-ness was decoded by the backend at handle
+  /// creation (`is_node`); no page round-trip. Value-backed handles
+  /// are primitives and never nodes.
+  #[must_use]
+  pub fn as_element(&self) -> Option<ElementHandle> {
+    if self.is_disposed() || !self.is_node {
+      return None;
     }
-    // Value-backed handles are primitive — never DOM nodes. Short-circuit
-    // without a page round-trip, matching Playwright's `asElement`
-    // which returns `null` at the base `JSHandle` layer.
-    let Some(remote) = self.remote() else {
-      return Ok(None);
-    };
-    let is_node = self
-      .evaluate(
-        "h => h instanceof Node",
-        crate::protocol::SerializedArgument::default(),
-        Some(true),
-      )
-      .await?;
-    let is_element = matches!(is_node, crate::protocol::SerializedValue::Bool(true));
-    if !is_element {
-      return Ok(None);
-    }
-    let any_element = crate::backend::element_from_remote(self.any_page(), remote)?;
-    Ok(Some(ElementHandle::from_js_handle_and_element(
-      self.clone(),
-      any_element,
-    )))
+    let remote = self.remote()?;
+    let any_element = crate::backend::element_from_remote(self.any_page(), remote).ok()?;
+    Some(ElementHandle::from_js_handle_and_element(self.clone(), any_element))
   }
 }
 

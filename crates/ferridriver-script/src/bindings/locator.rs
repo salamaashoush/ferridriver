@@ -330,12 +330,12 @@ impl LocatorJs {
     crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(&selector))
   }
 
-  /// Playwright: `locator.page(): Page`. See `frame.page()` notes —
-  /// returned handle does not carry the script engine's
-  /// `AsyncContext`.
+  /// Playwright: `locator.page(): Page`. Carries the session's
+  /// `AsyncContext` (via userdata) so `page.route` /
+  /// `page.exposeFunction` work on the returned handle.
   #[qjs(rename = "page")]
-  pub fn page(&self) -> crate::bindings::page::PageJs {
-    crate::bindings::page::PageJs::new(self.inner.page().clone())
+  pub fn page(&self, ctx: rquickjs::Ctx<'_>) -> crate::bindings::page::PageJs {
+    crate::bindings::page::pagejs_for_ctx(&ctx, self.inner.page().clone())
   }
 
   #[qjs(rename = "first")]
@@ -567,6 +567,35 @@ impl LocatorJs {
   #[qjs(rename = "inputValue")]
   pub async fn input_value(&self) -> rquickjs::Result<String> {
     self.inner.input_value().await.into_js()
+  }
+
+  /// Playwright: `locator.ariaSnapshot(options?: TimeoutOptions &
+  /// { mode?: 'ai' | 'default', depth?: number }): Promise<string>`.
+  #[qjs(rename = "ariaSnapshot")]
+  pub async fn aria_snapshot<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<String> {
+    let core_opts = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        #[derive(serde::Deserialize, Default)]
+        #[serde(rename_all = "camelCase", default)]
+        struct JsAria {
+          mode: Option<String>,
+          depth: Option<i32>,
+          timeout: Option<u64>,
+        }
+        let p: JsAria = crate::bindings::convert::serde_from_js(&ctx, v)?;
+        ferridriver::options::AriaSnapshotOptions {
+          mode: Some(ferridriver::options::AriaSnapshotMode::from_opt_str(p.mode.as_deref())),
+          depth: p.depth,
+          timeout: p.timeout,
+        }
+      },
+      _ => ferridriver::options::AriaSnapshotOptions::default(),
+    };
+    self.inner.aria_snapshot(core_opts).await.into_js()
   }
 
   #[qjs(rename = "getAttribute")]

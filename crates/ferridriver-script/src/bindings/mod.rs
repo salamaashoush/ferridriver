@@ -40,6 +40,7 @@ pub mod page;
 pub mod plugins;
 pub mod video;
 pub mod web_error;
+pub mod webapi;
 
 pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
@@ -59,7 +60,7 @@ pub use locator::LocatorJs;
 pub use mouse::MouseJs;
 pub use network::{RequestJs, ResponseJs, RouteJs, WebSocketJs};
 pub use page::PageJs;
-pub use plugins::{PluginBinding, PluginCommandsJs, PluginToolBinding, install_plugins};
+pub use plugins::{PluginBinding, PluginCommandsJs, PluginToolBinding, compile_plugin_bytecode, install_plugins};
 pub use video::VideoJs;
 pub use web_error::WebErrorJs;
 
@@ -69,7 +70,11 @@ use std::sync::Arc;
 /// Register every class prototype scripts can encounter so rquickjs knows how
 /// to build instances when a method returns one (e.g. `APIResponse` from
 /// `request.get()` or `Locator` from `page.locator()`).
-fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+///
+/// Prototype registration is idempotent and session-stable: callers
+/// invoke this ONCE at `Session::create`, not per `execute`. The
+/// per-call `install_*` helpers below only build the live instance.
+pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   let g = ctx.globals();
   Class::<PageJs>::define(&g)?;
   Class::<FrameJs>::define(&g)?;
@@ -110,20 +115,20 @@ fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 /// Scripts that do not need browser interaction can run with
 /// `RunContext.page = None` and simply have no `page` binding.
 pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, async_ctx: AsyncContext) -> rquickjs::Result<()> {
-  define_classes(ctx)?;
   let js_page = Class::instance(ctx.clone(), PageJs::new_with_async_ctx(page, async_ctx))?;
   ctx.globals().set("page", js_page)?;
   // Per-page route handler registry (`Map<id, fn>`) used by
   // `page.route(matcher, fn)` to look up callbacks from cross-task
   // dispatch. Created here so scripts that never call `route` don't
   // pay any setup cost beyond installing the global.
-  ctx.eval::<(), _>(b"globalThis.__fdRoutes = new Map();".as_slice())?;
+  // Idempotent: a session-created `__fdRoutes` (for script-launched
+  // pages) must NOT be wiped when the MCP-prebound page reinstalls.
+  ctx.eval::<(), _>(b"globalThis.__fdRoutes ||= new Map(); globalThis.__fdRoutePreds ||= new Map();".as_slice())?;
   Ok(())
 }
 
 /// Install the `context` global (cookies, storage, permissions, route, etc.).
 pub fn install_browser_context(ctx: &Ctx<'_>, bcx: Arc<ferridriver::context::ContextRef>) -> rquickjs::Result<()> {
-  define_classes(ctx)?;
   let js_bcx = Class::instance(ctx.clone(), BrowserContextJs::new(bcx))?;
   ctx.globals().set("context", js_bcx)?;
   Ok(())
@@ -134,7 +139,6 @@ pub fn install_browser_context(ctx: &Ctx<'_>, bcx: Arc<ferridriver::context::Con
 /// [`ferridriver::options::BrowserContextOptions`] bag. Rule-9 tests
 /// for §4.1 consume this entry point.
 pub fn install_browser(ctx: &Ctx<'_>, browser: Arc<ferridriver::Browser>) -> rquickjs::Result<()> {
-  define_classes(ctx)?;
   let js_browser = Class::instance(ctx.clone(), BrowserJs::new(browser))?;
   ctx.globals().set("browser", js_browser)?;
   Ok(())
@@ -142,7 +146,6 @@ pub fn install_browser(ctx: &Ctx<'_>, browser: Arc<ferridriver::Browser>) -> rqu
 
 /// Install the `request` global (runner-side HTTP via APIRequestContext).
 pub fn install_request(ctx: &Ctx<'_>, req: Arc<ferridriver::api_request::APIRequestContext>) -> rquickjs::Result<()> {
-  define_classes(ctx)?;
   let js_req = Class::instance(ctx.clone(), APIRequestContextJs::new(req))?;
   ctx.globals().set("request", js_req)?;
   Ok(())
@@ -151,7 +154,6 @@ pub fn install_request(ctx: &Ctx<'_>, req: Arc<ferridriver::api_request::APIRequ
 /// Install the `artifacts` global — a dedicated sandboxed directory for
 /// script outputs (screenshots, PDFs, traces, downloaded bodies).
 pub fn install_artifacts(ctx: &Ctx<'_>, sandbox: Arc<crate::fs::PathSandbox>) -> rquickjs::Result<()> {
-  define_classes(ctx)?;
   let js_art = Class::instance(ctx.clone(), ArtifactsJs::new(sandbox))?;
   ctx.globals().set("artifacts", js_art)?;
   Ok(())

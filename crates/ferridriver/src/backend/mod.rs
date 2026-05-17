@@ -864,6 +864,20 @@ impl AnyPage {
     page_dispatch!(self, evaluate_in_frame(expression, frame_id))
   }
 
+  /// The content-frame id for an `<iframe>`/`<frame>` element given its
+  /// remote-object id. Deterministic on CDP (`DOM.describeNode`);
+  /// `None` on BiDi/WebKit (no equivalent — callers fall back to the
+  /// frame-cache heuristic) or when the element hosts no frame.
+  pub async fn content_frame_id(&self, object_id: &str) -> Result<Option<String>> {
+    match self {
+      AnyPage::CdpPipe(p) => p.content_frame_id(object_id).await,
+      AnyPage::CdpRaw(p) => p.content_frame_id(object_id).await,
+      #[cfg(target_os = "macos")]
+      AnyPage::WebKit(_) => Ok(None),
+      AnyPage::Bidi(_) => Ok(None),
+    }
+  }
+
   // ── Navigation ──
 
   pub async fn goto(

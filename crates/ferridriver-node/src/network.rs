@@ -234,10 +234,10 @@ impl Request {
       .map_err(|e| napi::Error::from_reason(e.to_string()))
   }
 
-  /// Mirrors Playwright `request.failure(): { errorText: string } | null`.
-  #[napi(ts_return_type = "Promise<{ errorText: string } | null>")]
-  pub async fn failure(&self) -> Option<RequestFailure> {
-    self.inner.failure().await.map(|t| RequestFailure { error_text: t })
+  /// Mirrors Playwright `request.failure(): { errorText: string } | null` (sync).
+  #[napi]
+  pub fn failure(&self) -> Option<RequestFailure> {
+    self.inner.failure().map(|t| RequestFailure { error_text: t })
   }
 
   /// Mirrors Playwright `request.timing(): ResourceTiming` (sync).

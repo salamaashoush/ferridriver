@@ -1447,6 +1447,29 @@ impl From<SnapshotForAiOptions> for ferridriver::snapshot::SnapshotOptions {
   }
 }
 
+/// Options for `locator.ariaSnapshot(options?)`. Mirrors Playwright's
+/// `TimeoutOptions & { mode?: 'ai' | 'default', depth?: number }`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct AriaSnapshotOptions {
+  /// `'default'` (Playwright stable YAML) or `'ai'` (ref-annotated).
+  pub mode: Option<String>,
+  /// Subtree depth limit. `None` = unlimited.
+  pub depth: Option<i32>,
+  /// Resolution/actionability timeout in ms. `None` = page default.
+  pub timeout: Option<f64>,
+}
+
+impl From<AriaSnapshotOptions> for ferridriver::options::AriaSnapshotOptions {
+  fn from(o: AriaSnapshotOptions) -> Self {
+    Self {
+      mode: Some(ferridriver::options::AriaSnapshotMode::from_opt_str(o.mode.as_deref())),
+      depth: o.depth,
+      timeout: o.timeout.map(crate::types::f64_to_u64),
+    }
+  }
+}
+
 /// Filter options for `context.clearCookies(options?)`. Each field is
 /// a string match (exact). The Playwright TS surface accepts
 /// `string | RegExp` here too; ferridriver's Rust core only supports

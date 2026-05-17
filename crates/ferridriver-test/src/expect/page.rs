@@ -78,7 +78,7 @@ impl Expect<'_, Arc<Page>> {
     poll_until(self.timeout, page_ctx("toHaveURL", is_not), || {
       let expected = expected.clone();
       async move {
-        let actual = page.url().await.map_err(|e| MatchError::new("(url)", e.to_string()))?;
+        let actual = page.url();
         let matches = expected.matches(&actual);
         if matches == is_not {
           Err(MatchError::new(
@@ -102,7 +102,7 @@ impl Expect<'_, Arc<Page>> {
     poll_until(self.timeout, page_ctx("toContainURL", is_not), || {
       let expected = expected.clone();
       async move {
-        let actual = page.url().await.map_err(|e| MatchError::new("(url)", e.to_string()))?;
+        let actual = page.url();
         let contains = actual.contains(&expected);
         if contains == is_not {
           Err(MatchError::new(

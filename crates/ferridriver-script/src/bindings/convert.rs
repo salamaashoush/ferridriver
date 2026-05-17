@@ -27,25 +27,51 @@ impl<T> FerriResultExt<T> for Result<T, FerriError> {
   }
 }
 
-/// Convert any `serde::Serialize` value into a JS value by round-tripping
-/// through `JSON.parse(JSON.stringify(...))`. Used for binding methods that
-/// return complex Rust structures (cookies, storage state, JSON response
-/// bodies) without writing per-type FFI.
+/// Convert any `serde::Serialize` value into a JS value via
+/// `rquickjs-serde` — direct `T` -> `rquickjs::Value`, no JSON string
+/// and no `serde_json::Value` middle allocation. Used for binding
+/// returns (cookies, storage state, parsed JSON bodies).
 pub fn serde_to_js<'js, T: Serialize>(ctx: &Ctx<'js>, value: &T) -> rquickjs::Result<Value<'js>> {
-  let json = serde_json::to_string(value)
-    .map_err(|e| rquickjs::Error::new_from_js_message("serde", "serialize", e.to_string()))?;
-  let json_global: Object<'js> = ctx.globals().get("JSON")?;
-  let parse: Function<'js> = json_global.get("parse")?;
-  parse.call((json,))
+  rquickjs_serde::to_value(ctx.clone(), value)
+    .map_err(|e| rquickjs::Error::new_from_js_message("serde", "serialize", e.to_string()))
 }
 
-/// Inverse of [`serde_to_js`] — accept a JS value and deserialize into a
-/// Rust type via `JSON.stringify` → `serde_json::from_str`.
-pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
-  let json_global: Object<'js> = ctx.globals().get("JSON")?;
-  let stringify: Function<'js> = json_global.get("stringify")?;
-  let json: String = stringify.call((value,))?;
-  serde_json::from_str(&json).map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
+/// Build a JS `Array<{ name, value }>` straight from name/value pairs
+/// via `rquickjs-serde` — no `serde_json::json!` / `serde_json::Value`
+/// middle allocation. Used by `request`/`response`/`apiResponse`
+/// `headersArray()`.
+pub fn name_value_array_to_js<'js, S: AsRef<str>>(ctx: &Ctx<'js>, pairs: &[(S, S)]) -> rquickjs::Result<Value<'js>> {
+  #[derive(Serialize)]
+  struct NameValue<'a> {
+    name: &'a str,
+    value: &'a str,
+  }
+  let view: Vec<NameValue<'_>> = pairs
+    .iter()
+    .map(|(n, v)| NameValue {
+      name: n.as_ref(),
+      value: v.as_ref(),
+    })
+    .collect();
+  serde_to_js(ctx, &view)
+}
+
+/// Inverse of [`serde_to_js`] — deserialize a JS value into a Rust type
+/// via `rquickjs-serde` (direct `Value` -> `T`). Integral-float ->
+/// integer coercion, `undefined`/function-property drop, Proxy and
+/// cycle handling all hold (covered by the rquickjs-serde test suite),
+/// so the option-bag call sites keep their prior semantics without our
+/// own hand-rolled walker.
+pub fn serde_from_js<'js, T: DeserializeOwned>(_ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<T> {
+  rquickjs_serde::from_value(value)
+    .map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
+}
+
+/// Build an `rquickjs::Value` from a `serde_json::Value`. Thin wrapper
+/// over [`serde_to_js`], kept for the script-args call site in
+/// `engine.rs`.
+pub(crate) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs::Result<Value<'js>> {
+  serde_to_js(ctx, v)
 }
 
 // ── evaluate(fn, arg) wire bridge (Phase D) ───────────────────────────
@@ -68,7 +94,7 @@ pub fn serde_from_js<'js, T: DeserializeOwned>(ctx: &Ctx<'js>, value: Value<'js>
 /// rather than a correctness bug — we detect it at the top level
 /// where every Playwright test actually passes handles.
 pub fn quickjs_arg_to_serialized<'js>(
-  ctx: &Ctx<'js>,
+  _ctx: &Ctx<'js>,
   value: Option<Value<'js>>,
 ) -> rquickjs::Result<ferridriver::protocol::SerializedArgument> {
   use ferridriver::protocol::{SerializationContext, SerializedArgument, SerializedValue, SpecialValue};
@@ -104,12 +130,114 @@ pub fn quickjs_arg_to_serialized<'js>(
     return Ok(inner.inner().as_js_handle().backing().to_serialized_argument());
   }
 
-  let json: serde_json::Value = serde_from_js(ctx, v)?;
+  // Direct JS -> SerializedValue. The old path went
+  // JS -> serde_json::Value -> SerializedValue, allocating the whole
+  // argument tree twice on every `page.evaluate(fn, arg)` /
+  // `locator.evaluate`. Walk once. Semantics match the prior
+  // JSON-expressible contract (`JSON.stringify` rules: drop
+  // undefined/function/symbol properties, array holes -> null,
+  // non-finite -> null) — `toJSON()` was not honoured before either.
   let mut alloc = SerializationContext::default();
   Ok(SerializedArgument {
-    value: SerializedValue::from_json(&json, &mut alloc),
+    value: js_value_to_serialized(&v, &mut alloc, 0)?,
     handles: Vec::new(),
   })
+}
+
+/// Recursion cap. A cyclic / pathologically deep argument previously
+/// errored out of `serde_from_js` (serde can't represent a cycle); keep
+/// that behaviour with an explicit bound instead of overflowing.
+const MAX_ARG_DEPTH: u32 = 512;
+
+/// Walk a JS value into a wire [`SerializedValue`] following
+/// `JSON.stringify` rules (the documented JSON-expressible subset).
+fn js_value_to_serialized(
+  v: &Value<'_>,
+  alloc: &mut ferridriver::protocol::SerializationContext,
+  depth: u32,
+) -> rquickjs::Result<ferridriver::protocol::SerializedValue> {
+  use ferridriver::protocol::{SerializedValue, SpecialValue};
+
+  if depth > MAX_ARG_DEPTH {
+    return Err(rquickjs::Error::new_from_js_message(
+      "serde",
+      "serialize",
+      "argument too deeply nested or cyclic".to_string(),
+    ));
+  }
+
+  if v.is_undefined() {
+    return Ok(SerializedValue::Special(SpecialValue::Undefined));
+  }
+  if v.is_null() {
+    return Ok(SerializedValue::Special(SpecialValue::Null));
+  }
+  if let Some(b) = v.as_bool() {
+    return Ok(SerializedValue::Bool(b));
+  }
+  if let Some(i) = v.as_int() {
+    return Ok(SerializedValue::from_f64(f64::from(i)));
+  }
+  if let Some(f) = v.as_float() {
+    // JSON.stringify renders non-finite as null.
+    return Ok(if f.is_finite() {
+      SerializedValue::from_f64(f)
+    } else {
+      SerializedValue::Special(SpecialValue::Null)
+    });
+  }
+  if let Some(s) = v.as_string() {
+    return Ok(SerializedValue::Str(s.to_string()?));
+  }
+  if let Some(bi) = v.as_big_int() {
+    // Wire BigInt is a decimal string. `to_i64` covers the common
+    // range; a value outside it errors (the old serde_json path could
+    // not represent BigInt at all, so erroring is not a regression).
+    return match bi.clone().to_i64() {
+      Ok(n) => Ok(SerializedValue::BigInt(n.to_string())),
+      Err(_) => Err(rquickjs::Error::new_from_js_message(
+        "serde",
+        "serialize",
+        "BigInt argument out of i64 range".to_string(),
+      )),
+    };
+  }
+  if let Some(arr) = v.as_array() {
+    let id = alloc.alloc_id();
+    let mut items = Vec::with_capacity(arr.len());
+    for idx in 0..arr.len() {
+      let el: Value<'_> = arr.get(idx)?;
+      // Array holes / undefined / functions serialise as null.
+      items.push(if el.is_undefined() || el.is_function() {
+        SerializedValue::Special(SpecialValue::Null)
+      } else {
+        js_value_to_serialized(&el, alloc, depth + 1)?
+      });
+    }
+    return Ok(SerializedValue::Array { id, items });
+  }
+  if let Some(obj) = v.as_object() {
+    // Plain object: own enumerable string keys, dropping
+    // undefined/function/symbol-valued props (JSON.stringify rules).
+    let id = alloc.alloc_id();
+    let mut entries = Vec::new();
+    for key in obj.keys::<String>() {
+      let key = key?;
+      let val: Value<'_> = obj.get(&key)?;
+      if val.is_undefined() || val.is_function() || val.type_of() == rquickjs::Type::Symbol {
+        continue;
+      }
+      entries.push(ferridriver::protocol::PropertyEntry {
+        k: key,
+        v: js_value_to_serialized(&val, alloc, depth + 1)?,
+      });
+    }
+    return Ok(SerializedValue::Object { id, entries });
+  }
+
+  // Symbol / function / other non-JSON value at this position:
+  // JSON.stringify treats it as undefined.
+  Ok(SerializedValue::Special(SpecialValue::Undefined))
 }
 
 /// Convert a [`ferridriver::protocol::SerializedValue`] into a native
@@ -381,26 +509,37 @@ pub fn parse_input_files<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Re
     let s: String = value.get()?;
     return Ok(ferridriver::options::InputFiles::Paths(vec![s.into()]));
   }
-  if value.is_array() {
-    let arr: Vec<serde_json::Value> = serde_from_js(ctx, value)?;
-    if arr.is_empty() {
+  if let Some(arr) = value.as_array() {
+    let len = arr.len();
+    if len == 0 {
       return Ok(ferridriver::options::InputFiles::Paths(Vec::new()));
     }
-    if arr[0].is_string() {
-      let mut paths = Vec::with_capacity(arr.len());
-      for el in arr {
-        let s = el.as_str().ok_or_else(|| {
-          rquickjs::Error::new_from_js_message("ferridriver", "setInputFiles", "array elements must be strings")
-        })?;
+    // Probe the first element directly on the JS value (no
+    // serde_json::Value middle-hop): all-strings -> paths, else
+    // FilePayload objects.
+    let first: Value<'js> = arr.get(0)?;
+    if first.is_string() {
+      let mut paths = Vec::with_capacity(len);
+      for idx in 0..len {
+        let el: Value<'js> = arr.get(idx)?;
+        let s: String = el.into_string().map_or_else(
+          || {
+            Err(rquickjs::Error::new_from_js_message(
+              "ferridriver",
+              "setInputFiles",
+              "array elements must be strings",
+            ))
+          },
+          |s| s.to_string(),
+        )?;
         paths.push(std::path::PathBuf::from(s));
       }
       return Ok(ferridriver::options::InputFiles::Paths(paths));
     }
-    let mut payloads = Vec::with_capacity(arr.len());
-    for el in arr {
-      let p: JsFilePayload = serde_json::from_value(el).map_err(|e| {
-        rquickjs::Error::new_from_js_message("ferridriver", "setInputFiles", format!("FilePayload parse: {e}"))
-      })?;
+    let mut payloads = Vec::with_capacity(len);
+    for idx in 0..len {
+      let el: Value<'js> = arr.get(idx)?;
+      let p: JsFilePayload = serde_from_js(ctx, el)?;
       payloads.push(p.into());
     }
     return Ok(ferridriver::options::InputFiles::Payloads(payloads));
@@ -471,25 +610,24 @@ pub fn parse_select_option_values<'js>(
     let s: String = value.get()?;
     return Ok(vec![ferridriver::options::SelectOptionValue::by_value(s)]);
   }
-  if value.is_array() {
-    let arr: Vec<serde_json::Value> = serde_from_js(ctx, value)?;
-    let mut out = Vec::new();
-    for el in arr {
-      match el {
-        serde_json::Value::String(s) => out.push(ferridriver::options::SelectOptionValue::by_value(s)),
-        serde_json::Value::Object(_) => {
-          let desc: JsSelectOptionValue = serde_json::from_value(el).map_err(|e| {
-            rquickjs::Error::new_from_js_message("ferridriver", "selectOption", format!("descriptor parse: {e}"))
-          })?;
-          out.push(desc.into());
-        },
-        _ => {
-          return Err(rquickjs::Error::new_from_js_message(
-            "ferridriver",
-            "selectOption",
-            "array entries must be string or { value?, label?, index? } object",
-          ));
-        },
+  if let Some(arr) = value.as_array() {
+    let len = arr.len();
+    let mut out = Vec::with_capacity(len);
+    for idx in 0..len {
+      let el: Value<'js> = arr.get(idx)?;
+      if el.is_string() {
+        let s: String = el.get()?;
+        out.push(ferridriver::options::SelectOptionValue::by_value(s));
+      } else if el.is_object() {
+        // Direct rquickjs-serde (no serde_json::Value middle-hop).
+        let desc: JsSelectOptionValue = serde_from_js(ctx, el)?;
+        out.push(desc.into());
+      } else {
+        return Err(rquickjs::Error::new_from_js_message(
+          "ferridriver",
+          "selectOption",
+          "array entries must be string or { value?, label?, index? } object",
+        ));
       }
     }
     return Ok(out);

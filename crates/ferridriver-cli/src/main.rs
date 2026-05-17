@@ -41,6 +41,7 @@ async fn main() -> anyhow::Result<()> {
     cli::Command::Mcp(mcp_args) => Box::pin(run_mcp(config, mcp_args)).await,
     cli::Command::Bdd(bdd_args) => Box::pin(run_bdd(config, bdd_args)).await,
     cli::Command::Test(test_args) => run_test(&test_args),
+    cli::Command::Run(run_args) => Box::pin(run_script_cli(run_args)).await,
     cli::Command::Codegen(_) => anyhow::bail!("`codegen` subcommand not yet implemented"),
     cli::Command::Config(_) => anyhow::bail!("`config` subcommand not yet implemented"),
   }
@@ -167,6 +168,62 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   } else {
     std::process::exit(exit_code);
   }
+}
+
+/// Execute a JS script through the ferridriver-script engine with the
+/// full Playwright-style binding surface. The script launches its own
+/// browser via `chromium()` / `firefox()` / `webkit()`; `--backend`
+/// chooses what a plain `chromium()` resolves to. No page is pre-bound.
+async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
+  use std::io::Read as _;
+
+  let source = match (args.eval, args.script.as_deref()) {
+    (Some(code), _) => code,
+    (None, Some("-")) => {
+      let mut s = String::new();
+      std::io::stdin().read_to_string(&mut s)?;
+      s
+    },
+    (None, Some(path)) => std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("read {path}: {e}"))?,
+    (None, None) => anyhow::bail!("provide a script path, `-` for stdin, or --eval <code>"),
+  };
+
+  let cwd = std::env::current_dir()?;
+  let sandbox = Arc::new(
+    ferridriver_script::PathSandbox::new(&cwd)
+      .map_err(|e| anyhow::anyhow!("sandbox init ({}): {}", cwd.display(), e.message))?,
+  );
+
+  let ctx = ferridriver_script::RunContext {
+    vars: Arc::new(ferridriver_script::InMemoryVars::new()),
+    sandbox,
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: Vec::new(),
+  };
+
+  let opts = ferridriver_script::RunOptions {
+    timeout: args.timeout_ms.map(std::time::Duration::from_millis),
+    memory_limit: None,
+    stack_size: None,
+    gc_threshold: None,
+  };
+  let script_args: Vec<serde_json::Value> = args.script_args.into_iter().map(serde_json::Value::String).collect();
+
+  let session = ferridriver_script::Session::create(ferridriver_script::ScriptEngineConfig::default(), &ctx)
+    .await
+    .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
+  let result = session.execute(&source, &script_args, opts, &ctx).await.result;
+
+  println!("{}", serde_json::to_string_pretty(&result)?);
+  if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
+    eprintln!("[{}] {} ({}ms)", error.kind, error.message, result.duration_ms);
+    std::process::exit(1);
+  }
+  Ok(())
 }
 
 async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Result<()> {

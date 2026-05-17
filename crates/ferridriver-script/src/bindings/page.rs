@@ -16,7 +16,7 @@ use rquickjs::function::Opt;
 use serde::Deserialize;
 
 use crate::bindings::convert::{
-  FerriResultExt, extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js, serde_to_js,
+  FerriResultExt, extract_page_function, init_script_from_js, quickjs_arg_to_serialized, serde_from_js,
   serialized_value_to_quickjs,
 };
 use crate::bindings::keyboard::KeyboardJs;
@@ -224,6 +224,14 @@ pub struct PageJs {
   /// `Map`; the Rust handler dispatches by ID via the AsyncContext.
   #[qjs(skip_trace)]
   next_route_id: Arc<AtomicU64>,
+  /// Core `UrlMatcher` registered for each function-predicate `page.route`,
+  /// keyed by the same id as the JS-side `__fdRoutes` / `__fdRoutePreds`
+  /// entries. A predicate route registers an always-true matcher whose
+  /// `Arc` identity lets `unroute(fn)` remove exactly that registration
+  /// (core compares `UrlMatcher::Predicate` by `Arc::ptr_eq`). Shared so
+  /// `route` and `unroute` on the same `Page` wrapper see one table.
+  #[qjs(skip_trace)]
+  route_matchers: Arc<std::sync::Mutex<rustc_hash::FxHashMap<u64, ferridriver::url_matcher::UrlMatcher>>>,
 }
 
 impl PageJs {
@@ -233,6 +241,7 @@ impl PageJs {
       inner,
       async_ctx: None,
       next_route_id: Arc::new(AtomicU64::new(0)),
+      route_matchers: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     }
   }
 
@@ -242,12 +251,25 @@ impl PageJs {
       inner,
       async_ctx: Some(async_ctx),
       next_route_id: Arc::new(AtomicU64::new(0)),
+      route_matchers: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     }
   }
 
   #[must_use]
   pub fn page(&self) -> &Arc<Page> {
     &self.inner
+  }
+}
+
+/// Build a `PageJs` for a page minted from script (`newPage`,
+/// `locator.page()`, `frame.page()`), threading the session's
+/// `AsyncContext` (stashed as userdata at `Session::create`) so
+/// `page.route` / `page.exposeFunction` cross-task dispatch works on
+/// script-launched browsers — not just the MCP-prebound page.
+pub(crate) fn pagejs_for_ctx(ctx: &rquickjs::Ctx<'_>, page: Arc<Page>) -> PageJs {
+  match ctx.userdata::<crate::engine::SessionAsyncCtx>() {
+    Some(ud) => PageJs::new_with_async_ctx(page, ud.0.clone()),
+    None => PageJs::new(page),
   }
 }
 
@@ -306,9 +328,10 @@ impl PageJs {
   }
 
   /// Current URL of the page.
+  /// Playwright: `page.url(): string` — synchronous.
   #[qjs(rename = "url")]
-  pub async fn url(&self) -> rquickjs::Result<String> {
-    self.inner.url().await.into_js()
+  pub fn url(&self) -> String {
+    self.inner.url()
   }
 
   /// Document title.
@@ -650,6 +673,16 @@ impl PageJs {
     self.inner.press(&selector, &key, opts).await.into_js()
   }
 
+  /// `page.focus(selector, options?)`.
+  #[qjs(rename = "focus")]
+  pub async fn focus(
+    &self,
+    selector: String,
+    _options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<()> {
+    self.inner.focus(&selector).await.into_js()
+  }
+
   /// Hover the first element matching `selector`. Accepts Playwright's
   /// full `PageHoverOptions` bag.
   #[qjs(rename = "hover")]
@@ -836,15 +869,16 @@ impl PageJs {
     KeyboardJs::new(self.inner.clone())
   }
 
-  /// Click at viewport coordinates without a selector.
+  /// ferridriver-specific (NOT Playwright): click at viewport
+  /// coordinates without a selector. Playwright equivalent: `mouse.click(x, y)`.
   #[qjs(rename = "clickAt")]
   pub async fn click_at(&self, x: f64, y: f64) -> rquickjs::Result<()> {
     self.inner.click_at(x, y).await.into_js()
   }
 
-  /// Interpolated mouse move from `(fromX, fromY)` to `(toX, toY)` in `steps`
-  /// intermediate points. Used for coordinate-based drag: `mouse.down()` →
-  /// `moveMouseSmooth(...)` → `mouse.up()`.
+  /// ferridriver-specific (NOT Playwright): interpolated mouse move
+  /// from `(fromX, fromY)` to `(toX, toY)` in `steps` points. Playwright
+  /// equivalent: `mouse.move(x, y, { steps })`.
   #[qjs(rename = "moveMouseSmooth")]
   pub async fn move_mouse_smooth(
     &self,
@@ -898,9 +932,21 @@ impl PageJs {
 
   /// Override the viewport size for this page. Playwright public:
   /// `page.setViewportSize({ width, height })`.
+  /// Playwright: `page.setViewportSize({ width, height })` — a single
+  /// object, not two positional numbers.
   #[qjs(rename = "setViewportSize")]
-  pub async fn set_viewport_size(&self, width: i64, height: i64) -> rquickjs::Result<()> {
-    self.inner.set_viewport_size(width, height).await.into_js()
+  pub async fn set_viewport_size<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    size: rquickjs::Value<'js>,
+  ) -> rquickjs::Result<()> {
+    #[derive(serde::Deserialize)]
+    struct Size {
+      width: i64,
+      height: i64,
+    }
+    let s: Size = crate::bindings::convert::serde_from_js(&ctx, size)?;
+    self.inner.set_viewport_size(s.width, s.height).await.into_js()
   }
 
   /// Emulate media features. Accepts Playwright's
@@ -1006,7 +1052,6 @@ impl PageJs {
     url: rquickjs::Value<'js>,
     handler: rquickjs::Function<'js>,
   ) -> rquickjs::Result<()> {
-    let matcher = url_value_to_matcher(&ctx, url)?;
     let async_ctx = self.async_ctx.clone().ok_or_else(|| {
       rquickjs::Error::new_from_js_message(
         "page.route",
@@ -1019,6 +1064,36 @@ impl PageJs {
     let registry: rquickjs::Object<'js> = ctx.globals().get("__fdRoutes")?;
     registry.set(&id_key, handler)?;
 
+    // A JS predicate is `!Send` and core matches on the CDP recv task,
+    // so it can't ride `UrlMatcher::Predicate`. Register an always-true
+    // matcher with unique `Arc` identity (lets `unroute(fn)` drop
+    // exactly it via `Arc::ptr_eq`); evaluate the predicate in the
+    // dispatch bridge and continue the request unmodified on falsy.
+    let has_predicate = url.as_function().is_some();
+    let matcher = if let Some(pred) = url.as_function() {
+      let preds: rquickjs::Object<'js> = ctx.globals().get("__fdRoutePreds")?;
+      preds.set(&id_key, pred.clone())?;
+      let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
+      self
+        .route_matchers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id, m.clone());
+      m
+    } else {
+      url_value_to_matcher(&ctx, url)?
+    };
+
+    // LIMITATION (persistent-session VMs): this closure captures a clone
+    // of the session's `AsyncContext`. Core route registrations live on
+    // the page (independent of the JS VM), so they outlive a poisoning
+    // rebuild / LRU eviction of the session VM. After such a discard the
+    // closure dispatches into the now-detached old context; the new VM's
+    // scripts cannot see or `unroute` it. It stays memory-safe (the Arc
+    // keeps the old context alive) and fail-open (the route's `Drop`
+    // continues the request if dispatch can't reach JS), and it clears
+    // when the page closes. Fully reconciling it needs a cross-backend
+    // "unroute all" on VM discard — tracked, not yet implemented.
     let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
       let async_ctx = async_ctx.clone();
       let id_key = id.to_string();
@@ -1029,6 +1104,16 @@ impl PageJs {
       tokio::spawn(async move {
         use rquickjs::class::Class;
         let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
+          if has_predicate {
+            let preds: rquickjs::Object<'_> = ctx.globals().get("__fdRoutePreds")?;
+            let pred: rquickjs::Function<'_> = preds.get(id_key.as_str())?;
+            let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
+            let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
+            if !call_predicate_truthy(&pred, url_obj, &ctx).await? {
+              route.continue_route(ferridriver::route::ContinueOverrides::default());
+              return Ok(());
+            }
+          }
           let registry: rquickjs::Object<'_> = ctx.globals().get("__fdRoutes")?;
           let f: rquickjs::Function<'_> = registry.get(id_key.as_str())?;
           let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
@@ -1042,10 +1127,43 @@ impl PageJs {
     self.inner.route(matcher, rust_handler).await.into_js()
   }
 
-  /// Mirrors Playwright `page.unroute(url)`. Removes route handlers
-  /// matching `url` (`string | RegExp`).
+  /// `page.unroute(string | RegExp | ((url: URL) => boolean))`. A
+  /// predicate is matched by `===` identity against the function passed
+  /// to `route`, then its always-true core matcher is dropped by `Arc`
+  /// identity so sibling predicate routes survive.
   #[qjs(rename = "unroute")]
   pub async fn unroute<'js>(&self, ctx: rquickjs::Ctx<'js>, url: rquickjs::Value<'js>) -> rquickjs::Result<()> {
+    if let Some(pred) = url.as_function() {
+      let preds: rquickjs::Object<'js> = ctx.globals().get("__fdRoutePreds")?;
+      let registry: rquickjs::Object<'js> = ctx.globals().get("__fdRoutes")?;
+      // Find every id whose stored predicate is identical (===) to the
+      // passed function, then drop its core registration + JS entries.
+      let mut victims: Vec<u64> = Vec::new();
+      for entry in preds.props::<String, rquickjs::Function<'js>>() {
+        let (key, stored) = entry?;
+        // `Value`'s `PartialEq` compares the raw JS reference (tag +
+        // pointer bits) — strict `===` identity for function objects.
+        if stored.as_value() == pred.as_value() {
+          if let Ok(id) = key.parse::<u64>() {
+            victims.push(id);
+          }
+        }
+      }
+      for id in victims {
+        let m = self
+          .route_matchers
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .remove(&id);
+        if let Some(m) = m {
+          self.inner.unroute(&m).await.into_js()?;
+        }
+        let id_key = id.to_string();
+        let _ = preds.remove(&id_key);
+        let _ = registry.remove(&id_key);
+      }
+      return Ok(());
+    }
     let matcher = url_value_to_matcher(&ctx, url)?;
     self.inner.unroute(&matcher).await.into_js()
   }
@@ -1057,19 +1175,21 @@ impl PageJs {
   // `ResponseJs` / `WebSocketJs` so callers can inspect headers, body,
   // failure, etc.
 
-  /// Mirrors Playwright `page.waitForRequest(urlOrPredicate, options?)`.
-  /// Accepts `string | RegExp` — RegExp objects are detected via the
-  /// `source` / `flags` getters and lowered through
-  /// `UrlMatcher::regex_from_source`.
+  /// `page.waitForRequest(string | RegExp | ((r: Request) => boolean |
+  /// Promise<boolean>), options?)`.
   #[qjs(rename = "waitForRequest")]
   pub async fn wait_for_request<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
-    timeout_ms: Option<f64>,
+    timeout_ms: Opt<f64>,
   ) -> rquickjs::Result<crate::bindings::network::RequestJs> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let timeout = timeout_ms.map(|t| t as u64);
+    let timeout = timeout_ms.0.map(|t| t as u64);
+    if let Some(pred) = url.as_function() {
+      let t = timeout.unwrap_or_else(|| self.inner.default_timeout());
+      return wait_request_predicate(ctx.clone(), self.inner.clone(), pred.clone(), t).await;
+    }
     let matcher = url_value_to_matcher(&ctx, url)?;
     let req = self.inner.wait_for_request(matcher, timeout).await.into_js()?;
     Ok(crate::bindings::network::RequestJs::new_with_page(
@@ -1078,17 +1198,21 @@ impl PageJs {
     ))
   }
 
-  /// Mirrors Playwright `page.waitForResponse(urlOrPredicate, options?)`.
-  /// Accepts `string | RegExp`.
+  /// `page.waitForResponse(string | RegExp | ((r: Response) => boolean |
+  /// Promise<boolean>), options?)`.
   #[qjs(rename = "waitForResponse")]
   pub async fn wait_for_response<'js>(
     &self,
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
-    timeout_ms: Option<f64>,
+    timeout_ms: Opt<f64>,
   ) -> rquickjs::Result<crate::bindings::network::ResponseJs> {
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let timeout = timeout_ms.map(|t| t as u64);
+    let timeout = timeout_ms.0.map(|t| t as u64);
+    if let Some(pred) = url.as_function() {
+      let t = timeout.unwrap_or_else(|| self.inner.default_timeout());
+      return wait_response_predicate(ctx.clone(), self.inner.clone(), pred.clone(), t).await;
+    }
     let matcher = url_value_to_matcher(&ctx, url)?;
     let resp = self.inner.wait_for_response(matcher, timeout).await.into_js()?;
     Ok(crate::bindings::network::ResponseJs::new_with_page(
@@ -1108,11 +1232,11 @@ impl PageJs {
     &self,
     ctx: rquickjs::Ctx<'js>,
     event: String,
-    timeout_ms: Option<f64>,
+    timeout_ms: Opt<f64>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
     use rquickjs::class::Class;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let timeout = timeout_ms.unwrap_or(30_000.0) as u64;
+    let timeout = timeout_ms.0.unwrap_or(30_000.0) as u64;
     let event_lc = event.to_ascii_lowercase();
 
     // `dialog` bypasses the broadcast — it registers a one-shot
@@ -1209,10 +1333,7 @@ impl PageJs {
       ferridriver::events::PageEvent::PageError(err) => {
         crate::bindings::web_error::build_native_error(&ctx, err.error())
       },
-      other => {
-        let json = page_event_json(&other);
-        serde_to_js(&ctx, &json)
-      },
+      other => page_event_to_js(&ctx, &other),
     }
   }
 
@@ -1300,9 +1421,10 @@ impl PageJs {
     }
   }
 
-  /// Playwright: `page.snapshotForAI(options?)`.
-  ///
-  /// Returns `{ full: string, incremental?: string, refMap: Record<string, number> }`.
+  /// ferridriver-specific (NOT Playwright): structured AI snapshot
+  /// `{ full: string, incremental?: string, refMap: Record<string, number> }`.
+  /// Playwright's public accessibility API is `ariaSnapshot` (string);
+  /// this richer shape feeds the MCP server's incremental tracking.
   #[qjs(rename = "snapshotForAI")]
   pub async fn snapshot_for_ai<'js>(
     &self,
@@ -1338,6 +1460,32 @@ impl PageJs {
     }
     obj.set("refMap", ref_map)?;
     rquickjs::IntoJs::into_js(obj, &ctx)
+  }
+
+  /// Playwright `page.ariaSnapshot(options?): Promise<string>`.
+  #[qjs(rename = "ariaSnapshot")]
+  pub async fn aria_snapshot<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<String> {
+    let core_opts = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        #[derive(serde::Deserialize, Default)]
+        #[serde(rename_all = "camelCase", default)]
+        struct JsSnap {
+          depth: Option<i32>,
+          track: Option<String>,
+        }
+        let p: JsSnap = crate::bindings::convert::serde_from_js(&ctx, v)?;
+        ferridriver::snapshot::SnapshotOptions {
+          depth: p.depth,
+          track: p.track,
+        }
+      },
+      _ => ferridriver::snapshot::SnapshotOptions::default(),
+    };
+    self.inner.aria_snapshot(core_opts).await.into_js()
   }
 
   /// Playwright: `page.exposeFunction(name, callback)`. Binds
@@ -1403,9 +1551,10 @@ impl PageJs {
     self.inner.expose_function(&name, cb).await.into_js()
   }
 
-  /// Playwright internal: `page.startScreencast(quality, maxWidth,
-  /// maxHeight, callback)`. Callback receives `{ frame: Uint8Array,
-  /// timestamp: number }` for each frame.
+  /// ferridriver-specific (NOT Playwright): `startScreencast(quality,
+  /// maxWidth, maxHeight, callback)`. Callback receives `{ frame:
+  /// Uint8Array, timestamp: number }` per frame. Backed by CDP
+  /// `Page.startScreencast`; no Playwright client equivalent.
   #[qjs(rename = "startScreencast")]
   pub async fn start_screencast<'js>(
     &self,
@@ -1450,7 +1599,8 @@ impl PageJs {
     Ok(())
   }
 
-  /// Stop the screencast started by `startScreencast`.
+  /// ferridriver-specific (NOT Playwright): stop the screencast
+  /// started by `startScreencast`.
   #[qjs(rename = "stopScreencast")]
   pub async fn stop_screencast(&self) -> rquickjs::Result<()> {
     self.inner.stop_screencast().await.into_js()
@@ -1617,49 +1767,206 @@ fn match_event_name(name: &str, ev: &ferridriver::events::PageEvent) -> bool {
   )
 }
 
-fn page_event_json(ev: &ferridriver::events::PageEvent) -> serde_json::Value {
+/// Build the `page.waitForEvent` payload JS object directly — no
+/// serde_json::Value middle allocation. `FrameAttached`/`Navigated`
+/// serialise their `FrameInfo` through rquickjs-serde (also direct).
+fn page_event_to_js<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  ev: &ferridriver::events::PageEvent,
+) -> rquickjs::Result<rquickjs::Value<'js>> {
   use ferridriver::events::PageEvent;
+  let obj = || rquickjs::Object::new(ctx.clone());
   match ev {
     PageEvent::Console(msg) => {
       let loc = msg.location();
-      serde_json::json!({
-        "type": msg.type_str(),
-        "text": msg.text(),
-        "location": {
-          "url": loc.url,
-          "lineNumber": loc.line_number,
-          "columnNumber": loc.column_number,
-        },
-        "timestamp": msg.timestamp(),
-        "argsCount": msg.args().len(),
-      })
+      let o = obj()?;
+      o.set("type", msg.type_str())?;
+      o.set("text", msg.text())?;
+      let l = obj()?;
+      l.set("url", loc.url.as_str())?;
+      l.set("lineNumber", f64::from(loc.line_number))?;
+      l.set("columnNumber", f64::from(loc.column_number))?;
+      o.set("location", l)?;
+      o.set("timestamp", msg.timestamp())?;
+      o.set("argsCount", msg.args().len() as f64)?;
+      Ok(o.into_value())
     },
-    PageEvent::Dialog(d) => serde_json::json!({
-      "type": d.dialog_type().as_str(),
-      "message": d.message(),
-      "defaultValue": d.default_value(),
-    }),
-    PageEvent::FileChooser(fc) => serde_json::json!({
-      "isMultiple": fc.is_multiple(),
-    }),
-    PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => serde_json::to_value(f).unwrap_or_default(),
-    PageEvent::FrameDetached { frame_id } => serde_json::json!({ "frameId": frame_id }),
-    PageEvent::Download(d) => serde_json::json!({
-      "url": d.url(),
-      "suggestedFilename": d.suggested_filename(),
-    }),
-    PageEvent::Load => serde_json::json!({ "type": "load" }),
-    PageEvent::DomContentLoaded => serde_json::json!({ "type": "domcontentloaded" }),
-    PageEvent::Close => serde_json::json!({ "type": "close" }),
+    PageEvent::Dialog(d) => {
+      let o = obj()?;
+      o.set("type", d.dialog_type().as_str())?;
+      o.set("message", d.message())?;
+      o.set("defaultValue", d.default_value())?;
+      Ok(o.into_value())
+    },
+    PageEvent::FileChooser(fc) => {
+      let o = obj()?;
+      o.set("isMultiple", fc.is_multiple())?;
+      Ok(o.into_value())
+    },
+    PageEvent::FrameAttached(f) | PageEvent::FrameNavigated(f) => crate::bindings::convert::serde_to_js(ctx, f),
+    PageEvent::FrameDetached { frame_id } => {
+      let o = obj()?;
+      o.set("frameId", frame_id.as_str())?;
+      Ok(o.into_value())
+    },
+    PageEvent::Download(d) => {
+      let o = obj()?;
+      o.set("url", d.url())?;
+      o.set("suggestedFilename", d.suggested_filename())?;
+      Ok(o.into_value())
+    },
+    PageEvent::Load => {
+      let o = obj()?;
+      o.set("type", "load")?;
+      Ok(o.into_value())
+    },
+    PageEvent::DomContentLoaded => {
+      let o = obj()?;
+      o.set("type", "domcontentloaded")?;
+      Ok(o.into_value())
+    },
+    PageEvent::Close => {
+      let o = obj()?;
+      o.set("type", "close")?;
+      Ok(o.into_value())
+    },
     PageEvent::PageError(err) => {
       let details = err.error();
-      serde_json::json!({
-        "name": details.name,
-        "message": details.message,
-        "stack": details.stack,
-      })
+      let o = obj()?;
+      o.set("name", details.name.as_str())?;
+      o.set("message", details.message.as_str())?;
+      o.set("stack", details.stack.as_str())?;
+      Ok(o.into_value())
     },
-    _ => serde_json::Value::Null,
+    _ => Ok(rquickjs::Value::new_null(ctx.clone())),
+  }
+}
+
+/// ECMAScript `ToBoolean` for a predicate's return value.
+fn js_truthy(v: &rquickjs::Value<'_>) -> bool {
+  if v.is_undefined() || v.is_null() {
+    return false;
+  }
+  if let Some(b) = v.as_bool() {
+    return b;
+  }
+  if let Some(i) = v.as_int() {
+    return i != 0;
+  }
+  if let Some(f) = v.as_float() {
+    return f != 0.0 && !f.is_nan();
+  }
+  if let Some(s) = v.as_string() {
+    return !s.to_string().unwrap_or_default().is_empty();
+  }
+  true
+}
+
+/// Call a JS predicate and resolve `boolean | Promise<boolean>`.
+async fn call_predicate_truthy<'js>(
+  pred: &rquickjs::Function<'js>,
+  arg: impl rquickjs::IntoJs<'js>,
+  ctx: &rquickjs::Ctx<'js>,
+) -> rquickjs::Result<bool> {
+  let arg = arg.into_js(ctx)?;
+  let mp: rquickjs::promise::MaybePromise<'js> = pred.call((arg,))?;
+  let v: rquickjs::Value<'js> = mp.into_future().await?;
+  Ok(js_truthy(&v))
+}
+
+/// Binding-side wait loop for a `(Request) => boolean` predicate: the
+/// predicate needs a live `RequestJs`, so it runs in the JS runtime
+/// while the loop drains the page event broadcast.
+async fn wait_request_predicate<'js>(
+  ctx: rquickjs::Ctx<'js>,
+  page: Arc<Page>,
+  pred: rquickjs::Function<'js>,
+  timeout_ms: u64,
+) -> rquickjs::Result<crate::bindings::network::RequestJs> {
+  use ferridriver::events::PageEvent;
+  use rquickjs::class::Class;
+  let mut rx = page.events().subscribe();
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+  loop {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+      return Err(rquickjs::Error::new_from_js_message(
+        "page.waitForRequest",
+        "TimeoutError",
+        format!("Timeout {timeout_ms}ms exceeded while waiting for request"),
+      ));
+    }
+    match tokio::time::timeout(remaining, rx.recv()).await {
+      Ok(Ok(PageEvent::Request(req))) => {
+        let probe = crate::bindings::network::RequestJs::new_with_page(req.clone(), page.clone());
+        let inst = Class::instance(ctx.clone(), probe)?;
+        if call_predicate_truthy(&pred, inst, &ctx).await? {
+          return Ok(crate::bindings::network::RequestJs::new_with_page(req, page.clone()));
+        }
+      },
+      Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
+      Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+        return Err(rquickjs::Error::new_from_js_message(
+          "page.waitForRequest",
+          "Error",
+          "page closed while waiting for request".to_string(),
+        ));
+      },
+      Err(_) => {
+        return Err(rquickjs::Error::new_from_js_message(
+          "page.waitForRequest",
+          "TimeoutError",
+          format!("Timeout {timeout_ms}ms exceeded while waiting for request"),
+        ));
+      },
+    }
+  }
+}
+
+/// Response-side twin of [`wait_request_predicate`].
+async fn wait_response_predicate<'js>(
+  ctx: rquickjs::Ctx<'js>,
+  page: Arc<Page>,
+  pred: rquickjs::Function<'js>,
+  timeout_ms: u64,
+) -> rquickjs::Result<crate::bindings::network::ResponseJs> {
+  use ferridriver::events::PageEvent;
+  use rquickjs::class::Class;
+  let mut rx = page.events().subscribe();
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+  loop {
+    let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+    if remaining.is_zero() {
+      return Err(rquickjs::Error::new_from_js_message(
+        "page.waitForResponse",
+        "TimeoutError",
+        format!("Timeout {timeout_ms}ms exceeded while waiting for response"),
+      ));
+    }
+    match tokio::time::timeout(remaining, rx.recv()).await {
+      Ok(Ok(PageEvent::Response(resp))) => {
+        let probe = crate::bindings::network::ResponseJs::new_with_page(resp.clone(), page.clone());
+        let inst = Class::instance(ctx.clone(), probe)?;
+        if call_predicate_truthy(&pred, inst, &ctx).await? {
+          return Ok(crate::bindings::network::ResponseJs::new_with_page(resp, page.clone()));
+        }
+      },
+      Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
+      Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+        return Err(rquickjs::Error::new_from_js_message(
+          "page.waitForResponse",
+          "Error",
+          "page closed while waiting for response".to_string(),
+        ));
+      },
+      Err(_) => {
+        return Err(rquickjs::Error::new_from_js_message(
+          "page.waitForResponse",
+          "TimeoutError",
+          format!("Timeout {timeout_ms}ms exceeded while waiting for response"),
+        ));
+      },
+    }
   }
 }
 

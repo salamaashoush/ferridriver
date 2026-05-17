@@ -85,11 +85,8 @@ impl RequestJs {
   #[qjs(rename = "headersArray")]
   pub async fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let arr = self.inner.headers_array().await;
-    let json: Vec<serde_json::Value> = arr
-      .into_iter()
-      .map(|h| serde_json::json!({"name": h.name, "value": h.value}))
-      .collect();
-    serde_to_js(&ctx, &json)
+    let pairs: Vec<(String, String)> = arr.into_iter().map(|h| (h.name, h.value)).collect();
+    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
   }
 
   #[qjs(rename = "allHeaders")]
@@ -104,9 +101,13 @@ impl RequestJs {
   }
 
   #[qjs(rename = "failure")]
-  pub async fn failure<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    match self.inner.failure().await {
-      Some(error_text) => serde_to_js(&ctx, &serde_json::json!({"errorText": error_text})),
+  pub fn failure<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    match self.inner.failure() {
+      Some(error_text) => {
+        let o = rquickjs::Object::new(ctx.clone())?;
+        o.set("errorText", error_text)?;
+        Ok(o.into_value())
+      },
       None => Ok(Value::new_null(ctx.clone())),
     }
   }
@@ -243,11 +244,8 @@ impl ResponseJs {
   #[qjs(rename = "headersArray")]
   pub async fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let arr = self.inner.headers_array().await;
-    let json: Vec<serde_json::Value> = arr
-      .into_iter()
-      .map(|h| serde_json::json!({"name": h.name, "value": h.value}))
-      .collect();
-    serde_to_js(&ctx, &json)
+    let pairs: Vec<(String, String)> = arr.into_iter().map(|h| (h.name, h.value)).collect();
+    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
   }
 
   #[qjs(rename = "headerValue")]
@@ -276,8 +274,10 @@ impl ResponseJs {
 
   #[qjs(rename = "json")]
   pub async fn json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let v = self.inner.json().await.into_js()?;
-    serde_to_js(&ctx, &v)
+    // Body -> JS via QuickJS's C JSON parser; no serde_json::Value
+    // middle allocation, no dependence on the JS `JSON` global.
+    let text = self.inner.text().await.into_js()?;
+    ctx.json_parse(text)
   }
 
   /// Mirrors Playwright `response.finished()`. Resolves to `null` on
@@ -297,7 +297,12 @@ impl ResponseJs {
   #[qjs(rename = "serverAddr")]
   pub async fn server_addr<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     match self.inner.server_addr().await {
-      Some(a) => serde_to_js(&ctx, &serde_json::json!({"ipAddress": a.ip_address, "port": a.port})),
+      Some(a) => {
+        let o = rquickjs::Object::new(ctx.clone())?;
+        o.set("ipAddress", a.ip_address)?;
+        o.set("port", a.port)?;
+        Ok(o.into_value())
+      },
       None => Ok(Value::new_null(ctx.clone())),
     }
   }
@@ -386,8 +391,8 @@ impl WebSocketJs {
       }
       match tokio::time::timeout(remaining, rx.recv()).await {
         Ok(Ok(ev)) => {
-          if let Some(json) = match_event(&event_lc, &ev) {
-            return serde_to_js(&ctx, &json);
+          if let Some(v) = ws_event_to_js(&ctx, &event_lc, &ev)? {
+            return Ok(v);
           }
         },
         Ok(Err(_)) => {
@@ -412,39 +417,32 @@ impl WebSocketJs {
   }
 }
 
-fn match_event(name: &str, ev: &WebSocketEvent) -> Option<serde_json::Value> {
-  match (name, ev) {
-    ("framesent", WebSocketEvent::FrameSent(p)) => Some(serde_json::json!({
-      "event": "framesent",
-      "payload": payload_to_json(p),
-      "error": serde_json::Value::Null,
-    })),
-    ("framereceived", WebSocketEvent::FrameReceived(p)) => Some(serde_json::json!({
-      "event": "framereceived",
-      "payload": payload_to_json(p),
-      "error": serde_json::Value::Null,
-    })),
-    ("socketerror", WebSocketEvent::Error(msg)) => Some(serde_json::json!({
-      "event": "socketerror",
-      "payload": serde_json::Value::Null,
-      "error": msg,
-    })),
-    ("close", WebSocketEvent::Close) => Some(serde_json::json!({
-      "event": "close",
-      "payload": serde_json::Value::Null,
-      "error": serde_json::Value::Null,
-    })),
+/// Build the `{ event, payload, error }` JS object for a matched
+/// WebSocket event directly — no serde_json::Value middle allocation.
+fn ws_event_to_js<'js>(ctx: &Ctx<'js>, name: &str, ev: &WebSocketEvent) -> rquickjs::Result<Option<Value<'js>>> {
+  let make = |event: &str, payload: Value<'js>, error: Value<'js>| -> rquickjs::Result<Value<'js>> {
+    let o = rquickjs::Object::new(ctx.clone())?;
+    o.set("event", event)?;
+    o.set("payload", payload)?;
+    o.set("error", error)?;
+    Ok(o.into_value())
+  };
+  let null = || Value::new_null(ctx.clone());
+  let js_str =
+    |s: &str| -> rquickjs::Result<Value<'js>> { Ok(rquickjs::String::from_str(ctx.clone(), s)?.into_value()) };
+  let payload = |p: &WebSocketPayload| -> rquickjs::Result<Value<'js>> {
+    match p {
+      WebSocketPayload::Text(s) => js_str(s),
+      WebSocketPayload::Binary(b) => js_str(&base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b)),
+    }
+  };
+  Ok(match (name, ev) {
+    ("framesent", WebSocketEvent::FrameSent(p)) => Some(make("framesent", payload(p)?, null())?),
+    ("framereceived", WebSocketEvent::FrameReceived(p)) => Some(make("framereceived", payload(p)?, null())?),
+    ("socketerror", WebSocketEvent::Error(msg)) => Some(make("socketerror", null(), js_str(msg)?)?),
+    ("close", WebSocketEvent::Close) => Some(make("close", null(), null())?),
     _ => None,
-  }
-}
-
-fn payload_to_json(p: &WebSocketPayload) -> serde_json::Value {
-  match p {
-    WebSocketPayload::Text(s) => serde_json::Value::String(s.clone()),
-    WebSocketPayload::Binary(b) => {
-      serde_json::Value::String(base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b))
-    },
-  }
+  })
 }
 
 // ── RouteJs ──────────────────────────────────────────────────────────────────
