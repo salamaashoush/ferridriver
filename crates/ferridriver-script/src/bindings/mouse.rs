@@ -19,6 +19,7 @@ use crate::bindings::convert::{FerriResultExt, serde_from_js};
 struct JsMouseClickOptions {
   button: Option<String>,
   click_count: Option<u32>,
+  delay: Option<u64>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -66,6 +67,7 @@ impl MouseJs {
     let opts = ferridriver::page::MouseClickOptions {
       button: o.button,
       click_count: o.click_count,
+      delay: o.delay,
     };
     self.page.mouse().click(x, y, Some(opts)).await.into_js()
   }
@@ -101,6 +103,7 @@ impl MouseJs {
     let opts = ferridriver::page::MouseClickOptions {
       button: o.button,
       click_count: None,
+      delay: o.delay,
     };
     self.page.mouse().dblclick(x, y, Some(opts)).await.into_js()
   }

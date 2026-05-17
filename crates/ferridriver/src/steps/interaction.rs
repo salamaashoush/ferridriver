@@ -144,7 +144,7 @@ step!(TypeText {
     example: "When I type \"hello world\"",
     execute(page, caps, _table, _vars) {
         let text = q(&caps[1]);
-        page.keyboard().r#type(&text).await?;
+        page.keyboard().r#type(&text, None).await?;
         Ok(None)
     }
 });
@@ -156,7 +156,7 @@ step!(PressKey {
     example: "When I press \"Enter\"",
     execute(page, caps, _table, _vars) {
         let key = q(&caps[1]);
-        page.keyboard().press(&key).await?;
+        page.keyboard().press(&key, None).await?;
         Ok(None)
     }
 });

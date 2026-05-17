@@ -136,15 +136,15 @@ await page.moveMouseSmooth(0,0,10,10,3); ok('page.moveMouseSmooth', true);
 
 // ── mouse/keyboard namespace (Playwright options-bag parity) ─────────
 await page.fill('#txt',''); await page.focus('#txt');
-await page.keyboard.type('abc'); ok('keyboard.type', (await page.inputValue('#txt')) === 'abc');
+// delay option (Playwright {delay}) exercised end-to-end; effect must
+// still be exact.
+await page.keyboard.type('abc', { delay: 3 }); ok('keyboard.type(delay)', (await page.inputValue('#txt')) === 'abc');
 await page.keyboard.insertText('XY'); ok('keyboard.insertText', (await page.inputValue('#txt')) === 'abcXY');
-await page.keyboard.press('Backspace'); ok('keyboard.press', (await page.inputValue('#txt')) === 'abcX');
+await page.keyboard.press('Backspace', { delay: 3 }); ok('keyboard.press(delay)', (await page.inputValue('#txt')) === 'abcX');
 await page.mouse.move(3, 4, { steps: 2 }); ok('mouse.move(opts)', true);
-const bb = await page.evaluate("(()=>{const r=document.getElementById('btn').getBoundingClientRect();return [r.x+r.width/2, r.y+r.height/2]})()");
-await page.setContent(HTML);
 const bb2 = await page.evaluate("(()=>{const r=document.getElementById('btn').getBoundingClientRect();return [r.x+r.width/2, r.y+r.height/2]})()");
-await page.mouse.click(bb2[0], bb2[1], { button: 'left' });
-ok('mouse.click(opts)', (await page.textContent('#btn')) === 'clicked');
+await page.mouse.click(bb2[0], bb2[1], { button: 'left', delay: 3 });
+ok('mouse.click(delay)', (await page.textContent('#btn')) === 'clicked');
 await page.mouse.down({ button: 'left' }); await page.mouse.up({ button: 'left' }); ok('mouse.down/up(opts)', true);
 await page.setContent(HTML);
 await page.setInputFiles('#file', { name:'a.txt', mimeType:'text/plain', buffer:[104,105] });
