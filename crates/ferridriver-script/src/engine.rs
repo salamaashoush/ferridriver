@@ -7,7 +7,7 @@
 //! executions REPL-style while framework bindings refresh each call.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rquickjs::function::{Async, Func};
@@ -33,6 +33,18 @@ pub const DEFAULT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 /// Default per-script JS stack size (1 MiB).
 pub const DEFAULT_STACK_SIZE: usize = 1024 * 1024;
 
+/// Default GC trigger threshold (64 MiB). QuickJS is reference-counted;
+/// the cycle GC otherwise fires adaptively at ~1.5x live size, so an
+/// object-churny automation script (big `evaluate` results, repeated
+/// `ariaSnapshot`/snapshot trees, locator chains) pays recurring
+/// mark-sweep stalls mid-run. Raising the floor lets a typical
+/// short-lived script finish with few/zero cycle-GC passes — the same
+/// lever Amazon LLRT exposes (`LLRT_GC_THRESHOLD_MB`, 20 MiB default).
+/// `default_memory_limit` (256 MiB) remains the hard backstop, and
+/// acyclic garbage is still freed immediately by refcounting, so this
+/// only defers *cycle* collection, not normal frees.
+pub const DEFAULT_GC_THRESHOLD: usize = 64 * 1024 * 1024;
+
 /// Default cap on concurrently-retained persistent session VMs. When a
 /// new session would exceed this, the least-recently-used idle VM is
 /// evicted (its `globalThis` state is discarded; a later call rebuilds).
@@ -44,6 +56,8 @@ pub struct ScriptEngineConfig {
   pub default_timeout: Duration,
   pub default_memory_limit: usize,
   pub default_stack_size: usize,
+  /// Cycle-GC trigger threshold in bytes. See [`DEFAULT_GC_THRESHOLD`].
+  pub default_gc_threshold: usize,
   pub max_console_entries: usize,
   pub max_console_bytes: usize,
   pub max_console_entry_bytes: usize,
@@ -57,6 +71,7 @@ impl Default for ScriptEngineConfig {
       default_timeout: DEFAULT_TIMEOUT,
       default_memory_limit: DEFAULT_MEMORY_LIMIT,
       default_stack_size: DEFAULT_STACK_SIZE,
+      default_gc_threshold: DEFAULT_GC_THRESHOLD,
       max_console_entries: DEFAULT_MAX_CONSOLE_ENTRIES,
       max_console_bytes: DEFAULT_MAX_CONSOLE_BYTES,
       max_console_entry_bytes: DEFAULT_MAX_CONSOLE_ENTRY_BYTES,
@@ -71,6 +86,7 @@ pub struct RunOptions {
   pub timeout: Option<Duration>,
   pub memory_limit: Option<usize>,
   pub stack_size: Option<usize>,
+  pub gc_threshold: Option<usize>,
 }
 
 /// Per-call execution context holding session-level state the script reaches
@@ -179,6 +195,21 @@ pub struct Session {
   runtime: AsyncRuntime,
   ctx: AsyncContext,
   config: ScriptEngineConfig,
+  /// Last resource limits pushed to `runtime`. `set_memory_limit` /
+  /// `set_max_stack_size` / `set_gc_threshold` each take the runtime's
+  /// async lock; re-pushing identical values every `execute` is pure
+  /// overhead on a warm persistent session that runs many small
+  /// scripts (the MCP path). Skip the setter when the value is
+  /// unchanged.
+  applied: AppliedLimits,
+}
+
+/// Currently-applied runtime limits, so `execute` can skip redundant
+/// `AsyncRuntime` setter calls.
+struct AppliedLimits {
+  memory: AtomicUsize,
+  stack: AtomicUsize,
+  gc: AtomicUsize,
 }
 
 impl Session {
@@ -192,6 +223,10 @@ impl Session {
 
     runtime.set_memory_limit(config.default_memory_limit).await;
     runtime.set_max_stack_size(config.default_stack_size).await;
+    // Defer cycle-GC so short automation scripts don't mark-sweep
+    // mid-run (LLRT-style). Refcounting still frees acyclic garbage
+    // immediately; memory_limit is the hard cap.
+    runtime.set_gc_threshold(config.default_gc_threshold).await;
 
     // Module loader rooted at the sandbox — lets scripts `import './x.js'`.
     // Resolver and loader both check containment; rquickjs's built-in
@@ -271,7 +306,32 @@ impl Session {
     .await;
     install?;
 
-    Ok(Self { runtime, ctx, config })
+    let applied = AppliedLimits {
+      memory: AtomicUsize::new(config.default_memory_limit),
+      stack: AtomicUsize::new(config.default_stack_size),
+      gc: AtomicUsize::new(config.default_gc_threshold),
+    };
+    Ok(Self {
+      runtime,
+      ctx,
+      config,
+      applied,
+    })
+  }
+
+  /// Push resource limits to the runtime, skipping any setter whose
+  /// value is unchanged since the last call (avoids the runtime's async
+  /// lock on the warm-session hot path).
+  async fn apply_limits(&self, memory: usize, stack: usize, gc: usize) {
+    if self.applied.memory.swap(memory, Ordering::Relaxed) != memory {
+      self.runtime.set_memory_limit(memory).await;
+    }
+    if self.applied.stack.swap(stack, Ordering::Relaxed) != stack {
+      self.runtime.set_max_stack_size(stack).await;
+    }
+    if self.applied.gc.swap(gc, Ordering::Relaxed) != gc {
+      self.runtime.set_gc_threshold(gc).await;
+    }
   }
 
   /// Execute one script against the persistent VM. Framework globals are
@@ -288,6 +348,7 @@ impl Session {
     let timeout = options.timeout.unwrap_or(self.config.default_timeout);
     let memory_limit = options.memory_limit.unwrap_or(self.config.default_memory_limit);
     let stack_size = options.stack_size.unwrap_or(self.config.default_stack_size);
+    let gc_threshold = options.gc_threshold.unwrap_or(self.config.default_gc_threshold);
 
     let console = Arc::new(ConsoleCapture::new(
       self.config.max_console_entries,
@@ -296,9 +357,9 @@ impl Session {
     ));
 
     // Per-call resource overrides may differ from the session defaults;
-    // re-apply them on the persistent runtime each call.
-    self.runtime.set_memory_limit(memory_limit).await;
-    self.runtime.set_max_stack_size(stack_size).await;
+    // re-apply only the ones that actually changed (skips the runtime
+    // async lock on the warm-session hot path, where they never do).
+    self.apply_limits(memory_limit, stack_size, gc_threshold).await;
 
     // Timeout enforcement via interrupt handler. The handler fires
     // regularly during script execution; once the deadline passes we
