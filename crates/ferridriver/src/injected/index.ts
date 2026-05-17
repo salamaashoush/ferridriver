@@ -715,12 +715,40 @@ if (!window.__fd) {
     accessibilityTree,
 
     // Playwright's aria snapshot (locator/page scoped). `node` is the
-    // root element resolved by Rust (strict resolution + auto-wait done
+    // root resolved by Rust (strict resolution + auto-wait done
     // host-side — source of truth); delegates to the vendored
-    // InjectedScript.ariaSnapshot so the rendered YAML is byte-for-byte
-    // Playwright. Mirrors server `ariaSnapshotForFrame` (mode default).
+    // InjectedScript so the rendered YAML is byte-for-byte Playwright.
     ariaSnapshot: (node: Node, options?: { mode?: 'ai' | 'default'; depth?: number }) =>
       injected.ariaSnapshot(node, { mode: options?.mode || 'default', depth: options?.depth }),
+    // Full result incl. `iframeRefs` / `iframeDepths` so the Rust core
+    // can stitch child-iframe subtrees (mirrors server
+    // `ariaSnapshotForFrame`). `refPrefix` namespaces refs per frame so
+    // the parent's `- iframe [ref=...]` line is unique and resolvable.
+    incrementalAriaSnapshot: (
+      node: Node,
+      options?: { mode?: 'ai' | 'default'; depth?: number; refPrefix?: string },
+    ) =>
+      injected.incrementalAriaSnapshot(node, {
+        mode: options?.mode || 'default',
+        depth: options?.depth,
+        refPrefix: options?.refPrefix,
+      }),
+    // Tag the iframe/frame element that the renderer assigned `ref` to
+    // with `attr=ref`, so the host can re-resolve it through the normal
+    // selector + content-frame path (BiDi-safe — passing a utility-eval
+    // handle into the cross-context content-frame call is not). Returns
+    // whether a matching element was found.
+    markIframeByAriaRef: (ref: string, attr: string): boolean => {
+      const all = document.querySelectorAll('iframe,frame');
+      for (const el of all) {
+        const r = (el as any)._ariaRef;
+        if (r && r.ref === ref) {
+          el.setAttribute(attr, ref);
+          return true;
+        }
+      }
+      return false;
+    },
 
     // ── Evaluate(fn, arg) plumbing ──
     //

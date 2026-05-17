@@ -241,6 +241,16 @@ ok('locator.innerHTML', typeof (await page.locator('#h').innerHTML()) === 'strin
   ok('locator.ariaSnapshot', typeof sH === 'string' && sH.length > 0
     && /Heading/.test(sH) && !/FindThisText/.test(sH)
     && /FindThisText/.test(sP) && !/Heading/.test(sP) && !/Press/.test(sP));
+  // Cross-iframe stitching (Playwright ariaSnapshotForFrame). mode:'ai'
+  // assigns iframe refs, so the nested srcdoc -> data: child contexts
+  // (#ifn -> #deep -> "DEEP") and the srcdoc child (#if -> "inner")
+  // are spliced under their `- iframe [ref=...]` lines. mode:'default'
+  // assigns no refs => no stitch (exact Playwright behaviour).
+  const sAi = await page.locator('body').ariaSnapshot({ mode: 'ai' });
+  const sDef = await page.locator('body').ariaSnapshot();
+  ok('locator.ariaSnapshot(crossIframe)',
+    /\[ref=/.test(sAi) && /DEEP/.test(sAi) && /inner/.test(sAi)
+    && !/DEEP/.test(sDef) && !/\[ref=/.test(sDef));
 }
 const cb = page.locator('#cb');
 await cb.check(); ok('locator.check', (await cb.isChecked()) === true);
