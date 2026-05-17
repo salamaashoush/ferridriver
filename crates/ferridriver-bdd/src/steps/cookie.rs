@@ -9,7 +9,7 @@ use ferridriver_bdd_macros::{step, when};
 #[when("I set cookie {string} to {string}")]
 async fn set_cookie(world: &mut BrowserWorld, name: String, value: String) {
   // Extract domain from current page URL so CDP accepts the cookie.
-  let url = world.page().url().await.unwrap_or_default();
+  let url = world.page().url();
   let domain = url
     .split("://")
     .nth(1)

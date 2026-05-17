@@ -252,6 +252,17 @@ impl McpClient {
     assert_eq!(payload["status"].as_str(), Some("ok"), "script failed: {payload}");
     payload["value"].clone()
   }
+
+  /// Run a script with a wall-clock timeout (ms) and return the parsed
+  /// payload. Used to drive the poisoning-timeout recovery path.
+  pub fn script_with_timeout(&mut self, source: &str, timeout_ms: u64) -> Value {
+    let resp = self.call_tool(
+      "run_script",
+      json!({"source": source, "args": [], "timeout_ms": timeout_ms}),
+    );
+    ok(&resp, "run_script");
+    extract_script_payload(&resp).expect("script response should carry a JSON payload")
+  }
 }
 
 impl Drop for McpClient {

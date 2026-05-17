@@ -44,7 +44,7 @@ async fn store_info(world: &mut BrowserWorld) {
   let title = world.page().title().await.map_err(|e| step_err!("{e}"))?;
   world.set_var("page_title", title);
 
-  let url = world.page().url().await.map_err(|e| step_err!("{e}"))?;
+  let url = world.page().url();
   world.set_var("page_url", url);
 }
 

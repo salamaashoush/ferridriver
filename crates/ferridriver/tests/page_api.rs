@@ -59,7 +59,7 @@ async fn page_api_tests() {
     .unwrap();
   let title = page.title().await.unwrap();
   assert!(title.contains("Hello"), "title: {title}");
-  let url = page.url().await.unwrap();
+  let url = page.url();
   assert!(url.starts_with("data:"), "url: {url}");
 
   // ── Evaluate ──
@@ -1171,9 +1171,9 @@ async fn quick_wins_tests() {
   let page = browser.page().await.expect("get page");
 
   // ── browser.is_connected / version / contexts ──
-  assert!(browser.is_connected().await, "browser should be connected");
+  assert!(browser.is_connected(), "browser should be connected");
   assert!(!browser.version().is_empty(), "version should not be empty");
-  let contexts = browser.contexts().await;
+  let contexts = browser.contexts();
   assert!(!contexts.is_empty(), "should have at least one context");
 
   // ── locator.right_click ──
@@ -1219,8 +1219,5 @@ async fn quick_wins_tests() {
   assert!(page2.is_closed());
 
   browser.close(None).await.unwrap();
-  assert!(
-    !browser.is_connected().await,
-    "browser should be disconnected after close"
-  );
+  assert!(!browser.is_connected(), "browser should be disconnected after close");
 }

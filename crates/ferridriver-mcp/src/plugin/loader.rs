@@ -37,7 +37,14 @@ use super::manifest::PluginManifest;
 pub struct LoadedPlugin {
   /// One manifest per tool declared in the source file. At least one.
   pub tools: Vec<PluginManifest>,
-  pub source: String,
+  /// Shared (`Arc`) so each session VM that installs this plugin takes a
+  /// refcount bump, not a full copy of the source text. Drives the
+  /// source-eval fallback when `bytecode` is `None`.
+  pub source: Arc<str>,
+  /// Pre-compiled wrapper bytecode, filled in by `load_plugins` once the
+  /// file's registry index is known. `None` until then (and if compile
+  /// fails — the session VM then parses `source` instead).
+  pub bytecode: Option<Arc<[u8]>>,
   pub path: PathBuf,
 }
 
@@ -159,7 +166,9 @@ pub async fn load_plugin(path: &Path, engine: &ScriptEngine) -> Result<LoadedPlu
 
   Ok(LoadedPlugin {
     tools,
-    source,
+    source: Arc::<str>::from(source),
+    // Filled in by `load_plugins` once the registry index is assigned.
+    bytecode: None,
     path: path.to_path_buf(),
   })
 }

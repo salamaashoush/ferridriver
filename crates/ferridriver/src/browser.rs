@@ -51,6 +51,18 @@ pub struct Browser {
   /// [`crate::context::ContextRef::new_page`]. Kept alongside
   /// `context_options` until the video-only registry is retired.
   record_video: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::RecordVideoOptions>>>,
+  /// Ordered registry of live context names (`"default"` plus every
+  /// `new_context`), so `contexts()` stays sync like Playwright's
+  /// `browser.contexts()` — no `RwLock<BrowserState>` read, no
+  /// per-page round-trip.
+  context_names: Arc<std::sync::Mutex<Vec<String>>>,
+  /// Shared handle to [`BrowserState::connected`] so `is_connected()`
+  /// stays sync like Playwright's `browser.isConnected(): boolean`.
+  connected: Arc<std::sync::atomic::AtomicBool>,
+}
+
+fn default_context_registry() -> Arc<std::sync::Mutex<Vec<String>>> {
+  Arc::new(std::sync::Mutex::new(vec!["default".to_string()]))
 }
 
 impl Browser {
@@ -66,6 +78,7 @@ impl Browser {
     headless: bool,
     context_options: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::BrowserContextOptions>>>,
     record_video: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, crate::options::RecordVideoOptions>>>,
+    connected: Arc<std::sync::atomic::AtomicBool>,
   ) -> Self {
     Self {
       state,
@@ -74,6 +87,8 @@ impl Browser {
       headless,
       context_options,
       record_video,
+      connected,
+      context_names: default_context_registry(),
     }
   }
 
@@ -100,6 +115,7 @@ impl Browser {
     let headless = state.headless;
     let context_options = state.context_options.clone();
     let record_video = state.record_video.clone();
+    let connected = state.connected.clone();
     Self::from_parts(
       Arc::new(RwLock::new(state)),
       version,
@@ -107,6 +123,7 @@ impl Browser {
       headless,
       context_options,
       record_video,
+      connected,
     )
   }
 
@@ -117,28 +134,31 @@ impl Browser {
   /// the instance has not been launched yet, `version()` returns
   /// `"Unknown"` until a subsequent `ensure_browser` fills it in.
   pub fn from_shared_state(state: Arc<RwLock<BrowserState>>) -> Self {
-    let (version, backend_kind, headless, context_options, record_video) = state.try_read().ok().map_or_else(
-      || {
-        (
-          Arc::from("Unknown"),
-          crate::backend::BackendKind::CdpPipe,
-          true,
-          Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-          Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
-        )
-      },
-      |s| {
-        (
-          s.default_browser()
-            .map(crate::backend::AnyBrowser::version)
-            .map_or_else(|| Arc::<str>::from("Unknown"), Arc::from),
-          s.backend_kind(),
-          s.headless,
-          s.context_options.clone(),
-          s.record_video.clone(),
-        )
-      },
-    );
+    let (version, backend_kind, headless, context_options, record_video, connected) =
+      state.try_read().ok().map_or_else(
+        || {
+          (
+            Arc::from("Unknown"),
+            crate::backend::BackendKind::CdpPipe,
+            true,
+            Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+            Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+            Arc::new(std::sync::atomic::AtomicBool::new(false)),
+          )
+        },
+        |s| {
+          (
+            s.default_browser()
+              .map(crate::backend::AnyBrowser::version)
+              .map_or_else(|| Arc::<str>::from("Unknown"), Arc::from),
+            s.backend_kind(),
+            s.headless,
+            s.context_options.clone(),
+            s.record_video.clone(),
+            s.connected.clone(),
+          )
+        },
+      );
     Self {
       state,
       version,
@@ -146,6 +166,8 @@ impl Browser {
       headless,
       context_options,
       record_video,
+      connected,
+      context_names: default_context_registry(),
     }
   }
 
@@ -165,6 +187,13 @@ impl Browser {
     static CTX_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
     let id = CTX_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let name = format!("context-{id}");
+    {
+      let mut names = match self.context_names.lock() {
+        Ok(g) => g,
+        Err(poisoned) => poisoned.into_inner(),
+      };
+      names.push(name.clone());
+    }
     let ctx = ContextRef::new(self.state.clone(), name);
     if let Some(opts) = options {
       let composite = ctx.key.to_composite();
@@ -296,14 +325,19 @@ impl Browser {
     &self.state
   }
 
-  /// List all browser contexts.
-  pub async fn contexts(&self) -> Vec<ContextRef> {
-    let state = self.state.read().await;
-    state
-      .list_contexts()
-      .await
+  /// List all browser contexts. Sync — mirrors Playwright's
+  /// `browser.contexts(): BrowserContext[]`. Reads the in-memory name
+  /// registry (default + every `new_context`); no state lock, no
+  /// per-page round-trip.
+  #[must_use]
+  pub fn contexts(&self) -> Vec<ContextRef> {
+    let names = match self.context_names.lock() {
+      Ok(g) => g,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    names
       .iter()
-      .map(|c| ContextRef::new(self.state.clone(), c.name.clone()))
+      .map(|name| ContextRef::new(self.state.clone(), name.clone()))
       .collect()
   }
 
@@ -321,9 +355,10 @@ impl Browser {
     &self.version
   }
 
-  /// Check if the browser is connected and alive.
-  pub async fn is_connected(&self) -> bool {
-    let state = self.state.read().await;
-    state.is_connected()
+  /// Whether the browser is connected. Sync — mirrors Playwright's
+  /// `browser.isConnected(): boolean`.
+  #[must_use]
+  pub fn is_connected(&self) -> bool {
+    self.connected.load(std::sync::atomic::Ordering::Relaxed)
   }
 }

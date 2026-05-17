@@ -206,15 +206,12 @@ impl FrameJs {
     crate::bindings::frame_locator::FrameLocatorJs::new(self.inner.frame_locator(&selector))
   }
 
-  /// Playwright: `frame.page(): Page`. Returns the owning page as a
-  /// fresh `PageJs` handle. Note: the returned handle does NOT carry
-  /// the script engine's `AsyncContext`, so methods that dispatch JS
-  /// callbacks across tasks (`page.route`, `page.exposeFunction`)
-  /// will reject — those need the parent `page` global from
-  /// `install_page`.
+  /// Playwright: `frame.page(): Page`. Returns the owning page; it
+  /// carries the session's `AsyncContext` (via userdata) so
+  /// `page.route` / `page.exposeFunction` work on the returned handle.
   #[qjs(rename = "page")]
-  pub fn page(&self) -> crate::bindings::page::PageJs {
-    crate::bindings::page::PageJs::new(self.inner.page_arc().clone())
+  pub fn page(&self, ctx: rquickjs::Ctx<'_>) -> crate::bindings::page::PageJs {
+    crate::bindings::page::pagejs_for_ctx(&ctx, self.inner.page_arc().clone())
   }
 
   // ── Action methods (Playwright parity — task 3.9) ──────────────────

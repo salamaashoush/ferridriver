@@ -23,6 +23,7 @@ use rmcp::{
 };
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
+use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
 // ── SharedState ──────────────────────────────────────────────────────────────
@@ -293,6 +294,24 @@ impl McpServerConfig for DefaultConfig {}
 
 // ── McpServer ───────────────────────────────────────────────────────────────
 
+/// One session's persistent script VM slot. `vm` is `None` before the
+/// first script for the session and after a poisoning fault discards it
+/// (the next call rebuilds transparently). `last_used` drives LRU
+/// eviction when the warm-VM cap is exceeded.
+pub(crate) struct SessionSlot {
+  vm: Option<ferridriver_script::Session>,
+  last_used: Instant,
+}
+
+impl Default for SessionSlot {
+  fn default() -> Self {
+    Self {
+      vm: None,
+      last_used: Instant::now(),
+    }
+  }
+}
+
 #[derive(Clone)]
 pub struct McpServer {
   pub(crate) state: SharedState,
@@ -315,6 +334,11 @@ pub struct McpServer {
   /// Per-session variable stores exposed to scripts via the `vars` global.
   /// Lazily created on first `run_script` for a given session name.
   pub(crate) session_vars: Arc<DashMap<String, Arc<ferridriver_script::InMemoryVars>>>,
+  /// Persistent per-session script VMs. A session reuses one `QuickJS`
+  /// runtime+context across every `run_script` / plugin call so user
+  /// `globalThis` state survives REPL-style. Keyed identically to
+  /// `session_vars`; access is serialized by the per-session guard.
+  pub(crate) session_vms: Arc<DashMap<String, Arc<Mutex<SessionSlot>>>>,
   /// Plugins discovered + parsed at startup. Empty by default; populated
   /// by [`McpServer::load_plugins`].
   pub(crate) plugins: crate::plugin::PluginRegistry,
@@ -428,6 +452,7 @@ impl McpServer {
       script_sandbox,
       artifacts_sandbox,
       session_vars: Arc::new(DashMap::new()),
+      session_vms: Arc::new(DashMap::new()),
       plugins: crate::plugin::PluginRegistry::default(),
     }
   }
@@ -469,6 +494,23 @@ impl McpServer {
             tracing::warn!(path = %file.display(), error = %e, "plugin load failed; skipping");
           },
         }
+      }
+    }
+
+    // Pre-compile each file's wrapper to QuickJS bytecode ONCE, now that
+    // the registry index (file position) is fixed. Every session VM then
+    // loads bytecode instead of parsing source. A compile failure is
+    // soft: the file keeps `bytecode: None` and the session VM falls
+    // back to evaluating `source`.
+    for (idx, lp) in loaded.iter_mut().enumerate() {
+      let module_name = format!("__ferri_plugin_{idx}");
+      match ferridriver_script::compile_plugin_bytecode(idx, &lp.source, &module_name).await {
+        Ok(bytes) => lp.bytecode = Some(Arc::from(bytes)),
+        Err(e) => tracing::warn!(
+          path = %lp.path.display(),
+          error = %e.message,
+          "plugin bytecode precompile failed; falling back to source eval"
+        ),
       }
     }
 
@@ -570,23 +612,6 @@ impl McpServer {
     ));
     let browser_handle = Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
 
-    let plugin_bindings = self
-      .plugins
-      .files()
-      .iter()
-      .map(|f| ferridriver_script::PluginBinding {
-        source: f.source.clone(),
-        tools: f
-          .tools
-          .iter()
-          .map(|t| ferridriver_script::PluginToolBinding {
-            name: t.name.clone(),
-            allowed_commands: t.allow.commands.clone(),
-          })
-          .collect(),
-      })
-      .collect();
-
     let context = ferridriver_script::RunContext {
       vars,
       sandbox,
@@ -595,7 +620,7 @@ impl McpServer {
       browser_context: Some(Arc::new(ctx_ref)),
       request: Some(request),
       browser: Some(browser_handle),
-      plugins: plugin_bindings,
+      plugins: self.plugin_bindings(),
     };
 
     let name_literal = serde_json::to_string(plugin_name).unwrap_or_else(|_| "\"\"".into());
@@ -603,8 +628,13 @@ impl McpServer {
     let args = vec![args_obj];
 
     let result = self
-      .script_engine
-      .run(&source, &args, ferridriver_script::RunOptions::default(), context)
+      .run_in_session(
+        &session,
+        &source,
+        &args,
+        ferridriver_script::RunOptions::default(),
+        context,
+      )
       .await;
 
     let json = serde_json::to_string_pretty(&result).map_err(|e| Self::err(format!("serialize result: {e}")))?;
@@ -627,6 +657,107 @@ impl McpServer {
       .entry(session.to_string())
       .or_insert_with(|| Arc::new(ferridriver_script::InMemoryVars::new()))
       .clone()
+  }
+
+  /// Snapshot the loaded plugin registry into the script-engine binding
+  /// shape. Shared by `run_script` and `invoke_plugin` so the mapping
+  /// lives in exactly one place.
+  pub(crate) fn plugin_bindings(&self) -> Vec<ferridriver_script::PluginBinding> {
+    self
+      .plugins
+      .files()
+      .iter()
+      .map(|f| ferridriver_script::PluginBinding {
+        source: f.source.clone(),
+        bytecode: f.bytecode.clone(),
+        tools: f
+          .tools
+          .iter()
+          .map(|t| ferridriver_script::PluginToolBinding {
+            name: t.name.clone(),
+            allowed_commands: t.allow.commands.clone(),
+          })
+          .collect(),
+      })
+      .collect()
+  }
+
+  /// Get-or-create the persistent VM slot for a session. Mirrors
+  /// `session_vars` keying. Enforces the warm-VM cap by evicting the
+  /// least-recently-used idle session before admitting a new one.
+  fn session_slot(&self, session: &str) -> Arc<Mutex<SessionSlot>> {
+    if !self.session_vms.contains_key(session) && self.session_vms.len() >= self.script_engine.config().max_session_vms
+    {
+      self.evict_lru_session();
+    }
+    self
+      .session_vms
+      .entry(session.to_string())
+      .or_insert_with(|| Arc::new(Mutex::new(SessionSlot::default())))
+      .clone()
+  }
+
+  /// Evict the oldest session whose slot is not currently in use. A
+  /// locked slot means an execution is in flight on another session, so
+  /// it is skipped (the cap is soft — never drop a VM mid-run).
+  fn evict_lru_session(&self) {
+    let mut victim: Option<(String, Instant)> = None;
+    for entry in self.session_vms.iter() {
+      if let Ok(slot) = entry.value().try_lock() {
+        let t = slot.last_used;
+        if victim.as_ref().is_none_or(|(_, oldest)| t < *oldest) {
+          victim = Some((entry.key().clone(), t));
+        }
+      }
+    }
+    if let Some((key, _)) = victim {
+      self.session_vms.remove(&key);
+    }
+  }
+
+  /// Execute a script against the session's persistent VM, creating it
+  /// on first use and transparently rebuilding it after a poisoning
+  /// fault. The caller must already hold the per-session guard so slot
+  /// access is uncontended.
+  pub(crate) async fn run_in_session(
+    &self,
+    session: &str,
+    source: &str,
+    args: &[serde_json::Value],
+    options: ferridriver_script::RunOptions,
+    context: ferridriver_script::RunContext,
+  ) -> ferridriver_script::ScriptResult {
+    let slot = self.session_slot(session);
+    let mut slot = slot.lock().await;
+
+    if slot.vm.is_none() {
+      match ferridriver_script::Session::create(self.script_engine.config().clone(), &context).await {
+        Ok(vm) => slot.vm = Some(vm),
+        Err(e) => return ferridriver_script::ScriptResult::err(e, 0, Vec::new()),
+      }
+    }
+
+    let run = match slot.vm.as_ref() {
+      Some(vm) => vm.execute(source, args, options, &context).await,
+      // Unreachable: we just ensured `vm` is `Some`. Defensive (no
+      // `unwrap`/`expect`) rather than a panic path.
+      None => {
+        return ferridriver_script::ScriptResult::err(
+          ferridriver_script::ScriptError::internal("session vm unexpectedly absent"),
+          0,
+          Vec::new(),
+        );
+      },
+    };
+
+    // A poisoning fault (timeout interrupt / OOM) left the VM in an
+    // untrustworthy state — discard it so the NEXT call rebuilds fresh.
+    // The poisoning call still returns its own error result.
+    if run.poisoned {
+      slot.vm = None;
+    }
+    slot.last_used = Instant::now();
+    run.result
   }
 
   /// Add extra tool routers (merges with built-in browser tools).
@@ -941,7 +1072,7 @@ impl ServerHandler for McpServer {
 
     match resource.as_str() {
       "page-info" => {
-        let url = page.url().await.unwrap_or_default();
+        let url = page.url();
         let title = page.title().await.unwrap_or_default();
         let json =
           serde_json::to_string_pretty(&serde_json::json!({"url": url, "title": title, "session": context_name}))

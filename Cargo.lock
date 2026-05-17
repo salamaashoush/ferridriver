@@ -1886,6 +1886,29 @@ dependencies = [
 ]
 
 [[package]]
+name = "dlopen2"
+version = "0.8.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5e2c5bd4158e66d1e215c49b837e11d62f3267b30c92f1d171c4d3105e3dc4d4"
+dependencies = [
+ "dlopen2_derive",
+ "libc",
+ "once_cell",
+ "winapi",
+]
+
+[[package]]
+name = "dlopen2_derive"
+version = "0.4.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0fbbb781877580993a8707ec48672673ec7b81eeba04cfd2310bd28c08e47c8f"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
+]
+
+[[package]]
 name = "document-features"
 version = "0.2.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2182,6 +2205,7 @@ dependencies = [
  "ferridriver-bdd",
  "ferridriver-config",
  "ferridriver-mcp",
+ "ferridriver-script",
  "ferridriver-test",
  "futures",
  "libc",
@@ -2267,6 +2291,10 @@ dependencies = [
  "ferridriver",
  "futures",
  "rquickjs",
+ "rquickjs-extra-console",
+ "rquickjs-extra-timers",
+ "rquickjs-extra-url",
+ "rquickjs-serde",
  "rustc-hash 2.1.2",
  "serde",
  "serde_json",
@@ -2274,6 +2302,7 @@ dependencies = [
  "thiserror 2.0.18",
  "tokio",
  "tracing",
+ "url",
 ]
 
 [[package]]
@@ -4214,7 +4243,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1fd6780a80ae0c52cc120a26a1a42c1ae51b247a253e4e06113d23d2c2edd078"
 dependencies = [
  "phf_macros",
- "phf_shared",
+ "phf_shared 0.11.3",
+]
+
+[[package]]
+name = "phf"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1562dc717473dbaa4c1f85a36410e03c047b2e7df7f45ee938fbef64ae7fadf"
+dependencies = [
+ "phf_shared 0.13.1",
+ "serde",
 ]
 
 [[package]]
@@ -4223,8 +4262,18 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3c80231409c20246a13fddb31776fb942c38553c51e871f8cbd687a4cfb5843d"
 dependencies = [
- "phf_shared",
+ "phf_shared 0.11.3",
  "rand 0.8.6",
+]
+
+[[package]]
+name = "phf_generator"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "135ace3a761e564ec88c03a77317a7c6b80bb7f7135ef2544dbe054243b89737"
+dependencies = [
+ "fastrand",
+ "phf_shared 0.13.1",
 ]
 
 [[package]]
@@ -4233,8 +4282,8 @@ version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f84ac04429c13a7ff43785d75ad27569f2951ce0ffd30a3321230db2fc727216"
 dependencies = [
- "phf_generator",
- "phf_shared",
+ "phf_generator 0.11.3",
+ "phf_shared 0.11.3",
  "proc-macro2",
  "quote",
  "syn 2.0.117",
@@ -4245,6 +4294,15 @@ name = "phf_shared"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "67eabc2ef2a60eb7faa00097bd1ffdb5bd28e62bf39990626a582201b7a754e5"
+dependencies = [
+ "siphasher 1.0.3",
+]
+
+[[package]]
+name = "phf_shared"
+version = "0.13.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e57fef6bc5981e38c2ce2d63bfa546861309f875b8a75f092d1d54ae2d64f266"
 dependencies = [
  "siphasher 1.0.3",
 ]
@@ -5048,6 +5106,8 @@ version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c50dc6d6c587c339edb4769cf705867497a2baf0eca8b4645fa6ecd22f02c77a"
 dependencies = [
+ "either",
+ "indexmap",
  "rquickjs-core",
  "rquickjs-macro",
 ]
@@ -5059,9 +5119,45 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b8bf7840285c321c3ab20e752a9afb95548c75cd7f4632a0627cea3507e310c1"
 dependencies = [
  "async-lock",
+ "chrono",
+ "dlopen2",
+ "either",
  "hashbrown 0.16.1",
+ "indexmap",
+ "phf 0.13.1",
  "relative-path",
  "rquickjs-sys",
+]
+
+[[package]]
+name = "rquickjs-extra-console"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "bf3db7865177c3e3454099155514248d21f21a24a9f5dacdf3e5baf1e5d619d5"
+dependencies = [
+ "log",
+ "rquickjs",
+]
+
+[[package]]
+name = "rquickjs-extra-timers"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "345b35e379c7816bab3c1a6ad34ef4dc56852a2836d6f7ffa1c1bea867f8286f"
+dependencies = [
+ "log",
+ "rquickjs",
+ "tokio",
+]
+
+[[package]]
+name = "rquickjs-extra-url"
+version = "0.2.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "8ccd9433952bef09f62d6df9a809fd0d36b49a269bf20eabc7b266572947fc25"
+dependencies = [
+ "either",
+ "rquickjs",
 ]
 
 [[package]]
@@ -5074,11 +5170,23 @@ dependencies = [
  "fnv",
  "ident_case",
  "indexmap",
+ "phf_generator 0.13.1",
+ "phf_shared 0.13.1",
  "proc-macro-crate",
  "proc-macro2",
  "quote",
  "rquickjs-core",
  "syn 2.0.117",
+]
+
+[[package]]
+name = "rquickjs-serde"
+version = "0.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e9382258c8bd1cc5c555887e5e379ab1491ff0287ca68ceb07be39ea561beb23"
+dependencies = [
+ "rquickjs",
+ "serde",
 ]
 
 [[package]]
@@ -5864,7 +5972,7 @@ dependencies = [
  "is-macro",
  "num-bigint",
  "once_cell",
- "phf",
+ "phf 0.11.3",
  "rustc-hash 2.1.2",
  "serde",
  "string_enum",
@@ -5905,7 +6013,7 @@ dependencies = [
  "bitflags 2.11.1",
  "either",
  "num-bigint",
- "phf",
+ "phf 0.11.3",
  "rustc-hash 2.1.2",
  "seq-macro",
  "serde",

@@ -206,12 +206,12 @@ pub fn test_page_expose_function(c: &mut McpClient) {
     });
     const installed = await page.evaluate(`typeof window.__expose_record`);
     await page.evaluate(`void window.__expose_record(1, 'two', { three: 3 })`);
-    // QuickJS has no setTimeout, so poll via short page round-trips
-    // — each `evaluate` yields the tokio scheduler, giving the
-    // backend's console drain a chance to dispatch the exposed
-    // callback through to QuickJS.
+    // The exposed-callback dispatch runs on a tokio task; await a real
+    // setTimeout (rquickjs-extra-timers) — it yields the scheduler and
+    // drives the runtime so the dispatch reaches QuickJS. Bounded poll,
+    // exits as soon as the callback lands.
     for (let i = 0; i < 100 && globalThis.__capturedArgs === null; i++) {
-      await page.evaluate(`1`);
+      await new Promise((r) => setTimeout(r, 10));
     }
     return { installed, captured: globalThis.__capturedArgs };
   ",

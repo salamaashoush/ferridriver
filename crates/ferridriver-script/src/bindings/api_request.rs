@@ -9,7 +9,7 @@ use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use serde::Deserialize;
 
-use crate::bindings::convert::{FerriResultExt, serde_from_js, serde_to_js};
+use crate::bindings::convert::{FerriResultExt, serde_from_js};
 
 /// Shape of per-request options accepted from JS.
 ///
@@ -204,13 +204,9 @@ impl APIResponseJs {
   /// `headersArray` shape).
   #[qjs(rename = "headersArray")]
   pub fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let headers: Vec<serde_json::Value> = self
-      .inner
-      .headers()
-      .iter()
-      .map(|(n, v)| serde_json::json!({ "name": n, "value": v }))
-      .collect();
-    serde_to_js(&ctx, &headers)
+    let h = self.inner.headers();
+    let pairs: Vec<(&str, &str)> = h.iter().map(|(n, v)| (n.as_str(), v.as_str())).collect();
+    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
   }
 
   /// Value of a single header, or `null` if absent.
@@ -228,7 +224,11 @@ impl APIResponseJs {
   /// Response body parsed as JSON.
   #[qjs(rename = "json")]
   pub fn json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let value = self.inner.json_value().into_js()?;
-    serde_to_js(&ctx, &value)
+    // Parse the raw body straight into a JS value with QuickJS's C JSON
+    // parser — no serde_json::Value middle allocation. `json_parse`
+    // does not touch the JS `JSON` global, so a reassigned
+    // `globalThis.JSON` cannot affect it.
+    let text = self.inner.text().into_js()?;
+    ctx.json_parse(text)
   }
 }

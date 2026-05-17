@@ -107,6 +107,50 @@ for (const backend of BACKENDS) {
       expect(typeof snap.refMap).toBe("object");
     });
 
+    it("locator.ariaSnapshot is scoped to the element subtree", async () => {
+      await page.setContent(
+        "<main><h1 id='h'>Heading</h1><p id='p'>FindThisText</p>" +
+          "<button id='b'>PressMe</button></main>",
+      );
+      const sH = await page.locator("#h").ariaSnapshot();
+      const sP = await page.locator("#p").ariaSnapshot();
+      expect(typeof sH).toBe("string");
+      expect(sH.length).toBeGreaterThan(0);
+      // Heading subtree: its own content, none of the siblings.
+      expect(sH).toContain("Heading");
+      expect(sH).not.toContain("FindThisText");
+      expect(sH).not.toContain("PressMe");
+      // Paragraph subtree: complementary scoping check.
+      expect(sP).toContain("FindThisText");
+      expect(sP).not.toContain("Heading");
+      // mode: 'ai' adds [ref=eN] labels (Playwright parity).
+      const sAi = await page.locator("#b").ariaSnapshot({ mode: "ai" });
+      expect(sAi).toContain("PressMe");
+      expect(sAi).toMatch(/\[ref=/);
+    });
+
+    it("locator.ariaSnapshot stitches child iframes (ai mode)", async () => {
+      await page.setContent(
+        "<main><h1>Top</h1>" +
+          "<iframe id='f' srcdoc=\"<button id='ib'>InnerBtn</button>" +
+          "<iframe id='g' src='data:text/html,<b>DeepText</b>'></iframe>\"></iframe>" +
+          "</main>",
+      );
+      // mode:'ai' assigns iframe refs -> child browsing contexts are
+      // snapshotted recursively and spliced (Playwright
+      // ariaSnapshotForFrame). Nested two levels: srcdoc -> data:.
+      const ai = await page.locator("main").ariaSnapshot({ mode: "ai" });
+      expect(ai).toMatch(/\[ref=/);
+      expect(ai).toContain("Top");
+      expect(ai).toContain("InnerBtn");
+      expect(ai).toContain("DeepText");
+      // mode:'default' assigns no refs -> no stitch (exact Playwright).
+      const def = await page.locator("main").ariaSnapshot();
+      expect(def).not.toContain("InnerBtn");
+      expect(def).not.toContain("DeepText");
+      expect(def).not.toMatch(/\[ref=/);
+    });
+
     it("page.frameLocator works at page scope", async () => {
       await page.setContent("<iframe srcdoc='<p>x</p>'></iframe>");
       const fl = page.frameLocator("iframe");

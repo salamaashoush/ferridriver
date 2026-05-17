@@ -1,11 +1,17 @@
-//! `ScriptEngine`: per-call `QuickJS` runtime + sandboxed context.
+//! `ScriptEngine` + `Session`: a sandboxed `QuickJS` runtime/context.
+//!
+//! [`ScriptEngine::run`] is the one-shot path (fresh VM, used at plugin
+//! load and by callers that don't need continuity). [`Session`] is the
+//! persistent path: one `QuickJS` runtime + context reused across many
+//! [`Session::execute`] calls so user `globalThis` state survives between
+//! executions REPL-style while framework bindings refresh each call.
 
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rquickjs::function::{Async, Func};
-use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Function, Object, Value, async_with};
+use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Object, Value, async_with};
 
 use crate::console::{ConsoleCapture, strip_ansi};
 use crate::error::{ScriptError, ScriptErrorKind};
@@ -27,15 +33,36 @@ pub const DEFAULT_MEMORY_LIMIT: usize = 256 * 1024 * 1024;
 /// Default per-script JS stack size (1 MiB).
 pub const DEFAULT_STACK_SIZE: usize = 1024 * 1024;
 
+/// Default GC trigger threshold (64 MiB). QuickJS is reference-counted;
+/// the cycle GC otherwise fires adaptively at ~1.5x live size, so an
+/// object-churny automation script (big `evaluate` results, repeated
+/// `ariaSnapshot`/snapshot trees, locator chains) pays recurring
+/// mark-sweep stalls mid-run. Raising the floor lets a typical
+/// short-lived script finish with few/zero cycle-GC passes — the same
+/// lever Amazon LLRT exposes (`LLRT_GC_THRESHOLD_MB`, 20 MiB default).
+/// `default_memory_limit` (256 MiB) remains the hard backstop, and
+/// acyclic garbage is still freed immediately by refcounting, so this
+/// only defers *cycle* collection, not normal frees.
+pub const DEFAULT_GC_THRESHOLD: usize = 64 * 1024 * 1024;
+
+/// Default cap on concurrently-retained persistent session VMs. When a
+/// new session would exceed this, the least-recently-used idle VM is
+/// evicted (its `globalThis` state is discarded; a later call rebuilds).
+pub const DEFAULT_MAX_SESSION_VMS: usize = 64;
+
 /// Configuration for the script engine.
 #[derive(Debug, Clone)]
 pub struct ScriptEngineConfig {
   pub default_timeout: Duration,
   pub default_memory_limit: usize,
   pub default_stack_size: usize,
+  /// Cycle-GC trigger threshold in bytes. See [`DEFAULT_GC_THRESHOLD`].
+  pub default_gc_threshold: usize,
   pub max_console_entries: usize,
   pub max_console_bytes: usize,
   pub max_console_entry_bytes: usize,
+  /// Upper bound on persistent session VMs kept warm at once.
+  pub max_session_vms: usize,
 }
 
 impl Default for ScriptEngineConfig {
@@ -44,9 +71,11 @@ impl Default for ScriptEngineConfig {
       default_timeout: DEFAULT_TIMEOUT,
       default_memory_limit: DEFAULT_MEMORY_LIMIT,
       default_stack_size: DEFAULT_STACK_SIZE,
+      default_gc_threshold: DEFAULT_GC_THRESHOLD,
       max_console_entries: DEFAULT_MAX_CONSOLE_ENTRIES,
       max_console_bytes: DEFAULT_MAX_CONSOLE_BYTES,
       max_console_entry_bytes: DEFAULT_MAX_CONSOLE_ENTRY_BYTES,
+      max_session_vms: DEFAULT_MAX_SESSION_VMS,
     }
   }
 }
@@ -57,6 +86,7 @@ pub struct RunOptions {
   pub timeout: Option<Duration>,
   pub memory_limit: Option<usize>,
   pub stack_size: Option<usize>,
+  pub gc_threshold: Option<usize>,
 }
 
 /// Per-call execution context holding session-level state the script reaches
@@ -84,6 +114,20 @@ pub struct RunContext {
   pub plugins: Vec<crate::bindings::PluginBinding>,
 }
 
+/// The session's owning [`AsyncContext`], stashed as rquickjs userdata
+/// at [`Session::create`] so bindings that mint a `Page` from script
+/// (`browser.newContext().newPage()`, `locator.page()`, `frame.page()`)
+/// can thread it into `PageJs` — without it, `page.route` /
+/// `page.exposeFunction` cross-task dispatch has no context to re-enter.
+pub(crate) struct SessionAsyncCtx(pub(crate) AsyncContext);
+
+// SAFETY: holds only an owned `AsyncContext` (`'static`; no borrowed
+// JS values), so re-stating the unused `'js` lifetime is sound.
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for SessionAsyncCtx {
+  type Changed<'to> = SessionAsyncCtx;
+}
+
 /// Sandboxed `QuickJS` scripting engine.
 pub struct ScriptEngine {
   config: ScriptEngineConfig,
@@ -100,11 +144,15 @@ impl ScriptEngine {
     &self.config
   }
 
-  /// Run a script with bound args.
+  /// Run a script once in a throwaway VM with bound args.
   ///
   /// `source` is the JS text. `args` is an array of values made available
   /// inside the script as the `args` global (positional). Args are never
   /// interpolated into `source` — preventing prompt injection.
+  ///
+  /// No state survives the call. Callers that need REPL-style continuity
+  /// across executions should hold a [`Session`] and call
+  /// [`Session::execute`] instead.
   pub async fn run(
     &self,
     source: &str,
@@ -112,46 +160,78 @@ impl ScriptEngine {
     options: RunOptions,
     context: RunContext,
   ) -> ScriptResult {
-    let started = Instant::now();
-    let timeout = options.timeout.unwrap_or(self.config.default_timeout);
-    let memory_limit = options.memory_limit.unwrap_or(self.config.default_memory_limit);
-    let stack_size = options.stack_size.unwrap_or(self.config.default_stack_size);
+    match Session::create(self.config.clone(), &context).await {
+      Ok(session) => session.execute(source, args, options, &context).await.result,
+      Err(e) => ScriptResult::err(e, 0, Vec::new()),
+    }
+  }
+}
 
-    let console = Arc::new(ConsoleCapture::new(
-      self.config.max_console_entries,
-      self.config.max_console_bytes,
-      self.config.max_console_entry_bytes,
-    ));
+/// Outcome of one [`Session::execute`]: the script result plus whether
+/// the VM was left in a state the caller must discard before the next
+/// execution. Poisoning means the interpreter was force-halted mid-run
+/// (timeout interrupt) or hit an allocation fault — a plain JS `throw`
+/// is NOT poisoning and leaves session state intact.
+#[derive(Debug)]
+pub struct SessionRun {
+  pub result: ScriptResult,
+  pub poisoned: bool,
+}
 
-    let args_json = match serde_json::to_string(args) {
-      Ok(s) => s,
-      Err(e) => {
-        return ScriptResult::err(
-          ScriptError::internal(format!("failed to serialize args: {e}")),
-          elapsed_ms(started),
-          console.drain(),
-        );
-      },
-    };
+/// A persistent `QuickJS` runtime + context reused across many script
+/// executions for one logical session.
+///
+/// User state on `globalThis` (and `var` / `function` declarations,
+/// which hoist to the global object) survives across [`execute`] calls
+/// REPL-style. Top-level `let` / `const` inside a script are scoped to
+/// the async wrapper of that single call and do NOT persist — assign to
+/// `globalThis` for continuity. Framework bindings (`page`, `context`,
+/// `request`, `browser`, `vars`, `fs`, `artifacts`, `console`, `args`)
+/// are reinstalled every call so they always reflect current session
+/// state. Plugin bindings are installed once at creation.
+///
+/// [`execute`]: Session::execute
+pub struct Session {
+  runtime: AsyncRuntime,
+  ctx: AsyncContext,
+  config: ScriptEngineConfig,
+  /// Last resource limits pushed to `runtime`. `set_memory_limit` /
+  /// `set_max_stack_size` / `set_gc_threshold` each take the runtime's
+  /// async lock; re-pushing identical values every `execute` is pure
+  /// overhead on a warm persistent session that runs many small
+  /// scripts (the MCP path). Skip the setter when the value is
+  /// unchanged.
+  applied: AppliedLimits,
+}
 
-    let runtime = match AsyncRuntime::new() {
-      Ok(r) => r,
-      Err(e) => {
-        return ScriptResult::err(
-          ScriptError::internal(format!("rquickjs runtime init: {e}")),
-          elapsed_ms(started),
-          console.drain(),
-        );
-      },
-    };
+/// Currently-applied runtime limits, so `execute` can skip redundant
+/// `AsyncRuntime` setter calls.
+struct AppliedLimits {
+  memory: AtomicUsize,
+  stack: AtomicUsize,
+  gc: AtomicUsize,
+}
 
-    runtime.set_memory_limit(memory_limit).await;
-    runtime.set_max_stack_size(stack_size).await;
+impl Session {
+  /// Build the persistent VM: runtime, resource limits, sandbox-rooted
+  /// module loader, context, and one-time plugin install. The module
+  /// loader is bound to `context.sandbox` for the VM's lifetime, so a
+  /// session must always be driven with the same `script_root`.
+  pub async fn create(config: ScriptEngineConfig, context: &RunContext) -> Result<Self, ScriptError> {
+    let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("rquickjs runtime init: {e}")))?;
+
+    runtime.set_memory_limit(config.default_memory_limit).await;
+    runtime.set_max_stack_size(config.default_stack_size).await;
+    // Defer cycle-GC so short automation scripts don't mark-sweep
+    // mid-run (LLRT-style). Refcounting still frees acyclic garbage
+    // immediately; memory_limit is the hard cap.
+    runtime.set_gc_threshold(config.default_gc_threshold).await;
 
     // Module loader rooted at the sandbox — lets scripts `import './x.js'`.
     // Resolver and loader both check containment; rquickjs's built-in
     // ScriptLoader is replaced with our sandboxed pair so a rogue import
-    // can't escape `script_root`.
+    // can't escape `script_root`. Bound once: the sandbox is stable for
+    // the session's lifetime.
     runtime
       .set_loader(
         crate::modules::SandboxResolver::new(context.sandbox.clone()),
@@ -159,15 +239,129 @@ impl ScriptEngine {
       )
       .await;
 
-    // Timeout enforcement via interrupt handler. The handler fires regularly
-    // during script execution; once the deadline passes we signal `true` to
-    // halt the interpreter. `timed_out` is used to distinguish timeout from
-    // other interruptions when we build the error result.
+    let ctx = AsyncContext::full(&runtime)
+      .await
+      .map_err(|e| ScriptError::internal(format!("rquickjs context init: {e}")))?;
+
+    // Plugin bindings are server-global and immutable post-load, so they
+    // install exactly once. The per-tool wrappers dereference
+    // `globalThis.page` / `context` / `request` lazily at invocation,
+    // by which point `execute` has refreshed those bindings.
+    let plugins = context.plugins.clone();
+    // Cloned out of `context` (a `&RunContext`) so the async_with future
+    // owns them rather than borrowing across the await.
+    let vars = context.vars.clone();
+    let sandbox = context.sandbox.clone();
+    let artifacts = context.artifacts.clone();
+    let ud_ctx = ctx.clone();
+    let install: Result<(), ScriptError> = async_with!(ctx => |ctx| {
+      // Stash the session's AsyncContext so script-minted pages can
+      // thread it into PageJs (route/exposeFunction cross-task
+      // dispatch). A failure here only degrades those to "no async
+      // ctx" (same as before this fix) — never a correctness break.
+      let _ = ctx.store_userdata(SessionAsyncCtx(ud_ctx));
+      // Route-handler registry: session-once so `page.route` works on
+      // ANY page (script-launched `context.newPage()`, not just the
+      // MCP-prebound one whose `install_page` also creates it).
+      ctx
+        .eval::<(), _>(
+          b"globalThis.__fdRoutes ||= new Map(); globalThis.__fdRoutePreds ||= new Map();".as_slice(),
+        )
+        .map_err(|e| ScriptError::internal(format!("init route registry: {e}")))?;
+      // (No `__ferriJSON` intrinsic capture any more: result
+      // serialisation walks the JS value directly in Rust and never
+      // touches the JS `JSON` global, so a script reassigning
+      // `globalThis.JSON` in a persistent VM cannot affect it.)
+      install_runtime_shims(&ctx).map_err(|e| ScriptError::internal(format!("failed to install runtime shims: {e}")))?;
+
+      // Session-stable bindings: install ONCE, not per `execute`. Class
+      // prototypes are idempotent; `vars`/`fs`/`artifacts`/`browser_type`
+      // back onto Arcs that never change for a session's lifetime
+      // (server.rs keys `session_vars` + `script_sandbox` per session).
+      // Only per-call-variant handles (page/context/request/browser/
+      // console/args) refresh in `execute`.
+      crate::bindings::define_classes(&ctx)
+        .map_err(|e| ScriptError::internal(format!("failed to define classes: {e}")))?;
+      install_vars(&ctx, vars).map_err(|e| ScriptError::internal(format!("failed to install vars: {e}")))?;
+      install_fs(&ctx, sandbox).map_err(|e| ScriptError::internal(format!("failed to install fs: {e}")))?;
+      if let Some(artifacts) = artifacts {
+        crate::bindings::install_artifacts(&ctx, artifacts)
+          .map_err(|e| ScriptError::internal(format!("failed to install artifacts: {e}")))?;
+      }
+      crate::bindings::install_browser_type(&ctx)
+        .map_err(|e| ScriptError::internal(format!("failed to install browser_type: {e}")))?;
+
+      crate::bindings::install_plugins(&ctx, &plugins)
+        .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))
+    })
+    .await;
+    install?;
+
+    let applied = AppliedLimits {
+      memory: AtomicUsize::new(config.default_memory_limit),
+      stack: AtomicUsize::new(config.default_stack_size),
+      gc: AtomicUsize::new(config.default_gc_threshold),
+    };
+    Ok(Self {
+      runtime,
+      ctx,
+      config,
+      applied,
+    })
+  }
+
+  /// Push resource limits to the runtime, skipping any setter whose
+  /// value is unchanged since the last call (avoids the runtime's async
+  /// lock on the warm-session hot path).
+  async fn apply_limits(&self, memory: usize, stack: usize, gc: usize) {
+    if self.applied.memory.swap(memory, Ordering::Relaxed) != memory {
+      self.runtime.set_memory_limit(memory).await;
+    }
+    if self.applied.stack.swap(stack, Ordering::Relaxed) != stack {
+      self.runtime.set_max_stack_size(stack).await;
+    }
+    if self.applied.gc.swap(gc, Ordering::Relaxed) != gc {
+      self.runtime.set_gc_threshold(gc).await;
+    }
+  }
+
+  /// Execute one script against the persistent VM. Framework globals are
+  /// refreshed from `context` first; user `globalThis` state from prior
+  /// executions is preserved.
+  pub async fn execute(
+    &self,
+    source: &str,
+    args: &[serde_json::Value],
+    options: RunOptions,
+    context: &RunContext,
+  ) -> SessionRun {
+    let started = Instant::now();
+    let timeout = options.timeout.unwrap_or(self.config.default_timeout);
+    let memory_limit = options.memory_limit.unwrap_or(self.config.default_memory_limit);
+    let stack_size = options.stack_size.unwrap_or(self.config.default_stack_size);
+    let gc_threshold = options.gc_threshold.unwrap_or(self.config.default_gc_threshold);
+
+    let console = Arc::new(ConsoleCapture::new(
+      self.config.max_console_entries,
+      self.config.max_console_bytes,
+      self.config.max_console_entry_bytes,
+    ));
+
+    // Per-call resource overrides may differ from the session defaults;
+    // re-apply only the ones that actually changed (skips the runtime
+    // async lock on the warm-session hot path, where they never do).
+    self.apply_limits(memory_limit, stack_size, gc_threshold).await;
+
+    // Timeout enforcement via interrupt handler. The handler fires
+    // regularly during script execution; once the deadline passes we
+    // signal `true` to halt the interpreter. Reset each call with this
+    // call's deadline (overwrites any prior call's handler).
     let deadline = started + timeout;
     let timed_out = Arc::new(AtomicBool::new(false));
     {
       let timed_out = timed_out.clone();
-      runtime
+      self
+        .runtime
         .set_interrupt_handler(Some(Box::new(move || {
           if Instant::now() >= deadline {
             timed_out.store(true, Ordering::Relaxed);
@@ -179,33 +373,18 @@ impl ScriptEngine {
         .await;
     }
 
-    let ctx = match AsyncContext::full(&runtime).await {
-      Ok(c) => c,
-      Err(e) => {
-        return ScriptResult::err(
-          ScriptError::internal(format!("rquickjs context init: {e}")),
-          elapsed_ms(started),
-          console.drain(),
-        );
-      },
-    };
-
     let install = GlobalsInstall {
       console: console.clone(),
-      vars: context.vars.clone(),
-      sandbox: context.sandbox.clone(),
-      artifacts: context.artifacts.clone(),
       page: context.page.clone(),
       browser_context: context.browser_context.clone(),
       request: context.request.clone(),
       browser: context.browser.clone(),
-      plugins: context.plugins.clone(),
-      async_ctx: ctx.clone(),
+      async_ctx: self.ctx.clone(),
     };
     let source_owned = source.to_string();
 
-    let eval_result: Result<serde_json::Value, ScriptError> = async_with!(ctx => |ctx| {
-      if let Err(e) = install_globals(&ctx, &args_json, install) {
+    let eval_result: Result<serde_json::Value, ScriptError> = async_with!(self.ctx => |ctx| {
+      if let Err(e) = install_call_globals(&ctx, args, install) {
         return Err(ScriptError::internal(format!("failed to install globals: {e}")));
       }
 
@@ -229,12 +408,22 @@ impl ScriptEngine {
     let drained = console.drain();
 
     match eval_result {
-      Ok(value) => ScriptResult::ok(value, duration, drained),
+      Ok(value) => SessionRun {
+        result: ScriptResult::ok(value, duration, drained),
+        poisoned: false,
+      },
       Err(mut err) => {
-        if timed_out.load(Ordering::Relaxed) {
+        // A fired timeout interrupt force-halted the interpreter at an
+        // arbitrary point — the VM is no longer trustworthy and must be
+        // rebuilt. A plain JS throw does not poison.
+        let poisoned = timed_out.load(Ordering::Relaxed);
+        if poisoned {
           err = ScriptError::timeout(duration, timeout.as_millis() as u64);
         }
-        ScriptResult::err(err, duration, drained)
+        SessionRun {
+          result: ScriptResult::err(err, duration, drained),
+          poisoned,
+        }
       },
     }
   }
@@ -251,38 +440,36 @@ fn wrap_source(source: &str) -> String {
 /// surface grows.
 struct GlobalsInstall {
   console: Arc<ConsoleCapture>,
-  vars: Arc<dyn VarsStore>,
-  sandbox: Arc<PathSandbox>,
-  artifacts: Option<Arc<PathSandbox>>,
   page: Option<Arc<ferridriver::Page>>,
   browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
   browser: Option<Arc<ferridriver::Browser>>,
-  plugins: Vec<crate::bindings::PluginBinding>,
   /// `AsyncContext` driving the script — passed to `install_page` so
   /// `page.route` callbacks can dispatch back into JS from a separate
-  /// tokio task. Always present (cloned from the engine's context).
+  /// tokio task. Always present (cloned from the session's context).
   async_ctx: AsyncContext,
 }
 
-/// Install the sandbox globals: `args`, `console`, `vars`, `fs`, and any of
-/// `artifacts` / `page` / `context` / `request` that the run context carries.
-fn install_globals(ctx: &Ctx<'_>, args_json: &str, inst: GlobalsInstall) -> rquickjs::Result<()> {
+/// Reinstall ONLY the per-call-variant globals: `args`, `console`, and
+/// whichever of `page` / `context` / `request` / `browser` the run
+/// context carries (their backend handles are re-resolved every call).
+/// `vars` / `fs` / `artifacts` / `browser_type` / class prototypes are
+/// session-stable and installed once at [`Session::create`]; plugin
+/// bindings likewise.
+fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: GlobalsInstall) -> rquickjs::Result<()> {
   let globals = ctx.globals();
 
-  // args: deserialise via JSON.parse so array/object args round-trip cleanly
-  // without per-type conversion code.
-  let args_src = format!("JSON.parse({})", json_literal(args_json));
-  let args_value: Value<'_> = ctx.eval(args_src.as_bytes())?;
-  globals.set("args", args_value)?;
+  // args: build the JS array directly from the serde values — no JSON
+  // string, no JS-side `JSON.parse`, and immune to a script reassigning
+  // `globalThis.JSON` in a persistent VM.
+  let args_arr = rquickjs::Array::new(ctx.clone())?;
+  for (i, a) in args.iter().enumerate() {
+    args_arr.set(i, crate::bindings::convert::json_to_js(ctx, a)?)?;
+  }
+  globals.set("args", args_arr)?;
 
   install_console(ctx, inst.console)?;
-  install_vars(ctx, inst.vars)?;
-  install_fs(ctx, inst.sandbox)?;
 
-  if let Some(artifacts) = inst.artifacts {
-    crate::bindings::install_artifacts(ctx, artifacts)?;
-  }
   if let Some(page) = inst.page {
     crate::bindings::install_page(ctx, page, inst.async_ctx.clone())?;
   }
@@ -296,28 +483,22 @@ fn install_globals(ctx: &Ctx<'_>, args_json: &str, inst: GlobalsInstall) -> rqui
     crate::bindings::install_request(ctx, req)?;
   }
 
-  // The chromium / firefox / webkit globals are always available —
-  // they don't depend on any per-script handle. Mirrors Playwright's
-  // `import { chromium } from 'playwright'`, which is universally
-  // accessible once the package is loaded.
-  crate::bindings::install_browser_type(ctx)?;
-
-  // Plugin bindings (and the singleton commands runner) come last so
-  // wrappers can dereference `globalThis.page` / `globalThis.context`
-  // / `globalThis.request` if those were installed above.
-  crate::bindings::install_plugins(ctx, &inst.plugins)?;
-
   Ok(())
 }
 
-/// Shell-safe quote a JSON string as a JS string literal.
-fn json_literal(json: &str) -> String {
-  let escaped = json.replace('\\', r"\\").replace('`', r"\`").replace("${", r"\${");
-  format!("`{escaped}`")
-}
-
 fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs::Result<()> {
-  let native = Object::new(ctx.clone())?;
+  use std::fmt::Write as _;
+
+  use rquickjs::function::Rest;
+
+  // Reuse rquickjs-extra-console's Node-style value renderer (handles
+  // `%s`/`%d` substitution, arrays, objects, `[Function: name]`, Symbol,
+  // bounded depth) — but route the rendered line into our
+  // `ConsoleCapture` sink instead of the `log` crate, so it still
+  // surfaces in `ScriptResult.console[]` for the MCP caller. The
+  // formatter is stateless (`max_depth` only), cheap to clone per level.
+  let formatter = rquickjs_extra_console::Formatter::builder().max_depth(3).build();
+  let console = Object::new(ctx.clone())?;
 
   for (name, level) in [
     ("log", ConsoleLevel::Log),
@@ -327,45 +508,43 @@ fn install_console(ctx: &Ctx<'_>, capture: Arc<ConsoleCapture>) -> rquickjs::Res
     ("debug", ConsoleLevel::Debug),
   ] {
     let cap = capture.clone();
-    native.set(
+    let fmt = formatter.clone();
+    console.set(
       name,
-      Func::from(move |msg: String| {
+      Func::from(move |args: Rest<Value<'_>>| -> rquickjs::Result<()> {
+        let mut msg = String::new();
+        for (i, v) in args.0.into_iter().enumerate() {
+          if i > 0 {
+            let _ = msg.write_char(' ');
+          }
+          fmt.format(&mut msg, v)?;
+        }
         cap.push(level, strip_ansi(&msg));
+        Ok(())
       }),
     )?;
   }
 
-  ctx.globals().set("__ferridriver_console_native", native)?;
+  ctx.globals().set("console", console)?;
+  Ok(())
+}
 
-  // JS-side formatter that turns variadic args into a single display string,
-  // matching the usual console semantics (JSON.stringify for objects).
-  ctx.eval::<(), _>(
-    r"
-    globalThis.console = (() => {
-      const native = globalThis.__ferridriver_console_native;
-      const fmt = (a) => {
-        if (a === null) return 'null';
-        if (a === undefined) return 'undefined';
-        if (typeof a === 'string') return a;
-        if (typeof a === 'number' || typeof a === 'boolean' || typeof a === 'bigint') return String(a);
-        if (typeof a === 'function') return a.toString();
-        if (typeof a === 'symbol') return a.toString();
-        try { return JSON.stringify(a); } catch (_) { return String(a); }
-      };
-      const write = (level, parts) => native[level](parts.map(fmt).join(' '));
-      return {
-        log:   (...a) => write('log', a),
-        info:  (...a) => write('info', a),
-        warn:  (...a) => write('warn', a),
-        error: (...a) => write('error', a),
-        debug: (...a) => write('debug', a),
-      };
-    })();
-    delete globalThis.__ferridriver_console_native;
-  "
-    .as_bytes(),
-  )?;
-
+/// Install the session-lifetime runtime shims: timers, URL, and a few
+/// hand-rolled web globals. Called once at [`Session::create`]; these
+/// PERSIST across executions (browser/REPL-like) and are cancelled only
+/// when the session VM is dropped (poison / eviction / session end) —
+/// dropping the `AsyncRuntime` aborts every `setInterval`/`setTimeout`
+/// task `ctx.spawn`ed by the timers module, so no per-call teardown is
+/// needed. Sandbox-safe surface only — `os` / `sqlite` are deliberately
+/// excluded so scripts cannot escape the filesystem/db sandbox.
+fn install_runtime_shims(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+  // Native timers (setTimeout/Interval, ctx.spawn-backed) and the
+  // URLSearchParams class.
+  rquickjs_extra_timers::init(ctx)?;
+  rquickjs_extra_url::init(ctx)?;
+  // Native TextEncoder/TextDecoder/URL classes + queueMicrotask/btoa/
+  // atob — all real #[rquickjs::class]/Func bindings, no JS glue.
+  crate::bindings::webapi::install(ctx)?;
   Ok(())
 }
 
@@ -510,13 +689,24 @@ fn to_rq_error(err: &ScriptError) -> rquickjs::Error {
   rquickjs::Error::new_from_js_message("fs", "sandbox", err.message.clone())
 }
 
-fn value_to_json<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
-  // Round-trip through JSON.stringify; handles arrays/objects/primitives
-  // uniformly without per-type conversion.
-  let json_global: Object<'js> = ctx.globals().get("JSON").ok()?;
-  let stringify: Function<'js> = json_global.get("stringify").ok()?;
-  let serialized: Option<String> = stringify.call((value,)).ok();
-  serialized.and_then(|s| serde_json::from_str(&s).ok())
+/// Convert the script's return value to `serde_json::Value`.
+///
+/// Uses `rquickjs-serde` (`from_value`) — the same standard, direct
+/// `rquickjs::Value` → serde deserializer every other binding already
+/// uses (`convert::serde_from_js`). No `JSON.stringify` string
+/// round-trip, no `serde_json::Value` middle hop beyond the target
+/// itself, no custom walker, and no dependence on the JS `JSON` global
+/// (immune to a script reassigning it). `rquickjs-serde`'s `de.rs` is
+/// `JSON.stringify`-equivalent: it invokes `toJSON()` / `valueOf()`
+/// (so a returned `Date` still serialises as its ISO string), coerces
+/// whole f64 in the safe-integer range to `i64` (so result fields read
+/// back through `serde_json::Value::as_u64()` / `as_i64()`), drops
+/// `undefined` / function / symbol, and renders non-finite as null —
+/// behaviourally the same as the old `JSON.stringify` path, minus the
+/// round-trip and the custom walker. Cycles / non-serialisable values
+/// error → `None` → `null`, matching the old swallow-on-throw.
+fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
+  rquickjs_serde::from_value(value).ok()
 }
 
 fn caught_to_script_error(caught: rquickjs::CaughtError<'_>, source: &str) -> ScriptError {

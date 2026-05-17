@@ -9,7 +9,7 @@ async fn press_key(world: &mut BrowserWorld, key: String) {
   world
     .page()
     .keyboard()
-    .press(&key)
+    .press(&key, None)
     .await
     .map_err(|e| StepError::wrap(format!("press \"{key}\""), e))?;
 }
@@ -29,7 +29,7 @@ async fn type_text(world: &mut BrowserWorld, text: String) {
   world
     .page()
     .keyboard()
-    .r#type(&text)
+    .r#type(&text, None)
     .await
     .map_err(|e| StepError::wrap(format!("type \"{text}\""), e))?;
 }
@@ -40,7 +40,7 @@ async fn press_with_modifier(world: &mut BrowserWorld, key: String, modifier: St
   world
     .page()
     .keyboard()
-    .press(&combo)
+    .press(&combo, None)
     .await
     .map_err(|e| StepError::wrap(format!("press \"{combo}\""), e))?;
 }
