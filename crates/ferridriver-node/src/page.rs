@@ -1326,9 +1326,10 @@ impl Page {
     self.inner.aria_snapshot(opts).await.map_err(crate::error::to_napi)
   }
 
-  /// Playwright internal: `page.startScreencast(quality, maxWidth, maxHeight, callback)`.
-  /// Begins streaming JPEG frames; the callback fires for each frame
-  /// with `{ frame: Buffer, timestamp: number }`. Call
+  /// ferridriver-specific (NOT Playwright): `startScreencast(quality,
+  /// maxWidth, maxHeight, callback)`. Begins streaming JPEG frames; the
+  /// callback fires for each frame with `{ frame: Buffer, timestamp:
+  /// number }` (backed by CDP `Page.startScreencast`). Call
   /// `stopScreencast()` to halt.
   ///
   /// Backends: CDP-pipe / CDP-raw via `Page.startScreencast`. BiDi
