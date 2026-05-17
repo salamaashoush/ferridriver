@@ -1091,12 +1091,12 @@ impl Page {
 
   #[napi]
   pub async fn type_str(&self, text: String) -> Result<()> {
-    self.inner.keyboard().r#type(&text).await.map_err(crate::error::to_napi)
+    self.inner.keyboard().r#type(&text, None).await.map_err(crate::error::to_napi)
   }
 
   #[napi]
   pub async fn press_key(&self, key: String) -> Result<()> {
-    self.inner.keyboard().press(&key).await.map_err(crate::error::to_napi)
+    self.inner.keyboard().press(&key, None).await.map_err(crate::error::to_napi)
   }
 
   // ── Emulation ───────────────────────────────────────────────────────────
@@ -1778,6 +1778,13 @@ pub struct MouseClickOptions {
   pub button: Option<String>,
   #[napi(js_name = "clickCount")]
   pub click_count: Option<i32>,
+  pub delay: Option<f64>,
+}
+
+/// Playwright `{ delay? }` for `keyboard.press` / `keyboard.type`.
+#[napi(object)]
+pub struct KeyDelayOptions {
+  pub delay: Option<f64>,
 }
 
 #[napi]
@@ -1797,14 +1804,26 @@ impl Keyboard {
     self.page.keyboard().up(&key).await.map_err(crate::error::to_napi)
   }
 
+  /// Playwright: `keyboard.press(key, options?: { delay? })`.
   #[napi]
-  pub async fn press(&self, key: String) -> Result<()> {
-    self.page.keyboard().press(&key).await.map_err(crate::error::to_napi)
+  pub async fn press(&self, key: String, options: Option<KeyDelayOptions>) -> Result<()> {
+    let opts = options
+      .and_then(|o| o.delay)
+      .map(|d| ferridriver::page::KeyboardPressOptions {
+        delay: Some(crate::types::f64_to_u64(d)),
+      });
+    self.page.keyboard().press(&key, opts).await.map_err(crate::error::to_napi)
   }
 
+  /// Playwright: `keyboard.type(text, options?: { delay? })`.
   #[napi(js_name = "type")]
-  pub async fn type_text(&self, text: String) -> Result<()> {
-    self.page.keyboard().r#type(&text).await.map_err(crate::error::to_napi)
+  pub async fn type_text(&self, text: String, options: Option<KeyDelayOptions>) -> Result<()> {
+    let opts = options
+      .and_then(|o| o.delay)
+      .map(|d| ferridriver::page::KeyboardTypeOptions {
+        delay: Some(crate::types::f64_to_u64(d)),
+      });
+    self.page.keyboard().r#type(&text, opts).await.map_err(crate::error::to_napi)
   }
 
   #[napi(js_name = "insertText")]
@@ -1834,6 +1853,7 @@ impl Mouse {
         .as_ref()
         .and_then(|o| o.click_count)
         .and_then(|n| u32::try_from(n).ok()),
+      delay: options.as_ref().and_then(|o| o.delay).map(crate::types::f64_to_u64),
     };
     self
       .page
@@ -1865,6 +1885,7 @@ impl Mouse {
     let opts = ferridriver::page::MouseClickOptions {
       button: options.as_ref().and_then(|o| o.button.clone()),
       click_count: None,
+      delay: options.as_ref().and_then(|o| o.delay).map(crate::types::f64_to_u64),
     };
     self
       .page

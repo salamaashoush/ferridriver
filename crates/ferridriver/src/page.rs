@@ -2570,8 +2570,17 @@ impl Keyboard<'_> {
   /// # Errors
   ///
   /// Returns an error if the key press dispatch fails.
-  pub async fn press(&self, key: &str) -> Result<()> {
-    self.page.press_key(key).await
+  pub async fn press(&self, key: &str, opts: Option<KeyboardPressOptions>) -> Result<()> {
+    match opts.and_then(|o| o.delay) {
+      // Playwright `delay` waits between keydown and keyup. Combos
+      // ("Control+a") keep the atomic `press_key` path.
+      Some(ms) if !key.contains('+') => {
+        self.page.key_down(key).await?;
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+        self.page.key_up(key).await
+      },
+      _ => self.page.press_key(key).await,
+    }
   }
 
   /// Type text character by character with full keyboard events.
@@ -2583,11 +2592,15 @@ impl Keyboard<'_> {
   /// # Errors
   ///
   /// Returns an error if the typing dispatch fails.
-  pub async fn r#type(&self, text: &str) -> Result<()> {
+  pub async fn r#type(&self, text: &str, opts: Option<KeyboardTypeOptions>) -> Result<()> {
+    let delay = opts.and_then(|o| o.delay);
+    let mut first = true;
     for ch in text.chars() {
-      let s = ch.to_string();
-      // Single printable ASCII characters and common keys get full key events
-      self.page.press_key(&s).await?;
+      if let (false, Some(ms)) = (first, delay) {
+        tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+      }
+      first = false;
+      self.page.press_key(&ch.to_string()).await?;
     }
     Ok(())
   }
@@ -2621,7 +2634,18 @@ impl Mouse<'_> {
   pub async fn click(&self, x: f64, y: f64, opts: Option<MouseClickOptions>) -> Result<()> {
     let button = opts.as_ref().and_then(|o| o.button.as_deref()).unwrap_or("left");
     let count = opts.as_ref().and_then(|o| o.click_count).unwrap_or(1);
-    self.page.click_at_opts(x, y, button, count).await
+    match opts.as_ref().and_then(|o| o.delay) {
+      Some(ms) => {
+        self.page.move_mouse(x, y).await?;
+        for _ in 0..count {
+          self.page.mouse_down(x, y, button).await?;
+          tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+          self.page.mouse_up(x, y, button).await?;
+        }
+        Ok(())
+      },
+      None => self.page.click_at_opts(x, y, button, count).await,
+    }
   }
 
   /// Move mouse to coordinates.
@@ -2653,6 +2677,9 @@ impl Mouse<'_> {
     self.page.move_mouse(x, y).await?;
     self.page.mouse_down(x, y, button).await?;
     self.page.mouse_up(x, y, button).await?;
+    if let Some(ms) = opts.as_ref().and_then(|o| o.delay) {
+      tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
+    }
     self.page.mouse_down(x, y, button).await?;
     self.page.mouse_up(x, y, button).await?;
     Ok(())
@@ -2705,6 +2732,23 @@ pub struct MouseClickOptions {
   pub button: Option<String>,
   /// Click count (1=single, 2=double, 3=triple)
   pub click_count: Option<u32>,
+  /// Milliseconds to wait between `mousedown` and `mouseup`
+  /// (Playwright `delay`).
+  pub delay: Option<u64>,
+}
+
+/// Options for `Keyboard.press()` — Playwright `{ delay? }`.
+#[derive(Debug, Clone, Default)]
+pub struct KeyboardPressOptions {
+  /// Milliseconds to wait between `keydown` and `keyup`.
+  pub delay: Option<u64>,
+}
+
+/// Options for `Keyboard.type()` — Playwright `{ delay? }`.
+#[derive(Debug, Clone, Default)]
+pub struct KeyboardTypeOptions {
+  /// Milliseconds to wait between key presses.
+  pub delay: Option<u64>,
 }
 
 /// Options for `Mouse.down()`.
