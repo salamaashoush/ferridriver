@@ -234,35 +234,74 @@ pub struct BidiPage {
 }
 
 pub struct InjectedScriptManager {
-  injected: AtomicBool,
+  /// Browsing-context ids that already have `window.__fd`. `BiDi` has no
+  /// single "page" realm — every frame (including freshly-attached /
+  /// `srcdoc` / `data:` child contexts) is its own browsing context and
+  /// needs the engine injected separately before a frame-scoped query
+  /// can run there. Tracked per-context so the first use of a child
+  /// context injects on demand.
+  injected: std::sync::Mutex<rustc_hash::FxHashSet<String>>,
 }
 
 impl InjectedScriptManager {
   fn new() -> Self {
     Self {
-      injected: AtomicBool::new(false),
+      injected: std::sync::Mutex::new(rustc_hash::FxHashSet::default()),
     }
   }
 
+  /// Drop all injection state — a top-level navigation (goto/reload)
+  /// tears down every context, children included.
   fn reset(&self) {
-    self.injected.store(false, Ordering::Relaxed);
+    if let Ok(mut s) = self.injected.lock() {
+      s.clear();
+    }
   }
 
+  /// Drop one context's injection state — that specific context
+  /// navigated, so its `window.__fd` is gone and must be re-injected on
+  /// next use. A child iframe reloading must not invalidate the main
+  /// context's engine (and vice-versa).
+  fn reset_context(&self, ctx: &str) {
+    if ctx.is_empty() {
+      return;
+    }
+    if let Ok(mut s) = self.injected.lock() {
+      s.remove(ctx);
+    }
+  }
+
+  /// Engine into the page's main context. Back-compat entry point used
+  /// by `ensure_engine_injected` / `injected_script`.
   async fn ensure(&self, page: &BidiPage) -> Result<()> {
-    if !self.injected.load(Ordering::Relaxed) {
-      let full_check_js = crate::selectors::build_lazy_inject_js();
-      let _ = page
-        .cmd(
-          "script.evaluate",
-          json!({
-            "expression": full_check_js,
-            "target": {"context": &*page.context_id},
-            "awaitPromise": true,
-            "resultOwnership": "none"
-          }),
-        )
-        .await?;
-      self.injected.store(true, Ordering::Relaxed);
+    let ctx = page.context_id.clone();
+    self.ensure_in(page, &ctx).await
+  }
+
+  /// Engine into `ctx` (idempotent per context). The lazy-inject JS
+  /// itself guards against double-install (`if (window.__fd) return`),
+  /// so a racing concurrent call is harmless — the membership check is
+  /// a fast-path, not a correctness lock.
+  async fn ensure_in(&self, page: &BidiPage, ctx: &str) -> Result<()> {
+    if let Ok(s) = self.injected.lock() {
+      if s.contains(ctx) {
+        return Ok(());
+      }
+    }
+    let full_check_js = crate::selectors::build_lazy_inject_js();
+    page
+      .cmd(
+        "script.evaluate",
+        json!({
+          "expression": full_check_js,
+          "target": {"context": ctx},
+          "awaitPromise": true,
+          "resultOwnership": "none"
+        }),
+      )
+      .await?;
+    if let Ok(mut s) = self.injected.lock() {
+      s.insert(ctx.to_string());
     }
     Ok(())
   }
@@ -411,7 +450,15 @@ impl BidiPage {
   }
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<serde_json::Value>> {
-    // In BiDi, frames ARE browsing contexts
+    // In BiDi, frames ARE browsing contexts. A frame-scoped eval
+    // (selector engine queries) needs `window.__fd` in that child
+    // context — inject on demand after the child is parseable
+    // (Residual 2). Skip for the main context (already injected by the
+    // caller's `ensure_engine_injected`).
+    if frame_id != &*self.context_id {
+      self.wait_context_ready(frame_id).await?;
+      self.ensure_engine_injected_in(frame_id).await?;
+    }
     self.eval_internal(expression, frame_id).await
   }
 
@@ -600,6 +647,53 @@ impl BidiPage {
     self.injected_script.ensure(self).await
   }
 
+  /// Ensure the engine is injected into a specific browsing context.
+  /// Used before frame-scoped queries so freshly-attached / `srcdoc` /
+  /// `data:` child contexts have `window.__fd` (Residual 2).
+  pub async fn ensure_engine_injected_in(&self, ctx: &str) -> Result<()> {
+    self.injected_script.ensure_in(self, ctx).await
+  }
+
+  /// Block until `ctx` has a usable document, then return. Fast-path:
+  /// `document.readyState` is `interactive`/`complete` (true for
+  /// `srcdoc` / `data:` children, which parse synchronously) — returns
+  /// immediately, no sleep. Otherwise wait on the real `BiDi`
+  /// `browsingContext.domContentLoaded` / `load` event for that context
+  /// (no fixed delay), bounded so a wedged child can't hang a query.
+  async fn wait_context_ready(&self, ctx: &str) -> Result<()> {
+    // Fast path: query readiness directly. A successful evaluate also
+    // proves the context is reachable.
+    if let Ok(Some(v)) = self.eval_internal("document.readyState", ctx).await {
+      if let Some(s) = v.as_str() {
+        if s == "interactive" || s == "complete" {
+          return Ok(());
+        }
+      }
+    }
+    // Slow path: the child is still parsing — wait for its own
+    // domContentLoaded/load event (BiDi reports child events with
+    // `context` == the child id).
+    let mut rx = self.session.transport.subscribe_events();
+    let target = ctx.to_string();
+    let waited = tokio::time::timeout(std::time::Duration::from_secs(30), async move {
+      while let Ok(event) = rx.recv().await {
+        if matches!(
+          event.method.as_str(),
+          "browsingContext.domContentLoaded" | "browsingContext.load"
+        ) && event.params.get("context").and_then(|v| v.as_str()) == Some(target.as_str())
+        {
+          return;
+        }
+      }
+    })
+    .await;
+    // A timeout here is not fatal — the caller's own retry/deadline
+    // still governs; we just stop blocking. The subsequent query will
+    // surface a precise "no element found" if the child never loaded.
+    let _ = waited;
+    Ok(())
+  }
+
   pub async fn evaluate(&self, expression: &str) -> Result<Option<serde_json::Value>> {
     self.eval_internal(expression, &self.context_id).await
   }
@@ -629,6 +723,18 @@ impl BidiPage {
     let is_function = js.trim_start().starts_with("function") || js.trim_start().starts_with('(');
 
     let target_ctx: &str = frame_id.unwrap_or(&self.context_id);
+
+    // Frame-scoped resolution runs `window.__fd.selOne(...)` inside the
+    // child browsing context. Ensure the engine is present there (and
+    // the child is parseable) before querying — covers freshly-attached
+    // / `srcdoc` / `data:` children (Residual 2). Main context is
+    // already injected by the caller's `ensure_engine_injected`.
+    if let Some(fid) = frame_id {
+      if fid != &*self.context_id {
+        self.wait_context_ready(fid).await?;
+        self.ensure_engine_injected_in(fid).await?;
+      }
+    }
 
     let result = if is_function {
       self
@@ -1704,7 +1810,12 @@ impl BidiPage {
           | "browsingContext.fragmentNavigated"
           | "browsingContext.domContentLoaded"
           | "browsingContext.load" => {
-            injected_script.reset();
+            // Scope the engine-state reset to the context that actually
+            // navigated. A child iframe reloading must not wipe the
+            // main context's `window.__fd` (and vice-versa) — that
+            // blanket reset was forcing a redundant re-inject every
+            // time any frame fired a lifecycle event (Residual 2).
+            injected_script.reset_context(event_ctx);
           },
           "log.entryAdded" => {
             // Mirrors Playwright's `bidiPage.ts::_onLogEntryAdded`.
