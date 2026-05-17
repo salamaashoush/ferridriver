@@ -1423,9 +1423,10 @@ impl PageJs {
     }
   }
 
-  /// Playwright: `page.snapshotForAI(options?)`.
-  ///
-  /// Returns `{ full: string, incremental?: string, refMap: Record<string, number> }`.
+  /// ferridriver-specific (NOT Playwright): structured AI snapshot
+  /// `{ full: string, incremental?: string, refMap: Record<string, number> }`.
+  /// Playwright's public accessibility API is `ariaSnapshot` (string);
+  /// this richer shape feeds the MCP server's incremental tracking.
   #[qjs(rename = "snapshotForAI")]
   pub async fn snapshot_for_ai<'js>(
     &self,
@@ -1461,6 +1462,32 @@ impl PageJs {
     }
     obj.set("refMap", ref_map)?;
     rquickjs::IntoJs::into_js(obj, &ctx)
+  }
+
+  /// Playwright `page.ariaSnapshot(options?): Promise<string>`.
+  #[qjs(rename = "ariaSnapshot")]
+  pub async fn aria_snapshot<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<String> {
+    let core_opts = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        #[derive(serde::Deserialize, Default)]
+        #[serde(rename_all = "camelCase", default)]
+        struct JsSnap {
+          depth: Option<i32>,
+          track: Option<String>,
+        }
+        let p: JsSnap = crate::bindings::convert::serde_from_js(&ctx, v)?;
+        ferridriver::snapshot::SnapshotOptions {
+          depth: p.depth,
+          track: p.track,
+        }
+      },
+      _ => ferridriver::snapshot::SnapshotOptions::default(),
+    };
+    self.inner.aria_snapshot(core_opts).await.into_js()
   }
 
   /// Playwright: `page.exposeFunction(name, callback)`. Binds

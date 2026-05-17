@@ -180,6 +180,8 @@ await page.emulateMedia({ colorScheme:'dark' }); ok('page.emulateMedia', true);
 await page.setViewportSize({ width: 800, height: 600 }); ok('page.setViewportSize', true);
 const aiSnap = await page.snapshotForAI();
 ok('page.snapshotForAI', aiSnap && typeof aiSnap.full === 'string');
+const aria = await page.ariaSnapshot();
+ok('page.ariaSnapshot', typeof aria === 'string' && aria.length > 0);
 ok('page.markdown', typeof (await page.markdown()) === 'string');
 
 // ── page: frames ────────────────────────────────────────────────────
