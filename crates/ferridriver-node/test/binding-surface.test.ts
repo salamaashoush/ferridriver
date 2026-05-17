@@ -129,6 +129,28 @@ for (const backend of BACKENDS) {
       expect(sAi).toMatch(/\[ref=/);
     });
 
+    it("locator.ariaSnapshot stitches child iframes (ai mode)", async () => {
+      await page.setContent(
+        "<main><h1>Top</h1>" +
+          "<iframe id='f' srcdoc=\"<button id='ib'>InnerBtn</button>" +
+          "<iframe id='g' src='data:text/html,<b>DeepText</b>'></iframe>\"></iframe>" +
+          "</main>",
+      );
+      // mode:'ai' assigns iframe refs -> child browsing contexts are
+      // snapshotted recursively and spliced (Playwright
+      // ariaSnapshotForFrame). Nested two levels: srcdoc -> data:.
+      const ai = await page.locator("main").ariaSnapshot({ mode: "ai" });
+      expect(ai).toMatch(/\[ref=/);
+      expect(ai).toContain("Top");
+      expect(ai).toContain("InnerBtn");
+      expect(ai).toContain("DeepText");
+      // mode:'default' assigns no refs -> no stitch (exact Playwright).
+      const def = await page.locator("main").ariaSnapshot();
+      expect(def).not.toContain("InnerBtn");
+      expect(def).not.toContain("DeepText");
+      expect(def).not.toMatch(/\[ref=/);
+    });
+
     it("page.frameLocator works at page scope", async () => {
       await page.setContent("<iframe srcdoc='<p>x</p>'></iframe>");
       const fl = page.frameLocator("iframe");

@@ -2600,6 +2600,18 @@ impl BidiPage {
 
     let target_ctx: &str = frame_id.unwrap_or(&self.context_id);
 
+    // A utility eval targeting a child browsing context (e.g. the
+    // recursive cross-iframe `ariaSnapshot` stitch running
+    // `window.__fd.incrementalAriaSnapshot(document.body, ...)` inside
+    // an iframe) needs the engine present in that context, and the
+    // child to be parseable. Same chokepoint as `evaluate_to_element`
+    // / `evaluate_in_frame` (Residual 2) — main context is already
+    // injected above.
+    if target_ctx != &*self.context_id {
+      self.wait_context_ready(target_ctx).await?;
+      self.ensure_engine_injected_in(target_ctx).await?;
+    }
+
     let args_json = serde_json::to_string(args)?;
     let count = args.len();
 
