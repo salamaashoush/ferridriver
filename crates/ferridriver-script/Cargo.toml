@@ -32,7 +32,10 @@ url = "2"
 # undefined/function drop parity, Proxy + cycle handling.
 rquickjs-serde = "0.5"
 
-rquickjs = { version = "0.11", features = ["macro", "futures", "parallel", "loader", "array-buffer"] }
+# `full-async` does NOT imply `parallel`; without it the AsyncRuntime is
+# !Send/!Sync and the cross-task route/exposeFunction closures (which
+# must be `Arc<dyn Fn + Send + Sync>`) fail to compile. Keep `parallel`.
+rquickjs = { version = "0.11", features = ["full-async", "parallel", "macro", "loader", "array-buffer"] }
 
 # Sandbox-safe extras only: timers (setTimeout/Interval), URL/URLSearchParams,
 # and the console Formatter (we reuse only its Node-style renderer, not its
