@@ -156,22 +156,6 @@ impl McpServer {
     ));
 
     let browser_handle = std::sync::Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
-    let plugin_bindings = self
-      .plugins
-      .files()
-      .iter()
-      .map(|f| ferridriver_script::PluginBinding {
-        source: f.source.clone(),
-        tools: f
-          .tools
-          .iter()
-          .map(|t| ferridriver_script::PluginToolBinding {
-            name: t.name.clone(),
-            allowed_commands: t.allow.commands.clone(),
-          })
-          .collect(),
-      })
-      .collect();
     let context = RunContext {
       vars,
       sandbox,
@@ -180,10 +164,10 @@ impl McpServer {
       browser_context: Some(std::sync::Arc::new(ctx_ref)),
       request: Some(request),
       browser: Some(browser_handle),
-      plugins: plugin_bindings,
+      plugins: self.plugin_bindings(),
     };
 
-    let result = self.script_engine.run(&source, &args, options, context).await;
+    let result = self.run_in_session(&session, &source, &args, options, context).await;
 
     let json = serde_json::to_string_pretty(&result).map_err(|e| McpServer::err(format!("serialize result: {e}")))?;
 
