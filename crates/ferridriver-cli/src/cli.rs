@@ -45,6 +45,11 @@ pub enum Command {
   /// Run cargo unit/integration tests via nextest (or cargo test).
   Test(TestArgs),
 
+  /// Execute a JS script with Playwright-style bindings (script
+  /// launches its own browser via `chromium()` / `firefox()` /
+  /// `webkit()`).
+  Run(RunArgs),
+
   /// Generate test scaffolding from recorded interactions.
   Codegen(CodegenArgs),
 
@@ -138,6 +143,28 @@ pub struct TestArgs {
 pub enum TestRunner {
   Nextest,
   Cargo,
+}
+
+// ── run subcommand ──────────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct RunArgs {
+  /// Script file (`.js`/`.mjs`), or `-` to read source from stdin.
+  /// Omit when using `--eval`.
+  pub script: Option<String>,
+
+  /// Inline script source (alternative to a file / stdin).
+  #[arg(short = 'e', long = "eval", conflicts_with = "script")]
+  pub eval: Option<String>,
+
+  /// Per-script wall-clock timeout in milliseconds.
+  #[arg(long)]
+  pub timeout_ms: Option<u64>,
+
+  /// Positional args exposed to the script as the `args` global
+  /// (strings). Pass after `--`.
+  #[arg(last = true)]
+  pub script_args: Vec<String>,
 }
 
 // ── codegen subcommand ──────────────────────────────────────────────────
