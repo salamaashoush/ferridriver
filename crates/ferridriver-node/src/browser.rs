@@ -116,11 +116,16 @@ impl Browser {
     self.inner.close(opts).await.into_napi()
   }
 
-  /// List all browser contexts.
+  /// List all browser contexts. Sync — mirrors Playwright's
+  /// `browser.contexts(): BrowserContext[]`.
   #[napi]
-  pub async fn contexts(&self) -> Result<Vec<crate::context::BrowserContext>> {
-    let contexts = self.inner.contexts().await;
-    Ok(contexts.into_iter().map(crate::context::BrowserContext::wrap).collect())
+  pub fn contexts(&self) -> Vec<crate::context::BrowserContext> {
+    self
+      .inner
+      .contexts()
+      .into_iter()
+      .map(crate::context::BrowserContext::wrap)
+      .collect()
   }
 
   /// Real product version string (e.g. `"HeadlessChrome/120.0.6099.109"`).
@@ -129,9 +134,10 @@ impl Browser {
     self.inner.version().to_string()
   }
 
-  /// Check if the browser is connected.
+  /// Whether the browser is connected. Sync — mirrors Playwright's
+  /// `browser.isConnected(): boolean`.
   #[napi]
-  pub async fn is_connected(&self) -> bool {
-    self.inner.is_connected().await
+  pub fn is_connected(&self) -> bool {
+    self.inner.is_connected()
   }
 }

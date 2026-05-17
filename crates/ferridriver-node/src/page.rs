@@ -8,7 +8,7 @@ use crate::types::{
 };
 use ferridriver::protocol::SerializedArgument;
 use napi::Result;
-use napi::bindgen_prelude::Buffer;
+use napi::bindgen_prelude::{Buffer, JsObjectValue as _, JsValue as _};
 use napi_derive::napi;
 use std::sync::{Arc, Mutex};
 
@@ -40,10 +40,73 @@ pub type PageWaitForEventResult = napi::bindgen_prelude::Either9<
 >;
 
 /// High-level page API, mirrors Playwright's Page interface.
+/// Predicate return: a `(req|res|url) => boolean | Promise<boolean>`
+/// function resolves to either arm.
+type PredReturn = napi::Either<bool, napi::bindgen_prelude::Promise<bool>>;
+
+/// A `page.route(predicateFn, handler)` registration. The core matcher
+/// is always-true (unique `Arc` identity); `pred_ref` keeps the JS
+/// function so `unroute(fn)` can match it by `===`.
+struct PredRoute {
+  matcher: ferridriver::url_matcher::UrlMatcher,
+  pred_ref: napi::bindgen_prelude::FunctionRef<JsUrl, PredReturn>,
+}
+
+/// Carries a URL string into JS as a real `URL` instance — the
+/// `route(predicate)` predicate receives `(url: URL)`. The conversion
+/// runs on the JS thread (same `ToNapiValue`-builds-an-object trick as
+/// `web_error::JsErrorValue`), so no borrowed handle escapes a
+/// threadsafe-function arg transform.
+pub struct JsUrl(String);
+
+impl napi::bindgen_prelude::ToNapiValue for JsUrl {
+  unsafe fn to_napi_value(raw_env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
+    let env = napi::Env::from_raw(raw_env);
+    let url_ctor = env
+      .get_global()?
+      .get_named_property_unchecked::<napi::bindgen_prelude::Function<'_, napi::JsString<'_>, ()>>("URL")?;
+    let s = env.create_string(&val.0)?;
+    let instance = url_ctor.new_instance(s)?;
+    Ok(instance.raw())
+  }
+}
+
+/// A URL matcher captured synchronously but built inside the returned
+/// `AsyncBlock`, so an invalid glob/regex rejects the JS promise
+/// instead of throwing synchronously (Playwright `route` returns a
+/// `Promise`).
+enum MatcherSpec {
+  Glob(String),
+  Regex { source: String, flags: Option<String> },
+  Ready(ferridriver::url_matcher::UrlMatcher),
+}
+
+impl MatcherSpec {
+  fn build(self) -> Result<ferridriver::url_matcher::UrlMatcher> {
+    match self {
+      Self::Glob(g) => ferridriver::url_matcher::UrlMatcher::glob(g).map_err(crate::error::to_napi),
+      Self::Regex { source, flags } => {
+        ferridriver::url_matcher::UrlMatcher::regex_from_source(&source, flags.as_deref().unwrap_or(""))
+          .map_err(crate::error::to_napi)
+      },
+      Self::Ready(m) => Ok(m),
+    }
+  }
+}
+
+/// Resolve a predicate's `boolean | Promise<boolean>` return.
+async fn resolve_pred(r: PredReturn) -> bool {
+  match r {
+    napi::Either::A(b) => b,
+    napi::Either::B(p) => p.await.unwrap_or(false),
+  }
+}
+
 #[napi]
 pub struct Page {
   inner: Arc<ferridriver::Page>,
   mouse_position: Arc<Mutex<(f64, f64)>>,
+  predicate_routes: Arc<Mutex<Vec<PredRoute>>>,
 }
 
 impl Page {
@@ -51,6 +114,7 @@ impl Page {
     Self {
       inner,
       mouse_position: Arc::new(Mutex::new((0.0, 0.0))),
+      predicate_routes: Arc::new(Mutex::new(Vec::new())),
     }
   }
 
@@ -163,9 +227,10 @@ impl Page {
     Ok(resp.map(|r| crate::network::Response::from_core_with_page(r, self.inner.clone())))
   }
 
+  /// Playwright: `page.url(): string` — synchronous.
   #[napi]
-  pub async fn url(&self) -> Result<String> {
-    self.inner.url().await.map_err(crate::error::to_napi)
+  pub fn url(&self) -> String {
+    self.inner.url()
   }
 
   #[napi]
@@ -529,33 +594,79 @@ impl Page {
   /// `helper.waitForEvent` in
   /// `/tmp/playwright/packages/playwright-core/src/server/helper.ts:58`.
   #[napi(
-    ts_args_type = "url: string | RegExp, timeoutMs?: number",
+    ts_args_type = "urlOrPredicate: string | RegExp | ((response: Response) => boolean | Promise<boolean>), timeoutMs?: number",
     ts_return_type = "Promise<Response>"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn wait_for_response(
     &self,
     env: &napi::Env,
-    url: napi::Either<String, crate::types::JsRegExpLike>,
+    url: napi::bindgen_prelude::Either3<
+      String,
+      crate::types::JsRegExpLike,
+      napi::bindgen_prelude::Function<'_, crate::network::Response, PredReturn>,
+    >,
     timeout_ms: Option<f64>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::network::Response>> {
-    let matcher = crate::types::string_or_regex_to_rust(url)?;
+    use napi::bindgen_prelude::Either3;
     let mut rx = self.inner.events().subscribe();
     let timeout = timeout_ms
       .map(crate::types::f64_to_u64)
       .unwrap_or_else(|| self.inner.default_timeout());
     let page = self.inner.clone();
+    let predicate = match &url {
+      Either3::C(p) => Some(
+        p.build_threadsafe_function::<crate::network::Response>()
+          .callee_handled::<false>()
+          .weak::<false>()
+          .max_queue_size::<0>()
+          .build()?,
+      ),
+      Either3::A(_) | Either3::B(_) => None,
+    };
+    let spec = match url {
+      Either3::A(g) => Some(MatcherSpec::Glob(g)),
+      Either3::B(re) => Some(MatcherSpec::Regex {
+        source: re.source,
+        flags: re.flags,
+      }),
+      Either3::C(_) => None,
+    };
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
-      let event = ferridriver::events::drain_until(
-        &mut rx,
-        move |e| matches!(e, ferridriver::events::PageEvent::Response(r) if matcher.matches(r.url())),
-        timeout,
-      )
-      .await
-      .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-      match event {
-        ferridriver::events::PageEvent::Response(r) => Ok(crate::network::Response::from_core_with_page(r, page)),
-        _ => Err(napi::Error::from_reason("Unexpected event type")),
+      let matcher = match spec {
+        Some(s) => Some(s.build()?),
+        None => None,
+      };
+      let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
+      loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+          return Err(napi::Error::from_reason("Timeout while waiting for response"));
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+          Ok(Ok(ferridriver::events::PageEvent::Response(r))) => {
+            let hit = if let Some(m) = &matcher {
+              m.matches(r.url())
+            } else if let Some(tsfn) = &predicate {
+              let np = crate::network::Response::from_core_with_page(r.clone(), page.clone());
+              let res = tsfn
+                .call_async(np)
+                .await
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+              resolve_pred(res).await
+            } else {
+              false
+            };
+            if hit {
+              return Ok(crate::network::Response::from_core_with_page(r, page));
+            }
+          },
+          Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
+          Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+            return Err(napi::Error::from_reason("page closed while waiting for response"));
+          },
+          Err(_) => return Err(napi::Error::from_reason("Timeout while waiting for response")),
+        }
       }
     })
     .build(env)
@@ -899,12 +1010,13 @@ impl Page {
 
   // ── Viewport ────────────────────────────────────────────────────────────
 
-  /// Playwright public: `page.setViewportSize({ width, height })`.
+  /// Playwright: `page.setViewportSize({ width, height })` — a single
+  /// object, not two positional numbers.
   #[napi]
-  pub async fn set_viewport_size(&self, width: i32, height: i32) -> Result<()> {
+  pub async fn set_viewport_size(&self, size: crate::context::NapiViewportSize) -> Result<()> {
     self
       .inner
-      .set_viewport_size(i64::from(width), i64::from(height))
+      .set_viewport_size(size.width.max(0.0) as i64, size.height.max(0.0) as i64)
       .await
       .map_err(crate::error::to_napi)
   }
@@ -1361,33 +1473,79 @@ impl Page {
   /// typically the `page.evaluate("fetch(...)")` that triggers the
   /// request, and the listener must be armed before that line runs.
   #[napi(
-    ts_args_type = "url: string | RegExp, timeoutMs?: number",
+    ts_args_type = "urlOrPredicate: string | RegExp | ((request: Request) => boolean | Promise<boolean>), timeoutMs?: number",
     ts_return_type = "Promise<Request>"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn wait_for_request(
     &self,
     env: &napi::Env,
-    url: napi::Either<String, crate::types::JsRegExpLike>,
+    url: napi::bindgen_prelude::Either3<
+      String,
+      crate::types::JsRegExpLike,
+      napi::bindgen_prelude::Function<'_, crate::network::Request, PredReturn>,
+    >,
     timeout_ms: Option<f64>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::network::Request>> {
-    let matcher = crate::types::string_or_regex_to_rust(url)?;
+    use napi::bindgen_prelude::Either3;
     let mut rx = self.inner.events().subscribe();
     let timeout = timeout_ms
       .map(crate::types::f64_to_u64)
       .unwrap_or_else(|| self.inner.default_timeout());
     let page = self.inner.clone();
+    let predicate = match &url {
+      Either3::C(p) => Some(
+        p.build_threadsafe_function::<crate::network::Request>()
+          .callee_handled::<false>()
+          .weak::<false>()
+          .max_queue_size::<0>()
+          .build()?,
+      ),
+      Either3::A(_) | Either3::B(_) => None,
+    };
+    let spec = match url {
+      Either3::A(g) => Some(MatcherSpec::Glob(g)),
+      Either3::B(re) => Some(MatcherSpec::Regex {
+        source: re.source,
+        flags: re.flags,
+      }),
+      Either3::C(_) => None,
+    };
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
-      let event = ferridriver::events::drain_until(
-        &mut rx,
-        move |e| matches!(e, ferridriver::events::PageEvent::Request(r) if matcher.matches(r.url())),
-        timeout,
-      )
-      .await
-      .map_err(|e| napi::Error::from_reason(e.to_string()))?;
-      match event {
-        ferridriver::events::PageEvent::Request(r) => Ok(crate::network::Request::from_core_with_page(r, page)),
-        _ => Err(napi::Error::from_reason("Unexpected event type")),
+      let matcher = match spec {
+        Some(s) => Some(s.build()?),
+        None => None,
+      };
+      let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout);
+      loop {
+        let remaining = deadline.saturating_duration_since(tokio::time::Instant::now());
+        if remaining.is_zero() {
+          return Err(napi::Error::from_reason("Timeout while waiting for request"));
+        }
+        match tokio::time::timeout(remaining, rx.recv()).await {
+          Ok(Ok(ferridriver::events::PageEvent::Request(r))) => {
+            let hit = if let Some(m) = &matcher {
+              m.matches(r.url())
+            } else if let Some(tsfn) = &predicate {
+              let np = crate::network::Request::from_core_with_page(r.clone(), page.clone());
+              let res = tsfn
+                .call_async(np)
+                .await
+                .map_err(|e| napi::Error::from_reason(e.to_string()))?;
+              resolve_pred(res).await
+            } else {
+              false
+            };
+            if hit {
+              return Ok(crate::network::Request::from_core_with_page(r, page));
+            }
+          },
+          Ok(Ok(_) | Err(tokio::sync::broadcast::error::RecvError::Lagged(_))) => {},
+          Ok(Err(tokio::sync::broadcast::error::RecvError::Closed)) => {
+            return Err(napi::Error::from_reason("page closed while waiting for request"));
+          },
+          Err(_) => return Err(napi::Error::from_reason("Timeout while waiting for request")),
+        }
       }
     })
     .build(env)
@@ -1431,10 +1589,19 @@ impl Page {
   ///   }
   /// });
   /// ```
-  #[napi(ts_args_type = "url: string | RegExp, handler: (route: Route) => void")]
-  pub async fn route(
+  #[napi(
+    ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler: (route: Route) => void",
+    ts_return_type = "Promise<void>"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn route(
     &self,
-    url: napi::Either<String, crate::types::JsRegExpLike>,
+    env: &napi::Env,
+    url: napi::bindgen_prelude::Either3<
+      String,
+      crate::types::JsRegExpLike,
+      napi::bindgen_prelude::Function<'_, JsUrl, PredReturn>,
+    >,
     handler: napi::threadsafe_function::ThreadsafeFunction<
       crate::route::Route,
       (),
@@ -1444,29 +1611,135 @@ impl Page {
       true,
       0,
     >,
-  ) -> Result<()> {
-    let matcher = crate::types::string_or_regex_to_rust(url)?;
-    let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
-      let napi_route = crate::route::Route::wrap(route);
-      handler.call(
-        napi_route,
-        napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking,
-      );
-    });
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+    use napi::bindgen_prelude::Either3;
+    let nb = napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking;
+    // The route-handler TSFN is `weak` (not `Clone`); share it via `Arc`
+    // so the predicate path can move it into a per-request task.
+    let handler = std::sync::Arc::new(handler);
+    let (spec, rust_handler): (MatcherSpec, ferridriver::route::RouteHandler) = match url {
+      Either3::A(glob) => (
+        MatcherSpec::Glob(glob),
+        std::sync::Arc::new(move |route| {
+          handler.call(crate::route::Route::wrap(route), nb);
+        }),
+      ),
+      Either3::B(re) => (
+        MatcherSpec::Regex {
+          source: re.source,
+          flags: re.flags,
+        },
+        std::sync::Arc::new(move |route| {
+          handler.call(crate::route::Route::wrap(route), nb);
+        }),
+      ),
+      Either3::C(predicate) => {
+        let pred_ref = predicate.create_ref()?;
+        let ptsfn = predicate
+          .build_threadsafe_function::<JsUrl>()
+          .callee_handled::<false>()
+          .weak::<false>()
+          .max_queue_size::<0>()
+          .build()?;
+        let ptsfn = std::sync::Arc::new(ptsfn);
+        let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
+        self
+          .predicate_routes
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .push(PredRoute {
+            matcher: m.clone(),
+            pred_ref,
+          });
+        (
+          MatcherSpec::Ready(m),
+          std::sync::Arc::new(move |route| {
+            let ptsfn = std::sync::Arc::clone(&ptsfn);
+            let handler = std::sync::Arc::clone(&handler);
+            let url = JsUrl(route.request().url.clone());
+            tokio::spawn(async move {
+              let truthy = match ptsfn.call_async(url).await {
+                Ok(r) => resolve_pred(r).await,
+                Err(_) => false,
+              };
+              if truthy {
+                handler.call(crate::route::Route::wrap(route), nb);
+              } else {
+                route.continue_route(ferridriver::route::ContinueOverrides::default());
+              }
+            });
+          }),
+        )
+      },
+    };
 
-    self
-      .inner
-      .route(matcher, rust_handler)
-      .await
-      .map_err(crate::error::to_napi)
+    let inner = Arc::clone(&self.inner);
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      let matcher = spec.build()?;
+      inner.route(matcher, rust_handler).await.map_err(crate::error::to_napi)
+    })
+    .build(env)
   }
 
-  /// Remove all route handlers matching the given URL matcher.
-  /// Accepts the same shape as `route()` — a glob string or a native JS `RegExp`.
-  #[napi(ts_args_type = "url: string | RegExp")]
-  pub async fn unroute(&self, url: napi::Either<String, crate::types::JsRegExpLike>) -> Result<()> {
-    let matcher = crate::types::string_or_regex_to_rust(url)?;
-    self.inner.unroute(&matcher).await.map_err(crate::error::to_napi)
+  /// `page.unroute(string | RegExp | ((url: URL) => boolean))`. A
+  /// predicate is matched by `===` against the function passed to
+  /// `route`, dropping its always-true core matcher by `Arc` identity.
+  #[napi(
+    ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean)",
+    ts_return_type = "Promise<void>"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn unroute(
+    &self,
+    env: &napi::Env,
+    url: napi::bindgen_prelude::Either3<
+      String,
+      crate::types::JsRegExpLike,
+      napi::bindgen_prelude::Function<'_, JsUrl, PredReturn>,
+    >,
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+    use napi::bindgen_prelude::Either3;
+    let specs: Vec<MatcherSpec> = match url {
+      Either3::A(glob) => vec![MatcherSpec::Glob(glob)],
+      Either3::B(re) => vec![MatcherSpec::Regex {
+        source: re.source,
+        flags: re.flags,
+      }],
+      Either3::C(predicate) => {
+        // `Function` is not `Copy` across iterations; round-trip the
+        // input through a `Ref` so each comparison borrows a fresh
+        // handle.
+        let in_ref = predicate.create_ref()?;
+        let mut guard = self
+          .predicate_routes
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut hit = Vec::new();
+        let mut i = 0;
+        while i < guard.len() {
+          let same = {
+            let a = in_ref.borrow_back(env)?;
+            let b = guard[i].pred_ref.borrow_back(env)?;
+            env.strict_equals(a, b)?
+          };
+          if same {
+            hit.push(MatcherSpec::Ready(guard.remove(i).matcher));
+          } else {
+            i += 1;
+          }
+        }
+        hit
+      },
+    };
+    let inner = Arc::clone(&self.inner);
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      for spec in specs {
+        let m = spec.build()?;
+        inner.unroute(&m).await.map_err(crate::error::to_napi)?;
+      }
+      Ok(())
+    })
+    .build(env)
   }
 
   // ── Expect assertions (delegates to Rust core, all polling in Rust) ──
@@ -1603,20 +1876,28 @@ impl Mouse {
     Ok(())
   }
 
+  /// Playwright: `mouse.down(options?: { button?, clickCount? })`.
   #[napi]
-  pub async fn down(&self, button: Option<String>) -> Result<()> {
+  pub async fn down(&self, options: Option<MouseClickOptions>) -> Result<()> {
     let opts = ferridriver::page::MouseDownOptions {
-      button,
-      click_count: None,
+      button: options.as_ref().and_then(|o| o.button.clone()),
+      click_count: options
+        .as_ref()
+        .and_then(|o| o.click_count)
+        .and_then(|n| u32::try_from(n).ok()),
     };
     self.page.mouse().down(Some(opts)).await.map_err(crate::error::to_napi)
   }
 
+  /// Playwright: `mouse.up(options?: { button?, clickCount? })`.
   #[napi]
-  pub async fn up(&self, button: Option<String>) -> Result<()> {
+  pub async fn up(&self, options: Option<MouseClickOptions>) -> Result<()> {
     let opts = ferridriver::page::MouseUpOptions {
-      button,
-      click_count: None,
+      button: options.as_ref().and_then(|o| o.button.clone()),
+      click_count: options
+        .as_ref()
+        .and_then(|o| o.click_count)
+        .and_then(|n| u32::try_from(n).ok()),
     };
     self.page.mouse().up(Some(opts)).await.map_err(crate::error::to_napi)
   }

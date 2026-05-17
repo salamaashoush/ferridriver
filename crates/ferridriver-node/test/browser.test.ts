@@ -331,7 +331,7 @@ for (const backend of BACKENDS) {
     // ── Viewport and emulation ────────────────────────────────────────
 
     it("sets viewport size", async () => {
-      await page.setViewportSize(800, 600);
+      await page.setViewportSize({ width: 800, height: 600 });
       const width = await page.evaluate("window.innerWidth");
       expect(width).toBe(800);
     });
