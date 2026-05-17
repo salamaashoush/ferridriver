@@ -569,6 +569,35 @@ impl LocatorJs {
     self.inner.input_value().await.into_js()
   }
 
+  /// Playwright: `locator.ariaSnapshot(options?: TimeoutOptions &
+  /// { mode?: 'ai' | 'default', depth?: number }): Promise<string>`.
+  #[qjs(rename = "ariaSnapshot")]
+  pub async fn aria_snapshot<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<String> {
+    let core_opts = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        #[derive(serde::Deserialize, Default)]
+        #[serde(rename_all = "camelCase", default)]
+        struct JsAria {
+          mode: Option<String>,
+          depth: Option<i32>,
+          timeout: Option<u64>,
+        }
+        let p: JsAria = crate::bindings::convert::serde_from_js(&ctx, v)?;
+        ferridriver::options::AriaSnapshotOptions {
+          mode: Some(ferridriver::options::AriaSnapshotMode::from_opt_str(p.mode.as_deref())),
+          depth: p.depth,
+          timeout: p.timeout,
+        }
+      },
+      _ => ferridriver::options::AriaSnapshotOptions::default(),
+    };
+    self.inner.aria_snapshot(core_opts).await.into_js()
+  }
+
   #[qjs(rename = "getAttribute")]
   pub async fn get_attribute(&self, name: String) -> rquickjs::Result<Option<String>> {
     self.inner.get_attribute(&name).await.into_js()

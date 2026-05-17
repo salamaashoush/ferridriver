@@ -273,6 +273,54 @@ pub struct EvaluateOptions {
   pub timeout: Option<u64>,
 }
 
+/// Rendering mode for `locator.ariaSnapshot` / `page.ariaSnapshot`.
+/// Mirrors Playwright's `mode?: 'ai' | 'default'`
+/// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:327`).
+/// The vendored injected `AriaTreeOptions` also has `codegen` /
+/// `autoexpect`, but those are not part of the public client surface.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum AriaSnapshotMode {
+  /// Playwright default — stable YAML without volatile refs.
+  #[default]
+  Default,
+  /// AI-optimized — includes `[ref=eN]` labels + generic roles.
+  Ai,
+}
+
+impl AriaSnapshotMode {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      AriaSnapshotMode::Default => "default",
+      AriaSnapshotMode::Ai => "ai",
+    }
+  }
+
+  /// Parse the public mode string; unknown values fall back to `default`
+  /// (Playwright server uses `mode ?? 'default'`).
+  #[must_use]
+  pub fn from_opt_str(s: Option<&str>) -> Self {
+    match s {
+      Some("ai") => AriaSnapshotMode::Ai,
+      _ => AriaSnapshotMode::Default,
+    }
+  }
+}
+
+/// Options for `locator.ariaSnapshot(options?)`. Mirrors Playwright's
+/// `TimeoutOptions & { mode?: 'ai' | 'default', depth?: number }`
+/// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:327`;
+/// the vendored injected `AriaTreeOptions` has no `boxes`, so it is not
+/// exposed — it would be a silent no-op).
+#[derive(Debug, Clone, Default)]
+pub struct AriaSnapshotOptions {
+  pub mode: Option<AriaSnapshotMode>,
+  /// Subtree depth limit passed to the injected `generateAriaTree`.
+  pub depth: Option<i32>,
+  /// Actionability/resolution timeout (ms). `None` = page default.
+  pub timeout: Option<u64>,
+}
+
 /// Full `PageScreenshotOptions` surface — 13 fields. Includes the
 /// `LocatorScreenshotOptions` subset for `Locator.screenshot()` (which
 /// omits `full_page` and `clip` — the locator takes the screenshot of its

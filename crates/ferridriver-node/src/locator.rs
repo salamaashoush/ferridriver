@@ -358,6 +358,20 @@ impl Locator {
 
   // ── Content & state ─────────────────────────────────────────────────────
 
+  /// Playwright: `locator.ariaSnapshot(options?): Promise<string>`.
+  /// Renders the accessibility subtree rooted at the matched element
+  /// (siblings outside the locator excluded) via the vendored
+  /// Playwright `InjectedScript` — byte-for-byte Playwright YAML.
+  #[napi(
+    js_name = "ariaSnapshot",
+    ts_args_type = "options?: { mode?: 'ai' | 'default', depth?: number, timeout?: number }",
+    ts_return_type = "Promise<string>"
+  )]
+  pub async fn aria_snapshot(&self, options: Option<crate::types::AriaSnapshotOptions>) -> Result<String> {
+    let opts = options.map(Into::into).unwrap_or_default();
+    self.inner.aria_snapshot(opts).await.map_err(crate::error::to_napi)
+  }
+
   #[napi]
   pub async fn text_content(&self) -> Result<Option<String>> {
     self.inner.text_content().await.map_err(crate::error::to_napi)

@@ -946,6 +946,44 @@ impl Locator {
       .map(std::option::Option::unwrap_or_default)
   }
 
+  /// Playwright: `locator.ariaSnapshot(options?: TimeoutOptions &
+  /// { mode?: 'ai' | 'default', depth?: number }): Promise<string>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:327`).
+  ///
+  /// Resolves this locator to a single element under the auto-wait /
+  /// retry pipeline (strict mode honored — strictness + actionability
+  /// stay in Rust core), then renders the accessibility subtree rooted
+  /// at that element via the vendored Playwright `InjectedScript`
+  /// (`window.__fd.ariaSnapshot`). The output is byte-for-byte the
+  /// Playwright YAML, scoped to the element — siblings outside the
+  /// locator are excluded by construction. Uniform across every backend
+  /// (the injected renderer is the same JS Playwright ships).
+  ///
+  /// # Errors
+  ///
+  /// [`crate::error::FerriError::Timeout`] if the element cannot be
+  /// resolved within the timeout; forwards the page-side render error.
+  pub async fn aria_snapshot(&self, options: crate::options::AriaSnapshotOptions) -> Result<String> {
+    let mode = options.mode.unwrap_or_default().as_str();
+    let depth_field = match options.depth {
+      Some(d) => format!(", depth: {d}"),
+      None => String::new(),
+    };
+    // `injected.ariaSnapshot` returns the rendered YAML string directly;
+    // it is a primitive (no nested wire object) so no JSON.stringify
+    // wrapper is needed — CDP `returnByValue` / BiDi string RemoteValue
+    // both round-trip plain strings cleanly.
+    let js = format!("function() {{ return window.__fd.ariaSnapshot(this, {{ mode: \"{mode}\"{depth_field} }}); }}");
+    retry_resolve!(self, options.timeout, "ariaSnapshot", |el, _page| async {
+      let raw = el.call_js_fn_value(&js).await?;
+      Ok::<String, crate::error::FerriError>(
+        raw
+          .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+          .unwrap_or_default(),
+      )
+    })
+  }
+
   /// Get the value of an attribute on the element.
   ///
   /// Returns the raw attribute string exactly as
