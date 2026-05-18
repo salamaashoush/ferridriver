@@ -85,6 +85,7 @@ pub mod expression;
 pub mod feature;
 pub mod filter;
 pub mod hook;
+pub mod js;
 pub mod param_type;
 pub mod registry;
 // Reporters have been unified into ferridriver_test::reporter (including bdd/ submodule).
