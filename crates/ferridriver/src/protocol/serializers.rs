@@ -656,6 +656,10 @@ impl<'de> Deserialize<'de> for SerializedValue {
   }
 }
 
+/// `serde_json`'s internal key for an `arbitrary_precision` number when
+/// it surfaces through a `deserialize_any` visitor as a map.
+const AP_NUMBER_SENTINEL: &str = "$serde_json::private::Number";
+
 struct SerializedValueVisitor;
 
 impl<'de> Visitor<'de> for SerializedValueVisitor {
@@ -718,6 +722,19 @@ impl<'de> Visitor<'de> for SerializedValueVisitor {
     let mut bag = serde_json::Map::new();
     while let Some((k, v)) = map.next_entry::<String, serde_json::Value>()? {
       bag.insert(k, v);
+    }
+    // `serde_json`'s `arbitrary_precision` feature (force-enabled
+    // workspace-wide by a transitive dep) makes a bare JSON number
+    // reach a `deserialize_any` visitor as a one-key map
+    // `{"$serde_json::private::Number": "<literal>"}` instead of
+    // `visit_f64`. Decode that back to a number before tag dispatch so
+    // the wire stays AP-agnostic.
+    if bag.len() == 1 {
+      if let Some(serde_json::Value::String(lit)) = bag.get(AP_NUMBER_SENTINEL) {
+        if let Ok(n) = lit.parse::<f64>() {
+          return Ok(SerializedValue::Number(n));
+        }
+      }
     }
     decode_tagged_object(bag).map_err(de::Error::custom)
   }

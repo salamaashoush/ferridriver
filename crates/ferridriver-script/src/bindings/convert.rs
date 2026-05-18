@@ -71,7 +71,39 @@ pub fn serde_from_js<'js, T: DeserializeOwned>(_ctx: &Ctx<'js>, value: Value<'js
 /// over [`serde_to_js`], kept for the script-args call site in
 /// `engine.rs`.
 pub(crate) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs::Result<Value<'js>> {
-  serde_to_js(ctx, v)
+  // A transitive dep force-enables `serde_json/arbitrary_precision`
+  // workspace-wide. Under that feature `serde_json::Value::Number`'s
+  // `Serialize` emits a private one-key map, so routing through
+  // `serde_to_js` (rquickjs-serde) would inject numbers into JS as
+  // `{"$serde_json::private::Number": "..."}` objects. Walk the value
+  // explicitly with the AP-safe `as_*` accessors instead.
+  match v {
+    serde_json::Value::Null => Ok(Value::new_null(ctx.clone())),
+    serde_json::Value::Bool(b) => Ok(Value::new_bool(ctx.clone(), *b)),
+    serde_json::Value::Number(n) => {
+      let f = n.as_f64().unwrap_or(f64::NAN);
+      if let Some(i) = f64_as_exact_i32(f) {
+        Ok(Value::new_int(ctx.clone(), i))
+      } else {
+        Ok(Value::new_number(ctx.clone(), f))
+      }
+    },
+    serde_json::Value::String(s) => Ok(rquickjs::String::from_str(ctx.clone(), s)?.into_value()),
+    serde_json::Value::Array(items) => {
+      let arr = rquickjs::Array::new(ctx.clone())?;
+      for (i, item) in items.iter().enumerate() {
+        arr.set(i, json_to_js(ctx, item)?)?;
+      }
+      Ok(arr.into_value())
+    },
+    serde_json::Value::Object(map) => {
+      let obj = Object::new(ctx.clone())?;
+      for (k, val) in map {
+        obj.set(k.as_str(), json_to_js(ctx, val)?)?;
+      }
+      Ok(obj.into_value())
+    },
+  }
 }
 
 // ── evaluate(fn, arg) wire bridge (Phase D) ───────────────────────────
