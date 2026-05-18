@@ -22,7 +22,7 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use ferridriver_script::{
-  AsyncContext, CompiledBundle, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioWorld, ScriptAttachment,
+  AsyncContext, CompiledBundle, HookArg, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioWorld, ScriptAttachment,
   ScriptEngineConfig, Session, StepOutcome, bundle_and_compile, collect_registry, drain_attachments, eval_bundle,
   invoke_hook, invoke_step, reset_world, set_scenario_world,
 };
@@ -314,13 +314,13 @@ impl JsBddSession {
       bundle,
     };
     session
-      .run_hooks("BeforeAll", None)
+      .run_hooks("BeforeAll", None, None)
       .await
       .map_err(|e| anyhow::anyhow!(e))?;
     Ok(session)
   }
 
-  async fn run_hooks(&self, kind: &str, tags: Option<&[String]>) -> Result<(), String> {
+  async fn run_hooks(&self, kind: &str, tags: Option<&[String]>, arg: Option<&HookArg>) -> Result<(), String> {
     let actx = self.session.async_context();
     let mut hooks: Vec<(usize, Option<&TagExpression>)> = self
       .hooks
@@ -340,7 +340,7 @@ impl JsBddSession {
       if !applies {
         continue;
       }
-      if let Err(e) = invoke_hook(&actx, idx, &self.bundle.module_name).await {
+      if let Err(e) = invoke_hook(&actx, idx, arg, &self.bundle.module_name).await {
         return Err(fmt_script_error(&self.bundle, &e));
       }
     }
@@ -349,7 +349,7 @@ impl JsBddSession {
 
   /// Run-level `AfterAll` hooks (once per worker session).
   pub async fn after_all(&self) -> Result<(), String> {
-    self.run_hooks("AfterAll", None).await
+    self.run_hooks("AfterAll", None, None).await
   }
 
   /// Execute one expanded scenario: bind its World from the fixtures,
@@ -384,7 +384,13 @@ impl JsBddSession {
     let mut steps = Vec::with_capacity(scenario.steps.len());
     let mut failed = false;
 
-    if let Err(msg) = self.run_hooks("Before", Some(&scenario.tags)).await {
+    let before_arg = HookArg {
+      name: scenario.name.clone(),
+      tags: scenario.tags.clone(),
+      status: "PENDING".to_string(),
+      message: None,
+    };
+    if let Err(msg) = self.run_hooks("Before", Some(&scenario.tags), Some(&before_arg)).await {
       steps.push(JsStepResult {
         keyword: "Before".into(),
         text: "hook".into(),
@@ -438,8 +444,21 @@ impl JsBddSession {
       }
     }
 
-    // After hooks always run (cleanup), even on failure.
-    if let Err(msg) = self.run_hooks("After", Some(&scenario.tags)).await {
+    // After hooks always run (cleanup), even on failure. Pass the
+    // scenario result so `After(s => { if (s.result.status === 'FAILED')
+    // ... })` works (the screenshot-on-failure idiom).
+    let after_msg = steps.iter().find_map(|s| match &s.status {
+      JsStepStatus::Failed(m) | JsStepStatus::Undefined(m) => Some(m.clone()),
+      JsStepStatus::Pending => Some(format!("pending: {}{}", s.keyword, s.text)),
+      _ => None,
+    });
+    let after_arg = HookArg {
+      name: scenario.name.clone(),
+      tags: scenario.tags.clone(),
+      status: if failed { "FAILED" } else { "PASSED" }.to_string(),
+      message: after_msg,
+    };
+    if let Err(msg) = self.run_hooks("After", Some(&scenario.tags), Some(&after_arg)).await {
       steps.push(JsStepResult {
         keyword: "After".into(),
         text: "hook".into(),
