@@ -42,6 +42,13 @@ use serde::{Deserialize, Serialize};
 #[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
 pub struct FerridriverConfig {
+  /// Extension files (plugins): each a single `.js`/`.mjs`/`.ts`/`.mts`
+  /// file or a directory scanned shallowly for those. An extension
+  /// registers MCP tools (`defineTool`) and/or BDD steps
+  /// (`Given`/`When`/`Then`); the MCP server consumes its tools and the
+  /// test runner consumes its steps. Top-level (not under `mcp`) because
+  /// both hosts load it.
+  pub extensions: Vec<String>,
   /// MCP server configuration.
   pub mcp: mcp::McpConfig,
   /// Test runner configuration.

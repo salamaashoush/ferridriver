@@ -280,6 +280,7 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   // The mcp section drives chrome args, instances, and server metadata.
   // CLI flags fall back when the [mcp] section is empty so the user can
   // launch the server with no config file at all.
+  let extension_paths: Vec<std::path::PathBuf> = config.extensions.iter().map(std::path::PathBuf::from).collect();
   let mcp = config.mcp;
   let backend = if mcp.browser.backend.is_some() {
     mcp.backend_kind()
@@ -294,7 +295,7 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   let connect_mode = args.browser.connect_mode();
 
   let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp));
-  server.load_plugins().await;
+  server.load_extensions(&extension_paths).await;
   match args.transport.transport {
     cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio_with(server).await,
     cli::Transport::Http => ferridriver_mcp::mcp::serve_http_with(server, args.transport.port).await,

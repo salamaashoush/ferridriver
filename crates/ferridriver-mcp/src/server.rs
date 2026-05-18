@@ -211,16 +211,6 @@ pub trait McpServerConfig: Send + Sync + 'static {
   fn server_instructions(&self) -> &str {
     DEFAULT_INSTRUCTIONS
   }
-
-  /// Paths to plugin files or directories to load at startup.
-  ///
-  /// Each path is either a single `.js`/`.mjs` file or a directory scanned
-  /// shallowly for those extensions. Plugins are loaded once and registered
-  /// as `run_script` bindings; manifests marked `exposeAsTool: true` are
-  /// additionally surfaced in `tools/list`. Default: no plugins.
-  fn plugin_paths(&self) -> Vec<std::path::PathBuf> {
-    Vec::new()
-  }
 }
 
 /// Default server name for MCP `get_info`.
@@ -457,14 +447,15 @@ impl McpServer {
     }
   }
 
-  /// Discover and load every plugin configured via [`McpServerConfig::plugin_paths`].
+  /// Discover and load every configured extension file as MCP tools.
+  /// `paths` come from the top-level `extensions` config (resolved by
+  /// the CLI), each a `.js`/`.mjs`/`.ts`/`.mts` file or a directory.
   ///
-  /// Failed plugins are logged and skipped -- one broken file should not
-  /// prevent the server from starting. Successfully loaded plugins are
-  /// stored in `self.plugins` and become available as `run_script` bindings
-  /// (and, when promoted, as MCP tools) on the next invocation.
-  pub async fn load_plugins(&mut self) {
-    let paths = self.config.plugin_paths();
+  /// Failed extensions are logged and skipped -- one broken file should
+  /// not prevent the server from starting. Successfully loaded tools are
+  /// stored in `self.plugins` and become available as `run_script`
+  /// bindings (and, when `exposeAsTool`, as MCP tools).
+  pub async fn load_extensions(&mut self, paths: &[std::path::PathBuf]) {
     if paths.is_empty() {
       return;
     }
@@ -474,7 +465,7 @@ impl McpServer {
     // QuickJS bytecode; TypeScript and plugin-local imports resolved).
     let mut files = Vec::new();
     for root in paths {
-      match crate::plugin::discover(&root) {
+      match crate::plugin::discover(root) {
         Ok(v) => files.extend(v),
         Err(e) => tracing::warn!(path = %root.display(), error = %e, "plugin discovery failed; skipping path"),
       }

@@ -34,11 +34,6 @@ pub struct McpConfig {
   pub server: ServerConfig,
   /// Browser launch and instance configuration.
   pub browser: BrowserConfig,
-  /// Plugin source paths -- single `.js`/`.mjs` files or directories
-  /// scanned for `*.js`/`*.mjs`. Relative paths resolve against the
-  /// directory containing the loaded config file (or cwd when the config
-  /// was passed inline).
-  pub plugins: Vec<String>,
 
   // -- runtime fields (not deserialized) --
   /// Cached command outputs (populated at runtime).
