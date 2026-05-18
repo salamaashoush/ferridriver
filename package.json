@@ -2,16 +2,7 @@
   "name": "@ferridriver/monorepo",
   "private": true,
   "workspaces": [
-    "packages/*",
     "crates/ferridriver-node",
-    "examples/ct-react",
-    "examples/ct-vue",
-    "examples/ct-svelte",
-    "examples/ct-solid",
-    "site",
-    "bench/fd-tests"
-  ],
-  "devDependencies": {
-    "@ferridriver/test": "workspace:*"
-  }
+    "site"
+  ]
 }

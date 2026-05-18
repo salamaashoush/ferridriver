@@ -226,7 +226,7 @@ impl TestRunner {
         continue;
       }
 
-      let project_exit = self.run_single_project(project, &plan).await;
+      let project_exit = Box::pin(self.run_single_project(project, &plan)).await;
 
       completed_projects.insert(project.name.clone());
 
@@ -245,7 +245,7 @@ impl TestRunner {
             parent = project.name,
             "running teardown project",
           );
-          let td_exit = self.run_single_project(td_project, &plan).await;
+          let td_exit = Box::pin(self.run_single_project(td_project, &plan)).await;
           completed_projects.insert(td_project.name.clone());
           // Remove from pending if it was deferred.
           pending_teardowns.retain(|&i| i != td_idx);
@@ -267,7 +267,7 @@ impl TestRunner {
         project = td_project.name,
         "running deferred teardown project",
       );
-      let td_exit = self.run_single_project(td_project, &plan).await;
+      let td_exit = Box::pin(self.run_single_project(td_project, &plan)).await;
       if td_exit != 0 {
         exit_code = 1;
       }
@@ -284,7 +284,7 @@ impl TestRunner {
           project = td_project.name,
           "running CLI-supplied teardown project",
         );
-        let td_exit = self.run_single_project(td_project, &plan).await;
+        let td_exit = Box::pin(self.run_single_project(td_project, &plan)).await;
         if td_exit != 0 {
           exit_code = 1;
         }

@@ -112,6 +112,12 @@ pub struct RunContext {
   /// Plugin bindings to install on the `plugins` global. Empty means no
   /// `plugins` global is exposed beyond the singleton commands runner.
   pub plugins: Vec<crate::bindings::PluginBinding>,
+  /// When true, ES module imports use normal filesystem resolution
+  /// instead of the `PathSandbox`-rooted loader. Intended for trusted
+  /// first-party code (BDD step files run from the user's own CLI), so
+  /// step files can `import './helpers.js'` from anywhere on disk. The
+  /// MCP / `run_script` path leaves this `false` and stays sandboxed.
+  pub trusted_modules: bool,
 }
 
 /// The session's owning [`AsyncContext`], stashed as rquickjs userdata
@@ -232,12 +238,24 @@ impl Session {
     // ScriptLoader is replaced with our sandboxed pair so a rogue import
     // can't escape `script_root`. Bound once: the sandbox is stable for
     // the session's lifetime.
-    runtime
-      .set_loader(
-        crate::modules::SandboxResolver::new(context.sandbox.clone()),
-        crate::modules::SandboxLoader::new(context.sandbox.clone()),
-      )
-      .await;
+    if context.trusted_modules {
+      // Trusted first-party code (BDD step files): normal filesystem
+      // ESM resolution so shared `import './helpers.js'` works from
+      // anywhere, not only under the sandbox root.
+      let mut resolver = rquickjs::loader::FileResolver::default();
+      resolver.add_path(".");
+      resolver.add_path(context.sandbox.root().to_string_lossy().as_ref());
+      runtime
+        .set_loader(resolver, rquickjs::loader::ScriptLoader::default())
+        .await;
+    } else {
+      runtime
+        .set_loader(
+          crate::modules::SandboxResolver::new(context.sandbox.clone()),
+          crate::modules::SandboxLoader::new(context.sandbox.clone()),
+        )
+        .await;
+    }
 
     let ctx = AsyncContext::full(&runtime)
       .await
@@ -292,7 +310,11 @@ impl Session {
         .map_err(|e| ScriptError::internal(format!("failed to install browser_type: {e}")))?;
 
       crate::bindings::install_plugins(&ctx, &plugins)
-        .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))
+        .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))?;
+
+      // BDD step-registry shim — same VM, same bindings as scripting.
+      crate::bindings::install_bdd(&ctx)
+        .map_err(|e| ScriptError::internal(format!("failed to install bdd shim: {e}")))
     })
     .await;
     install?;
@@ -308,6 +330,14 @@ impl Session {
       config,
       applied,
     })
+  }
+
+  /// The session's owning [`AsyncContext`]. The BDD core clones this to
+  /// drive registered JS step functions back over the async bridge
+  /// (same mechanism as `page.route` cross-task dispatch).
+  #[must_use]
+  pub fn async_context(&self) -> AsyncContext {
+    self.ctx.clone()
   }
 
   /// Push resource limits to the runtime, skipping any setter whose
@@ -709,7 +739,7 @@ fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::
   rquickjs_serde::from_value(value).ok()
 }
 
-fn caught_to_script_error(caught: rquickjs::CaughtError<'_>, source: &str) -> ScriptError {
+pub(crate) fn caught_to_script_error(caught: rquickjs::CaughtError<'_>, source: &str) -> ScriptError {
   let (message, stack, line, column) = match caught {
     rquickjs::CaughtError::Exception(ex) => {
       let message = ex.message().unwrap_or_else(|| "exception".to_string());

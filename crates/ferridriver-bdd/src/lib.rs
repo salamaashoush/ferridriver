@@ -85,6 +85,7 @@ pub mod expression;
 pub mod feature;
 pub mod filter;
 pub mod hook;
+pub mod js;
 pub mod param_type;
 pub mod registry;
 // Reporters have been unified into ferridriver_test::reporter (including bdd/ submodule).
@@ -246,8 +247,29 @@ pub async fn run_bdd_with(
     return 0;
   }
 
-  let registry = Arc::new(registry::StepRegistry::build());
-  let plan = translate::translate_features(&feature_set, registry, &config);
+  // JS step files take the QuickJS path; otherwise inventory-collected
+  // Rust steps. `--steps` overrides `[test].steps`.
+  let js_globs: Vec<String> = if overrides.bdd_steps.is_empty() {
+    config.steps.clone()
+  } else {
+    overrides.bdd_steps.clone()
+  };
+  let plan = if js_globs.is_empty() {
+    let registry = Arc::new(registry::StepRegistry::build());
+    translate::translate_features(&feature_set, registry, &config)
+  } else {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    // rolldown-bundle + tree-shake + transpile the whole step graph to
+    // one module, compiled to bytecode once, before workers spawn.
+    let bundle = match js::bundle_steps(&js_globs, &cwd).await {
+      Ok(b) => b,
+      Err(e) => {
+        eprintln!("step bundle error: {e}");
+        return 1;
+      },
+    };
+    js::translate_features_js(&feature_set, &config, bundle, cwd)
+  };
 
   if plan.total_tests == 0 {
     eprintln!("no scenarios found");

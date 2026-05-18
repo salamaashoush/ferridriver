@@ -70,8 +70,6 @@ jobs:
             libclang-dev pkg-config
       - run: |
           cargo clippy --workspace --all-targets \
-            --exclude ct-dioxus-todomvc \
-            --exclude ct-leptos-todomvc \
             --exclude bdd-example
 
   doc:
@@ -93,8 +91,6 @@ jobs:
             libclang-dev pkg-config
       - run: |
           cargo doc --workspace --no-deps \
-            --exclude ct-dioxus-todomvc \
-            --exclude ct-leptos-todomvc \
             --exclude bdd-example
 
   # Gate job: all cheap checks must pass
@@ -152,15 +148,8 @@ jobs:
       - name: Build ferridriver binary
         run: cargo build --bin ferridriver
 
-      - name: Install JS deps
-        run: bun install
-
-      - name: Build NAPI debug
-        working-directory: crates/ferridriver-node
-        run: bun run build:debug
-
       - name: Install Chromium with system deps
-        run: bun run packages/ferridriver-test/src/cli.ts install --with-deps chromium
+        run: cargo run --bin ferridriver -- install --with-deps chromium
 
       - name: Run unit + integration tests
         env:
@@ -172,49 +161,10 @@ jobs:
           # while serialising the browser-heavy ones.
         run: |
           cargo nextest run --workspace --no-fail-fast -j 2 \
-            --exclude ct-dioxus-todomvc \
-            --exclude ct-leptos-todomvc \
             --exclude bdd-example
 
       - name: Run doc tests
         run: cargo test --doc --workspace
-
-  # ---------------------------------------------------------------------------
-  # NAPI: build native addon and run TypeScript tests
-  # ---------------------------------------------------------------------------
-  napi:
-    name: NAPI build & test
-    needs: [basics]
-    runs-on: ubuntu-latest
-    timeout-minutes: 30
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-      - uses: dtolnay/rust-toolchain@stable
-      - uses: Swatinem/rust-cache@v2
-        with:
-          save-if: ${{ github.ref == 'refs/heads/main' }}
-      - uses: oven-sh/setup-bun@v2
-
-      - name: Install system deps
-        run: |
-          DEBIAN_FRONTEND=noninteractive sudo apt-get update
-          DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libclang-dev pkg-config ffmpeg \
-            libdbus-glib-1-2 libxt6 libxtst6 libgtk-3-0t64
-      - name: Build ferridriver binary
-        run: cargo build --bin ferridriver
-      - name: Install dependencies
-        run: bun install
-      - name: Build NAPI debug
-        working-directory: crates/ferridriver-node
-        run: bun run build:debug
-      - name: Install Chromium with system deps
-        run: bun run packages/ferridriver-test/src/cli.ts install --with-deps chromium
-      - name: Run TypeScript tests
-        working-directory: crates/ferridriver-node
-        run: bun test --timeout 30000
 
   # ---------------------------------------------------------------------------
   # Security: audit dependencies for known vulnerabilities
@@ -259,7 +209,6 @@ jobs:
     if: always()
     needs:
       - test
-      - napi
       - security
       - lockfile
     runs-on: ubuntu-latest

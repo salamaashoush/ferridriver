@@ -6,18 +6,14 @@ ferridriver is a single Rust engine wrapped in many shapes. The test runner, BDD
 
 ```mermaid
 flowchart TB
-  subgraph TS ["TypeScript"]
-    A["@ferridriver/test"]
-    B["@ferridriver/ct-{react,vue,svelte,solid}"]
-  end
-
-  N["@ferridriver/node (NAPI)"]
+  N["@ferridriver/node (NAPI core binding)"]
 
   subgraph RustTools ["Rust tools"]
-    C["ferridriver-cli (MCP)"]
+    C["ferridriver-cli (mcp · bdd · test · run · install)"]
     D["ferridriver-test"]
     E["ferridriver-bdd"]
     F["ferridriver-mcp (9 tools, script-focused)"]
+    S["ferridriver-script (QuickJS: run_script + JS/TS BDD steps)"]
   end
 
   Core["ferridriver (core)\nBrowser · Page · Locator · Frame · Context"]
@@ -30,25 +26,24 @@ flowchart TB
     B4["Bidi"]
   end
 
-  A --> N
-  B --> A
   N --> Core
   C --> F
+  C --> E
   F --> Core
-  D --> Core
-  E --> Core
+  F --> S
   E --> D
+  E --> S
+  D --> Core
+  S --> Core
   Core --> B1
   Core --> B2
   Core --> B3
   Core --> B4
 
-  classDef tsLayer fill:#dbeafe,stroke:#1e40af,color:#0f172a
   classDef rustLayer fill:#fef3c7,stroke:#b45309,color:#1c1917
   classDef coreLayer fill:#dcfce7,stroke:#15803d,color:#052e16
   classDef backendLayer fill:#ede9fe,stroke:#6d28d9,color:#1e1b4b
-  class A,B tsLayer
-  class N,C,D,E,F rustLayer
+  class N,C,D,E,F,S rustLayer
   class Core coreLayer
   class B1,B2,B3,B4 backendLayer
 ```
@@ -72,7 +67,7 @@ See [Concepts → Backends](/concepts/backends) for when to pick which.
 
 ## Test execution
 
-Every test — E2E, BDD, component, NAPI — runs through one pipeline: `TestRunner::run()`. The BDD crate translates `.feature` files into the same `TestPlan`. The NAPI test runner delegates to the same Rust function. There is no second runner.
+Every test — Rust `#[ferritest]` and BDD — runs through one pipeline: `TestRunner::run()`. The BDD crate translates `.feature` files into the same `TestPlan`; JavaScript/TypeScript step bodies execute on the shared QuickJS engine inside that pipeline. There is no second runner.
 
 ```mermaid
 flowchart LR

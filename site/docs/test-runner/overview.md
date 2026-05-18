@@ -1,6 +1,6 @@
 # Test runner
 
-Playwright Test-compatible runner with parallel workers, auto-retrying assertions, fixtures, hooks, and reporters. Runs the same execution pipeline whether tests are written in Rust, TypeScript, or Gherkin.
+Playwright Test-compatible runner with parallel workers, auto-retrying assertions, fixtures, hooks, and reporters. Runs the same execution pipeline whether tests are written in Rust or as Gherkin features (with Rust or JavaScript/TypeScript step bodies).
 
 ## Features
 
@@ -15,10 +15,10 @@ Playwright Test-compatible runner with parallel workers, auto-retrying assertion
 - **Traces** — Playwright-compatible ZIP traces (viewable with `npx playwright show-trace`).
 - **Filters** — `--grep`, `--tag`, `--shard`, `--last-failed`, `--forbid-only`.
 
-## Pick a binding
+## Pick an entry point
 
 - [Rust](/test-runner/rust) — `#[ferritest]`, `ferridriver_test::main!()`, `cargo test`-driven
-- [TypeScript](/test-runner/typescript) — `test()`, `describe()`, `expect()`, Playwright-compatible
+- [BDD](/bdd/overview) — Gherkin features with Rust or JS/TS step bodies via `ferridriver bdd`
 - [`expect` matchers](/test-runner/expect) — all 38 matchers with auto-retry
 - [Fixtures and hooks](/test-runner/fixtures-and-hooks) — how to wire test state
 - [Configuration](/test-runner/config) — `ferridriver.config.*`, env vars, CLI flags

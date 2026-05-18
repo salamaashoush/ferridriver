@@ -40,6 +40,7 @@ async fn run_demo_plugin_twice(bytecode: Option<Arc<[u8]>>) {
     request: None,
     browser: None,
     plugins: vec![demo_binding(bytecode)],
+    trusted_modules: false,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -104,6 +105,7 @@ fn make_ctx() -> (tempfile::TempDir, RunContext) {
     request: None,
     browser: None,
     plugins: Vec::new(),
+    trusted_modules: false,
   };
   (tmp, ctx)
 }

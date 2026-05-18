@@ -1,7 +1,7 @@
 #![allow(clippy::doc_markdown)]
 //! ferridriver -- single-binary CLI for browser automation.
 //!
-//! Subcommands: `mcp`, `bdd`, `test`, `codegen`, `config`.
+//! Subcommands: `mcp`, `bdd`, `test`, `install`, `codegen`, `config`.
 //!
 //! The unified `FerridriverConfig` is loaded exactly once per invocation and
 //! its sections are passed to the selected subcommand.
@@ -42,9 +42,57 @@ async fn main() -> anyhow::Result<()> {
     cli::Command::Bdd(bdd_args) => Box::pin(run_bdd(config, bdd_args)).await,
     cli::Command::Test(test_args) => run_test(&test_args),
     cli::Command::Run(run_args) => Box::pin(run_script_cli(run_args)).await,
+    cli::Command::Install(install_args) => Box::pin(run_install(install_args)).await,
     cli::Command::Codegen(_) => anyhow::bail!("`codegen` subcommand not yet implemented"),
     cli::Command::Config(_) => anyhow::bail!("`config` subcommand not yet implemented"),
   }
+}
+
+async fn run_install(args: cli::InstallArgs) -> anyhow::Result<()> {
+  use ferridriver::install::{BrowserInstaller, InstallProgress};
+
+  let installer = BrowserInstaller::new();
+  let progress = |p: InstallProgress| match p {
+    InstallProgress::Resolving => eprintln!("Resolving latest version..."),
+    InstallProgress::Downloading {
+      bytes_downloaded,
+      total_bytes,
+    } => match total_bytes {
+      Some(total) => eprintln!("Downloading {bytes_downloaded}/{total} bytes"),
+      None => eprintln!("Downloading {bytes_downloaded} bytes"),
+    },
+    InstallProgress::Extracting => eprintln!("Extracting..."),
+    InstallProgress::Complete { version, path } => eprintln!("Installed {version} -> {path}"),
+    InstallProgress::AlreadyInstalled { version, path } => eprintln!("Already installed {version} -> {path}"),
+    InstallProgress::InstallingDeps { distro } => eprintln!("Installing system dependencies ({distro})..."),
+    InstallProgress::DepsInstalled => eprintln!("System dependencies installed"),
+  };
+
+  let mut browsers = args.browsers;
+  if browsers.is_empty() {
+    browsers.push("chromium".to_string());
+  }
+
+  if args.with_deps {
+    installer.install_system_deps(progress).await?;
+  }
+
+  for browser in &browsers {
+    match browser.as_str() {
+      "chromium" => {
+        installer.install_chromium(progress).await?;
+      },
+      "chromium-headless-shell" => {
+        installer.install_chromium_headless_shell(progress).await?;
+      },
+      "firefox" => {
+        installer.install_firefox(progress).await?;
+      },
+      other => anyhow::bail!("unknown browser {other:?} (expected chromium, chromium-headless-shell, or firefox)"),
+    }
+  }
+
+  Ok(())
 }
 
 fn run_test(args: &cli::TestArgs) -> anyhow::Result<()> {
@@ -130,6 +178,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
     bdd_step_timeout: args.step_timeout,
     bdd_order: args.order,
     bdd_language: args.language,
+    bdd_steps: args.steps,
     workers: args.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
     reporter: args.reporter,
     ..Default::default()
@@ -203,6 +252,7 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     request: None,
     browser: None,
     plugins: Vec::new(),
+    trusted_modules: false,
   };
 
   let opts = ferridriver_script::RunOptions {

@@ -20,6 +20,7 @@
 
 pub mod api_request;
 pub mod artifacts;
+pub mod bdd;
 pub mod browser;
 pub mod browser_type;
 pub mod console_message;
@@ -44,6 +45,10 @@ pub mod webapi;
 
 pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
+pub use bdd::{
+  CollectedRegistry, JsArg, ScenarioWorld, StepOutcome, collect_registry, install_bdd, invoke_hook, invoke_step,
+  reset_world, set_scenario_world,
+};
 pub use browser::BrowserJs;
 pub use browser_type::{BrowserTypeJs, install_browser_type};
 pub use console_message::ConsoleMessageJs;
@@ -115,22 +120,46 @@ pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
 /// Scripts that do not need browser interaction can run with
 /// `RunContext.page = None` and simply have no `page` binding.
 pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, async_ctx: AsyncContext) -> rquickjs::Result<()> {
+  install_page_on(ctx, &ctx.globals(), page, async_ctx)
+}
+
+/// Install the `page` binding onto an arbitrary target object.
+///
+/// This is the single implementation; scripting passes `ctx.globals()`
+/// (so bare `page.goto(...)` keeps working) and the BDD layer passes a
+/// per-scenario World object (so cucumber `this.page` resolves to that
+/// scenario's fixtures). One binding, two install targets — no
+/// duplicate `PageJs` wiring.
+pub fn install_page_on<'js>(
+  ctx: &Ctx<'js>,
+  target: &rquickjs::Object<'js>,
+  page: Arc<ferridriver::Page>,
+  async_ctx: AsyncContext,
+) -> rquickjs::Result<()> {
   let js_page = Class::instance(ctx.clone(), PageJs::new_with_async_ctx(page, async_ctx))?;
-  ctx.globals().set("page", js_page)?;
+  target.set("page", js_page)?;
   // Per-page route handler registry (`Map<id, fn>`) used by
   // `page.route(matcher, fn)` to look up callbacks from cross-task
-  // dispatch. Created here so scripts that never call `route` don't
-  // pay any setup cost beyond installing the global.
-  // Idempotent: a session-created `__fdRoutes` (for script-launched
-  // pages) must NOT be wiped when the MCP-prebound page reinstalls.
+  // dispatch. Always lives on `globalThis` (route dispatch re-enters
+  // the context and looks it up there) regardless of the binding
+  // target. Idempotent `||=`: never wipes an existing registry.
   ctx.eval::<(), _>(b"globalThis.__fdRoutes ||= new Map(); globalThis.__fdRoutePreds ||= new Map();".as_slice())?;
   Ok(())
 }
 
 /// Install the `context` global (cookies, storage, permissions, route, etc.).
 pub fn install_browser_context(ctx: &Ctx<'_>, bcx: Arc<ferridriver::context::ContextRef>) -> rquickjs::Result<()> {
+  install_browser_context_on(ctx, &ctx.globals(), bcx)
+}
+
+/// `context` binding onto an arbitrary target (see [`install_page_on`]).
+pub fn install_browser_context_on<'js>(
+  ctx: &Ctx<'js>,
+  target: &rquickjs::Object<'js>,
+  bcx: Arc<ferridriver::context::ContextRef>,
+) -> rquickjs::Result<()> {
   let js_bcx = Class::instance(ctx.clone(), BrowserContextJs::new(bcx))?;
-  ctx.globals().set("context", js_bcx)?;
+  target.set("context", js_bcx)?;
   Ok(())
 }
 
@@ -139,15 +168,33 @@ pub fn install_browser_context(ctx: &Ctx<'_>, bcx: Arc<ferridriver::context::Con
 /// [`ferridriver::options::BrowserContextOptions`] bag. Rule-9 tests
 /// for §4.1 consume this entry point.
 pub fn install_browser(ctx: &Ctx<'_>, browser: Arc<ferridriver::Browser>) -> rquickjs::Result<()> {
+  install_browser_on(ctx, &ctx.globals(), browser)
+}
+
+/// `browser` binding onto an arbitrary target (see [`install_page_on`]).
+pub fn install_browser_on<'js>(
+  ctx: &Ctx<'js>,
+  target: &rquickjs::Object<'js>,
+  browser: Arc<ferridriver::Browser>,
+) -> rquickjs::Result<()> {
   let js_browser = Class::instance(ctx.clone(), BrowserJs::new(browser))?;
-  ctx.globals().set("browser", js_browser)?;
+  target.set("browser", js_browser)?;
   Ok(())
 }
 
 /// Install the `request` global (runner-side HTTP via APIRequestContext).
 pub fn install_request(ctx: &Ctx<'_>, req: Arc<ferridriver::api_request::APIRequestContext>) -> rquickjs::Result<()> {
+  install_request_on(ctx, &ctx.globals(), req)
+}
+
+/// `request` binding onto an arbitrary target (see [`install_page_on`]).
+pub fn install_request_on<'js>(
+  ctx: &Ctx<'js>,
+  target: &rquickjs::Object<'js>,
+  req: Arc<ferridriver::api_request::APIRequestContext>,
+) -> rquickjs::Result<()> {
   let js_req = Class::instance(ctx.clone(), APIRequestContextJs::new(req))?;
-  ctx.globals().set("request", js_req)?;
+  target.set("request", js_req)?;
   Ok(())
 }
 
