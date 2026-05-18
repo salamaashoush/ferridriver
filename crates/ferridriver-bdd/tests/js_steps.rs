@@ -53,7 +53,7 @@ async fn js_steps_pass_fail_and_tag_filter() {
   // 1. Load the JS step files (as ES modules) into the shared QuickJS
   //    engine and build the Rust step registry from what they
   //    registered.
-  let session = JsBddSession::load(&["cukes.steps.js".to_string()], &fixtures_dir)
+  let session = JsBddSession::from_globs(&["cukes.steps.js".to_string()], &fixtures_dir)
     .await
     .expect("load js bdd session");
 

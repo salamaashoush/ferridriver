@@ -28,6 +28,15 @@
 - **Trusted modules**: BDD/CLI sets `RunContext.trusted_modules` so step
   files resolve modules anywhere on disk (filesystem `FileResolver` +
   `ScriptLoader`); the MCP / `run_script` path stays sandboxed.
+- **Bytecode compile-once**: step files are compiled to `QuickJS`
+  bytecode a single time up front (`compile_step_files` ->
+  `compile_module`, throwaway VM, native endianness). Each per-worker
+  session links bytecode via `Module::load` — no re-parse, no re-read
+  across N workers. The per-scenario hot path is already parse-free
+  (steps are `Persistent<Function>`). Non-compiled shared-util modules
+  imported by a step file (`./helpers.js`) are still parsed once per
+  worker session from source via the filesystem resolver; whole-graph
+  bytecode caching is a further optimization (open).
 - **Full TestRunner integration**: `ferridriver bdd` builds the plan via
   `js::translate_features_js`; scenarios run through the core
   `TestRunner` — parallel workers (one JS engine session per worker,
