@@ -92,17 +92,24 @@ You can mix — `--browser chromium --backend cdp-raw` is valid. `--browser fire
 
 Run the same test suite against multiple backends:
 
-```ts
-// ferridriver.config.ts
-import { defineConfig } from '@ferridriver/test/config';
+```toml
+# ferridriver.config.toml
+[[projects]]
+name = "chromium"
+[projects.browser]
+browser = "chromium"
 
-export default defineConfig({
-  projects: [
-    { name: 'chromium', use: { browser: 'chromium' } },
-    { name: 'firefox',  use: { browser: 'firefox',  backend: 'bidi' } },
-    { name: 'webkit',   use: { browser: 'webkit',   backend: 'webkit' } },
-  ],
-});
+[[projects]]
+name = "firefox"
+[projects.browser]
+browser = "firefox"
+backend = "bidi"
+
+[[projects]]
+name = "webkit"
+[projects.browser]
+browser = "webkit"
+backend = "webkit"
 ```
 
 Then `--project firefox` runs only that slice. CI typically runs all three in parallel shards.

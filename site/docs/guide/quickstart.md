@@ -67,4 +67,4 @@ async fn loads_homepage(ctx: TestContext) {
 }
 ```
 
-See the [Test runner](/test-runner/overview) guide for setup, or [Component testing](/component-testing/overview) for React / Vue / Svelte / Solid.
+See the [Test runner](/test-runner/overview) guide for setup, or [BDD](/bdd/overview) for Gherkin features with Rust or JS/TS step bodies.

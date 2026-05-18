@@ -1,6 +1,6 @@
 # ferridriver
 
-Browser automation for Rust projects. Playwright-compatible API, native Rust engine, and first-class bindings for Node and Bun — so you don't have to switch runtimes to write end-to-end tests. Ships with a parallel test runner, a BDD framework, component testing for React / Vue / Svelte / Solid / Leptos / Dioxus, and an MCP server for AI agents. Four backends (CDP pipe / CDP WebSocket / WKWebView / Firefox via BiDi), one API.
+Browser automation for Rust projects. Playwright-compatible API, native Rust engine, a parallel test runner, a BDD framework that runs JavaScript/TypeScript step files natively (no Node/Bun), a core browser binding for Node/Bun, and an MCP server for AI agents. Four backends (CDP pipe / CDP WebSocket / WKWebView / Firefox via BiDi), one API.
 
 ## Architecture
 
@@ -11,24 +11,23 @@ ferridriver (core library)
   ├── WebKit backend         macOS WKWebView — native accessibility
   ├── Bidi backend           Firefox via WebDriver BiDi
   │
-  ├── ferridriver-cli         CLI binary (MCP server: stdio + HTTP)
+  ├── ferridriver-cli         CLI binary: mcp · bdd · test · run · install
   ├── ferridriver-mcp         MCP server library (scripting-focused, 9 tools, rmcp)
-  ├── ferridriver-script      Sandboxed QuickJS engine behind run_script
-  ├── ferridriver-node        Node.js/Bun bindings (NAPI-RS) → @ferridriver/node
+  ├── ferridriver-script      QuickJS engine (run_script + JS/TS BDD step bodies)
+  ├── ferridriver-node        Core browser binding (NAPI-RS) → @ferridriver/node
   │
   ├── ferridriver-test        Test runner core: parallel, hooks, expect, reporters
   ├── ferridriver-test-macros Proc macros: #[ferritest], #[ferritest_each], hooks
   │
-  ├── ferridriver-bdd         BDD framework: Gherkin parser, 144 steps, translator
-  ├── ferridriver-bdd-macros  Proc macros: #[given], #[when], #[then], #[step]
-  │
-  ├── @ferridriver/test       TS CLI + test API (wraps @ferridriver/node)
-  ├── @ferridriver/ct-core    JS CT core: Vite plugin, import transform, browser runtime
-  ├── @ferridriver/ct-react   React adapter (createRoot/render)
-  ├── @ferridriver/ct-vue     Vue adapter (createApp/mount)
-  ├── @ferridriver/ct-svelte  Svelte adapter (Svelte 4 + 5)
-  └── @ferridriver/ct-solid   Solid adapter (render/dispose)
+  ├── ferridriver-bdd         BDD framework: Gherkin parser, steps, translator
+  └── ferridriver-bdd-macros  Proc macros: #[given], #[when], #[then], #[step]
 ```
+
+`@ferridriver/node` is the browser API for JavaScript: `Browser` /
+`BrowserContext` / `Page` / `Frame` / `Locator` / `ElementHandle` /
+`Mouse` / `Keyboard` / network / dialog. For testing, write Rust
+`#[ferritest]` tests or Gherkin features with JS/TS step bodies via
+`ferridriver bdd`.
 
 ## Installation
 
@@ -62,7 +61,6 @@ brew install pkg-config
 
 **From GitHub releases:**
 ```bash
-# Download the latest release for your platform
 curl -fsSL https://github.com/salamaashoush/ferridriver/releases/latest/download/ferridriver-VERSION-TARGET.tar.gz | tar xz
 ```
 
@@ -74,20 +72,20 @@ cargo install ferridriver-cli
 #### 3. Install a browser
 
 ```bash
-# Via the TS CLI
-npx @ferridriver/test install chromium
-npx @ferridriver/test install --with-deps chromium  # also install system deps (fonts, libs)
+ferridriver install chromium
+ferridriver install --with-deps chromium   # also install system libs
+ferridriver install firefox chromium-headless-shell
 ```
 
-### npm (Node.js/Bun)
+### npm (Node.js/Bun) — core browser binding only
 
 ```bash
-npm install @ferridriver/test
+npm install @ferridriver/node
 # or
-bun add @ferridriver/test
+bun add @ferridriver/node
 ```
 
-This installs the test runner CLI (`ferridriver-test`) and the `@ferridriver/node` native addon as a dependency. On macOS, it also ships the WebKit host binary.
+On macOS this also ships the WebKit host binary.
 
 ## Quick Start (Rust)
 
@@ -125,11 +123,9 @@ console.log(await page.locator('h1').textContent());
 await browser.close();
 ```
 
-## Test Runner
+## Test Runner (Rust)
 
-Parallel test execution with auto-retrying assertions. 99 tests/sec, 4x faster than Playwright Test.
-
-### Rust
+Parallel test execution with auto-retrying assertions.
 
 ```rust
 use ferridriver_test::prelude::*;
@@ -144,24 +140,7 @@ async fn login_flow(page: Page) -> Result<(), TestFailure> {
 }
 ```
 
-### TypeScript
-
-```typescript
-import { test, expect } from '@ferridriver/test';
-
-test('login flow', async ({ page }) => {
-  await page.goto('https://app.example.com/login');
-  await page.locator('#email').fill('user@example.com');
-  await page.locator('button[type=submit]').click();
-  await expect(page).toHaveURL(/dashboard/);
-});
-```
-
-```bash
-npx @ferridriver/test test tests/login.spec.ts --workers 4
-```
-
-### E2E Project Setup (Rust)
+### E2E Project Setup
 
 ```
 my-project/
@@ -170,7 +149,6 @@ my-project/
     harness.rs                  # main!() -- one per project
     homepage.rs                 # test modules
     login.rs
-    checkout.rs
   Cargo.toml
 ```
 
@@ -178,7 +156,6 @@ my-project/
 ```rust
 mod homepage;
 mod login;
-mod checkout;
 
 ferridriver_test::main!();
 ```
@@ -214,8 +191,6 @@ cargo test --test e2e -- --headed --backend webkit --workers 1
 
 ### Configuration
 
-All test runners (E2E, CT Rust, CT TypeScript) share the same configuration system.
-
 **`ferridriver.config.toml`** (auto-discovered by walking up from CWD):
 ```toml
 workers = 4
@@ -223,7 +198,7 @@ timeout = 30000
 retries = 1
 
 [browser]
-backend = "cdp-pipe"    # "cdp-pipe", "cdp-raw", "webkit"
+backend = "cdp-pipe"    # "cdp-pipe", "cdp-raw", "webkit", "bidi"
 headless = true
 
 [browser.viewport]
@@ -237,7 +212,7 @@ height = 720
 3. Environment variables (`FERRIDRIVER_BACKEND`, `FERRIDRIVER_WORKERS`, `FERRIDRIVER_TIMEOUT`, `FERRIDRIVER_RETRIES`)
 4. CLI flags (`--headed`, `--backend`, `--workers`, `--timeout`)
 
-**CLI flags** (after `--` for `cargo test`, direct for the TS CLI):
+**CLI flags** (after `--` for `cargo test`):
 | Flag | Description |
 |---|---|
 | `--headed` | Show browser window |
@@ -275,24 +250,10 @@ async fn flaky_test(page: Page) -> Result<(), TestFailure> { ... }
 
 WebKit uses the system WKWebView — no browser download, instant startup, native accessibility tree. Headless only (headful mode pending).
 
-### Features
-
-- **Parallel**: N workers x N browsers, MPMC work-stealing dispatch
-- **Hooks**: beforeAll/afterAll, beforeEach/afterEach
-- **Serial mode**: tests run in order, skip remaining on failure
-- **Expected failures**: `test.fail()` pass/fail inversion
-- **Global setup/teardown**
-- **Retry + flaky detection**
-- **Reporters**: Terminal, JUnit XML, JSON, HTML
-- **Text snapshots**: `.snap` files with unified diff
-- **Visual snapshots**: pixel-level PNG diff with threshold and diff image
-- **CDP tracing**: Playwright-compatible format
-
 ### Expect Matchers
 
-The Rust core ships **38 matchers** with auto-retry. The TypeScript wrapper currently exposes **13** of them (common Playwright patterns). All polling happens in Rust regardless.
-
-**Rust (38, snake_case):**
+`ferridriver-test::expect` ships **38 matchers** with auto-retry. All
+polling happens in Rust.
 
 Visibility: `to_be_visible`, `to_be_hidden`, `to_be_attached`, `to_be_in_viewport`
 State: `to_be_enabled`, `to_be_disabled`, `to_be_checked`, `to_be_editable`, `to_be_focused`, `to_be_empty`
@@ -306,78 +267,42 @@ Page: `to_have_title`, `to_contain_title`, `to_have_url`, `to_contain_url`
 Poll / satisfy: `expect_poll`, `to_equal`, `to_satisfy`, `to_pass`, `to_pass_with_options`
 Modifiers: `.not()`, `.with_timeout()`, `.soft()`, `.with_message()`
 
-**TypeScript (13, camelCase):**
+## BDD Framework
 
-`toHaveTitle`, `toHaveURL`, `toBeVisible`, `toBeHidden`, `toBeEnabled`, `toBeDisabled`, `toBeChecked`, `toHaveText`, `toContainText`, `toHaveValue`, `toHaveAttribute`, `toHaveCount`, `toPass`. All take `string` arguments; regex is Rust-only today.
+Gherkin step definitions backed by the Page/Locator API. Step bodies can be
+Rust (`#[given]`/`#[when]`/`#[then]`) or JavaScript/TypeScript — TS/JS step
+files are bundled with rolldown, compiled to QuickJS bytecode once, and run
+on the shared `ferridriver-script` engine through the core `TestRunner`.
+There is no Node or Bun in the run path.
 
-## Component Testing
-
-Test UI components in real browsers. JS frameworks use the built-in CT adapters. Rust WASM frameworks (Leptos, Dioxus) use E2E testing with `#[ferritest]` -- build the app with `trunk build` / `dx build`, serve it, and test with the Page API.
-
-### Leptos / Dioxus (E2E)
-
-```rust
-use ferridriver_test_macros::ferritest;
-use ferridriver_test::expect::expect;
-
-#[ferritest]
-async fn counter_increments(page: ferridriver::Page) {
-    page.goto("http://localhost:8080", None).await?;
-    page.locator("#inc").click().await?;
-    expect(&page.locator("#count")).to_have_text("1").await?;
-}
+```gherkin
+Feature: Login
+  Scenario: Successful login
+    Given I navigate to "https://app.example.com/login"
+    When I fill "label=Email" with "user@example.com"
+    And I fill "label=Password" with "secret"
+    And I click "role=button[name=Sign in]"
+    Then the URL should contain "/dashboard"
+    And "role=heading" should have text "Welcome"
 ```
 
 ```bash
-# Build the WASM app first, then run E2E tests
-cargo install trunk                  # Leptos
-trunk build && cargo test -p my-leptos-app
+# Rust steps only
+ferridriver bdd tests/features/
 
-cargo install dioxus-cli             # Dioxus
-dx build --platform web && cargo test -p my-dioxus-app
+# JavaScript / TypeScript step files (cucumber-js shaped)
+ferridriver bdd --steps 'steps/**/*.{js,ts}' tests/features/
 ```
 
-### React / Vue / Svelte / Solid
+JS/TS step files keep the cucumber-js surface: `Given`/`When`/`Then`/
+`Before`/`After`/`BeforeAll`/`AfterAll`/`defineParameterType`/
+`setWorldConstructor`/`setDefaultTimeout`, `this` is the World with
+`attach`/`log`/`parameters`, `DataTable` exposes
+`raw`/`rows`/`hashes`/`rowsHash`/`transpose`, and returning
+`'pending'`/`'skipped'` works. Run with the single `ferridriver` binary —
+no `package.json`, no `node_modules`.
 
-```typescript
-import { test, expect } from '@ferridriver/test';
-
-test('counter increments', async ({ page }) => {
-  await page.locator('#inc').click();
-  await expect(page.locator('#count')).toHaveText('1');
-});
-```
-
-```bash
-npx @ferridriver/test ct --framework react src/todomvc.ct.ts
-npx @ferridriver/test ct --framework vue src/todomvc.ct.ts
-npx @ferridriver/test ct --framework svelte src/todomvc.ct.ts
-npx @ferridriver/test ct --framework solid src/todomvc.ct.ts
-
-# With options
-npx @ferridriver/test ct --framework react --headed --backend webkit --workers 1 src/app.ct.ts
-```
-
-The `--ct` flag starts the Vite dev server, pre-warms it, navigates each test page to the app, and provides a `mount()` fixture.
-
-### How It Works
-
-**Rust frameworks**: `trunk build` / `dx build` (cached) → `ComponentServer` serves static output → ferridriver-test parallel runner creates pages against it. Custom harness with `inventory` for test discovery.
-
-**JS frameworks**: CLI starts Vite dev server → pre-warms compilation → NAPI test runner creates pages navigated to `baseUrl` → tests interact via Playwright-style Page/Locator API.
-
-### Performance
-
-| Framework | 15 TodoMVC tests | Per test |
-|-----------|-----------------|---------|
-| Solid | 392ms | 26ms |
-| Vue | 409ms | 27ms |
-| Svelte | 447ms | 30ms |
-| Leptos | 483ms | 32ms |
-| React | 534ms | 36ms |
-| Dioxus | 599ms | 40ms |
-
-500 Leptos tests: 10.1s (49.5 tests/sec)
+Available step categories: Navigation, Interaction (click, fill, type, hover, check, focus, blur, scroll), Wait, Assertion (text, visibility, value, attribute, class, state, count, aria), Keyboard, Mouse, Screenshot, Variable, Storage, Cookie, JavaScript, Dialog, Frame, Window, File, Network (route / fulfill / continue / abort), API request, Emulation.
 
 ## MCP Server
 
@@ -385,20 +310,20 @@ Scripting-focused MCP server for AI agent browser automation. Works with Claude,
 
 ```bash
 # stdio (for Claude Code, Cursor, etc.)
-ferridriver
+ferridriver mcp
 
 # headless mode
-ferridriver --headless
+ferridriver mcp --headless
 
 # HTTP transport (for remote clients)
-ferridriver --transport http --port 8080
+ferridriver mcp --transport http --port 8080
 
 # WebKit backend (macOS, no Chrome needed)
-ferridriver --backend webkit
+ferridriver mcp --backend webkit
 
 # Connect to running Chrome
-ferridriver --auto-connect
-ferridriver --connect ws://localhost:9222/devtools/browser/...
+ferridriver mcp --auto-connect chrome
+ferridriver mcp --connect ws://localhost:9222/devtools/browser/...
 ```
 
 **Nine tools:** `connect`, `navigate`, `page` (session bootstrap) · `snapshot`, `screenshot`, `evaluate`, `search_page`, `diagnostics` (observation) · `run_script` (action).
@@ -419,31 +344,12 @@ Globals available inside a script: `page`, `context`, `request`, `args` (bound, 
 
 See [`site/docs/mcp/tools.md`](./site/docs/mcp/tools.md) for the full script API.
 
-## BDD Framework
-
-144 Gherkin step definitions backed by the Page/Locator API (not raw JS `evaluate`). All selectors support Playwright engine syntax (`role=`, `text=`, `label=`, etc).
-
-```gherkin
-Feature: Login
-  Scenario: Successful login
-    Given I navigate to "https://app.example.com/login"
-    When I fill "label=Email" with "user@example.com"
-    And I fill "label=Password" with "secret"
-    And I click "role=button[name=Sign in]"
-    Then the URL should contain "/dashboard"
-    And "role=heading" should have text "Welcome"
-```
-
-Available step categories: Navigation, Interaction (click, fill, type, hover, check, focus, blur, scroll), Wait, Assertion (text, visibility, value, attribute, class, state, count, aria), Keyboard, Mouse, Screenshot, Variable, Storage, Cookie, JavaScript, Dialog, Frame, Window, File, Network (route / fulfill / continue / abort), API request, Emulation.
-
 ## Page API
 
 ### Navigation
 `goto`, `goBack`, `goForward`, `reload`, `url`, `title`, `content`, `waitForUrl`, `waitForLoadState`, `waitForNavigation`
 
 ### Selectors (Playwright-compatible)
-
-All Playwright selector engines are supported:
 
 | Selector | Example |
 |---|---|
@@ -497,73 +403,42 @@ All Playwright selector engines are supported:
 ```
 crates/
   ferridriver                 Core: Browser, Page, Locator, 4 backends
-  ferridriver-cli             CLI binary (MCP server: stdio + HTTP)
+  ferridriver-cli             CLI binary: mcp · bdd · test · run · install
   ferridriver-mcp             MCP server library (scripting-focused, 9 tools, rmcp)
-  ferridriver-script          Sandboxed QuickJS engine behind run_script
-  ferridriver-node            Node.js/Bun bindings (NAPI-RS) → @ferridriver/node
+  ferridriver-script          QuickJS engine (run_script + JS/TS BDD step bodies)
+  ferridriver-node            Core browser binding (NAPI-RS) → @ferridriver/node
   ferridriver-test            Test runner: parallel, hooks, expect, reporters
   ferridriver-test-macros     #[ferritest], #[ferritest_each], hook macros
-  ferridriver-bdd             BDD framework: Gherkin parser, 144 steps, translator
+  ferridriver-bdd             BDD framework: Gherkin parser, steps, translator
   ferridriver-bdd-macros      #[given], #[when], #[then], #[step], #[before], #[after]
-packages/
-  ferridriver-test            @ferridriver/test — TS CLI + test API
-  ct-core                     @ferridriver/ct-core — Vite plugin, import transform, browser runtime
-  ct-react                    @ferridriver/ct-react — React registerSource
-  ct-vue                      @ferridriver/ct-vue — Vue registerSource
-  ct-svelte                   @ferridriver/ct-svelte — Svelte registerSource (Svelte 4 + 5)
-  ct-solid                    @ferridriver/ct-solid — Solid registerSource
 examples/
-  bdd-example                 Rust BDD test suite (bdd_main!() + feature files)
-  ct-leptos-todomvc           Leptos TodoMVC E2E (#[ferritest] + trunk)
-  ct-dioxus-todomvc           Dioxus TodoMVC E2E (#[ferritest] + dx)
-  ct-react                    React TodoMVC (15 tests)
-  ct-vue                      Vue TodoMVC (15 tests)
-  ct-svelte                   Svelte TodoMVC (15 tests)
-  ct-solid                    Solid TodoMVC (15 tests)
+  bdd-example                 Rust + JS/TS BDD test suite (feature files + steps)
+site/                         Documentation site (rspress)
 ```
-
-## Performance
-
-| Metric | Value |
-|--------|-------|
-| Test runner throughput | **99 tests/sec** (100 tests, 6 workers) |
-| vs Playwright Test | **4x faster** (50 tests) |
-| CT per test (JS) | 26-36ms |
-| CT per test (WASM) | 32-40ms |
-| CdpPipe vs Playwright | 1.1x faster per operation |
-| WebKit vs Playwright WebKit | 1.3x faster |
-
-## Test Coverage
-
-- ~94 Rust workspace tests (unit + integration, across 4 backends)
-- ~337 NAPI / TypeScript tests (Bun)
-- 83 BDD feature scenarios (81 pass, 2 skip)
-- 60 JS component tests (15 each for React, Vue, Svelte, Solid TodoMVC)
-- **~430 total tests**
 
 ## Building and Testing
 
 ```bash
-# Run everything: build binary + NAPI, all Rust tests (4 backends), TS tests, BDD features
+# Build the binary, run all Rust tests (4 backends), then the BDD suite
 just test
 
 # Or step by step:
-cargo build --bin ferridriver                     # MCP server binary
-cd crates/ferridriver-node && bun run build:debug  # NAPI .node addon
-cargo test --workspace                             # Rust tests
-cd crates/ferridriver-node && bun test             # NAPI/TS tests
+cargo build --bin ferridriver
+cargo test --workspace
+cargo run --bin ferridriver -- bdd tests/features/
+
+# Core-binding bun tests for @ferridriver/node (optional):
+cd crates/ferridriver-node && bun run build:debug && bun test
 ```
 
 ## Requirements
 
 - Rust stable 1.91+ (edition 2024) — see `rust-toolchain.toml`
-- Chrome / Chromium (auto-detected, or set `CHROMIUM_PATH`)
+- Chrome / Chromium (`ferridriver install chromium`, auto-detected, or set `CHROMIUM_PATH`)
 - macOS 11+ for the WebKit backend
 - Firefox with WebDriver BiDi for the `bidi` backend
-- Bun 1.0+ or Node.js 18+ for the NAPI addon and TS test runner
+- Bun 1.0+ or Node.js 18+ only if you build/consume the `@ferridriver/node` addon
 - `ffmpeg` on PATH for `--video` recording (optional, runtime only)
-- `trunk` for Leptos CT (`cargo install trunk`)
-- `dx` for Dioxus CT (`cargo install dioxus-cli`)
 
 ## License
 
