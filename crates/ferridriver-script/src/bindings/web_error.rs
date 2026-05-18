@@ -46,19 +46,19 @@ impl WebErrorJs {
 /// `PageJs::waitForEvent('pageerror')` (page-scoped, Playwright-parity
 /// `Promise<Error>`).
 ///
-/// Uses [`rquickjs::Ctx::eval`] once per call to define+invoke a tiny
-/// factory `(n, m, s) => { const e = new Error(m); … }`. `rquickjs`'s
-/// `Function` lacks a `call-as-new` method (see `Constructor::construct`
-/// — only reachable via `Class::create_constructor` which is meant for
-/// Rust-side class registration), and its `pub(crate)` inner field
-/// blocks the obvious `Constructor(fun)` wrap. Going through `eval`
-/// keeps the binding readable without a newtype-conversion detour
-/// into rquickjs internals.
+/// Constructs the `Error` natively via the global `Error` constructor
+/// (`rquickjs::function::Constructor::construct`, the same call-as-new
+/// path `page.route` uses for `new URL(...)`), then sets `name` and a
+/// non-empty `stack` on the instance. No `ctx.eval` of a JS factory.
 pub fn build_native_error<'js>(
   ctx: &rquickjs::Ctx<'js>,
   details: &ErrorDetails,
 ) -> rquickjs::Result<rquickjs::Value<'js>> {
-  let factory_src = b"(function(n, m, s) { var e = new Error(m); e.name = n; if (s) { e.stack = s; } return e; })";
-  let factory: rquickjs::Function<'js> = ctx.eval(factory_src.as_slice())?;
-  factory.call::<_, rquickjs::Value<'js>>((details.name.clone(), details.message.clone(), details.stack.clone()))
+  let err_ctor: rquickjs::function::Constructor<'js> = ctx.globals().get("Error")?;
+  let err: rquickjs::Object<'js> = err_ctor.construct((details.message.clone(),))?;
+  err.set("name", details.name.clone())?;
+  if !details.stack.is_empty() {
+    err.set("stack", details.stack.clone())?;
+  }
+  Ok(err.into_value())
 }

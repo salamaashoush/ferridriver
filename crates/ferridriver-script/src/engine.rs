@@ -282,11 +282,7 @@ impl Session {
       // so `page.route` works on ANY page (script-launched
       // `context.newPage()`, not just the MCP-prebound one whose
       // `install_page` also creates it).
-      crate::bindings::page::ensure_route_registry(&ctx);
-      // (No `__ferriJSON` intrinsic capture any more: result
-      // serialisation walks the JS value directly in Rust and never
-      // touches the JS `JSON` global, so a script reassigning
-      // `globalThis.JSON` in a persistent VM cannot affect it.)
+      crate::bindings::page::ensure_page_callbacks(&ctx);
       install_runtime_shims(&ctx).map_err(|e| ScriptError::internal(format!("failed to install runtime shims: {e}")))?;
 
       // Session-stable bindings: install ONCE, not per `execute`. Class

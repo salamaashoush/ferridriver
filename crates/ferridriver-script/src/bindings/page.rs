@@ -200,50 +200,54 @@ fn parse_page_close_options<'js>(
   }
 }
 
-/// JS-visible wrapper around [`ferridriver::Page`].
-///
-/// Native route-handler registry: `page.route(matcher, fn)` keeps the JS
-/// callback (and an optional URL predicate) as `Persistent` functions in
-/// context userdata, keyed by the registration id. The cross-task
-/// dispatch bridge restores them by id and the `unroute(fn)` path drops
-/// them by `===` identity — no `globalThis.__fd*` Map, exactly the
-/// `Persistent`/userdata pattern the extension registry uses.
+/// Native registry for every page JS callback dispatched cross-task
+/// (outside the QuickJS context, from a backend tokio task): `page.route`
+/// handlers + URL predicates (keyed by registration id), `page.exposeFunction`
+/// callbacks (keyed by binding name), and the single `page.startScreencast`
+/// frame callback. All kept as `Persistent<Function>` in context
+/// userdata — no `globalThis.__fd*`, exactly the `Persistent`/userdata
+/// pattern the extension registry uses.
 ///
 /// Single-threaded VM ⇒ `RefCell`, never `Arc`/`Mutex` (same rationale
 /// as `BddUserData`).
 #[derive(Default)]
-pub(crate) struct RouteRegistry {
-  handlers: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
-  preds: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
+pub(crate) struct PageCallbacks {
+  route_handlers: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
+  route_preds: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
+  exposed: rustc_hash::FxHashMap<String, rquickjs::Persistent<rquickjs::Function<'static>>>,
+  screencast: Option<rquickjs::Persistent<rquickjs::Function<'static>>>,
 }
 
-pub(crate) struct RouteRegistryUd(std::cell::RefCell<RouteRegistry>);
+pub(crate) struct PageCallbacksUd(std::cell::RefCell<PageCallbacks>);
 
 // SAFETY: holds only `'static` data (`Persistent<…>` handles), so
 // re-stating the unused `'js` lifetime is sound — identical rationale to
 // `BddUserData` / `SessionAsyncCtx`.
 #[allow(unsafe_code)]
-unsafe impl rquickjs::JsLifetime<'_> for RouteRegistryUd {
-  type Changed<'to> = RouteRegistryUd;
+unsafe impl rquickjs::JsLifetime<'_> for PageCallbacksUd {
+  type Changed<'to> = PageCallbacksUd;
 }
 
-/// Ensure the route registry userdata exists on this context. Idempotent;
-/// called at `Session::create` and defensively from `page.route`.
-pub(crate) fn ensure_route_registry(ctx: &rquickjs::Ctx<'_>) {
-  if ctx.userdata::<RouteRegistryUd>().is_none() {
-    let _ = ctx.store_userdata(RouteRegistryUd(std::cell::RefCell::new(RouteRegistry::default())));
+/// Ensure the page-callbacks userdata exists on this context.
+/// Idempotent; called at `Session::create` and defensively from the
+/// `page.route` / `exposeFunction` / `startScreencast` bindings.
+pub(crate) fn ensure_page_callbacks(ctx: &rquickjs::Ctx<'_>) {
+  if ctx.userdata::<PageCallbacksUd>().is_none() {
+    let _ = ctx.store_userdata(PageCallbacksUd(std::cell::RefCell::new(PageCallbacks::default())));
   }
 }
 
-fn with_route_registry<R>(ctx: &rquickjs::Ctx<'_>, f: impl FnOnce(&mut RouteRegistry) -> R) -> rquickjs::Result<R> {
-  ensure_route_registry(ctx);
-  let ud = ctx
-    .userdata::<RouteRegistryUd>()
-    .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route registry missing".to_string()))?;
+fn with_page_callbacks<R>(ctx: &rquickjs::Ctx<'_>, f: impl FnOnce(&mut PageCallbacks) -> R) -> rquickjs::Result<R> {
+  ensure_page_callbacks(ctx);
+  let ud = ctx.userdata::<PageCallbacksUd>().ok_or_else(|| {
+    rquickjs::Error::new_from_js_message("page", "Error", "page callbacks registry missing".to_string())
+  })?;
   let mut reg = ud.0.borrow_mut();
   Ok(f(&mut reg))
 }
 
+/// JS-visible wrapper around [`ferridriver::Page`].
+///
 /// Held as `Arc<Page>` so the same page can be shared with the MCP session
 /// while the script runs; dropping the wrapper does not close the page.
 #[derive(JsLifetime, Trace)]
@@ -1104,7 +1108,7 @@ impl PageJs {
     })?;
     let id = self.next_route_id.fetch_add(1, Ordering::Relaxed);
     let saved_handler = rquickjs::Persistent::save(&ctx, handler);
-    with_route_registry(&ctx, |r| r.handlers.insert(id, saved_handler))?;
+    with_page_callbacks(&ctx, |r| r.route_handlers.insert(id, saved_handler))?;
 
     // A JS predicate is `!Send` and core matches on the CDP recv task,
     // so it can't ride `UrlMatcher::Predicate`. Register an always-true
@@ -1114,7 +1118,7 @@ impl PageJs {
     let has_predicate = url.as_function().is_some();
     let matcher = if let Some(pred) = url.as_function() {
       let saved_pred = rquickjs::Persistent::save(&ctx, pred.clone());
-      with_route_registry(&ctx, |r| r.preds.insert(id, saved_pred))?;
+      with_page_callbacks(&ctx, |r| r.route_preds.insert(id, saved_pred))?;
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
       self
         .route_matchers
@@ -1147,7 +1151,7 @@ impl PageJs {
         use rquickjs::class::Class;
         let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
           if has_predicate {
-            let pred = with_route_registry(&ctx, |r| r.preds.get(&id).cloned())?
+            let pred = with_page_callbacks(&ctx, |r| r.route_preds.get(&id).cloned())?
               .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route predicate gone".to_string()))?
               .restore(&ctx)?;
             let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
@@ -1157,7 +1161,7 @@ impl PageJs {
               return Ok(());
             }
           }
-          let f = with_route_registry(&ctx, |r| r.handlers.get(&id).cloned())?
+          let f = with_page_callbacks(&ctx, |r| r.route_handlers.get(&id).cloned())?
             .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route handler gone".to_string()))?
             .restore(&ctx)?;
           let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
@@ -1184,7 +1188,7 @@ impl PageJs {
       // same underlying object, so `Value` `PartialEq` (tag + pointer)
       // is still strict `===` identity.
       let saved: Vec<(u64, rquickjs::Persistent<rquickjs::Function<'static>>)> =
-        with_route_registry(&ctx, |r| r.preds.iter().map(|(k, v)| (*k, v.clone())).collect())?;
+        with_page_callbacks(&ctx, |r| r.route_preds.iter().map(|(k, v)| (*k, v.clone())).collect())?;
       let mut victims: Vec<u64> = Vec::new();
       for (id, sp) in saved {
         let stored = sp.restore(&ctx)?;
@@ -1201,9 +1205,9 @@ impl PageJs {
         if let Some(m) = m {
           self.inner.unroute(&m).await.into_js()?;
         }
-        with_route_registry(&ctx, |r| {
-          r.preds.remove(&id);
-          r.handlers.remove(&id);
+        with_page_callbacks(&ctx, |r| {
+          r.route_preds.remove(&id);
+          r.route_handlers.remove(&id);
         })?;
       }
       return Ok(());
@@ -1554,19 +1558,11 @@ impl PageJs {
         "page.exposeFunction requires the script engine's AsyncContext (install_page)".to_string(),
       )
     })?;
-    // Stash the JS callback in a page-global registry keyed by name
-    // — cross-task dispatch (the Rust ExposedFn runs outside the
-    // QuickJS context) looks it up by name via `async_with!`.
-    let globals = ctx.globals();
-    let registry: rquickjs::Object<'js> = match globals.get::<_, rquickjs::Value<'_>>("__fdExposed") {
-      Ok(v) if !v.is_undefined() && !v.is_null() => rquickjs::Object::from_value(v)?,
-      _ => {
-        let obj = rquickjs::Object::new(ctx.clone())?;
-        globals.set("__fdExposed", obj.clone())?;
-        obj
-      },
-    };
-    registry.set(name.clone(), callback)?;
+    // Stash the JS callback in the native page-callbacks registry keyed
+    // by binding name — cross-task dispatch (the Rust `ExposedFn` runs
+    // outside the QuickJS context) restores it by name via `async_with!`.
+    let saved = rquickjs::Persistent::save(&ctx, callback);
+    with_page_callbacks(&ctx, |r| r.exposed.insert(name.clone(), saved))?;
 
     let cb: ferridriver::events::ExposedFn = std::sync::Arc::new({
       let name = name.clone();
@@ -1575,8 +1571,9 @@ impl PageJs {
         let name = name.clone();
         tokio::spawn(async move {
           let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
-            let registry: rquickjs::Object<'_> = ctx.globals().get("__fdExposed")?;
-            let f: rquickjs::Function<'_> = registry.get(name.as_str())?;
+            let f = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
+              .ok_or_else(|| rquickjs::Error::new_from_js_message("page.exposeFunction", "Error", "exposed callback gone".to_string()))?
+              .restore(&ctx)?;
             // Pass args as a single JS array. The user's callback
             // signature is `(args: unknown[]) => ...`.
             let js_args = rquickjs::Array::new(ctx.clone())?;
@@ -1615,7 +1612,8 @@ impl PageJs {
         "page.startScreencast requires the script engine's AsyncContext (install_page)".to_string(),
       )
     })?;
-    ctx.globals().set("__fdScreencast", callback)?;
+    let saved = rquickjs::Persistent::save(&ctx, callback);
+    with_page_callbacks(&ctx, |r| r.screencast = Some(saved))?;
     // `start_screencast` returns `(rx, shutdown_tx)`. The QuickJS
     // binding doesn't expose a stop hook here; the shutdown signal is
     // dropped (which Chrome's stop-screencast path will subsequently
@@ -1629,7 +1627,9 @@ impl PageJs {
     tokio::spawn(async move {
       while let Some((bytes, ts)) = rx.recv().await {
         let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
-          let f: rquickjs::Function<'_> = ctx.globals().get("__fdScreencast")?;
+          let f = with_page_callbacks(&ctx, |r| r.screencast.clone())?
+            .ok_or_else(|| rquickjs::Error::new_from_js_message("page.startScreencast", "Error", "screencast callback gone".to_string()))?
+            .restore(&ctx)?;
           let payload = rquickjs::Object::new(ctx.clone())?;
           let buf = rquickjs::TypedArray::<u8>::new(ctx.clone(), bytes)?;
           payload.set("frame", buf)?;
