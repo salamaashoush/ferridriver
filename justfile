@@ -93,9 +93,11 @@ release version:
     echo "Usage: just release X.Y.Z" >&2; exit 1
   fi
   echo "Bumping to $VERSION..."
-  # Rust: workspace version + workspace dependency versions
-  sed -i '' "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
-  sed -i '' "s/\(ferridriver[a-z-]* = { path = \"[^\"]*\", version = \)\"[^\"]*\"/\1\"$VERSION\"/" Cargo.toml
+  # Rust: workspace version + workspace dependency versions.
+  # -i.bak (no space) is the portable in-place form across GNU and BSD sed.
+  sed -i.bak "s/^version = \".*\"/version = \"$VERSION\"/" Cargo.toml
+  sed -i.bak "s/\(ferridriver[a-z-]* = { path = \"[^\"]*\", version = \)\"[^\"]*\"/\1\"$VERSION\"/" Cargo.toml
+  rm -f Cargo.toml.bak
   cargo generate-lockfile 2>/dev/null || true
   # npm: the @ferridriver/node package.json -- replace the "version" field
   f=crates/ferridriver-node/package.json
