@@ -108,6 +108,13 @@ async fn plugin_path_bench() {
   let cold_ms = cold.elapsed().as_secs_f64() * 1e3;
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   assert_eq!(cp.len(), FILES.len(), "all files must compile");
+
+  // Second call: every file is unchanged -> served from the content-hash
+  // cache, no rolldown, no compile.
+  let warm_cache = Instant::now();
+  let (cp2, _) = compile_and_extract_plugins(&paths).await;
+  let warm_cache_ms = warm_cache.elapsed().as_secs_f64() * 1e3;
+  assert_eq!(cp2.len(), FILES.len(), "cache hit must return all files");
   let compiled: Vec<Compiled> = cp
     .into_iter()
     .map(|c| Compiled {
@@ -178,7 +185,8 @@ async fn plugin_path_bench() {
   let ff_us = (ff_t.elapsed().as_secs_f64() * 1e6) / f64::from(ITERS);
 
   println!("\n=== plugin path bench ({} files, {ITERS} iters) ===", FILES.len());
-  println!("cold start (compile all files) : {cold_ms:8.2} ms");
+  println!("cold start (bundle+compile all): {cold_ms:8.2} ms");
+  println!("warm start (content-hash cache): {warm_cache_ms:8.3} ms");
   println!("per-session install            : {per_session_ms:8.3} ms");
   println!("per-call no-op dispatch        : {noop_us:8.2} us");
   println!("per-call setFeatureFlip-class  : {ff_us:8.2} us");

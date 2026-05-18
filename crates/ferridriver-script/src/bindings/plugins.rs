@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
 
-use rquickjs::{Ctx, JsLifetime, Module, Object, Value, class::Class, class::Trace, function::Opt};
+use rquickjs::{Array, Ctx, JsLifetime, Module, Object, Value, class::Class, class::Trace, function::Opt};
 
 use crate::bindings::convert::{serde_from_js, serde_to_js};
 
@@ -132,6 +132,44 @@ fn parse_command_output(s: &str) -> serde_json::Value {
   serde_json::Value::String(s.to_string())
 }
 
+/// Session-level plugin factories, parsed once per session (not once
+/// per tool). `__ferri_mkCommands` builds a tool's `commands` binding
+/// from its allow-list; `__ferri_guardReq` wraps `request` in a
+/// host-checking Proxy from its `allow.net` list (exact host, or
+/// `*.suffix` which also matches the bare apex). Hung off `globalThis`
+/// so the tiny per-tool wrappers can reference them by name.
+const SHARED_PLUGIN_RUNTIME: &str = "\
+  globalThis.__ferri_mkCommands = (ALLOWED, PLUGIN_NAME) => ({\n\
+    run: async (cmdName, vars) => {\n\
+      const tpl = ALLOWED[cmdName];\n\
+      if (!tpl) throw new Error('commands.run: \"' + cmdName + '\" is not in the allow-list for plugin ' + PLUGIN_NAME);\n\
+      return await globalThis.__ferri_plugin_commands.exec(tpl, vars || {});\n\
+    },\n\
+  });\n\
+  globalThis.__ferri_NET_METHODS = ['get', 'post', 'put', 'delete', 'patch', 'head', 'fetch'];\n\
+  globalThis.__ferri_guardReq = (req, NET, PLUGIN_NAME) => {\n\
+    const hostOk = (h) => NET.some((p) =>\n\
+      p === h || (p.startsWith('*.') && (h === p.slice(2) || h.endsWith(p.slice(1)))));\n\
+    return new Proxy(req, {\n\
+      get(t, prop) {\n\
+        const v = t[prop];\n\
+        if (typeof v === 'function' && globalThis.__ferri_NET_METHODS.includes(prop)) {\n\
+          return (url, ...rest) => {\n\
+            let host;\n\
+            try { host = new URL(url).hostname; } catch (_) {\n\
+              throw new Error('plugin ' + PLUGIN_NAME + ': request to invalid/relative URL \"' + url + '\" is not permitted by allow.net');\n\
+            }\n\
+            if (!hostOk(host)) {\n\
+              throw new Error('plugin ' + PLUGIN_NAME + ': request host \"' + host + '\" is not in allow.net ' + JSON.stringify(NET));\n\
+            }\n\
+            return t[prop](url, ...rest);\n\
+          };\n\
+        }\n\
+        return v;\n\
+      },\n\
+    });\n\
+  };\n";
+
 /// Install the `plugins` global and the hidden `__ferri_plugin_commands`
 /// runner. `plugins` is an object keyed by tool name; each value is an
 /// async function `(args) => result`.
@@ -152,15 +190,29 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
   let plugins_obj = Object::new(ctx.clone())?;
   globals.set("plugins", plugins_obj.clone())?;
 
+  // Per-tool factories (commands binding + net-guard Proxy) are
+  // identical across every tool — only the allow-lists/name differ.
+  // Parse them ONCE per session here; each per-tool wrapper then just
+  // closes over its literals and calls these. This keeps the per-tool
+  // `eval` tiny (the net-guard body is large) on the session-create
+  // hot path.
+  ctx.eval::<(), _>(SHARED_PLUGIN_RUNTIME.as_bytes())?;
+
   // Storage for per-file tool arrays (the eval'd manifests, with their
   // live handler closures). Indexed by file position; the per-tool
   // wrapper closes over (fileIndex, toolIndex) to look up its handler.
-  ctx.eval::<(), _>(b"globalThis.__ferri_plugin_files = [];".as_slice())?;
+  // Built via the rquickjs Object API — no JS parse on the
+  // session-create hot path.
+  let files_arr = Array::new(ctx.clone())?;
+  globals.set("__ferri_plugin_files", files_arr.clone())?;
 
   for (file_idx, file) in files.iter().enumerate() {
     // 1. Load + evaluate the file's precompiled bytecode module. Its
-    //    appended epilogue publishes the normalised tool array (with
-    //    live handler closures) at `__ferri_plugin_files[file_idx]`.
+    //    epilogue parks the normalised tool array (with live handler
+    //    closures) on `globalThis.__ferri_plugin_pending`; move it into
+    //    this file's registry slot from here. The bytecode bakes in no
+    //    index, which is what makes it cacheable across registry
+    //    positions (see `compile_and_extract_plugins`).
     //
     // SAFETY: `file.bytecode` was produced by `Module::write` in THIS
     // process and this exact rquickjs/QuickJS build with native
@@ -170,9 +222,15 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
     #[allow(unsafe_code)]
     let module = unsafe { Module::load(ctx.clone(), &file.bytecode) }?;
     // Bundled module body + epilogue are fully synchronous (no top-level
-    // await); the slot assignment has applied by the time `eval`
+    // await); `__ferri_plugin_pending` is set by the time `eval`
     // returns, so the resolved promise carries nothing we need.
     let (_evaluated, _promise) = module.eval()?;
+    // Move the parked tool array into this file's registry slot via the
+    // Object API (no per-file JS parse). The next file's epilogue
+    // overwrites `__ferri_plugin_pending`; we always read it right after
+    // its own module eval, so a stale value never leaks across files.
+    let pending: Value<'_> = globals.get("__ferri_plugin_pending")?;
+    files_arr.set(file_idx, pending)?;
 
     // 2. For each tool, install a wrapper that locates its handler by
     //    (fileIndex, toolIndex) and binds the per-tool allow-list.
@@ -181,11 +239,10 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
       let net_json = serde_json::to_string(&tool.allowed_net).unwrap_or_else(|_| "[]".into());
       let name_literal = serde_json::to_string(&tool.name).unwrap_or_else(|_| "\"\"".into());
 
-      // `request` is wrapped in a host-checking Proxy ONLY when the tool
-      // declares `allow.net`; an empty list passes the binding through
-      // untouched so the common (no-net) case has zero overhead and
-      // unchanged semantics. Host match: exact, or `*.suffix` (which
-      // also matches the bare apex).
+      // Tiny per-tool wrapper: close over the literals and defer to the
+      // session-level factories. `request` is net-guarded ONLY when the
+      // tool declares `allow.net`; an empty list passes the binding
+      // through untouched (zero overhead, unchanged semantics).
       let wrapper = format!(
         "(() => {{\n\
            const ALLOWED = {allowed_json};\n\
@@ -193,34 +250,7 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
            const PLUGIN_NAME = {name_literal};\n\
            const FILE_IDX = {file_idx};\n\
            const TOOL_IDX = {tool_idx};\n\
-           const commands = {{\n\
-             run: async (cmdName, vars) => {{\n\
-               const tpl = ALLOWED[cmdName];\n\
-               if (!tpl) throw new Error('commands.run: \"' + cmdName + '\" is not in the allow-list for plugin ' + PLUGIN_NAME);\n\
-               return await globalThis.__ferri_plugin_commands.exec(tpl, vars || {{}});\n\
-             }},\n\
-           }};\n\
-           const __hostOk = (h) => NET.some((p) =>\n\
-             p === h || (p.startsWith('*.') && (h === p.slice(2) || h.endsWith(p.slice(1)))));\n\
-           const __NET_METHODS = ['get', 'post', 'put', 'delete', 'patch', 'head', 'fetch'];\n\
-           const __guardedRequest = (req) => new Proxy(req, {{\n\
-             get(t, prop) {{\n\
-               const v = t[prop];\n\
-               if (typeof v === 'function' && __NET_METHODS.includes(prop)) {{\n\
-                 return (url, ...rest) => {{\n\
-                   let host;\n\
-                   try {{ host = new URL(url).hostname; }} catch (_) {{\n\
-                     throw new Error('plugin ' + PLUGIN_NAME + ': request to invalid/relative URL \"' + url + '\" is not permitted by allow.net');\n\
-                   }}\n\
-                   if (!__hostOk(host)) {{\n\
-                     throw new Error('plugin ' + PLUGIN_NAME + ': request host \"' + host + '\" is not in allow.net ' + JSON.stringify(NET));\n\
-                   }}\n\
-                   return t[prop](url, ...rest);\n\
-                 }};\n\
-               }}\n\
-               return v;\n\
-             }},\n\
-           }});\n\
+           const commands = globalThis.__ferri_mkCommands(ALLOWED, PLUGIN_NAME);\n\
            return async (callArgs) => {{\n\
              const tool = globalThis.__ferri_plugin_files[FILE_IDX][TOOL_IDX];\n\
              const handler = tool && tool.handler;\n\
@@ -232,7 +262,7 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
                args: callArgs,\n\
                page: globalThis.page,\n\
                context: globalThis.context,\n\
-               request: (NET.length === 0 || !__req) ? __req : __guardedRequest(__req),\n\
+               request: (NET.length === 0 || !__req) ? __req : globalThis.__ferri_guardReq(__req, NET, PLUGIN_NAME),\n\
                commands,\n\
              }});\n\
            }};\n\
