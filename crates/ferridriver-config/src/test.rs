@@ -11,14 +11,12 @@
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use ts_rs::TS;
 
 // ── Trace mode ──────────────────────────────────────────────────────────────
 
 /// Trace recording mode. Mirrors Playwright's `trace`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[ts(export, export_to = "./")]
 pub enum TraceMode {
   #[default]
   Off,
@@ -69,9 +67,8 @@ impl TraceMode {
 // ── Video ───────────────────────────────────────────────────────────────────
 
 /// Video recording mode.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
-#[ts(export, export_to = "./")]
 pub enum VideoMode {
   #[default]
   Off,
@@ -92,9 +89,8 @@ impl VideoMode {
 }
 
 /// Video recording configuration.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct VideoConfig {
   pub mode: VideoMode,
   pub width: u32,
@@ -117,24 +113,19 @@ impl Default for VideoConfig {
 // Each bool field is an independent feature flag set in user TOML —
 // grouping into enums would be ceremony, not a real state machine.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Clone, Serialize, Deserialize, TS)]
+#[derive(Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct TestConfig {
   pub test_match: Vec<String>,
-  #[ts(optional)]
   pub test_dir: Option<String>,
   pub test_ignore: Vec<String>,
-  #[ts(type = "number")]
   pub timeout: u64,
-  #[ts(type = "number")]
   pub expect_timeout: u64,
   pub workers: u32,
   pub retries: u32,
   pub reporter: Vec<ReporterConfig>,
   pub output_dir: PathBuf,
   pub browser: BrowserConfig,
-  #[ts(optional)]
   pub base_url: Option<String>,
   pub projects: Vec<ProjectConfig>,
   pub global_setup: Vec<String>,
@@ -146,7 +137,6 @@ pub struct TestConfig {
   /// JavaScript step-definition file globs. Loaded into the shared
   /// `QuickJS` engine (cucumber-js `import`/`require` equivalent).
   pub steps: Vec<String>,
-  #[ts(optional)]
   pub tags: Option<String>,
   pub dry_run: bool,
   pub fail_fast: bool,
@@ -156,133 +146,98 @@ pub struct TestConfig {
   #[serde(default)]
   pub trace: TraceMode,
   #[serde(default)]
-  #[ts(optional)]
   pub storage_state: Option<String>,
   #[serde(default)]
   pub web_server: Vec<WebServerConfig>,
   pub max_failures: u32,
-  #[ts(type = "number")]
   pub global_timeout: u64,
   pub ignore_snapshots: bool,
   pub pass_with_no_tests: bool,
-  #[ts(optional)]
   pub tsconfig: Option<String>,
-  #[ts(optional)]
   pub name: Option<String>,
   pub fail_on_flaky_tests: bool,
   pub capture_git_info: bool,
-  #[ts(optional)]
   pub snapshot_dir: Option<String>,
-  #[ts(optional)]
   pub snapshot_path_template: Option<String>,
   #[serde(default)]
   pub update_snapshots: UpdateSnapshotsMode,
   pub preserve_output: String,
   #[serde(default)]
-  #[ts(optional)]
   pub report_slow_tests: Option<ReportSlowTestsConfig>,
   pub quiet: bool,
-  #[ts(optional)]
   pub config_grep: Option<String>,
-  #[ts(optional)]
   pub config_grep_invert: Option<String>,
   #[serde(default)]
   pub metadata: serde_json::Value,
   pub strict: bool,
   pub order: String,
-  #[ts(optional)]
   pub language: Option<String>,
   pub profiles: BTreeMap<String, serde_json::Value>,
   #[serde(default)]
   pub has_bdd: bool,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct BrowserConfig {
   pub browser: String,
   pub backend: String,
-  #[ts(optional)]
   pub channel: Option<String>,
   pub headless: bool,
-  #[ts(optional)]
   pub executable_path: Option<String>,
   pub args: Vec<String>,
-  #[ts(optional)]
   pub viewport: Option<ViewportConfig>,
-  #[ts(optional, type = "number")]
   pub slow_mo: Option<u64>,
   /// Playwright `use` block: per-project context defaults.
   #[serde(default, rename = "use")]
-  #[ts(rename = "use")]
   pub use_options: ContextConfig,
 }
 
 // Each bool field is an independent feature flag set in user TOML —
 // grouping into enums would be ceremony, not a real state machine.
 #[allow(clippy::struct_excessive_bools)]
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct ContextConfig {
   pub is_mobile: bool,
   pub has_touch: bool,
-  #[ts(optional)]
   pub color_scheme: Option<String>,
-  #[ts(optional)]
   pub locale: Option<String>,
-  #[ts(optional)]
   pub device_scale_factor: Option<f64>,
   pub offline: bool,
   pub java_script_enabled: bool,
   pub bypass_csp: bool,
   pub accept_downloads: bool,
-  #[ts(optional)]
   pub user_agent: Option<String>,
-  #[ts(optional)]
   pub timezone_id: Option<String>,
-  #[ts(optional)]
   pub geolocation: Option<GeolocationConfig>,
   #[serde(default)]
   pub permissions: Vec<String>,
   #[serde(default)]
   pub extra_http_headers: BTreeMap<String, String>,
-  #[ts(optional)]
   pub http_credentials: Option<HttpCredentialsConfig>,
   pub ignore_https_errors: bool,
-  #[ts(optional)]
   pub proxy: Option<ProxyConfig>,
-  #[ts(optional)]
   pub service_workers: Option<String>,
-  #[ts(optional)]
   pub storage_state: Option<String>,
-  #[ts(optional)]
   pub reduced_motion: Option<String>,
-  #[ts(optional)]
   pub forced_colors: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct HttpCredentialsConfig {
   pub username: String,
   pub password: String,
-  #[ts(optional)]
   pub origin: Option<String>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct ProxyConfig {
   pub server: String,
-  #[ts(optional)]
   pub bypass: Option<String>,
-  #[ts(optional)]
   pub username: Option<String>,
-  #[ts(optional)]
   pub password: Option<String>,
 }
 
@@ -314,13 +269,11 @@ impl Default for ContextConfig {
   }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct GeolocationConfig {
   pub latitude: f64,
   pub longitude: f64,
-  #[ts(optional)]
   pub accuracy: Option<f64>,
 }
 
@@ -373,9 +326,8 @@ impl Default for BrowserConfig {
   }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct ViewportConfig {
   pub width: i64,
   pub height: i64,
@@ -390,9 +342,8 @@ impl Default for ViewportConfig {
   }
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct ReporterConfig {
   pub name: String,
   #[serde(default)]
@@ -400,9 +351,8 @@ pub struct ReporterConfig {
 }
 
 /// Snapshot update mode. Playwright: `updateSnapshots`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
-#[ts(export, export_to = "./")]
 pub enum UpdateSnapshotsMode {
   All,
   Changed,
@@ -412,12 +362,10 @@ pub enum UpdateSnapshotsMode {
 }
 
 /// Configuration for slow test reporting. Playwright: `reportSlowTests`.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct ReportSlowTestsConfig {
   pub max: usize,
-  #[ts(type = "number")]
   pub threshold: u64,
 }
 
@@ -431,41 +379,26 @@ impl Default for ReportSlowTestsConfig {
 }
 
 /// Project configuration -- matches Playwright's `TestProject`.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct ProjectConfig {
   pub name: String,
-  #[ts(optional)]
   pub test_match: Option<Vec<String>>,
-  #[ts(optional)]
   pub test_ignore: Option<Vec<String>>,
-  #[ts(optional)]
   pub test_dir: Option<String>,
-  #[ts(optional)]
   pub browser: Option<BrowserConfig>,
-  #[ts(optional)]
   pub output_dir: Option<String>,
-  #[ts(optional)]
   pub snapshot_dir: Option<String>,
-  #[ts(optional)]
   pub retries: Option<u32>,
-  #[ts(optional, type = "number")]
   pub timeout: Option<u64>,
-  #[ts(optional)]
   pub repeat_each: Option<u32>,
-  #[ts(optional)]
   pub fully_parallel: Option<bool>,
-  #[ts(optional)]
   pub grep: Option<String>,
-  #[ts(optional)]
   pub grep_invert: Option<String>,
   pub dependencies: Vec<String>,
-  #[ts(optional)]
   pub teardown: Option<String>,
   #[serde(default)]
   pub metadata: serde_json::Value,
-  #[ts(optional)]
   pub tag: Option<Vec<String>>,
 }
 
@@ -494,42 +427,30 @@ impl Default for ProjectConfig {
 }
 
 /// Web server configuration -- matches Playwright's `webServer` option.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct WebServerConfig {
-  #[ts(optional)]
   pub command: Option<String>,
-  #[ts(optional)]
   pub static_dir: Option<String>,
-  #[ts(optional)]
   pub url: Option<String>,
   pub port: u16,
   pub reuse_existing_server: bool,
-  #[ts(type = "number")]
   pub timeout: u64,
-  #[ts(optional)]
   pub cwd: Option<String>,
   #[serde(default)]
   pub env: BTreeMap<String, String>,
   pub spa: bool,
-  #[ts(optional)]
   pub stdout: Option<String>,
-  #[ts(optional)]
   pub stderr: Option<String>,
   pub ignore_https_errors: bool,
-  #[ts(optional)]
   pub name: Option<String>,
-  #[ts(optional)]
   pub graceful_shutdown: Option<GracefulShutdown>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct GracefulShutdown {
   pub signal: String,
-  #[ts(type = "number")]
   pub timeout: u64,
 }
 

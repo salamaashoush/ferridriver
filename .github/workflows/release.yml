@@ -288,35 +288,6 @@ jobs:
             npm publish --access public --ignore-scripts --registry=https://registry.npmjs.org
           fi
 
-      # Publish pure JS/TS packages (dependency order: ct-core first, then adapters + test)
-      - name: Publish JS/TS packages
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-          NPM_CONFIG_REGISTRY: https://registry.npmjs.org
-        run: |
-          set -euo pipefail
-          publish_if_new() {
-            local dir="$1"
-            local name version existing
-            name=$(node -p "require('./${dir}/package.json').name")
-            version=$(node -p "require('./${dir}/package.json').version")
-            existing=$(npm view "${name}@${version}" version --registry=https://registry.npmjs.org 2>/dev/null || true)
-            if [ "${existing}" = "${version}" ]; then
-              echo "SKIP ${name}@${version} — already on registry"
-              return 0
-            fi
-            echo "PUBLISH ${name}@${version}"
-            (cd "${dir}" && npm publish --access public --registry=https://registry.npmjs.org)
-          }
-          # ct-core must come first; others are independent
-          publish_if_new packages/ct-core
-          publish_if_new packages/ct-react
-          publish_if_new packages/ct-vue
-          publish_if_new packages/ct-svelte
-          publish_if_new packages/ct-solid
-          publish_if_new packages/ferridriver-test
-
   # ---------------------------------------------------------------------------
   # Publish to crates.io (ordered by dependency graph)
   # ---------------------------------------------------------------------------

@@ -24,4 +24,3 @@ dirs = { workspace = true }
 tracing = { workspace = true }
 shellexpand = { workspace = true }
 config = { workspace = true }
-ts-rs = { version = "12", features = ["serde-compat", "format", "serde-json-impl"] }
