@@ -138,10 +138,10 @@ pub fn install_page_on<'js>(
 ) -> rquickjs::Result<()> {
   let js_page = Class::instance(ctx.clone(), PageJs::new_with_async_ctx(page, async_ctx))?;
   target.set("page", js_page)?;
-  // Native route-handler registry (context userdata, keyed by id) used
-  // by `page.route(matcher, fn)` cross-task dispatch. Idempotent;
-  // independent of the binding target.
-  page::ensure_route_registry(ctx);
+  // Native page-callbacks registry (context userdata): route handlers,
+  // exposeFunction callbacks, screencast — all cross-task dispatched.
+  // Idempotent; independent of the binding target.
+  page::ensure_page_callbacks(ctx);
   Ok(())
 }
 
