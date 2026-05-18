@@ -22,16 +22,17 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use ferridriver_script::{
-  AsyncContext, InMemoryVars, PathSandbox, RunContext, ScenarioWorld, ScriptEngineConfig, Session, StepOutcome,
-  collect_registry, invoke_hook, invoke_step, reset_world, set_scenario_world,
+  AsyncContext, CompiledBundle, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioWorld, ScriptEngineConfig,
+  Session, StepOutcome, bundle_and_compile, collect_registry, eval_bundle, invoke_hook, invoke_step, reset_world,
+  set_scenario_world,
 };
+use ferridriver_test::FixturePool;
 use ferridriver_test::model::{StepCategory, TestInfo};
 use tokio::sync::Mutex;
 
 use crate::feature::FeatureSet;
 use crate::filter::TagExpression;
 use crate::param_type::CustomParamType;
-use ferridriver_test::FixturePool;
 use crate::registry::StepRegistry;
 use crate::scenario::ScenarioExecution;
 use crate::step::{StepError, StepHandler, StepKind, StepLocation, StepParam};
@@ -39,7 +40,12 @@ use crate::world::BrowserWorld;
 
 const JS_STEP_LOCATION: &str = "<js-step>";
 
-const DEFAULT_STEP_GLOBS: &[&str] = &["steps/**/*.js", "step_definitions/**/*.js"];
+const DEFAULT_STEP_GLOBS: &[&str] = &[
+  "steps/**/*.js",
+  "steps/**/*.ts",
+  "step_definitions/**/*.js",
+  "step_definitions/**/*.ts",
+];
 
 /// Status of one step in a JS-driven scenario.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -76,12 +82,12 @@ pub struct JsBddSession {
   session: Session,
   registry: Arc<StepRegistry>,
   hooks: Vec<(usize, String, Option<TagExpression>)>,
-  source_label: String,
+  bundle: Arc<CompiledBundle>,
 }
 
-/// Discover step files for the given globs (relative globs are resolved
-/// against `cwd`). Empty globs fall back to the cucumber-js-style
-/// defaults.
+/// Discover step entry files for the given globs (relative globs are
+/// resolved against `cwd`). Empty globs fall back to the cucumber-js
+/// defaults. `.ts`/`.tsx` are included — rolldown transpiles them.
 pub fn discover_step_files(globs: &[String], cwd: &Path) -> Vec<PathBuf> {
   let patterns: Vec<String> = if globs.is_empty() {
     DEFAULT_STEP_GLOBS.iter().map(|s| (*s).to_string()).collect()
@@ -97,7 +103,10 @@ pub fn discover_step_files(globs: &[String], cwd: &Path) -> Vec<PathBuf> {
     };
     if let Ok(entries) = glob::glob(&full) {
       for entry in entries.flatten() {
-        if entry.extension().and_then(|e| e.to_str()) == Some("js") {
+        if matches!(
+          entry.extension().and_then(|e| e.to_str()),
+          Some("js" | "mjs" | "ts" | "tsx" | "jsx")
+        ) {
           files.push(entry);
         }
       }
@@ -108,19 +117,10 @@ pub fn discover_step_files(globs: &[String], cwd: &Path) -> Vec<PathBuf> {
   files
 }
 
-/// One step file compiled to `QuickJS` bytecode once. The hot startup
-/// path links these per worker session (no re-parse, no re-read).
-#[derive(Clone)]
-pub struct CompiledStep {
-  /// Module identity: cwd-relative path, so the file's own relative
-  /// `import './helpers.js'` resolves through the filesystem resolver.
-  pub name: String,
-  pub bytecode: Arc<[u8]>,
-}
-
-/// Discover + read + compile every step file to bytecode once, before
-/// workers spawn. Returns an error if no step files match.
-pub async fn compile_step_files(globs: &[String], cwd: &Path) -> anyhow::Result<Vec<CompiledStep>> {
+/// Discover the step entry files and rolldown-bundle + tree-shake +
+/// transpile them (plus `node_modules` / shared utils) into one module
+/// compiled to bytecode, once, before workers spawn.
+pub async fn bundle_steps(globs: &[String], cwd: &Path) -> anyhow::Result<Arc<CompiledBundle>> {
   let files = discover_step_files(globs, cwd);
   if files.is_empty() {
     let pats: Vec<&str> = if globs.is_empty() {
@@ -128,25 +128,12 @@ pub async fn compile_step_files(globs: &[String], cwd: &Path) -> anyhow::Result<
     } else {
       globs.iter().map(String::as_str).collect()
     };
-    anyhow::bail!("no JS step files found (globs: {:?}, cwd: {})", pats, cwd.display());
+    anyhow::bail!("no step files found (globs: {:?}, cwd: {})", pats, cwd.display());
   }
-  let mut out = Vec::with_capacity(files.len());
-  for f in &files {
-    let name = f
-      .strip_prefix(cwd)
-      .map(|p| p.to_string_lossy().into_owned())
-      .unwrap_or_else(|_| f.to_string_lossy().into_owned());
-    let src =
-      std::fs::read_to_string(f).map_err(|e| anyhow::anyhow!("read step file {}: {e}", f.display()))?;
-    let bytecode = ferridriver_script::compile_module(&name, &src)
-      .await
-      .map_err(|e| anyhow::anyhow!("compile step file {}: {}", f.display(), fmt_script_error(&e)))?;
-    out.push(CompiledStep {
-      name,
-      bytecode: Arc::from(bytecode.into_boxed_slice()),
-    });
-  }
-  Ok(out)
+  let bundle = bundle_and_compile(&files, cwd)
+    .await
+    .map_err(|e| anyhow::anyhow!("bundle step files: {}", e.message))?;
+  Ok(Arc::new(bundle))
 }
 
 impl JsBddSession {
@@ -155,23 +142,19 @@ impl JsBddSession {
     Arc::clone(&self.registry)
   }
 
-  /// Discover, compile and load step files in one call (convenience for
-  /// single-session callers / tests). Production uses
-  /// [`compile_step_files`] once + [`JsBddSession::load`] per worker.
+  /// Discover, bundle and load step files in one call (convenience for
+  /// single-session callers / tests). Production uses [`bundle_steps`]
+  /// once + [`JsBddSession::load`] per worker.
   pub async fn from_globs(globs: &[String], cwd: &Path) -> anyhow::Result<Self> {
-    let compiled = compile_step_files(globs, cwd).await?;
-    Self::load(&compiled, cwd).await
+    let bundle = bundle_steps(globs, cwd).await?;
+    Self::load(bundle, cwd).await
   }
 
-  /// Create a shared-engine session and link the precompiled step
-  /// bytecode (no re-parse, no re-read). Trusted filesystem resolution
-  /// so a step file's `import './helpers.js'` still works. Builds the
-  /// Rust step registry from what the modules registered.
-  pub async fn load(compiled: &[CompiledStep], cwd: &Path) -> anyhow::Result<Self> {
-    if compiled.is_empty() {
-      anyhow::bail!("no compiled JS step files");
-    }
-
+  /// Create a shared-engine session and link the precompiled bundled
+  /// step module (one `Module::load`, no parse, no resolver — imports
+  /// are inlined by rolldown). Builds the Rust step registry from what
+  /// the module registered.
+  pub async fn load(bundle: Arc<CompiledBundle>, cwd: &Path) -> anyhow::Result<Self> {
     let sandbox = Arc::new(
       PathSandbox::new(cwd).map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?,
     );
@@ -184,28 +167,18 @@ impl JsBddSession {
       request: None,
       browser: None,
       plugins: Vec::new(),
-      trusted_modules: true,
+      trusted_modules: false,
     };
 
     let session = Session::create(ScriptEngineConfig::default(), &run_ctx)
       .await
       .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
 
-    let source_label = compiled
-      .iter()
-      .map(|c| c.name.clone())
-      .collect::<Vec<_>>()
-      .join(", ");
-
-    // Link each precompiled step module (top-level Given/When/Then run
-    // here). Relative imports of non-compiled shared utils still resolve
-    // from source via the filesystem resolver.
+    // Link the single bundled module (top-level Given/When/Then run).
     let actx = session.async_context();
-    for c in compiled {
-      ferridriver_script::eval_module_bytecode(&actx, &c.bytecode, &c.name)
-        .await
-        .map_err(|e| anyhow::anyhow!("step module {} failed to load: {}", c.name, fmt_script_error(&e)))?;
-    }
+    eval_bundle(&actx, &bundle)
+      .await
+      .map_err(|e| anyhow::anyhow!("step bundle failed to load: {}", fmt_script_error(&bundle, &e)))?;
     let snapshot = collect_registry(&actx)
       .await
       .map_err(|e| anyhow::anyhow!("collect registry: {}", e.message))?;
@@ -225,7 +198,7 @@ impl JsBddSession {
         "Then" => StepKind::Then,
         _ => StepKind::Step,
       };
-      let handler = js_step_handler(actx.clone(), idx, source_label.clone());
+      let handler = js_step_handler(actx.clone(), idx, Arc::clone(&bundle));
       let loc = StepLocation {
         file: JS_STEP_LOCATION,
         line: 0,
@@ -252,7 +225,7 @@ impl JsBddSession {
       session,
       registry: Arc::new(registry),
       hooks,
-      source_label,
+      bundle,
     };
     session.run_hooks("BeforeAll", None).await.map_err(|e| anyhow::anyhow!(e))?;
     Ok(session)
@@ -278,8 +251,8 @@ impl JsBddSession {
       if !applies {
         continue;
       }
-      if let Err(e) = invoke_hook(&actx, idx, &self.source_label).await {
-        return Err(fmt_script_error(&e));
+      if let Err(e) = invoke_hook(&actx, idx, &self.bundle.module_name).await {
+        return Err(fmt_script_error(&self.bundle, &e));
       }
     }
     Ok(())
@@ -397,11 +370,11 @@ impl JsBddSession {
   }
 }
 
-fn js_step_handler(actx: AsyncContext, idx: usize, source: String) -> StepHandler {
+fn js_step_handler(actx: AsyncContext, idx: usize, bundle: Arc<CompiledBundle>) -> StepHandler {
   Arc::new(move |_world, params, table, doc| {
     let actx = actx.clone();
-    let source = source.clone();
-    let params_json: Vec<serde_json::Value> = params.iter().map(step_param_to_json).collect();
+    let bundle = Arc::clone(&bundle);
+    let params_json: Vec<JsArg> = params.iter().map(step_param_to_jsarg).collect();
     let data_table: Option<Vec<Vec<String>>> = table.map(|t| t.raw().to_vec());
     let doc_string: Option<String> = doc.map(str::to_string);
     Box::pin(async move {
@@ -411,52 +384,74 @@ fn js_step_handler(actx: AsyncContext, idx: usize, source: String) -> StepHandle
         &params_json,
         data_table.as_deref(),
         doc_string.as_deref(),
-        &source,
+        &bundle.module_name,
       )
       .await
       {
         Ok(StepOutcome::Passed | StepOutcome::Skipped) => Ok(()),
         Ok(StepOutcome::Pending) => Err(StepError::pending("step returned 'pending'")),
-        Err(e) => Err(StepError::from(fmt_script_error(&e))),
+        Err(e) => Err(StepError::from(fmt_script_error(&bundle, &e))),
       }
     })
   })
 }
 
-fn step_param_to_json(p: &StepParam) -> serde_json::Value {
+fn step_param_to_jsarg(p: &StepParam) -> JsArg {
   match p {
-    StepParam::String(s) | StepParam::Word(s) => serde_json::Value::String(s.clone()),
-    StepParam::Int(i) => serde_json::Value::Number((*i).into()),
-    StepParam::Float(f) => serde_json::Number::from_f64(*f)
-      .map(serde_json::Value::Number)
-      .unwrap_or(serde_json::Value::Null),
-    StepParam::Custom { value, .. } => serde_json::Value::String(value.clone()),
+    StepParam::String(s) | StepParam::Word(s) => JsArg::Str(s.clone()),
+    StepParam::Int(i) => JsArg::Int(*i),
+    StepParam::Float(f) => JsArg::Float(*f),
+    StepParam::Custom { value, .. } => JsArg::Str(value.clone()),
   }
 }
 
-fn fmt_script_error(e: &ferridriver_script::ScriptError) -> String {
+fn fmt_script_error(bundle: &CompiledBundle, e: &ferridriver_script::ScriptError) -> String {
   let mut m = e.message.clone();
+  // Remap the bundled-output position back to the original .ts/.js
+  // source via the rolldown source map.
   if let Some(line) = e.line {
-    m.push_str(&format!(" (at {JS_STEP_LOCATION}:{line}"));
-    if let Some(col) = e.column {
-      m.push_str(&format!(":{col}"));
+    let col = e.column.unwrap_or(1);
+    if let Some((src, sl, sc)) = bundle.remap(line, col) {
+      m.push_str(&format!(" (at {src}:{sl}:{sc})"));
+    } else {
+      m.push_str(&format!(" (at {}:{line}:{col})", bundle.module_name));
     }
-    m.push(')');
   }
   if let Some(snippet) = &e.source_snippet {
     m.push('\n');
     m.push_str(snippet);
   }
   // QuickJS does not expose `lineNumber` as an own property on a plain
-  // `throw new Error(...)`, so the precise location lives in the JS
-  // stack — surface it so a failing step points at its `.js` source.
+  // `throw new Error(...)`; the location lives in the stack. Remap each
+  // `<bundle>:line:col` frame back to the original .ts/.js source.
   if let Some(stack) = &e.stack {
-    if !stack.trim().is_empty() {
+    let stack = stack.trim_end();
+    if !stack.is_empty() {
       m.push('\n');
-      m.push_str(stack.trim_end());
+      m.push_str(&remap_stack(bundle, stack));
     }
   }
   m
+}
+
+/// Rewrite `ferridriver-bdd-steps.js:LINE:COL` occurrences in a JS stack
+/// to the original source location via the rolldown source map.
+fn remap_stack(bundle: &CompiledBundle, stack: &str) -> String {
+  use std::sync::OnceLock;
+
+  use regex::Regex;
+  static RE: OnceLock<Regex> = OnceLock::new();
+  let re = RE.get_or_init(|| Regex::new(r"([^\s()]+):(\d+):(\d+)").expect("valid stack regex"));
+  re.replace_all(stack, |caps: &regex::Captures<'_>| {
+    let (Ok(line), Ok(col)) = (caps[2].parse::<u32>(), caps[3].parse::<u32>()) else {
+      return caps[0].to_string();
+    };
+    match bundle.remap(line, col) {
+      Some((src, sl, sc)) => format!("{src}:{sl}:{sc}"),
+      None => caps[0].to_string(),
+    }
+  })
+  .into_owned()
 }
 
 // ── Per-worker session cache + TestRunner integration ────────────────
@@ -466,7 +461,7 @@ static WORKER_SESSIONS: OnceLock<WorkerSessions> = OnceLock::new();
 
 async fn worker_session(
   worker_index: u32,
-  compiled: Arc<Vec<CompiledStep>>,
+  bundle: Arc<CompiledBundle>,
   cwd: Arc<PathBuf>,
 ) -> Result<Arc<JsBddSession>, String> {
   let cache = WORKER_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
@@ -474,7 +469,7 @@ async fn worker_session(
   if let Some(s) = map.get(&worker_index) {
     return Ok(Arc::clone(s));
   }
-  let session = JsBddSession::load(&compiled, &cwd).await.map_err(|e| e.to_string())?;
+  let session = JsBddSession::load(bundle, &cwd).await.map_err(|e| e.to_string())?;
   let session = Arc::new(session);
   map.insert(worker_index, Arc::clone(&session));
   Ok(session)
@@ -508,12 +503,11 @@ async fn record_step(test_info: &TestInfo, s: &JsStepResult) {
 pub fn translate_features_js(
   feature_set: &FeatureSet,
   config: &ferridriver_test::config::TestConfig,
-  compiled: Vec<CompiledStep>,
+  bundle: Arc<CompiledBundle>,
   cwd: PathBuf,
 ) -> ferridriver_test::model::TestPlan {
   use ferridriver_test::model::{ExpectedStatus, Hooks, SuiteMode, TestCase, TestFailure, TestFn, TestId, TestSuite};
 
-  let compiled = Arc::new(compiled);
   let cwd = Arc::new(cwd);
   let mut suites = Vec::new();
 
@@ -529,13 +523,13 @@ pub fn translate_features_js(
     let mut tests = Vec::new();
     for scenario in &scenarios {
       let scenario_clone = scenario.clone();
-      let compiled = Arc::clone(&compiled);
+      let bundle = Arc::clone(&bundle);
       let cwd = Arc::clone(&cwd);
       let browser_config = config.browser.clone();
 
       let test_fn: TestFn = Arc::new(move |pool: FixturePool| {
         let scenario = scenario_clone.clone();
-        let compiled = Arc::clone(&compiled);
+        let bundle = Arc::clone(&bundle);
         let cwd = Arc::clone(&cwd);
         let browser_config = browser_config.clone();
         Box::pin(async move {
@@ -560,7 +554,7 @@ pub fn translate_features_js(
             .await
             .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
 
-          let session = worker_session(test_info.worker_index, compiled, cwd)
+          let session = worker_session(test_info.worker_index, bundle, cwd)
             .await
             .map_err(|e| TestFailure::from(format!("JS step load failed: {e}")))?;
 

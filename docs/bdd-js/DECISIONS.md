@@ -43,6 +43,27 @@
   cached), tag filtering, annotations, reporters (step events recorded
   to `TestInfo`). Verified end-to-end through the CLI.
 
+## Known debt (deferred — fix later)
+
+- **`clippy::large_futures` collateral (10 sites).** The rolldown git
+  dep-tree force-enables `serde_json/arbitrary_precision` workspace-wide
+  (Cargo feature unification). That makes `serde_json::Number`/`Value`
+  `String`-backed and larger, inflating pre-existing futures that embed
+  it by ~100–600 B — over the strict `clippy.toml`
+  `future-size-threshold = 4096`. Affected (NOT new logic):
+  `ferridriver/src/page.rs:1145,1156`,
+  `ferridriver-test/src/expect/page.rs:142,145`,
+  `ferridriver-test/src/runner.rs:229,248,270,287`,
+  `ferridriver-script/src/bindings/page.rs:1451,1488`. My own
+  `bundle.rs` futures are already `Box::pin`-ed. Fix options, later:
+  (a) eliminate the `arbitrary_precision` activation source; (b)
+  `Box::pin` the 10 sites — effectively free, they all wrap
+  browser/CDP/network I/O, not hot loops; (c) raise the threshold.
+- **`serde_json/arbitrary_precision` pitfall.** Because it is now on
+  globally, never round-trip step params through `serde_json::Value`
+  (numbers serialize as objects). Already handled: params use the
+  `JsArg` enum lowered directly to JS values, not `serde_json`.
+
 ## Open — need a decision before the TS CLI is deleted
 
 1. **TypeScript step files.** Decided JS-only for now; `.ts` is a
