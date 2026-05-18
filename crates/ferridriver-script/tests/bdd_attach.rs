@@ -289,3 +289,50 @@ async fn per_step_timeout_option_is_enforced() {
     .expect_err("step must time out");
   assert_eq!(err.kind, ScriptErrorKind::Timeout, "per-step {{timeout:30}} enforced");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn world_parameters_are_exposed_as_this_parameters() {
+  use ferridriver_script::invoke_step;
+  let dir = tempfile::tempdir().expect("tempdir");
+  std::fs::write(
+    dir.path().join("steps.js"),
+    "Given('s', async function () { this.attach(JSON.stringify(this.parameters), 'application/json'); });",
+  )
+  .expect("write");
+  let bundle = bundle_and_compile(&[dir.path().join("steps.js")], dir.path())
+    .await
+    .expect("bundle");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: Vec::new(),
+    trusted_modules: false,
+    host: ExtensionHost::Bdd,
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session");
+  let actx = session.async_context();
+  eval_bundle(&actx, &bundle).await.expect("eval");
+  let sw = ScenarioWorld {
+    parameters: Some(serde_json::json!({ "env": "staging", "n": 3 })),
+    ..Default::default()
+  };
+  set_scenario_world(&actx, &sw).await.expect("world");
+  invoke_step(&actx, 0, &[], None, None, &bundle.module_name)
+    .await
+    .expect("step");
+  let atts = drain_attachments(&actx).await.expect("drain");
+  assert_eq!(atts.len(), 1);
+  let v: serde_json::Value = serde_json::from_slice(&atts[0].bytes).unwrap();
+  assert_eq!(
+    v,
+    serde_json::json!({ "env": "staging", "n": 3 }),
+    "this.parameters == world params"
+  );
+}
