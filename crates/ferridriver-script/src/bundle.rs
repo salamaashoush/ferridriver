@@ -149,3 +149,196 @@ impl CompiledBundle {
     Some((src, token.get_src_line() + 1, token.get_src_col() + 1))
   }
 }
+
+/// One plugin file: rolldown-bundled (TypeScript, plugin-local imports,
+/// tree-shaking) and compiled to `QuickJS` bytecode, with its manifests
+/// extracted straight from the compiled module — no separate throwaway
+/// runtime per file.
+///
+/// `index` is the file's position among successfully compiled plugins.
+/// It is baked into the bytecode epilogue so evaluating the module
+/// publishes the file's tool array to `globalThis.__ferri_plugin_files[index]`;
+/// the per-tool wrapper in [`install_plugins`] looks handlers up by that
+/// same index. Survivors are returned with contiguous indices so a
+/// broken file never shifts another file's slot.
+pub struct CompiledPlugin {
+  pub path: PathBuf,
+  pub index: usize,
+  pub bytecode: Arc<[u8]>,
+  /// JSON array (one object per tool, source order, `handler` stripped).
+  /// Deserialises into `Vec<PluginManifest>` on the MCP side without
+  /// ever re-running the plugin.
+  pub manifests_json: String,
+}
+
+/// The epilogue appended to every bundled plugin module. It captures the
+/// plugin's `globalThis.exports`, normalises the three accepted shapes
+/// into one tool array, and publishes it at
+/// `globalThis.__ferri_plugin_files[index]`. `exports` is cleared after
+/// capture so a sibling file that forgets to set it fails loudly instead
+/// of inheriting the previous file's value.
+///
+/// This is the single source of truth for shape normalisation: both the
+/// startup extraction and every session install run this exact bytecode,
+/// so a file's tool indices are identical on both paths by construction.
+fn plugin_epilogue(index: usize) -> String {
+  format!(
+    "\n;(() => {{\n\
+       const __exp = globalThis.exports;\n\
+       globalThis.exports = undefined;\n\
+       if (typeof __exp !== 'object' || __exp === null) {{\n\
+         throw new Error('plugin file index {index} did not set globalThis.exports');\n\
+       }}\n\
+       let __t;\n\
+       if (Array.isArray(__exp)) __t = __exp;\n\
+       else if (Array.isArray(__exp.tools)) __t = __exp.tools;\n\
+       else __t = [__exp];\n\
+       (globalThis.__ferri_plugin_files ||= [])[{index}] = __t;\n\
+     }})();\n"
+  )
+}
+
+/// JS expression that reads a file's normalised tool array back out and
+/// serialises it with every `handler` stripped (functions are not
+/// JSON-serialisable and only make sense inside a live VM).
+fn manifest_extract_expr(index: usize) -> String {
+  format!(
+    "JSON.stringify((globalThis.__ferri_plugin_files[{index}] || []).map((t) => {{ \
+       const m = {{ ...t }}; delete m.handler; return m; }}))"
+  )
+}
+
+/// Bundle + compile + extract every plugin file. One throwaway runtime
+/// for the whole batch (the old path span one full engine per file for
+/// manifest extraction *and* one per file for bytecode). Each file is
+/// bundled independently so its TypeScript/import graph and top-level
+/// `const`s stay file-scoped.
+///
+/// Per-file failures (bundle, compile, or extraction) are returned
+/// rather than aborting the batch, so one broken plugin cannot stop the
+/// server. Returned `CompiledPlugin`s have contiguous `index` values
+/// matching their position in the success vec.
+pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlugin>, Vec<(PathBuf, ScriptError)>) {
+  let mut survivors: Vec<CompiledPlugin> = Vec::new();
+  let mut failures: Vec<(PathBuf, ScriptError)> = Vec::new();
+
+  // rolldown each file first (async; needs no JS context). Keep the
+  // index a survivor *would* get so the epilogue baked into bytecode
+  // matches the file's final registry slot even if a later step fails.
+  let mut bundled: Vec<(PathBuf, String)> = Vec::new();
+  for path in files {
+    let cwd = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+    match Box::pin(bundle_source(std::slice::from_ref(path), &cwd)).await {
+      Ok((code, _map)) => bundled.push((path.clone(), code)),
+      Err(e) => failures.push((path.clone(), e)),
+    }
+  }
+  if bundled.is_empty() {
+    return (survivors, failures);
+  }
+
+  let runtime = match AsyncRuntime::new() {
+    Ok(r) => r,
+    Err(e) => {
+      let err = ScriptError::internal(format!("plugin bytecode runtime: {e}"));
+      for (p, _) in bundled {
+        failures.push((p, err.clone()));
+      }
+      return (survivors, failures);
+    },
+  };
+  let actx = match AsyncContext::full(&runtime).await {
+    Ok(c) => c,
+    Err(e) => {
+      let err = ScriptError::internal(format!("plugin bytecode context: {e}"));
+      for (p, _) in bundled {
+        failures.push((p, err.clone()));
+      }
+      return (survivors, failures);
+    },
+  };
+
+  // Init the slot array once for the shared extraction context.
+  let init: Result<(), ScriptError> = async_with!(actx => |ctx| {
+    ctx
+      .eval::<(), _>(b"globalThis.__ferri_plugin_files = [];".as_slice())
+      .map_err(|e| ScriptError::internal(format!("init plugin slots: {e}")))
+  })
+  .await;
+  if let Err(e) = init {
+    for (p, _) in bundled {
+      failures.push((p, e.clone()));
+    }
+    return (survivors, failures);
+  }
+
+  for (path, code) in bundled {
+    let index = survivors.len();
+    let module_name = format!("__ferri_plugin_{index}.js");
+    let wrapped = format!("{code}{}", plugin_epilogue(index));
+    match compile_extract_one(&actx, index, &module_name, &wrapped).await {
+      Ok((bytecode, manifests_json)) => survivors.push(CompiledPlugin {
+        path,
+        index,
+        bytecode: Arc::from(bytecode.into_boxed_slice()),
+        manifests_json,
+      }),
+      Err(e) => failures.push((path, e)),
+    }
+  }
+
+  (survivors, failures)
+}
+
+/// Declare the bundled+epilogued module, serialise it to bytecode, then
+/// load that exact bytecode and evaluate it in the shared context so the
+/// manifest is read from the very bytes a session will run.
+async fn compile_extract_one(
+  actx: &AsyncContext,
+  index: usize,
+  module_name: &str,
+  wrapped: &str,
+) -> Result<(Vec<u8>, String), ScriptError> {
+  let name = module_name.to_string();
+  let code = wrapped.to_string();
+  let extract = manifest_extract_expr(index);
+  async_with!(actx => |ctx| {
+    // Bundled module has no remaining imports — `declare` (parse only)
+    // needs no resolver; mirrors `bundle_and_compile`.
+    let module = Module::declare(ctx.clone(), name.clone().into_bytes(), code.into_bytes())
+      .catch(&ctx)
+      .map_err(|e| caught_to_script_error(e, module_name))?;
+    let bytecode = module
+      .write(WriteOptions {
+        // Same process + interpreter that will `load` it.
+        endianness: WriteOptionsEndianness::Native,
+        ..Default::default()
+      })
+      .map_err(|e| ScriptError::internal(format!("plugin module write: {e}")))?;
+
+    // SAFETY: `bytecode` was just produced by `Module::write` in THIS
+    // process and rquickjs/QuickJS build with native endianness and is
+    // not persisted — the precondition `Module::load` documents. This is
+    // the same contract `eval_bundle` and `install_plugins` rely on.
+    #[allow(unsafe_code)]
+    let loaded = (unsafe { Module::load(ctx.clone(), &bytecode) })
+      .catch(&ctx)
+      .map_err(|e| caught_to_script_error(e, module_name))?;
+    let promise = loaded
+      .eval()
+      .catch(&ctx)
+      .map_err(|e| caught_to_script_error(e, module_name))?
+      .1;
+    promise
+      .into_future::<()>()
+      .await
+      .catch(&ctx)
+      .map_err(|e| caught_to_script_error(e, module_name))?;
+
+    let manifests_json: String = ctx
+      .eval::<String, _>(extract.as_bytes())
+      .map_err(|e| caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), module_name))?;
+    Ok((bytecode, manifests_json))
+  })
+  .await
+}

@@ -2,10 +2,13 @@
 //! the allow-listed `commands.run(name, vars)` escape hatch.
 //!
 //! Plugins are passed to `install_plugins` as `PluginBinding` snapshots
-//! (name, source text, allowed command map). For each plugin a JS wrapper
-//! is synthesised: it evaluates the plugin source so its `globalThis.exports`
-//! is set, extracts the handler, and returns a closure that invokes the
-//! handler with `{ args, page, context, request, commands }`.
+//! (precompiled bytecode + per-tool allow-lists). Each file's bytecode is
+//! the rolldown-bundled module produced once at startup by
+//! [`crate::bundle::compile_and_extract_plugins`]; loading + evaluating it
+//! publishes the file's tool array (with live handler closures) at
+//! `globalThis.__ferri_plugin_files[i]`. For each tool a thin wrapper is
+//! synthesised that looks its handler up by `(fileIndex, toolIndex)` and
+//! invokes it with `{ args, page, context, request, commands }`.
 //!
 //! The `commands.run` callback dispatches into the single
 //! `__ferri_plugin_commands` runner, which executes the matching template
@@ -17,13 +20,9 @@ use std::collections::HashMap;
 use std::process::Command;
 use std::sync::Arc;
 
-use rquickjs::{
-  AsyncContext, AsyncRuntime, Ctx, JsLifetime, Module, Object, Value, WriteOptions, WriteOptionsEndianness, async_with,
-  class::Class, class::Trace, function::Opt,
-};
+use rquickjs::{Ctx, JsLifetime, Module, Object, Value, class::Class, class::Trace, function::Opt};
 
 use crate::bindings::convert::{serde_from_js, serde_to_js};
-use crate::error::ScriptError;
 
 /// Snapshot of one plugin source file handed to the script engine at
 /// `install_plugins` time. A file may contribute one or more tools.
@@ -32,16 +31,11 @@ use crate::error::ScriptError;
 /// invoking `engine.run`.
 #[derive(Debug, Clone)]
 pub struct PluginBinding {
-  /// Source text of the plugin file. Shared (`Arc`) so handing the
-  /// binding to a session VM is a refcount bump, not a full copy of
-  /// potentially-large plugin source. Used by the source-eval fallback
-  /// when `bytecode` is `None`.
-  pub source: Arc<str>,
-  /// Pre-compiled `QuickJS` bytecode of the per-file wrapper module
-  /// (produced once at plugin load by [`compile_plugin_bytecode`]).
-  /// When present, a session VM loads this instead of parsing
-  /// `source` — no per-session parse. `None` falls back to source eval.
-  pub bytecode: Option<Arc<[u8]>>,
+  /// Pre-compiled `QuickJS` bytecode of the rolldown-bundled plugin
+  /// module, produced once at startup by
+  /// [`crate::bundle::compile_and_extract_plugins`]. A session VM
+  /// `Module::load`s this — no per-session parse, no source retained.
+  pub bytecode: Arc<[u8]>,
   /// Tools the file declares, in source order. Each maps onto a
   /// separate `plugins.<name>` binding.
   pub tools: Vec<PluginToolBinding>,
@@ -138,11 +132,10 @@ fn parse_command_output(s: &str) -> serde_json::Value {
 /// runner. `plugins` is an object keyed by tool name; each value is an
 /// async function `(args) => result`.
 ///
-/// One source file may declare several tools. The source is eval'd
-/// exactly once per file (under `globalThis.__ferri_plugin_files[i]`),
-/// then each tool gets its own wrapper that looks the handler up by
-/// index. Sibling tools in the same file share globals (helpers,
-/// constants) without re-evaluation overhead.
+/// One file's bytecode is loaded + evaluated exactly once per session
+/// (under `globalThis.__ferri_plugin_files[i]`), then each tool gets its
+/// own wrapper that looks the handler up by index. Sibling tools in the
+/// same file share module-scoped helpers/constants for free.
 pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Result<()> {
   let globals = ctx.globals();
 
@@ -161,30 +154,21 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
   ctx.eval::<(), _>(b"globalThis.__ferri_plugin_files = [];".as_slice())?;
 
   for (file_idx, file) in files.iter().enumerate() {
-    // 1. Make `globalThis.__ferri_plugin_files[file_idx]` the file's
-    //    normalised tool array. Prefer the pre-compiled bytecode module
-    //    (no per-session parse); fall back to evaluating the source
-    //    wrapper when bytecode is absent or failed to compile.
-    if let Some(bytecode) = file.bytecode.as_deref() {
-      // SAFETY: `bytecode` was produced by `Module::write` on a
-      // compile-only module in `compile_plugin_bytecode`, within THIS
-      // process and this exact rquickjs/QuickJS build, using Native
-      // endianness, and is never persisted or sent anywhere. So
-      // `JS_ReadObject` receives well-formed bytecode for this very
-      // interpreter — the precondition `Module::load` documents. A
-      // foreign or corrupt blob cannot reach this call.
-      #[allow(unsafe_code)]
-      let module = unsafe { Module::load(ctx.clone(), bytecode) }?;
-      // The wrapper module body is fully synchronous (no top-level
-      // await); its only effect — assigning
-      // `globalThis.__ferri_plugin_files[file_idx]` — has already
-      // applied by the time `eval` returns, so the resolved promise
-      // carries nothing we need.
-      let (_evaluated, _promise) = module.eval()?;
-    } else {
-      let source_literal = serde_json::to_string(&*file.source).unwrap_or_else(|_| "\"\"".into());
-      ctx.eval::<(), _>(plugin_file_wrapper(file_idx, &source_literal).as_bytes())?;
-    }
+    // 1. Load + evaluate the file's precompiled bytecode module. Its
+    //    appended epilogue publishes the normalised tool array (with
+    //    live handler closures) at `__ferri_plugin_files[file_idx]`.
+    //
+    // SAFETY: `file.bytecode` was produced by `Module::write` in THIS
+    // process and this exact rquickjs/QuickJS build with native
+    // endianness (see `compile_and_extract_plugins`) and is never
+    // persisted or sent anywhere — the precondition `Module::load`
+    // documents. A foreign or corrupt blob cannot reach this call.
+    #[allow(unsafe_code)]
+    let module = unsafe { Module::load(ctx.clone(), &file.bytecode) }?;
+    // Bundled module body + epilogue are fully synchronous (no top-level
+    // await); the slot assignment has applied by the time `eval`
+    // returns, so the resolved promise carries nothing we need.
+    let (_evaluated, _promise) = module.eval()?;
 
     // 2. For each tool, install a wrapper that locates its handler by
     //    (fileIndex, toolIndex) and binds the per-tool allow-list.
@@ -228,71 +212,4 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
   }
 
   Ok(())
-}
-
-/// The per-file wrapper: evaluate the plugin source once (in sloppy
-/// global scope via indirect `eval`, preserving classic-script
-/// semantics), normalise `globalThis.exports` into a tool array, and
-/// publish it at `globalThis.__ferri_plugin_files[file_idx]`.
-///
-/// Single source of truth for both the source-eval fallback and the
-/// bytecode the loader pre-compiles — they MUST stay byte-identical so
-/// a file's tool indices line up regardless of which path ran.
-fn plugin_file_wrapper(file_idx: usize, source_literal: &str) -> String {
-  format!(
-    "(() => {{\n\
-       const __exp_before = globalThis.exports;\n\
-       globalThis.exports = undefined;\n\
-       (0, eval)({source_literal});\n\
-       const __exp = globalThis.exports;\n\
-       globalThis.exports = __exp_before;\n\
-       if (typeof __exp !== 'object' || __exp === null) {{\n\
-         throw new Error('plugin file index {file_idx} did not set globalThis.exports');\n\
-       }}\n\
-       let __tools;\n\
-       if (Array.isArray(__exp)) __tools = __exp;\n\
-       else if (Array.isArray(__exp.tools)) __tools = __exp.tools;\n\
-       else __tools = [__exp];\n\
-       globalThis.__ferri_plugin_files[{file_idx}] = __tools;\n\
-     }})()\n"
-  )
-}
-
-/// Compile one plugin file's wrapper to `QuickJS` bytecode, once, at
-/// plugin load time. The bytes are loaded (not parsed) into every
-/// session VM via the `unsafe Module::load` path in [`install_plugins`].
-///
-/// `file_idx` must equal the file's position in the registry's file
-/// list — it is baked into the wrapper so the bytecode publishes to the
-/// correct `__ferri_plugin_files` slot. A throwaway runtime/context is
-/// used purely to compile (`JS_EVAL_FLAG_COMPILE_ONLY`); nothing runs.
-///
-/// # Errors
-///
-/// Returns [`ScriptError`] if the throwaway VM cannot be created or the
-/// wrapper fails to compile/serialise. Callers treat this as a soft
-/// failure and fall back to source eval.
-pub async fn compile_plugin_bytecode(file_idx: usize, source: &str, module_name: &str) -> Result<Vec<u8>, ScriptError> {
-  let source_literal = serde_json::to_string(source).unwrap_or_else(|_| "\"\"".into());
-  let wrapper = plugin_file_wrapper(file_idx, &source_literal);
-
-  let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("bytecode runtime init: {e}")))?;
-  let ctx = AsyncContext::full(&runtime)
-    .await
-    .map_err(|e| ScriptError::internal(format!("bytecode context init: {e}")))?;
-
-  let name = module_name.to_string();
-  async_with!(ctx => |ctx| {
-    let module = Module::declare(ctx.clone(), name.into_bytes(), wrapper.into_bytes())
-      .map_err(|e| ScriptError::internal(format!("plugin module compile: {e}")))?;
-    module
-      .write(WriteOptions {
-        // Same process + interpreter that will `load` it; native byte
-        // order avoids a pointless byte-swap.
-        endianness: WriteOptionsEndianness::Native,
-        ..Default::default()
-      })
-      .map_err(|e| ScriptError::internal(format!("plugin module write: {e}")))
-  })
-  .await
 }

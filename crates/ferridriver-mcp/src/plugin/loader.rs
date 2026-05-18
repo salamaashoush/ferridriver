@@ -1,182 +1,128 @@
 //! Plugin discovery and manifest extraction.
 //!
-//! At server startup each configured plugin path is read and evaluated in
-//! a throwaway `QuickJS` runtime (the same `ScriptEngine` that powers
-//! `run_script`, just with no live browser bindings). The plugin must
-//! assign its manifest(s) to `globalThis.exports`. Three shapes are
-//! accepted, in order of recognition:
+//! At server startup every configured plugin file is rolldown-bundled
+//! (TypeScript, plugin-local imports, and `node_modules` resolved +
+//! tree-shaken), compiled to `QuickJS` bytecode, and its manifests
+//! extracted — all in a single throwaway runtime for the whole batch
+//! (`ferridriver_script::compile_and_extract_plugins`), not one engine
+//! per file. The plugin must assign its manifest(s) to
+//! `globalThis.exports`. Three shapes are accepted:
 //!
 //! 1. **Multiple tools, with shared metadata** -- `globalThis.exports = {
-//!    tools: [ {...}, {...} ] }`. The outer object may carry future
-//!    bundle-level fields; only `tools` is consumed today.
+//!    tools: [ {...}, {...} ] }`.
 //! 2. **Multiple tools, plain array** -- `globalThis.exports = [ {...},
-//!    {...} ]`. Equivalent to (1) with no outer metadata.
+//!    {...} ]`.
 //! 3. **Single tool** -- `globalThis.exports = { name, description,
-//!    inputSchema, allow, exposeAsTool, handler }`. Back-compat with
-//!    the original single-tool format. Treated as `tools: [exports]`.
+//!    inputSchema, allow, exposeAsTool, handler }`. Treated as
+//!    `tools: [exports]`.
 //!
-//! The loader strips every `handler` (functions aren't JSON-serialisable)
-//! and serialises the rest, which then deserialises into a `Vec<PluginManifest>`.
-//! The full source text is retained on [`LoadedPlugin`] so the binding-
-//! install path can re-evaluate the file ONCE inside each `run_script`
-//! invocation and register every tool the file declares.
+//! Each manifest's `handler` is stripped during extraction (functions
+//! are not JSON-serialisable and only make sense inside a live VM); the
+//! compiled bytecode retains the live handler closures and is loaded
+//! into each session VM with no per-session parse.
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ferridriver_script::{InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine};
+use ferridriver_script::compile_and_extract_plugins;
 
 use super::manifest::PluginManifest;
 
-/// A plugin source file that has been discovered, parsed, and validated.
-///
-/// Carries every tool declared in the file plus the original source so
-/// the binding-install path can re-evaluate the file inside the live
-/// script context once and bind each tool under `plugins.<name>`.
+/// A plugin source file that has been discovered, bundled, compiled, and
+/// validated. Carries every tool the file declares plus the precompiled
+/// module bytecode each session VM loads.
 #[derive(Debug, Clone)]
 pub struct LoadedPlugin {
-  /// One manifest per tool declared in the source file. At least one.
+  /// One manifest per tool declared in the file. At least one.
   pub tools: Vec<PluginManifest>,
-  /// Shared (`Arc`) so each session VM that installs this plugin takes a
-  /// refcount bump, not a full copy of the source text. Drives the
-  /// source-eval fallback when `bytecode` is `None`.
-  pub source: Arc<str>,
-  /// Pre-compiled wrapper bytecode, filled in by `load_plugins` once the
-  /// file's registry index is known. `None` until then (and if compile
-  /// fails — the session VM then parses `source` instead).
-  pub bytecode: Option<Arc<[u8]>>,
+  /// Precompiled `QuickJS` bytecode of the rolldown-bundled module,
+  /// shared (`Arc`) so handing it to a session VM is a refcount bump.
+  pub bytecode: Arc<[u8]>,
   pub path: PathBuf,
 }
 
-/// Failure modes the loader can surface.
+/// Failure modes the loader can surface (per file; one bad file never
+/// stops the others).
 #[derive(Debug)]
 pub enum PluginLoadError {
-  Io { path: PathBuf, error: std::io::Error },
-  Eval { path: PathBuf, message: String },
-  ManifestMissing { path: PathBuf },
-  ManifestInvalid { path: PathBuf, error: serde_json::Error },
-  ManifestNoTools { path: PathBuf },
-  SandboxInit { error: String },
+  Io {
+    path: PathBuf,
+    error: std::io::Error,
+  },
+  /// Bundle, compile, or manifest extraction failed for this file.
+  Bundle {
+    path: PathBuf,
+    message: String,
+  },
+  ManifestInvalid {
+    path: PathBuf,
+    error: serde_json::Error,
+  },
+  ManifestNoTools {
+    path: PathBuf,
+  },
 }
 
 impl std::fmt::Display for PluginLoadError {
   fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
     match self {
       Self::Io { path, error } => write!(f, "read {}: {error}", path.display()),
-      Self::Eval { path, message } => write!(f, "eval {}: {message}", path.display()),
-      Self::ManifestMissing { path } => write!(f, "{}: globalThis.exports not set after eval", path.display()),
+      Self::Bundle { path, message } => write!(f, "bundle {}: {message}", path.display()),
       Self::ManifestInvalid { path, error } => write!(f, "{}: manifest invalid: {error}", path.display()),
       Self::ManifestNoTools { path } => write!(f, "{}: no tools declared in globalThis.exports", path.display()),
-      Self::SandboxInit { error } => write!(f, "sandbox init: {error}"),
     }
   }
 }
 
 impl std::error::Error for PluginLoadError {}
 
-/// Load a single plugin file: read source, eval to capture every tool
-/// manifest, return [`LoadedPlugin`] with `tools.len() >= 1`. Handler
-/// functions are NOT evaluated here -- only the metadata fields.
+/// Bundle + compile + extract every discovered plugin file in one batch.
+/// Returns the successfully loaded plugins (with contiguous registry
+/// indices baked into their bytecode) and a per-file error list so the
+/// caller can log and skip broken files without aborting startup.
 ///
-/// `engine` is the live script engine the rest of the server uses; we
-/// reuse its config (timeout, memory limits) so plugin authors get the
-/// same behaviour at startup as at runtime.
-///
-/// # Errors
-///
-/// Returns [`PluginLoadError`] if the file cannot be read, the manifest
-/// extractor script fails to evaluate, `globalThis.exports` is missing
-/// after eval, the captured JSON cannot be deserialised, or no tools
-/// were declared.
-pub async fn load_plugin(path: &Path, engine: &ScriptEngine) -> Result<LoadedPlugin, PluginLoadError> {
-  let source = std::fs::read_to_string(path).map_err(|error| PluginLoadError::Io {
-    path: path.to_path_buf(),
-    error,
-  })?;
+/// The returned `LoadedPlugin`s are in the same order
+/// `compile_and_extract_plugins` assigned indices, which the server
+/// preserves when building `PluginBinding`s — so a tool's `(fileIndex,
+/// toolIndex)` always matches the bytecode's `__ferri_plugin_files`
+/// slot.
+pub async fn load_all(files: &[PathBuf]) -> (Vec<LoadedPlugin>, Vec<PluginLoadError>) {
+  let (compiled, bundle_failures) = compile_and_extract_plugins(files).await;
 
-  // Throwaway sandbox rooted at the plugin's parent directory. Only used
-  // so the engine's `fs` global has SOMETHING to bind to -- plugin
-  // manifest extraction itself doesn't touch the filesystem.
-  let parent = path.parent().unwrap_or_else(|| Path::new("."));
-  let sandbox = PathSandbox::new(parent).map_err(|e| PluginLoadError::SandboxInit { error: e.message })?;
+  let mut loaded = Vec::with_capacity(compiled.len());
+  let mut errors: Vec<PluginLoadError> = bundle_failures
+    .into_iter()
+    .map(|(path, e)| PluginLoadError::Bundle {
+      path,
+      message: e.message,
+    })
+    .collect();
 
-  let vars = Arc::new(InMemoryVars::default());
-  let ctx = RunContext {
-    vars,
-    sandbox: Arc::new(sandbox),
-    artifacts: None,
-    page: None,
-    browser_context: None,
-    request: None,
-    browser: None,
-    plugins: Vec::new(),
-    trusted_modules: false,
-  };
-
-  // Eval the plugin source, then normalise `globalThis.exports` into an
-  // array of tool manifests. Three shapes are accepted -- see module
-  // docs. Each manifest gets its `handler` stripped before JSON
-  // serialisation (functions don't survive JSON).
-  let extractor = format!(
-    "{source}\n\
-     const __exp = globalThis.exports;\n\
-     if (typeof __exp !== 'object' || __exp === null) {{ return null; }}\n\
-     let __tools;\n\
-     if (Array.isArray(__exp)) {{ __tools = __exp; }}\n\
-     else if (Array.isArray(__exp.tools)) {{ __tools = __exp.tools; }}\n\
-     else {{ __tools = [__exp]; }}\n\
-     const __clean = __tools.map((t) => {{\n\
-       const m = {{ ...t }};\n\
-       delete m.handler;\n\
-       return m;\n\
-     }});\n\
-     return JSON.stringify(__clean);\n"
-  );
-
-  let result = engine.run(&extractor, &[], RunOptions::default(), ctx).await;
-
-  let manifest_json = match result.outcome {
-    Outcome::Ok { success } => match success.value {
-      serde_json::Value::String(s) => s,
-      serde_json::Value::Null => {
-        return Err(PluginLoadError::ManifestMissing {
-          path: path.to_path_buf(),
-        });
+  for cp in compiled {
+    let tools: Vec<PluginManifest> = match serde_json::from_str(&cp.manifests_json) {
+      Ok(t) => t,
+      Err(error) => {
+        errors.push(PluginLoadError::ManifestInvalid { path: cp.path, error });
+        continue;
       },
-      other => other.to_string(),
-    },
-    Outcome::Error { error } => {
-      return Err(PluginLoadError::Eval {
-        path: path.to_path_buf(),
-        message: format!("{:?}: {}", error.kind, error.message),
-      });
-    },
-  };
-
-  let tools: Vec<PluginManifest> =
-    serde_json::from_str(&manifest_json).map_err(|error| PluginLoadError::ManifestInvalid {
-      path: path.to_path_buf(),
-      error,
-    })?;
-
-  if tools.is_empty() {
-    return Err(PluginLoadError::ManifestNoTools {
-      path: path.to_path_buf(),
+    };
+    if tools.is_empty() {
+      errors.push(PluginLoadError::ManifestNoTools { path: cp.path });
+      continue;
+    }
+    loaded.push(LoadedPlugin {
+      tools,
+      bytecode: cp.bytecode,
+      path: cp.path,
     });
   }
 
-  Ok(LoadedPlugin {
-    tools,
-    source: Arc::<str>::from(source),
-    // Filled in by `load_plugins` once the registry index is assigned.
-    bytecode: None,
-    path: path.to_path_buf(),
-  })
+  (loaded, errors)
 }
 
 /// Discover plugin files under a path. Directories are scanned shallowly
-/// for `*.js` / `*.mjs` files. Single files are returned as-is. Anything
-/// else (symlinks, unreadable entries) is reported as an io error.
+/// for `*.js` / `*.mjs` / `*.ts` / `*.mts` files (rolldown transpiles
+/// TypeScript). Single files are returned as-is.
 ///
 /// # Errors
 ///
@@ -210,7 +156,7 @@ pub fn discover(path: &Path) -> Result<Vec<PathBuf>, PluginLoadError> {
     let p = entry.path();
     if p.is_file()
       && let Some(ext) = p.extension().and_then(|e| e.to_str())
-      && (ext == "js" || ext == "mjs")
+      && matches!(ext, "js" | "mjs" | "ts" | "mts")
     {
       out.push(p);
     }
