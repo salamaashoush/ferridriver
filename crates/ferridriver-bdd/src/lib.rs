@@ -247,8 +247,20 @@ pub async fn run_bdd_with(
     return 0;
   }
 
-  let registry = Arc::new(registry::StepRegistry::build());
-  let plan = translate::translate_features(&feature_set, registry, &config);
+  // JS step files take the QuickJS path; otherwise inventory-collected
+  // Rust steps. `--steps` overrides `[test].steps`.
+  let js_globs: Vec<String> = if overrides.bdd_steps.is_empty() {
+    config.steps.clone()
+  } else {
+    overrides.bdd_steps.clone()
+  };
+  let plan = if js_globs.is_empty() {
+    let registry = Arc::new(registry::StepRegistry::build());
+    translate::translate_features(&feature_set, registry, &config)
+  } else {
+    let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
+    js::translate_features_js(&feature_set, &config, js_globs, cwd)
+  };
 
   if plan.total_tests == 0 {
     eprintln!("no scenarios found");

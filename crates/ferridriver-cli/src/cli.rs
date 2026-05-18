@@ -111,6 +111,13 @@ pub struct BddArgs {
   #[arg(long)]
   pub reporter: Vec<String>,
 
+  /// JavaScript step-definition file globs, e.g.
+  /// `--steps 'steps/**/*.js'`. May be repeated. Overrides
+  /// `[test].steps` from config. Defaults to `steps/**/*.js` and
+  /// `step_definitions/**/*.js` when omitted.
+  #[arg(long)]
+  pub steps: Vec<String>,
+
   #[command(flatten)]
   pub browser: BrowserArgs,
 }

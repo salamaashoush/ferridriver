@@ -17,14 +17,29 @@
   registry is Rust state in context userdata (`RefCell`, not
   `Arc`/`Mutex` — single-threaded VM). No `globalThis.__*`.
 
+- **CLI surface**: `ferridriver bdd --steps <glob>` (repeatable) +
+  `[test].steps` config, matching the TS CLI flag/key. Default globs
+  `steps/**/*.js` and `step_definitions/**/*.js`. JS step files load as
+  ES modules.
+- **ESM**: step files load via `Module::evaluate` with a cwd-relative
+  module name, so `import './helpers.js'` and named/namespace imports
+  resolve through a filesystem resolver. JS source locations report the
+  real filename (e.g. `cukes.steps.js:34:13`).
+- **Trusted modules**: BDD/CLI sets `RunContext.trusted_modules` so step
+  files resolve modules anywhere on disk (filesystem `FileResolver` +
+  `ScriptLoader`); the MCP / `run_script` path stays sandboxed.
+- **Full TestRunner integration**: `ferridriver bdd` builds the plan via
+  `js::translate_features_js`; scenarios run through the core
+  `TestRunner` — parallel workers (one JS engine session per worker,
+  cached), tag filtering, annotations, reporters (step events recorded
+  to `TestInfo`). Verified end-to-end through the CLI.
+
 ## Open — need a decision before the TS CLI is deleted
 
-1. **TypeScript step files.** The TS CLI accepts `.ts` steps. QuickJS
-   runs JS only. Options: (a) bundle/transpile `.ts` -> `.js` ahead of
-   load with an embedded transpiler (e.g. an SWC/oxc Rust crate) — keeps
-   the single binary, adds a build dep; (b) JS-only, document `.ts` as
-   unsupported; (c) accept precompiled `.js` (user runs their own
-   tsc/esbuild). Recommendation: (a) for true TS-CLI parity.
+1. **TypeScript step files.** Decided JS-only for now; `.ts` is a
+   documented gap. Reaching TS-CLI parity later needs an embedded
+   transpiler (oxc/swc) to strip types `.ts` -> `.js` before
+   `evaluate_module`.
 2. **Step-file discovery + CLI surface.** Mirror cucumber-js / ts-cli:
    a `[bdd].require`/`import` glob list (config) plus a CLI flag (e.g.
    `--steps <glob>`/`--import <glob>`). Decide config key names and

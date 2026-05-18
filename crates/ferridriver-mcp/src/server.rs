@@ -621,6 +621,7 @@ impl McpServer {
       request: Some(request),
       browser: Some(browser_handle),
       plugins: self.plugin_bindings(),
+      trusted_modules: false,
     };
 
     let name_literal = serde_json::to_string(plugin_name).unwrap_or_else(|_| "\"\"".into());

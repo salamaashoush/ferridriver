@@ -166,6 +166,7 @@ impl McpServer {
       request: Some(request),
       browser: Some(browser_handle),
       plugins: self.plugin_bindings(),
+      trusted_modules: false,
     };
 
     let result = self.run_in_session(&session, &source, &args, options, context).await;

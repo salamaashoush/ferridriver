@@ -352,6 +352,27 @@ pub struct CollectedRegistry {
   pub param_types: Vec<CollectedParamType>,
 }
 
+/// Evaluate one step `.js` file as an ES module from its source.
+///
+/// `name` is the module identity (a path; use a cwd-relative path so the
+/// file's own relative `import './helpers.js'` resolves through the
+/// filesystem resolver). Top-level `Given`/`When`/`Then` run here.
+pub async fn evaluate_module(actx: &AsyncContext, name: &str, source: &str) -> Result<(), ScriptError> {
+  let name = name.to_string();
+  let source = source.to_string();
+  async_with!(actx => |ctx| {
+    let promise = match rquickjs::Module::evaluate(ctx.clone(), name.as_str(), source.as_bytes()).catch(&ctx) {
+      Ok(p) => p,
+      Err(e) => return Err(caught_to_script_error(e, &source)),
+    };
+    match promise.into_future::<()>().await.catch(&ctx) {
+      Ok(()) => Ok(()),
+      Err(e) => Err(caught_to_script_error(e, &source)),
+    }
+  })
+  .await
+}
+
 /// Snapshot the registry after the step `.js` files evaluated.
 pub async fn collect_registry(actx: &AsyncContext) -> Result<CollectedRegistry, ScriptError> {
   async_with!(actx => |ctx| {
