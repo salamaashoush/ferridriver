@@ -3,7 +3,7 @@
 //! A plugin/extension file is rolldown-bundled to `QuickJS` bytecode
 //! once at startup. Loading + evaluating that bytecode in a session runs
 //! its top-level `defineTool(...)` (and any `Given/When/Then`) calls,
-//! registering directly into the shared Rust [`ExtensionRegistry`].
+//! registering directly into the shared Rust `ExtensionRegistry`.
 //! `defineTool` is the only tool-registration surface — no
 //! `globalThis.exports`, no legacy shapes.
 //!
