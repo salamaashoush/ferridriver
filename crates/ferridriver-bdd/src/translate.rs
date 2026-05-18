@@ -175,6 +175,97 @@ async fn build_world_from_pool(
 }
 
 /// Translate a single scenario into a `TestCase`.
+/// Map a scenario's Gherkin tags to core `TestAnnotation`s
+/// (`@wip`/`@only`/`@skip(...)`/`@fixme(...)`/`@fail(...)`/`@slow(...)`
+/// and `@key(value)` -> `Info`). Shared by the Rust-step and JS-step
+/// translation paths.
+pub fn scenario_annotations(scenario: &ScenarioExecution) -> Vec<TestAnnotation> {
+  let mut annotations: Vec<TestAnnotation> = scenario.tags.iter().map(|t| TestAnnotation::Tag(t.clone())).collect();
+
+  if scenario.tags.iter().any(|t| t == "@wip" || t == "@pending") {
+    annotations.push(TestAnnotation::Skip {
+      reason: Some("tagged @wip/@pending".to_string()),
+      condition: None,
+    });
+  }
+
+  if scenario.tags.iter().any(|t| t == "@only") {
+    annotations.push(TestAnnotation::Only);
+  }
+
+  for tag in &scenario.tags {
+    if tag == "@skip" {
+      annotations.push(TestAnnotation::Skip {
+        reason: Some("tagged @skip".to_string()),
+        condition: None,
+      });
+    } else if let Some(cond) = tag.strip_prefix("@skip(").and_then(|s| s.strip_suffix(')')) {
+      annotations.push(TestAnnotation::Skip {
+        reason: Some(format!("tagged @skip({cond})")),
+        condition: Some(cond.to_string()),
+      });
+    } else if tag == "@fixme" {
+      annotations.push(TestAnnotation::Fixme {
+        reason: Some("tagged @fixme".to_string()),
+        condition: None,
+      });
+    } else if let Some(cond) = tag.strip_prefix("@fixme(").and_then(|s| s.strip_suffix(')')) {
+      annotations.push(TestAnnotation::Fixme {
+        reason: Some(format!("tagged @fixme({cond})")),
+        condition: Some(cond.to_string()),
+      });
+    } else if tag == "@fail" {
+      annotations.push(TestAnnotation::Fail {
+        reason: Some("tagged @fail".to_string()),
+        condition: None,
+      });
+    } else if let Some(cond) = tag.strip_prefix("@fail(").and_then(|s| s.strip_suffix(')')) {
+      annotations.push(TestAnnotation::Fail {
+        reason: Some(format!("tagged @fail({cond})")),
+        condition: Some(cond.to_string()),
+      });
+    } else if tag == "@slow" {
+      annotations.push(TestAnnotation::Slow {
+        reason: Some("tagged @slow".to_string()),
+        condition: None,
+      });
+    } else if let Some(cond) = tag.strip_prefix("@slow(").and_then(|s| s.strip_suffix(')')) {
+      annotations.push(TestAnnotation::Slow {
+        reason: Some(format!("tagged @slow({cond})")),
+        condition: Some(cond.to_string()),
+      });
+    }
+  }
+
+  for tag in &scenario.tags {
+    if let Some(rest) = tag.strip_prefix('@') {
+      if let Some(paren_pos) = rest.find('(') {
+        if rest.ends_with(')') {
+          let key = &rest[..paren_pos];
+          let value = &rest[paren_pos + 1..rest.len() - 1];
+          if !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only") {
+            annotations.push(TestAnnotation::Info {
+              type_name: key.to_string(),
+              description: value.to_string(),
+            });
+          }
+        }
+      }
+    }
+  }
+
+  annotations
+}
+
+/// Extract the scenario's 1-based source line from its `file:line`
+/// location string.
+pub fn scenario_line(scenario: &ScenarioExecution) -> Option<usize> {
+  scenario
+    .location
+    .rsplit_once(':')
+    .and_then(|(_, l)| l.parse::<usize>().ok())
+}
+
 fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>, config: &TestConfig) -> TestCase {
   let scenario_clone = scenario.clone();
   let step_timeout = Duration::from_millis(config.timeout);
@@ -255,90 +346,8 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
     })
   });
 
-  // Map BDD tags to TestAnnotations.
-  let mut annotations: Vec<TestAnnotation> = scenario.tags.iter().map(|t| TestAnnotation::Tag(t.clone())).collect();
-
-  if scenario.tags.iter().any(|t| t == "@wip" || t == "@pending") {
-    annotations.push(TestAnnotation::Skip {
-      reason: Some("tagged @wip/@pending".to_string()),
-      condition: None,
-    });
-  }
-
-  if scenario.tags.iter().any(|t| t == "@only") {
-    annotations.push(TestAnnotation::Only);
-  }
-
-  // @skip, @skip(condition), @fixme, @fixme(condition), @fail, @fail(condition),
-  // @slow, @slow(condition)
-  for tag in &scenario.tags {
-    if tag == "@skip" {
-      annotations.push(TestAnnotation::Skip {
-        reason: Some("tagged @skip".to_string()),
-        condition: None,
-      });
-    } else if let Some(cond) = tag.strip_prefix("@skip(").and_then(|s| s.strip_suffix(')')) {
-      annotations.push(TestAnnotation::Skip {
-        reason: Some(format!("tagged @skip({cond})")),
-        condition: Some(cond.to_string()),
-      });
-    } else if tag == "@fixme" {
-      annotations.push(TestAnnotation::Fixme {
-        reason: Some("tagged @fixme".to_string()),
-        condition: None,
-      });
-    } else if let Some(cond) = tag.strip_prefix("@fixme(").and_then(|s| s.strip_suffix(')')) {
-      annotations.push(TestAnnotation::Fixme {
-        reason: Some(format!("tagged @fixme({cond})")),
-        condition: Some(cond.to_string()),
-      });
-    } else if tag == "@fail" {
-      annotations.push(TestAnnotation::Fail {
-        reason: Some("tagged @fail".to_string()),
-        condition: None,
-      });
-    } else if let Some(cond) = tag.strip_prefix("@fail(").and_then(|s| s.strip_suffix(')')) {
-      annotations.push(TestAnnotation::Fail {
-        reason: Some(format!("tagged @fail({cond})")),
-        condition: Some(cond.to_string()),
-      });
-    } else if tag == "@slow" {
-      annotations.push(TestAnnotation::Slow {
-        reason: Some("tagged @slow".to_string()),
-        condition: None,
-      });
-    } else if let Some(cond) = tag.strip_prefix("@slow(").and_then(|s| s.strip_suffix(')')) {
-      annotations.push(TestAnnotation::Slow {
-        reason: Some(format!("tagged @slow({cond})")),
-        condition: Some(cond.to_string()),
-      });
-    }
-  }
-
-  // @key(value) → Info annotations (e.g., @issue(JIRA-1234), @severity(critical), @owner(team-auth))
-  for tag in &scenario.tags {
-    if let Some(rest) = tag.strip_prefix('@') {
-      if let Some(paren_pos) = rest.find('(') {
-        if rest.ends_with(')') {
-          let key = &rest[..paren_pos];
-          let value = &rest[paren_pos + 1..rest.len() - 1];
-          // Skip annotation tags handled above.
-          if !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only") {
-            annotations.push(TestAnnotation::Info {
-              type_name: key.to_string(),
-              description: value.to_string(),
-            });
-          }
-        }
-      }
-    }
-  }
-
-  // Extract line number from location "file:line".
-  let line = scenario
-    .location
-    .rsplit_once(':')
-    .and_then(|(_, l)| l.parse::<usize>().ok());
+  let annotations = scenario_annotations(scenario);
+  let line = scenario_line(scenario);
 
   TestCase {
     id: TestId {

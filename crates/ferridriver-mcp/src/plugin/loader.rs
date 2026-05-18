@@ -110,6 +110,7 @@ pub async fn load_plugin(path: &Path, engine: &ScriptEngine) -> Result<LoadedPlu
     request: None,
     browser: None,
     plugins: Vec::new(),
+    trusted_modules: false,
   };
 
   // Eval the plugin source, then normalise `globalThis.exports` into an

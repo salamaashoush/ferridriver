@@ -49,11 +49,11 @@ async fn build_world() -> BrowserWorld {
 async fn js_steps_pass_fail_and_tag_filter() {
   let fixtures_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures");
   let feature_src = std::fs::read_to_string(fixtures_dir.join("cukes.feature")).expect("read feature");
-  let steps_src = std::fs::read_to_string(fixtures_dir.join("cukes.steps.js")).expect("read steps");
 
-  // 1. Load the JS step file into the shared QuickJS engine and build
-  //    the Rust step registry from what it registered.
-  let session = JsBddSession::load(&steps_src, &fixtures_dir)
+  // 1. Load the JS step files (as ES modules) into the shared QuickJS
+  //    engine and build the Rust step registry from what they
+  //    registered.
+  let session = JsBddSession::load(&["cukes.steps.js".to_string()], &fixtures_dir)
     .await
     .expect("load js bdd session");
 
@@ -65,8 +65,8 @@ async fn js_steps_pass_fail_and_tag_filter() {
   filter_scenarios(&mut scenarios, &tag_expr);
 
   // 3. Drive each scenario through the QuickJS step functions.
+  //    (BeforeAll hooks ran during JsBddSession::load.)
   let mut world = build_world().await;
-  session.before_all().await.expect("beforeAll");
 
   let mut results: Vec<JsScenarioResult> = Vec::new();
   for scenario in &scenarios {

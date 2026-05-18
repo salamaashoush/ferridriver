@@ -143,6 +143,9 @@ pub struct TestConfig {
   pub forbid_only: bool,
   pub fully_parallel: bool,
   pub features: Vec<String>,
+  /// JavaScript step-definition file globs. Loaded into the shared
+  /// `QuickJS` engine (cucumber-js `import`/`require` equivalent).
+  pub steps: Vec<String>,
   #[ts(optional)]
   pub tags: Option<String>,
   pub dry_run: bool,
@@ -654,6 +657,8 @@ pub struct CliOverrides {
   pub bdd_step_timeout: Option<u64>,
   pub bdd_order: Option<String>,
   pub bdd_language: Option<String>,
+  /// JavaScript step-definition file globs (overrides `[test].steps`).
+  pub bdd_steps: Vec<String>,
 }
 
 impl Default for TestConfig {
@@ -683,6 +688,7 @@ impl Default for TestConfig {
       forbid_only: false,
       fully_parallel: false,
       features: Vec::new(),
+      steps: Vec::new(),
       tags: None,
       dry_run: false,
       fail_fast: false,

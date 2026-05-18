@@ -130,6 +130,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
     bdd_step_timeout: args.step_timeout,
     bdd_order: args.order,
     bdd_language: args.language,
+    bdd_steps: args.steps,
     workers: args.workers.map(|n| u32::try_from(n).unwrap_or(u32::MAX)),
     reporter: args.reporter,
     ..Default::default()
@@ -203,6 +204,7 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     request: None,
     browser: None,
     plugins: Vec::new(),
+    trusted_modules: false,
   };
 
   let opts = ferridriver_script::RunOptions {

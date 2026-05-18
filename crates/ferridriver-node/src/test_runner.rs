@@ -197,6 +197,7 @@ impl NapiCliOverrides {
       bdd_step_timeout: self.bdd_step_timeout.map(|t| t as u64),
       bdd_order: self.bdd_order.clone(),
       bdd_language: self.bdd_language.clone(),
+      bdd_steps: Vec::new(),
     }
   }
 }

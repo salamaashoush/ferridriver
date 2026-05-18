@@ -60,6 +60,7 @@ async fn harness() -> Harness {
     request: None,
     browser: None,
     plugins: Vec::new(),
+    trusted_modules: false,
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
 
