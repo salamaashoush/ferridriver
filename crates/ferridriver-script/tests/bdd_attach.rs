@@ -137,3 +137,67 @@ async fn after_hook_receives_cucumber_result_arg() {
   assert_eq!(atts[0].media_type, "text/plain");
   assert_eq!(atts[0].bytes, b"failed:My scenario:boom");
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn define_parameter_type_transformer_yields_typed_arg() {
+  // defineParameterType transformer runs on the matched text at step
+  // invocation and the step receives the typed value (cucumber parity).
+  use ferridriver_script::{JsArg, invoke_step};
+  let dir = tempfile::tempdir().expect("tempdir");
+  std::fs::write(
+    dir.path().join("steps.js"),
+    "defineParameterType({ name: 'amount', regexp: /\\d+/, \
+       transformer: (s) => ({ n: Number(s) * 2 }) }); \
+     Given('I have {amount}', async function (a) { this.attach(JSON.stringify(a), 'application/json'); });",
+  )
+  .expect("write steps");
+
+  let bundle = bundle_and_compile(&[dir.path().join("steps.js")], dir.path())
+    .await
+    .expect("bundle");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: Vec::new(),
+    trusted_modules: false,
+    host: ExtensionHost::Bdd,
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session");
+  let actx = session.async_context();
+  eval_bundle(&actx, &bundle).await.expect("eval");
+  let reg = collect_registry(&actx).await.expect("collect");
+  assert_eq!(reg.steps.len(), 1);
+  assert_eq!(reg.param_types.len(), 1, "param type registered");
+
+  set_scenario_world(&actx, &ScenarioWorld::default())
+    .await
+    .expect("world");
+  invoke_step(
+    &actx,
+    0,
+    &[JsArg::Custom {
+      type_name: "amount".to_string(),
+      raw: "21".to_string(),
+    }],
+    None,
+    None,
+    &bundle.module_name,
+  )
+  .await
+  .expect("step ran");
+
+  let atts = drain_attachments(&actx).await.expect("drain");
+  assert_eq!(atts.len(), 1);
+  assert_eq!(
+    String::from_utf8(atts[0].bytes.clone()).unwrap(),
+    r#"{"n":42}"#,
+    "transformer produced a typed object (21*2)"
+  );
+}

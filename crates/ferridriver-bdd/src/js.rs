@@ -509,7 +509,10 @@ fn step_param_to_jsarg(p: &StepParam) -> JsArg {
     StepParam::String(s) | StepParam::Word(s) => JsArg::Str(s.clone()),
     StepParam::Int(i) => JsArg::Int(*i),
     StepParam::Float(f) => JsArg::Float(*f),
-    StepParam::Custom { value, .. } => JsArg::Str(value.clone()),
+    StepParam::Custom { type_name, value } => JsArg::Custom {
+      type_name: type_name.clone(),
+      raw: value.clone(),
+    },
   }
 }
 
