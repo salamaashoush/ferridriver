@@ -18,12 +18,9 @@ use std::sync::Arc;
 
 use rquickjs::class::{Class, Trace};
 use rquickjs::function::{Args, Constructor, Func, Opt, Rest};
-use rquickjs::{
-  AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Function, JsLifetime, Module, Object, Persistent, Value,
-  WriteOptions, WriteOptionsEndianness, async_with,
-};
+use rquickjs::{AsyncContext, CatchResultExt, Ctx, Function, JsLifetime, Object, Persistent, Value, async_with};
 
-use crate::bindings::convert::{json_to_js, serde_to_js};
+use crate::bindings::convert::serde_to_js;
 use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
 use crate::engine::caught_to_script_error;
 use crate::error::ScriptError;
@@ -355,82 +352,6 @@ pub struct CollectedRegistry {
   pub param_types: Vec<CollectedParamType>,
 }
 
-/// Evaluate one step `.js` file as an ES module from its source.
-///
-/// `name` is the module identity (a path; use a cwd-relative path so the
-/// file's own relative `import './helpers.js'` resolves through the
-/// filesystem resolver). Top-level `Given`/`When`/`Then` run here.
-pub async fn evaluate_module(actx: &AsyncContext, name: &str, source: &str) -> Result<(), ScriptError> {
-  let name = name.to_string();
-  let source = source.to_string();
-  async_with!(actx => |ctx| {
-    let promise = match Module::evaluate(ctx.clone(), name.as_str(), source.as_bytes()).catch(&ctx) {
-      Ok(p) => p,
-      Err(e) => return Err(caught_to_script_error(e, &source)),
-    };
-    match promise.into_future::<()>().await.catch(&ctx) {
-      Ok(()) => Ok(()),
-      Err(e) => Err(caught_to_script_error(e, &source)),
-    }
-  })
-  .await
-}
-
-/// Compile one step `.js` file to `QuickJS` bytecode once, in a
-/// throwaway VM. Done before workers spawn so each per-worker session
-/// links bytecode (no re-parse, no re-read) instead of parsing source N
-/// times. `name` is the module identity (cwd-relative path) so the
-/// file's relative imports still resolve per session.
-pub async fn compile_module(name: &str, source: &str) -> Result<Vec<u8>, ScriptError> {
-  let name = name.to_string();
-  let source = source.to_string();
-  let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("bytecode runtime: {e}")))?;
-  let ctx = AsyncContext::full(&runtime)
-    .await
-    .map_err(|e| ScriptError::internal(format!("bytecode context: {e}")))?;
-  async_with!(ctx => |ctx| {
-    let module = Module::declare(ctx.clone(), name.into_bytes(), source.clone().into_bytes())
-      .catch(&ctx)
-      .map_err(|e| caught_to_script_error(e, &source))?;
-    module
-      .write(WriteOptions {
-        // Same process + interpreter that will `load` it.
-        endianness: WriteOptionsEndianness::Native,
-        ..Default::default()
-      })
-      .map_err(|e| ScriptError::internal(format!("module write: {e}")))
-  })
-  .await
-}
-
-/// Link + evaluate a step module from precompiled bytecode (the hot
-/// startup path). Top-level `Given`/`When`/`Then` run here.
-pub async fn eval_module_bytecode(actx: &AsyncContext, bytecode: &[u8], label: &str) -> Result<(), ScriptError> {
-  let bytecode = bytecode.to_vec();
-  let label = label.to_string();
-  async_with!(actx => |ctx| {
-    // SAFETY: `bytecode` was produced by `compile_module`'s
-    // `Module::write` in THIS process and rquickjs/QuickJS build, with
-    // Native endianness, and is never persisted or sent anywhere — the
-    // precondition `Module::load` documents. Same rationale as
-    // `install_plugins`' bytecode path.
-    #[allow(unsafe_code)]
-    let module = match (unsafe { Module::load(ctx.clone(), &bytecode) }).catch(&ctx) {
-      Ok(m) => m,
-      Err(e) => return Err(caught_to_script_error(e, &label)),
-    };
-    let promise = match module.eval().catch(&ctx) {
-      Ok((_evaluated, p)) => p,
-      Err(e) => return Err(caught_to_script_error(e, &label)),
-    };
-    match promise.into_future::<()>().await.catch(&ctx) {
-      Ok(()) => Ok(()),
-      Err(e) => Err(caught_to_script_error(e, &label)),
-    }
-  })
-  .await
-}
-
 /// Snapshot the registry after the step `.js` files evaluated.
 pub async fn collect_registry(actx: &AsyncContext) -> Result<CollectedRegistry, ScriptError> {
   async_with!(actx => |ctx| {
@@ -536,6 +457,17 @@ pub async fn reset_world(actx: &AsyncContext) -> Result<(), ScriptError> {
   .await
 }
 
+/// A cucumber-extracted step argument, lowered directly to a JS value
+/// (never through `serde_json` — a transitive dep may enable
+/// `serde_json/arbitrary_precision`, which would turn numbers into
+/// objects).
+#[derive(Debug, Clone)]
+pub enum JsArg {
+  Str(String),
+  Int(i64),
+  Float(f64),
+}
+
 /// Outcome of a JS step/hook beyond plain pass (cucumber return
 /// protocol: returning the string `'pending'`/`'skipped'`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -551,7 +483,7 @@ pub enum StepOutcome {
 pub async fn invoke_step(
   actx: &AsyncContext,
   idx: usize,
-  params: &[serde_json::Value],
+  params: &[JsArg],
   data_table: Option<&[Vec<String>]>,
   doc_string: Option<&str>,
   source: &str,
@@ -580,8 +512,12 @@ pub async fn invoke_step(
     let mut args = Args::new(ctx.clone(), n);
     args.this(this).map_err(|e| ScriptError::internal(e.to_string()))?;
     for p in &params {
-      let v = json_to_js(&ctx, p).map_err(|e| ScriptError::internal(e.to_string()))?;
-      args.push_arg(v).map_err(|e| ScriptError::internal(e.to_string()))?;
+      match p {
+        JsArg::Str(s) => args.push_arg(s.as_str()),
+        JsArg::Int(i) => args.push_arg(*i),
+        JsArg::Float(f) => args.push_arg(*f),
+      }
+      .map_err(|e| ScriptError::internal(e.to_string()))?;
     }
     if let Some(rows) = data_table {
       let dt = Class::instance(ctx.clone(), DataTableJs { rows }).map_err(|e| ScriptError::internal(e.to_string()))?;

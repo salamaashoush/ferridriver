@@ -121,8 +121,10 @@ async fn js_steps_pass_fail_and_tag_filter() {
     unreachable!()
   };
   assert!(msg.contains("boom from js step"), "JS throw message propagated: {msg}");
+  // The rolldown source map remaps the bundled stack back to the
+  // original step file.
   assert!(
-    msg.contains("<js-step>:") || msg.contains("    at "),
-    "failure carries the JS source location: {msg}"
+    msg.contains("cukes.steps.js"),
+    "failure remaps to the original .js source via source map: {msg}"
   );
 }
