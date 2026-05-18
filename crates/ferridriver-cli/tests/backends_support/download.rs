@@ -104,14 +104,41 @@ fn handle_download_conn(mut stream: TcpStream, payload: &[u8]) {
     .into_bytes();
     out.extend_from_slice(payload);
     out
+  } else if path.starts_with("/hang.bin") {
+    // Attachment that never reaches Content-Length: send headers, then
+    // dribble bytes until the client tears the socket down (which
+    // Chrome does on `download.cancel()`). Keeps the download
+    // deterministically in-flight so the cancel-vs-complete race always
+    // resolves as `canceled` regardless of runner speed.
+    let headers = "HTTP/1.1 200 OK\r\n\
+       Content-Type: application/octet-stream\r\n\
+       Content-Disposition: attachment; filename=\"greeting.txt\"\r\n\
+       Content-Length: 1048576\r\n\
+       Connection: close\r\n\r\n";
+    if stream.write_all(headers.as_bytes()).is_err() {
+      return;
+    }
+    let _ = stream.flush();
+    let chunk = [0u8; 1024];
+    // ~30 s safety cap; the test cancels within milliseconds, so the
+    // loop exits via the write error long before this.
+    for _ in 0..600 {
+      if stream.write_all(&chunk).is_err() {
+        return;
+      }
+      let _ = stream.flush();
+      thread::sleep(std::time::Duration::from_millis(50));
+    }
+    return;
   } else {
-    // Landing page with an anchor that navigates to the download path.
-    // The anchor's own `href` points at `/file.bin`; clicking it
-    // causes a new top-level navigation whose response is the
-    // attachment — Chrome and Firefox both treat the navigation as a
-    // download and fire the protocol-level download-begin event.
+    // Landing page with anchors that navigate to the download paths.
+    // Clicking an anchor causes a new top-level navigation whose
+    // response is the attachment — Chrome and Firefox both treat the
+    // navigation as a download and fire the protocol download-begin
+    // event. `#dl` completes immediately; `#dlhang` stays in-flight.
     let html = "<!doctype html><html><body>\
       <a id=\"dl\" href=\"/file.bin\">download</a>\
+      <a id=\"dlhang\" href=\"/hang.bin\">download-hang</a>\
       </body></html>";
     let mut out = format!(
       "HTTP/1.1 200 OK\r\n\
@@ -271,9 +298,12 @@ pub fn test_download_cancel_surfaces_failure(c: &mut McpClient) {
   let payload = b"bytes-that-may-get-truncated";
   with_download_server(payload, |base, _| {
     c.nav_url(base);
+    // `#dlhang` serves an attachment that never finishes, so the
+    // download is deterministically still in-flight when cancel()
+    // fires — no cancel-vs-complete race on slow CI runners.
     let script = r##"
       const p = page.waitForEvent("download", 15000);
-      await page.click("#dl");
+      await page.click("#dlhang");
       const dl = await p;
       await dl.cancel();
       const failure = await dl.failure();
