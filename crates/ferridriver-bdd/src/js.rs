@@ -426,7 +426,14 @@ impl JsBddSession {
         let status = match self.registry.find_match(&step.text) {
           Err(e) => {
             failed = true;
-            JsStepStatus::Undefined(e.to_string())
+            // JS step authors need a JS snippet, not a Rust skeleton.
+            let snip = crate::snippet::generate_js_snippet(
+              &step.keyword,
+              &step.text,
+              step.table.is_some(),
+              step.docstring.is_some(),
+            );
+            JsStepStatus::Undefined(format!("{e}\n\nImplement with:\n\n{snip}"))
           },
           Ok(m) => {
             let fut = (m.def.handler)(world, m.params, step.table.as_ref(), step.docstring.as_deref());

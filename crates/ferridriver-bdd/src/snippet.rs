@@ -43,6 +43,37 @@ pub fn generate_snippet(keyword: &str, text: &str, has_table: bool, has_docstrin
   format!("#[{attr}(\"{expression}\")]\nasync fn {fn_name}({params_str}) {{\n  todo!(\"implement step\")\n}}")
 }
 
+/// Generate a cucumber-js-shaped JS step-definition snippet for an
+/// undefined step, so JS step authors get a copy-pasteable stub (the
+/// Rust skeleton is useless to them). Mirrors `@cucumber/cucumber`'s
+/// default snippet: `Given('expr', async function (a0, ...) { return
+/// 'pending'; })`.
+#[must_use]
+pub fn generate_js_snippet(keyword: &str, text: &str, has_table: bool, has_docstring: bool) -> String {
+  let (expression, params) = analyze_step_text(text);
+  let kw = match keyword.trim() {
+    "When" => "When",
+    "Then" => "Then",
+    // And/But/* inherit the prior step's kind in Gherkin; cucumber-js
+    // emits `Given` for these in snippets.
+    _ => "Given",
+  };
+  let mut args: Vec<String> = (0..params.len()).map(|i| format!("arg{i}")).collect();
+  if has_table {
+    args.push("dataTable".to_string());
+  }
+  if has_docstring {
+    args.push("docString".to_string());
+  }
+  let arglist = args.join(", ");
+  let escaped = expression.replace('\\', "\\\\").replace('\'', "\\'");
+  format!(
+    "{kw}('{escaped}', async function ({arglist}) {{\n  \
+       // Write code here that turns the phrase above into concrete actions\n  \
+       return 'pending';\n}});"
+  )
+}
+
 /// Analyze step text, replacing quoted strings, floats, and integers with
 /// cucumber expression placeholders. Returns the expression pattern and a
 /// list of Rust type strings for each placeholder.
@@ -329,5 +360,24 @@ mod tests {
     assert!(snippet.contains("arg0: i64"));
     assert!(snippet.contains("arg1: String"));
     assert!(snippet.contains("arg2: f64"));
+  }
+
+  #[test]
+  fn js_snippet_is_cucumber_shaped() {
+    let s = generate_js_snippet("Given", "I have 3 \"apples\"", false, false);
+    assert!(s.starts_with("Given('"), "keyword + quoted expr: {s}");
+    assert!(s.contains("{int}") && s.contains("{string}"), "params templated: {s}");
+    assert!(s.contains("async function (arg0, arg1)"), "positional args: {s}");
+    assert!(s.contains("return 'pending';"), "pending body: {s}");
+
+    let t = generate_js_snippet("When", "I do it", true, true);
+    assert!(t.starts_with("When('"));
+    assert!(
+      t.contains("async function (dataTable, docString)"),
+      "table+docstring args: {t}"
+    );
+
+    // And/But snippets emit `Given` (cucumber-js behaviour).
+    assert!(generate_js_snippet("And", "x", false, false).starts_with("Given('"));
   }
 }

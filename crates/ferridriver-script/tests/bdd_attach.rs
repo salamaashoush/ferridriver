@@ -336,3 +336,45 @@ async fn world_parameters_are_exposed_as_this_parameters() {
     "this.parameters == world params"
   );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn this_skip_marks_step_skipped() {
+  use ferridriver_script::{StepOutcome, invoke_step};
+  let dir = tempfile::tempdir().expect("tempdir");
+  std::fs::write(
+    dir.path().join("steps.js"),
+    "Given('s', async function () { this.attach('pre', 'text/plain'); \
+       this.skip(); this.attach('post', 'text/plain'); });",
+  )
+  .expect("write");
+  let bundle = bundle_and_compile(&[dir.path().join("steps.js")], dir.path())
+    .await
+    .expect("bundle");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: Vec::new(),
+    trusted_modules: false,
+    host: ExtensionHost::Bdd,
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session");
+  let actx = session.async_context();
+  eval_bundle(&actx, &bundle).await.expect("eval");
+  set_scenario_world(&actx, &ScenarioWorld::default())
+    .await
+    .expect("world");
+  let out = invoke_step(&actx, 0, &[], None, None, &bundle.module_name)
+    .await
+    .expect("this.skip() must NOT be an error");
+  assert_eq!(out, StepOutcome::Skipped, "this.skip() -> Skipped");
+  let atts = drain_attachments(&actx).await.expect("drain");
+  assert_eq!(atts.len(), 1, "only the pre-skip attach ran");
+  assert_eq!(atts[0].bytes, b"pre");
+}
