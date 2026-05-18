@@ -155,12 +155,14 @@ impl CompiledBundle {
 /// extracted straight from the compiled module — no separate throwaway
 /// runtime per file.
 ///
-/// `index` is the file's position among successfully compiled plugins.
-/// It is baked into the bytecode epilogue so evaluating the module
-/// publishes the file's tool array to `globalThis.__ferri_plugin_files[index]`;
-/// the per-tool wrapper in [`install_plugins`] looks handlers up by that
-/// same index. Survivors are returned with contiguous indices so a
-/// broken file never shifts another file's slot.
+/// The bytecode is **registry-position-independent**: its epilogue
+/// publishes the file's tool array to a single transfer global
+/// (`globalThis.__ferri_plugin_pending`); the consumer assigns it to the
+/// correct `__ferri_plugin_files[i]` slot from Rust. That decoupling is
+/// what lets the content-hash cache reuse a file's bytecode regardless
+/// of where it lands in the registry. `index` is the file's position in
+/// the returned (file-order, contiguous over successes) vec — registry
+/// ordering only, never baked into the bytes.
 pub struct CompiledPlugin {
   pub path: PathBuf,
   pub index: usize,
@@ -173,120 +175,200 @@ pub struct CompiledPlugin {
 
 /// The epilogue appended to every bundled plugin module. It captures the
 /// plugin's `globalThis.exports`, normalises the three accepted shapes
-/// into one tool array, and publishes it at
-/// `globalThis.__ferri_plugin_files[index]`. `exports` is cleared after
-/// capture so a sibling file that forgets to set it fails loudly instead
-/// of inheriting the previous file's value.
+/// into one tool array, and parks it on the single transfer global
+/// `globalThis.__ferri_plugin_pending`. `exports` is cleared after
+/// capture so a sibling file that forgets to set it fails loudly.
 ///
-/// This is the single source of truth for shape normalisation: both the
-/// startup extraction and every session install run this exact bytecode,
-/// so a file's tool indices are identical on both paths by construction.
-fn plugin_epilogue(index: usize) -> String {
-  format!(
-    "\n;(() => {{\n\
-       const __exp = globalThis.exports;\n\
-       globalThis.exports = undefined;\n\
-       if (typeof __exp !== 'object' || __exp === null) {{\n\
-         throw new Error('plugin file index {index} did not set globalThis.exports');\n\
-       }}\n\
-       let __t;\n\
-       if (Array.isArray(__exp)) __t = __exp;\n\
-       else if (Array.isArray(__exp.tools)) __t = __exp.tools;\n\
-       else __t = [__exp];\n\
-       (globalThis.__ferri_plugin_files ||= [])[{index}] = __t;\n\
-     }})();\n"
-  )
+/// Single source of truth for shape normalisation: startup extraction
+/// and every session install run this exact bytecode, so a file's tool
+/// list is identical on both paths by construction. It bakes in NO
+/// registry index — the consumer moves `__ferri_plugin_pending` into the
+/// right slot — so the bytes are position-independent and cacheable.
+const PLUGIN_EPILOGUE: &str = "\n;(() => {\n\
+   const __exp = globalThis.exports;\n\
+   globalThis.exports = undefined;\n\
+   if (typeof __exp !== 'object' || __exp === null) {\n\
+     throw new Error('plugin did not set globalThis.exports');\n\
+   }\n\
+   let __t;\n\
+   if (Array.isArray(__exp)) __t = __exp;\n\
+   else if (Array.isArray(__exp.tools)) __t = __exp.tools;\n\
+   else __t = [__exp];\n\
+   globalThis.__ferri_plugin_pending = __t;\n\
+ })();\n";
+
+/// JS that serialises the just-evaluated module's parked tool array with
+/// every `handler` stripped (functions are not JSON-serialisable and
+/// only make sense inside a live VM).
+const MANIFEST_EXTRACT_EXPR: &str = "JSON.stringify((globalThis.__ferri_plugin_pending || []).map((t) => { \
+   const m = { ...t }; delete m.handler; return m; }))";
+
+/// Process-scoped content-hash cache: `hash(canonical path + bytes)` ->
+/// (bytecode, manifests JSON). A plugin file whose content+path is
+/// unchanged skips rolldown + compile entirely on any later
+/// `compile_and_extract_plugins` call (reload, the same file discovered
+/// under two roots, repeated `box-craft setup`). Bounded by the number
+/// of distinct plugin files a process ever loads (tiny) so no eviction
+/// is needed.
+///
+/// In-memory only and never serialised: the cached bytecode never
+/// crosses a process or interpreter boundary, which is exactly the
+/// precondition the `unsafe Module::load` paths rely on (a disk cache
+/// would violate it — see `docs/plugin-architecture.md`).
+type PluginCache = std::sync::Mutex<rustc_hash::FxHashMap<u64, (Arc<[u8]>, String)>>;
+static PLUGIN_BYTECODE_CACHE: std::sync::OnceLock<PluginCache> = std::sync::OnceLock::new();
+
+fn plugin_cache() -> &'static PluginCache {
+  PLUGIN_BYTECODE_CACHE.get_or_init(|| std::sync::Mutex::new(rustc_hash::FxHashMap::default()))
 }
 
-/// JS expression that reads a file's normalised tool array back out and
-/// serialises it with every `handler` stripped (functions are not
-/// JSON-serialisable and only make sense inside a live VM).
-fn manifest_extract_expr(index: usize) -> String {
-  format!(
-    "JSON.stringify((globalThis.__ferri_plugin_files[{index}] || []).map((t) => {{ \
-       const m = {{ ...t }}; delete m.handler; return m; }}))"
-  )
+/// Cache key: the file's canonical path (rolldown resolution + relative
+/// imports depend on it) plus its byte content. SipHash via the std
+/// default hasher — adequate for an in-process content cache, no dep.
+fn cache_key(path: &Path, bytes: &[u8]) -> u64 {
+  use std::hash::{Hash, Hasher};
+  let mut h = std::collections::hash_map::DefaultHasher::new();
+  std::fs::canonicalize(path)
+    .unwrap_or_else(|_| path.to_path_buf())
+    .hash(&mut h);
+  bytes.hash(&mut h);
+  h.finish()
 }
 
-/// Bundle + compile + extract every plugin file. One throwaway runtime
-/// for the whole batch (the old path span one full engine per file for
-/// manifest extraction *and* one per file for bytecode). Each file is
-/// bundled independently so its TypeScript/import graph and top-level
-/// `const`s stay file-scoped.
+/// Bundle + compile + extract every plugin file. The expensive
+/// per-file rolldown bundles run concurrently; bytecode compile +
+/// extraction share ONE throwaway runtime for the whole batch (the
+/// pre-migration path spun one full engine per file for extraction
+/// *and* one per file for bytecode). Unchanged files are served from
+/// the process content-hash cache with no bundle and no compile.
 ///
 /// Per-file failures (bundle, compile, or extraction) are returned
-/// rather than aborting the batch, so one broken plugin cannot stop the
-/// server. Returned `CompiledPlugin`s have contiguous `index` values
-/// matching their position in the success vec.
+/// rather than aborting the batch. Output preserves input file order;
+/// surviving `CompiledPlugin`s carry contiguous `index` values.
 pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlugin>, Vec<(PathBuf, ScriptError)>) {
-  let mut survivors: Vec<CompiledPlugin> = Vec::new();
-  let mut failures: Vec<(PathBuf, ScriptError)> = Vec::new();
+  // Per original position: a cache hit (bytecode + manifests), or a
+  // cache miss we must bundle, or an early failure.
+  enum Slot {
+    Hit(Arc<[u8]>, String),
+    Miss(u64),
+    Failed(ScriptError),
+  }
 
-  // rolldown each file first (async; needs no JS context). Keep the
-  // index a survivor *would* get so the epilogue baked into bytecode
-  // matches the file's final registry slot even if a later step fails.
-  let mut bundled: Vec<(PathBuf, String)> = Vec::new();
+  let mut bytes: Vec<Vec<u8>> = Vec::with_capacity(files.len());
+  let mut slots: Vec<Slot> = Vec::with_capacity(files.len());
   for path in files {
-    let cwd = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
-    match Box::pin(bundle_source(std::slice::from_ref(path), &cwd)).await {
-      Ok((code, _map)) => bundled.push((path.clone(), code)),
-      Err(e) => failures.push((path.clone(), e)),
+    match std::fs::read(path) {
+      Ok(b) => {
+        let key = cache_key(path, &b);
+        let cached = plugin_cache().lock().ok().and_then(|c| c.get(&key).cloned());
+        match cached {
+          Some((bc, mj)) => slots.push(Slot::Hit(bc, mj)),
+          None => slots.push(Slot::Miss(key)),
+        }
+        bytes.push(b);
+      },
+      Err(e) => {
+        slots.push(Slot::Failed(ScriptError::internal(format!(
+          "read {}: {e}",
+          path.display()
+        ))));
+        bytes.push(Vec::new());
+      },
     }
   }
-  if bundled.is_empty() {
-    return (survivors, failures);
+
+  // Bundle every cache-miss file concurrently (independent rolldown
+  // graphs; this is the dominant cold-start cost).
+  let miss_idx: Vec<usize> = slots
+    .iter()
+    .enumerate()
+    .filter_map(|(i, s)| matches!(s, Slot::Miss(_)).then_some(i))
+    .collect();
+  let bundles = futures::future::join_all(miss_idx.iter().map(|&i| {
+    let path = files[i].clone();
+    async move {
+      let cwd = path.parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+      (i, Box::pin(bundle_source(std::slice::from_ref(&path), &cwd)).await)
+    }
+  }))
+  .await;
+
+  // Compiled code per missed position (None = bundle failed).
+  let mut bundled_code: rustc_hash::FxHashMap<usize, String> = rustc_hash::FxHashMap::default();
+  for (i, res) in bundles {
+    match res {
+      Ok((code, _map)) => {
+        bundled_code.insert(i, code);
+      },
+      Err(e) => slots[i] = Slot::Failed(e),
+    }
   }
 
-  let runtime = match AsyncRuntime::new() {
-    Ok(r) => r,
+  // One throwaway runtime/context compiles + extracts every missed file.
+  let runtime_ctx = match AsyncRuntime::new() {
+    Ok(r) => match AsyncContext::full(&r).await {
+      Ok(c) => Some((r, c)),
+      Err(e) => {
+        let err = ScriptError::internal(format!("plugin bytecode context: {e}"));
+        for s in &mut slots {
+          if matches!(s, Slot::Miss(_)) {
+            *s = Slot::Failed(err.clone());
+          }
+        }
+        None
+      },
+    },
     Err(e) => {
       let err = ScriptError::internal(format!("plugin bytecode runtime: {e}"));
-      for (p, _) in bundled {
-        failures.push((p, err.clone()));
+      for s in &mut slots {
+        if matches!(s, Slot::Miss(_)) {
+          *s = Slot::Failed(err.clone());
+        }
       }
-      return (survivors, failures);
-    },
-  };
-  let actx = match AsyncContext::full(&runtime).await {
-    Ok(c) => c,
-    Err(e) => {
-      let err = ScriptError::internal(format!("plugin bytecode context: {e}"));
-      for (p, _) in bundled {
-        failures.push((p, err.clone()));
-      }
-      return (survivors, failures);
+      None
     },
   };
 
-  // Init the slot array once for the shared extraction context.
-  let init: Result<(), ScriptError> = async_with!(actx => |ctx| {
-    ctx
-      .eval::<(), _>(b"globalThis.__ferri_plugin_files = [];".as_slice())
-      .map_err(|e| ScriptError::internal(format!("init plugin slots: {e}")))
-  })
-  .await;
-  if let Err(e) = init {
-    for (p, _) in bundled {
-      failures.push((p, e.clone()));
+  if let Some((_runtime, actx)) = runtime_ctx {
+    for i in &miss_idx {
+      let i = *i;
+      let Slot::Miss(key) = slots[i] else { continue };
+      let Some(code) = bundled_code.get(&i) else { continue };
+      let wrapped = format!("{code}{PLUGIN_EPILOGUE}");
+      let module_name = format!("__ferri_plugin_{i}.js");
+      match compile_extract_one(&actx, &module_name, &wrapped).await {
+        Ok((bc, mj)) => {
+          let bc: Arc<[u8]> = Arc::from(bc.into_boxed_slice());
+          if let Ok(mut cache) = plugin_cache().lock() {
+            cache.insert(key, (bc.clone(), mj.clone()));
+          }
+          slots[i] = Slot::Hit(bc, mj);
+        },
+        Err(e) => slots[i] = Slot::Failed(e),
+      }
     }
-    return (survivors, failures);
   }
 
-  for (path, code) in bundled {
-    let index = survivors.len();
-    let module_name = format!("__ferri_plugin_{index}.js");
-    let wrapped = format!("{code}{}", plugin_epilogue(index));
-    match compile_extract_one(&actx, index, &module_name, &wrapped).await {
-      Ok((bytecode, manifests_json)) => survivors.push(CompiledPlugin {
-        path,
-        index,
-        bytecode: Arc::from(bytecode.into_boxed_slice()),
+  let mut survivors: Vec<CompiledPlugin> = Vec::new();
+  let mut failures: Vec<(PathBuf, ScriptError)> = Vec::new();
+  for (i, slot) in slots.into_iter().enumerate() {
+    match slot {
+      Slot::Hit(bytecode, manifests_json) => survivors.push(CompiledPlugin {
+        path: files[i].clone(),
+        index: survivors.len(),
+        bytecode,
         manifests_json,
       }),
-      Err(e) => failures.push((path, e)),
+      Slot::Failed(e) => failures.push((files[i].clone(), e)),
+      // A Miss with no compiled output never reached Hit/Failed only if
+      // its bundle was dropped — already recorded as Failed above; this
+      // arm is unreachable but keeps the match total without a panic.
+      Slot::Miss(_) => failures.push((
+        files[i].clone(),
+        ScriptError::internal("plugin compile produced no output".to_string()),
+      )),
     }
   }
-
   (survivors, failures)
 }
 
@@ -295,13 +377,11 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
 /// manifest is read from the very bytes a session will run.
 async fn compile_extract_one(
   actx: &AsyncContext,
-  index: usize,
   module_name: &str,
   wrapped: &str,
 ) -> Result<(Vec<u8>, String), ScriptError> {
   let name = module_name.to_string();
   let code = wrapped.to_string();
-  let extract = manifest_extract_expr(index);
   async_with!(actx => |ctx| {
     // Bundled module has no remaining imports — `declare` (parse only)
     // needs no resolver; mirrors `bundle_and_compile`.
@@ -336,7 +416,7 @@ async fn compile_extract_one(
       .map_err(|e| caught_to_script_error(e, module_name))?;
 
     let manifests_json: String = ctx
-      .eval::<String, _>(extract.as_bytes())
+      .eval::<String, _>(MANIFEST_EXTRACT_EXPR.as_bytes())
       .map_err(|e| caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), module_name))?;
     Ok((bytecode, manifests_json))
   })
