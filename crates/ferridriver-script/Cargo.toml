@@ -45,6 +45,14 @@ rquickjs-extra-timers = "0.2"
 rquickjs-extra-url = "0.2"
 rquickjs-extra-console = "0.2"
 
+# Step-file front-end: rolldown bundles + tree-shakes + transpiles TS to
+# one ESM module (resolving node_modules), which is compiled to QuickJS
+# bytecode once. crates.io is behind the monorepo, so pin the git rev.
+rolldown = { git = "https://github.com/rolldown/rolldown.git", rev = "14f967a4330465c6fb7c402a5067971d2f0f13d9" }
+rolldown_common = { git = "https://github.com/rolldown/rolldown.git", rev = "14f967a4330465c6fb7c402a5067971d2f0f13d9" }
+# Remap QuickJS error line:col (bundled output) back to original .ts/.js.
+sourcemap = "9"
+
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["full", "test-util"] }

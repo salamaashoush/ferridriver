@@ -1142,7 +1142,7 @@ impl Page {
   /// Returns an error if the accessibility snapshot cannot be built.
   pub async fn snapshot_for_ai(&self, opts: snapshot::SnapshotOptions) -> Result<snapshot::SnapshotForAI> {
     let mut tracker = self.snapshot_tracker.lock().await;
-    snapshot::build_snapshot_for_ai(&self.inner, &opts, &mut tracker).await
+    Box::pin(snapshot::build_snapshot_for_ai(&self.inner, &opts, &mut tracker)).await
   }
 
   /// Playwright `page.ariaSnapshot(options?): Promise<string>` — the
@@ -1153,7 +1153,7 @@ impl Page {
   ///
   /// Returns an error if the accessibility snapshot cannot be built.
   pub async fn aria_snapshot(&self, opts: snapshot::SnapshotOptions) -> Result<String> {
-    Ok(self.snapshot_for_ai(opts).await?.full)
+    Ok(Box::pin(self.snapshot_for_ai(opts)).await?.full)
   }
 
   // ── Viewport ────────────────────────────────────────────────────────────

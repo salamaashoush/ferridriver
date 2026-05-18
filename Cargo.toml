@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/*", "examples/ct-leptos-todomvc", "examples/ct-dioxus-todomvc", "examples/bdd-example"]
+members = ["crates/*", "examples/bdd-example"]
 default-members = [
   "crates/ferridriver",
   "crates/ferridriver-config",
@@ -12,8 +12,6 @@ default-members = [
   "crates/ferridriver-test-macros",
   "crates/ferridriver-script",
   "crates/ferridriver-node",
-  "examples/ct-leptos-todomvc",
-  "examples/ct-dioxus-todomvc",
   "examples/bdd-example",
 ]
 

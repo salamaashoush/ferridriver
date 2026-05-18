@@ -1,6 +1,34 @@
 # Running BDD
 
-There is no standalone `ferridriver bdd` command. Features run through one of three paths:
+Features run through one of two paths, both driven by the single
+`ferridriver` binary or `cargo test`.
+
+## `ferridriver bdd`
+
+The primary path. Runs Gherkin features through the core test runner with
+Rust and/or JavaScript/TypeScript step bodies — no Node or Bun:
+
+```bash
+# Rust steps only
+ferridriver bdd tests/features/
+
+# With JavaScript / TypeScript step files
+ferridriver bdd \
+  --steps 'steps/**/*.{js,ts}' \
+  --tags "@smoke and not @wip" \
+  --workers 4 \
+  --reporter junit:reports/junit.xml \
+  tests/features/
+```
+
+JS/TS step files are bundled with rolldown, compiled to QuickJS bytecode
+once, and linked per worker. `--steps` is repeatable and overrides
+`[test].steps` from config.
+
+Flags: `--steps <GLOB>` (repeatable), `--tags "<EXPR>"`, `--workers <N>`,
+`--reporter <SPEC>` (repeatable), `--strict`, `--dry-run`,
+`--order defined|random[:SEED]`, `--language <LANG>` (Gherkin keyword
+language), plus the shared browser flags.
 
 ## Rust / `cargo test`
 
@@ -23,19 +51,6 @@ harness = false
 ferridriver-bdd = "0.1"
 ferridriver-test = "0.1"
 ```
-
-## TypeScript / `@ferridriver/test`
-
-Mixed `.feature` + `.spec.ts` runs in one invocation with shared config:
-
-```bash
-npx @ferridriver/test test tests/features/ \
-  --steps 'steps/**/*.ts' \
-  -t "@smoke and not @wip" \
-  -j 4 --reporter junit --output reports/
-```
-
-BDD-only flags on the `test` subcommand: `--steps <GLOB>` (append), `-t, --tags "<EXPR>"`, `--strict`, `--order defined|random[:SEED]`, `--language <LANG>` (Gherkin keyword language).
 
 ## Environment variables
 

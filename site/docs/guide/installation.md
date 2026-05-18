@@ -35,22 +35,14 @@ cargo install ferridriver-cli
 curl -fsSL https://github.com/salamaashoush/ferridriver/releases/latest/download/ferridriver-VERSION-TARGET.tar.gz | tar xz
 ```
 
-## Test runner
-
-```bash
-npm install -D @ferridriver/test
-# or
-bun add -d @ferridriver/test
-```
-
 ## Browser
 
-The test runner can download Chromium for you:
+The `ferridriver` binary can download Chromium for you:
 
 ```bash
-npx @ferridriver/test install chromium
+ferridriver install chromium
 # With system dependencies (fonts, libs)
-npx @ferridriver/test install --with-deps chromium
+ferridriver install --with-deps chromium
 ```
 
 ## System dependencies

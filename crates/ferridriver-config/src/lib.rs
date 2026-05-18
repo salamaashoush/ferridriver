@@ -37,12 +37,10 @@ pub mod test;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
-use ts_rs::TS;
 
 /// Top-level configuration document.
-#[derive(Debug, Default, Deserialize, Serialize, TS)]
+#[derive(Debug, Default, Deserialize, Serialize)]
 #[serde(default, rename_all = "camelCase")]
-#[ts(export, export_to = "./")]
 pub struct FerridriverConfig {
   /// MCP server configuration.
   pub mcp: mcp::McpConfig,
