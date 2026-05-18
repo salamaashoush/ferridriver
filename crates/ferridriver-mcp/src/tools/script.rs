@@ -167,6 +167,7 @@ impl McpServer {
       browser: Some(browser_handle),
       plugins: self.plugin_bindings(),
       trusted_modules: false,
+      host: ferridriver_script::ExtensionHost::Mcp,
     };
 
     let result = self.run_in_session(&session, &source, &args, options, context).await;

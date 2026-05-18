@@ -591,6 +591,7 @@ impl McpServer {
       browser: Some(browser_handle),
       plugins: self.plugin_bindings(),
       trusted_modules: false,
+      host: ferridriver_script::ExtensionHost::Mcp,
     };
 
     let name_literal = serde_json::to_string(plugin_name).unwrap_or_else(|_| "\"\"".into());

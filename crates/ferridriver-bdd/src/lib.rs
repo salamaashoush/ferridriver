@@ -248,20 +248,36 @@ pub async fn run_bdd_with(
   }
 
   // JS step files take the QuickJS path; otherwise inventory-collected
-  // Rust steps. `--steps` overrides `[test].steps`.
+  // Rust steps. `--steps` overrides `[test].steps`. Top-level
+  // `extensions` (config or `FERRIDRIVER_EXTENSIONS`) are bundled in the
+  // same module so one extension serves MCP tools AND BDD steps.
   let js_globs: Vec<String> = if overrides.bdd_steps.is_empty() {
     config.steps.clone()
   } else {
     overrides.bdd_steps.clone()
   };
-  let plan = if js_globs.is_empty() {
+  let extensions: Vec<String> = if overrides.extensions.is_empty() {
+    std::env::var("FERRIDRIVER_EXTENSIONS")
+      .ok()
+      .map(|s| {
+        s.split(',')
+          .map(str::trim)
+          .filter(|s| !s.is_empty())
+          .map(String::from)
+          .collect()
+      })
+      .unwrap_or_default()
+  } else {
+    overrides.extensions.clone()
+  };
+  let plan = if js_globs.is_empty() && extensions.is_empty() {
     let registry = Arc::new(registry::StepRegistry::build());
     translate::translate_features(&feature_set, registry, &config)
   } else {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    // rolldown-bundle + tree-shake + transpile the whole step graph to
-    // one module, compiled to bytecode once, before workers spawn.
-    let bundle = match js::bundle_steps(&js_globs, &cwd).await {
+    // rolldown-bundle + tree-shake + transpile the whole step +
+    // extension graph to one module, compiled to bytecode once.
+    let bundle = match js::bundle_steps_with(&js_globs, &extensions, &cwd).await {
       Ok(b) => b,
       Err(e) => {
         eprintln!("step bundle error: {e}");

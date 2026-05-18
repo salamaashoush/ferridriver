@@ -57,7 +57,7 @@ pub use bundle::{
   CompiledBundle, CompiledPlugin, bundle_and_compile, bundle_source, compile_and_extract_plugins, eval_bundle,
 };
 pub use console::ConsoleCapture;
-pub use engine::{RunContext, RunOptions, ScriptEngine, ScriptEngineConfig, Session, SessionRun};
+pub use engine::{ExtensionHost, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig, Session, SessionRun};
 pub use error::{ScriptError, ScriptErrorKind};
 // Re-export so the BDD core can name the session's async context (the
 // bridge it drives JS step functions through) without a duplicate
