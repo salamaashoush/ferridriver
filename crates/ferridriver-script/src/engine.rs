@@ -721,22 +721,104 @@ fn to_rq_error(err: &ScriptError) -> rquickjs::Error {
 
 /// Convert the script's return value to `serde_json::Value`.
 ///
-/// Uses `rquickjs-serde` (`from_value`) — the same standard, direct
-/// `rquickjs::Value` → serde deserializer every other binding already
-/// uses (`convert::serde_from_js`). No `JSON.stringify` string
-/// round-trip, no `serde_json::Value` middle hop beyond the target
-/// itself, no custom walker, and no dependence on the JS `JSON` global
-/// (immune to a script reassigning it). `rquickjs-serde`'s `de.rs` is
-/// `JSON.stringify`-equivalent: it invokes `toJSON()` / `valueOf()`
-/// (so a returned `Date` still serialises as its ISO string), coerces
-/// whole f64 in the safe-integer range to `i64` (so result fields read
-/// back through `serde_json::Value::as_u64()` / `as_i64()`), drops
-/// `undefined` / function / symbol, and renders non-finite as null —
-/// behaviourally the same as the old `JSON.stringify` path, minus the
-/// round-trip and the custom walker. Cycles / non-serialisable values
-/// error → `None` → `null`, matching the old swallow-on-throw.
+/// `rquickjs-serde` (`from_value`) drives the deserializer: it invokes
+/// `toJSON()` / `valueOf()` (a returned `Date` still serialises as its
+/// ISO string), coerces whole f64 in the safe-integer range to `i64`,
+/// drops `undefined` / function / symbol, and renders non-finite as
+/// null. We deserialize into a small AP-immune intermediate rather than
+/// straight into `serde_json::Value`: a transitive dep force-enables
+/// `serde_json/arbitrary_precision` workspace-wide, and under that
+/// feature `serde_json::Value`'s own `Deserialize` demands a private
+/// number representation that a non-`serde_json` deserializer (here,
+/// `rquickjs-serde`) cannot provide — every numeric/array result would
+/// otherwise fail to convert and collapse to `null`. The intermediate's
+/// `Deserialize` is plain serde; the `serde_json::Value` is then built
+/// with explicit constructors, which are AP-correct.
 fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::Value> {
-  rquickjs_serde::from_value(value).ok()
+  rquickjs_serde::from_value::<JsonInter>(value)
+    .ok()
+    .map(JsonInter::into_json)
+}
+
+/// AP-immune mirror of a JSON value. Its `Deserialize` is plain serde
+/// (no `serde_json` number coupling); `into_json` rebuilds a
+/// `serde_json::Value` via explicit constructors.
+enum JsonInter {
+  Null,
+  Bool(bool),
+  I64(i64),
+  U64(u64),
+  F64(f64),
+  Str(String),
+  Arr(Vec<JsonInter>),
+  Obj(Vec<(String, JsonInter)>),
+}
+
+impl JsonInter {
+  fn into_json(self) -> serde_json::Value {
+    use serde_json::Value;
+    match self {
+      Self::Null => Value::Null,
+      Self::Bool(b) => Value::Bool(b),
+      Self::I64(n) => Value::Number(n.into()),
+      Self::U64(n) => Value::Number(n.into()),
+      Self::F64(f) => serde_json::Number::from_f64(f).map_or(Value::Null, Value::Number),
+      Self::Str(s) => Value::String(s),
+      Self::Arr(a) => Value::Array(a.into_iter().map(Self::into_json).collect()),
+      Self::Obj(o) => Value::Object(o.into_iter().map(|(k, v)| (k, v.into_json())).collect()),
+    }
+  }
+}
+
+impl<'de> serde::Deserialize<'de> for JsonInter {
+  fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+    struct V;
+    impl<'de> serde::de::Visitor<'de> for V {
+      type Value = JsonInter;
+      fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("any JSON value")
+      }
+      fn visit_unit<E>(self) -> Result<JsonInter, E> {
+        Ok(JsonInter::Null)
+      }
+      fn visit_none<E>(self) -> Result<JsonInter, E> {
+        Ok(JsonInter::Null)
+      }
+      fn visit_bool<E>(self, v: bool) -> Result<JsonInter, E> {
+        Ok(JsonInter::Bool(v))
+      }
+      fn visit_i64<E>(self, v: i64) -> Result<JsonInter, E> {
+        Ok(JsonInter::I64(v))
+      }
+      fn visit_u64<E>(self, v: u64) -> Result<JsonInter, E> {
+        Ok(JsonInter::U64(v))
+      }
+      fn visit_f64<E>(self, v: f64) -> Result<JsonInter, E> {
+        Ok(JsonInter::F64(v))
+      }
+      fn visit_str<E>(self, v: &str) -> Result<JsonInter, E> {
+        Ok(JsonInter::Str(v.to_owned()))
+      }
+      fn visit_string<E>(self, v: String) -> Result<JsonInter, E> {
+        Ok(JsonInter::Str(v))
+      }
+      fn visit_seq<A: serde::de::SeqAccess<'de>>(self, mut a: A) -> Result<JsonInter, A::Error> {
+        let mut out = Vec::new();
+        while let Some(e) = a.next_element()? {
+          out.push(e);
+        }
+        Ok(JsonInter::Arr(out))
+      }
+      fn visit_map<A: serde::de::MapAccess<'de>>(self, mut m: A) -> Result<JsonInter, A::Error> {
+        let mut out = Vec::new();
+        while let Some((k, v)) = m.next_entry()? {
+          out.push((k, v));
+        }
+        Ok(JsonInter::Obj(out))
+      }
+    }
+    d.deserialize_any(V)
+  }
 }
 
 pub(crate) fn caught_to_script_error(caught: rquickjs::CaughtError<'_>, source: &str) -> ScriptError {
