@@ -278,14 +278,11 @@ impl Session {
       // dispatch). A failure here only degrades those to "no async
       // ctx" (same as before this fix) — never a correctness break.
       let _ = ctx.store_userdata(SessionAsyncCtx(ud_ctx));
-      // Route-handler registry: session-once so `page.route` works on
-      // ANY page (script-launched `context.newPage()`, not just the
-      // MCP-prebound one whose `install_page` also creates it).
-      ctx
-        .eval::<(), _>(
-          b"globalThis.__fdRoutes ||= new Map(); globalThis.__fdRoutePreds ||= new Map();".as_slice(),
-        )
-        .map_err(|e| ScriptError::internal(format!("init route registry: {e}")))?;
+      // Native route-handler registry (context userdata): session-once
+      // so `page.route` works on ANY page (script-launched
+      // `context.newPage()`, not just the MCP-prebound one whose
+      // `install_page` also creates it).
+      crate::bindings::page::ensure_route_registry(&ctx);
       // (No `__ferriJSON` intrinsic capture any more: result
       // serialisation walks the JS value directly in Rust and never
       // touches the JS `JSON` global, so a script reassigning
