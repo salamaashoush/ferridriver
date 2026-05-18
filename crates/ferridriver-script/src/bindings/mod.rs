@@ -46,8 +46,8 @@ pub mod webapi;
 pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
 pub use bdd::{
-  CollectedRegistry, JsArg, ScenarioWorld, StepOutcome, collect_registry, install_bdd, invoke_hook, invoke_step,
-  reset_world, set_scenario_world,
+  CollectedAllow, CollectedRegistry, CollectedTool, JsArg, ScenarioWorld, StepOutcome, collect_registry,
+  ingest_exports, install_bdd, invoke_hook, invoke_step, reset_world, set_scenario_world, tools_len, tools_snapshot,
 };
 pub use browser::BrowserJs;
 pub use browser_type::{BrowserTypeJs, install_browser_type};
@@ -65,7 +65,7 @@ pub use locator::LocatorJs;
 pub use mouse::MouseJs;
 pub use network::{RequestJs, ResponseJs, RouteJs, WebSocketJs};
 pub use page::PageJs;
-pub use plugins::{PluginBinding, PluginCommandsJs, PluginToolBinding, install_plugins};
+pub use plugins::{PluginBinding, PluginCommandsJs, install_plugins};
 pub use video::VideoJs;
 pub use web_error::WebErrorJs;
 

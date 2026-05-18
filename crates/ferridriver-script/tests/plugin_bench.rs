@@ -17,13 +17,12 @@
 //! work the real tool does (build the cookie array, JSON round-trip)
 //! minus the `context.addCookies` call, which is identical pre/post.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Instant;
 
 use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, PluginBinding, PluginToolBinding, RunContext, RunOptions, ScriptEngineConfig,
-  Session, compile_and_extract_plugins,
+  InMemoryVars, Outcome, PathSandbox, PluginBinding, RunContext, RunOptions, ScriptEngineConfig, Session,
+  compile_and_extract_plugins,
 };
 
 /// Four representative plugin files mirroring the box-craft bundle
@@ -60,7 +59,6 @@ const FILES: &[(&str, &str)] = &[
 ];
 
 struct Compiled {
-  names: Vec<&'static str>,
   bytecode: Arc<[u8]>,
 }
 
@@ -69,15 +67,6 @@ fn bindings(compiled: &[Compiled]) -> Vec<PluginBinding> {
     .iter()
     .map(|c| PluginBinding {
       bytecode: c.bytecode.clone(),
-      tools: c
-        .names
-        .iter()
-        .map(|n| PluginToolBinding {
-          name: (*n).to_string(),
-          allowed_commands: HashMap::new(),
-          allowed_net: Vec::new(),
-        })
-        .collect(),
     })
     .collect()
 }
@@ -88,12 +77,6 @@ const ITERS: u32 = 200;
 #[ignore = "perf microbench; run with --ignored --nocapture"]
 async fn plugin_path_bench() {
   // ---- 1. cold start: bundle + compile + extract every file ----
-  let names: Vec<Vec<&str>> = vec![
-    vec!["box.login"],
-    vec!["box.noop", "box.setFeatureFlip"],
-    vec!["box.click", "box.type"],
-    vec!["box.sign"],
-  ];
   let src_tmp = tempfile::tempdir().expect("tempdir");
   let paths: Vec<_> = FILES
     .iter()
@@ -115,13 +98,7 @@ async fn plugin_path_bench() {
   let (cp2, _) = compile_and_extract_plugins(&paths).await;
   let warm_cache_ms = warm_cache.elapsed().as_secs_f64() * 1e3;
   assert_eq!(cp2.len(), FILES.len(), "cache hit must return all files");
-  let compiled: Vec<Compiled> = cp
-    .into_iter()
-    .map(|c| Compiled {
-      names: names[c.index].clone(),
-      bytecode: c.bytecode,
-    })
-    .collect();
+  let compiled: Vec<Compiled> = cp.into_iter().map(|c| Compiled { bytecode: c.bytecode }).collect();
 
   // ---- 2. per-session install ----
   let tmp = tempfile::tempdir().expect("tempdir");

@@ -3,13 +3,12 @@
 //! across many `execute` calls so user `globalThis` state survives
 //! REPL-style, while a poisoning timeout marks the VM for rebuild.
 
-use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::Duration;
 
 use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, PluginBinding, PluginToolBinding, RunContext, RunOptions, ScriptEngineConfig,
-  ScriptErrorKind, Session, compile_and_extract_plugins,
+  InMemoryVars, Outcome, PathSandbox, PluginBinding, RunContext, RunOptions, ScriptEngineConfig, ScriptErrorKind,
+  Session, compile_and_extract_plugins,
 };
 
 /// A one-tool plugin whose handler bumps a `globalThis` counter so a
@@ -27,17 +26,7 @@ async fn demo_binding() -> (tempfile::TempDir, PluginBinding) {
   assert!(failures.is_empty(), "compile failures: {failures:?}");
   let cp = compiled.into_iter().next().expect("one compiled plugin");
   assert!(!cp.bytecode.is_empty(), "compiled bytecode must be non-empty");
-  (
-    tmp,
-    PluginBinding {
-      bytecode: cp.bytecode,
-      tools: vec![PluginToolBinding {
-        name: "demo".to_string(),
-        allowed_commands: HashMap::new(),
-        allowed_net: Vec::new(),
-      }],
-    },
-  )
+  (tmp, PluginBinding { bytecode: cp.bytecode })
 }
 
 async fn run_demo_plugin_twice() {
@@ -121,14 +110,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![PluginBinding {
-      bytecode: cp.bytecode,
-      tools: vec![PluginToolBinding {
-        name: "ts".to_string(),
-        allowed_commands: HashMap::new(),
-        allowed_net: Vec::new(),
-      }],
-    }],
+    plugins: vec![PluginBinding { bytecode: cp.bytecode }],
     trusted_modules: false,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
@@ -155,6 +137,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
   // guard through to the real client (where it fails for an unrelated,
   // non-allow.net reason — proving the guard let it through).
   const NET_PLUGIN: &str = "globalThis.exports = { name: 'net', \
+    allow: { net: ['127.0.0.1'] }, \
     handler: async ({ args, request }) => { await request.get(args.url); return 'ok'; } };";
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("net.js");
@@ -175,14 +158,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
     browser_context: None,
     request: Some(request),
     browser: None,
-    plugins: vec![PluginBinding {
-      bytecode: cp.bytecode,
-      tools: vec![PluginToolBinding {
-        name: "net".to_string(),
-        allowed_commands: HashMap::new(),
-        allowed_net: vec!["127.0.0.1".to_string()],
-      }],
-    }],
+    plugins: vec![PluginBinding { bytecode: cp.bytecode }],
     trusted_modules: false,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)

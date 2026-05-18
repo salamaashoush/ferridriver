@@ -309,12 +309,16 @@ impl Session {
       crate::bindings::install_browser_type(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to install browser_type: {e}")))?;
 
-      crate::bindings::install_plugins(&ctx, &plugins)
-        .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))?;
-
-      // BDD step-registry shim — same VM, same bindings as scripting.
+      // The unified extension registry (userdata) + native contribution
+      // points (`Given`/`When`/`Then`/`defineTool`/...). Must precede
+      // `install_plugins`: evaluating a plugin's bytecode registers its
+      // tools through this surface (native `defineTool` or the legacy
+      // `globalThis.exports` ingest), and the registry must already exist.
       crate::bindings::install_bdd(&ctx)
-        .map_err(|e| ScriptError::internal(format!("failed to install bdd shim: {e}")))
+        .map_err(|e| ScriptError::internal(format!("failed to install extension registry: {e}")))?;
+
+      crate::bindings::install_plugins(&ctx, &plugins)
+        .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))
     })
     .await;
     install?;

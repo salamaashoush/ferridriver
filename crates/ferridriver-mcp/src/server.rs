@@ -648,15 +648,6 @@ impl McpServer {
       .iter()
       .map(|f| ferridriver_script::PluginBinding {
         bytecode: f.bytecode.clone(),
-        tools: f
-          .tools
-          .iter()
-          .map(|t| ferridriver_script::PluginToolBinding {
-            name: t.name.clone(),
-            allowed_commands: t.allow.commands.clone(),
-            allowed_net: t.allow.net.clone(),
-          })
-          .collect(),
       })
       .collect()
   }

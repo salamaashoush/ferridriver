@@ -155,14 +155,13 @@ impl CompiledBundle {
 /// extracted straight from the compiled module — no separate throwaway
 /// runtime per file.
 ///
-/// The bytecode is **registry-position-independent**: its epilogue
-/// publishes the file's tool array to a single transfer global
-/// (`globalThis.__ferri_plugin_pending`); the consumer assigns it to the
-/// correct `__ferri_plugin_files[i]` slot from Rust. That decoupling is
-/// what lets the content-hash cache reuse a file's bytecode regardless
-/// of where it lands in the registry. `index` is the file's position in
-/// the returned (file-order, contiguous over successes) vec — registry
-/// ordering only, never baked into the bytes.
+/// The bytecode is pure rolldown output — no appended epilogue, no
+/// transfer global. Evaluating it registers the file's tools into the
+/// Rust `ExtensionRegistry` (native `defineTool`, or the legacy
+/// `globalThis.exports` shapes via `ingest_exports`). `manifests_json`
+/// is read straight off that registry — no JS extraction expression.
+/// `index` is the file's position in the returned (file-order,
+/// contiguous over successes) vec.
 pub struct CompiledPlugin {
   pub path: PathBuf,
   pub index: usize,
@@ -172,36 +171,6 @@ pub struct CompiledPlugin {
   /// ever re-running the plugin.
   pub manifests_json: String,
 }
-
-/// The epilogue appended to every bundled plugin module. It captures the
-/// plugin's `globalThis.exports`, normalises the three accepted shapes
-/// into one tool array, and parks it on the single transfer global
-/// `globalThis.__ferri_plugin_pending`. `exports` is cleared after
-/// capture so a sibling file that forgets to set it fails loudly.
-///
-/// Single source of truth for shape normalisation: startup extraction
-/// and every session install run this exact bytecode, so a file's tool
-/// list is identical on both paths by construction. It bakes in NO
-/// registry index — the consumer moves `__ferri_plugin_pending` into the
-/// right slot — so the bytes are position-independent and cacheable.
-const PLUGIN_EPILOGUE: &str = "\n;(() => {\n\
-   const __exp = globalThis.exports;\n\
-   globalThis.exports = undefined;\n\
-   if (typeof __exp !== 'object' || __exp === null) {\n\
-     throw new Error('plugin did not set globalThis.exports');\n\
-   }\n\
-   let __t;\n\
-   if (Array.isArray(__exp)) __t = __exp;\n\
-   else if (Array.isArray(__exp.tools)) __t = __exp.tools;\n\
-   else __t = [__exp];\n\
-   globalThis.__ferri_plugin_pending = __t;\n\
- })();\n";
-
-/// JS that serialises the just-evaluated module's parked tool array with
-/// every `handler` stripped (functions are not JSON-serialisable and
-/// only make sense inside a live VM).
-const MANIFEST_EXTRACT_EXPR: &str = "JSON.stringify((globalThis.__ferri_plugin_pending || []).map((t) => { \
-   const m = { ...t }; delete m.handler; return m; }))";
 
 /// Process-scoped content-hash cache: `hash(canonical path + bytes)` ->
 /// (bytecode, manifests JSON). A plugin file whose content+path is
@@ -334,9 +303,8 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
       let i = *i;
       let Slot::Miss(key) = slots[i] else { continue };
       let Some(code) = bundled_code.get(&i) else { continue };
-      let wrapped = format!("{code}{PLUGIN_EPILOGUE}");
-      let module_name = format!("__ferri_plugin_{i}.js");
-      match compile_extract_one(&actx, &module_name, &wrapped).await {
+      let module_name = format!("ferri_plugin_{i}.js");
+      match compile_extract_one(&actx, &module_name, code).await {
         Ok((bc, mj)) => {
           let bc: Arc<[u8]> = Arc::from(bc.into_boxed_slice());
           if let Ok(mut cache) = plugin_cache().lock() {
@@ -372,22 +340,31 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
   (survivors, failures)
 }
 
-/// Declare the bundled+epilogued module, serialise it to bytecode, then
-/// load that exact bytecode and evaluate it in the shared context so the
-/// manifest is read from the very bytes a session will run.
+/// Declare the bundled module, serialise it to bytecode, then load +
+/// evaluate that exact bytecode in the shared context (which has the
+/// extension registry installed) so the manifest is read straight off
+/// the Rust registry — the very bytes, and the very registration path,
+/// a session will run. Returns the file's bytecode and the JSON of just
+/// the tools THIS file registered (registry slice `[before, after)`).
 async fn compile_extract_one(
   actx: &AsyncContext,
   module_name: &str,
-  wrapped: &str,
+  code: &str,
 ) -> Result<(Vec<u8>, String), ScriptError> {
   let name = module_name.to_string();
-  let code = wrapped.to_string();
+  let code = code.to_string();
+  let label = module_name.to_string();
   async_with!(actx => |ctx| {
+    // Registry + native `defineTool`/cucumber surface. Idempotent — the
+    // shared extraction context installs it once for the whole batch.
+    crate::bindings::install_bdd(&ctx)
+      .map_err(|e| ScriptError::internal(format!("install extension registry: {e}")))?;
+
     // Bundled module has no remaining imports — `declare` (parse only)
     // needs no resolver; mirrors `bundle_and_compile`.
     let module = Module::declare(ctx.clone(), name.clone().into_bytes(), code.into_bytes())
       .catch(&ctx)
-      .map_err(|e| caught_to_script_error(e, module_name))?;
+      .map_err(|e| caught_to_script_error(e, &label))?;
     let bytecode = module
       .write(WriteOptions {
         // Same process + interpreter that will `load` it.
@@ -396,6 +373,8 @@ async fn compile_extract_one(
       })
       .map_err(|e| ScriptError::internal(format!("plugin module write: {e}")))?;
 
+    let before = crate::bindings::tools_len(&ctx)?;
+
     // SAFETY: `bytecode` was just produced by `Module::write` in THIS
     // process and rquickjs/QuickJS build with native endianness and is
     // not persisted — the precondition `Module::load` documents. This is
@@ -403,21 +382,26 @@ async fn compile_extract_one(
     #[allow(unsafe_code)]
     let loaded = (unsafe { Module::load(ctx.clone(), &bytecode) })
       .catch(&ctx)
-      .map_err(|e| caught_to_script_error(e, module_name))?;
+      .map_err(|e| caught_to_script_error(e, &label))?;
     let promise = loaded
       .eval()
       .catch(&ctx)
-      .map_err(|e| caught_to_script_error(e, module_name))?
+      .map_err(|e| caught_to_script_error(e, &label))?
       .1;
     promise
       .into_future::<()>()
       .await
       .catch(&ctx)
-      .map_err(|e| caught_to_script_error(e, module_name))?;
+      .map_err(|e| caught_to_script_error(e, &label))?;
 
-    let manifests_json: String = ctx
-      .eval::<String, _>(MANIFEST_EXTRACT_EXPR.as_bytes())
-      .map_err(|e| caught_to_script_error(rquickjs::CaughtError::from_error(&ctx, e), module_name))?;
+    // Legacy `globalThis.exports` shapes -> registry (native Object
+    // API). `defineTool` files already registered during eval.
+    crate::bindings::ingest_exports(&ctx)?;
+
+    let all = crate::bindings::tools_snapshot(&ctx)?;
+    let slice = all.get(before..).unwrap_or(&[]);
+    let manifests_json =
+      serde_json::to_string(slice).map_err(|e| ScriptError::internal(format!("serialise manifests: {e}")))?;
     Ok((bytecode, manifests_json))
   })
   .await

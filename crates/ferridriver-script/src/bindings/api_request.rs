@@ -63,13 +63,93 @@ fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Resul
 pub struct APIRequestContextJs {
   #[qjs(skip_trace)]
   inner: Arc<APIRequestContext>,
+  /// Host allow-list (plugin `allow.net` capability). Empty =
+  /// unrestricted. Non-empty = default-deny: every request URL's host
+  /// must match an entry (exact, or `*.suffix` which also matches the
+  /// bare apex) or the call throws before any network I/O. Enforced
+  /// natively in Rust here — there is no JS proxy/shim.
+  #[qjs(skip_trace)]
+  net: Arc<[String]>,
 }
 
 impl APIRequestContextJs {
   #[must_use]
   pub fn new(inner: Arc<APIRequestContext>) -> Self {
-    Self { inner }
+    Self {
+      inner,
+      net: Arc::from([]),
+    }
   }
+
+  /// Same underlying context, restricted to `net` hosts. Used to build
+  /// the per-tool `request` a plugin handler receives when its manifest
+  /// declares `allow.net`.
+  #[must_use]
+  pub fn with_net(inner: Arc<APIRequestContext>, net: Arc<[String]>) -> Self {
+    Self { inner, net }
+  }
+
+  /// The shared underlying context — lets the plugin dispatch wrap the
+  /// session's `request` with a net allow-list without re-creating it.
+  #[must_use]
+  pub fn inner_arc(&self) -> Arc<APIRequestContext> {
+    self.inner.clone()
+  }
+
+  /// Default-deny host check. `Ok(())` when `net` is empty (unrestricted)
+  /// or the URL's host matches an allow-list entry; otherwise a JS-thrown
+  /// error naming the host. No network I/O happens on rejection.
+  fn guard(&self, url: &str) -> rquickjs::Result<()> {
+    if self.net.is_empty() {
+      return Ok(());
+    }
+    let host = host_of(url).ok_or_else(|| {
+      rquickjs::Error::new_from_js_message(
+        "request",
+        "Error",
+        format!("request to invalid/relative URL \"{url}\" is not permitted by allow.net"),
+      )
+    })?;
+    if host_allowed(&host, &self.net) {
+      Ok(())
+    } else {
+      Err(rquickjs::Error::new_from_js_message(
+        "request",
+        "Error",
+        format!("request host \"{host}\" is not in allow.net {:?}", &*self.net),
+      ))
+    }
+  }
+}
+
+/// Extract the lowercased host (no port, no userinfo) from an absolute
+/// URL. Returns `None` for relative/invalid input — the caller treats
+/// that as a denial when a net allow-list is active.
+fn host_of(url: &str) -> Option<String> {
+  let after_scheme = url.split_once("://")?.1;
+  let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or(after_scheme);
+  let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
+  let host = if let Some(stripped) = host_port.strip_prefix('[') {
+    // IPv6 literal: take up to the closing bracket.
+    stripped.split(']').next().unwrap_or(stripped)
+  } else {
+    host_port.split(':').next().unwrap_or(host_port)
+  };
+  (!host.is_empty()).then(|| host.to_ascii_lowercase())
+}
+
+/// Match a host against one allow-list: exact, or a leading-wildcard
+/// suffix (`*.box.com` also matches the bare apex `box.com`).
+fn host_allowed(host: &str, net: &[String]) -> bool {
+  net.iter().any(|p| {
+    if p == host {
+      return true;
+    }
+    if let Some(suffix) = p.strip_prefix("*.") {
+      return host == suffix || host.ends_with(&format!(".{suffix}"));
+    }
+    false
+  })
 }
 
 #[rquickjs::methods]
@@ -81,6 +161,7 @@ impl APIRequestContextJs {
     url: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
+    self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.get(&url, opts).await.into_js()?;
     Ok(APIResponseJs::new(resp))
@@ -93,6 +174,7 @@ impl APIRequestContextJs {
     url: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
+    self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.post(&url, opts).await.into_js()?;
     Ok(APIResponseJs::new(resp))
@@ -105,6 +187,7 @@ impl APIRequestContextJs {
     url: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
+    self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.put(&url, opts).await.into_js()?;
     Ok(APIResponseJs::new(resp))
@@ -117,6 +200,7 @@ impl APIRequestContextJs {
     url: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
+    self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.delete(&url, opts).await.into_js()?;
     Ok(APIResponseJs::new(resp))
@@ -129,6 +213,7 @@ impl APIRequestContextJs {
     url: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
+    self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.patch(&url, opts).await.into_js()?;
     Ok(APIResponseJs::new(resp))
@@ -141,6 +226,7 @@ impl APIRequestContextJs {
     url: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
+    self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.head(&url, opts).await.into_js()?;
     Ok(APIResponseJs::new(resp))
@@ -156,6 +242,7 @@ impl APIRequestContextJs {
     url: String,
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<APIResponseJs> {
+    self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.fetch(&url, opts).await.into_js()?;
     Ok(APIResponseJs::new(resp))

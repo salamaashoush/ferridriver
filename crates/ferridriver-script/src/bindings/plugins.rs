@@ -1,89 +1,73 @@
-//! Plugin bindings -- expose loaded plugins as `plugins.<name>(args)` and
-//! the allow-listed `commands.run(name, vars)` escape hatch.
+//! Native plugin surface.
 //!
-//! Plugins are passed to `install_plugins` as `PluginBinding` snapshots
-//! (precompiled bytecode + per-tool allow-lists). Each file's bytecode is
-//! the rolldown-bundled module produced once at startup by
-//! [`crate::bundle::compile_and_extract_plugins`]; loading + evaluating it
-//! publishes the file's tool array (with live handler closures) at
-//! `globalThis.__ferri_plugin_files[i]`. For each tool a thin wrapper is
-//! synthesised that looks its handler up by `(fileIndex, toolIndex)` and
-//! invokes it with `{ args, page, context, request, commands }`.
+//! A plugin file is rolldown-bundled to `QuickJS` bytecode once at
+//! startup. Loading + evaluating that bytecode in a session registers
+//! its tools into the shared Rust [`ExtensionRegistry`] — either via the
+//! native `defineTool(manifest, handler)` contribution point or, for the
+//! three legacy `globalThis.exports` shapes, via the Rust-side
+//! [`crate::bindings::ingest_exports`] which reads the export object
+//! through the native Object API.
 //!
-//! The `commands.run` callback dispatches into the single
-//! `__ferri_plugin_commands` runner, which executes the matching template
-//! via `sh -c` and parses the output as JSON when possible, plain text
-//! otherwise. The allow-list lives entirely inside the wrapper closure
-//! so a handler cannot escape into another plugin's commands.
+//! There is **no synthesized JS and no `globalThis.__*`**: the
+//! `plugins.<name>` callable is a native Rust closure that restores the
+//! handler from the registry, builds `{ args, page, context, request,
+//! commands }` with the Object API, applies the handler and returns its
+//! promise — the exact mechanism BDD steps use (`invoke_step`). The
+//! `commands` binding and the `allow.net` host guard are native Rust
+//! (`PluginCommandsJs`, `APIRequestContextJs::with_net`); the allow-list
+//! is checked in Rust before any shell/network I/O.
 
-use std::collections::HashMap;
+use std::collections::BTreeMap;
 use std::process::Command;
 use std::sync::Arc;
 
-use rquickjs::{Array, Ctx, JsLifetime, Module, Object, Value, class::Class, class::Trace, function::Opt};
+use rquickjs::function::{Func, Opt};
+use rquickjs::{Ctx, IntoJs, JsLifetime, Module, Object, Value, class::Class, class::Trace};
 
+use super::api_request::APIRequestContextJs;
+use super::bdd::{ingest_exports, tool_dispatch, tool_names};
 use crate::bindings::convert::{serde_from_js, serde_to_js};
+use crate::error::ScriptError;
 
-/// Snapshot of one plugin source file handed to the script engine at
-/// `install_plugins` time. A file may contribute one or more tools.
-/// Lives in `ferridriver-script` so the crate stays self-contained --
-/// the MCP crate maps its `LoadedPlugin` files into this shape before
-/// invoking `engine.run`.
+/// One plugin file handed to the engine at `install_plugins` time:
+/// just its precompiled bytecode. Tool names + capabilities are read
+/// from the manifest the module registers, not carried here.
 #[derive(Debug, Clone)]
 pub struct PluginBinding {
-  /// Pre-compiled `QuickJS` bytecode of the rolldown-bundled plugin
-  /// module, produced once at startup by
-  /// [`crate::bundle::compile_and_extract_plugins`]. A session VM
-  /// `Module::load`s this — no per-session parse, no source retained.
+  /// Precompiled `QuickJS` bytecode of the rolldown-bundled module,
+  /// produced once at startup by
+  /// [`crate::bundle::compile_and_extract_plugins`]. `Module::load`ed
+  /// per session — no per-session parse, no source retained.
   pub bytecode: Arc<[u8]>,
-  /// Tools the file declares, in source order. Each maps onto a
-  /// separate `plugins.<name>` binding.
-  pub tools: Vec<PluginToolBinding>,
 }
 
-/// One tool declared inside a plugin file. Capabilities are per-tool so
-/// a handler can only use what its own manifest authorises, even when a
-/// sibling tool in the same file grants more.
-#[derive(Debug, Clone, Default)]
-pub struct PluginToolBinding {
-  pub name: String,
-  /// Allowed command templates, keyed by the name the handler uses with
-  /// `commands.run(name, vars)`. Each value is a shell command template
-  /// with `${var}` placeholders substituted from the call-time `vars`.
-  pub allowed_commands: HashMap<String, String>,
-  /// Host patterns the handler's `request` client may target (exact host
-  /// or `*.suffix`). Empty = unrestricted; non-empty flips `request` to
-  /// default-deny for this tool.
-  pub allowed_net: Vec<String>,
-}
-
-/// Singleton helper instantiated once per script run and exposed as the
-/// hidden global `__ferri_plugin_commands`. JS wrappers call its `exec`
-/// method via `commands.run` after consulting their private allow-list.
+/// The `commands` object a plugin handler receives. Holds that tool's
+/// own exec allow-list; `run(name, vars)` resolves the named template,
+/// substitutes `${var}` placeholders (shell-escaped), runs it and parses
+/// the output. The allow-list check is native Rust — a handler cannot
+/// reach a command its manifest did not declare, nor another tool's.
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "PluginCommands")]
-pub struct PluginCommandsJs {}
+pub struct PluginCommandsJs {
+  #[qjs(skip_trace)]
+  allowed: Arc<BTreeMap<String, String>>,
+}
 
 #[rquickjs::methods]
 impl PluginCommandsJs {
-  /// Execute a shell-command template after `${var}` substitution.
-  ///
-  /// `template` is the literal command string (already vetted by the
-  /// per-plugin allow-list in the calling JS wrapper). `vars` is a plain
-  /// JS object; each value is JSON-coerced and shell-single-quoted before
-  /// interpolation. Output parsing mirrors the existing
-  /// `instance_args_command` helper: JSON object/array preferred, raw
-  /// trimmed string otherwise.
-  #[qjs(rename = "exec")]
-  pub async fn exec<'js>(
-    &self,
-    ctx: Ctx<'js>,
-    template: String,
-    vars: Opt<Value<'js>>,
-  ) -> rquickjs::Result<Value<'js>> {
-    let vars_map: HashMap<String, serde_json::Value> = match vars.0 {
+  #[qjs(rename = "run")]
+  pub async fn run<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    let template = self.allowed.get(&name).cloned().ok_or_else(|| {
+      rquickjs::Error::new_from_js_message(
+        "commands.run",
+        "Error",
+        format!("\"{name}\" is not in the exec allow-list for this tool"),
+      )
+    })?;
+
+    let vars_map: BTreeMap<String, serde_json::Value> = match vars.0 {
       Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v)?,
-      _ => HashMap::new(),
+      _ => BTreeMap::new(),
     };
 
     let mut cmd = template;
@@ -98,21 +82,20 @@ impl PluginCommandsJs {
 
     let output = tokio::task::spawn_blocking(move || Command::new("sh").args(["-c", &cmd]).output())
       .await
-      .map_err(|e| rquickjs::Error::new_from_js_message("commands.exec", "Error", e.to_string()))?
-      .map_err(|e| rquickjs::Error::new_from_js_message("commands.exec", "Error", e.to_string()))?;
+      .map_err(|e| rquickjs::Error::new_from_js_message("commands.run", "Error", e.to_string()))?
+      .map_err(|e| rquickjs::Error::new_from_js_message("commands.run", "Error", e.to_string()))?;
 
     if !output.status.success() {
       let stderr = String::from_utf8_lossy(&output.stderr).to_string();
       return Err(rquickjs::Error::new_from_js_message(
-        "commands.exec",
+        "commands.run",
         "Error",
         format!("command failed (exit {}): {stderr}", output.status),
       ));
     }
 
     let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    let parsed = parse_command_output(&stdout);
-    serde_to_js(&ctx, &parsed)
+    serde_to_js(&ctx, &parse_command_output(&stdout))
   }
 }
 
@@ -124,155 +107,91 @@ fn parse_command_output(s: &str) -> serde_json::Value {
   if s.is_empty() {
     return serde_json::Value::Null;
   }
-  if s.starts_with('{') || s.starts_with('[') {
-    if let Ok(v) = serde_json::from_str::<serde_json::Value>(s) {
-      return v;
-    }
+  if (s.starts_with('{') || s.starts_with('['))
+    && let Ok(v) = serde_json::from_str::<serde_json::Value>(s)
+  {
+    return v;
   }
   serde_json::Value::String(s.to_string())
 }
 
-/// Session-level plugin factories, parsed once per session (not once
-/// per tool). `__ferri_mkCommands` builds a tool's `commands` binding
-/// from its allow-list; `__ferri_guardReq` wraps `request` in a
-/// host-checking Proxy from its `allow.net` list (exact host, or
-/// `*.suffix` which also matches the bare apex). Hung off `globalThis`
-/// so the tiny per-tool wrappers can reference them by name.
-const SHARED_PLUGIN_RUNTIME: &str = "\
-  globalThis.__ferri_mkCommands = (ALLOWED, PLUGIN_NAME) => ({\n\
-    run: async (cmdName, vars) => {\n\
-      const tpl = ALLOWED[cmdName];\n\
-      if (!tpl) throw new Error('commands.run: \"' + cmdName + '\" is not in the allow-list for plugin ' + PLUGIN_NAME);\n\
-      return await globalThis.__ferri_plugin_commands.exec(tpl, vars || {});\n\
-    },\n\
-  });\n\
-  globalThis.__ferri_NET_METHODS = ['get', 'post', 'put', 'delete', 'patch', 'head', 'fetch'];\n\
-  globalThis.__ferri_guardReq = (req, NET, PLUGIN_NAME) => {\n\
-    const hostOk = (h) => NET.some((p) =>\n\
-      p === h || (p.startsWith('*.') && (h === p.slice(2) || h.endsWith(p.slice(1)))));\n\
-    return new Proxy(req, {\n\
-      get(t, prop) {\n\
-        const v = t[prop];\n\
-        if (typeof v === 'function' && globalThis.__ferri_NET_METHODS.includes(prop)) {\n\
-          return (url, ...rest) => {\n\
-            let host;\n\
-            try { host = new URL(url).hostname; } catch (_) {\n\
-              throw new Error('plugin ' + PLUGIN_NAME + ': request to invalid/relative URL \"' + url + '\" is not permitted by allow.net');\n\
-            }\n\
-            if (!hostOk(host)) {\n\
-              throw new Error('plugin ' + PLUGIN_NAME + ': request host \"' + host + '\" is not in allow.net ' + JSON.stringify(NET));\n\
-            }\n\
-            return t[prop](url, ...rest);\n\
-          };\n\
-        }\n\
-        return v;\n\
-      },\n\
-    });\n\
-  };\n";
+fn rq(e: &ScriptError) -> rquickjs::Error {
+  rquickjs::Error::new_from_js_message("plugins", "Error", e.message.clone())
+}
 
-/// Install the `plugins` global and the hidden `__ferri_plugin_commands`
-/// runner. `plugins` is an object keyed by tool name; each value is an
-/// async function `(args) => result`.
-///
-/// One file's bytecode is loaded + evaluated exactly once per session
-/// (under `globalThis.__ferri_plugin_files[i]`), then each tool gets its
-/// own wrapper that looks the handler up by index. Sibling tools in the
-/// same file share module-scoped helpers/constants for free.
+/// Install loaded plugins: load+evaluate each file's bytecode (which
+/// registers its tools into the shared registry, native or legacy
+/// shape), then expose every registered tool as a native
+/// `plugins.<name>` callable.
 pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Result<()> {
-  let globals = ctx.globals();
-
-  // Always install the runner -- even with zero plugins -- so handlers
-  // copied between contexts at runtime never see a missing global.
-  Class::<PluginCommandsJs>::define(&globals)?;
-  let runner = Class::instance(ctx.clone(), PluginCommandsJs {})?;
-  globals.set("__ferri_plugin_commands", runner)?;
-
-  let plugins_obj = Object::new(ctx.clone())?;
-  globals.set("plugins", plugins_obj.clone())?;
-
-  // Per-tool factories (commands binding + net-guard Proxy) are
-  // identical across every tool — only the allow-lists/name differ.
-  // Parse them ONCE per session here; each per-tool wrapper then just
-  // closes over its literals and calls these. This keeps the per-tool
-  // `eval` tiny (the net-guard body is large) on the session-create
-  // hot path.
-  ctx.eval::<(), _>(SHARED_PLUGIN_RUNTIME.as_bytes())?;
-
-  // Storage for per-file tool arrays (the eval'd manifests, with their
-  // live handler closures). Indexed by file position; the per-tool
-  // wrapper closes over (fileIndex, toolIndex) to look up its handler.
-  // Built via the rquickjs Object API — no JS parse on the
-  // session-create hot path.
-  let files_arr = Array::new(ctx.clone())?;
-  globals.set("__ferri_plugin_files", files_arr.clone())?;
-
-  for (file_idx, file) in files.iter().enumerate() {
-    // 1. Load + evaluate the file's precompiled bytecode module. Its
-    //    epilogue parks the normalised tool array (with live handler
-    //    closures) on `globalThis.__ferri_plugin_pending`; move it into
-    //    this file's registry slot from here. The bytecode bakes in no
-    //    index, which is what makes it cacheable across registry
-    //    positions (see `compile_and_extract_plugins`).
-    //
+  for file in files {
     // SAFETY: `file.bytecode` was produced by `Module::write` in THIS
     // process and this exact rquickjs/QuickJS build with native
     // endianness (see `compile_and_extract_plugins`) and is never
-    // persisted or sent anywhere — the precondition `Module::load`
-    // documents. A foreign or corrupt blob cannot reach this call.
+    // persisted — the precondition `Module::load` documents.
     #[allow(unsafe_code)]
     let module = unsafe { Module::load(ctx.clone(), &file.bytecode) }?;
-    // Bundled module body + epilogue are fully synchronous (no top-level
-    // await); `__ferri_plugin_pending` is set by the time `eval`
-    // returns, so the resolved promise carries nothing we need.
     let (_evaluated, _promise) = module.eval()?;
-    // Move the parked tool array into this file's registry slot via the
-    // Object API (no per-file JS parse). The next file's epilogue
-    // overwrites `__ferri_plugin_pending`; we always read it right after
-    // its own module eval, so a stale value never leaks across files.
-    let pending: Value<'_> = globals.get("__ferri_plugin_pending")?;
-    files_arr.set(file_idx, pending)?;
-
-    // 2. For each tool, install a wrapper that locates its handler by
-    //    (fileIndex, toolIndex) and binds the per-tool allow-list.
-    for (tool_idx, tool) in file.tools.iter().enumerate() {
-      let allowed_json = serde_json::to_string(&tool.allowed_commands).unwrap_or_else(|_| "{}".into());
-      let net_json = serde_json::to_string(&tool.allowed_net).unwrap_or_else(|_| "[]".into());
-      let name_literal = serde_json::to_string(&tool.name).unwrap_or_else(|_| "\"\"".into());
-
-      // Tiny per-tool wrapper: close over the literals and defer to the
-      // session-level factories. `request` is net-guarded ONLY when the
-      // tool declares `allow.net`; an empty list passes the binding
-      // through untouched (zero overhead, unchanged semantics).
-      let wrapper = format!(
-        "(() => {{\n\
-           const ALLOWED = {allowed_json};\n\
-           const NET = {net_json};\n\
-           const PLUGIN_NAME = {name_literal};\n\
-           const FILE_IDX = {file_idx};\n\
-           const TOOL_IDX = {tool_idx};\n\
-           const commands = globalThis.__ferri_mkCommands(ALLOWED, PLUGIN_NAME);\n\
-           return async (callArgs) => {{\n\
-             const tool = globalThis.__ferri_plugin_files[FILE_IDX][TOOL_IDX];\n\
-             const handler = tool && tool.handler;\n\
-             if (typeof handler !== 'function') {{\n\
-               throw new Error('plugin ' + PLUGIN_NAME + ' missing handler');\n\
-             }}\n\
-             const __req = globalThis.request;\n\
-             return handler({{\n\
-               args: callArgs,\n\
-               page: globalThis.page,\n\
-               context: globalThis.context,\n\
-               request: (NET.length === 0 || !__req) ? __req : globalThis.__ferri_guardReq(__req, NET, PLUGIN_NAME),\n\
-               commands,\n\
-             }});\n\
-           }};\n\
-         }})()\n"
-      );
-
-      let fn_value: Value<'_> = ctx.eval(wrapper.as_bytes())?;
-      plugins_obj.set(tool.name.as_str(), fn_value)?;
-    }
+    // Legacy `globalThis.exports` shapes -> registry (native Object API,
+    // no transfer global). A `defineTool` file set no exports: no-op.
+    ingest_exports(ctx).map_err(|e| rq(&e))?;
   }
 
+  let names = tool_names(ctx).map_err(|e| rq(&e))?;
+  let plugins_obj = Object::new(ctx.clone())?;
+  for (idx, name) in names.into_iter().enumerate() {
+    // The closure forwards into a generic fn so `Ctx`/`Value`/return
+    // share one `'js` (an inline closure with `<'_>` would give each its
+    // own lifetime and `Function::call`'s result could not be returned).
+    let f = Func::from(move |ctx, call_args| dispatch_tool(ctx, idx, call_args));
+    plugins_obj.set(name.as_str(), f)?;
+  }
+  ctx.globals().set("plugins", plugins_obj)?;
   Ok(())
+}
+
+/// Native `plugins.<name>(args)` body: restore the tool's handler from
+/// the registry, build `{ args, page, context, request, commands }` via
+/// the Object API (per-tool `commands` allow-list + optional net-guarded
+/// `request`, both Rust-enforced) and apply the handler. Returns the
+/// handler's promise; the JS caller `await`s it. No synthesized JS.
+fn dispatch_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+  let d = tool_dispatch(&ctx, idx).map_err(|e| rq(&e))?;
+
+  let arg = Object::new(ctx.clone())?;
+  let undef = Value::new_undefined(ctx.clone());
+  arg.set("args", call_args.0.unwrap_or_else(|| undef.clone()))?;
+
+  let g = ctx.globals();
+  arg.set("page", g.get::<_, Value<'js>>("page").unwrap_or_else(|_| undef.clone()))?;
+  arg.set(
+    "context",
+    g.get::<_, Value<'js>>("context").unwrap_or_else(|_| undef.clone()),
+  )?;
+
+  // `request`: pass through unless the tool declared `allow.net`, in
+  // which case hand it a net-restricted wrapper over the SAME underlying
+  // context (host check enforced natively in `APIRequestContextJs`).
+  let req_val: Value<'js> = g.get("request").unwrap_or_else(|_| undef.clone());
+  let request_out: Value<'js> = if d.allowed_net.is_empty() {
+    req_val
+  } else if let Ok(cls) = Class::<APIRequestContextJs>::from_value(&req_val) {
+    let inner = cls.borrow().inner_arc();
+    let net: Arc<[String]> = Arc::from(d.allowed_net);
+    let guarded = Class::instance(ctx.clone(), APIRequestContextJs::with_net(inner, net))?;
+    guarded.into_js(&ctx)?
+  } else {
+    req_val
+  };
+  arg.set("request", request_out)?;
+
+  let commands = Class::instance(
+    ctx.clone(),
+    PluginCommandsJs {
+      allowed: Arc::new(d.allowed_commands),
+    },
+  )?;
+  arg.set("commands", commands)?;
+
+  d.handler.call((arg,))
 }
