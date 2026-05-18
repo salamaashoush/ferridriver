@@ -350,7 +350,33 @@ jobs:
       - name: Wait for crates.io index
         run: sleep 30
 
-      # Layer 3: test runner (depends on ferridriver)
+      # Layer 2b: crates that depend only on ferridriver
+      - name: Publish ferridriver-config
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          output=$(cargo publish -p ferridriver-config 2>&1) && exit 0
+          if echo "$output" | grep -q "already exists"; then
+            echo "ferridriver-config already published, skipping"
+          else
+            echo "$output"; exit 1
+          fi
+
+      - name: Publish ferridriver-script
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+        run: |
+          output=$(cargo publish -p ferridriver-script 2>&1) && exit 0
+          if echo "$output" | grep -q "already exists"; then
+            echo "ferridriver-script already published, skipping"
+          else
+            echo "$output"; exit 1
+          fi
+
+      - name: Wait for crates.io index
+        run: sleep 30
+
+      # Layer 3: test runner (depends on ferridriver, ferridriver-config)
       - name: Publish ferridriver-test
         env:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

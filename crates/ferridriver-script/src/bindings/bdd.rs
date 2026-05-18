@@ -3,12 +3,12 @@
 //! The same VM that runs `ferridriver run` scripts and MCP `run_script`
 //! also loads cucumber-js-shaped `.js` step files. `Given`/`When`/
 //! `Then`/`Before`/`After`/`defineParameterType`/... are native Rust
-//! functions (no JS glue); registrations land in a Rust [`BddRegistry`]
+//! functions (no JS glue); registrations land in a Rust `BddRegistry`
 //! held as context userdata (the QuickJS context is single-threaded, so
 //! a `RefCell` is the right interior mutability — no `Arc`/`Mutex`).
-//! Step bodies are kept as [`Persistent`] functions and called back by
+//! Step bodies are kept as `Persistent` functions and called back by
 //! the Rust `ferridriver-bdd` core with cucumber-extracted arguments, a
-//! real [`DataTableJs`] and the per-scenario World as `this`.
+//! real `DataTableJs` and the per-scenario World as `this`.
 //!
 //! No business logic here: matching, outline expansion, tag filtering
 //! and hook ordering all stay in the `ferridriver-bdd` core.
