@@ -56,8 +56,7 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(Strin
     ..Default::default()
   };
 
-  let mut bundler =
-    Bundler::new(options).map_err(|e| ScriptError::internal(format!("rolldown init: {e:?}")))?;
+  let mut bundler = Bundler::new(options).map_err(|e| ScriptError::internal(format!("rolldown init: {e:?}")))?;
   // rolldown's generate future is large; box it so it doesn't bloat the
   // enclosing future.
   let out = Box::pin(bundler.generate())
@@ -67,7 +66,11 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(Strin
   for asset in &out.assets {
     if let Output::Chunk(chunk) = asset {
       if chunk.is_entry {
-        return Ok((chunk.code.clone(), chunk.map.as_ref().map(|m| m.to_json_string())));
+        let code = chunk.code.clone();
+        return Ok(match &chunk.map {
+          Some(m) => (code, Some(m.to_json_string())),
+          None => (code, None),
+        });
       }
     }
   }

@@ -72,9 +72,17 @@ async fn typescript_steps_run_and_unused_export_is_tree_shaken() {
   let mut world = build_world().await;
   let result = session.run_scenario(&scenarios[0], &mut world).await;
 
-  eprintln!("TS scenario: {} [{}]", result.name, if result.passed { "PASS" } else { "FAIL" });
+  eprintln!(
+    "TS scenario: {} [{}]",
+    result.name,
+    if result.passed { "PASS" } else { "FAIL" }
+  );
   for s in &result.steps {
     eprintln!("  {} {} -> {:?}", s.keyword, s.text, s.status);
   }
-  assert!(result.passed, "TypeScript steps must pass end-to-end: {:?}", result.steps);
+  assert!(
+    result.passed,
+    "TypeScript steps must pass end-to-end: {:?}",
+    result.steps
+  );
 }

@@ -155,7 +155,13 @@ impl DataTableJs {
   pub fn transpose<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, DataTableJs>> {
     let cols = self.rows.iter().map(Vec::len).max().unwrap_or(0);
     let rows = (0..cols)
-      .map(|c| self.rows.iter().map(|r| r.get(c).cloned().unwrap_or_default()).collect())
+      .map(|c| {
+        self
+          .rows
+          .iter()
+          .map(|r| r.get(c).cloned().unwrap_or_default())
+          .collect()
+      })
       .collect();
     Class::instance(ctx, DataTableJs { rows })
   }
@@ -167,17 +173,16 @@ fn as_function<'js>(v: &Value<'js>) -> Option<Function<'js>> {
 
 fn pattern_of(a: &Value<'_>) -> Result<(String, bool), ScriptError> {
   if let Some(s) = a.as_string() {
-    return Ok((
-      s.to_string().map_err(|e| ScriptError::internal(e.to_string()))?,
-      false,
-    ));
+    return Ok((s.to_string().map_err(|e| ScriptError::internal(e.to_string()))?, false));
   }
   if let Some(o) = a.as_object() {
     if let Ok(src) = o.get::<_, String>("source") {
       return Ok((src, true));
     }
   }
-  Err(ScriptError::internal("step pattern must be a string or RegExp".to_string()))
+  Err(ScriptError::internal(
+    "step pattern must be a string or RegExp".to_string(),
+  ))
 }
 
 fn rq(e: &ScriptError) -> rquickjs::Error {
@@ -273,7 +278,10 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     ("And", StepKind::Step),
     ("But", StepKind::Step),
   ] {
-    g.set(name, Func::from(move |args: Rest<Value<'_>>| register_step(kind, &args.0)))?;
+    g.set(
+      name,
+      Func::from(move |args: Rest<Value<'_>>| register_step(kind, &args.0)),
+    )?;
   }
 
   for hook in ["Before", "After", "BeforeAll", "AfterAll", "BeforeStep", "AfterStep"] {
@@ -288,7 +296,9 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     Func::from(|def: Object<'_>| -> rquickjs::Result<()> {
       let ctx = def.ctx().clone();
       let name: String = def.get("name").map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
-      let rx_val: Value<'_> = def.get("regexp").map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
+      let rx_val: Value<'_> = def
+        .get("regexp")
+        .map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
       let regexp = if let Some(s) = rx_val.as_string() {
         s.to_string().map_err(|e| rq(&ScriptError::internal(e.to_string())))?
       } else if let Some(o) = rx_val.as_object() {

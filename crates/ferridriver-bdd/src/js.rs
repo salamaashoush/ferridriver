@@ -155,9 +155,8 @@ impl JsBddSession {
   /// are inlined by rolldown). Builds the Rust step registry from what
   /// the module registered.
   pub async fn load(bundle: Arc<CompiledBundle>, cwd: &Path) -> anyhow::Result<Self> {
-    let sandbox = Arc::new(
-      PathSandbox::new(cwd).map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?,
-    );
+    let sandbox =
+      Arc::new(PathSandbox::new(cwd).map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?);
     let run_ctx = RunContext {
       vars: Arc::new(InMemoryVars::new()),
       sandbox,
@@ -227,7 +226,10 @@ impl JsBddSession {
       hooks,
       bundle,
     };
-    session.run_hooks("BeforeAll", None).await.map_err(|e| anyhow::anyhow!(e))?;
+    session
+      .run_hooks("BeforeAll", None)
+      .await
+      .map_err(|e| anyhow::anyhow!(e))?;
     Ok(session)
   }
 

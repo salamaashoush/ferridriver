@@ -39,9 +39,9 @@
 //! browser through the `page` / `context` / `request` bindings directly.
 
 pub mod bindings;
+pub mod bundle;
 pub mod console;
 pub mod engine;
-pub mod bundle;
 pub mod error;
 pub mod fs;
 pub mod modules;
@@ -49,8 +49,8 @@ pub mod result;
 pub mod vars;
 
 pub use bindings::{
-  APIRequestContextJs, APIResponseJs, ArtifactsJs, BrowserContextJs, CollectedRegistry, KeyboardJs, LocatorJs, MouseJs,
-  JsArg, PageJs, PluginBinding, PluginCommandsJs, PluginToolBinding, ScenarioWorld, StepOutcome, collect_registry,
+  APIRequestContextJs, APIResponseJs, ArtifactsJs, BrowserContextJs, CollectedRegistry, JsArg, KeyboardJs, LocatorJs,
+  MouseJs, PageJs, PluginBinding, PluginCommandsJs, PluginToolBinding, ScenarioWorld, StepOutcome, collect_registry,
   compile_plugin_bytecode, install_plugins, invoke_hook, invoke_step, reset_world, set_scenario_world,
 };
 pub use bundle::{CompiledBundle, bundle_and_compile, bundle_source, eval_bundle};
@@ -60,7 +60,7 @@ pub use error::{ScriptError, ScriptErrorKind};
 // Re-export so the BDD core can name the session's async context (the
 // bridge it drives JS step functions through) without a duplicate
 // rquickjs dependency/version.
-pub use rquickjs::AsyncContext;
 pub use fs::PathSandbox;
 pub use result::{ConsoleEntry, ConsoleLevel, Outcome, ScriptResult, ScriptSuccess};
+pub use rquickjs::AsyncContext;
 pub use vars::{InMemoryVars, VarsStore};
