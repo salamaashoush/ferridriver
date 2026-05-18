@@ -37,18 +37,16 @@ ferridriver              Core library: Browser, Page, Locator, Frame, backends
 ferridriver-config       Unified config schema (Rust source of truth; ts-rs generates TS types)
 ferridriver-mcp          MCP server library (rmcp-based, stdio + HTTP transports)
 ferridriver-cli          CLI binary (MCP server only: stdio + HTTP transports)
-ferridriver-node         Node.js/Bun native addon via NAPI-RS (thin target over core)
+ferridriver-node         Core-only browser binding via NAPI-RS (Playwright-in-Rust analogue; no test runner / expect / BDD)
 ferridriver-test         E2E test runner: parallel workers, fixtures, reporters, retries
 ferridriver-test-macros  Proc macros: #[ferritest], #[ferritest_each]
 ferridriver-bdd          BDD/Cucumber framework: step registry, Gherkin parser, translators
 ferridriver-bdd-macros   Proc macros: #[given], #[when], #[then], #[step]
 ```
 
-TS packages in `packages/`:
-
-```
-packages/ferridriver-test    TS CLI + test API (test.each, describe, expect, BDD steps)
-```
+There is no TypeScript CLI or test package. JavaScript/TypeScript BDD step
+files run natively (rolldown bundle -> QuickJS bytecode -> core
+`TestRunner`) via `ferridriver bdd --steps`. No Node/Bun in the run path.
 
 Dependency flow: `ferridriver-cli` -> `ferridriver-mcp` -> `ferridriver` <- `ferridriver-node`
 
@@ -58,29 +56,23 @@ Test framework flow: `ferridriver-cli` -> `ferridriver-bdd` -> `ferridriver-test
 
 ### Core Principle
 
-Rust is the source of truth. NAPI is a thin target. TS is a thin wrapper.
+Rust is the source of truth. The NAPI binding (`ferridriver-node`) is a
+thin core-only browser surface; the QuickJS engine (`ferridriver-script`)
+is a thin mirror used by `ferridriver bdd` for JS/TS step bodies.
 
 - All filtering (grep, only, skip, fixme, shard, last-failed) happens in the core runner
-- All expect/assertion polling happens in Rust via NAPI expect methods
-- The NAPI test runner delegates to `TestRunner::run()` — no separate execution loop
-- `TestAnnotation` is shared between Rust and TS via serde serialization
-- Never duplicate logic in NAPI/TS that exists in Rust core
+- All expect/assertion polling happens in Rust (`ferridriver-test::expect`)
+- `ferridriver bdd` builds its plan and runs through the core `TestRunner`
+- `TestAnnotation` lives in `ferridriver-test` core
+- Never duplicate logic in bindings that exists in Rust core
 
 ### Configuration
 
 `ferridriver-config` owns the canonical `FerridriverConfig` schema (`[mcp]` +
 `[test]` sections). TOML / YAML / JSON keys are **camelCase** on the wire
-(serde `rename_all = "camelCase"`). ts-rs generates matching TypeScript
-declarations into `packages/ferridriver-test/src/config-types/` (regenerate
-with `just config-types`; CI gates drift via `just check-config-types`).
-
-The NAPI `TestRunner.create(configJson: string)` takes a serialized
-`FerridriverConfig`; CLI overrides ride on `runner.applyOverrides(overrides)`
-(typed `NapiCliOverrides`), and runtime-only flags (`grep`, `lastFailed`,
-`watch`, `verbose`, `debug`) use dedicated setters. Function-form
-`globalSetupFn` / `globalTeardownFn` hooks register through
-`runner.registerGlobalSetup(...)` because they can't ride in the JSON
-payload. There is no flat NAPI config struct -- the schema is single-source.
+(serde `rename_all = "camelCase"`). It is consumed entirely Rust-side
+(`ferridriver bdd` resolves `[test]` and feeds the core `TestRunner`);
+there is no generated TypeScript config-type mirror.
 
 ### Backend System (enum dispatch, not trait objects)
 
@@ -141,19 +133,20 @@ backend/
 
 ## Testing
 
-~430 total tests: ~94 Rust tests + ~337 NAPI/TS tests (Bun) + 83 BDD scenarios (81 pass, 2 skip).
-
-Tests require a Chrome/Chromium binary and Bun. `just test` handles everything automatically:
-builds the CLI binary and NAPI .node addon, runs all Rust workspace tests (including backend
-integration tests across all 4 backends), runs NAPI/TS tests, and runs BDD feature tests.
+All Rust. `just test` builds the CLI binary, runs all Rust workspace tests
+(including backend integration tests across all 4 backends), then runs the
+BDD feature suite through the `ferridriver` binary. Tests require a
+Chrome/Chromium binary (install with `ferridriver install --with-deps chromium`).
 
 The CLI backend tests use `FERRIDRIVER_BIN` env var pointing to the built binary (set
 automatically by `just test`). The backend test binary defaults to `target/debug/ferridriver`
 if the env var is not set.
 
-To run BDD features manually: `cd packages/ferridriver-test && bun run src/cli.ts bdd -- ../../tests/features/*.feature`
+To run BDD features manually: `cargo run --bin ferridriver -- bdd --steps 'tests/steps/**/*.{js,ts}' tests/features/`
 
-To build NAPI .node binary manually: `cd crates/ferridriver-node && bun run build:debug`
+The slimmed NAPI addon still has core-binding bun tests under
+`crates/ferridriver-node/test/`; build it with
+`cd crates/ferridriver-node && bun run build:debug` and run `bun test`.
 
 ## Git Commits
 
@@ -161,13 +154,9 @@ To build NAPI .node binary manually: `cd crates/ferridriver-node && bun run buil
 - Commit messages should look like they were written by the developer
 - **Never commit with failing tests, failing clippy, or type errors.** Every commit must leave the tree fully green (`cargo clippy --workspace --all-targets -- -D warnings`, all Rust lib tests, all Bun tests, all script integration tests). Pre-existing failures get fixed in the current commit — no "unrelated," no follow-up tasks.
 
-## Benchmarks
-
-In `bench/` directory, Bun-based. See `bench/CLAUDE.md` for Bun conventions.
-
 ## Playwright Parity Rules (non-negotiable)
 
-Governs all work tracked in `PLAYWRIGHT_COMPAT.md`. Memory-of-hard-learned-mistakes; every rule below exists because a prior session violated it.
+Memory-of-hard-learned-mistakes; every rule below exists because a prior session violated it.
 
 ### 1. Rust is the source of truth; NAPI and QuickJS are thin mirrors
 
@@ -226,17 +215,15 @@ Never reconstruct a signature from memory or docs. `locator.locator(selectorOrLo
 
 Per task, in order:
 
-1. Read `PLAYWRIGHT_COMPAT.md` section for the task.
-2. Read `/tmp/playwright/...` for the canonical signature.
-3. Implement in Rust core (with tests exercising every option field + failure path).
-4. Update NAPI binding (with `ts_args_type` where needed + rebuild).
-5. Update QuickJS binding (with live-browser integration test).
-6. `cargo clippy --workspace --all-targets -- -D warnings` must be clean.
-7. `cargo test --workspace --lib` all green.
-8. `cd crates/ferridriver-node && bun test` all green.
-9. `cargo fmt`.
-10. Tick the `PLAYWRIGHT_COMPAT.md` checkbox in the same commit.
-11. Descriptive commit message referencing the task IDs and the Playwright source file used.
+1. Read `/tmp/playwright/...` for the canonical signature.
+2. Implement in Rust core (with tests exercising every option field + failure path).
+3. Update NAPI binding (with `ts_args_type` where needed + rebuild).
+4. Update QuickJS binding (with live-browser integration test).
+5. `cargo clippy --workspace --all-targets -- -D warnings` must be clean.
+6. `cargo test --workspace --lib` all green.
+7. `cd crates/ferridriver-node && bun test` all green.
+8. `cargo fmt`.
+9. Descriptive commit message referencing the Playwright source file used and stating exactly what landed AND what is still missing.
 
 ### 9. Signatures alone are not parity — prove it works end-to-end on every backend
 
@@ -261,9 +248,8 @@ there must be an integration test that:
    leaking between tests (mouse-button-down, unresolved listeners,
    lingering timers) is your problem to clean up.
 
-If you can't make it work on all backends, file the gap under Section B of
-`PLAYWRIGHT_COMPAT.md` with the concrete symptom — never paper over it with
-a conditional skip.
+If you can't make it work on all backends, surface the gap with the
+concrete symptom — never paper over it with a conditional skip.
 
 ### 10. No escape hatches anywhere
 
@@ -271,7 +257,7 @@ a conditional skip.
 - No `#[allow(clippy::...)]` suppressions — fix the underlying issue.
 - No `eslint-disable` comments (the user doesn't use eslint).
 - No `#[allow(dead_code)]` — delete unused code outright.
-  - **Single exception** (see *Lessons learned*, "Keep phase scaffolding"): `#[allow(dead_code)]` on a field or method the CURRENT commit intentionally carries for the NEXT phase of a multi-phase task (PLAYWRIGHT_COMPAT.md phases C → F etc.) IS allowed when the item name is accompanied by a `/// Held so phase-X ...` comment. Never apply at file level; never outside a phase-boundary scenario.
+  - **Single exception** (see *Lessons learned*, "Keep phase scaffolding"): `#[allow(dead_code)]` on a field or method the CURRENT commit intentionally carries for the NEXT phase of a multi-phase task IS allowed when the item name is accompanied by a `/// Held so phase-X ...` comment. Never apply at file level; never outside a phase-boundary scenario.
 - No `--no-verify` on commits.
 - No `git reset --hard` / `git checkout --` to undo changes without user confirmation.
 - No silent error swallowing — `FerriError::Unsupported { reason }` is preferred over `Ok(default)` for genuinely-unimplemented paths.
@@ -317,7 +303,7 @@ Each of these came from a real incident. They're the in-repo canonical copy — 
 
 A commit that says "full Tier 1.5 option bags shipped across all layers" after landing only the option-struct fields is a false completion. Reality was: `timeout` accepted on every option bag, honored on none; `force` only skipped Locator-level actionability; `tap` was JS-dispatched (`isTrusted: false`) even though CDP supports `Input.dispatchTouchEvent`; `HoverOptions`/`TapOptions` carried a `steps` field Playwright doesn't have. 12 of 13 methods had zero per-option integration tests.
 
-**Before flipping any `[x]` in PLAYWRIGHT_COMPAT.md**: run the per-option test on every backend, cite the test file + backend matrix in the checkbox body. If tests don't exist, the checkbox is `[~]`, not `[x]`. In commit messages, state exactly what landed AND what's missing — optimism costs trust.
+**Before claiming any option/feature done**: run the per-option test on every backend, cite the test file + backend matrix in the commit message. If tests don't exist, it is not done. State exactly what landed AND what's missing — optimism costs trust.
 
 ### Verify against cloned Playwright source before implementing
 

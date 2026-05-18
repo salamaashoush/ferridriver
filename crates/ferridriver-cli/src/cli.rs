@@ -4,6 +4,7 @@
 //! - `mcp`     -- MCP server (stdio or HTTP) for browser automation agents
 //! - `bdd`     -- run Gherkin/Cucumber feature files via the Rust test runner
 //! - `test`    -- wrap `cargo nextest` (or `cargo test`) for unit/integration tests
+//! - `install` -- download browser binaries into the local cache
 //! - `codegen` -- generate test scaffolding
 //! - `config`  -- inspect resolved configuration
 
@@ -49,6 +50,9 @@ pub enum Command {
   /// launches its own browser via `chromium()` / `firefox()` /
   /// `webkit()`).
   Run(RunArgs),
+
+  /// Download browser binaries (Chrome for Testing) into the local cache.
+  Install(InstallArgs),
 
   /// Generate test scaffolding from recorded interactions.
   Codegen(CodegenArgs),
@@ -172,6 +176,20 @@ pub struct RunArgs {
   /// (strings). Pass after `--`.
   #[arg(last = true)]
   pub script_args: Vec<String>,
+}
+
+// ── install subcommand ──────────────────────────────────────────────────
+
+#[derive(Args)]
+pub struct InstallArgs {
+  /// Browsers to install: `chromium`, `chromium-headless-shell`,
+  /// `firefox`. Defaults to `chromium` when omitted.
+  pub browsers: Vec<String>,
+
+  /// Also install required system libraries (Linux only; uses the
+  /// platform package manager and may require sudo).
+  #[arg(long)]
+  pub with_deps: bool,
 }
 
 // ── codegen subcommand ──────────────────────────────────────────────────
