@@ -66,6 +66,10 @@ struct HookReg {
 struct ParamTypeReg {
   name: String,
   regexp: String,
+  /// Optional `transformer` fn from `defineParameterType`. Applied to
+  /// the matched text in [`invoke_step`] so the step receives a typed
+  /// value (cucumber-js parity).
+  transformer: Option<Persistent<Function<'static>>>,
 }
 
 /// One MCP tool contribution. The handler is kept as a `Persistent`
@@ -527,7 +531,19 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
           "parameter type regexp must be string or RegExp".to_string(),
         )));
       };
-      with_registry(&ctx, |reg| reg.param_types.push(ParamTypeReg { name, regexp })).map_err(|e| rq(&e))
+      let transformer = def
+        .get::<_, Value<'_>>("transformer")
+        .ok()
+        .and_then(|v| v.as_function().cloned())
+        .map(|f| Persistent::save(&ctx, f));
+      with_registry(&ctx, |reg| {
+        reg.param_types.push(ParamTypeReg {
+          name,
+          regexp,
+          transformer,
+        });
+      })
+      .map_err(|e| rq(&e))
     }),
   )?;
 
@@ -788,6 +804,14 @@ pub enum JsArg {
   Str(String),
   Int(i64),
   Float(f64),
+  /// A custom cucumber-expression parameter. If its parameter type was
+  /// defined with a `transformer`, that JS fn runs on `raw` at step
+  /// invocation and the result is passed to the step; otherwise `raw`
+  /// is passed as a string.
+  Custom {
+    type_name: String,
+    raw: String,
+  },
 }
 
 /// Outcome of a JS step/hook beyond plain pass (cucumber return
@@ -835,11 +859,38 @@ pub async fn invoke_step(
     args.this(this).map_err(|e| ScriptError::internal(e.to_string()))?;
     for p in &params {
       match p {
-        JsArg::Str(s) => args.push_arg(s.as_str()),
-        JsArg::Int(i) => args.push_arg(*i),
-        JsArg::Float(f) => args.push_arg(*f),
+        JsArg::Str(s) => args.push_arg(s.as_str()).map_err(|e| ScriptError::internal(e.to_string()))?,
+        JsArg::Int(i) => args.push_arg(*i).map_err(|e| ScriptError::internal(e.to_string()))?,
+        JsArg::Float(f) => args.push_arg(*f).map_err(|e| ScriptError::internal(e.to_string()))?,
+        JsArg::Custom { type_name, raw } => {
+          // Apply the parameter type's JS `transformer` (if any) here,
+          // in the live ctx, at step invocation — same place cucumber-js
+          // transforms. No transformer ⇒ pass the raw string.
+          let tx = with_registry(&ctx, |reg| {
+            reg
+              .param_types
+              .iter()
+              .find(|pt| &pt.name == type_name)
+              .and_then(|pt| pt.transformer.clone())
+          })?;
+          match tx {
+            Some(saved) => {
+              let f = saved.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
+              let call: rquickjs::Result<rquickjs::promise::MaybePromise<'_>> = f.call((raw.as_str(),));
+              let mp = call.catch(&ctx).map_err(|e| caught_to_script_error(e, &source))?;
+              let v: Value<'_> = mp
+                .into_future::<Value<'_>>()
+                .await
+                .catch(&ctx)
+                .map_err(|e| caught_to_script_error(e, &source))?;
+              args.push_arg(v).map_err(|e| ScriptError::internal(e.to_string()))?;
+            },
+            None => args
+              .push_arg(raw.as_str())
+              .map_err(|e| ScriptError::internal(e.to_string()))?,
+          }
+        },
       }
-      .map_err(|e| ScriptError::internal(e.to_string()))?;
     }
     if let Some(rows) = data_table {
       let dt = Class::instance(ctx.clone(), DataTableJs { rows }).map_err(|e| ScriptError::internal(e.to_string()))?;
