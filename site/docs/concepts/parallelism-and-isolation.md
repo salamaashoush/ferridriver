@@ -60,7 +60,7 @@ CLI flag: `-j N` / `--workers N`. Defaults to logical CPU count capped at some s
 
 ```bash
 cargo test --test e2e -- -j 4
-npx @ferridriver/test test -j 8
+ferridriver bdd --workers 8 tests/features/
 ```
 
 Under a CI runner with a fixed CPU budget, pin this. Letting the runner auto-scale on a shared host leads to unpredictable timings.
@@ -106,9 +106,9 @@ A serial suite is enqueued as a single `WorkItem::Serial` — one worker grabs t
 
 ```bash
 # Three GitHub Actions jobs, one per shard
-npx @ferridriver/test test --shard 1/3
-npx @ferridriver/test test --shard 2/3
-npx @ferridriver/test test --shard 3/3
+cargo test --test e2e -- --shard 1/3
+cargo test --test e2e -- --shard 2/3
+cargo test --test e2e -- --shard 3/3
 ```
 
 Sharding is deterministic given a stable test discovery order. Combine with JUnit output and a CI test-report merger (e.g. GitHub's built-in one) to aggregate results.

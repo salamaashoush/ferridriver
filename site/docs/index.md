@@ -17,19 +17,19 @@ features:
   - title: Rust-native engine
     details: Browser, Page, Locator, Frame, BrowserContext — the types you already know from Playwright, written in idiomatic Rust. No Node sidecar, no JSON-RPC to shell out to.
     link: /guide/introduction
-  - title: Also great from Node and Bun
-    details: NAPI bindings expose the same API with TypeScript types. Mix Rust and JS test suites in one repo; they share the same engine.
-    link: /api/typescript
+  - title: Browser API for Node and Bun
+    details: "@ferridriver/node exposes Browser/Page/Locator/Frame/BrowserContext with TypeScript types, backed by the same Rust engine."
+    link: /api/rust
   - title: Four backends, one API
     details: CDP over pipes, CDP over WebSocket, native WKWebView on macOS, and Firefox via WebDriver BiDi. Switch with a single flag.
     link: /concepts/backends
   - title: Test runner included
     details: Parallel workers, DAG-resolved fixtures, hooks, retries, auto-retrying expect matchers, snapshot, trace, and Playwright-compatible reporters.
     link: /test-runner/overview
-  - title: Component testing for four frameworks
-    details: Mount React, Vue, Svelte, or Solid components in a real browser and drive them with the full Page/Locator API.
-    link: /component-testing/overview
-  - title: BDD and MCP in the box
-    details: 144 built-in Gherkin steps backed by the Page API. Scripting-focused MCP server with 9 tools and full Page/Context/APIRequest bindings via `run_script`. Mix .feature + .spec.ts + MCP in one run.
+  - title: BDD with native JS/TS steps
+    details: Gherkin steps backed by the Page API. Step bodies in Rust or JavaScript/TypeScript — TS/JS files bundle to QuickJS bytecode and run through the core runner with no Node or Bun in the loop.
     link: /bdd/overview
+  - title: MCP server in the box
+    details: Scripting-focused MCP server with 9 tools and full Page/Context/APIRequest bindings via `run_script`. Mix .feature scenarios + MCP in one run.
+    link: /mcp/overview
 ---

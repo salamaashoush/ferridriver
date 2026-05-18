@@ -15,11 +15,6 @@
     "activeMatch": "/test-runner/"
   },
   {
-    "text": "Component Testing",
-    "link": "/component-testing/overview",
-    "activeMatch": "/component-testing/"
-  },
-  {
     "text": "BDD",
     "link": "/bdd/overview",
     "activeMatch": "/bdd/"

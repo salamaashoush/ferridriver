@@ -1,6 +1,6 @@
 # Configuration
 
-ferridriver looks for `ferridriver.config.toml`, `.json`, or `.ts` by walking up from the current directory.
+ferridriver looks for `ferridriver.{toml,yaml,yml,json}` by walking up from the current directory. Keys are camelCase on the wire.
 
 ## Example
 
@@ -21,20 +21,26 @@ width = 1280
 height = 720
 ```
 
-```ts
-// ferridriver.config.ts
-import { defineConfig } from '@ferridriver/test/config';
+Projects (matrix runs) in TOML:
 
-export default defineConfig({
-  workers: 4,
-  timeout: 30_000,
-  retries: 1,
-  projects: [
-    { name: 'chromium', use: { browser: 'chromium' } },
-    { name: 'firefox',  use: { browser: 'firefox',  backend: 'bidi' } },
-    { name: 'webkit',   use: { browser: 'webkit',   backend: 'webkit' } },
-  ],
-});
+```toml
+# ferridriver.config.toml
+[[projects]]
+name = "chromium"
+[projects.browser]
+browser = "chromium"
+
+[[projects]]
+name = "firefox"
+[projects.browser]
+browser = "firefox"
+backend = "bidi"
+
+[[projects]]
+name = "webkit"
+[projects.browser]
+browser = "webkit"
+backend = "webkit"
 ```
 
 ## Priority

@@ -41,24 +41,30 @@ ferridriver_bdd::bdd_main!();
 cargo test --test bdd
 ```
 
-## TypeScript
+## JavaScript / TypeScript
+
+Step files keep the cucumber-js surface. `Given`/`When`/`Then`/`Before`/
+`After`/`defineParameterType`/`setWorldConstructor` are global; `this` is
+the World, carrying `page`/`context`/`request`/`browser` plus
+`attach`/`log`/`parameters`:
 
 ```ts
 // steps/login.ts
-import { Given, When, Then } from '@ferridriver/test/bdd';
-
-Given('I navigate to {string}', async (page, url) => {
-  await page.goto(url);
+Given('I navigate to {string}', async function (url: string) {
+  await this.page.goto(url);
 });
 
-When('I click {string}', async (page, selector) => {
-  await page.locator(selector).click();
+When('I click {string}', async function (selector: string) {
+  await this.page.locator(selector).click();
 });
 ```
 
 ```bash
-npx @ferridriver/test test tests/features/ --steps 'steps/**/*.ts'
+ferridriver bdd --steps 'steps/**/*.{js,ts}' tests/features/
 ```
+
+Files are bundled with rolldown, compiled to QuickJS bytecode once, and
+run through the core runner — no Node or Bun.
 
 ## Learn more
 
