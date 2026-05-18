@@ -201,3 +201,91 @@ async fn define_parameter_type_transformer_yields_typed_arg() {
     "transformer produced a typed object (21*2)"
   );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn set_definition_function_wrapper_wraps_steps() {
+  use ferridriver_script::invoke_step;
+  let dir = tempfile::tempdir().expect("tempdir");
+  std::fs::write(
+    dir.path().join("steps.js"),
+    "setDefinitionFunctionWrapper(function (fn) { \
+       return async function (...a) { this.attach('before', 'text/plain'); \
+         const r = await fn.apply(this, a); this.attach('after', 'text/plain'); return r; }; }); \
+     Given('s', async function () { this.attach('inner', 'text/plain'); });",
+  )
+  .expect("write");
+  let bundle = bundle_and_compile(&[dir.path().join("steps.js")], dir.path())
+    .await
+    .expect("bundle");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: Vec::new(),
+    trusted_modules: false,
+    host: ExtensionHost::Bdd,
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session");
+  let actx = session.async_context();
+  eval_bundle(&actx, &bundle).await.expect("eval");
+  set_scenario_world(&actx, &ScenarioWorld::default())
+    .await
+    .expect("world");
+  invoke_step(&actx, 0, &[], None, None, &bundle.module_name)
+    .await
+    .expect("step");
+  let atts = drain_attachments(&actx).await.expect("drain");
+  let seq: Vec<String> = atts
+    .iter()
+    .map(|a| String::from_utf8(a.bytes.clone()).unwrap())
+    .collect();
+  assert_eq!(
+    seq,
+    vec!["before", "inner", "after"],
+    "wrapper ran around the step body"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn per_step_timeout_option_is_enforced() {
+  use ferridriver_script::{ScriptErrorKind, invoke_step};
+  let dir = tempfile::tempdir().expect("tempdir");
+  std::fs::write(
+    dir.path().join("steps.js"),
+    "Given('slow', { timeout: 30 }, async function () { await new Promise(() => {}); });",
+  )
+  .expect("write");
+  let bundle = bundle_and_compile(&[dir.path().join("steps.js")], dir.path())
+    .await
+    .expect("bundle");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(dir.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: Vec::new(),
+    trusted_modules: false,
+    host: ExtensionHost::Bdd,
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session");
+  let actx = session.async_context();
+  eval_bundle(&actx, &bundle).await.expect("eval");
+  set_scenario_world(&actx, &ScenarioWorld::default())
+    .await
+    .expect("world");
+  let err = invoke_step(&actx, 0, &[], None, None, &bundle.module_name)
+    .await
+    .expect_err("step must time out");
+  assert_eq!(err.kind, ScriptErrorKind::Timeout, "per-step {{timeout:30}} enforced");
+}
