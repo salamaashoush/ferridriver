@@ -81,6 +81,31 @@ struct ToolReg {
   handler: Persistent<Function<'static>>,
 }
 
+/// One Cucumber attachment produced by `this.attach(...)` /
+/// `this.log(...)` during a scenario. Drained by the BDD layer into the
+/// test result so the messages / HTML / Allure reporters surface it
+/// (screenshot- and text-on-failure).
+#[derive(Debug, Clone)]
+pub struct ScriptAttachment {
+  pub media_type: String,
+  pub bytes: Vec<u8>,
+}
+
+/// The argument cucumber-js passes to `Before`/`After` hooks. Built by
+/// the BDD layer and lowered to a JS object `{ pickle: { name, tags },
+/// result: { status, message? } }` in [`invoke_hook`] — enough for the
+/// screenshot-on-failure idiom (`After(s => { if (s.result.status ===
+/// 'FAILED') this.attach(...) })`).
+#[derive(Debug, Clone, Default)]
+pub struct HookArg {
+  pub name: String,
+  pub tags: Vec<String>,
+  /// Cucumber status: `PENDING` for `Before` (not yet run), `PASSED` /
+  /// `FAILED` for `After`.
+  pub status: String,
+  pub message: Option<String>,
+}
+
 /// Rust-side **extension registry**: the single context-owned table that
 /// every contribution kind lands in. Cucumber `Given`/`When`/`Then`/
 /// hooks/param-types AND MCP `defineTool`/legacy-`exports` tools register
@@ -88,17 +113,6 @@ struct ToolReg {
 /// kinds they care about (`collect_registry` for BDD, [`collect_tools`]
 /// for MCP) and dispatch handlers natively ([`invoke_step`],
 /// [`invoke_tool`]). No `globalThis.__*`, no synthesized JS.
-/// One Cucumber attachment produced by `this.attach(...)` / `this.log(...)`
-/// during a scenario. Drained by the BDD layer into the test result so
-/// the messages / HTML / Allure reporters surface it (screenshot- and
-/// text-on-failure). `name` is `None` (Cucumber attachments are
-/// unnamed); the consumer derives one.
-#[derive(Debug, Clone)]
-pub struct ScriptAttachment {
-  pub media_type: String,
-  pub bytes: Vec<u8>,
-}
-
 #[derive(Default)]
 struct ExtensionRegistry {
   steps: Vec<StepReg>,
@@ -855,8 +869,14 @@ pub async fn invoke_step(
 }
 
 /// Invoke hook `idx`. Same bridge as [`invoke_step`].
-pub async fn invoke_hook(actx: &AsyncContext, idx: usize, source: &str) -> Result<StepOutcome, ScriptError> {
+pub async fn invoke_hook(
+  actx: &AsyncContext,
+  idx: usize,
+  arg: Option<&HookArg>,
+  source: &str,
+) -> Result<StepOutcome, ScriptError> {
   let source = source.to_string();
+  let arg = arg.cloned();
   async_with!(actx => |ctx| {
     let (func, world) = with_registry(&ctx, |reg| {
       let hook = reg
@@ -870,8 +890,31 @@ pub async fn invoke_hook(actx: &AsyncContext, idx: usize, source: &str) -> Resul
       Some(w) => w.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?,
       None => Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?,
     };
-    let mut args = Args::new(ctx.clone(), 0);
+    // Cucumber-shaped hook parameter: `{ pickle: { name, tags:[{name}] },
+    // result: { status, message? } }`. Built via the Object API.
+    let n_args = usize::from(arg.is_some());
+    let mut args = Args::new(ctx.clone(), n_args);
     args.this(this).map_err(|e| ScriptError::internal(e.to_string()))?;
+    if let Some(a) = arg {
+      let param = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
+      let pickle = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
+      pickle.set("name", a.name).map_err(|e| ScriptError::internal(e.to_string()))?;
+      let tags = rquickjs::Array::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
+      for (i, t) in a.tags.iter().enumerate() {
+        let to = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
+        to.set("name", t.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
+        tags.set(i, to).map_err(|e| ScriptError::internal(e.to_string()))?;
+      }
+      pickle.set("tags", tags).map_err(|e| ScriptError::internal(e.to_string()))?;
+      let result = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
+      result.set("status", a.status).map_err(|e| ScriptError::internal(e.to_string()))?;
+      if let Some(m) = a.message {
+        result.set("message", m).map_err(|e| ScriptError::internal(e.to_string()))?;
+      }
+      param.set("pickle", pickle).map_err(|e| ScriptError::internal(e.to_string()))?;
+      param.set("result", result).map_err(|e| ScriptError::internal(e.to_string()))?;
+      args.push_arg(param).map_err(|e| ScriptError::internal(e.to_string()))?;
+    }
     let called: rquickjs::Result<rquickjs::promise::MaybePromise<'_>> = args.apply(&func);
     let mp = match called.catch(&ctx) {
       Ok(v) => v,

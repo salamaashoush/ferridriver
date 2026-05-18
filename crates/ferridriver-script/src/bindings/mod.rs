@@ -46,7 +46,7 @@ pub mod webapi;
 pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
 pub use bdd::{
-  CollectedAllow, CollectedRegistry, CollectedTool, JsArg, ScenarioWorld, ScriptAttachment, StepOutcome,
+  CollectedAllow, CollectedRegistry, CollectedTool, HookArg, JsArg, ScenarioWorld, ScriptAttachment, StepOutcome,
   collect_registry, drain_attachments, install_bdd, invoke_hook, invoke_step, reset_world, set_scenario_world,
   tools_len, tools_snapshot,
 };
