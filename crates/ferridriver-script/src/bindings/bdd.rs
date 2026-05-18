@@ -275,8 +275,8 @@ fn register_hook(kind: &str, args: &[Value<'_>]) -> rquickjs::Result<()> {
 }
 
 /// Register one MCP tool from a manifest object + handler function.
-/// Backs both the native `defineTool(manifest, handler)` surface and the
-/// legacy `globalThis.exports` ingest — one code path, one registry.
+/// The single tool-registration path, behind the native `defineTool`
+/// contribution point.
 fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -> Result<(), ScriptError> {
   let name: String = m
     .get("name")
@@ -331,82 +331,38 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
   })
 }
 
-/// JS array → its element objects (non-objects skipped). Used to
-/// normalise the legacy `exports` array / `{tools:[]}` shapes.
-fn array_objects<'js>(arr: &rquickjs::Array<'js>) -> Vec<Object<'js>> {
-  arr
-    .iter::<Value<'js>>()
-    .filter_map(Result::ok)
-    .filter_map(Value::into_object)
-    .collect()
-}
-
-/// `defineTool(manifest, handler)` argument adapter. Pulls the manifest
-/// object + handler function off the call args (same `Rest`-derived
-/// single-`'js` pattern `register_step`/`register_hook` use, so the
-/// `Persistent::save` lifetimes unify).
+/// `defineTool(...)` argument adapter. Two equivalent native forms:
+/// `defineTool(tool)` where `tool` carries an inline `handler`, or
+/// `defineTool(manifest, handlerFn)`. Uses the same `Rest`-derived
+/// single-`'js` pattern `register_step`/`register_hook` use so the
+/// `Persistent::save` lifetimes unify. There is no `globalThis.exports`
+/// path — `defineTool` is the only tool-registration surface.
 fn register_tool_args(args: &[Value<'_>]) -> rquickjs::Result<()> {
   let ctx = ctx_of(args)?;
   let manifest = args.first().and_then(Value::as_object).ok_or_else(|| {
     rq(&ScriptError::internal(
-      "defineTool: first arg must be a manifest object".to_string(),
+      "defineTool: first arg must be a tool/manifest object".to_string(),
     ))
   })?;
-  let handler = args.iter().skip(1).find_map(as_function).ok_or_else(|| {
-    rq(&ScriptError::internal(
-      "defineTool: missing handler function".to_string(),
-    ))
-  })?;
+  // Handler: an explicit 2nd-arg function wins; otherwise the tool
+  // object's own `handler` method.
+  let handler = args
+    .iter()
+    .skip(1)
+    .find_map(as_function)
+    .or_else(|| {
+      manifest
+        .get::<_, Value<'_>>("handler")
+        .ok()
+        .and_then(|v| v.as_function().cloned())
+    })
+    .ok_or_else(|| {
+      rq(&ScriptError::internal(
+        "defineTool: no handler — pass defineTool(tool) with a `handler` method or defineTool(manifest, fn)"
+          .to_string(),
+      ))
+    })?;
   register_tool(&ctx, manifest, handler).map_err(|e| rq(&e))
-}
-
-/// Normalise a plugin file's `globalThis.exports` (set when the bundled
-/// module evaluated) into tool registrations, then clear it so a sibling
-/// file evaluated next in the same context does not re-ingest it. Reads
-/// the export object via the native Object API — no `__ferri_*` transfer
-/// global, no JS extraction expression. Files that call `defineTool`
-/// directly set no `exports`; this is then a no-op for them.
-///
-/// Accepts the three historical shapes: a bare array of tools,
-/// `{ tools: [...] }`, or a single `{ name, handler, ... }` object.
-pub fn ingest_exports(ctx: &Ctx<'_>) -> Result<(), ScriptError> {
-  let globals = ctx.globals();
-  let exports: Value<'_> = globals
-    .get("exports")
-    .unwrap_or_else(|_| Value::new_undefined(ctx.clone()));
-  if exports.is_undefined() || exports.is_null() {
-    return Ok(());
-  }
-
-  let entries: Vec<Object<'_>> = if let Some(arr) = exports.as_array() {
-    array_objects(arr)
-  } else if let Some(obj) = exports.as_object() {
-    match obj.get::<_, Value<'_>>("tools") {
-      Ok(t) => match t.as_array() {
-        Some(arr) => array_objects(arr),
-        None => vec![obj.clone()],
-      },
-      Err(_) => vec![obj.clone()],
-    }
-  } else {
-    return Err(ScriptError::internal(
-      "plugin globalThis.exports is neither an array nor an object".to_string(),
-    ));
-  };
-
-  for entry in entries {
-    let handler = entry
-      .get::<_, Value<'_>>("handler")
-      .ok()
-      .and_then(|v| v.as_function().cloned())
-      .ok_or_else(|| ScriptError::internal("plugin tool export has no `handler` function".to_string()))?;
-    register_tool(ctx, &entry, handler)?;
-  }
-
-  globals
-    .set("exports", Value::new_undefined(ctx.clone()))
-    .map_err(|e| ScriptError::internal(e.to_string()))?;
-  Ok(())
 }
 
 /// Install the native cucumber + MCP-tool surface and the shared
@@ -483,9 +439,8 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   )?;
   g.set("setParallelCanAssign", Func::from(|_: Opt<Value<'_>>| {}))?;
 
-  // MCP tool contribution point. `defineTool(manifest, handler)` is the
-  // first-class native surface; the legacy `globalThis.exports` shapes
-  // route through the same `register_tool` via `ingest_exports`.
+  // MCP tool contribution point — the only tool-registration surface.
+  // `defineTool(tool)` (inline `handler`) or `defineTool(manifest, fn)`.
   g.set(
     "defineTool",
     Func::from(|args: Rest<Value<'_>>| register_tool_args(&args.0)),

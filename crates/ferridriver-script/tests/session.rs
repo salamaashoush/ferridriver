@@ -13,8 +13,8 @@ use ferridriver_script::{
 
 /// A one-tool plugin whose handler bumps a `globalThis` counter so a
 /// second invocation in the same session observes the first's state.
-const DEMO_PLUGIN: &str = "globalThis.exports = { name: 'demo', handler: async ({ args }) => { \
-  globalThis.__n = (globalThis.__n || 0) + 1; return { n: globalThis.__n, got: args }; } };";
+const DEMO_PLUGIN: &str = "defineTool({ name: 'demo', handler: async ({ args }) => { \
+  globalThis.__n = (globalThis.__n || 0) + 1; return { n: globalThis.__n, got: args }; } });";
 
 /// Bundle + compile the demo plugin through the production pipeline
 /// (rolldown -> bytecode) and wrap it as a `PluginBinding`.
@@ -92,8 +92,8 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
     tmp.path().join("plug.ts"),
     "import { tag } from './helper';\n\
      interface In { n: number }\n\
-     globalThis.exports = { name: 'ts', exposeAsTool: true, \
-       async handler({ args }: { args: In }) { return { tag: tag(args.n) }; } };\n",
+     defineTool({ name: 'ts', exposeAsTool: true, \
+       async handler({ args }: { args: In }) { return { tag: tag(args.n) }; } });\n",
   )
   .expect("write plugin");
 
@@ -136,9 +136,9 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
   // the list is rejected BEFORE the call, and an allowed host passes the
   // guard through to the real client (where it fails for an unrelated,
   // non-allow.net reason — proving the guard let it through).
-  const NET_PLUGIN: &str = "globalThis.exports = { name: 'net', \
+  const NET_PLUGIN: &str = "defineTool({ name: 'net', \
     allow: { net: ['127.0.0.1'] }, \
-    handler: async ({ args, request }) => { await request.get(args.url); return 'ok'; } };";
+    handler: async ({ args, request }) => { await request.get(args.url); return 'ok'; } });";
   let tmp = tempfile::tempdir().expect("tempdir");
   let path = tmp.path().join("net.js");
   std::fs::write(&path, NET_PLUGIN).expect("write plugin");
