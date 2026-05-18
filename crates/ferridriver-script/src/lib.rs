@@ -50,8 +50,8 @@ pub mod vars;
 
 pub use bindings::{
   APIRequestContextJs, APIResponseJs, ArtifactsJs, BrowserContextJs, CollectedRegistry, JsArg, KeyboardJs, LocatorJs,
-  MouseJs, PageJs, PluginBinding, PluginCommandsJs, ScenarioWorld, StepOutcome, collect_registry, install_plugins,
-  invoke_hook, invoke_step, reset_world, set_scenario_world,
+  MouseJs, PageJs, PluginBinding, PluginCommandsJs, ScenarioWorld, ScriptAttachment, StepOutcome, collect_registry,
+  drain_attachments, install_plugins, invoke_hook, invoke_step, reset_world, set_scenario_world,
 };
 pub use bundle::{
   CompiledBundle, CompiledPlugin, bundle_and_compile, bundle_source, compile_and_extract_plugins, eval_bundle,

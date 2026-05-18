@@ -22,12 +22,12 @@ use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
 use ferridriver_script::{
-  AsyncContext, CompiledBundle, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioWorld, ScriptEngineConfig,
-  Session, StepOutcome, bundle_and_compile, collect_registry, eval_bundle, invoke_hook, invoke_step, reset_world,
-  set_scenario_world,
+  AsyncContext, CompiledBundle, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioWorld, ScriptAttachment,
+  ScriptEngineConfig, Session, StepOutcome, bundle_and_compile, collect_registry, drain_attachments, eval_bundle,
+  invoke_hook, invoke_step, reset_world, set_scenario_world,
 };
 use ferridriver_test::FixturePool;
-use ferridriver_test::model::{StepCategory, TestInfo};
+use ferridriver_test::model::{AttachmentBody, StepCategory, TestInfo};
 use tokio::sync::Mutex;
 
 use crate::feature::FeatureSet;
@@ -194,10 +194,38 @@ pub async fn bundle_steps_with(
   Ok(Arc::new(bundle))
 }
 
+/// Forward the scenario's queued `this.attach`/`this.log` attachments
+/// into the test result so the messages / HTML / Allure reporters
+/// surface them (the Cucumber screenshot-/text-on-failure idiom). The
+/// name is derived from the media type (Cucumber attachments are
+/// unnamed).
+async fn forward_attachments(test_info: &TestInfo, atts: Vec<ScriptAttachment>) {
+  for a in atts {
+    let name = if a.media_type.starts_with("image/") {
+      "screenshot"
+    } else if a.media_type.starts_with("text/x.cucumber.log") {
+      "log"
+    } else {
+      "attachment"
+    };
+    test_info
+      .attach(name.to_string(), a.media_type, AttachmentBody::Bytes(a.bytes))
+      .await;
+  }
+}
+
 impl JsBddSession {
   #[must_use]
   pub fn registry(&self) -> Arc<StepRegistry> {
     Arc::clone(&self.registry)
+  }
+
+  /// Drain attachments queued by `this.attach`/`this.log` during the
+  /// just-run scenario (clears the queue for the next scenario).
+  pub async fn drain_attachments(&self) -> Vec<ScriptAttachment> {
+    drain_attachments(&self.session.async_context())
+      .await
+      .unwrap_or_default()
   }
 
   /// Discover, bundle and load step files in one call (convenience for
@@ -634,6 +662,7 @@ pub fn translate_features_js(
           let mut world = BrowserWorld::new(fixtures);
 
           let result = session.run_scenario(&scenario, &mut world).await;
+          forward_attachments(&test_info, session.drain_attachments().await).await;
           for s in &result.steps {
             record_step(&test_info, s).await;
           }
