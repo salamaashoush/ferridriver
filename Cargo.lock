@@ -2489,19 +2489,13 @@ dependencies = [
 name = "ferridriver-node"
 version = "0.1.0"
 dependencies = [
- "async-channel",
- "async-trait",
  "base64 0.22.1",
  "ferridriver",
- "ferridriver-bdd",
- "ferridriver-config",
- "ferridriver-test",
  "mimalloc",
  "napi",
  "napi-build",
  "napi-derive",
  "rustc-hash 2.1.2",
- "serde",
  "serde_json",
  "tokio",
  "tracing",

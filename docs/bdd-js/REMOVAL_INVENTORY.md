@@ -23,40 +23,61 @@ wired and accepted.
 
 ## Phase order
 
-1. **Resolve `expect()` coupling.** Move
-   `crates/ferridriver-test/src/expect/{mod,locator,page}.rs` into
-   `ferridriver` core (it needs only `ferridriver` + `regex`/`image`);
-   repoint `ferridriver-node` and `ferridriver-test` to
-   `ferridriver::expect`. Compile-gate before proceeding.
-2. **Wire JS step loading into `ferridriver bdd`** (config/CLI glob for
-   step files; `JsBddSession` per worker; see `DECISIONS.md`). Until this
-   lands, do not remove the TS runner — it is the only JS step path.
-3. **Slim `ferridriver-node` to a core binding.** Delete
-   `test_runner.rs`, `bdd_registry.rs`, `test_fixtures.rs`,
-   `test_info.rs`, `step_handle.rs`, `js_reporter.rs` (~2.6k LOC); trim
-   `lib.rs` module list; drop `ferridriver-bdd` / `ferridriver-config`
-   (and `ferridriver-test`, pending the expect decision) from
-   `ferridriver-node/Cargo.toml`. No Rust crate has a path dep on
-   `ferridriver-node` (cdylib), so slimming cannot break the workspace.
-4. **Rewire config-types.** The TS CLI is the sole consumer of the
-   generated config types: drop `ts-rs` from `ferridriver-config`, the
-   `.cargo/config.toml` `TS_RS_EXPORT_DIR`, and the `config-types` /
-   `check-config-types` justfile recipes; remove `check-config-types`
-   from `just ready`.
-5. **Delete `packages/ferridriver-test`** and `bench/fd-tests`; edit
-   root `package.json` workspaces + devDeps; regenerate `bun.lock`.
-6. **CI.** Remove the `napi` job (and its entry in `conclusion.needs`);
-   replace the two `cli.ts install ... chromium` steps with
-   `cargo run --bin ferridriver -- ...` or a surviving installer;
-   remove the `@ferridriver/test` npm publish from `release.yml`.
-7. **justfile.** Delete/rewrite `config-types`, `check-config-types`,
-   `profile-ts`; strip `packages/ferridriver-test` lines from `release`.
-   `just test` / `just bdd` / `just ready` themselves are pure Rust and
-   need no change beyond step 4.
-8. **Delete the dead `ferridriver-node/test/*.test.ts`** that import the
-   removed package; keep only CORE-binding bun tests if a thin harness
-   is retained.
-9. **Docs.** `CLAUDE.md:50,74,154`, `site/docs/**`, `HANDOVER.md`,
+> **Superseded plan note (expect):** the original step 1 (move
+> `expect()` into `ferridriver` core) was **not** taken. Final decision:
+> `expect()` stays in `crates/ferridriver-test/src/expect/` untouched;
+> `ferridriver-test` (Rust crate) is kept (`ferridriver bdd` uses its
+> `TestRunner`/config/expect). `ferridriver-node` instead **drops the
+> expect surface entirely** — Playwright's core `playwright` library has
+> no `expect`, neither does the slimmed node binding.
+
+1. ~~Resolve `expect()` coupling by moving it to core.~~ **Superseded**
+   (see note above). `expect()` left in `ferridriver-test`; node's
+   expect bindings deleted instead.
+2. [x] **Wire JS step loading into `ferridriver bdd`** (rolldown ->
+   QuickJS bytecode -> core `TestRunner`; `--steps` glob + `[test].steps`).
+   Landed before this removal.
+
+**Phase A — slim `ferridriver-node` to a core-only browser binding:**
+
+3. [x] Delete `test_runner.rs`, `bdd_registry.rs`, `test_fixtures.rs`,
+   `test_info.rs`, `step_handle.rs`, `js_reporter.rs`; also deleted the
+   now-dead `playwright_namespace.rs` (only the removed `{ playwright }`
+   fixture consumed it; top-level `chromium()`/`firefox()`/`webkit()` in
+   `browser_type.rs` are the real entry points). Trimmed `lib.rs`
+   module list; removed the dead `ApiRequestContext::wrap`.
+3a. [x] Removed the entire `expect_*` surface from node's CORE
+   `locator.rs` (incl. `parse_screenshot_options`) and `page.rs`
+   (`expect_title`/`expect_url`).
+3b. [x] `ferridriver-node/Cargo.toml`: dropped `ferridriver-test`,
+   `ferridriver-bdd`, `ferridriver-config` (and now-unused
+   `async-trait`, `serde`, `async-channel`); kept only `ferridriver`
+   (+ napi/runtime). Dropped the `profiling` feature. No remaining
+   `ferridriver_test::`/`ferridriver_bdd::`/`ferridriver_config::` paths.
+8. [x] **Deleted the dead `ferridriver-node/test/*.ts`** that imported
+   the removed `@ferridriver/test`/expect/test surface (11 files incl.
+   `_test-helpers.ts`); 22 pure CORE-binding bun test files retained.
+   Rebuilt the addon — `index.d.ts` is now core-only (no
+   TestRunner/expect/BDD/Playwright* symbols).
+
+**Phase B — delete TS/JS surface + rewire:**
+
+4. [ ] **Rewire config-types.** TS CLI is the sole consumer: drop
+   `ts-rs` from `ferridriver-config`, the `.cargo/config.toml`
+   `TS_RS_EXPORT_DIR`, and the `config-types` / `check-config-types`
+   justfile recipes; remove `check-config-types` from `just ready`.
+5. [ ] **Delete `packages/ferridriver-test`**, `packages/ct-*`,
+   `examples/ct-*`, `bench/fd-tests`, `tests/steps/*.ts`; edit root
+   `package.json` workspaces + devDeps; regenerate `bun.lock`; drop the
+   Rust ct examples from root `Cargo.toml` members/default-members.
+6. [ ] **CI.** Remove the `napi` job (and its `conclusion.needs`
+   entry); replace the two `cli.ts install ... chromium` steps with a
+   surviving installer; remove the `@ferridriver/test` npm publish from
+   `release.yml`.
+7. [ ] **justfile.** Delete `config-types`, `check-config-types`,
+   `profile-ts`; remove `check-config-types` from `ready`; strip
+   `packages/ferridriver-test` lines from `release`.
+9. [ ] **Docs.** `CLAUDE.md:50,74,154`, `site/docs/**`, `HANDOVER.md`,
    `BDD_TODO.md`, `PLAYWRIGHT_COMPAT.md`, `plans/*` — doc-only.
 
 ## Highest-risk missable points
