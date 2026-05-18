@@ -34,6 +34,7 @@ async fn demo_binding() -> (tempfile::TempDir, PluginBinding) {
       tools: vec![PluginToolBinding {
         name: "demo".to_string(),
         allowed_commands: HashMap::new(),
+        allowed_net: Vec::new(),
       }],
     },
   )
@@ -125,6 +126,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
       tools: vec![PluginToolBinding {
         name: "ts".to_string(),
         allowed_commands: HashMap::new(),
+        allowed_net: Vec::new(),
       }],
     }],
     trusted_modules: false,
@@ -143,6 +145,87 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
   match r.result.outcome {
     Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "tag": "t7" })),
     Outcome::Error { error } => panic!("ts plugin failed: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn allow_net_capability_is_enforced_on_the_request_binding() {
+  // The `net` capability must default-deny once declared: a host not in
+  // the list is rejected BEFORE the call, and an allowed host passes the
+  // guard through to the real client (where it fails for an unrelated,
+  // non-allow.net reason — proving the guard let it through).
+  const NET_PLUGIN: &str = "globalThis.exports = { name: 'net', \
+    handler: async ({ args, request }) => { await request.get(args.url); return 'ok'; } };";
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("net.js");
+  std::fs::write(&path, NET_PLUGIN).expect("write plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+
+  let sb_tmp = tempfile::tempdir().expect("tempdir");
+  let request = Arc::new(ferridriver::api_request::APIRequestContext::new(
+    ferridriver::api_request::RequestContextOptions::default(),
+  ));
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: Some(request),
+    browser: None,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      tools: vec![PluginToolBinding {
+        name: "net".to_string(),
+        allowed_commands: HashMap::new(),
+        allowed_net: vec!["127.0.0.1".to_string()],
+      }],
+    }],
+    trusted_modules: false,
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+
+  // Disallowed host: rejected by the capability guard, no call made.
+  let blocked = session
+    .execute(
+      "return await plugins['net']({ url: 'http://blocked.test/' });",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match blocked.result.outcome {
+    Outcome::Error { error } => {
+      assert!(
+        error.message.contains("not in allow.net") && error.message.contains("blocked.test"),
+        "expected an allow.net denial naming the host, got: {}",
+        error.message
+      );
+    },
+    Outcome::Ok { .. } => panic!("disallowed host must be rejected by the net capability"),
+  }
+
+  // Allowed host: guard passes; the real client is reached and fails
+  // for a non-capability reason (connection refused on port 1).
+  let allowed = session
+    .execute(
+      "return await plugins['net']({ url: 'http://127.0.0.1:1/' });",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match allowed.result.outcome {
+    Outcome::Error { error } => assert!(
+      !error.message.contains("allow.net"),
+      "allowed host must pass the guard; got an allow.net error instead: {}",
+      error.message
+    ),
+    Outcome::Ok { .. } => {},
   }
 }
 

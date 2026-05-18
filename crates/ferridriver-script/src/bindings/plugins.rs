@@ -41,9 +41,9 @@ pub struct PluginBinding {
   pub tools: Vec<PluginToolBinding>,
 }
 
-/// One tool declared inside a plugin file. The allow-list is per-tool
-/// so a handler can only invoke commands the manifest explicitly
-/// authorises, even when sibling tools in the same file grant more.
+/// One tool declared inside a plugin file. Capabilities are per-tool so
+/// a handler can only use what its own manifest authorises, even when a
+/// sibling tool in the same file grants more.
 #[derive(Debug, Clone, Default)]
 pub struct PluginToolBinding {
   pub name: String,
@@ -51,6 +51,10 @@ pub struct PluginToolBinding {
   /// `commands.run(name, vars)`. Each value is a shell command template
   /// with `${var}` placeholders substituted from the call-time `vars`.
   pub allowed_commands: HashMap<String, String>,
+  /// Host patterns the handler's `request` client may target (exact host
+  /// or `*.suffix`). Empty = unrestricted; non-empty flips `request` to
+  /// default-deny for this tool.
+  pub allowed_net: Vec<String>,
 }
 
 /// Singleton helper instantiated once per script run and exposed as the
@@ -174,11 +178,18 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
     //    (fileIndex, toolIndex) and binds the per-tool allow-list.
     for (tool_idx, tool) in file.tools.iter().enumerate() {
       let allowed_json = serde_json::to_string(&tool.allowed_commands).unwrap_or_else(|_| "{}".into());
+      let net_json = serde_json::to_string(&tool.allowed_net).unwrap_or_else(|_| "[]".into());
       let name_literal = serde_json::to_string(&tool.name).unwrap_or_else(|_| "\"\"".into());
 
+      // `request` is wrapped in a host-checking Proxy ONLY when the tool
+      // declares `allow.net`; an empty list passes the binding through
+      // untouched so the common (no-net) case has zero overhead and
+      // unchanged semantics. Host match: exact, or `*.suffix` (which
+      // also matches the bare apex).
       let wrapper = format!(
         "(() => {{\n\
            const ALLOWED = {allowed_json};\n\
+           const NET = {net_json};\n\
            const PLUGIN_NAME = {name_literal};\n\
            const FILE_IDX = {file_idx};\n\
            const TOOL_IDX = {tool_idx};\n\
@@ -189,17 +200,39 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
                return await globalThis.__ferri_plugin_commands.exec(tpl, vars || {{}});\n\
              }},\n\
            }};\n\
+           const __hostOk = (h) => NET.some((p) =>\n\
+             p === h || (p.startsWith('*.') && (h === p.slice(2) || h.endsWith(p.slice(1)))));\n\
+           const __NET_METHODS = ['get', 'post', 'put', 'delete', 'patch', 'head', 'fetch'];\n\
+           const __guardedRequest = (req) => new Proxy(req, {{\n\
+             get(t, prop) {{\n\
+               const v = t[prop];\n\
+               if (typeof v === 'function' && __NET_METHODS.includes(prop)) {{\n\
+                 return (url, ...rest) => {{\n\
+                   let host;\n\
+                   try {{ host = new URL(url).hostname; }} catch (_) {{\n\
+                     throw new Error('plugin ' + PLUGIN_NAME + ': request to invalid/relative URL \"' + url + '\" is not permitted by allow.net');\n\
+                   }}\n\
+                   if (!__hostOk(host)) {{\n\
+                     throw new Error('plugin ' + PLUGIN_NAME + ': request host \"' + host + '\" is not in allow.net ' + JSON.stringify(NET));\n\
+                   }}\n\
+                   return t[prop](url, ...rest);\n\
+                 }};\n\
+               }}\n\
+               return v;\n\
+             }},\n\
+           }});\n\
            return async (callArgs) => {{\n\
              const tool = globalThis.__ferri_plugin_files[FILE_IDX][TOOL_IDX];\n\
              const handler = tool && tool.handler;\n\
              if (typeof handler !== 'function') {{\n\
                throw new Error('plugin ' + PLUGIN_NAME + ' missing handler');\n\
              }}\n\
+             const __req = globalThis.request;\n\
              return handler({{\n\
                args: callArgs,\n\
                page: globalThis.page,\n\
                context: globalThis.context,\n\
-               request: globalThis.request,\n\
+               request: (NET.length === 0 || !__req) ? __req : __guardedRequest(__req),\n\
                commands,\n\
              }});\n\
            }};\n\

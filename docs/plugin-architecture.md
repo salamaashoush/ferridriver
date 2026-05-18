@@ -29,11 +29,20 @@ and records what ferridriver adopts versus defers, with the tradeoff.
    parse). Tradeoff: rolldown bundle cost moves to startup (one-time, ~ms
    per file) in exchange for zero per-session parse and free TS/imports.
 2. **Declarative capability manifest** (Deno `--allow-*` + WASM no-ambient-
-   authority): generalize `allow.commands` into `allow.{exec,net,fs}` scopes,
-   default-deny, Rust-enforced at the binding boundary. `allow.commands`
-   stays as a back-compat alias for `allow.exec`. Tradeoff: a slightly larger
-   manifest surface for an auditable, complete sandbox boundary instead of
-   exec-only.
+   authority): `allow` becomes a named, default-deny capability set,
+   Rust-owned and enforced at the binding boundary. Shipped capabilities:
+   **exec** (`allow.commands`, `exec` accepted as a synonym — fully enforced
+   already) and **net** (`allow.net`: host allow-list on the handler's
+   `request` client; empty = unrestricted for back-compat, non-empty flips
+   that binding to default-deny). `fs` is deliberately **not** a capability:
+   the plugin handler context (`{args,page,context,request,commands}`)
+   exposes no filesystem handle, so an `fs` scope would gate nothing — a
+   stub, which the repo rules forbid. `net` is scoped precisely to the
+   `request` HTTP client and documented as such; `page`/`context` browser
+   navigation is a separate, deliberately ungated authority (an automation
+   plugin must navigate), so this is a *complete* boundary for what it
+   covers, not a partial one giving false confidence. Tradeoff: a slightly
+   larger manifest for an auditable, honestly-scoped sandbox.
 3. **Content-hash bytecode cache** (Deno): key compiled bytecode by source
    content hash; identical/unchanged files skip rebundle+recompile. In-memory
    only — `Module::load` bytecode is interpreter-build- and process-specific,
