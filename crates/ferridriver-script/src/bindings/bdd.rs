@@ -18,7 +18,10 @@ use std::sync::Arc;
 
 use rquickjs::class::{Class, Trace};
 use rquickjs::function::{Args, Constructor, Func, Opt, Rest};
-use rquickjs::{AsyncContext, CatchResultExt, Ctx, Function, JsLifetime, Object, Persistent, Value, async_with};
+use rquickjs::{
+  ArrayBuffer, AsyncContext, CatchResultExt, Ctx, Function, JsLifetime, Object, Persistent, TypedArray, Value,
+  async_with,
+};
 
 use crate::bindings::convert::{serde_from_js, serde_to_js};
 use crate::bindings::{install_browser_context_on, install_browser_on, install_page_on, install_request_on};
@@ -85,12 +88,26 @@ struct ToolReg {
 /// kinds they care about (`collect_registry` for BDD, [`collect_tools`]
 /// for MCP) and dispatch handlers natively ([`invoke_step`],
 /// [`invoke_tool`]). No `globalThis.__*`, no synthesized JS.
+/// One Cucumber attachment produced by `this.attach(...)` / `this.log(...)`
+/// during a scenario. Drained by the BDD layer into the test result so
+/// the messages / HTML / Allure reporters surface it (screenshot- and
+/// text-on-failure). `name` is `None` (Cucumber attachments are
+/// unnamed); the consumer derives one.
+#[derive(Debug, Clone)]
+pub struct ScriptAttachment {
+  pub media_type: String,
+  pub bytes: Vec<u8>,
+}
+
 #[derive(Default)]
 struct ExtensionRegistry {
   steps: Vec<StepReg>,
   hooks: Vec<HookReg>,
   param_types: Vec<ParamTypeReg>,
   tools: Vec<ToolReg>,
+  /// Attachments queued by the running scenario's `this.attach`/`log`.
+  /// Drained per scenario by the BDD layer; cleared by `reset_world`.
+  attachments: Vec<ScriptAttachment>,
   default_timeout_ms: u64,
   world_ctor: Option<Persistent<Constructor<'static>>>,
   current_world: Option<Persistent<Object<'static>>>,
@@ -272,6 +289,83 @@ fn register_hook(kind: &str, args: &[Value<'_>]) -> rquickjs::Result<()> {
     });
   })
   .map_err(|e| rq(&e))
+}
+
+fn value_bytes(v: &Value<'_>) -> Option<Vec<u8>> {
+  if let Ok(ta) = TypedArray::<u8>::from_value(v.clone())
+    && let Some(b) = ta.as_bytes()
+  {
+    return Some(b.to_vec());
+  }
+  if let Some(obj) = v.as_object()
+    && let Some(buf) = ArrayBuffer::from_object(obj.clone())
+    && let Some(b) = buf.as_bytes()
+  {
+    return Some(b.to_vec());
+  }
+  None
+}
+
+/// `this.attach(data, mediaType?)` / `this.log(...)` adapter. Mirrors
+/// cucumber-js: a string attaches as `text/plain` (override via
+/// `mediaType`), a `Uint8Array`/`ArrayBuffer` as
+/// `application/octet-stream`, anything else JSON-encoded as
+/// `application/json`. `log` joins its args as
+/// `text/x.cucumber.log+plain`. Same `Rest`-derived single-`'js`
+/// pattern as `register_step`.
+fn register_attachment(args: &[Value<'_>], is_log: bool) -> rquickjs::Result<()> {
+  let ctx = ctx_of(args)?;
+  let media_arg = args.get(1).and_then(Value::as_string).and_then(|s| s.to_string().ok());
+
+  let (bytes, media): (Vec<u8>, String) = if is_log {
+    let text = args
+      .iter()
+      .map(|v| {
+        v.as_string().and_then(|s| s.to_string().ok()).unwrap_or_else(|| {
+          serde_from_js::<serde_json::Value>(&ctx, v.clone())
+            .map(|j| j.to_string())
+            .unwrap_or_default()
+        })
+      })
+      .collect::<Vec<_>>()
+      .join(" ");
+    (text.into_bytes(), "text/x.cucumber.log+plain".to_string())
+  } else {
+    let data = args
+      .first()
+      .cloned()
+      .unwrap_or_else(|| Value::new_undefined(ctx.clone()));
+    if let Some(s) = data.as_string() {
+      let s = s.to_string().map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
+      (s.into_bytes(), media_arg.unwrap_or_else(|| "text/plain".to_string()))
+    } else if let Some(b) = value_bytes(&data) {
+      (b, media_arg.unwrap_or_else(|| "application/octet-stream".to_string()))
+    } else {
+      let j: serde_json::Value = serde_from_js(&ctx, data).map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
+      (
+        serde_json::to_vec(&j).unwrap_or_default(),
+        media_arg.unwrap_or_else(|| "application/json".to_string()),
+      )
+    }
+  };
+
+  with_registry(&ctx, |reg| {
+    reg.attachments.push(ScriptAttachment {
+      media_type: media,
+      bytes,
+    });
+  })
+  .map_err(|e| rq(&e))
+}
+
+/// Drain the scenario's queued attachments (and clear the queue). The
+/// BDD layer calls this after each scenario and forwards them into the
+/// test result so the reporters surface them.
+pub async fn drain_attachments(actx: &AsyncContext) -> Result<Vec<ScriptAttachment>, ScriptError> {
+  async_with!(actx => |ctx| {
+    with_registry(&ctx, |reg| std::mem::take(&mut reg.attachments))
+  })
+  .await
 }
 
 /// Register one MCP tool from a manifest object + handler function.
@@ -631,13 +725,14 @@ pub async fn set_scenario_world(actx: &AsyncContext, world: &ScenarioWorld) -> R
       let params = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
       obj.set("parameters", params).map_err(|e| ScriptError::internal(e.to_string()))?;
     }
-    let noop = Function::new(ctx.clone(), |_: Rest<Value<'_>>| {}).map_err(|e| ScriptError::internal(e.to_string()))?;
-    if obj.get::<_, Value<'_>>("attach").map_or(true, |v| v.is_undefined()) {
-      obj.set("attach", noop.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
-    }
-    if obj.get::<_, Value<'_>>("log").map_or(true, |v| v.is_undefined()) {
-      obj.set("log", noop).map_err(|e| ScriptError::internal(e.to_string()))?;
-    }
+    // Native Cucumber `this.attach` / `this.log` — queue into the
+    // registry; the BDD layer drains them into the test result.
+    let attach = Function::new(ctx.clone(), |args: Rest<Value<'_>>| register_attachment(&args.0, false))
+      .map_err(|e| ScriptError::internal(e.to_string()))?;
+    let log = Function::new(ctx.clone(), |args: Rest<Value<'_>>| register_attachment(&args.0, true))
+      .map_err(|e| ScriptError::internal(e.to_string()))?;
+    obj.set("attach", attach).map_err(|e| ScriptError::internal(e.to_string()))?;
+    obj.set("log", log).map_err(|e| ScriptError::internal(e.to_string()))?;
 
     if let Some(page) = world.page {
       install_page_on(&ctx, &obj, page, route_ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
@@ -662,7 +757,10 @@ pub async fn set_scenario_world(actx: &AsyncContext, world: &ScenarioWorld) -> R
 /// scenario). The next [`set_scenario_world`] installs a new one.
 pub async fn reset_world(actx: &AsyncContext) -> Result<(), ScriptError> {
   async_with!(actx => |ctx| {
-    with_registry(&ctx, |reg| reg.current_world = None)
+    with_registry(&ctx, |reg| {
+      reg.current_world = None;
+      reg.attachments.clear();
+    })
   })
   .await
 }
