@@ -259,7 +259,16 @@ pub async fn run_bdd_with(
     translate::translate_features(&feature_set, registry, &config)
   } else {
     let cwd = std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."));
-    js::translate_features_js(&feature_set, &config, js_globs, cwd)
+    // Compile every step file to bytecode once, before workers spawn;
+    // per-worker sessions link bytecode (no re-parse, no re-read).
+    let compiled = match js::compile_step_files(&js_globs, &cwd).await {
+      Ok(c) => c,
+      Err(e) => {
+        eprintln!("step compile error: {e}");
+        return 1;
+      },
+    };
+    js::translate_features_js(&feature_set, &config, compiled, cwd)
   };
 
   if plan.total_tests == 0 {

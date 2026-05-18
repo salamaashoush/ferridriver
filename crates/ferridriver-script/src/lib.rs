@@ -50,8 +50,8 @@ pub mod vars;
 pub use bindings::{
   APIRequestContextJs, APIResponseJs, ArtifactsJs, BrowserContextJs, CollectedRegistry, KeyboardJs, LocatorJs, MouseJs,
   PageJs, PluginBinding, PluginCommandsJs, PluginToolBinding, ScenarioWorld, StepOutcome, collect_registry,
-  compile_plugin_bytecode, evaluate_module, install_plugins, invoke_hook, invoke_step, reset_world,
-  set_scenario_world,
+  compile_module, compile_plugin_bytecode, eval_module_bytecode, evaluate_module, install_plugins, invoke_hook,
+  invoke_step, reset_world, set_scenario_world,
 };
 pub use console::ConsoleCapture;
 pub use engine::{RunContext, RunOptions, ScriptEngine, ScriptEngineConfig, Session, SessionRun};
