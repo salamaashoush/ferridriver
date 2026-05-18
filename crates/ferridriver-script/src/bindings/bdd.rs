@@ -55,12 +55,17 @@ struct StepReg {
   pattern: String,
   is_regex: bool,
   func: Persistent<Function<'static>>,
+  /// Per-step `{ timeout }` (ms) from `Given(pat, { timeout }, fn)`.
+  /// `None` ⇒ the registry default. Enforced in [`invoke_step`].
+  timeout_ms: Option<u64>,
 }
 
 struct HookReg {
   kind: String,
   tags: Option<String>,
   func: Persistent<Function<'static>>,
+  /// Per-hook `{ timeout }` (ms). `None` ⇒ registry default.
+  timeout_ms: Option<u64>,
 }
 
 struct ParamTypeReg {
@@ -127,8 +132,24 @@ struct ExtensionRegistry {
   /// Drained per scenario by the BDD layer; cleared by `reset_world`.
   attachments: Vec<ScriptAttachment>,
   default_timeout_ms: u64,
+  /// `setDefinitionFunctionWrapper(fn)` — wraps every step body
+  /// (cross-cut: retry/trace/log). Applied in [`invoke_step`].
+  def_fn_wrapper: Option<Persistent<Function<'static>>>,
   world_ctor: Option<Persistent<Constructor<'static>>>,
   current_world: Option<Persistent<Object<'static>>>,
+}
+
+/// Read an optional `{ timeout }` (milliseconds) off an options object
+/// arg, mirroring cucumber-js `Given(pat, { timeout }, fn)` /
+/// `Before({ timeout }, fn)`.
+fn timeout_from_opts(args: &[Value<'_>]) -> Option<u64> {
+  args.iter().find_map(|v| {
+    let o = v.as_object()?;
+    if v.as_function().is_some() {
+      return None;
+    }
+    o.get::<_, f64>("timeout").ok().map(|ms| ms.max(0.0) as u64)
+  })
 }
 
 /// Context userdata holding the registry. Single-threaded VM ⇒
@@ -264,6 +285,7 @@ fn register_step(kind: StepKind, args: &[Value<'_>]) -> rquickjs::Result<()> {
     .rev()
     .find_map(as_function)
     .ok_or_else(|| rq(&ScriptError::internal(format!("step `{pat}` has no function body"))))?;
+  let timeout_ms = timeout_from_opts(&args[1..]);
   let saved = Persistent::save(&ctx, func);
   with_registry(&ctx, |reg| {
     reg.steps.push(StepReg {
@@ -271,6 +293,7 @@ fn register_step(kind: StepKind, args: &[Value<'_>]) -> rquickjs::Result<()> {
       pattern: pat,
       is_regex,
       func: saved,
+      timeout_ms,
     });
   })
   .map_err(|e| rq(&e))
@@ -298,12 +321,14 @@ fn register_hook(kind: &str, args: &[Value<'_>]) -> rquickjs::Result<()> {
       .ok_or_else(|| rq(&ScriptError::internal(format!("{kind} hook has no function body"))))?;
     (tags, f)
   };
+  let timeout_ms = timeout_from_opts(args);
   let saved = Persistent::save(&ctx, func);
   with_registry(&ctx, |reg| {
     reg.hooks.push(HookReg {
       kind: kind.to_string(),
       tags,
       func: saved,
+      timeout_ms,
     });
   })
   .map_err(|e| rq(&e))
@@ -551,6 +576,14 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     "setDefaultTimeout",
     Func::from(|ctx: Ctx<'_>, ms: f64| -> rquickjs::Result<()> {
       with_registry(&ctx, |reg| reg.default_timeout_ms = ms.max(0.0) as u64).map_err(|e| rq(&e))
+    }),
+  )?;
+  g.set(
+    "setDefinitionFunctionWrapper",
+    Func::from(|w: Function<'_>| -> rquickjs::Result<()> {
+      let ctx = w.ctx().clone();
+      let saved = Persistent::save(&ctx, w);
+      with_registry(&ctx, |reg| reg.def_fn_wrapper = Some(saved)).map_err(|e| rq(&e))
     }),
   )?;
   g.set(
@@ -840,15 +873,25 @@ pub async fn invoke_step(
   let source = source.to_string();
 
   async_with!(actx => |ctx| {
-    let (func, world) = with_registry(&ctx, |reg| {
+    let (func, world, wrapper, timeout_ms) = with_registry(&ctx, |reg| {
       let step = reg
         .steps
         .get(idx)
         .ok_or_else(|| ScriptError::internal(format!("step index {idx} out of range")))?;
-      Ok::<_, ScriptError>((step.func.clone(), reg.current_world.clone()))
+      let t = step.timeout_ms.or(Some(reg.default_timeout_ms)).filter(|&v| v > 0);
+      Ok::<_, ScriptError>((step.func.clone(), reg.current_world.clone(), reg.def_fn_wrapper.clone(), t))
     })??;
 
-    let func = func.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
+    let mut func = func.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
+    // `setDefinitionFunctionWrapper`: replace the step body with
+    // `wrapper(stepFn)` (cucumber-js cross-cut hook).
+    if let Some(w) = wrapper {
+      let w = w.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
+      func = w
+        .call::<_, Function<'_>>((func.clone(),))
+        .catch(&ctx)
+        .map_err(|e| caught_to_script_error(e, &source))?;
+    }
     let this = match world {
       Some(w) => w.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?,
       None => Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?,
@@ -905,7 +948,16 @@ pub async fn invoke_step(
       Ok(v) => v,
       Err(e) => return Err(caught_to_script_error(e, &source)),
     };
-    let resolved: Value<'_> = match mp.into_future::<Value<'_>>().await.catch(&ctx) {
+    // Per-step (or registry-default) timeout — JS steps had none before.
+    let fut = mp.into_future::<Value<'_>>();
+    let awaited = match timeout_ms {
+      Some(t) => match tokio::time::timeout(std::time::Duration::from_millis(t), fut).await {
+        Ok(r) => r,
+        Err(_) => return Err(ScriptError::timeout(t, t)),
+      },
+      None => fut.await,
+    };
+    let resolved: Value<'_> = match awaited.catch(&ctx) {
       Ok(v) => v,
       Err(e) => return Err(caught_to_script_error(e, &source)),
     };
@@ -929,12 +981,13 @@ pub async fn invoke_hook(
   let source = source.to_string();
   let arg = arg.cloned();
   async_with!(actx => |ctx| {
-    let (func, world) = with_registry(&ctx, |reg| {
+    let (func, world, timeout_ms) = with_registry(&ctx, |reg| {
       let hook = reg
         .hooks
         .get(idx)
         .ok_or_else(|| ScriptError::internal(format!("hook index {idx} out of range")))?;
-      Ok::<_, ScriptError>((hook.func.clone(), reg.current_world.clone()))
+      let t = hook.timeout_ms.or(Some(reg.default_timeout_ms)).filter(|&v| v > 0);
+      Ok::<_, ScriptError>((hook.func.clone(), reg.current_world.clone(), t))
     })??;
     let func = func.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
     let this = match world {
@@ -971,7 +1024,15 @@ pub async fn invoke_hook(
       Ok(v) => v,
       Err(e) => return Err(caught_to_script_error(e, &source)),
     };
-    if let Err(e) = mp.into_future::<Value<'_>>().await.catch(&ctx) {
+    let fut = mp.into_future::<Value<'_>>();
+    let awaited = match timeout_ms {
+      Some(t) => match tokio::time::timeout(std::time::Duration::from_millis(t), fut).await {
+        Ok(r) => r,
+        Err(_) => return Err(ScriptError::timeout(t, t)),
+      },
+      None => fut.await,
+    };
+    if let Err(e) = awaited.catch(&ctx) {
       return Err(caught_to_script_error(e, &source));
     }
     Ok(StepOutcome::Passed)
