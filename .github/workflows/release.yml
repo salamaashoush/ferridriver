@@ -74,9 +74,9 @@ jobs:
           - target: aarch64-apple-darwin
             os: macos-latest
             cross: false
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
-            cross: false
+          # No Windows CLI target: cdp-pipe (fd 3/4) + signal handling
+          # are unix-only. @ferridriver/node still ships a Windows NAPI
+          # binary (see build-napi). Windows CLI is a tracked follow-up.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -438,7 +438,12 @@ jobs:
   # ---------------------------------------------------------------------------
   publish-release:
     name: Publish release
-    needs: [build-cli, publish-npm, publish-crates]
+    # crates.io publish is decoupled: ferridriver-script depends on
+    # rolldown via a git rev, which `cargo publish` categorically
+    # rejects, so script/bdd/mcp/cli are unpublishable to crates.io
+    # until rolldown is vendored or released. The GitHub binary + npm
+    # release does not block on it (tracked follow-up).
+    needs: [build-cli, publish-npm]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
