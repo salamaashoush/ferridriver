@@ -2172,6 +2172,7 @@ dependencies = [
  "cucumber-expressions",
  "ferridriver",
  "ferridriver-bdd-macros",
+ "ferridriver-script",
  "ferridriver-test",
  "futures",
  "gherkin",

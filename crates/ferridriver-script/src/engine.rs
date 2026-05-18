@@ -292,7 +292,11 @@ impl Session {
         .map_err(|e| ScriptError::internal(format!("failed to install browser_type: {e}")))?;
 
       crate::bindings::install_plugins(&ctx, &plugins)
-        .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))
+        .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))?;
+
+      // BDD step-registry shim — same VM, same bindings as scripting.
+      crate::bindings::install_bdd(&ctx)
+        .map_err(|e| ScriptError::internal(format!("failed to install bdd shim: {e}")))
     })
     .await;
     install?;
@@ -308,6 +312,14 @@ impl Session {
       config,
       applied,
     })
+  }
+
+  /// The session's owning [`AsyncContext`]. The BDD core clones this to
+  /// drive registered JS step functions back over the async bridge
+  /// (same mechanism as `page.route` cross-task dispatch).
+  #[must_use]
+  pub fn async_context(&self) -> AsyncContext {
+    self.ctx.clone()
   }
 
   /// Push resource limits to the runtime, skipping any setter whose
@@ -709,7 +721,7 @@ fn value_to_json<'js>(_ctx: &Ctx<'js>, value: Value<'js>) -> Option<serde_json::
   rquickjs_serde::from_value(value).ok()
 }
 
-fn caught_to_script_error(caught: rquickjs::CaughtError<'_>, source: &str) -> ScriptError {
+pub(crate) fn caught_to_script_error(caught: rquickjs::CaughtError<'_>, source: &str) -> ScriptError {
   let (message, stack, line, column) = match caught {
     rquickjs::CaughtError::Exception(ex) => {
       let message = ex.message().unwrap_or_else(|| "exception".to_string());
