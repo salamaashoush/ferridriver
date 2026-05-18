@@ -233,6 +233,15 @@ pub async fn run_bdd_with(
   if overrides.bdd_language.is_some() {
     config.language = overrides.bdd_language.clone();
   }
+  if let Some(s) = overrides.world_parameters.as_deref() {
+    match serde_json::from_str::<serde_json::Value>(s) {
+      Ok(v) => config.world_parameters = v,
+      Err(e) => {
+        eprintln!("--world-parameters: invalid JSON: {e}");
+        return 1;
+      },
+    }
+  }
 
   let feature_set = match feature::FeatureSet::discover_and_parse(&config.features, &config.test_ignore) {
     Ok(fs) => fs,

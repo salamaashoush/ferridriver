@@ -83,6 +83,9 @@ pub struct JsBddSession {
   registry: Arc<StepRegistry>,
   hooks: Vec<(usize, String, Option<TagExpression>)>,
   bundle: Arc<CompiledBundle>,
+  /// Cucumber `--world-parameters` exposed to every scenario as
+  /// `this.parameters`.
+  world_parameters: serde_json::Value,
 }
 
 /// Discover step entry files for the given globs (relative globs are
@@ -233,14 +236,18 @@ impl JsBddSession {
   /// once + [`JsBddSession::load`] per worker.
   pub async fn from_globs(globs: &[String], cwd: &Path) -> anyhow::Result<Self> {
     let bundle = bundle_steps(globs, cwd).await?;
-    Self::load(bundle, cwd).await
+    Self::load(bundle, cwd, serde_json::Value::Null).await
   }
 
   /// Create a shared-engine session and link the precompiled bundled
   /// step module (one `Module::load`, no parse, no resolver — imports
   /// are inlined by rolldown). Builds the Rust step registry from what
   /// the module registered.
-  pub async fn load(bundle: Arc<CompiledBundle>, cwd: &Path) -> anyhow::Result<Self> {
+  pub async fn load(
+    bundle: Arc<CompiledBundle>,
+    cwd: &Path,
+    world_parameters: serde_json::Value,
+  ) -> anyhow::Result<Self> {
     let sandbox =
       Arc::new(PathSandbox::new(cwd).map_err(|e| anyhow::anyhow!("sandbox {}: {}", cwd.display(), e.message))?);
     let run_ctx = RunContext {
@@ -312,6 +319,7 @@ impl JsBddSession {
       registry: Arc::new(registry),
       hooks,
       bundle,
+      world_parameters,
     };
     session
       .run_hooks("BeforeAll", None, None)
@@ -363,6 +371,7 @@ impl JsBddSession {
       context: Some(Arc::clone(&fixtures.context)),
       request: Some(Arc::clone(&fixtures.request)),
       browser: Some(Arc::clone(&fixtures.browser)),
+      parameters: Some(self.world_parameters.clone()),
     };
 
     let _ = reset_world(&actx).await;
@@ -574,13 +583,16 @@ async fn worker_session(
   worker_index: u32,
   bundle: Arc<CompiledBundle>,
   cwd: Arc<PathBuf>,
+  world_parameters: serde_json::Value,
 ) -> Result<Arc<JsBddSession>, String> {
   let cache = WORKER_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
   let mut map = cache.lock().await;
   if let Some(s) = map.get(&worker_index) {
     return Ok(Arc::clone(s));
   }
-  let session = JsBddSession::load(bundle, &cwd).await.map_err(|e| e.to_string())?;
+  let session = JsBddSession::load(bundle, &cwd, world_parameters)
+    .await
+    .map_err(|e| e.to_string())?;
   let session = Arc::new(session);
   map.insert(worker_index, Arc::clone(&session));
   Ok(session)
@@ -637,12 +649,14 @@ pub fn translate_features_js(
       let bundle = Arc::clone(&bundle);
       let cwd = Arc::clone(&cwd);
       let browser_config = config.browser.clone();
+      let world_parameters = config.world_parameters.clone();
 
       let test_fn: TestFn = Arc::new(move |pool: FixturePool| {
         let scenario = scenario_clone.clone();
         let bundle = Arc::clone(&bundle);
         let cwd = Arc::clone(&cwd);
         let browser_config = browser_config.clone();
+        let world_parameters = world_parameters.clone();
         Box::pin(async move {
           let browser = pool
             .get("browser")
@@ -665,7 +679,7 @@ pub fn translate_features_js(
             .await
             .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
 
-          let session = worker_session(test_info.worker_index, bundle, cwd)
+          let session = worker_session(test_info.worker_index, bundle, cwd, world_parameters)
             .await
             .map_err(|e| TestFailure::from(format!("JS step load failed: {e}")))?;
 

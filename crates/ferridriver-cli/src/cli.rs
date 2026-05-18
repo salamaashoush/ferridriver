@@ -122,6 +122,11 @@ pub struct BddArgs {
   #[arg(long)]
   pub steps: Vec<String>,
 
+  /// Cucumber world parameters as a JSON object, exposed to every
+  /// scenario as `this.parameters`. Overrides `[test].worldParameters`.
+  #[arg(long)]
+  pub world_parameters: Option<String>,
+
   #[command(flatten)]
   pub browser: BrowserArgs,
 }

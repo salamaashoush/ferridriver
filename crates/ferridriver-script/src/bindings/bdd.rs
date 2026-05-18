@@ -763,6 +763,10 @@ pub struct ScenarioWorld {
   pub context: Option<Arc<ferridriver::context::ContextRef>>,
   pub request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
   pub browser: Option<Arc<ferridriver::Browser>>,
+  /// Cucumber `--world-parameters` (top-level config / CLI). Exposed as
+  /// `this.parameters` and passed to a `setWorldConstructor` ctor as
+  /// `{ parameters }`. `None`/`Null` ⇒ `{}`.
+  pub parameters: Option<serde_json::Value>,
 }
 
 /// Build the per-scenario World and make it the `this` steps run
@@ -774,9 +778,22 @@ pub async fn set_scenario_world(actx: &AsyncContext, world: &ScenarioWorld) -> R
   async_with!(actx => |ctx| {
     let ctor = with_registry(&ctx, |reg| reg.world_ctor.clone())?;
 
+    // `this.parameters` (cucumber `--world-parameters`). Built once;
+    // passed to a custom World ctor as `{ parameters }` and set on the
+    // instance regardless (cucumber-js always populates it).
+    let params_val: Value<'_> = match &world.parameters {
+      Some(v) if !v.is_null() => serde_to_js(&ctx, v).map_err(|e| ScriptError::internal(e.to_string()))?,
+      _ => Object::new(ctx.clone())
+        .map_err(|e| ScriptError::internal(e.to_string()))?
+        .into_value(),
+    };
+
     let obj: Object<'_> = if let Some(ctor) = ctor {
       let ctor = ctor.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
       let opts = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
+      opts
+        .set("parameters", params_val.clone())
+        .map_err(|e| ScriptError::internal(e.to_string()))?;
       ctor
         .construct::<_, Object<'_>>((opts,))
         .map_err(|e| ScriptError::internal(format!("World constructor: {e}")))?
@@ -784,10 +801,9 @@ pub async fn set_scenario_world(actx: &AsyncContext, world: &ScenarioWorld) -> R
       Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?
     };
 
-    if obj.get::<_, Value<'_>>("parameters").map_or(true, |v| v.is_undefined()) {
-      let params = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
-      obj.set("parameters", params).map_err(|e| ScriptError::internal(e.to_string()))?;
-    }
+    obj
+      .set("parameters", params_val)
+      .map_err(|e| ScriptError::internal(e.to_string()))?;
     // Native Cucumber `this.attach` / `this.log` — queue into the
     // registry; the BDD layer drains them into the test result.
     let attach = Function::new(ctx.clone(), |args: Rest<Value<'_>>| register_attachment(&args.0, false))

@@ -172,6 +172,11 @@ pub struct TestConfig {
   pub strict: bool,
   pub order: String,
   pub language: Option<String>,
+  /// Cucumber `--world-parameters`: JSON exposed to every scenario as
+  /// `this.parameters` (and to a `setWorldConstructor` ctor). `Null` ⇒
+  /// `{}`. CLI `--world-parameters` overrides this.
+  #[serde(default)]
+  pub world_parameters: serde_json::Value,
   pub profiles: BTreeMap<String, serde_json::Value>,
   #[serde(default)]
   pub has_bdd: bool,
@@ -584,6 +589,9 @@ pub struct CliOverrides {
   /// step definitions are bundled alongside `bdd_steps` so one extension
   /// can serve both the MCP server (`defineTool`) and the test runner.
   pub extensions: Vec<String>,
+  /// `--world-parameters <JSON>`: overrides `[test].worldParameters`;
+  /// parsed and exposed to scenarios as `this.parameters`.
+  pub world_parameters: Option<String>,
 }
 
 impl Default for TestConfig {
@@ -642,6 +650,7 @@ impl Default for TestConfig {
       strict: false,
       order: "defined".into(),
       language: None,
+      world_parameters: serde_json::Value::Null,
       profiles: BTreeMap::new(),
       has_bdd: false,
     }
