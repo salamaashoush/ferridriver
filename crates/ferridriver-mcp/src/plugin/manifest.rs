@@ -46,21 +46,42 @@ pub struct PluginManifest {
   pub expose_as_tool: bool,
 }
 
-/// Capability allow-list bundled with the manifest.
+/// Declarative capability manifest bundled with the plugin.
 ///
-/// Anything not declared here is denied at runtime. The whole point of the
-/// plugin sandbox is that escapes (shell, network) are opt-in and auditable
-/// from the manifest -- the handler source alone cannot grant itself
-/// new privileges.
+/// This is the plugin sandbox's opt-in authority list: each named
+/// capability is independently scoped and Rust-enforced at the binding
+/// boundary, so the handler source alone cannot grant itself a privilege
+/// it did not declare. Capabilities are additive and default to the
+/// least-privilege value, so an absent field is back-compatible.
+///
+/// Covered today:
+/// - **exec** (`commands`): named shell-command templates. Default-deny —
+///   a `commands.run(name)` for an undeclared `name` throws.
+/// - **net**: host allow-list for the handler's `request` HTTP client.
+///   Empty = unrestricted (opt-in: declaring any host switches that
+///   binding to default-deny). Scopes the `request` binding only;
+///   `page`/`context` browser navigation is a separate, deliberately
+///   ungated authority (an automation plugin must be able to navigate) —
+///   see `docs/plugin-architecture.md` for why `fs` is not a capability
+///   here (the handler context exposes no filesystem handle to gate).
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginAllow {
   /// Named CLI templates the handler may invoke via `commands.run(name, vars)`.
   /// Each template may reference handler-supplied vars as `${var}` placeholders.
   /// The plugin handler picks names -- runtime substitutes vars literally
-  /// after shell-escaping each value.
-  #[serde(default)]
+  /// after shell-escaping each value. `exec` is accepted as a synonym so
+  /// authors can spell the capability after its category.
+  #[serde(default, alias = "exec")]
   pub commands: HashMap<String, String>,
+
+  /// Host patterns the handler's `request` client may target. Each entry
+  /// is an exact host (`api.box.com`) or a leading-wildcard suffix
+  /// (`*.box.com`, which also matches the bare apex `box.com`). Empty
+  /// leaves `request` unrestricted (back-compat); a non-empty list flips
+  /// it to default-deny — any other host throws before the call is made.
+  #[serde(default)]
+  pub net: Vec<String>,
 }
 
 impl PluginManifest {

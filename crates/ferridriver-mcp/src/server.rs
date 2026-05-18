@@ -654,6 +654,7 @@ impl McpServer {
           .map(|t| ferridriver_script::PluginToolBinding {
             name: t.name.clone(),
             allowed_commands: t.allow.commands.clone(),
+            allowed_net: t.allow.net.clone(),
           })
           .collect(),
       })

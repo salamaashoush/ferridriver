@@ -75,6 +75,7 @@ fn bindings(compiled: &[Compiled]) -> Vec<PluginBinding> {
         .map(|n| PluginToolBinding {
           name: (*n).to_string(),
           allowed_commands: HashMap::new(),
+          allowed_net: Vec::new(),
         })
         .collect(),
     })
