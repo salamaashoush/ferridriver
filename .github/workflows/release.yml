@@ -83,6 +83,14 @@ jobs:
         with:
           targets: ${{ matrix.target }}
 
+      # rust-toolchain.toml pins nightly; the action's `targets:` only
+      # adds std to the *stable* toolchain it set up. Add the cross
+      # target to the pinned toolchain cargo actually uses (no-op when
+      # target == host; `cross` jobs build the target in a container).
+      - name: Add target to pinned toolchain
+        if: '!matrix.cross'
+        run: rustup target add ${{ matrix.target }}
+
       - name: Install system deps (Linux)
         if: runner.os == 'Linux' && !matrix.cross
         run: |
