@@ -25,36 +25,34 @@ use ferridriver_script::{
   compile_and_extract_plugins,
 };
 
-/// Four representative plugin files mirroring the box-craft bundle
-/// shapes: a single-export file, a `{ tools: [...] }` bundle, a bare
-/// array, and a single-tool bundle.
+/// Four representative extension files: a single tool, a multi-tool
+/// file, another multi-tool file, and a single-tool file — all via the
+/// native `defineTool` surface (no legacy `globalThis.exports`).
 const FILES: &[(&str, &str)] = &[
   (
     "login.js",
-    "globalThis.exports = { name: 'box.login', description: 'login', \
+    "defineTool({ name: 'box.login', description: 'login', \
        inputSchema: { type: 'object' }, allow: { commands: { resolveUser: 'true' } }, \
-       exposeAsTool: true, async handler({ args }) { return { ok: true, user: args && args.user }; } };",
+       exposeAsTool: true, async handler({ args }) { return { ok: true, user: args && args.user }; } });",
   ),
   (
     "core.js",
-    "const V = 'yes';\nglobalThis.exports = { tools: [\
-       { name: 'box.noop', description: 'noop', exposeAsTool: true, async handler() { return null; } },\
-       { name: 'box.setFeatureFlip', description: 'ff', exposeAsTool: true, \
-         async handler({ args }) { \
-           const flags = Array.isArray(args.flag) ? args.flag : [args.flag]; \
-           const cookies = flags.map((f) => ({ name: 'ff_' + f, value: V, domain: '.box.com', path: '/' })); \
-           return { flags, value: V, cookies: JSON.parse(JSON.stringify(cookies)) }; } } ] };",
+    "const V = 'yes';\n\
+     defineTool({ name: 'box.noop', description: 'noop', exposeAsTool: true, async handler() { return null; } });\n\
+     defineTool({ name: 'box.setFeatureFlip', description: 'ff', exposeAsTool: true, \
+       async handler({ args }) { \
+         const flags = Array.isArray(args.flag) ? args.flag : [args.flag]; \
+         const cookies = flags.map((f) => ({ name: 'ff_' + f, value: V, domain: '.box.com', path: '/' })); \
+         return { flags, value: V, cookies: JSON.parse(JSON.stringify(cookies)) }; } });",
   ),
   (
     "ui.js",
-    "globalThis.exports = [\
-       { name: 'box.click', description: 'click', exposeAsTool: true, async handler() { return 1; } },\
-       { name: 'box.type', description: 'type', exposeAsTool: true, async handler() { return 2; } } ];",
+    "defineTool({ name: 'box.click', description: 'click', exposeAsTool: true, async handler() { return 1; } });\n\
+     defineTool({ name: 'box.type', description: 'type', exposeAsTool: true, async handler() { return 2; } });",
   ),
   (
     "sign.js",
-    "globalThis.exports = { tools: [\
-       { name: 'box.sign', description: 'sign', exposeAsTool: true, async handler() { return 'signed'; } } ] };",
+    "defineTool({ name: 'box.sign', description: 'sign', exposeAsTool: true, async handler() { return 'signed'; } });",
   ),
 ];
 

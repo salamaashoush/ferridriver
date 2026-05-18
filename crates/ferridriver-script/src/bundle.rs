@@ -156,12 +156,11 @@ impl CompiledBundle {
 /// runtime per file.
 ///
 /// The bytecode is pure rolldown output — no appended epilogue, no
-/// transfer global. Evaluating it registers the file's tools into the
-/// Rust `ExtensionRegistry` (native `defineTool`, or the legacy
-/// `globalThis.exports` shapes via `ingest_exports`). `manifests_json`
-/// is read straight off that registry — no JS extraction expression.
-/// `index` is the file's position in the returned (file-order,
-/// contiguous over successes) vec.
+/// transfer global. Evaluating it runs the file's top-level
+/// `defineTool(...)` calls, registering into the Rust
+/// `ExtensionRegistry`. `manifests_json` is read straight off that
+/// registry — no JS extraction expression. `index` is the file's
+/// position in the returned (file-order, contiguous over successes) vec.
 pub struct CompiledPlugin {
   pub path: PathBuf,
   pub index: usize,
@@ -394,10 +393,8 @@ async fn compile_extract_one(
       .catch(&ctx)
       .map_err(|e| caught_to_script_error(e, &label))?;
 
-    // Legacy `globalThis.exports` shapes -> registry (native Object
-    // API). `defineTool` files already registered during eval.
-    crate::bindings::ingest_exports(&ctx)?;
-
+    // Tools registered via the file's top-level `defineTool(...)` calls
+    // during eval — slice off the ones THIS file added.
     let all = crate::bindings::tools_snapshot(&ctx)?;
     let slice = all.get(before..).unwrap_or(&[]);
     let manifests_json =

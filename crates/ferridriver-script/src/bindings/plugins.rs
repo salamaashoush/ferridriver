@@ -1,12 +1,11 @@
 //! Native plugin surface.
 //!
-//! A plugin file is rolldown-bundled to `QuickJS` bytecode once at
-//! startup. Loading + evaluating that bytecode in a session registers
-//! its tools into the shared Rust [`ExtensionRegistry`] — either via the
-//! native `defineTool(manifest, handler)` contribution point or, for the
-//! three legacy `globalThis.exports` shapes, via the Rust-side
-//! [`crate::bindings::ingest_exports`] which reads the export object
-//! through the native Object API.
+//! A plugin/extension file is rolldown-bundled to `QuickJS` bytecode
+//! once at startup. Loading + evaluating that bytecode in a session runs
+//! its top-level `defineTool(...)` (and any `Given/When/Then`) calls,
+//! registering directly into the shared Rust [`ExtensionRegistry`].
+//! `defineTool` is the only tool-registration surface — no
+//! `globalThis.exports`, no legacy shapes.
 //!
 //! There is **no synthesized JS and no `globalThis.__*`**: the
 //! `plugins.<name>` callable is a native Rust closure that restores the
@@ -25,7 +24,7 @@ use rquickjs::function::{Func, Opt};
 use rquickjs::{Ctx, IntoJs, JsLifetime, Module, Object, Value, class::Class, class::Trace};
 
 use super::api_request::APIRequestContextJs;
-use super::bdd::{ingest_exports, tool_dispatch, tool_names};
+use super::bdd::{tool_dispatch, tool_names};
 use crate::bindings::convert::{serde_from_js, serde_to_js};
 use crate::error::ScriptError;
 
@@ -131,10 +130,10 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
     // persisted — the precondition `Module::load` documents.
     #[allow(unsafe_code)]
     let module = unsafe { Module::load(ctx.clone(), &file.bytecode) }?;
+    // Evaluating the module runs its top-level `defineTool(...)` /
+    // `Given(...)` calls, registering directly into the extension
+    // registry. No `globalThis.exports`, no post-eval ingest.
     let (_evaluated, _promise) = module.eval()?;
-    // Legacy `globalThis.exports` shapes -> registry (native Object API,
-    // no transfer global). A `defineTool` file set no exports: no-op.
-    ingest_exports(ctx).map_err(|e| rq(&e))?;
   }
 
   let names = tool_names(ctx).map_err(|e| rq(&e))?;
