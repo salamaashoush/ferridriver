@@ -138,12 +138,10 @@ pub fn install_page_on<'js>(
 ) -> rquickjs::Result<()> {
   let js_page = Class::instance(ctx.clone(), PageJs::new_with_async_ctx(page, async_ctx))?;
   target.set("page", js_page)?;
-  // Per-page route handler registry (`Map<id, fn>`) used by
-  // `page.route(matcher, fn)` to look up callbacks from cross-task
-  // dispatch. Always lives on `globalThis` (route dispatch re-enters
-  // the context and looks it up there) regardless of the binding
-  // target. Idempotent `||=`: never wipes an existing registry.
-  ctx.eval::<(), _>(b"globalThis.__fdRoutes ||= new Map(); globalThis.__fdRoutePreds ||= new Map();".as_slice())?;
+  // Native route-handler registry (context userdata, keyed by id) used
+  // by `page.route(matcher, fn)` cross-task dispatch. Idempotent;
+  // independent of the binding target.
+  page::ensure_route_registry(ctx);
   Ok(())
 }
 

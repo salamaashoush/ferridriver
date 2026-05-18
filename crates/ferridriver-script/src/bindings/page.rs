@@ -202,6 +202,48 @@ fn parse_page_close_options<'js>(
 
 /// JS-visible wrapper around [`ferridriver::Page`].
 ///
+/// Native route-handler registry: `page.route(matcher, fn)` keeps the JS
+/// callback (and an optional URL predicate) as `Persistent` functions in
+/// context userdata, keyed by the registration id. The cross-task
+/// dispatch bridge restores them by id and the `unroute(fn)` path drops
+/// them by `===` identity — no `globalThis.__fd*` Map, exactly the
+/// `Persistent`/userdata pattern the extension registry uses.
+///
+/// Single-threaded VM ⇒ `RefCell`, never `Arc`/`Mutex` (same rationale
+/// as `BddUserData`).
+#[derive(Default)]
+pub(crate) struct RouteRegistry {
+  handlers: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
+  preds: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
+}
+
+pub(crate) struct RouteRegistryUd(std::cell::RefCell<RouteRegistry>);
+
+// SAFETY: holds only `'static` data (`Persistent<…>` handles), so
+// re-stating the unused `'js` lifetime is sound — identical rationale to
+// `BddUserData` / `SessionAsyncCtx`.
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for RouteRegistryUd {
+  type Changed<'to> = RouteRegistryUd;
+}
+
+/// Ensure the route registry userdata exists on this context. Idempotent;
+/// called at `Session::create` and defensively from `page.route`.
+pub(crate) fn ensure_route_registry(ctx: &rquickjs::Ctx<'_>) {
+  if ctx.userdata::<RouteRegistryUd>().is_none() {
+    let _ = ctx.store_userdata(RouteRegistryUd(std::cell::RefCell::new(RouteRegistry::default())));
+  }
+}
+
+fn with_route_registry<R>(ctx: &rquickjs::Ctx<'_>, f: impl FnOnce(&mut RouteRegistry) -> R) -> rquickjs::Result<R> {
+  ensure_route_registry(ctx);
+  let ud = ctx
+    .userdata::<RouteRegistryUd>()
+    .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route registry missing".to_string()))?;
+  let mut reg = ud.0.borrow_mut();
+  Ok(f(&mut reg))
+}
+
 /// Held as `Arc<Page>` so the same page can be shared with the MCP session
 /// while the script runs; dropping the wrapper does not close the page.
 #[derive(JsLifetime, Trace)]
@@ -220,12 +262,13 @@ pub struct PageJs {
   #[qjs(skip_trace)]
   async_ctx: Option<rquickjs::AsyncContext>,
   /// Per-page route registration counter. Each `page.route(matcher, fn)`
-  /// gets a unique numeric ID stored in the JS-side `globalThis.__fdRoutes`
-  /// `Map`; the Rust handler dispatches by ID via the AsyncContext.
+  /// gets a unique numeric ID; the handler/predicate are stored in the
+  /// native `RouteRegistry` userdata under that ID and the Rust handler
+  /// dispatches by ID via the AsyncContext.
   #[qjs(skip_trace)]
   next_route_id: Arc<AtomicU64>,
   /// Core `UrlMatcher` registered for each function-predicate `page.route`,
-  /// keyed by the same id as the JS-side `__fdRoutes` / `__fdRoutePreds`
+  /// keyed by the same id as the native `RouteRegistry` handler/predicate
   /// entries. A predicate route registers an always-true matcher whose
   /// `Arc` identity lets `unroute(fn)` remove exactly that registration
   /// (core compares `UrlMatcher::Predicate` by `Arc::ptr_eq`). Shared so
@@ -1038,8 +1081,8 @@ impl PageJs {
   ///
   /// Cross-task dispatch: the Rust route handler runs inside the
   /// backend's network listener (a separate tokio task from the
-  /// script's JS context). The handler stashes the JS callback in a
-  /// per-page `globalThis.__fdRoutes` `Map` keyed by ID at registration
+  /// script's JS context). The handler stashes the JS callback in the
+  /// native `RouteRegistry` userdata keyed by ID at registration
   /// time; when a request matches, the handler spawns a task that
   /// `async_with`s back into the script's `AsyncContext`, looks up the
   /// callback by ID, and invokes it with a fresh `RouteJs` wrapper.
@@ -1060,9 +1103,8 @@ impl PageJs {
       )
     })?;
     let id = self.next_route_id.fetch_add(1, Ordering::Relaxed);
-    let id_key = id.to_string();
-    let registry: rquickjs::Object<'js> = ctx.globals().get("__fdRoutes")?;
-    registry.set(&id_key, handler)?;
+    let saved_handler = rquickjs::Persistent::save(&ctx, handler);
+    with_route_registry(&ctx, |r| r.handlers.insert(id, saved_handler))?;
 
     // A JS predicate is `!Send` and core matches on the CDP recv task,
     // so it can't ride `UrlMatcher::Predicate`. Register an always-true
@@ -1071,8 +1113,8 @@ impl PageJs {
     // dispatch bridge and continue the request unmodified on falsy.
     let has_predicate = url.as_function().is_some();
     let matcher = if let Some(pred) = url.as_function() {
-      let preds: rquickjs::Object<'js> = ctx.globals().get("__fdRoutePreds")?;
-      preds.set(&id_key, pred.clone())?;
+      let saved_pred = rquickjs::Persistent::save(&ctx, pred.clone());
+      with_route_registry(&ctx, |r| r.preds.insert(id, saved_pred))?;
       let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
       self
         .route_matchers
@@ -1096,17 +1138,18 @@ impl PageJs {
     // "unroute all" on VM discard — tracked, not yet implemented.
     let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
       let async_ctx = async_ctx.clone();
-      let id_key = id.to_string();
       // Cross-task dispatch: spawn a tokio task that grabs the
-      // AsyncContext lock and calls the JS callback by ID. Errors are
-      // swallowed because the route's own `Drop` (fail-open continue)
-      // covers the case where dispatch can't reach JS.
+      // AsyncContext lock and calls the JS callback (restored from the
+      // native route registry by id). Errors are swallowed because the
+      // route's own `Drop` (fail-open continue) covers the case where
+      // dispatch can't reach JS.
       tokio::spawn(async move {
         use rquickjs::class::Class;
         let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
           if has_predicate {
-            let preds: rquickjs::Object<'_> = ctx.globals().get("__fdRoutePreds")?;
-            let pred: rquickjs::Function<'_> = preds.get(id_key.as_str())?;
+            let pred = with_route_registry(&ctx, |r| r.preds.get(&id).cloned())?
+              .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route predicate gone".to_string()))?
+              .restore(&ctx)?;
             let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
             let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
             if !call_predicate_truthy(&pred, url_obj, &ctx).await? {
@@ -1114,8 +1157,9 @@ impl PageJs {
               return Ok(());
             }
           }
-          let registry: rquickjs::Object<'_> = ctx.globals().get("__fdRoutes")?;
-          let f: rquickjs::Function<'_> = registry.get(id_key.as_str())?;
+          let f = with_route_registry(&ctx, |r| r.handlers.get(&id).cloned())?
+            .ok_or_else(|| rquickjs::Error::new_from_js_message("page.route", "Error", "route handler gone".to_string()))?
+            .restore(&ctx)?;
           let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
           let _: rquickjs::Value<'_> = f.call((route_class,))?;
           Ok(())
@@ -1134,19 +1178,18 @@ impl PageJs {
   #[qjs(rename = "unroute")]
   pub async fn unroute<'js>(&self, ctx: rquickjs::Ctx<'js>, url: rquickjs::Value<'js>) -> rquickjs::Result<()> {
     if let Some(pred) = url.as_function() {
-      let preds: rquickjs::Object<'js> = ctx.globals().get("__fdRoutePreds")?;
-      let registry: rquickjs::Object<'js> = ctx.globals().get("__fdRoutes")?;
       // Find every id whose stored predicate is identical (===) to the
-      // passed function, then drop its core registration + JS entries.
+      // passed function, then drop its core registration + registry
+      // entries. Restoring each saved predicate yields a handle to the
+      // same underlying object, so `Value` `PartialEq` (tag + pointer)
+      // is still strict `===` identity.
+      let saved: Vec<(u64, rquickjs::Persistent<rquickjs::Function<'static>>)> =
+        with_route_registry(&ctx, |r| r.preds.iter().map(|(k, v)| (*k, v.clone())).collect())?;
       let mut victims: Vec<u64> = Vec::new();
-      for entry in preds.props::<String, rquickjs::Function<'js>>() {
-        let (key, stored) = entry?;
-        // `Value`'s `PartialEq` compares the raw JS reference (tag +
-        // pointer bits) — strict `===` identity for function objects.
+      for (id, sp) in saved {
+        let stored = sp.restore(&ctx)?;
         if stored.as_value() == pred.as_value() {
-          if let Ok(id) = key.parse::<u64>() {
-            victims.push(id);
-          }
+          victims.push(id);
         }
       }
       for id in victims {
@@ -1158,9 +1201,10 @@ impl PageJs {
         if let Some(m) = m {
           self.inner.unroute(&m).await.into_js()?;
         }
-        let id_key = id.to_string();
-        let _ = preds.remove(&id_key);
-        let _ = registry.remove(&id_key);
+        with_route_registry(&ctx, |r| {
+          r.preds.remove(&id);
+          r.handlers.remove(&id);
+        })?;
       }
       return Ok(());
     }
