@@ -43,6 +43,7 @@ async fn run_demo_plugin_twice() {
     browser: None,
     plugins: vec![binding],
     trusted_modules: false,
+    host: ferridriver_script::ExtensionHost::Script,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -112,6 +113,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
     browser: None,
     plugins: vec![PluginBinding { bytecode: cp.bytecode }],
     trusted_modules: false,
+    host: ferridriver_script::ExtensionHost::Script,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -160,6 +162,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
     browser: None,
     plugins: vec![PluginBinding { bytecode: cp.bytecode }],
     trusted_modules: false,
+    host: ferridriver_script::ExtensionHost::Script,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -206,6 +209,69 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn extension_branches_on_ferridriver_host_flag() {
+  // One extension file, two contributions gated on the native
+  // `ferridriver.host` flag: a tool only under MCP, a step only under
+  // BDD. Under host=Mcp the tool registers (callable); under host=Bdd
+  // it does NOT (the `plugins.<name>` binding is absent).
+  const EXT: &str = "if (ferridriver.host === 'mcp') { \
+      defineTool({ name: 'mcpOnly', handler: async () => 'tool-ran' }); \
+    } \
+    if (ferridriver.host === 'bdd') { Given('a step', () => {}); }";
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("ext.js");
+  std::fs::write(&path, EXT).expect("write ext");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one compiled");
+
+  let mk = |host| {
+    let sb = tempfile::tempdir().expect("tempdir");
+    let ctx = RunContext {
+      vars: Arc::new(InMemoryVars::new()),
+      sandbox: Arc::new(PathSandbox::new(sb.path()).expect("sandbox")),
+      artifacts: None,
+      page: None,
+      browser_context: None,
+      request: None,
+      browser: None,
+      plugins: vec![PluginBinding {
+        bytecode: cp.bytecode.clone(),
+      }],
+      trusted_modules: false,
+      host,
+    };
+    (sb, ctx)
+  };
+
+  // host = Mcp -> the tool registered and is callable.
+  let (_sb1, ctx) = mk(ferridriver_script::ExtensionHost::Mcp);
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute("return await plugins['mcpOnly']({});", &[], RunOptions::default(), &ctx)
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("tool-ran")),
+    Outcome::Error { error } => panic!("mcp host should expose the tool: {error:?}"),
+  }
+
+  // host = Bdd -> the tool was NOT registered; the binding is absent.
+  let (_sb2, ctx) = mk(ferridriver_script::ExtensionHost::Bdd);
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+  let r = session
+    .execute("return typeof plugins['mcpOnly'];", &[], RunOptions::default(), &ctx)
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("undefined")),
+    Outcome::Error { error } => panic!("bdd host lookup should be undefined, not error: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn plugin_bytecode_path_installs_and_persists() {
   // Exercises the production path: rolldown-bundled plugin compiled once
   // to bytecode, `Module::load`ed into the session VM, handler state
@@ -226,6 +292,7 @@ fn make_ctx() -> (tempfile::TempDir, RunContext) {
     browser: None,
     plugins: Vec::new(),
     trusted_modules: false,
+    host: ferridriver_script::ExtensionHost::Script,
   };
   (tmp, ctx)
 }

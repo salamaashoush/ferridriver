@@ -358,6 +358,20 @@ async fn compile_extract_one(
     // shared extraction context installs it once for the whole batch.
     crate::bindings::install_bdd(&ctx)
       .map_err(|e| ScriptError::internal(format!("install extension registry: {e}")))?;
+    // Manifest extraction is the MCP tool path: expose
+    // `ferridriver.host = 'mcp'` so an extension's host-gated
+    // `defineTool` runs and its manifest is captured (mirrors what the
+    // mcp session does).
+    {
+      let fd = rquickjs::Object::new(ctx.clone())
+        .map_err(|e| ScriptError::internal(format!("ferridriver global: {e}")))?;
+      fd.set("host", "mcp")
+        .map_err(|e| ScriptError::internal(format!("ferridriver.host: {e}")))?;
+      ctx
+        .globals()
+        .set("ferridriver", fd)
+        .map_err(|e| ScriptError::internal(format!("install ferridriver global: {e}")))?;
+    }
 
     // Bundled module has no remaining imports — `declare` (parse only)
     // needs no resolver; mirrors `bundle_and_compile`.

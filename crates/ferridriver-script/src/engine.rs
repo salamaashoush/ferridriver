@@ -89,6 +89,33 @@ pub struct RunOptions {
   pub gc_threshold: Option<usize>,
 }
 
+/// Which host is running the extension/registry. Exposed to JS as the
+/// native global `ferridriver.host` ("mcp" | "bdd" | "script") so one
+/// extension file can branch its contributions — e.g. only `defineTool`
+/// under MCP, only `Given/When/Then` under the test runner — without any
+/// runtime cost (a single string set once per session).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ExtensionHost {
+  /// MCP server (`ferridriver mcp`) — consumes `defineTool` tools.
+  Mcp,
+  /// BDD test runner (`ferridriver bdd`) — consumes step/hook defs.
+  Bdd,
+  /// Ad-hoc script (`ferridriver run` / `run_script`).
+  #[default]
+  Script,
+}
+
+impl ExtensionHost {
+  #[must_use]
+  pub fn as_str(self) -> &'static str {
+    match self {
+      Self::Mcp => "mcp",
+      Self::Bdd => "bdd",
+      Self::Script => "script",
+    }
+  }
+}
+
 /// Per-call execution context holding session-level state the script reaches
 /// via globals (`vars`, `fs`, `artifacts`, and the optional browser bindings
 /// `page` / `context` / `request`). A `None` entry skips installation of
@@ -118,6 +145,9 @@ pub struct RunContext {
   /// step files can `import './helpers.js'` from anywhere on disk. The
   /// MCP / `run_script` path leaves this `false` and stays sandboxed.
   pub trusted_modules: bool,
+  /// Which host is driving this session — surfaced to JS as
+  /// `ferridriver.host`. Defaults to [`ExtensionHost::Script`].
+  pub host: ExtensionHost,
 }
 
 /// The session's owning [`AsyncContext`], stashed as rquickjs userdata
@@ -271,6 +301,7 @@ impl Session {
     let vars = context.vars.clone();
     let sandbox = context.sandbox.clone();
     let artifacts = context.artifacts.clone();
+    let host = context.host;
     let ud_ctx = ctx.clone();
     let install: Result<(), ScriptError> = async_with!(ctx => |ctx| {
       // Stash the session's AsyncContext so script-minted pages can
@@ -304,11 +335,21 @@ impl Session {
 
       // The unified extension registry (userdata) + native contribution
       // points (`Given`/`When`/`Then`/`defineTool`/...). Must precede
-      // `install_plugins`: evaluating a plugin's bytecode registers its
-      // tools through this surface (native `defineTool` or the legacy
-      // `globalThis.exports` ingest), and the registry must already exist.
+      // `install_plugins`: evaluating an extension's bytecode registers
+      // its tools/steps through this native surface (`defineTool` /
+      // `Given`...), so the registry must already exist.
       crate::bindings::install_bdd(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to install extension registry: {e}")))?;
+
+      // `ferridriver.host` — the native context flag an extension reads
+      // to branch between MCP and the test runner. One string, set once.
+      let fd = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(format!("ferridriver global: {e}")))?;
+      fd.set("host", host.as_str())
+        .map_err(|e| ScriptError::internal(format!("ferridriver.host: {e}")))?;
+      ctx
+        .globals()
+        .set("ferridriver", fd)
+        .map_err(|e| ScriptError::internal(format!("install ferridriver global: {e}")))?;
 
       crate::bindings::install_plugins(&ctx, &plugins)
         .map_err(|e| ScriptError::internal(format!("failed to install plugins: {e}")))

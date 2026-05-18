@@ -117,22 +117,80 @@ pub fn discover_step_files(globs: &[String], cwd: &Path) -> Vec<PathBuf> {
   files
 }
 
+/// Discover extension entry files. Each path is a single
+/// `.js`/`.mjs`/`.ts`/`.mts` file or a directory scanned shallowly for
+/// those. Extensions register `defineTool` tools (consumed by the MCP
+/// server) and/or `Given/When/Then` steps (consumed here); bundling them
+/// with the step files lets one extension serve both hosts.
+pub fn discover_extension_files(paths: &[String], cwd: &Path) -> Vec<PathBuf> {
+  let is_ext = |p: &Path| {
+    matches!(
+      p.extension().and_then(|e| e.to_str()),
+      Some("js" | "mjs" | "ts" | "mts")
+    )
+  };
+  let mut files = Vec::new();
+  for raw in paths {
+    let p = if Path::new(raw).is_absolute() {
+      PathBuf::from(raw)
+    } else {
+      cwd.join(raw)
+    };
+    match std::fs::metadata(&p) {
+      Ok(m) if m.is_file() => files.push(p),
+      Ok(m) if m.is_dir() => {
+        if let Ok(rd) = std::fs::read_dir(&p) {
+          for e in rd.flatten() {
+            let ep = e.path();
+            if ep.is_file() && is_ext(&ep) {
+              files.push(ep);
+            }
+          }
+        }
+      },
+      _ => {},
+    }
+  }
+  files.sort();
+  files.dedup();
+  files
+}
+
 /// Discover the step entry files and rolldown-bundle + tree-shake +
 /// transpile them (plus `node_modules` / shared utils) into one module
 /// compiled to bytecode, once, before workers spawn.
 pub async fn bundle_steps(globs: &[String], cwd: &Path) -> anyhow::Result<Arc<CompiledBundle>> {
-  let files = discover_step_files(globs, cwd);
+  bundle_steps_with(globs, &[], cwd).await
+}
+
+/// Like [`bundle_steps`] but also bundles the configured `extensions`
+/// (top-level config) into the same module, so an extension's BDD steps
+/// are available to the test runner exactly like a step file's.
+pub async fn bundle_steps_with(
+  globs: &[String],
+  extensions: &[String],
+  cwd: &Path,
+) -> anyhow::Result<Arc<CompiledBundle>> {
+  let mut files = discover_step_files(globs, cwd);
+  files.extend(discover_extension_files(extensions, cwd));
+  files.sort();
+  files.dedup();
   if files.is_empty() {
     let pats: Vec<&str> = if globs.is_empty() {
       DEFAULT_STEP_GLOBS.to_vec()
     } else {
       globs.iter().map(String::as_str).collect()
     };
-    anyhow::bail!("no step files found (globs: {:?}, cwd: {})", pats, cwd.display());
+    anyhow::bail!(
+      "no step or extension files found (globs: {:?}, extensions: {:?}, cwd: {})",
+      pats,
+      extensions,
+      cwd.display()
+    );
   }
   let bundle = bundle_and_compile(&files, cwd)
     .await
-    .map_err(|e| anyhow::anyhow!("bundle step files: {}", e.message))?;
+    .map_err(|e| anyhow::anyhow!("bundle step/extension files: {}", e.message))?;
   Ok(Arc::new(bundle))
 }
 
@@ -167,6 +225,7 @@ impl JsBddSession {
       browser: None,
       plugins: Vec::new(),
       trusted_modules: false,
+      host: ferridriver_script::ExtensionHost::Bdd,
     };
 
     let session = Session::create(ScriptEngineConfig::default(), &run_ctx)

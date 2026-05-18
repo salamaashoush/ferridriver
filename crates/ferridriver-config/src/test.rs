@@ -580,6 +580,10 @@ pub struct CliOverrides {
   pub bdd_language: Option<String>,
   /// JavaScript step-definition file globs (overrides `[test].steps`).
   pub bdd_steps: Vec<String>,
+  /// Top-level `extensions` paths (files or dirs). Their `Given/When/Then`
+  /// step definitions are bundled alongside `bdd_steps` so one extension
+  /// can serve both the MCP server (`defineTool`) and the test runner.
+  pub extensions: Vec<String>,
 }
 
 impl Default for TestConfig {
