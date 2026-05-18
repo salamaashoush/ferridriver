@@ -469,49 +469,27 @@ impl McpServer {
       return;
     }
 
-    let mut loaded = Vec::new();
+    // Discover every file across all configured roots, then bundle +
+    // compile + extract the whole set in ONE batch runtime (rolldown ->
+    // QuickJS bytecode; TypeScript and plugin-local imports resolved).
+    let mut files = Vec::new();
     for root in paths {
-      let files = match crate::plugin::loader::discover(&root) {
-        Ok(v) => v,
-        Err(e) => {
-          tracing::warn!(path = %root.display(), error = %e, "plugin discovery failed; skipping path");
-          continue;
-        },
-      };
-
-      for file in files {
-        match crate::plugin::load_plugin(&file, &self.script_engine).await {
-          Ok(plugin) => {
-            let tool_names: Vec<&str> = plugin.tools.iter().map(|t| t.name.as_str()).collect();
-            tracing::info!(
-              path = %plugin.path.display(),
-              tools = ?tool_names,
-              "loaded plugin file"
-            );
-            loaded.push(plugin);
-          },
-          Err(e) => {
-            tracing::warn!(path = %file.display(), error = %e, "plugin load failed; skipping");
-          },
-        }
+      match crate::plugin::discover(&root) {
+        Ok(v) => files.extend(v),
+        Err(e) => tracing::warn!(path = %root.display(), error = %e, "plugin discovery failed; skipping path"),
       }
     }
+    if files.is_empty() {
+      return;
+    }
 
-    // Pre-compile each file's wrapper to QuickJS bytecode ONCE, now that
-    // the registry index (file position) is fixed. Every session VM then
-    // loads bytecode instead of parsing source. A compile failure is
-    // soft: the file keeps `bytecode: None` and the session VM falls
-    // back to evaluating `source`.
-    for (idx, lp) in loaded.iter_mut().enumerate() {
-      let module_name = format!("__ferri_plugin_{idx}");
-      match ferridriver_script::compile_plugin_bytecode(idx, &lp.source, &module_name).await {
-        Ok(bytes) => lp.bytecode = Some(Arc::from(bytes)),
-        Err(e) => tracing::warn!(
-          path = %lp.path.display(),
-          error = %e.message,
-          "plugin bytecode precompile failed; falling back to source eval"
-        ),
-      }
+    let (loaded, errors) = crate::plugin::load_all(&files).await;
+    for e in errors {
+      tracing::warn!(error = %e, "plugin load failed; skipping");
+    }
+    for lp in &loaded {
+      let tool_names: Vec<&str> = lp.tools.iter().map(|t| t.name.as_str()).collect();
+      tracing::info!(path = %lp.path.display(), tools = ?tool_names, "loaded plugin file");
     }
 
     self.plugins = crate::plugin::PluginRegistry::new(loaded);
@@ -669,7 +647,6 @@ impl McpServer {
       .files()
       .iter()
       .map(|f| ferridriver_script::PluginBinding {
-        source: f.source.clone(),
         bytecode: f.bytecode.clone(),
         tools: f
           .tools

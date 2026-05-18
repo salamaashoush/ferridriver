@@ -51,9 +51,11 @@ pub mod vars;
 pub use bindings::{
   APIRequestContextJs, APIResponseJs, ArtifactsJs, BrowserContextJs, CollectedRegistry, JsArg, KeyboardJs, LocatorJs,
   MouseJs, PageJs, PluginBinding, PluginCommandsJs, PluginToolBinding, ScenarioWorld, StepOutcome, collect_registry,
-  compile_plugin_bytecode, install_plugins, invoke_hook, invoke_step, reset_world, set_scenario_world,
+  install_plugins, invoke_hook, invoke_step, reset_world, set_scenario_world,
 };
-pub use bundle::{CompiledBundle, bundle_and_compile, bundle_source, eval_bundle};
+pub use bundle::{
+  CompiledBundle, CompiledPlugin, bundle_and_compile, bundle_source, compile_and_extract_plugins, eval_bundle,
+};
 pub use console::ConsoleCapture;
 pub use engine::{RunContext, RunOptions, ScriptEngine, ScriptEngineConfig, Session, SessionRun};
 pub use error::{ScriptError, ScriptErrorKind};

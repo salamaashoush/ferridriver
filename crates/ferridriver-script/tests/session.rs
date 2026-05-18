@@ -9,7 +9,7 @@ use std::time::Duration;
 
 use ferridriver_script::{
   InMemoryVars, Outcome, PathSandbox, PluginBinding, PluginToolBinding, RunContext, RunOptions, ScriptEngineConfig,
-  ScriptErrorKind, Session, compile_plugin_bytecode,
+  ScriptErrorKind, Session, compile_and_extract_plugins,
 };
 
 /// A one-tool plugin whose handler bumps a `globalThis` counter so a
@@ -17,18 +17,30 @@ use ferridriver_script::{
 const DEMO_PLUGIN: &str = "globalThis.exports = { name: 'demo', handler: async ({ args }) => { \
   globalThis.__n = (globalThis.__n || 0) + 1; return { n: globalThis.__n, got: args }; } };";
 
-fn demo_binding(bytecode: Option<Arc<[u8]>>) -> PluginBinding {
-  PluginBinding {
-    source: Arc::from(DEMO_PLUGIN),
-    bytecode,
-    tools: vec![PluginToolBinding {
-      name: "demo".to_string(),
-      allowed_commands: HashMap::new(),
-    }],
-  }
+/// Bundle + compile the demo plugin through the production pipeline
+/// (rolldown -> bytecode) and wrap it as a `PluginBinding`.
+async fn demo_binding() -> (tempfile::TempDir, PluginBinding) {
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("demo.js");
+  std::fs::write(&path, DEMO_PLUGIN).expect("write plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+  assert!(!cp.bytecode.is_empty(), "compiled bytecode must be non-empty");
+  (
+    tmp,
+    PluginBinding {
+      bytecode: cp.bytecode,
+      tools: vec![PluginToolBinding {
+        name: "demo".to_string(),
+        allowed_commands: HashMap::new(),
+      }],
+    },
+  )
 }
 
-async fn run_demo_plugin_twice(bytecode: Option<Arc<[u8]>>) {
+async fn run_demo_plugin_twice() {
+  let (_plugin_tmp, binding) = demo_binding().await;
   let tmp = tempfile::tempdir().expect("tempdir");
   let sandbox = PathSandbox::new(tmp.path()).expect("sandbox");
   let ctx = RunContext {
@@ -39,7 +51,7 @@ async fn run_demo_plugin_twice(bytecode: Option<Arc<[u8]>>) {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: vec![demo_binding(bytecode)],
+    plugins: vec![binding],
     trusted_modules: false,
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
@@ -76,21 +88,70 @@ async fn run_demo_plugin_twice(bytecode: Option<Arc<[u8]>>) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn plugin_bytecode_path_installs_and_persists() {
-  // Exercises the `unsafe Module::load` bytecode branch in
-  // `install_plugins` — bytecode compiled once, loaded into the session.
-  let bytecode = compile_plugin_bytecode(0, DEMO_PLUGIN, "__ferri_plugin_0")
+async fn typescript_plugin_with_local_import_bundles_and_runs() {
+  // Headline migration capability: a `.ts` plugin that imports a
+  // plugin-local `.ts` helper. rolldown must transpile + inline the
+  // import; the compiled bytecode then runs with no resolver in-session.
+  let tmp = tempfile::tempdir().expect("tempdir");
+  std::fs::write(
+    tmp.path().join("helper.ts"),
+    "export const tag = (n: number): string => `t${n}`;\n",
+  )
+  .expect("write helper");
+  std::fs::write(
+    tmp.path().join("plug.ts"),
+    "import { tag } from './helper';\n\
+     interface In { n: number }\n\
+     globalThis.exports = { name: 'ts', exposeAsTool: true, \
+       async handler({ args }: { args: In }) { return { tag: tag(args.n) }; } };\n",
+  )
+  .expect("write plugin");
+
+  let (compiled, failures) = compile_and_extract_plugins(&[tmp.path().join("plug.ts")]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+
+  let sb_tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: vec![PluginBinding {
+      bytecode: cp.bytecode,
+      tools: vec![PluginToolBinding {
+        name: "ts".to_string(),
+        allowed_commands: HashMap::new(),
+      }],
+    }],
+    trusted_modules: false,
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
-    .expect("bytecode compile");
-  assert!(!bytecode.is_empty(), "compiled bytecode must be non-empty");
-  run_demo_plugin_twice(Some(Arc::from(bytecode))).await;
+    .expect("session create");
+  let r = session
+    .execute(
+      "return await plugins['ts']({ n: 7 });",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "tag": "t7" })),
+    Outcome::Error { error } => panic!("ts plugin failed: {error:?}"),
+  }
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn plugin_source_fallback_matches_bytecode_path() {
-  // `bytecode: None` drives the source-eval fallback. It must behave
-  // byte-identically to the bytecode path (shared `plugin_file_wrapper`).
-  run_demo_plugin_twice(None).await;
+async fn plugin_bytecode_path_installs_and_persists() {
+  // Exercises the production path: rolldown-bundled plugin compiled once
+  // to bytecode, `Module::load`ed into the session VM, handler state
+  // persisting across two invocations in the same session.
+  run_demo_plugin_twice().await;
 }
 
 fn make_ctx() -> (tempfile::TempDir, RunContext) {

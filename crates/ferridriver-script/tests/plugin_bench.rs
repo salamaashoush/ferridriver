@@ -23,12 +23,12 @@ use std::time::Instant;
 
 use ferridriver_script::{
   InMemoryVars, Outcome, PathSandbox, PluginBinding, PluginToolBinding, RunContext, RunOptions, ScriptEngineConfig,
-  Session, compile_plugin_bytecode,
+  Session, compile_and_extract_plugins,
 };
 
 /// Four representative plugin files mirroring the box-craft bundle
 /// shapes: a single-export file, a `{ tools: [...] }` bundle, a bare
-/// array, and a TypeScript file (exercised post-migration).
+/// array, and a single-tool bundle.
 const FILES: &[(&str, &str)] = &[
   (
     "login.js",
@@ -61,15 +61,13 @@ const FILES: &[(&str, &str)] = &[
 
 struct Compiled {
   names: Vec<&'static str>,
-  bytecode: Option<Arc<[u8]>>,
-  source: Arc<str>,
+  bytecode: Arc<[u8]>,
 }
 
 fn bindings(compiled: &[Compiled]) -> Vec<PluginBinding> {
   compiled
     .iter()
     .map(|c| PluginBinding {
-      source: c.source.clone(),
       bytecode: c.bytecode.clone(),
       tools: c
         .names
@@ -88,26 +86,34 @@ const ITERS: u32 = 200;
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "perf microbench; run with --ignored --nocapture"]
 async fn plugin_path_bench() {
-  // ---- 1. cold start: compile every file to bytecode ----
+  // ---- 1. cold start: bundle + compile + extract every file ----
   let names: Vec<Vec<&str>> = vec![
     vec!["box.login"],
     vec!["box.noop", "box.setFeatureFlip"],
     vec!["box.click", "box.type"],
     vec!["box.sign"],
   ];
+  let src_tmp = tempfile::tempdir().expect("tempdir");
+  let paths: Vec<_> = FILES
+    .iter()
+    .map(|(file, src)| {
+      let p = src_tmp.path().join(file);
+      std::fs::write(&p, src).expect("write plugin");
+      p
+    })
+    .collect();
   let cold = Instant::now();
-  let mut compiled: Vec<Compiled> = Vec::new();
-  for (idx, (file, src)) in FILES.iter().enumerate() {
-    let bc = compile_plugin_bytecode(idx, src, &format!("__ferri_plugin_{idx}"))
-      .await
-      .unwrap_or_else(|e| panic!("compile {file}: {}", e.message));
-    compiled.push(Compiled {
-      names: names[idx].clone(),
-      bytecode: Some(Arc::from(bc)),
-      source: Arc::from(*src),
-    });
-  }
+  let (cp, failures) = compile_and_extract_plugins(&paths).await;
   let cold_ms = cold.elapsed().as_secs_f64() * 1e3;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  assert_eq!(cp.len(), FILES.len(), "all files must compile");
+  let compiled: Vec<Compiled> = cp
+    .into_iter()
+    .map(|c| Compiled {
+      names: names[c.index].clone(),
+      bytecode: c.bytecode,
+    })
+    .collect();
 
   // ---- 2. per-session install ----
   let tmp = tempfile::tempdir().expect("tempdir");
