@@ -28,6 +28,10 @@ use crate::bindings::{install_browser_context_on, install_browser_on, install_pa
 use crate::engine::caught_to_script_error;
 use crate::error::ScriptError;
 
+/// Thrown by `this.skip()`; recognised in [`invoke_step`] and mapped to
+/// `StepOutcome::Skipped` (cucumber aborts the step on throw).
+const SKIP_SENTINEL: &str = "__ferri_skip__";
+
 /// Cucumber step keyword. `Step` is keyword-agnostic (`defineStep`,
 /// `And`, `But`); matching in the core is keyword-agnostic anyway.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -594,6 +598,13 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
       with_registry(&ctx, |reg| reg.world_ctor = Some(saved)).map_err(|e| rq(&e))
     }),
   )?;
+  // `setParallelCanAssign` is accepted (so cucumber-js suites that call
+  // it don't break) but intentionally inert: it governs cucumber-js's
+  // own pickle-level parallel scheduler, whereas ferridriver
+  // parallelises at the `ferridriver-test` worker level (one VM per
+  // worker) with no equivalent per-pickle assignment hook. A real
+  // implementation would be a cross-worker scheduler rework with no
+  // proportionate value — documented-inert, not a stub claiming to work.
   g.set("setParallelCanAssign", Func::from(|_: Opt<Value<'_>>| {}))?;
 
   // MCP tool contribution point — the only tool-registration surface.
@@ -812,6 +823,13 @@ pub async fn set_scenario_world(actx: &AsyncContext, world: &ScenarioWorld) -> R
       .map_err(|e| ScriptError::internal(e.to_string()))?;
     obj.set("attach", attach).map_err(|e| ScriptError::internal(e.to_string()))?;
     obj.set("log", log).map_err(|e| ScriptError::internal(e.to_string()))?;
+    // Cucumber `this.skip()` — throws a sentinel the step bridge maps
+    // to `Skipped` (cucumber aborts the step as skipped on throw).
+    let skip = Function::new(ctx.clone(), || -> rquickjs::Result<()> {
+      Err(rquickjs::Error::new_from_js_message("World", "Error", SKIP_SENTINEL.to_string()))
+    })
+    .map_err(|e| ScriptError::internal(e.to_string()))?;
+    obj.set("skip", skip).map_err(|e| ScriptError::internal(e.to_string()))?;
 
     if let Some(page) = world.page {
       install_page_on(&ctx, &obj, page, route_ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
@@ -975,7 +993,15 @@ pub async fn invoke_step(
     };
     let resolved: Value<'_> = match awaited.catch(&ctx) {
       Ok(v) => v,
-      Err(e) => return Err(caught_to_script_error(e, &source)),
+      Err(e) => {
+        let se = caught_to_script_error(e, &source);
+        // `this.skip()` throws the sentinel → cucumber-style Skipped,
+        // not a failure.
+        if se.message.contains(SKIP_SENTINEL) {
+          return Ok(StepOutcome::Skipped);
+        }
+        return Err(se);
+      },
     };
     let marker = resolved.as_string().and_then(|s| s.to_string().ok());
     Ok(match marker.as_deref() {
