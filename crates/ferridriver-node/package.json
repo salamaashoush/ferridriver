@@ -1,6 +1,6 @@
 {
   "name": "@ferridriver/node",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Browser automation with a Playwright-compatible API. Rust engine, NAPI bindings.",
   "main": "index.js",
   "types": "index.d.ts",
