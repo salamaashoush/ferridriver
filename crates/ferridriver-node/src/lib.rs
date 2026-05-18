@@ -52,7 +52,6 @@
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
 mod api_request;
-mod bdd_registry;
 mod browser;
 mod browser_type;
 mod codegen;
@@ -68,17 +67,11 @@ mod frame_locator;
 #[allow(dead_code)]
 mod install;
 mod js_handle;
-mod js_reporter;
 mod locator;
 mod network;
 mod page;
-mod playwright_namespace;
 mod route;
 mod serialize_out;
-mod step_handle;
-mod test_fixtures;
-mod test_info;
-mod test_runner;
 mod types;
 mod video;
 mod web_error;
