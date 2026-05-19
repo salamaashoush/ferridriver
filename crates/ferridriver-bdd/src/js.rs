@@ -24,7 +24,7 @@ use std::time::{Duration, Instant};
 use ferridriver_script::{
   AsyncContext, CompiledBundle, HookArg, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioWorld, ScriptAttachment,
   ScriptEngineConfig, Session, StepOutcome, bundle_and_compile, collect_registry, drain_attachments, eval_bundle,
-  invoke_hook, invoke_step, reset_world, set_scenario_world,
+  invoke_hook, invoke_step, is_source_file, reset_world, set_scenario_world, walk_source_files,
 };
 use ferridriver_test::FixturePool;
 use ferridriver_test::model::{AttachmentBody, StepCategory, TestInfo};
@@ -106,10 +106,7 @@ pub fn discover_step_files(globs: &[String], cwd: &Path) -> Vec<PathBuf> {
     };
     if let Ok(entries) = glob::glob(&full) {
       for entry in entries.flatten() {
-        if matches!(
-          entry.extension().and_then(|e| e.to_str()),
-          Some("js" | "mjs" | "ts" | "tsx" | "jsx")
-        ) {
+        if is_source_file(&entry) {
           files.push(entry);
         }
       }
@@ -120,18 +117,12 @@ pub fn discover_step_files(globs: &[String], cwd: &Path) -> Vec<PathBuf> {
   files
 }
 
-/// Discover extension entry files. Each path is a single
-/// `.js`/`.mjs`/`.ts`/`.mts` file or a directory scanned shallowly for
-/// those. Extensions register `defineTool` tools (consumed by the MCP
-/// server) and/or `Given/When/Then` steps (consumed here); bundling them
-/// with the step files lets one extension serve both hosts.
+/// Discover extension entry files. Each path is a single source file or
+/// a directory scanned **recursively** for
+/// [`ferridriver_script::SOURCE_EXTENSIONS`] files (same rule the MCP
+/// plugin loader uses, so one extension serves both hosts). A file the
+/// user named explicitly is taken as-is regardless of extension.
 pub fn discover_extension_files(paths: &[String], cwd: &Path) -> Vec<PathBuf> {
-  let is_ext = |p: &Path| {
-    matches!(
-      p.extension().and_then(|e| e.to_str()),
-      Some("js" | "mjs" | "ts" | "mts")
-    )
-  };
   let mut files = Vec::new();
   for raw in paths {
     let p = if Path::new(raw).is_absolute() {
@@ -141,16 +132,7 @@ pub fn discover_extension_files(paths: &[String], cwd: &Path) -> Vec<PathBuf> {
     };
     match std::fs::metadata(&p) {
       Ok(m) if m.is_file() => files.push(p),
-      Ok(m) if m.is_dir() => {
-        if let Ok(rd) = std::fs::read_dir(&p) {
-          for e in rd.flatten() {
-            let ep = e.path();
-            if ep.is_file() && is_ext(&ep) {
-              files.push(ep);
-            }
-          }
-        }
-      },
+      Ok(m) if m.is_dir() => files.extend(walk_source_files(&p)),
       _ => {},
     }
   }
@@ -261,6 +243,11 @@ impl JsBddSession {
       plugins: Vec::new(),
       trusted_modules: false,
       host: ferridriver_script::ExtensionHost::Bdd,
+      // Locked down for the test runner. Threading `[scripting]` caps
+      // through the BDD load chain is a deliberate follow-up; step files
+      // are first-party (run from the user's own CLI), so no env is the
+      // safe default until that wiring lands.
+      caps: ferridriver_script::ScriptCaps::default(),
     };
 
     let session = Session::create(ScriptEngineConfig::default(), &run_ctx)

@@ -17,16 +17,20 @@
 //! is checked in Rust before any shell/network I/O.
 
 use std::collections::BTreeMap;
-use std::process::Command;
 use std::sync::Arc;
+use std::time::Duration;
 
 use rquickjs::function::{Func, Opt};
+use rquickjs::promise::{MaybePromise, Promised};
 use rquickjs::{Ctx, IntoJs, JsLifetime, Module, Object, Value, class::Class, class::Trace};
 
 use super::api_request::APIRequestContextJs;
 use super::bdd::{tool_dispatch, tool_names};
-use crate::bindings::convert::{serde_from_js, serde_to_js};
+use crate::bindings::convert::{json_to_js, serde_from_js};
+use crate::command_spec::CommandSpec;
+use crate::engine::SessionProcsUd;
 use crate::error::ScriptError;
+use crate::session_procs::{self, SessionProcs};
 
 /// One plugin file handed to the engine at `install_plugins` time:
 /// just its precompiled bytecode. Tool names + capabilities are read
@@ -40,78 +44,104 @@ pub struct PluginBinding {
   pub bytecode: Arc<[u8]>,
 }
 
-/// The `commands` object a plugin handler receives. Holds that tool's
-/// own exec allow-list; `run(name, vars)` resolves the named template,
-/// substitutes `${var}` placeholders (shell-escaped), runs it and parses
-/// the output. The allow-list check is native Rust — a handler cannot
-/// reach a command its manifest did not declare, nor another tool's.
+/// The `commands` object a plugin handler receives. Holds this tool's
+/// declared command set (default-deny — a handler cannot reach a name
+/// its manifest did not declare, nor another tool's) plus the session's
+/// durable persistent-process registry.
+///
+/// - `run(name, vars?)` — one-shot: resolve `${vars}` strictly, execute
+///   (argv or `sh -c` per the spec), bounded by timeout + output cap,
+///   shaped per the declared output mode.
+/// - `start(name, vars?)` / `status(name)` / `stop(name)` — persistent:
+///   manage a long-running process whose lifetime is the session's.
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "PluginCommands")]
 pub struct PluginCommandsJs {
   #[qjs(skip_trace)]
-  allowed: Arc<BTreeMap<String, String>>,
+  allowed: Arc<BTreeMap<String, CommandSpec>>,
+  #[qjs(skip_trace)]
+  procs: Option<Arc<SessionProcs>>,
+}
+
+impl PluginCommandsJs {
+  fn cmd_err(verb: &'static str, msg: impl std::fmt::Display) -> rquickjs::Error {
+    rquickjs::Error::new_from_js_message(verb, "Error", msg.to_string())
+  }
+
+  fn spec(&self, verb: &'static str, name: &str) -> rquickjs::Result<CommandSpec> {
+    self.allowed.get(name).cloned().ok_or_else(|| {
+      Self::cmd_err(
+        verb,
+        format!("\"{name}\" is not in the commands allow-list for this tool"),
+      )
+    })
+  }
+
+  fn vars_of<'js>(ctx: &Ctx<'js>, vars: Opt<Value<'js>>) -> rquickjs::Result<BTreeMap<String, serde_json::Value>> {
+    match vars.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(ctx, v),
+      _ => Ok(BTreeMap::new()),
+    }
+  }
+
+  fn registry(&self, verb: &'static str) -> rquickjs::Result<&Arc<SessionProcs>> {
+    self
+      .procs
+      .as_ref()
+      .ok_or_else(|| Self::cmd_err(verb, "persistent commands are unavailable in this context"))
+  }
 }
 
 #[rquickjs::methods]
 impl PluginCommandsJs {
+  /// One-shot: run to completion and return shaped stdout.
   #[qjs(rename = "run")]
   pub async fn run<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
-    let template = self.allowed.get(&name).cloned().ok_or_else(|| {
-      rquickjs::Error::new_from_js_message(
-        "commands.run",
-        "Error",
-        format!("\"{name}\" is not in the exec allow-list for this tool"),
-      )
-    })?;
-
-    let vars_map: BTreeMap<String, serde_json::Value> = match vars.0 {
-      Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v)?,
-      _ => BTreeMap::new(),
-    };
-
-    let mut cmd = template;
-    for (key, value) in &vars_map {
-      let placeholder = format!("${{{key}}}");
-      let raw = match value {
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
-      };
-      cmd = cmd.replace(&placeholder, &shell_single_quote(&raw));
-    }
-
-    let output = tokio::task::spawn_blocking(move || Command::new("sh").args(["-c", &cmd]).output())
+    let spec = self.spec("commands.run", &name)?;
+    let vars_map = Self::vars_of(&ctx, vars)?;
+    let resolved = spec
+      .resolve(&vars_map)
+      .map_err(|m| Self::cmd_err("commands.run", format!("{name}: {m}")))?;
+    let value = Box::pin(session_procs::run_oneshot(&resolved))
       .await
-      .map_err(|e| rquickjs::Error::new_from_js_message("commands.run", "Error", e.to_string()))?
-      .map_err(|e| rquickjs::Error::new_from_js_message("commands.run", "Error", e.to_string()))?;
-
-    if !output.status.success() {
-      let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-      return Err(rquickjs::Error::new_from_js_message(
-        "commands.run",
-        "Error",
-        format!("command failed (exit {}): {stderr}", output.status),
-      ));
-    }
-
-    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
-    serde_to_js(&ctx, &parse_command_output(&stdout))
+      .map_err(|m| Self::cmd_err("commands.run", format!("{name}: {m}")))?;
+    json_to_js(&ctx, &value)
   }
-}
 
-fn shell_single_quote(s: &str) -> String {
-  format!("'{}'", s.replace('\'', r"'\''"))
-}
+  /// Persistent: start (idempotent if already running). Returns
+  /// `{ name, pid }`.
+  #[qjs(rename = "start")]
+  pub fn start<'js>(&self, ctx: Ctx<'js>, name: String, vars: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    let spec = self.spec("commands.start", &name)?;
+    let vars_map = Self::vars_of(&ctx, vars)?;
+    let resolved = spec
+      .resolve(&vars_map)
+      .map_err(|m| Self::cmd_err("commands.start", format!("{name}: {m}")))?;
+    let pid = self
+      .registry("commands.start")?
+      .start(&name, &resolved)
+      .map_err(|m| Self::cmd_err("commands.start", format!("{name}: {m}")))?;
+    json_to_js(&ctx, &serde_json::json!({ "name": name, "pid": pid }))
+  }
 
-fn parse_command_output(s: &str) -> serde_json::Value {
-  if s.is_empty() {
-    return serde_json::Value::Null;
+  /// Persistent: running?/exit code + the buffered stdout/stderr tail.
+  #[qjs(rename = "status")]
+  pub fn status<'js>(&self, ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
+    let value = self
+      .registry("commands.status")?
+      .status(&name)
+      .map_err(|m| Self::cmd_err("commands.status", m))?;
+    json_to_js(&ctx, &value)
   }
-  if (s.starts_with('{') || s.starts_with('['))
-    && let Ok(v) = serde_json::from_str::<serde_json::Value>(s)
-  {
-    return v;
+
+  /// Persistent: kill the process group.
+  #[qjs(rename = "stop")]
+  pub fn stop(&self, name: String) -> rquickjs::Result<()> {
+    self
+      .registry("commands.stop")?
+      .stop(&name)
+      .map_err(|m| Self::cmd_err("commands.stop", m))
   }
-  serde_json::Value::String(s.to_string())
 }
 
 fn rq(e: &ScriptError) -> rquickjs::Error {
@@ -152,45 +182,70 @@ pub fn install_plugins(ctx: &Ctx<'_>, files: &[PluginBinding]) -> rquickjs::Resu
 /// Native `plugins.<name>(args)` body: restore the tool's handler from
 /// the registry, build `{ args, page, context, request, commands }` via
 /// the Object API (per-tool `commands` allow-list + optional net-guarded
-/// `request`, both Rust-enforced) and apply the handler. Returns the
-/// handler's promise; the JS caller `await`s it. No synthesized JS.
-fn dispatch_tool<'js>(ctx: Ctx<'js>, idx: usize, call_args: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
-  let d = tool_dispatch(&ctx, idx).map_err(|e| rq(&e))?;
+/// `request`, both Rust-enforced), apply the handler and await its
+/// result. When the manifest declared `timeoutMs`, the handler is raced
+/// against that bound natively (same mechanism `invoke_step` uses) so
+/// every caller — promoted MCP tool, `invoke_plugin`, or another
+/// extension calling `plugins.<name>` — is covered, not just the MCP
+/// entry point. Returns a JS promise; the caller `await`s it. No
+/// synthesized JS.
+fn dispatch_tool<'js>(
+  ctx: Ctx<'js>,
+  idx: usize,
+  call_args: Opt<Value<'js>>,
+) -> Promised<impl std::future::Future<Output = rquickjs::Result<Value<'js>>> + 'js> {
+  Promised::from(async move {
+    let d = tool_dispatch(&ctx, idx).map_err(|e| rq(&e))?;
 
-  let arg = Object::new(ctx.clone())?;
-  let undef = Value::new_undefined(ctx.clone());
-  arg.set("args", call_args.0.unwrap_or_else(|| undef.clone()))?;
+    let arg = Object::new(ctx.clone())?;
+    let undef = Value::new_undefined(ctx.clone());
+    arg.set("args", call_args.0.unwrap_or_else(|| undef.clone()))?;
 
-  let g = ctx.globals();
-  arg.set("page", g.get::<_, Value<'js>>("page").unwrap_or_else(|_| undef.clone()))?;
-  arg.set(
-    "context",
-    g.get::<_, Value<'js>>("context").unwrap_or_else(|_| undef.clone()),
-  )?;
+    let g = ctx.globals();
+    arg.set("page", g.get::<_, Value<'js>>("page").unwrap_or_else(|_| undef.clone()))?;
+    arg.set(
+      "context",
+      g.get::<_, Value<'js>>("context").unwrap_or_else(|_| undef.clone()),
+    )?;
 
-  // `request`: pass through unless the tool declared `allow.net`, in
-  // which case hand it a net-restricted wrapper over the SAME underlying
-  // context (host check enforced natively in `APIRequestContextJs`).
-  let req_val: Value<'js> = g.get("request").unwrap_or_else(|_| undef.clone());
-  let request_out: Value<'js> = if d.allowed_net.is_empty() {
-    req_val
-  } else if let Ok(cls) = Class::<APIRequestContextJs>::from_value(&req_val) {
-    let inner = cls.borrow().inner_arc();
-    let net: Arc<[String]> = Arc::from(d.allowed_net);
-    let guarded = Class::instance(ctx.clone(), APIRequestContextJs::with_net(inner, net))?;
-    guarded.into_js(&ctx)?
-  } else {
-    req_val
-  };
-  arg.set("request", request_out)?;
+    // `request`: pass through unless the tool declared `allow.net`, in
+    // which case hand it a net-restricted wrapper over the SAME underlying
+    // context (host check enforced natively in `APIRequestContextJs`).
+    let req_val: Value<'js> = g.get("request").unwrap_or_else(|_| undef.clone());
+    let request_out: Value<'js> = if d.allowed_net.is_empty() {
+      req_val
+    } else if let Ok(cls) = Class::<APIRequestContextJs>::from_value(&req_val) {
+      let inner = cls.borrow().inner_arc();
+      let net: Arc<[String]> = Arc::from(d.allowed_net);
+      let guarded = Class::instance(ctx.clone(), APIRequestContextJs::with_net(inner, net))?;
+      guarded.into_js(&ctx)?
+    } else {
+      req_val
+    };
+    arg.set("request", request_out)?;
 
-  let commands = Class::instance(
-    ctx.clone(),
-    PluginCommandsJs {
-      allowed: Arc::new(d.allowed_commands),
-    },
-  )?;
-  arg.set("commands", commands)?;
+    let procs = ctx.userdata::<SessionProcsUd>().map(|u| u.0.clone());
+    let commands = Class::instance(
+      ctx.clone(),
+      PluginCommandsJs {
+        allowed: Arc::new(d.allowed_commands),
+        procs,
+      },
+    )?;
+    arg.set("commands", commands)?;
 
-  d.handler.call((arg,))
+    let mp: MaybePromise<'js> = d.handler.call((arg,))?;
+    let fut = mp.into_future::<Value<'js>>();
+    match d.timeout_ms {
+      Some(t) => match tokio::time::timeout(Duration::from_millis(t), fut).await {
+        Ok(r) => r,
+        Err(_) => Err(rquickjs::Error::new_from_js_message(
+          "plugins",
+          "Error",
+          format!("tool timed out after {t}ms"),
+        )),
+      },
+      None => fut.await,
+    }
+  })
 }

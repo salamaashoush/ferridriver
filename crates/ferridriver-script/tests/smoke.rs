@@ -24,6 +24,7 @@ fn make_engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
     plugins: Vec::new(),
     trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
   (engine, tmp, context)
@@ -46,6 +47,7 @@ fn make_engine_with_artifacts() -> (ScriptEngine, tempfile::TempDir, tempfile::T
     plugins: Vec::new(),
     trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
   };
   let engine = ScriptEngine::new(ScriptEngineConfig::default());
   (engine, scripts_tmp, artifacts_tmp, context)

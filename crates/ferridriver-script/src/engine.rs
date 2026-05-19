@@ -1,10 +1,12 @@
 //! `ScriptEngine` + `Session`: a sandboxed `QuickJS` runtime/context.
 //!
-//! [`ScriptEngine::run`] is the one-shot path (fresh VM, used at plugin
-//! load and by callers that don't need continuity). [`Session`] is the
-//! persistent path: one `QuickJS` runtime + context reused across many
-//! [`Session::execute`] calls so user `globalThis` state survives between
-//! executions REPL-style while framework bindings refresh each call.
+//! [`ScriptEngine::run`] is the one-shot path (fresh VM, library/test
+//! convenience). [`Session`] is the persistent path: one `QuickJS`
+//! runtime + context reused across many [`Session::execute`] calls so
+//! user `globalThis` state survives between executions REPL-style while
+//! framework bindings refresh each call. The production MCP server keeps
+//! a set of [`Session`]s with a retention policy in
+//! [`crate::session_table::SessionTable`].
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -50,6 +52,11 @@ pub const DEFAULT_GC_THRESHOLD: usize = 64 * 1024 * 1024;
 /// evicted (its `globalThis` state is discarded; a later call rebuilds).
 pub const DEFAULT_MAX_SESSION_VMS: usize = 64;
 
+/// Default idle TTL: a session VM untouched this long is reaped on the
+/// next `SessionTable::acquire`, independent of cap pressure, so a
+/// long-running server does not pin dead sessions' memory indefinitely.
+pub const DEFAULT_SESSION_IDLE_TTL: Duration = Duration::from_secs(30 * 60);
+
 /// Configuration for the script engine.
 #[derive(Debug, Clone)]
 pub struct ScriptEngineConfig {
@@ -63,6 +70,9 @@ pub struct ScriptEngineConfig {
   pub max_console_entry_bytes: usize,
   /// Upper bound on persistent session VMs kept warm at once.
   pub max_session_vms: usize,
+  /// Idle TTL for a session VM. `None` disables time-based reaping (only
+  /// the `max_session_vms` LRU cap applies).
+  pub session_idle_ttl: Option<Duration>,
 }
 
 impl Default for ScriptEngineConfig {
@@ -76,6 +86,7 @@ impl Default for ScriptEngineConfig {
       max_console_bytes: DEFAULT_MAX_CONSOLE_BYTES,
       max_console_entry_bytes: DEFAULT_MAX_CONSOLE_ENTRY_BYTES,
       max_session_vms: DEFAULT_MAX_SESSION_VMS,
+      session_idle_ttl: Some(DEFAULT_SESSION_IDLE_TTL),
     }
   }
 }
@@ -148,6 +159,38 @@ pub struct RunContext {
   /// Which host is driving this session — surfaced to JS as
   /// `ferridriver.host`. Defaults to [`ExtensionHost::Script`].
   pub host: ExtensionHost,
+  /// Opt-in sandbox relaxations resolved from config (env allow-list,
+  /// node-compat). Default = fully locked down.
+  pub caps: ScriptCaps,
+}
+
+/// Resolved, ready-to-install sandbox relaxations. Built by the host
+/// (MCP/CLI/BDD) from `ferridriver_config::ScriptingConfig`; the engine
+/// only consumes it. Default is the locked-down posture: no env, no
+/// node-compat.
+#[derive(Debug, Clone, Default)]
+pub struct ScriptCaps {
+  /// `process.env` contents — already filtered to the operator's
+  /// allow-list intersected with the real environment. Empty ⇒
+  /// `process.env` is an empty object.
+  pub env: std::collections::BTreeMap<String, String>,
+  /// Expose a Node-ish `process.versions.node` compatibility shim.
+  pub node_compat: bool,
+}
+
+impl ScriptCaps {
+  /// Resolve from an operator allow-list: only the named variables, and
+  /// only those actually present in the process environment, are
+  /// captured. A name not in the environment is silently absent (same
+  /// as Node) — it is never invented.
+  #[must_use]
+  pub fn resolve(allow_env: &[String], node_compat: bool) -> Self {
+    let env = allow_env
+      .iter()
+      .filter_map(|k| std::env::var(k).ok().map(|v| (k.clone(), v)))
+      .collect();
+    Self { env, node_compat }
+  }
 }
 
 /// The session's owning [`AsyncContext`], stashed as rquickjs userdata
@@ -162,6 +205,20 @@ pub(crate) struct SessionAsyncCtx(pub(crate) AsyncContext);
 #[allow(unsafe_code)]
 unsafe impl rquickjs::JsLifetime<'_> for SessionAsyncCtx {
   type Changed<'to> = SessionAsyncCtx;
+}
+
+/// The session's durable persistent-process registry, stashed as
+/// userdata so `plugins.<name>` dispatch can hand a tool's `commands`
+/// binding the registry without threading it through `RunContext`.
+/// Re-installed (same `Arc`) on every VM (re)build by
+/// [`crate::session_table::BrowserSession::run`], so a persistent
+/// process outlives a VM rebuild but dies with the session record.
+pub(crate) struct SessionProcsUd(pub(crate) std::sync::Arc<crate::session_procs::SessionProcs>);
+
+// SAFETY: holds only an owned `Arc` (`'static`; no borrowed JS values).
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for SessionProcsUd {
+  type Changed<'to> = SessionProcsUd;
 }
 
 /// Sandboxed `QuickJS` scripting engine.
@@ -180,15 +237,14 @@ impl ScriptEngine {
     &self.config
   }
 
-  /// Run a script once in a throwaway VM with bound args.
+  /// Run a script once in a throwaway VM with bound args. A one-shot
+  /// convenience for library consumers and tests that need no
+  /// continuity; the persistent MCP path uses
+  /// [`crate::session_table::SessionTable`] instead.
   ///
-  /// `source` is the JS text. `args` is an array of values made available
-  /// inside the script as the `args` global (positional). Args are never
-  /// interpolated into `source` — preventing prompt injection.
-  ///
-  /// No state survives the call. Callers that need REPL-style continuity
-  /// across executions should hold a [`Session`] and call
-  /// [`Session::execute`] instead.
+  /// `args` is bound as the `args` global (positional) and never
+  /// interpolated into `source` — preventing prompt injection. No state
+  /// survives the call.
   pub async fn run(
     &self,
     source: &str,
@@ -300,8 +356,10 @@ impl Session {
     // owns them rather than borrowing across the await.
     let vars = context.vars.clone();
     let sandbox = context.sandbox.clone();
+    let sandbox_root = context.sandbox.root().to_string_lossy().into_owned();
     let artifacts = context.artifacts.clone();
     let host = context.host;
+    let caps = context.caps.clone();
     let ud_ctx = ctx.clone();
     let install: Result<(), ScriptError> = async_with!(ctx => |ctx| {
       // Stash the session's AsyncContext so script-minted pages can
@@ -318,14 +376,16 @@ impl Session {
 
       // Session-stable bindings: install ONCE, not per `execute`. Class
       // prototypes are idempotent; `vars`/`fs`/`artifacts`/`browser_type`
-      // back onto Arcs that never change for a session's lifetime
-      // (server.rs keys `session_vars` + `script_sandbox` per session).
-      // Only per-call-variant handles (page/context/request/browser/
-      // console/args) refresh in `execute`.
+      // back onto Arcs that never change for a session's lifetime (the
+      // `SessionTable` slot owns the durable `vars`; the sandbox is
+      // fixed per session). Only per-call-variant handles
+      // (page/context/request/browser/console/args) refresh in `execute`.
       crate::bindings::define_classes(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to define classes: {e}")))?;
       install_vars(&ctx, vars).map_err(|e| ScriptError::internal(format!("failed to install vars: {e}")))?;
       install_fs(&ctx, sandbox).map_err(|e| ScriptError::internal(format!("failed to install fs: {e}")))?;
+      crate::bindings::process::install(&ctx, &caps, &sandbox_root)
+        .map_err(|e| ScriptError::internal(format!("failed to install process: {e}")))?;
       if let Some(artifacts) = artifacts {
         crate::bindings::install_artifacts(&ctx, artifacts)
           .map_err(|e| ScriptError::internal(format!("failed to install artifacts: {e}")))?;
@@ -376,6 +436,17 @@ impl Session {
   #[must_use]
   pub fn async_context(&self) -> AsyncContext {
     self.ctx.clone()
+  }
+
+  /// Stash the session's persistent-process registry into VM userdata
+  /// so plugin `commands` start/status/stop reach it. Idempotent; the
+  /// same `Arc` is re-installed on each VM rebuild (the registry is
+  /// durable session state, the VM is not).
+  pub async fn install_session_procs(&self, procs: std::sync::Arc<crate::session_procs::SessionProcs>) {
+    async_with!(self.ctx => |ctx| {
+      let _ = ctx.store_userdata(SessionProcsUd(procs));
+    })
+    .await;
   }
 
   /// Push resource limits to the runtime, skipping any setter whose
@@ -481,11 +552,16 @@ impl Session {
         poisoned: false,
       },
       Err(mut err) => {
-        // A fired timeout interrupt force-halted the interpreter at an
-        // arbitrary point — the VM is no longer trustworthy and must be
-        // rebuilt. A plain JS throw does not poison.
-        let poisoned = timed_out.load(Ordering::Relaxed);
-        if poisoned {
+        // The VM is no longer trustworthy and must be rebuilt when
+        // either: a timeout interrupt force-halted the interpreter at an
+        // arbitrary point, OR the runtime hit its memory limit (the
+        // allocation that failed could be anywhere — global tables,
+        // a half-built object — so reusing the heap is unsound). A
+        // plain JS throw and a recoverable stack overflow do NOT poison.
+        let timed_out = timed_out.load(Ordering::Relaxed);
+        let oom = is_oom(&err);
+        let poisoned = timed_out || oom;
+        if timed_out {
           err = ScriptError::timeout(duration, timeout.as_millis() as u64);
         }
         SessionRun {
@@ -501,6 +577,14 @@ impl Session {
 /// the expression evaluates to a `Promise<value>` the engine can await.
 fn wrap_source(source: &str) -> String {
   format!("(async () => {{\n{source}\n}})()")
+}
+
+/// QuickJS raises an `out of memory` error when an allocation fails
+/// after the runtime memory limit is hit. The allocation site is
+/// arbitrary, so the heap cannot be trusted afterwards — treat it as
+/// poisoning (rebuild the VM), exactly like a timeout force-halt.
+fn is_oom(err: &ScriptError) -> bool {
+  err.message.to_ascii_lowercase().contains("out of memory")
 }
 
 /// Everything `install_globals` needs beyond `ctx` + args JSON. Bundled into
@@ -548,7 +632,16 @@ fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: Globals
     crate::bindings::install_browser(ctx, browser)?;
   }
   if let Some(req) = inst.request {
+    crate::bindings::fetch::install(ctx, req.clone())?;
     crate::bindings::install_request(ctx, req)?;
+  } else {
+    // `fetch` is always present; with no session HTTP context it uses
+    // a fresh default one (no shared cookies). Same net posture as the
+    // `request` binding when absent.
+    let cx = std::sync::Arc::new(ferridriver::api_request::APIRequestContext::new(
+      ferridriver::api_request::RequestContextOptions::default(),
+    ));
+    crate::bindings::fetch::install(ctx, cx)?;
   }
 
   Ok(())

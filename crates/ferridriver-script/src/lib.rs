@@ -26,7 +26,9 @@
 //!
 //! - One-shot isolation via [`ScriptEngine::run`] (fresh VM per call) or
 //!   REPL-style continuity via a persistent [`Session`] whose `globalThis`
-//!   survives across [`Session::execute`] calls.
+//!   survives across [`Session::execute`] calls; [`SessionTable`] owns a
+//!   set of them with a warm-VM cap, idle TTL, and browser-swap
+//!   invalidation.
 //! - Bound args (never interpolated into source) to prevent prompt injection.
 //! - Wall-clock and memory quotas enforced by the `QuickJS` runtime.
 //! - Sandboxed globals: scoped `fs`, captured `console`, session `vars`.
@@ -40,12 +42,16 @@
 
 pub mod bindings;
 pub mod bundle;
+pub mod command_spec;
 pub mod console;
+pub mod discover;
 pub mod engine;
 pub mod error;
 pub mod fs;
 pub mod modules;
 pub mod result;
+pub mod session_procs;
+pub mod session_table;
 pub mod vars;
 
 pub use bindings::{
@@ -56,8 +62,12 @@ pub use bindings::{
 pub use bundle::{
   CompiledBundle, CompiledPlugin, bundle_and_compile, bundle_source, compile_and_extract_plugins, eval_bundle,
 };
+pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
 pub use console::ConsoleCapture;
-pub use engine::{ExtensionHost, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig, Session, SessionRun};
+pub use discover::{SOURCE_EXTENSIONS, is_source_file, walk_source_files};
+pub use engine::{
+  ExtensionHost, RunContext, RunOptions, ScriptCaps, ScriptEngine, ScriptEngineConfig, Session, SessionRun,
+};
 pub use error::{ScriptError, ScriptErrorKind};
 // Re-export so the BDD core can name the session's async context (the
 // bridge it drives JS step functions through) without a duplicate
@@ -65,4 +75,6 @@ pub use error::{ScriptError, ScriptErrorKind};
 pub use fs::PathSandbox;
 pub use result::{ConsoleEntry, ConsoleLevel, Outcome, ScriptResult, ScriptSuccess};
 pub use rquickjs::AsyncContext;
+pub use session_procs::SessionProcs;
+pub use session_table::{BrowserSession, SessionTable};
 pub use vars::{InMemoryVars, VarsStore};

@@ -81,6 +81,13 @@ impl SessionKey {
 struct BrowserInstance {
   browser: AnyBrowser,
   contexts: HashMap<String, BrowserContext>,
+  /// Monotonic id assigned when this instance was (re)created. A
+  /// consumer that caches state derived from a browser session (e.g. the
+  /// MCP per-session script VM, which may hold JS handles into pages)
+  /// stores the generation it built against and discards that state when
+  /// the generation changes — a relaunch/reconnect under the same
+  /// instance name is a *different* browser session.
+  generation: u64,
 }
 
 #[derive(Clone)]
@@ -136,6 +143,10 @@ pub type InstanceResolverFn = Box<dyn Fn(&str) -> Option<ConnectMode> + Send + S
 /// All browser state -- manages multiple Chrome instances, each with contexts and pages.
 pub struct BrowserState {
   instances: HashMap<String, BrowserInstance>,
+  /// Monotonic source for [`BrowserInstance::generation`]. Bumped on
+  /// every instance (re)creation so consumers can detect a browser
+  /// session swap under a reused instance name.
+  instance_generation_counter: u64,
   chromium_path: String,
   connect_mode: ConnectMode,
   backend_kind: BackendKind,
@@ -246,6 +257,7 @@ impl BrowserState {
     };
     Self {
       instances: HashMap::default(),
+      instance_generation_counter: 0,
       chromium_path,
       connect_mode,
       backend_kind: plan.backend,
@@ -481,6 +493,7 @@ impl BrowserState {
     let mut inst = BrowserInstance {
       browser,
       contexts: HashMap::default(),
+      generation: 0,
     };
 
     // Adopt existing pages into the "default" context of this instance.
@@ -502,6 +515,7 @@ impl BrowserState {
       }
     }
 
+    inst.generation = self.next_instance_generation();
     self.instances.insert(instance_name.to_string(), inst);
     self.connected.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(())
@@ -538,6 +552,7 @@ impl BrowserState {
     let mut inst = BrowserInstance {
       browser,
       contexts: HashMap::default(),
+      generation: 0,
     };
 
     // Skip viewport override for existing pages — connect_to_url attaches to a
@@ -550,6 +565,7 @@ impl BrowserState {
       ctx.pages.push(page);
     }
 
+    inst.generation = self.next_instance_generation();
     self.instances.insert(instance_name.to_string(), inst);
     self.connected.store(true, std::sync::atomic::Ordering::Relaxed);
     Ok(page_count)
@@ -1002,6 +1018,20 @@ impl BrowserState {
   #[must_use]
   pub fn is_connected(&self) -> bool {
     !self.instances.is_empty()
+  }
+
+  fn next_instance_generation(&mut self) -> u64 {
+    self.instance_generation_counter += 1;
+    self.instance_generation_counter
+  }
+
+  /// Current generation of the named instance, or `None` if no instance
+  /// by that name is live. A changed value (including `Some`→`None`→
+  /// `Some`) means the browser session was swapped: any state a consumer
+  /// cached against the old session is stale.
+  #[must_use]
+  pub fn instance_generation(&self, instance: &str) -> Option<u64> {
+    self.instances.get(instance).map(|i| i.generation)
   }
 }
 

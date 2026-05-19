@@ -24,7 +24,7 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use ferridriver_script::compile_and_extract_plugins;
+use ferridriver_script::{compile_and_extract_plugins, walk_source_files};
 
 use super::manifest::PluginManifest;
 
@@ -120,14 +120,16 @@ pub async fn load_all(files: &[PathBuf]) -> (Vec<LoadedPlugin>, Vec<PluginLoadEr
   (loaded, errors)
 }
 
-/// Discover plugin files under a path. Directories are scanned shallowly
-/// for `*.js` / `*.mjs` / `*.ts` / `*.mts` files (rolldown transpiles
-/// TypeScript). Single files are returned as-is.
+/// Discover plugin files under a path. Directories are scanned
+/// **recursively** for any [`ferridriver_script::SOURCE_EXTENSIONS`]
+/// file (rolldown transpiles TypeScript / JSX). A single file the user
+/// named explicitly is returned as-is regardless of extension. This
+/// shares the discovery rule with the BDD runner so a `.tsx`/`.cts`
+/// extension is visible to both hosts.
 ///
 /// # Errors
 ///
-/// Returns [`PluginLoadError::Io`] when the path cannot be stat'd or
-/// listed.
+/// Returns [`PluginLoadError::Io`] when the path cannot be stat'd.
 pub fn discover(path: &Path) -> Result<Vec<PathBuf>, PluginLoadError> {
   let meta = std::fs::metadata(path).map_err(|error| PluginLoadError::Io {
     path: path.to_path_buf(),
@@ -142,25 +144,5 @@ pub fn discover(path: &Path) -> Result<Vec<PathBuf>, PluginLoadError> {
     return Ok(Vec::new());
   }
 
-  let read = std::fs::read_dir(path).map_err(|error| PluginLoadError::Io {
-    path: path.to_path_buf(),
-    error,
-  })?;
-
-  let mut out = Vec::new();
-  for entry in read {
-    let entry = entry.map_err(|error| PluginLoadError::Io {
-      path: path.to_path_buf(),
-      error,
-    })?;
-    let p = entry.path();
-    if p.is_file()
-      && let Some(ext) = p.extension().and_then(|e| e.to_str())
-      && matches!(ext, "js" | "mjs" | "ts" | "mts")
-    {
-      out.push(p);
-    }
-  }
-  out.sort();
-  Ok(out)
+  Ok(walk_source_files(path))
 }

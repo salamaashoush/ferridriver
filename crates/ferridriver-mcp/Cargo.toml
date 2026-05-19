@@ -19,6 +19,7 @@ ferridriver-script = { workspace = true }
 ferridriver-config = { workspace = true }
 rmcp = { workspace = true }
 schemars = { workspace = true }
+jsonschema = { workspace = true }
 tokio = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

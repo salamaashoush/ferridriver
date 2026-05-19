@@ -244,6 +244,10 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     ferridriver_script::PathSandbox::new(&cwd)
       .map_err(|e| anyhow::anyhow!("sandbox init ({}): {}", cwd.display(), e.message))?,
   );
+  // `ferridriver run` honours a ferridriver.toml in scope for the
+  // scripting sandbox knobs (env allow-list / node-compat).
+  let scripting = FerridriverConfig::load(None).unwrap_or_default().scripting;
+  let caps = ferridriver_script::ScriptCaps::resolve(&scripting.allow_env, scripting.node_compat);
 
   let ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
@@ -256,6 +260,7 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     plugins: Vec::new(),
     trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
+    caps,
   };
 
   let opts = ferridriver_script::RunOptions {
@@ -284,6 +289,7 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   // CLI flags fall back when the [mcp] section is empty so the user can
   // launch the server with no config file at all.
   let extension_paths: Vec<std::path::PathBuf> = config.extensions.iter().map(std::path::PathBuf::from).collect();
+  let scripting = config.scripting;
   let mcp = config.mcp;
   let backend = if mcp.browser.backend.is_some() {
     mcp.backend_kind()
@@ -297,7 +303,8 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   };
   let connect_mode = args.browser.connect_mode();
 
-  let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp));
+  let caps = ferridriver_script::ScriptCaps::resolve(&scripting.allow_env, scripting.node_compat);
+  let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp)).with_script_caps(caps);
   server.load_extensions(&extension_paths).await;
   match args.transport.transport {
     cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio_with(server).await,

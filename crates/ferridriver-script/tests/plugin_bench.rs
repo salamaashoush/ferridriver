@@ -111,6 +111,7 @@ async fn plugin_path_bench() {
     plugins: bindings(&compiled),
     trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
   };
   let n_sessions = 50;
   let sess_t = Instant::now();

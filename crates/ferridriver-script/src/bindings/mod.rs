@@ -29,6 +29,7 @@ pub mod convert;
 pub mod dialog;
 pub mod download;
 pub mod element_handle;
+pub mod fetch;
 pub mod file_chooser;
 pub mod frame;
 pub mod frame_locator;
@@ -39,6 +40,7 @@ pub mod mouse;
 pub mod network;
 pub mod page;
 pub mod plugins;
+pub mod process;
 pub mod video;
 pub mod web_error;
 pub mod webapi;
@@ -107,6 +109,8 @@ pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<BrowserTypeJs>::define(&g)?;
   Class::<FrameLocatorJs>::define(&g)?;
   Class::<crate::bindings::page::TouchscreenJs>::define(&g)?;
+  Class::<crate::bindings::fetch::HeadersJs>::define(&g)?;
+  Class::<crate::bindings::fetch::FetchResponseJs>::define(&g)?;
   Ok(())
 }
 
