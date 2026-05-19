@@ -5,11 +5,14 @@
 //! ergonomic `request` API stays; this just adds the standard entry
 //! point.
 //!
-//! Deliberately a subset: `text()` / `json()` / `arrayBuffer()` bodies,
-//! request `method` / `headers` / `body` (string or JSON object). No
-//! streaming / `Blob` / `FormData` / `AbortController` yet, and the
-//! response class is `FetchResponse` (the global `Response` name is the
-//! page-network class) so `instanceof Response` does not apply.
+//! `Headers` is WHATWG-spec (lowercased + RFC7230-validated names,
+//! value normalization, `, ` combine, separate `set-cookie` +
+//! `getSetCookie`, sorted real iterators, `forEach`). The response is
+//! still a subset (`text()`/`json()`/`arrayBuffer()`), and its class is
+//! `FetchResponse` for now (the standard constructible global
+//! `Response` lands with the network-class de-globalisation in a
+//! follow-up); no streaming / `Blob` / `FormData` / `AbortController`
+//! yet.
 //!
 //! Net policy: `fetch` is a facade over the SAME core a net-restricted
 //! tool's `request` wraps, so the `allow.net` allow-list must bind here
@@ -22,8 +25,9 @@
 use std::sync::{Arc, Mutex};
 
 use ferridriver::http_client::{HttpClient, RequestOptions};
-use rquickjs::function::Opt;
-use rquickjs::{Ctx, IntoJs, Object, Value, class::Class, class::Trace};
+use rquickjs::atom::PredefinedAtom;
+use rquickjs::function::{Func, Opt};
+use rquickjs::{Coerced, Ctx, IntoJs, Object, Value, class::Class, class::Trace};
 
 use crate::bindings::convert::json_to_js;
 use crate::bindings::http_client::net_check;
@@ -75,11 +79,155 @@ pub(crate) fn active_net(ctx: &Ctx<'_>) -> Option<Arc<[String]>> {
   ctx.userdata::<NetPolicyUd>().and_then(|u| u.0.current())
 }
 
+/// WHATWG `Headers` (spec subset, no external deps): names are
+/// lowercased and RFC7230-validated, values are HTTP-whitespace
+/// normalized and validated, `append` combines same-name values with
+/// `, ` (`; ` for `cookie`) while `set-cookie` is kept as separate
+/// entries, `getSetCookie()` returns them all, and iteration is sorted
+/// by name. `keys`/`values`/`entries`/`[Symbol.iterator]` return real
+/// iterator objects.
 #[derive(Trace)]
 #[rquickjs::class(rename = "Headers")]
 pub struct HeadersJs {
+  /// Lowercased name -> spec-combined value. `set-cookie` may appear
+  /// multiple times (never combined).
   #[qjs(skip_trace)]
   pairs: Vec<(String, String)>,
+}
+
+#[derive(Clone, Copy)]
+enum IterKind {
+  Entries,
+  Keys,
+  Values,
+}
+
+/// A real JS iterator over a sorted header snapshot: `{ next(),
+/// [Symbol.iterator]() }`. Captures only `Send` data (the crate builds
+/// rquickjs with `parallel`, so `Func` closures must be `Send`); JS
+/// values are built from `ctx` inside `next`. `[Symbol.iterator]`
+/// returns an object sharing THIS cursor's position (`pos`), so it
+/// behaves as the spec's "return the iterator itself" — `[...it]` after
+/// a partial `next()` continues rather than restarting.
+fn make_header_iter<'js>(
+  ctx: &Ctx<'js>,
+  data: Arc<Vec<(String, String)>>,
+  pos: Arc<std::sync::atomic::AtomicUsize>,
+  kind: IterKind,
+) -> rquickjs::Result<Object<'js>> {
+  let it = Object::new(ctx.clone())?;
+  {
+    let data = data.clone();
+    let pos = pos.clone();
+    it.set(
+      PredefinedAtom::Next,
+      Func::from(move |ctx: Ctx<'js>| -> rquickjs::Result<Object<'js>> {
+        let r = Object::new(ctx.clone())?;
+        let i = pos.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        if let Some((k, v)) = data.get(i) {
+          let value: Value<'js> = match kind {
+            IterKind::Entries => {
+              let a = rquickjs::Array::new(ctx.clone())?;
+              a.set(0, k.clone())?;
+              a.set(1, v.clone())?;
+              a.into_value()
+            },
+            IterKind::Keys => k.clone().into_js(&ctx)?,
+            IterKind::Values => v.clone().into_js(&ctx)?,
+          };
+          r.set(PredefinedAtom::Value, value)?;
+          r.set(PredefinedAtom::Done, false)?;
+        } else {
+          pos.store(data.len(), std::sync::atomic::Ordering::Relaxed);
+          r.set(PredefinedAtom::Value, Value::new_undefined(ctx.clone()))?;
+          r.set(PredefinedAtom::Done, true)?;
+        }
+        Ok(r)
+      }),
+    )?;
+  }
+  {
+    let data = data.clone();
+    let pos = pos.clone();
+    it.set(
+      PredefinedAtom::SymbolIterator,
+      Func::from(move |ctx: Ctx<'js>| make_header_iter(&ctx, data.clone(), pos.clone(), kind)),
+    )?;
+  }
+  Ok(it)
+}
+
+/// Fresh iterator (cursor at 0) over a header snapshot.
+fn new_header_iter<'js>(ctx: &Ctx<'js>, data: Vec<(String, String)>, kind: IterKind) -> rquickjs::Result<Object<'js>> {
+  make_header_iter(
+    ctx,
+    Arc::new(data),
+    Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+    kind,
+  )
+}
+
+/// RFC 7230 token: a valid header field name.
+fn is_header_name(name: &str) -> bool {
+  !name.is_empty()
+    && name.bytes().all(|b| {
+      matches!(b,
+        b'!' | b'#' | b'$' | b'%' | b'&' | b'\'' | b'*' | b'+'
+        | b'-' | b'.' | b'^' | b'_' | b'`' | b'|' | b'~'
+        | b'0'..=b'9' | b'A'..=b'Z' | b'a'..=b'z')
+    })
+}
+
+/// A valid (already-normalized) header field value: HTAB, SP, VCHAR,
+/// form-feed, or NBSP.
+fn is_header_value(value: &str) -> bool {
+  value
+    .chars()
+    .all(|c| c == '\t' || c == ' ' || ('\u{21}'..='\u{7E}').contains(&c) || c == '\u{0C}' || c == '\u{00A0}')
+}
+
+/// WHATWG header value normalization (WPT `headers-normalize`): strip
+/// leading/trailing SP/HTAB, drop bare CR/LF, and treat an obs-fold
+/// (CRLF + SP/HTAB) as a single space; runs of inner whitespace
+/// collapse to the last one seen.
+fn normalize_header_value(text: &str) -> String {
+  let input = text.as_bytes();
+  let mut out: Vec<u8> = Vec::with_capacity(input.len());
+  let mut read = 0;
+  while read < input.len() && (input[read] == b' ' || input[read] == b'\t') {
+    read += 1;
+  }
+  let mut pending: Option<u8> = None;
+  while read < input.len() {
+    match input[read] {
+      b'\r'
+        if read + 2 < input.len()
+          && input[read + 1] == b'\n'
+          && (input[read + 2] == b' ' || input[read + 2] == b'\t') =>
+      {
+        pending = Some(input[read + 2]);
+        read += 3;
+      },
+      b'\r' | b'\n' => read += 1,
+      b' ' | b'\t' => {
+        pending = Some(input[read]);
+        read += 1;
+      },
+      byte => {
+        if let Some(ws) = pending.take()
+          && !out.is_empty()
+        {
+          out.push(ws);
+        }
+        out.push(byte);
+        read += 1;
+      },
+    }
+  }
+  while matches!(out.last(), Some(b' ' | b'\t')) {
+    out.pop();
+  }
+  String::from_utf8_lossy(&out).into_owned()
 }
 
 #[derive(Trace)]
@@ -109,74 +257,234 @@ unsafe impl rquickjs::JsLifetime<'_> for FetchResponseJs {
   type Changed<'to> = FetchResponseJs;
 }
 
+/// Infallible best-effort extraction of `(name,value)` pairs from a JS
+/// value (`Headers` instance, `[[k,v],...]` sequence, or record) for
+/// the outbound request `headers` — invalid entries are skipped rather
+/// than thrown (the throwing path is the `Headers` constructor).
 fn header_pairs_from(v: &Value<'_>) -> Vec<(String, String)> {
   if let Ok(h) = Class::<HeadersJs>::from_value(v) {
     return h.borrow().pairs.clone();
   }
-  if let Some(obj) = v.as_object() {
-    let mut out = Vec::new();
-    if let Ok(keys) = obj.keys::<String>().collect::<rquickjs::Result<Vec<_>>>() {
-      for k in keys {
-        if let Ok(val) = obj.get::<_, String>(k.as_str()) {
-          out.push((k, val));
-        }
+  let mut acc = HeadersJs { pairs: Vec::new() };
+  if let Some(arr) = v.as_array() {
+    for i in 0..arr.len() {
+      if let Ok(entry) = arr.get::<Value<'_>>(i)
+        && let Some(pair) = entry.as_array()
+        && pair.len() == 2
+        && let (Ok(k), Ok(val)) = (pair.get::<Coerced<String>>(0), pair.get::<Coerced<String>>(1))
+        && is_header_name(&k.0)
+      {
+        acc.append_normalized(k.0.to_ascii_lowercase(), normalize_header_value(&val.0));
       }
     }
-    return out;
+    return acc.pairs;
   }
-  Vec::new()
+  if let Some(obj) = v.as_object()
+    && let Ok(keys) = obj.keys::<String>().collect::<rquickjs::Result<Vec<_>>>()
+  {
+    for k in keys {
+      if let Ok(val) = obj.get::<_, Coerced<String>>(k.as_str())
+        && is_header_name(&k)
+      {
+        acc.append_normalized(k.to_ascii_lowercase(), normalize_header_value(&val.0));
+      }
+    }
+  }
+  acc.pairs
+}
+
+impl HeadersJs {
+  /// Spec "append": `set-cookie` is never combined; other repeats join
+  /// with `, ` (`; ` for `cookie`). `name_lc` must already be lowercased
+  /// and `value` normalized.
+  fn append_normalized(&mut self, name_lc: String, value: String) {
+    if name_lc == "set-cookie" {
+      self.pairs.push((name_lc, value));
+      return;
+    }
+    if let Some(i) = self.pairs.iter().position(|(k, _)| k == &name_lc) {
+      let sep = if name_lc == "cookie" { "; " } else { ", " };
+      self.pairs[i].1 = format!("{}{sep}{value}", self.pairs[i].1);
+    } else {
+      self.pairs.push((name_lc, value));
+    }
+  }
+
+  /// Build from known server/response pairs (lowercase + normalize +
+  /// spec-combine). Used by `FetchResponseJs::headers`.
+  pub(crate) fn from_pairs<I: IntoIterator<Item = (String, String)>>(it: I) -> Self {
+    let mut h = Self { pairs: Vec::new() };
+    for (k, v) in it {
+      h.append_normalized(k.to_ascii_lowercase(), normalize_header_value(&v));
+    }
+    h
+  }
+
+  /// Sorted-by-name snapshot for iteration (`sort_by` is stable, so
+  /// repeated `set-cookie` keep insertion order).
+  fn sorted(&self) -> Vec<(String, String)> {
+    let mut v = self.pairs.clone();
+    v.sort_by(|a, b| a.0.cmp(&b.0));
+    v
+  }
+
+  fn check_name(ctx: &Ctx<'_>, name: &str) -> rquickjs::Result<String> {
+    if is_header_name(name) {
+      Ok(name.to_ascii_lowercase())
+    } else {
+      Err(rquickjs::Exception::throw_type(
+        ctx,
+        &format!("Invalid header name: {name:?}"),
+      ))
+    }
+  }
+
+  fn check_value(ctx: &Ctx<'_>, raw: &str) -> rquickjs::Result<String> {
+    let v = normalize_header_value(raw);
+    if is_header_value(&v) {
+      Ok(v)
+    } else {
+      Err(rquickjs::Exception::throw_type(ctx, "Invalid header value"))
+    }
+  }
+
+  fn fill_from_value<'js>(&mut self, ctx: &Ctx<'js>, v: &Value<'js>) -> rquickjs::Result<()> {
+    if let Ok(other) = Class::<HeadersJs>::from_value(v) {
+      for (k, val) in &other.borrow().pairs {
+        self.append_normalized(k.clone(), val.clone());
+      }
+      return Ok(());
+    }
+    if let Some(arr) = v.as_array() {
+      for i in 0..arr.len() {
+        let entry = arr.get::<Value<'js>>(i)?;
+        let pair = entry
+          .as_array()
+          .ok_or_else(|| rquickjs::Exception::throw_type(ctx, "Header init entry is not a [name, value] pair"))?;
+        if pair.len() != 2 {
+          return Err(rquickjs::Exception::throw_type(
+            ctx,
+            "Header init entry must be a [name, value] pair",
+          ));
+        }
+        let name = Self::check_name(ctx, &pair.get::<Coerced<String>>(0)?.0)?;
+        let value = Self::check_value(ctx, &pair.get::<Coerced<String>>(1)?.0)?;
+        self.append_normalized(name, value);
+      }
+      return Ok(());
+    }
+    if let Some(obj) = v.as_object() {
+      for k in obj.keys::<String>().collect::<rquickjs::Result<Vec<_>>>()? {
+        let name = Self::check_name(ctx, &k)?;
+        let value = Self::check_value(ctx, &obj.get::<_, Coerced<String>>(k.as_str())?.0)?;
+        self.append_normalized(name, value);
+      }
+    }
+    Ok(())
+  }
 }
 
 #[rquickjs::methods]
 impl HeadersJs {
   #[qjs(constructor)]
-  pub fn new(init: Opt<Value<'_>>) -> Self {
-    let pairs = init.0.as_ref().map(header_pairs_from).unwrap_or_default();
-    Self { pairs }
-  }
-
-  #[qjs(rename = "get")]
-  pub fn get(&self, name: String) -> Option<String> {
-    let n = name.to_ascii_lowercase();
-    self
-      .pairs
-      .iter()
-      .find(|(k, _)| k.to_ascii_lowercase() == n)
-      .map(|(_, v)| v.clone())
-  }
-
-  #[qjs(rename = "has")]
-  pub fn has(&self, name: String) -> bool {
-    let n = name.to_ascii_lowercase();
-    self.pairs.iter().any(|(k, _)| k.to_ascii_lowercase() == n)
-  }
-
-  #[qjs(rename = "set")]
-  pub fn set(&mut self, name: String, value: String) {
-    let n = name.to_ascii_lowercase();
-    self.pairs.retain(|(k, _)| k.to_ascii_lowercase() != n);
-    self.pairs.push((name, value));
+  pub fn new<'js>(ctx: Ctx<'js>, init: Opt<Value<'js>>) -> rquickjs::Result<Self> {
+    let mut h = Self { pairs: Vec::new() };
+    if let Some(v) = init.0 {
+      if v.is_null() || v.is_number() {
+        return Err(rquickjs::Exception::throw_type(
+          &ctx,
+          "Failed to construct 'Headers': invalid init",
+        ));
+      }
+      if !v.is_undefined() {
+        h.fill_from_value(&ctx, &v)?;
+      }
+    }
+    Ok(h)
   }
 
   #[qjs(rename = "append")]
-  pub fn append(&mut self, name: String, value: String) {
-    self.pairs.push((name, value));
+  pub fn append(&mut self, ctx: Ctx<'_>, name: String, value: Coerced<String>) -> rquickjs::Result<()> {
+    let n = Self::check_name(&ctx, &name)?;
+    let v = Self::check_value(&ctx, &value.0)?;
+    self.append_normalized(n, v);
+    Ok(())
+  }
+
+  #[qjs(rename = "set")]
+  pub fn set(&mut self, ctx: Ctx<'_>, name: String, value: Coerced<String>) -> rquickjs::Result<()> {
+    let n = Self::check_name(&ctx, &name)?;
+    let v = Self::check_value(&ctx, &value.0)?;
+    self.pairs.retain(|(k, _)| k != &n);
+    self.pairs.push((n, v));
+    Ok(())
+  }
+
+  #[qjs(rename = "get")]
+  pub fn get<'js>(&self, ctx: Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
+    let n = Self::check_name(&ctx, &name)?;
+    let matches: Vec<&str> = self
+      .pairs
+      .iter()
+      .filter(|(k, _)| k == &n)
+      .map(|(_, v)| v.as_str())
+      .collect();
+    if matches.is_empty() {
+      Ok(Value::new_null(ctx))
+    } else {
+      matches.join(", ").into_js(&ctx)
+    }
+  }
+
+  #[qjs(rename = "getSetCookie")]
+  pub fn get_set_cookie(&self) -> Vec<String> {
+    self
+      .pairs
+      .iter()
+      .filter(|(k, _)| k == "set-cookie")
+      .map(|(_, v)| v.clone())
+      .collect()
+  }
+
+  #[qjs(rename = "has")]
+  pub fn has(&self, ctx: Ctx<'_>, name: String) -> rquickjs::Result<bool> {
+    let n = Self::check_name(&ctx, &name)?;
+    Ok(self.pairs.iter().any(|(k, _)| k == &n))
   }
 
   #[qjs(rename = "delete")]
-  pub fn delete(&mut self, name: String) {
-    let n = name.to_ascii_lowercase();
-    self.pairs.retain(|(k, _)| k.to_ascii_lowercase() != n);
+  pub fn delete(&mut self, ctx: Ctx<'_>, name: String) -> rquickjs::Result<()> {
+    let n = Self::check_name(&ctx, &name)?;
+    self.pairs.retain(|(k, _)| k != &n);
+    Ok(())
   }
 
   #[qjs(rename = "entries")]
-  pub fn entries(&self) -> Vec<Vec<String>> {
-    self.pairs.iter().map(|(k, v)| vec![k.clone(), v.clone()]).collect()
+  pub fn entries<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+    new_header_iter(&ctx, self.sorted(), IterKind::Entries)
   }
 
   #[qjs(rename = "keys")]
-  pub fn keys(&self) -> Vec<String> {
-    self.pairs.iter().map(|(k, _)| k.clone()).collect()
+  pub fn keys<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+    new_header_iter(&ctx, self.sorted(), IterKind::Keys)
+  }
+
+  #[qjs(rename = "values")]
+  pub fn values<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+    new_header_iter(&ctx, self.sorted(), IterKind::Values)
+  }
+
+  #[qjs(rename = PredefinedAtom::SymbolIterator)]
+  pub fn js_iterator<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+    new_header_iter(&ctx, self.sorted(), IterKind::Entries)
+  }
+
+  #[qjs(rename = "forEach")]
+  pub fn for_each(&self, cb: rquickjs::Function<'_>) -> rquickjs::Result<()> {
+    for (k, v) in self.sorted() {
+      cb.call::<_, ()>((v, k))?;
+    }
+    Ok(())
   }
 }
 
@@ -201,12 +509,7 @@ impl FetchResponseJs {
 
   #[qjs(get, rename = "headers")]
   pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, HeadersJs>> {
-    Class::instance(
-      ctx,
-      HeadersJs {
-        pairs: self.headers.clone(),
-      },
-    )
+    Class::instance(ctx, HeadersJs::from_pairs(self.headers.iter().cloned()))
   }
 
   #[qjs(rename = "text")]
