@@ -1134,12 +1134,25 @@ impl WebKitPage {
       let sy = if i == steps { y } else { y * t };
       self.send_mouse_event(0, btn, 0, sx, sy).await?;
     }
-    for i in 1..=args.click_count {
-      self.send_mouse_event(1, btn, i, x, y).await?;
-      if args.delay_ms > 0 {
-        tokio::time::sleep(std::time::Duration::from_millis(args.delay_ms)).await;
+    // Middle button: the native `otherMouseDown:`/`otherMouseUp:` do
+    // NOT reach WebCore's DOM-event generator in an offscreen
+    // `WKWebView` (see the JS workaround below), but they DO still feed
+    // WebCore's pointer-event/hit-test path a trusted event at a
+    // coordinate space that Playwright's hit-target interceptor then
+    // mis-attributes to `<html>` — failing the actionability accounting
+    // even though the click logically lands. Since the DOM events for
+    // middle come exclusively from the JS workaround, emitting the
+    // native button down/up buys nothing and only confuses the
+    // interceptor — skip it (keep the moves; left/right still dispatch
+    // natively as before).
+    if args.button != crate::options::MouseButton::Middle {
+      for i in 1..=args.click_count {
+        self.send_mouse_event(1, btn, i, x, y).await?;
+        if args.delay_ms > 0 {
+          tokio::time::sleep(std::time::Duration::from_millis(args.delay_ms)).await;
+        }
+        self.send_mouse_event(2, btn, i, x, y).await?;
       }
-      self.send_mouse_event(2, btn, i, x, y).await?;
     }
     // Middle-button DOM dispatch workaround: in an offscreen / borderless
     // `WKWebView`, `-[WKWebView otherMouseDown:]` + `otherMouseUp:` don't
