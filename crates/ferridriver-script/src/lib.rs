@@ -55,7 +55,7 @@ pub mod session_table;
 pub mod vars;
 
 pub use bindings::{
-  APIRequestContextJs, APIResponseJs, ArtifactsJs, BrowserContextJs, CollectedRegistry, HookArg, JsArg, KeyboardJs,
+  ArtifactsJs, BrowserContextJs, CollectedRegistry, HookArg, HttpClientJs, HttpResponseJs, JsArg, KeyboardJs,
   LocatorJs, MouseJs, PageJs, PluginBinding, PluginCommandsJs, ScenarioWorld, ScriptAttachment, StepOutcome,
   collect_registry, drain_attachments, install_plugins, invoke_hook, invoke_step, reset_world, set_scenario_world,
 };

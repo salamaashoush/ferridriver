@@ -13,7 +13,7 @@
 //! commands }` with the Object API, applies the handler and returns its
 //! promise — the exact mechanism BDD steps use (`invoke_step`). The
 //! `commands` binding and the `allow.net` host guard are native Rust
-//! (`PluginCommandsJs`, `APIRequestContextJs::with_net`); the allow-list
+//! (`PluginCommandsJs`, `HttpClientJs::with_net`); the allow-list
 //! is checked in Rust before any shell/network I/O.
 
 use std::collections::BTreeMap;
@@ -25,8 +25,8 @@ use rquickjs::function::{Func, Opt};
 use rquickjs::promise::{MaybePromise, Promised};
 use rquickjs::{Ctx, IntoJs, JsLifetime, Module, Object, Value, class::Class, class::Trace};
 
-use super::api_request::APIRequestContextJs;
 use super::bdd::{tool_dispatch, tool_names};
+use super::http_client::HttpClientJs;
 use crate::bindings::convert::{json_to_js, serde_from_js};
 use crate::command_spec::CommandSpec;
 use crate::engine::SessionProcsUd;
@@ -220,13 +220,13 @@ fn dispatch_tool<'js>(
 
     // `request`: pass through unless the tool declared `allow.net`, in
     // which case hand it a net-restricted wrapper over the SAME underlying
-    // context (host check enforced natively in `APIRequestContextJs`).
+    // context (host check enforced natively in `HttpClientJs`).
     let req_val: Value<'js> = g.get("request").unwrap_or_else(|_| undef.clone());
     let request_out: Value<'js> = match net_policy.clone() {
-      Some(net) => match Class::<APIRequestContextJs>::from_value(&req_val) {
+      Some(net) => match Class::<HttpClientJs>::from_value(&req_val) {
         Ok(cls) => {
           let inner = cls.borrow().inner_arc();
-          let guarded = Class::instance(ctx.clone(), APIRequestContextJs::with_net(inner, net))?;
+          let guarded = Class::instance(ctx.clone(), HttpClientJs::with_net(inner, net))?;
           guarded.into_js(&ctx)?
         },
         Err(_) => req_val,

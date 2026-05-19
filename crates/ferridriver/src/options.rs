@@ -1591,7 +1591,7 @@ pub enum HttpCredentialsSend {
   /// Only on 401 responses (default).
   #[default]
   Unauthorized,
-  /// On every request (`APIRequestContext` only).
+  /// On every request (`HttpClient` only).
   Always,
 }
 

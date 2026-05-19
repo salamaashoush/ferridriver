@@ -148,7 +148,7 @@ async fn build_world_from_pool(
     .get("context")
     .await
     .map_err(|e| TestFailure::wrap("fixture 'context' failed", e))?;
-  let request: Arc<ferridriver::api_request::APIRequestContext> = pool
+  let request: Arc<ferridriver::http_client::HttpClient> = pool
     .get("request")
     .await
     .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;
@@ -296,7 +296,7 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
         .get("test_info")
         .await
         .map_err(|e| TestFailure::wrap("fixture 'test_info' failed", e))?;
-      let request: Arc<ferridriver::api_request::APIRequestContext> = pool
+      let request: Arc<ferridriver::http_client::HttpClient> = pool
         .get("request")
         .await
         .map_err(|e| TestFailure::wrap("fixture 'request' failed", e))?;

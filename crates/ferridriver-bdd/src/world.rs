@@ -62,7 +62,7 @@ impl BrowserWorld {
     &self.fixtures.browser
   }
 
-  pub fn request(&self) -> &ferridriver::api_request::APIRequestContext {
+  pub fn request(&self) -> &ferridriver::http_client::HttpClient {
     &self.fixtures.request
   }
 

@@ -566,8 +566,8 @@ fn build_browser_fixture_defs(
         move |_pool| {
           let base_url = base_url.clone();
           Box::pin(async move {
-            Ok(Arc::new(ferridriver::api_request::APIRequestContext::new(
-              ferridriver::api_request::RequestContextOptions {
+            Ok(Arc::new(ferridriver::http_client::HttpClient::new(
+              ferridriver::http_client::HttpClientOptions {
                 base_url,
                 ..Default::default()
               },

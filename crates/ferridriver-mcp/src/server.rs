@@ -281,7 +281,7 @@ only exposed via the `page` tool.\n\
 == SCRIPTING SAFETY ==\n\
 `run_script` runs in a sandboxed QuickJS runtime: no raw filesystem access (only \
 `fs.*` scoped to script_root for source files + `artifacts.*` scoped to artifacts_root \
-for outputs), no runner-side network except via `request.*` (APIRequestContext), no \
+for outputs), no runner-side network except via `request.*` (HttpClient), no \
 `process` / `require` / bare `import`. Caller-controlled data MUST be passed via the \
 `args` array, never interpolated into the `source` string — the engine does not protect \
 against source-level injection.";
@@ -643,8 +643,8 @@ impl McpServer {
       ));
     };
     let (page, ctx_ref) = Box::pin(self.page_and_context(session)).await?;
-    let request = Arc::new(ferridriver::api_request::APIRequestContext::new(
-      ferridriver::api_request::RequestContextOptions::default(),
+    let request = Arc::new(ferridriver::http_client::HttpClient::new(
+      ferridriver::http_client::HttpClientOptions::default(),
     ));
     let browser = Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
     Ok(ferridriver_script::RunContext {

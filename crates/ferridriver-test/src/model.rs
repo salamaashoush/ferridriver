@@ -1048,7 +1048,7 @@ pub struct TestFixtures {
   pub browser: Arc<ferridriver::Browser>,
   pub page: Arc<ferridriver::Page>,
   pub context: Arc<ferridriver::context::ContextRef>,
-  pub request: Arc<ferridriver::api_request::APIRequestContext>,
+  pub request: Arc<ferridriver::http_client::HttpClient>,
   pub test_info: Arc<TestInfo>,
   pub modifiers: Arc<TestModifiers>,
   pub browser_config: crate::config::BrowserConfig,

@@ -141,7 +141,7 @@ pub struct RunContext {
   pub artifacts: Option<Arc<PathSandbox>>,
   pub page: Option<Arc<ferridriver::Page>>,
   pub browser_context: Option<Arc<ferridriver::context::ContextRef>>,
-  pub request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
+  pub request: Option<Arc<ferridriver::http_client::HttpClient>>,
   /// Optional root `Browser` handle exposed as the `browser` global.
   /// Scripts use it for
   /// `browser.newContext(BrowserContextOptions)` — the natural
@@ -601,7 +601,7 @@ struct GlobalsInstall {
   console: Arc<ConsoleCapture>,
   page: Option<Arc<ferridriver::Page>>,
   browser_context: Option<Arc<ferridriver::context::ContextRef>>,
-  request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
+  request: Option<Arc<ferridriver::http_client::HttpClient>>,
   browser: Option<Arc<ferridriver::Browser>>,
   /// `AsyncContext` driving the script — passed to `install_page` so
   /// `page.route` callbacks can dispatch back into JS from a separate
@@ -645,8 +645,8 @@ fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: Globals
     // `fetch` is always present; with no session HTTP context it uses
     // a fresh default one (no shared cookies). Same net posture as the
     // `request` binding when absent.
-    let cx = std::sync::Arc::new(ferridriver::api_request::APIRequestContext::new(
-      ferridriver::api_request::RequestContextOptions::default(),
+    let cx = std::sync::Arc::new(ferridriver::http_client::HttpClient::new(
+      ferridriver::http_client::HttpClientOptions::default(),
     ));
     crate::bindings::fetch::install(ctx, cx)?;
   }
