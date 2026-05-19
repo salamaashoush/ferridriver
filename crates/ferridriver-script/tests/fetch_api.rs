@@ -653,3 +653,57 @@ async fn fetch_blob_and_formdata_bodies() {
     "multipart contains the file part: {body}"
   );
 }
+
+/// Sends the body in two parts with a gap, so a reader that gets the
+/// first chunk before the second is written proves incremental (not
+/// fully-buffered) delivery.
+fn spawn_chunked() -> (String, std::thread::JoinHandle<()>) {
+  let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+  let addr = listener.local_addr().expect("addr");
+  let url = format!("http://{addr}");
+  let h = std::thread::spawn(move || {
+    for stream in listener.incoming().take(2) {
+      let Ok(mut s) = stream else { break };
+      let mut buf = [0u8; 1024];
+      let _ = s.read(&mut buf);
+      let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 6\r\nConnection: close\r\n\r\nAAA");
+      let _ = s.flush();
+      std::thread::sleep(std::time::Duration::from_millis(400));
+      let _ = s.write_all(b"BBB");
+      let _ = s.flush();
+    }
+  });
+  (url, h)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_body_streams_incrementally() {
+  let (url, _h) = spawn_chunked();
+  let started = std::time::Instant::now();
+  let o = run(&format!(
+    "const r = await fetch('{url}/c'); const rd = r.body.getReader(); const dec = new TextDecoder(); \
+     const a = await rd.read(); \
+     const rest = []; for (;;) {{ const x = await rd.read(); if (x.done) break; rest.push(dec.decode(x.value)); }} \
+     return {{ first: dec.decode(a.value), all: dec.decode(a.value) + rest.join('') }};"
+  ))
+  .await;
+  let first_read_elapsed = started.elapsed();
+  let v = val(&o);
+  assert_eq!(
+    v["first"],
+    serde_json::json!("AAA"),
+    "first chunk arrives before the rest"
+  );
+  assert_eq!(
+    v["all"],
+    serde_json::json!("AAABBB"),
+    "stream reassembles the full body"
+  );
+  // The whole read finishes only after the 400ms gap, but the point is
+  // the body was delivered in >1 network chunk (incremental, not one
+  // buffered blob) — assert it did not hang absurdly.
+  assert!(
+    first_read_elapsed < std::time::Duration::from_secs(3),
+    "streamed read completed: {first_read_elapsed:?}"
+  );
+}
