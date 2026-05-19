@@ -352,9 +352,8 @@ the real cwd).
 
 ### `fetch`
 
-Standard `fetch(input, init?)` with `Headers` and a `FetchResponse`
-(`status`, `ok`, `statusText`, `url`, `headers`, `text()`, `json()`,
-`arrayBuffer()`):
+Web-standard `fetch(input, init?)` with the WHATWG globals `Headers`,
+`Request`, and `Response` (constructible; `instanceof` works):
 
 ```ts
 const r = await fetch("https://api.example.com/x", {
@@ -366,10 +365,26 @@ if (!r.ok) throw new Error(`HTTP ${r.status}`);
 const data = await r.json();
 ```
 
+`Headers` follows the spec (case-insensitive, `, `-combined,
+`set-cookie` separate + `getSetCookie()`, real iterators, `forEach`).
+`Response` has `status`/`ok`/`statusText`/`url`/`redirected`/`type`/
+`bodyUsed`/`headers`, single-use `text()`/`json()`/`arrayBuffer()`,
+`clone()`, and static `Response.json()`/`error()`/`redirect()`.
+`Request` (`new Request(url|Request, init?)`) carries
+`url`/`method`/`headers`/`redirect`/`credentials`/`bodyUsed` and is
+accepted by `fetch`. Subset, for now: bodies buffer (no streaming
+`ReadableStream` body yet), no `Blob`/`FormData`, and `signal` is
+accepted but not yet enforced.
+
+The Playwright page-network `Request`/`Response` (from `page.on(...)`,
+`route`, navigation) are unchanged but are not global constructors
+(matching Playwright, which never globalised them) — the bare
+`Request`/`Response` globals are the fetch classes.
+
 It runs on the **same HTTP core as `request`** — so cookies/session are
 shared and any `allow.net` restriction on a tool's `request` applies to
 `fetch` the same way (no second stack, no bypass). `request` (the
-Playwright-style API) stays; `fetch` is just the standard entry point.
+Playwright-style API) stays; `fetch` is the standard entry point.
 Subset today: no streaming/`Blob`/`FormData`/`AbortController`, and
 `instanceof Response` does not apply (the response class is
 `FetchResponse`; the global `Response` is the page-network one).

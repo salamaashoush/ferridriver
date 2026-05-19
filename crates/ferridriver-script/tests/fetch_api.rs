@@ -215,3 +215,123 @@ async fn headers_for_each_normalization_and_validation() {
     "constructible from a Headers"
   );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_is_constructible_with_spec_surface() {
+  let o = run(
+    "const r = new Response('hi', { status: 201, statusText: 'Created', headers: { 'X-A': 'b' } }); \
+     const beforeUsed = r.bodyUsed; \
+     const cloned = r.clone(); \
+     const body = await r.text(); \
+     let reread = false; try { await r.text(); } catch (e) { reread = e instanceof TypeError; } \
+     let cloneAfter = false; try { r.clone(); } catch (e) { cloneAfter = e instanceof TypeError; } \
+     return { status: r.status, ok: r.ok, statusText: r.statusText, type: r.type, \
+       url: r.url, redirected: r.redirected, xa: r.headers.get('x-a'), \
+       beforeUsed, afterUsed: r.bodyUsed, body, reread, cloneAfter, \
+       clonedBody: await cloned.text(), \
+       isResp: r instanceof Response };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["status"], serde_json::json!(201));
+  assert_eq!(v["ok"], serde_json::json!(true), "201 is ok");
+  assert_eq!(v["statusText"], serde_json::json!("Created"));
+  assert_eq!(v["type"], serde_json::json!("default"));
+  assert_eq!(v["url"], serde_json::json!(""));
+  assert_eq!(v["redirected"], serde_json::json!(false));
+  assert_eq!(v["xa"], serde_json::json!("b"));
+  assert_eq!(v["beforeUsed"], serde_json::json!(false));
+  assert_eq!(v["afterUsed"], serde_json::json!(true));
+  assert_eq!(v["body"], serde_json::json!("hi"));
+  assert_eq!(v["reread"], serde_json::json!(true), "second body read -> TypeError");
+  assert_eq!(v["cloneAfter"], serde_json::json!(true), "clone after use -> TypeError");
+  assert_eq!(
+    v["clonedBody"],
+    serde_json::json!("hi"),
+    "clone keeps an independent body"
+  );
+  assert_eq!(v["isResp"], serde_json::json!(true), "instanceof Response");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_static_helpers() {
+  let o = run(
+    "const j = Response.json({ a: 1 }, { status: 202 }); \
+     const e = Response.error(); \
+     const rd = Response.redirect('http://x/y', 301); \
+     let badRange = false; try { Response.redirect('http://x', 200); } catch (er) { badRange = er instanceof RangeError; } \
+     return { jStatus: j.status, jCt: j.headers.get('content-type'), jBody: await j.json(), \
+       eStatus: e.status, eType: e.type, \
+       rdStatus: rd.status, rdLoc: rd.headers.get('location'), badRange };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["jStatus"], serde_json::json!(202));
+  assert_eq!(v["jCt"], serde_json::json!("application/json"));
+  assert_eq!(v["jBody"], serde_json::json!({ "a": 1 }));
+  assert_eq!(v["eStatus"], serde_json::json!(0), "Response.error() status 0");
+  assert_eq!(v["eType"], serde_json::json!("error"));
+  assert_eq!(v["rdStatus"], serde_json::json!(301));
+  assert_eq!(v["rdLoc"], serde_json::json!("http://x/y"));
+  assert_eq!(
+    v["badRange"],
+    serde_json::json!(true),
+    "non-redirect status -> RangeError"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn request_is_constructible_and_clonable() {
+  let o = run(
+    "const a = new Request('http://x/p', { method: 'post', headers: { 'X-A': 'b' }, body: 'hello', \
+       redirect: 'manual', credentials: 'include' }); \
+     const b = new Request(a); \
+     const ab = await a.text(); \
+     let reread = false; try { await a.text(); } catch (e) { reread = e instanceof TypeError; } \
+     return { url: a.url, method: a.method, xa: a.headers.get('x-a'), \
+       redirect: a.redirect, credentials: a.credentials, ab, reread, \
+       bUrl: b.url, bMethod: b.method, isReq: a instanceof Request };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["url"], serde_json::json!("http://x/p"));
+  assert_eq!(v["method"], serde_json::json!("POST"), "method upper-cased");
+  assert_eq!(v["xa"], serde_json::json!("b"));
+  assert_eq!(v["redirect"], serde_json::json!("manual"));
+  assert_eq!(v["credentials"], serde_json::json!("include"));
+  assert_eq!(v["ab"], serde_json::json!("hello"));
+  assert_eq!(v["reread"], serde_json::json!(true));
+  assert_eq!(
+    v["bUrl"],
+    serde_json::json!("http://x/p"),
+    "constructible from a Request"
+  );
+  assert_eq!(v["bMethod"], serde_json::json!("POST"));
+  assert_eq!(v["isReq"], serde_json::json!(true), "instanceof Request");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_accepts_a_request_instance() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const req = new Request('{url}/r', {{ method: 'POST', body: {{ a: 1 }} }}); \
+     const r = await fetch(req); const j = await r.json(); \
+     return {{ method: j.method, path: j.path, body: j.body, type: r.type }};"
+  ))
+  .await;
+  let v = val(&o);
+  assert_eq!(
+    v["method"],
+    serde_json::json!("POST"),
+    "fetch reads method off a Request"
+  );
+  assert_eq!(v["path"], serde_json::json!("/r"));
+  assert_eq!(
+    v["body"]
+      .as_str()
+      .and_then(|s| serde_json::from_str::<serde_json::Value>(s).ok()),
+    Some(serde_json::json!({ "a": 1 })),
+    "Request body forwarded"
+  );
+  assert_eq!(v["type"], serde_json::json!("basic"), "fetched Response type is basic");
+}
