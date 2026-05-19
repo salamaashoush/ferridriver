@@ -377,9 +377,14 @@ accepted by `fetch`. `AbortController`/`AbortSignal` are standard
 `throwIfAborted()`/`onabort`/`addEventListener('abort')`,
 `AbortSignal.abort/timeout/any`); `fetch(url, { signal })` rejects an
 already-aborted call before I/O and cancels an in-flight request.
-Subset, for now: bodies buffer (no streaming `ReadableStream` body
-yet), no `Blob`/`FormData`, and a `signal` set on a `Request` instance
-is not yet forwarded (pass it through `init.signal`).
+`Response.body` is a `ReadableStream` (`getReader().read()` ->
+`{value:Uint8Array,done}`, `for await (const chunk of res.body)`,
+`cancel()`, `locked`); `new ReadableStream({ start(c){ c.enqueue(x);
+c.close() } })` works too. Subset, for now: the body is buffered (one
+chunk — not yet streamed incrementally from the socket), no `Blob`/
+`FormData`, no `ReadableStream` `pull`/`tee`/BYOB, and a `signal` set
+on a `Request` instance is not yet forwarded (pass it through
+`init.signal`).
 
 The Playwright page-network `Request`/`Response` (from `page.on(...)`,
 `route`, navigation) are unchanged but are not global constructors
