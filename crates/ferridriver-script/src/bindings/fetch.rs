@@ -10,14 +10,70 @@
 //! streaming / `Blob` / `FormData` / `AbortController` yet, and the
 //! response class is `FetchResponse` (the global `Response` name is the
 //! page-network class) so `instanceof Response` does not apply.
+//!
+//! Net policy: `fetch` is a facade over the SAME core a net-restricted
+//! tool's `request` wraps, so the `allow.net` allow-list must bind here
+//! too — otherwise a tool restricted to host X could reach anywhere via
+//! the global `fetch`. The per-tool allow-list lives in [`NetPolicyUd`]
+//! (VM userdata); `plugins::dispatch_tool` brackets each handler poll so
+//! the policy in effect is whichever tool's continuation is running, and
+//! `fetch` snapshots it synchronously at call time (before any I/O).
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use ferridriver::api_request::{APIRequestContext, RequestOptions};
 use rquickjs::function::Opt;
 use rquickjs::{Ctx, IntoJs, Object, Value, class::Class, class::Trace};
 
+use crate::bindings::api_request::net_check;
 use crate::bindings::convert::json_to_js;
+
+/// Per-VM carrier of the *currently active* tool net allow-list. `None`
+/// (the resting state, and what the top-level script sees) means
+/// unrestricted; `Some(list)` means default-deny against `list`.
+///
+/// One cell per session VM, stored as rquickjs userdata at
+/// [`crate::engine::Session::create`]. `plugins::dispatch_tool` swaps the
+/// active policy in/out around every poll of a tool handler's future so
+/// nested and concurrently-interleaved tool calls each see their own
+/// declared `allow.net` — the swap is synchronous and the `fetch` guard
+/// reads the cell synchronously within the same poll, so single-threaded
+/// QuickJS execution makes it race-free without locking the JS thread.
+#[derive(Clone, Default)]
+pub(crate) struct NetPolicy(Arc<Mutex<Option<Arc<[String]>>>>);
+
+impl NetPolicy {
+  fn lock(&self) -> std::sync::MutexGuard<'_, Option<Arc<[String]>>> {
+    self.0.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
+  }
+
+  /// Snapshot the active allow-list (cheap clone of the `Arc`).
+  pub(crate) fn current(&self) -> Option<Arc<[String]>> {
+    self.lock().clone()
+  }
+
+  /// Install `next` as the active policy, returning the previous value
+  /// so a poll-scoped guard can restore it.
+  pub(crate) fn swap(&self, next: Option<Arc<[String]>>) -> Option<Arc<[String]>> {
+    std::mem::replace(&mut *self.lock(), next)
+  }
+}
+
+/// rquickjs userdata wrapper for the session's [`NetPolicy`] cell.
+pub(crate) struct NetPolicyUd(pub(crate) NetPolicy);
+
+// SAFETY: holds only owned `'static` data (`Arc`/`Mutex`), no borrowed JS.
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for NetPolicyUd {
+  type Changed<'to> = NetPolicyUd;
+}
+
+/// Snapshot the session's active net allow-list, if any. Called
+/// synchronously at `fetch()` invocation time so the snapshot reflects
+/// the tool whose continuation is currently executing.
+pub(crate) fn active_net(ctx: &Ctx<'_>) -> Option<Arc<[String]>> {
+  ctx.userdata::<NetPolicyUd>().and_then(|u| u.0.current())
+}
 
 #[derive(Trace)]
 #[rquickjs::class(rename = "Headers")]
@@ -198,6 +254,11 @@ fn do_fetch<'js>(
       .and_then(|s| s.to_string().ok())
       .or_else(|| input.as_object().and_then(|o| o.get::<_, String>("url").ok()))
       .unwrap_or_default();
+    // Snapshot the net policy NOW (synchronously, while this `fetch()`
+    // call is still on the calling tool's stack) so the allow-list
+    // checked below is the caller's, not whatever runs by the time the
+    // request future is polled.
+    let net = active_net(&ctx);
     let init = init.0;
     let method = init.as_ref().and_then(|o| o.get::<_, String>("method").ok());
     let headers = init
@@ -217,6 +278,11 @@ fn do_fetch<'js>(
       _ => (None, None),
     };
     let promised = rquickjs::promise::Promised::from(async move {
+      if let Some(list) = net.as_deref()
+        && let Err(msg) = net_check(list, &url)
+      {
+        return Err(rquickjs::Error::new_from_js_message("fetch", "Error", msg));
+      }
       let opts = RequestOptions {
         method,
         headers,

@@ -215,18 +215,22 @@ await commands.stop("dev");           // SIGKILLs the process group
 
 ### `allow.net`
 
-A host allow-list scoping the handler's `request` HTTP client.
+A host allow-list scoping the handler's HTTP — both the `request` client
+and the global `fetch` (they share one core, so the list binds both).
 
-- Empty / absent: `request` is unrestricted (back-compat default).
-- Non-empty: that `request` binding flips to **default-deny**. Each entry
-  is an exact host (`api.box.com`) or a leading-wildcard suffix
-  (`*.box.com`, which also matches the bare apex `box.com`). Any other host
-  throws before the request is made.
+- Empty / absent: HTTP is unrestricted (back-compat default).
+- Non-empty: the tool's `request` binding and `fetch` both flip to
+  **default-deny**. Each entry is an exact host (`api.box.com`) or a
+  leading-wildcard suffix (`*.box.com`, which also matches the bare apex
+  `box.com`). Any other host throws before the request is made. The
+  policy follows the running handler: a tool calling another tool, or
+  two tools running concurrently, each see only their own declared list.
 
-`allow.net` scopes the `request` client **only**. `page`/`context` browser
-navigation is a separate, deliberately ungated authority — an automation
-tool must be able to navigate. There is no `fs` capability: the handler
-context exposes no filesystem handle, so an `fs` scope would gate nothing.
+`allow.net` scopes HTTP (`request` + `fetch`) **only**. `page`/`context`
+browser navigation is a separate, deliberately ungated authority — an
+automation tool must be able to navigate. There is no `fs` capability:
+the handler context exposes no filesystem handle, so an `fs` scope would
+gate nothing.
 
 ---
 
@@ -489,7 +493,7 @@ cross-plugin channel by design.
 | Field    | Wire        | Default | Meaning |
 |----------|-------------|---------|---------|
 | commands | `commands`  | `{}`    | name → command (shell string or spec object; `persistent` opt-in); alias `exec`. |
-| net      | `net`       | `[]`    | host allow-list for `request`; empty = unrestricted. |
+| net      | `net`       | `[]`    | host allow-list for `request` + `fetch`; empty = unrestricted. |
 
 ### Registration surface (JS globals)
 
