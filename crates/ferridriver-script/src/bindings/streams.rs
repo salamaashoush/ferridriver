@@ -1,52 +1,64 @@
 //! WHATWG `ReadableStream` — a deliberately small spec subset (the
-//! full llrt/stream-web machinery — BYOB, byte controllers,
-//! backpressure, tee — is studied for behaviour only, not ported).
+//! full llrt/stream-web machinery — BYOB, byte controllers, tee — is
+//! studied for behaviour only, not ported).
 //!
-//! Supported: `new ReadableStream({ start(controller) })` with
-//! `controller.enqueue/close/error`; `getReader()` ->
-//! `ReadableStreamDefaultReader` with `read()` (`{value:Uint8Array,
-//! done}`), `releaseLock()`, `cancel()`, `closed`; stream `cancel()`,
-//! `locked`; async iteration (`for await (const chunk of stream)`).
-//! `Response.body` is a `ReadableStream` of the body bytes.
+//! Two body sources behind one class:
+//! - **Buffered**: `new ReadableStream({ start(controller) })` and
+//!   `Blob.stream()` — chunks held in memory.
+//! - **Net**: `Response.body` — pulls chunks directly off the live
+//!   `reqwest` response ([`ferridriver::http_client::HttpStreamResponse`])
+//!   on each `read()`, so a large/streamed body is NOT fully buffered;
+//!   the consumer's pull rate is the backpressure.
 //!
-//! Subset, documented: the body is buffered (one chunk) rather than
-//! incrementally streamed from the socket — `Response.body` is
-//! spec-shaped but not yet backpressured/incremental (a follow-up
-//! plumbs `reqwest::Response::bytes_stream` through the core). No
-//! `pull`/`cancel` underlying-source callbacks, no BYOB, no `tee()`.
+//! `getReader()` (locks; second getReader -> TypeError), `read()`
+//! (`{value:Uint8Array,done}`), `releaseLock()`, `cancel()`, `locked`,
+//! async iteration. Reader/controller are not user-constructible
+//! (throw, per spec) but the global names + `instanceof` exist.
+//! `read()` is async (a Net pull awaits the socket). Subset: no
+//! `pull`/`tee`/BYOB underlying-source callbacks.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::VecDeque;
 use std::rc::Rc;
+use std::sync::Arc;
 
+use ferridriver::http_client::HttpStreamResponse;
 use rquickjs::atom::PredefinedAtom;
 use rquickjs::function::{Opt, This};
 use rquickjs::{Class, Ctx, Object, TypedArray, Value, class::Trace};
+use tokio::sync::Mutex as AsyncMutex;
 
 #[derive(Default)]
-struct StreamState {
+struct BufState {
   chunks: VecDeque<Vec<u8>>,
   closed: bool,
   errored: Option<String>,
-  locked: bool,
 }
 
-type Shared = Rc<RefCell<StreamState>>;
+/// The body behind a stream. `Net` is the live response; `Buffered` is
+/// an in-memory queue (constructed streams, `Blob.stream()`).
+#[derive(Clone)]
+enum StreamSource {
+  Buffered(Rc<RefCell<BufState>>),
+  Net(Arc<AsyncMutex<Option<HttpStreamResponse>>>),
+}
 
-/// Bytes from a JS chunk: string (UTF-8), `Uint8Array`, or
-/// `ArrayBuffer`. Anything else -> empty.
+/// `locked` is shared between a stream and the reader it hands out so
+/// `releaseLock()` is observable on the stream.
+type Locked = Rc<Cell<bool>>;
+
 fn chunk_bytes(v: &Value<'_>) -> Vec<u8> {
   if let Some(s) = v.as_string().and_then(|s| s.to_string().ok()) {
     return s.into_bytes();
   }
   if let Ok(ta) = TypedArray::<u8>::from_value(v.clone()) {
-    let bytes: &[u8] = ta.as_ref();
-    return bytes.to_vec();
+    let b: &[u8] = ta.as_ref();
+    return b.to_vec();
   }
   if let Some(ab) = rquickjs::ArrayBuffer::from_value(v.clone())
-    && let Some(bytes) = ab.as_bytes()
+    && let Some(b) = ab.as_bytes()
   {
-    return bytes.to_vec();
+    return b.to_vec();
   }
   Vec::new()
 }
@@ -58,27 +70,68 @@ fn result_obj<'js>(ctx: &Ctx<'js>, value: Value<'js>, done: bool) -> rquickjs::R
   Ok(o)
 }
 
-/// One read step against shared state (buffered model): a queued chunk,
-/// else end-of-stream once closed, else (no data, not closed) treated
-/// as done — the buffered producer always closes.
-fn read_step<'js>(ctx: &Ctx<'js>, state: &Shared) -> rquickjs::Result<Object<'js>> {
-  let (chunk, errored) = {
-    let mut s = state.borrow_mut();
-    if let Some(e) = s.errored.clone() {
-      (None, Some(e))
-    } else {
-      (s.chunks.pop_front(), None)
-    }
-  };
-  if let Some(e) = errored {
-    return Err(rquickjs::Exception::throw_type(ctx, &e));
-  }
-  match chunk {
-    Some(bytes) => {
-      let ta = TypedArray::<u8>::new(ctx.clone(), bytes)?;
-      result_obj(ctx, ta.into_value(), false)
+fn chunk_result<'js>(ctx: &Ctx<'js>, bytes: Vec<u8>) -> rquickjs::Result<Object<'js>> {
+  let ta = TypedArray::<u8>::new(ctx.clone(), bytes)?;
+  result_obj(ctx, ta.into_value(), false)
+}
+
+/// One read step. Buffered is immediate; Net awaits the next socket
+/// chunk (the only `.await` for a buffered stream is the readiness
+/// yield, so `read()` is uniformly async without a no-op `async`).
+async fn pull<'js>(ctx: &Ctx<'js>, source: &StreamSource) -> rquickjs::Result<Object<'js>> {
+  match source {
+    StreamSource::Buffered(state) => {
+      std::future::ready(()).await;
+      let (chunk, errored) = {
+        let mut s = state.borrow_mut();
+        if let Some(e) = s.errored.clone() {
+          (None, Some(e))
+        } else {
+          (s.chunks.pop_front(), None)
+        }
+      };
+      if let Some(e) = errored {
+        return Err(rquickjs::Exception::throw_type(ctx, &e));
+      }
+      match chunk {
+        Some(b) => chunk_result(ctx, b),
+        None => result_obj(ctx, Value::new_undefined(ctx.clone()), true),
+      }
     },
-    None => result_obj(ctx, Value::new_undefined(ctx.clone()), true),
+    StreamSource::Net(resp) => {
+      let mut guard = resp.lock().await;
+      let Some(r) = guard.as_mut() else {
+        return result_obj(ctx, Value::new_undefined(ctx.clone()), true);
+      };
+      match r.chunk().await {
+        Ok(Some(bytes)) => chunk_result(ctx, bytes.to_vec()),
+        Ok(None) => {
+          *guard = None;
+          result_obj(ctx, Value::new_undefined(ctx.clone()), true)
+        },
+        Err(e) => {
+          *guard = None;
+          Err(rquickjs::Exception::throw_type(ctx, &e.to_string()))
+        },
+      }
+    },
+  }
+}
+
+fn cancel_source(source: &StreamSource) {
+  match source {
+    StreamSource::Buffered(state) => {
+      let mut s = state.borrow_mut();
+      s.chunks.clear();
+      s.closed = true;
+    },
+    // Drop the live response if not mid-read (best-effort; a concurrent
+    // read keeps the lock and finishes its chunk first).
+    StreamSource::Net(resp) => {
+      if let Ok(mut g) = resp.try_lock() {
+        *g = None;
+      }
+    },
   }
 }
 
@@ -86,7 +139,7 @@ fn read_step<'js>(ctx: &Ctx<'js>, state: &Shared) -> rquickjs::Result<Object<'js
 #[rquickjs::class(rename = "ReadableStreamDefaultController")]
 pub struct ReadableStreamDefaultControllerJs {
   #[qjs(skip_trace)]
-  state: Shared,
+  buf: Rc<RefCell<BufState>>,
 }
 
 #[allow(unsafe_code)]
@@ -105,13 +158,12 @@ impl ReadableStreamDefaultControllerJs {
 
   #[qjs(rename = "enqueue")]
   pub fn enqueue(&self, chunk: Value<'_>) {
-    let bytes = chunk_bytes(&chunk);
-    self.state.borrow_mut().chunks.push_back(bytes);
+    self.buf.borrow_mut().chunks.push_back(chunk_bytes(&chunk));
   }
 
   #[qjs(rename = "close")]
   pub fn close(&self) {
-    self.state.borrow_mut().closed = true;
+    self.buf.borrow_mut().closed = true;
   }
 
   #[qjs(rename = "error")]
@@ -124,7 +176,7 @@ impl ReadableStreamDefaultControllerJs {
           .or_else(|| v.as_object().and_then(|o| o.get::<_, String>("message").ok()))
       })
       .unwrap_or_else(|| "stream errored".to_string());
-    let mut s = self.state.borrow_mut();
+    let mut s = self.buf.borrow_mut();
     s.errored = Some(msg);
     s.closed = true;
   }
@@ -134,7 +186,9 @@ impl ReadableStreamDefaultControllerJs {
 #[rquickjs::class(rename = "ReadableStreamDefaultReader")]
 pub struct ReadableStreamDefaultReaderJs {
   #[qjs(skip_trace)]
-  state: Shared,
+  source: StreamSource,
+  #[qjs(skip_trace)]
+  locked: Locked,
   #[qjs(skip_trace)]
   released: bool,
 }
@@ -146,55 +200,47 @@ unsafe impl rquickjs::JsLifetime<'_> for ReadableStreamDefaultReaderJs {
 
 #[rquickjs::methods(rename_all = "camelCase")]
 impl ReadableStreamDefaultReaderJs {
-  /// Not user-constructible in this subset (`stream.getReader()` is the
-  /// entry point); present so the global name + `instanceof` exist.
   #[qjs(constructor)]
   pub fn new(ctx: Ctx<'_>) -> rquickjs::Result<Self> {
     Err(rquickjs::Exception::throw_type(&ctx, "Illegal constructor"))
   }
 
-  /// `read()` -> `{ value: Uint8Array, done }`. Returned synchronously
-  /// (buffered model); `await reader.read()` is transparent on a
-  /// non-Promise, matching the rest of this subset.
+  /// `read()` -> `Promise<{ value: Uint8Array, done }>` (a Net pull
+  /// awaits the socket; buffered resolves immediately).
   #[qjs(rename = "read")]
-  pub fn read<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+  pub async fn read<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
     if self.released {
       return Err(rquickjs::Exception::throw_type(&ctx, "Reader has been released"));
     }
-    read_step(&ctx, &self.state)
+    pull(&ctx, &self.source).await
   }
 
   #[qjs(rename = "releaseLock")]
   pub fn release_lock(&mut self) {
     self.released = true;
-    self.state.borrow_mut().locked = false;
+    self.locked.set(false);
   }
 
   #[qjs(rename = "cancel")]
   pub fn cancel(&self, _reason: Opt<Value<'_>>) {
-    let mut s = self.state.borrow_mut();
-    s.chunks.clear();
-    s.closed = true;
+    cancel_source(&self.source);
   }
 
-  /// Spec `reader.closed` is a `Promise`. Buffered model: the producer
-  /// has already closed, so resolve eagerly (documented deviation for
-  /// the not-yet-closed case).
+  /// Spec `reader.closed` is a `Promise`; buffered-subset eager-resolve.
   #[qjs(get, rename = "closed")]
   pub fn closed<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
     result_obj(&ctx, Value::new_undefined(ctx.clone()), true)
   }
 
-  /// Reader is its own async iterator (`for await (const c of
-  /// stream.getReader())`).
+  /// A reader is its own async iterator.
   #[qjs(rename = PredefinedAtom::SymbolAsyncIterator)]
   pub fn async_iter(this: This<Class<'_, ReadableStreamDefaultReaderJs>>) -> Class<'_, ReadableStreamDefaultReaderJs> {
     this.0
   }
 
   #[qjs(rename = "next")]
-  pub fn next<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
-    read_step(&ctx, &self.state)
+  pub async fn next<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Object<'js>> {
+    pull(&ctx, &self.source).await
   }
 }
 
@@ -202,7 +248,9 @@ impl ReadableStreamDefaultReaderJs {
 #[rquickjs::class(rename = "ReadableStream")]
 pub struct ReadableStreamJs {
   #[qjs(skip_trace)]
-  state: Shared,
+  source: StreamSource,
+  #[qjs(skip_trace)]
+  locked: Locked,
 }
 
 #[allow(unsafe_code)]
@@ -211,20 +259,37 @@ unsafe impl rquickjs::JsLifetime<'_> for ReadableStreamJs {
 }
 
 impl ReadableStreamJs {
-  /// A stream pre-filled with `bytes` as a single chunk and closed —
-  /// what `Response.body` returns (buffered subset).
+  /// A buffered stream pre-filled with `bytes` (one chunk, closed) —
+  /// `Blob.stream()` and a buffered `Response.body`.
   pub fn from_bytes(bytes: Vec<u8>) -> Self {
     let mut chunks = VecDeque::new();
     if !bytes.is_empty() {
       chunks.push_back(bytes);
     }
     Self {
-      state: Rc::new(RefCell::new(StreamState {
+      source: StreamSource::Buffered(Rc::new(RefCell::new(BufState {
         chunks,
         closed: true,
         errored: None,
-        locked: false,
-      })),
+      }))),
+      locked: Rc::new(Cell::new(false)),
+    }
+  }
+
+  /// A live stream over a not-yet-read response — an incremental
+  /// `Response.body`.
+  pub fn from_net(resp: Arc<AsyncMutex<Option<HttpStreamResponse>>>) -> Self {
+    Self {
+      source: StreamSource::Net(resp),
+      locked: Rc::new(Cell::new(false)),
+    }
+  }
+
+  fn reader(&self) -> ReadableStreamDefaultReaderJs {
+    ReadableStreamDefaultReaderJs {
+      source: self.source.clone(),
+      locked: self.locked.clone(),
+      released: false,
     }
   }
 }
@@ -232,63 +297,48 @@ impl ReadableStreamJs {
 #[rquickjs::methods(rename_all = "camelCase")]
 impl ReadableStreamJs {
   /// `new ReadableStream(underlyingSource?)` — runs `start(controller)`
-  /// synchronously if present (`enqueue`/`close`/`error`). `pull` /
-  /// `cancel` / BYOB are not supported (documented subset).
+  /// synchronously if present. `pull`/`cancel`/BYOB unsupported.
   #[qjs(constructor)]
   pub fn new<'js>(ctx: Ctx<'js>, source: Opt<Object<'js>>) -> rquickjs::Result<Self> {
-    let state: Shared = Rc::new(RefCell::new(StreamState::default()));
+    let buf = Rc::new(RefCell::new(BufState::default()));
     if let Some(src) = source.0
       && let Ok(start) = src.get::<_, rquickjs::Function<'js>>("start")
     {
-      let controller = Class::instance(ctx.clone(), ReadableStreamDefaultControllerJs { state: state.clone() })?;
+      let controller = Class::instance(ctx.clone(), ReadableStreamDefaultControllerJs { buf: buf.clone() })?;
       start.call::<_, ()>((controller,))?;
     }
-    Ok(Self { state })
+    Ok(Self {
+      source: StreamSource::Buffered(buf),
+      locked: Rc::new(Cell::new(false)),
+    })
   }
 
   #[qjs(get, rename = "locked")]
   pub fn locked(&self) -> bool {
-    self.state.borrow().locked
+    self.locked.get()
   }
 
   #[qjs(rename = "getReader")]
   pub fn get_reader<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, ReadableStreamDefaultReaderJs>> {
-    {
-      let mut s = self.state.borrow_mut();
-      if s.locked {
-        return Err(rquickjs::Exception::throw_type(
-          &ctx,
-          "ReadableStream is already locked to a reader",
-        ));
-      }
-      s.locked = true;
+    if self.locked.get() {
+      return Err(rquickjs::Exception::throw_type(
+        &ctx,
+        "ReadableStream is already locked to a reader",
+      ));
     }
-    Class::instance(
-      ctx,
-      ReadableStreamDefaultReaderJs {
-        state: self.state.clone(),
-        released: false,
-      },
-    )
+    self.locked.set(true);
+    Class::instance(ctx, self.reader())
   }
 
   #[qjs(rename = "cancel")]
   pub fn cancel(&self, _reason: Opt<Value<'_>>) {
-    let mut s = self.state.borrow_mut();
-    s.chunks.clear();
-    s.closed = true;
+    cancel_source(&self.source);
   }
 
-  /// `stream[Symbol.asyncIterator]()` — a fresh reader (async iterator).
+  /// `stream[Symbol.asyncIterator]()` — a reader (locks the stream).
   #[qjs(rename = PredefinedAtom::SymbolAsyncIterator)]
   pub fn async_iter<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, ReadableStreamDefaultReaderJs>> {
-    self.state.borrow_mut().locked = true;
-    Class::instance(
-      ctx,
-      ReadableStreamDefaultReaderJs {
-        state: self.state.clone(),
-        released: false,
-      },
-    )
+    self.locked.set(true);
+    Class::instance(ctx, self.reader())
   }
 }

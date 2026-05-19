@@ -18,11 +18,13 @@
 //! is wired to `AbortController`/`AbortSignal` (see [`super::abort`]):
 //! an already-aborted signal rejects before I/O and an in-flight abort
 //! drops the request future. `Response.body` is a `ReadableStream`
-//! (see [`super::streams`]). `Blob` and `FormData` (see [`super::blob`]
-//! / [`super::form_data`]) are accepted as bodies — a `Blob` sends its
+//! that pulls chunks live off the socket (the body is NOT buffered;
+//! `text()`/`json()`/`arrayBuffer()` drain it on demand) — see
+//! [`super::streams`]. `Blob` and `FormData` (see [`super::blob`] /
+//! [`super::form_data`]) are accepted as bodies — a `Blob` sends its
 //! bytes + type, a `FormData` is serialized as `multipart/form-data`.
-//! Still a subset: the response body is buffered (one chunk — not yet
-//! incrementally streamed from the socket); a `signal` on a `Request`
+//! Still a subset: `clone()` of a not-yet-read streamed `Response`
+//! throws (no stream tee); a `signal` on a `Request`
 //! instance is not yet forwarded (pass it via `init.signal`);
 //! `init.redirect` maps onto the per-request redirect
 //! cap (`manual`/`error` -> don't follow; a spec-exact opaque-redirect /
@@ -272,6 +274,12 @@ pub struct FetchResponseJs {
   type_: &'static str,
   #[qjs(skip_trace)]
   body_used: bool,
+  /// `Some` for a `fetch()` result: the live, not-yet-buffered
+  /// response. `text`/`json`/`arrayBuffer` drain it; `body` hands it to
+  /// a `ReadableStream`. `None` for a constructed/`Response.json/error/
+  /// redirect` (the bytes are in `body`).
+  #[qjs(skip_trace)]
+  net: Option<Arc<tokio::sync::Mutex<Option<ferridriver::http_client::HttpStreamResponse>>>>,
 }
 
 /// WHATWG `Request` (spec subset). Constructible (`new Request(input,
@@ -580,26 +588,52 @@ impl HeadersJs {
 }
 
 impl FetchResponseJs {
-  /// Build the `Response` a `fetch()` resolves to.
-  fn from_fetch(status: u16, status_text: String, url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> Self {
+  /// The `Response` a `fetch()` resolves to: status/headers are known,
+  /// the body streams from `stream` (not buffered).
+  fn from_stream(
+    status: u16,
+    status_text: String,
+    url: String,
+    headers: Vec<(String, String)>,
+    redirected: bool,
+    stream: ferridriver::http_client::HttpStreamResponse,
+  ) -> Self {
     Self {
       status,
       status_text,
       url,
       headers,
-      body,
-      redirected: false,
+      body: Vec::new(),
+      redirected,
       type_: "basic",
       body_used: false,
+      net: Some(Arc::new(tokio::sync::Mutex::new(Some(stream)))),
     }
   }
 
-  /// WHATWG "consume body": a second read is a `TypeError`.
-  fn consume(&mut self, ctx: &Ctx<'_>) -> rquickjs::Result<Vec<u8>> {
+  /// WHATWG "consume body": a second read is a `TypeError`. Drains the
+  /// live response to completion when this is a streamed `fetch` body,
+  /// else returns the in-memory bytes.
+  async fn consume(&mut self, ctx: &Ctx<'_>) -> rquickjs::Result<Vec<u8>> {
     if self.body_used {
       return Err(rquickjs::Exception::throw_type(ctx, "Body has already been consumed"));
     }
     self.body_used = true;
+    if let Some(net) = &self.net {
+      let mut guard = net.lock().await;
+      let mut out = Vec::new();
+      if let Some(resp) = guard.as_mut() {
+        while let Some(chunk) = resp
+          .chunk()
+          .await
+          .map_err(|e| rquickjs::Exception::throw_type(ctx, &e.to_string()))?
+        {
+          out.extend_from_slice(&chunk);
+        }
+      }
+      *guard = None;
+      return Ok(out);
+    }
     Ok(std::mem::take(&mut self.body))
   }
 }
@@ -635,6 +669,7 @@ impl FetchResponseJs {
       redirected: false,
       type_: "default",
       body_used: false,
+      net: None,
     })
   }
 
@@ -660,6 +695,7 @@ impl FetchResponseJs {
       redirected: false,
       type_: "default",
       body_used: false,
+      net: None,
     })
   }
 
@@ -675,6 +711,7 @@ impl FetchResponseJs {
       redirected: false,
       type_: "error",
       body_used: false,
+      net: None,
     }
   }
 
@@ -695,6 +732,7 @@ impl FetchResponseJs {
       redirected: false,
       type_: "default",
       body_used: false,
+      net: None,
     })
   }
 
@@ -732,35 +770,37 @@ impl FetchResponseJs {
     Class::instance(ctx, HeadersJs::from_pairs(self.headers.iter().cloned()))
   }
 
-  /// `Response.body` — a `ReadableStream` of the body bytes. Buffered
-  /// subset: bytes are already in memory (one chunk), so this is
-  /// spec-shaped but not incrementally streamed; empty once the body
-  /// was consumed by `text()`/`json()`/`arrayBuffer()`.
+  /// `Response.body` — a `ReadableStream`. For a streamed `fetch`
+  /// result the stream pulls chunks live off the socket (the body is
+  /// NOT buffered); for a constructed `Response` it is the in-memory
+  /// bytes. Empty/done once the body was consumed by
+  /// `text()`/`json()`/`arrayBuffer()`.
   #[qjs(get, rename = "body")]
   pub fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, crate::bindings::streams::ReadableStreamJs>> {
-    Class::instance(
-      ctx,
-      crate::bindings::streams::ReadableStreamJs::from_bytes(self.body.clone()),
-    )
+    let stream = match &self.net {
+      Some(net) => crate::bindings::streams::ReadableStreamJs::from_net(net.clone()),
+      None => crate::bindings::streams::ReadableStreamJs::from_bytes(self.body.clone()),
+    };
+    Class::instance(ctx, stream)
   }
 
   #[qjs(rename = "text")]
-  pub fn text(&mut self, ctx: Ctx<'_>) -> rquickjs::Result<String> {
-    let b = self.consume(&ctx)?;
+  pub async fn text(&mut self, ctx: Ctx<'_>) -> rquickjs::Result<String> {
+    let b = self.consume(&ctx).await?;
     Ok(String::from_utf8_lossy(&b).into_owned())
   }
 
   #[qjs(rename = "json")]
-  pub fn json<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let b = self.consume(&ctx)?;
+  pub async fn json<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let b = self.consume(&ctx).await?;
     let v: serde_json::Value = serde_json::from_slice(&b)
       .map_err(|e| rquickjs::Error::new_from_js_message("Response.json", "Error", e.to_string()))?;
     json_to_js(&ctx, &v)
   }
 
   #[qjs(rename = "arrayBuffer")]
-  pub fn array_buffer<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let b = self.consume(&ctx)?;
+  pub async fn array_buffer<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let b = self.consume(&ctx).await?;
     rquickjs::ArrayBuffer::new(ctx.clone(), b).map(rquickjs::ArrayBuffer::into_value)
   }
 
@@ -768,6 +808,14 @@ impl FetchResponseJs {
   pub fn clone_(&self, ctx: Ctx<'_>) -> rquickjs::Result<Self> {
     if self.body_used {
       return Err(rquickjs::Exception::throw_type(&ctx, "Cannot clone a used Response"));
+    }
+    if self.net.is_some() {
+      // Cloning would require teeing the live stream; not supported in
+      // this subset (the body has not been buffered).
+      return Err(rquickjs::Exception::throw_type(
+        &ctx,
+        "Cannot clone a streaming Response (body is not buffered)",
+      ));
     }
     Ok(Self {
       status: self.status,
@@ -778,6 +826,7 @@ impl FetchResponseJs {
       redirected: self.redirected,
       type_: self.type_,
       body_used: false,
+      net: None,
     })
   }
 }
@@ -1037,7 +1086,9 @@ fn do_fetch<'js>(
           sig.reason_message(),
         ));
       }
-      let fut = cx.fetch(&url, Some(opts));
+      // Streamed: status/headers resolve here, the body is pulled
+      // incrementally later (via Response.body / text() / json()).
+      let fut = cx.fetch_stream(&url, Some(opts));
       let resp = match &signal {
         Some(sig) => {
           tokio::select! {
@@ -1052,16 +1103,17 @@ fn do_fetch<'js>(
           .map_err(|e| rquickjs::Error::new_from_js_message("fetch", "Error", e.to_string()))?,
       };
       let final_url = resp.url().to_string();
-      let mut out = FetchResponseJs::from_fetch(
-        resp.status(),
-        resp.status_text().to_string(),
-        final_url.clone(),
-        resp.headers().to_vec(),
-        resp.body().to_vec(),
-      );
       // Best-effort: a differing final URL means at least one hop was
       // followed (the core does not yet expose a redirect count).
-      out.redirected = !final_url.is_empty() && final_url != url;
+      let redirected = !final_url.is_empty() && final_url != url;
+      let out = FetchResponseJs::from_stream(
+        resp.status(),
+        resp.status_text().to_string(),
+        final_url,
+        resp.headers().to_vec(),
+        redirected,
+        resp,
+      );
       Ok::<_, rquickjs::Error>(out)
     });
     promised.into_js(&ctx)

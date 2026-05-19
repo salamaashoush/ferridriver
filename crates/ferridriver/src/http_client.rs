@@ -146,6 +146,59 @@ impl HttpResponse {
   }
 }
 
+/// A response whose body has NOT been buffered: status/headers are
+/// available immediately, body bytes are pulled incrementally with
+/// [`Self::chunk`]. Produced by [`HttpClient::fetch_stream`]; backs a
+/// WHATWG `Response.body` `ReadableStream`.
+#[derive(Debug)]
+pub struct HttpStreamResponse {
+  status_code: u16,
+  status_text: String,
+  response_url: String,
+  response_headers: Vec<(String, String)>,
+  inner: reqwest::Response,
+}
+
+impl HttpStreamResponse {
+  #[must_use]
+  pub fn status(&self) -> u16 {
+    self.status_code
+  }
+
+  #[must_use]
+  pub fn status_text(&self) -> &str {
+    &self.status_text
+  }
+
+  #[must_use]
+  pub fn url(&self) -> &str {
+    &self.response_url
+  }
+
+  #[must_use]
+  pub fn ok(&self) -> bool {
+    (200..300).contains(&self.status_code)
+  }
+
+  #[must_use]
+  pub fn headers(&self) -> &[(String, String)] {
+    &self.response_headers
+  }
+
+  /// Next body chunk, or `None` at end of stream.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if reading the body fails (connection reset, etc).
+  pub async fn chunk(&mut self) -> crate::error::Result<Option<bytes::Bytes>> {
+    self
+      .inner
+      .chunk()
+      .await
+      .map_err(|e| crate::error::FerriError::Backend(format!("read response body: {e}")))
+  }
+}
+
 /// A general HTTP client: all methods, JSON/form/multipart bodies,
 /// query params, custom headers, timeouts, and cookie persistence via
 /// reqwest's cookie jar. The one stack `fetch` and `request` share.
@@ -355,49 +408,7 @@ impl HttpClient {
   /// Returns an error if the request fails or `fail_on_status_code` is set and the response is 4xx/5xx.
   pub async fn fetch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
     let opts = options.unwrap_or_default();
-    let method_str = opts.method.as_deref().unwrap_or("GET");
-    let method: reqwest::Method = method_str
-      .parse()
-      .map_err(|_| format!("invalid HTTP method: {method_str}"))?;
-
-    let resolved_url = self.resolve_url(url);
-    let mut builder = self.client_for(opts.max_redirects).request(method, &resolved_url);
-
-    // Apply default extra headers.
-    for (k, v) in &self.extra_headers {
-      builder = builder.header(k, v);
-    }
-
-    // Apply per-request headers.
-    if let Some(headers) = &opts.headers {
-      for (k, v) in headers {
-        builder = builder.header(k, v);
-      }
-    }
-
-    // Query parameters.
-    if let Some(params) = &opts.params {
-      builder = builder.query(params);
-    }
-
-    // Request body (mutually exclusive: data, json_data, form).
-    if let Some(json) = &opts.json_data {
-      builder = builder.json(json);
-    } else if let Some(form) = &opts.form {
-      builder = builder.form(form);
-    } else if let Some(data) = &opts.data {
-      builder = builder.body(data.clone());
-    }
-
-    // Timeout.
-    let timeout = opts.timeout.unwrap_or(self.default_timeout);
-    builder = builder.timeout(timeout);
-
-    // Send.
-    let response = builder
-      .send()
-      .await
-      .map_err(|e| format!("request to {resolved_url} failed: {e}"))?;
+    let (response, resolved_url, method_str) = self.send_request(url, &opts).await?;
 
     let status_code = response.status().as_u16();
     let status_text = response.status().canonical_reason().unwrap_or("Unknown").to_string();
@@ -418,17 +429,99 @@ impl HttpClient {
       body_bytes,
     };
 
-    // Fail on status code if requested.
     if opts.fail_on_status_code.unwrap_or(false) && !api_response.ok() {
       return Err(crate::error::FerriError::Backend(format!(
-        "{} {resolved_url} failed: {} {}",
-        method_str,
+        "{method_str} {resolved_url} failed: {} {}",
         api_response.status(),
         api_response.status_text()
       )));
     }
 
     Ok(api_response)
+  }
+
+  /// Like [`Self::fetch`] but the body is NOT buffered: returns the
+  /// status/headers plus a handle whose [`HttpStreamResponse::chunk`]
+  /// yields bytes as they arrive (backs a WHATWG `Response.body`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the request fails, or `fail_on_status_code` is
+  /// set and the response is 4xx/5xx (checked before any body is read).
+  pub async fn fetch_stream(
+    &self,
+    url: &str,
+    options: Option<RequestOptions>,
+  ) -> crate::error::Result<HttpStreamResponse> {
+    let opts = options.unwrap_or_default();
+    let (response, resolved_url, method_str) = self.send_request(url, &opts).await?;
+
+    let status_code = response.status().as_u16();
+    let status_text = response.status().canonical_reason().unwrap_or("Unknown").to_string();
+    let response_url = response.url().to_string();
+    let response_headers: Vec<(String, String)> = response
+      .headers()
+      .iter()
+      .map(|(k, v)| (k.to_string(), v.to_str().unwrap_or("").to_string()))
+      .collect();
+
+    if opts.fail_on_status_code.unwrap_or(false) && !(200..300).contains(&status_code) {
+      return Err(crate::error::FerriError::Backend(format!(
+        "{method_str} {resolved_url} failed: {status_code} {status_text}"
+      )));
+    }
+
+    Ok(HttpStreamResponse {
+      status_code,
+      status_text,
+      response_url,
+      response_headers,
+      inner: response,
+    })
+  }
+
+  /// Build and send the request shared by [`Self::fetch`] and
+  /// [`Self::fetch_stream`]. Returns the unread response plus the
+  /// resolved URL and method (for error messages).
+  async fn send_request(
+    &self,
+    url: &str,
+    opts: &RequestOptions,
+  ) -> crate::error::Result<(reqwest::Response, String, String)> {
+    let method_str = opts.method.as_deref().unwrap_or("GET").to_string();
+    let method: reqwest::Method = method_str
+      .parse()
+      .map_err(|_| format!("invalid HTTP method: {method_str}"))?;
+
+    let resolved_url = self.resolve_url(url);
+    let mut builder = self.client_for(opts.max_redirects).request(method, &resolved_url);
+
+    for (k, v) in &self.extra_headers {
+      builder = builder.header(k, v);
+    }
+    if let Some(headers) = &opts.headers {
+      for (k, v) in headers {
+        builder = builder.header(k, v);
+      }
+    }
+    if let Some(params) = &opts.params {
+      builder = builder.query(params);
+    }
+    // Request body (mutually exclusive: json, form, raw data).
+    if let Some(json) = &opts.json_data {
+      builder = builder.json(json);
+    } else if let Some(form) = &opts.form {
+      builder = builder.form(form);
+    } else if let Some(data) = &opts.data {
+      builder = builder.body(data.clone());
+    }
+    builder = builder.timeout(opts.timeout.unwrap_or(self.default_timeout));
+
+    let response = builder
+      .send()
+      .await
+      .map_err(|e| format!("request to {resolved_url} failed: {e}"))?;
+    Ok((response, resolved_url, method_str))
   }
 
   /// Dispose the request context (Playwright compat).
