@@ -18,6 +18,7 @@
 //! carries the error message and, where applicable, a `name` matching
 //! Playwright's convention (`TimeoutError`, `TargetClosedError`).
 
+pub mod abort;
 pub mod artifacts;
 pub mod bdd;
 pub mod browser;
@@ -82,7 +83,7 @@ use std::sync::Arc;
 /// Prototype registration is idempotent and session-stable: callers
 /// invoke this ONCE at `Session::create`, not per `execute`. The
 /// per-call `install_*` helpers below only build the live instance.
-pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   let g = ctx.globals();
   Class::<PageJs>::define(&g)?;
   Class::<FrameJs>::define(&g)?;
@@ -116,6 +117,8 @@ pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<crate::bindings::fetch::HeadersJs>::define(&g)?;
   Class::<crate::bindings::fetch::FetchResponseJs>::define(&g)?;
   Class::<crate::bindings::fetch::FetchRequestJs>::define(&g)?;
+  Class::<crate::bindings::abort::AbortControllerJs<'js>>::define(&g)?;
+  Class::<crate::bindings::abort::AbortSignalJs<'js>>::define(&g)?;
   Ok(())
 }
 

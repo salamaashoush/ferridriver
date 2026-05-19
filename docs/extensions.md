@@ -372,9 +372,14 @@ const data = await r.json();
 `clone()`, and static `Response.json()`/`error()`/`redirect()`.
 `Request` (`new Request(url|Request, init?)`) carries
 `url`/`method`/`headers`/`redirect`/`credentials`/`bodyUsed` and is
-accepted by `fetch`. Subset, for now: bodies buffer (no streaming
-`ReadableStream` body yet), no `Blob`/`FormData`, and `signal` is
-accepted but not yet enforced.
+accepted by `fetch`. `AbortController`/`AbortSignal` are standard
+(`controller.abort(reason?)`, `signal.aborted`/`reason`/
+`throwIfAborted()`/`onabort`/`addEventListener('abort')`,
+`AbortSignal.abort/timeout/any`); `fetch(url, { signal })` rejects an
+already-aborted call before I/O and cancels an in-flight request.
+Subset, for now: bodies buffer (no streaming `ReadableStream` body
+yet), no `Blob`/`FormData`, and a `signal` set on a `Request` instance
+is not yet forwarded (pass it through `init.signal`).
 
 The Playwright page-network `Request`/`Response` (from `page.on(...)`,
 `route`, navigation) are unchanged but are not global constructors
