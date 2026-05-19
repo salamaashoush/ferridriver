@@ -18,10 +18,13 @@
 //! is wired to `AbortController`/`AbortSignal` (see [`super::abort`]):
 //! an already-aborted signal rejects before I/O and an in-flight abort
 //! drops the request future. `Response.body` is a `ReadableStream`
-//! (see [`super::streams`]). Still a subset: the body is buffered (one
-//! chunk — not yet incrementally streamed from the socket), no `Blob` /
-//! `FormData`; a `signal` on a `Request` instance is not yet forwarded
-//! (pass it via `init.signal`); `init.redirect` maps onto the per-request redirect
+//! (see [`super::streams`]). `Blob` and `FormData` (see [`super::blob`]
+//! / [`super::form_data`]) are accepted as bodies — a `Blob` sends its
+//! bytes + type, a `FormData` is serialized as `multipart/form-data`.
+//! Still a subset: the response body is buffered (one chunk — not yet
+//! incrementally streamed from the socket); a `signal` on a `Request`
+//! instance is not yet forwarded (pass it via `init.signal`);
+//! `init.redirect` maps onto the per-request redirect
 //! cap (`manual`/`error` -> don't follow; a spec-exact opaque-redirect /
 //! rejection is not distinguishable through reqwest's per-request
 //! policy).
@@ -949,27 +952,47 @@ fn do_fetch<'js>(
       .as_ref()
       .and_then(|o| o.get::<_, String>("method").ok())
       .or_else(|| req.as_ref().map(|r| r.borrow().method.clone()));
-    let headers = init
+    let mut headers_vec: Vec<(String, String)> = init
       .as_ref()
       .and_then(|o| o.get::<_, Value<'_>>("headers").ok())
       .map(|v| header_pairs_from(&v))
       .or_else(|| req.as_ref().map(|r| r.borrow().headers.clone()))
-      .filter(|h| !h.is_empty());
-    // body: string -> raw; object -> JSON; else a Request's own body.
-    let (data, json_data) = match init.as_ref().and_then(|o| o.get::<_, Value<'_>>("body").ok()) {
-      Some(b) if b.is_string() => (
-        b.as_string().and_then(|s| s.to_string().ok()).map(String::into_bytes),
-        None,
-      ),
-      Some(b) if b.is_object() => {
-        let j: Option<serde_json::Value> = crate::bindings::convert::serde_from_js(&ctx, b).ok();
-        (None, j)
-      },
-      _ => match req.as_ref().map(|r| r.borrow().body.clone()) {
-        Some(b) if !b.is_empty() => (Some(b), None),
-        _ => (None, None),
-      },
+      .unwrap_or_default();
+    // body: string -> raw; `Blob` -> bytes (+ its type); `FormData` ->
+    // multipart (content-type MUST be the boundary one); other object
+    // -> JSON; else a Request's own body. `body_ct` is the content-type
+    // the body implies (FormData overrides, Blob only fills if absent).
+    let body_val = init.as_ref().and_then(|o| o.get::<_, Value<'_>>("body").ok());
+    let (data, json_data, body_ct, force_ct) = if let Some(b) = &body_val {
+      if let Some(s) = b.as_string().and_then(|s| s.to_string().ok()) {
+        (Some(s.into_bytes()), None, None, false)
+      } else if let Ok(fd) = Class::<crate::bindings::form_data::FormDataJs>::from_value(b) {
+        let (bytes, ct) = fd.borrow().to_multipart();
+        (Some(bytes), None, Some(ct), true)
+      } else if let Some((bytes, ct)) = crate::bindings::blob::BlobJs::from_js_blob(b) {
+        (Some(bytes), None, (!ct.is_empty()).then_some(ct), false)
+      } else if b.is_object() {
+        let j: Option<serde_json::Value> = crate::bindings::convert::serde_from_js(&ctx, b.clone()).ok();
+        (None, j, None, false)
+      } else {
+        (None, None, None, false)
+      }
+    } else {
+      match req.as_ref().map(|r| r.borrow().body.clone()) {
+        Some(b) if !b.is_empty() => (Some(b), None, None, false),
+        _ => (None, None, None, false),
+      }
     };
+    if let Some(ct) = body_ct {
+      let has_ct = headers_vec.iter().any(|(k, _)| k == "content-type");
+      if force_ct {
+        headers_vec.retain(|(k, _)| k != "content-type");
+        headers_vec.push(("content-type".to_string(), ct));
+      } else if !has_ct {
+        headers_vec.push(("content-type".to_string(), ct));
+      }
+    }
+    let headers = (!headers_vec.is_empty()).then_some(headers_vec);
     // `init.redirect` (or the Request's) maps onto the per-request
     // redirect cap: "follow" (default) keeps the client default;
     // "manual"/"error" pin 0 so a 3xx is returned rather than followed.

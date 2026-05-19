@@ -21,6 +21,7 @@
 pub mod abort;
 pub mod artifacts;
 pub mod bdd;
+pub mod blob;
 pub mod browser;
 pub mod browser_type;
 pub mod console_message;
@@ -31,6 +32,7 @@ pub mod download;
 pub mod element_handle;
 pub mod fetch;
 pub mod file_chooser;
+pub mod form_data;
 pub mod frame;
 pub mod frame_locator;
 pub mod http_client;
@@ -123,6 +125,8 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   Class::<crate::bindings::streams::ReadableStreamJs>::define(&g)?;
   Class::<crate::bindings::streams::ReadableStreamDefaultReaderJs>::define(&g)?;
   Class::<crate::bindings::streams::ReadableStreamDefaultControllerJs>::define(&g)?;
+  Class::<crate::bindings::blob::BlobJs>::define(&g)?;
+  Class::<crate::bindings::form_data::FormDataJs>::define(&g)?;
   Ok(())
 }
 

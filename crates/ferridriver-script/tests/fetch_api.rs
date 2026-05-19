@@ -58,6 +58,36 @@ fn spawn_slow() -> (String, std::thread::JoinHandle<()>) {
   (url, h)
 }
 
+/// Echoes the raw request body verbatim (no JSON wrapping) so a
+/// multipart payload survives intact for inspection.
+fn spawn_raw() -> (String, std::thread::JoinHandle<()>) {
+  let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+  let addr = listener.local_addr().expect("addr");
+  let url = format!("http://{addr}");
+  let h = std::thread::spawn(move || {
+    for stream in listener.incoming().take(2) {
+      let Ok(mut s) = stream else { break };
+      let mut buf = [0u8; 16384];
+      let n = s.read(&mut buf).unwrap_or(0);
+      let raw = &buf[..n];
+      let body = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .map(|i| raw[i + 4..].to_vec())
+        .unwrap_or_default();
+      let mut resp = format!(
+        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+        body.len()
+      )
+      .into_bytes();
+      resp.extend_from_slice(&body);
+      let _ = s.write_all(&resp);
+      let _ = s.flush();
+    }
+  });
+  (url, h)
+}
+
 async fn run(src: &str) -> Outcome {
   let tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
@@ -531,4 +561,95 @@ async fn readable_stream_constructible_and_locking() {
   assert_eq!(v["endDone"], serde_json::json!(true), "closed stream ends");
   assert_eq!(v["unlocked"], serde_json::json!(false), "releaseLock unlocks");
   assert_eq!(v["isReader"], serde_json::json!(true));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn blob_construct_slice_and_stream() {
+  let o = run(
+    "const b = new Blob(['ab', new Uint8Array([99]), new Blob(['d'])], { type: 'TEXT/Plain' }); \
+     const sl = b.slice(1, 3); \
+     const r = b.stream().getReader(); const first = await r.read(); \
+     return { size: b.size, type: b.type, text: await b.text(), \
+       slice: await sl.text(), sliceType: sl.type, \
+       isBlob: b instanceof Blob, streamIsStream: b.stream() instanceof ReadableStream, \
+       firstChunk: Array.from(first.value) };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["size"], serde_json::json!(4), "ab + 0x63 + d");
+  assert_eq!(v["type"], serde_json::json!("text/plain"), "type lowercased");
+  assert_eq!(v["text"], serde_json::json!("abcd"));
+  assert_eq!(v["slice"], serde_json::json!("bc"), "slice(1,3) of abcd");
+  assert_eq!(v["sliceType"], serde_json::json!(""));
+  assert_eq!(v["isBlob"], serde_json::json!(true));
+  assert_eq!(v["streamIsStream"], serde_json::json!(true));
+  assert_eq!(
+    v["firstChunk"],
+    serde_json::json!([97, 98, 99, 100]),
+    "stream yields the bytes"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn formdata_surface() {
+  let o = run(
+    "const fd = new FormData(); fd.append('a', '1'); fd.append('a', '2'); \
+     fd.append('f', new Blob(['hi'], { type: 'text/plain' }), 'note.txt'); \
+     fd.set('a', 'only'); \
+     const fileVal = fd.get('f'); \
+     const seen = []; fd.forEach((v, k) => seen.push(k)); \
+     return { a: fd.get('a'), all: fd.getAll('a'), hasF: fd.has('f'), \
+       fileIsBlob: fileVal instanceof Blob, fileText: await fileVal.text(), \
+       keys: fd.keys(), entriesLen: [...fd.entries()].length, seen, \
+       isFD: fd instanceof FormData, removed: (fd.delete('a'), fd.has('a')) };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["a"], serde_json::json!("only"), "set replaces all of a name");
+  assert_eq!(v["all"], serde_json::json!(["only"]));
+  assert_eq!(v["hasF"], serde_json::json!(true));
+  assert_eq!(
+    v["fileIsBlob"],
+    serde_json::json!(true),
+    "file entry reads back as a Blob"
+  );
+  assert_eq!(v["fileText"], serde_json::json!("hi"));
+  assert_eq!(v["keys"], serde_json::json!(["a", "f"]));
+  assert_eq!(v["entriesLen"], serde_json::json!(2));
+  assert_eq!(v["seen"], serde_json::json!(["a", "f"]), "forEach yields (value, key)");
+  assert_eq!(v["isFD"], serde_json::json!(true));
+  assert_eq!(v["removed"], serde_json::json!(false), "delete removes the name");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_blob_and_formdata_bodies() {
+  let (url, _h) = spawn_echo();
+  let blob = run(&format!(
+    "const r = await fetch('{url}/b', {{ method: 'POST', body: new Blob(['payload']) }}); \
+     return {{ body: (await r.json()).body }};"
+  ))
+  .await;
+  assert_eq!(
+    val(&blob)["body"],
+    serde_json::json!("payload"),
+    "Blob body sent as raw bytes"
+  );
+
+  let (url2, _h2) = spawn_raw();
+  let fd = run(&format!(
+    "const fd = new FormData(); fd.append('field', 'value'); \
+     fd.append('file', new Blob(['filedata'], {{ type: 'text/plain' }}), 'a.txt'); \
+     const r = await fetch('{url2}/m', {{ method: 'POST', body: fd }}); \
+     return {{ body: await r.text() }};"
+  ))
+  .await;
+  let body = val(&fd)["body"].as_str().unwrap_or_default();
+  assert!(
+    body.contains("Content-Disposition: form-data; name=\"field\"") && body.contains("value"),
+    "multipart contains the text field: {body}"
+  );
+  assert!(
+    body.contains("filename=\"a.txt\"") && body.contains("filedata") && body.contains("Content-Type: text/plain"),
+    "multipart contains the file part: {body}"
+  );
 }
