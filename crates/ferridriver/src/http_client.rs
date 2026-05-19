@@ -18,7 +18,10 @@
 //! let users: Vec<User> = resp.json()?;
 //! ```
 
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
+
+use rustc_hash::FxHashMap;
 
 /// Options for creating an `HttpClient`.
 #[derive(Debug, Clone, Default)]
@@ -52,7 +55,9 @@ pub struct RequestOptions {
   pub timeout: Option<Duration>,
   /// Fail with error on 4xx/5xx status codes.
   pub fail_on_status_code: Option<bool>,
-  /// Max redirects (default: follow all).
+  /// Per-request redirect cap: `Some(0)` does not follow redirects
+  /// (the 3xx is returned as-is), `Some(n)` follows up to `n` then
+  /// errors, `None` uses the client default.
   pub max_redirects: Option<u32>,
 }
 
@@ -150,19 +155,49 @@ pub struct HttpClient {
   base_url: Option<String>,
   extra_headers: Vec<(String, String)>,
   default_timeout: Duration,
+  /// Shared cookie jar. reqwest pins the redirect policy on the
+  /// `Client`, so a per-request `max_redirects` override needs a
+  /// distinct `Client`; every such client is built against THIS jar so
+  /// session cookies still persist across calls regardless of which
+  /// redirect-policy client served a given request.
+  jar: Arc<reqwest::cookie::Jar>,
+  ignore_https_errors: bool,
+  /// Lazily-built clients keyed by requested redirect limit (`0` =
+  /// don't follow, `n` = follow up to `n`). The default-policy client
+  /// is `self.client`; this only holds the per-override ones.
+  redirect_clients: Arc<Mutex<FxHashMap<u32, reqwest::Client>>>,
+}
+
+/// Build a reqwest client sharing `jar` (so cookies persist across the
+/// default and any per-redirect-limit clients). `max_redirects`:
+/// `None` keeps reqwest's default policy, `Some(0)` does not follow
+/// redirects, `Some(n)` follows up to `n` (exceeding errors).
+fn build_client(
+  jar: &Arc<reqwest::cookie::Jar>,
+  ignore_https_errors: bool,
+  max_redirects: Option<u32>,
+) -> reqwest::Client {
+  let mut builder = reqwest::Client::builder().cookie_provider(jar.clone());
+  if let Some(max) = max_redirects {
+    let policy = if max == 0 {
+      reqwest::redirect::Policy::none()
+    } else {
+      reqwest::redirect::Policy::limited(max as usize)
+    };
+    builder = builder.redirect(policy);
+  }
+  if ignore_https_errors {
+    builder = builder.danger_accept_invalid_certs(true);
+  }
+  builder.build().unwrap_or_else(|_| reqwest::Client::new())
 }
 
 impl HttpClient {
-  /// Create a new API request context.
+  /// Create a new HTTP client.
   #[must_use]
   pub fn new(options: HttpClientOptions) -> Self {
-    let mut builder = reqwest::Client::builder().cookie_store(true);
-
-    if options.ignore_https_errors {
-      builder = builder.danger_accept_invalid_certs(true);
-    }
-
-    let client = builder.build().unwrap_or_else(|_| reqwest::Client::new());
+    let jar = Arc::new(reqwest::cookie::Jar::default());
+    let client = build_client(&jar, options.ignore_https_errors, None);
     let default_timeout = options.timeout.unwrap_or(Duration::from_secs(30));
 
     Self {
@@ -170,7 +205,27 @@ impl HttpClient {
       base_url: options.base_url,
       extra_headers: options.extra_http_headers,
       default_timeout,
+      jar,
+      ignore_https_errors: options.ignore_https_errors,
+      redirect_clients: Arc::new(Mutex::new(FxHashMap::default())),
     }
+  }
+
+  /// The reqwest client to use for a request: the default-policy one,
+  /// or — when the caller pinned `max_redirects` — a jar-sharing client
+  /// built for exactly that limit (built once, then cached).
+  fn client_for(&self, max_redirects: Option<u32>) -> reqwest::Client {
+    let Some(max) = max_redirects else {
+      return self.client.clone();
+    };
+    let mut cache = self
+      .redirect_clients
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner);
+    cache
+      .entry(max)
+      .or_insert_with(|| build_client(&self.jar, self.ignore_https_errors, Some(max)))
+      .clone()
   }
 
   /// Resolve a URL against the base URL.
@@ -306,7 +361,7 @@ impl HttpClient {
       .map_err(|_| format!("invalid HTTP method: {method_str}"))?;
 
     let resolved_url = self.resolve_url(url);
-    let mut builder = self.client.request(method, &resolved_url);
+    let mut builder = self.client_for(opts.max_redirects).request(method, &resolved_url);
 
     // Apply default extra headers.
     for (k, v) in &self.extra_headers {
@@ -337,13 +392,6 @@ impl HttpClient {
     // Timeout.
     let timeout = opts.timeout.unwrap_or(self.default_timeout);
     builder = builder.timeout(timeout);
-
-    // Max redirects.
-    if let Some(max) = opts.max_redirects {
-      // reqwest sets redirect policy on the client, not per-request.
-      // For per-request, we'd need a separate client. Skip for now — use client default.
-      let _ = max;
-    }
 
     // Send.
     let response = builder
