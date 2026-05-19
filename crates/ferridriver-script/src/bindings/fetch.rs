@@ -5,14 +5,22 @@
 //! ergonomic `request` API stays; this just adds the standard entry
 //! point.
 //!
-//! `Headers` is WHATWG-spec (lowercased + RFC7230-validated names,
-//! value normalization, `, ` combine, separate `set-cookie` +
-//! `getSetCookie`, sorted real iterators, `forEach`). The response is
-//! still a subset (`text()`/`json()`/`arrayBuffer()`), and its class is
-//! `FetchResponse` for now (the standard constructible global
-//! `Response` lands with the network-class de-globalisation in a
-//! follow-up); no streaming / `Blob` / `FormData` / `AbortController`
-//! yet.
+//! Web-standard names: `Headers`, `Request`, `Response` are the WHATWG
+//! classes (the Playwright page-network `Request`/`Response` are no
+//! longer globals — they were never globals in Playwright either, only
+//! return values). `Headers` is spec (lowercase + RFC7230 validate,
+//! value normalize, `, ` combine, separate `set-cookie` +
+//! `getSetCookie`, sorted real iterators, `forEach`). `Response` /
+//! `Request` are constructible with the spec accessors
+//! (`status`/`ok`/`redirected`/`type`/`bodyUsed`/`headers`/...),
+//! single-use bodies (`text`/`json`/`arrayBuffer`), `clone()`, and
+//! static `Response.json`/`error`/`redirect`. Still a subset: bodies
+//! buffer (no streaming `ReadableStream` yet — follow-up), no `Blob` /
+//! `FormData`; `Request.signal` is accepted but not yet wired
+//! (AbortController follow-up); `init.redirect` maps onto the per-
+//! request redirect cap (`manual`/`error` -> don't follow; a spec-exact
+//! opaque-redirect / rejection is not distinguishable through reqwest's
+//! per-request policy).
 //!
 //! Net policy: `fetch` is a facade over the SAME core a net-restricted
 //! tool's `request` wraps, so the `allow.net` allow-list must bind here
@@ -230,13 +238,19 @@ fn normalize_header_value(text: &str) -> String {
   String::from_utf8_lossy(&out).into_owned()
 }
 
+/// WHATWG `Response` (spec subset). Constructible (`new Response(body?,
+/// init?)`), with `status`/`ok`/`statusText`/`url`/`redirected`/`type`/
+/// `bodyUsed`/`headers` accessors, `text`/`json`/`arrayBuffer` body
+/// readers (single-use: a second read throws, per spec), `clone()`
+/// (throws once the body is used), and static `Response.json`,
+/// `Response.error`, `Response.redirect`. This is the global `Response`
+/// (the Playwright page-network `Response` is no longer a global — it is
+/// only ever a return value, matching Playwright itself).
 #[derive(Trace)]
-#[rquickjs::class(rename = "FetchResponse")]
+#[rquickjs::class(rename = "Response")]
 pub struct FetchResponseJs {
   #[qjs(skip_trace)]
   status: u16,
-  #[qjs(skip_trace)]
-  ok: bool,
   #[qjs(skip_trace)]
   status_text: String,
   #[qjs(skip_trace)]
@@ -245,6 +259,38 @@ pub struct FetchResponseJs {
   headers: Vec<(String, String)>,
   #[qjs(skip_trace)]
   body: Vec<u8>,
+  #[qjs(skip_trace)]
+  redirected: bool,
+  #[qjs(skip_trace)]
+  type_: &'static str,
+  #[qjs(skip_trace)]
+  body_used: bool,
+}
+
+/// WHATWG `Request` (spec subset). Constructible (`new Request(input,
+/// init?)` where `input` is a URL string or another `Request`), with
+/// `url`/`method`/`headers`/`redirect`/`credentials`/`bodyUsed`
+/// accessors and `text`/`json`/`arrayBuffer`/`clone`. `signal` is
+/// accepted and stored but not yet wired (AbortController follow-up);
+/// `fetch` reads `url`/`method`/`headers`/`body`/`redirect` off a
+/// `Request` argument.
+#[derive(Trace)]
+#[rquickjs::class(rename = "Request")]
+pub struct FetchRequestJs {
+  #[qjs(skip_trace)]
+  url: String,
+  #[qjs(skip_trace)]
+  method: String,
+  #[qjs(skip_trace)]
+  headers: Vec<(String, String)>,
+  #[qjs(skip_trace)]
+  body: Vec<u8>,
+  #[qjs(skip_trace)]
+  redirect: String,
+  #[qjs(skip_trace)]
+  credentials: String,
+  #[qjs(skip_trace)]
+  body_used: bool,
 }
 
 // SAFETY: only owned `'static` data.
@@ -255,6 +301,44 @@ unsafe impl rquickjs::JsLifetime<'_> for HeadersJs {
 #[allow(unsafe_code)]
 unsafe impl rquickjs::JsLifetime<'_> for FetchResponseJs {
   type Changed<'to> = FetchResponseJs;
+}
+#[allow(unsafe_code)]
+unsafe impl rquickjs::JsLifetime<'_> for FetchRequestJs {
+  type Changed<'to> = FetchRequestJs;
+}
+
+/// Extract a request/response body from a JS value, returning the bytes
+/// and the default `content-type` the body type implies (string ->
+/// `text/plain;charset=UTF-8`, object -> JSON; `Headers`/null/undefined
+/// -> none). Caller applies the content-type only if not already set.
+fn extract_body<'js>(ctx: &Ctx<'js>, v: &Value<'js>) -> (Vec<u8>, Option<&'static str>) {
+  if v.is_undefined() || v.is_null() {
+    return (Vec::new(), None);
+  }
+  if let Some(s) = v.as_string().and_then(|s| s.to_string().ok()) {
+    return (s.into_bytes(), Some("text/plain;charset=UTF-8"));
+  }
+  if v.is_object() {
+    if let Ok(j) = crate::bindings::convert::serde_from_js::<serde_json::Value>(ctx, v.clone()) {
+      return (j.to_string().into_bytes(), Some("application/json"));
+    }
+  }
+  (Vec::new(), None)
+}
+
+/// Parse a `Response`/`Request` `init` bag's `headers` into raw pairs
+/// and apply `default_ct` as `content-type` unless already present.
+fn init_headers(init: Option<&Object<'_>>, default_ct: Option<&'static str>) -> Vec<(String, String)> {
+  let mut pairs = init
+    .and_then(|o| o.get::<_, Value<'_>>("headers").ok())
+    .map(|v| header_pairs_from(&v))
+    .unwrap_or_default();
+  if let Some(ct) = default_ct
+    && !pairs.iter().any(|(k, _)| k == "content-type")
+  {
+    pairs.push(("content-type".to_string(), ct.to_string()));
+  }
+  pairs
 }
 
 /// Infallible best-effort extraction of `(name,value)` pairs from a JS
@@ -488,15 +572,132 @@ impl HeadersJs {
   }
 }
 
+impl FetchResponseJs {
+  /// Build the `Response` a `fetch()` resolves to.
+  fn from_fetch(status: u16, status_text: String, url: String, headers: Vec<(String, String)>, body: Vec<u8>) -> Self {
+    Self {
+      status,
+      status_text,
+      url,
+      headers,
+      body,
+      redirected: false,
+      type_: "basic",
+      body_used: false,
+    }
+  }
+
+  /// WHATWG "consume body": a second read is a `TypeError`.
+  fn consume(&mut self, ctx: &Ctx<'_>) -> rquickjs::Result<Vec<u8>> {
+    if self.body_used {
+      return Err(rquickjs::Exception::throw_type(ctx, "Body has already been consumed"));
+    }
+    self.body_used = true;
+    Ok(std::mem::take(&mut self.body))
+  }
+}
+
 #[rquickjs::methods]
 impl FetchResponseJs {
+  /// `new Response(body?, init?)` — `init`: `{ status?, statusText?,
+  /// headers? }`. `status` outside 200..=599 is a `RangeError`.
+  #[qjs(constructor)]
+  pub fn new<'js>(ctx: Ctx<'js>, body: Opt<Value<'js>>, init: Opt<Object<'js>>) -> rquickjs::Result<Self> {
+    let init = init.0;
+    let status = match init.as_ref().and_then(|o| o.get::<_, i64>("status").ok()) {
+      Some(s) if !(200..=599).contains(&s) => {
+        return Err(rquickjs::Exception::throw_range(
+          &ctx,
+          "Failed to construct 'Response': status is outside the range [200, 599]",
+        ));
+      },
+      Some(s) => s as u16,
+      None => 200,
+    };
+    let status_text = init
+      .as_ref()
+      .and_then(|o| o.get::<_, String>("statusText").ok())
+      .unwrap_or_default();
+    let (bytes, default_ct) = body.0.map_or((Vec::new(), None), |v| extract_body(&ctx, &v));
+    Ok(Self {
+      status,
+      status_text,
+      url: String::new(),
+      headers: init_headers(init.as_ref(), default_ct),
+      body: bytes,
+      redirected: false,
+      type_: "default",
+      body_used: false,
+    })
+  }
+
+  /// `Response.json(data, init?)` — JSON body + `application/json`.
+  #[qjs(static, rename = "json")]
+  pub fn json_static<'js>(ctx: Ctx<'js>, data: Value<'js>, init: Opt<Object<'js>>) -> rquickjs::Result<Self> {
+    let init = init.0;
+    let json: serde_json::Value = crate::bindings::convert::serde_from_js(&ctx, data)?;
+    let status = init
+      .as_ref()
+      .and_then(|o| o.get::<_, i64>("status").ok())
+      .unwrap_or(200) as u16;
+    let status_text = init
+      .as_ref()
+      .and_then(|o| o.get::<_, String>("statusText").ok())
+      .unwrap_or_default();
+    Ok(Self {
+      status,
+      status_text,
+      url: String::new(),
+      headers: init_headers(init.as_ref(), Some("application/json")),
+      body: json.to_string().into_bytes(),
+      redirected: false,
+      type_: "default",
+      body_used: false,
+    })
+  }
+
+  /// `Response.error()` — a network-error response (status 0).
+  #[qjs(static, rename = "error")]
+  pub fn error() -> Self {
+    Self {
+      status: 0,
+      status_text: String::new(),
+      url: String::new(),
+      headers: Vec::new(),
+      body: Vec::new(),
+      redirected: false,
+      type_: "error",
+      body_used: false,
+    }
+  }
+
+  /// `Response.redirect(url, status=302)` — status must be a redirect
+  /// code (301/302/303/307/308) or it is a `RangeError`.
+  #[qjs(static, rename = "redirect")]
+  pub fn redirect(ctx: Ctx<'_>, url: String, status: Opt<i64>) -> rquickjs::Result<Self> {
+    let status = status.0.unwrap_or(302);
+    if ![301, 302, 303, 307, 308].contains(&status) {
+      return Err(rquickjs::Exception::throw_range(&ctx, "Invalid redirect status code"));
+    }
+    Ok(Self {
+      status: status as u16,
+      status_text: String::new(),
+      url: String::new(),
+      headers: vec![("location".to_string(), url)],
+      body: Vec::new(),
+      redirected: false,
+      type_: "default",
+      body_used: false,
+    })
+  }
+
   #[qjs(get, rename = "status")]
   pub fn status(&self) -> u16 {
     self.status
   }
   #[qjs(get, rename = "ok")]
   pub fn ok(&self) -> bool {
-    self.ok
+    (200..300).contains(&self.status)
   }
   #[qjs(get, rename = "statusText")]
   pub fn status_text(&self) -> String {
@@ -506,6 +707,18 @@ impl FetchResponseJs {
   pub fn url(&self) -> String {
     self.url.clone()
   }
+  #[qjs(get, rename = "redirected")]
+  pub fn redirected(&self) -> bool {
+    self.redirected
+  }
+  #[qjs(get, rename = "type")]
+  pub fn type_(&self) -> String {
+    self.type_.to_string()
+  }
+  #[qjs(get, rename = "bodyUsed")]
+  pub fn body_used(&self) -> bool {
+    self.body_used
+  }
 
   #[qjs(get, rename = "headers")]
   pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, HeadersJs>> {
@@ -513,20 +726,168 @@ impl FetchResponseJs {
   }
 
   #[qjs(rename = "text")]
-  pub fn text(&self) -> String {
-    String::from_utf8_lossy(&self.body).into_owned()
+  pub fn text(&mut self, ctx: Ctx<'_>) -> rquickjs::Result<String> {
+    let b = self.consume(&ctx)?;
+    Ok(String::from_utf8_lossy(&b).into_owned())
   }
 
   #[qjs(rename = "json")]
-  pub fn json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    let v: serde_json::Value = serde_json::from_slice(&self.body)
+  pub fn json<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let b = self.consume(&ctx)?;
+    let v: serde_json::Value = serde_json::from_slice(&b)
       .map_err(|e| rquickjs::Error::new_from_js_message("Response.json", "Error", e.to_string()))?;
     json_to_js(&ctx, &v)
   }
 
   #[qjs(rename = "arrayBuffer")]
-  pub fn array_buffer<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
-    rquickjs::ArrayBuffer::new(ctx.clone(), self.body.clone()).map(rquickjs::ArrayBuffer::into_value)
+  pub fn array_buffer<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let b = self.consume(&ctx)?;
+    rquickjs::ArrayBuffer::new(ctx.clone(), b).map(rquickjs::ArrayBuffer::into_value)
+  }
+
+  #[qjs(rename = "clone")]
+  pub fn clone_(&self, ctx: Ctx<'_>) -> rquickjs::Result<Self> {
+    if self.body_used {
+      return Err(rquickjs::Exception::throw_type(&ctx, "Cannot clone a used Response"));
+    }
+    Ok(Self {
+      status: self.status,
+      status_text: self.status_text.clone(),
+      url: self.url.clone(),
+      headers: self.headers.clone(),
+      body: self.body.clone(),
+      redirected: self.redirected,
+      type_: self.type_,
+      body_used: false,
+    })
+  }
+}
+
+#[rquickjs::methods]
+impl FetchRequestJs {
+  /// `new Request(input, init?)` — `input` is a URL string or another
+  /// `Request`; `init`: `{ method?, headers?, body?, redirect?,
+  /// credentials?, signal? }` (`signal` accepted, not yet wired).
+  #[qjs(constructor)]
+  pub fn new<'js>(ctx: Ctx<'js>, input: Value<'js>, init: Opt<Object<'js>>) -> Self {
+    let init = init.0;
+    let mut req = if let Ok(other) = Class::<FetchRequestJs>::from_value(&input) {
+      let o = other.borrow();
+      Self {
+        url: o.url.clone(),
+        method: o.method.clone(),
+        headers: o.headers.clone(),
+        body: o.body.clone(),
+        redirect: o.redirect.clone(),
+        credentials: o.credentials.clone(),
+        body_used: false,
+      }
+    } else {
+      Self {
+        url: input.as_string().and_then(|s| s.to_string().ok()).unwrap_or_default(),
+        method: "GET".to_string(),
+        headers: Vec::new(),
+        body: Vec::new(),
+        redirect: "follow".to_string(),
+        credentials: "same-origin".to_string(),
+        body_used: false,
+      }
+    };
+    if let Some(o) = init.as_ref() {
+      if let Ok(m) = o.get::<_, String>("method") {
+        req.method = m.to_ascii_uppercase();
+      }
+      if let Ok(r) = o.get::<_, String>("redirect") {
+        req.redirect = r;
+      }
+      if let Ok(c) = o.get::<_, String>("credentials") {
+        req.credentials = c;
+      }
+      let (bytes, default_ct) = o
+        .get::<_, Value<'_>>("body")
+        .ok()
+        .map_or((Vec::new(), None), |v| extract_body(&ctx, &v));
+      if !bytes.is_empty() {
+        req.body = bytes;
+      }
+      req.headers = {
+        let mut h = init_headers(init.as_ref(), default_ct);
+        if h.is_empty() {
+          std::mem::take(&mut req.headers)
+        } else {
+          if let Ok(existing) = Class::<FetchRequestJs>::from_value(&input) {
+            for (k, v) in &existing.borrow().headers {
+              if !h.iter().any(|(hk, _)| hk == k) {
+                h.push((k.clone(), v.clone()));
+              }
+            }
+          }
+          h
+        }
+      };
+    }
+    req
+  }
+
+  #[qjs(get, rename = "url")]
+  pub fn url(&self) -> String {
+    self.url.clone()
+  }
+  #[qjs(get, rename = "method")]
+  pub fn method(&self) -> String {
+    self.method.clone()
+  }
+  #[qjs(get, rename = "redirect")]
+  pub fn redirect(&self) -> String {
+    self.redirect.clone()
+  }
+  #[qjs(get, rename = "credentials")]
+  pub fn credentials(&self) -> String {
+    self.credentials.clone()
+  }
+  #[qjs(get, rename = "bodyUsed")]
+  pub fn body_used(&self) -> bool {
+    self.body_used
+  }
+  #[qjs(get, rename = "headers")]
+  pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, HeadersJs>> {
+    Class::instance(ctx, HeadersJs::from_pairs(self.headers.iter().cloned()))
+  }
+
+  #[qjs(rename = "text")]
+  pub fn text(&mut self, ctx: Ctx<'_>) -> rquickjs::Result<String> {
+    if self.body_used {
+      return Err(rquickjs::Exception::throw_type(&ctx, "Body has already been consumed"));
+    }
+    self.body_used = true;
+    Ok(String::from_utf8_lossy(&std::mem::take(&mut self.body)).into_owned())
+  }
+
+  #[qjs(rename = "json")]
+  pub fn json<'js>(&mut self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    if self.body_used {
+      return Err(rquickjs::Exception::throw_type(&ctx, "Body has already been consumed"));
+    }
+    self.body_used = true;
+    let v: serde_json::Value = serde_json::from_slice(&std::mem::take(&mut self.body))
+      .map_err(|e| rquickjs::Error::new_from_js_message("Request.json", "Error", e.to_string()))?;
+    json_to_js(&ctx, &v)
+  }
+
+  #[qjs(rename = "clone")]
+  pub fn clone_(&self, ctx: Ctx<'_>) -> rquickjs::Result<Self> {
+    if self.body_used {
+      return Err(rquickjs::Exception::throw_type(&ctx, "Cannot clone a used Request"));
+    }
+    Ok(Self {
+      url: self.url.clone(),
+      method: self.method.clone(),
+      headers: self.headers.clone(),
+      body: self.body.clone(),
+      redirect: self.redirect.clone(),
+      credentials: self.credentials.clone(),
+      body_used: false,
+    })
   }
 }
 
@@ -552,9 +913,14 @@ fn do_fetch<'js>(
   cx: Arc<HttpClient>,
 ) -> rquickjs::Result<Value<'js>> {
   {
-    let url = input
-      .as_string()
-      .and_then(|s| s.to_string().ok())
+    // `input` may be a URL string, a `Request` instance, or an object
+    // with a `url`. A `Request` seeds method/headers/body/redirect; the
+    // `init` bag overrides each.
+    let req = Class::<FetchRequestJs>::from_value(&input).ok();
+    let url = req
+      .as_ref()
+      .map(|r| r.borrow().url.clone())
+      .or_else(|| input.as_string().and_then(|s| s.to_string().ok()))
       .or_else(|| input.as_object().and_then(|o| o.get::<_, String>("url").ok()))
       .unwrap_or_default();
     // Snapshot the net policy NOW (synchronously, while this `fetch()`
@@ -563,12 +929,17 @@ fn do_fetch<'js>(
     // request future is polled.
     let net = active_net(&ctx);
     let init = init.0;
-    let method = init.as_ref().and_then(|o| o.get::<_, String>("method").ok());
+    let method = init
+      .as_ref()
+      .and_then(|o| o.get::<_, String>("method").ok())
+      .or_else(|| req.as_ref().map(|r| r.borrow().method.clone()));
     let headers = init
       .as_ref()
       .and_then(|o| o.get::<_, Value<'_>>("headers").ok())
-      .map(|v| header_pairs_from(&v));
-    // body: string -> raw; object -> JSON (+ content-type unless set).
+      .map(|v| header_pairs_from(&v))
+      .or_else(|| req.as_ref().map(|r| r.borrow().headers.clone()))
+      .filter(|h| !h.is_empty());
+    // body: string -> raw; object -> JSON; else a Request's own body.
     let (data, json_data) = match init.as_ref().and_then(|o| o.get::<_, Value<'_>>("body").ok()) {
       Some(b) if b.is_string() => (
         b.as_string().and_then(|s| s.to_string().ok()).map(String::into_bytes),
@@ -578,7 +949,24 @@ fn do_fetch<'js>(
         let j: Option<serde_json::Value> = crate::bindings::convert::serde_from_js(&ctx, b).ok();
         (None, j)
       },
-      _ => (None, None),
+      _ => match req.as_ref().map(|r| r.borrow().body.clone()) {
+        Some(b) if !b.is_empty() => (Some(b), None),
+        _ => (None, None),
+      },
+    };
+    // `init.redirect` (or the Request's) maps onto the per-request
+    // redirect cap: "follow" (default) keeps the client default;
+    // "manual"/"error" pin 0 so a 3xx is returned rather than followed.
+    // (A spec-exact "manual" opaque-redirect / "error" rejection is not
+    // distinguishable through reqwest's per-request policy; the 3xx is
+    // surfaced instead. Documented subset.)
+    let redirect = init
+      .as_ref()
+      .and_then(|o| o.get::<_, String>("redirect").ok())
+      .or_else(|| req.as_ref().map(|r| r.borrow().redirect.clone()));
+    let max_redirects = match redirect.as_deref() {
+      Some("manual" | "error") => Some(0),
+      _ => None,
     };
     let promised = rquickjs::promise::Promised::from(async move {
       if let Some(list) = net.as_deref()
@@ -591,20 +979,24 @@ fn do_fetch<'js>(
         headers,
         data,
         json_data,
+        max_redirects,
         ..Default::default()
       };
       let resp = cx
         .fetch(&url, Some(opts))
         .await
         .map_err(|e| rquickjs::Error::new_from_js_message("fetch", "Error", e.to_string()))?;
-      let out = FetchResponseJs {
-        status: resp.status(),
-        ok: resp.ok(),
-        status_text: resp.status_text().to_string(),
-        url: resp.url().to_string(),
-        headers: resp.headers().to_vec(),
-        body: resp.text().map(String::into_bytes).unwrap_or_default(),
-      };
+      let final_url = resp.url().to_string();
+      let mut out = FetchResponseJs::from_fetch(
+        resp.status(),
+        resp.status_text().to_string(),
+        final_url.clone(),
+        resp.headers().to_vec(),
+        resp.body().to_vec(),
+      );
+      // Best-effort: a differing final URL means at least one hop was
+      // followed (the core does not yet expose a redirect count).
+      out.redirected = !final_url.is_empty() && final_url != url;
       Ok::<_, rquickjs::Error>(out)
     });
     promised.into_js(&ctx)

@@ -96,8 +96,12 @@ pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<ArtifactsJs>::define(&g)?;
   Class::<JSHandleJs>::define(&g)?;
   Class::<ElementHandleJs>::define(&g)?;
-  Class::<RequestJs>::define(&g)?;
-  Class::<ResponseJs>::define(&g)?;
+  // Playwright page-network `Request`/`Response` are NOT globalised
+  // (Playwright itself never puts them on globalThis — they are only
+  // ever return values; `Class::instance` registers their prototype
+  // lazily, so `page.on('response', r => r.status())` still works). The
+  // bare `Request`/`Response` globals belong to the WHATWG fetch
+  // classes below.
   Class::<RouteJs>::define(&g)?;
   Class::<WebSocketJs>::define(&g)?;
   Class::<DialogJs>::define(&g)?;
@@ -111,6 +115,7 @@ pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<crate::bindings::page::TouchscreenJs>::define(&g)?;
   Class::<crate::bindings::fetch::HeadersJs>::define(&g)?;
   Class::<crate::bindings::fetch::FetchResponseJs>::define(&g)?;
+  Class::<crate::bindings::fetch::FetchRequestJs>::define(&g)?;
   Ok(())
 }
 
