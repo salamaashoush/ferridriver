@@ -100,25 +100,25 @@ impl APIRequestContextJs {
   /// or the URL's host matches an allow-list entry; otherwise a JS-thrown
   /// error naming the host. No network I/O happens on rejection.
   fn guard(&self, url: &str) -> rquickjs::Result<()> {
-    if self.net.is_empty() {
-      return Ok(());
-    }
-    let host = host_of(url).ok_or_else(|| {
-      rquickjs::Error::new_from_js_message(
-        "request",
-        "Error",
-        format!("request to invalid/relative URL \"{url}\" is not permitted by allow.net"),
-      )
-    })?;
-    if host_allowed(&host, &self.net) {
-      Ok(())
-    } else {
-      Err(rquickjs::Error::new_from_js_message(
-        "request",
-        "Error",
-        format!("request host \"{host}\" is not in allow.net {:?}", &*self.net),
-      ))
-    }
+    net_check(&self.net, url).map_err(|m| rquickjs::Error::new_from_js_message("request", "Error", m))
+  }
+}
+
+/// Default-deny host check shared by the `request` binding and the global
+/// `fetch` facade — one allow-list semantics, one place. `Ok(())` when
+/// `net` is empty (unrestricted) or the URL's host matches an entry;
+/// otherwise an `Err(message)` the caller wraps as a JS error. The check
+/// is synchronous and happens before any network I/O.
+pub(crate) fn net_check(net: &[String], url: &str) -> Result<(), String> {
+  if net.is_empty() {
+    return Ok(());
+  }
+  let host =
+    host_of(url).ok_or_else(|| format!("request to invalid/relative URL \"{url}\" is not permitted by allow.net"))?;
+  if host_allowed(&host, net) {
+    Ok(())
+  } else {
+    Err(format!("request host \"{host}\" is not in allow.net {net:?}"))
   }
 }
 

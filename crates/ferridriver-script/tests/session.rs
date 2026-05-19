@@ -211,6 +211,153 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
   }
 }
 
+/// Rule 9: the `allow.net` allow-list must bind the global `fetch` too,
+/// not only the plugin's `request` arg. Before this fix a net-restricted
+/// tool could reach any host via `fetch` (the global was wired straight
+/// to the raw session context). Proven page-visible: a disallowed host
+/// is rejected with the allow.net denial BEFORE any I/O; an allowed host
+/// passes the guard and fails only for an unrelated connection reason.
+#[tokio::test(flavor = "multi_thread")]
+async fn allow_net_capability_is_enforced_on_the_global_fetch() {
+  const NET_PLUGIN: &str = "defineTool({ name: 'netf', \
+    allow: { net: ['127.0.0.1'] }, \
+    handler: async ({ args }) => { const r = await fetch(args.url); return r.status; } });";
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("netf.js");
+  std::fs::write(&path, NET_PLUGIN).expect("write plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+
+  let sb_tmp = tempfile::tempdir().expect("tempdir");
+  let request = Arc::new(ferridriver::api_request::APIRequestContext::new(
+    ferridriver::api_request::RequestContextOptions::default(),
+  ));
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: Some(request),
+    browser: None,
+    plugins: vec![PluginBinding { bytecode: cp.bytecode }],
+    trusted_modules: false,
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+
+  // Disallowed host: rejected by the capability guard before any I/O.
+  let blocked = session
+    .execute(
+      "return await plugins['netf']({ url: 'http://blocked.test/' });",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match blocked.result.outcome {
+    Outcome::Error { error } => assert!(
+      error.message.contains("not in allow.net") && error.message.contains("blocked.test"),
+      "fetch to a disallowed host must be rejected by allow.net, got: {}",
+      error.message
+    ),
+    Outcome::Ok { .. } => panic!("disallowed fetch host must be rejected by the net capability"),
+  }
+
+  // Allowed host: guard passes; the real client is reached and fails for
+  // a non-capability reason (connection refused on port 1).
+  let allowed = session
+    .execute(
+      "return await plugins['netf']({ url: 'http://127.0.0.1:1/' });",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match allowed.result.outcome {
+    Outcome::Error { error } => assert!(
+      !error.message.contains("allow.net"),
+      "allowed fetch host must pass the guard; got an allow.net error: {}",
+      error.message
+    ),
+    Outcome::Ok { .. } => {},
+  }
+}
+
+/// The per-poll policy bracket must not leak across tools. Two tools in
+/// one VM: `restricted` (allow.net = [127.0.0.1]) and `open` (no net
+/// capability). Run concurrently via `Promise.all` so their handler
+/// futures interleave at awaits. `restricted`'s fetch to a disallowed
+/// host must still be denied, while `open`'s fetch is unrestricted —
+/// proving the active policy follows whichever continuation is running,
+/// not whichever ran last.
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
+  const PLUGIN: &str = "defineTool({ name: 'restricted', allow: { net: ['127.0.0.1'] }, \
+      handler: async ({ args }) => { try { await fetch(args.url); return 'reached'; } \
+        catch (e) { return 'denied:' + String(e.message || e); } } }); \
+    defineTool({ name: 'open', \
+      handler: async ({ args }) => { try { await fetch(args.url); return 'reached'; } \
+        catch (e) { return 'err:' + String(e.message || e); } } });";
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("leak.js");
+  std::fs::write(&path, PLUGIN).expect("write plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  assert!(failures.is_empty(), "compile failures: {failures:?}");
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+
+  let sb_tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(sb_tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: Some(Arc::new(ferridriver::api_request::APIRequestContext::new(
+      ferridriver::api_request::RequestContextOptions::default(),
+    ))),
+    browser: None,
+    plugins: vec![PluginBinding { bytecode: cp.bytecode }],
+    trusted_modules: false,
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+
+  let r = session
+    .execute(
+      "const [a, b] = await Promise.all([ \
+         plugins['restricted']({ url: 'http://blocked.test/' }), \
+         plugins['open']({ url: 'http://127.0.0.1:1/' }) ]); \
+       return { restricted: a, open: b };",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match r.result.outcome {
+    Outcome::Ok { success } => {
+      let restricted = success.value["restricted"].as_str().unwrap_or_default();
+      let open = success.value["open"].as_str().unwrap_or_default();
+      assert!(
+        restricted.contains("denied:") && restricted.contains("not in allow.net"),
+        "restricted tool's fetch must be denied by allow.net even under concurrency, got: {restricted}"
+      );
+      assert!(
+        !open.contains("not in allow.net"),
+        "the unrestricted tool's fetch must not inherit another tool's allow.net, got: {open}"
+      );
+    },
+    Outcome::Error { error } => panic!("concurrent tool run failed: {error:?}"),
+  }
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn extension_branches_on_ferridriver_host_flag() {
   // One extension file, two contributions gated on the native

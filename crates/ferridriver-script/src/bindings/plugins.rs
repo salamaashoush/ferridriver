@@ -17,6 +17,7 @@
 //! is checked in Rust before any shell/network I/O.
 
 use std::collections::BTreeMap;
+use std::future::Future;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -208,19 +209,29 @@ fn dispatch_tool<'js>(
       g.get::<_, Value<'js>>("context").unwrap_or_else(|_| undef.clone()),
     )?;
 
+    // The tool's declared `allow.net` (empty ⇒ unrestricted). Used for
+    // BOTH the net-guarded `request` wrapper AND the `fetch` policy
+    // bracket below — one allow-list, both HTTP entry points.
+    let net_policy: Option<Arc<[String]>> = if d.allowed_net.is_empty() {
+      None
+    } else {
+      Some(Arc::from(d.allowed_net.as_slice()))
+    };
+
     // `request`: pass through unless the tool declared `allow.net`, in
     // which case hand it a net-restricted wrapper over the SAME underlying
     // context (host check enforced natively in `APIRequestContextJs`).
     let req_val: Value<'js> = g.get("request").unwrap_or_else(|_| undef.clone());
-    let request_out: Value<'js> = if d.allowed_net.is_empty() {
-      req_val
-    } else if let Ok(cls) = Class::<APIRequestContextJs>::from_value(&req_val) {
-      let inner = cls.borrow().inner_arc();
-      let net: Arc<[String]> = Arc::from(d.allowed_net);
-      let guarded = Class::instance(ctx.clone(), APIRequestContextJs::with_net(inner, net))?;
-      guarded.into_js(&ctx)?
-    } else {
-      req_val
+    let request_out: Value<'js> = match net_policy.clone() {
+      Some(net) => match Class::<APIRequestContextJs>::from_value(&req_val) {
+        Ok(cls) => {
+          let inner = cls.borrow().inner_arc();
+          let guarded = Class::instance(ctx.clone(), APIRequestContextJs::with_net(inner, net))?;
+          guarded.into_js(&ctx)?
+        },
+        Err(_) => req_val,
+      },
+      None => req_val,
     };
     arg.set("request", request_out)?;
 
@@ -234,18 +245,49 @@ fn dispatch_tool<'js>(
     )?;
     arg.set("commands", commands)?;
 
-    let mp: MaybePromise<'js> = d.handler.call((arg,))?;
-    let fut = mp.into_future::<Value<'js>>();
-    match d.timeout_ms {
-      Some(t) => match tokio::time::timeout(Duration::from_millis(t), fut).await {
-        Ok(r) => r,
-        Err(_) => Err(rquickjs::Error::new_from_js_message(
-          "plugins",
-          "Error",
-          format!("tool timed out after {t}ms"),
-        )),
+    // The same `allow.net` must also bind the global `fetch` (a facade
+    // over the same core). `fetch` reads the active policy from VM
+    // userdata; bracket every poll of THIS handler's future so the cell
+    // holds this tool's list whenever its continuation runs and is
+    // restored to the caller's value otherwise — correct under nesting
+    // (a tool calling `plugins.other`) and concurrent interleaving
+    // (`Promise.all([plugins.a(), plugins.b()])`) because the swap and
+    // the synchronous `fetch` guard both run within a single poll on the
+    // single QuickJS thread.
+    let policy_cell = ctx
+      .userdata::<crate::bindings::fetch::NetPolicyUd>()
+      .map(|u| u.0.clone());
+
+    let handler = d.handler;
+    let timeout_ms = d.timeout_ms;
+    let inner = async move {
+      let mp: MaybePromise<'js> = handler.call((arg,))?;
+      let fut = mp.into_future::<Value<'js>>();
+      match timeout_ms {
+        Some(t) => match tokio::time::timeout(Duration::from_millis(t), fut).await {
+          Ok(r) => r,
+          Err(_) => Err(rquickjs::Error::new_from_js_message(
+            "plugins",
+            "Error",
+            format!("tool timed out after {t}ms"),
+          )),
+        },
+        None => fut.await,
+      }
+    };
+
+    match policy_cell {
+      None => inner.await,
+      Some(cell) => {
+        let mut inner = std::pin::pin!(inner);
+        std::future::poll_fn(move |cx2| {
+          let prev = cell.swap(net_policy.clone());
+          let r = inner.as_mut().poll(cx2);
+          cell.swap(prev);
+          r
+        })
+        .await
       },
-      None => fut.await,
     }
   })
 }

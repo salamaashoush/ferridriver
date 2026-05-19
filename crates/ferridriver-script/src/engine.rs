@@ -367,6 +367,13 @@ impl Session {
       // dispatch). A failure here only degrades those to "no async
       // ctx" (same as before this fix) — never a correctness break.
       let _ = ctx.store_userdata(SessionAsyncCtx(ud_ctx));
+      // The active-tool net allow-list cell `fetch` reads (resting state
+      // = unrestricted). Stored once per VM so it survives rebuilds and
+      // is present even when no plugin runs; `plugins::dispatch_tool`
+      // swaps it around each net-restricted handler's poll.
+      let _ = ctx.store_userdata(crate::bindings::fetch::NetPolicyUd(
+        crate::bindings::fetch::NetPolicy::default(),
+      ));
       // Native route-handler registry (context userdata): session-once
       // so `page.route` works on ANY page (script-launched
       // `context.newPage()`, not just the MCP-prebound one whose
