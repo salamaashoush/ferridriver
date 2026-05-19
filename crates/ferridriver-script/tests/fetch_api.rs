@@ -115,11 +115,103 @@ async fn fetch_post_sends_method_and_json_body() {
 async fn headers_class_is_constructible_and_iterable() {
   let o = run(
     "const h = new Headers({ 'A': '1' }); h.append('b', '2'); \
-     return { a: h.get('a'), has: h.has('B'), n: h.entries().length };",
+     return { a: h.get('a'), has: h.has('B'), n: [...h.entries()].length };",
   )
   .await;
   let v = val(&o);
   assert_eq!(v["a"], serde_json::json!("1"));
-  assert_eq!(v["has"], serde_json::json!(true));
+  assert_eq!(v["has"], serde_json::json!(true), "has is case-insensitive");
   assert_eq!(v["n"], serde_json::json!(2));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn headers_append_combines_and_set_cookie_stays_separate() {
+  let o = run(
+    "const h = new Headers(); \
+     h.append('Accept-Encoding', 'gzip'); h.append('accept-encoding', 'br'); \
+     h.append('Set-Cookie', 'a=1'); h.append('set-cookie', 'b=2'); \
+     h.set('X-One', 'first'); h.set('x-one', 'second'); \
+     return { ae: h.get('accept-encoding'), \
+       sc: h.get('set-cookie'), scList: h.getSetCookie(), \
+       one: h.get('X-One'), missing: h.get('nope') };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(
+    v["ae"],
+    serde_json::json!("gzip, br"),
+    "same-name values combine with ', '"
+  );
+  assert_eq!(
+    v["sc"],
+    serde_json::json!("a=1, b=2"),
+    "get('set-cookie') returns the combined value"
+  );
+  assert_eq!(
+    v["scList"],
+    serde_json::json!(["a=1", "b=2"]),
+    "getSetCookie returns each set-cookie separately"
+  );
+  assert_eq!(v["one"], serde_json::json!("second"), "set replaces all of a name");
+  assert_eq!(v["missing"], serde_json::Value::Null, "absent header is null");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn headers_real_iterators_and_sorted_order() {
+  let o = run(
+    "const h = new Headers([['x-b','2'],['x-a','1']]); h.append('x-a','3'); \
+     const it = h.entries(); const first = it.next(); \
+     const rest = [...it]; \
+     return { firstDone: first.done, first: first.value, rest, \
+       keys: [...h.keys()], vals: [...h.values()], \
+       selfIter: typeof h[Symbol.iterator], \
+       spread: [...h], \
+       reIter: [...h.keys()[Symbol.iterator]()] };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["firstDone"], serde_json::json!(false));
+  // Sorted by name: x-a (combined) before x-b.
+  assert_eq!(v["first"], serde_json::json!(["x-a", "1, 3"]));
+  assert_eq!(
+    v["rest"],
+    serde_json::json!([["x-b", "2"]]),
+    "iterator continues from cursor"
+  );
+  assert_eq!(v["keys"], serde_json::json!(["x-a", "x-b"]));
+  assert_eq!(v["vals"], serde_json::json!(["1, 3", "2"]));
+  assert_eq!(v["selfIter"], serde_json::json!("function"));
+  assert_eq!(v["spread"], serde_json::json!([["x-a", "1, 3"], ["x-b", "2"]]));
+  assert_eq!(
+    v["reIter"],
+    serde_json::json!(["x-a", "x-b"]),
+    "iterator is itself iterable (Symbol.iterator yields a fresh cursor)"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn headers_for_each_normalization_and_validation() {
+  let o = run(
+    "const h = new Headers(); h.set('X-Trim', '  spaced\\tvalue  '); \
+     const seen = []; h.forEach((v, k) => seen.push([k, v])); \
+     let threwName = false; try { h.set('bad name', 'x'); } catch (e) { threwName = e instanceof TypeError; } \
+     let threwCtor = false; try { new Headers(5); } catch (e) { threwCtor = e instanceof TypeError; } \
+     const copy = new Headers(h); \
+     return { trimmed: h.get('x-trim'), seen, threwName, threwCtor, copy: copy.get('x-trim') };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(
+    v["trimmed"],
+    serde_json::json!("spaced\tvalue"),
+    "leading/trailing HTTP whitespace stripped, inner kept"
+  );
+  assert_eq!(v["seen"], serde_json::json!([["x-trim", "spaced\tvalue"]]));
+  assert_eq!(v["threwName"], serde_json::json!(true), "invalid name -> TypeError");
+  assert_eq!(v["threwCtor"], serde_json::json!(true), "Headers(number) -> TypeError");
+  assert_eq!(
+    v["copy"],
+    serde_json::json!("spaced\tvalue"),
+    "constructible from a Headers"
+  );
 }
