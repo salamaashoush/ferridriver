@@ -170,6 +170,10 @@ fn chosen_runner_name(r: cli::TestRunner) -> &'static str {
 }
 
 async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Result<()> {
+  // Thread the `[scripting]` env allow-list into the BDD step VM — the
+  // same resolution the MCP server and `ferridriver run` use. Must be
+  // set before the run starts.
+  ferridriver_bdd::js::set_bdd_script_caps(ferridriver_script::ScriptCaps::resolve(&config.scripting.allow_env));
   let mut overrides = ferridriver_test::config::CliOverrides {
     bdd_tags: args.tags,
     bdd_dry_run: args.dry_run,
@@ -245,9 +249,9 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
       .map_err(|e| anyhow::anyhow!("sandbox init ({}): {}", cwd.display(), e.message))?,
   );
   // `ferridriver run` honours a ferridriver.toml in scope for the
-  // scripting sandbox knobs (env allow-list / node-compat).
+  // scripting sandbox env allow-list.
   let scripting = FerridriverConfig::load(None).unwrap_or_default().scripting;
-  let caps = ferridriver_script::ScriptCaps::resolve(&scripting.allow_env, scripting.node_compat);
+  let caps = ferridriver_script::ScriptCaps::resolve(&scripting.allow_env);
 
   let ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
@@ -303,7 +307,7 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   };
   let connect_mode = args.browser.connect_mode();
 
-  let caps = ferridriver_script::ScriptCaps::resolve(&scripting.allow_env, scripting.node_compat);
+  let caps = ferridriver_script::ScriptCaps::resolve(&scripting.allow_env);
   let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp)).with_script_caps(caps);
   server.load_extensions(&extension_paths).await;
   match args.transport.transport {

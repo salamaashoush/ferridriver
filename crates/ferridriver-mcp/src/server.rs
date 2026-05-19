@@ -708,7 +708,7 @@ impl McpServer {
 
   /// Set the scripting sandbox relaxations (resolved from the
   /// operator's `[scripting]` config). Without this the sandbox stays
-  /// fully locked down (`process.env` empty, no node-compat).
+  /// fully locked down (`process.env` empty).
   #[must_use]
   pub fn with_script_caps(mut self, caps: ferridriver_script::ScriptCaps) -> Self {
     self.script_caps = caps;

@@ -159,23 +159,20 @@ pub struct RunContext {
   /// Which host is driving this session — surfaced to JS as
   /// `ferridriver.host`. Defaults to [`ExtensionHost::Script`].
   pub host: ExtensionHost,
-  /// Opt-in sandbox relaxations resolved from config (env allow-list,
-  /// node-compat). Default = fully locked down.
+  /// Opt-in sandbox relaxations resolved from config (the env
+  /// allow-list). Default = fully locked down.
   pub caps: ScriptCaps,
 }
 
 /// Resolved, ready-to-install sandbox relaxations. Built by the host
 /// (MCP/CLI/BDD) from `ferridriver_config::ScriptingConfig`; the engine
-/// only consumes it. Default is the locked-down posture: no env, no
-/// node-compat.
+/// only consumes it. Default is the locked-down posture: no env.
 #[derive(Debug, Clone, Default)]
 pub struct ScriptCaps {
   /// `process.env` contents — already filtered to the operator's
   /// allow-list intersected with the real environment. Empty ⇒
   /// `process.env` is an empty object.
   pub env: std::collections::BTreeMap<String, String>,
-  /// Expose a Node-ish `process.versions.node` compatibility shim.
-  pub node_compat: bool,
 }
 
 impl ScriptCaps {
@@ -184,12 +181,12 @@ impl ScriptCaps {
   /// captured. A name not in the environment is silently absent (same
   /// as Node) — it is never invented.
   #[must_use]
-  pub fn resolve(allow_env: &[String], node_compat: bool) -> Self {
+  pub fn resolve(allow_env: &[String]) -> Self {
     let env = allow_env
       .iter()
       .filter_map(|k| std::env::var(k).ok().map(|v| (k.clone(), v)))
       .collect();
-    Self { env, node_compat }
+    Self { env }
   }
 }
 

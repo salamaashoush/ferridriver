@@ -308,9 +308,6 @@ extensions = ["./extensions", "./tools/box-login.ts"]
 # environment; absent names stay absent — never invented). Empty ⇒
 # process.env is {}.
 allowEnv = ["HOME", "TZ"]
-# Expose a Node-ish process.versions.node so npm packages that hard-gate
-# on it run. A documented compatibility shim; off (honest) by default.
-nodeCompat = false
 
 [test]
 # JS/TS step-definition globs. Defaults to steps/**/*.{js,ts} and
@@ -351,9 +348,8 @@ follows scheduling order.
   no way for a script to read an unlisted variable.
 - `process.exit()` — throws (a script must never kill the server).
 - `process.binding`/`dlopen`/`kill`/`chdir`/`setuid`/… — not present.
-- `process.versions.node` — absent unless `nodeCompat = true`, which
-  sets a clearly-non-real value (`…-ferridriver-compat`). Use only for
-  packages that hard-check it.
+- `process.versions.node` — never present (`process.versions` is
+  honest: `ferridriver` + `quickjs` only). This is not Node.
 
 ### `fetch`
 
