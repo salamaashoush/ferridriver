@@ -14,13 +14,16 @@
 //! `Request` are constructible with the spec accessors
 //! (`status`/`ok`/`redirected`/`type`/`bodyUsed`/`headers`/...),
 //! single-use bodies (`text`/`json`/`arrayBuffer`), `clone()`, and
-//! static `Response.json`/`error`/`redirect`. Still a subset: bodies
-//! buffer (no streaming `ReadableStream` yet — follow-up), no `Blob` /
-//! `FormData`; `Request.signal` is accepted but not yet wired
-//! (AbortController follow-up); `init.redirect` maps onto the per-
-//! request redirect cap (`manual`/`error` -> don't follow; a spec-exact
-//! opaque-redirect / rejection is not distinguishable through reqwest's
-//! per-request policy).
+//! static `Response.json`/`error`/`redirect`. `fetch(url, { signal })`
+//! is wired to `AbortController`/`AbortSignal` (see [`super::abort`]):
+//! an already-aborted signal rejects before I/O and an in-flight abort
+//! drops the request future. Still a subset: bodies buffer (no
+//! streaming `ReadableStream` yet — follow-up), no `Blob` / `FormData`;
+//! a `signal` on a `Request` instance is not yet forwarded (pass it via
+//! `init.signal`); `init.redirect` maps onto the per-request redirect
+//! cap (`manual`/`error` -> don't follow; a spec-exact opaque-redirect /
+//! rejection is not distinguishable through reqwest's per-request
+//! policy).
 //!
 //! Net policy: `fetch` is a facade over the SAME core a net-restricted
 //! tool's `request` wraps, so the `allow.net` allow-list must bind here
@@ -968,6 +971,13 @@ fn do_fetch<'js>(
       Some("manual" | "error") => Some(0),
       _ => None,
     };
+    // `init.signal` (an `AbortSignal`): grab its native channel so the
+    // request future can be dropped when it aborts.
+    let signal = init
+      .as_ref()
+      .and_then(|o| o.get::<_, Value<'_>>("signal").ok())
+      .and_then(|v| Class::<crate::bindings::abort::AbortSignalJs<'js>>::from_value(&v).ok())
+      .map(|s| crate::bindings::abort::AbortSignalJs::inner_of(&s));
     let promised = rquickjs::promise::Promised::from(async move {
       if let Some(list) = net.as_deref()
         && let Err(msg) = net_check(list, &url)
@@ -982,10 +992,29 @@ fn do_fetch<'js>(
         max_redirects,
         ..Default::default()
       };
-      let resp = cx
-        .fetch(&url, Some(opts))
-        .await
-        .map_err(|e| rquickjs::Error::new_from_js_message("fetch", "Error", e.to_string()))?;
+      if let Some(sig) = &signal
+        && sig.is_aborted()
+      {
+        return Err(rquickjs::Error::new_from_js_message(
+          "fetch",
+          "AbortError",
+          sig.reason_message(),
+        ));
+      }
+      let fut = cx.fetch(&url, Some(opts));
+      let resp = match &signal {
+        Some(sig) => {
+          tokio::select! {
+            r = fut => r.map_err(|e| rquickjs::Error::new_from_js_message("fetch", "Error", e.to_string()))?,
+            () = sig.aborted() => {
+              return Err(rquickjs::Error::new_from_js_message("fetch", "AbortError", sig.reason_message()));
+            }
+          }
+        },
+        None => fut
+          .await
+          .map_err(|e| rquickjs::Error::new_from_js_message("fetch", "Error", e.to_string()))?,
+      };
       let final_url = resp.url().to_string();
       let mut out = FetchResponseJs::from_fetch(
         resp.status(),

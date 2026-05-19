@@ -39,6 +39,25 @@ fn spawn_echo() -> (String, std::thread::JoinHandle<()>) {
   (url, h)
 }
 
+/// A server that accepts a connection then sleeps before replying, so an
+/// in-flight `fetch` can be aborted before any response arrives.
+fn spawn_slow() -> (String, std::thread::JoinHandle<()>) {
+  let listener = TcpListener::bind("127.0.0.1:0").expect("bind");
+  let addr = listener.local_addr().expect("addr");
+  let url = format!("http://{addr}");
+  let h = std::thread::spawn(move || {
+    for stream in listener.incoming().take(2) {
+      let Ok(mut s) = stream else { break };
+      let mut buf = [0u8; 1024];
+      let _ = s.read(&mut buf);
+      std::thread::sleep(std::time::Duration::from_millis(1500));
+      let _ = s.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\nConnection: close\r\n\r\nhi");
+      let _ = s.flush();
+    }
+  });
+  (url, h)
+}
+
 async fn run(src: &str) -> Outcome {
   let tmp = tempfile::tempdir().expect("tempdir");
   let ctx = RunContext {
@@ -334,4 +353,117 @@ async fn fetch_accepts_a_request_instance() {
     "Request body forwarded"
   );
   assert_eq!(v["type"], serde_json::json!("basic"), "fetched Response type is basic");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn abort_controller_signal_and_listeners() {
+  let o = run(
+    "const c = new AbortController(); const s = c.signal; \
+     const before = s.aborted; let fired = null; let evt = 0; \
+     s.onabort = (r) => { fired = r && r.name; }; \
+     s.addEventListener('abort', () => { evt++; }); \
+     c.abort(); c.abort(); \
+     return { before, after: s.aborted, fired, evt, reasonName: s.reason && s.reason.name, \
+       isSignal: s instanceof AbortSignal };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["before"], serde_json::json!(false));
+  assert_eq!(v["after"], serde_json::json!(true));
+  assert_eq!(v["fired"], serde_json::json!("AbortError"), "onabort got the reason");
+  assert_eq!(
+    v["evt"],
+    serde_json::json!(1),
+    "listener fires exactly once (abort is idempotent)"
+  );
+  assert_eq!(v["reasonName"], serde_json::json!("AbortError"));
+  assert_eq!(v["isSignal"], serde_json::json!(true));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn abort_custom_reason_throw_if_aborted_and_statics() {
+  let o = run(
+    "const c = new AbortController(); c.abort('boom'); \
+     let t = false; try { c.signal.throwIfAborted(); } catch (e) { t = (e === 'boom'); } \
+     const sa = AbortSignal.abort('x'); \
+     const c2 = new AbortController(); const any = AbortSignal.any([c2.signal, c.signal]); \
+     return { reason: c.signal.reason, t, saAborted: sa.aborted, saReason: sa.reason, \
+       anyAborted: any.aborted };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["reason"], serde_json::json!("boom"), "custom reason preserved");
+  assert_eq!(v["t"], serde_json::json!(true), "throwIfAborted throws the reason");
+  assert_eq!(
+    v["saAborted"],
+    serde_json::json!(true),
+    "AbortSignal.abort is pre-aborted"
+  );
+  assert_eq!(v["saReason"], serde_json::json!("x"));
+  assert_eq!(
+    v["anyAborted"],
+    serde_json::json!(true),
+    "AbortSignal.any is aborted if an input already is"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn abort_signal_timeout_and_any_propagation() {
+  let o = run(
+    "const t = AbortSignal.timeout(10); const t0 = t.aborted; \
+     const c = new AbortController(); const any = AbortSignal.any([c.signal]); \
+     let anyFired = false; any.addEventListener('abort', () => { anyFired = true; }); \
+     await new Promise((r) => setTimeout(r, 80)); \
+     c.abort(); \
+     return { t0, tAborted: t.aborted, tName: t.reason && t.reason.name, \
+       anyAborted: any.aborted, anyFired };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["t0"], serde_json::json!(false), "timeout signal starts un-aborted");
+  assert_eq!(v["tAborted"], serde_json::json!(true), "timeout fires after the delay");
+  assert_eq!(v["tName"], serde_json::json!("TimeoutError"));
+  assert_eq!(v["anyAborted"], serde_json::json!(true), "any() follows a later abort");
+  assert_eq!(v["anyFired"], serde_json::json!(true), "any() forwards the abort event");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_rejects_when_signal_already_aborted() {
+  let o = run(
+    "const c = new AbortController(); c.abort(); let err = null; \
+     try { await fetch('http://127.0.0.1:1/', { signal: c.signal }); } \
+     catch (e) { err = String(e.message || e); } return { err };",
+  )
+  .await;
+  let v = val(&o);
+  let err = v["err"].as_str().unwrap_or_default();
+  assert!(
+    err.to_lowercase().contains("abort"),
+    "an already-aborted signal must reject fetch before I/O, got: {err}"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_aborts_an_in_flight_request() {
+  let (url, _h) = spawn_slow();
+  let started = std::time::Instant::now();
+  let o = run(&format!(
+    "const c = new AbortController(); \
+     const p = fetch('{url}/slow', {{ signal: c.signal }}); \
+     setTimeout(() => c.abort(), 30); \
+     let err = null; try {{ await p; }} catch (e) {{ err = String(e.message || e); }} \
+     return {{ err }};"
+  ))
+  .await;
+  let elapsed = started.elapsed();
+  let v = val(&o);
+  let err = v["err"].as_str().unwrap_or_default();
+  assert!(
+    err.to_lowercase().contains("abort"),
+    "in-flight fetch must reject on abort, got: {err}"
+  );
+  assert!(
+    elapsed < std::time::Duration::from_millis(1200),
+    "abort must drop the request future, not wait for the 1.5s server: {elapsed:?}"
+  );
 }
