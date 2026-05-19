@@ -380,11 +380,16 @@ already-aborted call before I/O and cancels an in-flight request.
 `Response.body` is a `ReadableStream` (`getReader().read()` ->
 `{value:Uint8Array,done}`, `for await (const chunk of res.body)`,
 `cancel()`, `locked`); `new ReadableStream({ start(c){ c.enqueue(x);
-c.close() } })` works too. Subset, for now: the body is buffered (one
-chunk — not yet streamed incrementally from the socket), no `Blob`/
-`FormData`, no `ReadableStream` `pull`/`tee`/BYOB, and a `signal` set
-on a `Request` instance is not yet forwarded (pass it through
-`init.signal`).
+c.close() } })` works too. `Blob` (`new Blob(parts, {type})`, `size`/
+`type`/`text()`/`arrayBuffer()`/`bytes()`/`slice()`/`stream()`) and
+`FormData` (`append`/`set`/`get`/`getAll`/`has`/`delete`/`keys`/
+`values`/`entries`/`forEach`) are accepted as `fetch` bodies — a `Blob`
+sends its bytes + type, a `FormData` is sent as `multipart/form-data`.
+Subset, for now: the response body is buffered (one chunk — not yet
+streamed incrementally from the socket), no `ReadableStream`
+`pull`/`tee`/BYOB, `FormData` iteration is via `entries()`/`forEach`
+(arrays), and a `signal` set on a `Request` instance is not yet
+forwarded (pass it through `init.signal`).
 
 The Playwright page-network `Request`/`Response` (from `page.on(...)`,
 `route`, navigation) are unchanged but are not global constructors
@@ -395,9 +400,6 @@ It runs on the **same HTTP core as `request`** — so cookies/session are
 shared and any `allow.net` restriction on a tool's `request` applies to
 `fetch` the same way (no second stack, no bypass). `request` (the
 Playwright-style API) stays; `fetch` is the standard entry point.
-Subset today: no streaming/`Blob`/`FormData`/`AbortController`, and
-`instanceof Response` does not apply (the response class is
-`FetchResponse`; the global `Response` is the page-network one).
 
 ---
 
