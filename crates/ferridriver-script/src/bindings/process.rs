@@ -15,7 +15,7 @@ use rquickjs::{Ctx, Object, Value};
 use crate::engine::ScriptCaps;
 
 /// Install `globalThis.process`. Called once per session (the values
-/// are session-stable: env/node-compat come from resolved config, the
+/// are session-stable: env comes from resolved config, the
 /// monotonic clock anchors at session start).
 pub fn install(ctx: &Ctx<'_>, caps: &ScriptCaps, cwd: &str) -> rquickjs::Result<()> {
   let g = ctx.globals();
@@ -39,15 +39,10 @@ pub fn install(ctx: &Ctx<'_>, caps: &ScriptCaps, cwd: &str) -> rquickjs::Result<
   let versions = Object::new(ctx.clone())?;
   versions.set("ferridriver", fv)?;
   versions.set("quickjs", "rquickjs-0.11")?;
-  if caps.node_compat {
-    // Documented compatibility lie: not a real Node. Lets packages that
-    // hard-gate on `process.versions.node` run.
-    versions.set("node", "20.0.0-ferridriver-compat")?;
-  }
   freeze(ctx, &versions)?;
   p.set("versions", versions)?;
   let release = Object::new(ctx.clone())?;
-  release.set("name", if caps.node_compat { "node" } else { "ferridriver" })?;
+  release.set("name", "ferridriver")?;
   freeze(ctx, &release)?;
   p.set("release", release)?;
 

@@ -243,11 +243,11 @@ impl JsBddSession {
       plugins: Vec::new(),
       trusted_modules: false,
       host: ferridriver_script::ExtensionHost::Bdd,
-      // Locked down for the test runner. Threading `[scripting]` caps
-      // through the BDD load chain is a deliberate follow-up; step files
-      // are first-party (run from the user's own CLI), so no env is the
-      // safe default until that wiring lands.
-      caps: ferridriver_script::ScriptCaps::default(),
+      // `[scripting]` caps threaded from resolved config by the
+      // `ferridriver bdd` entry (`set_bdd_script_caps`), exactly like
+      // the MCP server. Unset (macro/harness path with no config) ⇒
+      // locked down — the safe default.
+      caps: BDD_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
     };
 
     let session = Session::create(ScriptEngineConfig::default(), &run_ctx)
@@ -572,6 +572,19 @@ fn remap_stack(bundle: &CompiledBundle, stack: &str) -> String {
 
 type WorkerSessions = Mutex<HashMap<u32, Arc<JsBddSession>>>;
 static WORKER_SESSIONS: OnceLock<WorkerSessions> = OnceLock::new();
+
+/// The `[scripting]` sandbox caps the BDD step VM runs with. Set once
+/// by the `ferridriver bdd` entry point from resolved config (mirrors
+/// how the MCP server threads them); unset ⇒ locked down
+/// ([`ScriptCaps::default`]), the safe default for the macro/harness
+/// path that has no config.
+static BDD_SCRIPT_CAPS: OnceLock<ferridriver_script::ScriptCaps> = OnceLock::new();
+
+/// Install the BDD step VM sandbox caps (the env allow-list). Call
+/// before the run; idempotent (first set wins).
+pub fn set_bdd_script_caps(caps: ferridriver_script::ScriptCaps) {
+  let _ = BDD_SCRIPT_CAPS.set(caps);
+}
 
 async fn worker_session(
   worker_index: u32,

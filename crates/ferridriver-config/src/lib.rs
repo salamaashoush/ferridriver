@@ -69,11 +69,6 @@ pub struct ScriptingConfig {
   /// exposed — a script never sees an ambient secret the operator did
   /// not name.
   pub allow_env: Vec<String>,
-  /// When true, expose a Node-ish `process.versions.node` so npm
-  /// packages that hard-check it run. A documented compatibility shim
-  /// (the value is not a real Node); off by default to keep
-  /// `process.versions` honest.
-  pub node_compat: bool,
 }
 
 impl FerridriverConfig {
