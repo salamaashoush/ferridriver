@@ -42,6 +42,7 @@ pub mod network;
 pub mod page;
 pub mod plugins;
 pub mod process;
+pub mod streams;
 pub mod video;
 pub mod web_error;
 pub mod webapi;
@@ -119,6 +120,9 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   Class::<crate::bindings::fetch::FetchRequestJs>::define(&g)?;
   Class::<crate::bindings::abort::AbortControllerJs<'js>>::define(&g)?;
   Class::<crate::bindings::abort::AbortSignalJs<'js>>::define(&g)?;
+  Class::<crate::bindings::streams::ReadableStreamJs>::define(&g)?;
+  Class::<crate::bindings::streams::ReadableStreamDefaultReaderJs>::define(&g)?;
+  Class::<crate::bindings::streams::ReadableStreamDefaultControllerJs>::define(&g)?;
   Ok(())
 }
 

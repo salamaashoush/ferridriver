@@ -17,10 +17,11 @@
 //! static `Response.json`/`error`/`redirect`. `fetch(url, { signal })`
 //! is wired to `AbortController`/`AbortSignal` (see [`super::abort`]):
 //! an already-aborted signal rejects before I/O and an in-flight abort
-//! drops the request future. Still a subset: bodies buffer (no
-//! streaming `ReadableStream` yet — follow-up), no `Blob` / `FormData`;
-//! a `signal` on a `Request` instance is not yet forwarded (pass it via
-//! `init.signal`); `init.redirect` maps onto the per-request redirect
+//! drops the request future. `Response.body` is a `ReadableStream`
+//! (see [`super::streams`]). Still a subset: the body is buffered (one
+//! chunk — not yet incrementally streamed from the socket), no `Blob` /
+//! `FormData`; a `signal` on a `Request` instance is not yet forwarded
+//! (pass it via `init.signal`); `init.redirect` maps onto the per-request redirect
 //! cap (`manual`/`error` -> don't follow; a spec-exact opaque-redirect /
 //! rejection is not distinguishable through reqwest's per-request
 //! policy).
@@ -726,6 +727,18 @@ impl FetchResponseJs {
   #[qjs(get, rename = "headers")]
   pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, HeadersJs>> {
     Class::instance(ctx, HeadersJs::from_pairs(self.headers.iter().cloned()))
+  }
+
+  /// `Response.body` — a `ReadableStream` of the body bytes. Buffered
+  /// subset: bytes are already in memory (one chunk), so this is
+  /// spec-shaped but not incrementally streamed; empty once the body
+  /// was consumed by `text()`/`json()`/`arrayBuffer()`.
+  #[qjs(get, rename = "body")]
+  pub fn body<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Class<'js, crate::bindings::streams::ReadableStreamJs>> {
+    Class::instance(
+      ctx,
+      crate::bindings::streams::ReadableStreamJs::from_bytes(self.body.clone()),
+    )
   }
 
   #[qjs(rename = "text")]

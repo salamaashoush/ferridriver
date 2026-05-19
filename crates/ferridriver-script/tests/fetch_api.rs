@@ -467,3 +467,68 @@ async fn fetch_aborts_an_in_flight_request() {
     "abort must drop the request future, not wait for the 1.5s server: {elapsed:?}"
   );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_body_is_a_readable_stream() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const r = await fetch('{url}/s'); \
+     const reader = r.body.getReader(); const dec = new TextDecoder(); let out = ''; \
+     for (;;) {{ const {{ value, done }} = await reader.read(); if (done) break; out += dec.decode(value); }} \
+     const after = await reader.read(); \
+     const j = JSON.parse(out); \
+     return {{ path: j.path, method: j.method, doneAgain: after.done, isStream: r.body instanceof ReadableStream }};"
+  ))
+  .await;
+  let v = val(&o);
+  assert_eq!(v["path"], serde_json::json!("/s"), "stream reassembles the body");
+  assert_eq!(v["method"], serde_json::json!("GET"));
+  assert_eq!(v["doneAgain"], serde_json::json!(true), "reader is done after drain");
+  assert_eq!(
+    v["isStream"],
+    serde_json::json!(true),
+    "Response.body instanceof ReadableStream"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_body_async_iteration() {
+  let (url, _h) = spawn_echo();
+  let o = run(&format!(
+    "const r = await fetch('{url}/ai'); const dec = new TextDecoder(); let out = ''; \
+     for await (const chunk of r.body) {{ out += dec.decode(chunk); }} \
+     return {{ path: JSON.parse(out).path }};"
+  ))
+  .await;
+  let v = val(&o);
+  assert_eq!(
+    v["path"],
+    serde_json::json!("/ai"),
+    "for-await over Response.body works"
+  );
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn readable_stream_constructible_and_locking() {
+  let o = run(
+    "const s = new ReadableStream({ start(c) { c.enqueue('ab'); c.enqueue(new Uint8Array([99])); c.close(); } }); \
+     const before = s.locked; const rd = s.getReader(); const afterLock = s.locked; \
+     let dbl = false; try { s.getReader(); } catch (e) { dbl = e instanceof TypeError; } \
+     const a = await rd.read(); const b = await rd.read(); const end = await rd.read(); \
+     rd.releaseLock(); const unlocked = s.locked; \
+     return { before, afterLock, dbl, a: Array.from(a.value), aDone: a.done, \
+       b: Array.from(b.value), endDone: end.done, unlocked, \
+       isReader: rd instanceof ReadableStreamDefaultReader };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["before"], serde_json::json!(false));
+  assert_eq!(v["afterLock"], serde_json::json!(true), "getReader locks the stream");
+  assert_eq!(v["dbl"], serde_json::json!(true), "second getReader -> TypeError");
+  assert_eq!(v["a"], serde_json::json!([97, 98]), "string chunk -> UTF-8 bytes");
+  assert_eq!(v["aDone"], serde_json::json!(false));
+  assert_eq!(v["b"], serde_json::json!([99]), "Uint8Array chunk preserved");
+  assert_eq!(v["endDone"], serde_json::json!(true), "closed stream ends");
+  assert_eq!(v["unlocked"], serde_json::json!(false), "releaseLock unlocks");
+  assert_eq!(v["isReader"], serde_json::json!(true));
+}
