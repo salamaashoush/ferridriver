@@ -1,6 +1,6 @@
 # ferridriver-cli
 
-Scripting-focused MCP (Model Context Protocol) server for AI-powered browser automation. `run_script` is the action path — a sandboxed QuickJS runtime with live Page / Locator / BrowserContext / APIRequestContext bindings over the ferridriver core.
+Scripting-focused MCP (Model Context Protocol) server for AI-powered browser automation. `run_script` is the action path — a sandboxed QuickJS runtime with live Page / Locator / BrowserContext / HttpClient bindings over the ferridriver core.
 
 Ships as the `ferridriver` binary. Supports stdio (default) and HTTP transports, and four browser backends (`cdp-pipe`, `cdp-raw`, `webkit`, `bidi`).
 
@@ -65,7 +65,7 @@ curl -fsSL https://github.com/salamaashoush/ferridriver/releases/latest/download
 
 ### Scripting (1)
 
-- **run_script** — sandboxed QuickJS runtime with Page, Locator, BrowserContext, APIRequestContext bindings. See below
+- **run_script** — sandboxed QuickJS runtime with Page, Locator, BrowserContext, HttpClient bindings. See below
 
 ## `run_script`
 
@@ -88,7 +88,7 @@ return { title: await page.title(), cookies: await context.cookies() };
 | `page` | Playwright-shaped Page: `goto`, `click`, `fill`, `hover`, `press`, `type`, `check`, `uncheck`, `selectOption`, `locator`, `getByRole`/`getByText`/`getByLabel`/`getByPlaceholder`/`getByAltText`/`getByTestId`, `waitForSelector`, `textContent`, `innerText`, `innerHTML`, `inputValue`, `getAttribute`, `isVisible`/`isHidden`/`isEnabled`/`isDisabled`/`isChecked`, `evaluate`, `title`, `url`, `content`, `setContent`, `markdown`, `screenshot`, `reload`, `goBack`, `goForward`, `close`, `isClosed` |
 | `Locator` | Returned from `page.locator` / `page.getBy*`. `click`, `dblclick`, `fill`, `type`, `press`, `hover`, `focus`, `blur`, `check`, `uncheck`, `setChecked`, `clear`, `selectOption`, `scrollIntoViewIfNeeded`, `count`, `textContent`, `innerText`, `innerHTML`, `inputValue`, `getAttribute`, visibility/state predicates, `first`/`last`/`nth`/`locator`, `allTextContents`/`allInnerTexts`, `evaluate` |
 | `context` | BrowserContext: `cookies`, `addCookies`, `clearCookies`, `deleteCookie`, `grantPermissions`, `clearPermissions`, `setGeolocation`, `setOffline`, `setExtraHTTPHeaders`, `addInitScript`, `close` |
-| `request` | APIRequestContext for runner-side HTTP: `get`, `post`, `put`, `delete`, `patch`, `head`, `fetch`. Returns `APIResponse` with `status`, `ok`, `url`, `text`, `json`, `headersArray`, `header` |
+| `request` | HttpClient for runner-side HTTP: `get`, `post`, `put`, `delete`, `patch`, `head`, `fetch`. Returns `HttpResponse` with `status`, `ok`, `url`, `text`, `json`, `headersArray`, `header` |
 | `args` | Positional arguments bound to the script. Access via `args[0]`, `args[1]`. **Use this for any caller-controlled data** — bound values are safe from source-level injection |
 | `vars` | Session-level string store: `get`/`set`/`has`/`delete`/`keys`. Persists across `run_script` calls with the same session |
 | `console` | `log`/`info`/`warn`/`error`/`debug` — captured with size limits (1000 entries / 1 MiB / 8 KiB per entry), ANSI-stripped, returned in the result |

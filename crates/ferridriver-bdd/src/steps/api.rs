@@ -1,6 +1,6 @@
 //! API request step definitions -- direct HTTP requests from BDD scenarios.
 //!
-//! Uses `APIRequestContext` from the core library for making HTTP requests
+//! Uses `HttpClient` from the core library for making HTTP requests
 //! outside the browser context. Response stored in world for assertion chaining.
 //!
 //! ```gherkin
@@ -16,22 +16,22 @@
 
 use crate::step::StepError;
 use crate::world::BrowserWorld;
-use ferridriver::api_request::{APIRequestContext, APIResponse, RequestContextOptions, RequestOptions};
+use ferridriver::http_client::{HttpClient, HttpClientOptions, HttpResponse, RequestOptions};
 use ferridriver_bdd_macros::{then, when};
 
 /// Stored API response for assertion chaining.
-struct LastAPIResponse(APIResponse);
+struct LastHttpResponse(HttpResponse);
 
-fn get_or_create_ctx(world: &mut BrowserWorld) -> &APIRequestContext {
-  if world.get_state::<APIRequestContext>().is_none() {
-    world.set_state(APIRequestContext::new(RequestContextOptions::default()));
+fn get_or_create_ctx(world: &mut BrowserWorld) -> &HttpClient {
+  if world.get_state::<HttpClient>().is_none() {
+    world.set_state(HttpClient::new(HttpClientOptions::default()));
   }
-  world.get_state::<APIRequestContext>().unwrap()
+  world.get_state::<HttpClient>().unwrap()
 }
 
-fn last_api_response(world: &BrowserWorld) -> Result<&APIResponse, StepError> {
+fn last_api_response(world: &BrowserWorld) -> Result<&HttpResponse, StepError> {
   world
-    .get_state::<LastAPIResponse>()
+    .get_state::<LastHttpResponse>()
     .map(|r| &r.0)
     .ok_or_else(|| StepError::from("no API response stored -- use 'When I send a GET/POST/... request' first"))
 }
@@ -45,7 +45,7 @@ async fn send_get(world: &mut BrowserWorld, url: String) {
     .get(&url, None)
     .await
     .map_err(|e| StepError::wrap(format!("GET {url}"), e))?;
-  world.set_state(LastAPIResponse(resp));
+  world.set_state(LastHttpResponse(resp));
 }
 
 #[when("I send a POST request to {string}")]
@@ -55,7 +55,7 @@ async fn send_post_no_body(world: &mut BrowserWorld, url: String) {
     .post(&url, None)
     .await
     .map_err(|e| StepError::wrap(format!("POST {url}"), e))?;
-  world.set_state(LastAPIResponse(resp));
+  world.set_state(LastHttpResponse(resp));
 }
 
 #[when("I send a POST request to {string} with body:")]
@@ -75,7 +75,7 @@ async fn send_post_with_body(world: &mut BrowserWorld, url: String, docstring: O
     .post(&url, Some(opts))
     .await
     .map_err(|e| StepError::wrap(format!("POST {url}"), e))?;
-  world.set_state(LastAPIResponse(resp));
+  world.set_state(LastHttpResponse(resp));
 }
 
 #[when("I send a PUT request to {string} with body:")]
@@ -95,7 +95,7 @@ async fn send_put_with_body(world: &mut BrowserWorld, url: String, docstring: Op
     .put(&url, Some(opts))
     .await
     .map_err(|e| StepError::wrap(format!("PUT {url}"), e))?;
-  world.set_state(LastAPIResponse(resp));
+  world.set_state(LastHttpResponse(resp));
 }
 
 #[when("I send a DELETE request to {string}")]
@@ -105,7 +105,7 @@ async fn send_delete(world: &mut BrowserWorld, url: String) {
     .delete(&url, None)
     .await
     .map_err(|e| StepError::wrap(format!("DELETE {url}"), e))?;
-  world.set_state(LastAPIResponse(resp));
+  world.set_state(LastHttpResponse(resp));
 }
 
 #[when("I send a PATCH request to {string} with body:")]
@@ -125,7 +125,7 @@ async fn send_patch_with_body(world: &mut BrowserWorld, url: String, docstring: 
     .patch(&url, Some(opts))
     .await
     .map_err(|e| StepError::wrap(format!("PATCH {url}"), e))?;
-  world.set_state(LastAPIResponse(resp));
+  world.set_state(LastHttpResponse(resp));
 }
 
 // ── Response assertion steps ───────────────────────────────────────────

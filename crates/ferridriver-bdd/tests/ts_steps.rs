@@ -22,7 +22,7 @@ async fn build_world() -> BrowserWorld {
   );
   let context = Arc::new(browser.new_context(None));
   let page = context.new_page().await.expect("new page");
-  let request = Arc::new(ferridriver::api_request::APIRequestContext::new(Default::default()));
+  let request = Arc::new(ferridriver::http_client::HttpClient::new(Default::default()));
   let fixtures = ferridriver_test::model::TestFixtures {
     browser,
     page,

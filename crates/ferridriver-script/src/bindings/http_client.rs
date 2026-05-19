@@ -1,10 +1,10 @@
-//! `APIRequestContextJs` + `APIResponseJs`: JS wrappers for HTTP calls from
+//! `HttpClientJs` + `HttpResponseJs`: JS wrappers for HTTP calls from
 //! the runner side (separate from the page's own network).
 
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferridriver::api_request::{APIRequestContext, APIResponse, RequestOptions};
+use ferridriver::http_client::{HttpClient, HttpResponse, RequestOptions};
 use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use serde::Deserialize;
@@ -13,7 +13,7 @@ use crate::bindings::convert::{FerriResultExt, serde_from_js};
 
 /// Shape of per-request options accepted from JS.
 ///
-/// Mirrors `ferridriver::api_request::RequestOptions` but uses
+/// Mirrors `ferridriver::http_client::RequestOptions` but uses
 /// `serde::Deserialize` so callers can pass a plain object:
 /// `request.post('/api', { json: { x: 1 }, headers: { 'X-A': 'b' } })`.
 #[derive(Debug, Default, Deserialize)]
@@ -56,13 +56,13 @@ fn parse_options<'js>(ctx: &Ctx<'js>, value: Opt<Value<'js>>) -> rquickjs::Resul
   }
 }
 
-// ── APIRequestContextJs ──────────────────────────────────────────────────────
+// ── HttpClientJs ──────────────────────────────────────────────────────
 
 #[derive(JsLifetime, Trace)]
-#[rquickjs::class(rename = "APIRequestContext")]
-pub struct APIRequestContextJs {
+#[rquickjs::class(rename = "HttpClient")]
+pub struct HttpClientJs {
   #[qjs(skip_trace)]
-  inner: Arc<APIRequestContext>,
+  inner: Arc<HttpClient>,
   /// Host allow-list (plugin `allow.net` capability). Empty =
   /// unrestricted. Non-empty = default-deny: every request URL's host
   /// must match an entry (exact, or `*.suffix` which also matches the
@@ -72,9 +72,9 @@ pub struct APIRequestContextJs {
   net: Arc<[String]>,
 }
 
-impl APIRequestContextJs {
+impl HttpClientJs {
   #[must_use]
-  pub fn new(inner: Arc<APIRequestContext>) -> Self {
+  pub fn new(inner: Arc<HttpClient>) -> Self {
     Self {
       inner,
       net: Arc::from([]),
@@ -85,14 +85,14 @@ impl APIRequestContextJs {
   /// the per-tool `request` a plugin handler receives when its manifest
   /// declares `allow.net`.
   #[must_use]
-  pub fn with_net(inner: Arc<APIRequestContext>, net: Arc<[String]>) -> Self {
+  pub fn with_net(inner: Arc<HttpClient>, net: Arc<[String]>) -> Self {
     Self { inner, net }
   }
 
   /// The shared underlying context — lets the plugin dispatch wrap the
   /// session's `request` with a net allow-list without re-creating it.
   #[must_use]
-  pub fn inner_arc(&self) -> Arc<APIRequestContext> {
+  pub fn inner_arc(&self) -> Arc<HttpClient> {
     self.inner.clone()
   }
 
@@ -153,18 +153,18 @@ fn host_allowed(host: &str, net: &[String]) -> bool {
 }
 
 #[rquickjs::methods]
-impl APIRequestContextJs {
+impl HttpClientJs {
   #[qjs(rename = "get")]
   pub async fn get<'js>(
     &self,
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<APIResponseJs> {
+  ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.get(&url, opts).await.into_js()?;
-    Ok(APIResponseJs::new(resp))
+    Ok(HttpResponseJs::new(resp))
   }
 
   #[qjs(rename = "post")]
@@ -173,11 +173,11 @@ impl APIRequestContextJs {
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<APIResponseJs> {
+  ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.post(&url, opts).await.into_js()?;
-    Ok(APIResponseJs::new(resp))
+    Ok(HttpResponseJs::new(resp))
   }
 
   #[qjs(rename = "put")]
@@ -186,11 +186,11 @@ impl APIRequestContextJs {
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<APIResponseJs> {
+  ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.put(&url, opts).await.into_js()?;
-    Ok(APIResponseJs::new(resp))
+    Ok(HttpResponseJs::new(resp))
   }
 
   #[qjs(rename = "delete")]
@@ -199,11 +199,11 @@ impl APIRequestContextJs {
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<APIResponseJs> {
+  ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.delete(&url, opts).await.into_js()?;
-    Ok(APIResponseJs::new(resp))
+    Ok(HttpResponseJs::new(resp))
   }
 
   #[qjs(rename = "patch")]
@@ -212,11 +212,11 @@ impl APIRequestContextJs {
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<APIResponseJs> {
+  ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.patch(&url, opts).await.into_js()?;
-    Ok(APIResponseJs::new(resp))
+    Ok(HttpResponseJs::new(resp))
   }
 
   #[qjs(rename = "head")]
@@ -225,48 +225,48 @@ impl APIRequestContextJs {
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<APIResponseJs> {
+  ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.head(&url, opts).await.into_js()?;
-    Ok(APIResponseJs::new(resp))
+    Ok(HttpResponseJs::new(resp))
   }
 
   /// Generic fetch — `options` may include `method` via `headers` only; this
   /// mirrors `RequestOptions` (no request overload for now — see the
-  /// `PLAYWRIGHT_COMPAT.md` gap for `APIRequestContext.fetch(Request, ...)`).
+  /// `PLAYWRIGHT_COMPAT.md` gap for `HttpClient.fetch(Request, ...)`).
   #[qjs(rename = "fetch")]
   pub async fn fetch<'js>(
     &self,
     ctx: Ctx<'js>,
     url: String,
     options: Opt<Value<'js>>,
-  ) -> rquickjs::Result<APIResponseJs> {
+  ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
     let opts = parse_options(&ctx, options)?;
     let resp = self.inner.fetch(&url, opts).await.into_js()?;
-    Ok(APIResponseJs::new(resp))
+    Ok(HttpResponseJs::new(resp))
   }
 }
 
-// ── APIResponseJs ────────────────────────────────────────────────────────────
+// ── HttpResponseJs ────────────────────────────────────────────────────────────
 
 #[derive(JsLifetime, Trace)]
-#[rquickjs::class(rename = "APIResponse")]
-pub struct APIResponseJs {
+#[rquickjs::class(rename = "HttpResponse")]
+pub struct HttpResponseJs {
   #[qjs(skip_trace)]
-  inner: APIResponse,
+  inner: HttpResponse,
 }
 
-impl APIResponseJs {
+impl HttpResponseJs {
   #[must_use]
-  pub fn new(inner: APIResponse) -> Self {
+  pub fn new(inner: HttpResponse) -> Self {
     Self { inner }
   }
 }
 
 #[rquickjs::methods]
-impl APIResponseJs {
+impl HttpResponseJs {
   #[qjs(rename = "status")]
   pub fn status(&self) -> i32 {
     i32::from(self.inner.status())

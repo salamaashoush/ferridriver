@@ -68,9 +68,9 @@ pub mod install;
 
 // ── Implementation modules (used by MCP server, will be internalized) ──
 pub mod actions;
-pub mod api_request;
 pub mod codegen;
 pub mod ffmpeg;
+pub mod http_client;
 pub mod selectors;
 pub mod video;
 

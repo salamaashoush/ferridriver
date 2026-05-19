@@ -51,7 +51,6 @@
 #[global_allocator]
 static ALLOC: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-mod api_request;
 mod browser;
 mod browser_type;
 mod codegen;
@@ -64,6 +63,7 @@ mod error;
 mod file_chooser;
 mod frame;
 mod frame_locator;
+mod http_client;
 #[allow(dead_code)]
 mod install;
 mod js_handle;

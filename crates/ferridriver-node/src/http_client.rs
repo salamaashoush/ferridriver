@@ -1,13 +1,14 @@
-//! NAPI bindings for the API request context (Playwright's `request` fixture).
+//! NAPI bindings for the HTTP client (backs the Playwright-style
+//! `request` API and the WHATWG `fetch` global).
 
 use crate::error::IntoNapi;
 use napi::Result;
 use napi_derive::napi;
 
-/// Options for creating an API request context.
+/// Options for creating an `HttpClient`.
 #[napi(object)]
 #[derive(Debug, Clone, Default)]
-pub struct ApiRequestOptions {
+pub struct HttpClientOptions {
   /// Base URL prepended to relative paths.
   pub base_url: Option<String>,
   /// Default headers as `[[key, value], ...]`.
@@ -39,8 +40,8 @@ pub struct FetchOptions {
 }
 
 impl FetchOptions {
-  fn to_core(&self) -> ferridriver::api_request::RequestOptions {
-    ferridriver::api_request::RequestOptions {
+  fn to_core(&self) -> ferridriver::http_client::RequestOptions {
+    ferridriver::http_client::RequestOptions {
       method: None,
       headers: self.headers.as_ref().map(|h| {
         h.iter()
@@ -86,12 +87,12 @@ impl FetchOptions {
 
 /// API response from an HTTP request.
 #[napi]
-pub struct ApiResponse {
-  inner: ferridriver::api_request::APIResponse,
+pub struct HttpResponse {
+  inner: ferridriver::http_client::HttpResponse,
 }
 
 #[napi]
-impl ApiResponse {
+impl HttpResponse {
   /// HTTP status code.
   #[napi(getter)]
   pub fn status(&self) -> i32 {
@@ -147,19 +148,19 @@ impl ApiResponse {
   }
 }
 
-/// Playwright-compatible HTTP client for API testing.
+/// A general HTTP client backing `fetch` and the `request` API.
 #[napi]
-pub struct ApiRequestContext {
-  inner: ferridriver::api_request::APIRequestContext,
+pub struct HttpClient {
+  inner: ferridriver::http_client::HttpClient,
 }
 
 #[napi]
-impl ApiRequestContext {
-  /// Create a new API request context.
+impl HttpClient {
+  /// Create a new HTTP client.
   #[napi(factory)]
-  pub fn create(options: Option<ApiRequestOptions>) -> Result<Self> {
+  pub fn create(options: Option<HttpClientOptions>) -> Result<Self> {
     let opts = options.unwrap_or_default();
-    let core_opts = ferridriver::api_request::RequestContextOptions {
+    let core_opts = ferridriver::http_client::HttpClientOptions {
       base_url: opts.base_url,
       extra_http_headers: opts
         .extra_http_headers
@@ -180,64 +181,64 @@ impl ApiRequestContext {
       ignore_https_errors: opts.ignore_https_errors.unwrap_or(false),
     };
     Ok(Self {
-      inner: ferridriver::api_request::APIRequestContext::new(core_opts),
+      inner: ferridriver::http_client::HttpClient::new(core_opts),
     })
   }
 
   /// Send a GET request.
   #[napi]
-  pub async fn get(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
+  pub async fn get(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core());
     let resp = self.inner.get(&url, opts).await.into_napi()?;
-    Ok(ApiResponse { inner: resp })
+    Ok(HttpResponse { inner: resp })
   }
 
   /// Send a POST request.
   #[napi]
-  pub async fn post(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
+  pub async fn post(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core());
     let resp = self.inner.post(&url, opts).await.into_napi()?;
-    Ok(ApiResponse { inner: resp })
+    Ok(HttpResponse { inner: resp })
   }
 
   /// Send a PUT request.
   #[napi]
-  pub async fn put(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
+  pub async fn put(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core());
     let resp = self.inner.put(&url, opts).await.into_napi()?;
-    Ok(ApiResponse { inner: resp })
+    Ok(HttpResponse { inner: resp })
   }
 
   /// Send a DELETE request.
   #[napi]
-  pub async fn delete(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
+  pub async fn delete(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core());
     let resp = self.inner.delete(&url, opts).await.into_napi()?;
-    Ok(ApiResponse { inner: resp })
+    Ok(HttpResponse { inner: resp })
   }
 
   /// Send a PATCH request.
   #[napi]
-  pub async fn patch(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
+  pub async fn patch(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core());
     let resp = self.inner.patch(&url, opts).await.into_napi()?;
-    Ok(ApiResponse { inner: resp })
+    Ok(HttpResponse { inner: resp })
   }
 
   /// Send a HEAD request.
   #[napi]
-  pub async fn head(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
+  pub async fn head(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core());
     let resp = self.inner.head(&url, opts).await.into_napi()?;
-    Ok(ApiResponse { inner: resp })
+    Ok(HttpResponse { inner: resp })
   }
 
   /// Send a generic HTTP request.
   #[napi]
-  pub async fn fetch(&self, url: String, options: Option<FetchOptions>) -> Result<ApiResponse> {
+  pub async fn fetch(&self, url: String, options: Option<FetchOptions>) -> Result<HttpResponse> {
     let opts = options.map(|o| o.to_core());
     let resp = self.inner.fetch(&url, opts).await.into_napi()?;
-    Ok(ApiResponse { inner: resp })
+    Ok(HttpResponse { inner: resp })
   }
 
   /// Dispose the request context.

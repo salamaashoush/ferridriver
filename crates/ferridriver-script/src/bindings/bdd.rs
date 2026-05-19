@@ -805,7 +805,7 @@ pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispa
 pub struct ScenarioWorld {
   pub page: Option<Arc<ferridriver::Page>>,
   pub context: Option<Arc<ferridriver::context::ContextRef>>,
-  pub request: Option<Arc<ferridriver::api_request::APIRequestContext>>,
+  pub request: Option<Arc<ferridriver::http_client::HttpClient>>,
   pub browser: Option<Arc<ferridriver::Browser>>,
   /// Cucumber `--world-parameters` (top-level config / CLI). Exposed as
   /// `this.parameters` and passed to a `setWorldConstructor` ctor as

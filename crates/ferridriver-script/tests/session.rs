@@ -151,8 +151,8 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
   let sb_tmp = tempfile::tempdir().expect("tempdir");
-  let request = Arc::new(ferridriver::api_request::APIRequestContext::new(
-    ferridriver::api_request::RequestContextOptions::default(),
+  let request = Arc::new(ferridriver::http_client::HttpClient::new(
+    ferridriver::http_client::HttpClientOptions::default(),
   ));
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
@@ -230,8 +230,8 @@ async fn allow_net_capability_is_enforced_on_the_global_fetch() {
   let cp = compiled.into_iter().next().expect("one compiled plugin");
 
   let sb_tmp = tempfile::tempdir().expect("tempdir");
-  let request = Arc::new(ferridriver::api_request::APIRequestContext::new(
-    ferridriver::api_request::RequestContextOptions::default(),
+  let request = Arc::new(ferridriver::http_client::HttpClient::new(
+    ferridriver::http_client::HttpClientOptions::default(),
   ));
   let ctx = RunContext {
     vars: Arc::new(InMemoryVars::new()),
@@ -317,8 +317,8 @@ async fn fetch_net_policy_does_not_leak_between_concurrent_tools() {
     artifacts: None,
     page: None,
     browser_context: None,
-    request: Some(Arc::new(ferridriver::api_request::APIRequestContext::new(
-      ferridriver::api_request::RequestContextOptions::default(),
+    request: Some(Arc::new(ferridriver::http_client::HttpClient::new(
+      ferridriver::http_client::HttpClientOptions::default(),
     ))),
     browser: None,
     plugins: vec![PluginBinding { bytecode: cp.bytecode }],

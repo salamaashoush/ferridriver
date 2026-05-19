@@ -18,7 +18,6 @@
 //! carries the error message and, where applicable, a `name` matching
 //! Playwright's convention (`TimeoutError`, `TargetClosedError`).
 
-pub mod api_request;
 pub mod artifacts;
 pub mod bdd;
 pub mod browser;
@@ -33,6 +32,7 @@ pub mod fetch;
 pub mod file_chooser;
 pub mod frame;
 pub mod frame_locator;
+pub mod http_client;
 pub mod js_handle;
 pub mod keyboard;
 pub mod locator;
@@ -45,7 +45,6 @@ pub mod video;
 pub mod web_error;
 pub mod webapi;
 
-pub use api_request::{APIRequestContextJs, APIResponseJs};
 pub use artifacts::ArtifactsJs;
 pub use bdd::{
   CollectedAllow, CollectedRegistry, CollectedTool, HookArg, JsArg, ScenarioWorld, ScriptAttachment, StepOutcome,
@@ -62,6 +61,7 @@ pub use element_handle::ElementHandleJs;
 pub use file_chooser::FileChooserJs;
 pub use frame::FrameJs;
 pub use frame_locator::FrameLocatorJs;
+pub use http_client::{HttpClientJs, HttpResponseJs};
 pub use js_handle::JSHandleJs;
 pub use keyboard::KeyboardJs;
 pub use locator::LocatorJs;
@@ -76,7 +76,7 @@ use rquickjs::{AsyncContext, Ctx, class::Class};
 use std::sync::Arc;
 
 /// Register every class prototype scripts can encounter so rquickjs knows how
-/// to build instances when a method returns one (e.g. `APIResponse` from
+/// to build instances when a method returns one (e.g. `HttpResponse` from
 /// `request.get()` or `Locator` from `page.locator()`).
 ///
 /// Prototype registration is idempotent and session-stable: callers
@@ -89,8 +89,8 @@ pub fn define_classes(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   Class::<LocatorJs>::define(&g)?;
   Class::<BrowserContextJs>::define(&g)?;
   Class::<BrowserJs>::define(&g)?;
-  Class::<APIRequestContextJs>::define(&g)?;
-  Class::<APIResponseJs>::define(&g)?;
+  Class::<HttpClientJs>::define(&g)?;
+  Class::<HttpResponseJs>::define(&g)?;
   Class::<KeyboardJs>::define(&g)?;
   Class::<MouseJs>::define(&g)?;
   Class::<ArtifactsJs>::define(&g)?;
@@ -185,8 +185,8 @@ pub fn install_browser_on<'js>(
   Ok(())
 }
 
-/// Install the `request` global (runner-side HTTP via APIRequestContext).
-pub fn install_request(ctx: &Ctx<'_>, req: Arc<ferridriver::api_request::APIRequestContext>) -> rquickjs::Result<()> {
+/// Install the `request` global (runner-side HTTP via HttpClient).
+pub fn install_request(ctx: &Ctx<'_>, req: Arc<ferridriver::http_client::HttpClient>) -> rquickjs::Result<()> {
   install_request_on(ctx, &ctx.globals(), req)
 }
 
@@ -194,9 +194,9 @@ pub fn install_request(ctx: &Ctx<'_>, req: Arc<ferridriver::api_request::APIRequ
 pub fn install_request_on<'js>(
   ctx: &Ctx<'js>,
   target: &rquickjs::Object<'js>,
-  req: Arc<ferridriver::api_request::APIRequestContext>,
+  req: Arc<ferridriver::http_client::HttpClient>,
 ) -> rquickjs::Result<()> {
-  let js_req = Class::instance(ctx.clone(), APIRequestContextJs::new(req))?;
+  let js_req = Class::instance(ctx.clone(), HttpClientJs::new(req))?;
   target.set("request", js_req)?;
   Ok(())
 }

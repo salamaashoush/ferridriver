@@ -1,6 +1,6 @@
 //! A WHATWG-ish `fetch` + `Headers` + `Response`, so npm packages that
 //! expect `fetch` work. It is a thin surface over the SAME
-//! `ferridriver::api_request` core the Playwright-style `request`
+//! `ferridriver::http_client` core the Playwright-style `request`
 //! binding uses — one HTTP stack, one place the net policy applies. The
 //! ergonomic `request` API stays; this just adds the standard entry
 //! point.
@@ -21,12 +21,12 @@
 
 use std::sync::{Arc, Mutex};
 
-use ferridriver::api_request::{APIRequestContext, RequestOptions};
+use ferridriver::http_client::{HttpClient, RequestOptions};
 use rquickjs::function::Opt;
 use rquickjs::{Ctx, IntoJs, Object, Value, class::Class, class::Trace};
 
-use crate::bindings::api_request::net_check;
 use crate::bindings::convert::json_to_js;
+use crate::bindings::http_client::net_check;
 
 /// Per-VM carrier of the *currently active* tool net allow-list. `None`
 /// (the resting state, and what the top-level script sees) means
@@ -230,7 +230,7 @@ impl FetchResponseJs {
 /// Install `globalThis.fetch`, bound to `cx` (the session's HTTP
 /// context — same one the `request` binding wraps). Net policy that
 /// applies to `request` applies here because it is the same core.
-pub fn install(ctx: &Ctx<'_>, cx: Arc<APIRequestContext>) -> rquickjs::Result<()> {
+pub fn install(ctx: &Ctx<'_>, cx: Arc<HttpClient>) -> rquickjs::Result<()> {
   // Forward into a generic fn so `Ctx`/`Value`/return share one `'js`
   // (an inline closure gives each arg its own lifetime and the returned
   // promise Value cannot be proven to outlive them) — same pattern as
@@ -246,7 +246,7 @@ fn do_fetch<'js>(
   ctx: Ctx<'js>,
   input: Value<'js>,
   init: Opt<Object<'js>>,
-  cx: Arc<APIRequestContext>,
+  cx: Arc<HttpClient>,
 ) -> rquickjs::Result<Value<'js>> {
   {
     let url = input

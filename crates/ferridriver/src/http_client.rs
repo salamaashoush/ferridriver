@@ -1,13 +1,15 @@
-//! API request context -- Playwright-compatible HTTP client for API testing.
+//! WHATWG-fetch-compatible HTTP client -- the runner-side request
+//! stack, separate from the browser/page network. Backs both the
+//! `fetch` global and the Playwright-style `request` binding.
 //!
-//! Provides `APIRequestContext` with methods matching Playwright's API:
-//! `get`, `post`, `put`, `delete`, `patch`, `head`, and generic `fetch`.
+//! Provides `HttpClient` with `get`, `post`, `put`, `delete`, `patch`,
+//! `head`, and generic `fetch`.
 //!
-//! Each method returns an `APIResponse` with `status()`, `text()`, `json()`,
+//! Each method returns an `HttpResponse` with `status()`, `text()`, `json()`,
 //! `headers()`, `ok()`, and `body()`.
 //!
 //! ```ignore
-//! let ctx = APIRequestContext::new(RequestContextOptions {
+//! let ctx = HttpClient::new(HttpClientOptions {
 //!     base_url: Some("https://api.example.com".into()),
 //!     ..Default::default()
 //! });
@@ -18,9 +20,9 @@
 
 use std::time::Duration;
 
-/// Options for creating an `APIRequestContext`.
+/// Options for creating an `HttpClient`.
 #[derive(Debug, Clone, Default)]
-pub struct RequestContextOptions {
+pub struct HttpClientOptions {
   /// Base URL prepended to relative paths (e.g., `"https://api.example.com"`).
   pub base_url: Option<String>,
   /// Default headers sent with every request.
@@ -54,9 +56,9 @@ pub struct RequestOptions {
   pub max_redirects: Option<u32>,
 }
 
-/// HTTP response from an API request.
+/// An HTTP response.
 #[derive(Debug, Clone)]
-pub struct APIResponse {
+pub struct HttpResponse {
   status_code: u16,
   status_text: String,
   response_url: String,
@@ -64,7 +66,7 @@ pub struct APIResponse {
   body_bytes: bytes::Bytes,
 }
 
-impl APIResponse {
+impl HttpResponse {
   /// HTTP status code.
   pub fn status(&self) -> u16 {
     self.status_code
@@ -139,22 +141,21 @@ impl APIResponse {
   }
 }
 
-/// Playwright-compatible HTTP client for API testing.
-///
-/// Supports all HTTP methods, JSON/form/multipart bodies, query parameters,
-/// custom headers, timeouts, and cookie persistence via reqwest's cookie jar.
+/// A general HTTP client: all methods, JSON/form/multipart bodies,
+/// query params, custom headers, timeouts, and cookie persistence via
+/// reqwest's cookie jar. The one stack `fetch` and `request` share.
 #[derive(Clone)]
-pub struct APIRequestContext {
+pub struct HttpClient {
   client: reqwest::Client,
   base_url: Option<String>,
   extra_headers: Vec<(String, String)>,
   default_timeout: Duration,
 }
 
-impl APIRequestContext {
+impl HttpClient {
   /// Create a new API request context.
   #[must_use]
-  pub fn new(options: RequestContextOptions) -> Self {
+  pub fn new(options: HttpClientOptions) -> Self {
     let mut builder = reqwest::Client::builder().cookie_store(true);
 
     if options.ignore_https_errors {
@@ -195,7 +196,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn get(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
+  pub async fn get(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
     self
       .fetch(
         url,
@@ -212,7 +213,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn post(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
+  pub async fn post(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
     self
       .fetch(
         url,
@@ -229,7 +230,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn put(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
+  pub async fn put(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
     self
       .fetch(
         url,
@@ -246,7 +247,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn delete(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
+  pub async fn delete(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
     self
       .fetch(
         url,
@@ -263,7 +264,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn patch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
+  pub async fn patch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
     self
       .fetch(
         url,
@@ -280,7 +281,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or status-code validation fails.
-  pub async fn head(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
+  pub async fn head(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
     self
       .fetch(
         url,
@@ -297,7 +298,7 @@ impl APIRequestContext {
   /// # Errors
   ///
   /// Returns an error if the request fails or `fail_on_status_code` is set and the response is 4xx/5xx.
-  pub async fn fetch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<APIResponse> {
+  pub async fn fetch(&self, url: &str, options: Option<RequestOptions>) -> crate::error::Result<HttpResponse> {
     let opts = options.unwrap_or_default();
     let method_str = opts.method.as_deref().unwrap_or("GET");
     let method: reqwest::Method = method_str
@@ -361,7 +362,7 @@ impl APIRequestContext {
 
     let body_bytes = response.bytes().await.map_err(|e| format!("read response body: {e}"))?;
 
-    let api_response = APIResponse {
+    let api_response = HttpResponse {
       status_code,
       status_text,
       response_url,
