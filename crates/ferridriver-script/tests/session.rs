@@ -44,6 +44,7 @@ async fn run_demo_plugin_twice() {
     plugins: vec![binding],
     trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -114,6 +115,7 @@ async fn typescript_plugin_with_local_import_bundles_and_runs() {
     plugins: vec![PluginBinding { bytecode: cp.bytecode }],
     trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -163,6 +165,7 @@ async fn allow_net_capability_is_enforced_on_the_request_binding() {
     plugins: vec![PluginBinding { bytecode: cp.bytecode }],
     trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
   };
   let session = Session::create(ScriptEngineConfig::default(), &ctx)
     .await
@@ -240,6 +243,7 @@ async fn extension_branches_on_ferridriver_host_flag() {
       }],
       trusted_modules: false,
       host,
+      caps: ferridriver_script::ScriptCaps::default(),
     };
     (sb, ctx)
   };
@@ -293,6 +297,7 @@ fn make_ctx() -> (tempfile::TempDir, RunContext) {
     plugins: Vec::new(),
     trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
   };
   (tmp, ctx)
 }
@@ -607,5 +612,97 @@ async fn native_url_class_parses_and_exposes_search_params() {
       assert_eq!(v["str"], serde_json::json!("https://ex.com:8443/a/b?x=1&y=2#frag"));
     },
     Outcome::Error { error } => panic!("native URL failed: {error:?}"),
+  }
+}
+
+async fn binding_from(src: &str) -> (tempfile::TempDir, Result<PluginBinding, String>) {
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let path = tmp.path().join("ext.ts");
+  std::fs::write(&path, src).expect("write plugin");
+  let (compiled, failures) = compile_and_extract_plugins(&[path]).await;
+  if let Some((_, e)) = failures.into_iter().next() {
+    return (tmp, Err(e.message));
+  }
+  let cp = compiled.into_iter().next().expect("one compiled plugin");
+  (tmp, Ok(PluginBinding { bytecode: cp.bytecode }))
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn duplicate_tool_name_is_rejected_at_load() {
+  // Two defineTool calls with the same name must fail the file (the
+  // shared registry rejects the second) instead of silently letting the
+  // last registration clobber the binding.
+  let (_tmp, res) = binding_from(
+    "defineTool({ name: 'dup', handler: async () => 1 });\n\
+     defineTool({ name: 'dup', handler: async () => 2 });\n",
+  )
+  .await;
+  let err = res.expect_err("duplicate tool name must fail compilation");
+  assert!(err.contains("duplicate tool name `dup`"), "unexpected error: {err}");
+
+  // An empty name is likewise rejected.
+  let (_tmp2, res2) = binding_from("defineTool({ name: '  ', handler: async () => 1 });\n").await;
+  let err2 = res2.expect_err("empty tool name must fail compilation");
+  assert!(err2.contains("non-empty string"), "unexpected error: {err2}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn per_tool_timeout_ms_is_enforced_for_every_caller() {
+  // `timeoutMs` races the handler natively in dispatch_tool, so the
+  // bound holds for an in-VM `plugins.<name>()` call (not only the MCP
+  // entry point). A handler that sleeps past the bound rejects; a fast
+  // one resolves.
+  let (_tmp, binding) = binding_from(
+    "defineTool({ name: 'slow', timeoutMs: 50, handler: async () => { \
+       await new Promise(r => setTimeout(r, 400)); return 'late'; } });\n\
+     defineTool({ name: 'fast', timeoutMs: 5000, handler: async () => 'quick' });\n",
+  )
+  .await;
+  let binding = binding.expect("compiles");
+
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let sandbox = PathSandbox::new(tmp.path()).expect("sandbox");
+  let ctx = RunContext {
+    vars: Arc::new(InMemoryVars::new()),
+    sandbox: Arc::new(sandbox),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: vec![binding],
+    trusted_modules: false,
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let session = Session::create(ScriptEngineConfig::default(), &ctx)
+    .await
+    .expect("session create");
+
+  let slow = session
+    .execute(
+      "try { await plugins['slow'](); return 'resolved'; } catch (e) { return String(e); }",
+      &[],
+      RunOptions::default(),
+      &ctx,
+    )
+    .await;
+  match slow.result.outcome {
+    Outcome::Ok { success } => {
+      let s = success.value.as_str().unwrap_or_default();
+      assert!(
+        s.contains("timed out after 50ms"),
+        "slow tool should have timed out, got: {s}"
+      );
+    },
+    Outcome::Error { error } => panic!("expected caught rejection, not engine error: {error:?}"),
+  }
+
+  let fast = session
+    .execute("return await plugins['fast']();", &[], RunOptions::default(), &ctx)
+    .await;
+  match fast.result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("quick")),
+    Outcome::Error { error } => panic!("fast tool within its timeout must resolve: {error:?}"),
   }
 }

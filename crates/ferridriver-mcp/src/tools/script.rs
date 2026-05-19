@@ -10,7 +10,7 @@
 
 use std::time::Duration;
 
-use ferridriver_script::{RunContext, RunOptions};
+use ferridriver_script::RunOptions;
 use rmcp::{
   ErrorData,
   handler::server::wrapper::Parameters,
@@ -98,7 +98,7 @@ impl McpServer {
     let session = sess(p.session.as_ref()).to_string();
     // Serialize per-session: a concurrent run_script / plugin / navigation
     // call on the same session must not interleave browser state.
-    let _guard = self.session_guard(&session).await;
+    let guard = self.session_guard(&session).await;
 
     let Some(sandbox) = self.script_sandbox.clone() else {
       return Err(McpServer::err(
@@ -106,8 +106,6 @@ impl McpServer {
         Check the server log for the underlying error.",
       ));
     };
-
-    let vars = self.session_vars(&session);
 
     let options = RunOptions {
       timeout: p.timeout_ms.map(Duration::from_millis),
@@ -147,30 +145,14 @@ impl McpServer {
       },
     };
 
-    // Resolve the session's active page so scripts can call `page.click/etc`.
-    // We launch/attach eagerly (same as other tools) — pure-compute scripts
-    // that don't touch `page` still work; they just pay the launch cost
-    // once for the session.
-    let (page, ctx_ref) = Box::pin(self.page_and_context(&session)).await?;
-    let request = std::sync::Arc::new(ferridriver::api_request::APIRequestContext::new(
-      ferridriver::api_request::RequestContextOptions::default(),
-    ));
+    // Live page/context/request/browser handles + sandboxes + plugins.
+    // `mcp_run_context` launches/attaches the session's browser eagerly
+    // (pure-compute scripts still work; they just pay the one-time cost).
+    let context = self.mcp_run_context(&session).await?;
 
-    let browser_handle = std::sync::Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
-    let context = RunContext {
-      vars,
-      sandbox,
-      artifacts: self.artifacts_sandbox.clone(),
-      page: Some(page),
-      browser_context: Some(std::sync::Arc::new(ctx_ref)),
-      request: Some(request),
-      browser: Some(browser_handle),
-      plugins: self.plugin_bindings(),
-      trusted_modules: false,
-      host: ferridriver_script::ExtensionHost::Mcp,
-    };
-
-    let result = self.run_in_session(&session, &source, &args, options, context).await;
+    let result = self
+      .run_on_session_vm(&session, &guard, &source, &args, options, context)
+      .await;
 
     let json = serde_json::to_string_pretty(&result).map_err(|e| McpServer::err(format!("serialize result: {e}")))?;
 

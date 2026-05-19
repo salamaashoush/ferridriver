@@ -89,8 +89,12 @@ struct ToolReg {
   description: Option<String>,
   input_schema: Option<serde_json::Value>,
   expose_as_tool: bool,
-  allowed_commands: std::collections::BTreeMap<String, String>,
+  allowed_commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
   allowed_net: Vec<String>,
+  /// Per-tool handler timeout (ms) from the manifest `timeoutMs`. `None`
+  /// ⇒ no independent bound (the session wall-clock still applies).
+  /// Enforced natively in `plugins::dispatch_tool`.
+  timeout_ms: Option<u64>,
   handler: Persistent<Function<'static>>,
 }
 
@@ -422,6 +426,11 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
   let name: String = m
     .get("name")
     .map_err(|e| ScriptError::internal(format!("tool manifest missing string `name`: {e}")))?;
+  if name.trim().is_empty() {
+    return Err(ScriptError::internal(
+      "defineTool: `name` must be a non-empty string".to_string(),
+    ));
+  }
   let description = m
     .get::<_, Value<'_>>("description")
     .ok()
@@ -433,6 +442,11 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
     _ => None,
   };
   let expose_as_tool = m.get::<_, bool>("exposeAsTool").unwrap_or(false);
+  let timeout_ms = m
+    .get::<_, f64>("timeoutMs")
+    .ok()
+    .map(|ms| ms.max(0.0) as u64)
+    .filter(|&v| v > 0);
 
   let (allowed_commands, allowed_net) = match m.get::<_, Value<'_>>("allow") {
     Ok(v) => {
@@ -460,6 +474,11 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
 
   let saved = Persistent::save(ctx, handler);
   with_registry(ctx, |reg| {
+    if reg.tools.iter().any(|t| t.name == name) {
+      return Err(ScriptError::internal(format!(
+        "defineTool: duplicate tool name `{name}` — names must be unique across all loaded extensions"
+      )));
+    }
     reg.tools.push(ToolReg {
       name,
       description,
@@ -467,9 +486,11 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
       expose_as_tool,
       allowed_commands,
       allowed_net,
+      timeout_ms,
       handler: saved,
     });
-  })
+    Ok(())
+  })?
 }
 
 /// `defineTool(...)` argument adapter. Two equivalent native forms:
@@ -687,7 +708,7 @@ pub async fn collect_registry(actx: &AsyncContext) -> Result<CollectedRegistry, 
 /// loader needs no JS round-trip to recover manifests.
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct CollectedAllow {
-  pub commands: std::collections::BTreeMap<String, String>,
+  pub commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
   pub net: Vec<String>,
 }
 
@@ -704,6 +725,8 @@ pub struct CollectedTool {
   pub input_schema: Option<serde_json::Value>,
   pub allow: CollectedAllow,
   pub expose_as_tool: bool,
+  #[serde(skip_serializing_if = "Option::is_none")]
+  pub timeout_ms: Option<u64>,
 }
 
 /// Snapshot every registered tool manifest, in registration order.
@@ -723,6 +746,7 @@ pub fn tools_snapshot(ctx: &Ctx<'_>) -> Result<Vec<CollectedTool>, ScriptError> 
           net: t.allowed_net.clone(),
         },
         expose_as_tool: t.expose_as_tool,
+        timeout_ms: t.timeout_ms,
       })
       .collect()
   })
@@ -745,16 +769,24 @@ pub fn tool_names(ctx: &Ctx<'_>) -> Result<Vec<String>, ScriptError> {
 /// `plugins.rs` — the analogue of `invoke_step`'s registry lookup.
 pub(crate) struct ToolDispatch<'js> {
   pub handler: Function<'js>,
-  pub allowed_commands: std::collections::BTreeMap<String, String>,
+  pub allowed_commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
   pub allowed_net: Vec<String>,
+  pub timeout_ms: Option<u64>,
 }
 
 pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispatch<'js>, ScriptError> {
-  let (saved, allowed_commands, allowed_net) = with_registry(ctx, |reg| {
+  let (saved, allowed_commands, allowed_net, timeout_ms) = with_registry(ctx, |reg| {
     reg
       .tools
       .get(idx)
-      .map(|t| (t.handler.clone(), t.allowed_commands.clone(), t.allowed_net.clone()))
+      .map(|t| {
+        (
+          t.handler.clone(),
+          t.allowed_commands.clone(),
+          t.allowed_net.clone(),
+          t.timeout_ms,
+        )
+      })
       .ok_or_else(|| ScriptError::internal(format!("tool index {idx} out of range")))
   })??;
   let handler = saved.restore(ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
@@ -762,6 +794,7 @@ pub(crate) fn tool_dispatch<'js>(ctx: &Ctx<'js>, idx: usize) -> Result<ToolDispa
     handler,
     allowed_commands,
     allowed_net,
+    timeout_ms,
   })
 }
 

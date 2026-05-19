@@ -28,8 +28,10 @@ pub struct PluginManifest {
   #[serde(default)]
   pub description: Option<String>,
 
-  /// JSON Schema describing the plugin's input arguments. Used both for
-  /// the promoted tool's `inputSchema` and for argument validation before
+  /// JSON Schema describing the plugin's input arguments. Surfaced as the
+  /// promoted tool's `inputSchema` and enforced: `invoke_plugin`
+  /// validates the caller's arguments against it (Draft 2020-12 et al.,
+  /// via the `jsonschema` crate) and rejects a non-conforming call before
   /// the handler runs. `serde_json::Value` so plugin authors can use any
   /// valid JSON Schema construct without us re-encoding it.
   #[serde(default)]
@@ -44,6 +46,13 @@ pub struct PluginManifest {
   /// invocation route through the same handler.
   #[serde(default)]
   pub expose_as_tool: bool,
+
+  /// Optional per-invocation handler timeout (milliseconds). Enforced
+  /// natively for every caller in `plugins::dispatch_tool` (the handler
+  /// is raced against this bound). `None` ⇒ only the session wall-clock
+  /// applies.
+  #[serde(default)]
+  pub timeout_ms: Option<u64>,
 }
 
 /// Declarative capability manifest bundled with the plugin.
@@ -67,13 +76,13 @@ pub struct PluginManifest {
 #[derive(Debug, Default, Clone, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct PluginAllow {
-  /// Named CLI templates the handler may invoke via `commands.run(name, vars)`.
-  /// Each template may reference handler-supplied vars as `${var}` placeholders.
-  /// The plugin handler picks names -- runtime substitutes vars literally
-  /// after shell-escaping each value. `exec` is accepted as a synonym so
-  /// authors can spell the capability after its category.
+  /// Named commands the handler may invoke. Each value is a shell-string
+  /// shorthand or a [`ferridriver_script::CommandSpec`] object (argv vs
+  /// shell, per-command timeout, env passthrough, cwd, output mode,
+  /// `persistent`). Default-deny: a name not declared here cannot be
+  /// run. `exec` is accepted as a synonym.
   #[serde(default, alias = "exec")]
-  pub commands: HashMap<String, String>,
+  pub commands: HashMap<String, ferridriver_script::CommandSpec>,
 
   /// Host patterns the handler's `request` client may target. Each entry
   /// is an exact host (`api.box.com`) or a leading-wildcard suffix

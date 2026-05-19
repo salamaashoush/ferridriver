@@ -23,7 +23,6 @@ use rmcp::{
 };
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
-use std::time::Instant;
 use tokio::sync::{Mutex, RwLock};
 
 // ── SharedState ──────────────────────────────────────────────────────────────
@@ -68,6 +67,15 @@ impl SharedState {
   /// Read-lock the inner state (for lookups).
   pub(crate) async fn read(&self) -> tokio::sync::RwLockReadGuard<'_, BrowserState> {
     self.inner.read().await
+  }
+
+  /// Current generation of the browser instance backing `context`'s
+  /// session, or `None` if no such instance is live. Used to detect a
+  /// browser-session swap (relaunch/reconnect) so a stale script VM is
+  /// discarded rather than left holding handles into a dead session.
+  pub(crate) async fn instance_generation(&self, context: &str) -> Option<u64> {
+    let key = ferridriver::state::SessionKey::parse(context);
+    self.inner.read().await.instance_generation(key.instance.as_ref())
   }
 
   /// Get a cached `ArcSwap` handle for storing `ref_map`s (wait-free store).
@@ -284,24 +292,6 @@ impl McpServerConfig for DefaultConfig {}
 
 // ── McpServer ───────────────────────────────────────────────────────────────
 
-/// One session's persistent script VM slot. `vm` is `None` before the
-/// first script for the session and after a poisoning fault discards it
-/// (the next call rebuilds transparently). `last_used` drives LRU
-/// eviction when the warm-VM cap is exceeded.
-pub(crate) struct SessionSlot {
-  vm: Option<ferridriver_script::Session>,
-  last_used: Instant,
-}
-
-impl Default for SessionSlot {
-  fn default() -> Self {
-    Self {
-      vm: None,
-      last_used: Instant::now(),
-    }
-  }
-}
-
 #[derive(Clone)]
 pub struct McpServer {
   pub(crate) state: SharedState,
@@ -321,14 +311,17 @@ pub struct McpServer {
   /// in that case scripts just don't get an `artifacts` binding and must
   /// use `fs` for output (which pollutes the script source directory).
   pub(crate) artifacts_sandbox: Option<Arc<ferridriver_script::PathSandbox>>,
-  /// Per-session variable stores exposed to scripts via the `vars` global.
-  /// Lazily created on first `run_script` for a given session name.
-  pub(crate) session_vars: Arc<DashMap<String, Arc<ferridriver_script::InMemoryVars>>>,
-  /// Persistent per-session script VMs. A session reuses one `QuickJS`
-  /// runtime+context across every `run_script` / plugin call so user
-  /// `globalThis` state survives REPL-style. Keyed identically to
-  /// `session_vars`; access is serialized by the per-session guard.
-  pub(crate) session_vms: Arc<DashMap<String, Arc<Mutex<SessionSlot>>>>,
+  /// All live script sessions: one persistent `QuickJS` VM + its
+  /// session-scoped `vars` + the browser generation it was built
+  /// against, per session name, behind one lock each. Shared by
+  /// `run_script` and plugin calls so `globalThis`/`vars` persist
+  /// REPL-style; a browser relaunch under the same name discards the VM
+  /// (stale handles) but keeps `vars`.
+  pub(crate) sessions: Arc<ferridriver_script::SessionTable>,
+  /// Resolved scripting sandbox relaxations (env allow-list / node
+  /// compat). Default = locked down; set by [`McpServer::with_script_caps`]
+  /// from the operator's `[scripting]` config.
+  pub(crate) script_caps: ferridriver_script::ScriptCaps,
   /// Plugins discovered + parsed at startup. Empty by default; populated
   /// by [`McpServer::load_plugins`].
   pub(crate) plugins: crate::plugin::PluginRegistry,
@@ -398,6 +391,10 @@ impl McpServer {
     // directory; we create the configured root up front and log (not panic)
     // if initialisation fails so the rest of the server still works.
     let script_engine = Arc::new(ferridriver_script::ScriptEngine::new(config.script_engine_config()));
+    let sessions = Arc::new(ferridriver_script::SessionTable::new(
+      script_engine.config().max_session_vms,
+      script_engine.config().session_idle_ttl,
+    ));
     let script_root = config.script_root();
     let script_sandbox = match std::fs::create_dir_all(&script_root)
       .map_err(|e| format!("{e}"))
@@ -441,8 +438,8 @@ impl McpServer {
       script_engine,
       script_sandbox,
       artifacts_sandbox,
-      session_vars: Arc::new(DashMap::new()),
-      session_vms: Arc::new(DashMap::new()),
+      sessions,
+      script_caps: ferridriver_script::ScriptCaps::default(),
       plugins: crate::plugin::PluginRegistry::default(),
     }
   }
@@ -515,6 +512,15 @@ impl McpServer {
       .collect();
 
     for (name, desc, schema_obj) in promoted {
+      // register_tool already rejects duplicate names within a load
+      // batch; this guards the remaining collision: a plugin name that
+      // shadows a built-in tool (or a name added by an earlier,
+      // separately-loaded batch). Skip + warn rather than silently
+      // letting `add_route` clobber a route.
+      if self.tool_router.has_route(&name) {
+        tracing::warn!(name = %name, "plugin tool name collides with an existing tool; not promoting");
+        continue;
+      }
       let tool = Tool::new(name.clone(), desc, schema_obj);
       let plugin_name = name.clone();
 
@@ -552,8 +558,16 @@ impl McpServer {
   ) -> Result<rmcp::model::CallToolResult, ErrorData> {
     use rmcp::model::{CallToolResult, Content};
 
-    if self.plugins.get_tool(plugin_name).is_none() {
+    let Some(manifest) = self.plugins.get_tool(plugin_name) else {
       return Err(Self::err(format!("unknown plugin: {plugin_name}")));
+    };
+    // Enforce the declared inputSchema before doing any work (browser
+    // launch, session lock). A non-conforming call is the caller's bug,
+    // surfaced as a tool error so the model can correct and retry.
+    if let Some(schema) = &manifest.input_schema
+      && let Err(msg) = validate_plugin_args(plugin_name, schema, &args_obj)
+    {
+      return Ok(CallToolResult::error(vec![Content::text(msg)]));
     }
 
     let session = args_obj
@@ -564,43 +578,17 @@ impl McpServer {
     // invocations on the same session don't race against each other's
     // browser state (cookies, navigation, page identity). Matches the
     // pattern other tool routers use.
-    let _guard = self.session_guard(&session).await;
-
-    let Some(sandbox) = self.script_sandbox.clone() else {
-      return Err(Self::err(
-        "scripting is disabled: the configured script_root could not be prepared at server startup.",
-      ));
-    };
-
-    let vars = self.session_vars(&session);
-
-    // Resolve live browser handles -- same path the run_script tool uses.
-    let (page, ctx_ref) = Box::pin(self.page_and_context(&session)).await?;
-    let request = Arc::new(ferridriver::api_request::APIRequestContext::new(
-      ferridriver::api_request::RequestContextOptions::default(),
-    ));
-    let browser_handle = Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
-
-    let context = ferridriver_script::RunContext {
-      vars,
-      sandbox,
-      artifacts: self.artifacts_sandbox.clone(),
-      page: Some(page),
-      browser_context: Some(Arc::new(ctx_ref)),
-      request: Some(request),
-      browser: Some(browser_handle),
-      plugins: self.plugin_bindings(),
-      trusted_modules: false,
-      host: ferridriver_script::ExtensionHost::Mcp,
-    };
+    let guard = self.session_guard(&session).await;
+    let context = self.mcp_run_context(&session).await?;
 
     let name_literal = serde_json::to_string(plugin_name).unwrap_or_else(|_| "\"\"".into());
     let source = format!("return await plugins[{name_literal}](args[0]);");
     let args = vec![args_obj];
 
     let result = self
-      .run_in_session(
+      .run_on_session_vm(
         &session,
+        &guard,
         &source,
         &args,
         ferridriver_script::RunOptions::default(),
@@ -610,24 +598,17 @@ impl McpServer {
 
     let json = serde_json::to_string_pretty(&result).map_err(|e| Self::err(format!("serialize result: {e}")))?;
     let mut contents = vec![Content::text(json)];
+    // A promoted plugin is a first-class named tool: a handler failure
+    // must surface as an MCP error result (is_error) so the model can
+    // distinguish it from success, not a "success" carrying an error
+    // blob. (This deliberately differs from `run_script`, whose contract
+    // is "always succeed, inspect `status`".)
     if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
       let summary = format!("[{:?}] {} ({}ms)", error.kind, error.message, result.duration_ms);
       contents.insert(0, Content::text(summary));
+      return Ok(CallToolResult::error(contents));
     }
     Ok(CallToolResult::success(contents))
-  }
-
-  /// Get-or-create the `InMemoryVars` store for a given session name.
-  ///
-  /// Called from `run_script` so each session sees a stable vars namespace
-  /// across tool invocations (matching the "fresh context per call, but
-  /// session-level vars persist" design choice).
-  pub(crate) fn session_vars(&self, session: &str) -> Arc<ferridriver_script::InMemoryVars> {
-    self
-      .session_vars
-      .entry(session.to_string())
-      .or_insert_with(|| Arc::new(ferridriver_script::InMemoryVars::new()))
-      .clone()
   }
 
   /// Snapshot the loaded plugin registry into the script-engine binding
@@ -644,88 +625,93 @@ impl McpServer {
       .collect()
   }
 
-  /// Get-or-create the persistent VM slot for a session. Mirrors
-  /// `session_vars` keying. Enforces the warm-VM cap by evicting the
-  /// least-recently-used idle session before admitting a new one.
-  fn session_slot(&self, session: &str) -> Arc<Mutex<SessionSlot>> {
-    if !self.session_vms.contains_key(session) && self.session_vms.len() >= self.script_engine.config().max_session_vms
-    {
-      self.evict_lru_session();
-    }
-    self
-      .session_vms
-      .entry(session.to_string())
-      .or_insert_with(|| Arc::new(Mutex::new(SessionSlot::default())))
-      .clone()
+  /// Assemble the `RunContext` an MCP script/plugin call needs: live
+  /// page/context/request/browser handles for `session`, the script and
+  /// artifacts sandboxes, and the loaded plugin bytecode. Shared by
+  /// `run_script` and `invoke_plugin` so the wiring lives in one place.
+  ///
+  /// `vars` is a throwaway here: a session's `vars` is the durable tier
+  /// owned by the [`ferridriver_script::SessionTable`] entry (survives
+  /// VM rebuild + cap eviction for the session's lifetime), so
+  /// `run_on_session_vm` swaps in that store. The field stays required
+  /// because the one-shot/CLI/BDD constructors legitimately supply their
+  /// own; making it optional is a wider ripple, deliberately not done.
+  pub(crate) async fn mcp_run_context(&self, session: &str) -> Result<ferridriver_script::RunContext, ErrorData> {
+    let Some(sandbox) = self.script_sandbox.clone() else {
+      return Err(Self::err(
+        "scripting is disabled: the configured script_root could not be prepared at server startup.",
+      ));
+    };
+    let (page, ctx_ref) = Box::pin(self.page_and_context(session)).await?;
+    let request = Arc::new(ferridriver::api_request::APIRequestContext::new(
+      ferridriver::api_request::RequestContextOptions::default(),
+    ));
+    let browser = Arc::new(ferridriver::Browser::from_shared_state(self.state.state_arc()));
+    Ok(ferridriver_script::RunContext {
+      vars: Arc::new(ferridriver_script::InMemoryVars::new()),
+      sandbox,
+      artifacts: self.artifacts_sandbox.clone(),
+      page: Some(page),
+      browser_context: Some(Arc::new(ctx_ref)),
+      request: Some(request),
+      browser: Some(browser),
+      plugins: self.plugin_bindings(),
+      trusted_modules: false,
+      host: ferridriver_script::ExtensionHost::Mcp,
+      caps: self.script_caps.clone(),
+    })
   }
 
-  /// Evict the oldest session whose slot is not currently in use. A
-  /// locked slot means an execution is in flight on another session, so
-  /// it is skipped (the cap is soft — never drop a VM mid-run).
-  fn evict_lru_session(&self) {
-    let mut victim: Option<(String, Instant)> = None;
-    for entry in self.session_vms.iter() {
-      if let Ok(slot) = entry.value().try_lock() {
-        let t = slot.last_used;
-        if victim.as_ref().is_none_or(|(_, oldest)| t < *oldest) {
-          victim = Some((entry.key().clone(), t));
-        }
-      }
-    }
-    if let Some((key, _)) = victim {
-      self.session_vms.remove(&key);
-    }
-  }
-
-  /// Execute a script against the session's persistent VM, creating it
-  /// on first use and transparently rebuilding it after a poisoning
-  /// fault. The caller must already hold the per-session guard so slot
-  /// access is uncontended.
-  pub(crate) async fn run_in_session(
+  /// Run `source` on `session`'s persistent VM via the
+  /// [`ferridriver_script::SessionTable`], which owns VM creation,
+  /// warm-VM cap + idle-TTL reaping, browser-swap and poison rebuild.
+  ///
+  /// `_guard` is the per-context serialization lock, taken by reference
+  /// purely to make "the caller already holds the context guard" a
+  /// compile-time requirement instead of a comment.
+  ///
+  /// `context.vars` is replaced with the session's own durable store
+  /// (vars belong to the session, not the call), and the browser
+  /// instance generation is read so a relaunch under the same session
+  /// name rebuilds the VM (its `globalThis` may hold dead page handles)
+  /// while `vars` survive.
+  pub(crate) async fn run_on_session_vm(
     &self,
     session: &str,
+    _guard: &tokio::sync::OwnedMutexGuard<()>,
     source: &str,
     args: &[serde_json::Value],
     options: ferridriver_script::RunOptions,
-    context: ferridriver_script::RunContext,
+    mut context: ferridriver_script::RunContext,
   ) -> ferridriver_script::ScriptResult {
-    let slot = self.session_slot(session);
-    let mut slot = slot.lock().await;
-
-    if slot.vm.is_none() {
-      match ferridriver_script::Session::create(self.script_engine.config().clone(), &context).await {
-        Ok(vm) => slot.vm = Some(vm),
-        Err(e) => return ferridriver_script::ScriptResult::err(e, 0, Vec::new()),
-      }
-    }
-
-    let run = match slot.vm.as_ref() {
-      Some(vm) => vm.execute(source, args, options, &context).await,
-      // Unreachable: we just ensured `vm` is `Some`. Defensive (no
-      // `unwrap`/`expect`) rather than a panic path.
-      None => {
-        return ferridriver_script::ScriptResult::err(
-          ferridriver_script::ScriptError::internal("session vm unexpectedly absent"),
-          0,
-          Vec::new(),
-        );
-      },
-    };
-
-    // A poisoning fault (timeout interrupt / OOM) left the VM in an
-    // untrustworthy state — discard it so the NEXT call rebuilds fresh.
-    // The poisoning call still returns its own error result.
-    if run.poisoned {
-      slot.vm = None;
-    }
-    slot.last_used = Instant::now();
-    run.result
+    let slot = self.sessions.acquire(session);
+    let mut bs = slot.lock().await;
+    context.vars = bs.vars();
+    let epoch = self.state.instance_generation(session).await;
+    bs.run(
+      self.script_engine.config().clone(),
+      source,
+      args,
+      options,
+      context,
+      epoch,
+    )
+    .await
   }
 
   /// Add extra tool routers (merges with built-in browser tools).
   #[must_use]
   pub fn with_extra_tools(mut self, extra: ToolRouter<Self>) -> Self {
     self.tool_router += extra;
+    self
+  }
+
+  /// Set the scripting sandbox relaxations (resolved from the
+  /// operator's `[scripting]` config). Without this the sandbox stays
+  /// fully locked down (`process.env` empty, no node-compat).
+  #[must_use]
+  pub fn with_script_caps(mut self, caps: ferridriver_script::ScriptCaps) -> Self {
+    self.script_caps = caps;
     self
   }
 
@@ -913,6 +899,36 @@ impl McpServer {
     let snap = self.snap(page, context).await;
     Ok(CallToolResult::success(vec![Content::text(format!("{msg}\n\n{snap}"))]))
   }
+}
+
+/// Validate a plugin call's arguments against the manifest `inputSchema`.
+/// The validator is compiled per call — tool invocations are not a hot
+/// path and schemas are tiny. An invalid schema is the plugin author's
+/// bug and is surfaced loudly rather than silently skipped.
+fn validate_plugin_args(plugin: &str, schema: &serde_json::Value, args: &serde_json::Value) -> Result<(), String> {
+  let validator =
+    jsonschema::validator_for(schema).map_err(|e| format!("plugin `{plugin}` has an invalid inputSchema: {e}"))?;
+  let mut messages: Vec<String> = validator
+    .iter_errors(args)
+    .map(|e| {
+      let path = e.instance_path.to_string();
+      if path.is_empty() {
+        e.to_string()
+      } else {
+        format!("{path}: {e}")
+      }
+    })
+    .take(20)
+    .collect();
+  if messages.is_empty() {
+    return Ok(());
+  }
+  messages.sort();
+  messages.dedup();
+  Err(format!(
+    "invalid arguments for `{plugin}` (does not match inputSchema):\n- {}",
+    messages.join("\n- ")
+  ))
 }
 
 #[tool_handler(router = self.tool_router)]
@@ -1220,5 +1236,38 @@ impl ServerHandler for McpServer {
       },
       _ => Err(Self::err(format!("Unknown prompt: {}", request.name))),
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::validate_plugin_args;
+
+  #[test]
+  fn schema_validation_accepts_conforming_and_rejects_bad() {
+    let schema = serde_json::json!({
+      "type": "object",
+      "properties": { "user": { "type": "string" }, "n": { "type": "integer" } },
+      "required": ["user"],
+      "additionalProperties": false
+    });
+
+    assert!(validate_plugin_args("t", &schema, &serde_json::json!({ "user": "a", "n": 3 })).is_ok());
+
+    let missing = validate_plugin_args("t", &schema, &serde_json::json!({ "n": 3 })).unwrap_err();
+    assert!(missing.contains("invalid arguments for `t`"), "{missing}");
+
+    let wrong_type = validate_plugin_args("t", &schema, &serde_json::json!({ "user": 1 })).unwrap_err();
+    assert!(wrong_type.contains("invalid arguments for `t`"), "{wrong_type}");
+
+    let extra = validate_plugin_args("t", &schema, &serde_json::json!({ "user": "a", "x": 1 })).unwrap_err();
+    assert!(extra.contains("invalid arguments for `t`"), "{extra}");
+  }
+
+  #[test]
+  fn an_invalid_schema_is_surfaced_loudly() {
+    let bad_schema = serde_json::json!({ "type": "not-a-real-type" });
+    let err = validate_plugin_args("t", &bad_schema, &serde_json::json!({})).unwrap_err();
+    assert!(err.contains("invalid inputSchema"), "{err}");
   }
 }

@@ -10,11 +10,13 @@
 //!   `evaluate`, `search_page`
 //! - **network** — session diagnostics: `diagnostics`
 //! - **script** — imperative scripting: `run_script` (the action path)
+//! - **extensions** — `ferridriver_extensions`: introspect loaded plugins
 //!
 //! Browser interaction flows through `run_script`, which exposes `page`,
 //! `context`, and `request` globals over the ferridriver core.
 
 pub mod content;
+pub mod extensions;
 pub mod navigation;
 pub mod network;
 pub mod script;
@@ -30,6 +32,10 @@ impl McpServer {
   /// through the field (`self.tool_router`) rather than calling this method.
   #[must_use]
   pub fn tool_router() -> ToolRouter<Self> {
-    Self::navigation_router() + Self::content_router() + Self::network_router() + Self::script_router()
+    Self::navigation_router()
+      + Self::content_router()
+      + Self::network_router()
+      + Self::script_router()
+      + Self::extensions_router()
   }
 }

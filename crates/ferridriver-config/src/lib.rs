@@ -49,10 +49,31 @@ pub struct FerridriverConfig {
   /// test runner consumes its steps. Top-level (not under `mcp`) because
   /// both hosts load it.
   pub extensions: Vec<String>,
+  /// Sandbox-relaxation knobs for the scripting VM (default-deny).
+  pub scripting: ScriptingConfig,
   /// MCP server configuration.
   pub mcp: mcp::McpConfig,
   /// Test runner configuration.
   pub test: test::TestConfig,
+}
+
+/// Opt-in relaxations of the scripting sandbox. Every field defaults to
+/// the locked-down value; an operator who widens it is stating they
+/// understand the exposure — same posture as `allow.net`.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ScriptingConfig {
+  /// Server environment variable names a script may read via
+  /// `process.env`. Empty (default) ⇒ `process.env` is `{}`. Only names
+  /// listed here, and only if present in the server's environment, are
+  /// exposed — a script never sees an ambient secret the operator did
+  /// not name.
+  pub allow_env: Vec<String>,
+  /// When true, expose a Node-ish `process.versions.node` so npm
+  /// packages that hard-check it run. A documented compatibility shim
+  /// (the value is not a real Node); off by default to keep
+  /// `process.versions` honest.
+  pub node_compat: bool,
 }
 
 impl FerridriverConfig {
