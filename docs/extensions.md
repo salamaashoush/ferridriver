@@ -337,8 +337,13 @@ So real npm packages run, scripts and handlers get a sandbox-safe
 
 Always available (no authority, real values): `platform`, `arch`,
 `version`, `versions`, `release`, `argv` (`["ferridriver","script"]`),
-`pid`, `nextTick`, `hrtime`, `cwd()` (returns the sandbox root, never
-the real cwd).
+`pid`, `nextTick`, `hrtime` (+ `hrtime.bigint()` -> BigInt ns),
+`stdout`/`stderr` (`.write(chunk)` routes into the captured console —
+`stdout`->log, `stderr`->error, one trailing newline trimmed; returns
+`true`, `isTTY` is `false`), `cwd()` (returns the sandbox root, never
+the real cwd). `nextTick(cb)` is a FIFO microtask (via
+`queueMicrotask`), not Node's separate higher-priority queue — order
+follows scheduling order.
 
 - `process.env` — **default `{}`**. Only the names in `[scripting]`
   `allowEnv`, and only if set in the server's environment, appear; the

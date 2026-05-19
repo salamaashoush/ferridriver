@@ -71,29 +71,59 @@ pub fn install(ctx: &Ctx<'_>, caps: &ScriptCaps, cwd: &str) -> rquickjs::Result<
   )?;
   p.set("nextTick", next_tick)?;
 
-  // hrtime([prev]) -> [seconds, nanos], monotonic from session start.
+  // stdout/stderr: only `.write(chunk)` — routed into the same console
+  // capture the `console` global feeds (so output surfaces in
+  // `ScriptResult.console[]`), one trailing newline trimmed so a
+  // `write("x\n")` is one line, not a line + blank. Returns `true`
+  // (Node's "not backpressured"). No fd, not a TTY.
+  for (name, level) in [("stdout", "log"), ("stderr", "error")] {
+    let stream = Object::new(ctx.clone())?;
+    let f = rquickjs::Function::new(
+      ctx.clone(),
+      move |c: Ctx<'_>, chunk: Value<'_>| -> rquickjs::Result<bool> {
+        let s = chunk
+          .as_string()
+          .and_then(|v| v.to_string().ok())
+          .or_else(|| chunk.as_number().map(|n| n.to_string()))
+          .unwrap_or_default();
+        let s = s.strip_suffix('\n').unwrap_or(&s).to_string();
+        let console: Object<'_> = c.globals().get("console")?;
+        let sink: rquickjs::Function<'_> = console.get(level)?;
+        sink.call::<_, ()>((s,))?;
+        Ok(true)
+      },
+    )?;
+    stream.set("write", f)?;
+    stream.set("isTTY", false)?;
+    p.set(name, stream)?;
+  }
+
+  // hrtime([prev]) -> [seconds, nanos], monotonic from session start;
+  // hrtime.bigint() -> BigInt nanoseconds (Node parity).
   let start = Instant::now();
-  p.set(
-    "hrtime",
-    Func::from(move |prev: Rest<Value<'_>>| -> Vec<i64> {
-      let now = start.elapsed();
-      let (mut s, mut n) = (
-        i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
-        i64::from(now.subsec_nanos()),
-      );
-      if let Some(arr) = prev.0.first().and_then(|v| v.as_array()) {
-        let ps = arr.get::<i64>(0).unwrap_or(0);
-        let pn = arr.get::<i64>(1).unwrap_or(0);
-        s -= ps;
-        n -= pn;
-        if n < 0 {
-          s -= 1;
-          n += 1_000_000_000;
-        }
+  let hrtime = rquickjs::Function::new(ctx.clone(), move |prev: Rest<Value<'_>>| -> Vec<i64> {
+    let now = start.elapsed();
+    let (mut s, mut n) = (
+      i64::try_from(now.as_secs()).unwrap_or(i64::MAX),
+      i64::from(now.subsec_nanos()),
+    );
+    if let Some(arr) = prev.0.first().and_then(|v| v.as_array()) {
+      let ps = arr.get::<i64>(0).unwrap_or(0);
+      let pn = arr.get::<i64>(1).unwrap_or(0);
+      s -= ps;
+      n -= pn;
+      if n < 0 {
+        s -= 1;
+        n += 1_000_000_000;
       }
-      vec![s, n]
-    }),
-  )?;
+    }
+    vec![s, n]
+  })?;
+  // Forward into a generic fn so the `Ctx` and the returned `Value`
+  // share one `'js` (an inline closure gives each its own lifetime).
+  let bigint = rquickjs::Function::new(ctx.clone(), move |c| hrtime_bigint(c, start))?;
+  hrtime.set("bigint", bigint)?;
+  p.set("hrtime", hrtime)?;
 
   // exit(): never kill the server — surface intent as an error so a
   // script that relies on it fails loudly instead of silently no-oping.
@@ -111,6 +141,13 @@ pub fn install(ctx: &Ctx<'_>, caps: &ScriptCaps, cwd: &str) -> rquickjs::Result<
 
   g.set("process", p)?;
   Ok(())
+}
+
+/// `process.hrtime.bigint()` — nanoseconds since session start as a
+/// JS `BigInt`. Free fn so the closure's `Ctx`/return share `'js`.
+fn hrtime_bigint(ctx: Ctx<'_>, start: Instant) -> rquickjs::Result<Value<'_>> {
+  let nanos = u64::try_from(start.elapsed().as_nanos()).unwrap_or(u64::MAX);
+  Ok(rquickjs::BigInt::from_u64(ctx, nanos)?.into_value())
 }
 
 fn freeze<'js>(ctx: &Ctx<'js>, obj: &Object<'js>) -> rquickjs::Result<()> {
