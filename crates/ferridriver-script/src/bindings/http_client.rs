@@ -4,7 +4,7 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use ferridriver::http_client::{HttpClient, HttpResponse, RequestOptions};
+use ferridriver::http_client::{HttpClient, HttpResponse, NetGuard, RequestOptions};
 use rquickjs::function::Opt;
 use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use serde::Deserialize;
@@ -42,6 +42,8 @@ impl JsRequestOptions {
       timeout: self.timeout_ms.map(Duration::from_millis),
       fail_on_status_code: self.fail_on_status_code,
       max_redirects: self.max_redirects,
+      // Set by `with_guard` after parsing — never from JS input.
+      net_guard: None,
     }
   }
 }
@@ -96,60 +98,53 @@ impl HttpClientJs {
     self.inner.clone()
   }
 
-  /// Default-deny host check. `Ok(())` when `net` is empty (unrestricted)
-  /// or the URL's host matches an allow-list entry; otherwise a JS-thrown
-  /// error naming the host. No network I/O happens on rejection.
+  /// The sandbox network policy for this binding: default-deny against
+  /// `self.net` when an `allow.net` list is present, and the cloud
+  /// instance-metadata endpoints blocked unconditionally (no automation
+  /// targets them). Enforced in core on the initial URL, every redirect
+  /// hop, and every resolved address.
+  pub(crate) fn net_guard(&self) -> NetGuard {
+    NetGuard {
+      allowlist: (!self.net.is_empty()).then(|| self.net.clone()),
+      block_metadata: true,
+      block_private: false,
+    }
+  }
+
+  /// Synchronous fast-fail on the initial URL so an allow-list
+  /// violation throws before any I/O (the same check runs again in core
+  /// for redirect hops). `Ok(())` when no allow-list, or the host
+  /// matches; otherwise a JS-thrown error.
   fn guard(&self, url: &str) -> rquickjs::Result<()> {
     net_check(&self.net, url).map_err(|m| rquickjs::Error::new_from_js_message("request", "Error", m))
   }
 }
 
-/// Default-deny host check shared by the `request` binding and the global
-/// `fetch` facade — one allow-list semantics, one place. `Ok(())` when
-/// `net` is empty (unrestricted) or the URL's host matches an entry;
-/// otherwise an `Err(message)` the caller wraps as a JS error. The check
-/// is synchronous and happens before any network I/O.
+/// Attach `g` to the per-request options (creating a default bag if the
+/// caller passed none) so core enforces the sandbox network policy.
+fn with_guard(opts: Option<RequestOptions>, g: NetGuard) -> RequestOptions {
+  let mut o = opts.unwrap_or_default();
+  o.net_guard = Some(g);
+  o
+}
+
+/// Default-deny host check shared by the `request` binding and the
+/// global `fetch` facade, delegating to the core allow-list semantics
+/// (one implementation, in Rust core). `Ok(())` when `net` is empty
+/// (unrestricted) or the URL's host matches an entry; otherwise an
+/// `Err(message)`. Synchronous, before any network I/O. Metadata /
+/// redirect-hop enforcement lives in core's [`NetGuard`].
 pub(crate) fn net_check(net: &[String], url: &str) -> Result<(), String> {
   if net.is_empty() {
     return Ok(());
   }
-  let host =
-    host_of(url).ok_or_else(|| format!("request to invalid/relative URL \"{url}\" is not permitted by allow.net"))?;
-  if host_allowed(&host, net) {
+  let host = ferridriver::http_client::host_of(url)
+    .ok_or_else(|| format!("request to invalid/relative URL \"{url}\" is not permitted by allow.net"))?;
+  if ferridriver::http_client::host_allowed(&host, net) {
     Ok(())
   } else {
     Err(format!("request host \"{host}\" is not in allow.net {net:?}"))
   }
-}
-
-/// Extract the lowercased host (no port, no userinfo) from an absolute
-/// URL. Returns `None` for relative/invalid input — the caller treats
-/// that as a denial when a net allow-list is active.
-fn host_of(url: &str) -> Option<String> {
-  let after_scheme = url.split_once("://")?.1;
-  let authority = after_scheme.split(['/', '?', '#']).next().unwrap_or(after_scheme);
-  let host_port = authority.rsplit_once('@').map_or(authority, |(_, hp)| hp);
-  let host = if let Some(stripped) = host_port.strip_prefix('[') {
-    // IPv6 literal: take up to the closing bracket.
-    stripped.split(']').next().unwrap_or(stripped)
-  } else {
-    host_port.split(':').next().unwrap_or(host_port)
-  };
-  (!host.is_empty()).then(|| host.to_ascii_lowercase())
-}
-
-/// Match a host against one allow-list: exact, or a leading-wildcard
-/// suffix (`*.box.com` also matches the bare apex `box.com`).
-fn host_allowed(host: &str, net: &[String]) -> bool {
-  net.iter().any(|p| {
-    if p == host {
-      return true;
-    }
-    if let Some(suffix) = p.strip_prefix("*.") {
-      return host == suffix || host.ends_with(&format!(".{suffix}"));
-    }
-    false
-  })
 }
 
 #[rquickjs::methods]
@@ -162,7 +157,7 @@ impl HttpClientJs {
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
-    let opts = parse_options(&ctx, options)?;
+    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
     let resp = self.inner.get(&url, opts).await.into_js()?;
     Ok(HttpResponseJs::new(resp))
   }
@@ -175,7 +170,7 @@ impl HttpClientJs {
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
-    let opts = parse_options(&ctx, options)?;
+    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
     let resp = self.inner.post(&url, opts).await.into_js()?;
     Ok(HttpResponseJs::new(resp))
   }
@@ -188,7 +183,7 @@ impl HttpClientJs {
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
-    let opts = parse_options(&ctx, options)?;
+    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
     let resp = self.inner.put(&url, opts).await.into_js()?;
     Ok(HttpResponseJs::new(resp))
   }
@@ -201,7 +196,7 @@ impl HttpClientJs {
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
-    let opts = parse_options(&ctx, options)?;
+    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
     let resp = self.inner.delete(&url, opts).await.into_js()?;
     Ok(HttpResponseJs::new(resp))
   }
@@ -214,7 +209,7 @@ impl HttpClientJs {
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
-    let opts = parse_options(&ctx, options)?;
+    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
     let resp = self.inner.patch(&url, opts).await.into_js()?;
     Ok(HttpResponseJs::new(resp))
   }
@@ -227,7 +222,7 @@ impl HttpClientJs {
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
-    let opts = parse_options(&ctx, options)?;
+    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
     let resp = self.inner.head(&url, opts).await.into_js()?;
     Ok(HttpResponseJs::new(resp))
   }
@@ -243,7 +238,7 @@ impl HttpClientJs {
     options: Opt<Value<'js>>,
   ) -> rquickjs::Result<HttpResponseJs> {
     self.guard(&url)?;
-    let opts = parse_options(&ctx, options)?;
+    let opts = Some(with_guard(parse_options(&ctx, options)?, self.net_guard()));
     let resp = self.inner.fetch(&url, opts).await.into_js()?;
     Ok(HttpResponseJs::new(resp))
   }
@@ -262,6 +257,14 @@ impl HttpResponseJs {
   #[must_use]
   pub fn new(inner: HttpResponse) -> Self {
     Self { inner }
+  }
+
+  /// Clone of the wrapped core `HttpResponse` for cross-binding
+  /// consumers (used by `expect()` to lift a `HttpResponseJs` into an
+  /// `ApiResponse` assertion target).
+  #[must_use]
+  pub fn inner_clone(&self) -> HttpResponse {
+    self.inner.clone()
   }
 }
 

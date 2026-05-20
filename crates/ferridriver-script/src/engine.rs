@@ -397,6 +397,13 @@ impl Session {
       crate::bindings::install_browser_type(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to install browser_type: {e}")))?;
 
+      // expect() global (Jest value matchers, Playwright web-first
+      // matchers, asymmetric matchers, expect.poll). Session-stable —
+      // class prototypes + factory function are installed once and
+      // survive across `execute` calls.
+      crate::bindings::expect::install_expect(&ctx)
+        .map_err(|e| ScriptError::internal(format!("failed to install expect: {e}")))?;
+
       // The unified extension registry (userdata) + native contribution
       // points (`Given`/`When`/`Then`/`defineTool`/...). Must precede
       // `install_plugins`: evaluating an extension's bytecode registers

@@ -302,6 +302,13 @@ impl PageJs {
     }
   }
 
+  /// Clone of the wrapped `Arc<Page>` for cross-binding consumers
+  /// (used by `expect()` to lift a `PageJs` into an assertion target).
+  #[must_use]
+  pub fn page_arc(&self) -> Arc<Page> {
+    self.inner.clone()
+  }
+
   #[must_use]
   pub fn page(&self) -> &Arc<Page> {
     &self.inner
@@ -1275,6 +1282,70 @@ impl PageJs {
   /// for simpler events. The overloaded return keeps the Playwright-
   /// canonical call shape — scripts write `await page.waitForEvent('websocket')`
   /// and receive a real `WebSocket` instance.
+  /// Playwright: `page.waitForLoadState(state?: 'load' |
+  /// 'domcontentloaded' | 'networkidle', options?)`. Defaults to
+  /// `'load'`. Thin delegator to `Page::wait_for_load_state`.
+  #[qjs(rename = "waitForLoadState")]
+  pub async fn wait_for_load_state(&self, state: Opt<String>) -> rquickjs::Result<()> {
+    use crate::bindings::convert::FerriResultExt;
+    self.inner.wait_for_load_state(state.0.as_deref()).await.into_js()
+  }
+
+  /// Playwright: `page.waitForURL(url: string | RegExp | (url:URL) =>
+  /// boolean, options?)`. Thin delegator to `Page::wait_for_url`
+  /// (a function predicate is reduced to an always-true matcher; the
+  /// function check is enforced by the core polling against the
+  /// current URL).
+  #[qjs(rename = "waitForURL")]
+  pub async fn wait_for_url<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    url: rquickjs::Value<'js>,
+  ) -> rquickjs::Result<()> {
+    use crate::bindings::convert::FerriResultExt;
+    let matcher = url_value_to_matcher(&ctx, url)?;
+    self.inner.wait_for_url(matcher).await.into_js()
+  }
+
+  /// Playwright: `page.waitForFunction(pageFunction: Function|string,
+  /// arg?, options?: { timeout?, polling? })`. Function values get
+  /// `String(fn)` (Playwright parity) and are evaluated as IIFEs
+  /// inside the page. Returns the truthy value the function resolved
+  /// to.
+  #[qjs(rename = "waitForFunction")]
+  pub async fn wait_for_function<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    page_function: rquickjs::Value<'js>,
+    _arg: Opt<rquickjs::Value<'js>>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    struct JsOpts {
+      timeout: Option<u64>,
+    }
+    let opts: JsOpts = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => crate::bindings::convert::serde_from_js(&ctx, v)?,
+      _ => JsOpts::default(),
+    };
+    let (src, is_fn) = crate::bindings::convert::extract_page_function(&ctx, page_function)?;
+    // For a function: invoke it as `(<src>)()` so the body's return is
+    // the polled value. For a string: use as-is (the user passes an
+    // expression string, like Playwright).
+    let expr = if is_fn.unwrap_or(false) {
+      format!("({src})()")
+    } else {
+      src
+    };
+    let v = self
+      .inner
+      .wait_for_function(&expr, opts.timeout)
+      .await
+      .map_err(|e| crate::bindings::convert::to_rq_error(&e))?;
+    crate::bindings::convert::json_to_js(&ctx, &v)
+  }
+
   #[qjs(rename = "waitForEvent")]
   pub async fn wait_for_event<'js>(
     &self,
@@ -1569,24 +1640,52 @@ impl PageJs {
       move |args: Vec<serde_json::Value>| {
         let async_ctx = async_ctx.clone();
         let name = name.clone();
-        tokio::spawn(async move {
-          let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
+        // Playwright delivers the callback's return value (awaiting a
+        // returned Promise) to the page-side caller. Run the JS
+        // callback on the engine context via `async_with`, await it if
+        // it returns a thenable, convert to JSON and hand it back so
+        // the backend resolves the page binding with the REAL value —
+        // not `null` (the previous fire-and-forget behaviour was a
+        // Playwright incompatibility).
+        Box::pin(async move {
+          let out: rquickjs::Result<serde_json::Value> = rquickjs::async_with!(async_ctx => |ctx| {
             let f = with_page_callbacks(&ctx, |r| r.exposed.get(&name).cloned())?
-              .ok_or_else(|| rquickjs::Error::new_from_js_message("page.exposeFunction", "Error", "exposed callback gone".to_string()))?
+              .ok_or_else(|| {
+                rquickjs::Error::new_from_js_message(
+                  "page.exposeFunction",
+                  "Error",
+                  "exposed callback gone".to_string(),
+                )
+              })?
               .restore(&ctx)?;
-            // Pass args as a single JS array. The user's callback
-            // signature is `(args: unknown[]) => ...`.
-            let js_args = rquickjs::Array::new(ctx.clone())?;
-            for (i, v) in args.into_iter().enumerate() {
-              let val = crate::bindings::convert::serde_to_js(&ctx, &v)?;
-              js_args.set(i, val)?;
+            // Playwright spreads the page-side call arguments into the
+            // callback: `window.fn(a, b)` -> `callback(a, b)` (see
+            // playwright-core client/page.ts `(...args) => callback(...args)`).
+            // Build a spread arg list, not a single array.
+            let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
+            for v in args {
+              // `json_to_js` (NOT `serde_to_js`): a transitive dep
+              // force-enables `serde_json/arbitrary_precision`, under
+              // which rquickjs-serde turns every number into a
+              // `{$serde_json::private::Number}` object. The AP-safe
+              // walker keeps numbers as JS numbers.
+              call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, &v)?)?;
             }
-            let _: rquickjs::Value<'_> = f.call((js_args,))?;
-            Ok(())
+            let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
+            let res = mp.into_future::<rquickjs::Value<'_>>().await?;
+            // Round-trip through QuickJS `JSON.stringify` + serde_json's
+            // own parser — AP-safe both ways (a non-serde_json
+            // deserializer mis-handles numbers under
+            // `arbitrary_precision`). `undefined`/function -> null.
+            let json = match ctx.json_stringify(res)? {
+              Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
+              None => serde_json::Value::Null,
+            };
+            Ok(json)
           })
           .await;
-        });
-        serde_json::Value::Null
+          out.unwrap_or(serde_json::Value::Null)
+        })
       }
     });
     self.inner.expose_function(&name, cb).await.into_js()

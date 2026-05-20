@@ -140,6 +140,14 @@ impl LocatorJs {
   pub fn new(inner: Locator) -> Self {
     Self { inner }
   }
+
+  /// Read-only access to the wrapped core `Locator` for cross-binding
+  /// consumers (e.g. the `expect()` binding lifting a `LocatorJs` into
+  /// an assertion target).
+  #[must_use]
+  pub fn inner_ref(&self) -> &Locator {
+    &self.inner
+  }
 }
 
 #[rquickjs::methods]
@@ -225,6 +233,28 @@ impl LocatorJs {
       visible: parsed.visible,
     };
     Ok(LocatorJs::new(self.inner.filter(&opts)))
+  }
+
+  /// Playwright: `locator.and(locator: Locator): Locator`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts` —
+  /// matches elements satisfying BOTH this and `other` on the same
+  /// element). Thin delegator to core's `Locator::and`.
+  #[qjs(rename = "and")]
+  pub fn and<'js>(&self, ctx: rquickjs::Ctx<'js>, other: rquickjs::Value<'js>) -> rquickjs::Result<LocatorJs> {
+    let _ = ctx;
+    let class = rquickjs::Class::<LocatorJs>::from_value(&other)
+      .map_err(|_| rquickjs::Error::new_from_js_message("Locator", "and", "expected a Locator instance"))?;
+    Ok(LocatorJs::new(self.inner.and(&class.borrow().inner)))
+  }
+
+  /// Playwright: `locator.or(locator: Locator): Locator` — matches
+  /// elements from EITHER selector. Thin delegator to `Locator::or`.
+  #[qjs(rename = "or")]
+  pub fn or<'js>(&self, ctx: rquickjs::Ctx<'js>, other: rquickjs::Value<'js>) -> rquickjs::Result<LocatorJs> {
+    let _ = ctx;
+    let class = rquickjs::Class::<LocatorJs>::from_value(&other)
+      .map_err(|_| rquickjs::Error::new_from_js_message("Locator", "or", "expected a Locator instance"))?;
+    Ok(LocatorJs::new(self.inner.or(&class.borrow().inner)))
   }
 
   /// Playwright: `locator.elementHandle(): Promise<ElementHandle>`.
@@ -517,6 +547,35 @@ impl LocatorJs {
     self.inner.scroll_into_view_if_needed().await.into_js()
   }
 
+  /// Playwright: `locator.waitFor(options?: { state?: 'attached' |
+  /// 'detached' | 'visible' | 'hidden', timeout?: number })`. Thin
+  /// delegator to core `Locator::wait_for(WaitOptions)`.
+  #[qjs(rename = "waitFor")]
+  pub async fn wait_for<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    #[derive(serde::Deserialize, Default)]
+    #[serde(rename_all = "camelCase", default)]
+    struct JsWaitOpts {
+      state: Option<String>,
+      timeout: Option<u64>,
+    }
+    let parsed: JsWaitOpts = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => crate::bindings::convert::serde_from_js(&ctx, v)?,
+      _ => JsWaitOpts::default(),
+    };
+    self
+      .inner
+      .wait_for(ferridriver::options::WaitOptions {
+        state: parsed.state,
+        timeout: parsed.timeout,
+      })
+      .await
+      .into_js()
+  }
+
   /// Dispatch a DOM event on the element. Mirrors Playwright's
   /// `locator.dispatchEvent(type, eventInit?, options?)`.
   #[qjs(rename = "dispatchEvent")]
@@ -547,6 +606,13 @@ impl LocatorJs {
       .await
       .into_js()
       .map(|c| i32::try_from(c).unwrap_or(i32::MAX))
+  }
+
+  /// Playwright: `locator.screenshot(options?): Promise<Buffer>`.
+  /// Thin delegator to core `Locator::screenshot` (PNG bytes).
+  #[qjs(rename = "screenshot")]
+  pub async fn screenshot(&self) -> rquickjs::Result<Vec<u8>> {
+    self.inner.screenshot().await.into_js()
   }
 
   #[qjs(rename = "textContent")]
