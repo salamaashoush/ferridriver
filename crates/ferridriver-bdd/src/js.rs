@@ -15,7 +15,6 @@
 //! `ferridriver-test` worker: scenarios run in parallel across workers,
 //! each VM driving its own scenarios.
 
-use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -28,7 +27,8 @@ use ferridriver_script::{
 };
 use ferridriver_test::FixturePool;
 use ferridriver_test::model::{AttachmentBody, StepCategory, TestInfo};
-use tokio::sync::Mutex;
+use dashmap::DashMap;
+use tokio::sync::OnceCell;
 
 use crate::feature::FeatureSet;
 use crate::filter::TagExpression;
@@ -352,6 +352,16 @@ impl JsBddSession {
   pub async fn run_scenario(&self, scenario: &ScenarioExecution, world: &mut BrowserWorld) -> JsScenarioResult {
     let actx = self.session.async_context();
 
+    // Mirror the Rust executor: scope `world.resolve_fixture_path(...)`
+    // to the feature file's directory so steps like
+    // `I mock requests to "..." with fixture "mocks/page.html"` resolve
+    // relative to the feature, not the process cwd. Without this the
+    // JS-driven path resolves against cwd and every fixture-file step
+    // errors with `No such file or directory`.
+    if let Some(dir) = scenario.feature_path.parent() {
+      world.set_feature_dir(dir.to_path_buf());
+    }
+
     let fixtures = world.fixtures();
     let sw = ScenarioWorld {
       page: Some(Arc::clone(&fixtures.page)),
@@ -569,8 +579,18 @@ fn remap_stack(bundle: &CompiledBundle, stack: &str) -> String {
 }
 
 // ── Per-worker session cache + TestRunner integration ────────────────
+//
+// Per-worker `OnceCell`s keyed by `worker_index`. The outer `DashMap`
+// is sharded so concurrent workers fetching their own slot don't
+// contend on a single mutex. The inner `OnceCell` is per-worker, so
+// `JsBddSession::load(...)` for worker N proceeds in parallel with
+// worker M's load — only the same worker's repeated calls collapse to
+// one init (the desired behaviour). Previous design used
+// `Mutex<HashMap>` and held the lock across `load().await`, which
+// serialised the first-scenario session load across every worker.
 
-type WorkerSessions = Mutex<HashMap<u32, Arc<JsBddSession>>>;
+type WorkerSessionCell = OnceCell<Arc<JsBddSession>>;
+type WorkerSessions = DashMap<u32, Arc<WorkerSessionCell>>;
 static WORKER_SESSIONS: OnceLock<WorkerSessions> = OnceLock::new();
 
 /// The `[scripting]` sandbox caps the BDD step VM runs with. Set once
@@ -592,17 +612,20 @@ async fn worker_session(
   cwd: Arc<PathBuf>,
   world_parameters: serde_json::Value,
 ) -> Result<Arc<JsBddSession>, String> {
-  let cache = WORKER_SESSIONS.get_or_init(|| Mutex::new(HashMap::new()));
-  let mut map = cache.lock().await;
-  if let Some(s) = map.get(&worker_index) {
-    return Ok(Arc::clone(s));
-  }
-  let session = JsBddSession::load(bundle, &cwd, world_parameters)
+  let map = WORKER_SESSIONS.get_or_init(DashMap::new);
+  let cell = map
+    .entry(worker_index)
+    .or_insert_with(|| Arc::new(OnceCell::new()))
+    .clone();
+  cell
+    .get_or_try_init(|| async move {
+      JsBddSession::load(bundle, &cwd, world_parameters)
+        .await
+        .map(Arc::new)
+        .map_err(|e| e.to_string())
+    })
     .await
-    .map_err(|e| e.to_string())?;
-  let session = Arc::new(session);
-  map.insert(worker_index, Arc::clone(&session));
-  Ok(session)
+    .cloned()
 }
 
 async fn record_step(test_info: &TestInfo, s: &JsStepResult) {
@@ -657,6 +680,7 @@ pub fn translate_features_js(
       let cwd = Arc::clone(&cwd);
       let browser_config = config.browser.clone();
       let world_parameters = config.world_parameters.clone();
+      let bdd_strict = config.strict;
 
       let test_fn: TestFn = Arc::new(move |pool: FixturePool| {
         let scenario = scenario_clone.clone();
@@ -664,6 +688,7 @@ pub fn translate_features_js(
         let cwd = Arc::clone(&cwd);
         let browser_config = browser_config.clone();
         let world_parameters = world_parameters.clone();
+        let bdd_strict = bdd_strict;
         Box::pin(async move {
           let browser = pool
             .get("browser")
@@ -710,19 +735,35 @@ pub fn translate_features_js(
             record_step(&test_info, s).await;
           }
           if result.passed {
-            Ok(())
-          } else {
-            let msg = result
-              .steps
-              .iter()
-              .find_map(|s| match &s.status {
-                JsStepStatus::Failed(m) | JsStepStatus::Undefined(m) => Some(m.clone()),
-                JsStepStatus::Pending => Some(format!("pending: {}{}", s.keyword, s.text)),
-                _ => None,
-              })
-              .unwrap_or_else(|| "scenario failed".to_string());
-            Err(TestFailure::from(msg))
+            return Ok(());
           }
+          // Non-strict mode: undefined / pending steps don't fail the
+          // test — they're reported as `StepStatus::Pending` and the
+          // scenario passes overall (mirrors the Rust executor's
+          // `Err(e) if e.pending && !self.strict` branch).
+          let only_pending = !bdd_strict
+            && result.steps.iter().all(|s| {
+              matches!(
+                s.status,
+                JsStepStatus::Passed
+                  | JsStepStatus::Skipped
+                  | JsStepStatus::Pending
+                  | JsStepStatus::Undefined(_)
+              )
+            });
+          if only_pending {
+            return Ok(());
+          }
+          let msg = result
+            .steps
+            .iter()
+            .find_map(|s| match &s.status {
+              JsStepStatus::Failed(m) | JsStepStatus::Undefined(m) => Some(m.clone()),
+              JsStepStatus::Pending => Some(format!("pending: {}{}", s.keyword, s.text)),
+              _ => None,
+            })
+            .unwrap_or_else(|| "scenario failed".to_string());
+          Err(TestFailure::from(msg))
         })
       });
 

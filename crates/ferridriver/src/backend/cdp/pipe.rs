@@ -90,7 +90,16 @@ impl PipeTransport {
 
       loop {
         let n = match reader.read(&mut tmp).await {
-          Ok(0) | Err(_) => return,
+          Ok(0) | Err(_) => {
+            // Pipe EOF / error — chrome exited. Drain every pending
+            // oneshot so in-flight `send_command` awaits return with
+            // `target_closed` instead of stalling until the 30s
+            // response timeout. Without this, any close path that
+            // SIGKILLs chrome while requests are in flight makes
+            // every queued caller wait the full timeout.
+            dispatcher2.fail_all_pending("CDP transport closed (chrome exited)");
+            return;
+          },
           Ok(n) => n,
         };
         let scan_from = rx.len();

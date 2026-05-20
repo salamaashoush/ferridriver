@@ -64,6 +64,10 @@ impl WsTransport {
         let Message::Text(text) = msg else { continue };
         dispatcher2.dispatch_message(text.as_bytes());
       }
+      // WebSocket closed — drain pending oneshots so in-flight
+      // `send_command` awaits don't stall to the 30s response
+      // timeout (see pipe.rs reader for the same bug fix).
+      dispatcher2.fail_all_pending("CDP transport closed (websocket ended)");
     });
 
     Ok(Self { write_tx, dispatcher })

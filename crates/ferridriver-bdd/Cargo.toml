@@ -30,5 +30,6 @@ gherkin = "0.15"
 cucumber-expressions = { version = "0.5", features = ["into-regex"] }
 inventory = "0.3"
 rustc-hash = "2"
+dashmap = { workspace = true }
 glob = "0.3"
 console = "0.16"

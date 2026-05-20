@@ -590,16 +590,17 @@ impl<T: CdpWrap> CdpBrowser<T> {
   }
 
   /// Close the browser process and release resources.
+  ///
+  /// SIGKILLs the chrome process directly via the held `ChildGroup`.
+  /// The graceful CDP `Browser.close` is intentionally skipped — for
+  /// test runs the user-data-dir tempdir is removed regardless, and
+  /// the CDP roundtrip cost (~5-10ms RTT) outweighs the value of
+  /// letting chrome flush its `IndexedDB` / profile state on exit.
   pub async fn close(&mut self) -> Result<()> {
-    let _ = self
-      .transport
-      .send_command(None, "Browser.close", super::empty_params())
-      .await;
     if let Some(mut group) = self.child.lock().await.take() {
-      // `ChildGroup::drop` kills every helper subprocess in the group
-      // regardless, but calling `kill().await` here gives us the reap
-      // opportunity (waits for the parent to be collected) so the
-      // enclosing runtime doesn't carry a zombie pending waitpid.
+      // `ChildGroup::drop` also kills every helper subprocess in the
+      // group, but calling `kill().await` here reaps the parent
+      // (waitpid) so the enclosing runtime doesn't carry a zombie.
       let _ = group.inner_mut().kill().await;
     }
     Ok(())
@@ -3226,7 +3227,20 @@ impl<T: CdpWrap> CdpPage<T> {
     // browser context (`Storage.getCookies`), not just the current
     // page's (`Network.getCookies` is frame-URL scoped — a cookie set
     // for another domain would be invisible).
-    let result = self.cmd("Storage.getCookies", super::empty_params()).await?;
+    //
+    // `Storage.getCookies` is a browser-target command: on a page
+    // session it errors with "browserContextId is only allowed for
+    // Browser target", and without `browserContextId` on the root
+    // session it returns the DEFAULT context's cookies (missing
+    // everything set on a page in an isolated `Target.createBrowserContext`).
+    // Send on the root session with explicit `browserContextId` so
+    // test-fixture contexts see their own cookies.
+    let (sid, params) = if let Some(ref ctx_id) = self.browser_context_id {
+      (None, serde_json::json!({"browserContextId": ctx_id.as_ref()}))
+    } else {
+      (self.session_id.as_deref(), super::empty_params())
+    };
+    let result = self.transport.send_command(sid, "Storage.getCookies", params).await?;
     let cookies = result
       .get("cookies")
       .and_then(|c| c.as_array())
