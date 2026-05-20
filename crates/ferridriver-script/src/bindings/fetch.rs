@@ -40,6 +40,7 @@
 //! `fetch` snapshots it synchronously at call time (before any I/O).
 
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 
 use ferridriver::http_client::{HttpClient, RequestOptions};
 use rquickjs::atom::PredefinedAtom;
@@ -48,6 +49,18 @@ use rquickjs::{Coerced, Ctx, IntoJs, Object, Value, class::Class, class::Trace};
 
 use crate::bindings::convert::json_to_js;
 use crate::bindings::http_client::net_check;
+
+/// Hard cap on a single buffered `fetch` body (`text`/`json`/
+/// `arrayBuffer`). QuickJS's `memory_limit` only bounds the JS heap;
+/// the drained body is a Rust allocation, so without this a script
+/// reading an unbounded/huge response could exhaust host memory well
+/// past the JS quota. Streaming via `Response.body` is unaffected.
+const MAX_FETCH_BODY_BYTES: usize = 64 * 1024 * 1024;
+
+/// Wall-clock bound on draining one streamed body, so a slow-loris /
+/// never-ending response cannot pin a session forever (the per-script
+/// interrupt-handler timeout does not fire during a native await).
+const FETCH_BODY_DRAIN_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// Per-VM carrier of the *currently active* tool net allow-list. `None`
 /// (the resting state, and what the top-level script sees) means
@@ -402,8 +415,10 @@ impl HeadersJs {
       return;
     }
     if let Some(i) = self.pairs.iter().position(|(k, _)| k == &name_lc) {
-      let sep = if name_lc == "cookie" { "; " } else { ", " };
-      self.pairs[i].1 = format!("{}{sep}{value}", self.pairs[i].1);
+      // WHATWG "Headers append": every non-`set-cookie` repeat combines
+      // with `, ` (0x2C 0x20). There is no per-name separator in the
+      // spec — the old `; ` for `cookie` was a non-standard deviation.
+      self.pairs[i].1 = format!("{}, {value}", self.pairs[i].1);
     } else {
       self.pairs.push((name_lc, value));
     }
@@ -623,13 +638,27 @@ impl FetchResponseJs {
       let mut guard = net.lock().await;
       let mut out = Vec::new();
       if let Some(resp) = guard.as_mut() {
-        while let Some(chunk) = resp
-          .chunk()
-          .await
-          .map_err(|e| rquickjs::Exception::throw_type(ctx, &e.to_string()))?
-        {
-          out.extend_from_slice(&chunk);
+        let drained = tokio::time::timeout(FETCH_BODY_DRAIN_TIMEOUT, async {
+          while let Some(chunk) = resp.chunk().await.map_err(|e| e.to_string())? {
+            if out.len() + chunk.len() > MAX_FETCH_BODY_BYTES {
+              return Err(format!("response body exceeded {MAX_FETCH_BODY_BYTES} bytes"));
+            }
+            out.extend_from_slice(&chunk);
+          }
+          Ok::<(), String>(())
+        })
+        .await;
+        // Free the socket regardless of outcome so a rejected read does
+        // not leave the connection (and its buffers) pinned.
+        *guard = None;
+        match drained {
+          Ok(Ok(())) => {},
+          Ok(Err(msg)) => return Err(rquickjs::Exception::throw_type(ctx, &msg)),
+          Err(_) => {
+            return Err(rquickjs::Exception::throw_type(ctx, "response body read timed out"));
+          },
         }
+        return Ok(out);
       }
       *guard = None;
       return Ok(out);
@@ -659,6 +688,18 @@ impl FetchResponseJs {
       .as_ref()
       .and_then(|o| o.get::<_, String>("statusText").ok())
       .unwrap_or_default();
+    // WHATWG: a null-body status (204/205/304) with a non-null body is
+    // a `TypeError`.
+    let has_body = body
+      .0
+      .as_ref()
+      .is_some_and(|v| !v.is_null() && !v.is_undefined());
+    if has_body && matches!(status, 204 | 205 | 304) {
+      return Err(rquickjs::Exception::throw_type(
+        &ctx,
+        "Failed to construct 'Response': Response with null body status cannot have body",
+      ));
+    }
     let (bytes, default_ct) = body.0.map_or((Vec::new(), None), |v| extract_body(&ctx, &v));
     Ok(Self {
       status,
@@ -1075,6 +1116,16 @@ fn do_fetch<'js>(
         data,
         json_data,
         max_redirects,
+        // Same sandbox policy as the `request` binding (one core
+        // implementation): the active `allow.net` list is enforced on
+        // the initial URL AND every redirect hop, and the cloud
+        // metadata endpoints are blocked for every script `fetch`
+        // regardless of allow-list (closes the default-open SSRF).
+        net_guard: Some(ferridriver::http_client::NetGuard {
+          allowlist: net.clone(),
+          block_metadata: true,
+          block_private: false,
+        }),
         ..Default::default()
       };
       if let Some(sig) = &signal

@@ -87,7 +87,21 @@ impl PathSandbox {
     let Some(name) = full.file_name() else {
       return Err(ScriptError::sandbox("fs: path has no filename"));
     };
-    Ok(canonical_parent.join(name))
+    let target = canonical_parent.join(name);
+    // The parent is canonicalised, but the final component is appended
+    // unverified. If it is itself a symlink, `tokio::fs::write` would
+    // follow it and clobber a file outside the sandbox. Reject it: the
+    // sandbox never lets a script create symlinks, so a symlink here
+    // was pre-seeded and is always an escape attempt.
+    if let Ok(meta) = std::fs::symlink_metadata(&target)
+      && meta.file_type().is_symlink()
+    {
+      return Err(ScriptError::sandbox(format!(
+        "fs: refusing to write through symlink: {}",
+        target.display()
+      )));
+    }
+    Ok(target)
   }
 
   fn syntactic_check(rel: &str) -> Result<PathBuf, ScriptError> {
@@ -162,6 +176,21 @@ mod tests {
     let resolved = sb.resolve_write("nested/deep/new.txt").expect("resolve");
     assert!(resolved.starts_with(sb.root()));
     assert!(tmp.path().join("nested/deep").is_dir());
+  }
+
+  #[cfg(unix)]
+  #[test]
+  fn rejects_symlink_write_final_component() {
+    use std::os::unix::fs::symlink;
+    let (tmp, sb) = tmp_sandbox();
+    let outside = tempfile::tempdir().unwrap();
+    // A pre-seeded symlink at the write target pointing outside the
+    // sandbox must NOT be writable through (the parent is in-root but
+    // the final component escapes).
+    symlink(outside.path().join("escape.txt"), tmp.path().join("out.txt")).unwrap();
+    let err = sb.resolve_write("out.txt").unwrap_err();
+    assert_eq!(err.kind, crate::error::ScriptErrorKind::SandboxViolation);
+    assert!(!outside.path().join("escape.txt").exists(), "must not have created the target");
   }
 
   #[cfg(unix)]

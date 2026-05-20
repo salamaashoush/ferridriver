@@ -24,6 +24,13 @@ use tokio::process::Command;
 
 use crate::command_spec::{CommandOutput, ResolvedCommand, ResolvedExec};
 
+/// Default hard wall-clock bound for a one-shot command that did not
+/// declare `timeoutMs`. Without this a hung child (blocked on a
+/// resource, an infinite loop) would pin the calling script forever —
+/// the per-script interrupt-handler timeout does not fire during this
+/// native await. A spec's explicit `timeoutMs` still overrides.
+const DEFAULT_ONESHOT_TIMEOUT_MS: u64 = 120_000;
+
 /// Max bytes captured per stream (one-shot result, or the tail kept for
 /// a persistent process's `status`).
 const OUTPUT_CAP: usize = 8 * 1024 * 1024;
@@ -152,14 +159,16 @@ pub async fn run_oneshot(rc: &ResolvedCommand) -> Result<serde_json::Value, Stri
     Ok::<_, String>((o?, e?, status))
   });
 
-  let (stdout, stderr, status) = if let Some(ms) = rc.timeout_ms {
+  // An explicit `timeoutMs` is honoured as-is; an unset one still gets
+  // a hard default so a hung one-shot can never block the session
+  // indefinitely.
+  let ms = rc.timeout_ms.unwrap_or(DEFAULT_ONESHOT_TIMEOUT_MS);
+  let (stdout, stderr, status) = {
     let Ok(r) = tokio::time::timeout(Duration::from_millis(ms), work).await else {
       kill_group(pid);
       return Err(format!("command timed out after {ms}ms"));
     };
     r.inspect_err(|_| kill_group(pid))?
-  } else {
-    work.await?
   };
 
   if !status.success() {

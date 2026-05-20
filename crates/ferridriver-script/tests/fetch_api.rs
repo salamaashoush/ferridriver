@@ -707,3 +707,95 @@ async fn response_body_streams_incrementally() {
     "streamed read completed: {first_read_elapsed:?}"
   );
 }
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_to_cloud_metadata_is_blocked_by_default() {
+  // No allow-list (the default top-level-script posture): the cloud
+  // instance-metadata endpoint must still be refused — closes the
+  // default-open SSRF. No I/O happens; preflight denies.
+  let o = run(
+    "try { await fetch('http://169.254.169.254/latest/meta-data/'); return 'REACHED'; } \
+     catch (e) { return String(e); }",
+  )
+  .await;
+  let v = val(&o);
+  let s = v.as_str().unwrap_or("");
+  assert!(s != "REACHED", "metadata endpoint must not be reachable");
+  assert!(s.contains("blocked address"), "blocked with a clear reason: {s}");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn atob_is_whatwg_forgiving() {
+  // Embedded ASCII whitespace is stripped and missing '=' padding is
+  // tolerated (forgiving-base64) — `base64::STANDARD` does neither.
+  let o = run(
+    "return { ws: atob(' a G V s b G 8 = '), nopad: atob('aGVsbG8'), \
+       rt: atob(btoa('xy')) };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["ws"], serde_json::json!("hello"), "whitespace stripped");
+  assert_eq!(v["nopad"], serde_json::json!("hello"), "missing padding tolerated");
+  assert_eq!(v["rt"], serde_json::json!("xy"), "round-trips");
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn url_component_setters_roundtrip() {
+  let o = run(
+    "const u = new URL('https://old.test/a?x=1#h'); \
+     u.protocol = 'http:'; u.hostname = 'new.test'; u.port = '8080'; \
+     u.pathname = '/b/c'; u.search = '?y=2'; u.hash = '#z'; \
+     u.username = 'usr'; u.password = 'pw'; \
+     return { href: u.href, user: u.username, pass: u.password, port: u.port };",
+  )
+  .await;
+  let v = val(&o);
+  assert_eq!(v["href"], serde_json::json!("http://usr:pw@new.test:8080/b/c?y=2#z"));
+  assert_eq!(v["user"], serde_json::json!("usr"));
+  assert_eq!(v["pass"], serde_json::json!("pw"));
+  assert_eq!(v["port"], serde_json::json!("8080"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn response_null_body_status_throws() {
+  let o = run(
+    "try { new Response('x', { status: 204 }); return 'NO_THROW'; } \
+     catch (e) { return e.name; }",
+  )
+  .await;
+  assert_eq!(val(&o), &serde_json::json!("TypeError"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn json_arg_proto_key_does_not_pollute() {
+  // A `__proto__` key in untrusted arg JSON must become an own data
+  // property, not retarget the object's prototype or pollute globals.
+  let tmp = tempfile::tempdir().expect("tempdir");
+  let ctx = RunContext {
+    vars: Arc::new(ferridriver_script::InMemoryVars::new()),
+    sandbox: Arc::new(PathSandbox::new(tmp.path()).expect("sandbox")),
+    artifacts: None,
+    page: None,
+    browser_context: None,
+    request: None,
+    browser: None,
+    plugins: Vec::new(),
+    trusted_modules: false,
+    host: ferridriver_script::ExtensionHost::Script,
+    caps: ferridriver_script::ScriptCaps::default(),
+  };
+  let args = vec![serde_json::json!({ "__proto__": { "polluted": true } })];
+  let out = ScriptEngine::new(ScriptEngineConfig::default())
+    .run(
+      "return { own: Object.prototype.hasOwnProperty.call(args[0], '__proto__'), \
+         globalClean: ({}).polluted === undefined };",
+      &args,
+      RunOptions::default(),
+      ctx,
+    )
+    .await
+    .outcome;
+  let v = val(&out);
+  assert_eq!(v["own"], serde_json::json!(true), "__proto__ is an own data property");
+  assert_eq!(v["globalClean"], serde_json::json!(true), "Object.prototype not polluted");
+}
