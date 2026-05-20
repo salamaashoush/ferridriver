@@ -5,10 +5,9 @@ use std::time::Duration;
 use crate::step::{StepError, StepParam};
 use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::step;
-use ferridriver_test::expect::{self, expect};
-use ferridriver_test::model::TestFailure;
+use ferridriver_test::expect::{self, AssertionFailure, expect};
 
-fn to_step_err(e: TestFailure) -> StepError {
+fn to_step_err(e: AssertionFailure) -> StepError {
   StepError {
     message: e.message,
     diff: e.diff.map(|d| (d, String::new())),
@@ -94,7 +93,7 @@ async fn within_seconds(world: &mut BrowserWorld, timeout_secs: String, inner_st
       temp_world.set_registry(registry);
       handler(&mut temp_world, params, None, None)
         .await
-        .map_err(|e| TestFailure::from(e.message))
+        .map_err(|e| AssertionFailure::new(e.message, None))
     }
   })
   .await
