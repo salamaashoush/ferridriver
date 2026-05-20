@@ -797,5 +797,9 @@ async fn json_arg_proto_key_does_not_pollute() {
     .outcome;
   let v = val(&out);
   assert_eq!(v["own"], serde_json::json!(true), "__proto__ is an own data property");
-  assert_eq!(v["globalClean"], serde_json::json!(true), "Object.prototype not polluted");
+  assert_eq!(
+    v["globalClean"],
+    serde_json::json!(true),
+    "Object.prototype not polluted"
+  );
 }

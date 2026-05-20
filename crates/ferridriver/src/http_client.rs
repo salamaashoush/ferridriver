@@ -78,11 +78,7 @@ impl NetGuard {
   /// reqwest `Client` (so the common sandbox path — no allow-list,
   /// metadata blocked — is a single shared client, not one per request).
   fn cache_key(&self, max_redirects: Option<u32>) -> String {
-    let mut list = self
-      .allowlist
-      .as_deref()
-      .map(<[String]>::to_vec)
-      .unwrap_or_default();
+    let mut list = self.allowlist.as_deref().map(<[String]>::to_vec).unwrap_or_default();
     list.sort();
     format!(
       "{}|{}|{}|{}",
@@ -181,7 +177,9 @@ fn ip_blocked(ip: IpAddr, block_metadata: bool, block_private: bool) -> bool {
 fn check_url(url: &reqwest::Url, g: &NetGuard) -> Result<(), String> {
   let scheme = url.scheme();
   if scheme != "http" && scheme != "https" {
-    return Err(format!("scheme \"{scheme}\" is not permitted by the sandbox network policy"));
+    return Err(format!(
+      "scheme \"{scheme}\" is not permitted by the sandbox network policy"
+    ));
   }
   let host = url
     .host_str()
@@ -826,10 +824,7 @@ mod net_guard_tests {
   fn host_of_ignores_userinfo_and_port() {
     assert_eq!(host_of("https://allowed.com/x").as_deref(), Some("allowed.com"));
     // userinfo must not let an attacker spoof the host.
-    assert_eq!(
-      host_of("https://allowed.com@evil.com/x").as_deref(),
-      Some("evil.com")
-    );
+    assert_eq!(host_of("https://allowed.com@evil.com/x").as_deref(), Some("evil.com"));
     assert_eq!(host_of("http://[::1]:8080/").as_deref(), Some("::1"));
     assert_eq!(host_of("/relative"), None);
   }

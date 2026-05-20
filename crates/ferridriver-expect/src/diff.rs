@@ -110,6 +110,9 @@ mod tests {
     // checking whether any line starts with -/+.
     let v = json!({"a": 1});
     let d = json_diff(&v, &v);
-    assert_eq!(d.lines().filter(|l| l.starts_with('-') || l.starts_with('+')).count(), 0);
+    assert_eq!(
+      d.lines().filter(|l| l.starts_with('-') || l.starts_with('+')).count(),
+      0
+    );
   }
 }

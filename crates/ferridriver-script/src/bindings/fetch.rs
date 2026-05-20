@@ -34,7 +34,7 @@
 //! Net policy: `fetch` is a facade over the SAME core a net-restricted
 //! tool's `request` wraps, so the `allow.net` allow-list must bind here
 //! too — otherwise a tool restricted to host X could reach anywhere via
-//! the global `fetch`. The per-tool allow-list lives in [`NetPolicyUd`]
+//! the global `fetch`. The per-tool allow-list lives in `NetPolicyUd`
 //! (VM userdata); `plugins::dispatch_tool` brackets each handler poll so
 //! the policy in effect is whichever tool's continuation is running, and
 //! `fetch` snapshots it synchronously at call time (before any I/O).
@@ -690,10 +690,7 @@ impl FetchResponseJs {
       .unwrap_or_default();
     // WHATWG: a null-body status (204/205/304) with a non-null body is
     // a `TypeError`.
-    let has_body = body
-      .0
-      .as_ref()
-      .is_some_and(|v| !v.is_null() && !v.is_undefined());
+    let has_body = body.0.as_ref().is_some_and(|v| !v.is_null() && !v.is_undefined());
     if has_body && matches!(status, 204 | 205 | 304) {
       return Err(rquickjs::Exception::throw_type(
         &ctx,

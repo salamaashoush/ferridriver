@@ -118,11 +118,7 @@ impl ExpectFn {
       },
     };
     let not = if self.is_not { ".not" } else { "" };
-    let prefix = self
-      .message
-      .as_ref()
-      .map(|m| format!("{m}: "))
-      .unwrap_or_default();
+    let prefix = self.message.as_ref().map(|m| format!("{m}: ")).unwrap_or_default();
     let title = format!("{prefix}expect(fn){not}.toThrow() failed");
     let body = format!("Expected: {expected_desc}\nReceived: {received_desc}");
     Err(AssertionFailure::new(title, Some(body)).with_location(CallerLocation::from_std(location)))
@@ -156,12 +152,14 @@ mod tests {
 
   #[test]
   fn not_inverts_throw() {
-    err(expect_fn(Some(ThrownError {
-      message: "boom".into(),
-      class_name: None,
-    }))
-    .not()
-    .to_throw(None));
+    err(
+      expect_fn(Some(ThrownError {
+        message: "boom".into(),
+        class_name: None,
+      }))
+      .not()
+      .to_throw(None),
+    );
     expect_fn(None).not().to_throw(None).unwrap();
   }
 }

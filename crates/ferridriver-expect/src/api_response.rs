@@ -20,9 +20,7 @@ impl Expect<'_, HttpResponse> {
     let not = if self.is_not { ".not" } else { "" };
     Err(AssertionFailure::new(
       format!("expect(response){not}.toBeOK() failed"),
-      Some(format!(
-        "URL:      {url}\nStatus:   {status} {status_text}"
-      )),
+      Some(format!("URL:      {url}\nStatus:   {status} {status_text}")),
     ))
   }
 }

@@ -18,11 +18,7 @@ use ferridriver_expect::{
   AssertionFailure, DEFAULT_EXPECT_TIMEOUT, ExpectValue, POLL_INTERVALS, StringOrRegex, ThrowMatcher, ThrownError,
   deep_equal, expect_fn, expect_value,
 };
-use rquickjs::{
-  Array, Class, Ctx, Function, JsLifetime, Object, Persistent, Value,
-  class::Trace,
-  function::Opt,
-};
+use rquickjs::{Array, Class, Ctx, Function, JsLifetime, Object, Persistent, Value, class::Trace, function::Opt};
 use serde_json::Value as JsonValue;
 
 use crate::bindings::convert::{json_to_js, serde_from_js};
@@ -202,7 +198,6 @@ impl ExpectJs {
     }
     Ok(e)
   }
-
 }
 
 fn assertion_to_rq(err: AssertionFailure) -> rquickjs::Error {
@@ -290,7 +285,10 @@ impl ExpectJs {
   #[qjs(rename = "toStrictEqual")]
   pub fn to_strict_equal<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
     let exp: JsonValue = serde_from_js(&ctx, expected)?;
-    self.build_value_expect()?.to_strict_equal(&exp).map_err(assertion_to_rq)
+    self
+      .build_value_expect()?
+      .to_strict_equal(&exp)
+      .map_err(assertion_to_rq)
   }
 
   #[qjs(rename = "toBeNull")]
@@ -412,7 +410,10 @@ impl ExpectJs {
   #[qjs(rename = "toMatchObject")]
   pub fn to_match_object<'js>(&self, ctx: Ctx<'js>, subset: Value<'js>) -> rquickjs::Result<()> {
     let sub: JsonValue = serde_from_js(&ctx, subset)?;
-    self.build_value_expect()?.to_match_object(&sub).map_err(assertion_to_rq)
+    self
+      .build_value_expect()?
+      .to_match_object(&sub)
+      .map_err(assertion_to_rq)
   }
 
   #[qjs(rename = "toBeInstanceOf")]
@@ -476,17 +477,29 @@ impl ExpectJs {
 
   #[qjs(rename = "toBeVisible")]
   pub async fn to_be_visible(&self) -> rquickjs::Result<()> {
-    self.build_locator_expect()?.to_be_visible().await.map_err(assertion_to_rq)
+    self
+      .build_locator_expect()?
+      .to_be_visible()
+      .await
+      .map_err(assertion_to_rq)
   }
 
   #[qjs(rename = "toBeHidden")]
   pub async fn to_be_hidden(&self) -> rquickjs::Result<()> {
-    self.build_locator_expect()?.to_be_hidden().await.map_err(assertion_to_rq)
+    self
+      .build_locator_expect()?
+      .to_be_hidden()
+      .await
+      .map_err(assertion_to_rq)
   }
 
   #[qjs(rename = "toBeEnabled")]
   pub async fn to_be_enabled(&self) -> rquickjs::Result<()> {
-    self.build_locator_expect()?.to_be_enabled().await.map_err(assertion_to_rq)
+    self
+      .build_locator_expect()?
+      .to_be_enabled()
+      .await
+      .map_err(assertion_to_rq)
   }
 
   #[qjs(rename = "toBeDisabled")]
@@ -500,7 +513,11 @@ impl ExpectJs {
 
   #[qjs(rename = "toBeChecked")]
   pub async fn to_be_checked(&self) -> rquickjs::Result<()> {
-    self.build_locator_expect()?.to_be_checked().await.map_err(assertion_to_rq)
+    self
+      .build_locator_expect()?
+      .to_be_checked()
+      .await
+      .map_err(assertion_to_rq)
   }
 
   #[qjs(rename = "toBeEditable")]
@@ -523,7 +540,11 @@ impl ExpectJs {
 
   #[qjs(rename = "toBeEmpty")]
   pub async fn to_be_empty(&self) -> rquickjs::Result<()> {
-    self.build_locator_expect()?.to_be_empty().await.map_err(assertion_to_rq)
+    self
+      .build_locator_expect()?
+      .to_be_empty()
+      .await
+      .map_err(assertion_to_rq)
   }
 
   #[qjs(rename = "toHaveText")]
@@ -587,13 +608,21 @@ impl ExpectJs {
   #[qjs(rename = "toHaveTitle")]
   pub async fn to_have_title<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
     let exp = parse_string_or_regex(&ctx, &expected)?;
-    self.build_page_expect()?.to_have_title(exp).await.map_err(assertion_to_rq)
+    self
+      .build_page_expect()?
+      .to_have_title(exp)
+      .await
+      .map_err(assertion_to_rq)
   }
 
   #[qjs(rename = "toHaveURL")]
   pub async fn to_have_url<'js>(&self, ctx: Ctx<'js>, expected: Value<'js>) -> rquickjs::Result<()> {
     let exp = parse_string_or_regex(&ctx, &expected)?;
-    self.build_page_expect()?.to_have_url(exp).await.map_err(assertion_to_rq)
+    self
+      .build_page_expect()?
+      .to_have_url(exp)
+      .await
+      .map_err(assertion_to_rq)
   }
 
   // ── APIResponse matcher (delegated) ──────────────────────────────
@@ -780,7 +809,10 @@ impl ExpectPollJs {
   }
 }
 
-async fn call_generator<'js>(ctx: &Ctx<'js>, generator_fn: &Persistent<Function<'static>>) -> rquickjs::Result<JsonValue> {
+async fn call_generator<'js>(
+  ctx: &Ctx<'js>,
+  generator_fn: &Persistent<Function<'static>>,
+) -> rquickjs::Result<JsonValue> {
   let f = generator_fn.clone().restore(ctx)?;
   let result: rquickjs::Value<'js> = f.call(())?;
   // Await the result if it's a thenable.
@@ -816,14 +848,14 @@ fn build_expect<'js>(ctx: &Ctx<'js>, value: Value<'js>) -> rquickjs::Result<Expe
   let ctor_name = value
     .as_object()
     .and_then(|o| o.get::<_, rquickjs::Value<'js>>("constructor").ok())
-    .and_then(|c| c.as_object().and_then(|o| o.get::<_, rquickjs::Value<'js>>("name").ok()))
+    .and_then(|c| {
+      c.as_object()
+        .and_then(|o| o.get::<_, rquickjs::Value<'js>>("name").ok())
+    })
     .and_then(|n| n.as_string().and_then(|s| s.to_string().ok()))
     .filter(|s| !s.is_empty());
   let json: JsonValue = serde_from_js(ctx, value)?;
-  Ok(ExpectJs::new(ExpectTarget::Value {
-    value: json,
-    ctor_name,
-  }))
+  Ok(ExpectJs::new(ExpectTarget::Value { value: json, ctor_name }))
 }
 
 fn make_asymmetric<'js>(ctx: &Ctx<'js>, tag: &str, payload: Object<'js>) -> rquickjs::Result<Object<'js>> {
@@ -845,17 +877,20 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   Class::<ExpectJs>::define(&ctx.globals())?;
   Class::<ExpectPollJs>::define(&ctx.globals())?;
 
-  let expect_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>, value: Value<'js>| -> rquickjs::Result<Value<'js>> {
-    let inst = build_expect(&ctx, value)?;
-    let class = Class::instance(ctx.clone(), inst)?;
-    // Wrap in the JS proxy that translates `.not` (a getter) to
-    // `_notInner()` (the method-bound clone).
-    {
-      let val = class.into_value();
-      install_not_getter(&ctx, &val)?;
-      Ok(val)
-    }
-  })?;
+  let expect_fn = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, value: Value<'js>| -> rquickjs::Result<Value<'js>> {
+      let inst = build_expect(&ctx, value)?;
+      let class = Class::instance(ctx.clone(), inst)?;
+      // Wrap in the JS proxy that translates `.not` (a getter) to
+      // `_notInner()` (the method-bound clone).
+      {
+        let val = class.into_value();
+        install_not_getter(&ctx, &val)?;
+        Ok(val)
+      }
+    },
+  )?;
   expect_fn.set_name("expect")?;
 
   // expect.poll(fn, opts?)
@@ -865,8 +900,15 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
       let timeout_ms = opts
         .0
         .as_ref()
-        .and_then(|v| v.as_object().and_then(|o| o.get::<_, rquickjs::Value<'js>>("timeout").ok()))
-        .and_then(|v| v.as_int().map(|i| u64::try_from(i).unwrap_or(0)).or_else(|| v.as_number().map(|n| n as u64)))
+        .and_then(|v| {
+          v.as_object()
+            .and_then(|o| o.get::<_, rquickjs::Value<'js>>("timeout").ok())
+        })
+        .and_then(|v| {
+          v.as_int()
+            .map(|i| u64::try_from(i).unwrap_or(0))
+            .or_else(|| v.as_number().map(|n| n as u64))
+        })
         .unwrap_or_else(|| DEFAULT_EXPECT_TIMEOUT.as_millis() as u64);
       let saved = Persistent::save(&ctx, generator);
       let inst = ExpectPollJs {
@@ -876,82 +918,105 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
       };
       let class = Class::instance(ctx.clone(), inst)?;
       {
-      let val = class.into_value();
-      install_poll_not_getter(&ctx, &val)?;
-      Ok(val)
-    }
+        let val = class.into_value();
+        install_poll_not_getter(&ctx, &val)?;
+        Ok(val)
+      }
     },
   )?;
 
   // expect.soft(target) – marks the resulting Expect as soft.
-  let soft_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>, value: Value<'js>| -> rquickjs::Result<Value<'js>> {
-    let mut inst = build_expect(&ctx, value)?;
-    inst.is_soft = true;
-    let class = Class::instance(ctx.clone(), inst)?;
-    {
-      let val = class.into_value();
-      install_not_getter(&ctx, &val)?;
-      Ok(val)
-    }
-  })?;
+  let soft_fn = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, value: Value<'js>| -> rquickjs::Result<Value<'js>> {
+      let mut inst = build_expect(&ctx, value)?;
+      inst.is_soft = true;
+      let class = Class::instance(ctx.clone(), inst)?;
+      {
+        let val = class.into_value();
+        install_not_getter(&ctx, &val)?;
+        Ok(val)
+      }
+    },
+  )?;
 
   // Asymmetric matcher factories.
-  let any_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>, ctor: Value<'js>| -> rquickjs::Result<Object<'js>> {
-    let name = ctor
-      .as_function()
-      .and_then(|f| f.get::<_, rquickjs::Value<'js>>("name").ok())
-      .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()))
-      .unwrap_or_else(|| "Object".into());
-    let obj = Object::new(ctx.clone())?;
-    obj.set("name", name)?;
-    make_asymmetric(&ctx, "any", obj)
-  })?;
+  let any_fn = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, ctor: Value<'js>| -> rquickjs::Result<Object<'js>> {
+      let name = ctor
+        .as_function()
+        .and_then(|f| f.get::<_, rquickjs::Value<'js>>("name").ok())
+        .and_then(|v| v.as_string().and_then(|s| s.to_string().ok()))
+        .unwrap_or_else(|| "Object".into());
+      let obj = Object::new(ctx.clone())?;
+      obj.set("name", name)?;
+      make_asymmetric(&ctx, "any", obj)
+    },
+  )?;
   let anything_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>| -> rquickjs::Result<Object<'js>> {
     make_asymmetric(&ctx, "anything", Object::new(ctx.clone())?)
   })?;
-  let array_containing_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>, items: Array<'js>| -> rquickjs::Result<Object<'js>> {
-    let obj = Object::new(ctx.clone())?;
-    obj.set("items", items)?;
-    make_asymmetric(&ctx, "arrayContaining", obj)
-  })?;
-  let object_containing_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>, subset: Object<'js>| -> rquickjs::Result<Object<'js>> {
-    let obj = Object::new(ctx.clone())?;
-    obj.set("subset", subset)?;
-    make_asymmetric(&ctx, "objectContaining", obj)
-  })?;
-  let string_containing_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>, s: String| -> rquickjs::Result<Object<'js>> {
-    let obj = Object::new(ctx.clone())?;
-    obj.set("substring", s)?;
-    make_asymmetric(&ctx, "stringContaining", obj)
-  })?;
-  let string_matching_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>, pat: Value<'js>| -> rquickjs::Result<Object<'js>> {
-    let obj = Object::new(ctx.clone())?;
-    if let Some(s) = pat.as_string() {
-      obj.set("substring", s.to_string()?)?;
-    } else if let Some(re_obj) = pat.as_object() {
-      let source = re_obj.get::<_, rquickjs::Value<'js>>("source")?;
-      let flags = re_obj.get::<_, rquickjs::Value<'js>>("flags").unwrap_or(Value::new_undefined(ctx.clone()));
-      if let Some(s) = source.as_string() {
-        obj.set("regex", s.to_string()?)?;
+  let array_containing_fn = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, items: Array<'js>| -> rquickjs::Result<Object<'js>> {
+      let obj = Object::new(ctx.clone())?;
+      obj.set("items", items)?;
+      make_asymmetric(&ctx, "arrayContaining", obj)
+    },
+  )?;
+  let object_containing_fn = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, subset: Object<'js>| -> rquickjs::Result<Object<'js>> {
+      let obj = Object::new(ctx.clone())?;
+      obj.set("subset", subset)?;
+      make_asymmetric(&ctx, "objectContaining", obj)
+    },
+  )?;
+  let string_containing_fn = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, s: String| -> rquickjs::Result<Object<'js>> {
+      let obj = Object::new(ctx.clone())?;
+      obj.set("substring", s)?;
+      make_asymmetric(&ctx, "stringContaining", obj)
+    },
+  )?;
+  let string_matching_fn = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, pat: Value<'js>| -> rquickjs::Result<Object<'js>> {
+      let obj = Object::new(ctx.clone())?;
+      if let Some(s) = pat.as_string() {
+        obj.set("substring", s.to_string()?)?;
+      } else if let Some(re_obj) = pat.as_object() {
+        let source = re_obj.get::<_, rquickjs::Value<'js>>("source")?;
+        let flags = re_obj
+          .get::<_, rquickjs::Value<'js>>("flags")
+          .unwrap_or(Value::new_undefined(ctx.clone()));
+        if let Some(s) = source.as_string() {
+          obj.set("regex", s.to_string()?)?;
+        }
+        if let Some(f) = flags.as_string() {
+          obj.set("flags", f.to_string()?)?;
+        }
+      } else {
+        return Err(rquickjs::Error::new_from_js_message(
+          "expect",
+          "argument",
+          "expect.stringMatching expects a string or RegExp",
+        ));
       }
-      if let Some(f) = flags.as_string() {
-        obj.set("flags", f.to_string()?)?;
-      }
-    } else {
-      return Err(rquickjs::Error::new_from_js_message(
-        "expect",
-        "argument",
-        "expect.stringMatching expects a string or RegExp",
-      ));
-    }
-    make_asymmetric(&ctx, "stringMatching", obj)
-  })?;
-  let close_to_fn = Function::new(ctx.clone(), |ctx: Ctx<'js>, value: f64, digits: Opt<u8>| -> rquickjs::Result<Object<'js>> {
-    let obj = Object::new(ctx.clone())?;
-    obj.set("value", value)?;
-    obj.set("digits", digits.0.unwrap_or(2))?;
-    make_asymmetric(&ctx, "closeTo", obj)
-  })?;
+      make_asymmetric(&ctx, "stringMatching", obj)
+    },
+  )?;
+  let close_to_fn = Function::new(
+    ctx.clone(),
+    |ctx: Ctx<'js>, value: f64, digits: Opt<u8>| -> rquickjs::Result<Object<'js>> {
+      let obj = Object::new(ctx.clone())?;
+      obj.set("value", value)?;
+      obj.set("digits", digits.0.unwrap_or(2))?;
+      make_asymmetric(&ctx, "closeTo", obj)
+    },
+  )?;
 
   // expect.not.<asym>(...) — wraps an asymmetric matcher in a NOT
   // tag. Mirrors Jest's `expect.not.objectContaining` etc.
@@ -990,7 +1055,12 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   Ok(())
 }
 
-fn install_not_asym<'js>(ctx: &Ctx<'js>, not_obj: &Object<'js>, name: &str, inner: Function<'js>) -> rquickjs::Result<()> {
+fn install_not_asym<'js>(
+  ctx: &Ctx<'js>,
+  not_obj: &Object<'js>,
+  name: &str,
+  inner: Function<'js>,
+) -> rquickjs::Result<()> {
   let wrapped = Function::new(
     ctx.clone(),
     move |ctx: Ctx<'js>, args: rquickjs::function::Rest<Value<'js>>| -> rquickjs::Result<Object<'js>> {

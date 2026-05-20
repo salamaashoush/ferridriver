@@ -79,10 +79,7 @@ async fn js_stack_is_captured_on_failure() {
   // Multi-line script so the stack carries a meaningful line number;
   // any thrown error from QuickJS should populate ScriptError.stack
   // with `at ... (<source>:N:M)` frames.
-  let err = run_err_structured(
-    "function inner() { expect(1).toBe(2); }\ninner();\nreturn 'unreached';",
-  )
-  .await;
+  let err = run_err_structured("function inner() { expect(1).toBe(2); }\ninner();\nreturn 'unreached';").await;
   let stack = err.stack.clone().unwrap_or_default();
   assert!(!stack.is_empty(), "stack must be populated; full err: {err:?}");
   assert!(stack.contains("at "), "stack lacks frame prefix: {stack}");
@@ -94,10 +91,7 @@ async fn to_equal_failure_message_has_unified_diff() {
   // unified-diff `+`/`-` markers in the JS-visible error. Proves the
   // Rust-side similar-based diff round-trips through QuickJS into the
   // thrown error message.
-  let err = run_err(
-    "expect({a: 1, b: 'x'}).toEqual({a: 2, b: 'x'}); return 'unreached'",
-  )
-  .await;
+  let err = run_err("expect({a: 1, b: 'x'}).toEqual({a: 2, b: 'x'}); return 'unreached'").await;
   assert!(err.contains("toEqual"), "no toEqual in message: {err}");
   assert!(err.contains("Diff:"), "no Diff section in message: {err}");
   assert!(err.contains('-'), "no '-' marker in message: {err}");
@@ -111,10 +105,7 @@ async fn to_equal_nested_pass() {
 
 #[tokio::test]
 async fn to_equal_with_asymmetric_any_number() {
-  run_ok(
-    "expect({id: 7, name: 'n'}).toEqual({id: expect.any(Number), name: 'n'}); return 'ok'",
-  )
-  .await;
+  run_ok("expect({id: 7, name: 'n'}).toEqual({id: expect.any(Number), name: 'n'}); return 'ok'").await;
 }
 
 #[tokio::test]
@@ -129,34 +120,22 @@ async fn to_equal_with_asymmetric_object_containing() {
 
 #[tokio::test]
 async fn to_equal_with_asymmetric_array_containing() {
-  run_ok(
-    "expect([1, 2, 3, 4]).toEqual(expect.arrayContaining([2, 3])); return 'ok'",
-  )
-  .await;
+  run_ok("expect([1, 2, 3, 4]).toEqual(expect.arrayContaining([2, 3])); return 'ok'").await;
 }
 
 #[tokio::test]
 async fn to_equal_with_asymmetric_string_matching_regex() {
-  run_ok(
-    "expect('Hello World').toEqual(expect.stringMatching(/hello/i)); return 'ok'",
-  )
-  .await;
+  run_ok("expect('Hello World').toEqual(expect.stringMatching(/hello/i)); return 'ok'").await;
 }
 
 #[tokio::test]
 async fn to_equal_with_asymmetric_string_containing() {
-  run_ok(
-    "expect('Hello World').toEqual(expect.stringContaining('World')); return 'ok'",
-  )
-  .await;
+  run_ok("expect('Hello World').toEqual(expect.stringContaining('World')); return 'ok'").await;
 }
 
 #[tokio::test]
 async fn asymmetric_not_inverts() {
-  run_ok(
-    "expect('Hello').toEqual(expect.not.stringContaining('Bye')); return 'ok'",
-  )
-  .await;
+  run_ok("expect('Hello').toEqual(expect.not.stringContaining('Bye')); return 'ok'").await;
 }
 
 #[tokio::test]
@@ -194,18 +173,12 @@ async fn to_have_length_array_and_string() {
 
 #[tokio::test]
 async fn to_have_property_dot_path_with_value() {
-  run_ok(
-    "expect({a: {b: 42}}).toHaveProperty('a.b', 42); return 'ok'",
-  )
-  .await;
+  run_ok("expect({a: {b: 42}}).toHaveProperty('a.b', 42); return 'ok'").await;
 }
 
 #[tokio::test]
 async fn to_have_property_array_path_index() {
-  run_ok(
-    "expect({arr: [10, 20]}).toHaveProperty(['arr', 1], 20); return 'ok'",
-  )
-  .await;
+  run_ok("expect({arr: [10, 20]}).toHaveProperty(['arr', 1], 20); return 'ok'").await;
 }
 
 #[tokio::test]
@@ -220,10 +193,7 @@ async fn to_match_regex() {
 
 #[tokio::test]
 async fn to_match_object_subset() {
-  run_ok(
-    "expect({a: 1, b: 2, c: 3}).toMatchObject({a: 1, c: 3}); return 'ok'",
-  )
-  .await;
+  run_ok("expect({a: 1, b: 2, c: 3}).toMatchObject({a: 1, c: 3}); return 'ok'").await;
 }
 
 #[tokio::test]
@@ -233,34 +203,22 @@ async fn to_be_instance_of_builtins() {
 
 #[tokio::test]
 async fn to_throw_sync() {
-  run_ok(
-    "await expect(() => { throw new Error('boom'); }).toThrow(); return 'ok'",
-  )
-  .await;
+  run_ok("await expect(() => { throw new Error('boom'); }).toThrow(); return 'ok'").await;
 }
 
 #[tokio::test]
 async fn to_throw_substring_match() {
-  run_ok(
-    "await expect(() => { throw new Error('out of range'); }).toThrow('out of range'); return 'ok'",
-  )
-  .await;
+  run_ok("await expect(() => { throw new Error('out of range'); }).toThrow('out of range'); return 'ok'").await;
 }
 
 #[tokio::test]
 async fn to_throw_regex_match() {
-  run_ok(
-    "await expect(() => { throw new Error('boom42'); }).toThrow(/boom\\d+/); return 'ok'",
-  )
-  .await;
+  run_ok("await expect(() => { throw new Error('boom42'); }).toThrow(/boom\\d+/); return 'ok'").await;
 }
 
 #[tokio::test]
 async fn to_throw_class_match() {
-  run_ok(
-    "await expect(() => { throw new RangeError('bad'); }).toThrow(RangeError); return 'ok'",
-  )
-  .await;
+  run_ok("await expect(() => { throw new RangeError('bad'); }).toThrow(RangeError); return 'ok'").await;
 }
 
 #[tokio::test]
@@ -276,10 +234,7 @@ async fn not_to_throw_passes_when_no_throw() {
 
 #[tokio::test]
 async fn to_throw_async_promise() {
-  run_ok(
-    "await expect(async () => { throw new Error('async boom'); }).toThrow('async boom'); return 'ok'",
-  )
-  .await;
+  run_ok("await expect(async () => { throw new Error('async boom'); }).toThrow('async boom'); return 'ok'").await;
 }
 
 #[tokio::test]
@@ -342,8 +297,5 @@ async fn poll_timeout_throws_with_last_value() {
 
 #[tokio::test]
 async fn close_to_asymmetric() {
-  run_ok(
-    "expect({pi: 3.14159}).toEqual({pi: expect.closeTo(3.14, 2)}); return 'ok'",
-  )
-  .await;
+  run_ok("expect({pi: 3.14159}).toEqual({pi: expect.closeTo(3.14, 2)}); return 'ok'").await;
 }

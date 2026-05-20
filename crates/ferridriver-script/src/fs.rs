@@ -190,7 +190,10 @@ mod tests {
     symlink(outside.path().join("escape.txt"), tmp.path().join("out.txt")).unwrap();
     let err = sb.resolve_write("out.txt").unwrap_err();
     assert_eq!(err.kind, crate::error::ScriptErrorKind::SandboxViolation);
-    assert!(!outside.path().join("escape.txt").exists(), "must not have created the target");
+    assert!(
+      !outside.path().join("escape.txt").exists(),
+      "must not have created the target"
+    );
   }
 
   #[cfg(unix)]

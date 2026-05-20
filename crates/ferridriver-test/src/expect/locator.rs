@@ -44,11 +44,7 @@ pub trait LocatorSnapshotMatchers {
 
   /// Playwright `toHaveScreenshot(name, options?)` — full capture
   /// option bag.
-  async fn to_have_screenshot_with(
-    &self,
-    name: &str,
-    options: ScreenshotMatcherOptions,
-  ) -> Result<(), TestFailure>;
+  async fn to_have_screenshot_with(&self, name: &str, options: ScreenshotMatcherOptions) -> Result<(), TestFailure>;
 
   /// Playwright `toMatchAriaSnapshot(yaml)` — compares the live ARIA
   /// tree against the Playwright-style YAML template.
@@ -101,11 +97,7 @@ impl LocatorSnapshotMatchers for Expect<'_, Locator> {
       .await
   }
 
-  async fn to_have_screenshot_with(
-    &self,
-    name: &str,
-    options: ScreenshotMatcherOptions,
-  ) -> Result<(), TestFailure> {
+  async fn to_have_screenshot_with(&self, name: &str, options: ScreenshotMatcherOptions) -> Result<(), TestFailure> {
     let locator = self.subject;
     let actual_png = capture_with_options(locator, &options).await?;
     crate::snapshot::compare_screenshot_png_with(&actual_png, name, &options)
@@ -483,9 +475,7 @@ fn matches_aria_node(expected: &AriaNode, actual: &AriaNode) -> bool {
       return false;
     }
   }
-  if !expected.children.is_empty()
-    && !match_aria_template(&expected.children, &actual.children)
-  {
+  if !expected.children.is_empty() && !match_aria_template(&expected.children, &actual.children) {
     return false;
   }
   true

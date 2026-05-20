@@ -20,6 +20,7 @@ use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use ferridriver_script::{
   AsyncContext, CompiledBundle, HookArg, InMemoryVars, JsArg, PathSandbox, RunContext, ScenarioWorld, ScriptAttachment,
   ScriptEngineConfig, Session, StepOutcome, bundle_and_compile, collect_registry, drain_attachments, eval_bundle,
@@ -27,7 +28,6 @@ use ferridriver_script::{
 };
 use ferridriver_test::FixturePool;
 use ferridriver_test::model::{AttachmentBody, StepCategory, TestInfo};
-use dashmap::DashMap;
 use tokio::sync::OnceCell;
 
 use crate::feature::FeatureSet;
@@ -745,10 +745,7 @@ pub fn translate_features_js(
             && result.steps.iter().all(|s| {
               matches!(
                 s.status,
-                JsStepStatus::Passed
-                  | JsStepStatus::Skipped
-                  | JsStepStatus::Pending
-                  | JsStepStatus::Undefined(_)
+                JsStepStatus::Passed | JsStepStatus::Skipped | JsStepStatus::Pending | JsStepStatus::Undefined(_)
               )
             });
           if only_pending {

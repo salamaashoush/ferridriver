@@ -123,7 +123,11 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
       )
       .await;
     let v = ok_value(r, "iter");
-    assert_eq!(v["c"], serde_json::json!(i), "REPL counter must advance with no rebuild");
+    assert_eq!(
+      v["c"],
+      serde_json::json!(i),
+      "REPL counter must advance with no rebuild"
+    );
     assert_eq!(v["t"], serde_json::json!("hi"), "live page still reachable at iter {i}");
   }
   {
@@ -185,7 +189,11 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
         Some(1),
       )
       .await;
-    assert_eq!(ok_value(r, "churn-final"), serde_json::json!(250), "all 250 churn executes ran in one VM");
+    assert_eq!(
+      ok_value(r, "churn-final"),
+      serde_json::json!(250),
+      "all 250 churn executes ran in one VM"
+    );
   }
 
   // Timeout poisons the VM; the durable `vars` must still survive and
@@ -207,7 +215,10 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
         Some(1),
       )
       .await;
-    assert!(matches!(r.outcome, Outcome::Error { .. }), "infinite loop must time out");
+    assert!(
+      matches!(r.outcome, Outcome::Error { .. }),
+      "infinite loop must time out"
+    );
   }
   {
     let mut s = slot.lock().await;
@@ -224,7 +235,11 @@ async fn long_live_session_keeps_state_and_stays_healthy() {
       )
       .await;
     let v = ok_value(r, "post-poison");
-    assert_eq!(v["rebuilt"], serde_json::json!(true), "poisoned VM was rebuilt (globalThis cleared)");
+    assert_eq!(
+      v["rebuilt"],
+      serde_json::json!(true),
+      "poisoned VM was rebuilt (globalThis cleared)"
+    );
     assert_eq!(
       v["persisted"],
       serde_json::json!("yes"),
