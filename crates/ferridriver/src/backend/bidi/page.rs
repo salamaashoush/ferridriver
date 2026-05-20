@@ -1253,11 +1253,26 @@ impl BidiPage {
   }
 
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
+    // BiDi `storage.setCookie` has no `url` field (unlike CDP), and
+    // `domain` is mandatory. Match Playwright by deriving domain/path
+    // from `url` when domain/path are not given explicitly.
+    let (mut domain, mut path) = (cookie.domain.clone(), cookie.path.clone());
+    if let Some(u) = &cookie.url
+      && let Ok(parsed) = reqwest::Url::parse(u)
+    {
+      if domain.is_empty() {
+        domain = parsed.host_str().unwrap_or("").to_string();
+      }
+      if path.is_empty() {
+        let p = parsed.path();
+        path = if p.is_empty() { "/".to_string() } else { p.to_string() };
+      }
+    }
     let mut cookie_obj = json!({
       "name": cookie.name,
       "value": {"type": "string", "value": cookie.value},
-      "domain": cookie.domain,
-      "path": cookie.path
+      "domain": domain,
+      "path": path
     });
     if cookie.secure {
       cookie_obj["secure"] = json!(true);
@@ -1881,7 +1896,7 @@ impl BidiPage {
                     .unwrap_or_default();
                   let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
                   if let Some(callback) = maybe_fn {
-                    let result = callback(args);
+                    let result = callback(args).await;
                     let result_js = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
                     let escaped_id = id.replace('\\', r"\\").replace('\'', r"\'");
                     let resolve_js = format!(
@@ -3294,5 +3309,6 @@ fn parse_bidi_cookie(c: &serde_json::Value) -> CookieData {
     http_only,
     expires,
     same_site,
+    url: None,
   }
 }

@@ -54,10 +54,20 @@ impl PageBackref {
     Self::default()
   }
 
-  /// Overwrite the stored weak reference. Called by `Page::new` /
+  /// Set the stored weak reference. Called by `Page::new` /
   /// `Page::with_context` on every construction.
+  ///
+  /// Skips overwrite if the existing weak still upgrades — multiple
+  /// transient `Page` wrappers can be built for the same backend page
+  /// (e.g. `ContextRef::pages()` re-wraps on every call, `frame.page()`
+  /// builds a fresh wrapper); a last-writer-wins overwrite would dangle
+  /// the live wrapper and silently drop every subsequent console /
+  /// network / dialog event the listeners route through `upgrade()`.
   pub fn set(&self, weak: std::sync::Weak<crate::page::Page>) {
     if let Ok(mut guard) = self.inner.lock() {
+      if guard.upgrade().is_some() {
+        return;
+      }
       *guard = weak;
     }
   }
@@ -151,6 +161,12 @@ pub struct CookieData {
   /// `SameSite` attribute (`Strict`, `Lax`, or `None`).
   #[serde(default, skip_serializing_if = "Option::is_none")]
   pub same_site: Option<SameSite>,
+  /// Playwright `SetNetworkCookieParam.url`: when set, the backend
+  /// derives domain/path from it (CDP `Network.setCookie` accepts
+  /// `url`; `BiDi`/`WebKit` have no `url`, so the host/path is parsed
+  /// from it). Never populated on cookies READ back from the browser.
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub url: Option<String>,
 }
 
 /// Options for setting a cookie (matches Playwright's `SetNetworkCookieParam`).
@@ -188,6 +204,7 @@ impl From<SetCookieParams> for CookieData {
       http_only: p.http_only,
       expires: p.expires,
       same_site: p.same_site,
+      url: p.url,
     }
   }
 }

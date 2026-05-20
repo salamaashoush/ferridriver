@@ -1455,12 +1455,27 @@ impl WebKitPage {
   ///
   /// Returns an error if the set cookie IPC call fails.
   pub async fn set_cookie(&self, c: CookieData) -> Result<()> {
+    // The IPC SetCookie op needs an explicit domain/path. Match
+    // Playwright by deriving them from `url` when not given (CDP/BiDi
+    // do the same so `addCookies([{ name, value, url }])` is portable).
+    let (mut domain, mut path) = (c.domain.clone(), c.path.clone());
+    if let Some(u) = &c.url
+      && let Ok(parsed) = reqwest::Url::parse(u)
+    {
+      if domain.is_empty() {
+        domain = parsed.host_str().unwrap_or("").to_string();
+      }
+      if path.is_empty() {
+        let pp = parsed.path();
+        path = if pp.is_empty() { "/".to_string() } else { pp.to_string() };
+      }
+    }
     let mut p = Vec::new();
     p.extend_from_slice(&self.vid().to_le_bytes());
     ipc::str_encode(&mut p, &c.name);
     ipc::str_encode(&mut p, &c.value);
-    ipc::str_encode(&mut p, &c.domain);
-    ipc::str_encode(&mut p, &c.path);
+    ipc::str_encode(&mut p, &domain);
+    ipc::str_encode(&mut p, &path);
     p.push(u8::from(c.secure));
     p.push(u8::from(c.http_only));
     let expires = c.expires.unwrap_or(-1.0);
@@ -2549,7 +2564,7 @@ async fn drain_console_events(
           .unwrap_or_default();
         let maybe_fn = exposed_fns.read().await.get(&fn_name).cloned();
         if let Some(callback) = maybe_fn {
-          let result = callback(args);
+          let result = callback(args).await;
           let result_js = serde_json::to_string(&result).unwrap_or_else(|_| "null".into());
           let escaped_id = id.replace('\\', r"\\").replace('\'', r"\'");
           let resolve_js = format!(

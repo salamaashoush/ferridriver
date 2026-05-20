@@ -88,16 +88,19 @@ impl Recorder {
     let emitter_cb = Arc::clone(&emitter);
     let output_cb = Arc::clone(&output);
     let callback: ExposedFn = Arc::new(move |args: Vec<serde_json::Value>| {
-      let json_str = args.first().and_then(|v| v.as_str()).unwrap_or("{}");
-      if let Ok(action) = serde_json::from_str::<Action>(json_str) {
-        let code = emitter_cb.action(&action);
-        // Synchronous lock — ExposedFn is not async, but this is fine for stdout/file writes.
-        if let Ok(mut out) = output_cb.try_lock() {
-          let _ = out.write_all(code.as_bytes());
-          let _ = out.flush();
+      let emitter_cb = Arc::clone(&emitter_cb);
+      let output_cb = Arc::clone(&output_cb);
+      Box::pin(async move {
+        let json_str = args.first().and_then(|v| v.as_str()).unwrap_or("{}").to_string();
+        if let Ok(action) = serde_json::from_str::<Action>(&json_str) {
+          let code = emitter_cb.action(&action);
+          if let Ok(mut out) = output_cb.try_lock() {
+            let _ = out.write_all(code.as_bytes());
+            let _ = out.flush();
+          }
         }
-      }
-      serde_json::Value::Null
+        serde_json::Value::Null
+      })
     });
 
     page.expose_function("__fdRecorderAction", callback).await?;

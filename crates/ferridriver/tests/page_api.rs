@@ -718,8 +718,10 @@ async fn expose_function_tests() {
     .expose_function(
       "double",
       Arc::new(|args| {
-        let x = args.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
-        serde_json::json!(x * 2.0)
+        Box::pin(async move {
+          let x = args.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
+          serde_json::json!(x * 2.0)
+        })
       }),
     )
     .await
@@ -740,8 +742,10 @@ async fn expose_function_tests() {
     .expose_function(
       "greet",
       Arc::new(|args| {
-        let name = args.first().and_then(|v| v.as_str()).unwrap_or("world");
-        serde_json::json!(format!("Hello, {}!", name))
+        Box::pin(async move {
+          let name = args.first().and_then(|v| v.as_str()).unwrap_or("world");
+          serde_json::json!(format!("Hello, {}!", name))
+        })
       }),
     )
     .await
@@ -767,9 +771,11 @@ async fn expose_function_tests() {
     .expose_function(
       "add",
       Arc::new(|args| {
-        let a = args.get(0).and_then(|v| v.as_f64()).unwrap_or(0.0);
-        let b = args.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
-        serde_json::json!(a + b)
+        Box::pin(async move {
+          let a = args.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
+          let b = args.get(1).and_then(|v| v.as_f64()).unwrap_or(0.0);
+          serde_json::json!(a + b)
+        })
       }),
     )
     .await
