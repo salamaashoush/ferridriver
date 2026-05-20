@@ -118,6 +118,7 @@ impl TestBrowserResources {
     }
   }
 
+  #[tracing::instrument(skip_all, name = "page_fixture")]
   async fn page(&self) -> ferridriver::error::Result<Arc<ferridriver::Page>> {
     let mut state = self.state.lock().await;
     match &mut *state {

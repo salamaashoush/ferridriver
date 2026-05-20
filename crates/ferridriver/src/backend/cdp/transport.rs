@@ -317,6 +317,19 @@ impl CdpDispatcher {
     self.event_tx.subscribe()
   }
 
+  /// Drain every in-flight `send_command` oneshot and deliver a
+  /// `target_closed` error. Called by the reader task on EOF / error
+  /// so callers don't block on responses that will never arrive.
+  pub fn fail_all_pending(&self, reason: &str) {
+    // `DashMap::iter_mut` would hold shard locks; collect keys first.
+    let keys: Vec<u64> = self.pending.iter().map(|e| *e.key()).collect();
+    for id in keys {
+      if let Some((_, entry)) = self.pending.remove(&id) {
+        let _ = entry.tx.send(Err(FerriError::target_closed(Some(reason.to_string()))));
+      }
+    }
+  }
+
   /// Build a CDP command as NUL-terminated JSON bytes and register a response receiver.
   pub fn build_command(
     &self,

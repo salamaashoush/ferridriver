@@ -1207,6 +1207,7 @@ impl BrowserHandle {
     }
   }
 
+  #[tracing::instrument(skip_all, name = "browser_launch")]
   pub async fn get(&self) -> ferridriver::error::Result<Arc<Browser>> {
     let plan = self.plan.clone();
     self

@@ -1383,6 +1383,7 @@ dependencies = [
  "async-trait",
  "console",
  "cucumber-expressions",
+ "dashmap",
  "ferridriver",
  "ferridriver-bdd-macros",
  "ferridriver-expect",

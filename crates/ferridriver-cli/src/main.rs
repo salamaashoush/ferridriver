@@ -23,15 +23,7 @@ use ferridriver_mcp::McpServer;
 async fn main() -> anyhow::Result<()> {
   let args = cli::Cli::parse();
 
-  let filter = match args.verbose {
-    0 => "warn",
-    1 => "info,ferridriver=debug",
-    _ => "trace",
-  };
-  tracing_subscriber::fmt()
-    .with_env_filter(tracing_subscriber::EnvFilter::try_from_default_env().unwrap_or_else(|_| filter.into()))
-    .with_writer(std::io::stderr)
-    .init();
+  ferridriver_test::logging::init(args.verbose);
 
   // Load the unified config exactly once. Each subcommand reads the
   // section it cares about from this single document.

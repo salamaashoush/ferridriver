@@ -17,6 +17,9 @@ path = "src/main.rs"
 [lints]
 workspace = true
 
+[features]
+profiling = ["ferridriver-test/profiling"]
+
 [dependencies]
 ferridriver-mcp = { workspace = true }
 ferridriver-script = { workspace = true }

@@ -1,5 +1,6 @@
 [test]
 testMatch = ["tests/**/*.spec.ts", "tests/**/*.test.ts", "tests/**/*.feature"]
+steps = ["tests/steps/**/*.ts"]
 
 [[test.webServer]]
 staticDir = "tests/assets"
