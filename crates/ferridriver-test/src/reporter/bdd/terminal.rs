@@ -97,7 +97,7 @@ impl Reporter for BddTerminalReporter {
         println!(
           "    {} {}{}",
           s_dim().apply_to("\u{25cf}"), // filled circle (running indicator)
-          &test_id.name,
+          test_id.name,
           retry,
         );
       },
@@ -160,7 +160,7 @@ impl Reporter for BddTerminalReporter {
           println!(
             "      {} {} {}",
             s_pass().apply_to("\u{2713}"),
-            &ev.title,
+            ev.title,
             s_dim().apply_to(format!("({dur})")),
           );
         }

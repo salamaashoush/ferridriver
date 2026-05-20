@@ -113,11 +113,7 @@ impl ExpectValue {
     let expected = expected.into();
     let received = received.into();
     let not = if self.is_not { ".not" } else { "" };
-    let prefix = self
-      .message
-      .as_ref()
-      .map(|m| format!("{m}: "))
-      .unwrap_or_default();
+    let prefix = self.message.as_ref().map(|m| format!("{m}: ")).unwrap_or_default();
     // Two-field split:
     //   `message` = a single-line title that a reporter can highlight
     //               on its own (`expect(value).toEqual() failed`).
@@ -254,7 +250,12 @@ impl ExpectValue {
 
   #[track_caller]
   pub fn to_be_truthy(&self) -> Result<(), AssertionFailure> {
-    self.check(is_truthy(&self.actual), "toBeTruthy", "truthy", json_short(&self.actual))
+    self.check(
+      is_truthy(&self.actual),
+      "toBeTruthy",
+      "truthy",
+      json_short(&self.actual),
+    )
   }
 
   #[track_caller]
@@ -511,7 +512,9 @@ fn is_truthy(v: &Value) -> bool {
   match v {
     Value::Null => false,
     Value::Bool(b) => *b,
-    Value::Number(n) => n.as_f64().is_some_and(|f| !float_bit_eq(f, 0.0) && !float_bit_eq(f, -0.0) && !f.is_nan()),
+    Value::Number(n) => n
+      .as_f64()
+      .is_some_and(|f| !float_bit_eq(f, 0.0) && !float_bit_eq(f, -0.0) && !f.is_nan()),
     Value::String(s) => !s.is_empty(),
     Value::Array(_) | Value::Object(_) => true,
   }

@@ -125,8 +125,8 @@ impl Url {
   /// throws).
   #[qjs(set, rename = "href")]
   pub fn set_href(&mut self, value: String) -> rquickjs::Result<()> {
-    self.inner = url::Url::parse(&value)
-      .map_err(|e| rquickjs::Error::new_from_js_message("URL", "TypeError", e.to_string()))?;
+    self.inner =
+      url::Url::parse(&value).map_err(|e| rquickjs::Error::new_from_js_message("URL", "TypeError", e.to_string()))?;
     Ok(())
   }
 
@@ -165,7 +165,9 @@ impl Url {
 
   #[qjs(set, rename = "password")]
   pub fn set_password(&mut self, value: String) {
-    let _ = self.inner.set_password(if value.is_empty() { None } else { Some(&value) });
+    let _ = self
+      .inner
+      .set_password(if value.is_empty() { None } else { Some(&value) });
   }
 
   #[qjs(get, rename = "hostname")]

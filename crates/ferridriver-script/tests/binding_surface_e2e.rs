@@ -27,9 +27,7 @@ use std::sync::Arc;
 
 use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
-use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session,
-};
+use ferridriver_script::{InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session};
 
 fn data_url(html: &str) -> String {
   format!(
@@ -118,11 +116,11 @@ async fn harness() -> H {
 
 /// Run one chunk; panic with the script error if it threw.
 async fn step(h: &H, label: &str, src: &str) -> serde_json::Value {
-  let r = h
-    .session
-    .execute(src, &[], RunOptions::default(), &h.ctx)
-    .await;
-  assert!(!r.poisoned, "[{label}] VM was poisoned — must not happen on a valid script");
+  let r = h.session.execute(src, &[], RunOptions::default(), &h.ctx).await;
+  assert!(
+    !r.poisoned,
+    "[{label}] VM was poisoned — must not happen on a valid script"
+  );
   match r.result.outcome {
     Outcome::Ok { success } => success.value,
     Outcome::Error { error } => panic!("[{label}] script error: {error:?}"),
@@ -130,9 +128,15 @@ async fn step(h: &H, label: &str, src: &str) -> serde_json::Value {
 }
 
 fn assert_all_true(label: &str, v: &serde_json::Value) {
-  let obj = v.as_object().unwrap_or_else(|| panic!("[{label}] expected object, got {v}"));
+  let obj = v
+    .as_object()
+    .unwrap_or_else(|| panic!("[{label}] expected object, got {v}"));
   for (k, val) in obj {
-    assert_eq!(val, &serde_json::Value::Bool(true), "[{label}] check {k} failed (full: {v})");
+    assert_eq!(
+      val,
+      &serde_json::Value::Bool(true),
+      "[{label}] check {k} failed (full: {v})"
+    );
   }
 }
 

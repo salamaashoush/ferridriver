@@ -79,10 +79,7 @@ pub fn serde_from_js<'js, T: DeserializeOwned>(_ctx: &Ctx<'js>, value: Value<'js
 /// which always creates an own data property and never triggers a
 /// setter — the value lands exactly where a JSON consumer expects.
 fn define_own<'js, V: rquickjs::IntoJs<'js>>(obj: &Object<'js>, key: &str, value: V) -> rquickjs::Result<()> {
-  obj.prop(
-    key,
-    Property::from(value).writable().enumerable().configurable(),
-  )
+  obj.prop(key, Property::from(value).writable().enumerable().configurable())
 }
 
 /// Build an `rquickjs::Value` from a `serde_json::Value`. Thin wrapper

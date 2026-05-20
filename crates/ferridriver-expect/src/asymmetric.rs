@@ -204,11 +204,7 @@ pub fn float_bit_eq(a: f64, b: f64) -> bool {
 
 pub fn json_short(v: &Value) -> String {
   let s = v.to_string();
-  if s.len() > 80 {
-    format!("{}…", &s[..80])
-  } else {
-    s
-  }
+  if s.len() > 80 { format!("{}…", &s[..80]) } else { s }
 }
 
 /// Deep equality treating any [`Asymmetric`] embedded in `expected` as
@@ -227,7 +223,10 @@ pub fn deep_equal(actual: &Value, expected: &Value) -> bool {
     (Value::String(a), Value::String(b)) => a == b,
     (Value::Array(a), Value::Array(b)) => a.len() == b.len() && a.iter().zip(b.iter()).all(|(x, y)| deep_equal(x, y)),
     (Value::Object(a), Value::Object(b)) => {
-      a.len() == b.len() && a.iter().all(|(k, v)| b.get(k).is_some_and(|other| deep_equal(v, other)))
+      a.len() == b.len()
+        && a
+          .iter()
+          .all(|(k, v)| b.get(k).is_some_and(|other| deep_equal(v, other)))
     },
     _ => false,
   }

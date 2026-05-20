@@ -80,7 +80,10 @@ async fn allowlisted_host_direct_request_succeeds() {
   let (base, _) = spawn_server();
   let client = HttpClient::new(HttpClientOptions::default());
   let resp = client
-    .get(&format!("{base}/landed"), Some(opts(guard(Some(&["127.0.0.1"]), true, false))))
+    .get(
+      &format!("{base}/landed"),
+      Some(opts(guard(Some(&["127.0.0.1"]), true, false))),
+    )
     .await
     .expect("allowlisted loopback host is reachable");
   assert_eq!(resp.text().unwrap(), "LANDED");
@@ -120,7 +123,10 @@ async fn redirect_to_metadata_is_rejected_even_without_allowlist() {
 async fn direct_metadata_request_is_rejected_at_preflight() {
   let client = HttpClient::new(HttpClientOptions::default());
   let err = client
-    .get("http://169.254.169.254/latest/meta-data/", Some(opts(guard(None, true, false))))
+    .get(
+      "http://169.254.169.254/latest/meta-data/",
+      Some(opts(guard(None, true, false))),
+    )
     .await
     .expect_err("metadata IP must be denied before any I/O");
   assert!(err.to_string().contains("blocked address"), "{err}");

@@ -30,12 +30,7 @@ pub fn check_bool(actual: bool, is_not: bool, expected_state: &str) -> Result<()
   }
 }
 
-pub fn check_text_match(
-  expected: &StringOrRegex,
-  actual: &str,
-  is_not: bool,
-  _label: &str,
-) -> Result<(), MatchError> {
+pub fn check_text_match(expected: &StringOrRegex, actual: &str, is_not: bool, _label: &str) -> Result<(), MatchError> {
   let matches = expected.matches(actual);
   if matches == is_not {
     let exp = format!("{}{}", if is_not { "not " } else { "" }, expected.description());
@@ -51,70 +46,98 @@ impl Expect<'_, Locator> {
   pub async fn to_be_visible(&self) -> Result<(), AssertionFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeVisible", is_not), || async move {
-      let visible = locator.is_visible().await.unwrap_or(false);
-      check_bool(visible, is_not, "visible")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeVisible", is_not),
+      || async move {
+        let visible = locator.is_visible().await.unwrap_or(false);
+        check_bool(visible, is_not, "visible")
+      },
+    )
     .await
   }
 
   pub async fn to_be_hidden(&self) -> Result<(), AssertionFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeHidden", is_not), || async move {
-      let hidden = locator.is_hidden().await.unwrap_or(true);
-      check_bool(hidden, is_not, "to be hidden")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeHidden", is_not),
+      || async move {
+        let hidden = locator.is_hidden().await.unwrap_or(true);
+        check_bool(hidden, is_not, "to be hidden")
+      },
+    )
     .await
   }
 
   pub async fn to_be_enabled(&self) -> Result<(), AssertionFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeEnabled", is_not), || async move {
-      let enabled = locator.is_enabled().await.unwrap_or(false);
-      check_bool(enabled, is_not, "to be enabled")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeEnabled", is_not),
+      || async move {
+        let enabled = locator.is_enabled().await.unwrap_or(false);
+        check_bool(enabled, is_not, "to be enabled")
+      },
+    )
     .await
   }
 
   pub async fn to_be_disabled(&self) -> Result<(), AssertionFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeDisabled", is_not), || async move {
-      let disabled = locator.is_disabled().await.unwrap_or(false);
-      check_bool(disabled, is_not, "to be disabled")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeDisabled", is_not),
+      || async move {
+        let disabled = locator.is_disabled().await.unwrap_or(false);
+        check_bool(disabled, is_not, "to be disabled")
+      },
+    )
     .await
   }
 
   pub async fn to_be_checked(&self) -> Result<(), AssertionFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeChecked", is_not), || async move {
-      let checked = locator.is_checked().await.unwrap_or(false);
-      check_bool(checked, is_not, "to be checked")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeChecked", is_not),
+      || async move {
+        let checked = locator.is_checked().await.unwrap_or(false);
+        check_bool(checked, is_not, "to be checked")
+      },
+    )
     .await
   }
 
   pub async fn to_be_editable(&self) -> Result<(), AssertionFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeEditable", is_not), || async move {
-      let editable = locator.is_editable().await.unwrap_or(false);
-      check_bool(editable, is_not, "to be editable")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeEditable", is_not),
+      || async move {
+        let editable = locator.is_editable().await.unwrap_or(false);
+        check_bool(editable, is_not, "to be editable")
+      },
+    )
     .await
   }
 
   pub async fn to_be_attached(&self) -> Result<(), AssertionFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeAttached", is_not), || async move {
-      let attached = locator.is_attached().await.unwrap_or(false);
-      check_bool(attached, is_not, "to be attached")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeAttached", is_not),
+      || async move {
+        let attached = locator.is_attached().await.unwrap_or(false);
+        check_bool(attached, is_not, "to be attached")
+      },
+    )
     .await
   }
 
@@ -139,20 +162,24 @@ impl Expect<'_, Locator> {
   pub async fn to_be_focused(&self) -> Result<(), AssertionFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toBeFocused", is_not), || async move {
-      let focused = locator
-        .evaluate(
-          "el => document.activeElement === el",
-          ferridriver::protocol::SerializedArgument::default(),
-          None,
-          None,
-        )
-        .await
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-      check_bool(focused, is_not, "to be focused")
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeFocused", is_not),
+      || async move {
+        let focused = locator
+          .evaluate(
+            "el => document.activeElement === el",
+            ferridriver::protocol::SerializedArgument::default(),
+            None,
+            None,
+          )
+          .await
+          .ok()
+          .and_then(|v| v.as_bool())
+          .unwrap_or(false);
+        check_bool(focused, is_not, "to be focused")
+      },
+    )
     .await
   }
 
@@ -164,9 +191,12 @@ impl Expect<'_, Locator> {
     let locator = self.subject;
     let is_not = self.is_not;
     let ratio = options.ratio.unwrap_or(0.0).clamp(0.0, 1.0);
-    poll_until(self.timeout, locator_ctx(locator, "toBeInViewport", is_not), || async move {
-      let js = format!(
-        "el => {{ var r = el.getBoundingClientRect(); \
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toBeInViewport", is_not),
+      || async move {
+        let js = format!(
+          "el => {{ var r = el.getBoundingClientRect(); \
          if (r.width === 0 || r.height === 0) return false; \
          var iw = window.innerWidth, ih = window.innerHeight; \
          var visW = Math.max(0, Math.min(r.right, iw) - Math.max(r.left, 0)); \
@@ -174,15 +204,16 @@ impl Expect<'_, Locator> {
          var inter = visW * visH; var area = r.width * r.height; \
          if (inter <= 0) return false; \
          return inter / area >= {ratio:.6}; }}"
-      );
-      let in_viewport = locator
-        .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None, None)
-        .await
-        .ok()
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-      check_bool(in_viewport, is_not, "to be in viewport")
-    })
+        );
+        let in_viewport = locator
+          .evaluate(&js, ferridriver::protocol::SerializedArgument::default(), None, None)
+          .await
+          .ok()
+          .and_then(|v| v.as_bool())
+          .unwrap_or(false);
+        check_bool(in_viewport, is_not, "to be in viewport")
+      },
+    )
     .await
   }
 
@@ -286,11 +317,7 @@ impl Expect<'_, Locator> {
 
   // ── Attributes ──
 
-  pub async fn to_have_attribute(
-    &self,
-    name: &str,
-    value: impl Into<StringOrRegex>,
-  ) -> Result<(), AssertionFailure> {
+  pub async fn to_have_attribute(&self, name: &str, value: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     let expected = value.into();
     let locator = self.subject;
     let is_not = self.is_not;
@@ -371,11 +398,7 @@ impl Expect<'_, Locator> {
     .await
   }
 
-  pub async fn to_have_css(
-    &self,
-    property: &str,
-    value: impl Into<StringOrRegex>,
-  ) -> Result<(), AssertionFailure> {
+  pub async fn to_have_css(&self, property: &str, value: impl Into<StringOrRegex>) -> Result<(), AssertionFailure> {
     self.to_have_css_with(property, value, HaveCssOptions::default()).await
   }
 
@@ -551,11 +574,7 @@ impl Expect<'_, Locator> {
     .await
   }
 
-  pub async fn to_have_js_property(
-    &self,
-    name: &str,
-    value: serde_json::Value,
-  ) -> Result<(), AssertionFailure> {
+  pub async fn to_have_js_property(&self, name: &str, value: serde_json::Value) -> Result<(), AssertionFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
     let prop_name = name.to_string();
@@ -589,10 +608,7 @@ impl Expect<'_, Locator> {
 
   // ── Array text matchers ──
 
-  pub async fn to_have_texts(
-    &self,
-    expected: &[impl Into<StringOrRegex> + Clone],
-  ) -> Result<(), AssertionFailure> {
+  pub async fn to_have_texts(&self, expected: &[impl Into<StringOrRegex> + Clone]) -> Result<(), AssertionFailure> {
     let expected: Vec<StringOrRegex> = expected.iter().map(|e| e.clone().into()).collect();
     let locator = self.subject;
     let is_not = self.is_not;
@@ -706,18 +722,22 @@ impl Expect<'_, Locator> {
   pub async fn to_have_count(&self, expected: usize) -> Result<(), AssertionFailure> {
     let locator = self.subject;
     let is_not = self.is_not;
-    poll_until(self.timeout, locator_ctx(locator, "toHaveCount", is_not), || async move {
-      let actual = locator.count().await.unwrap_or(0);
-      let matches = actual == expected;
-      if matches == is_not {
-        Err(MatchError::new(
-          format!("{}{expected}", if is_not { "not " } else { "" }),
-          format!("{actual}"),
-        ))
-      } else {
-        Ok(())
-      }
-    })
+    poll_until(
+      self.timeout,
+      locator_ctx(locator, "toHaveCount", is_not),
+      || async move {
+        let actual = locator.count().await.unwrap_or(0);
+        let matches = actual == expected;
+        if matches == is_not {
+          Err(MatchError::new(
+            format!("{}{expected}", if is_not { "not " } else { "" }),
+            format!("{actual}"),
+          ))
+        } else {
+          Ok(())
+        }
+      },
+    )
     .await
   }
 }

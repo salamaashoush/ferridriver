@@ -32,7 +32,14 @@ invokable = "invokable"
 tempory = "tempory"
 # "caf" appears as the first three chars of a git short-sha
 caf = "caf"
+# "clonable" — JS-idiomatic spelling (Web API uses `structuredClone`); test name parity
+clonable = "clonable"
+# "unparseable" — UK/CS variant matches "parse"/"parseable" idiom in our code
+unparseable = "unparseable"
 
 [default.extend-identifiers]
 # Intentional misspelling in Playwright-ported code
 deperecated = "deperecated"
+# `IIFEs` plural — JS term "Immediately Invoked Function Expression(s)"; typos
+# splits this and flags `IIF` as a typo for `IF`. Whitelist the identifier.
+IIFEs = "IIFEs"

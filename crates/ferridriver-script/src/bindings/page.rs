@@ -1297,11 +1297,7 @@ impl PageJs {
   /// function check is enforced by the core polling against the
   /// current URL).
   #[qjs(rename = "waitForURL")]
-  pub async fn wait_for_url<'js>(
-    &self,
-    ctx: rquickjs::Ctx<'js>,
-    url: rquickjs::Value<'js>,
-  ) -> rquickjs::Result<()> {
+  pub async fn wait_for_url<'js>(&self, ctx: rquickjs::Ctx<'js>, url: rquickjs::Value<'js>) -> rquickjs::Result<()> {
     use crate::bindings::convert::FerriResultExt;
     let matcher = url_value_to_matcher(&ctx, url)?;
     self.inner.wait_for_url(matcher).await.into_js()
