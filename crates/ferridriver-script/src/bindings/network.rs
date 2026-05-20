@@ -460,6 +460,66 @@ pub struct RouteJs {
   inner: StdMutex<Option<CoreRoute>>,
 }
 
+/// `Request` returned by `route.request()` (Playwright parity) — a
+/// read-only snapshot of the intercepted request's url / method /
+/// headers / postData / resourceType so handlers can `route.request()
+/// .headers()['x-foo']` exactly like Playwright code does.
+#[derive(JsLifetime, Trace)]
+#[rquickjs::class(rename = "RouteRequest")]
+pub struct RouteRequestJs {
+  #[qjs(skip_trace)]
+  url: String,
+  #[qjs(skip_trace)]
+  method: String,
+  #[qjs(skip_trace)]
+  headers: rustc_hash::FxHashMap<String, String>,
+  #[qjs(skip_trace)]
+  post_data: Option<String>,
+  #[qjs(skip_trace)]
+  resource_type: String,
+}
+
+#[rquickjs::methods]
+impl RouteRequestJs {
+  #[qjs(rename = "url")]
+  pub fn url(&self) -> String {
+    self.url.clone()
+  }
+  #[qjs(rename = "method")]
+  pub fn method(&self) -> String {
+    self.method.clone()
+  }
+  /// Playwright: `request.headers(): Record<string, string>`.
+  #[qjs(rename = "headers")]
+  pub fn headers<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    serde_to_js(&ctx, &self.headers)
+  }
+  /// Playwright: `request.headersArray(): { name, value }[]`.
+  #[qjs(rename = "headersArray")]
+  pub fn headers_array<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    let pairs: Vec<(&str, &str)> = self.headers.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    crate::bindings::convert::name_value_array_to_js(&ctx, &pairs)
+  }
+  /// Playwright: `request.headerValue(name): Promise<string | null>`.
+  #[qjs(rename = "headerValue")]
+  pub fn header_value(&self, name: String) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    self
+      .headers
+      .iter()
+      .find(|(k, _)| k.to_ascii_lowercase() == lower)
+      .map(|(_, v)| v.clone())
+  }
+  #[qjs(rename = "postData")]
+  pub fn post_data(&self) -> Option<String> {
+    self.post_data.clone()
+  }
+  #[qjs(rename = "resourceType")]
+  pub fn resource_type(&self) -> String {
+    self.resource_type.clone()
+  }
+}
+
 impl RouteJs {
   /// Construct a wrapper around a paused-route handle. The handle is
   /// consumed on the first call to `fulfill` / `continue` / `abort`;
@@ -474,13 +534,21 @@ impl RouteJs {
   }
 }
 
+/// WHATWG/Playwright `Headers` — `{ [name: string]: string }` record.
+/// Deserialised as a map then flattened to pairs at the call site so
+/// the core API (which takes `Vec<(String, String)>`) sees the
+/// expected shape. Accepting the record is REQUIRED for Playwright
+/// parity: `route.fulfill({ headers: { 'x-from': 'route' } })` is
+/// the documented form (see `client/network.ts`).
+type JsHeadersMap = std::collections::BTreeMap<String, String>;
+
 #[derive(serde::Deserialize, Debug, Default)]
 #[serde(rename_all = "camelCase", default)]
 struct JsFulfillOptions {
   status: Option<i32>,
   body: Option<String>,
   content_type: Option<String>,
-  headers: Option<Vec<(String, String)>>,
+  headers: Option<JsHeadersMap>,
 }
 
 #[derive(serde::Deserialize, Debug, Default)]
@@ -488,12 +556,51 @@ struct JsFulfillOptions {
 struct JsContinueOptions {
   url: Option<String>,
   method: Option<String>,
-  headers: Option<Vec<(String, String)>>,
+  headers: Option<JsHeadersMap>,
   post_data: Option<String>,
+}
+
+/// Lower the Playwright `Headers` record (`{name: value}`) the bindings
+/// accept down to the `Vec<(String, String)>` core expects.
+fn headers_to_pairs(map: Option<JsHeadersMap>) -> Vec<(String, String)> {
+  map.map(|m| m.into_iter().collect()).unwrap_or_default()
 }
 
 #[rquickjs::methods]
 impl RouteJs {
+  /// Playwright: `route.request(): Request` — the intercepted request,
+  /// inspectable as a real Request class (`.url()`, `.method()`,
+  /// `.headers()`, `.headerValue(name)`, `.headersArray()`,
+  /// `.postData()`, `.resourceType()`). LLM-generated Playwright code
+  /// uses `route.request().headers()['x-foo']` constantly; previously
+  /// `route.request` was undefined and the handler silently threw,
+  /// falling through to the network (`Failed to fetch`).
+  #[qjs(rename = "request")]
+  pub fn request(&self) -> RouteRequestJs {
+    let snap = self
+      .inner
+      .lock()
+      .ok()
+      .and_then(|g| g.as_ref().map(|r| r.request().clone()));
+    if let Some(r) = snap {
+      RouteRequestJs {
+        url: r.url,
+        method: r.method,
+        headers: r.headers,
+        post_data: r.post_data,
+        resource_type: r.resource_type,
+      }
+    } else {
+      RouteRequestJs {
+        url: String::new(),
+        method: String::new(),
+        headers: rustc_hash::FxHashMap::default(),
+        post_data: None,
+        resource_type: String::new(),
+      }
+    }
+  }
+
   /// Mirrors Playwright `route.url(): string`.
   #[qjs(rename = "url")]
   pub fn url(&self) -> String {
@@ -562,7 +669,7 @@ impl RouteJs {
       .ok()
       .and_then(|mut g| g.take())
       .ok_or_else(|| rquickjs::Error::new_from_js_message("Route", "Error", "Route already handled".to_string()))?;
-    let mut headers: Vec<(String, String)> = opts.headers.unwrap_or_default();
+    let mut headers: Vec<(String, String)> = headers_to_pairs(opts.headers);
     if let Some(ct) = opts.content_type.clone() {
       if !headers.iter().any(|(k, _)| k.eq_ignore_ascii_case("content-type")) {
         headers.push(("content-type".to_string(), ct));
@@ -594,7 +701,7 @@ impl RouteJs {
     route.continue_route(ContinueOverrides {
       url: opts.url,
       method: opts.method,
-      headers: opts.headers,
+      headers: opts.headers.map(|m| m.into_iter().collect()),
       post_data: opts.post_data.map(String::into_bytes),
     });
     Ok(())

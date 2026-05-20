@@ -1,6 +1,7 @@
 //! Conversion helpers between ferridriver core types and `rquickjs` values.
 
 use ferridriver::FerriError;
+use rquickjs::object::Property;
 use rquickjs::{Ctx, Function, Object, Value};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
@@ -67,6 +68,23 @@ pub fn serde_from_js<'js, T: DeserializeOwned>(_ctx: &Ctx<'js>, value: Value<'js
     .map_err(|e| rquickjs::Error::new_from_js_message("serde", "deserialize", e.to_string()))
 }
 
+/// Define `key` as an own data property (writable/enumerable/
+/// configurable, like a normal JS literal field) on `obj`.
+///
+/// Untrusted input — page-controlled `evaluate` results, script args —
+/// can contain a `__proto__` (or other accessor) key. `Object::set`
+/// routes through `[[Set]]`, so such a key would invoke the
+/// `__proto__` setter (retargeting the object's prototype) or any
+/// inherited setter. `Object::prop` lowers to `JS_DefineProperty`,
+/// which always creates an own data property and never triggers a
+/// setter — the value lands exactly where a JSON consumer expects.
+fn define_own<'js, V: rquickjs::IntoJs<'js>>(obj: &Object<'js>, key: &str, value: V) -> rquickjs::Result<()> {
+  obj.prop(
+    key,
+    Property::from(value).writable().enumerable().configurable(),
+  )
+}
+
 /// Build an `rquickjs::Value` from a `serde_json::Value`. Thin wrapper
 /// over [`serde_to_js`], kept for the script-args call site in
 /// `engine.rs`.
@@ -99,7 +117,7 @@ pub(crate) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs
     serde_json::Value::Object(map) => {
       let obj = Object::new(ctx.clone())?;
       for (k, val) in map {
-        obj.set(k.as_str(), json_to_js(ctx, val)?)?;
+        define_own(&obj, k.as_str(), json_to_js(ctx, val)?)?;
       }
       Ok(obj.into_value())
     },
@@ -358,7 +376,7 @@ fn rehydrate<'js>(
       refs.insert(*id, obj_value.clone());
       for entry in entries {
         let v = rehydrate(ctx, &entry.v, refs)?;
-        obj.set(entry.k.clone(), v)?;
+        define_own(&obj, &entry.k, v)?;
       }
       Ok(obj_value)
     },

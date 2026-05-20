@@ -8,6 +8,8 @@
 //! via its registered global constructor — no string `eval`.
 
 use base64::Engine as _;
+use base64::engine::GeneralPurpose;
+use base64::engine::general_purpose::GeneralPurposeConfig;
 use rquickjs::function::{Constructor, Func, Opt};
 use rquickjs::{Class, Ctx, Function, JsLifetime, TypedArray, Value, class::Trace};
 
@@ -118,6 +120,16 @@ impl Url {
     self.inner.as_str().to_string()
   }
 
+  /// `url.href = ...` reparses; an invalid value is a `TypeError`
+  /// (WHATWG: the `href` setter is the one component setter that
+  /// throws).
+  #[qjs(set, rename = "href")]
+  pub fn set_href(&mut self, value: String) -> rquickjs::Result<()> {
+    self.inner = url::Url::parse(&value)
+      .map_err(|e| rquickjs::Error::new_from_js_message("URL", "TypeError", e.to_string()))?;
+    Ok(())
+  }
+
   #[qjs(get, rename = "origin")]
   pub fn origin(&self) -> String {
     self.inner.origin().ascii_serialization()
@@ -128,14 +140,53 @@ impl Url {
     format!("{}:", self.inner.scheme())
   }
 
+  /// Component setters mirror the WHATWG URL setter steps: an invalid
+  /// value is ignored (no throw), matching browser behaviour.
+  #[qjs(set, rename = "protocol")]
+  pub fn set_protocol(&mut self, value: String) {
+    let scheme = value.strip_suffix(':').unwrap_or(&value);
+    let _ = self.inner.set_scheme(scheme);
+  }
+
+  #[qjs(get, rename = "username")]
+  pub fn username(&self) -> String {
+    self.inner.username().to_string()
+  }
+
+  #[qjs(set, rename = "username")]
+  pub fn set_username(&mut self, value: String) {
+    let _ = self.inner.set_username(&value);
+  }
+
+  #[qjs(get, rename = "password")]
+  pub fn password(&self) -> String {
+    self.inner.password().unwrap_or("").to_string()
+  }
+
+  #[qjs(set, rename = "password")]
+  pub fn set_password(&mut self, value: String) {
+    let _ = self.inner.set_password(if value.is_empty() { None } else { Some(&value) });
+  }
+
   #[qjs(get, rename = "hostname")]
   pub fn hostname(&self) -> String {
     self.inner.host_str().unwrap_or("").to_string()
   }
 
+  #[qjs(set, rename = "hostname")]
+  pub fn set_hostname(&mut self, value: String) {
+    let _ = self.inner.set_host(Some(&value));
+  }
+
   #[qjs(get, rename = "port")]
   pub fn port(&self) -> String {
     self.inner.port().map(|p| p.to_string()).unwrap_or_default()
+  }
+
+  #[qjs(set, rename = "port")]
+  pub fn set_port(&mut self, value: String) {
+    let port = value.trim().parse::<u16>().ok();
+    let _ = self.inner.set_port(port);
   }
 
   #[qjs(get, rename = "host")]
@@ -147,9 +198,25 @@ impl Url {
     }
   }
 
+  #[qjs(set, rename = "host")]
+  pub fn set_host(&mut self, value: String) {
+    if let Some((h, p)) = value.rsplit_once(':') {
+      if self.inner.set_host(Some(h)).is_ok() {
+        let _ = self.inner.set_port(p.parse::<u16>().ok());
+      }
+    } else {
+      let _ = self.inner.set_host(Some(&value));
+    }
+  }
+
   #[qjs(get, rename = "pathname")]
   pub fn pathname(&self) -> String {
     self.inner.path().to_string()
+  }
+
+  #[qjs(set, rename = "pathname")]
+  pub fn set_pathname(&mut self, value: String) {
+    self.inner.set_path(&value);
   }
 
   #[qjs(get, rename = "search")]
@@ -160,12 +227,24 @@ impl Url {
     }
   }
 
+  #[qjs(set, rename = "search")]
+  pub fn set_search(&mut self, value: String) {
+    let q = value.strip_prefix('?').unwrap_or(&value);
+    self.inner.set_query(if q.is_empty() { None } else { Some(q) });
+  }
+
   #[qjs(get, rename = "hash")]
   pub fn hash(&self) -> String {
     match self.inner.fragment() {
       Some(f) if !f.is_empty() => format!("#{f}"),
       _ => String::new(),
     }
+  }
+
+  #[qjs(set, rename = "hash")]
+  pub fn set_hash(&mut self, value: String) {
+    let f = value.strip_prefix('#').unwrap_or(&value);
+    self.inner.set_fragment(if f.is_empty() { None } else { Some(f) });
   }
 
   /// Live-ish `URLSearchParams` over this URL's query, built through the
@@ -186,6 +265,44 @@ impl Url {
   pub fn to_json(&self) -> String {
     self.inner.as_str().to_string()
   }
+}
+
+/// WHATWG "forgiving-base64 decode"
+/// (<https://infra.spec.whatwg.org/#forgiving-base64-decode>): strip
+/// ALL ASCII whitespace (not just the ends), reject a length ≡ 1 mod 4,
+/// tolerate missing/partial `=` padding, and discard non-zero trailing
+/// bits. `base64::STANDARD` does none of this (canonical padding only,
+/// no whitespace), so a spec-conformant `atob` needs the explicit
+/// algorithm here.
+fn forgiving_base64_decode(input: &str) -> Result<Vec<u8>, &'static str> {
+  let mut s: String = input
+    .chars()
+    .filter(|c| !matches!(c, '\t' | '\n' | '\u{0C}' | '\r' | ' '))
+    .collect();
+  // At most two trailing '=' are stripped; any remaining '=' (or one
+  // that leaves length ≡ 1 mod 4) is invalid.
+  if s.ends_with('=') {
+    s.pop();
+    if s.ends_with('=') {
+      s.pop();
+    }
+  }
+  if s.len() % 4 == 1 || s.contains('=') {
+    return Err("invalid base64 length");
+  }
+  if !s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'+' || b == b'/') {
+    return Err("invalid base64 character");
+  }
+  // No-pad alphabet, padding indifferent (we stripped it), trailing
+  // bits discarded — exactly the forgiving contract.
+  let engine = GeneralPurpose::new(
+    &base64::alphabet::STANDARD,
+    GeneralPurposeConfig::new()
+      .with_encode_padding(false)
+      .with_decode_padding_mode(base64::engine::DecodePaddingMode::Indifferent)
+      .with_decode_allow_trailing_bits(true),
+  );
+  engine.decode(s.as_bytes()).map_err(|_| "invalid base64")
 }
 
 /// Install the native web-API classes + globals. Called once at
@@ -230,9 +347,8 @@ pub fn install(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   globals.set(
     "atob",
     Func::from(|s: String| -> rquickjs::Result<String> {
-      let bytes = base64::engine::general_purpose::STANDARD
-        .decode(s.trim())
-        .map_err(|e| rquickjs::Error::new_from_js_message("atob", "InvalidCharacterError", e.to_string()))?;
+      let bytes = forgiving_base64_decode(&s)
+        .map_err(|m| rquickjs::Error::new_from_js_message("atob", "InvalidCharacterError", m.to_string()))?;
       Ok(bytes.into_iter().map(|b| b as char).collect())
     }),
   )?;

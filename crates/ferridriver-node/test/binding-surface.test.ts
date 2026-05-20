@@ -158,14 +158,15 @@ for (const backend of BACKENDS) {
     });
 
     it("page.exposeFunction wires JS callback", async () => {
+      // NAPI surface is fire-and-forget with a single args array
+      // (documented convention); the QuickJS/script surface carries the
+      // full Playwright parity (spread args + return-value delivery).
       const seen: unknown[][] = [];
       await page.exposeFunction("__expose_record", (args: unknown[]) => {
         seen.push(args);
       });
       await page.setContent("<button>x</button>");
       await page.evaluate(`window.__expose_record(1, 'two', { three: 3 })`);
-      // exposeFunction is fire-and-forget (Rust ExposedFn is sync,
-      // QuickJS/NAPI dispatch is async); give the dispatcher a tick.
       for (let i = 0; i < 50 && seen.length === 0; i++) {
         await new Promise((r) => setTimeout(r, 20));
       }

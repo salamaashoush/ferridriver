@@ -179,6 +179,9 @@ pub struct CookieData {
   pub expires: Option<f64>,
   /// SameSite attribute: "Strict", "Lax", or "None".
   pub same_site: Option<String>,
+  /// Playwright `SetNetworkCookieParam.url` — when set, the browser
+  /// derives domain/path from it. Absent on cookies read back.
+  pub url: Option<String>,
 }
 
 /// Performance metric.
@@ -1154,6 +1157,7 @@ impl From<&CookieData> for ferridriver::backend::CookieData {
         .same_site
         .as_deref()
         .and_then(|v| v.parse::<ferridriver::backend::SameSite>().ok()),
+      url: o.url.clone(),
     }
   }
 }
@@ -1169,6 +1173,7 @@ impl From<&ferridriver::backend::CookieData> for CookieData {
       http_only: o.http_only,
       expires: o.expires,
       same_site: o.same_site.map(|ss| ss.as_str().to_string()),
+      url: o.url.clone(),
     }
   }
 }

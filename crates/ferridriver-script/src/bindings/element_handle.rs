@@ -65,8 +65,9 @@ impl ElementHandleJs {
 
 #[rquickjs::methods]
 impl ElementHandleJs {
-  /// `true` once [`Self::dispose`] has run.
-  #[qjs(get, rename = "isDisposed")]
+  /// Playwright `elementHandle.isDisposed(): boolean` — METHOD (not a
+  /// property). LLM-generated code calls `eh.isDisposed()` with parens.
+  #[qjs(rename = "isDisposed")]
   pub fn is_disposed(&self) -> bool {
     self.inner.is_disposed()
   }
