@@ -89,7 +89,7 @@ async fn after_hook_receives_cucumber_result_arg() {
   let dir = tempfile::tempdir().expect("tempdir");
   std::fs::write(
     dir.path().join("steps.js"),
-    "After(function (s) { \
+    "After(function (world, s) { \
        if (s.result.status === 'FAILED') { \
          this.attach('failed:' + s.pickle.name + ':' + s.result.message, 'text/plain'); \
        } \
@@ -150,7 +150,7 @@ async fn define_parameter_type_transformer_yields_typed_arg() {
     dir.path().join("steps.js"),
     "defineParameterType({ name: 'amount', regexp: /\\d+/, \
        transformer: (s) => ({ n: Number(s) * 2 }) }); \
-     Given('I have {amount}', async function (a) { this.attach(JSON.stringify(a), 'application/json'); });",
+     Given('I have {amount}', async function (world, a) { this.attach(JSON.stringify(a), 'application/json'); });",
   )
   .expect("write steps");
 
