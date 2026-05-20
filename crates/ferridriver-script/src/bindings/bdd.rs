@@ -7,8 +7,13 @@
 //! held as context userdata (the QuickJS context is single-threaded, so
 //! a `RefCell` is the right interior mutability — no `Arc`/`Mutex`).
 //! Step bodies are kept as `Persistent` functions and called back by
-//! the Rust `ferridriver-bdd` core with cucumber-extracted arguments, a
-//! real `DataTableJs` and the per-scenario World as `this`.
+//! the Rust `ferridriver-bdd` core. Every body receives the
+//! per-scenario World as its FIRST positional argument — arrow,
+//! classic `function`, async, all the same shape — followed by the
+//! cucumber-extracted parameters, an optional `DataTableJs`, and an
+//! optional doc-string. The World is also bound as `this` so
+//! `function (world) { this === world }` holds for callers who prefer
+//! that style.
 //!
 //! No business logic here: matching, outline expansion, tag filtering
 //! and hook ordering all stay in the `ferridriver-bdd` core.
@@ -959,14 +964,28 @@ pub async fn invoke_step(
         .catch(&ctx)
         .map_err(|e| caught_to_script_error(e, &source))?;
     }
-    let this = match world {
+    let world_obj = match world {
       Some(w) => w.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?,
       None => Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?,
     };
 
-    let n = params.len() + usize::from(data_table.is_some()) + usize::from(doc_string.is_some());
+    // The per-scenario World is always the FIRST positional argument
+    // and is also bound as `this`. Same shape for every body — arrow,
+    // classic `function`, async, shorthand methods.
+    //
+    //   Given("I have {int} cukes", (world, n) => { world.count = n; })
+    //   Given("I have {int} cukes", function (world, n) { this.count = n; })
+    //
+    // Both work identically; the second form just chooses to use `this`
+    // instead of the first arg.
+    let n = 1 + params.len() + usize::from(data_table.is_some()) + usize::from(doc_string.is_some());
     let mut args = Args::new(ctx.clone(), n);
-    args.this(this).map_err(|e| ScriptError::internal(e.to_string()))?;
+    args
+      .this(world_obj.clone())
+      .map_err(|e| ScriptError::internal(e.to_string()))?;
+    args
+      .push_arg(world_obj)
+      .map_err(|e| ScriptError::internal(e.to_string()))?;
     for p in &params {
       match p {
         JsArg::Str(s) => args.push_arg(s.as_str()).map_err(|e| ScriptError::internal(e.to_string()))?,
@@ -1065,15 +1084,21 @@ pub async fn invoke_hook(
       Ok::<_, ScriptError>((hook.func.clone(), reg.current_world.clone(), t))
     })??;
     let func = func.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?;
-    let this = match world {
+    let world_obj = match world {
       Some(w) => w.restore(&ctx).map_err(|e| ScriptError::internal(e.to_string()))?,
       None => Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?,
     };
-    // Cucumber-shaped hook parameter: `{ pickle: { name, tags:[{name}] },
-    // result: { status, message? } }`. Built via the Object API.
-    let n_args = usize::from(arg.is_some());
+    // Hooks: World is always arg[0] and `this`. The cucumber-shaped
+    // hook parameter (`{ pickle, result }`) follows as arg[1] when
+    // present (`After(world, hookInfo)`).
+    let n_args = 1 + usize::from(arg.is_some());
     let mut args = Args::new(ctx.clone(), n_args);
-    args.this(this).map_err(|e| ScriptError::internal(e.to_string()))?;
+    args
+      .this(world_obj.clone())
+      .map_err(|e| ScriptError::internal(e.to_string()))?;
+    args
+      .push_arg(world_obj)
+      .map_err(|e| ScriptError::internal(e.to_string()))?;
     if let Some(a) = arg {
       let param = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
       let pickle = Object::new(ctx.clone()).map_err(|e| ScriptError::internal(e.to_string()))?;
