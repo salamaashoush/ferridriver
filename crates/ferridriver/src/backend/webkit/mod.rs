@@ -749,13 +749,35 @@ impl WebKitPage {
       url: main_url,
     }];
 
-    // Probe the DOM for <iframe> elements.
+    // Probe the DOM for <iframe> elements. webkit6's `LoadEvent::Finished`
+    // fires when the main resource is loaded but the parser may still
+    // be building the subtree on the next main-loop turn — querying
+    // `document.querySelectorAll('iframe')` synchronously after
+    // `WaitNav` resolves can return an empty list even when iframes
+    // are present in the source HTML. Retry from the Rust side (a
+    // fresh `evaluate_javascript_future` is a clean JSCContext turn,
+    // unlike a single async JS body where `setTimeout(0)` yields are
+    // not always honored under headless webkit6).
     let probe = "JSON.stringify(Array.from(document.querySelectorAll('iframe')).map((el, i) => ({\
        i, \
        name: el.getAttribute('name') || '', \
        url: el.src || (el.contentDocument && el.contentDocument.URL) || '' \
      })))";
-    if let Ok(Some(value)) = self.evaluate(probe).await {
+    #[cfg_attr(not(target_os = "linux"), allow(unused_mut))]
+    let mut probe_result = self.evaluate(probe).await;
+    #[cfg(target_os = "linux")]
+    for _ in 0..10 {
+      let empty = matches!(
+        &probe_result,
+        Ok(Some(serde_json::Value::String(s))) if s == "[]"
+      );
+      if !empty {
+        break;
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+      probe_result = self.evaluate(probe).await;
+    }
+    if let Ok(Some(value)) = probe_result {
       if let Some(raw) = value.as_str() {
         if let Ok(arr) = serde_json::from_str::<Vec<serde_json::Value>>(raw) {
           for entry in arr {

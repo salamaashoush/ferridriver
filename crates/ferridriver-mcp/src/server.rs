@@ -363,7 +363,7 @@ impl McpServer {
   ) -> Self {
     let kind = match backend {
       BackendKind::Bidi => ferridriver::options::BrowserKind::Firefox,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       BackendKind::WebKit => ferridriver::options::BrowserKind::WebKit,
       _ => ferridriver::options::BrowserKind::Chromium,
     };

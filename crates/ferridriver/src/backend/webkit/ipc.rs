@@ -1,124 +1,24 @@
 //! IPC between parent and `WebKit` host subprocess.
 //!
-//! Binary frame protocol over Unix socketpair (ported from Bun's `ipc_protocol.h)`:
-//!   Frame = { u32 len, u32 `req_id`, u8 op } (9 bytes LE) + payload\[len\]
-//!   Strings = u32 len (LE) + UTF-8 bytes
+//! Wire-level binary frame protocol lives in
+//! [`ferridriver_webkit_wire`]; this module is the parent-side client —
+//! [`IpcClient`], reader thread, response dispatch, route-handler
+//! plumbing.
 //!
-//! Child: single-threaded, nonblocking socket, `NSRunLoop` for `AppKit` callbacks.
-//!        NO background threads. NO mpsc. NO socket cloning.
-//!        Matches Bun's `host_main.cpp`: `read()` to EAGAIN, parse frames, dispatch.
+//! Child: single-threaded, nonblocking socket, run-loop-driven (`NSRunLoop`
+//! on macOS, GTK main loop on Linux). NO background threads. NO mpsc. NO
+//! socket cloning.
 //!
-//! Parent: std blocking sockets, background reader thread, oneshot channels.
-//!         `std::process::Command` spawn (NOT tokio).
+//! Parent: std blocking sockets, background reader thread, oneshot
+//! channels. `std::process::Command` spawn (NOT tokio).
 
 use rustc_hash::FxHashMap;
-use std::io::{Read, Write};
+use std::io::Read;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use tokio::sync::oneshot;
 
-// ─── Binary frame protocol ──────────────────────────────────────────────────
-
-const FRAME_HDR: usize = 9;
-
-#[repr(u8)]
-#[derive(Debug, Clone, Copy)]
-pub enum Op {
-  CreateView = 1,
-  Navigate = 2,
-  Evaluate = 3,
-  Screenshot = 4,
-  Close = 5,
-  GoBack = 7,
-  GoForward = 8,
-  Reload = 9,
-  Click = 10,
-  Type = 11,
-  PressKey = 12,
-  KeyDown = 13,
-  KeyUp = 14,
-  GetUrl = 20,
-  GetTitle = 21,
-  ListViews = 22,
-  SetUserAgent = 30,
-  WaitNav = 40,
-  SetFileInput = 50,
-  SetViewport = 51,
-  GetCookies = 60,
-  SetCookie = 61,
-  DeleteCookie = 62,
-  ClearCookies = 63,
-  LoadHtml = 64,
-  AddInitScript = 65,
-  MouseEvent = 66,
-  SetLocale = 67,
-  SetTimezone = 68,
-  EmulateMedia = 69,
-  AccessibilityTree = 70,
-  /// Route request: sent FROM the host subprocess TO the parent when a JS
-  /// fetch/XHR matches a route. Payload: str url + str method + str `headers_json` + str body.
-  /// Parent responds with `REP_VALUE` containing the serialized `RouteAction` JSON.
-  RouteRequest = 71,
-  /// Query the running WebKit.framework version. No payload. Response:
-  /// `REP_VALUE` with a string like `"WebKit/617.1.2 (17618)"` — the same
-  /// shape CDP's `Browser.getVersion().product` returns for Chromium, so
-  /// `browser.version()` surfaces a real product version on every backend.
-  GetWebKitVersion = 72,
-  /// Release a `window.__wr` registry entry — the `WebKit` equivalent of
-  /// CDP's `Runtime.releaseObject` and `BiDi`'s `script.disown`. Payload:
-  /// `u64 ref_id + u64 view_id` (LE). Response: `REP_OK` on successful
-  /// delete, `REP_OK` also when the ref doesn't exist (idempotent). Used
-  /// by [`crate::js_handle::JSHandle::dispose`] on the `WebKit` backend.
-  ReleaseRef = 73,
-  Shutdown = 255,
-}
-
-#[repr(u8)]
-#[derive(Debug, Clone, Copy)]
-pub enum Rep {
-  Ok = 1,
-  Error = 2,
-  Value = 3,
-  ViewCreated = 4,
-  ViewList = 5,
-  Binary = 6,
-}
-
-fn frame_write(w: &mut impl Write, req_id: u32, op: u8, payload: &[u8]) {
-  #[allow(clippy::cast_possible_truncation)] // payload length is always < 4GB for IPC frames
-  let len = payload.len() as u32;
-  let mut h = [0u8; FRAME_HDR];
-  h[0..4].copy_from_slice(&len.to_le_bytes());
-  h[4..8].copy_from_slice(&req_id.to_le_bytes());
-  h[8] = op;
-  let _ = w.write_all(&h);
-  if !payload.is_empty() {
-    let _ = w.write_all(payload);
-  }
-  let _ = w.flush();
-}
-
-pub fn str_encode(buf: &mut Vec<u8>, s: &str) {
-  #[allow(clippy::cast_possible_truncation)] // string length is always < 4GB for IPC payloads
-  let str_len = s.len() as u32;
-  buf.extend_from_slice(&str_len.to_le_bytes());
-  buf.extend_from_slice(s.as_bytes());
-}
-
-fn str_decode(data: &[u8], off: &mut usize) -> String {
-  if *off + 4 > data.len() {
-    return String::new();
-  }
-  let n = u32::from_le_bytes([data[*off], data[*off + 1], data[*off + 2], data[*off + 3]]) as usize;
-  *off += 4;
-  if *off + n > data.len() {
-    *off = data.len();
-    return String::new();
-  }
-  let s = String::from_utf8_lossy(&data[*off..*off + n]).to_string();
-  *off += n;
-  s
-}
+pub use ferridriver_webkit_wire::{FRAME_HDR, Op, Rep, frame_write, str_decode, str_encode};
 
 // ─── IPC Response ───────────────────────────────────────────────────────────
 
@@ -259,7 +159,11 @@ fn handle_route_request(
     #[allow(clippy::cast_possible_truncation)] // rid fits in u32 (originated as u32)
     let rid_u32 = rid as u32;
     if let Ok(mut w) = writer.lock() {
-      frame_write(&mut *w, rid_u32, 71 /* OP_ROUTE_REQUEST */, &resp_payload);
+      // Route-reply errors are non-fatal: if the writer is gone, the host has
+      // either crashed or shut down — the pending fetch on the page side will
+      // surface its own timeout. Mirrors the macOS reader-thread behaviour
+      // (the prior `let _ = w.write_all(...)` pattern in the old inline impl).
+      let _ = frame_write(&mut *w, rid_u32, 71 /* OP_ROUTE_REQUEST */, &resp_payload);
     }
   }
 }
@@ -360,13 +264,10 @@ pub struct IpcClient {
   pub route_handler: Arc<StdMutex<Option<RouteCallback>>>,
 }
 
-/// Path to the host binary baked in at compile time by build.rs.
-#[cfg(target_os = "macos")]
-static HOST_BINARY_PATH: &str = concat!(env!("OUT_DIR"), "/fd_webkit_host");
-
-/// File name of the `WebKit` host binary.
-#[cfg(target_os = "macos")]
-const HOST_BINARY_NAME: &str = "fd_webkit_host";
+/// File name of the cross-platform `WebKit` host binary, produced by
+/// `crates/ferridriver-webkit-host` for both macOS (Obj-C `WKWebView`)
+/// and Linux (webkit6 / GTK4).
+const HOST_BINARY_NAME: &str = "ferridriver-webkit-host";
 
 impl IpcClient {
   /// Resolve the path to the `WebKit` host binary.
@@ -374,9 +275,11 @@ impl IpcClient {
   /// Priority:
   /// 1. `FERRIDRIVER_WEBKIT_HOST` env var (explicit override)
   /// 2. Sibling to the running executable (e.g. next to `ferridriver` CLI)
-  /// 3. `~/.cache/ferridriver/fd_webkit_host` (survives cargo clean)
-  /// 4. Compile-time baked path from build.rs (dev builds)
-  #[cfg(target_os = "macos")]
+  /// 3. Cargo target directory walked up from `CARGO_MANIFEST_DIR`
+  ///    (dev builds — `cargo build` puts the binary in
+  ///    `target/{profile}/ferridriver-webkit-host`)
+  /// 4. `~/Library/Caches/ferridriver/ferridriver-webkit-host` (macOS-native)
+  /// 5. `~/.cache/ferridriver/ferridriver-webkit-host` (XDG)
   fn resolve_host_binary() -> crate::error::Result<std::path::PathBuf> {
     use crate::FerriError;
     // Priority 1: Environment variable override
@@ -409,17 +312,11 @@ impl IpcClient {
       if mac_cached.exists() {
         return Ok(mac_cached);
       }
-      // XDG-style fallback (used by build.rs)
+      // XDG-style fallback
       let xdg_cached = home.join(".cache/ferridriver").join(HOST_BINARY_NAME);
       if xdg_cached.exists() {
         return Ok(xdg_cached);
       }
-    }
-
-    // Priority 4: Compile-time baked path (dev builds)
-    let baked = std::path::PathBuf::from(HOST_BINARY_PATH);
-    if baked.exists() {
-      return Ok(baked);
     }
 
     Err(FerriError::backend(format!(
@@ -427,9 +324,8 @@ impl IpcClient {
        1. $FERRIDRIVER_WEBKIT_HOST (not set)\n  \
        2. sibling to current executable\n  \
        3. ~/Library/Caches/ferridriver/{HOST_BINARY_NAME}\n  \
-       4. ~/.cache/ferridriver/{HOST_BINARY_NAME}\n  \
-       5. {HOST_BINARY_PATH}\n\
-       Set FERRIDRIVER_WEBKIT_HOST or rebuild with `cargo build`."
+       4. ~/.cache/ferridriver/{HOST_BINARY_NAME}\n\
+       Rebuild with `cargo build --workspace` (or `cargo build -p ferridriver-webkit-host`)."
     )))
   }
 
@@ -500,7 +396,7 @@ impl IpcClient {
   fn spawn_host_process(
     exe: &std::path::Path,
     child_fd: std::os::unix::io::RawFd,
-    _headless: bool,
+    headless: bool,
   ) -> crate::error::Result<std::process::Child> {
     // SAFETY: pre_exec runs in the forked child before exec. We manipulate
     // file descriptors to pass the IPC socket as fd 3 to the host subprocess.
@@ -513,6 +409,13 @@ impl IpcClient {
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::inherit());
+      // Linux: when `headless` is requested, ask the host to re-exec
+      // under `xvfb-run` so the GTK window never lands on the user's
+      // desktop. macOS host ignores this env var (its `WKWebView`
+      // host already runs offscreen by design).
+      if headless {
+        cmd.env("FERRIDRIVER_WEBKIT_HEADLESS", "1");
+      }
       cmd.pre_exec(move || {
         // Put the WebKit host in its own session+process group so any
         // helper it forks is torn down together with it.
@@ -673,7 +576,8 @@ impl IpcClient {
         .writer
         .lock()
         .map_err(|e| FerriError::backend(format!("writer lock poisoned: {e}")))?;
-      frame_write(&mut *w, rid, op as u8, payload);
+      frame_write(&mut *w, rid, op as u8, payload)
+        .map_err(|e| FerriError::backend(format!("webkit ipc write: {e}")))?;
     }
     match tokio::time::timeout(std::time::Duration::from_secs(30), rx).await {
       Ok(Ok(r)) => Ok(r),

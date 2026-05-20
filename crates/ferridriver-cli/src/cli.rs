@@ -289,7 +289,7 @@ pub struct TransportArgs {
 pub enum Backend {
   CdpPipe,
   CdpRaw,
-  #[cfg(target_os = "macos")]
+  #[cfg(webkit_backend)]
   Webkit,
   Bidi,
 }
@@ -304,7 +304,7 @@ pub fn backend_to_kind(b: &Backend) -> BackendKind {
   match b {
     Backend::CdpPipe => BackendKind::CdpPipe,
     Backend::CdpRaw => BackendKind::CdpRaw,
-    #[cfg(target_os = "macos")]
+    #[cfg(webkit_backend)]
     Backend::Webkit => BackendKind::WebKit,
     Backend::Bidi => BackendKind::Bidi,
   }

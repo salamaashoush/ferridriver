@@ -1,0 +1,41 @@
+[package]
+name = "ferridriver-webkit-host"
+description = "Cross-platform WebKit host subprocess for ferridriver. Drives webkit6::WebView on GTK4 on Linux and WKWebView (Obj-C) on macOS — single binary, single IPC wire protocol."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[[bin]]
+name = "ferridriver-webkit-host"
+path = "src/main.rs"
+
+[dependencies]
+ferridriver-webkit-wire = { workspace = true }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+base64.workspace = true
+gdk4 = { version = "0.11", features = ["v4_6"] }
+gio = "0.22.6"
+glib = "0.22.7"
+gtk4 = "0.11.3"
+libc = { workspace = true }
+serde_json.workspace = true
+soup3 = "0.9.0"
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+webkit6 = { version = "0.6.1", features = ["v2_52"] }
+
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+libc = { workspace = true }
+
+[build-dependencies]
+cc = "1"

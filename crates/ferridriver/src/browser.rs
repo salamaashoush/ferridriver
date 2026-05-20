@@ -241,7 +241,7 @@ impl Browser {
       crate::backend::BackendKind::CdpPipe
       | crate::backend::BackendKind::CdpRaw
       | crate::backend::BackendKind::Bidi => true,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       crate::backend::BackendKind::WebKit => false,
     }
   }

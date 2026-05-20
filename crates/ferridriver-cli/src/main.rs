@@ -194,7 +194,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
     overrides.backend = match args.browser.backend {
       cli::Backend::CdpPipe => Some("cdp-pipe".into()),
       cli::Backend::CdpRaw => Some("cdp-raw".into()),
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       cli::Backend::Webkit => Some("webkit".into()),
       cli::Backend::Bidi => Some("bidi".into()),
     };

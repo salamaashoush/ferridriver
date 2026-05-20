@@ -366,9 +366,9 @@ async fn apply_page_config(
   // WebKit (stock WKWebView) rejects several context-options fields
   // outright; mirror Playwright's launchPersistentContext semantics
   // and degrade silently when the user hasn't explicitly opted in.
-  #[cfg(target_os = "macos")]
+  #[cfg(webkit_backend)]
   let is_webkit = matches!(backend_kind, ferridriver::backend::BackendKind::WebKit);
-  #[cfg(not(target_os = "macos"))]
+  #[cfg(not(webkit_backend))]
   let is_webkit = false;
   let _ = backend_kind;
 

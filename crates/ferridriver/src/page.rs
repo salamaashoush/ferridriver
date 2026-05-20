@@ -346,10 +346,14 @@ impl Page {
     // - BiDi: `browsingContext.contextCreated` arrives async with empty
     //   `name`; the cache won't reflect the DOM until our `getTree` probe
     //   runs.
-    // - WebKit (WKWebView, macOS-only): no FrameAttached events at all —
-    //   the cache is populated solely by `get_frame_tree`'s DOM probe.
+    // - WebKit (WKWebView on macOS, WebKitGTK on Linux): no FrameAttached
+    //   events at all — the cache is populated solely by `get_frame_tree`'s
+    //   DOM probe, which must run after EVERY navigation since
+    //   `ensure_frame_cache_seeded`'s early-return on `main_frame_id`
+    //   present would otherwise skip refreshing the iframe set on a
+    //   reused page.
     let needs_sync = matches!(self.inner.kind(), crate::backend::BackendKind::Bidi);
-    #[cfg(target_os = "macos")]
+    #[cfg(webkit_backend)]
     let needs_sync = needs_sync || matches!(self.inner.kind(), crate::backend::BackendKind::WebKit);
     if needs_sync {
       // Single pass — extra sync rounds would push past the
@@ -2796,13 +2800,23 @@ impl Touchscreen<'_> {
   ///
   /// Returns an error if the tap event dispatch fails.
   pub async fn tap(&self, x: f64, y: f64) -> Result<()> {
+    // webkit6 / WebKitGTK exposes `Touch` and `TouchEvent` as
+    // constructors but throws "Illegal constructor" when JS tries to
+    // instantiate them — they're internal-only. macOS WKWebView is
+    // the same. `typeof X !== 'undefined'` isn't enough; try the
+    // actual construction in a try/catch and fall through on throw.
     self.page.inner.evaluate(&format!(
       "(function(){{var el=document.elementFromPoint({x},{y})||document.body;\
-       if(typeof Touch!=='undefined'&&typeof TouchEvent!=='undefined'){{\
-         var t=new Touch({{identifier:1,target:el,clientX:{x},clientY:{y}}});\
-         el.dispatchEvent(new TouchEvent('touchstart',{{touches:[t],changedTouches:[t],bubbles:true}}));\
-         el.dispatchEvent(new TouchEvent('touchend',{{touches:[],changedTouches:[t],bubbles:true}}));\
-       }}else{{\
+       var dispatched=false;\
+       try{{\
+         if(typeof Touch!=='undefined'&&typeof TouchEvent!=='undefined'){{\
+           var t=new Touch({{identifier:1,target:el,clientX:{x},clientY:{y}}});\
+           el.dispatchEvent(new TouchEvent('touchstart',{{touches:[t],changedTouches:[t],bubbles:true}}));\
+           el.dispatchEvent(new TouchEvent('touchend',{{touches:[],changedTouches:[t],bubbles:true}}));\
+           dispatched=true;\
+         }}\
+       }}catch(e){{}}\
+       if(!dispatched){{\
          el.dispatchEvent(new PointerEvent('pointerdown',{{clientX:{x},clientY:{y},bubbles:true,isPrimary:true,pointerType:'touch'}}));\
          el.dispatchEvent(new PointerEvent('pointerup',{{clientX:{x},clientY:{y},bubbles:true,isPrimary:true,pointerType:'touch'}}));\
          el.click();\
