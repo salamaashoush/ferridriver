@@ -14,3 +14,4 @@ ferridriver = { path = "../../crates/ferridriver" }
 ferridriver-bdd = { path = "../../crates/ferridriver-bdd" }
 ferridriver-test = { path = "../../crates/ferridriver-test" }
 tokio = { workspace = true }
+serde_json = { workspace = true }
