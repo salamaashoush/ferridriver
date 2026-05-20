@@ -16,6 +16,7 @@ pub mod client;
 pub mod console_message;
 pub mod dialog;
 pub mod download;
+pub mod expect;
 pub mod file_chooser;
 pub mod getby_regex;
 pub mod handle_surface;

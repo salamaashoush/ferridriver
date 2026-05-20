@@ -1263,7 +1263,7 @@ fn test_script_handle_lifecycle(c: &mut McpClient) {
   // querySelector returns an ElementHandle with isDisposed=false.
   let v = c.script_value(
     "const h = await page.querySelector('button#primary');\
-     return {found: h !== null, disposed: h.isDisposed};",
+     return {found: h !== null, disposed: h.isDisposed()};",
   );
   assert_eq!(v["found"], json!(true), "querySelector missed #primary: {v}");
   assert_eq!(v["disposed"], json!(false), "fresh handle already disposed: {v}");
@@ -1290,11 +1290,11 @@ fn test_script_handle_lifecycle(c: &mut McpClient) {
   // dispose() latches isDisposed and is idempotent.
   let v = c.script_value(
     "const h = await page.querySelector('button#primary');\
-     const before = h.isDisposed;\
+     const before = h.isDisposed();\
      await h.dispose();\
-     const after1 = h.isDisposed;\
+     const after1 = h.isDisposed();\
      await h.dispose();\
-     const after2 = h.isDisposed;\
+     const after2 = h.isDisposed();\
      return {before, after1, after2};",
   );
   assert_eq!(v["before"], json!(false), "before dispose: {v}");
@@ -1305,11 +1305,11 @@ fn test_script_handle_lifecycle(c: &mut McpClient) {
   let v = c.script_value(
     "const eh = await page.querySelector('button#primary');\
      const jh = eh.asJSHandle();\
-     const before_eh = eh.isDisposed;\
-     const before_jh = jh.isDisposed;\
+     const before_eh = eh.isDisposed();\
+     const before_jh = jh.isDisposed();\
      await eh.dispose();\
-     const after_eh = eh.isDisposed;\
-     const after_jh = jh.isDisposed;\
+     const after_eh = eh.isDisposed();\
+     const after_jh = jh.isDisposed();\
      return {before_eh, before_jh, after_eh, after_jh};",
   );
   assert_eq!(v["before_eh"], json!(false));
@@ -1375,9 +1375,9 @@ fn test_script_evaluate_fn_and_handle(c: &mut McpClient) {
   // page.evaluateHandle — returns a live JSHandle.
   let v = c.script_value(
     "const h = await page.evaluateHandle(() => ({x: 42}));\
-     const disposed = h.isDisposed;\
+     const disposed = h.isDisposed();\
      await h.dispose();\
-     return {disposed_before: disposed, disposed_after: h.isDisposed};",
+     return {disposed_before: disposed, disposed_after: h.isDisposed()};",
   );
   assert_eq!(v["disposed_before"], json!(false));
   assert_eq!(v["disposed_after"], json!(true));
@@ -2453,6 +2453,21 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::browser_type::test_browser_type_chromium_transport_ws);
   run!(backends_support::browser_type::test_browser_type_connect_over_cdp_chromium_only);
   run!(backends_support::browser_type::test_browser_type_launch_persistent_context);
+
+  // expect() global — Jest-style value matchers + Playwright web-first
+  // matchers + asymmetric matchers, exercised through a live browser
+  // on every backend (Rule 9).
+  run!(backends_support::expect::test_expect_to_be_visible);
+  run!(backends_support::expect::test_expect_to_have_text);
+  run!(backends_support::expect::test_expect_to_contain_text);
+  run!(backends_support::expect::test_expect_to_have_count);
+  run!(backends_support::expect::test_expect_to_have_attribute);
+  run!(backends_support::expect::test_expect_to_have_value);
+  run!(backends_support::expect::test_expect_page_title_and_url);
+  run!(backends_support::expect::test_expect_value_matchers_in_script);
+  run!(backends_support::expect::test_expect_to_throw_in_script);
+  run!(backends_support::expect::test_expect_failure_throws);
+  run!(backends_support::expect::test_expect_poll_with_browser);
 
   // QuickJS binding surface — `getBy*` accessors on Frame/Locator,
   // FrameLocator class, page-level `touchscreen`/`snapshotForAI`/

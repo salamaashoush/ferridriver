@@ -200,20 +200,16 @@ pub fn test_page_expose_function(c: &mut McpClient) {
   setup(c);
   let v = c.script_value(
     r"
-    globalThis.__capturedArgs = null;
-    await page.exposeFunction('__expose_record', (args) => {
-      globalThis.__capturedArgs = args;
+    // Playwright parity: args are SPREAD into the callback and the
+    // callback's return value is delivered to the page-side caller, so
+    // `await window.fn(...)` resolves to the real result (no polling).
+    await page.exposeFunction('__expose_record', (...a) => {
+      return { got: a, n: a.length };
     });
     const installed = await page.evaluate(`typeof window.__expose_record`);
-    await page.evaluate(`void window.__expose_record(1, 'two', { three: 3 })`);
-    // The exposed-callback dispatch runs on a tokio task; await a real
-    // setTimeout (rquickjs-extra-timers) — it yields the scheduler and
-    // drives the runtime so the dispatch reaches QuickJS. Bounded poll,
-    // exits as soon as the callback lands.
-    for (let i = 0; i < 100 && globalThis.__capturedArgs === null; i++) {
-      await new Promise((r) => setTimeout(r, 10));
-    }
-    return { installed, captured: globalThis.__capturedArgs };
+    const result = await page.evaluate(
+      `window.__expose_record(1, 'two', { three: 3 })`);
+    return { installed, result };
   ",
   );
   assert_eq!(
@@ -221,11 +217,10 @@ pub fn test_page_expose_function(c: &mut McpClient) {
     Some("function"),
     "exposeFunction should install window.__expose_record as a function: {v}"
   );
-  let captured = &v["captured"];
   assert_eq!(
-    captured,
-    &json!([1, "two", {"three": 3}]),
-    "exposed callback should receive the page-side args"
+    &v["result"],
+    &json!({ "got": [1, "two", {"three": 3}], "n": 3 }),
+    "exposed callback receives SPREAD args and its return value reaches the page: {v}"
   );
 }
 
