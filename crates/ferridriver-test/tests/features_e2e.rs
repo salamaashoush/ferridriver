@@ -360,7 +360,10 @@ fn make_to_pass_test() -> TestCase {
         "#;
         page.goto(&data_url(html), None).await.map_err(make_failure)?;
 
-        // toPass retries the block until it succeeds.
+        // toPass retries the block until it succeeds. The closure
+        // returns an `AssertionFailure` (the shared assertion error
+        // type); the test-runner adapter converts to `TestFailure` at
+        // the call site below.
         ferridriver_test::to_pass(Duration::from_secs(5), || {
           let page = Arc::clone(&page);
           async move {
@@ -368,20 +371,19 @@ fn make_to_pass_test() -> TestCase {
               .locator("#status", None)
               .text_content()
               .await
-              .map_err(make_failure)?
+              .map_err(|e| ferridriver_test::expect::AssertionFailure::new(e.to_string(), None))?
               .unwrap_or_default();
             if text != "ready" {
-              return Err(TestFailure {
-                message: format!("expected 'ready', got '{text}'"),
-                stack: None,
-                diff: None,
-                screenshot: None,
-              });
+              return Err(ferridriver_test::expect::AssertionFailure::new(
+                format!("expected 'ready', got '{text}'"),
+                None,
+              ));
             }
             Ok(())
           }
         })
-        .await?;
+        .await
+        .map_err(TestFailure::from)?;
 
         Ok(())
       })
