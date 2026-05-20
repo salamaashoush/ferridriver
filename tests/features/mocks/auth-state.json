@@ -2,6 +2,7 @@
   "cookies": [],
   "origins": [
     {
+      "origin": "https://example.com",
       "localStorage": [
         {
           "name": "token",
@@ -11,8 +12,7 @@
           "name": "theme",
           "value": "dark"
         }
-      ],
-      "origin": "https://example.com"
+      ]
     }
   ]
 }

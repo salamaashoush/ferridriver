@@ -1542,6 +1542,7 @@ impl Page {
             .get("sameSite")
             .and_then(|v| v.as_str())
             .and_then(|v| v.parse::<crate::backend::SameSite>().ok()),
+          url: None,
         };
         self.inner.set_cookie(cookie).await?;
       }

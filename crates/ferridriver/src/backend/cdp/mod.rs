@@ -3054,17 +3054,109 @@ impl<T: CdpWrap> CdpPage<T> {
 
   /// Dispatch a keyDown event for a single key (does NOT release it).
   pub async fn key_down(&self, key: &str) -> Result<()> {
+    self.key_down_with_mods(key, 0).await
+  }
+
+  /// Dispatch a keyDown carrying a CDP `modifiers` bitfield (Alt=1,
+  /// Ctrl=2, Meta=4, Shift=8). Used by `press_key` to handle
+  /// Playwright-style combos like `"Control+a"`.
+  pub(crate) async fn key_down_with_mods(&self, key: &str, modifiers: u32) -> Result<()> {
     let (dom_key, vk, text) = Self::resolve_key(key);
     let down_type = if text.is_some() { "keyDown" } else { "rawKeyDown" };
+    // Don't emit text characters while a non-Shift modifier is held —
+    // otherwise `Control+a` inserts the literal "a" instead of doing a
+    // select-all (mirrors Playwright's behaviour).
+    let suppress_text = modifiers & !8 != 0;
     let mut params = serde_json::json!({
         "type": down_type, "key": dom_key,
         "windowsVirtualKeyCode": vk,
+        "modifiers": modifiers,
     });
-    if let Some(t) = text {
+    if let Some(code) = Self::resolve_code(key) {
+      params["code"] = serde_json::json!(code);
+    }
+    if let Some(t) = text
+      && !suppress_text
+    {
       params["text"] = serde_json::json!(t);
     }
     self.cmd("Input.dispatchKeyEvent", params).await?;
     Ok(())
+  }
+
+  /// Dispatch a keyUp carrying the current `modifiers` bitfield. The
+  /// up event for a modifier itself should still carry the modifier
+  /// bit (it's released as part of this event).
+  pub(crate) async fn key_up_with_mods(&self, key: &str, modifiers: u32) -> Result<()> {
+    let (dom_key, vk, _) = Self::resolve_key(key);
+    let mut params = serde_json::json!({
+        "type": "keyUp", "key": dom_key,
+        "windowsVirtualKeyCode": vk,
+        "modifiers": modifiers,
+    });
+    if let Some(code) = Self::resolve_code(key) {
+      params["code"] = serde_json::json!(code);
+    }
+    self.cmd("Input.dispatchKeyEvent", params).await?;
+    Ok(())
+  }
+
+  /// Map a Playwright key name to the DOM `code` value (e.g. `"a"` ->
+  /// `"KeyA"`, `"1"` -> `"Digit1"`, modifiers/named keys -> their
+  /// canonical code). Required by Chrome to interpret `Control+a` as a
+  /// real Ctrl+A keystroke (select-all) instead of plain text input.
+  fn resolve_code(key: &str) -> Option<&'static str> {
+    match key {
+      "Control" | "ControlLeft" => Some("ControlLeft"),
+      "ControlRight" => Some("ControlRight"),
+      "Shift" | "ShiftLeft" => Some("ShiftLeft"),
+      "ShiftRight" => Some("ShiftRight"),
+      "Alt" | "AltLeft" => Some("AltLeft"),
+      "AltRight" => Some("AltRight"),
+      "Meta" | "MetaLeft" => Some("MetaLeft"),
+      "MetaRight" => Some("MetaRight"),
+      "Enter" => Some("Enter"),
+      "Tab" => Some("Tab"),
+      "Backspace" => Some("Backspace"),
+      "Delete" => Some("Delete"),
+      "Escape" => Some("Escape"),
+      "ArrowUp" => Some("ArrowUp"),
+      "ArrowDown" => Some("ArrowDown"),
+      "ArrowLeft" => Some("ArrowLeft"),
+      "ArrowRight" => Some("ArrowRight"),
+      "Home" => Some("Home"),
+      "End" => Some("End"),
+      "PageUp" => Some("PageUp"),
+      "PageDown" => Some("PageDown"),
+      "Space" | " " => Some("Space"),
+      k if k.len() == 1 => {
+        let c = k.chars().next()?;
+        // ASCII letters -> Key<UPPER>; digits -> Digit<n>.
+        if c.is_ascii_alphabetic() {
+          let upper = c.to_ascii_uppercase();
+          Some(match upper {
+            'A' => "KeyA", 'B' => "KeyB", 'C' => "KeyC", 'D' => "KeyD",
+            'E' => "KeyE", 'F' => "KeyF", 'G' => "KeyG", 'H' => "KeyH",
+            'I' => "KeyI", 'J' => "KeyJ", 'K' => "KeyK", 'L' => "KeyL",
+            'M' => "KeyM", 'N' => "KeyN", 'O' => "KeyO", 'P' => "KeyP",
+            'Q' => "KeyQ", 'R' => "KeyR", 'S' => "KeyS", 'T' => "KeyT",
+            'U' => "KeyU", 'V' => "KeyV", 'W' => "KeyW", 'X' => "KeyX",
+            'Y' => "KeyY", 'Z' => "KeyZ",
+            _ => return None,
+          })
+        } else if c.is_ascii_digit() {
+          Some(match c {
+            '0' => "Digit0", '1' => "Digit1", '2' => "Digit2", '3' => "Digit3",
+            '4' => "Digit4", '5' => "Digit5", '6' => "Digit6", '7' => "Digit7",
+            '8' => "Digit8", '9' => "Digit9",
+            _ => return None,
+          })
+        } else {
+          None
+        }
+      },
+      _ => None,
+    }
   }
 
   /// Dispatch a keyUp event for a single key.
@@ -3083,15 +3175,58 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn press_key(&self, key: &str) -> Result<()> {
-    self.key_down(key).await?;
-    self.key_up(key).await?;
+    // Playwright-style modifier combos: `"Control+a"`, `"Shift+Alt+T"`.
+    // Press each modifier (down), then the primary key with the
+    // modifiers bitfield set so the page sees a real combo (e.g.
+    // select-all on Ctrl+A), then release in reverse.
+    let parts: Vec<&str> = key.split('+').collect();
+    if parts.len() <= 1 {
+      self.key_down(key).await?;
+      self.key_up(key).await?;
+      return Ok(());
+    }
+    let (mods, primary) = parts.split_at(parts.len() - 1);
+    let primary = primary[0];
+    let mod_bit = |name: &str| -> u32 {
+      match name {
+        "Alt" => 1,
+        "Control" | "ControlOrMeta" => 2,
+        "Meta" => 4,
+        "Shift" => 8,
+        _ => 0,
+      }
+    };
+    let mut bits = 0u32;
+    for m in mods {
+      let b = mod_bit(m);
+      if b != 0 {
+        bits |= b;
+        // The modifier's own keyDown carries the cumulative bitfield
+        // (Chrome expects to see Ctrl set on the Ctrl keyDown itself).
+        self.key_down_with_mods(m, bits).await?;
+      }
+    }
+    self.key_down_with_mods(primary, bits).await?;
+    self.key_up_with_mods(primary, bits).await?;
+    let mut down_bits = bits;
+    for m in mods.iter().rev() {
+      let b = mod_bit(m);
+      if b != 0 {
+        self.key_up_with_mods(m, down_bits).await?;
+        down_bits &= !b;
+      }
+    }
     Ok(())
   }
 
   // ---- Cookies ----
 
   pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
-    let result = self.cmd("Network.getCookies", super::empty_params()).await?;
+    // Playwright's `context.cookies()` returns EVERY cookie in the
+    // browser context (`Storage.getCookies`), not just the current
+    // page's (`Network.getCookies` is frame-URL scoped — a cookie set
+    // for another domain would be invisible).
+    let result = self.cmd("Storage.getCookies", super::empty_params()).await?;
     let cookies = result
       .get("cookies")
       .and_then(|c| c.as_array())
@@ -3112,6 +3247,7 @@ impl<T: CdpWrap> CdpPage<T> {
             .get("sameSite")
             .and_then(|v| v.as_str())
             .and_then(|v| v.parse::<super::SameSite>().ok()),
+          url: None,
         })
         .collect(),
     )
@@ -3122,6 +3258,13 @@ impl<T: CdpWrap> CdpPage<T> {
         "name": cookie.name,
         "value": cookie.value,
     });
+    // Playwright `SetNetworkCookieParam.url`: CDP `Network.setCookie`
+    // accepts `url` and derives domain/path from it. Forward it so
+    // `addCookies([{ name, value, url }])` (the common Playwright form)
+    // works instead of erroring "url or domain needs to be specified".
+    if let Some(u) = &cookie.url {
+      params["url"] = serde_json::json!(u);
+    }
     if !cookie.domain.is_empty() {
       params["domain"] = serde_json::json!(cookie.domain);
     }
@@ -3692,7 +3835,15 @@ impl<T: CdpWrap> CdpPage<T> {
   ) {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_events();
-      while let Ok(event) = rx.recv().await {
+      loop {
+        // Tolerate broadcast `Lagged` so the console listener stays
+        // alive after a busy session — exit-on-Lagged silently dropped
+        // every future `console.*` event.
+        let event = match rx.recv().await {
+          Ok(e) => e,
+          Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+          Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+        };
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4399,7 +4550,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
 
           let maybe_fn = fns.read().await.get(&fn_name).cloned();
           if let Some(callback) = maybe_fn {
-            let result = callback(args);
+            let result = callback(args).await;
             let deliver_js = format!(
               "globalThis.__fd_bc.resolve({}, {})",
               seq,
@@ -4544,7 +4695,16 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       Some(format!("{scheme}://{host_and_port}"))
     }
     let mut rx = transport.subscribe_events();
-    while let Ok(event) = rx.recv().await {
+    loop {
+      // Tolerate broadcast `Lagged` (slow-consumer overflow) so the
+      // Fetch interceptor stays alive after a busy session — previously
+      // a single overflow killed the listener, future requests dropped
+      // through to the network and a routed URL hit `ERR_NAME_NOT_RESOLVED`.
+      let event = match rx.recv().await {
+        Ok(e) => e,
+        Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+        Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+      };
       if let Some(ref expected_sid) = session_id {
         let event_sid = event.get("sessionId").and_then(|v| v.as_str());
         if event_sid != Some(&**expected_sid) {

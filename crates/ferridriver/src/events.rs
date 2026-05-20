@@ -14,7 +14,10 @@ use crate::download::Download;
 use crate::file_chooser::FileChooser;
 use crate::network::{Request, Response, WebSocket};
 use crate::web_error::WebError;
+use std::future::Future;
+use std::pin::Pin;
 use std::sync::Arc;
+
 use tokio::sync::broadcast;
 
 // ── Event Types ──────────────────────────────────────────────────────────────
@@ -79,9 +82,23 @@ pub enum PageEvent {
   Download(Download),
 }
 
-/// Callback type for exposed functions.
-/// Takes serialized JSON arguments, returns serialized JSON result.
-pub type ExposedFn = Arc<dyn Fn(Vec<serde_json::Value>) -> serde_json::Value + Send + Sync>;
+/// Future returned by an [`ExposedFn`] — resolves to the page-visible
+/// result of the bound callback.
+pub type ExposedFnFuture = Pin<Box<dyn Future<Output = serde_json::Value> + Send>>;
+
+/// Callback type for exposed functions (`page.exposeFunction`).
+///
+/// Receives the page-side call arguments as a `Vec` (the binding
+/// layers SPREAD them into the user JS callback — `window.fn(a, b)` ->
+/// `callback(a, b)` — matching Playwright) and returns a future
+/// resolving to the serialized JSON result. It is async (not a plain
+/// `-> Value`)
+/// because the binding layers (NAPI threadsafe-function, `QuickJS`
+/// cross-task `async_with`) can only produce the callback's real
+/// return value asynchronously — Playwright delivers that value (and
+/// awaits a returned Promise) to the page-side caller, so the backend
+/// dispatch must `await` this before resolving the page binding.
+pub type ExposedFn = Arc<dyn Fn(Vec<serde_json::Value>) -> ExposedFnFuture + Send + Sync>;
 
 /// Event listener callback type.
 pub type EventCallback = Arc<dyn Fn(PageEvent) + Send + Sync>;

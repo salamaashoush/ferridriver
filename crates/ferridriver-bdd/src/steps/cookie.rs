@@ -29,6 +29,7 @@ async fn set_cookie(world: &mut BrowserWorld, name: String, value: String) {
       http_only: false,
       expires: None,
       same_site: None,
+      url: None,
     }])
     .await
     .map_err(|e| StepError::wrap("set cookie", e))?;
