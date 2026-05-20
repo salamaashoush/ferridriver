@@ -70,6 +70,35 @@ fn s_bold() -> Style {
 fn s_cyan() -> Style {
   Style::new().cyan().bold()
 }
+fn s_diff_minus() -> Style {
+  Style::new().red()
+}
+fn s_diff_plus() -> Style {
+  Style::new().green()
+}
+fn s_label() -> Style {
+  Style::new().bold().cyan()
+}
+
+/// Apply colors based on the line's role inside a rendered
+/// assertion-failure body:
+/// - `Expected:` / `Received:` / `Diff:` labels → bold cyan
+/// - lines starting with `-` (with space margin) → red
+/// - lines starting with `+` (with space margin) → green
+/// - everything else → default
+fn style_diff_line(line: &str) -> String {
+  let trimmed = line.trim_start();
+  if trimmed.starts_with("Expected:") || trimmed.starts_with("Received:") || trimmed.starts_with("Diff:") {
+    return s_label().apply_to(line).to_string();
+  }
+  if trimmed.starts_with('-') && !trimmed.starts_with("--") {
+    return s_diff_minus().apply_to(line).to_string();
+  }
+  if trimmed.starts_with('+') && !trimmed.starts_with("++") {
+    return s_diff_plus().apply_to(line).to_string();
+  }
+  line.to_string()
+}
 fn s_feature() -> Style {
   Style::new().magenta().bold()
 }
@@ -278,15 +307,27 @@ impl Reporter for TerminalReporter {
           }
         }
 
-        // Error.
+        // Error: title in bold red, then the rich body with per-line
+        // colorization for unified-diff `-`/`+` markers + bold cyan
+        // labels for the `Expected:` / `Received:` / `Diff:` lines.
+        // The captured caller location (if any) prints between title
+        // and body.
         if let Some(error) = &outcome.error {
           println!();
           for line in error.message.lines() {
             println!("    {}", s_fail().apply_to(line));
           }
+          if let Some(stack) = &error.stack
+            && !stack.is_empty()
+          {
+            for line in stack.lines() {
+              println!("    {}", s_dim().apply_to(line));
+            }
+          }
           if let Some(diff) = &error.diff {
             for line in diff.lines() {
-              println!("    {line}");
+              let styled = style_diff_line(line);
+              println!("    {styled}");
             }
           }
           println!();
