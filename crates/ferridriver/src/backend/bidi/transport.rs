@@ -140,6 +140,17 @@ impl BidiTransport {
         }
         // else: ignore unknown message types
       }
+      // WebSocket closed — drain pending oneshots so in-flight
+      // `send_command` awaits return immediately with a `target_closed`
+      // error instead of waiting the full 60s response timeout.
+      // Mirrors the CDP pipe/ws reader fix.
+      let mut map = pending2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      for (_, tx) in map.drain() {
+        let _ = tx.send(Err(BidiError {
+          error: "target closed".into(),
+          message: "BiDi transport closed (browser exited)".into(),
+        }));
+      }
       debug!("BiDi reader task ended");
     });
 

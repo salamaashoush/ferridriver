@@ -94,7 +94,11 @@ async fn clear_session_storage(world: &mut BrowserWorld) {
 
 #[step("I save the storage state to {string}")]
 async fn save_storage_state(world: &mut BrowserWorld, file_path: String) {
-  let path = world.resolve_fixture_path(&file_path);
+  // Writes go to the per-test output dir, not the feature/source-tree
+  // path. Previously this used `resolve_fixture_path` which anchored
+  // against the feature dir, so `save … "mocks/cookie-state.json"`
+  // overwrote checked-in fixtures during a normal run.
+  let path = world.resolve_output_path(&file_path);
   let state = world
     .page()
     .storage_state()
@@ -113,7 +117,10 @@ async fn save_storage_state(world: &mut BrowserWorld, file_path: String) {
 
 #[step("I load the storage state from {string}")]
 async fn load_storage_state(world: &mut BrowserWorld, file_path: String) {
-  let path = world.resolve_fixture_path(&file_path);
+  // Read order: per-test output dir first (a `save → load` round-trip
+  // within one scenario reads what was just written), then the feature
+  // dir (committed fixtures).
+  let path = world.resolve_io_path(&file_path);
   let json = std::fs::read_to_string(&path)
     .map_err(|e| StepError::from(format!("read storage state from {}: {e}", path.display())))?;
 

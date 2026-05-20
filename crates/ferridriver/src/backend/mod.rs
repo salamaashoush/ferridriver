@@ -8,6 +8,7 @@
 //!
 //! Uses enum dispatch (not trait objects) for zero-cost abstraction and Clone support.
 
+pub(crate) mod async_tempdir;
 pub mod cdp;
 pub(crate) mod json_scan;
 pub(crate) mod process;

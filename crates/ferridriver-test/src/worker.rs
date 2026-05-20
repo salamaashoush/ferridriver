@@ -556,33 +556,40 @@ fn build_browser_fixture_defs(
     },
   );
 
-  defs.insert(
-    "request".into(),
-    FixtureDef {
-      name: "request".into(),
-      scope,
-      dependencies: vec![],
-      setup: Arc::new({
-        let base_url = resources.effective.request_base_url.clone();
-        move |_pool| {
-          let base_url = base_url.clone();
-          Box::pin(async move {
-            Ok(Arc::new(ferridriver::http_client::HttpClient::new(
-              ferridriver::http_client::HttpClientOptions {
-                base_url,
-                ..Default::default()
-              },
-            )) as Arc<dyn std::any::Any + Send + Sync>)
-          })
-        }
-      }),
-      teardown: None,
-      timeout: Duration::from_secs(10),
-      auto: false,
-    },
-  );
-
   defs
+}
+
+/// Worker-scope `request` fixture. Builds one [`HttpClient`] per worker
+/// so the underlying reqwest connection pool, TLS context, and cookie
+/// jar are reused across every test on this worker — saves the per-test
+/// `reqwest::Client::builder().build()` cost (~1-10ms each on the bench).
+///
+/// `base_url` is captured from the worker's config; per-test
+/// `use_options.base_url` overrides aren't honored at this scope. Tests
+/// that need a different base URL should construct an `HttpClient`
+/// inside the test body, or we expose a per-test override fixture
+/// later (Playwright's `request` fixture has the same worker-scoped
+/// shape — `playwright/types/test.d.ts` `APIRequestContext`).
+fn build_worker_request_def(base_url: Option<String>) -> FixtureDef {
+  FixtureDef {
+    name: "request".into(),
+    scope: FixtureScope::Worker,
+    dependencies: vec![],
+    setup: Arc::new(move |_pool| {
+      let base_url = base_url.clone();
+      Box::pin(async move {
+        Ok(Arc::new(ferridriver::http_client::HttpClient::new(
+          ferridriver::http_client::HttpClientOptions {
+            base_url,
+            ..Default::default()
+          },
+        )) as Arc<dyn std::any::Any + Send + Sync>)
+      })
+    }),
+    teardown: None,
+    timeout: Duration::from_secs(10),
+    auto: false,
+  }
 }
 
 fn build_test_fixture_defs(resources: Arc<TestBrowserResources>) -> FxHashMap<String, FixtureDef> {
@@ -681,12 +688,29 @@ impl Worker {
       .emit(ReporterEvent::WorkerStarted { worker_id: self.id })
       .await;
 
-    // Register the worker-scope `browser` fixture on the custom pool so
-    // child suite/test pools resolve it via the parent chain. The
-    // backing `BrowserHandle` makes the launch lazy.
+    // Register the worker-scope `browser` + `request` fixtures on the
+    // custom pool so child suite/test pools resolve them via the parent
+    // chain. The backing `BrowserHandle` makes the browser launch lazy;
+    // the `HttpClient` is built once per worker so its reqwest pool,
+    // TLS context, and cookie jar are reused across every test on this
+    // worker.
     let mut worker_defs: FxHashMap<String, FixtureDef> = FxHashMap::default();
     worker_defs.insert("browser".into(), build_worker_browser_def(Arc::clone(&browser_handle)));
+    worker_defs.insert("request".into(), build_worker_request_def(self.config.base_url.clone()));
     let custom_fixture_pool = custom_fixture_pool.child_with_defs(worker_defs, FixtureScope::Worker);
+
+    // Pre-warm: fire chromium launch on a background task so the first
+    // test that resolves the `browser` fixture can skip the ~20-30ms
+    // launch wait. `BrowserHandle::get` is a `tokio::sync::OnceCell`
+    // so a concurrent in-flight init folds together — the first test's
+    // `.await` either sees the launch already done or waits for the
+    // same future the pre-warm started.
+    {
+      let handle = Arc::clone(&browser_handle);
+      tokio::spawn(async move {
+        let _ = handle.get().await;
+      });
+    }
 
     let mut active_suites: FxHashMap<String, SuiteState> = FxHashMap::default();
 

@@ -139,6 +139,31 @@ impl BrowserWorld {
     }
   }
 
+  /// Resolve a relative path for writing artifacts that should NOT be
+  /// committed (saved storage state, screenshot dumps, recording files).
+  /// Anchors against the per-test `TestInfo::output_dir` so steps
+  /// like `I save the storage state to "foo.json"` land under
+  /// `test-results/...` instead of polluting the feature-file dir.
+  ///
+  /// Reads should use [`Self::resolve_io_path`], which tries the
+  /// output dir first (round-trips within a scenario) and falls back
+  /// to the feature dir (committed fixtures).
+  pub fn resolve_output_path(&self, relative: &str) -> std::path::PathBuf {
+    self.fixtures.test_info.output_dir.join(relative)
+  }
+
+  /// Resolve a relative path for read+write round-trips: try the test
+  /// output dir first (so a `save → load` within one scenario reads
+  /// what was just written), fall back to the feature dir for
+  /// committed fixtures.
+  pub fn resolve_io_path(&self, relative: &str) -> std::path::PathBuf {
+    let out = self.resolve_output_path(relative);
+    if out.exists() {
+      return out;
+    }
+    self.resolve_fixture_path(relative)
+  }
+
   pub fn registry_arc(&self) -> Option<Arc<crate::registry::StepRegistry>> {
     self.registry.clone()
   }
