@@ -6,11 +6,12 @@ use crate::types::{
   DragAndDropOptions, GotoOptions, MetricData, RoleOptions, ScreenshotOptions, SnapshotForAiOptions, TextOptions,
   WaitOptions,
 };
+use std::sync::{Arc, Mutex};
+
 use ferridriver::protocol::SerializedArgument;
 use napi::Result;
 use napi::bindgen_prelude::{Buffer, JsObjectValue as _, JsValue as _};
 use napi_derive::napi;
-use std::sync::{Arc, Mutex};
 
 /// Lower an optional [`crate::types::NapiEvaluateArg`] into a
 /// [`SerializedArgument`]. `None` maps to the `undefined` sentinel so
@@ -1257,11 +1258,13 @@ impl Page {
   /// `callback`. The callback receives the args from the page-side
   /// call as a single array.
   ///
-  /// The Rust core's `ExposedFn` is a sync callback that returns the
-  /// page-visible value synchronously; NAPI's threadsafe-function
-  /// dispatch is async, so this binding is fire-and-forget — the
-  /// page-side call resolves to `null` while the JS callback runs
-  /// asynchronously.
+  /// NAPI convention: the callback receives the page-side call
+  /// arguments as a single array (`(args: unknown[]) => void`) and is
+  /// fire-and-forget — the page-side call resolves to `null` while the
+  /// JS callback runs asynchronously. Return-value delivery + arg
+  /// spreading (full Playwright parity) lives on the QuickJS/script
+  /// surface, which is the one that runs LLM-generated Playwright code;
+  /// this Rust-native binding keeps its established contract.
   #[napi(
     ts_args_type = "name: string, callback: (args: unknown[]) => void",
     ts_return_type = "Promise<void>"
@@ -1282,7 +1285,9 @@ impl Page {
     let cb: ferridriver::events::ExposedFn = std::sync::Arc::new(move |args: Vec<serde_json::Value>| {
       let arg = serde_json::Value::Array(args);
       tsfn.call(arg, napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking);
-      serde_json::Value::Null
+      // ExposedFn is async now (the QuickJS surface awaits the real
+      // value); NAPI stays fire-and-forget — resolve immediately.
+      Box::pin(async move { serde_json::Value::Null })
     });
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {

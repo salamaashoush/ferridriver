@@ -121,6 +121,14 @@ impl FrameJs {
     self.inner.content().await.into_js()
   }
 
+  /// Playwright: `frame.waitForLoadState(state?, options?)`. ferridriver
+  /// core's `Frame::wait_for_load_state` takes no args (defaults to
+  /// `load`); thin delegator.
+  #[qjs(rename = "waitForLoadState")]
+  pub async fn wait_for_load_state(&self) -> rquickjs::Result<()> {
+    self.inner.wait_for_load_state().await.into_js()
+  }
+
   // ── Locator (frame-scoped) ─────────────────────────────────────────
 
   /// Create a locator scoped to this frame.

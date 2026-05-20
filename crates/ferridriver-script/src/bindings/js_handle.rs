@@ -38,8 +38,9 @@ impl JSHandleJs {
 
 #[rquickjs::methods]
 impl JSHandleJs {
-  /// `true` once [`Self::dispose`] has run.
-  #[qjs(get, rename = "isDisposed")]
+  /// Playwright `jsHandle.isDisposed(): boolean` — METHOD (not
+  /// property): callers write `h.isDisposed()` with parens.
+  #[qjs(rename = "isDisposed")]
   pub fn is_disposed(&self) -> bool {
     self.inner.is_disposed()
   }
@@ -57,12 +58,21 @@ impl JSHandleJs {
   /// Inspects the remote value and returns a fresh `ElementHandle`
   /// (sharing this handle's dispose flag) when the value is a DOM
   /// Node, otherwise `null`.
+  /// Playwright: `jsHandle.asElement(): ElementHandle | null`.
+  /// Explicit `null` (NOT `undefined`) — rquickjs maps `Option::None` to
+  /// JS `undefined`, so we hand back a JS Value carrying a real `null`.
   #[qjs(rename = "asElement")]
-  pub fn as_element(&self) -> Option<crate::bindings::element_handle::ElementHandleJs> {
-    self
-      .inner
-      .as_element()
-      .map(crate::bindings::element_handle::ElementHandleJs::new)
+  pub fn as_element<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+    use rquickjs::class::Class;
+    use rquickjs::{IntoJs, Value};
+    match self.inner.as_element() {
+      Some(e) => {
+        let wrapper = crate::bindings::element_handle::ElementHandleJs::new(e);
+        let inst = Class::instance(ctx.clone(), wrapper)?;
+        inst.into_js(&ctx)
+      },
+      None => Ok(Value::new_null(ctx)),
+    }
   }
 
   /// Playwright: `jsHandle.jsonValue(): Promise<T>`. Rich types

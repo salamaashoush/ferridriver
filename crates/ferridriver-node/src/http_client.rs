@@ -81,6 +81,9 @@ impl FetchOptions {
       timeout: self.timeout.map(|t| std::time::Duration::from_millis(t as u64)),
       fail_on_status_code: self.fail_on_status_code,
       max_redirects: self.max_redirects.map(|m| m as u32),
+      // The Node binding is the trusted Playwright-in-Rust surface, not
+      // the script sandbox — no network guard is imposed here.
+      net_guard: None,
     }
   }
 }
