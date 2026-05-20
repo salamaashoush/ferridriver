@@ -12,6 +12,7 @@ default-members = [
   "crates/ferridriver-test-macros",
   "crates/ferridriver-script",
   "crates/ferridriver-node",
+  "crates/ferridriver-expect",
   "examples/bdd-example",
 ]
 
@@ -52,6 +53,7 @@ ferridriver-bdd = { path = "crates/ferridriver-bdd", version = "0.2.0" }
 ferridriver-bdd-macros = { path = "crates/ferridriver-bdd-macros", version = "0.2.0" }
 ferridriver-script = { path = "crates/ferridriver-script", version = "0.2.0" }
 ferridriver-config = { path = "crates/ferridriver-config", version = "0.2.0" }
+ferridriver-expect = { path = "crates/ferridriver-expect", version = "0.2.0" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }

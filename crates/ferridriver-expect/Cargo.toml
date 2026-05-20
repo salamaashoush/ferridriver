@@ -1,0 +1,25 @@
+[package]
+name = "ferridriver-expect"
+description = "Value matchers (Jest-compatible) and asymmetric matchers for ferridriver's expect API. Shared core between the test runner and the QuickJS scripting layer."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+authors.workspace = true
+repository.workspace = true
+homepage.workspace = true
+keywords.workspace = true
+categories.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+ferridriver = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+regex = { workspace = true }
+tokio = { workspace = true }
+similar = "3"
+
+[dev-dependencies]
+pretty_assertions = "1"
