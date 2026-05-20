@@ -70,7 +70,7 @@ pub struct CdpBrowser<T: CdpTransport> {
   /// when the last handle drops (after the `Child` is killed via
   /// `kill_on_drop(true)`). `None` for `connect()` — we don't own the dir
   /// of a browser someone else launched.
-  user_data_dir: Option<Arc<tempfile::TempDir>>,
+  user_data_dir: Option<Arc<super::async_tempdir::AsyncTempDir>>,
 }
 
 impl<T: CdpTransport> CdpBrowser<T> {
@@ -287,7 +287,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       child: Arc::new(tokio::sync::Mutex::new(child)),
       attached_targets: std::sync::Mutex::new(FxHashMap::default()),
       version,
-      user_data_dir: user_data_dir.map(Arc::new),
+      user_data_dir: user_data_dir.map(|td| Arc::new(super::async_tempdir::AsyncTempDir::new(td))),
     })
   }
 

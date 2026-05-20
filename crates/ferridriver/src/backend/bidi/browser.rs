@@ -246,16 +246,18 @@ impl BidiBrowser {
   }
 
   /// Close the browser.
+  ///
+  /// SIGKILLs firefox directly via the held `ChildGroup`. The
+  /// graceful `browser.close` `BiDi` command is intentionally skipped —
+  /// for test runs the user-data-dir tempdir is removed regardless,
+  /// and waiting for the `BiDi` response is wasted wall-clock. Mirrors
+  /// the `CdpBrowser::close` fast-path.
   pub async fn close(&mut self) -> Result<()> {
-    // Try graceful BiDi close first
-    let _ = self.session.transport.send_command("browser.close", json!({})).await;
-
-    // Then kill the child process if we own it. `ChildGroup::drop`
-    // additionally takes down every helper subprocess in the group.
     if let Some(mut group) = self.child.lock().await.take() {
+      // `ChildGroup::drop` takes down every helper subprocess in the
+      // group; `kill().await` reaps the parent (waitpid) so no zombie.
       let _ = group.inner_mut().kill().await;
     }
-
     Ok(())
   }
 }
