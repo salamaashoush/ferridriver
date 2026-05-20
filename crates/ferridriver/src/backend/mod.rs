@@ -12,7 +12,7 @@ pub(crate) mod async_tempdir;
 pub mod cdp;
 pub(crate) mod json_scan;
 pub(crate) mod process;
-#[cfg(target_os = "macos")]
+#[cfg(webkit_backend)]
 pub mod webkit;
 
 pub mod bidi;
@@ -537,7 +537,7 @@ pub enum BackendKind {
   /// Chrome `DevTools` Protocol over WebSocket (our own, fully parallel)
   CdpRaw,
   /// Native WebKit/WKWebView (macOS only)
-  #[cfg(target_os = "macos")]
+  #[cfg(webkit_backend)]
   WebKit,
   /// `WebDriver` `BiDi` protocol (cross-browser: Chrome, Firefox, future Safari)
   Bidi,
@@ -550,7 +550,7 @@ pub enum BackendKind {
 pub enum AnyBrowser {
   CdpPipe(cdp::CdpBrowser<cdp::pipe::PipeTransport>),
   CdpRaw(cdp::CdpBrowser<cdp::ws::WsTransport>),
-  #[cfg(target_os = "macos")]
+  #[cfg(webkit_backend)]
   WebKit(webkit::WebKitBrowser),
 
   Bidi(bidi::BidiBrowser),
@@ -566,7 +566,7 @@ impl AnyBrowser {
     match self {
       Self::CdpPipe(b) => Box::pin(b.pages()).await,
       Self::CdpRaw(b) => Box::pin(b.pages()).await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       Self::WebKit(b) => Box::pin(b.pages()).await,
 
       Self::Bidi(b) => Box::pin(b.pages()).await,
@@ -582,7 +582,7 @@ impl AnyBrowser {
     match self {
       Self::CdpPipe(b) => b.new_context(proxy).await,
       Self::CdpRaw(b) => b.new_context(proxy).await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       Self::WebKit(_) => Err(crate::error::FerriError::unsupported(
         "WebKit does not support multiple browser contexts",
       )),
@@ -599,7 +599,7 @@ impl AnyBrowser {
     match self {
       Self::CdpPipe(b) => b.dispose_context(browser_context_id).await,
       Self::CdpRaw(b) => b.dispose_context(browser_context_id).await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       Self::WebKit(_) => Ok(()),
       Self::Bidi(b) => b.dispose_context(browser_context_id).await,
     }
@@ -619,7 +619,7 @@ impl AnyBrowser {
     match self {
       Self::CdpPipe(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
       Self::CdpRaw(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       Self::WebKit(b) => Box::pin(b.new_page(url)).await,
       Self::Bidi(b) => Box::pin(b.new_page(url, browser_context_id, viewport)).await,
     }
@@ -634,7 +634,7 @@ impl AnyBrowser {
     match self {
       Self::CdpPipe(b) => b.close().await,
       Self::CdpRaw(b) => b.close().await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       Self::WebKit(b) => b.close().await,
 
       Self::Bidi(b) => b.close().await,
@@ -656,7 +656,7 @@ impl AnyBrowser {
     match self {
       Self::CdpPipe(b) => b.version().to_string(),
       Self::CdpRaw(b) => b.version().to_string(),
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       Self::WebKit(b) => b.version().to_string(),
 
       Self::Bidi(b) => b.version(),
@@ -671,7 +671,7 @@ impl AnyBrowser {
 pub enum AnyPage {
   CdpPipe(cdp::CdpPage<cdp::pipe::PipeTransport>),
   CdpRaw(cdp::CdpPage<cdp::ws::WsTransport>),
-  #[cfg(target_os = "macos")]
+  #[cfg(webkit_backend)]
   WebKit(webkit::WebKitPage),
 
   Bidi(bidi::BidiPage),
@@ -683,7 +683,7 @@ macro_rules! page_dispatch {
         match $self {
             AnyPage::CdpPipe(p) => p.$method($($arg),*).await,
             AnyPage::CdpRaw(p) => p.$method($($arg),*).await,
-            #[cfg(target_os = "macos")]
+            #[cfg(webkit_backend)]
             AnyPage::WebKit(p) => p.$method($($arg),*).await,
 
             AnyPage::Bidi(p) => p.$method($($arg),*).await,
@@ -700,7 +700,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => &p.events,
       AnyPage::CdpRaw(p) => &p.events,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(p) => &p.events,
 
       AnyPage::Bidi(p) => &p.events,
@@ -717,7 +717,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => &p.dialog_manager,
       AnyPage::CdpRaw(p) => &p.dialog_manager,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(p) => &p.dialog_manager,
       AnyPage::Bidi(p) => &p.dialog_manager,
     }
@@ -733,7 +733,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => &p.file_chooser_manager,
       AnyPage::CdpRaw(p) => &p.file_chooser_manager,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(p) => &p.file_chooser_manager,
       AnyPage::Bidi(p) => &p.file_chooser_manager,
     }
@@ -749,7 +749,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => &p.download_manager,
       AnyPage::CdpRaw(p) => &p.download_manager,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(p) => &p.download_manager,
       AnyPage::Bidi(p) => &p.download_manager,
     }
@@ -766,7 +766,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => p.enable_file_chooser_intercept().await,
       AnyPage::CdpRaw(p) => p.enable_file_chooser_intercept().await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(_) => Ok(()),
       AnyPage::Bidi(_) => Ok(()),
     }
@@ -780,7 +780,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => p.enable_download_behavior().await,
       AnyPage::CdpRaw(p) => p.enable_download_behavior().await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(_) => Ok(()),
       AnyPage::Bidi(_) => Ok(()),
     }
@@ -796,7 +796,7 @@ impl AnyPage {
     let slot = match self {
       AnyPage::CdpPipe(p) => &p.page_backref,
       AnyPage::CdpRaw(p) => &p.page_backref,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(p) => &p.page_backref,
       AnyPage::Bidi(p) => &p.page_backref,
     };
@@ -814,7 +814,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => &p.frame_cache,
       AnyPage::CdpRaw(p) => &p.frame_cache,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(p) => &p.frame_cache,
       AnyPage::Bidi(p) => &p.frame_cache,
     }
@@ -828,7 +828,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => &p.frame_listener_started,
       AnyPage::CdpRaw(p) => &p.frame_listener_started,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(p) => &p.frame_listener_started,
       AnyPage::Bidi(p) => &p.frame_listener_started,
     }
@@ -843,7 +843,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(_) => BackendKind::CdpPipe,
       AnyPage::CdpRaw(_) => BackendKind::CdpRaw,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(_) => BackendKind::WebKit,
       AnyPage::Bidi(_) => BackendKind::Bidi,
     }
@@ -867,7 +867,7 @@ impl AnyPage {
     match self {
       Self::CdpPipe(p) => p.peek_main_frame_id(),
       Self::CdpRaw(p) => p.peek_main_frame_id(),
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       Self::WebKit(_) => None,
       // BiDi's top-level browsing context id IS the page's main-frame
       // identifier — `browsingContext.navigate` / `browsingContext.tree`
@@ -890,7 +890,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => p.content_frame_id(object_id).await,
       AnyPage::CdpRaw(p) => p.content_frame_id(object_id).await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(_) => Ok(None),
       AnyPage::Bidi(_) => Ok(None),
     }
@@ -1191,7 +1191,7 @@ impl AnyPage {
     match self {
       Self::CdpPipe(p) => p.attach_listeners(console_log, network_log, dialog_log),
       Self::CdpRaw(p) => p.attach_listeners(console_log, network_log, dialog_log),
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       Self::WebKit(p) => p.attach_listeners(console_log, network_log, dialog_log),
 
       Self::Bidi(p) => p.attach_listeners(console_log, network_log, dialog_log),
@@ -1224,7 +1224,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => p.start_screencast(quality, max_width, max_height).await,
       AnyPage::CdpRaw(p) => p.start_screencast(quality, max_width, max_height).await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(_) => Err(crate::error::FerriError::unsupported(
         "Video recording is not supported on WebKit backend",
       )),
@@ -1244,7 +1244,7 @@ impl AnyPage {
     match self {
       AnyPage::CdpPipe(p) => p.stop_screencast().await,
       AnyPage::CdpRaw(p) => p.stop_screencast().await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       AnyPage::WebKit(_) => Ok(()), // No-op if never started.
 
       AnyPage::Bidi(p) => p.stop_screencast().await,
@@ -1290,7 +1290,7 @@ impl AnyPage {
     match self {
       Self::CdpPipe(p) => p.is_closed(),
       Self::CdpRaw(p) => p.is_closed(),
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       Self::WebKit(p) => p.is_closed(),
 
       Self::Bidi(p) => p.is_closed(),
@@ -1374,7 +1374,7 @@ impl AnyPage {
         p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
           .await
       },
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       Self::WebKit(p) => {
         p.call_utility_evaluate(fn_source, args, handles, frame_id, is_function, return_by_value)
           .await
@@ -1391,7 +1391,7 @@ impl AnyPage {
     match (self, remote) {
       (Self::CdpPipe(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await,
       (Self::CdpRaw(p), HandleRemote::Cdp(obj)) => p.release_object(obj).await,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       (Self::WebKit(p), HandleRemote::WebKit(ref_id)) => p.release_ref(*ref_id).await,
       (Self::Bidi(p), HandleRemote::Bidi { shared_id, handle }) => p.release_handle(shared_id, handle.as_deref()).await,
       // A HandleRemote shape that doesn't match the backend kind is a
@@ -1445,7 +1445,7 @@ pub fn element_from_remote(
   match (page, remote) {
     (AnyPage::CdpPipe(p), HandleRemote::Cdp(obj)) => Ok(AnyElement::CdpPipe(p.element_from_object_id(obj.clone()))),
     (AnyPage::CdpRaw(p), HandleRemote::Cdp(obj)) => Ok(AnyElement::CdpRaw(p.element_from_object_id(obj.clone()))),
-    #[cfg(target_os = "macos")]
+    #[cfg(webkit_backend)]
     (AnyPage::WebKit(p), HandleRemote::WebKit(ref_id)) => Ok(AnyElement::WebKit(p.element_from_ref_id(*ref_id))),
     (AnyPage::Bidi(p), HandleRemote::Bidi { shared_id, .. }) => {
       Ok(AnyElement::Bidi(p.element_from_shared_id(shared_id.clone())))
@@ -1469,7 +1469,7 @@ pub async fn element_handle_remote(element: &AnyElement) -> crate::error::Result
       let obj = e.ensure_object_id().await?;
       Ok(HandleRemote::Cdp(obj))
     },
-    #[cfg(target_os = "macos")]
+    #[cfg(webkit_backend)]
     AnyElement::WebKit(e) => Ok(HandleRemote::WebKit(e.ref_id())),
     AnyElement::Bidi(e) => Ok(HandleRemote::Bidi {
       shared_id: e.shared_id.clone(),
@@ -1484,7 +1484,7 @@ pub async fn element_handle_remote(element: &AnyElement) -> crate::error::Result
 pub enum AnyElement {
   CdpPipe(cdp::CdpElement<cdp::pipe::PipeTransport>),
   CdpRaw(cdp::CdpElement<cdp::ws::WsTransport>),
-  #[cfg(target_os = "macos")]
+  #[cfg(webkit_backend)]
   WebKit(webkit::WebKitElement),
 
   Bidi(bidi::BidiElement),
@@ -1495,7 +1495,7 @@ macro_rules! element_dispatch {
         match $self {
             AnyElement::CdpPipe(e) => e.$method($($arg),*).await,
             AnyElement::CdpRaw(e) => e.$method($($arg),*).await,
-            #[cfg(target_os = "macos")]
+            #[cfg(webkit_backend)]
             AnyElement::WebKit(e) => e.$method($($arg),*).await,
 
             AnyElement::Bidi(e) => e.$method($($arg),*).await,

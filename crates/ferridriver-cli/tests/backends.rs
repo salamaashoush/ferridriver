@@ -2211,22 +2211,6 @@ fn run_all_tests(backend: &str) {
     }};
   }
 
-  /// Skip a test on the WebKit backend. Used for tests that depend on
-  /// the `window.__fd` utility script which the WKWebView host doesn't
-  /// inject reliably yet — `expect`-style locator matchers and
-  /// `selOne` / `newUtilityScript`-based binding-surface tests hit
-  /// `TypeError: undefined is not an object` instead of finding the
-  /// element. Tracked separately from the all-backend parity matrix.
-  macro_rules! run_skip_webkit {
-    ($name:path) => {{
-      if backend != "webkit" {
-        run!($name);
-      } else if verbose {
-        eprintln!("=== SKIP {backend} {} (webkit utility-script bug)", stringify!($name));
-      }
-    }};
-  }
-
   // Navigation + session
   run!(test_navigate);
   run!(test_page_list);
@@ -2474,11 +2458,11 @@ fn run_all_tests(backend: &str) {
   // matchers + asymmetric matchers, exercised through a live browser
   // on every backend (Rule 9).
   run!(backends_support::expect::test_expect_to_be_visible);
-  run_skip_webkit!(backends_support::expect::test_expect_to_have_text);
+  run!(backends_support::expect::test_expect_to_have_text);
   run!(backends_support::expect::test_expect_to_contain_text);
-  run_skip_webkit!(backends_support::expect::test_expect_to_have_count);
+  run!(backends_support::expect::test_expect_to_have_count);
   run!(backends_support::expect::test_expect_to_have_attribute);
-  run_skip_webkit!(backends_support::expect::test_expect_to_have_value);
+  run!(backends_support::expect::test_expect_to_have_value);
   run!(backends_support::expect::test_expect_page_title_and_url);
   run!(backends_support::expect::test_expect_value_matchers_in_script);
   run!(backends_support::expect::test_expect_to_throw_in_script);
@@ -2488,7 +2472,7 @@ fn run_all_tests(backend: &str) {
   // QuickJS binding surface — `getBy*` accessors on Frame/Locator,
   // FrameLocator class, page-level `touchscreen`/`snapshotForAI`/
   // `exposeFunction`/`frameLocator`, and `context.clearCookies({...})`.
-  run_skip_webkit!(backends_support::binding_surface::test_frame_get_by_methods);
+  run!(backends_support::binding_surface::test_frame_get_by_methods);
   run!(backends_support::binding_surface::test_frame_page_and_frame_locator);
   run!(backends_support::binding_surface::test_locator_get_by_methods);
   run!(backends_support::binding_surface::test_locator_page_and_frame_methods);
@@ -2496,7 +2480,7 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::binding_surface::test_page_frame_locator);
   run!(backends_support::binding_surface::test_page_touchscreen_tap);
   run!(backends_support::binding_surface::test_page_snapshot_for_ai);
-  run_skip_webkit!(backends_support::binding_surface::test_page_expose_function);
+  run!(backends_support::binding_surface::test_page_expose_function);
   run!(backends_support::binding_surface::test_context_clear_cookies_filter);
 
   // Multi-page last (changes session state)
@@ -2527,7 +2511,7 @@ fn all_tests_cdp_raw() {
   run_all_tests("cdp-raw");
 }
 
-#[cfg(target_os = "macos")]
+#[cfg(webkit_backend)]
 #[test]
 fn all_tests_webkit() {
   run_all_tests("webkit");

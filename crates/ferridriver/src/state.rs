@@ -471,7 +471,7 @@ impl BrowserState {
           };
           AnyBrowser::CdpRaw(browser)
         },
-        #[cfg(target_os = "macos")]
+        #[cfg(webkit_backend)]
         BackendKind::WebKit => {
           use crate::backend::webkit::WebKitBrowser;
           AnyBrowser::WebKit(WebKitBrowser::launch_with_options(self.headless).await?)
@@ -1771,7 +1771,7 @@ mod tests {
   fn test_state(backend: BackendKind) -> BrowserState {
     let kind = match backend {
       BackendKind::Bidi => crate::options::BrowserKind::Firefox,
-      #[cfg(target_os = "macos")]
+      #[cfg(webkit_backend)]
       BackendKind::WebKit => crate::options::BrowserKind::WebKit,
       _ => crate::options::BrowserKind::Chromium,
     };

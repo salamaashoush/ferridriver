@@ -22,6 +22,7 @@ futures = { workspace = true }
 regex = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
+ferridriver-webkit-wire = { workspace = true }
 libc = { workspace = true }
 tracing = { workspace = true }
 tokio-tungstenite = "0.29"
@@ -46,9 +47,6 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Securit
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }
-
-[build-dependencies]
-cc = "1"
 
 [[bench]]
 name = "alloc_bench"
