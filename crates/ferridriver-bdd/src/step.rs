@@ -122,6 +122,16 @@ impl From<ferridriver::FerriError> for StepError {
   }
 }
 
+impl From<ferridriver_expect::AssertionFailure> for StepError {
+  fn from(err: ferridriver_expect::AssertionFailure) -> Self {
+    Self {
+      message: err.message,
+      diff: err.diff.map(|d| (d, String::new())),
+      pending: false,
+    }
+  }
+}
+
 impl fmt::Display for StepError {
   fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
     write!(f, "{}", self.message)?;

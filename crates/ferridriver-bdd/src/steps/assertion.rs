@@ -6,11 +6,9 @@
 use crate::step::StepError;
 use crate::world::BrowserWorld;
 use ferridriver_bdd_macros::then;
-use ferridriver_test::expect::StringOrRegex;
-use ferridriver_test::expect::expect;
-use ferridriver_test::model::TestFailure;
+use ferridriver_test::expect::{AssertionFailure, StringOrRegex, expect};
 
-fn to_step_err(e: TestFailure) -> StepError {
+fn to_step_err(e: AssertionFailure) -> StepError {
   StepError {
     message: e.message,
     diff: e.diff.map(|d| (d, String::new())),

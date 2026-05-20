@@ -12,10 +12,9 @@ use crate::world::BrowserWorld;
 use ferridriver::dialog::Dialog;
 use ferridriver::events::PageEvent;
 use ferridriver_bdd_macros::{given, then};
-use ferridriver_test::expect::expect_poll;
-use ferridriver_test::model::TestFailure;
+use ferridriver_test::expect::{AssertionFailure, expect_poll};
 
-fn to_step_err(e: TestFailure) -> StepError {
+fn to_step_err(e: AssertionFailure) -> StepError {
   StepError {
     message: e.message,
     diff: e.diff.map(|d| (d, String::new())),
