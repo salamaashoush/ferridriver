@@ -5,7 +5,7 @@
 #![allow(unsafe_code)]
 
 use ferridriver_test::ct::server::ComponentServer;
-use ferridriver_test::expect::expect;
+use ferridriver_test::expect::{LocatorSnapshotMatchers, expect};
 
 static TEST_MUTEX: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
