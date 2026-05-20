@@ -15,6 +15,7 @@ workspace = true
 
 [dependencies]
 ferridriver = { workspace = true }
+ferridriver-expect = { workspace = true }
 
 tokio = { workspace = true }
 futures = { workspace = true }

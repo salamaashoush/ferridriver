@@ -30,6 +30,7 @@ pub mod convert;
 pub mod dialog;
 pub mod download;
 pub mod element_handle;
+pub mod expect;
 pub mod fetch;
 pub mod file_chooser;
 pub mod form_data;
