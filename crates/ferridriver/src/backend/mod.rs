@@ -17,6 +17,8 @@ pub mod webkit;
 
 pub mod bidi;
 
+pub mod pw_webkit;
+
 /// Empty JSON object `{}` — avoids `serde_json::json!({})` heap allocation per call.
 #[inline]
 pub(crate) fn empty_params() -> serde_json::Value {
