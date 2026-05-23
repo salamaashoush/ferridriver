@@ -2161,7 +2161,7 @@ fn test_script_error_surfaces_structured(c: &mut McpClient) {
 
 fn run_all_tests(backend: &str) {
   let mut c = McpClient::new(backend);
-  let is_cdp = backend != "webkit" && backend != "bidi";
+  let is_cdp = backend == "cdp-pipe" || backend == "cdp-raw";
   let mut passed = 0u32;
   let mut failed = 0u32;
   let mut failures: Vec<String> = Vec::new();
@@ -2515,6 +2515,11 @@ fn all_tests_cdp_raw() {
 #[test]
 fn all_tests_webkit() {
   run_all_tests("webkit");
+}
+
+#[test]
+fn all_tests_pw_webkit() {
+  run_all_tests("pw-webkit");
 }
 
 #[test]

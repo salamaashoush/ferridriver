@@ -112,4 +112,6 @@ pub struct NavigateParams {
 pub struct NavigateResult {
   #[serde(default)]
   pub loader_id: Option<String>,
+  #[serde(default)]
+  pub error_text: Option<String>,
 }

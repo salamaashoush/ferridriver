@@ -50,6 +50,9 @@ pub enum HandleRemote {
   /// `WebKit` host IPC ref — the `ref_id` used to index `window.__wr`.
   /// Released via the new `Op::ReleaseRef` IPC op.
   WebKit(u64),
+  /// PW `WebKit` `Runtime.RemoteObjectId` — an opaque string.
+  /// Released via `Runtime.releaseObject`.
+  PwWebKit(Arc<str>),
 }
 
 /// Backing of a [`JSHandle`] returned from `evaluateHandle`. Mirrors
@@ -117,6 +120,7 @@ impl HandleRemote {
         handle: handle.clone(),
       },
       Self::WebKit(ref_id) => HandleId::WebKit(*ref_id),
+      Self::PwWebKit(obj) => HandleId::PwWebKit((**obj).to_string()),
     }
   }
 
@@ -128,6 +132,7 @@ impl HandleRemote {
       HandleId::Cdp(obj) => Self::Cdp(Arc::from(obj)),
       HandleId::Bidi { shared_id, handle } => Self::Bidi { shared_id, handle },
       HandleId::WebKit(ref_id) => Self::WebKit(ref_id),
+      HandleId::PwWebKit(obj) => Self::PwWebKit(Arc::from(obj)),
     }
   }
 }

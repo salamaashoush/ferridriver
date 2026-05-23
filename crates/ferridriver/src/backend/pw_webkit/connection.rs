@@ -1,34 +1,36 @@
-//! Three-level JSON-RPC routing for Playwright's `WebKit` Inspector
-//! protocol:
+//! JSON-RPC routing for Playwright's `WebKit` Inspector protocol.
 //!
-//! 1. **Browser session** — the root. `Playwright.enable`,
-//!    `Playwright.createContext`, `Playwright.createPage`, …. Outbound
-//!    messages go straight onto the wire.
-//! 2. **Page-proxy session** — keyed by `pageProxyId`. Methods
-//!    `Target.sendMessageToTarget`, `Target.activate`, `Target.close`,
-//!    `Dialog.handleJavaScriptDialog`. Outbound messages get
-//!    `pageProxyId` added to the envelope.
-//! 3. **Target session** — keyed by `targetId` (a.k.a. the inner
-//!    `sessionId`). Methods `Page.*`, `Runtime.*`, `DOM.*`,
-//!    `Network.*`, `Input.*`, `Console.*`. Outbound messages are
-//!    serialized as JSON, wrapped in
-//!    `Target.sendMessageToTarget({ message, targetId })` on the
-//!    parent page-proxy session. Inbound messages arrive on the
-//!    parent page-proxy session as
-//!    `Target.dispatchMessageFromTarget` events.
+//! The protocol nests three logical levels, but they are NOT three
+//! types — they are three ways of *wrapping an outbound message* and
+//! one *routing key* for inbound events:
 //!
-//! Each level has its own monotonic id space + callback table so
-//! responses route back to the originating call regardless of how
-//! deep the nesting goes.
+//! - **Browser** — root. `Playwright.*`. Envelope: `{id, method, params}`.
+//! - **Page proxy** — keyed by `pageProxyId`. `Target.*`, `Dialog.*`,
+//!   `Emulation.*`. Envelope gains a `pageProxyId` field.
+//! - **Target** — the inner page session. `Page.*`, `Runtime.*`,
+//!   `DOM.*`, `Network.*`, `Input.*`, `Console.*`. The message is
+//!   JSON-encoded and shipped as the `message` field of a
+//!   `Target.sendMessageToTarget` call on the parent page proxy;
+//!   replies arrive wrapped in `Target.dispatchMessageFromTarget`.
+//!
+//! Per `wkConnection.ts`, message ids come from a single connection-wide
+//! counter, so a response routes back purely by `id` — no per-level id
+//! space. Only *events* need routing, by [`RouteKey`].
 
 use super::protocol::{Envelope, ErrorPayload};
-use super::transport::{Transport, TransportError, WriterHandle};
+use super::transport::{ReaderHandle, Transport, TransportError, WriterHandle};
+use rustc_hash::FxHashMap;
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::hash_map::Entry;
 use std::sync::atomic::{AtomicI64, Ordering};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, PoisonError};
 use thiserror::Error;
 use tokio::sync::{broadcast, oneshot};
+
+/// Sentinel id `Playwright.close` is sent with — the child never
+/// answers it, so inbound frames carrying it are dropped.
+const BROWSER_CLOSE_ID: i64 = -9999;
+const EVENT_CHANNEL_CAP: usize = 256;
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {
@@ -42,198 +44,207 @@ pub enum ConnectionError {
   Json(#[from] serde_json::Error),
 }
 
+impl From<ConnectionError> for crate::error::FerriError {
+  fn from(e: ConnectionError) -> Self {
+    let msg = e.to_string();
+    crate::error::FerriError::backend(format!("pw-webkit: {msg}"))
+  }
+}
+
 type ResponseSlot = oneshot::Sender<Result<Value, ErrorPayload>>;
 
-/// Shared callback table + id counter. Each session owns its own
-/// instance — responses are keyed by the session's local id, NOT a
-/// global one.
-struct SessionState {
-  next_id: AtomicI64,
-  callbacks: Mutex<HashMap<i64, ResponseSlot>>,
-  events: broadcast::Sender<Envelope>,
-  /// Events the connection's reader buffered before the owning
-  /// session was registered. Drained on the first
-  /// [`PageProxySession::drain_pending`] call.
-  pending: Mutex<Vec<Envelope>>,
+/// Routing key for inbound events. Responses do not need this — they
+/// route by global id — but a pending callback is tagged with it so
+/// closing a route can reject the calls still waiting on it.
+#[derive(Clone, PartialEq, Eq, Hash)]
+enum RouteKey {
+  Browser,
+  PageProxy(String),
+  Target(String),
 }
 
-impl SessionState {
-  fn new() -> Arc<Self> {
-    let (events, _) = broadcast::channel(256);
-    Arc::new(SessionState {
-      next_id: AtomicI64::new(1),
-      callbacks: Mutex::new(HashMap::new()),
-      events,
-      pending: Mutex::new(Vec::new()),
-    })
-  }
-
-  fn alloc_callback(&self) -> (i64, oneshot::Receiver<Result<Value, ErrorPayload>>) {
-    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
-    let (tx, rx) = oneshot::channel();
-    if let Ok(mut g) = self.callbacks.lock() {
-      g.insert(id, tx);
-    }
-    (id, rx)
-  }
-
-  fn complete(&self, id: i64, result: Result<Value, ErrorPayload>) {
-    if let Ok(mut g) = self.callbacks.lock() {
-      if let Some(tx) = g.remove(&id) {
-        let _ = tx.send(result);
-      }
-    }
-  }
-
-  fn dispatch_event(&self, env: Envelope) {
-    let _ = self.events.send(env);
-  }
-
-  fn drain_with_error(&self, message: &str) {
-    if let Ok(mut g) = self.callbacks.lock() {
-      for (_, tx) in g.drain() {
-        let _ = tx.send(Err(ErrorPayload {
-          message: message.into(),
-          code: None,
-          data: None,
-        }));
-      }
-    }
-  }
+/// One event stream. Starts `Buffering` because the child can emit
+/// events (`Target.targetCreated`) before our code subscribes; the
+/// reader auto-creates the entry and stashes them. The first
+/// [`Connection::subscribe`] flips it `Live` and replays the buffer
+/// through the channel.
+enum Route {
+  Buffering(Vec<Envelope>),
+  Live(broadcast::Sender<Envelope>),
 }
 
-/// Owns the transport + the browser-level session state. Holds weak
-/// pointers to live page-proxy sessions so inbound traffic can be
-/// routed to the right callback table.
 pub struct Connection {
   writer: Arc<WriterHandle>,
-  browser: Arc<SessionState>,
-  page_proxies: Mutex<HashMap<String, Arc<SessionState>>>,
-  targets: Mutex<HashMap<String, Arc<SessionState>>>,
-  /// Events that arrive with a `pageProxyId` we haven't registered
-  /// yet. The server can emit `Target.targetCreated` before our
-  /// `Playwright.createPage` response races back to us — without
-  /// buffering, those events drop on the floor and the caller hangs
-  /// waiting for them. On `open_page_proxy(id)` we drain the buffer
-  /// into the new session.
-  pending_proxy_events: Mutex<HashMap<String, Vec<Envelope>>>,
-  /// Same race for inner target sessions: `Target.dispatchMessageFromTarget`
-  /// can arrive before `open_target` registers the target session.
-  pending_target_events: Mutex<HashMap<String, Vec<Envelope>>>,
+  next_id: AtomicI64,
+  callbacks: Mutex<FxHashMap<i64, (RouteKey, ResponseSlot)>>,
+  routes: Mutex<FxHashMap<RouteKey, Route>>,
 }
 
 impl Connection {
   /// Spawn the reader task and return a shared connection handle.
   pub fn spawn(transport: Transport) -> Arc<Self> {
     let Transport { reader, writer } = transport;
-    let writer = Arc::new(writer);
     let conn = Arc::new(Connection {
-      writer,
-      browser: SessionState::new(),
-      page_proxies: Mutex::new(HashMap::new()),
-      targets: Mutex::new(HashMap::new()),
-      pending_proxy_events: Mutex::new(HashMap::new()),
-      pending_target_events: Mutex::new(HashMap::new()),
+      writer: Arc::new(writer),
+      next_id: AtomicI64::new(1),
+      callbacks: Mutex::new(FxHashMap::default()),
+      routes: Mutex::new(FxHashMap::default()),
     });
-    let reader_conn = Arc::clone(&conn);
-    tokio::spawn(reader_loop(reader_conn, reader));
+    tokio::spawn(reader_loop(Arc::clone(&conn), reader));
     conn
   }
 
   /// Handle on the root browser session.
   #[must_use]
-  pub fn browser(self: &Arc<Self>) -> BrowserSession {
-    BrowserSession {
+  pub fn browser_session(self: &Arc<Self>) -> Session {
+    Session {
       conn: Arc::clone(self),
-      state: Arc::clone(&self.browser),
+      kind: SessionKind::Browser,
     }
   }
 
-  /// Register a [`PageProxySession`] for `page_proxy_id`. Subsequent
-  /// inbound messages with that `pageProxyId` envelope field route
-  /// to its callback table.
-  pub fn open_page_proxy(self: &Arc<Self>, page_proxy_id: impl Into<String>) -> PageProxySession {
-    let id = page_proxy_id.into();
-    let state = SessionState::new();
-    if let Ok(mut g) = self.page_proxies.lock() {
-      g.insert(id.clone(), Arc::clone(&state));
-    }
-    // Stash any events the reader buffered before this session was
-    // registered. `route_to_session`-ing them here would broadcast on
-    // an empty subscriber set (we have no receivers yet) and the
-    // events would disappear. Caller drains via [`PageProxySession::drain_pending`]
-    // BEFORE subscribing to live events.
-    let drained: Vec<Envelope> = self
-      .pending_proxy_events
-      .lock()
-      .ok()
-      .and_then(|mut g| g.remove(&id))
-      .unwrap_or_default();
-    if let Ok(mut p) = state.pending.lock() {
-      *p = drained;
-    }
-    PageProxySession {
+  /// Handle on the page-proxy session for `page_proxy_id`.
+  #[must_use]
+  pub fn page_proxy_session(self: &Arc<Self>, page_proxy_id: impl Into<String>) -> Session {
+    Session {
       conn: Arc::clone(self),
-      state,
-      page_proxy_id: id,
+      kind: SessionKind::PageProxy {
+        page_proxy_id: page_proxy_id.into(),
+      },
     }
   }
 
-  /// Unregister a page-proxy session by id. Pending callbacks are
-  /// flushed with a transport-closed error.
-  pub fn close_page_proxy(&self, page_proxy_id: &str) {
-    let removed = self.page_proxies.lock().ok().and_then(|mut g| g.remove(page_proxy_id));
-    if let Some(state) = removed {
-      state.drain_with_error("page proxy closed");
+  /// Handle on the inner target session reached through `page_proxy_id`.
+  #[must_use]
+  pub fn target_session(self: &Arc<Self>, page_proxy_id: impl Into<String>, target_id: impl Into<String>) -> Session {
+    Session {
+      conn: Arc::clone(self),
+      kind: SessionKind::Target {
+        page_proxy_id: page_proxy_id.into(),
+        target_id: target_id.into(),
+      },
     }
   }
 
-  /// Register a [`TargetSession`] for `target_id`, child of the given
-  /// page-proxy session. Outbound messages get wrapped via
-  /// `Target.sendMessageToTarget` on the parent proxy.
-  pub fn open_target(self: &Arc<Self>, parent: &PageProxySession, target_id: impl Into<String>) -> TargetSession {
-    let id = target_id.into();
-    let state = SessionState::new();
-    if let Ok(mut g) = self.targets.lock() {
-      g.insert(id.clone(), Arc::clone(&state));
+  /// Reject every pending call on a route and drop its event stream.
+  /// Called when a page proxy or target goes away.
+  pub fn close_route(&self, page_proxy_id: Option<&str>, target_id: Option<&str>) {
+    let key = match (page_proxy_id, target_id) {
+      (_, Some(t)) => RouteKey::Target(t.to_string()),
+      (Some(p), None) => RouteKey::PageProxy(p.to_string()),
+      (None, None) => RouteKey::Browser,
+    };
+    let mut callbacks = self.callbacks.lock().unwrap_or_else(PoisonError::into_inner);
+    let ids: Vec<i64> = callbacks
+      .iter()
+      .filter(|(_, (k, _))| *k == key)
+      .map(|(id, _)| *id)
+      .collect();
+    let drained: Vec<ResponseSlot> = ids.iter().filter_map(|id| callbacks.remove(id)).map(|(_, slot)| slot).collect();
+    drop(callbacks);
+    for slot in drained {
+      let _ = slot.send(Err(closed_error()));
     }
-    let drained: Vec<Envelope> = self
-      .pending_target_events
-      .lock()
-      .ok()
-      .and_then(|mut g| g.remove(&id))
-      .unwrap_or_default();
-    if let Ok(mut p) = state.pending.lock() {
-      *p = drained;
-    }
-    TargetSession {
-      state,
-      parent: parent.clone(),
-      target_id: id,
-    }
-  }
-
-  /// Unregister a target session.
-  pub fn close_target(&self, target_id: &str) {
-    let removed = self.targets.lock().ok().and_then(|mut g| g.remove(target_id));
-    if let Some(state) = removed {
-      state.drain_with_error("target closed");
-    }
-  }
-
-  fn writer(&self) -> &Arc<WriterHandle> {
-    &self.writer
+    self.routes.lock().unwrap_or_else(PoisonError::into_inner).remove(&key);
   }
 
   /// Fire a raw envelope onto the wire without expecting a response.
-  /// Used by `Playwright.close` and any other call that the child
-  /// answers by closing the pipe rather than sending a result.
+  /// Used by `Playwright.close`, which the child answers by closing
+  /// the pipe rather than replying.
   pub fn send_raw(&self, envelope: &Value) -> Result<(), ConnectionError> {
     self.writer.send(envelope).map_err(ConnectionError::from)
   }
+
+  fn alloc_callback(&self, key: RouteKey) -> (i64, oneshot::Receiver<Result<Value, ErrorPayload>>) {
+    let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+    let (tx, rx) = oneshot::channel();
+    self
+      .callbacks
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .insert(id, (key, tx));
+    (id, rx)
+  }
+
+  fn complete(&self, id: i64, result: Result<Value, ErrorPayload>) {
+    let slot = self
+      .callbacks
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .remove(&id)
+      .map(|(_, slot)| slot);
+    if let Some(slot) = slot {
+      let _ = slot.send(result);
+    }
+  }
+
+  /// Deliver an event to its route, creating a `Buffering` entry if no
+  /// subscriber has claimed the route yet.
+  fn route_event(&self, key: RouteKey, env: Envelope) {
+    match self
+      .routes
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .entry(key)
+      .or_insert_with(|| Route::Buffering(Vec::new()))
+    {
+      Route::Buffering(buf) => buf.push(env),
+      Route::Live(tx) => {
+        let _ = tx.send(env);
+      },
+    }
+  }
+
+  /// Subscribe to a route's events. The first subscriber flips the
+  /// route `Live` and replays whatever the reader buffered before the
+  /// route had an owner.
+  fn subscribe(&self, key: RouteKey) -> broadcast::Receiver<Envelope> {
+    let mut routes = self.routes.lock().unwrap_or_else(PoisonError::into_inner);
+    match routes.entry(key) {
+      Entry::Occupied(mut e) => match e.get_mut() {
+        Route::Live(tx) => tx.subscribe(),
+        Route::Buffering(buf) => {
+          let buffered = std::mem::take(buf);
+          let (tx, rx) = broadcast::channel(EVENT_CHANNEL_CAP);
+          for env in buffered {
+            let _ = tx.send(env);
+          }
+          e.insert(Route::Live(tx));
+          rx
+        },
+      },
+      Entry::Vacant(e) => {
+        let (tx, rx) = broadcast::channel(EVENT_CHANNEL_CAP);
+        e.insert(Route::Live(tx));
+        rx
+      },
+    }
+  }
+
+  /// Reject every pending call. Invoked on transport EOF.
+  fn drain_all(&self) {
+    let drained: Vec<ResponseSlot> = self
+      .callbacks
+      .lock()
+      .unwrap_or_else(PoisonError::into_inner)
+      .drain()
+      .map(|(_, (_, slot))| slot)
+      .collect();
+    for slot in drained {
+      let _ = slot.send(Err(closed_error()));
+    }
+  }
 }
 
-async fn reader_loop(conn: Arc<Connection>, mut reader: super::transport::ReaderHandle) {
+fn closed_error() -> ErrorPayload {
+  ErrorPayload {
+    message: "transport closed".into(),
+    code: None,
+    data: None,
+  }
+}
+
+async fn reader_loop(conn: Arc<Connection>, mut reader: ReaderHandle) {
   while let Some(frame) = reader.recv().await {
     let raw = match frame {
       Ok(v) => v,
@@ -243,225 +254,154 @@ async fn reader_loop(conn: Arc<Connection>, mut reader: super::transport::Reader
       },
     };
     tracing::debug!(target: "ferridriver::pw_webkit", "recv: {raw}");
-    let env: Envelope = match serde_json::from_value(raw) {
-      Ok(e) => e,
-      Err(e) => {
-        tracing::warn!(target: "ferridriver::pw_webkit", "skip un-parseable frame: {e}");
-        continue;
-      },
-    };
-    dispatch_frame(&conn, env);
-  }
-  // EOF / error — flush every callback table.
-  conn.browser.drain_with_error("transport closed");
-  if let Ok(g) = conn.page_proxies.lock() {
-    for state in g.values() {
-      state.drain_with_error("transport closed");
+    match serde_json::from_value::<Envelope>(raw) {
+      Ok(env) => dispatch(&conn, env),
+      Err(e) => tracing::warn!(target: "ferridriver::pw_webkit", "skip un-parseable frame: {e}"),
     }
   }
-  if let Ok(g) = conn.targets.lock() {
-    for state in g.values() {
-      state.drain_with_error("transport closed");
-    }
-  }
+  conn.drain_all();
 }
 
-/// Route an inbound envelope to the right session. Order matters:
-/// target-wrapped messages arrive AS events on a page-proxy session
-/// (`Target.dispatchMessageFromTarget`), so we have to inspect the
-/// method name BEFORE forwarding to the proxy's event bus.
-fn dispatch_frame(conn: &Connection, env: Envelope) {
-  // Target-wrapped response: `pageProxyId` set + event method is
-  // `Target.dispatchMessageFromTarget`. Unwrap the inner JSON and
-  // route through the target session.
-  if let Some(ref method) = env.method {
-    if method == "Target.dispatchMessageFromTarget" {
-      if let Some(target_id) = env.params.get("targetId").and_then(Value::as_str) {
-        if let Some(message_str) = env.params.get("message").and_then(Value::as_str) {
-          if let Ok(inner) = serde_json::from_str::<Envelope>(message_str) {
-            route_to_target(conn, target_id, inner);
-            return;
-          }
-        }
-      }
-    }
-  }
-
-  // Response / event routing by envelope shape.
-  if let Some(page_proxy_id) = env.page_proxy_id.clone() {
-    let state = conn
-      .page_proxies
-      .lock()
-      .ok()
-      .and_then(|g| g.get(&page_proxy_id).cloned());
-    if let Some(state) = state {
-      route_to_session(&state, env);
-      return;
-    }
-    // Buffer for the proxy to claim once it's registered. Without
-    // this, `Target.targetCreated` events that race ahead of the
-    // `Playwright.createPage` response (and our subsequent
-    // `open_page_proxy` call) get dropped.
-    if let Ok(mut g) = conn.pending_proxy_events.lock() {
-      g.entry(page_proxy_id).or_default().push(env);
-    }
+/// Route one inbound envelope. A frame carrying an `id` is a response
+/// (route by global id); a frame carrying a `method` is an event
+/// (route by [`RouteKey`]). `Target.dispatchMessageFromTarget` is
+/// transport plumbing — its inner message is unwrapped and re-routed.
+fn dispatch(conn: &Connection, env: Envelope) {
+  if env.id == Some(BROWSER_CLOSE_ID) {
     return;
   }
-
-  route_to_session(&conn.browser, env);
-}
-
-fn route_to_target(conn: &Connection, target_id: &str, env: Envelope) {
-  let state = conn.targets.lock().ok().and_then(|g| g.get(target_id).cloned());
-  if let Some(state) = state {
-    route_to_session(&state, env);
-    return;
-  }
-  // Same race as the proxy buffer above: `Target.dispatchMessageFromTarget`
-  // can arrive before `open_target` registers the session.
-  if let Ok(mut g) = conn.pending_target_events.lock() {
-    g.entry(target_id.to_string()).or_default().push(env);
-  }
-}
-
-fn route_to_session(state: &Arc<SessionState>, env: Envelope) {
   if let Some(id) = env.id {
-    let result = if let Some(err) = env.error.clone() {
-      Err(err)
-    } else {
-      Ok(env.result.clone().unwrap_or(Value::Null))
-    };
-    state.complete(id, result);
+    conn.complete(id, response_of(&env));
     return;
   }
-  if env.method.is_some() {
-    state.dispatch_event(env);
+  let Some(method) = env.method.as_deref() else {
+    return;
+  };
+  if method == "Target.dispatchMessageFromTarget" {
+    if let Some((target_id, inner)) = unwrap_target_message(&env) {
+      route_target_inner(conn, &target_id, inner);
+    }
+    return;
+  }
+  match env.page_proxy_id.clone() {
+    Some(proxy) => conn.route_event(RouteKey::PageProxy(proxy), env),
+    None => conn.route_event(RouteKey::Browser, env),
   }
 }
 
-// ── Session handles ───────────────────────────────────────────────────
+/// Decode the JSON payload nested inside `Target.dispatchMessageFromTarget`.
+fn unwrap_target_message(env: &Envelope) -> Option<(String, Envelope)> {
+  let target_id = env.params.get("targetId").and_then(Value::as_str)?.to_string();
+  let message = env.params.get("message").and_then(Value::as_str)?;
+  let inner = serde_json::from_str::<Envelope>(message).ok()?;
+  Some((target_id, inner))
+}
 
-/// Root browser session. One per [`Connection`].
+fn route_target_inner(conn: &Connection, target_id: &str, env: Envelope) {
+  if let Some(id) = env.id {
+    conn.complete(id, response_of(&env));
+  } else if env.method.is_some() {
+    conn.route_event(RouteKey::Target(target_id.to_string()), env);
+  }
+}
+
+fn response_of(env: &Envelope) -> Result<Value, ErrorPayload> {
+  match env.error.clone() {
+    Some(err) => Err(err),
+    None => Ok(env.result.clone().unwrap_or(Value::Null)),
+  }
+}
+
+/// Which level of the protocol a [`Session`] speaks. Determines how
+/// outbound messages are wrapped and which [`RouteKey`] events route to.
 #[derive(Clone)]
-pub struct BrowserSession {
+enum SessionKind {
+  Browser,
+  PageProxy { page_proxy_id: String },
+  Target { page_proxy_id: String, target_id: String },
+}
+
+/// A protocol session — one handle, three flavours. Cloning is cheap
+/// (an `Arc` bump plus a couple of `String`s) and every clone shares
+/// the connection's id space and callback table.
+#[derive(Clone)]
+pub struct Session {
   conn: Arc<Connection>,
-  state: Arc<SessionState>,
+  kind: SessionKind,
 }
 
-impl BrowserSession {
-  pub async fn send(&self, method: &str, params: Value) -> Result<Value, ConnectionError> {
-    let (id, rx) = self.state.alloc_callback();
-    let envelope = json!({ "id": id, "method": method, "params": params });
-    self.conn.writer().send(&envelope)?;
-    wait_for(rx, method).await
+impl Session {
+  /// `pageProxyId` for page-proxy and target sessions; `None` for the
+  /// root browser session.
+  #[must_use]
+  pub fn page_proxy_id(&self) -> Option<&str> {
+    match &self.kind {
+      SessionKind::Browser => None,
+      SessionKind::PageProxy { page_proxy_id } | SessionKind::Target { page_proxy_id, .. } => Some(page_proxy_id),
+    }
   }
 
+  /// `targetId` for target sessions; `None` otherwise.
+  #[must_use]
+  pub fn target_id(&self) -> Option<&str> {
+    match &self.kind {
+      SessionKind::Target { target_id, .. } => Some(target_id),
+      _ => None,
+    }
+  }
+
+  /// Send `method` and await its reply.
+  pub async fn send(&self, method: &str, params: Value) -> Result<Value, ConnectionError> {
+    match &self.kind {
+      SessionKind::Browser => {
+        let (id, rx) = self.conn.alloc_callback(RouteKey::Browser);
+        self.conn.writer.send(&json!({ "id": id, "method": method, "params": params }))?;
+        wait_for(rx, method).await
+      },
+      SessionKind::PageProxy { page_proxy_id } => {
+        let (id, rx) = self.conn.alloc_callback(RouteKey::PageProxy(page_proxy_id.clone()));
+        self.conn.writer.send(&json!({
+          "id": id, "method": method, "params": params, "pageProxyId": page_proxy_id,
+        }))?;
+        wait_for(rx, method).await
+      },
+      SessionKind::Target {
+        page_proxy_id,
+        target_id,
+      } => {
+        // The inner call gets its own (global) id; its reply arrives
+        // wrapped in `Target.dispatchMessageFromTarget` and routes
+        // back by that id. The `Target.sendMessageToTarget` wrapper
+        // gets a second id on the page-proxy level — we await it so a
+        // wrapper-level rejection (target gone) surfaces instead of
+        // hanging on the inner reply.
+        let (id, rx) = self.conn.alloc_callback(RouteKey::Target(target_id.clone()));
+        let inner = serde_json::to_string(&json!({ "id": id, "method": method, "params": params }))?;
+        let (wrap_id, wrap_rx) = self.conn.alloc_callback(RouteKey::PageProxy(page_proxy_id.clone()));
+        self.conn.writer.send(&json!({
+          "id": wrap_id,
+          "method": "Target.sendMessageToTarget",
+          "params": { "message": inner, "targetId": target_id },
+          "pageProxyId": page_proxy_id,
+        }))?;
+        wait_for(wrap_rx, "Target.sendMessageToTarget").await?;
+        wait_for(rx, method).await
+      },
+    }
+  }
+
+  /// Subscribe to this session's events.
   #[must_use]
   pub fn events(&self) -> broadcast::Receiver<Envelope> {
-    self.state.events.subscribe()
-  }
-}
-
-/// Per-page-proxy session. Outbound calls add `pageProxyId` to the
-/// envelope; inbound is routed by the connection's
-/// `dispatch_frame`.
-#[derive(Clone)]
-pub struct PageProxySession {
-  conn: Arc<Connection>,
-  state: Arc<SessionState>,
-  page_proxy_id: String,
-}
-
-impl PageProxySession {
-  #[must_use]
-  pub fn page_proxy_id(&self) -> &str {
-    &self.page_proxy_id
+    self.conn.subscribe(self.route_key())
   }
 
-  /// Drain events the connection's reader buffered between the
-  /// `Playwright.createPage` request hitting the wire and the
-  /// corresponding [`Connection::open_page_proxy`] call. Returns the
-  /// stashed envelopes in arrival order, then clears the buffer.
-  /// Callers that need to observe pre-subscription events (e.g.
-  /// `Target.targetCreated`) MUST call this before [`Self::events`].
-  #[must_use]
-  pub fn drain_pending(&self) -> Vec<Envelope> {
-    self
-      .state
-      .pending
-      .lock()
-      .map(|mut g| std::mem::take(&mut *g))
-      .unwrap_or_default()
-  }
-
-  pub async fn send(&self, method: &str, params: Value) -> Result<Value, ConnectionError> {
-    let (id, rx) = self.state.alloc_callback();
-    let envelope = json!({
-      "id": id,
-      "method": method,
-      "params": params,
-      "pageProxyId": self.page_proxy_id,
-    });
-    self.conn.writer().send(&envelope)?;
-    wait_for(rx, method).await
-  }
-
-  #[must_use]
-  pub fn events(&self) -> broadcast::Receiver<Envelope> {
-    self.state.events.subscribe()
-  }
-}
-
-/// Target session — inner page session reached via
-/// `Target.sendMessageToTarget` on the parent [`PageProxySession`].
-/// Each outbound call is JSON-encoded and sent as the `message` field
-/// of a `Target.sendMessageToTarget` call on the parent.
-#[derive(Clone)]
-pub struct TargetSession {
-  state: Arc<SessionState>,
-  parent: PageProxySession,
-  target_id: String,
-}
-
-impl TargetSession {
-  #[must_use]
-  pub fn target_id(&self) -> &str {
-    &self.target_id
-  }
-
-  /// Drain events buffered before [`Connection::open_target`]
-  /// registered the session. Mirrors [`PageProxySession::drain_pending`].
-  #[must_use]
-  pub fn drain_pending(&self) -> Vec<Envelope> {
-    self
-      .state
-      .pending
-      .lock()
-      .map(|mut g| std::mem::take(&mut *g))
-      .unwrap_or_default()
-  }
-
-  pub async fn send(&self, method: &str, params: Value) -> Result<Value, ConnectionError> {
-    let (id, rx) = self.state.alloc_callback();
-    let inner = json!({ "id": id, "method": method, "params": params });
-    let inner_str = serde_json::to_string(&inner)?;
-    // The wrapper call to the parent proxy session must complete
-    // before we await the inner response — if the parent rejects
-    // (e.g. target closed), we need to surface that synchronously
-    // rather than block forever on `rx`.
-    self
-      .parent
-      .send(
-        "Target.sendMessageToTarget",
-        json!({ "message": inner_str, "targetId": self.target_id }),
-      )
-      .await?;
-    wait_for(rx, method).await
-  }
-
-  #[must_use]
-  pub fn events(&self) -> broadcast::Receiver<Envelope> {
-    self.state.events.subscribe()
+  fn route_key(&self) -> RouteKey {
+    match &self.kind {
+      SessionKind::Browser => RouteKey::Browser,
+      SessionKind::PageProxy { page_proxy_id } => RouteKey::PageProxy(page_proxy_id.clone()),
+      SessionKind::Target { target_id, .. } => RouteKey::Target(target_id.clone()),
+    }
   }
 }
 
@@ -472,8 +412,3 @@ async fn wait_for(rx: oneshot::Receiver<Result<Value, ErrorPayload>>, method: &s
     Err(_) => Err(ConnectionError::Closed { method: method.into() }),
   }
 }
-
-// Backwards-compatible aliases for the earlier two-level skeleton —
-// downstream code can use `Session` to mean the page-proxy level until
-// it's updated to the typed forms.
-pub type Session = PageProxySession;

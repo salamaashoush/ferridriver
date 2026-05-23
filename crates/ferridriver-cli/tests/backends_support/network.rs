@@ -250,7 +250,7 @@ pub fn test_network_redirect_chain(c: &mut McpClient) {
 /// trigger the failure via a refused TCP port there instead — the
 /// `requestfailed` lifecycle observability is identical.
 pub fn test_network_request_failure(c: &mut McpClient) {
-  if c.backend == "webkit" {
+  if c.backend == "webkit" || c.backend == "pw-webkit" {
     return test_network_request_failure_via_refused_port(c);
   }
   with_stub_server(|base| {
@@ -366,7 +366,7 @@ pub fn test_network_response_body(c: &mut McpClient) {
     // bytes for non-intercepted responses, mirrors Playwright's BiDi
     // backend; WebKit: no public `WKWebView` API). Per Rule 4 we never
     // silently skip — we assert the typed error.
-    let body_supported = c.backend == "cdp-pipe" || c.backend == "cdp-raw";
+    let body_supported = c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "pw-webkit";
     if body_supported {
       let v = c.script_value(script);
       assert_eq!(v["status"].as_i64(), Some(200), "status: {v}");
@@ -429,8 +429,8 @@ pub fn test_network_post_data(c: &mut McpClient) {
       ";
     let v = c.script_value(script);
     assert_eq!(v["method"].as_str(), Some("POST"), "method: {v}");
-    if c.backend == "cdp-pipe" || c.backend == "cdp-raw" {
-      // CDP exposes the post body via `Network.requestWillBeSent.request.postData`.
+    if c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "pw-webkit" {
+      // CDP/PW WebKit expose the post body via `Network.requestWillBeSent.request.postData`.
       assert!(
         v["data"].as_str().is_some_and(|s| s.contains("\"ping\":\"pong\"")),
         "data: {v}",
@@ -475,10 +475,10 @@ pub fn test_network_headers(c: &mut McpClient) {
       };
       "#;
     let v = c.script_value(script);
-    if c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "bidi" {
+    if c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "bidi" || c.backend == "pw-webkit" {
       // CDP exposes all request headers via `requestWillBeSent.request.headers`;
-      // BiDi via `network.beforeRequestSent.request.headers`. Both surface
-      // browser-added headers (`User-Agent`, `Accept`, ...).
+      // BiDi via `network.beforeRequestSent.request.headers`; PW WebKit
+      // mirrors the CDP shape. All surface browser-added headers.
       assert!(
         v["userAgent"].as_str().is_some_and(|s| !s.is_empty()),
         "User-Agent header should be set on {}: {v}",
@@ -541,7 +541,7 @@ pub fn test_network_headers(c: &mut McpClient) {
 /// assert that `page.waitForEvent('websocket', { timeoutMs })` rejects
 /// with a typed Timeout there rather than silently dangling.
 pub fn test_network_websocket(c: &mut McpClient) {
-  if c.backend == "bidi" || c.backend == "webkit" {
+  if c.backend == "bidi" || c.backend == "webkit" || c.backend == "pw-webkit" {
     c.nav_url("about:blank");
     let script = "const r = await page.waitForEvent('websocket', 500).catch(e => ({ error: String(e) }));\
                   return r && r.error ? { error: r.error } : { ok: true };";

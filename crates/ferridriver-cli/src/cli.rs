@@ -291,6 +291,7 @@ pub enum Backend {
   CdpRaw,
   #[cfg(webkit_backend)]
   Webkit,
+  PwWebkit,
   Bidi,
 }
 
@@ -306,6 +307,7 @@ pub fn backend_to_kind(b: &Backend) -> BackendKind {
     Backend::CdpRaw => BackendKind::CdpRaw,
     #[cfg(webkit_backend)]
     Backend::Webkit => BackendKind::WebKit,
+    Backend::PwWebkit => BackendKind::PwWebKit,
     Backend::Bidi => BackendKind::Bidi,
   }
 }
