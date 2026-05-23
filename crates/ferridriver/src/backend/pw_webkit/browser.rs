@@ -1,26 +1,29 @@
-//! Playwright `WebKit` browser handle. Owns the spawned child process,
-//! the [`super::Connection`], and the root [`super::BrowserSession`].
+//! Playwright `WebKit` browser handle.
 //!
-//! Mirrors the launch flow of Playwright's `WKBrowser`:
+//! Owns the spawned `pw_run.sh` child, the [`Connection`], and the root
+//! browser [`Session`]. Launch flow mirrors `WKBrowser`:
 //!
-//! 1. Spawn `pw_run.sh --inspector-pipe [--headless] [--user-data-dir=...]`.
-//! 2. Wire fd 3 (parent → child input) and fd 4 (child → parent output)
-//!    through [`super::Transport`].
-//! 3. Send `Playwright.enable` on the root session.
-//! 4. Subscribe to `Playwright.pageProxyCreated` so subsequent
-//!    `Playwright.createPage` calls return a usable page handle.
+//! 1. Spawn `pw_run.sh --inspector-pipe [--headless]` with fd 3/4 wired
+//!    to a socketpair pair.
+//! 2. `Playwright.enable` handshake on the root session.
+//! 3. `Playwright.createContext` / `createPage` per page.
+//!
+//! Cheaply cloneable — the child + pipe fds live behind an `Arc<ChildHandle>`
+//! whose `Drop` reaps the process, matching `WebKitBrowser`'s shape.
 
-use super::connection::{BrowserSession, Connection, ConnectionError, PageProxySession};
+use super::connection::{Connection, ConnectionError, Session};
 use super::launcher::{LaunchConfig, LaunchError};
-use super::protocol::{self, CreateContextParams, CreateContextResult, CreatePageParams, CreatePageResult, Envelope};
+use super::page::PwWebKitPage;
+use super::protocol::{self, CreateContextParams, CreateContextResult, CreatePageParams, CreatePageResult};
 use super::transport::Transport;
-use serde_json::{Value, json};
+use crate::backend::AnyPage;
+use crate::error::{FerriError, Result};
+use serde_json::json;
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::process::Child;
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use thiserror::Error;
-use tokio::sync::broadcast;
 
 #[derive(Debug, Error)]
 pub enum BrowserError {
@@ -36,68 +39,138 @@ pub enum BrowserError {
   Protocol(String),
 }
 
-pub struct Browser {
-  child: Child,
-  /// Parent's halves of the IPC socketpair. Held so the descriptors
-  /// stay open for the lifetime of the connection — Rust's
-  /// `UnixStream` Drop closes them. [`Self::close`] consumes them
-  /// explicitly so EOF reaches the child before we reap it.
-  ipc: (UnixStream, UnixStream),
-  conn: Arc<Connection>,
-  root: BrowserSession,
+impl From<BrowserError> for FerriError {
+  fn from(e: BrowserError) -> Self {
+    FerriError::backend(e.to_string())
+  }
 }
 
-impl Browser {
-  /// Spawn a Playwright `WebKit` child + complete the
-  /// `Playwright.enable` handshake.
-  pub async fn launch(config: &LaunchConfig) -> Result<Self, BrowserError> {
-    // Two socketpairs:
-    //
-    //   pair A — child reads from fd 3 ← parent writes to its end of A.
-    //   pair B — child writes to fd 4 → parent reads from its end of B.
-    //
-    // The naming convention here is "what the OWNER does":
-    //   parent_write   — parent writes to this socket (pair A, parent side).
-    //   child_read     — child reads from this socket (pair A, child side; dup → fd 3).
-    //   child_write    — child writes to this socket (pair B, child side; dup → fd 4).
-    //   parent_read    — parent reads from this socket (pair B, parent side).
-    //
-    // Swapping these two pairs (e.g. handing the child its own read end on
-    // fd 4) leaves both processes blocked on `read()` forever, so be
-    // precise about which half lives on which side.
+/// Owns the child process + the parent's pipe fds. `Drop` closes the
+/// fds (child sees EOF) and reaps the process so test runs leave no
+/// zombie.
+struct ChildHandle {
+  child: Mutex<Option<Child>>,
+  /// Parent halves of the two socketpairs. Dropping closes them.
+  ipc: Mutex<Option<(UnixStream, UnixStream)>>,
+}
+
+impl Drop for ChildHandle {
+  fn drop(&mut self) {
+    if let Ok(mut g) = self.ipc.lock() {
+      g.take();
+    }
+    if let Ok(mut g) = self.child.lock() {
+      if let Some(mut c) = g.take() {
+        let _ = c.kill();
+        let _ = c.wait();
+      }
+    }
+  }
+}
+
+/// Playwright `WebKit` browser. Cloneable; clones share the child + connection.
+#[derive(Clone)]
+pub struct PwWebKitBrowser {
+  conn: Arc<Connection>,
+  root: Session,
+  handle: Arc<ChildHandle>,
+  /// Pages created through this browser. `pages()` snapshots it; the
+  /// PW `WebKit` protocol has no page-list RPC.
+  pages: Arc<Mutex<Vec<PwWebKitPage>>>,
+  /// Shared download directory the per-context `setDownloadBehavior`
+  /// points at. Files land here keyed by `uuid`; the per-page
+  /// [`crate::download::DownloadManager`] surfaces them as live
+  /// `Download` handles. Held so its lifetime tracks the browser —
+  /// it is consumed inside the per-launch download listener task.
+  #[allow(dead_code, reason = "held for lifetime; listener task owns the only active reference")]
+  downloads_dir: Arc<std::path::PathBuf>,
+  /// Context every page lands in when the caller passes no explicit
+  /// `browserContextId`. PW `WebKit` non-persistent launches have no
+  /// implicit default context — `Playwright.createPage` without a
+  /// `browserContextId` fails with "Browser started with no default
+  /// context", so we mint one at launch.
+  default_context: Arc<str>,
+  /// PW `WebKit` build revision (e.g. `"webkit-playwright/2272"`),
+  /// derived from the binary path — a real build identifier, not a
+  /// placeholder.
+  version: Arc<str>,
+}
+
+impl PwWebKitBrowser {
+  /// Spawn a Playwright `WebKit` child and complete `Playwright.enable`.
+  pub async fn launch(config: &LaunchConfig) -> std::result::Result<Self, BrowserError> {
+    // pair A — child reads fd 3 ← parent writes. pair B — child writes
+    // fd 4 → parent reads. Swapping the pairs deadlocks both ends.
     let (parent_write, child_read) = UnixStream::pair()?;
     let (parent_read, child_write) = UnixStream::pair()?;
     let child_read_fd = child_read.as_raw_fd();
     let child_write_fd = child_write.as_raw_fd();
-    // launcher::spawn signature: (config, fd_that_becomes_child_fd_4_write_end,
-    //                             fd_that_becomes_child_fd_3_read_end).
-    // PW's `--inspector-pipe`: child READS from fd 3, WRITES to fd 4.
     let child = super::launcher::spawn(config, child_write_fd, child_read_fd)?;
-    // Drop the child halves — they're already dup'd to fd 3/4 in the
-    // child. Keeping them open in the parent would prevent EOF
-    // propagation when the child exits.
     drop(child_read);
     drop(child_write);
 
     parent_read.set_nonblocking(false)?;
     parent_write.set_nonblocking(false)?;
-    let read_clone = parent_read.try_clone()?;
-    let write_clone = parent_write.try_clone()?;
-    let transport = Transport::new(read_clone, write_clone);
+    let transport = Transport::new(parent_read.try_clone()?, parent_write.try_clone()?);
     let conn = Connection::spawn(transport);
-    let browser = conn.browser();
-    browser.send(protocol::PLAYWRIGHT_ENABLE, json!({})).await?;
+    let root = conn.browser_session();
+    root.send(protocol::PLAYWRIGHT_ENABLE, json!({})).await?;
 
-    Ok(Browser {
-      child,
-      ipc: (parent_read, parent_write),
+    // Mint the default context — PW WebKit non-persistent launches
+    // have no implicit one.
+    let ctx_resp = root
+      .send(
+        protocol::PLAYWRIGHT_CREATE_CONTEXT,
+        serde_json::to_value(CreateContextParams::default())?,
+      )
+      .await?;
+    let default_context: Arc<str> = serde_json::from_value::<CreateContextResult>(ctx_resp)
+      .map(|r| Arc::from(r.browser_context_id))
+      .map_err(|e| BrowserError::Protocol(format!("default context: {e}")))?;
+
+    let version: Arc<str> = Arc::from(format!("webkit-playwright/{}", super::launcher::binary_revision()));
+
+    let downloads_dir = std::env::temp_dir().join(format!(
+      "ferridriver-pw-webkit-downloads-{}",
+      std::process::id()
+    ));
+    let _ = std::fs::create_dir_all(&downloads_dir);
+    let downloads_dir = Arc::new(downloads_dir);
+    let _ = root
+      .send(
+        "Playwright.setDownloadBehavior",
+        json!({
+          "behavior": "allow",
+          "downloadPath": downloads_dir.to_string_lossy(),
+          "browserContextId": default_context.to_string(),
+        }),
+      )
+      .await;
+
+    let pages: Arc<Mutex<Vec<PwWebKitPage>>> = Arc::new(Mutex::new(Vec::new()));
+    spawn_download_listener(&root, pages.clone(), downloads_dir.clone());
+
+    Ok(PwWebKitBrowser {
       conn,
-      root: browser,
+      root,
+      handle: Arc::new(ChildHandle {
+        child: Mutex::new(Some(child)),
+        ipc: Mutex::new(Some((parent_read, parent_write))),
+      }),
+      pages,
+      downloads_dir,
+      default_context,
+      version,
     })
   }
 
   #[must_use]
-  pub fn root(&self) -> &BrowserSession {
+  pub fn version(&self) -> String {
+    self.version.to_string()
+  }
+
+  #[must_use]
+  pub fn root(&self) -> &Session {
     &self.root
   }
 
@@ -106,83 +179,243 @@ impl Browser {
     &self.conn
   }
 
-  /// Create an ephemeral browser context. Returns the
-  /// `browserContextId` Playwright assigned.
-  pub async fn create_context(&self, params: CreateContextParams) -> Result<String, BrowserError> {
+  /// Create an ephemeral browser context. `Playwright.createContext`.
+  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
+    let mut params = CreateContextParams::default();
+    if let Some(p) = proxy {
+      params.proxy_server = Some(p.server.clone());
+      params.proxy_bypass_list = p.bypass.clone();
+    }
     let resp = self
       .root
       .send(protocol::PLAYWRIGHT_CREATE_CONTEXT, serde_json::to_value(&params)?)
-      .await?;
+      .await
+      .map_err(BrowserError::from)?;
     let parsed: CreateContextResult =
-      serde_json::from_value(resp).map_err(|e| BrowserError::Protocol(e.to_string()))?;
+      serde_json::from_value(resp).map_err(|e| FerriError::protocol("Playwright.createContext", e.to_string()))?;
     Ok(parsed.browser_context_id)
   }
 
-  /// Delete a context previously returned by [`Self::create_context`].
-  pub async fn delete_context(&self, browser_context_id: &str) -> Result<(), BrowserError> {
+  /// Delete a context. `Playwright.deleteContext`.
+  pub async fn dispose_context(&self, browser_context_id: &str) -> Result<()> {
     self
       .root
       .send(
         protocol::PLAYWRIGHT_DELETE_CONTEXT,
         json!({ "browserContextId": browser_context_id }),
       )
-      .await?;
+      .await
+      .map_err(BrowserError::from)?;
     Ok(())
   }
 
-  /// Create a new page in `browser_context_id` (or the default
-  /// persistent context when `None`). Returns the `pageProxyId`
-  /// + a registered [`PageProxySession`] handle.
-  pub async fn create_page(&self, browser_context_id: Option<&str>) -> Result<PageProxySession, BrowserError> {
+  /// `Playwright.createPage` → returns the registered page-proxy [`Session`].
+  /// Falls back to the default context when no explicit one is given.
+  pub async fn create_page(&self, browser_context_id: Option<&str>) -> Result<Session> {
     let params = CreatePageParams {
-      browser_context_id: browser_context_id.map(str::to_string),
+      browser_context_id: Some(browser_context_id.unwrap_or(&self.default_context).to_string()),
     };
     let resp = self
       .root
       .send(protocol::PLAYWRIGHT_CREATE_PAGE, serde_json::to_value(&params)?)
-      .await?;
-    let parsed: CreatePageResult = serde_json::from_value(resp).map_err(|e| BrowserError::Protocol(e.to_string()))?;
-    Ok(self.conn.open_page_proxy(parsed.page_proxy_id))
+      .await
+      .map_err(BrowserError::from)?;
+    let parsed: CreatePageResult =
+      serde_json::from_value(resp).map_err(|e| FerriError::protocol("Playwright.createPage", e.to_string()))?;
+    Ok(self.conn.page_proxy_session(parsed.page_proxy_id))
   }
 
-  /// Subscribe to events on the root browser session. Useful for
-  /// `Playwright.pageProxyCreated/Destroyed`, download events, etc.
-  #[must_use]
-  pub fn events(&self) -> broadcast::Receiver<Envelope> {
-    self.root.events()
+  /// List all open pages.
+  pub async fn pages(&self) -> Result<Vec<AnyPage>> {
+    tokio::task::yield_now().await;
+    Ok(
+      self
+        .pages
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .iter()
+        .filter(|p| !p.is_closed())
+        .cloned()
+        .map(AnyPage::PwWebKit)
+        .collect(),
+    )
   }
 
-  /// Issue `Playwright.close` and wait for the child process to exit.
-  pub async fn close(mut self) -> Result<(), BrowserError> {
-    // `Playwright.close` does not always send a response — Playwright
-    // assigns a sentinel id (`kBrowserCloseMessageId = -9999`) the
-    // dispatcher silently drops. We mirror that by firing the
-    // request without awaiting a callback so we don't deadlock on a
-    // reply the child will never deliver. Best-effort: ignore write
-    // errors (the child may already have torn down its read end).
-    let close_envelope = json!({ "id": -9999, "method": protocol::PLAYWRIGHT_CLOSE, "params": {} });
-    let _ = self.conn.send_raw(&close_envelope);
-    // Close our pipe fds so the child's reads return EOF and it can
-    // tear down cleanly. The `ipc` tuple owns the parent halves of
-    // both socketpairs; dropping it closes them.
-    drop(self.ipc);
-    // Reap the child without blocking forever — if `Playwright.close`
-    // didn't make it exit, escalate to SIGKILL after a short timeout
-    // so test runs don't wedge.
+  /// Create a new page, attach it, and optionally navigate.
+  pub async fn new_page(
+    &self,
+    url: &str,
+    browser_context_id: Option<&str>,
+    viewport: Option<&crate::options::ViewportConfig>,
+  ) -> Result<AnyPage> {
+    let proxy = self.create_page(browser_context_id).await?;
+    let page = PwWebKitPage::attach(self, proxy, browser_context_id.map(str::to_string)).await?;
+    if let Some(vp) = viewport {
+      page.emulate_viewport(vp).await?;
+    }
+    if !url.is_empty() && url != "about:blank" {
+      page.goto(url, crate::backend::NavLifecycle::Load, 30_000, None).await?;
+    }
+    self
+      .pages
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .push(page.clone());
+    Ok(AnyPage::PwWebKit(page))
+  }
+
+  /// Issue `Playwright.close` and reap the child.
+  pub async fn close(&mut self) -> Result<()> {
+    // `Playwright.close` carries the sentinel id the child never
+    // answers — fire without awaiting a reply.
+    let _ = self.conn.send_raw(&json!({
+      "id": -9999, "method": protocol::PLAYWRIGHT_CLOSE, "params": {},
+    }));
+    // Closing the fds gives the child EOF; ChildHandle::Drop reaps it.
+    if let Ok(mut g) = self.handle.ipc.lock() {
+      g.take();
+    }
     for _ in 0..30 {
-      if let Ok(Some(_)) = self.child.try_wait() {
+      let exited = self
+        .handle
+        .child
+        .lock()
+        .ok()
+        .and_then(|mut g| g.as_mut().map(|c| c.try_wait().ok().flatten().is_some()))
+        .unwrap_or(true);
+      if exited {
         return Ok(());
       }
       tokio::time::sleep(std::time::Duration::from_millis(100)).await;
     }
-    let _ = self.child.kill();
-    let _ = self.child.wait();
+    if let Ok(mut g) = self.handle.child.lock() {
+      if let Some(mut c) = g.take() {
+        let _ = c.kill();
+        let _ = c.wait();
+      }
+    }
     Ok(())
   }
 
-  /// Returns the result of `Playwright.getInfo` (currently
-  /// `{ os: "macOS" | "Linux" | "Windows" }`).
-  pub async fn info(&self) -> Result<Value, BrowserError> {
-    Ok(self.root.send(protocol::PLAYWRIGHT_GET_INFO, json!({})).await?)
+  /// `Playwright.getInfo` — `{ os }`.
+  pub async fn info(&self) -> Result<serde_json::Value> {
+    self
+      .root
+      .send(protocol::PLAYWRIGHT_GET_INFO, json!({}))
+      .await
+      .map_err(|e| BrowserError::from(e).into())
   }
+}
+
+/// Spawn a browser-level listener that translates `Playwright.downloadCreated`,
+/// `Playwright.downloadFilenameSuggested`, and `Playwright.downloadFinished`
+/// into per-page [`crate::download::Download`] handles.
+fn spawn_download_listener(root: &Session, pages: Arc<Mutex<Vec<PwWebKitPage>>>, downloads_dir: Arc<std::path::PathBuf>) {
+  let mut rx = root.events();
+  tokio::spawn(async move {
+    use tokio::sync::broadcast::error::RecvError;
+    loop {
+      let env = match rx.recv().await {
+        Ok(e) => e,
+        Err(RecvError::Lagged(_)) => continue,
+        Err(RecvError::Closed) => break,
+      };
+      match env.method.as_deref() {
+        Some("Playwright.downloadCreated") => {
+          let Some(page_proxy_id) = env.params.get("pageProxyId").and_then(serde_json::Value::as_str) else {
+            continue;
+          };
+          let uuid = env
+            .params
+            .get("uuid")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+          let url = env
+            .params
+            .get("url")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+          let Some(page) = find_page(&pages, page_proxy_id) else {
+            continue;
+          };
+          let Some(arc_page) = page.page_backref.upgrade() else {
+            continue;
+          };
+          let canceler: crate::download::DownloadCanceler = std::sync::Arc::new(|| Box::pin(async { Ok(()) }));
+          let download = crate::download::Download::new(
+            &arc_page,
+            uuid,
+            url,
+            String::new(),
+            (*downloads_dir).clone(),
+            canceler,
+          );
+          page.download_manager.did_open(&download);
+        },
+        Some("Playwright.downloadFilenameSuggested") => {
+          let uuid = env
+            .params
+            .get("uuid")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+          let suggested = env
+            .params
+            .get("suggestedFilename")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("")
+            .to_string();
+          let pages_snapshot: Vec<PwWebKitPage> = pages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+          for p in &pages_snapshot {
+            if let Some(dl) = p.download_manager.peek_for_guid(uuid) {
+              dl.filename_suggested(suggested);
+              break;
+            }
+          }
+        },
+        Some("Playwright.downloadFinished") => {
+          let uuid = env
+            .params
+            .get("uuid")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("");
+          let error = env
+            .params
+            .get("error")
+            .and_then(serde_json::Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(std::string::ToString::to_string);
+          let pages_snapshot: Vec<PwWebKitPage> = pages
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone();
+          for p in &pages_snapshot {
+            if let Some(dl) = p.download_manager.take_for_guid(uuid) {
+              let final_path = if error.is_none() {
+                Some(downloads_dir.join(uuid))
+              } else {
+                None
+              };
+              dl.report_finished(final_path, error.clone());
+              break;
+            }
+          }
+        },
+        _ => {},
+      }
+    }
+  });
+}
+
+fn find_page(pages: &Arc<Mutex<Vec<PwWebKitPage>>>, page_proxy_id: &str) -> Option<PwWebKitPage> {
+  pages
+    .lock()
+    .unwrap_or_else(std::sync::PoisonError::into_inner)
+    .iter()
+    .find(|p| p.page_proxy_id() == page_proxy_id)
+    .cloned()
 }

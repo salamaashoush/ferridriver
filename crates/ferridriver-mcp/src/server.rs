@@ -365,6 +365,7 @@ impl McpServer {
       BackendKind::Bidi => ferridriver::options::BrowserKind::Firefox,
       #[cfg(webkit_backend)]
       BackendKind::WebKit => ferridriver::options::BrowserKind::WebKit,
+      BackendKind::PwWebKit => ferridriver::options::BrowserKind::WebKit,
       _ => ferridriver::options::BrowserKind::Chromium,
     };
     let mut browser_state = BrowserState::with_plan(

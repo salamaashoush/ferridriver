@@ -390,7 +390,68 @@ impl BrowserState {
 
   // ── Instance management ─────────────────────────────────────────────────
 
-  /// Ensure a Chrome instance is launched. If it already exists, no-op.
+  /// Launch a fresh browser process for the configured `backend_kind`.
+  /// Extracted from [`Self::ensure_instance`] to keep the per-backend
+  /// match arms out of the ensure-instance hot path.
+  async fn launch_browser(&self, all_extra: &[String]) -> Result<AnyBrowser> {
+    Ok(match self.backend_kind {
+      BackendKind::CdpPipe => {
+        use crate::backend::cdp::{CdpBrowser, pipe::PipeTransport};
+        let flags = chrome_flags(self.headless, all_extra);
+        let browser = match &self.user_data_dir {
+          Some(dir) => {
+            CdpBrowser::<PipeTransport>::launch_with_flags_in_dir(
+              &self.chromium_path,
+              &flags,
+              std::path::Path::new(dir),
+            )
+            .await?
+          },
+          None => CdpBrowser::<PipeTransport>::launch_with_flags(&self.chromium_path, &flags).await?,
+        };
+        AnyBrowser::CdpPipe(browser)
+      },
+      BackendKind::CdpRaw => {
+        use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
+        let flags = chrome_flags(self.headless, all_extra);
+        let browser = match &self.user_data_dir {
+          Some(dir) => {
+            Box::pin(CdpBrowser::<WsTransport>::launch_with_flags_in_dir(
+              &self.chromium_path,
+              &flags,
+              std::path::Path::new(dir),
+            ))
+            .await?
+          },
+          None => CdpBrowser::<WsTransport>::launch_with_flags(&self.chromium_path, &flags).await?,
+        };
+        AnyBrowser::CdpRaw(browser)
+      },
+      #[cfg(webkit_backend)]
+      BackendKind::WebKit => {
+        use crate::backend::webkit::WebKitBrowser;
+        AnyBrowser::WebKit(WebKitBrowser::launch_with_options(self.headless).await?)
+      },
+      BackendKind::PwWebKit => {
+        use crate::backend::pw_webkit::{LaunchConfig, PwWebKitBrowser};
+        let config = LaunchConfig {
+          headless: self.headless,
+          ..LaunchConfig::default()
+        };
+        AnyBrowser::PwWebKit(Box::pin(PwWebKitBrowser::launch(&config)).await?)
+      },
+      BackendKind::Bidi => {
+        use crate::backend::bidi::BidiBrowser;
+        let mut flags = all_extra.to_vec();
+        if self.headless {
+          flags.push("--headless".into());
+        }
+        AnyBrowser::Bidi(Box::pin(BidiBrowser::launch_with_flags(&self.chromium_path, &flags)).await?)
+      },
+    })
+  }
+
+  /// Ensure a browser instance is launched. If it already exists, no-op.
   ///
   /// # Errors
   ///
@@ -438,56 +499,7 @@ impl BrowserState {
         let ws_url = discover_chrome_ws(channel, user_data_dir.as_deref())?;
         AnyBrowser::CdpRaw(Box::pin(CdpBrowser::<WsTransport>::connect(&ws_url)).await?)
       },
-      ConnectMode::Launch => match self.backend_kind {
-        BackendKind::CdpPipe => {
-          use crate::backend::cdp::{CdpBrowser, pipe::PipeTransport};
-          let flags = chrome_flags(self.headless, &all_extra);
-          let browser = match &self.user_data_dir {
-            Some(dir) => {
-              CdpBrowser::<PipeTransport>::launch_with_flags_in_dir(
-                &self.chromium_path,
-                &flags,
-                std::path::Path::new(dir),
-              )
-              .await?
-            },
-            None => CdpBrowser::<PipeTransport>::launch_with_flags(&self.chromium_path, &flags).await?,
-          };
-          AnyBrowser::CdpPipe(browser)
-        },
-        BackendKind::CdpRaw => {
-          use crate::backend::cdp::{CdpBrowser, ws::WsTransport};
-          let flags = chrome_flags(self.headless, &all_extra);
-          let browser = match &self.user_data_dir {
-            Some(dir) => {
-              Box::pin(CdpBrowser::<WsTransport>::launch_with_flags_in_dir(
-                &self.chromium_path,
-                &flags,
-                std::path::Path::new(dir),
-              ))
-              .await?
-            },
-            None => CdpBrowser::<WsTransport>::launch_with_flags(&self.chromium_path, &flags).await?,
-          };
-          AnyBrowser::CdpRaw(browser)
-        },
-        #[cfg(webkit_backend)]
-        BackendKind::WebKit => {
-          use crate::backend::webkit::WebKitBrowser;
-          AnyBrowser::WebKit(WebKitBrowser::launch_with_options(self.headless).await?)
-        },
-
-        BackendKind::Bidi => {
-          use crate::backend::bidi::BidiBrowser;
-          let mut flags = all_extra.clone();
-          if self.headless {
-            // Firefox doesn't accept `--headless=new`; bare flag is
-            // correct on this BiDi/Firefox path.
-            flags.push("--headless".into());
-          }
-          AnyBrowser::Bidi(Box::pin(BidiBrowser::launch_with_flags(&self.chromium_path, &flags)).await?)
-        },
-      },
+      ConnectMode::Launch => self.launch_browser(&all_extra).await?,
     };
 
     let mut inst = BrowserInstance {

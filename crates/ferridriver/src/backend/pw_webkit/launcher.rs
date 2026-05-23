@@ -52,6 +52,24 @@ pub fn locate_binary() -> Result<PathBuf, LaunchError> {
   Err(LaunchError::BinaryNotFound)
 }
 
+/// The PW `WebKit` build revision parsed from the located binary's
+/// parent directory (`.../webkit-2272/pw_run.sh` → `"2272"`). Falls
+/// back to `"unknown"` when the binary can't be located or the
+/// directory isn't revision-named — never panics.
+#[must_use]
+pub fn binary_revision() -> String {
+  let Ok(path) = locate_binary() else {
+    return "unknown".to_string();
+  };
+  path
+    .parent()
+    .and_then(Path::file_name)
+    .and_then(|n| n.to_str())
+    .and_then(|n| n.strip_prefix("webkit-"))
+    .unwrap_or("unknown")
+    .to_string()
+}
+
 /// Spawn the Playwright `WebKit` child with `--inspector-pipe`.
 ///
 /// `read_fd` is the fd the child should write outbound messages to

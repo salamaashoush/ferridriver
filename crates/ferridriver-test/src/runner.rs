@@ -1117,6 +1117,7 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPla
     "cdp-raw" => BackendKind::CdpRaw,
     #[cfg(webkit_backend)]
     "webkit" => BackendKind::WebKit,
+    "pw-webkit" => BackendKind::PwWebKit,
     "bidi" => BackendKind::Bidi,
     _ => BackendKind::CdpPipe,
   };

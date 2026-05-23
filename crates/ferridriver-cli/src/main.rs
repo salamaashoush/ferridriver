@@ -196,6 +196,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
       cli::Backend::CdpRaw => Some("cdp-raw".into()),
       #[cfg(webkit_backend)]
       cli::Backend::Webkit => Some("webkit".into()),
+      cli::Backend::PwWebkit => Some("pw-webkit".into()),
       cli::Backend::Bidi => Some("bidi".into()),
     };
   }

@@ -240,6 +240,7 @@ impl Browser {
     match self.backend_kind {
       crate::backend::BackendKind::CdpPipe
       | crate::backend::BackendKind::CdpRaw
+      | crate::backend::BackendKind::PwWebKit
       | crate::backend::BackendKind::Bidi => true,
       #[cfg(webkit_backend)]
       crate::backend::BackendKind::WebKit => false,
