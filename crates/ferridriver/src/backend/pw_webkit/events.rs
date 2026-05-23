@@ -104,9 +104,7 @@ pub async fn set_cookie(target: &Session, cookie: CookieData) -> Result<()> {
   if let Some(exp) = cookie.expires {
     obj["expires"] = json!(exp);
   }
-  if let Some(ss) = cookie.same_site {
-    obj["sameSite"] = json!(ss.as_str());
-  }
+  obj["sameSite"] = json!(cookie.same_site.map_or("None", SameSite::as_str));
   // PW WebKit `Page.setCookie` derives the URL from domain+path+secure
   // when no explicit url is given.
   let scheme = if cookie.secure { "https" } else { "http" };
@@ -137,6 +135,10 @@ pub fn attach_listeners(
   let emitter = page.events.clone();
   let requests = page.requests.clone();
   let nav_slot = page.nav_request_slot.clone();
+  let routes = page.routes.clone();
+  let frame_contexts = page.frame_contexts.clone();
+  let frame_cache = page.frame_cache.clone();
+  let emitter_frame = emitter.clone();
   let _ = dialog_manager.register_emitter_bridge(emitter.clone());
 
   tokio::spawn(async move {
@@ -162,6 +164,21 @@ pub fn attach_listeners(
               },
               Some("Page.fileChooserOpened") => {
                 dispatch_file_chooser(&env.params, &target, &page_backref, &file_chooser_manager);
+              },
+              Some("Network.requestIntercepted") => {
+                handle_request_intercepted(&env.params, &target, &routes);
+              },
+              Some("Runtime.executionContextCreated") => {
+                handle_exec_context_created(&env.params, &frame_contexts).await;
+              },
+              Some("Page.frameAttached") => {
+                handle_frame_attached(&env.params, &frame_cache, &emitter_frame);
+              },
+              Some("Page.frameNavigated") => {
+                handle_frame_navigated(&env.params, &frame_cache, &emitter_frame);
+              },
+              Some("Page.frameDetached") => {
+                handle_frame_detached(&env.params, &frame_cache, &emitter_frame, &frame_contexts).await;
               },
               _ => {},
             }
@@ -441,6 +458,248 @@ fn pw_remote_object_to_backing(arg: &Value) -> crate::js_handle::JSHandleBacking
 /// event emitter. Drops the event when no outer `Arc<Page>` is
 /// reachable through `page_backref` — matches Playwright's
 /// `createHandle(context, arg)` guard.
+type Routes = Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>;
+type FrameContexts = Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>>;
+type FrameCache = Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>;
+
+async fn handle_exec_context_created(params: &Value, frame_contexts: &FrameContexts) {
+  let Some(ctx) = params.get("context") else {
+    return;
+  };
+  let Some(frame_id) = ctx.get("frameId").and_then(Value::as_str) else {
+    return;
+  };
+  let Some(id) = ctx.get("id").and_then(Value::as_i64) else {
+    return;
+  };
+  frame_contexts.write().await.insert(frame_id.to_string(), id);
+}
+
+fn handle_frame_attached(params: &Value, frame_cache: &FrameCache, emitter: &crate::events::EventEmitter) {
+  let Some(frame_id) = params.get("frameId").and_then(Value::as_str) else {
+    return;
+  };
+  let parent_id = params
+    .get("parentFrameId")
+    .and_then(Value::as_str)
+    .map(std::string::ToString::to_string);
+  if let Ok(mut cache) = frame_cache.lock() {
+    cache.attach(crate::backend::FrameInfo {
+      frame_id: frame_id.to_string(),
+      parent_frame_id: parent_id.clone(),
+      name: String::new(),
+      url: String::new(),
+    });
+  }
+  emitter.emit(crate::events::PageEvent::FrameAttached(crate::backend::FrameInfo {
+    frame_id: frame_id.to_string(),
+    parent_frame_id: parent_id,
+    name: String::new(),
+    url: String::new(),
+  }));
+}
+
+fn handle_frame_navigated(params: &Value, frame_cache: &FrameCache, emitter: &crate::events::EventEmitter) {
+  let Some(frame) = params.get("frame") else {
+    return;
+  };
+  let info = crate::backend::FrameInfo {
+    frame_id: frame.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
+    parent_frame_id: frame.get("parentId").and_then(Value::as_str).map(std::string::ToString::to_string),
+    name: frame.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
+    url: frame.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
+  };
+  if let Ok(mut cache) = frame_cache.lock() {
+    cache.navigated(info.clone());
+  }
+  emitter.emit(crate::events::PageEvent::FrameNavigated(info));
+}
+
+async fn handle_frame_detached(
+  params: &Value,
+  frame_cache: &FrameCache,
+  emitter: &crate::events::EventEmitter,
+  frame_contexts: &FrameContexts,
+) {
+  let Some(frame_id) = params.get("frameId").and_then(Value::as_str) else {
+    return;
+  };
+  if let Ok(mut cache) = frame_cache.lock() {
+    cache.detach(frame_id);
+  }
+  frame_contexts.write().await.remove(frame_id);
+  emitter.emit(crate::events::PageEvent::FrameDetached {
+    frame_id: frame_id.to_string(),
+  });
+}
+
+
+/// Translate `Network.requestIntercepted` into a matched
+/// [`crate::route::Route`] dispatch. When no route matches, continue
+/// unmodified.
+fn handle_request_intercepted(params: &Value, target: &super::connection::Session, routes: &Routes) {
+  let request_id = params
+    .get("requestId")
+    .and_then(Value::as_str)
+    .unwrap_or("")
+    .to_string();
+  if request_id.is_empty() {
+    return;
+  }
+  let request_payload = params.get("request").cloned().unwrap_or(Value::Null);
+  let target = target.clone();
+  let routes = routes.clone();
+  tokio::spawn(async move { dispatch_intercepted(target, routes, request_id, request_payload).await });
+}
+
+async fn dispatch_intercepted(
+  target: super::connection::Session,
+  routes: Routes,
+  request_id: String,
+  request_payload: Value,
+) {
+  let intercepted = build_intercepted(&request_id, &request_payload);
+  let handler = {
+    let routes_guard = routes.read().await;
+    routes_guard
+      .iter()
+      .find(|r| r.matcher.matches(&intercepted.url))
+      .map(|r| r.handler.clone())
+  };
+  let Some(handler) = handler else {
+    let _ = target
+      .send(
+        "Network.interceptContinue",
+        json!({ "requestId": request_id, "stage": "request" }),
+      )
+      .await;
+    return;
+  };
+  let (action_tx, action_rx) = tokio::sync::oneshot::channel();
+  let route = crate::route::Route::new(intercepted, action_tx);
+  handler(route);
+  let action = action_rx.await.unwrap_or(crate::route::RouteAction::Continue(
+    crate::route::ContinueOverrides::default(),
+  ));
+  match action {
+    crate::route::RouteAction::Continue(overrides) => intercept_continue(&target, &request_id, overrides).await,
+    crate::route::RouteAction::Fulfill(response) => intercept_fulfill(&target, &request_id, &response).await,
+    crate::route::RouteAction::Abort(_) => {
+      let _ = target
+        .send(
+          "Network.interceptRequestWithError",
+          json!({ "requestId": request_id, "errorType": "Cancellation" }),
+        )
+        .await;
+    },
+  }
+}
+
+fn build_intercepted(request_id: &str, request_payload: &Value) -> crate::route::InterceptedRequest {
+  let url = request_payload
+    .get("url")
+    .and_then(Value::as_str)
+    .unwrap_or("")
+    .to_string();
+  let method = request_payload
+    .get("method")
+    .and_then(Value::as_str)
+    .unwrap_or("GET")
+    .to_string();
+  let post_data = request_payload
+    .get("postData")
+    .and_then(Value::as_str)
+    .map(std::string::ToString::to_string);
+  let mut headers = rustc_hash::FxHashMap::default();
+  if let Some(map) = request_payload.get("headers").and_then(Value::as_object) {
+    for (k, v) in map {
+      if let Some(s) = v.as_str() {
+        headers.insert(k.clone(), s.to_string());
+      }
+    }
+  }
+  crate::route::InterceptedRequest {
+    request_id: request_id.to_string(),
+    url,
+    method,
+    headers,
+    post_data,
+    resource_type: "Other".to_string(),
+  }
+}
+
+async fn intercept_continue(
+  target: &super::connection::Session,
+  request_id: &str,
+  overrides: crate::route::ContinueOverrides,
+) {
+  use base64::Engine as _;
+  if overrides.url.is_none() && overrides.method.is_none() && overrides.headers.is_none() && overrides.post_data.is_none()
+  {
+    let _ = target
+      .send(
+        "Network.interceptContinue",
+        json!({ "requestId": request_id, "stage": "request" }),
+      )
+      .await;
+    return;
+  }
+  let mut params = json!({ "requestId": request_id });
+  if let Some(u) = overrides.url {
+    params["url"] = json!(u);
+  }
+  if let Some(m) = overrides.method {
+    params["method"] = json!(m);
+  }
+  if let Some(h) = overrides.headers {
+    let mut headers_map = serde_json::Map::new();
+    for (k, v) in h {
+      headers_map.insert(k, Value::String(v));
+    }
+    params["headers"] = Value::Object(headers_map);
+  }
+  if let Some(body) = overrides.post_data {
+    params["postData"] = json!(base64::engine::general_purpose::STANDARD.encode(&body));
+  }
+  let _ = target.send("Network.interceptWithRequest", params).await;
+}
+
+async fn intercept_fulfill(
+  target: &super::connection::Session,
+  request_id: &str,
+  response: &crate::route::FulfillResponse,
+) {
+  use base64::Engine as _;
+  let mut headers_map = serde_json::Map::new();
+  let mut mime_type = String::from("text/plain");
+  for (k, v) in &response.headers {
+    if k.eq_ignore_ascii_case("content-type") {
+      mime_type = v.clone();
+    }
+    headers_map.insert(k.clone(), Value::String(v.clone()));
+  }
+  if let Some(ct) = response.content_type.as_ref() {
+    mime_type = ct.clone();
+    headers_map.insert("content-type".to_string(), Value::String(ct.clone()));
+  }
+  let content_b64 = base64::engine::general_purpose::STANDARD.encode(&response.body);
+  let status_text = crate::route::status_text(response.status);
+  let _ = target
+    .send(
+      "Network.interceptRequestWithResponse",
+      json!({
+        "requestId": request_id,
+        "content": content_b64,
+        "base64Encoded": true,
+        "mimeType": mime_type,
+        "status": response.status,
+        "statusText": status_text,
+        "headers": Value::Object(headers_map),
+      }),
+    )
+    .await;
+}
+
 /// Translate a `Page.fileChooserOpened` event into a live
 /// [`crate::file_chooser::FileChooser`] and dispatch through the
 /// page's manager.
