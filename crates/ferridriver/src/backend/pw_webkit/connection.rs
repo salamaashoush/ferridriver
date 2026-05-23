@@ -114,6 +114,14 @@ impl Connection {
     }
   }
 
+  /// Underlying `Arc<Connection>` for a given [`Session`]. Used by
+  /// page close paths that need to drain pending callbacks for the
+  /// page's proxy/target routes.
+  #[must_use]
+  pub fn arc(self: &Arc<Self>) -> Arc<Self> {
+    Arc::clone(self)
+  }
+
   /// Handle on the inner target session reached through `page_proxy_id`.
   #[must_use]
   pub fn target_session(self: &Arc<Self>, page_proxy_id: impl Into<String>, target_id: impl Into<String>) -> Session {
@@ -331,6 +339,12 @@ pub struct Session {
 }
 
 impl Session {
+  /// The underlying [`Connection`] handle.
+  #[must_use]
+  pub fn connection_handle(&self) -> Arc<Connection> {
+    Arc::clone(&self.conn)
+  }
+
   /// `pageProxyId` for page-proxy and target sessions; `None` for the
   /// root browser session.
   #[must_use]

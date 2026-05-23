@@ -64,6 +64,17 @@ pub struct PwWebKitPage {
   /// [`Self::goto`] / [`Self::reload`] / history traversals can resolve
   /// the navigation `Response` without polling.
   pub(crate) nav_request_slot: crate::network::NavRequestSlot,
+  /// Registered network-interception routes. Listener consults this
+  /// vec on `Network.requestIntercepted` to decide which handler to
+  /// invoke.
+  pub(crate) routes: Arc<tokio::sync::RwLock<Vec<crate::route::RegisteredRoute>>>,
+  /// Idempotent latch for `Network.setInterceptionEnabled` +
+  /// `Network.addInterception` setup.
+  pub(crate) intercept_enabled: Arc<AtomicBool>,
+  /// `frameId` → `executionContextId` mapping populated by
+  /// `Runtime.executionContextCreated` events. Used by
+  /// [`Self::evaluate_in_frame`] to evaluate inside an iframe's realm.
+  pub(crate) frame_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>>,
   pub events: EventEmitter,
   pub dialog_manager: crate::dialog::DialogManager,
   pub file_chooser_manager: crate::file_chooser::FileChooserManager,
@@ -120,6 +131,9 @@ impl PwWebKitPage {
       binding_initialized: Arc::new(AtomicBool::new(false)),
       requests: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       nav_request_slot: crate::network::NavRequestSlot::new(),
+      routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
+      intercept_enabled: Arc::new(AtomicBool::new(false)),
+      frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
       events: EventEmitter::new(),
       dialog_manager: crate::dialog::DialogManager::new(),
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
@@ -248,9 +262,33 @@ impl PwWebKitPage {
     (!id.is_empty()).then_some(id)
   }
 
-  pub async fn evaluate_in_frame(&self, expression: &str, _frame_id: &str) -> Result<Option<Value>> {
-    // Per-frame execution contexts are a later batch — main frame only.
-    Ok(Some(self.eval_value(expression).await?))
+  pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<Value>> {
+    let ctx_id = self.frame_contexts.read().await.get(frame_id).copied();
+    let mut params = json!({ "expression": expression, "returnByValue": true });
+    if let Some(id) = ctx_id {
+      params["contextId"] = json!(id);
+    }
+    let resp = self
+      .target
+      .send(protocol::RUNTIME_EVALUATE, params)
+      .await
+      .map_err(conn_err)?;
+    if resp.get("wasThrown").and_then(Value::as_bool).unwrap_or(false) {
+      let text = resp
+        .get("result")
+        .and_then(|r| r.get("description").or_else(|| r.get("value")))
+        .and_then(Value::as_str)
+        .unwrap_or("evaluation threw")
+        .to_string();
+      return Err(FerriError::evaluation(text));
+    }
+    Ok(Some(
+      resp
+        .get("result")
+        .and_then(|r| r.get("value"))
+        .cloned()
+        .unwrap_or(Value::Null),
+    ))
   }
 
   pub async fn content_frame_id(&self, _object_id: &str) -> Result<Option<String>> {
@@ -823,7 +861,28 @@ impl PwWebKitPage {
       }
       params
     }
-    // media: Set(v) -> v; Disabled -> ""; Unchanged -> skip.
+    // Apply user-preference overrides BEFORE `Page.setEmulatedMedia`:
+    // WPE WebKit resets `PrefersColorScheme` whenever the media override
+    // is (re)assigned, so the media call has to come last.
+    if let MediaOverride::Set(v) = &opts.color_scheme {
+      let value = match v.as_str() {
+        "light" => "Light",
+        "dark" => "Dark",
+        other => other,
+      };
+      self
+        .target
+        .send("Page.overrideUserPreference", user_pref("PrefersColorScheme", Some(value)))
+        .await
+        .map_err(conn_err)?;
+    } else if matches!(opts.color_scheme, MediaOverride::Disabled) {
+      self
+        .target
+        .send("Page.overrideUserPreference", user_pref("PrefersColorScheme", None))
+        .await
+        .map_err(conn_err)?;
+    }
+    self.emulate_media_remaining(opts).await?;
     match &opts.media {
       MediaOverride::Set(v) => {
         self.target.send("Page.setEmulatedMedia", json!({ "media": v })).await.map_err(conn_err)?;
@@ -833,22 +892,22 @@ impl PwWebKitPage {
       },
       MediaOverride::Unchanged => {},
     }
-    // color_scheme via Page.overrideUserPreference {name:"PrefersColorScheme"}.
-    let color = match &opts.color_scheme {
-      MediaOverride::Set(v) => Some(match v.as_str() {
+    // Re-assert the color-scheme override after `setEmulatedMedia` —
+    // a media change resets `PrefersColorScheme` in WPE; the second
+    // call restores the dark/light/no-preference state we want.
+    if let MediaOverride::Set(v) = &opts.color_scheme {
+      let value = match v.as_str() {
         "light" => "Light",
         "dark" => "Dark",
         other => other,
-      }),
-      MediaOverride::Disabled => None,
-      MediaOverride::Unchanged => return self.emulate_media_remaining(opts).await,
-    };
-    self
-      .target
-      .send("Page.overrideUserPreference", user_pref("PrefersColorScheme", color))
-      .await
-      .map_err(conn_err)?;
-    self.emulate_media_remaining(opts).await
+      };
+      self
+        .target
+        .send("Page.overrideUserPreference", user_pref("PrefersColorScheme", Some(value)))
+        .await
+        .map_err(conn_err)?;
+    }
+    Ok(())
   }
 
   async fn emulate_media_remaining(&self, opts: &crate::options::EmulateMediaOptions) -> Result<()> {
@@ -1068,24 +1127,40 @@ impl PwWebKitPage {
 
   pub async fn route(
     &self,
-    _matcher: crate::url_matcher::UrlMatcher,
-    _handler: crate::route::RouteHandler,
+    matcher: crate::url_matcher::UrlMatcher,
+    handler: crate::route::RouteHandler,
   ) -> Result<()> {
-    tokio::task::yield_now().await;
-    // Network interception on PW WebKit goes through `Network.addInterception`
-    // + `Network.requestIntercepted` events + `Network.interceptContinue`/
-    // `Network.interceptWithResponse`. Wiring this through ferridriver's
-    // `RegisteredRoute` table + Fetch-style continue/abort/fulfill semantics
-    // is a focused follow-up batch — surfaced as Unsupported so a calling
-    // test gets a clear signal rather than a silent no-op.
-    Err(FerriError::unsupported(
-      "pw-webkit: network interception (`route`) is not yet wired — Network.addInterception \
-       + Network.requestIntercepted plumbing pending. Use cdp-pipe/cdp-raw for routes.",
-    ))
+    self.ensure_interception_enabled().await?;
+    self
+      .routes
+      .write()
+      .await
+      .push(crate::route::RegisteredRoute { matcher, handler });
+    Ok(())
   }
 
-  pub async fn unroute(&self, _matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
-    tokio::task::yield_now().await;
+  async fn ensure_interception_enabled(&self) -> Result<()> {
+    if self.intercept_enabled.swap(true, Ordering::SeqCst) {
+      return Ok(());
+    }
+    self
+      .target
+      .send("Network.setInterceptionEnabled", json!({ "enabled": true }))
+      .await
+      .map_err(conn_err)?;
+    self
+      .target
+      .send(
+        "Network.addInterception",
+        json!({ "url": ".*", "stage": "request", "isRegex": true }),
+      )
+      .await
+      .map_err(conn_err)?;
+    Ok(())
+  }
+
+  pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
+    self.routes.write().await.retain(|r| !r.matcher.equivalent(matcher));
     Ok(())
   }
 
@@ -1294,6 +1369,11 @@ impl PwWebKitPage {
       json!({ "targetId": self.target_id.to_string(), "runBeforeUnload": false }),
     );
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), send).await;
+    // Reject pending in-flight calls bound to this page's proxy + target
+    // routes so successive callers don't pile up indefinitely.
+    let conn = self.proxy.connection_handle();
+    conn.close_route(Some(&self.proxy_id), Some(&self.target_id));
+    conn.close_route(Some(&self.proxy_id), None);
     Ok(())
   }
 
