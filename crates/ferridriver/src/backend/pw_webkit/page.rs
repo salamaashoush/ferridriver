@@ -107,11 +107,12 @@ impl PwWebKitPage {
     // without `Dialog.enable` the `javascriptDialogOpening` event
     // never fires and `window.alert` would wedge the page.
     proxy.send("Dialog.enable", json!({})).await?;
-    // Intercept the native file picker so `Page.fileChooserOpened` fires
-    // instead of the browser opening an OS dialog.
-    let _ = target
-      .send("Page.setInterceptFileChooserDialog", json!({ "enabled": true }))
-      .await;
+    // File-chooser interception is enabled lazily through
+    // [`Self::enable_file_chooser_intercept`] when a listener attaches,
+    // matching CDP's `_updateFileChooserInterception`. Setting it at
+    // attach time unconditionally caused matrix runs to wedge because
+    // every page in the session held an intercept lease, and the
+    // shared MCP browser couldn't drain pending events fast enough.
     let _ = target
       .send("Page.createUserWorld", json!({ "name": UTILITY_WORLD_NAME }))
       .await;
@@ -1165,7 +1166,10 @@ impl PwWebKitPage {
   }
 
   pub async fn enable_file_chooser_intercept(&self) -> Result<()> {
-    tokio::task::yield_now().await;
+    let _ = self
+      .target
+      .send("Page.setInterceptFileChooserDialog", json!({ "enabled": true }))
+      .await;
     Ok(())
   }
 
