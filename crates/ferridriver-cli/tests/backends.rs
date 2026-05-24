@@ -2211,6 +2211,12 @@ fn run_all_tests(backend: &str) {
     }};
   }
 
+  // `run_cdp!` historically gated emulation tests to CDP only because
+  // pw-webkit hadn't wired the equivalents through `apply_context_options`.
+  // Round 5 wired them; the macro stays in place for any future
+  // CDP-specific protocol coverage (e.g. CDP-only `Tracing.start`
+  // categories) without forcing a re-derivation.
+  #[allow(unused_macros)]
   macro_rules! run_cdp {
     ($name:path) => {{
       if is_cdp {
@@ -2218,6 +2224,10 @@ fn run_all_tests(backend: &str) {
       }
     }};
   }
+
+  // Silence the unused-binding lint for the rare-call macro above
+  // without papering over a real bug.
+  let _ = is_cdp;
 
   macro_rules! run_webkit {
     ($name:path) => {{
@@ -2258,7 +2268,7 @@ fn run_all_tests(backend: &str) {
   // diagnostics (CDP-only: trace uses Performance domain)
   run!(test_console_messages);
   run!(test_network_requests);
-  run_cdp!(test_trace);
+  run!(test_trace);
 
   // run_script: Page interaction
   run!(test_script_click);
@@ -2347,14 +2357,19 @@ fn run_all_tests(backend: &str) {
   // run_script: file input
   run!(test_script_upload_file);
 
-  // run_script: page-scoped emulation (CDP-only for UA + viewport — WebKit has
-  // its own emulation path that isn't surfaced here yet).
-  run_cdp!(test_script_user_agent);
-  run_cdp!(test_script_viewport);
+  // run_script: page-scoped emulation. PW WebKit wires through
+  // `Page.overrideUserAgent` (via context options bag) /
+  // `Emulation.setDeviceMetricsOverride` so both run on every backend.
+  // Legacy `webkit` backend stays skipped at the test body level.
+  run!(test_script_user_agent);
+  run!(test_script_viewport);
 
-  // run_script: context-scoped emulation
-  run_cdp!(test_script_geolocation);
-  run_cdp!(test_script_offline);
+  // run_script: context-scoped emulation. PW WebKit wires
+  // `Playwright.setGeolocationOverride` (root browser session) and
+  // `Network.setEmulateOfflineState` (target session) through
+  // `apply_context_options`.
+  run!(test_script_geolocation);
+  run!(test_script_offline);
 
   // run_script: BrowserContext cookies + page storage
   run!(test_script_cookies);
