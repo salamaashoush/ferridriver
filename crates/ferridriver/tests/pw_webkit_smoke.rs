@@ -45,7 +45,9 @@ async fn pw_webkit_launch_navigate_evaluate() {
     .await
     .expect("new_page");
 
-  let _ = page.goto("data:text/html,<h1>hello</h1>", NavLifecycle::Load, 30_000, None).await;
+  let _ = page
+    .goto("data:text/html,<h1>hello</h1>", NavLifecycle::Load, 30_000, None)
+    .await;
 
   let value = page.evaluate("1 + 1").await.expect("evaluate");
   assert_eq!(value, Some(serde_json::json!(2)), "evaluate returned: {value:?}");
@@ -55,11 +57,15 @@ async fn pw_webkit_launch_navigate_evaluate() {
     .await
     .expect("evaluate outerHTML");
   assert!(
-    html.as_ref().and_then(|v| v.as_str()).is_some_and(|s| s.contains("hello")),
+    html
+      .as_ref()
+      .and_then(|v| v.as_str())
+      .is_some_and(|s| s.contains("hello")),
     "outerHTML should include the navigated content: {html:?}"
   );
 
-  page.close_page(ferridriver::options::PageCloseOptions::default())
+  page
+    .close_page(ferridriver::options::PageCloseOptions::default())
     .await
     .expect("close page");
   browser.close().await.expect("close browser");

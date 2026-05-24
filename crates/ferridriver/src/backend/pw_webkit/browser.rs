@@ -128,10 +128,7 @@ impl PwWebKitBrowser {
 
     let version: Arc<str> = Arc::from(format!("webkit-playwright/{}", super::launcher::binary_revision()));
 
-    let downloads_dir = std::env::temp_dir().join(format!(
-      "ferridriver-pw-webkit-downloads-{}",
-      std::process::id()
-    ));
+    let downloads_dir = std::env::temp_dir().join(format!("ferridriver-pw-webkit-downloads-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&downloads_dir);
     let downloads_dir = Arc::new(downloads_dir);
     let _ = root
@@ -357,7 +354,11 @@ impl PwWebKitBrowser {
 /// Spawn a browser-level listener that translates `Playwright.downloadCreated`,
 /// `Playwright.downloadFilenameSuggested`, and `Playwright.downloadFinished`
 /// into per-page [`crate::download::Download`] handles.
-fn spawn_download_listener(root: &Session, pages: Arc<Mutex<Vec<PwWebKitPage>>>, downloads_dir: Arc<std::path::PathBuf>) {
+fn spawn_download_listener(
+  root: &Session,
+  pages: Arc<Mutex<Vec<PwWebKitPage>>>,
+  downloads_dir: Arc<std::path::PathBuf>,
+) {
   let mut rx = root.events();
   tokio::spawn(async move {
     use tokio::sync::broadcast::error::RecvError;
@@ -391,32 +392,20 @@ fn spawn_download_listener(root: &Session, pages: Arc<Mutex<Vec<PwWebKitPage>>>,
             continue;
           };
           let canceler: crate::download::DownloadCanceler = std::sync::Arc::new(|| Box::pin(async { Ok(()) }));
-          let download = crate::download::Download::new(
-            &arc_page,
-            uuid,
-            url,
-            String::new(),
-            (*downloads_dir).clone(),
-            canceler,
-          );
+          let download =
+            crate::download::Download::new(&arc_page, uuid, url, String::new(), (*downloads_dir).clone(), canceler);
           page.download_manager.did_open(&download);
         },
         Some("Playwright.downloadFilenameSuggested") => {
-          let uuid = env
-            .params
-            .get("uuid")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+          let uuid = env.params.get("uuid").and_then(serde_json::Value::as_str).unwrap_or("");
           let suggested = env
             .params
             .get("suggestedFilename")
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string();
-          let pages_snapshot: Vec<PwWebKitPage> = pages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+          let pages_snapshot: Vec<PwWebKitPage> =
+            pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
           for p in &pages_snapshot {
             if let Some(dl) = p.download_manager.peek_for_guid(uuid) {
               dl.filename_suggested(suggested);
@@ -425,21 +414,15 @@ fn spawn_download_listener(root: &Session, pages: Arc<Mutex<Vec<PwWebKitPage>>>,
           }
         },
         Some("Playwright.downloadFinished") => {
-          let uuid = env
-            .params
-            .get("uuid")
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("");
+          let uuid = env.params.get("uuid").and_then(serde_json::Value::as_str).unwrap_or("");
           let error = env
             .params
             .get("error")
             .and_then(serde_json::Value::as_str)
             .filter(|s| !s.is_empty())
             .map(std::string::ToString::to_string);
-          let pages_snapshot: Vec<PwWebKitPage> = pages
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner)
-            .clone();
+          let pages_snapshot: Vec<PwWebKitPage> =
+            pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
           for p in &pages_snapshot {
             if let Some(dl) = p.download_manager.take_for_guid(uuid) {
               let final_path = if error.is_none() {

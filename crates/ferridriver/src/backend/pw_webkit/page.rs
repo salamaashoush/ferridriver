@@ -9,6 +9,7 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 
+use arc_swap::ArcSwap;
 use base64::Engine as _;
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
@@ -35,10 +36,16 @@ pub const UTILITY_WORLD_NAME: &str = "__playwright_utility_world__";
 #[derive(Clone)]
 pub struct PwWebKitPage {
   proxy: Session,
-  target: Session,
+  /// Live target session. Swapped on cross-process navigation when
+  /// `WebKit` creates a provisional target and commits it via
+  /// `Target.didCommitProvisionalTarget` (mirrors `wkPage.ts::_setSession`).
+  /// Wrapped in `ArcSwap` so listeners can replace it atomically without
+  /// blocking concurrent senders on the old session.
+  target: Arc<ArcSwap<Session>>,
   browser: Session,
   proxy_id: Arc<str>,
-  target_id: Arc<str>,
+  /// Live target id. Swapped alongside [`Self::target`] on commit.
+  target_id: Arc<ArcSwap<Arc<str>>>,
   context_id: Option<Arc<str>>,
   closed: Arc<AtomicBool>,
   /// Latch: the `window.__fd` selector engine has been injected.
@@ -83,7 +90,7 @@ pub struct PwWebKitPage {
   /// filled the real id with the navigated URL -- callers reading
   /// `page.url()` then saw the empty phantom record. Mirrors CDP's
   /// `main_frame_id` `OnceLock`.
-  pub(crate) main_frame_id_cache: Arc<std::sync::OnceLock<String>>,
+  pub(crate) main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>>,
   /// Live WebSocket table, keyed by PW `WebKit` `requestId`. The network
   /// listener inserts on `Network.webSocketCreated`, emits frames on
   /// `webSocketFrameSent` / `webSocketFrameReceived`, and removes the
@@ -96,6 +103,98 @@ pub struct PwWebKitPage {
   pub page_backref: crate::backend::PageBackref,
   pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
   pub(crate) frame_listener_started: Arc<AtomicBool>,
+  /// Per-page lifecycle signals fed by the target-session listener.
+  /// Lets navigation methods await `Page.loadEventFired` /
+  /// `domContentEventFired` / `frameNavigated` survivably across
+  /// cross-process target swaps (the listener re-subscribes to the new
+  /// target on commit, so events continue arriving here).
+  pub(crate) lifecycle: Arc<LifecycleSignals>,
+  /// Where the listener writes console/network/dialog events. Swapped
+  /// in by [`Self::attach_listeners`] so the always-on listener (spawned
+  /// from [`Self::attach`]) writes to the caller's logs once they're
+  /// provided. Default-empty sinks let the raw API (no `attach_listeners`
+  /// call) use page methods without `wait_for_lifecycle` wedging on the
+  /// missing-listener path.
+  pub(crate) console_log: Arc<ArcSwap<tokio::sync::RwLock<Vec<ConsoleMessage>>>>,
+  pub(crate) network_log: Arc<ArcSwap<tokio::sync::RwLock<Vec<NetworkRequest>>>>,
+  pub(crate) dialog_log: Arc<ArcSwap<tokio::sync::RwLock<Vec<DialogEvent>>>>,
+}
+
+/// Latch + notify for navigation lifecycle events fed by the
+/// target-session listener.
+#[derive(Default)]
+pub(crate) struct LifecycleSignals {
+  pub commit: AtomicBool,
+  pub domcontentloaded: AtomicBool,
+  pub load: AtomicBool,
+  pub failed: AtomicBool,
+  pub failure_text: std::sync::Mutex<Option<String>>,
+  pub failed_request_id: std::sync::Mutex<Option<String>>,
+  pub notify: tokio::sync::Notify,
+}
+
+impl LifecycleSignals {
+  pub fn reset(&self) {
+    self.commit.store(false, Ordering::SeqCst);
+    self.domcontentloaded.store(false, Ordering::SeqCst);
+    self.load.store(false, Ordering::SeqCst);
+    self.failed.store(false, Ordering::SeqCst);
+    *self
+      .failure_text
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *self
+      .failed_request_id
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+  }
+
+  pub fn mark(&self, kind: NavLifecycle) {
+    match kind {
+      NavLifecycle::Commit => self.commit.store(true, Ordering::SeqCst),
+      NavLifecycle::DomContentLoaded => self.domcontentloaded.store(true, Ordering::SeqCst),
+      NavLifecycle::Load => self.load.store(true, Ordering::SeqCst),
+    }
+    self.notify.notify_waiters();
+  }
+
+  pub fn mark_failed(&self, request_id: String, error_text: String) {
+    self.failed.store(true, Ordering::SeqCst);
+    *self
+      .failure_text
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(error_text);
+    *self
+      .failed_request_id
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(request_id);
+    self.notify.notify_waiters();
+  }
+
+  pub fn seen(&self, kind: NavLifecycle) -> bool {
+    match kind {
+      NavLifecycle::Commit => self.commit.load(Ordering::SeqCst),
+      NavLifecycle::DomContentLoaded => self.domcontentloaded.load(Ordering::SeqCst),
+      NavLifecycle::Load => self.load.load(Ordering::SeqCst),
+    }
+  }
+
+  pub fn failure(&self) -> Option<(String, String)> {
+    if !self.failed.load(Ordering::SeqCst) {
+      return None;
+    }
+    let req = self
+      .failed_request_id
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone();
+    let txt = self
+      .failure_text
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone();
+    Some((req.unwrap_or_default(), txt.unwrap_or_default()))
+  }
 }
 
 impl PwWebKitPage {
@@ -143,7 +242,7 @@ impl PwWebKitPage {
       .send("Page.createUserWorld", json!({ "name": UTILITY_WORLD_NAME }))
       .await;
     let resource_tree = target.send("Page.getResourceTree", json!({})).await.ok();
-    let main_frame_id_cache: Arc<std::sync::OnceLock<String>> = Arc::new(std::sync::OnceLock::new());
+    let main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
     if let Some(tree) = resource_tree
       .as_ref()
       .and_then(|r| r.get("frameTree"))
@@ -151,15 +250,17 @@ impl PwWebKitPage {
       .and_then(|f| f.get("id"))
       .and_then(Value::as_str)
     {
-      let _ = main_frame_id_cache.set(tree.to_string());
+      *main_frame_id_cache
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tree.to_string());
     }
 
-    Ok(PwWebKitPage {
+    let page = PwWebKitPage {
       proxy,
-      target,
+      target: Arc::new(ArcSwap::from_pointee(target)),
       browser: browser.root().clone(),
       proxy_id: Arc::from(proxy_id),
-      target_id: Arc::from(target_id),
+      target_id: Arc::new(ArcSwap::from_pointee(Arc::<str>::from(target_id))),
       context_id: context_id.map(Arc::from),
       closed: Arc::new(AtomicBool::new(false)),
       engine_injected: Arc::new(AtomicBool::new(false)),
@@ -180,7 +281,19 @@ impl PwWebKitPage {
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
       frame_listener_started: Arc::new(AtomicBool::new(false)),
-    })
+      lifecycle: Arc::new(LifecycleSignals::default()),
+      console_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
+      network_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
+      dialog_log: Arc::new(ArcSwap::from_pointee(tokio::sync::RwLock::new(Vec::new()))),
+    };
+    // Spawn the always-on listener: lifecycle signals, frame events,
+    // network log, console log, dialog log, route interception, and
+    // cross-process target swap. Without this, raw users of the page
+    // API (no `attach_listeners` from `BrowserState`) would see
+    // `wait_for_lifecycle` wedge for the full timeout because no one
+    // ever marks the lifecycle latches.
+    super::events::attach_listeners(&page);
+    Ok(page)
   }
 
   #[must_use]
@@ -188,14 +301,65 @@ impl PwWebKitPage {
     &self.proxy_id
   }
 
+  /// Current target id. Snapshot of the swappable inner — callers
+  /// holding the returned `Arc<str>` keep that snapshot stable even if
+  /// the live target is swapped underneath them.
   #[must_use]
-  pub fn target_id(&self) -> &str {
-    &self.target_id
+  pub fn target_id(&self) -> Arc<str> {
+    Arc::clone(&self.target_id.load())
   }
 
+  /// Current target session. Cheap clone (Session is `Arc`-shaped
+  /// inside). Swappable underneath callers via
+  /// [`Self::swap_target_session`]; each call returns the live session
+  /// at the moment of the call.
   #[must_use]
-  pub(crate) fn target_session(&self) -> &Session {
-    &self.target
+  pub(crate) fn target_session(&self) -> Session {
+    Session::clone(&self.target.load())
+  }
+
+  /// Handle to the swappable target slot — used by the page-proxy
+  /// listener so dispatch helpers read the LIVE session on every event
+  /// (not a snapshot taken at attach time).
+  #[must_use]
+  pub(crate) fn target_swap(&self) -> Arc<ArcSwap<Session>> {
+    Arc::clone(&self.target)
+  }
+
+  /// Atomically replace the live target session and target id. Called
+  /// by the page-proxy listener when `WebKit` commits a provisional
+  /// target after a cross-process navigation.
+  pub(crate) fn swap_target_session(&self, new_session: Session, new_target_id: Arc<str>) {
+    self.target.store(Arc::new(new_session));
+    self.target_id.store(Arc::new(new_target_id));
+    // The committed target lives in a fresh process — any frame
+    // contexts / realm caches / interception state from the OLD process
+    // are invalid. The new target's listener events will reseed the
+    // caches as frames attach + navigate; the interception latch needs
+    // an explicit reset so `ensure_interception_enabled` re-issues the
+    // protocol calls on the new target.
+    *self
+      .global_object_id
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    self.engine_injected.store(false, Ordering::Relaxed);
+    self.intercept_enabled.store(false, Ordering::Relaxed);
+    *self
+      .frame_cache
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = crate::frame_cache::FrameCache::default();
+    self.main_frame_id_cache_clear();
+  }
+
+  /// Reset the main-frame id cache. Used after a cross-process target
+  /// swap because the new target has a fresh main frame id distinct
+  /// from the old one. Next call to `peek_main_frame_id` returns `None`
+  /// until the listener re-seeds via `Page.frameNavigated`.
+  fn main_frame_id_cache_clear(&self) {
+    *self
+      .main_frame_id_cache
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
   }
 
   #[must_use]
@@ -210,7 +374,7 @@ impl PwWebKitPage {
   /// `objectId` handle.
   async fn runtime_evaluate(&self, expression: &str, return_by_value: bool) -> Result<Value> {
     let resp = self
-      .target
+      .target_session()
       .send(
         protocol::RUNTIME_EVALUATE,
         json!({
@@ -248,7 +412,10 @@ impl PwWebKitPage {
   /// injection and the cached global `objectId`.
   fn reset_realm(&self) {
     self.engine_injected.store(false, Ordering::Relaxed);
-    *self.global_object_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = None;
+    *self
+      .global_object_id
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = None;
   }
 
   /// Cached `objectId` of the main-world global, evaluating `"this"`
@@ -269,7 +436,10 @@ impl PwWebKitPage {
       .and_then(Value::as_str)
       .ok_or_else(|| FerriError::protocol("Runtime.evaluate", "global anchor: no objectId"))?
       .to_string();
-    *self.global_object_id.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.clone());
+    *self
+      .global_object_id
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(id.clone());
     Ok(id)
   }
 
@@ -284,7 +454,7 @@ impl PwWebKitPage {
 
   pub async fn get_frame_tree(&self) -> Result<Vec<FrameInfo>> {
     let resp = self
-      .target
+      .target_session()
       .send("Page.getResourceTree", json!({}))
       .await
       .map_err(conn_err)?;
@@ -297,7 +467,11 @@ impl PwWebKitPage {
 
   #[must_use]
   pub fn peek_main_frame_id(&self) -> Option<String> {
-    self.main_frame_id_cache.get().cloned()
+    self
+      .main_frame_id_cache
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clone()
   }
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<Value>> {
@@ -307,7 +481,7 @@ impl PwWebKitPage {
       params["contextId"] = json!(id);
     }
     let resp = self
-      .target
+      .target_session()
       .send(protocol::RUNTIME_EVALUATE, params)
       .await
       .map_err(conn_err)?;
@@ -346,18 +520,11 @@ impl PwWebKitPage {
     self.ensure_open()?;
     self.reset_realm();
     self.nav_request_slot.clear();
-    // Subscribe BEFORE issuing the navigate. `tokio::sync::broadcast`
-    // doesn't replay events to receivers created after the send -- and
-    // data: URLs commit so fast that `Page.loadEventFired` can arrive
-    // between `Playwright.navigate` returning and a later
-    // `events()` subscription, leaving `wait_for_lifecycle` to wedge
-    // for the full timeout. Subscribing here ensures we see every
-    // event from this point onward; the EVENT_CHANNEL_CAP buffer
-    // (8192) absorbs the burst load. Listening only on lifecycle
-    // events via a separate subscriber would race attach_listeners on
-    // the Buffering→Live flip and drop initial-document events, so we
-    // share the target broadcast.
-    let rx = self.target.events();
+    // Reset lifecycle latches BEFORE issuing the navigate -- the listener
+    // marks them as events come in. Survives cross-process target swaps
+    // (the listener re-subscribes on `Target.didCommitProvisionalTarget`
+    // so events from the new process still feed the latches).
+    self.lifecycle.reset();
     let params = NavigateParams {
       url: url.to_string(),
       page_proxy_id: self.proxy_id.to_string(),
@@ -366,7 +533,9 @@ impl PwWebKitPage {
     };
     let nav = tokio::time::timeout(
       std::time::Duration::from_millis(timeout_ms),
-      self.browser.send(protocol::PLAYWRIGHT_NAVIGATE, serde_json::to_value(&params)?),
+      self
+        .browser
+        .send(protocol::PLAYWRIGHT_NAVIGATE, serde_json::to_value(&params)?),
     )
     .await
     .map_err(|_| FerriError::timeout(format!("navigating to {url}"), timeout_ms))?
@@ -378,7 +547,7 @@ impl PwWebKitPage {
       }
     }
     if parsed.loader_id.is_some() {
-      self.wait_for_lifecycle_on(rx, lifecycle, timeout_ms).await?;
+      self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
     }
     Ok(self.await_nav_response().await)
   }
@@ -392,45 +561,25 @@ impl PwWebKitPage {
 
   /// Wait for the target-session lifecycle event matching `lifecycle`,
   /// or for `Network.loadingFailed` on the main-document request.
-  /// Takes a pre-existing receiver so callers subscribe BEFORE
-  /// triggering the action; `tokio::sync::broadcast` doesn't replay
-  /// to receivers created after a send.
-  async fn wait_for_lifecycle_on(
-    &self,
-    mut rx: tokio::sync::broadcast::Receiver<Envelope>,
-    lifecycle: NavLifecycle,
-    timeout_ms: u64,
-  ) -> Result<()> {
-    let want = match lifecycle {
-      NavLifecycle::Commit => "Page.frameNavigated",
-      NavLifecycle::DomContentLoaded => "Page.domContentEventFired",
-      NavLifecycle::Load => "Page.loadEventFired",
-    };
+  /// Uses [`LifecycleSignals`] fed by the target listener so the wait
+  /// survives cross-process target swaps (listener re-subscribes to
+  /// the new target on `Target.didCommitProvisionalTarget`).
+  async fn wait_for_lifecycle(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<()> {
+    let signals = Arc::clone(&self.lifecycle);
     let nav_slot = self.nav_request_slot.clone();
     let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async move {
       loop {
-        match rx.recv().await {
-          Ok(env) => match env.method.as_deref() {
-            Some(m) if m == want => return Ok(()),
-            Some("Network.loadingFailed") => {
-              if let Some(req) = nav_slot.get() {
-                let event_id = env.params.get("requestId").and_then(Value::as_str).unwrap_or("");
-                if event_id == req.id() {
-                  let err = env
-                    .params
-                    .get("errorText")
-                    .and_then(Value::as_str)
-                    .unwrap_or("navigation failed")
-                    .to_string();
-                  return Err(FerriError::backend(format!("pw-webkit navigate: {err}")));
-                }
-              }
-            },
-            _ => {},
-          },
-          Err(RecvError::Lagged(_)) => {},
-          Err(RecvError::Closed) => return Ok(()),
+        if signals.seen(lifecycle) {
+          return Ok(());
         }
+        if let Some((event_request_id, err)) = signals.failure() {
+          if let Some(req) = nav_slot.get() {
+            if event_request_id == req.id() {
+              return Err(FerriError::backend(format!("pw-webkit navigate: {err}")));
+            }
+          }
+        }
+        signals.notify.notified().await;
       }
     })
     .await;
@@ -441,17 +590,21 @@ impl PwWebKitPage {
   }
 
   pub async fn wait_for_navigation(&self) -> Result<()> {
-    let rx = self.target.events();
-    self.wait_for_lifecycle_on(rx, NavLifecycle::Load, 30_000).await
+    self.lifecycle.reset();
+    self.wait_for_lifecycle(NavLifecycle::Load, 30_000).await
   }
 
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.ensure_open()?;
     self.reset_realm();
     self.nav_request_slot.clear();
-    let rx = self.target.events();
-    self.target.send("Page.reload", json!({})).await.map_err(conn_err)?;
-    let _ = self.wait_for_lifecycle_on(rx, lifecycle, timeout_ms).await;
+    self.lifecycle.reset();
+    self
+      .target_session()
+      .send("Page.reload", json!({}))
+      .await
+      .map_err(conn_err)?;
+    let _ = self.wait_for_lifecycle(lifecycle, timeout_ms).await;
     Ok(self.await_nav_response().await)
   }
 
@@ -463,18 +616,13 @@ impl PwWebKitPage {
     self.history_traverse("Page.goForward", lifecycle, timeout_ms).await
   }
 
-  async fn history_traverse(
-    &self,
-    method: &str,
-    lifecycle: NavLifecycle,
-    timeout_ms: u64,
-  ) -> Result<Option<Response>> {
+  async fn history_traverse(&self, method: &str, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.ensure_open()?;
     self.reset_realm();
     self.nav_request_slot.clear();
-    let rx = self.target.events();
-    self.target.send(method, json!({})).await.map_err(conn_err)?;
-    let _ = self.wait_for_lifecycle_on(rx, lifecycle, timeout_ms).await;
+    self.lifecycle.reset();
+    self.target_session().send(method, json!({})).await.map_err(conn_err)?;
+    let _ = self.wait_for_lifecycle(lifecycle, timeout_ms).await;
     Ok(self.await_nav_response().await)
   }
 
@@ -505,7 +653,7 @@ impl PwWebKitPage {
     let js = crate::selectors::build_lazy_inject_js();
     let wrapper = format!("function(){{ return ({js}); }}");
     let resp = self
-      .target
+      .target_session()
       .send(
         protocol::RUNTIME_CALL_FUNCTION_ON,
         json!({
@@ -553,14 +701,17 @@ impl PwWebKitPage {
       .and_then(Value::as_str)
       .ok_or_else(|| FerriError::protocol("Runtime.evaluate", "evaluate_to_element: result is not an object"))?;
     Ok(AnyElement::PwWebKit(PwWebKitElement::new(
-      self.target.clone(),
+      self.target_session(),
       object_id.to_string(),
     )))
   }
 
   pub async fn resolve_backend_node(&self, _backend_node_id: i64, ref_id: &str) -> Result<AnyElement> {
     tokio::task::yield_now().await;
-    Ok(AnyElement::PwWebKit(PwWebKitElement::new(self.target.clone(), ref_id.to_string())))
+    Ok(AnyElement::PwWebKit(PwWebKitElement::new(
+      self.target_session(),
+      ref_id.to_string(),
+    )))
   }
 
   // ── Content ───────────────────────────────────────────────────────────
@@ -627,7 +778,7 @@ impl PwWebKitPage {
     params["coordinateSystem"] = json!(coord_system);
     params["omitDeviceScaleFactor"] = json!(!matches!(opts.scale, Some(crate::backend::ScreenshotScale::Device)));
     let resp = self
-      .target
+      .target_session()
       .send("Page.snapshotRect", params)
       .await
       .map_err(conn_err)?;
@@ -667,7 +818,9 @@ impl PwWebKitPage {
   // ── Input ─────────────────────────────────────────────────────────────
 
   pub async fn click_at(&self, x: f64, y: f64) -> Result<()> {
-    self.click_at_with(x, y, &crate::backend::BackendClickArgs::default_left()).await
+    self
+      .click_at_with(x, y, &crate::backend::BackendClickArgs::default_left())
+      .await
   }
 
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
@@ -741,16 +894,20 @@ impl PwWebKitPage {
 
   pub async fn get_cookies(&self) -> Result<Vec<CookieData>> {
     let resp = self
-      .target
+      .target_session()
       .send("Page.getCookies", json!({}))
       .await
       .map_err(conn_err)?;
-    let arr = resp.get("cookies").and_then(Value::as_array).cloned().unwrap_or_default();
+    let arr = resp
+      .get("cookies")
+      .and_then(Value::as_array)
+      .cloned()
+      .unwrap_or_default();
     Ok(arr.iter().map(super::events::parse_cookie).collect())
   }
 
   pub async fn set_cookie(&self, cookie: CookieData) -> Result<()> {
-    super::events::set_cookie(&self.target, cookie).await
+    super::events::set_cookie(&self.target_session(), cookie).await
   }
 
   pub async fn delete_cookie(&self, name: &str, domain: Option<&str>) -> Result<()> {
@@ -759,7 +916,7 @@ impl PwWebKitPage {
       params["url"] = json!(format!("http://{d}/"));
     }
     self
-      .target
+      .target_session()
       .send("Page.deleteCookie", params)
       .await
       .map_err(conn_err)?;
@@ -806,19 +963,19 @@ impl PwWebKitPage {
   async fn apply_target_session_overrides(&self, opts: &crate::options::BrowserContextOptions) {
     if let Some(ua) = opts.user_agent.as_deref() {
       let _ = self
-        .target
+        .target_session()
         .send("Page.overrideUserAgent", json!({ "value": ua }))
         .await;
     }
     if let Some(tz) = opts.timezone_id.as_deref() {
       let _ = self
-        .target
+        .target_session()
         .send("Page.setTimeZone", json!({ "timeZone": tz }))
         .await;
     }
     if let Some(screen) = opts.screen {
       let _ = self
-        .target
+        .target_session()
         .send(
           "Page.setScreenSizeOverride",
           json!({ "width": screen.width, "height": screen.height }),
@@ -827,13 +984,13 @@ impl PwWebKitPage {
     }
     if let Some(o) = opts.offline {
       let _ = self
-        .target
+        .target_session()
         .send("Network.setEmulateOfflineState", json!({ "offline": o }))
         .await;
     }
     if let Some(true) = opts.bypass_csp {
       let _ = self
-        .target
+        .target_session()
         .send("Page.setBypassCSP", json!({ "enabled": true }))
         .await;
     }
@@ -849,7 +1006,10 @@ impl PwWebKitPage {
     if let Some(perms) = opts.permissions.as_ref() {
       let _ = self
         .proxy
-        .send("Emulation.grantPermissions", json!({ "origin": "*", "permissions": perms }))
+        .send(
+          "Emulation.grantPermissions",
+          json!({ "origin": "*", "permissions": perms }),
+        )
         .await;
     }
   }
@@ -909,7 +1069,7 @@ impl PwWebKitPage {
       .await
       .map_err(conn_err)?;
     let _ = self
-      .target
+      .target_session()
       .send(
         "Page.setScreenSizeOverride",
         json!({ "width": config.width, "height": config.height }),
@@ -938,13 +1098,16 @@ impl PwWebKitPage {
         other => other,
       };
       self
-        .target
-        .send("Page.overrideUserPreference", user_pref("PrefersColorScheme", Some(value)))
+        .target_session()
+        .send(
+          "Page.overrideUserPreference",
+          user_pref("PrefersColorScheme", Some(value)),
+        )
         .await
         .map_err(conn_err)?;
     } else if matches!(opts.color_scheme, MediaOverride::Disabled) {
       self
-        .target
+        .target_session()
         .send("Page.overrideUserPreference", user_pref("PrefersColorScheme", None))
         .await
         .map_err(conn_err)?;
@@ -952,10 +1115,18 @@ impl PwWebKitPage {
     self.emulate_media_remaining(opts).await?;
     match &opts.media {
       MediaOverride::Set(v) => {
-        self.target.send("Page.setEmulatedMedia", json!({ "media": v })).await.map_err(conn_err)?;
+        self
+          .target_session()
+          .send("Page.setEmulatedMedia", json!({ "media": v }))
+          .await
+          .map_err(conn_err)?;
       },
       MediaOverride::Disabled => {
-        self.target.send("Page.setEmulatedMedia", json!({ "media": "" })).await.map_err(conn_err)?;
+        self
+          .target_session()
+          .send("Page.setEmulatedMedia", json!({ "media": "" }))
+          .await
+          .map_err(conn_err)?;
       },
       MediaOverride::Unchanged => {},
     }
@@ -969,8 +1140,11 @@ impl PwWebKitPage {
         other => other,
       };
       self
-        .target
-        .send("Page.overrideUserPreference", user_pref("PrefersColorScheme", Some(value)))
+        .target_session()
+        .send(
+          "Page.overrideUserPreference",
+          user_pref("PrefersColorScheme", Some(value)),
+        )
         .await
         .map_err(conn_err)?;
     }
@@ -996,14 +1170,17 @@ impl PwWebKitPage {
           other => other,
         };
         self
-          .target
-          .send("Page.overrideUserPreference", user_pref("PrefersReducedMotion", Some(val)))
+          .target_session()
+          .send(
+            "Page.overrideUserPreference",
+            user_pref("PrefersReducedMotion", Some(val)),
+          )
           .await
           .map_err(conn_err)?;
       },
       MediaOverride::Disabled => {
         self
-          .target
+          .target_session()
           .send("Page.overrideUserPreference", user_pref("PrefersReducedMotion", None))
           .await
           .map_err(conn_err)?;
@@ -1019,14 +1196,14 @@ impl PwWebKitPage {
           other => other,
         };
         self
-          .target
+          .target_session()
           .send("Page.setForcedColors", json!({ "forcedColors": val }))
           .await
           .map_err(conn_err)?;
       },
       MediaOverride::Disabled => {
         self
-          .target
+          .target_session()
           .send("Page.setForcedColors", json!({ "forcedColors": Value::Null }))
           .await
           .map_err(conn_err)?;
@@ -1042,14 +1219,14 @@ impl PwWebKitPage {
           other => other,
         };
         self
-          .target
+          .target_session()
           .send("Page.overrideUserPreference", user_pref("PrefersContrast", Some(val)))
           .await
           .map_err(conn_err)?;
       },
       MediaOverride::Disabled => {
         self
-          .target
+          .target_session()
           .send("Page.overrideUserPreference", user_pref("PrefersContrast", None))
           .await
           .map_err(conn_err)?;
@@ -1065,7 +1242,7 @@ impl PwWebKitPage {
       .map(|(k, v)| (k.clone(), Value::String(v.clone())))
       .collect();
     self
-      .target
+      .target_session()
       .send("Network.setExtraHTTPHeaders", json!({ "headers": map }))
       .await
       .map_err(conn_err)?;
@@ -1105,13 +1282,19 @@ impl PwWebKitPage {
 
   // ── Listeners ─────────────────────────────────────────────────────────
 
+  /// Re-route the listener (already spawned in [`Self::attach`]) to
+  /// write captured console / network / dialog events into the
+  /// caller's [`tokio::sync::RwLock`] sinks. Cheap pointer swap — the
+  /// running listener picks up the new sinks on its next event.
   pub fn attach_listeners(
     &self,
     console_log: Arc<tokio::sync::RwLock<Vec<ConsoleMessage>>>,
     network_log: Arc<tokio::sync::RwLock<Vec<NetworkRequest>>>,
     dialog_log: Arc<tokio::sync::RwLock<Vec<DialogEvent>>>,
   ) {
-    super::events::attach_listeners(self, console_log, network_log, dialog_log);
+    self.console_log.store(console_log);
+    self.network_log.store(network_log);
+    self.dialog_log.store(dialog_log);
   }
 
   // ── PDF / screencast ──────────────────────────────────────────────────
@@ -1184,7 +1367,7 @@ impl PwWebKitPage {
       return Err(FerriError::backend("set_file_input: non-pw-webkit element"));
     };
     self
-      .target
+      .target_session()
       .send(
         "DOM.setInputFiles",
         json!({ "objectId": e.object_id(), "paths": paths }),
@@ -1213,12 +1396,12 @@ impl PwWebKitPage {
       return Ok(());
     }
     self
-      .target
+      .target_session()
       .send("Network.setInterceptionEnabled", json!({ "enabled": true }))
       .await
       .map_err(conn_err)?;
     self
-      .target
+      .target_session()
       .send(
         "Network.addInterception",
         json!({ "url": ".*", "stage": "request", "isRegex": true }),
@@ -1235,7 +1418,7 @@ impl PwWebKitPage {
 
   pub async fn enable_file_chooser_intercept(&self) -> Result<()> {
     let _ = self
-      .target
+      .target_session()
       .send("Page.setInterceptFileChooserDialog", json!({ "enabled": true }))
       .await;
     Ok(())
@@ -1277,10 +1460,10 @@ impl PwWebKitPage {
     // Subscribe BEFORE evaluating the controller. User JS that calls
     // the binding can run as soon as `add_init_script` lands, so the
     // listener must already be live by then.
-    let target = self.target.clone();
+    let target = self.target_session();
     let mut rx = target.events();
     self
-      .target
+      .target_session()
       .send("Runtime.addBinding", json!({ "name": "__fd_binding__" }))
       .await
       .map_err(conn_err)?;
@@ -1328,7 +1511,9 @@ impl PwWebKitPage {
         } else {
           format!("globalThis.__fd_bc.reject({seq}, 'Function not found: {fn_name}')")
         };
-        let _ = target.send(protocol::RUNTIME_EVALUATE, json!({ "expression": deliver_js })).await;
+        let _ = target
+          .send(protocol::RUNTIME_EVALUATE, json!({ "expression": deliver_js }))
+          .await;
       }
     });
     Ok(())
@@ -1336,18 +1521,21 @@ impl PwWebKitPage {
 
   pub async fn add_init_script(&self, source: &str) -> Result<String> {
     let resp = self
-      .target
+      .target_session()
       .send("Page.setBootstrapScript", json!({ "source": source }))
       .await
       .map_err(conn_err)?;
-    Ok(resp.get("identifier").and_then(Value::as_str).unwrap_or("0").to_string())
+    Ok(
+      resp
+        .get("identifier")
+        .and_then(Value::as_str)
+        .unwrap_or("0")
+        .to_string(),
+    )
   }
 
   pub async fn remove_init_script(&self, _identifier: &str) -> Result<()> {
-    let _ = self
-      .target
-      .send("Page.setBootstrapScript", json!({}))
-      .await;
+    let _ = self.target_session().send("Page.setBootstrapScript", json!({})).await;
     Ok(())
   }
 
@@ -1404,7 +1592,7 @@ impl PwWebKitPage {
       None => self.global_anchor().await?,
     };
     let resp = self
-      .target
+      .target_session()
       .send(
         protocol::RUNTIME_CALL_FUNCTION_ON,
         json!({
@@ -1422,7 +1610,7 @@ impl PwWebKitPage {
 
   pub async fn release_object(&self, object_id: &str) -> Result<()> {
     let _ = self
-      .target
+      .target_session()
       .send(protocol::RUNTIME_RELEASE_OBJECT, json!({ "objectId": object_id }))
       .await;
     Ok(())
@@ -1430,7 +1618,7 @@ impl PwWebKitPage {
 
   #[must_use]
   pub fn element_from_object_id(&self, object_id: String) -> PwWebKitElement {
-    PwWebKitElement::new(self.target.clone(), object_id)
+    PwWebKitElement::new(self.target_session(), object_id)
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -1439,15 +1627,16 @@ impl PwWebKitPage {
     if self.closed.swap(true, Ordering::Relaxed) {
       return Ok(());
     }
+    let target_id = self.target_id();
     let send = self.proxy.send(
       "Target.close",
-      json!({ "targetId": self.target_id.to_string(), "runBeforeUnload": false }),
+      json!({ "targetId": target_id.to_string(), "runBeforeUnload": false }),
     );
     let _ = tokio::time::timeout(std::time::Duration::from_secs(2), send).await;
     // Reject pending in-flight calls bound to this page's proxy + target
     // routes so successive callers don't pile up indefinitely.
     let conn = self.proxy.connection_handle();
-    conn.close_route(Some(&self.proxy_id), Some(&self.target_id));
+    conn.close_route(Some(&self.proxy_id), Some(&target_id));
     conn.close_route(Some(&self.proxy_id), None);
     Ok(())
   }
@@ -1478,7 +1667,9 @@ async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crat
     let _ = target.send("Page.setBypassCSP", json!({ "enabled": true })).await;
   }
   if let Some(o) = opts.offline {
-    let _ = target.send("Network.setEmulateOfflineState", json!({ "offline": o })).await;
+    let _ = target
+      .send("Network.setEmulateOfflineState", json!({ "offline": o }))
+      .await;
   }
   if let Some(screen) = opts.screen {
     let _ = target
@@ -1504,7 +1695,10 @@ async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crat
   }
   if let Some(perms) = opts.permissions.as_ref() {
     let _ = proxy
-      .send("Emulation.grantPermissions", json!({ "origin": "*", "permissions": perms }))
+      .send(
+        "Emulation.grantPermissions",
+        json!({ "origin": "*", "permissions": perms }),
+      )
       .await;
   }
 }
