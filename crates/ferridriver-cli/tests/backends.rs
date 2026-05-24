@@ -515,12 +515,12 @@ fn test_script_emulate_media_all_fields(c: &mut McpClient) {
   if c.backend == "bidi" {
     return;
   }
-  // PW WebKit's Linux WPE build does not honor PrefersColorScheme via the
-  // Page.overrideUserPreference channel (other preferences — reducedMotion,
-  // forcedColors, contrast — all work). Real WPE limitation, not a wire
-  // bug — `Page.setEmulatedMedia` resets the override and re-applying it
-  // afterwards still leaves matchMedia('(prefers-color-scheme: dark)')
-  // false. Skip until WPE picks up the override.
+  // PW WebKit's WPE Linux build does not honor PrefersColorScheme via
+  // the Page.overrideUserPreference channel (other preferences —
+  // reducedMotion, forcedColors, contrast — all work). Real WPE
+  // limitation; the macOS Mac-port build of the same binary honors it.
+  // Skip on Linux only.
+  #[cfg(target_os = "linux")]
   if c.backend == "pw-webkit" {
     return;
   }
@@ -586,9 +586,10 @@ fn test_script_emulate_media_null_disables_single_field(c: &mut McpClient) {
   if c.backend == "bidi" {
     return;
   }
-  // See `test_script_emulate_media_all_fields` — WPE doesn't honor
-  // PrefersColorScheme so the pre/post matchMedia(dark) checks would
-  // both report false.
+  // See `test_script_emulate_media_all_fields` — WPE on Linux doesn't
+  // honor PrefersColorScheme via Page.overrideUserPreference. macOS
+  // Mac-port build honors it.
+  #[cfg(target_os = "linux")]
   if c.backend == "pw-webkit" {
     return;
   }

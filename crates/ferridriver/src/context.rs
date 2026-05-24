@@ -312,13 +312,16 @@ impl ContextRef {
         Some(existing_ctx_id),
       )
     } else {
-      // Per-context `proxy` flows through
-      // `Target.createBrowserContext({ proxyServer, proxyBypassList })`
-      // on CDP (`crBrowser.ts::doCreateNewContext`) and
-      // `browser.createUserContext({ proxy })` on BiDi
-      // (`bidiBrowser.ts::doCreateNewContext`).
-      let proxy = ctx_opts.as_ref().and_then(|o| o.proxy.as_ref());
-      let ctx_id = plan.browser.new_context(proxy).await?;
+      // Per-context options flow through:
+      //   * CDP: `Target.createBrowserContext({ proxyServer, proxyBypassList })`
+      //     (`crBrowser.ts::doCreateNewContext`)
+      //   * BiDi: `browser.createUserContext({ proxy })`
+      //     (`bidiBrowser.ts::doCreateNewContext`)
+      //   * pw-webkit: `Playwright.createContext` + `Playwright.setLanguages`
+      //     (`wkBrowser.ts::WKBrowserContext.initialize`), then per-page
+      //     overrides applied in `attach()` before the about:blank document
+      //     becomes scriptable.
+      let ctx_id = plan.browser.new_context(ctx_opts.as_ref()).await?;
       let page = Box::pin(
         plan
           .browser

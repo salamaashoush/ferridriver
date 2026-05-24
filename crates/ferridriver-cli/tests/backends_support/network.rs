@@ -541,7 +541,7 @@ pub fn test_network_headers(c: &mut McpClient) {
 /// assert that `page.waitForEvent('websocket', { timeoutMs })` rejects
 /// with a typed Timeout there rather than silently dangling.
 pub fn test_network_websocket(c: &mut McpClient) {
-  if c.backend == "bidi" || c.backend == "webkit" || c.backend == "pw-webkit" {
+  if c.backend == "bidi" || c.backend == "webkit" {
     c.nav_url("about:blank");
     let script = "const r = await page.waitForEvent('websocket', 500).catch(e => ({ error: String(e) }));\
                   return r && r.error ? { error: r.error } : { ok: true };";

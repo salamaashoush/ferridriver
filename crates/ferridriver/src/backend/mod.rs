@@ -60,17 +60,23 @@ impl PageBackref {
   /// Set the stored weak reference. Called by `Page::new` /
   /// `Page::with_context` on every construction.
   ///
-  /// Skips overwrite if the existing weak still upgrades — multiple
-  /// transient `Page` wrappers can be built for the same backend page
-  /// (e.g. `ContextRef::pages()` re-wraps on every call, `frame.page()`
-  /// builds a fresh wrapper); a last-writer-wins overwrite would dangle
-  /// the live wrapper and silently drop every subsequent console /
-  /// network / dialog event the listeners route through `upgrade()`.
+  /// **Always overwrites.** Earlier behaviour was "skip overwrite if
+  /// the existing weak still upgrades" to protect against transient
+  /// `Page` wrappers (`ContextRef::pages()`, `frame.page()`) clobbering
+  /// a long-lived persistent wrapper. In the MCP / script-engine path
+  /// there IS no persistent outer `Page` -- every script call mints a
+  /// new wrapper via `page_and_context` and drops it when the
+  /// `RunContext` drops. With skip-on-upgrade, the very first transient
+  /// wrapper "won" and stayed pinned in `page_backref`; once GC reaped
+  /// its JS heap reference, the weak dangled while the listener thread
+  /// kept silently dropping every console / file-chooser / dialog event
+  /// for the rest of the session (reproduced via
+  /// `test_file_chooser_multiple_string_array` running after
+  /// `test_file_chooser_single_string_path`). Last-writer-wins matches
+  /// the actual lifetime story: the wrapper most recently registered is
+  /// the one the current call is using.
   pub fn set(&self, weak: std::sync::Weak<crate::page::Page>) {
     if let Ok(mut guard) = self.inner.lock() {
-      if guard.upgrade().is_some() {
-        return;
-      }
       *guard = weak;
     }
   }
@@ -581,10 +587,18 @@ impl AnyBrowser {
 
   /// Create a new browser context (isolated cookies, storage, cache).
   ///
+  /// `options` carries the full `BrowserContextOptions` bag — most
+  /// backends only need `proxy`, but pw-webkit applies `locale` (via
+  /// `Playwright.setLanguages`) at context-creation time and stashes
+  /// the remainder so per-page settings (userAgent, timezone, JS-disabled)
+  /// can be sent during `attach()` BEFORE the about:blank document is
+  /// live. Mirrors PW's `WKBrowserContext.initialize` flow.
+  ///
   /// # Errors
   ///
   /// Returns an error if context creation fails.
-  pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
+  pub async fn new_context(&self, options: Option<&crate::options::BrowserContextOptions>) -> Result<String> {
+    let proxy = options.and_then(|o| o.proxy.as_ref());
     match self {
       Self::CdpPipe(b) => b.new_context(proxy).await,
       Self::CdpRaw(b) => b.new_context(proxy).await,
@@ -592,7 +606,7 @@ impl AnyBrowser {
       Self::WebKit(_) => Err(crate::error::FerriError::unsupported(
         "WebKit does not support multiple browser contexts",
       )),
-      Self::PwWebKit(b) => b.new_context(proxy).await,
+      Self::PwWebKit(b) => b.new_context_with_options(options).await,
       Self::Bidi(b) => b.new_context(proxy).await,
     }
   }

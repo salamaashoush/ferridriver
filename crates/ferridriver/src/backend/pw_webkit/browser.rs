@@ -77,13 +77,6 @@ pub struct PwWebKitBrowser {
   /// Pages created through this browser. `pages()` snapshots it; the
   /// PW `WebKit` protocol has no page-list RPC.
   pages: Arc<Mutex<Vec<PwWebKitPage>>>,
-  /// Shared download directory the per-context `setDownloadBehavior`
-  /// points at. Files land here keyed by `uuid`; the per-page
-  /// [`crate::download::DownloadManager`] surfaces them as live
-  /// `Download` handles. Held so its lifetime tracks the browser —
-  /// it is consumed inside the per-launch download listener task.
-  #[allow(dead_code, reason = "held for lifetime; listener task owns the only active reference")]
-  downloads_dir: Arc<std::path::PathBuf>,
   /// Context every page lands in when the caller passes no explicit
   /// `browserContextId`. PW `WebKit` non-persistent launches have no
   /// implicit default context — `Playwright.createPage` without a
@@ -94,6 +87,11 @@ pub struct PwWebKitBrowser {
   /// derived from the binary path — a real build identifier, not a
   /// placeholder.
   version: Arc<str>,
+  /// Per-context options stash, keyed by `browserContextId`. Populated
+  /// by [`Self::new_context_with_options`]; consumed by
+  /// [`PwWebKitPage::attach`] to apply per-page overrides before the
+  /// initial document becomes scriptable.
+  context_options: Arc<Mutex<rustc_hash::FxHashMap<String, crate::options::BrowserContextOptions>>>,
 }
 
 impl PwWebKitBrowser {
@@ -158,9 +156,9 @@ impl PwWebKitBrowser {
         ipc: Mutex::new(Some((parent_read, parent_write))),
       }),
       pages,
-      downloads_dir,
       default_context,
       version,
+      context_options: Arc::new(Mutex::new(rustc_hash::FxHashMap::default())),
     })
   }
 
@@ -179,7 +177,10 @@ impl PwWebKitBrowser {
     &self.conn
   }
 
-  /// Create an ephemeral browser context. `Playwright.createContext`.
+  /// Create an ephemeral browser context with proxy-only options.
+  /// Equivalent to [`Self::new_context_with_options`] with the full
+  /// options bag stripped to just the proxy field — kept for state.rs's
+  /// legacy `new_context(None)` callsite.
   pub async fn new_context(&self, proxy: Option<&crate::options::ProxyConfig>) -> Result<String> {
     let mut params = CreateContextParams::default();
     if let Some(p) = proxy {
@@ -194,6 +195,52 @@ impl PwWebKitBrowser {
     let parsed: CreateContextResult =
       serde_json::from_value(resp).map_err(|e| FerriError::protocol("Playwright.createContext", e.to_string()))?;
     Ok(parsed.browser_context_id)
+  }
+
+  /// Create a context with the full [`BrowserContextOptions`] bag.
+  ///
+  /// Sends `Playwright.createContext` for the proxy fields, then
+  /// `Playwright.setLanguages` if `locale` is set (mirroring
+  /// `WKBrowserContext.initialize`), then stashes the options so
+  /// [`Self::new_page`] / [`PwWebKitPage::attach`] can apply per-page
+  /// overrides (userAgent, timezone, JS-disabled, bypassCSP, offline,
+  /// permissions, extraHTTPHeaders) on the target session BEFORE the
+  /// initial about:blank document becomes scriptable.
+  pub async fn new_context_with_options(
+    &self,
+    options: Option<&crate::options::BrowserContextOptions>,
+  ) -> Result<String> {
+    let proxy = options.and_then(|o| o.proxy.as_ref());
+    let ctx_id = self.new_context(proxy).await?;
+    if let Some(opts) = options {
+      if let Some(locale) = opts.locale.as_deref() {
+        let _ = self
+          .root
+          .send(
+            "Playwright.setLanguages",
+            json!({ "browserContextId": ctx_id.clone(), "languages": [locale] }),
+          )
+          .await;
+      }
+      self
+        .context_options
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(ctx_id.clone(), opts.clone());
+    }
+    Ok(ctx_id)
+  }
+
+  /// Look up stashed [`BrowserContextOptions`] for a context id. Used
+  /// by [`PwWebKitPage::attach`] to apply per-page overrides before the
+  /// initial document loads.
+  pub(crate) fn context_options_for(&self, ctx_id: &str) -> Option<crate::options::BrowserContextOptions> {
+    self
+      .context_options
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .get(ctx_id)
+      .cloned()
   }
 
   /// Delete a context. `Playwright.deleteContext`.

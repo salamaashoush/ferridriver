@@ -75,6 +75,20 @@ pub struct PwWebKitPage {
   /// `Runtime.executionContextCreated` events. Used by
   /// [`Self::evaluate_in_frame`] to evaluate inside an iframe's realm.
   pub(crate) frame_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>>,
+  /// Main-frame id captured from the initial `Page.getResourceTree`
+  /// response. PW `WebKit`'s `frame_id` is distinct from `target_id`
+  /// (the page proxy's id); returning `target_id` from
+  /// `peek_main_frame_id` caused `main_frame()` to attach a phantom
+  /// record under the wrong key while `Page.frameNavigated` events
+  /// filled the real id with the navigated URL -- callers reading
+  /// `page.url()` then saw the empty phantom record. Mirrors CDP's
+  /// `main_frame_id` `OnceLock`.
+  pub(crate) main_frame_id_cache: Arc<std::sync::OnceLock<String>>,
+  /// Live WebSocket table, keyed by PW `WebKit` `requestId`. The network
+  /// listener inserts on `Network.webSocketCreated`, emits frames on
+  /// `webSocketFrameSent` / `webSocketFrameReceived`, and removes the
+  /// entry on `webSocketClosed`.
+  pub(crate) websockets: Arc<tokio::sync::Mutex<rustc_hash::FxHashMap<String, crate::network::WebSocket>>>,
   pub events: EventEmitter,
   pub dialog_manager: crate::dialog::DialogManager,
   pub file_chooser_manager: crate::file_chooser::FileChooserManager,
@@ -107,6 +121,18 @@ impl PwWebKitPage {
     // without `Dialog.enable` the `javascriptDialogOpening` event
     // never fires and `window.alert` would wedge the page.
     proxy.send("Dialog.enable", json!({})).await?;
+    // Apply per-page context overrides BEFORE the about:blank document
+    // becomes scriptable. Mirrors `WKPage._initializeSessionMayThrow` —
+    // userAgent / timezone / bypassCSP / offline / permissions live on
+    // the target session and must be set before any JS runs in the
+    // initial document. Without this, `navigator.userAgent`,
+    // `Intl.DateTimeFormat().resolvedOptions().timeZone`, etc. stay at
+    // their default values for the lifetime of about:blank.
+    if let Some(ctx_id) = context_id.as_deref() {
+      if let Some(opts) = browser.context_options_for(ctx_id) {
+        apply_pre_page_overrides(&target, &proxy, &opts).await;
+      }
+    }
     // File-chooser interception is enabled lazily through
     // [`Self::enable_file_chooser_intercept`] when a listener attaches,
     // matching CDP's `_updateFileChooserInterception`. Setting it at
@@ -116,7 +142,17 @@ impl PwWebKitPage {
     let _ = target
       .send("Page.createUserWorld", json!({ "name": UTILITY_WORLD_NAME }))
       .await;
-    let _ = target.send("Page.getResourceTree", json!({})).await;
+    let resource_tree = target.send("Page.getResourceTree", json!({})).await.ok();
+    let main_frame_id_cache: Arc<std::sync::OnceLock<String>> = Arc::new(std::sync::OnceLock::new());
+    if let Some(tree) = resource_tree
+      .as_ref()
+      .and_then(|r| r.get("frameTree"))
+      .and_then(|t| t.get("frame"))
+      .and_then(|f| f.get("id"))
+      .and_then(Value::as_str)
+    {
+      let _ = main_frame_id_cache.set(tree.to_string());
+    }
 
     Ok(PwWebKitPage {
       proxy,
@@ -135,6 +171,8 @@ impl PwWebKitPage {
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       intercept_enabled: Arc::new(AtomicBool::new(false)),
       frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
+      main_frame_id_cache,
+      websockets: Arc::new(tokio::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       events: EventEmitter::new(),
       dialog_manager: crate::dialog::DialogManager::new(),
       file_chooser_manager: crate::file_chooser::FileChooserManager::new(),
@@ -259,8 +297,7 @@ impl PwWebKitPage {
 
   #[must_use]
   pub fn peek_main_frame_id(&self) -> Option<String> {
-    let id = self.target_id.to_string();
-    (!id.is_empty()).then_some(id)
+    self.main_frame_id_cache.get().cloned()
   }
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<Value>> {
@@ -309,6 +346,18 @@ impl PwWebKitPage {
     self.ensure_open()?;
     self.reset_realm();
     self.nav_request_slot.clear();
+    // Subscribe BEFORE issuing the navigate. `tokio::sync::broadcast`
+    // doesn't replay events to receivers created after the send -- and
+    // data: URLs commit so fast that `Page.loadEventFired` can arrive
+    // between `Playwright.navigate` returning and a later
+    // `events()` subscription, leaving `wait_for_lifecycle` to wedge
+    // for the full timeout. Subscribing here ensures we see every
+    // event from this point onward; the EVENT_CHANNEL_CAP buffer
+    // (8192) absorbs the burst load. Listening only on lifecycle
+    // events via a separate subscriber would race attach_listeners on
+    // the Buffering→Live flip and drop initial-document events, so we
+    // share the target broadcast.
+    let rx = self.target.events();
     let params = NavigateParams {
       url: url.to_string(),
       page_proxy_id: self.proxy_id.to_string(),
@@ -329,7 +378,7 @@ impl PwWebKitPage {
       }
     }
     if parsed.loader_id.is_some() {
-      self.wait_for_lifecycle(lifecycle, timeout_ms).await?;
+      self.wait_for_lifecycle_on(rx, lifecycle, timeout_ms).await?;
     }
     Ok(self.await_nav_response().await)
   }
@@ -342,16 +391,21 @@ impl PwWebKitPage {
   }
 
   /// Wait for the target-session lifecycle event matching `lifecycle`,
-  /// or for `Network.loadingFailed` on the main-document request
-  /// (so an unreachable navigation surfaces as an error instead of
-  /// wedging until `timeout_ms`).
-  async fn wait_for_lifecycle(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<()> {
+  /// or for `Network.loadingFailed` on the main-document request.
+  /// Takes a pre-existing receiver so callers subscribe BEFORE
+  /// triggering the action; `tokio::sync::broadcast` doesn't replay
+  /// to receivers created after a send.
+  async fn wait_for_lifecycle_on(
+    &self,
+    mut rx: tokio::sync::broadcast::Receiver<Envelope>,
+    lifecycle: NavLifecycle,
+    timeout_ms: u64,
+  ) -> Result<()> {
     let want = match lifecycle {
       NavLifecycle::Commit => "Page.frameNavigated",
       NavLifecycle::DomContentLoaded => "Page.domContentEventFired",
       NavLifecycle::Load => "Page.loadEventFired",
     };
-    let mut rx = self.target.events();
     let nav_slot = self.nav_request_slot.clone();
     let result = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), async move {
       loop {
@@ -387,15 +441,17 @@ impl PwWebKitPage {
   }
 
   pub async fn wait_for_navigation(&self) -> Result<()> {
-    self.wait_for_lifecycle(NavLifecycle::Load, 30_000).await
+    let rx = self.target.events();
+    self.wait_for_lifecycle_on(rx, NavLifecycle::Load, 30_000).await
   }
 
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.ensure_open()?;
     self.reset_realm();
     self.nav_request_slot.clear();
+    let rx = self.target.events();
     self.target.send("Page.reload", json!({})).await.map_err(conn_err)?;
-    let _ = self.wait_for_lifecycle(lifecycle, timeout_ms).await;
+    let _ = self.wait_for_lifecycle_on(rx, lifecycle, timeout_ms).await;
     Ok(self.await_nav_response().await)
   }
 
@@ -416,8 +472,9 @@ impl PwWebKitPage {
     self.ensure_open()?;
     self.reset_realm();
     self.nav_request_slot.clear();
+    let rx = self.target.events();
     self.target.send(method, json!({})).await.map_err(conn_err)?;
-    let _ = self.wait_for_lifecycle(lifecycle, timeout_ms).await;
+    let _ = self.wait_for_lifecycle_on(rx, lifecycle, timeout_ms).await;
     Ok(self.await_nav_response().await)
   }
 
@@ -719,72 +776,44 @@ impl PwWebKitPage {
   // ── Emulation ─────────────────────────────────────────────────────────
 
   pub async fn apply_context_options(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
+    // Per-page document-time overrides (userAgent, timezone, locale,
+    // JS-disabled, bypassCSP, offline, permissions) are now sent inside
+    // [`Self::attach`] from the browser's stashed context options, so
+    // they're live BEFORE about:blank becomes scriptable. This call
+    // re-asserts the runtime-mutable subset (viewport, media,
+    // extra headers) plus the geolocation/screen overrides that don't
+    // care about document timing. No reload needed.
+    self.apply_runtime_overrides(opts).await?;
+    self.apply_proxy_session_overrides(opts).await;
+    self.apply_browser_session_overrides(opts).await;
+    self.apply_target_session_overrides(opts).await;
+    Ok(())
+  }
+
+  async fn apply_runtime_overrides(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     if let Some(vp) = opts.resolved_viewport() {
       self.emulate_viewport(&vp).await?;
     }
     if opts.any_media_override() {
       self.emulate_media(&opts.as_emulate_media()).await?;
     }
+    if let Some(h) = opts.extra_http_headers.as_ref() {
+      self.set_extra_http_headers(h).await?;
+    }
+    Ok(())
+  }
+
+  async fn apply_target_session_overrides(&self, opts: &crate::options::BrowserContextOptions) {
     if let Some(ua) = opts.user_agent.as_deref() {
       let _ = self
         .target
         .send("Page.overrideUserAgent", json!({ "value": ua }))
         .await;
     }
-    if let Some(locale) = opts.locale.as_deref() {
-      if let Some(ctx) = &self.context_id {
-        let _ = self
-          .browser
-          .send(
-            "Playwright.setLanguages",
-            json!({ "browserContextId": ctx.to_string(), "languages": [locale] }),
-          )
-          .await;
-      }
-    }
     if let Some(tz) = opts.timezone_id.as_deref() {
       let _ = self
         .target
         .send("Page.setTimeZone", json!({ "timeZone": tz }))
-        .await;
-    }
-    if let Some(true) = opts.java_script_enabled.map(|v| !v) {
-      let _ = self
-        .proxy
-        .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
-        .await;
-    }
-    if let Some(h) = opts.extra_http_headers.as_ref() {
-      self.set_extra_http_headers(h).await?;
-    }
-    if let Some(g) = opts.geolocation {
-      if let Some(ctx) = &self.context_id {
-        let ts: u64 = std::time::SystemTime::now()
-          .duration_since(std::time::UNIX_EPOCH)
-          .ok()
-          .and_then(|d| u64::try_from(d.as_millis()).ok())
-          .unwrap_or(0);
-        let _ = self
-          .browser
-          .send(
-            "Playwright.setGeolocationOverride",
-            json!({
-              "browserContextId": ctx.to_string(),
-              "geolocation": {
-                "latitude": g.latitude,
-                "longitude": g.longitude,
-                "accuracy": g.accuracy,
-                "timestamp": ts,
-              },
-            }),
-          )
-          .await;
-      }
-    }
-    if let Some(perms) = opts.permissions.as_ref() {
-      let _ = self
-        .proxy
-        .send("Emulation.grantPermissions", json!({ "origin": "*", "permissions": perms }))
         .await;
     }
     if let Some(screen) = opts.screen {
@@ -808,21 +837,58 @@ impl PwWebKitPage {
         .send("Page.setBypassCSP", json!({ "enabled": true }))
         .await;
     }
-    // PW `WebKit` applies context-level overrides (locale, JS-disabled,
-    // user-agent) to the *next* page load. ferridriver runs
-    // `apply_context_options` *after* the first page is constructed, so
-    // a fresh `about:blank` document is already live and ignores them.
-    // Reload here when any document-time override was set so the page's
-    // JS engine picks them up.
-    let needs_reload = opts.locale.is_some()
-      || opts.user_agent.is_some()
-      || opts.timezone_id.is_some()
-      || matches!(opts.java_script_enabled, Some(false));
-    if needs_reload {
-      let _ = self.target.send("Page.reload", json!({})).await;
-      let _ = self.wait_for_lifecycle(NavLifecycle::Load, 5_000).await;
+  }
+
+  async fn apply_proxy_session_overrides(&self, opts: &crate::options::BrowserContextOptions) {
+    if let Some(true) = opts.java_script_enabled.map(|v| !v) {
+      let _ = self
+        .proxy
+        .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
+        .await;
     }
-    Ok(())
+    if let Some(perms) = opts.permissions.as_ref() {
+      let _ = self
+        .proxy
+        .send("Emulation.grantPermissions", json!({ "origin": "*", "permissions": perms }))
+        .await;
+    }
+  }
+
+  async fn apply_browser_session_overrides(&self, opts: &crate::options::BrowserContextOptions) {
+    let Some(ctx) = &self.context_id else {
+      return;
+    };
+    if let Some(locale) = opts.locale.as_deref() {
+      let _ = self
+        .browser
+        .send(
+          "Playwright.setLanguages",
+          json!({ "browserContextId": ctx.to_string(), "languages": [locale] }),
+        )
+        .await;
+    }
+    if let Some(g) = opts.geolocation {
+      let ts: u64 = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .unwrap_or(0);
+      let _ = self
+        .browser
+        .send(
+          "Playwright.setGeolocationOverride",
+          json!({
+            "browserContextId": ctx.to_string(),
+            "geolocation": {
+              "latitude": g.latitude,
+              "longitude": g.longitude,
+              "accuracy": g.accuracy,
+              "timestamp": ts,
+            },
+          }),
+        )
+        .await;
+    }
   }
 
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
@@ -1065,6 +1131,9 @@ impl PwWebKitPage {
     max_height: u32,
   ) -> Result<tokio::sync::mpsc::UnboundedReceiver<(Vec<u8>, f64)>> {
     use base64::Engine as _;
+    // Subscribe BEFORE startScreencast so we don't drop frames that
+    // fire between the call returning and the listener spawning.
+    let mut events = self.proxy.events();
     self
       .proxy
       .send(
@@ -1079,7 +1148,6 @@ impl PwWebKitPage {
       .await
       .map_err(conn_err)?;
     let (tx, rx) = tokio::sync::mpsc::unbounded_channel::<(Vec<u8>, f64)>();
-    let mut events = self.proxy.events();
     tokio::spawn(async move {
       loop {
         let env = match events.recv().await {
@@ -1206,6 +1274,11 @@ impl PwWebKitPage {
     if self.binding_initialized.swap(true, Ordering::SeqCst) {
       return Ok(());
     }
+    // Subscribe BEFORE evaluating the controller. User JS that calls
+    // the binding can run as soon as `add_init_script` lands, so the
+    // listener must already be live by then.
+    let target = self.target.clone();
+    let mut rx = target.events();
     self
       .target
       .send("Runtime.addBinding", json!({ "name": "__fd_binding__" }))
@@ -1221,9 +1294,7 @@ impl PwWebKitPage {
       )
       .await?;
 
-    let target = self.target.clone();
     let fns = self.exposed_fns.clone();
-    let mut rx = target.events();
     tokio::spawn(async move {
       loop {
         let env = match rx.recv().await {
@@ -1384,6 +1455,57 @@ impl PwWebKitPage {
   #[must_use]
   pub fn is_closed(&self) -> bool {
     self.closed.load(Ordering::Relaxed)
+  }
+}
+
+/// Apply per-page context overrides via the page's target + proxy
+/// sessions BEFORE the about:blank document becomes scriptable.
+///
+/// Mirrors `wkPage.ts::_initializeSessionMayThrow`: userAgent /
+/// timezone / bypassCSP / offline / screen / permissions live on the
+/// target session; JS-disabled lives on the page-proxy. Anything that
+/// hits the browser-root session (locale, geolocation) is sent from
+/// `PwWebKitBrowser::new_context_with_options` instead — that runs
+/// once per context, not once per page.
+async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crate::options::BrowserContextOptions) {
+  if let Some(ua) = opts.user_agent.as_deref() {
+    let _ = target.send("Page.overrideUserAgent", json!({ "value": ua })).await;
+  }
+  if let Some(tz) = opts.timezone_id.as_deref() {
+    let _ = target.send("Page.setTimeZone", json!({ "timeZone": tz })).await;
+  }
+  if let Some(true) = opts.bypass_csp {
+    let _ = target.send("Page.setBypassCSP", json!({ "enabled": true })).await;
+  }
+  if let Some(o) = opts.offline {
+    let _ = target.send("Network.setEmulateOfflineState", json!({ "offline": o })).await;
+  }
+  if let Some(screen) = opts.screen {
+    let _ = target
+      .send(
+        "Page.setScreenSizeOverride",
+        json!({ "width": screen.width, "height": screen.height }),
+      )
+      .await;
+  }
+  if let Some(headers) = opts.extra_http_headers.as_ref() {
+    let map: serde_json::Map<String, Value> = headers
+      .iter()
+      .map(|(k, v)| (k.clone(), Value::String(v.clone())))
+      .collect();
+    let _ = target
+      .send("Network.setExtraHTTPHeaders", json!({ "headers": map }))
+      .await;
+  }
+  if matches!(opts.java_script_enabled, Some(false)) {
+    let _ = proxy
+      .send("Emulation.setJavaScriptEnabled", json!({ "enabled": false }))
+      .await;
+  }
+  if let Some(perms) = opts.permissions.as_ref() {
+    let _ = proxy
+      .send("Emulation.grantPermissions", json!({ "origin": "*", "permissions": perms }))
+      .await;
   }
 }
 
