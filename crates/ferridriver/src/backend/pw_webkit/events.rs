@@ -38,7 +38,11 @@ pub fn parse_ax_nodes(arr: &[Value]) -> Vec<AxNodeData> {
     push_str("checked", "checked");
     push_str("expanded", "expanded");
     push_str("url", "url");
-    for (name, key) in [("disabled", "disabled"), ("readonly", "readonly"), ("required", "required")] {
+    for (name, key) in [
+      ("disabled", "disabled"),
+      ("readonly", "readonly"),
+      ("required", "required"),
+    ] {
       if item.get(key).and_then(Value::as_bool).unwrap_or(false) {
         properties.push(AxProperty {
           name: name.to_string(),
@@ -69,15 +73,12 @@ pub fn parse_ax_nodes(arr: &[Value]) -> Vec<AxNodeData> {
 /// Parse one `Page.Cookie` JSON object into [`CookieData`].
 #[must_use]
 pub fn parse_cookie(c: &Value) -> CookieData {
-  let same_site = c
-    .get("sameSite")
-    .and_then(Value::as_str)
-    .and_then(|s| match s {
-      "Strict" => Some(SameSite::Strict),
-      "Lax" => Some(SameSite::Lax),
-      "None" => Some(SameSite::None),
-      _ => None,
-    });
+  let same_site = c.get("sameSite").and_then(Value::as_str).and_then(|s| match s {
+    "Strict" => Some(SameSite::Strict),
+    "Lax" => Some(SameSite::Lax),
+    "None" => Some(SameSite::None),
+    _ => None,
+  });
   CookieData {
     name: c.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
     value: c.get("value").and_then(Value::as_str).unwrap_or("").to_string(),
@@ -117,18 +118,19 @@ pub async fn set_cookie(target: &Session, cookie: CookieData) -> Result<()> {
   Ok(())
 }
 
-/// Spawn the per-page listener loop: translates `Console.messageAdded`
-/// into [`ConsoleMessage`]s and auto-handles `Dialog.*` so a dialog
-/// never wedges a test. Network capture is handled separately.
-pub fn attach_listeners(
-  page: &PwWebKitPage,
-  console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
-  network_log: Arc<RwLock<Vec<NetworkRequest>>>,
-  dialog_log: Arc<RwLock<Vec<DialogEvent>>>,
-) {
+/// Spawn the always-on per-page listener loop. Translates `Console.*` /
+/// `Network.*` / `Dialog.*` / frame / route / websocket events into
+/// page-level state (and writes to the page's `ArcSwap`-held console /
+/// network / dialog logs), feeds [`super::page::LifecycleSignals`] for
+/// `wait_for_lifecycle`, and handles `Target.*` cross-process swaps
+/// via the provisional-target slot.
+///
+/// Called from [`super::page::PwWebKitPage::attach`] — no separate
+/// "wire it up later" step. [`super::page::PwWebKitPage::attach_listeners`]
+/// only swaps in the caller's log sinks via the `ArcSwap` fields.
+pub fn attach_listeners(page: &PwWebKitPage) {
   let mut target_rx = page.target_session().events();
   let mut proxy_rx = page.proxy_session().events();
-  let target = page.target_session().clone();
   let proxy = page.proxy_session().clone();
   let dialog_manager = page.dialog_manager.clone();
   let file_chooser_manager = page.file_chooser_manager.clone();
@@ -144,7 +146,7 @@ pub fn attach_listeners(
   let _ = dialog_manager.register_emitter_bridge(emitter.clone());
 
   let ctx = TargetListenerCtx {
-    target,
+    target_swap: page.target_swap(),
     emitter,
     emitter_frame,
     page_backref,
@@ -155,9 +157,17 @@ pub fn attach_listeners(
     frame_contexts,
     frame_cache,
     websockets,
-    console_log,
-    network_log,
+    console_log: Arc::clone(&page.console_log),
+    network_log: Arc::clone(&page.network_log),
+    lifecycle: Arc::clone(&page.lifecycle),
+    main_frame_id_cache: Arc::clone(&page.main_frame_id_cache),
   };
+  let dialog_log = Arc::clone(&page.dialog_log);
+  // Provisional-target slot. Populated on `Target.targetCreated` with
+  // `isProvisional: true`; consumed on `Target.didCommitProvisionalTarget`
+  // to swap the page's live target session.
+  let provisional: ProvisionalSlot = Arc::new(tokio::sync::Mutex::new(None));
+  let page = page.clone();
   tokio::spawn(async move {
     loop {
       tokio::select! {
@@ -167,10 +177,22 @@ pub fn attach_listeners(
           Err(RecvError::Closed) => break,
         },
         ev = proxy_rx.recv() => match ev {
-          Ok(env) => {
-            if env.method.as_deref() == Some("Dialog.javascriptDialogOpening") {
-              dispatch_dialog(&proxy, &env.params, &dialog_manager, &dialog_log).await;
-            }
+          Ok(env) => match env.method.as_deref() {
+            Some("Dialog.javascriptDialogOpening") => {
+              let log = arc_swap::Guard::into_inner(dialog_log.load());
+              dispatch_dialog(&proxy, &env.params, &dialog_manager, &log).await;
+            },
+            Some("Target.targetCreated") => {
+              handle_provisional_target_created(&env.params, &page, provisional.clone()).await;
+            },
+            Some("Target.didCommitProvisionalTarget") => {
+              if let Some(new_rx) =
+                handle_committed_provisional_target(&env.params, &page, provisional.clone()).await
+              {
+                target_rx = new_rx;
+              }
+            },
+            _ => {},
           },
           Err(RecvError::Lagged(_)) => {},
           Err(RecvError::Closed) => break,
@@ -180,12 +202,90 @@ pub fn attach_listeners(
   });
 }
 
+/// Handle `Target.targetCreated` with `isProvisional: true` — open a
+/// fresh target session for the new (post-process-swap) page, run the
+/// standard `*.enable` initialisation, apply per-page context
+/// overrides, then `Target.resume` the paused new process. Stashes the
+/// new session in `provisional` so the matching
+/// `Target.didCommitProvisionalTarget` event can complete the swap.
+///
+/// Mirrors `wkPage.ts::_onTargetCreated` for the `isProvisional: true`
+/// branch, which constructs a `WKProvisionalPage`, opens a session,
+/// and resumes the paused target.
+async fn handle_provisional_target_created(params: &Value, page: &PwWebKitPage, provisional: ProvisionalSlot) {
+  let Some(info) = params.get("targetInfo") else {
+    return;
+  };
+  if info.get("type").and_then(Value::as_str) != Some("page") {
+    return;
+  }
+  if !info.get("isProvisional").and_then(Value::as_bool).unwrap_or(false) {
+    return;
+  }
+  let target_id = match info.get("targetId").and_then(Value::as_str) {
+    Some(s) => s.to_string(),
+    None => return,
+  };
+  let proxy = page.proxy_session().clone();
+  let proxy_id = page.page_proxy_id().to_string();
+  let conn = proxy.connection_handle();
+  let new_target = conn.target_session(proxy_id, target_id.clone());
+  // *.enable, mirroring `WKPage._initializeSessionMayThrow`.
+  let _ = new_target.send("Page.enable", json!({})).await;
+  let _ = new_target.send("Runtime.enable", json!({})).await;
+  let _ = new_target.send("Network.enable", json!({})).await;
+  let _ = new_target.send("Console.enable", json!({})).await;
+  let _ = new_target
+    .send(
+      "Page.createUserWorld",
+      json!({ "name": super::page::UTILITY_WORLD_NAME }),
+    )
+    .await;
+  // Stash before resuming — a fast commit could fire before `await`
+  // releases here, and the swap reader needs to find the session.
+  {
+    let mut slot = provisional.lock().await;
+    *slot = Some((new_target, Arc::<str>::from(target_id.clone())));
+  }
+  if info.get("isPaused").and_then(Value::as_bool).unwrap_or(false) {
+    let _ = proxy.send("Target.resume", json!({ "targetId": target_id })).await;
+  }
+}
+
+/// Handle `Target.didCommitProvisionalTarget` — atomically swap the
+/// page's live target session to the previously-stashed provisional
+/// session and return a fresh `target_rx` for the new session so the
+/// listener loop starts seeing events from the new process.
+///
+/// Mirrors `wkPage.ts::_onDidCommitProvisionalTarget` which calls
+/// `_setSession(newSession)`.
+async fn handle_committed_provisional_target(
+  params: &Value,
+  page: &PwWebKitPage,
+  provisional: ProvisionalSlot,
+) -> Option<tokio::sync::broadcast::Receiver<super::protocol::Envelope>> {
+  let new_target_id = params.get("newTargetId").and_then(Value::as_str)?.to_string();
+  let (new_session, stashed_id) = provisional.lock().await.take()?;
+  if &*stashed_id != new_target_id.as_str() {
+    // Defensive: if WebKit committed a target other than the one we
+    // stashed, drop the stash and let the next attach cycle recover.
+    return None;
+  }
+  let new_rx = new_session.events();
+  page.swap_target_session(new_session, stashed_id);
+  Some(new_rx)
+}
+
 /// Bundle of per-page handles + state the target listener loop hands
 /// to its event-dispatch helper. Extracted from `attach_listeners` to
 /// keep the listener function inside clippy's 100-line cap; nothing
 /// here is borrow-cheap enough to inline at every event site.
+///
+/// `target_swap` holds the live target session — read fresh on every
+/// dispatch so handlers always send on the current session, even after
+/// a provisional-target commit swap (cross-process navigation).
 struct TargetListenerCtx {
-  target: super::connection::Session,
+  target_swap: Arc<arc_swap::ArcSwap<super::connection::Session>>,
   emitter: crate::events::EventEmitter,
   emitter_frame: crate::events::EventEmitter,
   page_backref: crate::backend::PageBackref,
@@ -196,32 +296,67 @@ struct TargetListenerCtx {
   frame_contexts: FrameContexts,
   frame_cache: FrameCache,
   websockets: WebSockets,
-  console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
-  network_log: Arc<RwLock<Vec<NetworkRequest>>>,
+  /// Sinks for captured events. Swapped in by
+  /// [`super::page::PwWebKitPage::attach_listeners`]; the listener
+  /// reads the current pointer on each event so post-attach calls land
+  /// in the caller's logs.
+  console_log: Arc<arc_swap::ArcSwap<RwLock<Vec<ConsoleMessage>>>>,
+  network_log: Arc<arc_swap::ArcSwap<RwLock<Vec<NetworkRequest>>>>,
+  lifecycle: Arc<super::page::LifecycleSignals>,
+  main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>>,
+}
+
+impl TargetListenerCtx {
+  fn target(&self) -> super::connection::Session {
+    super::connection::Session::clone(&self.target_swap.load())
+  }
 }
 
 async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::Envelope) {
   match env.method.as_deref() {
     Some("Console.messageAdded") => {
-      dispatch_console(&env.params, &ctx.console_log, &ctx.emitter, &ctx.page_backref).await;
+      let log = arc_swap::Guard::into_inner(ctx.console_log.load());
+      dispatch_console(&env.params, &log, &ctx.emitter, &ctx.page_backref).await;
     },
     Some("Network.requestWillBeSent") => {
-      handle_request_will_be_sent(&env.params, &ctx.requests, &ctx.nav_slot, &ctx.network_log, &ctx.emitter).await;
+      let log = arc_swap::Guard::into_inner(ctx.network_log.load());
+      handle_request_will_be_sent(&env.params, &ctx.requests, &ctx.nav_slot, &log, &ctx.emitter).await;
     },
     Some("Network.responseReceived") => {
-      handle_response_received(&env.params, &ctx.requests, &ctx.target, &ctx.emitter).await;
+      let target = ctx.target();
+      handle_response_received(&env.params, &ctx.requests, &target, &ctx.emitter).await;
     },
     Some("Network.loadingFinished") => {
       handle_loading_finished(&env.params, &ctx.requests, &ctx.emitter);
     },
     Some("Network.loadingFailed") => {
+      if let (Some(request_id), error_text) = (
+        env.params.get("requestId").and_then(Value::as_str),
+        env
+          .params
+          .get("errorText")
+          .and_then(Value::as_str)
+          .unwrap_or("navigation failed"),
+      ) {
+        ctx
+          .lifecycle
+          .mark_failed(request_id.to_string(), error_text.to_string());
+      }
       handle_loading_failed(&env.params, &ctx.requests, &ctx.emitter);
     },
+    Some("Page.loadEventFired") => {
+      ctx.lifecycle.mark(crate::backend::NavLifecycle::Load);
+    },
+    Some("Page.domContentEventFired") => {
+      ctx.lifecycle.mark(crate::backend::NavLifecycle::DomContentLoaded);
+    },
     Some("Page.fileChooserOpened") => {
-      dispatch_file_chooser(&env.params, &ctx.target, &ctx.page_backref, &ctx.file_chooser_manager);
+      let target = ctx.target();
+      dispatch_file_chooser(&env.params, &target, &ctx.page_backref, &ctx.file_chooser_manager);
     },
     Some("Network.requestIntercepted") => {
-      handle_request_intercepted(&env.params, &ctx.target, &ctx.routes);
+      let target = ctx.target();
+      handle_request_intercepted(&env.params, &target, &ctx.routes);
     },
     Some("Runtime.executionContextCreated") => {
       handle_exec_context_created(&env.params, &ctx.frame_contexts).await;
@@ -230,6 +365,26 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
       handle_frame_attached(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
     },
     Some("Page.frameNavigated") => {
+      // Only main-document commits feed the lifecycle latch — child
+      // frame commits would falsely mark navigation as complete on the
+      // page level. Also re-seed the main-frame-id cache: a
+      // cross-process target swap cleared it, and the new target's
+      // first main-frame commit gives us the new id.
+      if env.params.get("frame").and_then(|f| f.get("parentId")).is_none() {
+        ctx.lifecycle.mark(crate::backend::NavLifecycle::Commit);
+        if let Some(new_main_id) = env
+          .params
+          .get("frame")
+          .and_then(|f| f.get("id"))
+          .and_then(Value::as_str)
+        {
+          let mut slot = ctx
+            .main_frame_id_cache
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+          *slot = Some(new_main_id.to_string());
+        }
+      }
       handle_frame_navigated(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
     },
     Some("Page.frameDetached") => {
@@ -245,6 +400,7 @@ async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::En
 }
 
 type Requests = Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, NetworkRequest>>>;
+type ProvisionalSlot = Arc<tokio::sync::Mutex<Option<(super::connection::Session, Arc<str>)>>>;
 
 /// Push a fresh [`NetworkRequest`] into the per-page table and the
 /// context log. When `redirectResponse` is present, link the chain
@@ -549,7 +705,10 @@ fn handle_frame_navigated(params: &Value, frame_cache: &FrameCache, emitter: &cr
   };
   let info = crate::backend::FrameInfo {
     frame_id: frame.get("id").and_then(Value::as_str).unwrap_or("").to_string(),
-    parent_frame_id: frame.get("parentId").and_then(Value::as_str).map(std::string::ToString::to_string),
+    parent_frame_id: frame
+      .get("parentId")
+      .and_then(Value::as_str)
+      .map(std::string::ToString::to_string),
     name: frame.get("name").and_then(Value::as_str).unwrap_or("").to_string(),
     url: frame.get("url").and_then(Value::as_str).unwrap_or("").to_string(),
   };
@@ -576,7 +735,6 @@ async fn handle_frame_detached(
     frame_id: frame_id.to_string(),
   });
 }
-
 
 type WebSockets = Arc<tokio::sync::Mutex<rustc_hash::FxHashMap<String, WebSocket>>>;
 
@@ -755,7 +913,10 @@ async fn intercept_continue(
   overrides: crate::route::ContinueOverrides,
 ) {
   use base64::Engine as _;
-  if overrides.url.is_none() && overrides.method.is_none() && overrides.headers.is_none() && overrides.post_data.is_none()
+  if overrides.url.is_none()
+    && overrides.method.is_none()
+    && overrides.headers.is_none()
+    && overrides.post_data.is_none()
   {
     let _ = target
       .send(
@@ -900,7 +1061,9 @@ async fn dispatch_console(
     };
     let stack = build_stack(&raw, message.get("stackTrace"));
     let err = crate::web_error::ErrorDetails::new(name, msg_body, stack);
-    emitter.emit(crate::events::PageEvent::PageError(crate::web_error::WebError::new(&page, err)));
+    emitter.emit(crate::events::PageEvent::PageError(crate::web_error::WebError::new(
+      &page, err,
+    )));
     return;
   }
   let ty = match level {
@@ -956,8 +1119,6 @@ fn build_stack(text: &str, stack: Option<&Value>) -> String {
   out
 }
 
-
-
 /// Build a live [`crate::dialog::Dialog`] handle from a
 /// `Dialog.javascriptDialogOpening` payload and route it through
 /// [`crate::dialog::DialogManager::did_open`]. The responder closure
@@ -971,7 +1132,11 @@ async fn dispatch_dialog(
   dialog_manager: &crate::dialog::DialogManager,
   dialog_log: &Arc<RwLock<Vec<DialogEvent>>>,
 ) {
-  let dialog_type_str = params.get("type").and_then(Value::as_str).unwrap_or("alert").to_string();
+  let dialog_type_str = params
+    .get("type")
+    .and_then(Value::as_str)
+    .unwrap_or("alert")
+    .to_string();
   let message = params.get("message").and_then(Value::as_str).unwrap_or("").to_string();
   let default_value = params
     .get("defaultPrompt")

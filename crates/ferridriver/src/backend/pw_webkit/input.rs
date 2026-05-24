@@ -80,11 +80,31 @@ pub async fn click(page: &PwWebKitPage, x: f64, y: f64, args: &BackendClickArgs)
   let mods = modifiers_mask(&args.modifiers);
   let btn = args.button.as_cdp();
   let bmask = button_mask(args.button);
-  mouse_event(page, MouseEvent { ty: "move", button: "none", buttons: 0, x, y, click_count: 0, modifiers: mods }).await?;
+  mouse_event(
+    page,
+    MouseEvent {
+      ty: "move",
+      button: "none",
+      buttons: 0,
+      x,
+      y,
+      click_count: 0,
+      modifiers: mods,
+    },
+  )
+  .await?;
   for n in 1..=args.click_count.max(1) {
     mouse_event(
       page,
-      MouseEvent { ty: "down", button: btn, buttons: bmask, x, y, click_count: n, modifiers: mods },
+      MouseEvent {
+        ty: "down",
+        button: btn,
+        buttons: bmask,
+        x,
+        y,
+        click_count: n,
+        modifiers: mods,
+      },
     )
     .await?;
     if args.delay_ms > 0 {
@@ -92,7 +112,15 @@ pub async fn click(page: &PwWebKitPage, x: f64, y: f64, args: &BackendClickArgs)
     }
     mouse_event(
       page,
-      MouseEvent { ty: "up", button: btn, buttons: 0, x, y, click_count: n, modifiers: mods },
+      MouseEvent {
+        ty: "up",
+        button: btn,
+        buttons: 0,
+        x,
+        y,
+        click_count: n,
+        modifiers: mods,
+      },
     )
     .await?;
   }
@@ -101,7 +129,19 @@ pub async fn click(page: &PwWebKitPage, x: f64, y: f64, args: &BackendClickArgs)
 
 pub async fn hover(page: &PwWebKitPage, x: f64, y: f64, args: &BackendHoverArgs) -> Result<()> {
   let _ = args;
-  mouse_event(page, MouseEvent { ty: "move", button: "none", buttons: 0, x, y, click_count: 0, modifiers: 0 }).await
+  mouse_event(
+    page,
+    MouseEvent {
+      ty: "move",
+      button: "none",
+      buttons: 0,
+      x,
+      y,
+      click_count: 0,
+      modifiers: 0,
+    },
+  )
+  .await
 }
 
 /// Convert a CDP `modifiers` bitmask (alt=1, ctrl=2, meta=4, shift=8)
@@ -139,7 +179,19 @@ pub async fn tap(page: &PwWebKitPage, x: f64, y: f64, args: &BackendTapArgs) -> 
 }
 
 pub async fn move_mouse(page: &PwWebKitPage, x: f64, y: f64) -> Result<()> {
-  mouse_event(page, MouseEvent { ty: "move", button: "none", buttons: 0, x, y, click_count: 0, modifiers: 0 }).await
+  mouse_event(
+    page,
+    MouseEvent {
+      ty: "move",
+      button: "none",
+      buttons: 0,
+      x,
+      y,
+      click_count: 0,
+      modifiers: 0,
+    },
+  )
+  .await
 }
 
 pub async fn move_mouse_smooth(
@@ -155,7 +207,19 @@ pub async fn move_mouse_smooth(
     let t = f64::from(i) / f64::from(steps);
     let x = from_x + (to_x - from_x) * t;
     let y = from_y + (to_y - from_y) * t;
-    mouse_event(page, MouseEvent { ty: "move", button: "none", buttons: 0, x, y, click_count: 0, modifiers: 0 }).await?;
+    mouse_event(
+      page,
+      MouseEvent {
+        ty: "move",
+        button: "none",
+        buttons: 0,
+        x,
+        y,
+        click_count: 0,
+        modifiers: 0,
+      },
+    )
+    .await?;
   }
   Ok(())
 }
@@ -177,7 +241,15 @@ pub async fn mouse_down(page: &PwWebKitPage, x: f64, y: f64, button: &str) -> Re
   let b = MouseButton::parse(button).unwrap_or_default();
   mouse_event(
     page,
-    MouseEvent { ty: "down", button: b.as_cdp(), buttons: button_mask(b), x, y, click_count: 1, modifiers: 0 },
+    MouseEvent {
+      ty: "down",
+      button: b.as_cdp(),
+      buttons: button_mask(b),
+      x,
+      y,
+      click_count: 1,
+      modifiers: 0,
+    },
   )
   .await
 }
@@ -186,7 +258,15 @@ pub async fn mouse_up(page: &PwWebKitPage, x: f64, y: f64, button: &str) -> Resu
   let b = MouseButton::parse(button).unwrap_or_default();
   mouse_event(
     page,
-    MouseEvent { ty: "up", button: b.as_cdp(), buttons: 0, x, y, click_count: 1, modifiers: 0 },
+    MouseEvent {
+      ty: "up",
+      button: b.as_cdp(),
+      buttons: 0,
+      x,
+      y,
+      click_count: 1,
+      modifiers: 0,
+    },
   )
   .await
 }
@@ -194,12 +274,28 @@ pub async fn mouse_up(page: &PwWebKitPage, x: f64, y: f64, button: &str) -> Resu
 pub async fn click_and_drag(page: &PwWebKitPage, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
   mouse_event(
     page,
-    MouseEvent { ty: "move", button: "none", buttons: 0, x: from.0, y: from.1, click_count: 0, modifiers: 0 },
+    MouseEvent {
+      ty: "move",
+      button: "none",
+      buttons: 0,
+      x: from.0,
+      y: from.1,
+      click_count: 0,
+      modifiers: 0,
+    },
   )
   .await?;
   mouse_event(
     page,
-    MouseEvent { ty: "down", button: "left", buttons: 1, x: from.0, y: from.1, click_count: 1, modifiers: 0 },
+    MouseEvent {
+      ty: "down",
+      button: "left",
+      buttons: 1,
+      x: from.0,
+      y: from.1,
+      click_count: 1,
+      modifiers: 0,
+    },
   )
   .await?;
   let steps = steps.max(1);
@@ -209,13 +305,29 @@ pub async fn click_and_drag(page: &PwWebKitPage, from: (f64, f64), to: (f64, f64
     let y = from.1 + (to.1 - from.1) * t;
     mouse_event(
       page,
-      MouseEvent { ty: "move", button: "left", buttons: 1, x, y, click_count: 0, modifiers: 0 },
+      MouseEvent {
+        ty: "move",
+        button: "left",
+        buttons: 1,
+        x,
+        y,
+        click_count: 0,
+        modifiers: 0,
+      },
     )
     .await?;
   }
   mouse_event(
     page,
-    MouseEvent { ty: "up", button: "left", buttons: 0, x: to.0, y: to.1, click_count: 1, modifiers: 0 },
+    MouseEvent {
+      ty: "up",
+      button: "left",
+      buttons: 0,
+      x: to.0,
+      y: to.1,
+      click_count: 1,
+      modifiers: 0,
+    },
   )
   .await?;
   Ok(())

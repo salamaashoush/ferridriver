@@ -159,7 +159,11 @@ impl Connection {
       .filter(|(_, (k, _))| *k == key)
       .map(|(id, _)| *id)
       .collect();
-    let drained: Vec<ResponseSlot> = ids.iter().filter_map(|id| callbacks.remove(id)).map(|(_, slot)| slot).collect();
+    let drained: Vec<ResponseSlot> = ids
+      .iter()
+      .filter_map(|id| callbacks.remove(id))
+      .map(|(_, slot)| slot)
+      .collect();
     drop(callbacks);
     for slot in drained {
       let _ = slot.send(Err(closed_error()));
@@ -380,7 +384,10 @@ impl Session {
     match &self.kind {
       SessionKind::Browser => {
         let (id, rx) = self.conn.alloc_callback(RouteKey::Browser);
-        self.conn.writer.send(&json!({ "id": id, "method": method, "params": params }))?;
+        self
+          .conn
+          .writer
+          .send(&json!({ "id": id, "method": method, "params": params }))?;
         wait_for(rx, method).await
       },
       SessionKind::PageProxy { page_proxy_id } => {
