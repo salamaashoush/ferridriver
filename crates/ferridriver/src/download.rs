@@ -434,14 +434,32 @@ impl DownloadManager {
     if let Ok(mut by_guid) = self.inner.by_guid.lock() {
       by_guid.push(download.clone());
     }
+    self.fire_download_event(download);
+  }
+
+  /// Register a download internally without firing the Download event
+  /// to JS listeners. Used by backends that report `suggestedFilename`
+  /// in a separate event after `downloadCreated` (PW `WebKit`) — the
+  /// listener calls this on `downloadCreated`, sets the filename on
+  /// `downloadFilenameSuggested`, then invokes [`Self::fire_download_event`].
+  /// Mirrors Playwright's `server/download.ts` which only fires the
+  /// `Page.Events.Download` event once the suggested filename is known.
+  pub fn register_pending(&self, download: &Download) {
+    if let Ok(mut by_guid) = self.inner.by_guid.lock() {
+      by_guid.push(download.clone());
+    }
+  }
+
+  /// Fire the Download event to every registered handler. Separated
+  /// from [`Self::did_open`] so backends that defer the JS-side event
+  /// until `suggestedFilename` arrives can register on
+  /// `downloadCreated` and emit on `downloadFilenameSuggested`.
+  pub fn fire_download_event(&self, download: &Download) {
     let handlers: Vec<DownloadHandlerFn> = match self.inner.handlers.lock() {
       Ok(g) => g.iter().map(|e| Arc::clone(&e.handler)).collect(),
       Err(_) => Vec::new(),
     };
     for h in handlers {
-      // Handlers may return `true`, but unlike FileChooser we don't
-      // branch on "claimed" — Playwright's no-listener branch is a
-      // no-op so the return value is purely informational. Discard it.
       let _ = h(download);
     }
   }
