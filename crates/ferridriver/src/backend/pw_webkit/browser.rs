@@ -394,7 +394,14 @@ fn spawn_download_listener(
           let canceler: crate::download::DownloadCanceler = std::sync::Arc::new(|| Box::pin(async { Ok(()) }));
           let download =
             crate::download::Download::new(&arc_page, uuid, url, String::new(), (*downloads_dir).clone(), canceler);
-          page.download_manager.did_open(&download);
+          // Register internally only; do NOT fire `did_open` (which
+          // emits the Download event to JS waitForEvent listeners) yet.
+          // PW WebKit reports the suggested filename in a SEPARATE
+          // `Playwright.downloadFilenameSuggested` event that arrives
+          // after `downloadCreated`. Mirrors Playwright's own
+          // `server/download.ts::Download` constructor which only fires
+          // the Page.Events.Download event once the filename is known.
+          page.download_manager.register_pending(&download);
         },
         Some("Playwright.downloadFilenameSuggested") => {
           let uuid = env.params.get("uuid").and_then(serde_json::Value::as_str).unwrap_or("");
@@ -409,6 +416,10 @@ fn spawn_download_listener(
           for p in &pages_snapshot {
             if let Some(dl) = p.download_manager.peek_for_guid(uuid) {
               dl.filename_suggested(suggested);
+              // Now that the filename is known, fire the Download
+              // event to JS listeners (Playwright parity — see
+              // `server/download.ts::Download._fireDownloadEvent`).
+              p.download_manager.fire_download_event(&dl);
               break;
             }
           }
