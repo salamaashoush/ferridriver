@@ -30,7 +30,18 @@ use tokio::sync::{broadcast, oneshot};
 /// Sentinel id `Playwright.close` is sent with — the child never
 /// answers it, so inbound frames carrying it are dropped.
 const BROWSER_CLOSE_ID: i64 = -9999;
-const EVENT_CHANNEL_CAP: usize = 256;
+/// Broadcast capacity for each route's event ring buffer. Sized large
+/// enough to absorb the burst PW `WebKit` generates during a busy page
+/// load (request + response + loading-finished for every subresource,
+/// frame attached/navigated/detached, console messages, plus
+/// `Network.requestIntercepted` for every subresource when interception
+/// is on). 256 -- the prior cap -- was small enough that any subscriber
+/// taking a single async lock during the burst would fall behind and
+/// hit `RecvError::Lagged`, silently dropping lifecycle events
+/// (`Page.loadEventFired`, `Page.domContentEventFired`,
+/// `Page.frameNavigated`) and wedging `wait_for_lifecycle` for the
+/// full 30s timeout.
+const EVENT_CHANNEL_CAP: usize = 8192;
 
 #[derive(Debug, Error)]
 pub enum ConnectionError {

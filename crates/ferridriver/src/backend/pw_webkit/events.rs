@@ -15,6 +15,7 @@ use crate::context::DialogEvent;
 use crate::error::{FerriError, Result};
 use crate::network::{
   BodyFn, Headers, RemoteAddr, Request as NetworkRequest, RequestInit, Response, ResponseInit, SecurityDetails,
+  WebSocket, WebSocketPayload,
 };
 
 /// Parse the JSON array produced by `window.__fd.accessibilityTree(depth)`
@@ -138,51 +139,30 @@ pub fn attach_listeners(
   let routes = page.routes.clone();
   let frame_contexts = page.frame_contexts.clone();
   let frame_cache = page.frame_cache.clone();
+  let websockets = page.websockets.clone();
   let emitter_frame = emitter.clone();
   let _ = dialog_manager.register_emitter_bridge(emitter.clone());
 
+  let ctx = TargetListenerCtx {
+    target,
+    emitter,
+    emitter_frame,
+    page_backref,
+    file_chooser_manager,
+    requests,
+    nav_slot,
+    routes,
+    frame_contexts,
+    frame_cache,
+    websockets,
+    console_log,
+    network_log,
+  };
   tokio::spawn(async move {
     loop {
       tokio::select! {
         ev = target_rx.recv() => match ev {
-          Ok(env) => {
-            match env.method.as_deref() {
-              Some("Console.messageAdded") => {
-                dispatch_console(&env.params, &console_log, &emitter, &page_backref).await;
-              },
-              Some("Network.requestWillBeSent") => {
-                handle_request_will_be_sent(&env.params, &requests, &nav_slot, &network_log, &emitter).await;
-              },
-              Some("Network.responseReceived") => {
-                handle_response_received(&env.params, &requests, &target, &emitter).await;
-              },
-              Some("Network.loadingFinished") => {
-                handle_loading_finished(&env.params, &requests, &emitter);
-              },
-              Some("Network.loadingFailed") => {
-                handle_loading_failed(&env.params, &requests, &emitter);
-              },
-              Some("Page.fileChooserOpened") => {
-                dispatch_file_chooser(&env.params, &target, &page_backref, &file_chooser_manager);
-              },
-              Some("Network.requestIntercepted") => {
-                handle_request_intercepted(&env.params, &target, &routes);
-              },
-              Some("Runtime.executionContextCreated") => {
-                handle_exec_context_created(&env.params, &frame_contexts).await;
-              },
-              Some("Page.frameAttached") => {
-                handle_frame_attached(&env.params, &frame_cache, &emitter_frame);
-              },
-              Some("Page.frameNavigated") => {
-                handle_frame_navigated(&env.params, &frame_cache, &emitter_frame);
-              },
-              Some("Page.frameDetached") => {
-                handle_frame_detached(&env.params, &frame_cache, &emitter_frame, &frame_contexts).await;
-              },
-              _ => {},
-            }
-          },
+          Ok(env) => dispatch_target_event(&ctx, env).await,
           Err(RecvError::Lagged(_)) => {},
           Err(RecvError::Closed) => break,
         },
@@ -198,6 +178,70 @@ pub fn attach_listeners(
       }
     }
   });
+}
+
+/// Bundle of per-page handles + state the target listener loop hands
+/// to its event-dispatch helper. Extracted from `attach_listeners` to
+/// keep the listener function inside clippy's 100-line cap; nothing
+/// here is borrow-cheap enough to inline at every event site.
+struct TargetListenerCtx {
+  target: super::connection::Session,
+  emitter: crate::events::EventEmitter,
+  emitter_frame: crate::events::EventEmitter,
+  page_backref: crate::backend::PageBackref,
+  file_chooser_manager: crate::file_chooser::FileChooserManager,
+  requests: Requests,
+  nav_slot: crate::network::NavRequestSlot,
+  routes: Routes,
+  frame_contexts: FrameContexts,
+  frame_cache: FrameCache,
+  websockets: WebSockets,
+  console_log: Arc<RwLock<Vec<ConsoleMessage>>>,
+  network_log: Arc<RwLock<Vec<NetworkRequest>>>,
+}
+
+async fn dispatch_target_event(ctx: &TargetListenerCtx, env: super::protocol::Envelope) {
+  match env.method.as_deref() {
+    Some("Console.messageAdded") => {
+      dispatch_console(&env.params, &ctx.console_log, &ctx.emitter, &ctx.page_backref).await;
+    },
+    Some("Network.requestWillBeSent") => {
+      handle_request_will_be_sent(&env.params, &ctx.requests, &ctx.nav_slot, &ctx.network_log, &ctx.emitter).await;
+    },
+    Some("Network.responseReceived") => {
+      handle_response_received(&env.params, &ctx.requests, &ctx.target, &ctx.emitter).await;
+    },
+    Some("Network.loadingFinished") => {
+      handle_loading_finished(&env.params, &ctx.requests, &ctx.emitter);
+    },
+    Some("Network.loadingFailed") => {
+      handle_loading_failed(&env.params, &ctx.requests, &ctx.emitter);
+    },
+    Some("Page.fileChooserOpened") => {
+      dispatch_file_chooser(&env.params, &ctx.target, &ctx.page_backref, &ctx.file_chooser_manager);
+    },
+    Some("Network.requestIntercepted") => {
+      handle_request_intercepted(&env.params, &ctx.target, &ctx.routes);
+    },
+    Some("Runtime.executionContextCreated") => {
+      handle_exec_context_created(&env.params, &ctx.frame_contexts).await;
+    },
+    Some("Page.frameAttached") => {
+      handle_frame_attached(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
+    },
+    Some("Page.frameNavigated") => {
+      handle_frame_navigated(&env.params, &ctx.frame_cache, &ctx.emitter_frame);
+    },
+    Some("Page.frameDetached") => {
+      handle_frame_detached(&env.params, &ctx.frame_cache, &ctx.emitter_frame, &ctx.frame_contexts).await;
+    },
+    Some("Network.webSocketCreated") => handle_websocket_created(&env.params, &ctx.websockets, &ctx.emitter).await,
+    Some("Network.webSocketFrameSent") => handle_websocket_frame(&env.params, &ctx.websockets, true).await,
+    Some("Network.webSocketFrameReceived") => handle_websocket_frame(&env.params, &ctx.websockets, false).await,
+    Some("Network.webSocketFrameError") => handle_websocket_error(&env.params, &ctx.websockets).await,
+    Some("Network.webSocketClosed") => handle_websocket_closed(&env.params, &ctx.websockets).await,
+    _ => {},
+  }
 }
 
 type Requests = Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, NetworkRequest>>>;
@@ -533,6 +577,83 @@ async fn handle_frame_detached(
   });
 }
 
+
+type WebSockets = Arc<tokio::sync::Mutex<rustc_hash::FxHashMap<String, WebSocket>>>;
+
+/// `Network.webSocketCreated` → register live [`WebSocket`] keyed by
+/// `requestId` and emit [`PageEvent::WebSocket`] so user code attached
+/// via `page.waitForEvent('websocket')` can grab it.
+async fn handle_websocket_created(params: &Value, websockets: &WebSockets, emitter: &crate::events::EventEmitter) {
+  let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
+    return;
+  };
+  let url = params.get("url").and_then(Value::as_str).unwrap_or("").to_string();
+  let ws = WebSocket::new(url);
+  websockets.lock().await.insert(request_id.to_string(), ws.clone());
+  emitter.emit(crate::events::PageEvent::WebSocket(ws));
+}
+
+/// `Network.webSocketFrame{Sent,Received}` → emit one frame on the live
+/// [`WebSocket`]. Opcode 2 → binary (base64-decoded), otherwise text.
+async fn handle_websocket_frame(params: &Value, websockets: &WebSockets, sent: bool) {
+  let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
+    return;
+  };
+  let payload = parse_websocket_frame(params);
+  let map = websockets.lock().await;
+  if let Some(ws) = map.get(request_id) {
+    if sent {
+      ws.emit_frame_sent(payload);
+    } else {
+      ws.emit_frame_received(payload);
+    }
+  }
+}
+
+async fn handle_websocket_error(params: &Value, websockets: &WebSockets) {
+  let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
+    return;
+  };
+  let message = params
+    .get("errorMessage")
+    .and_then(Value::as_str)
+    .unwrap_or("WebSocket error")
+    .to_string();
+  if let Some(ws) = websockets.lock().await.get(request_id) {
+    ws.emit_error(message);
+  }
+}
+
+async fn handle_websocket_closed(params: &Value, websockets: &WebSockets) {
+  let Some(request_id) = params.get("requestId").and_then(Value::as_str) else {
+    return;
+  };
+  if let Some(ws) = websockets.lock().await.remove(request_id) {
+    ws.emit_close();
+  }
+}
+
+/// Decode `WebSocketFrame` payload — opcode 2 = binary (base64).
+fn parse_websocket_frame(params: &Value) -> WebSocketPayload {
+  use base64::Engine as _;
+  let response = params.get("response");
+  let opcode = response
+    .and_then(|r| r.get("opcode"))
+    .and_then(Value::as_u64)
+    .unwrap_or(1);
+  let payload_data = response
+    .and_then(|r| r.get("payloadData"))
+    .and_then(Value::as_str)
+    .unwrap_or("");
+  if opcode == 2 {
+    let bytes = base64::engine::general_purpose::STANDARD
+      .decode(payload_data)
+      .unwrap_or_else(|_| payload_data.as_bytes().to_vec());
+    WebSocketPayload::Binary(bytes)
+  } else {
+    WebSocketPayload::Text(payload_data.to_string())
+  }
+}
 
 /// Translate `Network.requestIntercepted` into a matched
 /// [`crate::route::Route`] dispatch. When no route matches, continue
