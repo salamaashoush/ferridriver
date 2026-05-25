@@ -1035,23 +1035,44 @@ enum PackageManager {
 }
 
 /// Return the package manager and deduplicated list of packages needed
-/// to run Chromium on the given distro.
+/// to run **both Chromium and Playwright `WebKit`** on the given distro.
 ///
-/// These lists are Docker-verified against Chrome for Testing on bare Ubuntu 24.04.
-/// Only packages whose shared libraries Chrome actually links against are included,
-/// plus fonts for text rendering and headed mode X11 libs for developers.
+/// These lists are Docker-verified against Chrome for Testing and the
+/// Playwright `WebKit` bundle on bare Ubuntu 24.04. Only packages whose
+/// shared libraries the respective binary actually links against are
+/// included, plus fonts for text rendering and headed mode X11 libs.
+///
+/// `ferridriver install --with-deps` calls into this once and apt-gets
+/// the merged union, so users do not need to track which packages go
+/// with which browser.
 #[cfg(target_os = "linux")]
 fn system_packages_for_distro(distro: &str) -> (PackageManager, Vec<&'static str>) {
   if distro.starts_with("arch") {
-    return (PackageManager::Pacman, arch_chromium_packages());
+    let mut pkgs = arch_chromium_packages();
+    pkgs.extend(arch_webkit_packages());
+    pkgs.sort_unstable();
+    pkgs.dedup();
+    return (PackageManager::Pacman, pkgs);
   }
 
-  // Chrome for Testing runtime deps (verified via ldd on bare Ubuntu 24.04 Docker).
-  // These are the actual shared libraries Chrome links against at the binary level.
-  // X11 composite/damage/fixes/randr ARE required even for headless (linked, not dlopen'd).
-  let chromium: &[&str] = match distro {
+  let mut merged: Vec<&'static str> = apt_chromium_packages(distro)
+    .iter()
+    .copied()
+    .chain(apt_webkit_packages(distro).iter().copied())
+    .collect();
+  merged.sort_unstable();
+  merged.dedup();
+  (PackageManager::Apt, merged)
+}
+
+/// Chrome for Testing runtime deps (verified via ldd on bare Ubuntu
+/// 24.04 Docker). These are the actual shared libraries Chrome links
+/// against at the binary level. X11 composite/damage/fixes/randr ARE
+/// required even for headless (linked, not dlopen'd).
+#[cfg(target_os = "linux")]
+fn apt_chromium_packages(distro: &str) -> &'static [&'static str] {
+  match distro {
     d if d.starts_with("ubuntu20.04") => &[
-      // Core runtime
       "libasound2",
       "libatk-bridge2.0-0",
       "libatk1.0-0",
@@ -1065,20 +1086,16 @@ fn system_packages_for_distro(distro: &str) -> (PackageManager, Vec<&'static str
       "libnspr4",
       "libnss3",
       "libpango-1.0-0",
-      // X11 (required by the binary even in headless)
       "libxcb1",
       "libxcomposite1",
       "libxdamage1",
       "libxfixes3",
       "libxrandr2",
       "libxkbcommon0",
-      // Fonts (minimum for text rendering)
       "fonts-liberation",
-      // Headed mode (X11 display)
       "libx11-6",
       "libxext6",
       "libwayland-client0",
-      // Emoji
       "fonts-noto-color-emoji",
     ],
     d if d.starts_with("ubuntu22.04") | d.starts_with("debian11") | d.starts_with("debian12") => &[
@@ -1134,9 +1151,95 @@ fn system_packages_for_distro(distro: &str) -> (PackageManager, Vec<&'static str
       "libwayland-client0",
       "fonts-noto-color-emoji",
     ],
-  };
+  }
+}
 
-  (PackageManager::Apt, chromium.to_vec())
+/// Playwright `WebKit` runtime deps (sourced from PW's `noble.txt` /
+/// `jammy.txt` / `focal.txt`). `pw_run.sh` exits silently with
+/// "transport closed" when any of these is missing — symptoms are hard
+/// to attribute without trace logs, so the merged install removes the
+/// foot-gun.
+#[cfg(target_os = "linux")]
+fn apt_webkit_packages(distro: &str) -> &'static [&'static str] {
+  match distro {
+    d if d.starts_with("ubuntu20.04") => &[
+      "libwoff1",
+      "libvpx6",
+      "libopus0",
+      "libwebp6",
+      "libwebpdemux2",
+      "libharfbuzz-icu0",
+      "libenchant1c2a",
+      "libhyphen0",
+      "libsecret-1-0",
+      "libnotify4",
+      "libgles2",
+      "libegl1",
+      "libxslt1.1",
+      "libevent-2.1-7",
+      "libgudev-1.0-0",
+      "libsoup2.4-1",
+      "libgstreamer-plugins-base1.0-0",
+      "libgstreamer-gl1.0-0",
+      "libgstreamer-plugins-bad1.0-0",
+      "gstreamer1.0-libav",
+      "gstreamer1.0-plugins-base",
+      "gstreamer1.0-plugins-good",
+      "gstreamer1.0-plugins-bad",
+    ],
+    d if d.starts_with("ubuntu22.04") | d.starts_with("debian11") | d.starts_with("debian12") => &[
+      "libwoff1",
+      "libvpx7",
+      "libopus0",
+      "libwebp7",
+      "libwebpdemux2",
+      "libharfbuzz-icu0",
+      "libenchant-2-2",
+      "libhyphen0",
+      "libsecret-1-0",
+      "libnotify4",
+      "libgles2",
+      "libegl1",
+      "libxslt1.1",
+      "libevent-2.1-7",
+      "libgudev-1.0-0",
+      "libsoup-3.0-0",
+      "libgstreamer-plugins-base1.0-0",
+      "libgstreamer-gl1.0-0",
+      "libgstreamer-plugins-bad1.0-0",
+      "gstreamer1.0-libav",
+      "gstreamer1.0-plugins-base",
+      "gstreamer1.0-plugins-good",
+      "gstreamer1.0-plugins-bad",
+    ],
+    // ubuntu24.04, debian13, and fallback (noble / trixie t64 ABI)
+    _ => &[
+      "libwoff1",
+      "libvpx9",
+      "libopus0",
+      "libwebp7",
+      "libwebpdemux2",
+      "libharfbuzz-icu0",
+      "libenchant-2-2",
+      "libhyphen0",
+      "libsecret-1-0",
+      "libnotify4",
+      "libgles2",
+      "libegl1",
+      "libxslt1.1",
+      "libevent-2.1-7t64",
+      "libgudev-1.0-0",
+      "libsoup-3.0-0",
+      "libavif16",
+      "libgstreamer-plugins-base1.0-0",
+      "libgstreamer-gl1.0-0",
+      "libgstreamer-plugins-bad1.0-0",
+      "gstreamer1.0-libav",
+      "gstreamer1.0-plugins-base",
+      "gstreamer1.0-plugins-good",
+      "gstreamer1.0-plugins-bad",
+    ],
+  }
 }
 
 /// Arch Linux (and derivatives) packages for Chromium.
@@ -1173,6 +1276,38 @@ fn arch_chromium_packages() -> Vec<&'static str> {
     "noto-fonts-emoji", // emoji rendering
     "fontconfig",       // font discovery
     "freetype2",        // font rendering
+  ]
+}
+
+/// Arch Linux (and derivatives) packages for Playwright `WebKit`.
+/// Mirrors the runtime libs the bundled `pw_run.sh` loads.
+#[cfg(target_os = "linux")]
+fn arch_webkit_packages() -> Vec<&'static str> {
+  vec![
+    // Core WebKit runtime
+    "woff2",        // libwoff2common, libwoff2dec
+    "libvpx",       // libvpx.so
+    "opus",         // libopus.so
+    "libwebp",      // libwebp, libwebpdemux
+    "harfbuzz-icu", // libharfbuzz-icu.so
+    "enchant",      // libenchant-2.so
+    "hyphen",       // libhyphen.so
+    "libsecret",    // libsecret-1.so
+    "libnotify",    // libnotify.so
+    "mesa",         // libgles, libegl (already pulled by chromium)
+    "libxslt",      // libxslt.so
+    "libevent",     // libevent.so
+    "libgudev",     // libgudev-1.0.so
+    "libsoup3",     // libsoup-3.0.so
+    "libavif",      // libavif.so
+    // GStreamer (audio/video pipelines used by WebKit)
+    "gst-plugins-base",
+    "gst-plugins-base-libs",
+    "gst-plugins-good",
+    "gst-plugins-bad",
+    "gst-libav",
+    // GTK4 (PW WebKit links against minibrowser-gtk's GTK4 stack)
+    "gtk4",
   ]
 }
 
