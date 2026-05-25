@@ -476,6 +476,15 @@ fn coverage_page_scripts() {
   assert_clean(&run_script(&build(PAGE_SCRIPTS_BODY)));
 }
 
+// PAGE_MISC_BODY uses `page.startScreencast` and a `waitForResponse`
+// against an unreachable host. On macOS Chromium under CI both wedge
+// past 10 minutes (likely waiting for a frame the headless surface
+// never produces). Linux passes consistently. TODO: separate
+// screencast + dead-host waits into a macOS-aware variant.
+#[cfg_attr(
+  target_os = "macos",
+  ignore = "pre-existing macOS hang in startScreencast / dead-host waitForResponse"
+)]
 #[test]
 fn coverage_page_misc() {
   assert_clean(&run_script(&build(PAGE_MISC_BODY)));
