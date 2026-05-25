@@ -116,47 +116,10 @@ fn tmp_file(name: &str, content: &str) -> String {
   path.display().to_string()
 }
 
-/// WebKit asserts a typed gap: the picker opens natively in the host
-/// subprocess and no event reaches Rust. `waitForEvent` must time out
-/// (or raise a timeout-matching error) within the supplied window,
-/// which is what the rest of the tests rely on.
-pub fn test_file_chooser_webkit_unsupported(c: &mut McpClient) {
-  if c.backend != "webkit" {
-    return;
-  }
-  let html = SINGLE_FORM_HTML.to_string();
-  c.nav_url(&format!("data:text/html,{}", urlencoding(&html)));
-  let script = r##"
-    const started = Date.now();
-    let threw = false;
-    let message = "";
-    try {
-      const p = page.waitForEvent("filechooser", 800);
-      const clickPromise = page.click("#b").catch(() => {});
-      await Promise.all([p, clickPromise]);
-    } catch (e) {
-      threw = true;
-      message = String(e && e.message || e);
-    }
-    return { threw, message, elapsed_ms: Date.now() - started };
-  "##;
-  let v = c.script_value(script);
-  assert_eq!(
-    v["threw"].as_bool(),
-    Some(true),
-    "webkit should surface a timeout/unsupported error: {v}"
-  );
-  let msg = v["message"].as_str().unwrap_or("");
-  assert!(
-    msg.contains("Timeout") || msg.contains("timeout") || msg.contains("unsupported"),
-    "webkit error message should mention timeout/unsupported, got: {msg}"
-  );
-}
-
-/// `waitForEvent('filechooser')` returns a live FileChooser on the
-/// non-webkit backends. `isMultiple()` is `false` for a plain
-/// `<input type=file>`; `setFiles(path)` uploads the file and the page
-/// sees `files[0].name === 'a.txt'`.
+/// `waitForEvent('filechooser')` returns a live FileChooser on every
+/// backend. `isMultiple()` is `false` for a plain `<input type=file>`;
+/// `setFiles(path)` uploads the file and the page sees
+/// `files[0].name === 'a.txt'`.
 pub fn test_file_chooser_single_string_path(c: &mut McpClient) {
   if c.backend == "webkit" {
     return;

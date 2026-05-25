@@ -1234,10 +1234,7 @@ impl BrowserKind {
     match self {
       Self::Chromium => crate::backend::BackendKind::CdpPipe,
       Self::Firefox => crate::backend::BackendKind::Bidi,
-      #[cfg(webkit_backend)]
       Self::WebKit => crate::backend::BackendKind::WebKit,
-      #[cfg(not(webkit_backend))]
-      Self::WebKit => crate::backend::BackendKind::CdpPipe,
     }
   }
 }

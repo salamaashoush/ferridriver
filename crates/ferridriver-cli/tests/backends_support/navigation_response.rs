@@ -54,14 +54,6 @@ pub fn test_goto_returns_response(c: &mut McpClient) {
       landed = landed,
     );
     let v = c.script_value(&script);
-    if c.backend == "webkit" {
-      assert_eq!(
-        v["responded"].as_bool(),
-        Some(false),
-        "webkit has no public API for main-doc response; goto should honestly return null: {v}",
-      );
-      return;
-    }
     assert_eq!(v["responded"].as_bool(), Some(true), "goto should return Response: {v}");
     assert_eq!(v["status"].as_i64(), Some(200), "status: {v}");
     assert_eq!(v["ok"].as_bool(), Some(true), "ok: {v}");
@@ -92,14 +84,6 @@ pub fn test_goto_follows_redirects(c: &mut McpClient) {
       redirect = redirect,
     );
     let v = c.script_value(&script);
-    if c.backend == "webkit" {
-      assert_eq!(
-        v["responded"].as_bool(),
-        Some(false),
-        "webkit cannot observe main-doc responses (§1.4 gap): {v}",
-      );
-      return;
-    }
     assert_eq!(v["responded"].as_bool(), Some(true), "goto should return Response: {v}");
     assert_eq!(
       v["status"].as_i64(),
@@ -119,14 +103,6 @@ pub fn test_goto_follows_redirects(c: &mut McpClient) {
 /// typed error. Same contract as Playwright — the promise rejects,
 /// not a Response-with-status-0.
 pub fn test_goto_network_failure(c: &mut McpClient) {
-  // webkit: the JS-interceptor + WKWebView navigation path reject
-  // differently for blocked main-doc loads, and stock WKWebView's
-  // error surface is tracked separately. Skip here rather than
-  // reproducing the JS-fetch failure path, which is already covered
-  // by `test_network_request_failure`.
-  if c.backend == "webkit" {
-    return;
-  }
   let script = r#"
     try {
       await page.goto("http://127.0.0.1:65531/unreachable");
@@ -174,14 +150,6 @@ pub fn test_reload_returns_response(c: &mut McpClient) {
       landed = landed,
     );
     let v = c.script_value(&script);
-    if c.backend == "webkit" {
-      assert_eq!(
-        v["responded"].as_bool(),
-        Some(false),
-        "webkit reload should honestly return null (§1.4 gap): {v}",
-      );
-      return;
-    }
     assert_eq!(
       v["responded"].as_bool(),
       Some(true),
@@ -224,19 +192,6 @@ pub fn test_history_traversal_returns_response(c: &mut McpClient) {
       api_users = api_users,
     );
     let v = c.script_value(&script);
-    if c.backend == "webkit" {
-      assert_eq!(
-        v["backResponded"].as_bool(),
-        Some(false),
-        "webkit goBack should honestly return null: {v}",
-      );
-      assert_eq!(
-        v["fwdResponded"].as_bool(),
-        Some(false),
-        "webkit goForward should honestly return null: {v}",
-      );
-      return;
-    }
     assert_eq!(
       v["backResponded"].as_bool(),
       Some(true),

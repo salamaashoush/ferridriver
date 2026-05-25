@@ -904,10 +904,8 @@ pub enum HandleId {
   Cdp(String),
   /// `WebDriver` `BiDi` shared reference — `{ sharedId, handle? }`.
   Bidi { shared_id: String, handle: Option<String> },
-  /// `WebKit` host IPC ref — an index into `window.__wr[]`.
-  WebKit(u64),
-  /// PW `WebKit` `Runtime.RemoteObjectId` — an opaque string.
-  PwWebKit(String),
+  /// Playwright `WebKit` `Runtime.RemoteObjectId` — an opaque string.
+  WebKit(String),
 }
 
 // ── base64 helpers (stand-alone) ────────────────────────────────────────────

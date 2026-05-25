@@ -363,14 +363,10 @@ async fn apply_page_config(
 ) -> ferridriver::error::Result<()> {
   let ctx_config = &effective.context;
   let mut opts = ferridriver::options::BrowserContextOptions::default();
-  // WebKit (stock WKWebView) rejects several context-options fields
-  // outright; mirror Playwright's launchPersistentContext semantics
-  // and degrade silently when the user hasn't explicitly opted in.
-  #[cfg(webkit_backend)]
+  // Playwright WebKit rejects several context-options fields outright
+  // on launchPersistentContext; degrade silently when the user hasn't
+  // explicitly opted in.
   let is_webkit = matches!(backend_kind, ferridriver::backend::BackendKind::WebKit);
-  #[cfg(not(webkit_backend))]
-  let is_webkit = false;
-  let _ = backend_kind;
 
   let viewport = effective
     .viewport_override

@@ -3,9 +3,9 @@
 //! transport; we dup our socketpair halves into place before exec so
 //! `pw_run.sh` inherits them naturally.
 //!
-//! Binary discovery: `FERRIDRIVER_PW_WEBKIT` env var first, then the
+//! Binary discovery: `FERRIDRIVER_WEBKIT` env var first, then the
 //! Playwright Node.js cache, then ferridriver's own cache (populated
-//! by `ferridriver install pw-webkit`).
+//! by `ferridriver install webkit`).
 
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command};
@@ -26,7 +26,7 @@ pub struct LaunchConfig {
 #[derive(Debug, Error)]
 pub enum LaunchError {
   #[error(
-    "Playwright WebKit binary not found in any of: FERRIDRIVER_PW_WEBKIT, Playwright cache, ferridriver cache. Run `ferridriver install pw-webkit` to download it."
+    "Playwright WebKit binary not found in any of: FERRIDRIVER_WEBKIT, Playwright cache, ferridriver cache. Run `ferridriver install webkit` to download it."
   )]
   BinaryNotFound,
   #[error("io: {0}")]
@@ -38,7 +38,7 @@ const BINARY_RELATIVE: &str = "pw_run.sh";
 /// Resolve the `pw_run.sh` (or platform-equivalent) path. Returns the
 /// first existing candidate from the search order.
 pub fn locate_binary() -> Result<PathBuf, LaunchError> {
-  if let Ok(path) = std::env::var("FERRIDRIVER_PW_WEBKIT") {
+  if let Ok(path) = std::env::var("FERRIDRIVER_WEBKIT") {
     let p = PathBuf::from(path);
     if p.is_file() {
       return Ok(p);
@@ -142,7 +142,7 @@ fn pre_exec_setup_fds(read_fd: i32, write_fd: i32) -> std::io::Result<()> {
 
 #[cfg(not(unix))]
 fn pre_exec_setup_fds(_read_fd: i32, _write_fd: i32) -> std::io::Result<()> {
-  Err(std::io::Error::other("pw-webkit launcher: non-unix not yet supported"))
+  Err(std::io::Error::other("webkit launcher: non-unix not yet supported"))
 }
 
 fn playwright_caches() -> Vec<PathBuf> {
@@ -155,8 +155,8 @@ fn playwright_caches() -> Vec<PathBuf> {
     out.push(home.join(".cache/ms-playwright"));
     #[cfg(target_os = "windows")]
     out.push(home.join("AppData/Local/ms-playwright"));
-    // ferridriver's own cache (populated by `install pw-webkit`).
-    out.push(home.join(".cache/ferridriver/pw-webkit"));
+    // ferridriver's own cache (populated by `install webkit`).
+    out.push(home.join(".cache/ferridriver/webkit"));
   }
   out
 }

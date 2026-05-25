@@ -14,9 +14,9 @@ use base64::Engine as _;
 use serde_json::{Value, json};
 use tokio::sync::broadcast::error::RecvError;
 
-use super::browser::{BrowserError, PwWebKitBrowser};
+use super::browser::{BrowserError, WebKitBrowser};
 use super::connection::Session;
-use super::element::PwWebKitElement;
+use super::element::WebKitElement;
 use super::protocol::{self, Envelope, NavigateParams, NavigateResult};
 use crate::backend::{
   AnyElement, AxNodeData, CookieData, FrameInfo, ImageFormat, MetricData, NavLifecycle, ScreenshotOpts,
@@ -34,7 +34,7 @@ pub const UTILITY_WORLD_NAME: &str = "__playwright_utility_world__";
 /// Playwright `WebKit` page. Cheaply cloneable; clones share the
 /// underlying sessions + managers.
 #[derive(Clone)]
-pub struct PwWebKitPage {
+pub struct WebKitPage {
   proxy: Session,
   /// Live target session. Swapped on cross-process navigation when
   /// `WebKit` creates a provisional target and commits it via
@@ -197,12 +197,12 @@ impl LifecycleSignals {
   }
 }
 
-impl PwWebKitPage {
+impl WebKitPage {
   /// Attach to a freshly-created page proxy: wait for the inner
   /// `Target.targetCreated`, open the target session, run the standard
   /// `*.enable` initialisation (mirrors `WKPage._initializeSessionMayThrow`).
   pub async fn attach(
-    browser: &PwWebKitBrowser,
+    browser: &WebKitBrowser,
     proxy: Session,
     context_id: Option<String>,
   ) -> std::result::Result<Self, BrowserError> {
@@ -255,7 +255,7 @@ impl PwWebKitPage {
         .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(tree.to_string());
     }
 
-    let page = PwWebKitPage {
+    let page = WebKitPage {
       proxy,
       target: Arc::new(ArcSwap::from_pointee(target)),
       browser: browser.root().clone(),
@@ -445,7 +445,7 @@ impl PwWebKitPage {
 
   fn ensure_open(&self) -> Result<()> {
     if self.closed.load(Ordering::Relaxed) {
-      return Err(FerriError::backend("pw-webkit: page is closed"));
+      return Err(FerriError::backend("webkit: page is closed"));
     }
     Ok(())
   }
@@ -543,7 +543,7 @@ impl PwWebKitPage {
     let parsed: NavigateResult = serde_json::from_value(nav).unwrap_or_default();
     if let Some(err) = parsed.error_text {
       if !err.is_empty() {
-        return Err(FerriError::backend(format!("pw-webkit navigate: {err}")));
+        return Err(FerriError::backend(format!("webkit navigate: {err}")));
       }
     }
     if parsed.loader_id.is_some() {
@@ -575,7 +575,7 @@ impl PwWebKitPage {
         if let Some((event_request_id, err)) = signals.failure() {
           if let Some(req) = nav_slot.get() {
             if event_request_id == req.id() {
-              return Err(FerriError::backend(format!("pw-webkit navigate: {err}")));
+              return Err(FerriError::backend(format!("webkit navigate: {err}")));
             }
           }
         }
@@ -700,7 +700,7 @@ impl PwWebKitPage {
       .and_then(|r| r.get("objectId"))
       .and_then(Value::as_str)
       .ok_or_else(|| FerriError::protocol("Runtime.evaluate", "evaluate_to_element: result is not an object"))?;
-    Ok(AnyElement::PwWebKit(PwWebKitElement::new(
+    Ok(AnyElement::WebKit(WebKitElement::new(
       self.target_session(),
       object_id.to_string(),
     )))
@@ -708,7 +708,7 @@ impl PwWebKitPage {
 
   pub async fn resolve_backend_node(&self, _backend_node_id: i64, ref_id: &str) -> Result<AnyElement> {
     tokio::task::yield_now().await;
-    Ok(AnyElement::PwWebKit(PwWebKitElement::new(
+    Ok(AnyElement::WebKit(WebKitElement::new(
       self.target_session(),
       ref_id.to_string(),
     )))
@@ -792,8 +792,8 @@ impl PwWebKitPage {
   pub async fn screenshot_element(&self, selector: &str, format: ImageFormat) -> Result<Vec<u8>> {
     let elem = self.find_element(selector).await?;
     match elem {
-      AnyElement::PwWebKit(e) => e.screenshot(format).await,
-      _ => Err(FerriError::backend("screenshot_element: non-pw-webkit element")),
+      AnyElement::WebKit(e) => e.screenshot(format).await,
+      _ => Err(FerriError::backend("screenshot_element: non-webkit element")),
     }
   }
 
@@ -1302,7 +1302,7 @@ impl PwWebKitPage {
   pub async fn pdf(&self, _opts: crate::options::PdfOptions) -> Result<Vec<u8>> {
     tokio::task::yield_now().await;
     Err(FerriError::unsupported(
-      "PDF generation is not supported on the pw-webkit backend — Playwright's WebKit \
+      "PDF generation is not supported on the webkit backend — Playwright's WebKit \
        protocol exposes no `Page.pdf` / `Page.printToPDF` command. Use cdp-pipe or cdp-raw for PDF.",
     ))
   }
@@ -1363,8 +1363,8 @@ impl PwWebKitPage {
 
   pub async fn set_file_input(&self, selector: &str, paths: &[String]) -> Result<()> {
     let elem = self.find_element(selector).await?;
-    let AnyElement::PwWebKit(e) = elem else {
-      return Err(FerriError::backend("set_file_input: non-pw-webkit element"));
+    let AnyElement::WebKit(e) = elem else {
+      return Err(FerriError::backend("set_file_input: non-webkit element"));
     };
     self
       .target_session()
@@ -1573,7 +1573,7 @@ impl PwWebKitPage {
     let mut anchor: Option<String> = None;
     for handle in handles {
       match handle {
-        crate::protocol::HandleId::PwWebKit(obj) => {
+        crate::protocol::HandleId::WebKit(obj) => {
           if anchor.is_none() {
             anchor = Some(obj.clone());
           }
@@ -1582,7 +1582,7 @@ impl PwWebKitPage {
         other => {
           return Err(FerriError::invalid_argument(
             "handles",
-            format!("call_utility_evaluate: non-pw-webkit handle {other:?} on pw-webkit backend"),
+            format!("call_utility_evaluate: non-webkit handle {other:?} on webkit backend"),
           ));
         },
       }
@@ -1617,8 +1617,8 @@ impl PwWebKitPage {
   }
 
   #[must_use]
-  pub fn element_from_object_id(&self, object_id: String) -> PwWebKitElement {
-    PwWebKitElement::new(self.target_session(), object_id)
+  pub fn element_from_object_id(&self, object_id: String) -> WebKitElement {
+    WebKitElement::new(self.target_session(), object_id)
   }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────
@@ -1654,7 +1654,7 @@ impl PwWebKitPage {
 /// timezone / bypassCSP / offline / screen / permissions live on the
 /// target session; JS-disabled lives on the page-proxy. Anything that
 /// hits the browser-root session (locale, geolocation) is sent from
-/// `PwWebKitBrowser::new_context_with_options` instead — that runs
+/// `WebKitBrowser::new_context_with_options` instead — that runs
 /// once per context, not once per page.
 async fn apply_pre_page_overrides(target: &Session, proxy: &Session, opts: &crate::options::BrowserContextOptions) {
   if let Some(ua) = opts.user_agent.as_deref() {
@@ -1800,7 +1800,7 @@ fn parse_eval_response(resp: &Value, return_by_value: bool) -> Result<crate::js_
   if let Some(obj_id) = result.get("objectId").and_then(Value::as_str) {
     let is_node = result.get("subtype").and_then(Value::as_str) == Some("node");
     return Ok(EvaluateResult::Handle(
-      JSHandleBacking::Remote(HandleRemote::PwWebKit(Arc::from(obj_id))),
+      JSHandleBacking::Remote(HandleRemote::WebKit(Arc::from(obj_id))),
       is_node,
     ));
   }

@@ -36,3 +36,4 @@ trace-*.json
 bench/_legacy/go-bench/chromedp-bench
 bench/_legacy/go-bench/rod-bench
 bench/results/
+.midnight-expert/

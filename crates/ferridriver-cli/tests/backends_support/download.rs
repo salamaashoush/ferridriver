@@ -157,50 +157,10 @@ fn handle_download_conn(mut stream: TcpStream, payload: &[u8]) {
 
 // ── Tests ──────────────────────────────────────────────────────────────
 
-/// `waitForEvent('download')` on WebKit must surface a timeout — the
-/// stock `WKWebView` download delegate runs in the Obj-C host and no
-/// event flows through our IPC. Matches Rule 4 honesty.
-pub fn test_download_webkit_unsupported(c: &mut McpClient) {
-  if c.backend != "webkit" {
-    return;
-  }
-  with_download_server(b"hello-webkit", |base, _| {
-    c.nav_url(base);
-    let script = r##"
-      const started = Date.now();
-      let threw = false;
-      let message = "";
-      try {
-        const p = page.waitForEvent("download", 800);
-        const clickPromise = page.click("#dl").catch(() => {});
-        await Promise.all([p, clickPromise]);
-      } catch (e) {
-        threw = true;
-        message = String(e && e.message || e);
-      }
-      return { threw, message, elapsed_ms: Date.now() - started };
-    "##;
-    let v = c.script_value(script);
-    assert_eq!(
-      v["threw"].as_bool(),
-      Some(true),
-      "webkit should surface a timeout for downloads: {v}"
-    );
-    let msg = v["message"].as_str().unwrap_or("");
-    assert!(
-      msg.contains("Timeout") || msg.contains("timeout") || msg.contains("unsupported"),
-      "webkit download error should mention timeout/unsupported, got: {msg}"
-    );
-  });
-}
-
 /// Trigger a download, capture via `waitForEvent('download')`, call
 /// `saveAs(tmpPath)`, read the saved file, assert the bytes match the
-/// payload byte-for-byte. Runs on cdp-pipe, cdp-raw, bidi.
+/// payload byte-for-byte. Runs on every backend.
 pub fn test_download_save_as_roundtrip(c: &mut McpClient) {
-  if c.backend == "webkit" {
-    return;
-  }
   let payload = b"hello download world";
   with_download_server(payload, |base, _| {
     c.nav_url(base);
@@ -251,9 +211,6 @@ pub fn test_download_save_as_roundtrip(c: &mut McpClient) {
 /// contents match the payload. Exercises the `wait_finished` +
 /// `report_finished` watch transition end-to-end.
 pub fn test_download_path_contents(c: &mut McpClient) {
-  if c.backend == "webkit" {
-    return;
-  }
   let payload = b"payload-for-path";
   with_download_server(payload, |base, _| {
     c.nav_url(base);

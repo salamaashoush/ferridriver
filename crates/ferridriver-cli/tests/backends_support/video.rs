@@ -137,35 +137,24 @@ pub fn test_video_recording_lifecycle(c: &mut McpClient) {
       );
     },
     "webkit" => {
+      // Playwright WebKit's Inspector protocol delivers
+      // `Screencast.startScreencast` frames; ferridriver wires these
+      // into a per-page recorder that writes a `.webm` file, matching
+      // the CDP/BiDi observable surface.
       assert_eq!(
         v["hasVideo"].as_bool(),
         Some(true),
-        "WebKit page.video() should still return a handle (Playwright parity): {v}"
-      );
-      assert_eq!(
-        v["kind"].as_str(),
-        Some("rejected"),
-        "WebKit video.path() should reject with the typed Unsupported reason: {v}"
-      );
-    },
-    "pw-webkit" => {
-      // PW WebKit's Inspector protocol delivers `Screencast.startScreencast`
-      // frames; ferridriver wires these into a per-page recorder that
-      // writes a `.webm` file, matching the CDP/BiDi observable surface.
-      assert_eq!(
-        v["hasVideo"].as_bool(),
-        Some(true),
-        "pw-webkit page.video() should expose a handle when recordVideo is set: {v}"
+        "webkit page.video() should expose a handle when recordVideo is set: {v}"
       );
       assert_eq!(
         v["kind"].as_str(),
         Some("ok"),
-        "pw-webkit video.path() should resolve: {v}"
+        "webkit video.path() should resolve: {v}"
       );
       let file_path = v["filePath"].as_str().expect("filePath is a string");
       assert!(
         std::path::Path::new(file_path).exists(),
-        "pw-webkit recorded file must exist: {file_path}"
+        "webkit recorded file must exist: {file_path}"
       );
       assert!(
         file_path.contains(&*record_dir_str),

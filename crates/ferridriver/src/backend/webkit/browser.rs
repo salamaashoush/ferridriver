@@ -13,7 +13,7 @@
 
 use super::connection::{Connection, ConnectionError, Session};
 use super::launcher::{LaunchConfig, LaunchError};
-use super::page::PwWebKitPage;
+use super::page::WebKitPage;
 use super::protocol::{self, CreateContextParams, CreateContextResult, CreatePageParams, CreatePageResult};
 use super::transport::Transport;
 use crate::backend::AnyPage;
@@ -70,13 +70,13 @@ impl Drop for ChildHandle {
 
 /// Playwright `WebKit` browser. Cloneable; clones share the child + connection.
 #[derive(Clone)]
-pub struct PwWebKitBrowser {
+pub struct WebKitBrowser {
   conn: Arc<Connection>,
   root: Session,
   handle: Arc<ChildHandle>,
   /// Pages created through this browser. `pages()` snapshots it; the
   /// PW `WebKit` protocol has no page-list RPC.
-  pages: Arc<Mutex<Vec<PwWebKitPage>>>,
+  pages: Arc<Mutex<Vec<WebKitPage>>>,
   /// Context every page lands in when the caller passes no explicit
   /// `browserContextId`. PW `WebKit` non-persistent launches have no
   /// implicit default context — `Playwright.createPage` without a
@@ -89,12 +89,12 @@ pub struct PwWebKitBrowser {
   version: Arc<str>,
   /// Per-context options stash, keyed by `browserContextId`. Populated
   /// by [`Self::new_context_with_options`]; consumed by
-  /// [`PwWebKitPage::attach`] to apply per-page overrides before the
+  /// [`WebKitPage::attach`] to apply per-page overrides before the
   /// initial document becomes scriptable.
   context_options: Arc<Mutex<rustc_hash::FxHashMap<String, crate::options::BrowserContextOptions>>>,
 }
 
-impl PwWebKitBrowser {
+impl WebKitBrowser {
   /// Spawn a Playwright `WebKit` child and complete `Playwright.enable`.
   pub async fn launch(config: &LaunchConfig) -> std::result::Result<Self, BrowserError> {
     // pair A — child reads fd 3 ← parent writes. pair B — child writes
@@ -128,7 +128,7 @@ impl PwWebKitBrowser {
 
     let version: Arc<str> = Arc::from(format!("webkit-playwright/{}", super::launcher::binary_revision()));
 
-    let downloads_dir = std::env::temp_dir().join(format!("ferridriver-pw-webkit-downloads-{}", std::process::id()));
+    let downloads_dir = std::env::temp_dir().join(format!("ferridriver-webkit-downloads-{}", std::process::id()));
     let _ = std::fs::create_dir_all(&downloads_dir);
     let downloads_dir = Arc::new(downloads_dir);
     let _ = root
@@ -142,10 +142,10 @@ impl PwWebKitBrowser {
       )
       .await;
 
-    let pages: Arc<Mutex<Vec<PwWebKitPage>>> = Arc::new(Mutex::new(Vec::new()));
+    let pages: Arc<Mutex<Vec<WebKitPage>>> = Arc::new(Mutex::new(Vec::new()));
     spawn_download_listener(&root, pages.clone(), downloads_dir.clone());
 
-    Ok(PwWebKitBrowser {
+    Ok(WebKitBrowser {
       conn,
       root,
       handle: Arc::new(ChildHandle {
@@ -199,7 +199,7 @@ impl PwWebKitBrowser {
   /// Sends `Playwright.createContext` for the proxy fields, then
   /// `Playwright.setLanguages` if `locale` is set (mirroring
   /// `WKBrowserContext.initialize`), then stashes the options so
-  /// [`Self::new_page`] / [`PwWebKitPage::attach`] can apply per-page
+  /// [`Self::new_page`] / [`WebKitPage::attach`] can apply per-page
   /// overrides (userAgent, timezone, JS-disabled, bypassCSP, offline,
   /// permissions, extraHTTPHeaders) on the target session BEFORE the
   /// initial about:blank document becomes scriptable.
@@ -229,7 +229,7 @@ impl PwWebKitBrowser {
   }
 
   /// Look up stashed [`BrowserContextOptions`] for a context id. Used
-  /// by [`PwWebKitPage::attach`] to apply per-page overrides before the
+  /// by [`WebKitPage::attach`] to apply per-page overrides before the
   /// initial document loads.
   pub(crate) fn context_options_for(&self, ctx_id: &str) -> Option<crate::options::BrowserContextOptions> {
     self
@@ -280,7 +280,7 @@ impl PwWebKitBrowser {
         .iter()
         .filter(|p| !p.is_closed())
         .cloned()
-        .map(AnyPage::PwWebKit)
+        .map(AnyPage::WebKit)
         .collect(),
     )
   }
@@ -293,7 +293,7 @@ impl PwWebKitBrowser {
     viewport: Option<&crate::options::ViewportConfig>,
   ) -> Result<AnyPage> {
     let proxy = self.create_page(browser_context_id).await?;
-    let page = PwWebKitPage::attach(self, proxy, browser_context_id.map(str::to_string)).await?;
+    let page = WebKitPage::attach(self, proxy, browser_context_id.map(str::to_string)).await?;
     if let Some(vp) = viewport {
       page.emulate_viewport(vp).await?;
     }
@@ -305,7 +305,7 @@ impl PwWebKitBrowser {
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .push(page.clone());
-    Ok(AnyPage::PwWebKit(page))
+    Ok(AnyPage::WebKit(page))
   }
 
   /// Issue `Playwright.close` and reap the child.
@@ -354,11 +354,7 @@ impl PwWebKitBrowser {
 /// Spawn a browser-level listener that translates `Playwright.downloadCreated`,
 /// `Playwright.downloadFilenameSuggested`, and `Playwright.downloadFinished`
 /// into per-page [`crate::download::Download`] handles.
-fn spawn_download_listener(
-  root: &Session,
-  pages: Arc<Mutex<Vec<PwWebKitPage>>>,
-  downloads_dir: Arc<std::path::PathBuf>,
-) {
+fn spawn_download_listener(root: &Session, pages: Arc<Mutex<Vec<WebKitPage>>>, downloads_dir: Arc<std::path::PathBuf>) {
   let mut rx = root.events();
   tokio::spawn(async move {
     use tokio::sync::broadcast::error::RecvError;
@@ -411,8 +407,7 @@ fn spawn_download_listener(
             .and_then(serde_json::Value::as_str)
             .unwrap_or("")
             .to_string();
-          let pages_snapshot: Vec<PwWebKitPage> =
-            pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+          let pages_snapshot: Vec<WebKitPage> = pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
           for p in &pages_snapshot {
             if let Some(dl) = p.download_manager.peek_for_guid(uuid) {
               dl.filename_suggested(suggested);
@@ -432,8 +427,7 @@ fn spawn_download_listener(
             .and_then(serde_json::Value::as_str)
             .filter(|s| !s.is_empty())
             .map(std::string::ToString::to_string);
-          let pages_snapshot: Vec<PwWebKitPage> =
-            pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+          let pages_snapshot: Vec<WebKitPage> = pages.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
           for p in &pages_snapshot {
             if let Some(dl) = p.download_manager.take_for_guid(uuid) {
               let final_path = if error.is_none() {
@@ -452,7 +446,7 @@ fn spawn_download_listener(
   });
 }
 
-fn find_page(pages: &Arc<Mutex<Vec<PwWebKitPage>>>, page_proxy_id: &str) -> Option<PwWebKitPage> {
+fn find_page(pages: &Arc<Mutex<Vec<WebKitPage>>>, page_proxy_id: &str) -> Option<WebKitPage> {
   pages
     .lock()
     .unwrap_or_else(std::sync::PoisonError::into_inner)

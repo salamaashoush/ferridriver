@@ -1,4 +1,4 @@
-//! Native input dispatch for the PW `WebKit` backend.
+//! Native input dispatch for the `WebKit` backend.
 //!
 //! Per `wkInput.ts`: mouse / key / wheel / tap events go through
 //! `Input.dispatch*Event` on the **page-proxy** session;
@@ -8,7 +8,7 @@
 use serde_json::{Value, json};
 
 use super::connection::ConnectionError;
-use super::page::PwWebKitPage;
+use super::page::WebKitPage;
 use crate::backend::{BackendClickArgs, BackendHoverArgs, BackendTapArgs};
 use crate::error::{FerriError, Result};
 use crate::options::{Modifier, MouseButton};
@@ -17,7 +17,7 @@ fn err(e: ConnectionError) -> FerriError {
   e.into()
 }
 
-/// PW `WebKit` modifier mask (`Source/WebKit/Shared/WebEvent.h`):
+/// `WebKit` modifier mask (`Source/WebKit/Shared/WebEvent.h`):
 /// Shift=1, Control=2, Alt=4, Meta=8.
 fn modifiers_mask(mods: &[Modifier]) -> u32 {
   let mut m = 0;
@@ -60,7 +60,7 @@ struct MouseEvent<'a> {
 }
 
 /// Dispatch one `Input.dispatchMouseEvent` on the page-proxy session.
-async fn mouse_event(page: &PwWebKitPage, ev: MouseEvent<'_>) -> Result<()> {
+async fn mouse_event(page: &WebKitPage, ev: MouseEvent<'_>) -> Result<()> {
   let mut params = json!({
     "type": ev.ty, "button": ev.button, "buttons": ev.buttons,
     "x": ev.x, "y": ev.y, "modifiers": ev.modifiers,
@@ -76,7 +76,7 @@ async fn mouse_event(page: &PwWebKitPage, ev: MouseEvent<'_>) -> Result<()> {
   Ok(())
 }
 
-pub async fn click(page: &PwWebKitPage, x: f64, y: f64, args: &BackendClickArgs) -> Result<()> {
+pub async fn click(page: &WebKitPage, x: f64, y: f64, args: &BackendClickArgs) -> Result<()> {
   let mods = modifiers_mask(&args.modifiers);
   let btn = args.button.as_cdp();
   let bmask = button_mask(args.button);
@@ -127,7 +127,7 @@ pub async fn click(page: &PwWebKitPage, x: f64, y: f64, args: &BackendClickArgs)
   Ok(())
 }
 
-pub async fn hover(page: &PwWebKitPage, x: f64, y: f64, args: &BackendHoverArgs) -> Result<()> {
+pub async fn hover(page: &WebKitPage, x: f64, y: f64, args: &BackendHoverArgs) -> Result<()> {
   let _ = args;
   mouse_event(
     page,
@@ -145,7 +145,7 @@ pub async fn hover(page: &PwWebKitPage, x: f64, y: f64, args: &BackendHoverArgs)
 }
 
 /// Convert a CDP `modifiers` bitmask (alt=1, ctrl=2, meta=4, shift=8)
-/// into PW `WebKit`'s `Source/WebKit/Shared/WebEvent.h` ordering
+/// into `WebKit`'s `Source/WebKit/Shared/WebEvent.h` ordering
 /// (shift=1, ctrl=2, alt=4, meta=8). [`BackendTapArgs`] carries only
 /// the CDP-shaped bitmask, so the conversion happens here at the wire
 /// boundary.
@@ -166,7 +166,7 @@ fn cdp_to_wk_mask(cdp: u32) -> u32 {
   wk
 }
 
-pub async fn tap(page: &PwWebKitPage, x: f64, y: f64, args: &BackendTapArgs) -> Result<()> {
+pub async fn tap(page: &WebKitPage, x: f64, y: f64, args: &BackendTapArgs) -> Result<()> {
   page
     .proxy_session()
     .send(
@@ -178,7 +178,7 @@ pub async fn tap(page: &PwWebKitPage, x: f64, y: f64, args: &BackendTapArgs) -> 
   Ok(())
 }
 
-pub async fn move_mouse(page: &PwWebKitPage, x: f64, y: f64) -> Result<()> {
+pub async fn move_mouse(page: &WebKitPage, x: f64, y: f64) -> Result<()> {
   mouse_event(
     page,
     MouseEvent {
@@ -195,7 +195,7 @@ pub async fn move_mouse(page: &PwWebKitPage, x: f64, y: f64) -> Result<()> {
 }
 
 pub async fn move_mouse_smooth(
-  page: &PwWebKitPage,
+  page: &WebKitPage,
   from_x: f64,
   from_y: f64,
   to_x: f64,
@@ -224,7 +224,7 @@ pub async fn move_mouse_smooth(
   Ok(())
 }
 
-pub async fn mouse_wheel(page: &PwWebKitPage, delta_x: f64, delta_y: f64) -> Result<()> {
+pub async fn mouse_wheel(page: &WebKitPage, delta_x: f64, delta_y: f64) -> Result<()> {
   let _ = page.target_session().send("Page.updateScrollingState", json!({})).await;
   page
     .proxy_session()
@@ -237,7 +237,7 @@ pub async fn mouse_wheel(page: &PwWebKitPage, delta_x: f64, delta_y: f64) -> Res
   Ok(())
 }
 
-pub async fn mouse_down(page: &PwWebKitPage, x: f64, y: f64, button: &str) -> Result<()> {
+pub async fn mouse_down(page: &WebKitPage, x: f64, y: f64, button: &str) -> Result<()> {
   let b = MouseButton::parse(button).unwrap_or_default();
   mouse_event(
     page,
@@ -254,7 +254,7 @@ pub async fn mouse_down(page: &PwWebKitPage, x: f64, y: f64, button: &str) -> Re
   .await
 }
 
-pub async fn mouse_up(page: &PwWebKitPage, x: f64, y: f64, button: &str) -> Result<()> {
+pub async fn mouse_up(page: &WebKitPage, x: f64, y: f64, button: &str) -> Result<()> {
   let b = MouseButton::parse(button).unwrap_or_default();
   mouse_event(
     page,
@@ -271,7 +271,7 @@ pub async fn mouse_up(page: &PwWebKitPage, x: f64, y: f64, button: &str) -> Resu
   .await
 }
 
-pub async fn click_and_drag(page: &PwWebKitPage, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
+pub async fn click_and_drag(page: &WebKitPage, from: (f64, f64), to: (f64, f64), steps: u32) -> Result<()> {
   mouse_event(
     page,
     MouseEvent {
@@ -333,7 +333,7 @@ pub async fn click_and_drag(page: &PwWebKitPage, from: (f64, f64), to: (f64, f64
   Ok(())
 }
 
-pub async fn type_text(page: &PwWebKitPage, text: &str) -> Result<()> {
+pub async fn type_text(page: &WebKitPage, text: &str) -> Result<()> {
   page
     .target_session()
     .send("Page.insertText", json!({ "text": text }))
@@ -384,7 +384,7 @@ fn key_descriptor(key: &str) -> (String, String, i64, Option<String>) {
   }
 }
 
-async fn dispatch_key(page: &PwWebKitPage, ty: &str, key: &str) -> Result<()> {
+async fn dispatch_key(page: &WebKitPage, ty: &str, key: &str) -> Result<()> {
   let (code, key_name, vk, text) = key_descriptor(key);
   let mut params = json!({
     "type": ty,
@@ -407,27 +407,27 @@ async fn dispatch_key(page: &PwWebKitPage, ty: &str, key: &str) -> Result<()> {
   Ok(())
 }
 
-pub async fn key_down(page: &PwWebKitPage, key: &str) -> Result<()> {
+pub async fn key_down(page: &WebKitPage, key: &str) -> Result<()> {
   dispatch_key(page, "keyDown", key).await
 }
 
-pub async fn key_up(page: &PwWebKitPage, key: &str) -> Result<()> {
+pub async fn key_up(page: &WebKitPage, key: &str) -> Result<()> {
   dispatch_key(page, "keyUp", key).await
 }
 
-pub async fn press_key(page: &PwWebKitPage, key: &str) -> Result<()> {
+pub async fn press_key(page: &WebKitPage, key: &str) -> Result<()> {
   dispatch_key(page, "keyDown", key).await?;
   dispatch_key(page, "keyUp", key).await
 }
 
-pub async fn press_modifiers(page: &PwWebKitPage, mods: &[Modifier]) -> Result<()> {
+pub async fn press_modifiers(page: &WebKitPage, mods: &[Modifier]) -> Result<()> {
   for m in mods {
     dispatch_key(page, "keyDown", m.key_name()).await?;
   }
   Ok(())
 }
 
-pub async fn release_modifiers(page: &PwWebKitPage, mods: &[Modifier]) -> Result<()> {
+pub async fn release_modifiers(page: &WebKitPage, mods: &[Modifier]) -> Result<()> {
   for m in mods.iter().rev() {
     dispatch_key(page, "keyUp", m.key_name()).await?;
   }

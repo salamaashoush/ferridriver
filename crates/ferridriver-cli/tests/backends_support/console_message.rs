@@ -57,15 +57,7 @@ pub fn test_console_message_primitives(c: &mut McpClient) {
     text.contains("hello") && text.contains("42"),
     "text should include both primitive args: {v}"
   );
-  if c.backend == "webkit" {
-    assert_eq!(
-      v["argsLen"].as_u64(),
-      Some(0),
-      "webkit's host interceptor surfaces text only, args is empty: {v}"
-    );
-  } else {
-    assert_eq!(v["argsLen"].as_u64(), Some(2), "cdp/bidi should report 2 args: {v}");
-  }
+  assert_eq!(v["argsLen"].as_u64(), Some(2), "should report 2 args: {v}");
 }
 
 /// `console.warn` -> `type() === 'warning'` on BiDi (which reports

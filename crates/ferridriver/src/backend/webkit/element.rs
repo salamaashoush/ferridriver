@@ -11,19 +11,19 @@ use crate::error::{FerriError, Result};
 
 /// Element handle for the PW `WebKit` backend.
 #[derive(Clone)]
-pub struct PwWebKitElement {
+pub struct WebKitElement {
   target: Session,
   object_id: String,
 }
 
-impl PwWebKitElement {
+impl WebKitElement {
   #[must_use]
   pub fn new(target: Session, object_id: String) -> Self {
     Self { target, object_id }
   }
 
   /// The backing `Runtime.RemoteObject.objectId`. Used by
-  /// `element_handle_remote` when minting a `HandleRemote::PwWebKit`.
+  /// `element_handle_remote` when minting a `HandleRemote::WebKit`.
   #[must_use]
   pub fn object_id(&self) -> &str {
     &self.object_id
@@ -73,7 +73,7 @@ impl PwWebKitElement {
          const r=this.getBoundingClientRect();return {x:r.x+r.width/2,y:r.y+r.height/2};}",
       )
       .await?
-      .ok_or_else(|| FerriError::backend("pw-webkit: element bounding box null"))?;
+      .ok_or_else(|| FerriError::backend("webkit: element bounding box null"))?;
     Ok((
       v.get("x").and_then(Value::as_f64).unwrap_or(0.0),
       v.get("y").and_then(Value::as_f64).unwrap_or(0.0),
@@ -150,7 +150,7 @@ impl PwWebKitElement {
          const r=this.getBoundingClientRect();return {x:r.x,y:r.y,width:r.width,height:r.height};}",
       )
       .await?
-      .ok_or_else(|| FerriError::backend("pw-webkit: element rect null"))?;
+      .ok_or_else(|| FerriError::backend("webkit: element rect null"))?;
     let resp = self
       .target
       .send(
