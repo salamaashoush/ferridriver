@@ -409,8 +409,12 @@ impl BrowserInstaller {
         .await?;
 
       if !status.success() {
+        let tool = match pkg_manager {
+          PackageManager::Apt => "apt-get",
+          PackageManager::Pacman => "pacman",
+        };
         return Err(backend_err(format!(
-          "apt-get exited with code: {}",
+          "{tool} exited with code: {}",
           status.code().unwrap_or(-1)
         )));
       }
