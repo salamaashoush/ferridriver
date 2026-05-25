@@ -1,8 +1,8 @@
 # `ferridriver`
 
-`ferridriver` is a single static binary with subcommands. There is no
-TypeScript CLI — JavaScript/TypeScript BDD step files run natively through
-the same binary.
+A single static binary with five subcommands. JavaScript / TypeScript
+BDD step files run natively through the same binary — no separate
+TypeScript CLI exists.
 
 ## Synopsis
 
@@ -10,66 +10,112 @@ the same binary.
 ferridriver [GLOBAL FLAGS] <SUBCOMMAND> [ARGS]
 ```
 
-Subcommands:
-
-| Command | Purpose |
-|---|---|
-| `mcp` | Run the MCP server (stdio or HTTP) for AI agents |
-| `bdd` | Run Gherkin features (Rust and/or JS/TS step bodies) |
-| `test` | Wrap `cargo nextest` / `cargo test` for Rust unit/integration tests |
-| `run` | Execute a JS script with Playwright-style bindings |
-| `install` | Download browser binaries into the local cache |
+| Subcommand           | Purpose |
+|----------------------|---------|
+| `ferridriver mcp`    | Run the MCP server (stdio or HTTP) for AI agents |
+| `ferridriver bdd`    | Run Gherkin features (Rust and / or JS / TS step bodies) |
+| `ferridriver test`   | Wrap `cargo nextest` / `cargo test` for Rust unit and integration tests |
+| `ferridriver run`    | Execute a JavaScript script with Playwright-style bindings |
+| `ferridriver install`| Download browser binaries into the local cache |
 
 ## Global flags
 
 ```
--v, --verbose...           increase log level (-v = info+debug, -vv = trace)
--c, --config <PATH>        YAML / TOML / JSON config file
+-v, --verbose...        Cumulative log level (-v debug, -vv trace incl. CDP)
+-c, --config PATH       Config file (TOML/YAML/JSON; inferred from extension).
+                        Auto-searches ferridriver.{toml,yaml,yml,json} in the
+                        current directory and ~/.config/ferridriver/.
 ```
 
 ## `ferridriver mcp`
 
 ```
-    --backend <B>          cdp-pipe (default) | cdp-raw | webkit | bidi
-    --headless             run browser headless
-    --executable-path      path to a Chrome / Chromium binary
-    --connect <URL>        WebSocket URL of a running browser
-    --auto-connect <CH>    discover a running browser by channel name
-    --user-data-dir <DIR>  persistent Chrome profile directory
-    --transport <T>        stdio (default) | http
-    --port <N>             HTTP port (default: 8080)
+--backend BACKEND       cdp-pipe (default) | cdp-raw | webkit | bidi
+--headless              Run the browser without a visible window
+--executable-path PATH  Path to a Chrome / Chromium binary
+--connect URL           WebSocket URL of an already-running browser
+--auto-connect CHANNEL  Discover a running Chrome by channel name (mutually exclusive with --connect)
+--user-data-dir DIR     Persistent Chrome profile directory (used by --auto-connect)
+--transport TRANSPORT   stdio (default) | http
+--port N                HTTP port (default 8080)
 ```
+
+See [MCP overview](/mcp/overview) and [Client setup](/mcp/setup).
 
 ## `ferridriver bdd`
 
 ```
-ferridriver bdd [--steps <GLOB>]... [--tags <EXPR>] [--workers <N>]
-                [--reporter <SPEC>]... [--strict] [--dry-run]
-                [--order defined|random[:SEED]] [--language <LANG>]
-                <FEATURE GLOBS>...
+ferridriver bdd [--steps GLOB]... [--tags EXPR] [--workers N]
+                [--reporter SPEC]... [--strict] [--dry-run] [--fail-fast]
+                [--step-timeout MS] [--order defined|random[:SEED]]
+                [--language LANG] [--world-parameters JSON]
+                [BROWSER FLAGS]
+                FEATURE_GLOB...
 ```
 
-`--steps` loads JavaScript/TypeScript step-definition files (repeatable;
-overrides `[test].steps`). They are bundled with rolldown, compiled to
-QuickJS bytecode once, and run through the core test runner — no Node or
-Bun required.
+`--steps` loads JavaScript / TypeScript step-definition files
+(repeatable; overrides `[test].steps` from the config file). Files are
+bundled with rolldown, compiled to QuickJS bytecode once at startup, and
+run on the embedded engine — no Node, no Bun.
+
+Defaults to `steps/**/*.{js,ts}` and `step_definitions/**/*.{js,ts}` when
+no `--steps` flag is provided.
+
+Browser flags shared with `mcp`: `--backend`, `--headless`,
+`--executable-path`, `--connect`, `--auto-connect`, `--user-data-dir`.
+
+## `ferridriver test`
+
+```
+ferridriver test [FILTER] [-p PACKAGE]... [--runner nextest|cargo]
+                 [--profile PROFILE] [-- PASSTHROUGH...]
+```
+
+Auto-detects `cargo-nextest` and falls back to `cargo test`. Useful in
+mixed projects where one command should drive any Rust test target.
+
+## `ferridriver run`
+
+```
+ferridriver run [SCRIPT|-] [-e CODE] [--timeout-ms MS] [-- ARGS...]
+```
+
+Executes a `.js` / `.mjs` script with Playwright-shaped globals
+(`chromium`, `firefox`, `webkit`, `page`, `context`, `request`). `args`
+is the positional list exposed as a global. `-` reads source from stdin.
+`--eval` runs an inline expression instead of a file.
 
 ## `ferridriver install`
 
 ```
-ferridriver install [chromium|chromium-headless-shell|firefox]... [--with-deps]
+ferridriver install [BROWSERS]... [--with-deps]
 ```
 
-Defaults to `chromium`. `--with-deps` also installs required system
-libraries (Linux).
+Browsers: `chromium`, `chromium-headless-shell`, `firefox`. Defaults to
+`chromium`. `--with-deps` also installs Linux system libraries via the
+platform package manager.
+
+The WebKit backend uses Playwright's WebKit binary; it is not downloaded
+by `ferridriver install` today. Provide it via `FERRIDRIVER_WEBKIT` or
+install Playwright once (`npx playwright install webkit`).
+
+## Environment variables
+
+| Variable                    | Purpose |
+|-----------------------------|---------|
+| `RUST_LOG`                  | Standard tracing filter — takes priority. Example: `RUST_LOG=warn,ferridriver::cdp=trace`. |
+| `FERRIDRIVER_DEBUG`         | Category-based filter when `RUST_LOG` is unset. Values: `*` / `all`, `cdp`, `step` / `steps`, `hook` / `hooks`, `worker`, `fixture`, `reporter`, `action`, `runner`. |
+| `FERRIDRIVER_PROFILE`       | `chrome` writes `trace-{pid}.json`; `console` enables the `tokio-console` dashboard. |
+| `FERRIDRIVER_TRACE_FILE`    | Override the Chrome trace output path. |
+| `FERRIDRIVER_BROWSERS_PATH` | Override the browser cache directory. |
+| `FERRIDRIVER_WEBKIT`        | Override the Playwright WebKit checkout path. |
+| `FERRIDRIVER_INSTALL_DIR`   | Where the install script drops the binary (`install.sh` only). |
 
 ## Install the binary
 
 ```bash
-# From crates.io
 cargo install ferridriver-cli
-
-# From GitHub releases (prebuilt binary)
+# or prebuilt
 curl -fsSL https://github.com/salamaashoush/ferridriver/releases/latest/download/ferridriver-VERSION-TARGET.tar.gz | tar xz
 ```
 

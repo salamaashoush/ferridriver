@@ -1,8 +1,12 @@
 # Selectors
 
-Every call to `page.locator(...)` or `locator.locator(...)` takes a **selector string**. ferridriver implements the full Playwright selector engine in Rust: each selector compiles to a pipeline of parts that run against the DOM via a small IIFE injected once per page.
+Every call to `page.locator(...)` or `locator.locator(...)` takes a
+**selector string**. ferridriver implements the full Playwright selector
+engine in Rust: each selector compiles to a pipeline of parts that runs
+against the DOM via a small IIFE injected once per page.
 
-You usually don't need the engine prefixes — CSS is the default, and helpers like `get_by_role` build a correct rich selector for you.
+You usually do not need engine prefixes — CSS is the default, and the
+`get_by_*` helpers build correct rich selectors for you.
 
 ## CSS is the default
 
@@ -17,33 +21,34 @@ page.locator("form > input:first-child")
 
 ## Engines
 
-Prefix a part with `engine=` to switch engines. Engines are:
+Prefix a part with `engine=` to switch engines:
 
-| Prefix | What it matches |
-|---|---|
-| `css=`          | CSS selectors (the default; prefix is optional) |
-| `text=`          | Visible text, substring by default, quoted string for exact (`text="Hello"`) |
-| `role=`          | ARIA role, with optional `[name=...]`, `[level=...]`, `[checked=true]`, etc. |
-| `label=`         | Form label text (picks the associated control) |
-| `placeholder=`   | Input `placeholder` attribute |
-| `alt=`           | Image `alt` attribute |
-| `title=`         | Any element's `title` attribute |
-| `testid=`        | `data-testid` attribute |
-| `xpath=`         | XPath expression |
-| `id=`            | Exact `id` attribute |
-| `nth=N`          | Pick the Nth result from the previous part (0-indexed) |
-| `visible=true`   | Filter previous part to visible elements only |
-| `has=...`        | Keep only elements that have a descendant matching the inner selector |
-| `has-text=...`   | Keep only elements whose text contains the argument |
-| `has-not=...`    | Inverse of `has` |
-| `has-not-text=...` | Inverse of `has-text` |
+| Prefix              | Matches |
+|---------------------|---------|
+| `css=`              | CSS selectors (default; prefix optional) |
+| `text=`             | Visible text (substring by default, quoted for exact: `text="Hello"`) |
+| `role=`             | ARIA role, with optional refiners (`role=button[name="Save"]`) |
+| `label=`            | Form label text (picks the associated control) |
+| `placeholder=`      | Input `placeholder` attribute |
+| `alt=`              | Image `alt` attribute |
+| `title=`            | Any element's `title` attribute |
+| `testid=`           | `data-testid` attribute |
+| `xpath=`            | XPath expression |
+| `id=`               | Exact `id` attribute |
+| `nth=N`             | Pick the Nth result from the previous part (0-indexed) |
+| `visible=true`      | Filter previous part to visible elements only |
+| `has=...`           | Keep elements that have a descendant matching the inner selector |
+| `has-text=...`      | Keep elements whose text contains the argument |
+| `has-not=...`       | Inverse of `has` |
+| `has-not-text=...`  | Inverse of `has-text` |
 
 ## Chaining with `>>`
 
-The `>>` operator narrows scope: each part's results become the roots for the next part's query.
+The `>>` operator narrows scope: each part's results become the roots
+for the next part's query.
 
 ```rust
-// Find buttons named "Delete" inside the current row
+// Buttons named "Delete" inside the current row
 page.locator("css=tr.row >> role=button[name=Delete]")
 
 // First item in a list that contains "Keep"
@@ -78,11 +83,9 @@ Text-based engines accept options from their typed getter equivalents:
 ```rust
 use ferridriver::options::TextOptions;
 
-// Rust: exact string, case-sensitive
 let opts = TextOptions { exact: Some(true), ..Default::default() };
 page.get_by_text("Sign in", &opts);
 
-// Rust: regex
 let opts = TextOptions { regex: Some("^Sign".to_string()), ..Default::default() };
 page.get_by_text("", &opts);
 ```
@@ -97,9 +100,10 @@ text=/^Hello$/i         regex with flags
 
 ## Typed getters
 
-The `get_by_*` helpers build the right selector for you and are the preferred API when you have something accessible to target.
+The `get_by_*` helpers build the right selector for you and are the
+preferred API when you have something accessible to target.
 
-**Rust (`Page`, `Frame`, `Locator`):**
+**Rust:**
 
 ```rust
 page.get_by_role("button", &RoleOptions { name: Some("Save".into()), ..Default::default() });
@@ -125,17 +129,24 @@ page.getByTestId('login-form');
 
 ## Custom test ID attribute
 
-By default, `testid=` and `getByTestId` look at `data-testid`. Override per context:
+By default, `testid=` and `getByTestId` look at `data-testid`. Override
+per context:
 
 ```rust
 browser.new_context_with_options(ContextOptions {
-  test_id_attribute: Some("data-qa".to_string()),
-  ..Default::default()
+    test_id_attribute: Some("data-qa".to_string()),
+    ..Default::default()
 }).await?;
 ```
 
 ## Performance notes
 
-- The selector-engine JavaScript is injected **once per page** via `addInitScript` and re-bootstrapped after navigation. Repeated selectors don't reparse the engine.
-- Each selector is parsed to a `Selector { parts: Vec<SelectorPart> }` **in Rust** (see `crates/ferridriver/src/selectors.rs`) and then compiled into a single IIFE — no per-query JS eval.
-- `locator(...)` is lazy: no DOM query happens until you call an action (`click`, `fill`, ...) or an assertion (`to_be_visible`, `to_have_text`, ...).
+- The selector-engine JavaScript is injected **once per page** via
+  `addInitScript` and re-bootstrapped after navigation. Repeated
+  selectors do not reparse the engine.
+- Each selector parses to a `Selector { parts: Vec<SelectorPart> }`
+  **in Rust** (see `crates/ferridriver/src/selectors.rs`) and compiles
+  into a single IIFE — no per-query JS eval.
+- `locator(...)` is lazy: no DOM query happens until you call an action
+  (`click`, `fill`, …) or an assertion (`to_be_visible`,
+  `to_have_text`, …).

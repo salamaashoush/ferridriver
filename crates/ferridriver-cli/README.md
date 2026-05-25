@@ -1,187 +1,139 @@
 # ferridriver-cli
 
-Scripting-focused MCP (Model Context Protocol) server for AI-powered browser automation. `run_script` is the action path — a sandboxed QuickJS runtime with live Page / Locator / BrowserContext / HttpClient bindings over the ferridriver core.
+[![crates.io](https://img.shields.io/crates/v/ferridriver-cli.svg?logo=rust&color=c97b4a)](https://crates.io/crates/ferridriver-cli)
+[![docs.rs](https://img.shields.io/docsrs/ferridriver-cli?logo=docs.rs&color=c97b4a)](https://docs.rs/ferridriver-cli)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-c97b4a.svg)](https://github.com/salamaashoush/ferridriver)
 
-Ships as the `ferridriver` binary. Supports stdio (default) and HTTP transports, and four browser backends (`cdp-pipe`, `cdp-raw`, `webkit`, `bidi`).
+The `ferridriver` command-line binary. Five subcommands:
+
+| Subcommand       | Purpose |
+|------------------|---------|
+| `ferridriver mcp` | Run the MCP server (stdio or HTTP transport) |
+| `ferridriver bdd` | Run Gherkin features with Rust and / or JS / TS step bodies |
+| `ferridriver test` | Wrap `cargo nextest` / `cargo test` for Rust unit and integration tests |
+| `ferridriver run` | Execute a JavaScript script with Playwright-style bindings |
+| `ferridriver install` | Download browser binaries into the local cache |
 
 ## Install
 
 ```bash
-# From source
+# From crates.io
 cargo install ferridriver-cli
 
 # From GitHub releases
 curl -fsSL https://github.com/salamaashoush/ferridriver/releases/latest/download/ferridriver-VERSION-TARGET.tar.gz | tar xz
 ```
 
-## Register with an MCP client
-
-```json
-{
-  "mcpServers": {
-    "ferridriver": {
-      "command": "ferridriver",
-      "args": []
-    }
-  }
-}
-```
-
-## CLI flags
+## Global flags
 
 ```
--v, --verbose...           increase log level (-v = info+debug, -vv = trace)
--c, --config <PATH>        YAML / TOML / JSON config file
-
-    --backend <B>          cdp-pipe (default) | cdp-raw | webkit | bidi
-    --headless             run browser headless (default: true)
-    --executable-path      path to a Chrome / Chromium binary
-    --connect <URL>        WebSocket URL of a running browser
-    --auto-connect <CH>    discover a running browser by channel name
-    --user-data-dir <DIR>  persistent Chrome profile directory
-
-    --transport <T>        stdio (default) | http
-    --port <N>             HTTP port (default: 8080)
+-v, --verbose...   Cumulative log level (-v debug, -vv trace incl. CDP)
+-c, --config PATH  Config file (TOML / YAML / JSON; format inferred from extension).
+                   Auto-searches ferridriver.toml in the current directory and
+                   ~/.config/ferridriver/ when not specified.
 ```
 
-## Tools (9)
-
-### Navigation (3)
-
-- **connect** — attach to a running Chrome (debugger URL or `auto_discover`)
-- **navigate** — go to URL; returns a fresh accessibility snapshot
-- **page** — manage pages / tabs (`back`, `forward`, `reload`, `new`, `close`, `select`, `list`, `close_browser`)
-
-### Observation (4)
-
-- **snapshot** — primary grounding tool: accessibility tree with `[ref=eN]` handles, roles, visible text. Always your first action before deciding on selectors
-- **screenshot** — PNG / JPEG / WebP base64 image. Use sparingly — heavier than `snapshot`
-- **evaluate** — single JavaScript expression in the page; returns JSON-serialized value
-- **search_page** — grep the page's rendered text (literal or regex) with surrounding context
-
-### Diagnostics (1)
-
-- **diagnostics** — session telemetry: console messages, network requests, performance metrics
-
-### Scripting (1)
-
-- **run_script** — sandboxed QuickJS runtime with Page, Locator, BrowserContext, HttpClient bindings. See below
-
-## `run_script`
-
-One tool call executes many browser operations without LLM round-trips between them.
-
-```js
-// source
-await page.goto(args[0]);
-await page.getByLabel('Email').fill(args[1]);
-await page.getByLabel('Password').fill(args[2]);
-await page.getByRole('button', { name: 'Sign in' }).click();
-await page.waitForSelector('[data-testid="dashboard"]');
-return { title: await page.title(), cookies: await context.cookies() };
-```
-
-**Globals**
-
-| Name | Purpose |
-|---|---|
-| `page` | Playwright-shaped Page: `goto`, `click`, `fill`, `hover`, `press`, `type`, `check`, `uncheck`, `selectOption`, `locator`, `getByRole`/`getByText`/`getByLabel`/`getByPlaceholder`/`getByAltText`/`getByTestId`, `waitForSelector`, `textContent`, `innerText`, `innerHTML`, `inputValue`, `getAttribute`, `isVisible`/`isHidden`/`isEnabled`/`isDisabled`/`isChecked`, `evaluate`, `title`, `url`, `content`, `setContent`, `markdown`, `screenshot`, `reload`, `goBack`, `goForward`, `close`, `isClosed` |
-| `Locator` | Returned from `page.locator` / `page.getBy*`. `click`, `dblclick`, `fill`, `type`, `press`, `hover`, `focus`, `blur`, `check`, `uncheck`, `setChecked`, `clear`, `selectOption`, `scrollIntoViewIfNeeded`, `count`, `textContent`, `innerText`, `innerHTML`, `inputValue`, `getAttribute`, visibility/state predicates, `first`/`last`/`nth`/`locator`, `allTextContents`/`allInnerTexts`, `evaluate` |
-| `context` | BrowserContext: `cookies`, `addCookies`, `clearCookies`, `deleteCookie`, `grantPermissions`, `clearPermissions`, `setGeolocation`, `setOffline`, `setExtraHTTPHeaders`, `addInitScript`, `close` |
-| `request` | HttpClient for runner-side HTTP: `get`, `post`, `put`, `delete`, `patch`, `head`, `fetch`. Returns `HttpResponse` with `status`, `ok`, `url`, `text`, `json`, `headersArray`, `header` |
-| `args` | Positional arguments bound to the script. Access via `args[0]`, `args[1]`. **Use this for any caller-controlled data** — bound values are safe from source-level injection |
-| `vars` | Session-level string store: `get`/`set`/`has`/`delete`/`keys`. Persists across `run_script` calls with the same session |
-| `console` | `log`/`info`/`warn`/`error`/`debug` — captured with size limits (1000 entries / 1 MiB / 8 KiB per entry), ANSI-stripped, returned in the result |
-| `fs` | Scoped I/O: `readFile`, `readFileBytes`, `writeFile`, `readdir`, `exists`. Bound to `script_root`; absolute paths, `..`, and symlink escapes are rejected |
-
-ES module `import './foo.js'` resolves inside `script_root` with the same sandbox rules.
-
-**Parameters**
-
-```jsonc
-{
-  "source":           "await page.goto(args[0]); return await page.title();",
-  "args":             ["https://example.com"],  // bound array, accessed via args[0]
-  "timeout_ms":       30000,                     // optional; default 5 min
-  "memory_limit_mb":  256,                        // optional; default 256 MiB
-  "session":          "default"                   // optional
-}
-```
-
-**Return**
-
-```jsonc
-{
-  "status": "ok" | "error",
-  "value":  /* JSON-serialized script return, on ok */,
-  "error": {
-    "kind":           "runtime" | "syntax" | "timeout" | "memory_limit" | "sandbox_violation" | "internal",
-    "message":        "Cannot read property 'click' of null",
-    "stack":          "...",
-    "line":           14,
-    "column":         21,
-    "source_snippet": "12: ...\n13: ...\n14: >>> await page.click('.foo')\n15: ..."
-  },
-  "duration_ms": 42,
-  "console": [
-    { "level": "log", "message": "...", "ts_ms": 0 }
-  ]
-}
-```
-
-Script errors surface as `status: "error"` in the payload, not as MCP-level errors — callers can inspect the failure without catching protocol exceptions.
-
-## Sessions
-
-All tools accept an optional `session` parameter (default: `"default"`). Sessions have isolated cookies, localStorage, and network state. Use for multi-user testing or parallel automation.
+## `ferridriver mcp`
 
 ```
-session: "admin"        isolated context named "admin"
-session: "staging:qa"   context "qa" on Chrome instance "staging"
+--backend BACKEND       cdp-pipe (default) | cdp-raw | webkit | bidi
+--headless              Run the browser without a visible window
+--executable-path PATH  Path to a Chrome / Chromium binary
+--connect URL           WebSocket URL of an already-running browser
+--auto-connect CHANNEL  Discover a running Chrome by channel name (mutually exclusive with --connect)
+--user-data-dir DIR     Persistent Chrome profile directory (used by --auto-connect)
+--transport TRANSPORT   stdio (default) | http
+--port N                HTTP port (default: 8080)
 ```
 
-Session-scoped `vars` persist across `run_script` calls with the same session; fresh QuickJS context per call means no JS state leaks between runs.
-
-## Accessibility snapshots
-
-`snapshot` returns an LLM-optimized tree:
+## `ferridriver bdd`
 
 ```
-### Page
-- URL: https://example.com
-- Title: Example Domain
-
-### Snapshot
-- heading "Example Domain" [ref=e1] [level=1]
-- paragraph [ref=e2]
-- paragraph [ref=e3]
-  - link "Learn more" [ref=e4] [url=https://iana.org/domains/example]
+ferridriver bdd [--steps GLOB]... [--tags EXPR] [--workers N]
+                [--reporter SPEC]... [--strict] [--dry-run] [--fail-fast]
+                [--step-timeout MS] [--order defined|random[:SEED]]
+                [--language LANG] [--world-parameters JSON]
+                [BROWSER FLAGS]
+                FEATURE_GLOB...
 ```
 
-Refs are tied to that specific snapshot — any `navigate`, `page(select)`, or DOM-mutating `run_script` invalidates them. Re-snapshot before acting. When scripting, prefer Playwright-style locators (`page.getByRole`, `page.getByText`, `page.locator`) — they survive re-snapshots.
+`--steps` loads JavaScript / TypeScript step-definition files
+(repeatable; overrides `[test].steps` from the config file). Files are
+bundled with rolldown, compiled to QuickJS bytecode once, and run on the
+embedded engine — no Node, no Bun. Defaults to `steps/**/*.{js,ts}` and
+`step_definitions/**/*.{js,ts}` when no `--steps` flag is provided.
 
-## Running
+Browser flags shared with `mcp`: `--backend`, `--headless`,
+`--executable-path`, `--connect`, `--auto-connect`, `--user-data-dir`.
 
-```bash
-# stdio transport (default) for Claude Desktop / Cursor / Claude Code
-ferridriver
+## `ferridriver test`
 
-# HTTP transport for remote clients
-ferridriver --transport http --port 8080
-
-# WebKit backend (macOS, no Chrome needed)
-ferridriver --backend webkit
-
-# Firefox over BiDi
-ferridriver --backend bidi
-
-# Attach to a running Chrome
-ferridriver --auto-connect my-channel
-ferridriver --connect ws://localhost:9222/devtools/browser/...
+```
+ferridriver test [FILTER] [-p PACKAGE]... [--runner nextest|cargo]
+                 [--profile PROFILE] [-- PASSTHROUGH...]
 ```
 
-## Building
+Auto-detects `cargo-nextest` and falls back to `cargo test`. Useful in
+mixed projects where one command should drive any Rust test target.
 
-```bash
-cargo build --release -p ferridriver-cli
+## `ferridriver run`
+
 ```
+ferridriver run [SCRIPT|-] [-e CODE] [--timeout-ms MS] [-- ARGS...]
+```
+
+Executes a `.js` / `.mjs` script with Playwright-shaped bindings
+(`chromium`, `firefox`, `webkit`, `page`, `context`, `request`). `args` is
+the positional list exposed as a global. `-` reads from stdin.
+
+## `ferridriver install`
+
+```
+ferridriver install [BROWSERS]... [--with-deps]
+```
+
+Browsers: `chromium`, `chromium-headless-shell`, `firefox`. Defaults to
+`chromium` when none specified. `--with-deps` also installs Linux system
+libraries via the platform package manager (`apt-get`, `pacman`, `dnf`,
+`brew`).
+
+The WebKit backend uses Playwright's WebKit binary; it is not downloaded
+by `ferridriver install` today. Provide it via `FERRIDRIVER_WEBKIT` or use
+Playwright's cache (`npx playwright install webkit` once).
+
+## Environment variables
+
+| Variable                  | Purpose |
+|---------------------------|---------|
+| `RUST_LOG`                | Standard tracing env filter — takes priority. Example: `RUST_LOG=warn,ferridriver::cdp=trace`. |
+| `FERRIDRIVER_DEBUG`       | Category-based filter when `RUST_LOG` is unset. Values: `*` / `all`, `cdp`, `step` / `steps`, `hook` / `hooks`, `worker`, `fixture`, `reporter`, `action`, `runner`, or any tracing target. |
+| `FERRIDRIVER_PROFILE`     | `chrome` writes `trace-{pid}.json`; `console` enables the `tokio-console` dashboard. |
+| `FERRIDRIVER_TRACE_FILE`  | Override the Chrome trace output path. |
+| `FERRIDRIVER_BROWSERS_PATH` | Override the browser cache directory. Defaults to platform cache dir (`~/.cache/ferridriver/` on Linux, `~/Library/Caches/ferridriver/` on macOS, `%LOCALAPPDATA%/ferridriver/` on Windows). |
+| `FERRIDRIVER_WEBKIT`      | Override the Playwright WebKit checkout path (containing `pw_run.sh`). |
+
+## Configuration file
+
+`ferridriver.toml`, `ferridriver.yaml` / `.yml`, or `ferridriver.json`.
+Search order: `-c PATH` → current directory → `~/.config/ferridriver/`.
+Wire keys are camelCase.
+
+```toml
+[mcp]
+# MCP server defaults (browser, transport, instance config).
+
+[test]
+# Test runner defaults — workers, timeouts, reporters, projects, features, steps.
+
+[scripting]
+allowEnv = ["HOME", "TZ"]  # process.env keys a script may read
+
+extensions = ["./extensions", "./tools/box-login.ts"]
+```
+
+See `ferridriver-config` for the full schema. The `mcp` and `test`
+sections are documented at <https://salamaashoush.github.io/ferridriver/>.
+
+## License
+
+MIT OR Apache-2.0

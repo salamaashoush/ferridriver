@@ -1,15 +1,16 @@
 # Fixtures and hooks
 
-Dependency-injected fixtures with three scopes and automatic LIFO teardown. Hooks attach to the suite or test lifecycle.
+Dependency-injected fixtures with three scopes and automatic LIFO
+teardown. Hooks attach to the suite or test lifecycle.
 
 ## Built-in fixtures
 
-| Name | Scope | Type |
-|---|---|---|
-| `browser` | Worker | `Arc<Browser>` |
-| `context` | Test | `Arc<ContextRef>` |
-| `page` | Test | `Arc<Page>` |
-| `test_info` | Test | `Arc<TestInfo>` |
+| Name        | Scope  | Type              |
+|-------------|--------|-------------------|
+| `browser`   | Worker | `Arc<Browser>`    |
+| `context`   | Test   | `Arc<ContextRef>` |
+| `page`      | Test   | `Arc<Page>`       |
+| `test_info` | Test   | `Arc<TestInfo>`   |
 
 ## Scope hierarchy
 
@@ -26,11 +27,17 @@ flowchart TB
   class T test
 ```
 
-`pool.get::<T>("name")` walks the scope chain, resolves dependencies recursively, caches values, and registers teardown. The DAG is validated at startup.
+`pool.get::<T>("name")` walks the scope chain, resolves dependencies
+recursively, caches values, and registers teardown. The DAG is validated
+at startup.
 
 ## Hooks
 
-All hook macros (`#[before_all]`, `#[after_all]`, `#[before_each]`, `#[after_each]`) take no attributes. Every hook receives a `TestContext` — name it however you like. Suite hooks (`before_all` / `after_all`) run once per suite per worker; each hooks (`before_each` / `after_each`) run for every test.
+All hook macros (`#[before_all]`, `#[after_all]`, `#[before_each]`,
+`#[after_each]`) take no attributes. Every hook receives a
+`TestContext` — name it however you like. Suite hooks (`before_all` /
+`after_all`) run once per suite per worker; each hooks (`before_each` /
+`after_each`) run for every test.
 
 ```rust
 use ferridriver_test::prelude::*;
@@ -47,7 +54,6 @@ async fn teardown_db(ctx: TestContext) {
 
 #[before_each]
 async fn set_auth(ctx: TestContext) {
-    // Runs for every test. Fetch fixtures via ctx.page(), ctx.context(), etc.
     let context = ctx.context().await?;
     context.add_cookies(vec![/* ... */]).await?;
 }
@@ -73,7 +79,7 @@ sequenceDiagram
     W->>F: create fresh context + page
     W->>F: inject browser, context, page, test_info
     W->>T: beforeEach
-    W->>T: run body (timeout; 3x for @slow)
+    W->>T: run body (timeout; 3x for slow)
     W->>T: afterEach (runs even on failure)
     alt test failed
       W->>W: screenshot
@@ -82,3 +88,62 @@ sequenceDiagram
   end
   W->>S: afterAll (on worker shutdown)
 ```
+
+## Custom fixtures
+
+Use the `#[fixture]` attribute to register a custom value with explicit
+scope. The body becomes a producer; teardown happens automatically when
+the scope ends.
+
+```rust
+use ferridriver_test::prelude::*;
+use std::sync::Arc;
+
+#[ferridriver_test::fixture(scope = "test")]
+async fn authed_page(ctx: TestContext) -> Arc<Page> {
+    let page = ctx.page().await.unwrap();
+    page.goto("https://app.example.com/login", None).await.unwrap();
+    page.locator("#email").fill("user@example.com").await.unwrap();
+    page.locator("button[type=submit]").click().await.unwrap();
+    page.wait_for_url("/dashboard").await.unwrap();
+    page
+}
+```
+
+```rust
+#[ferritest]
+async fn shows_dashboard(ctx: TestContext) {
+    let page = ctx.get::<Arc<Page>>("authed_page").await?;
+    expect(&page.locator("h1")).to_have_text("Dashboard").await?;
+}
+```
+
+Fixtures can depend on other fixtures — request them from `ctx` inside
+the body. The DAG is validated at startup: a cycle aborts the run before
+any test starts.
+
+## Hooks vs fixtures
+
+Both run around tests; they solve different problems:
+
+- **Fixtures** are *pull*-based. The test asks for what it needs;
+  unused fixtures never run. They carry values.
+- **Hooks** are *push*-based. They run for every test in the suite
+  whether the test uses them or not. They carry side effects.
+
+If you have a value to inject, make it a fixture. If you have a side
+effect that every test needs regardless of the body (metrics tagging,
+screenshot on failure, log-capture setup), make it a hook.
+
+## Practical guidance
+
+- **Prefer test-scope over worker-scope.** If a fixture is cheap (tens
+  of ms), recreate it. You save a class of "why did this test pollute
+  the next one" bugs.
+- **Don't hide `ctx.page()` behind a fixture.** `page` is already a
+  test-scoped built-in; a custom one would just be an alias.
+- **Worker-scope is for things that are truly expensive** — a browser,
+  a webdriver session, a seeded database snapshot.
+- **Global-scope is for things that are `#[ignore]`-able by design** —
+  integration-test infrastructure you start once (a docker-compose
+  stack, a migrated DB, a webhook listener).
