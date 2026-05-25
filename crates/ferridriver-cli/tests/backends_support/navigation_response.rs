@@ -123,7 +123,10 @@ pub fn test_goto_network_failure(c: &mut McpClient) {
       || msg.contains("NS_ERROR")
       || msg.contains("failed")
       || msg.contains("refused")
-      || msg.contains("Navigation"),
+      || msg.contains("Navigation")
+      // PW WebKit surfaces network failures as plain CFNetwork strings
+      // on macOS — "Could not connect to the server.".
+      || msg.contains("Could not connect"),
     "error should name the network failure: {msg}",
   );
 }
