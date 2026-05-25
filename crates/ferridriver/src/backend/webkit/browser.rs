@@ -194,7 +194,7 @@ impl WebKitBrowser {
     Ok(parsed.browser_context_id)
   }
 
-  /// Create a context with the full [`BrowserContextOptions`] bag.
+  /// Create a context with the full `BrowserContextOptions` bag.
   ///
   /// Sends `Playwright.createContext` for the proxy fields, then
   /// `Playwright.setLanguages` if `locale` is set (mirroring

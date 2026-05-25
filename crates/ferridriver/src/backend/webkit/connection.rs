@@ -15,7 +15,7 @@
 //!
 //! Per `wkConnection.ts`, message ids come from a single connection-wide
 //! counter, so a response routes back purely by `id` — no per-level id
-//! space. Only *events* need routing, by [`RouteKey`].
+//! space. Only *events* need routing, by `RouteKey`.
 
 use super::protocol::{Envelope, ErrorPayload};
 use super::transport::{ReaderHandle, Transport, TransportError, WriterHandle};
