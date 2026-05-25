@@ -135,11 +135,23 @@ jobs:
 
       - name: Install system deps (Linux)
         if: runner.os == 'Linux'
+        # ferridriver install --with-deps covers Chromium runtime libs.
+        # Playwright WebKit needs an extra GTK / WebKit2 / GStreamer set
+        # that `install --with-deps` does not handle yet — install them
+        # inline until install_system_deps grows a webkit list.
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
             libclang-dev pkg-config ffmpeg \
-            libdbus-glib-1-2 libxt6 libxtst6 libgtk-3-0t64
+            libdbus-glib-1-2 libxt6 libxtst6 libgtk-3-0t64 \
+            libwoff1 libvpx9 libopus0 libwebp7 libwebpdemux2 \
+            libharfbuzz-icu0 libenchant-2-2 libhyphen0 libsecret-1-0 \
+            libnotify4 libgles2 libegl1 libxslt1.1 libevent-2.1-7t64 \
+            libgudev-1.0-0 libsoup-3.0-0 libavif16 \
+            libgstreamer-plugins-base1.0-0 libgstreamer-gl1.0-0 \
+            libgstreamer-plugins-bad1.0-0 gstreamer1.0-libav \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good \
+            gstreamer1.0-plugins-bad
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
