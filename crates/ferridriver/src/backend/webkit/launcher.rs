@@ -155,9 +155,19 @@ fn playwright_caches() -> Vec<PathBuf> {
     out.push(home.join(".cache/ms-playwright"));
     #[cfg(target_os = "windows")]
     out.push(home.join("AppData/Local/ms-playwright"));
-    // ferridriver's own cache (populated by `install webkit`).
-    out.push(home.join(".cache/ferridriver/webkit"));
   }
+  // ferridriver's own cache (populated by `install webkit`). Mirrors
+  // BrowserInstaller::new(): respects FERRIDRIVER_BROWSERS_PATH first,
+  // then dirs::cache_dir() (~/.cache on Linux, ~/Library/Caches on
+  // macOS, %LOCALAPPDATA% on Windows) joined with `ferridriver/webkit`.
+  let ferri_cache = if let Ok(p) = std::env::var("FERRIDRIVER_BROWSERS_PATH") {
+    PathBuf::from(p)
+  } else {
+    dirs::cache_dir()
+      .unwrap_or_else(|| PathBuf::from(".cache"))
+      .join("ferridriver")
+  };
+  out.push(ferri_cache.join("webkit"));
   out
 }
 

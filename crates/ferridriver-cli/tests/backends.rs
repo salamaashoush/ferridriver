@@ -2143,11 +2143,15 @@ fn test_script_error_surfaces_structured(c: &mut McpClient) {
 
 // ─── Run all tests on one client ────────────────────────────────────────────
 
-fn run_all_tests(backend: &str) {
+/// Run a closure-supplied test list against a fresh `McpClient` for
+/// `backend`. Each per-(backend, category) `#[test]` reaches here via
+/// the `gen_backend_tests!` macro at the bottom of this file. The
+/// shared browser model (one launch per `#[test]`) preserves the
+/// original architecture's per-backend cost while letting nextest
+/// distribute categories in parallel.
+fn run_category(backend: &str, register: fn(&mut TestSet<'_>)) {
   let mut c = McpClient::new(backend);
-  let is_cdp = backend == "cdp-pipe" || backend == "cdp-raw";
   let mut passed = 0u32;
-  let mut failed = 0u32;
   let mut failures: Vec<String> = Vec::new();
 
   // Optional substring filter for interactive debugging. When
@@ -2158,323 +2162,17 @@ fn run_all_tests(backend: &str) {
   let filter = std::env::var("FERRIDRIVER_TEST_FILTER").ok();
   let verbose = std::env::var("FERRIDRIVER_TEST_VERBOSE").is_ok();
 
-  macro_rules! run {
-    ($name:path) => {{
-      let name = stringify!($name);
-      if filter.as_deref().is_none_or(|f| name.contains(f)) {
-        if verbose {
-          eprintln!("=== RUN {backend} {name}");
-        }
-        match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| $name(&mut c))) {
-          Ok(()) => {
-            passed += 1;
-          },
-          Err(_) => {
-            failed += 1;
-            failures.push(name.to_string());
-            eprintln!("  FAIL {name}");
-          },
-        }
-      }
-    }};
-  }
+  let mut set = TestSet {
+    backend,
+    client: &mut c,
+    passed: &mut passed,
+    failures: &mut failures,
+    filter: filter.as_deref(),
+    verbose,
+  };
+  register(&mut set);
 
-  // `run_cdp!` historically gated emulation tests to CDP only because
-  // webkit hadn't wired the equivalents through `apply_context_options`.
-  // Round 5 wired them; the macro stays in place for any future
-  // CDP-specific protocol coverage (e.g. CDP-only `Tracing.start`
-  // categories) without forcing a re-derivation.
-  #[allow(unused_macros)]
-  macro_rules! run_cdp {
-    ($name:path) => {{
-      if is_cdp {
-        run!($name);
-      }
-    }};
-  }
-
-  // Silence the unused-binding lint for the rare-call macro above
-  // without papering over a real bug.
-  let _ = is_cdp;
-
-  // Navigation + session
-  run!(test_navigate);
-  run!(test_page_list);
-  run!(test_page_reload);
-  run!(test_page_back_forward);
-
-  // evaluate
-  run!(test_evaluate_number);
-  run!(test_evaluate_string);
-  run!(test_evaluate_dom);
-  run!(test_evaluate_promise);
-  run!(test_evaluate_boolean);
-  run!(test_evaluate_array);
-  run!(test_evaluate_object);
-  run!(test_evaluate_null);
-  run!(test_evaluate_error);
-  run!(test_evaluate_syntax_error);
-  run!(test_evaluate_large_payload);
-
-  // snapshot + screenshot + search_page
-  run!(test_snapshot);
-  run!(test_snapshot_scroll_info);
-  run!(test_screenshot_png);
-  run!(test_screenshot_full_page);
-  run!(test_search_page);
-  run!(test_search_page_regex);
-  run!(test_search_page_no_match);
-
-  // diagnostics (CDP-only: trace uses Performance domain)
-  run!(test_console_messages);
-  run!(test_network_requests);
-  run!(test_trace);
-
-  // run_script: Page interaction
-  run!(test_script_click);
-  run!(test_script_fill);
-  run!(test_script_fill_form);
-  run!(test_script_type);
-  run!(test_script_press);
-  run!(test_script_hover);
-  run!(test_script_dblclick);
-  run!(test_script_select_option);
-  run!(test_script_check_uncheck);
-  run!(test_script_scroll);
-  run!(test_script_scroll_into_view);
-  run!(test_script_click_offscreen);
-  run!(test_script_dialog_alert);
-  run!(test_script_fill_dispatches_events);
-
-  // run_script: mouse/keyboard namespaces + coordinate-based actions
-  run!(test_script_click_at);
-  run!(test_script_mouse_click_coords);
-  run!(test_script_drag_coords);
-  run!(test_script_drag_and_drop);
-  run!(test_script_drag_and_drop_options);
-  run!(test_script_locator_drag_to_options);
-  run!(test_script_drag_and_drop_trial);
-  run!(test_script_emulate_media_all_fields);
-  run!(test_script_emulate_media_null_disables_single_field);
-  run!(test_script_add_init_script);
-  run!(test_script_utility_script_exposed);
-  // Task 1.2 + 1.3 phase C — JSHandle + ElementHandle lifecycle (4
-  // backends via the QuickJS bindings).
-  run!(test_script_handle_lifecycle);
-  // WebKit-only observability: Op::ReleaseRef actually shrinks
-  // `window.__wr` (CDP and BiDi dispose paths are proven via the
-  // successful `dispose()` call but have no page-observable side
-  // effect until phase D's use-after-dispose test).
-  run!(test_script_evaluate_fn_and_handle);
-  run!(test_script_evaluate_rich_types);
-  run!(test_script_element_handle_methods);
-  run!(test_script_handle_materialisation);
-  // Handle surface — JSHandle value/property/multi-arg evaluate,
-  // ElementHandle $eval/$$eval, frame accessors, wait helpers,
-  // temp-tag actions, selectText. All on four backends.
-  run!(backends_support::handle_surface::test_handle_json_value);
-  run!(backends_support::handle_surface::test_handle_properties);
-  run!(backends_support::handle_surface::test_handle_multi_arg_evaluate);
-  run!(backends_support::handle_surface::test_element_handle_eval);
-  run!(backends_support::handle_surface::test_element_handle_frames);
-  run!(backends_support::handle_surface::test_element_handle_waits);
-  run!(backends_support::handle_surface::test_element_handle_temp_tag_actions);
-  run!(backends_support::handle_surface::test_element_handle_select_text);
-  run!(test_script_click_options);
-  // Per-option Rule-9 coverage for the remaining §1.5 methods.
-  run!(backends_support::action_options::test_script_dblclick_options);
-  run!(backends_support::action_options::test_script_press_options);
-  run!(backends_support::action_options::test_script_type_options);
-  run!(backends_support::action_options::test_script_set_input_files_polymorphism);
-  run!(test_script_action_timeout);
-  run!(test_script_tap_native);
-  run!(test_script_fill_force);
-  run!(test_script_check_behavior);
-  run!(test_script_dispatch_event_timeout);
-  run!(test_script_select_option_force);
-  run!(test_script_mouse_wheel);
-  run!(test_script_keyboard_press);
-
-  // run_script: Frame sync accessors (Playwright parity — task 3.8)
-  run!(test_script_frame_sync_accessors);
-  run!(test_script_frame_selector_union);
-
-  // run_script: waits
-  run!(test_script_wait_for_selector);
-  run!(test_script_wait_for_text);
-  run!(test_script_auto_wait_visibility);
-
-  // run_script: Locator chains
-  run!(test_script_locator_role);
-  run!(test_script_locator_label);
-  run!(test_script_locator_placeholder);
-  run!(test_script_locator_text);
-  run!(test_script_locator_nth);
-  run!(test_script_locator_all_text);
-  run!(test_script_selector_chain);
-
-  // run_script: file input
-  run!(test_script_upload_file);
-
-  // run_script: page-scoped emulation. PW WebKit wires through
-  // `Page.overrideUserAgent` (via context options bag) /
-  // `Emulation.setDeviceMetricsOverride` so both run on every backend.
-  // Legacy `webkit` backend stays skipped at the test body level.
-  run!(test_script_user_agent);
-  run!(test_script_viewport);
-
-  // run_script: context-scoped emulation. PW WebKit wires
-  // `Playwright.setGeolocationOverride` (root browser session) and
-  // `Network.setEmulateOfflineState` (target session) through
-  // `apply_context_options`.
-  run!(test_script_geolocation);
-  run!(test_script_offline);
-
-  // run_script: BrowserContext cookies + page storage
-  run!(test_script_cookies);
-  run!(test_script_localstorage);
-
-  // run_script: page markdown extraction
-  run!(test_script_markdown);
-  run!(test_script_markdown_links);
-
-  // run_script: args + vars + console + errors
-  run!(test_script_bound_args);
-  run!(test_script_vars_persist_across_calls);
-  run!(test_script_globals_persist_across_calls);
-  run!(test_script_throw_keeps_session_state);
-  run!(test_script_session_recovers_after_timeout);
-  run!(test_script_timers_and_web_globals);
-  run!(test_script_console_captured);
-  run!(test_script_error_surfaces_structured);
-
-  // §1.4 lifecycle objects (Request / Response / WebSocket).
-  run!(backends_support::network::test_network_redirect_chain);
-  run!(backends_support::network::test_network_request_failure);
-  run!(backends_support::network::test_network_response_body);
-  run!(backends_support::network::test_network_post_data);
-  run!(backends_support::network::test_network_headers);
-  run!(backends_support::network::test_network_websocket);
-
-  // §3.1 Navigation methods return main-document Response.
-  run!(backends_support::navigation_response::test_goto_returns_response);
-  run!(backends_support::navigation_response::test_goto_follows_redirects);
-  run!(backends_support::navigation_response::test_goto_network_failure);
-  run!(backends_support::navigation_response::test_reload_returns_response);
-  run!(backends_support::navigation_response::test_history_traversal_returns_response);
-
-  // §3.12 getBy* accept string | RegExp.
-  run!(backends_support::getby_regex::test_getby_text_regex);
-  run!(backends_support::getby_regex::test_getby_role_name_regex);
-  run!(backends_support::getby_regex::test_getby_placeholder_regex);
-  run!(backends_support::getby_regex::test_getby_test_id_regex);
-
-  // §2.9 Dialog as first-class event handle.
-  run!(backends_support::dialog::test_dialog_accept_confirm);
-  run!(backends_support::dialog::test_dialog_dismiss_confirm);
-  run!(backends_support::dialog::test_dialog_prompt_with_text);
-  run!(backends_support::dialog::test_dialog_double_accept_rejects);
-  run!(backends_support::dialog::test_dialog_auto_dismiss_without_listener);
-
-  // §2.11 FileChooser as first-class event handle.
-  run!(backends_support::file_chooser::test_file_chooser_single_string_path);
-  run!(backends_support::file_chooser::test_file_chooser_multiple_string_array);
-  run!(backends_support::file_chooser::test_file_chooser_file_payload_single);
-  run!(backends_support::file_chooser::test_file_chooser_unclaimed_disposes);
-
-  // §2.10 Download as first-class event handle.
-  run!(backends_support::download::test_download_save_as_roundtrip);
-  run!(backends_support::download::test_download_path_contents);
-  run!(backends_support::download::test_download_cancel_surfaces_failure);
-  run!(backends_support::download::test_download_cancel_bidi_unsupported);
-
-  // §2.12 ConsoleMessage as first-class event handle.
-  run!(backends_support::console_message::test_console_message_primitives);
-  run!(backends_support::console_message::test_console_message_warn_maps_to_warning);
-  run!(backends_support::console_message::test_console_message_error_type);
-  run!(backends_support::console_message::test_console_message_location_shape);
-
-  // §2.13 WebError / pageerror / weberror — Playwright-shape
-  // assertions: `page.waitForEvent('pageerror')` resolves to a native
-  // JS `Error` (not a wrapper); `context.waitForEvent('weberror')`
-  // resolves to a live `WebError` class whose `.error()` returns a
-  // native JS `Error`.
-  run!(backends_support::web_error::test_page_error_is_native_error);
-  run!(backends_support::web_error::test_context_weberror_is_webbed_error_class);
-
-  // §2.14 Video as first-class handle. CDP backends record to a real
-  // file; BiDi uses the poll-based screencast polyfill; WebKit returns
-  // a handle whose accessors reject with the typed Unsupported reason.
-  run!(backends_support::video::test_video_null_without_recording);
-  run!(backends_support::video::test_video_recording_lifecycle);
-
-  // §4.1 BrowserContextOptions — per-option Rule-9 coverage. Each
-  // creates a fresh `browser.newContext({...})`, opens a page, and
-  // observes a page-side effect produced ONLY when the bag's field
-  // took effect.
-  run!(backends_support::browser_context_options::test_context_options_user_agent);
-  run!(backends_support::browser_context_options::test_context_options_locale);
-  run!(backends_support::browser_context_options::test_context_options_timezone);
-  run!(backends_support::browser_context_options::test_context_options_color_scheme);
-  run!(backends_support::browser_context_options::test_context_options_reduced_motion);
-  run!(backends_support::browser_context_options::test_context_options_forced_colors);
-  run!(backends_support::browser_context_options::test_context_options_viewport);
-  run!(backends_support::browser_context_options::test_context_options_javascript_enabled);
-  run!(backends_support::browser_context_options::test_context_options_geolocation);
-  run!(backends_support::browser_context_options::test_context_options_extra_http_headers);
-  run!(backends_support::browser_context_options::test_context_options_offline);
-  run!(backends_support::browser_context_options::test_context_options_device_scale_factor);
-  run!(backends_support::browser_context_options::test_context_options_has_touch);
-  run!(backends_support::browser_context_options::test_context_options_service_workers_block);
-  run!(backends_support::browser_context_options::test_context_options_screen);
-  run!(backends_support::browser_context_options::test_context_options_bypass_csp);
-  run!(backends_support::browser_context_options::test_context_options_base_url);
-  run!(backends_support::browser_context_options::test_context_options_storage_state);
-  run!(backends_support::browser_context_options::test_context_options_proxy);
-
-  // §2.15 BrowserType — script-side `chromium`/`firefox`/`webkit`
-  // factory tests. Each call spins up a SECONDARY browser independent
-  // of the host backend.
-  run!(backends_support::browser_type::test_browser_type_name);
-  run!(backends_support::browser_type::test_browser_type_executable_path);
-  run!(backends_support::browser_type::test_browser_type_chromium_launch);
-  run!(backends_support::browser_type::test_browser_type_chromium_transport_ws);
-  run!(backends_support::browser_type::test_browser_type_connect_over_cdp_chromium_only);
-  run!(backends_support::browser_type::test_browser_type_launch_persistent_context);
-
-  // expect() global — Jest-style value matchers + Playwright web-first
-  // matchers + asymmetric matchers, exercised through a live browser
-  // on every backend (Rule 9).
-  run!(backends_support::expect::test_expect_to_be_visible);
-  run!(backends_support::expect::test_expect_to_have_text);
-  run!(backends_support::expect::test_expect_to_contain_text);
-  run!(backends_support::expect::test_expect_to_have_count);
-  run!(backends_support::expect::test_expect_to_have_attribute);
-  run!(backends_support::expect::test_expect_to_have_value);
-  run!(backends_support::expect::test_expect_page_title_and_url);
-  run!(backends_support::expect::test_expect_value_matchers_in_script);
-  run!(backends_support::expect::test_expect_to_throw_in_script);
-  run!(backends_support::expect::test_expect_failure_throws);
-  run!(backends_support::expect::test_expect_poll_with_browser);
-
-  // QuickJS binding surface — `getBy*` accessors on Frame/Locator,
-  // FrameLocator class, page-level `touchscreen`/`snapshotForAI`/
-  // `exposeFunction`/`frameLocator`, and `context.clearCookies({...})`.
-  run!(backends_support::binding_surface::test_frame_get_by_methods);
-  run!(backends_support::binding_surface::test_frame_page_and_frame_locator);
-  run!(backends_support::binding_surface::test_locator_get_by_methods);
-  run!(backends_support::binding_surface::test_locator_page_and_frame_methods);
-  run!(backends_support::binding_surface::test_frame_locator_class);
-  run!(backends_support::binding_surface::test_page_frame_locator);
-  run!(backends_support::binding_surface::test_page_touchscreen_tap);
-  run!(backends_support::binding_surface::test_page_snapshot_for_ai);
-  run!(backends_support::binding_surface::test_page_expose_function);
-  run!(backends_support::binding_surface::test_context_clear_cookies_filter);
-
-  // Multi-page last (changes session state)
-  run!(test_new_page);
-
-  eprintln!("\n{backend}: {passed} passed, {failed} failed");
+  eprintln!("\n{backend}: {passed} passed, {} failed", failures.len());
   if !failures.is_empty() {
     eprintln!("Failures: {}", failures.join(", "));
   }
@@ -2487,24 +2185,473 @@ fn run_all_tests(backend: &str) {
   );
 }
 
-// ─── One #[test] per backend ────────────────────────────────────────────────
-
-#[test]
-fn all_tests_cdp_pipe() {
-  run_all_tests("cdp-pipe");
+struct TestSet<'a> {
+  backend: &'a str,
+  client: &'a mut McpClient,
+  passed: &'a mut u32,
+  failures: &'a mut Vec<String>,
+  filter: Option<&'a str>,
+  verbose: bool,
 }
 
-#[test]
-fn all_tests_cdp_raw() {
-  run_all_tests("cdp-raw");
+impl TestSet<'_> {
+  fn run(&mut self, name: &'static str, body: fn(&mut McpClient)) {
+    if let Some(f) = self.filter
+      && !name.contains(f)
+    {
+      return;
+    }
+    if self.verbose {
+      eprintln!("=== RUN {} {}", self.backend, name);
+    }
+    if std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| body(self.client))).is_ok() {
+      *self.passed += 1;
+    } else {
+      self.failures.push(name.to_string());
+      eprintln!("  FAIL {name}");
+    }
+  }
 }
 
-#[test]
-fn all_tests_webkit() {
-  run_all_tests("webkit");
+// Macro shorthand: `run!(set, test_fn)` registers a single test by
+// stringifying its path. Replaces the old free `run!` macro inside
+// `run_all_tests`.
+macro_rules! run {
+  ($set:ident, $name:path) => {
+    $set.run(stringify!($name), $name)
+  };
 }
 
-#[test]
-fn all_tests_bidi() {
-  run_all_tests("bidi");
+fn register_nav(set: &mut TestSet<'_>) {
+  run!(set, test_navigate);
+  run!(set, test_page_list);
+  run!(set, test_page_reload);
+  run!(set, test_page_back_forward);
 }
+
+fn register_evaluate(set: &mut TestSet<'_>) {
+  run!(set, test_evaluate_number);
+  run!(set, test_evaluate_string);
+  run!(set, test_evaluate_dom);
+  run!(set, test_evaluate_promise);
+  run!(set, test_evaluate_boolean);
+  run!(set, test_evaluate_array);
+  run!(set, test_evaluate_object);
+  run!(set, test_evaluate_null);
+  run!(set, test_evaluate_error);
+  run!(set, test_evaluate_syntax_error);
+  run!(set, test_evaluate_large_payload);
+}
+
+fn register_observation(set: &mut TestSet<'_>) {
+  run!(set, test_snapshot);
+  run!(set, test_snapshot_scroll_info);
+  run!(set, test_screenshot_png);
+  run!(set, test_screenshot_full_page);
+  run!(set, test_search_page);
+  run!(set, test_search_page_regex);
+  run!(set, test_search_page_no_match);
+  run!(set, test_console_messages);
+  run!(set, test_network_requests);
+  run!(set, test_trace);
+}
+
+fn register_script_input(set: &mut TestSet<'_>) {
+  run!(set, test_script_click);
+  run!(set, test_script_fill);
+  run!(set, test_script_fill_form);
+  run!(set, test_script_type);
+  run!(set, test_script_press);
+  run!(set, test_script_hover);
+  run!(set, test_script_dblclick);
+  run!(set, test_script_select_option);
+  run!(set, test_script_check_uncheck);
+  run!(set, test_script_scroll);
+  run!(set, test_script_scroll_into_view);
+  run!(set, test_script_click_offscreen);
+  run!(set, test_script_dialog_alert);
+  run!(set, test_script_fill_dispatches_events);
+}
+
+fn register_script_handles(set: &mut TestSet<'_>) {
+  run!(set, test_script_click_at);
+  run!(set, test_script_mouse_click_coords);
+  run!(set, test_script_drag_coords);
+  run!(set, test_script_drag_and_drop);
+  run!(set, test_script_drag_and_drop_options);
+  run!(set, test_script_locator_drag_to_options);
+  run!(set, test_script_drag_and_drop_trial);
+  run!(set, test_script_emulate_media_all_fields);
+  run!(set, test_script_emulate_media_null_disables_single_field);
+  run!(set, test_script_add_init_script);
+  run!(set, test_script_utility_script_exposed);
+  run!(set, test_script_handle_lifecycle);
+  run!(set, test_script_evaluate_fn_and_handle);
+  run!(set, test_script_evaluate_rich_types);
+  run!(set, test_script_element_handle_methods);
+  run!(set, test_script_handle_materialisation);
+  run!(set, backends_support::handle_surface::test_handle_json_value);
+  run!(set, backends_support::handle_surface::test_handle_properties);
+  run!(set, backends_support::handle_surface::test_handle_multi_arg_evaluate);
+  run!(set, backends_support::handle_surface::test_element_handle_eval);
+  run!(set, backends_support::handle_surface::test_element_handle_frames);
+  run!(set, backends_support::handle_surface::test_element_handle_waits);
+  run!(
+    set,
+    backends_support::handle_surface::test_element_handle_temp_tag_actions
+  );
+  run!(set, backends_support::handle_surface::test_element_handle_select_text);
+  run!(set, test_script_click_options);
+  run!(set, backends_support::action_options::test_script_dblclick_options);
+  run!(set, backends_support::action_options::test_script_press_options);
+  run!(set, backends_support::action_options::test_script_type_options);
+  run!(
+    set,
+    backends_support::action_options::test_script_set_input_files_polymorphism
+  );
+  run!(set, test_script_action_timeout);
+  run!(set, test_script_tap_native);
+  run!(set, test_script_fill_force);
+  run!(set, test_script_check_behavior);
+  run!(set, test_script_dispatch_event_timeout);
+  run!(set, test_script_select_option_force);
+  run!(set, test_script_mouse_wheel);
+  run!(set, test_script_keyboard_press);
+}
+
+fn register_script_locators(set: &mut TestSet<'_>) {
+  run!(set, test_script_frame_sync_accessors);
+  run!(set, test_script_frame_selector_union);
+  run!(set, test_script_wait_for_selector);
+  run!(set, test_script_wait_for_text);
+  run!(set, test_script_auto_wait_visibility);
+  run!(set, test_script_locator_role);
+  run!(set, test_script_locator_label);
+  run!(set, test_script_locator_placeholder);
+  run!(set, test_script_locator_text);
+  run!(set, test_script_locator_nth);
+  run!(set, test_script_locator_all_text);
+  run!(set, test_script_selector_chain);
+  run!(set, test_script_upload_file);
+}
+
+fn register_script_emulation_storage(set: &mut TestSet<'_>) {
+  run!(set, test_script_user_agent);
+  run!(set, test_script_viewport);
+  run!(set, test_script_geolocation);
+  run!(set, test_script_offline);
+  run!(set, test_script_cookies);
+  run!(set, test_script_localstorage);
+  run!(set, test_script_markdown);
+  run!(set, test_script_markdown_links);
+}
+
+fn register_script_sessions(set: &mut TestSet<'_>) {
+  run!(set, test_script_bound_args);
+  run!(set, test_script_vars_persist_across_calls);
+  run!(set, test_script_globals_persist_across_calls);
+  run!(set, test_script_throw_keeps_session_state);
+  run!(set, test_script_session_recovers_after_timeout);
+  run!(set, test_script_timers_and_web_globals);
+  run!(set, test_script_console_captured);
+  run!(set, test_script_error_surfaces_structured);
+}
+
+fn register_events_network(set: &mut TestSet<'_>) {
+  run!(set, backends_support::network::test_network_redirect_chain);
+  run!(set, backends_support::network::test_network_request_failure);
+  run!(set, backends_support::network::test_network_response_body);
+  run!(set, backends_support::network::test_network_post_data);
+  run!(set, backends_support::network::test_network_headers);
+  run!(set, backends_support::network::test_network_websocket);
+  run!(set, backends_support::navigation_response::test_goto_returns_response);
+  run!(set, backends_support::navigation_response::test_goto_follows_redirects);
+  run!(set, backends_support::navigation_response::test_goto_network_failure);
+  run!(set, backends_support::navigation_response::test_reload_returns_response);
+  run!(
+    set,
+    backends_support::navigation_response::test_history_traversal_returns_response
+  );
+}
+
+fn register_events_dialog_files(set: &mut TestSet<'_>) {
+  run!(set, backends_support::dialog::test_dialog_accept_confirm);
+  run!(set, backends_support::dialog::test_dialog_dismiss_confirm);
+  run!(set, backends_support::dialog::test_dialog_prompt_with_text);
+  run!(set, backends_support::dialog::test_dialog_double_accept_rejects);
+  run!(set, backends_support::dialog::test_dialog_auto_dismiss_without_listener);
+  run!(
+    set,
+    backends_support::file_chooser::test_file_chooser_single_string_path
+  );
+  run!(
+    set,
+    backends_support::file_chooser::test_file_chooser_multiple_string_array
+  );
+  run!(
+    set,
+    backends_support::file_chooser::test_file_chooser_file_payload_single
+  );
+  run!(
+    set,
+    backends_support::file_chooser::test_file_chooser_unclaimed_disposes
+  );
+  run!(set, backends_support::download::test_download_save_as_roundtrip);
+  run!(set, backends_support::download::test_download_path_contents);
+  run!(set, backends_support::download::test_download_cancel_surfaces_failure);
+  run!(set, backends_support::download::test_download_cancel_bidi_unsupported);
+}
+
+fn register_events_metadata(set: &mut TestSet<'_>) {
+  run!(set, backends_support::console_message::test_console_message_primitives);
+  run!(
+    set,
+    backends_support::console_message::test_console_message_warn_maps_to_warning
+  );
+  run!(set, backends_support::console_message::test_console_message_error_type);
+  run!(
+    set,
+    backends_support::console_message::test_console_message_location_shape
+  );
+  run!(set, backends_support::web_error::test_page_error_is_native_error);
+  run!(
+    set,
+    backends_support::web_error::test_context_weberror_is_webbed_error_class
+  );
+  run!(set, backends_support::video::test_video_null_without_recording);
+  run!(set, backends_support::video::test_video_recording_lifecycle);
+}
+
+fn register_context_options(set: &mut TestSet<'_>) {
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_user_agent
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_locale
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_timezone
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_color_scheme
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_reduced_motion
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_forced_colors
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_viewport
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_javascript_enabled
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_geolocation
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_extra_http_headers
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_offline
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_device_scale_factor
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_has_touch
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_service_workers_block
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_screen
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_bypass_csp
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_base_url
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_storage_state
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_options_proxy
+  );
+}
+
+fn register_browser_type(set: &mut TestSet<'_>) {
+  run!(set, backends_support::browser_type::test_browser_type_name);
+  run!(set, backends_support::browser_type::test_browser_type_executable_path);
+  run!(set, backends_support::browser_type::test_browser_type_chromium_launch);
+  run!(
+    set,
+    backends_support::browser_type::test_browser_type_chromium_transport_ws
+  );
+  run!(
+    set,
+    backends_support::browser_type::test_browser_type_connect_over_cdp_chromium_only
+  );
+  run!(
+    set,
+    backends_support::browser_type::test_browser_type_launch_persistent_context
+  );
+}
+
+fn register_expect(set: &mut TestSet<'_>) {
+  run!(set, backends_support::expect::test_expect_to_be_visible);
+  run!(set, backends_support::expect::test_expect_to_have_text);
+  run!(set, backends_support::expect::test_expect_to_contain_text);
+  run!(set, backends_support::expect::test_expect_to_have_count);
+  run!(set, backends_support::expect::test_expect_to_have_attribute);
+  run!(set, backends_support::expect::test_expect_to_have_value);
+  run!(set, backends_support::expect::test_expect_page_title_and_url);
+  run!(set, backends_support::expect::test_expect_value_matchers_in_script);
+  run!(set, backends_support::expect::test_expect_to_throw_in_script);
+  run!(set, backends_support::expect::test_expect_failure_throws);
+  run!(set, backends_support::expect::test_expect_poll_with_browser);
+}
+
+fn register_binding_surface(set: &mut TestSet<'_>) {
+  run!(set, backends_support::binding_surface::test_frame_get_by_methods);
+  run!(
+    set,
+    backends_support::binding_surface::test_frame_page_and_frame_locator
+  );
+  run!(set, backends_support::binding_surface::test_locator_get_by_methods);
+  run!(
+    set,
+    backends_support::binding_surface::test_locator_page_and_frame_methods
+  );
+  run!(set, backends_support::binding_surface::test_frame_locator_class);
+  run!(set, backends_support::binding_surface::test_page_frame_locator);
+  run!(set, backends_support::binding_surface::test_page_touchscreen_tap);
+  run!(set, backends_support::binding_surface::test_page_snapshot_for_ai);
+  run!(set, backends_support::binding_surface::test_page_expose_function);
+  run!(
+    set,
+    backends_support::binding_surface::test_context_clear_cookies_filter
+  );
+}
+
+fn register_getby_regex(set: &mut TestSet<'_>) {
+  run!(set, backends_support::getby_regex::test_getby_text_regex);
+  run!(set, backends_support::getby_regex::test_getby_role_name_regex);
+  run!(set, backends_support::getby_regex::test_getby_placeholder_regex);
+  run!(set, backends_support::getby_regex::test_getby_test_id_regex);
+}
+
+fn register_multi_page(set: &mut TestSet<'_>) {
+  // Changes session state — keep last per its own browser.
+  run!(set, test_new_page);
+}
+
+// ─── Per-(backend, category) #[test] entry points ──────────────────────────
+//
+// 17 categories × 4 backends = 68 `#[test]`s grouped into one module
+// per backend. nextest reports them as
+// `backends::<backend>::<category>` and distributes them across cores.
+// A single failing category fails its own test, not the entire backend.
+
+macro_rules! backend_module {
+  ($module:ident, $backend:literal) => {
+    mod $module {
+      use super::*;
+
+      #[test]
+      fn nav() {
+        run_category($backend, register_nav);
+      }
+      #[test]
+      fn evaluate() {
+        run_category($backend, register_evaluate);
+      }
+      #[test]
+      fn observation() {
+        run_category($backend, register_observation);
+      }
+      #[test]
+      fn script_input() {
+        run_category($backend, register_script_input);
+      }
+      #[test]
+      fn script_handles() {
+        run_category($backend, register_script_handles);
+      }
+      #[test]
+      fn script_locators() {
+        run_category($backend, register_script_locators);
+      }
+      #[test]
+      fn script_emulation_storage() {
+        run_category($backend, register_script_emulation_storage);
+      }
+      #[test]
+      fn script_sessions() {
+        run_category($backend, register_script_sessions);
+      }
+      #[test]
+      fn events_network() {
+        run_category($backend, register_events_network);
+      }
+      #[test]
+      fn events_dialog_files() {
+        run_category($backend, register_events_dialog_files);
+      }
+      #[test]
+      fn events_metadata() {
+        run_category($backend, register_events_metadata);
+      }
+      #[test]
+      fn context_options() {
+        run_category($backend, register_context_options);
+      }
+      #[test]
+      fn browser_type() {
+        run_category($backend, register_browser_type);
+      }
+      #[test]
+      fn expect() {
+        run_category($backend, register_expect);
+      }
+      #[test]
+      fn binding_surface() {
+        run_category($backend, register_binding_surface);
+      }
+      #[test]
+      fn getby_regex() {
+        run_category($backend, register_getby_regex);
+      }
+      #[test]
+      fn multi_page() {
+        run_category($backend, register_multi_page);
+      }
+    }
+  };
+}
+
+backend_module!(cdp_pipe, "cdp-pipe");
+backend_module!(cdp_raw, "cdp-raw");
+backend_module!(webkit, "webkit");
+backend_module!(bidi, "bidi");
