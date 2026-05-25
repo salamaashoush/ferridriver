@@ -4,6 +4,10 @@
 //! method via `ferridriver run` and asserts an observable effect for
 //! each. A binding that throws, returns the wrong type, or misbehaves
 //! fails the run. Requires the built `ferridriver` binary + Chrome.
+//!
+//! The coverage script is split across multiple `#[test]`s grouped by
+//! surface area so nextest can run them in parallel. Each test launches
+//! its own Chromium and is fully self-contained.
 
 use std::io::Write as _;
 use std::process::{Command, Stdio};
@@ -35,9 +39,16 @@ fn run_script(src: &str) -> serde_json::Value {
   serde_json::from_str(&stdout).unwrap_or_else(|e| panic!("bad JSON ({e}); stdout={stdout}; stderr={stderr}"))
 }
 
-/// The coverage script: a self-contained harness that records a
-/// pass/fail per binding and returns `{ passed, failed }`.
-const COVERAGE_JS: &str = r##"
+fn assert_clean(v: &serde_json::Value) {
+  assert_eq!(v["status"], "ok", "coverage script must run clean: {v}");
+  let failed = v["value"]["failed"].as_array().expect("failed array");
+  assert!(failed.is_empty(), "{} binding(s) failed: {:#?}", failed.len(), failed);
+}
+
+/// Shared prelude: declares `results` / `ok` / `okEq` / `tryOk`, the
+/// `HTML` fixture, then opens `browser` + `context` + `page` and seeds
+/// the page with `HTML`.
+const PRELUDE: &str = r##"
 const results = { passed: [], failed: [] };
 const ok = (name, cond) => { (cond ? results.passed : results.failed).push(name); };
 const okEq = (name, a, b) => ok(name, JSON.stringify(a) === JSON.stringify(b));
@@ -71,9 +82,31 @@ browser = await chromium().launch({ headless: true });
 ok('browser.isConnected', browser.isConnected() === true);
 context = await browser.newContext();
 page = await context.newPage();
-
-// ── page: navigation / content ──────────────────────────────────────
 await page.setContent(HTML);
+"##;
+
+/// Shared epilogue: closes the page + browser, returns the result JSON.
+const EPILOGUE: &str = r"
+await browser.close();
+
+} catch (e) {
+  const lastPassed = results.passed[results.passed.length - 1] || '<start>';
+  results.failed.push('ABORT after [' + lastPassed + ']: ' + (e && e.message || e));
+}
+try { if (page && !page.isClosed()) await page.close(); } catch (_) {}
+try { if (browser) await browser.close(); } catch (_) {}
+return { passed: results.passed.length, failed: results.failed, total: results.passed.length + results.failed.length };
+";
+
+/// Build a self-contained script from a body chunk by sandwiching it
+/// between [`PRELUDE`] and [`EPILOGUE`].
+fn build(body: &str) -> String {
+  format!("{PRELUDE}{body}{EPILOGUE}")
+}
+
+// ── page: navigation / content + content inspectors ───────────────────
+const PAGE_BASICS_BODY: &str = r#"
+// navigation / content
 ok('page.url', typeof page.url() === 'string');
 ok('page.title', (await page.title()) === 'Cov');
 ok('page.content', (await page.content()).includes('Heading'));
@@ -89,7 +122,23 @@ await page.goForward(); ok('page.goForward', true);
 await page.setContent(HTML);
 ok('page.setContent', (await page.title()) === 'Cov');
 
-// ── page: query / locators ──────────────────────────────────────────
+// content inspectors
+ok('page.getAttribute', (await page.getAttribute('#lnk','aria-label')) === 'golink');
+ok('page.innerHTML', (await page.innerHTML('#h')).length >= 0);
+ok('page.innerText', (await page.innerText('#h')) === 'Heading');
+ok('page.textContent', (await page.textContent('#para')) === 'FindThisText');
+await page.fill('#txt','typed');
+ok('page.inputValue', (await page.inputValue('#txt')) === 'typed');
+ok('page.isVisible', (await page.isVisible('#h')) === true);
+ok('page.isHidden', (await page.isHidden('#hidden')) === true);
+ok('page.isEnabled', (await page.isEnabled('#btn')) === true);
+ok('page.isDisabled', (await page.isDisabled('#btn')) === false);
+ok('page.isChecked', (await page.isChecked('#cb')) === false);
+await page.close(); ok('page.close', page.isClosed() === true);
+"#;
+
+// ── page: query / locators ────────────────────────────────────────────
+const PAGE_QUERY_BODY: &str = r"
 ok('page.locator', (await page.locator('#h').count()) === 1);
 ok('page.$', (await page.$('#h')) !== null);
 ok('page.$$', (await page.$$('a')).length === 1);
@@ -103,21 +152,12 @@ ok('page.getByAltText', (await page.getByAltText('alttext').count()) === 1);
 ok('page.getByTitle', (await page.getByTitle('htitle').count()) === 1);
 ok('page.getByTestId', (await page.getByTestId('hid').count()) === 1);
 ok('page.waitForSelector', (await page.waitForSelector('#btn')) !== null);
+await page.close();
+";
 
-// ── page: content inspectors ────────────────────────────────────────
-ok('page.getAttribute', (await page.getAttribute('#lnk','aria-label')) === 'golink');
-ok('page.innerHTML', (await page.innerHTML('#h')).length >= 0);
-ok('page.innerText', (await page.innerText('#h')) === 'Heading');
-ok('page.textContent', (await page.textContent('#para')) === 'FindThisText');
-await page.fill('#txt','typed');
-ok('page.inputValue', (await page.inputValue('#txt')) === 'typed');
-ok('page.isVisible', (await page.isVisible('#h')) === true);
-ok('page.isHidden', (await page.isHidden('#hidden')) === true);
-ok('page.isEnabled', (await page.isEnabled('#btn')) === true);
-ok('page.isDisabled', (await page.isDisabled('#btn')) === false);
-ok('page.isChecked', (await page.isChecked('#cb')) === false);
-
-// ── page: input actions ─────────────────────────────────────────────
+// ── page: input actions + mouse/keyboard namespace ────────────────────
+const PAGE_INPUT_BODY: &str = r#"
+// input actions
 await page.click('#btn'); ok('page.click', (await page.textContent('#btn')) === 'clicked');
 await page.setContent(HTML);
 await page.dblclick('#btn'); ok('page.dblclick', true);
@@ -135,7 +175,7 @@ await page.dragAndDrop('#drag','#drop'); ok('page.dragAndDrop', true);
 await page.clickAt(5,5); ok('page.clickAt', true);
 await page.moveMouseSmooth(0,0,10,10,3); ok('page.moveMouseSmooth', true);
 
-// ── mouse/keyboard namespace (Playwright options-bag parity) ─────────
+// mouse/keyboard namespace (Playwright options-bag parity)
 await page.fill('#txt',''); await page.focus('#txt');
 // delay option (Playwright {delay}) exercised end-to-end; effect must
 // still be exact.
@@ -150,8 +190,12 @@ await page.mouse.down({ button: 'left' }); await page.mouse.up({ button: 'left' 
 await page.setContent(HTML);
 await page.setInputFiles('#file', { name:'a.txt', mimeType:'text/plain', buffer:[104,105] });
 ok('page.setInputFiles', true);
+await page.close();
+"#;
 
-// ── page: evaluate / scripts ────────────────────────────────────────
+// ── page: evaluate / scripts + capture ────────────────────────────────
+const PAGE_SCRIPTS_BODY: &str = r#"
+// evaluate / scripts
 ok('page.evaluate', (await page.evaluate("1+2")) === 3);
 const h = await page.evaluateHandle("({k:9})");
 ok('page.evaluateHandle', h !== null);
@@ -170,7 +214,7 @@ await page.exposeFunction('__cov_fn', () => { exposed = 1; });
 await page.evaluate("window.__cov_fn && window.__cov_fn()");
 ok('page.exposeFunction', true);
 
-// ── page: capture ───────────────────────────────────────────────────
+// capture
 const shot = await page.screenshot();
 ok('page.screenshot', shot && (shot.length > 0 || shot.byteLength > 0 || typeof shot === 'string'));
 const eshot = await page.screenshotElement('#h');
@@ -184,8 +228,12 @@ ok('page.snapshotForAI', aiSnap && typeof aiSnap.full === 'string');
 const aria = await page.ariaSnapshot();
 ok('page.ariaSnapshot', typeof aria === 'string' && aria.length > 0);
 ok('page.markdown', typeof (await page.markdown()) === 'string');
+await page.close();
+"#;
 
-// ── page: frames ────────────────────────────────────────────────────
+// ── page: frames overview + routing/waits + lifecycle waits ───────────
+const PAGE_MISC_BODY: &str = r#"
+// frames overview
 ok('page.mainFrame', page.mainFrame() != null);
 ok('page.frames', page.frames().length >= 1);
 const fl = page.frameLocator('#if');
@@ -195,7 +243,7 @@ ok('page.touchscreen', page.touchscreen != null);
 ok('page.video', page.video() === null || typeof page.video() === 'object');
 ok('page.isClosed', page.isClosed() === false);
 
-// ── page: routing / waits ───────────────────────────────────────────
+// routing / waits
 await page.route('**/never', (r) => r.abort());
 ok('page.route', true);
 await page.unroute('**/never');
@@ -205,8 +253,49 @@ ok('page.startScreencast', true);
 await page.stopScreencast();
 ok('page.stopScreencast', true);
 
-// ── locator ─────────────────────────────────────────────────────────
-await page.setContent(HTML); // reset DOM mutated by the page-action section
+// page lifecycle waits + predicate matchers
+// waitForRequest/waitForResponse/route accept string | RegExp |
+// predicate; waitFor* predicates get the live Request/Response, route
+// predicates get a URL.
+{
+  const sReq = page.waitForRequest('**/SMARK').catch(() => null);
+  const sResp = page.waitForResponse(r => r.url().startsWith('data:text/html') && r.status() === 200).catch(() => null);
+  const sEv = page.waitForEvent('load').catch(() => null);
+  await page.goto('data:text/html,<title>WF</title><img src="https://localhost:1/SMARK">');
+  const rq = await Promise.race([sReq, new Promise(r => setTimeout(() => r(null), 5000))]);
+  ok('page.waitForRequest(string)', !!rq && rq.url().includes('SMARK'));
+  const rs = await Promise.race([sResp, new Promise(r => setTimeout(() => r(null), 5000))]);
+  ok('page.waitForResponse(predicate)', !!rs && rs.status() === 200);
+  await Promise.race([sEv, new Promise(r => setTimeout(r, 1000))]);
+  ok('page.waitForEvent', true);
+
+  // async predicate over a live Request (boolean | Promise<boolean>)
+  const aReq = page.waitForRequest(async (r) => r.url().includes('AMARK')).then(r => r.url()).catch(() => null);
+  await page.evaluate("fetch('https://localhost:1/AMARK').catch(()=>{})");
+  const au = await Promise.race([aReq, new Promise(r => setTimeout(() => r(null), 5000))]);
+  ok('page.waitForRequest(predicate)', typeof au === 'string' && au.includes('AMARK'));
+
+  // route/unroute by predicate: the handler runs while routed and
+  // stops once unrouted. Count handler invocations (an abort and a
+  // real net error both reject in JS); a request may pause more than
+  // once, so assert "fired" then "no further increment".
+  let hits = 0;
+  const killFn = (u) => u.pathname.endsWith('/RKILL');
+  await page.route(killFn, async (r) => { hits++; await r.abort(); });
+  await page.evaluate("fetch('https://localhost:1/RKILL').catch(()=>{})");
+  await new Promise(r => setTimeout(r, 1000));
+  ok('page.route(predicate)', hits >= 1);
+  await page.unroute(killFn);
+  const mark = hits;
+  await page.evaluate("fetch('https://localhost:1/RKILL').catch(()=>{})");
+  await new Promise(r => setTimeout(r, 1000));
+  ok('page.unroute(predicate)', hits === mark);
+}
+await page.close();
+"#;
+
+// ── locator ───────────────────────────────────────────────────────────
+const LOCATOR_BODY: &str = r#"
 const loc = page.locator('#txt');
 ok('locator.count', (await loc.count()) === 1);
 ok('locator.first', (await loc.first().count()) === 1);
@@ -286,9 +375,11 @@ ok('locator.getByTestId', (await page.locator('body').getByTestId('hid').count()
 ok('locator.page', page.locator('#h').page() != null);
 ok('locator.frameLocator', page.locator('body').frameLocator('#if') != null);
 ok('locator.contentFrame', page.locator('#if').contentFrame() != null);
+await page.close();
+"#;
 
-// ── frame + frameLocator ────────────────────────────────────────────
-await page.setContent(HTML); // reset DOM mutated by the locator section
+// ── frame ─────────────────────────────────────────────────────────────
+const FRAME_BODY: &str = r#"
 const mf = page.mainFrame();
 ok('frame.url', typeof mf.url() === 'string');
 ok('frame.name', typeof mf.name() === 'string');
@@ -337,7 +428,11 @@ ok('frame.getByPlaceholder', (await mf.getByPlaceholder('ph').count()) === 1);
 ok('frame.getByAltText', (await mf.getByAltText('alttext').count()) === 1);
 ok('frame.getByTitle', (await mf.getByTitle('htitle').count()) === 1);
 ok('frame.getByTestId', (await mf.getByTestId('hid').count()) === 1);
+await page.close();
+"#;
 
+// ── frameLocator ──────────────────────────────────────────────────────
+const FRAME_LOCATOR_BODY: &str = r#"
 const flo = page.frameLocator('#if');
 ok('frameLocator.locator', (await flo.locator('#ibtn').textContent()) === 'inner');
 ok('frameLocator.first', flo.first() != null);
@@ -358,68 +453,45 @@ ok('frameLocator.getByPlaceholder', flo.getByPlaceholder('x') != null);
 ok('frameLocator.getByAltText', flo.getByAltText('x') != null);
 ok('frameLocator.getByTitle', flo.getByTitle('x') != null);
 ok('frameLocator.getByTestId', flo.getByTestId('x') != null);
-
-// ── page lifecycle waits + predicate matchers (last) ────────────────
-// waitForRequest/waitForResponse/route accept string | RegExp |
-// predicate; waitFor* predicates get the live Request/Response, route
-// predicates get a URL.
-{
-  const sReq = page.waitForRequest('**/SMARK').catch(() => null);
-  const sResp = page.waitForResponse(r => r.url().startsWith('data:text/html') && r.status() === 200).catch(() => null);
-  const sEv = page.waitForEvent('load').catch(() => null);
-  await page.goto('data:text/html,<title>WF</title><img src="https://localhost:1/SMARK">');
-  const rq = await Promise.race([sReq, new Promise(r => setTimeout(() => r(null), 5000))]);
-  ok('page.waitForRequest(string)', !!rq && rq.url().includes('SMARK'));
-  const rs = await Promise.race([sResp, new Promise(r => setTimeout(() => r(null), 5000))]);
-  ok('page.waitForResponse(predicate)', !!rs && rs.status() === 200);
-  await Promise.race([sEv, new Promise(r => setTimeout(r, 1000))]);
-  ok('page.waitForEvent', true);
-
-  // async predicate over a live Request (boolean | Promise<boolean>)
-  const aReq = page.waitForRequest(async (r) => r.url().includes('AMARK')).then(r => r.url()).catch(() => null);
-  await page.evaluate("fetch('https://localhost:1/AMARK').catch(()=>{})");
-  const au = await Promise.race([aReq, new Promise(r => setTimeout(() => r(null), 5000))]);
-  ok('page.waitForRequest(predicate)', typeof au === 'string' && au.includes('AMARK'));
-
-  // route/unroute by predicate: the handler runs while routed and
-  // stops once unrouted. Count handler invocations (an abort and a
-  // real net error both reject in JS); a request may pause more than
-  // once, so assert "fired" then "no further increment".
-  let hits = 0;
-  const killFn = (u) => u.pathname.endsWith('/RKILL');
-  await page.route(killFn, async (r) => { hits++; await r.abort(); });
-  await page.evaluate("fetch('https://localhost:1/RKILL').catch(()=>{})");
-  await new Promise(r => setTimeout(r, 1000));
-  ok('page.route(predicate)', hits >= 1);
-  await page.unroute(killFn);
-  const mark = hits;
-  await page.evaluate("fetch('https://localhost:1/RKILL').catch(()=>{})");
-  await new Promise(r => setTimeout(r, 1000));
-  ok('page.unroute(predicate)', hits === mark);
-}
-await page.close(); ok('page.close', page.isClosed() === true);
-await browser.close();
-
-} catch (e) {
-  const lastPassed = results.passed[results.passed.length - 1] || '<start>';
-  results.failed.push('ABORT after [' + lastPassed + ']: ' + (e && e.message || e));
-}
-try { if (page && !page.isClosed()) await page.close(); } catch (_) {}
-try { if (browser) await browser.close(); } catch (_) {}
-return { passed: results.passed.length, failed: results.failed, total: results.passed.length + results.failed.length };
-"##;
+await page.close();
+"#;
 
 #[test]
-fn binding_coverage_page_locator_frame_chromium() {
-  let v = run_script(COVERAGE_JS);
-  assert_eq!(v["status"], "ok", "coverage script must run clean: {v}");
-  let val = &v["value"];
-  let failed = val["failed"].as_array().expect("failed array");
-  assert!(failed.is_empty(), "{} binding(s) failed: {:#?}", failed.len(), failed);
-  // Sanity: we exercised a large surface, not a trivial subset.
-  assert!(
-    val["passed"].as_u64().unwrap_or(0) >= 150,
-    "expected >=150 binding checks, got {}",
-    val["passed"]
-  );
+fn coverage_page_basics() {
+  assert_clean(&run_script(&build(PAGE_BASICS_BODY)));
+}
+
+#[test]
+fn coverage_page_query() {
+  assert_clean(&run_script(&build(PAGE_QUERY_BODY)));
+}
+
+#[test]
+fn coverage_page_input() {
+  assert_clean(&run_script(&build(PAGE_INPUT_BODY)));
+}
+
+#[test]
+fn coverage_page_scripts() {
+  assert_clean(&run_script(&build(PAGE_SCRIPTS_BODY)));
+}
+
+#[test]
+fn coverage_page_misc() {
+  assert_clean(&run_script(&build(PAGE_MISC_BODY)));
+}
+
+#[test]
+fn coverage_locator() {
+  assert_clean(&run_script(&build(LOCATOR_BODY)));
+}
+
+#[test]
+fn coverage_frame() {
+  assert_clean(&run_script(&build(FRAME_BODY)));
+}
+
+#[test]
+fn coverage_frame_locator() {
+  assert_clean(&run_script(&build(FRAME_LOCATOR_BODY)));
 }
