@@ -121,7 +121,7 @@ pub async fn set_cookie(target: &Session, cookie: CookieData) -> Result<()> {
 /// Spawn the always-on per-page listener loop. Translates `Console.*` /
 /// `Network.*` / `Dialog.*` / frame / route / websocket events into
 /// page-level state (and writes to the page's `ArcSwap`-held console /
-/// network / dialog logs), feeds [`super::page::LifecycleSignals`] for
+/// network / dialog logs), feeds `super::page::LifecycleSignals` for
 /// `wait_for_lifecycle`, and handles `Target.*` cross-process swaps
 /// via the provisional-target slot.
 ///
