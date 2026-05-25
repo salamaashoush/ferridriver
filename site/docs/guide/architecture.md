@@ -1,39 +1,46 @@
 # Architecture
 
-ferridriver is a single Rust engine wrapped in many shapes. The test runner, BDD framework, MCP server, and NAPI bindings don't ship their own browser logic — they all dispatch to the same core. That's where the consistency comes from, and it's also where the speed comes from.
+ferridriver is a single Rust engine wrapped in many shapes. The test
+runner, BDD framework, MCP server, and NAPI binding don't ship their own
+browser logic — they all dispatch to the same core. That is where the
+consistency comes from, and it is also where the speed comes from.
 
-## The layers
+## Layers
 
 ```mermaid
 flowchart TB
   N["@ferridriver/node (NAPI core binding)"]
 
-  subgraph RustTools ["Rust tools"]
+  subgraph RustTools [Rust tools]
     C["ferridriver-cli (mcp · bdd · test · run · install)"]
-    D["ferridriver-test"]
+    D["ferridriver-test (TestRunner)"]
     E["ferridriver-bdd"]
-    F["ferridriver-mcp (9 tools, script-focused)"]
-    S["ferridriver-script (QuickJS: run_script + JS/TS BDD steps)"]
+    EX["ferridriver-expect"]
+    F["ferridriver-mcp (10 tools)"]
+    S["ferridriver-script (QuickJS: run_script · JS/TS BDD steps · extensions)"]
   end
 
-  Core["ferridriver (core)\nBrowser · Page · Locator · Frame · Context"]
+  Core["ferridriver (core)\nBrowser · Page · Locator · Frame · Context · ElementHandle"]
 
   subgraph Backends
     direction LR
-    B1["CdpPipe"]
+    B1["CdpPipe (default)"]
     B2["CdpRaw"]
-    B3["WebKit"]
-    B4["Bidi"]
+    B3["WebKit (Playwright)"]
+    B4["Bidi (Firefox)"]
   end
 
   N --> Core
   C --> F
   C --> E
+  C --> S
   F --> Core
   F --> S
   E --> D
   E --> S
   D --> Core
+  D --> EX
+  EX --> Core
   S --> Core
   Core --> B1
   Core --> B2
@@ -43,31 +50,37 @@ flowchart TB
   classDef rustLayer fill:#fef3c7,stroke:#b45309,color:#1c1917
   classDef coreLayer fill:#dcfce7,stroke:#15803d,color:#052e16
   classDef backendLayer fill:#ede9fe,stroke:#6d28d9,color:#1e1b4b
-  class N,C,D,E,F,S rustLayer
+  class N,C,D,E,EX,F,S rustLayer
   class Core coreLayer
   class B1,B2,B3,B4 backendLayer
 ```
 
-The core holds the browser protocol knowledge — nothing above it has to. That's why a Gherkin step, a Rust `#[ferritest]`, and an MCP tool call all reach the same `Page::click` implementation.
+A Gherkin step, a Rust `#[ferritest]`, an MCP tool call, and a Node.js
+`page.click()` all reach the same `Page::click` in `ferridriver`.
 
 ## Backends at a glance
 
-Four transports, one API:
+| Backend     | Browser            | Transport                                       | Default? |
+|-------------|--------------------|--------------------------------------------------|----------|
+| `cdp-pipe`  | Chromium / Chrome  | CDP over Unix pipes (fd 3/4)                     | yes      |
+| `cdp-raw`   | Chromium / Chrome  | CDP over WebSocket (also supports `Browser::connect`) |     |
+| `webkit`    | Playwright WebKit  | Playwright Inspector protocol over `pw_run.sh` (NUL-delimited JSON) | |
+| `bidi`      | Firefox            | WebDriver BiDi over WebSocket                    |          |
 
-| Backend | Browser | Transport | Default? |
-|---|---|---|---|
-| `cdp-pipe` | Chromium | CDP over fd 3/4 pipes | yes |
-| `cdp-raw`  | Chromium | CDP over WebSocket    | |
-| `webkit`   | WKWebView (macOS) | Native Obj-C IPC | |
-| `bidi`     | Firefox | WebDriver BiDi | |
-
-Backends dispatch through an `enum`, not a trait object. Each call monomorphizes to a single backend path — no vtable lookup, no dynamic dispatch, and the compiler can inline across the boundary. You pay for exactly one backend per process.
+Backends dispatch through a Rust `enum` (`BackendKind`), not a trait
+object. Calls monomorphize to a single backend path — no vtable lookup,
+the compiler can inline across the boundary. You pay for exactly one
+backend per process.
 
 See [Concepts → Backends](/concepts/backends) for when to pick which.
 
 ## Test execution
 
-Every test — Rust `#[ferritest]` and BDD — runs through one pipeline: `TestRunner::run()`. The BDD crate translates `.feature` files into the same `TestPlan`; JavaScript/TypeScript step bodies execute on the shared QuickJS engine inside that pipeline. There is no second runner.
+Every test — Rust `#[ferritest]`, parameterized `#[ferritest_each]`, and
+BDD scenarios — runs through one pipeline: `TestRunner::run()`. The BDD
+crate translates `.feature` files into the same `TestPlan`; JavaScript /
+TypeScript step bodies execute on the embedded QuickJS engine inside that
+pipeline. There is no second runner.
 
 ```mermaid
 flowchart LR
@@ -97,17 +110,17 @@ flowchart LR
   class disp router
 ```
 
-A few consequences worth knowing:
+A few consequences:
 
-- **Workers launch browsers concurrently**, not sequentially. On a warm machine, overlapping launches save 80–100 ms per extra worker.
-- **The dispatcher is work-stealing**. Fast workers pick up more tests. You don't hand-balance anything.
-- **Retry re-enqueues**. A failed test goes back on the shared queue, and any worker can grab it — not just the one that failed.
-
-Dive deeper in [Concepts → Parallelism and isolation](/concepts/parallelism-and-isolation).
+- **Workers launch browsers concurrently** via `tokio::join!`, not
+  sequentially. On a warm machine, overlapping launches save 80–100 ms
+  per extra worker.
+- **The dispatcher is work-stealing**. Fast workers pick up more tests.
+  You don't hand-balance anything.
+- **Retry re-enqueues**. A failed test goes back on the shared queue —
+  any worker can grab it, not just the one that failed.
 
 ## A single test, end to end
-
-What actually happens from the moment a worker pulls a test off the queue:
 
 ```mermaid
 sequenceDiagram
@@ -138,16 +151,26 @@ sequenceDiagram
 Three things to notice:
 
 - The `Browser` survives between tests. The `BrowserContext` does not.
-- `afterEach` runs even when the test body fails. That's how you keep teardown reliable.
-- Retry is separate from this loop — a failed test goes back into the dispatcher; you see this same diagram play out again, possibly on a different worker.
+- `afterEach` runs even when the test body fails. That is how teardown
+  stays reliable.
+- Retry is separate from this loop — a failed test goes back into the
+  dispatcher; the diagram plays out again, possibly on a different
+  worker.
 
 ## Why the shape is this shape
 
-A few opinionated choices that fall out of the architecture:
+- **One engine, many frontends.** Adding a new test style (a new macro,
+  a new DSL, an MCP tool) doesn't fork the execution path. It translates
+  into a `TestPlan` and lets the core handle the rest.
+- **Rust owns the hot path.** Polling, actionability checks, selector
+  compilation, CDP transport — all Rust. The TypeScript `expect` wrapper
+  is a thin shim that issues one NAPI call per assertion; the retry loop
+  stays inside Rust.
+- **Per-worker browser, per-test context.** Launching a browser is the
+  most expensive thing you can do. Creating a context is cheap. Amortize
+  the first, refresh the second.
+- **Dispatch via enum, not trait object.** Uniform API without the
+  vtable cost.
 
-- **One engine, many frontends.** Adding a new test style (a new macro, a new DSL, an MCP tool) doesn't fork the execution path. It translates into a `TestPlan` and lets the core handle the rest.
-- **Rust owns the hot path.** Polling, actionability checks, selector compilation, CDP transport — all Rust. The TypeScript `expect` wrapper is a thin shim; it issues one NAPI call per assertion and the retry loop stays inside Rust.
-- **Per-worker browser, per-test context.** Launching a browser is the most expensive thing you can do. Creating a context is cheap. Amortize the first, refresh the second.
-- **Dispatch via enum, not trait object.** Uniform API without the vtable cost.
-
-If you want the file-level map, see the [workspace section of the root README](https://github.com/salamaashoush/ferridriver#workspace).
+For the file-level map, see the [workspace section in the root
+README](https://github.com/salamaashoush/ferridriver#project-layout).

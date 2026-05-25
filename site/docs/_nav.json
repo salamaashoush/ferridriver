@@ -1,37 +1,68 @@
 [
   {
-    "text": "Guide",
-    "link": "/guide/introduction",
-    "activeMatch": "/guide/"
+    "text": "Docs",
+    "items": [
+      {
+        "text": "Get started",
+        "items": [
+          { "text": "Introduction", "link": "/guide/introduction" },
+          { "text": "Installation", "link": "/guide/installation" },
+          { "text": "Quickstart", "link": "/guide/quickstart" },
+          { "text": "Architecture", "link": "/guide/architecture" }
+        ]
+      },
+      {
+        "text": "Concepts",
+        "items": [
+          { "text": "Backends", "link": "/concepts/backends" },
+          { "text": "Selectors", "link": "/concepts/selectors" },
+          { "text": "Auto-waiting", "link": "/concepts/auto-waiting" },
+          { "text": "Fixtures", "link": "/concepts/fixtures" },
+          { "text": "Parallelism", "link": "/concepts/parallelism-and-isolation" },
+          { "text": "Migrating from Playwright", "link": "/concepts/migrating-from-playwright" }
+        ]
+      }
+    ],
+    "activeMatch": "/(guide|concepts)/"
   },
   {
-    "text": "Concepts",
-    "link": "/concepts/selectors",
-    "activeMatch": "/concepts/"
+    "text": "Recipes",
+    "link": "/recipes/overview",
+    "activeMatch": "/recipes/"
   },
   {
-    "text": "Test Runner",
-    "link": "/test-runner/overview",
-    "activeMatch": "/test-runner/"
+    "text": "Reference",
+    "items": [
+      { "text": "Test Runner", "link": "/test-runner/overview" },
+      { "text": "BDD", "link": "/bdd/overview" },
+      { "text": "MCP Server", "link": "/mcp/overview" },
+      { "text": "CLI", "link": "/cli/ferridriver" },
+      { "text": "Rust API (docs.rs)", "link": "/api/rust" }
+    ],
+    "activeMatch": "/(test-runner|bdd|mcp|cli|api)/"
   },
   {
-    "text": "BDD",
-    "link": "/bdd/overview",
-    "activeMatch": "/bdd/"
+    "text": "Scripting",
+    "items": [
+      { "text": "Overview", "link": "/scripting/overview" },
+      { "text": "Extensions", "link": "/scripting/extensions" },
+      { "text": "BDD JS / TS API", "link": "/scripting/bdd-js-api" },
+      { "text": "run_script", "link": "/scripting/run-script" },
+      { "text": "Sandbox", "link": "/scripting/sandbox" },
+      { "text": "Capabilities", "link": "/scripting/capabilities" },
+      { "text": "State and sessions", "link": "/scripting/state-and-sessions" }
+    ],
+    "activeMatch": "/scripting/"
   },
   {
-    "text": "MCP",
-    "link": "/mcp/overview",
-    "activeMatch": "/mcp/"
-  },
-  {
-    "text": "CLI",
-    "link": "/cli/ferridriver",
-    "activeMatch": "/cli/"
-  },
-  {
-    "text": "API",
-    "link": "/api/rust",
-    "activeMatch": "/api/"
+    "text": "Help",
+    "items": [
+      { "text": "Compare", "link": "/comparison/" },
+      { "text": "Troubleshooting", "link": "/troubleshooting/" },
+      { "text": "FAQ", "link": "/troubleshooting/faq" },
+      { "text": "Changelog", "link": "/changelog" },
+      { "text": "Contributing", "link": "/contributing" }
+    ],
+    "activeMatch": "/(comparison|troubleshooting|changelog|contributing)"
   }
 ]

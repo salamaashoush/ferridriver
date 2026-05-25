@@ -1,23 +1,23 @@
 # Quickstart
 
-Pick your language.
+Pick your language. Both Rust and TypeScript drive the same Rust engine.
 
 ## Rust
 
 ```toml
 # Cargo.toml
 [dependencies]
-ferridriver = "0.1"
-tokio = { version = "1", features = ["full"] }
+ferridriver = "0.2"
+tokio       = { version = "1", features = ["full"] }
 ```
 
 ```rust
-use ferridriver::{Browser, Page};
+use ferridriver::browser_type::chromium;
 use ferridriver::options::LaunchOptions;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let browser = Browser::launch(LaunchOptions::default()).await?;
+    let browser = chromium().launch(LaunchOptions::default()).await?;
     let page = browser.page().await?;
 
     page.goto("https://example.com", None).await?;
@@ -26,10 +26,17 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     page.wait_for_url("/dashboard").await?;
 
     let png = page.screenshot(Default::default()).await?;
+    std::fs::write("home.png", png)?;
+
     browser.close().await?;
     Ok(())
 }
 ```
+
+`chromium()`, `firefox()`, and `webkit()` are the launch entry points.
+Default backend is `CdpPipe` (Chromium over fd 3/4 pipes). Pick a
+different one with `chromium_with(BrowserTypeOptions { transport: ... })`
+or `BrowserType::with_backend(...)`.
 
 ## TypeScript (Node.js or Bun)
 
@@ -49,6 +56,8 @@ await page.locator('#email').fill('test@example.com');
 await page.locator('button[type=submit]').click();
 await page.waitForUrl('/dashboard');
 
+const png = await page.screenshot({ fullPage: true });
+
 await browser.close();
 ```
 
@@ -67,4 +76,17 @@ async fn loads_homepage(ctx: TestContext) {
 }
 ```
 
-See the [Test runner](/test-runner/overview) guide for setup, or [BDD](/bdd/overview) for Gherkin features with Rust or JS/TS step bodies.
+See [Test runner](/test-runner/overview) for harness setup, or
+[BDD](/bdd/overview) for Gherkin features with Rust or JavaScript /
+TypeScript step bodies.
+
+## Running as an MCP server
+
+```bash
+ferridriver mcp                         # stdio (default)
+ferridriver mcp --transport http --port 8080
+ferridriver mcp --backend webkit --headless
+```
+
+See [MCP overview](/mcp/overview) for setup with Claude Code, Claude
+Desktop, and Cursor.

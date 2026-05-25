@@ -1,15 +1,16 @@
 # Rust tests
 
-Write tests with `#[ferritest]`; generate a harness with `ferridriver_test::main!()`; run with `cargo test`.
+Write tests with `#[ferritest]`; generate a harness with
+`ferridriver_test::main!()`; run with `cargo test`.
 
 ## Project layout
 
 ```
 my-project/
 ├── Cargo.toml
-├── ferridriver.config.toml   # optional, auto-discovered
+├── ferridriver.toml         # optional, auto-discovered
 └── tests/
-    ├── harness.rs            # main!() — one per test binary
+    ├── harness.rs           # main!() — one per test binary
     ├── homepage.rs
     └── login.rs
 ```
@@ -20,7 +21,6 @@ my-project/
 // tests/harness.rs
 mod homepage;
 mod login;
-
 ferridriver_test::main!();
 ```
 
@@ -32,12 +32,14 @@ path = "tests/harness.rs"
 harness = false
 
 [dev-dependencies]
-ferridriver-test = "0.1"
+ferridriver-test = "0.2"
 ```
 
 ## Tests
 
-Every `#[ferritest]` function takes a single `TestContext` argument. Name it whatever you like — the macro binds the context regardless of the type annotation. Use `ctx.page().await?` to get the pre-created `Arc<Page>` (plus `ctx.context()`, `ctx.browser()`, `ctx.test_info()`).
+Every `#[ferritest]` function takes a single `TestContext` argument. The
+macro binds the context regardless of the type annotation — name it
+whatever you like.
 
 ```rust
 // tests/homepage.rs
@@ -56,11 +58,16 @@ async fn login_flow(ctx: TestContext) {
     page.goto("https://app.example.com/login", None).await?;
     page.locator("#email").fill("user@example.com").await?;
     page.locator("button[type=submit]").click().await?;
-    expect(&page).to_have_url("https://app.example.com/dashboard").await?;
+    expect(&page).to_have_url("/dashboard").await?;
 }
 ```
 
-The generated wrapper returns `Result<(), TestFailure>` and propagates `?` — the body can use `?` freely on anything that converts into `TestFailure` (everything from ferridriver core via `String: From<&str>` and the provided `From<String>` impls).
+Use `ctx.page()` for the pre-created `Arc<Page>`. Also available:
+`ctx.context()`, `ctx.browser()`, `ctx.test_info()`.
+
+The generated wrapper returns `Result<(), TestFailure>` and propagates
+`?` — the body can use `?` freely on anything that converts into
+`TestFailure`.
 
 ## Run
 
@@ -74,26 +81,29 @@ cargo test --test e2e -- -g smoke --retries 2
 
 ```
 retries = N             # per-test retry count
-timeout = "30s"          # per-test timeout (duration string: "500ms", "30s", "5m")
-tag = "smoke"            # grouping tag for --tag filtering
-skip                     # always skip
-slow                     # triple the default timeout
-fixme                    # mark as known broken
-fail                     # pass if and only if the body fails
-only                     # isolate (--forbid-only catches stray ones in CI)
-info = "JIRA-123"        # arbitrary metadata attached to test result
-use_options = ...        # per-test override of LaunchOptions / ContextOptions
-```
+timeout = "30s"         # per-test timeout — "500ms", "30s", "5m", ...
+tag     = "smoke"       # tag for --tag filtering (repeatable)
 
-Conditional forms like `skip = "linux"` or `fixme = "firefox | known bug"` are also supported (condition | reason).
+skip                    # unconditional skip
+skip    = "firefox"     # conditional — browser name, platform name,
+                        #   env var name, "ci", or "!" prefix
+skip    = "firefox | flaky on Firefox"  # condition | reason
+slow                    # 3x default timeout
+slow    = "ci"          # conditional slow
+fixme                   # known broken (skipped, reported separately)
+fixme   = "webkit"      # conditional fixme
+fail                    # expected failure (pass iff body fails)
+fail    = "linux"       # conditional expected failure
+only                    # isolate one test (--forbid-only catches strays in CI)
+info    = "JIRA-123"    # arbitrary metadata
+use_options = r#"{...}"#  # JSON overrides for launch / context options
+```
 
 ## Parameterized tests
 
-Use `#[ferritest_each(data = [ ... ])]` with a `(ctx: TestContext, input: T)` signature:
-
 ```rust
 #[ferritest_each(data = [
-    ("https://example.com", "Example Domain"),
+    ("https://example.com",   "Example Domain"),
     ("https://rust-lang.org", "Rust Programming Language"),
 ])]
 async fn title_check(ctx: TestContext, case: (&str, &str)) {
@@ -102,3 +112,7 @@ async fn title_check(ctx: TestContext, case: (&str, &str)) {
     expect(&page).to_contain_title(case.1).await?;
 }
 ```
+
+Generates one test per row, named `title_check (<row values>)`. The
+first parameter is the test context; subsequent parameters receive the
+tuple element(s).

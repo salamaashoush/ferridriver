@@ -1,0 +1,11 @@
+[
+  "overview",
+  "login-and-auth-state",
+  "network-mocking",
+  "file-upload-download",
+  "cookies-and-storage",
+  "multiple-tabs",
+  "mobile-emulation",
+  "screenshots-and-traces",
+  "ci-github-actions"
+]

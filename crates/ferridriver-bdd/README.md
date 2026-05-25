@@ -1,44 +1,49 @@
 # ferridriver-bdd
 
-Cucumber/Gherkin BDD framework for ferridriver. Translates `.feature` files into parallel test execution via the core `TestRunner` -- same worker pool, retries, reporters, and fixtures as E2E tests.
+[![crates.io](https://img.shields.io/crates/v/ferridriver-bdd.svg?logo=rust&color=c97b4a)](https://crates.io/crates/ferridriver-bdd)
+[![docs.rs](https://img.shields.io/docsrs/ferridriver-bdd?logo=docs.rs&color=c97b4a)](https://docs.rs/ferridriver-bdd)
+[![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-c97b4a.svg)](https://github.com/salamaashoush/ferridriver)
 
-## Quick Start (Rust)
+Cucumber / Gherkin BDD framework for ferridriver. Translates `.feature`
+files into the same `TestPlan` the `#[ferritest]` runner executes — same
+parallel workers, retries, fixtures, reporters. Step bodies are written in
+Rust or in JavaScript / TypeScript; both share one registry.
+
+## Rust step bodies
 
 ```rust
 use ferridriver_bdd::prelude::*;
 
 #[given("I navigate to {string}")]
 async fn navigate(world: &mut BrowserWorld, url: String) {
-  world.page().goto(&url, None).await.unwrap();
+    world.page().goto(&url, None).await.unwrap();
 }
 
 #[when("I click {string}")]
 async fn click(world: &mut BrowserWorld, selector: String) {
-  world.page().locator(&selector).click().await.unwrap();
+    world.page().locator(&selector).click().await.unwrap();
 }
 
 #[then("the page should contain text {string}")]
-async fn check_text(world: &mut BrowserWorld, text: String) {
-  let content = world.page().text_content().await.unwrap();
-  if !content.contains(&text) {
-    return Err(step_err!("expected text '{}' not found", text));
-  }
-  Ok(())
+async fn check_text(
+    world: &mut BrowserWorld,
+    text: String,
+) -> Result<(), StepError> {
+    let body = world
+        .page()
+        .locator("body")
+        .text_content()
+        .await
+        .map_err(|e| step_err!("{e}"))?
+        .unwrap_or_default();
+    if !body.contains(&text) {
+        return Err(step_err!("text {text:?} not found"));
+    }
+    Ok(())
 }
 ```
 
-```gherkin
-# features/login.feature
-Feature: Login
-
-  @smoke
-  Scenario: Successful login
-    Given I navigate to "https://app.example.com/login"
-    When I fill "#email" with "user@test.com"
-    And I fill "#password" with "secret"
-    And I click "button[type=submit]"
-    Then the page should contain text "Dashboard"
-```
+Wire a binary entry point:
 
 ```rust
 // tests/bdd.rs
@@ -46,285 +51,160 @@ ferridriver_bdd::bdd_main!();
 ```
 
 ```toml
-# Cargo.toml
 [[test]]
 name = "bdd"
 path = "tests/bdd.rs"
 harness = false
+
+[dev-dependencies]
+ferridriver-bdd = "0.2"
+ferridriver-test = "0.2"
 ```
 
-```sh
+```bash
 cargo test --test bdd
+# or
+ferridriver bdd tests/features/
 ```
 
-## Quick Start (TypeScript)
+## JavaScript / TypeScript step bodies
 
-```typescript
+```ts
 // steps/login.ts
-import { Given, When, Then } from '@ferridriver/test/bdd';
-
-Given('I navigate to {string}', async (page, url) => {
-  await page.goto(url);
+Given('I navigate to {string}', async function (url: string) {
+  await this.page.goto(url);
 });
 
-When('I click {string}', async (page, selector) => {
-  await page.locator(selector).click();
+When('I click {string}', async function (selector: string) {
+  await this.page.locator(selector).click();
+});
+
+Then('the URL contains {string}', async function (fragment: string) {
+  if (!this.page.url().includes(fragment)) throw new Error('mismatch');
 });
 ```
 
-```sh
-# .feature files are picked up automatically alongside .spec.ts files.
-npx @ferridriver/test test tests/features/ --steps 'steps/**/*.ts'
+```bash
+ferridriver bdd --steps 'steps/**/*.{js,ts}' tests/features/
 ```
 
-## Architecture
+`Given` / `When` / `Then` / `Step` / `Before` / `After` / `BeforeAll` /
+`AfterAll` / `BeforeStep` / `AfterStep` / `defineParameterType` /
+`setWorldConstructor` / `setDefaultTimeout` / `setDefinitionFunctionWrapper`
+are globals. `this` is the World — `page`, `context`, `browser`, `request`,
+`parameters`, `attach`, `log`, `skip`.
+
+Files are bundled with rolldown (TypeScript + `node_modules` + tree-shake),
+compiled to QuickJS bytecode once at startup, and `Module::load`ed per
+worker. The bytecode cache is content-hashed and in-memory. **No Node, no
+Bun in the run path.**
+
+## Macros
 
 ```
-.feature files
-    |
-FeatureSet::discover() + parse()     -- glob + gherkin crate
-    |
-expand_feature()                      -- Background, Scenario Outline, Rules
-    |
-filter (tags, grep)                   -- tag expression parser
-    |
-translate_features()                  -- Feature -> TestSuite, Scenario -> TestCase
-    |
-TestRunner.run(TestPlan)              -- core ferridriver-test runner
-    |
-Workers execute tests:
-  - create BrowserWorld (Page + Context + variables + state)
-  - run BeforeScenario hooks
-  - for each step:
-      interpolate variables
-      registry.find_match(text) -> StepDef + params
-      handler(world, params, table, docstring)
-      emit StepStarted/StepFinished events
-  - run AfterScenario hooks
-  - screenshot on failure
-```
-
-The BDD crate is a thin translation layer. It does not duplicate any execution logic -- the core TestRunner handles parallelism, retries, fixtures, and reporting.
-
-## Modules
-
-### expression.rs -- Cucumber Expression Compiler
-
-Compiles cucumber expressions to regex with typed parameter extraction.
-
-```
-"I have {int} item(s) in my {string}" -> regex with ParamType::Int, ParamType::String
-```
-
-Parameter types: `{string}`, `{int}`, `{float}`, `{word}`, `{}` (anonymous).
-
-String parameters use named capture groups (`__N_0` for double-quoted, `__N_1` for single-quoted), consuming 2 positional indices per string param.
-
-### feature.rs -- Feature Discovery and Parsing
-
-- `FeatureSet::discover(patterns, ignore)`: Glob-based `.feature` file discovery
-- `FeatureSet::parse()`: Gherkin parsing via the `gherkin` crate (v0.15)
-- Output: `ParsedFeature { path, gherkin::Feature }`
-
-### scenario.rs -- Scenario Expansion
-
-`expand_feature()` transforms parsed Gherkin into flat `ScenarioExecution` structs:
-
-- Background steps prepended to every scenario
-- Scenario Outlines expanded: each Examples row produces a concrete scenario with `<placeholder>` substitution in steps, tables, and docstrings
-- Tags merged: feature tags + scenario tags + example tags
-- Rules handled: nested Background + scenarios within Rule blocks
-
-### filter.rs -- Tag Expression Parser
-
-Recursive descent parser for boolean tag expressions:
-
-```
-@smoke                     -- single tag
-not @wip                   -- negation
-@smoke and not @wip        -- conjunction
-@fast or @critical         -- disjunction
-(@smoke or @regression) and not @wip  -- grouping
-```
-
-Also: `filter_by_grep(scenarios, pattern, invert)` for regex name filtering.
-
-### registry.rs -- Step and Hook Registry
-
-Central registry built from `inventory::iter` (proc macro submissions).
-
-- `find_match(text)`: O(n) scan of all step definitions
-  - 1 match: returns `StepMatch { def, params }`
-  - 0 matches: `MatchError::Undefined` with word-overlap suggestions
-  - 2+ matches: `MatchError::Ambiguous`
-- `register_step()`: Runtime registration for NAPI/external steps
-- `reference()`: Generate markdown step documentation grouped by kind
-
-Matching is keyword-agnostic: a `Given` definition matches `When`/`Then`/`And`/`But` too (per Cucumber spec).
-
-### translate.rs -- Gherkin to TestPlan
-
-The bridge between BDD and the core test runner:
-
-- Each Feature becomes a `TestSuite`
-- Each Scenario becomes a `TestCase` requesting fixtures: browser, context, page, test_info
-- `@serial` tag on any scenario forces the entire feature to run serially
-- Tags mapped to annotations: `@skip`/`@wip` -> Skip, `@slow` -> Slow
-
-**Step execution inside TestCase::test_fn:**
-
-1. Get Page, Context, TestInfo from FixturePool
-2. Construct `BrowserWorld` with Page + Context
-3. Run BeforeScenario hooks
-4. For each step:
-   - Interpolate `$variables`
-   - `registry.find_match(text)` -> StepDef + params
-   - `test_info.begin_step()` with metadata `{bdd_keyword, bdd_text, bdd_line}`
-   - `tokio::time::timeout(step_timeout, handler(world, params, table, docstring))`
-   - `handle.end(error)`
-   - On failure: skip remaining steps
-5. Run AfterScenario hooks
-6. Screenshot on failure if configured
-
-### world.rs -- BrowserWorld
-
-Shared state passed to every step handler within a scenario.
-
-```rust
-world.page()              // &Page
-world.context()           // &ContextRef (cookies, permissions)
-world.set_var("key", "value")
-world.var("key")          // Option<&String>
-world.interpolate("$key") // variable substitution
-world.set_state(my_data)  // type-safe state store (TypeId-based)
-world.get_state::<T>()    // Option<&T>
-```
-
-### step.rs -- Step Definition Types
-
-```rust
-StepKind: Given | When | Then | Step (keyword-agnostic)
-
-StepParam: String(String) | Int(i64) | Float(f64) | Word(String)
-
-StepHandler: Arc<dyn Fn(&BrowserWorld, Vec<StepParam>, Option<&DataTable>, Option<&str>) -> BoxFuture<Result<()>>>
-
-StepDef { kind, expression, regex, handler, source_file, source_line }
-```
-
-### hook.rs -- Lifecycle Hooks
-
-Hook points: `BeforeAll`, `AfterAll`, `BeforeFeature`, `AfterFeature`, `BeforeScenario`, `AfterScenario`, `BeforeStep`, `AfterStep`.
-
-Hooks have optional tag filters and ordering:
-
-```rust
+#[given(EXPR)]           #[when(EXPR)]              #[then(EXPR)]
+#[step(EXPR)]            #[given(regex = PATTERN)]  // …same for when/then
+#[before(scenario)]      #[after(scenario)]
 #[before(scenario, tags = "@auth", order = 10)]
-async fn setup_auth(world: &mut BrowserWorld) {
-  // runs before scenarios tagged @auth, ordered by priority
-}
+#[before(all)]           #[after(all)]
+#[before(feature)]       #[before(step)]            // and matching afters
+#[param_type(name = "color", regex = "red|green|blue")]
 ```
 
-## Proc Macros (ferridriver-bdd-macros)
+Parameter extraction is type-directed:
+- `String` → `{string}`
+- `i64` → `{int}`
+- `f64` → `{float}`
+- Custom `{name}` → registered regex (extract as `String`)
 
-### Step Macros
+`table: &DataTable` / `data_table: &DataTable` and `docstring: &str` /
+`doc_string: &str` are recognised by name and pulled in after positional
+parameters.
 
-```rust
-#[given("pattern")]   // Given steps
-#[when("pattern")]    // When steps
-#[then("pattern")]    // Then steps
-#[step("pattern")]    // Any keyword
-```
+## Hooks
 
-Function signature auto-detection:
-- First param `world: &mut BrowserWorld` (required)
-- Subsequent params extracted from cucumber expression by type:
-  - `String` -> `{string}` capture
-  - `i64` -> `{int}` capture
-  - `f64` -> `{float}` capture
-- Optional `table: &DataTable` or `data_table: &DataTable` for Gherkin tables
-- Optional `docstring: &str` or `doc_string: &str` for docstrings
+Eight hook points, both Rust and JS:
 
-Registration via `inventory::submit!(StepRegistration { ... })`.
+`BeforeAll`, `AfterAll`, `BeforeFeature`, `AfterFeature`, `BeforeScenario`,
+`AfterScenario`, `BeforeStep`, `AfterStep`. Tag filters and explicit order
+are supported on every point. `After*` hooks run even on failure (cleanup
+guarantee).
 
-### Hook Macros
+## Gherkin coverage
 
-```rust
-#[before(scenario)]                          // before each scenario
-#[before(scenario, tags = "@smoke")]         // filtered by tag
-#[before(scenario, order = 10)]             // execution order
-#[after(scenario)]                           // after each scenario
-#[before(all)]                               // before all scenarios
-#[after(all)]                                // after all scenarios
-```
+Full Gherkin 6+: Features, Rules, Backgrounds, Scenarios, Scenario
+Outlines (with named Examples blocks), tags (boolean expressions: `and`,
+`or`, `not`, parens), data tables (with `.hashes()`, `.rows_hash()`,
+`.transpose()`, `.as_type::<T>()`), doc strings (with media-type hints
+like `"""json`), the asterisk (`*`) keyword, and i18n keywords via
+`--language` or `# language: xx`.
+
+Scenario Outline placeholders (`<key>`) substitute into step text, table
+cells, and doc strings recursively. At runtime, `$key` interpolation
+reaches into `world.vars()` / `world.set_var(name, value)`.
 
 ## Built-in steps (144)
 
-Grouped by source module in `src/steps/`. Counts reflect the actual number of `#[given]` / `#[when]` / `#[then]` / `#[step]` attributes registered.
+Source: `crates/ferridriver-bdd/src/steps/`. Counts reflect actual
+`#[given]` / `#[when]` / `#[then]` / `#[step]` registrations.
 
-| Module | Count | Coverage |
-|---|---|---|
-| `assertion` | 34 | text, visibility, value, attribute, class, state, count, role, aria |
-| `interaction` | 20 | click / double-click / right-click, fill, clear, type, hover, focus, blur, drag, scroll, select, check / uncheck |
-| `network` | 14 | route, fulfill, continue, abort, request / response waits, HAR capture |
-| `api` | 11 | API request context: GET / POST / PUT / DELETE / PATCH, headers, body, status / JSON assertions |
-| `storage` | 8 | localStorage / sessionStorage get / set / clear / remove |
-| `wait` | 7 | wait for selector / text / navigation / seconds / load state |
-| `navigation` | 6 | navigate, back, forward, reload, URL assertions |
-| `frame` | 6 | switch to frame by name / index, main frame, frame element queries |
-| `dialog` | 5 | accept / dismiss, provide prompt text, assert message |
-| `emulation` | 5 | viewport, user agent, geolocation, color scheme, network conditions |
-| `mouse` | 5 | move to coordinates, scroll by delta, wheel events, button holds |
-| `window` | 5 | window size, maximize / minimize, tab / window switching |
-| `keyboard` | 4 | press key, press on selector, repeat N times, type slowly |
-| `javascript` | 3 | execute, evaluate, inject script |
-| `cookie` | 3 | add, delete, clear all |
-| `screenshot` | 3 | full page, named file, element-scoped |
-| `variable` | 3 | set variable, store text / attribute / property / count of selector as variable |
-| `file` | 2 | upload to input, assert download |
+| Module       | Count | Coverage |
+|--------------|-------|----------|
+| `assertion`  | 34    | Text, visibility, value, attribute, class, state, count, role, ARIA |
+| `interaction`| 20    | Click / double-click / right-click, fill, clear, type, hover, focus, blur, drag, scroll, select, check, uncheck |
+| `network`    | 14    | Route, fulfill, continue, abort, request / response waits, HAR |
+| `api`        | 11    | API request context: GET/POST/PUT/DELETE/PATCH, headers, body, status / JSON assertions |
+| `storage`    | 8     | localStorage / sessionStorage get / set / clear / remove |
+| `wait`       | 7     | Wait for selector / text / navigation / seconds / load state |
+| `navigation` | 6     | Navigate, back, forward, reload, URL assertions |
+| `frame`      | 6     | Switch frames by name / index, main frame, frame queries |
+| `dialog`     | 5     | Accept / dismiss, prompt text, assert message |
+| `emulation`  | 5     | Viewport, user agent, geolocation, color scheme, network |
+| `mouse`      | 5     | Move to coordinates, scroll by delta, wheel, button holds |
+| `window`     | 5     | Window size, maximize / minimize, tab / window switching |
+| `keyboard`   | 4     | Press key, press on selector, repeat N times, type slowly |
+| `javascript` | 3     | Execute, evaluate, inject script |
+| `cookie`     | 3     | Add, delete, clear all |
+| `screenshot` | 3     | Full page, named file, element-scoped |
+| `variable`   | 3     | Set, store text / attribute / property / count of selector |
+| `file`       | 2     | Upload to input, assert download |
 
-Source: `crates/ferridriver-bdd/src/steps/`. Call `StepRegistry::reference()` from a `bdd_main!()` binary for the full expression strings with their parameter types.
+Call `StepRegistry::reference()` from a `bdd_main!()` binary for the live
+expression list with parameter types.
 
 ## Reporters
 
-| Reporter | Format | Constructor |
-|----------|--------|-------------|
-| BddTerminalReporter | Gherkin-formatted stdout | Feature > Scenario > Step hierarchy |
-| BddJsonReporter | JSON file | Full results with step details |
-| BddJunitReporter | JUnit XML | CI-compatible |
-| CucumberJsonReporter | Cucumber JSON | Compatible with Cucumber reporting tools |
+Same reporter family as `ferridriver-test` plus BDD-specific renderers:
 
-All implement `ferridriver_test::reporter::Reporter` and receive the same event stream as E2E reporters. BDD step events carry metadata (`bdd_keyword`, `bdd_text`, `bdd_line`) for Gherkin-aware rendering.
+`terminal` (Feature → Scenario → Step hierarchy with colours), `json`,
+`junit`, `html`, `cucumber-json`, `messages` / `ndjson` (Cucumber Messages
+NDJSON), `usage`, `rerun`, `progress`, `dot`.
 
-## Running
+## Public API (programmatic use)
 
-There is no standalone `ferridriver bdd` command. Features run through one of two paths:
+Bypass the CLI / macros and drive the executor directly when embedding:
 
-**Rust / `cargo test`** — use `bdd_main!()` and the standard runner flags:
+```rust
+use ferridriver_bdd::{registry::StepRegistry, executor::ScenarioExecutor};
+use std::sync::Arc;
+use std::time::Duration;
 
-```sh
-cargo test --test bdd -- --headed --workers 4 --tags "@smoke and not @wip"
+let registry = StepRegistry::build();
+let executor = ScenarioExecutor::new(
+    Arc::new(registry),
+    Duration::from_millis(5000),
+    /* strict */ false,
+    /* screenshot_on_failure */ true,
+);
+let result = executor
+    .run_scenario_observed(&mut world, &scenario, &observer)
+    .await;
 ```
 
-**TypeScript / `@ferridriver/test`** — mixed `.feature` + `.spec.ts` in one run, with shared config:
+`StepRegistry::register()` / `register_regex()` accept handler closures —
+useful when registering steps from a host other than the macros (an MCP
+plugin, an external test driver).
 
-```sh
-npx @ferridriver/test test tests/features/ --steps 'steps/**/*.ts' \
-    -t "@smoke and not @wip" -j 4 --reporter junit
-```
+## License
 
-See `@ferridriver/test test --help` for the full flag list (`-t`/`--tags`, `--strict`, `--order defined|random[:SEED]`, `--language`, plus all shared runner flags).
-
-## Design Decisions
-
-1. **Translation layer, not a runner.** The BDD crate translates Features to `TestPlan` and delegates everything to the core `TestRunner`. No duplicate execution logic, worker management, or reporter infrastructure.
-
-2. **Keyword-agnostic matching.** Step definitions match by pattern only, not by keyword (Given/When/Then). A `#[given]` step can match a `When` or `And` line. This follows the Cucumber specification.
-
-3. **Inventory-based registration.** Steps and hooks auto-register via proc macros + `inventory` crate. Binary crates just need `bdd_main!()` -- no manual registry setup.
-
-4. **BrowserWorld as step context.** Each scenario gets a fresh `BrowserWorld` with Page, Context, variables, and type-safe state. Steps share state within a scenario but are isolated across scenarios.
-
-5. **Domain metadata in generic events.** Step events carry BDD-specific info (keyword, line number) in `metadata: Option<serde_json::Value>` rather than domain-specific enum variants. Keeps the core test engine generic.
-
-6. **Cucumber expressions over raw regex.** Type-safe parameter extraction (`{string}`, `{int}`, `{float}`) with auto-generated regex, instead of forcing users to write regex patterns.
+MIT OR Apache-2.0
