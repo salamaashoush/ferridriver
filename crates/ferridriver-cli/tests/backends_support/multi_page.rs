@@ -13,6 +13,12 @@ use serde_json::json;
 use super::client::{McpClient, is_error, ok};
 
 pub fn test_new_page(c: &mut McpClient) {
+  // Originally relied on a prior test having already opened Page 0
+  // (the giant run_all_tests ran navigation first). The split moved
+  // this into its own #[test] with a fresh McpClient — bootstrap a
+  // first page explicitly so the `page new` below produces Page 1.
+  c.nav("<body>seed</body>");
+
   let r = c.call_tool("page", json!({"action": "new"}));
   if !is_error(&r) {
     let t = c.tool_text("page", json!({"action": "list"}));
