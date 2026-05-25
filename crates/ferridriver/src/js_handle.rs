@@ -47,12 +47,9 @@ pub enum HandleRemote {
   /// `BiDi` `SharedReference.sharedId` (plus optional `handle` field).
   /// Released via `script.disown`.
   Bidi { shared_id: String, handle: Option<String> },
-  /// `WebKit` host IPC ref — the `ref_id` used to index `window.__wr`.
-  /// Released via the new `Op::ReleaseRef` IPC op.
-  WebKit(u64),
-  /// PW `WebKit` `Runtime.RemoteObjectId` — an opaque string.
+  /// Playwright `WebKit` `Runtime.RemoteObjectId` — an opaque string.
   /// Released via `Runtime.releaseObject`.
-  PwWebKit(Arc<str>),
+  WebKit(Arc<str>),
 }
 
 /// Backing of a [`JSHandle`] returned from `evaluateHandle`. Mirrors
@@ -119,8 +116,7 @@ impl HandleRemote {
         shared_id: shared_id.clone(),
         handle: handle.clone(),
       },
-      Self::WebKit(ref_id) => HandleId::WebKit(*ref_id),
-      Self::PwWebKit(obj) => HandleId::PwWebKit((**obj).to_string()),
+      Self::WebKit(obj) => HandleId::WebKit((**obj).to_string()),
     }
   }
 
@@ -131,8 +127,7 @@ impl HandleRemote {
     match id {
       HandleId::Cdp(obj) => Self::Cdp(Arc::from(obj)),
       HandleId::Bidi { shared_id, handle } => Self::Bidi { shared_id, handle },
-      HandleId::WebKit(ref_id) => Self::WebKit(ref_id),
-      HandleId::PwWebKit(obj) => Self::PwWebKit(Arc::from(obj)),
+      HandleId::WebKit(obj) => Self::WebKit(Arc::from(obj)),
     }
   }
 }
@@ -567,7 +562,7 @@ mod tests {
         shared_id: "shared-43".into(),
         handle: None,
       },
-      HandleRemote::WebKit(42),
+      HandleRemote::WebKit(Arc::from("obj-42")),
     ];
     for original in cases {
       let id = original.to_handle_id();

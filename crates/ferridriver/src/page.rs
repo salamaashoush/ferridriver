@@ -352,9 +352,10 @@ impl Page {
     //   `ensure_frame_cache_seeded`'s early-return on `main_frame_id`
     //   present would otherwise skip refreshing the iframe set on a
     //   reused page.
-    let needs_sync = matches!(self.inner.kind(), crate::backend::BackendKind::Bidi);
-    #[cfg(webkit_backend)]
-    let needs_sync = needs_sync || matches!(self.inner.kind(), crate::backend::BackendKind::WebKit);
+    let needs_sync = matches!(
+      self.inner.kind(),
+      crate::backend::BackendKind::Bidi | crate::backend::BackendKind::WebKit
+    );
     if needs_sync {
       // Single pass — extra sync rounds would push past the
       // `setTimeout(confirm, 80)` window dialog tests rely on between

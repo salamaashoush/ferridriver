@@ -379,9 +379,7 @@ pub fn builtin_fixtures(browser_config: &BrowserConfig) -> FxHashMap<String, Fix
 
   let backend = match browser_config.backend.as_str() {
     "cdp-raw" => BackendKind::CdpRaw,
-    #[cfg(webkit_backend)]
     "webkit" => BackendKind::WebKit,
-    "pw-webkit" => BackendKind::PwWebKit,
     "bidi" => BackendKind::Bidi,
     _ => BackendKind::CdpPipe,
   };

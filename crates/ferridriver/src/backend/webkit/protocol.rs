@@ -3,7 +3,7 @@
 //! Method names follow the wire format (`Namespace.method`, e.g.
 //! `Playwright.createContext`, `Page.navigate`). Constants are kept
 //! as `&'static str` so callers can pass them to
-//! [`crate::backend::pw_webkit::Connection::send`] without further
+//! [`crate::backend::webkit::Connection::send`] without further
 //! allocation.
 
 use serde::{Deserialize, Serialize};

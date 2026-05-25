@@ -8,7 +8,7 @@ use tokio::sync::RwLock;
 use tokio::sync::broadcast::error::RecvError;
 
 use super::connection::Session;
-use super::page::PwWebKitPage;
+use super::page::WebKitPage;
 use crate::backend::{AxNodeData, AxProperty, CookieData, SameSite};
 use crate::console_message::{ConsoleMessage, ConsoleMessageLocation};
 use crate::context::DialogEvent;
@@ -114,7 +114,7 @@ pub async fn set_cookie(target: &Session, cookie: CookieData) -> Result<()> {
   target
     .send("Page.setCookie", json!({ "cookie": obj }))
     .await
-    .map_err(|e| FerriError::backend(format!("pw-webkit set_cookie: {e}")))?;
+    .map_err(|e| FerriError::backend(format!("webkit set_cookie: {e}")))?;
   Ok(())
 }
 
@@ -125,10 +125,10 @@ pub async fn set_cookie(target: &Session, cookie: CookieData) -> Result<()> {
 /// `wait_for_lifecycle`, and handles `Target.*` cross-process swaps
 /// via the provisional-target slot.
 ///
-/// Called from [`super::page::PwWebKitPage::attach`] — no separate
-/// "wire it up later" step. [`super::page::PwWebKitPage::attach_listeners`]
+/// Called from [`super::page::WebKitPage::attach`] — no separate
+/// "wire it up later" step. [`super::page::WebKitPage::attach_listeners`]
 /// only swaps in the caller's log sinks via the `ArcSwap` fields.
-pub fn attach_listeners(page: &PwWebKitPage) {
+pub fn attach_listeners(page: &WebKitPage) {
   let mut target_rx = page.target_session().events();
   let mut proxy_rx = page.proxy_session().events();
   let proxy = page.proxy_session().clone();
@@ -212,7 +212,7 @@ pub fn attach_listeners(page: &PwWebKitPage) {
 /// Mirrors `wkPage.ts::_onTargetCreated` for the `isProvisional: true`
 /// branch, which constructs a `WKProvisionalPage`, opens a session,
 /// and resumes the paused target.
-async fn handle_provisional_target_created(params: &Value, page: &PwWebKitPage, provisional: ProvisionalSlot) {
+async fn handle_provisional_target_created(params: &Value, page: &WebKitPage, provisional: ProvisionalSlot) {
   let Some(info) = params.get("targetInfo") else {
     return;
   };
@@ -261,7 +261,7 @@ async fn handle_provisional_target_created(params: &Value, page: &PwWebKitPage, 
 /// `_setSession(newSession)`.
 async fn handle_committed_provisional_target(
   params: &Value,
-  page: &PwWebKitPage,
+  page: &WebKitPage,
   provisional: ProvisionalSlot,
 ) -> Option<tokio::sync::broadcast::Receiver<super::protocol::Envelope>> {
   let new_target_id = params.get("newTargetId").and_then(Value::as_str)?.to_string();
@@ -297,7 +297,7 @@ struct TargetListenerCtx {
   frame_cache: FrameCache,
   websockets: WebSockets,
   /// Sinks for captured events. Swapped in by
-  /// [`super::page::PwWebKitPage::attach_listeners`]; the listener
+  /// [`super::page::WebKitPage::attach_listeners`]; the listener
   /// reads the current pointer on each event so post-attach calls land
   /// in the caller's logs.
   console_log: Arc<arc_swap::ArcSwap<RwLock<Vec<ConsoleMessage>>>>,
@@ -637,7 +637,7 @@ fn pw_remote_object_to_backing(arg: &Value) -> crate::js_handle::JSHandleBacking
   use crate::protocol::{SerializationContext, SerializedValue, SpecialValue};
 
   if let Some(obj_id) = arg.get("objectId").and_then(Value::as_str) {
-    return JSHandleBacking::Remote(HandleRemote::PwWebKit(Arc::from(obj_id)));
+    return JSHandleBacking::Remote(HandleRemote::WebKit(Arc::from(obj_id)));
   }
   let value = arg.get("value").cloned().unwrap_or(Value::Null);
   let ty = arg.get("type").and_then(Value::as_str).unwrap_or("");
@@ -1026,8 +1026,8 @@ fn dispatch_file_chooser(
       .and_then(|r| r.get("value"))
       .and_then(Value::as_bool)
       .unwrap_or(false);
-    let element = super::element::PwWebKitElement::new(target, object_id);
-    let any_element = crate::backend::AnyElement::PwWebKit(element);
+    let element = super::element::WebKitElement::new(target, object_id);
+    let any_element = crate::backend::AnyElement::WebKit(element);
     let Ok(handle) = crate::element_handle::ElementHandle::from_any_element(page, any_element).await else {
       return;
     };
@@ -1162,7 +1162,7 @@ async fn dispatch_dialog(
         .send("Dialog.handleJavaScriptDialog", cmd_params)
         .await
         .map(|_| ())
-        .map_err(|e| crate::error::FerriError::backend(format!("pw-webkit dialog: {e}")))
+        .map_err(|e| crate::error::FerriError::backend(format!("webkit dialog: {e}")))
     })
   });
   let dialog = crate::dialog::Dialog::new_with_manager(

@@ -317,7 +317,7 @@ impl ContextRef {
       //     (`crBrowser.ts::doCreateNewContext`)
       //   * BiDi: `browser.createUserContext({ proxy })`
       //     (`bidiBrowser.ts::doCreateNewContext`)
-      //   * pw-webkit: `Playwright.createContext` + `Playwright.setLanguages`
+      //   * webkit: `Playwright.createContext` + `Playwright.setLanguages`
       //     (`wkBrowser.ts::WKBrowserContext.initialize`), then per-page
       //     overrides applied in `attach()` before the about:blank document
       //     becomes scriptable.

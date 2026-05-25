@@ -1,6 +1,6 @@
 [package]
 name = "ferridriver"
-description = "Browser automation in Rust with a Playwright-compatible API. Four pluggable backends: CDP pipe, CDP WebSocket, WKWebView, Firefox BiDi."
+description = "Browser automation in Rust with a Playwright-compatible API. Four pluggable backends: CDP pipe, CDP WebSocket, Playwright WebKit, Firefox BiDi."
 version.workspace = true
 edition.workspace = true
 license.workspace = true
@@ -22,7 +22,6 @@ futures = { workspace = true }
 regex = { workspace = true }
 async-trait = { workspace = true }
 base64 = { workspace = true }
-ferridriver-webkit-wire = { workspace = true }
 libc = { workspace = true }
 tracing = { workspace = true }
 tokio-tungstenite = "0.29"

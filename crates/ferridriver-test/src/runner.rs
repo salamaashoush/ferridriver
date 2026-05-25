@@ -1115,9 +1115,7 @@ fn build_launch_plan(browser_config: &crate::config::BrowserConfig) -> LaunchPla
   // BrowserConfig is already normalized (browser↔backend consistent).
   let backend = match browser_config.backend.as_str() {
     "cdp-raw" => BackendKind::CdpRaw,
-    #[cfg(webkit_backend)]
     "webkit" => BackendKind::WebKit,
-    "pw-webkit" => BackendKind::PwWebKit,
     "bidi" => BackendKind::Bidi,
     _ => BackendKind::CdpPipe,
   };

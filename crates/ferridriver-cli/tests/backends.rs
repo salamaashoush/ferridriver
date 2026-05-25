@@ -248,6 +248,11 @@ fn test_network_requests(c: &mut McpClient) {
 }
 
 fn test_trace(c: &mut McpClient) {
+  // BiDi has no per-page CDP-style tracing; metrics() returns
+  // Unsupported. CDP / webkit produce real metrics.
+  if c.backend == "bidi" {
+    return;
+  }
   c.nav("<body></body>");
   c.call_tool("diagnostics", json!({"type": "trace_start"}));
   c.call_tool(
@@ -521,7 +526,7 @@ fn test_script_emulate_media_all_fields(c: &mut McpClient) {
   // limitation; the macOS Mac-port build of the same binary honors it.
   // Skip on Linux only.
   #[cfg(target_os = "linux")]
-  if c.backend == "pw-webkit" {
+  if c.backend == "webkit" {
     return;
   }
   c.nav("<html><body><div id='x'></div></body></html>");
@@ -590,7 +595,7 @@ fn test_script_emulate_media_null_disables_single_field(c: &mut McpClient) {
   // honor PrefersColorScheme via Page.overrideUserPreference. macOS
   // Mac-port build honors it.
   #[cfg(target_os = "linux")]
-  if c.backend == "pw-webkit" {
+  if c.backend == "webkit" {
     return;
   }
   c.nav("<html><body>init</body></html>");
@@ -956,10 +961,9 @@ fn test_script_fill_force(c: &mut McpClient) {
 // WebKit (no public NSTouchEvent synthesis) surface a typed Unsupported
 // error instead.
 fn test_script_tap_native(c: &mut McpClient) {
-  if c.backend == "bidi" || c.backend == "webkit" {
-    // On these backends, tap must return Unsupported. Install a button,
-    // call tap(), and assert the error message identifies the backend
-    // and explains the protocol gap — not a silent JS fallback.
+  if c.backend == "bidi" {
+    // BiDi has no `pointerType='touch'` in stable yet. Tap must surface
+    // Unsupported — not a silent JS fallback.
     c.nav(
       "<button id='b' ontouchstart=\"document.getElementById('out').textContent='fired'\">b</button>\
        <div id='out'>no</div>",
@@ -979,8 +983,6 @@ fn test_script_tap_native(c: &mut McpClient) {
       "{}: Unsupported message should mention tap, got: {v}",
       c.backend
     );
-    // The page's DOM event handler must NOT have fired — proof there's
-    // no JS-fallback dispatch happening behind the typed error.
     let after = c.script_value("return await page.evaluate('document.getElementById(\"out\").textContent');");
     assert_eq!(
       after,
@@ -1674,45 +1676,6 @@ fn test_script_handle_materialisation(c: &mut McpClient) {
   assert_eq!(v["texts"], json!(["x", "y"]));
 }
 
-// WebKit-specific probe: proves `Op::ReleaseRef` actually reached the
-// host and deleted from `window.__wr`. CDP's `Runtime.releaseObject`
-// and BiDi's `script.disown` are not observable from page-side JS; this
-// probe covers WebKit's page-side registry shrink which IS observable.
-fn test_script_handle_lifecycle_webkit_observable(c: &mut McpClient) {
-  c.nav("<button id='primary'>ok</button>");
-
-  // `page.evaluate` through the QuickJS binding JSON-stringifies its
-  // result, so the Number comes back as a string (`"0"`). Coerce via
-  // `Number(...)` inside JS so we get a real number on the wire.
-  let v = c.script_value(
-    "const sizeNow = async () => Number(await page.evaluate('window.__wr ? window.__wr.size : 0'));\
-     const before = await sizeNow();\
-     const h = await page.querySelector('button#primary');\
-     const during = await sizeNow();\
-     await h.dispose();\
-     const after = await sizeNow();\
-     return {before, during, after};",
-  );
-  let as_int = |k: &str| -> i64 {
-    v[k]
-      .as_i64()
-      .or_else(|| v[k].as_str().and_then(|s| s.parse::<i64>().ok()))
-      .unwrap_or(-1)
-  };
-  let before_size = as_int("before");
-  let during_size = as_int("during");
-  let after_size = as_int("after");
-  assert_eq!(
-    during_size,
-    before_size + 1,
-    "querySelector did not grow window.__wr by 1 (before={before_size}, during={during_size}): {v}"
-  );
-  assert_eq!(
-    after_size, before_size,
-    "Op::ReleaseRef did not shrink window.__wr back to pre-mint size (before={before_size}, after={after_size}): {v}"
-  );
-}
-
 // Task 3.25: `page.addInitScript(script, arg)` — exercise the full
 // Playwright surface (Function + arg, string, `{ content }`) from QuickJS
 // end-to-end, including the Rust-core-driven `Cannot evaluate a string with
@@ -1952,6 +1915,11 @@ fn test_script_geolocation(c: &mut McpClient) {
 }
 
 fn test_script_offline(c: &mut McpClient) {
+  // BiDi has no `network.setEmulatedConditions` equivalent yet —
+  // `context.setOffline` returns Unsupported there.
+  if c.backend == "bidi" {
+    return;
+  }
   c.nav("<body></body>");
   let v = c.script_value(
     "await context.setOffline(true); \
@@ -2212,7 +2180,7 @@ fn run_all_tests(backend: &str) {
   }
 
   // `run_cdp!` historically gated emulation tests to CDP only because
-  // pw-webkit hadn't wired the equivalents through `apply_context_options`.
+  // webkit hadn't wired the equivalents through `apply_context_options`.
   // Round 5 wired them; the macro stays in place for any future
   // CDP-specific protocol coverage (e.g. CDP-only `Tracing.start`
   // categories) without forcing a re-derivation.
@@ -2228,14 +2196,6 @@ fn run_all_tests(backend: &str) {
   // Silence the unused-binding lint for the rare-call macro above
   // without papering over a real bug.
   let _ = is_cdp;
-
-  macro_rules! run_webkit {
-    ($name:path) => {{
-      if backend == "webkit" {
-        run!($name);
-      }
-    }};
-  }
 
   // Navigation + session
   run!(test_navigate);
@@ -2305,7 +2265,6 @@ fn run_all_tests(backend: &str) {
   // `window.__wr` (CDP and BiDi dispose paths are proven via the
   // successful `dispose()` call but have no page-observable side
   // effect until phase D's use-after-dispose test).
-  run_webkit!(test_script_handle_lifecycle_webkit_observable);
   run!(test_script_evaluate_fn_and_handle);
   run!(test_script_evaluate_rich_types);
   run!(test_script_element_handle_methods);
@@ -2418,14 +2377,12 @@ fn run_all_tests(backend: &str) {
   run!(backends_support::dialog::test_dialog_auto_dismiss_without_listener);
 
   // §2.11 FileChooser as first-class event handle.
-  run!(backends_support::file_chooser::test_file_chooser_webkit_unsupported);
   run!(backends_support::file_chooser::test_file_chooser_single_string_path);
   run!(backends_support::file_chooser::test_file_chooser_multiple_string_array);
   run!(backends_support::file_chooser::test_file_chooser_file_payload_single);
   run!(backends_support::file_chooser::test_file_chooser_unclaimed_disposes);
 
   // §2.10 Download as first-class event handle.
-  run!(backends_support::download::test_download_webkit_unsupported);
   run!(backends_support::download::test_download_save_as_roundtrip);
   run!(backends_support::download::test_download_path_contents);
   run!(backends_support::download::test_download_cancel_surfaces_failure);
@@ -2542,15 +2499,9 @@ fn all_tests_cdp_raw() {
   run_all_tests("cdp-raw");
 }
 
-#[cfg(webkit_backend)]
 #[test]
 fn all_tests_webkit() {
   run_all_tests("webkit");
-}
-
-#[test]
-fn all_tests_pw_webkit() {
-  run_all_tests("pw-webkit");
 }
 
 #[test]

@@ -427,18 +427,13 @@ impl BrowserState {
         };
         AnyBrowser::CdpRaw(browser)
       },
-      #[cfg(webkit_backend)]
       BackendKind::WebKit => {
-        use crate::backend::webkit::WebKitBrowser;
-        AnyBrowser::WebKit(WebKitBrowser::launch_with_options(self.headless).await?)
-      },
-      BackendKind::PwWebKit => {
-        use crate::backend::pw_webkit::{LaunchConfig, PwWebKitBrowser};
+        use crate::backend::webkit::{LaunchConfig, WebKitBrowser};
         let config = LaunchConfig {
           headless: self.headless,
           ..LaunchConfig::default()
         };
-        AnyBrowser::PwWebKit(Box::pin(PwWebKitBrowser::launch(&config)).await?)
+        AnyBrowser::WebKit(Box::pin(WebKitBrowser::launch(&config)).await?)
       },
       BackendKind::Bidi => {
         use crate::backend::bidi::BidiBrowser;
@@ -1783,8 +1778,6 @@ mod tests {
   fn test_state(backend: BackendKind) -> BrowserState {
     let kind = match backend {
       BackendKind::Bidi => crate::options::BrowserKind::Firefox,
-      #[cfg(webkit_backend)]
-      BackendKind::WebKit => crate::options::BrowserKind::WebKit,
       _ => crate::options::BrowserKind::Chromium,
     };
     BrowserState::with_plan(

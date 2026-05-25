@@ -203,26 +203,6 @@ pub fn test_network_redirect_chain(c: &mut McpClient) {
       landed = landed,
       base = base,
     );
-    if c.backend == "webkit" {
-      // WebKit's JS interceptor only sees fetch/XHR — main-document
-      // navigation redirects (the page.goto path) are handled
-      // internally by `WKWebView` without traversing the interceptor.
-      // The CDP `Network.requestWillBeSent.redirectResponse` analog
-      // doesn't exist on stock `WKWebView`. Verified gap; the binding
-      // surfaces a typed Timeout instead of dangling.
-      let payload = c.script(&script);
-      assert_eq!(
-        payload["status"].as_str(),
-        Some("error"),
-        "WebKit should time out on waitForResponse for navigation: {payload}",
-      );
-      let msg = payload["error"]["message"].as_str().unwrap_or("");
-      assert!(
-        msg.contains("Timeout") || msg.contains("timeout"),
-        "WebKit redirect_chain should fail with typed Timeout: {msg}",
-      );
-      return;
-    }
     let v = c.script_value(&script);
     assert_eq!(v["finalUrl"].as_str(), Some(landed.as_str()), "final url: {v}");
     assert_eq!(v["finalStatus"].as_i64(), Some(200), "final status: {v}");
@@ -250,7 +230,7 @@ pub fn test_network_redirect_chain(c: &mut McpClient) {
 /// trigger the failure via a refused TCP port there instead — the
 /// `requestfailed` lifecycle observability is identical.
 pub fn test_network_request_failure(c: &mut McpClient) {
-  if c.backend == "webkit" || c.backend == "pw-webkit" {
+  if c.backend == "webkit" {
     return test_network_request_failure_via_refused_port(c);
   }
   with_stub_server(|base| {
@@ -366,7 +346,7 @@ pub fn test_network_response_body(c: &mut McpClient) {
     // bytes for non-intercepted responses, mirrors Playwright's BiDi
     // backend; WebKit: no public `WKWebView` API). Per Rule 4 we never
     // silently skip — we assert the typed error.
-    let body_supported = c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "pw-webkit";
+    let body_supported = c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "webkit";
     if body_supported {
       let v = c.script_value(script);
       assert_eq!(v["status"].as_i64(), Some(200), "status: {v}");
@@ -429,7 +409,7 @@ pub fn test_network_post_data(c: &mut McpClient) {
       ";
     let v = c.script_value(script);
     assert_eq!(v["method"].as_str(), Some("POST"), "method: {v}");
-    if c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "pw-webkit" {
+    if c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "webkit" {
       // CDP/PW WebKit expose the post body via `Network.requestWillBeSent.request.postData`.
       assert!(
         v["data"].as_str().is_some_and(|s| s.contains("\"ping\":\"pong\"")),
@@ -475,7 +455,7 @@ pub fn test_network_headers(c: &mut McpClient) {
       };
       "#;
     let v = c.script_value(script);
-    if c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "bidi" || c.backend == "pw-webkit" {
+    if c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "bidi" || c.backend == "webkit" {
       // CDP exposes all request headers via `requestWillBeSent.request.headers`;
       // BiDi via `network.beforeRequestSent.request.headers`; PW WebKit
       // mirrors the CDP shape. All surface browser-added headers.
@@ -504,27 +484,15 @@ pub fn test_network_headers(c: &mut McpClient) {
         "two Set-Cookie entries preserved: {v}",
       );
     }
-    if c.backend == "webkit" {
-      // WebKit's JS-fetch interceptor relies on `Headers.forEach`,
-      // which the Fetch spec defines to filter out `Set-Cookie`
-      // (privacy: Set-Cookie isn't exposed to scripts). So the
-      // observable response headers exclude Set-Cookie entirely.
-      // Documented Tier-2 raw-header-parsing follow-up.
-      assert!(
-        v["setCookieJoined"].is_null(),
-        "WebKit cannot observe Set-Cookie via Fetch API: {v}",
-      );
-    } else {
-      // CDP / BiDi expose raw response headers — both keep both
-      // Set-Cookie values in the joined string.
-      assert!(
-        v["setCookieJoined"]
-          .as_str()
-          .is_some_and(|s| s.contains("a=1") && s.contains("b=2")),
-        "{} joined set-cookie should carry both values: {v}",
-        c.backend,
-      );
-    }
+    // CDP / BiDi / WebKit expose raw response headers — all keep both
+    // Set-Cookie values in the joined string.
+    assert!(
+      v["setCookieJoined"]
+        .as_str()
+        .is_some_and(|s| s.contains("a=1") && s.contains("b=2")),
+      "{} joined set-cookie should carry both values: {v}",
+      c.backend,
+    );
   });
 }
 

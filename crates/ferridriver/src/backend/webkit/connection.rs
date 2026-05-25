@@ -58,7 +58,7 @@ pub enum ConnectionError {
 impl From<ConnectionError> for crate::error::FerriError {
   fn from(e: ConnectionError) -> Self {
     let msg = e.to_string();
-    crate::error::FerriError::backend(format!("pw-webkit: {msg}"))
+    crate::error::FerriError::backend(format!("webkit: {msg}"))
   }
 }
 
@@ -272,14 +272,14 @@ async fn reader_loop(conn: Arc<Connection>, mut reader: ReaderHandle) {
     let raw = match frame {
       Ok(v) => v,
       Err(e) => {
-        tracing::error!(target: "ferridriver::pw_webkit", "reader: {e}");
+        tracing::error!(target: "ferridriver::webkit", "reader: {e}");
         break;
       },
     };
-    tracing::debug!(target: "ferridriver::pw_webkit", "recv: {raw}");
+    tracing::debug!(target: "ferridriver::webkit", "recv: {raw}");
     match serde_json::from_value::<Envelope>(raw) {
       Ok(env) => dispatch(&conn, env),
-      Err(e) => tracing::warn!(target: "ferridriver::pw_webkit", "skip un-parseable frame: {e}"),
+      Err(e) => tracing::warn!(target: "ferridriver::webkit", "skip un-parseable frame: {e}"),
     }
   }
   conn.drain_all();

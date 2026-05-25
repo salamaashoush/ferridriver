@@ -73,7 +73,7 @@ impl Transport {
   /// Construct a transport from raw blocking read + write halves.
   /// Usually called with the `Stdio::piped()` fds 3/4 of a spawned
   /// `pw_run.sh` child. The reader thread is named so it shows up as
-  /// `pw-webkit-reader` in `tokio-console` / `ps`.
+  /// `webkit-reader` in `tokio-console` / `ps`.
   /// # Panics
   ///
   /// Panics if the OS refuses to spawn the reader thread (vanishingly
@@ -85,9 +85,9 @@ impl Transport {
   {
     let (tx, rx) = mpsc::unbounded_channel();
     std::thread::Builder::new()
-      .name("pw-webkit-reader".into())
+      .name("webkit-reader".into())
       .spawn(move || drain_reader(read, &tx))
-      .unwrap_or_else(|e| panic!("spawn pw-webkit-reader: {e}"));
+      .unwrap_or_else(|e| panic!("spawn webkit-reader: {e}"));
     Transport {
       reader: ReaderHandle { rx },
       writer: WriterHandle {
