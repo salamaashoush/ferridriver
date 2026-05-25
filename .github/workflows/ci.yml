@@ -67,8 +67,7 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libclang-dev pkg-config \
-            libwebkitgtk-6.0-dev libgtk-4-dev libsoup-3.0-dev
+            libclang-dev pkg-config
       - run: |
           cargo clippy --workspace --all-targets \
             --exclude bdd-example
@@ -89,8 +88,7 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libclang-dev pkg-config \
-            libwebkitgtk-6.0-dev libgtk-4-dev libsoup-3.0-dev
+            libclang-dev pkg-config
       - run: |
           cargo doc --workspace --no-deps \
             --exclude bdd-example
@@ -141,27 +139,24 @@ jobs:
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
             libclang-dev pkg-config ffmpeg \
-            libdbus-glib-1-2 libxt6 libxtst6 libgtk-3-0t64 \
-            libwebkitgtk-6.0-dev libgtk-4-dev libsoup-3.0-dev xvfb
+            libdbus-glib-1-2 libxt6 libxtst6 libgtk-3-0t64
 
       - name: Install system deps (macOS)
         if: runner.os == 'macOS'
         run: brew install pkg-config llvm ffmpeg
 
-      - name: Build ferridriver binaries
-        run: cargo build --bin ferridriver --bin ferridriver-webkit-host
+      - name: Build ferridriver binary
+        run: cargo build --bin ferridriver
 
       - name: Install Chromium with system deps
         run: cargo run --bin ferridriver -- install --with-deps chromium
 
+      - name: Install Playwright WebKit binary
+        run: npx --yes playwright@latest install --with-deps webkit
+
       - name: Run unit + integration tests
         env:
           FERRIDRIVER_BIN: ${{ github.workspace }}/target/debug/ferridriver
-          FERRIDRIVER_WEBKIT_HOST: ${{ github.workspace }}/target/debug/ferridriver-webkit-host
-          # Force the Linux host to self-exec under `xvfb-run -a`.
-          # The macOS leg ignores this and runs the native WKWebView
-          # path. See `crates/ferridriver-webkit-host/src/linux/mod.rs::run`.
-          FERRIDRIVER_WEBKIT_HEADLESS: "1"
           # Limit nextest parallelism — many integration tests spawn a
           # browser per test, so running N at once on a 2-4 core
           # runner exhausts memory and they all hit the per-test
@@ -206,8 +201,7 @@ jobs:
         run: |
           DEBIAN_FRONTEND=noninteractive sudo apt-get update
           DEBIAN_FRONTEND=noninteractive sudo apt-get install -y --no-install-recommends \
-            libclang-dev pkg-config \
-            libwebkitgtk-6.0-dev libgtk-4-dev libsoup-3.0-dev
+            libclang-dev pkg-config
       - run: cargo check --locked --workspace
 
   # ---------------------------------------------------------------------------
