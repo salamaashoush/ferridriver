@@ -846,15 +846,17 @@ async fn binding_surface_sweep() {
   assert_all_true("kbd-combo", &v);
 
   // 42 ── page.waitForEvent('console') captures a page-side console
-  // message (Playwright `page.waitForEvent('console')`).
+  // message (Playwright `page.waitForEvent('console')`). Attach the
+  // listener BEFORE triggering — Promise.all races the listener
+  // registration against the synchronous console.log dispatch under
+  // CI load and the message is lost.
   let v = step(
     &h,
     "waitForEvent-console",
     "await page.setContent('<body>x</body>'); \
-     const [msg] = await Promise.all([ \
-       page.waitForEvent('console'), \
-       page.evaluate(() => { console.log('hello-from-page'); }) \
-     ]); \
+     const waitPromise = page.waitForEvent('console'); \
+     await page.evaluate(() => { console.log('hello-from-page'); }); \
+     const msg = await waitPromise; \
      return { type: msg.type() === 'log', text: msg.text().includes('hello-from-page') };",
   )
   .await;
