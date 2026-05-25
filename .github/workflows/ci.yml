@@ -148,11 +148,8 @@ jobs:
       - name: Build ferridriver binary
         run: cargo build --bin ferridriver
 
-      - name: Install Chromium with system deps
-        run: cargo run --bin ferridriver -- install --with-deps chromium
-
-      - name: Install Playwright WebKit binary
-        run: npx --yes playwright@latest install --with-deps webkit
+      - name: Install browsers (Chromium with system deps, WebKit)
+        run: cargo run --bin ferridriver -- install --with-deps chromium webkit
 
       - name: Run unit + integration tests
         env:

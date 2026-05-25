@@ -47,6 +47,29 @@ const FIREFOX_RELEASES_URL: &str = "https://archive.mozilla.org/pub/firefox/rele
 /// Download retry count (matches Playwright's 5 attempts).
 const DOWNLOAD_RETRIES: u32 = 5;
 
+/// Playwright's `browsers.json` on main — single source of truth for the
+/// `WebKit` build revision.
+const PW_BROWSERS_JSON_URL: &str =
+  "https://raw.githubusercontent.com/microsoft/playwright/main/packages/playwright-core/browsers.json";
+
+/// Playwright CDN mirrors. Try in order; on connection failure, fall over.
+const PW_CDN_MIRRORS: &[&str] = &[
+  "https://cdn.playwright.dev/dbazure/download/playwright",
+  "https://playwright.download.prss.microsoft.com/dbazure/download/playwright",
+  "https://cdn.playwright.dev",
+];
+
+#[derive(Debug, Deserialize)]
+struct PwBrowsersJson {
+  browsers: Vec<PwBrowserEntry>,
+}
+
+#[derive(Debug, Deserialize)]
+struct PwBrowserEntry {
+  name: String,
+  revision: String,
+}
+
 #[derive(Debug, Deserialize)]
 struct CftResponse {
   channels: CftChannels,
@@ -694,6 +717,127 @@ impl BrowserInstaller {
     Ok(path)
   }
 
+  /// Install the Playwright `WebKit` binary.
+  ///
+  /// Reads the current `WebKit` revision from Playwright's `browsers.json`
+  /// (latest main), downloads the matching archive from the Playwright
+  /// CDN, and extracts it to `~/.cache/ferridriver/webkit/webkit-<rev>/`.
+  ///
+  /// The launcher search order picks this up automatically. Override
+  /// with the `FERRIDRIVER_WEBKIT` environment variable when needed.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if Playwright's `browsers.json` is unreachable,
+  /// the host platform has no published `WebKit` build, the download fails
+  /// after all retries, or extraction fails.
+  pub async fn install_webkit<F>(&self, progress: F) -> Result<String>
+  where
+    F: Fn(InstallProgress),
+  {
+    progress(InstallProgress::Resolving);
+
+    let browsers: PwBrowsersJson = self
+      .client
+      .get(PW_BROWSERS_JSON_URL)
+      .send()
+      .await
+      .map_err(|e| backend_err(format!("failed to fetch Playwright browsers.json: {e}")))?
+      .json()
+      .await
+      .map_err(|e| backend_err(format!("failed to parse Playwright browsers.json: {e}")))?;
+
+    let revision = browsers
+      .browsers
+      .into_iter()
+      .find(|b| b.name == "webkit")
+      .map(|b| b.revision)
+      .ok_or_else(|| backend_err("Playwright browsers.json missing webkit entry"))?;
+
+    let archive = webkit_archive_for_host()?;
+
+    let webkit_root = self.cache_dir.join("webkit");
+    let install_dir = webkit_root.join(format!("webkit-{revision}"));
+    let marker_file = install_dir.join(".downloaded");
+    let executable = install_dir.join("pw_run.sh");
+
+    if marker_file.exists() && executable.exists() {
+      let path = executable.to_string_lossy().to_string();
+      progress(InstallProgress::AlreadyInstalled {
+        version: revision.clone(),
+        path: path.clone(),
+      });
+      return Ok(path);
+    }
+
+    if install_dir.exists() {
+      let _ = tokio::fs::remove_dir_all(&install_dir).await;
+    }
+
+    let tmp_dir = self.cache_dir.join(".tmp");
+    tokio::fs::create_dir_all(&tmp_dir).await?;
+    let zip_path = tmp_dir.join(format!("webkit-{revision}.zip"));
+
+    let mut last_error = String::new();
+    'outer: for host in PW_CDN_MIRRORS {
+      let url = format!("{host}/builds/webkit/{revision}/{archive}");
+      for attempt in 1..=DOWNLOAD_RETRIES {
+        progress(InstallProgress::Downloading {
+          bytes_downloaded: 0,
+          total_bytes: None,
+        });
+        match self.download_file(&url, &zip_path, &progress).await {
+          Ok(()) => {
+            last_error.clear();
+            break 'outer;
+          },
+          Err(e) => {
+            last_error = format!("{host} attempt {attempt}/{DOWNLOAD_RETRIES}: {e}");
+            let _ = tokio::fs::remove_file(&zip_path).await;
+          },
+        }
+      }
+    }
+    if !last_error.is_empty() {
+      return Err(backend_err(format!(
+        "WebKit download failed after exhausting mirrors: {last_error}"
+      )));
+    }
+
+    progress(InstallProgress::Extracting);
+    tokio::fs::create_dir_all(&install_dir).await?;
+    let install_dir_clone = install_dir.clone();
+    let zip_path_clone = zip_path.clone();
+    tokio::task::spawn_blocking(move || extract_zip(&zip_path_clone, &install_dir_clone))
+      .await
+      .map_err(|e| backend_err(format!("extract task failed: {e}")))??;
+    let _ = tokio::fs::remove_file(&zip_path).await;
+
+    #[cfg(unix)]
+    {
+      use std::os::unix::fs::PermissionsExt;
+      if executable.exists() {
+        let _ = std::fs::set_permissions(&executable, std::fs::Permissions::from_mode(0o755));
+      }
+    }
+
+    if !executable.exists() {
+      return Err(backend_err(format!(
+        "extraction completed but pw_run.sh not found at: {}",
+        executable.display()
+      )));
+    }
+
+    let _ = tokio::fs::write(&marker_file, revision.as_bytes()).await;
+
+    let path = executable.to_string_lossy().to_string();
+    progress(InstallProgress::Complete {
+      version: revision,
+      path: path.clone(),
+    });
+    Ok(path)
+  }
+
   /// Return the path to an installed Firefox, or `None` if not installed.
   #[must_use]
   pub fn find_installed_firefox(&self) -> Option<String> {
@@ -724,6 +868,54 @@ impl Default for BrowserInstaller {
 // ---------------------------------------------------------------------------
 // Platform detection
 // ---------------------------------------------------------------------------
+
+/// Map the host to the Playwright `WebKit` archive name. Mirrors the
+/// table in `packages/playwright-core/src/server/registry/index.ts`.
+fn webkit_archive_for_host() -> Result<String> {
+  let os = std::env::consts::OS;
+  let arch = std::env::consts::ARCH;
+
+  let archive = match (os, arch) {
+    #[cfg(target_os = "linux")]
+    ("linux", _) => {
+      let distro = detect_linux_distro();
+      // Map distro tag → PW WebKit archive. Arch and any unknown distro
+      // ride the ubuntu-24.04 build (same call Playwright makes).
+      if distro.starts_with("ubuntu20.04") {
+        if arch == "aarch64" {
+          "webkit-ubuntu-20.04-arm64.zip"
+        } else {
+          "webkit-ubuntu-20.04.zip"
+        }
+      } else if distro.starts_with("ubuntu22.04") || distro.starts_with("debian11") {
+        if arch == "aarch64" {
+          "webkit-ubuntu-22.04-arm64.zip"
+        } else {
+          "webkit-ubuntu-22.04.zip"
+        }
+      } else if distro.starts_with("debian12") {
+        "webkit-debian-12.zip"
+      } else if arch == "aarch64" {
+        "webkit-ubuntu-24.04-arm64.zip"
+      } else {
+        "webkit-ubuntu-24.04.zip"
+      }
+    },
+    #[cfg(not(target_os = "linux"))]
+    ("linux", "aarch64") => "webkit-ubuntu-24.04-arm64.zip",
+    #[cfg(not(target_os = "linux"))]
+    ("linux", _) => "webkit-ubuntu-24.04.zip",
+    ("macos", "aarch64") => "webkit-mac-15-arm64.zip",
+    ("macos", _) => "webkit-mac-15.zip",
+    ("windows", _) => "webkit-win64.zip",
+    _ => {
+      return Err(FerriError::unsupported(format!(
+        "no Playwright WebKit build for {os}/{arch}"
+      )));
+    },
+  };
+  Ok(archive.to_string())
+}
 
 fn current_platform() -> String {
   let os = std::env::consts::OS;
@@ -1143,22 +1335,39 @@ fn extract_zip(zip_path: &Path, dest: &Path) -> Result<()> {
 
     if entry.is_dir() {
       std::fs::create_dir_all(&out_path)?;
-    } else {
-      if let Some(parent) = out_path.parent() {
-        std::fs::create_dir_all(parent)?;
-      }
-      let mut out_file = std::fs::File::create(&out_path)?;
-      std::io::copy(&mut entry, &mut out_file)?;
+      continue;
+    }
 
-      // Preserve executable permissions on Unix
-      #[cfg(unix)]
-      {
-        use std::os::unix::fs::PermissionsExt;
-        if let Some(mode) = entry.unix_mode() {
-          let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
+    if let Some(parent) = out_path.parent() {
+      std::fs::create_dir_all(parent)?;
+    }
+
+    // Symlink entries: file content IS the link target. Required for
+    // Playwright WebKit bundles (libwebkitgtk-6.0.so.4 → ...so.4.17.1).
+    // ZIP encodes symlinks as regular file entries with the unix mode
+    // bits S_IFLNK (0o120000) set.
+    #[cfg(unix)]
+    {
+      use std::io::Read;
+      use std::os::unix::fs::PermissionsExt;
+      if let Some(mode) = entry.unix_mode() {
+        if mode & 0o170_000 == 0o120_000 {
+          let mut target = String::new();
+          entry.read_to_string(&mut target)?;
+          // Replace any pre-existing entry — zip ordering is not stable.
+          let _ = std::fs::remove_file(&out_path);
+          std::os::unix::fs::symlink(&target, &out_path)?;
+          continue;
         }
+        let mut out_file = std::fs::File::create(&out_path)?;
+        std::io::copy(&mut entry, &mut out_file)?;
+        let _ = std::fs::set_permissions(&out_path, std::fs::Permissions::from_mode(mode));
+        continue;
       }
     }
+
+    let mut out_file = std::fs::File::create(&out_path)?;
+    std::io::copy(&mut entry, &mut out_file)?;
   }
 
   Ok(())

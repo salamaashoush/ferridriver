@@ -80,7 +80,12 @@ async fn run_install(args: cli::InstallArgs) -> anyhow::Result<()> {
       "firefox" => {
         installer.install_firefox(progress).await?;
       },
-      other => anyhow::bail!("unknown browser {other:?} (expected chromium, chromium-headless-shell, or firefox)"),
+      "webkit" => {
+        installer.install_webkit(progress).await?;
+      },
+      other => {
+        anyhow::bail!("unknown browser {other:?} (expected chromium, chromium-headless-shell, firefox, or webkit)")
+      },
     }
   }
 
