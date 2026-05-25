@@ -188,7 +188,7 @@ pub struct RunArgs {
 #[derive(Args)]
 pub struct InstallArgs {
   /// Browsers to install: `chromium`, `chromium-headless-shell`,
-  /// `firefox`. Defaults to `chromium` when omitted.
+  /// `firefox`, `webkit`. Defaults to `chromium` when omitted.
   pub browsers: Vec<String>,
 
   /// Also install required system libraries (Linux only; uses the
