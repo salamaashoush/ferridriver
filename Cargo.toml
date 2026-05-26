@@ -17,7 +17,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 rust-version = "1.91.0"
 license = "MIT OR Apache-2.0"
@@ -45,15 +45,15 @@ todo = "warn"
 dbg_macro = "warn"
 
 [workspace.dependencies]
-ferridriver = { path = "crates/ferridriver", version = "0.2.0" }
-ferridriver-mcp = { path = "crates/ferridriver-mcp", version = "0.2.0" }
-ferridriver-test = { path = "crates/ferridriver-test", version = "0.2.0" }
-ferridriver-test-macros = { path = "crates/ferridriver-test-macros", version = "0.2.0" }
-ferridriver-bdd = { path = "crates/ferridriver-bdd", version = "0.2.0" }
-ferridriver-bdd-macros = { path = "crates/ferridriver-bdd-macros", version = "0.2.0" }
-ferridriver-script = { path = "crates/ferridriver-script", version = "0.2.0" }
-ferridriver-config = { path = "crates/ferridriver-config", version = "0.2.0" }
-ferridriver-expect = { path = "crates/ferridriver-expect", version = "0.2.0" }
+ferridriver = { path = "crates/ferridriver", version = "0.3.0" }
+ferridriver-mcp = { path = "crates/ferridriver-mcp", version = "0.3.0" }
+ferridriver-test = { path = "crates/ferridriver-test", version = "0.3.0" }
+ferridriver-test-macros = { path = "crates/ferridriver-test-macros", version = "0.3.0" }
+ferridriver-bdd = { path = "crates/ferridriver-bdd", version = "0.3.0" }
+ferridriver-bdd-macros = { path = "crates/ferridriver-bdd-macros", version = "0.3.0" }
+ferridriver-script = { path = "crates/ferridriver-script", version = "0.3.0" }
+ferridriver-config = { path = "crates/ferridriver-config", version = "0.3.0" }
+ferridriver-expect = { path = "crates/ferridriver-expect", version = "0.3.0" }
 tokio = { version = "1", features = ["full"] }
 futures = "0.3"
 serde = { version = "1", features = ["derive"] }
