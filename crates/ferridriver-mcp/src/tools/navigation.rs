@@ -106,11 +106,12 @@ impl McpServer {
         let s = sess(p.session.as_opt());
         let _guard = self.session_guard(s).await;
         let url = p.url.as_deref().unwrap_or("about:blank");
-        let mut state = self.state.write().await;
-        let any_page = Box::pin(state.open_page(s, url)).await.map_err(Self::err)?;
-        drop(state);
+        let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), s.to_string());
+        let page = Box::pin(ctx_ref.new_page()).await.map_err(Self::err)?;
+        if url != "about:blank" {
+          page.goto(url, None).await.map_err(Self::err)?;
+        }
         self.state.invalidate_context(s);
-        let page = ferridriver::Page::new(any_page);
         let snap = self.snap(&page, s).await;
         Ok(CallToolResult::success(vec![Content::text(format!(
           "Opened new page in session '{s}'.\n\n{snap}"

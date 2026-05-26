@@ -25,6 +25,7 @@ async-trait = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 rustc-hash = "2"
+dashmap = { workspace = true }
 libc = { workspace = true }
 base64 = { workspace = true }
 url = "2"

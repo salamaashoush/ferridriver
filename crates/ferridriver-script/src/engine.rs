@@ -284,6 +284,7 @@ pub struct Session {
   runtime: AsyncRuntime,
   ctx: AsyncContext,
   config: ScriptEngineConfig,
+  default_request: Arc<ferridriver::http_client::HttpClient>,
   /// Last resource limits pushed to `runtime`. `set_memory_limit` /
   /// `set_max_stack_size` / `set_gc_threshold` each take the runtime's
   /// async lock; re-pushing identical values every `execute` is pure
@@ -437,6 +438,9 @@ impl Session {
       runtime,
       ctx,
       config,
+      default_request: Arc::new(ferridriver::http_client::HttpClient::new(
+        ferridriver::http_client::HttpClientOptions::default(),
+      )),
       applied,
     })
   }
@@ -528,6 +532,7 @@ impl Session {
       page: context.page.clone(),
       browser_context: context.browser_context.clone(),
       request: context.request.clone(),
+      default_request: self.default_request.clone(),
       browser: context.browser.clone(),
       async_ctx: self.ctx.clone(),
     };
@@ -606,6 +611,7 @@ struct GlobalsInstall {
   page: Option<Arc<ferridriver::Page>>,
   browser_context: Option<Arc<ferridriver::context::ContextRef>>,
   request: Option<Arc<ferridriver::http_client::HttpClient>>,
+  default_request: Arc<ferridriver::http_client::HttpClient>,
   browser: Option<Arc<ferridriver::Browser>>,
   /// `AsyncContext` driving the script — passed to `install_page` so
   /// `page.route` callbacks can dispatch back into JS from a separate
@@ -647,12 +653,9 @@ fn install_call_globals(ctx: &Ctx<'_>, args: &[serde_json::Value], inst: Globals
     crate::bindings::install_request(ctx, req)?;
   } else {
     // `fetch` is always present; with no session HTTP context it uses
-    // a fresh default one (no shared cookies). Same net posture as the
+    // a session-stable default one (no shared cookies). Same net posture as the
     // `request` binding when absent.
-    let cx = std::sync::Arc::new(ferridriver::http_client::HttpClient::new(
-      ferridriver::http_client::HttpClientOptions::default(),
-    ));
-    crate::bindings::fetch::install(ctx, cx)?;
+    crate::bindings::fetch::install(ctx, inst.default_request)?;
   }
 
   Ok(())

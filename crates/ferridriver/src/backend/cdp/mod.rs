@@ -2694,18 +2694,18 @@ impl<T: CdpWrap> CdpPage<T> {
   }
 
   pub async fn click_at_opts(&self, x: f64, y: f64, button: &str, click_count: u32) -> Result<()> {
-    self
-      .cmd(
-        "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "clickCount": click_count}),
-      )
-      .await?;
-    self
-      .cmd(
-        "Input.dispatchMouseEvent",
-        serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "clickCount": click_count}),
-      )
-      .await?;
+    let press = self.cmd(
+      "Input.dispatchMouseEvent",
+      serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "clickCount": click_count}),
+    );
+    let release = self.cmd(
+      "Input.dispatchMouseEvent",
+      serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "clickCount": click_count}),
+    );
+    let _ = tokio::try_join!(press, release)?;
+    if let Ok(mut guard) = self.last_cursor_pos.lock() {
+      *guard = Some((x, y));
+    }
     Ok(())
   }
 
@@ -2739,6 +2739,71 @@ impl<T: CdpWrap> CdpPage<T> {
         Ok(g) => matches!(*g, Some((px, py)) if (px - x).abs() < 0.5 && (py - y).abs() < 0.5),
         Err(_) => false,
       };
+    if args.click_count == 1 && args.delay_ms == 0 && steps == 1 {
+      if skip_move {
+        let press = self.cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mousePressed",
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": 1,
+            "modifiers": mods,
+          }),
+        );
+        let release = self.cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mouseReleased",
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": 1,
+            "modifiers": mods,
+          }),
+        );
+        let _ = tokio::try_join!(press, release)?;
+      } else {
+        let moved = self.cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mouseMoved",
+            "x": x,
+            "y": y,
+            "modifiers": mods,
+          }),
+        );
+        let press = self.cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mousePressed",
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": 1,
+            "modifiers": mods,
+          }),
+        );
+        let release = self.cmd(
+          "Input.dispatchMouseEvent",
+          serde_json::json!({
+            "type": "mouseReleased",
+            "x": x,
+            "y": y,
+            "button": button,
+            "clickCount": 1,
+            "modifiers": mods,
+          }),
+        );
+        let _ = tokio::try_join!(moved, press, release)?;
+      }
+      if let Ok(mut guard) = self.last_cursor_pos.lock() {
+        *guard = Some((x, y));
+      }
+      return Ok(());
+    }
+
     if !skip_move {
       for i in 1..=steps {
         let t = f64::from(i) / f64::from(steps);
@@ -2926,6 +2991,9 @@ impl<T: CdpWrap> CdpPage<T> {
         serde_json::json!({"type": "mouseMoved", "x": x, "y": y}),
       )
       .await?;
+    if let Ok(mut guard) = self.last_cursor_pos.lock() {
+      *guard = Some((x, y));
+    }
     Ok(())
   }
 
@@ -2977,6 +3045,9 @@ impl<T: CdpWrap> CdpPage<T> {
         serde_json::json!({"type": "mouseReleased", "x": to.0, "y": to.1, "button": "left", "clickCount": 1}),
       )
       .await?;
+    if let Ok(mut guard) = self.last_cursor_pos.lock() {
+      *guard = Some(to);
+    }
     Ok(())
   }
 
@@ -2997,6 +3068,9 @@ impl<T: CdpWrap> CdpPage<T> {
         serde_json::json!({"type": "mousePressed", "x": x, "y": y, "button": button, "clickCount": 1}),
       )
       .await?;
+    if let Ok(mut guard) = self.last_cursor_pos.lock() {
+      *guard = Some((x, y));
+    }
     Ok(())
   }
 
@@ -3007,6 +3081,9 @@ impl<T: CdpWrap> CdpPage<T> {
         serde_json::json!({"type": "mouseReleased", "x": x, "y": y, "button": button, "clickCount": 1}),
       )
       .await?;
+    if let Ok(mut guard) = self.last_cursor_pos.lock() {
+      *guard = Some((x, y));
+    }
     Ok(())
   }
 
