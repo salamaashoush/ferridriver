@@ -78,6 +78,7 @@ pub fn binary_revision() -> String {
 /// caller is responsible for keeping ownership of the parent ends of
 /// the pipe; this function only borrows the descriptors long enough to
 /// dup them into the child's environment.
+#[cfg(unix)]
 pub fn spawn(config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<Child, LaunchError> {
   let binary = locate_binary()?;
   let mut cmd = Command::new(&binary);
@@ -112,6 +113,18 @@ pub fn spawn(config: &LaunchConfig, read_fd: i32, write_fd: i32) -> Result<Child
 
   let child = cmd.spawn()?;
   Ok(child)
+}
+
+/// Windows stub. The `--inspector-pipe` transport relies on `pre_exec`
+/// to dup fd 3 / fd 4 into the child before the binary starts; Windows
+/// has no fork model and PW WebKit does not ship a usable Windows
+/// inspector-pipe binary today either. Return a typed error so callers
+/// surface "Unsupported" instead of a build failure.
+#[cfg(not(unix))]
+pub fn spawn(_config: &LaunchConfig, _read_fd: i32, _write_fd: i32) -> Result<Child, LaunchError> {
+  Err(LaunchError::Io(std::io::Error::other(
+    "webkit launcher: --inspector-pipe spawn is not supported on this platform yet",
+  )))
 }
 
 #[cfg(unix)]
