@@ -327,7 +327,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           output=$(cargo publish -p ferridriver-test-macros 2>&1) && exit 0
-          if echo "$output" | grep -q "already exists"; then
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
             echo "ferridriver-test-macros already published, skipping"
           else
             echo "$output"; exit 1
@@ -338,7 +338,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           output=$(cargo publish -p ferridriver-bdd-macros 2>&1) && exit 0
-          if echo "$output" | grep -q "already exists"; then
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
             echo "ferridriver-bdd-macros already published, skipping"
           else
             echo "$output"; exit 1
@@ -353,7 +353,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           output=$(cargo publish -p ferridriver 2>&1) && exit 0
-          if echo "$output" | grep -q "already exists"; then
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
             echo "ferridriver already published, skipping"
           else
             echo "$output"; exit 1
@@ -368,7 +368,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           output=$(cargo publish -p ferridriver-config 2>&1) && exit 0
-          if echo "$output" | grep -q "already exists"; then
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
             echo "ferridriver-config already published, skipping"
           else
             echo "$output"; exit 1
@@ -381,7 +381,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           output=$(cargo publish -p ferridriver-expect 2>&1) && exit 0
-          if echo "$output" | grep -q "already exists"; then
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
             echo "ferridriver-expect already published, skipping"
           else
             echo "$output"; exit 1
@@ -395,7 +395,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           output=$(cargo publish -p ferridriver-script 2>&1) && exit 0
-          if echo "$output" | grep -q "already exists"; then
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
             echo "ferridriver-script already published, skipping"
           else
             echo "$output"; exit 1
@@ -410,7 +410,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           output=$(cargo publish -p ferridriver-test 2>&1) && exit 0
-          if echo "$output" | grep -q "already exists"; then
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
             echo "ferridriver-test already published, skipping"
           else
             echo "$output"; exit 1
@@ -425,7 +425,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           output=$(cargo publish -p ferridriver-bdd 2>&1) && exit 0
-          if echo "$output" | grep -q "already exists"; then
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
             echo "ferridriver-bdd already published, skipping"
           else
             echo "$output"; exit 1
@@ -440,7 +440,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           output=$(cargo publish -p ferridriver-mcp 2>&1) && exit 0
-          if echo "$output" | grep -q "already exists"; then
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
             echo "ferridriver-mcp already published, skipping"
           else
             echo "$output"; exit 1
@@ -455,7 +455,7 @@ jobs:
           CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
         run: |
           output=$(cargo publish -p ferridriver-cli 2>&1) && exit 0
-          if echo "$output" | grep -q "already exists"; then
+          if echo "$output" | grep -qE "already exists|already uploaded"; then
             echo "ferridriver-cli already published, skipping"
           else
             echo "$output"; exit 1
