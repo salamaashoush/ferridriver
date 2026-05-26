@@ -3,8 +3,8 @@
 //! Handles connection, command/response correlation, and event dispatch.
 //! Uses `json_scan` for zero-allocation hot-path field extraction (same as CDP).
 
+use dashmap::DashMap;
 use futures::{SinkExt, StreamExt};
-use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::sync::{broadcast, mpsc, oneshot};
@@ -41,7 +41,7 @@ pub(crate) struct BidiEvent {
 }
 
 /// Pending command map: command ID -> oneshot sender for the response.
-type PendingMap = FxHashMap<u64, oneshot::Sender<BidiResult>>;
+type PendingMap = DashMap<u64, oneshot::Sender<BidiResult>>;
 
 // ── Transport ──────────────────────────────────────────────────────────────
 
@@ -54,7 +54,7 @@ type PendingMap = FxHashMap<u64, oneshot::Sender<BidiResult>>;
 /// - Broadcast channel for events with method-based filtering at receive site
 pub(crate) struct BidiTransport {
   next_id: AtomicU64,
-  pending: Arc<std::sync::Mutex<PendingMap>>,
+  pending: Arc<PendingMap>,
   write_tx: mpsc::Sender<Message>,
   event_tx: broadcast::Sender<BidiEvent>,
 }
@@ -69,7 +69,7 @@ impl BidiTransport {
       .map_err(|e| FerriError::Backend(format!("BiDi WebSocket connect to {ws_url}: {e}")))?;
 
     let (write, read) = ws_stream.split();
-    let pending: Arc<std::sync::Mutex<PendingMap>> = Arc::new(std::sync::Mutex::new(FxHashMap::default()));
+    let pending: Arc<PendingMap> = Arc::new(DashMap::default());
 
     // Writer task
     let (write_tx, mut write_rx) = mpsc::channel::<Message>(128);
@@ -144,8 +144,11 @@ impl BidiTransport {
       // `send_command` awaits return immediately with a `target_closed`
       // error instead of waiting the full 60s response timeout.
       // Mirrors the CDP pipe/ws reader fix.
-      let mut map = pending2.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      for (_, tx) in map.drain() {
+      let pending_ids: Vec<u64> = pending2.iter().map(|entry| *entry.key()).collect();
+      for id in pending_ids {
+        let Some((_, tx)) = pending2.remove(&id) else {
+          continue;
+        };
         let _ = tx.send(Err(BidiError {
           error: "target closed".into(),
           message: "BiDi transport closed (browser exited)".into(),
@@ -169,10 +172,7 @@ impl BidiTransport {
     let (tx, rx) = oneshot::channel();
 
     // Register pending before sending (avoid race)
-    {
-      let mut map = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      map.insert(id, tx);
-    }
+    self.pending.insert(id, tx);
 
     // Build command JSON directly as string (no Value intermediary for envelope)
     let params_str = serde_json::to_string(&params).unwrap_or_else(|_| "{}".to_string());
@@ -180,8 +180,7 @@ impl BidiTransport {
     trace!("BiDi send id={id}: {method}");
 
     if self.write_tx.send(Message::Text(cmd.into())).await.is_err() {
-      let mut map = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-      map.remove(&id);
+      self.pending.remove(&id);
       return Err(FerriError::backend("BiDi WebSocket connection closed"));
     }
 
@@ -190,8 +189,7 @@ impl BidiTransport {
       Ok(Ok(result)) => result.map_err(|e| FerriError::protocol(method, e.to_string())),
       Ok(Err(_)) => Err(FerriError::backend("BiDi command response channel dropped")),
       Err(_) => {
-        let mut map = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.remove(&id);
+        self.pending.remove(&id);
         Err(FerriError::timeout(format!("BiDi command '{method}'"), 60_000))
       },
     }
@@ -208,10 +206,7 @@ impl BidiTransport {
       let id = self.next_id.fetch_add(1, Ordering::Relaxed) + 1;
       let (tx, rx) = oneshot::channel();
 
-      {
-        let mut map = self.pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        map.insert(id, tx);
-      }
+      self.pending.insert(id, tx);
 
       let params_str = serde_json::to_string(params).unwrap_or_else(|_| "{}".to_string());
       let cmd = format!(r#"{{"id":{id},"method":"{method}","params":{params_str}}}"#);
@@ -248,17 +243,14 @@ impl BidiTransport {
 }
 
 /// Process a `BiDi` command response (success or error) by correlating with the pending map.
-fn handle_command_response(bytes: &[u8], type_field: &[u8], pending: &Arc<std::sync::Mutex<PendingMap>>) {
+fn handle_command_response(bytes: &[u8], type_field: &[u8], pending: &PendingMap) {
   let id = json_scan::json_id(bytes);
   if id == 0 {
     warn!("BiDi response missing id");
     return;
   }
 
-  let tx = {
-    let mut map = pending.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-    map.remove(&id)
-  };
+  let tx = pending.remove(&id).map(|(_, tx)| tx);
 
   let Some(tx) = tx else {
     trace!("BiDi response for unknown id={id}");

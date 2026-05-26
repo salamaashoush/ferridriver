@@ -416,9 +416,15 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or cookie retrieval fails.
   pub async fn cookies(&self) -> Result<Vec<CookieData>> {
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    ctx.cookies().await
+    let page = {
+      let state = self.state.read().await;
+      state.context(&self.name)?.active_page().cloned()
+    };
+    if let Some(page) = page {
+      page.get_cookies().await
+    } else {
+      Ok(Vec::new())
+    }
   }
 
   /// Add cookies to this context.
@@ -427,9 +433,16 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or setting cookies fails.
   pub async fn add_cookies(&self, cookies: Vec<CookieData>) -> Result<()> {
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    ctx.add_cookies(cookies).await
+    let page = {
+      let state = self.state.read().await;
+      state.context(&self.name)?.active_page().cloned()
+    }
+    .ok_or(crate::error::FerriError::NotConnected)?;
+
+    for cookie in cookies {
+      page.set_cookie(cookie).await?;
+    }
+    Ok(())
   }
 
   /// Clear all cookies in this context.
@@ -438,9 +451,14 @@ impl ContextRef {
   ///
   /// Returns an error if the context does not exist or clearing cookies fails.
   pub async fn clear_cookies(&self) -> Result<()> {
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    ctx.clear_cookies().await
+    let page = {
+      let state = self.state.read().await;
+      state.context(&self.name)?.active_page().cloned()
+    };
+    if let Some(page) = page {
+      page.clear_cookies().await?;
+    }
+    Ok(())
   }
 
   /// Clear cookies matching the given filters (matches Playwright's `context.clearCookies(options?)`).
@@ -453,10 +471,12 @@ impl ContextRef {
     if options.name.is_none() && options.domain.is_none() && options.path.is_none() {
       return self.clear_cookies().await;
     }
-    let state = self.state.read().await;
-    let ctx = state.context(&self.name)?;
-    let cookies = ctx.cookies().await?;
-    if let Some(page) = ctx.active_page() {
+    let page = {
+      let state = self.state.read().await;
+      state.context(&self.name)?.active_page().cloned()
+    };
+    if let Some(page) = page {
+      let cookies = page.get_cookies().await?;
       page.clear_cookies().await?;
       for c in cookies {
         let name_match = options.name.as_ref().is_none_or(|n| &c.name == n);

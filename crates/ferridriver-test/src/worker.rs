@@ -695,19 +695,6 @@ impl Worker {
     worker_defs.insert("request".into(), build_worker_request_def(self.config.base_url.clone()));
     let custom_fixture_pool = custom_fixture_pool.child_with_defs(worker_defs, FixtureScope::Worker);
 
-    // Pre-warm: fire chromium launch on a background task so the first
-    // test that resolves the `browser` fixture can skip the ~20-30ms
-    // launch wait. `BrowserHandle::get` is a `tokio::sync::OnceCell`
-    // so a concurrent in-flight init folds together — the first test's
-    // `.await` either sees the launch already done or waits for the
-    // same future the pre-warm started.
-    {
-      let handle = Arc::clone(&browser_handle);
-      tokio::spawn(async move {
-        let _ = handle.get().await;
-      });
-    }
-
     let mut active_suites: FxHashMap<String, SuiteState> = FxHashMap::default();
 
     while let Ok(item) = rx.recv().await {

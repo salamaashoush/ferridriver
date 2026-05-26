@@ -19,10 +19,10 @@
 //! browser handles a call has (or `None`) and the browser `epoch` is
 //! passed in, so every policy here is unit-testable without a browser.
 
-use std::collections::HashMap;
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+use dashmap::DashMap;
 use tokio::sync::Mutex as AsyncMutex;
 
 use crate::engine::{RunContext, RunOptions, ScriptEngineConfig, Session};
@@ -144,7 +144,7 @@ impl BrowserSession {
 /// The set of live sessions plus the retention policy. Cheap to share
 /// (`Arc` it); every method takes `&self`.
 pub struct SessionTable {
-  map: Mutex<HashMap<String, Arc<AsyncMutex<BrowserSession>>>>,
+  map: DashMap<String, Arc<AsyncMutex<BrowserSession>>>,
   /// Upper bound on concurrently-warm VMs (not session records).
   max_vms: usize,
   idle_ttl: Option<Duration>,
@@ -154,7 +154,7 @@ impl SessionTable {
   #[must_use]
   pub fn new(max_vms: usize, idle_ttl: Option<Duration>) -> Self {
     Self {
-      map: Mutex::new(HashMap::new()),
+      map: DashMap::new(),
       max_vms: max_vms.max(1),
       idle_ttl,
     }
@@ -174,66 +174,74 @@ impl SessionTable {
   /// `lock().await` it, build a `RunContext` with its `vars()`, then
   /// call [`BrowserSession::run`].
   pub fn acquire(&self, name: &str) -> Arc<AsyncMutex<BrowserSession>> {
-    let mut map = self.map.lock().unwrap_or_else(PoisonError::into_inner);
-
     if let Some(ttl) = self.idle_ttl {
       let now = Instant::now();
-      map.retain(|_, slot| match slot.try_lock() {
-        Ok(s) => now.duration_since(s.last_used) < ttl,
-        Err(_) => true, // in flight — keep
-      });
+      let expired: Vec<String> = self
+        .map
+        .iter()
+        .filter_map(|entry| match entry.value().try_lock() {
+          Ok(s) if now.duration_since(s.last_used) >= ttl => Some(entry.key().clone()),
+          Ok(_) | Err(_) => None,
+        })
+        .collect();
+      for key in expired {
+        self.map.remove(&key);
+      }
     }
 
     // A build happens unless an entry already holds a live VM for this
     // name (a locked entry owns its own VM lifecycle — don't second-guess).
-    let will_build = match map.get(name).map(|s| s.try_lock()) {
-      Some(Ok(s)) => !s.has_vm(),
-      Some(Err(_)) => false,
-      None => true,
-    };
+    let will_build = self.map.get(name).map_or(true, |slot| match slot.value().try_lock() {
+      Ok(s) => !s.has_vm(),
+      Err(_) => false,
+    });
 
     if will_build {
-      let mut live: Vec<(String, Instant)> = map
+      let mut live: Vec<(String, Instant)> = self
+        .map
         .iter()
-        .filter(|(k, _)| k.as_str() != name)
-        .filter_map(|(k, s)| {
-          s.try_lock()
+        .filter(|entry| entry.key().as_str() != name)
+        .filter_map(|entry| {
+          entry
+            .value()
+            .try_lock()
             .ok()
-            .and_then(|g| g.has_vm().then(|| (k.clone(), g.last_used)))
+            .and_then(|g| g.has_vm().then(|| (entry.key().clone(), g.last_used)))
         })
         .collect();
       if live.len() >= self.max_vms {
         live.sort_by_key(|(_, t)| *t);
         if let Some((victim, _)) = live.first()
-          && let Some(slot) = map.get(victim)
-          && let Ok(mut g) = slot.try_lock()
+          && let Some(slot) = self.map.get(victim)
+          && let Ok(mut g) = slot.value().try_lock()
         {
           g.drop_vm();
         }
       }
     }
 
-    map
+    let entry = self
+      .map
       .entry(name.to_string())
-      .or_insert_with(|| Arc::new(AsyncMutex::new(BrowserSession::new())))
-      .clone()
+      .or_insert_with(|| Arc::new(AsyncMutex::new(BrowserSession::new())));
+    Arc::clone(entry.value())
   }
 
   /// End a logical session (explicit close / browser shutdown): drops
   /// the slot and its durable `vars`. A later `acquire` starts fresh.
   pub fn remove(&self, name: &str) {
-    self.map.lock().unwrap_or_else(PoisonError::into_inner).remove(name);
+    self.map.remove(name);
   }
 
   /// End every session (server shutdown).
   pub fn clear(&self) {
-    self.map.lock().unwrap_or_else(PoisonError::into_inner).clear();
+    self.map.clear();
   }
 
   /// Number of live session records (durable tier), warm or not.
   #[must_use]
   pub fn len(&self) -> usize {
-    self.map.lock().unwrap_or_else(PoisonError::into_inner).len()
+    self.map.len()
   }
 
   #[must_use]
@@ -247,10 +255,8 @@ impl SessionTable {
   pub fn live_vm_count(&self) -> usize {
     self
       .map
-      .lock()
-      .unwrap_or_else(PoisonError::into_inner)
-      .values()
-      .filter(|s| s.try_lock().map_or(true, |g| g.has_vm()))
+      .iter()
+      .filter(|entry| entry.value().try_lock().map_or(true, |g| g.has_vm()))
       .count()
   }
 }
@@ -335,8 +341,8 @@ mod tests {
 
     assert_eq!(table.len(), 2, "both session records live (vars tier)");
     {
-      let m = table.map.lock().unwrap();
-      let ga = m.get("a").unwrap().try_lock().unwrap();
+      let slot = table.map.get("a").unwrap();
+      let ga = slot.value().try_lock().unwrap();
       assert!(!ga.has_vm(), "a's VM was evicted under the cap");
     }
 
@@ -369,10 +375,7 @@ mod tests {
     run(&a, "vars.set('x','1'); return 1;", None).await;
     tokio::time::sleep(Duration::from_millis(120)).await;
     let _b = table.acquire("b"); // triggers reap sweep
-    let present = {
-      let m = table.map.lock().unwrap();
-      (m.contains_key("a"), m.contains_key("b"))
-    };
+    let present = (table.map.contains_key("a"), table.map.contains_key("b"));
     assert_eq!(present, (false, true), "idle session reaped whole; fresh kept");
   }
 

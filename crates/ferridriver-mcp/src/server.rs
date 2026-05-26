@@ -787,17 +787,10 @@ impl McpServer {
         return Ok(any_page.clone());
       }
     }
-    let key = ferridriver::state::SessionKey::parse(context);
-    let mut state = self.state.write().await;
-    Box::pin(state.ensure_instance(&key.instance))
-      .await
-      .map_err(Self::err)?;
-    if state.active_page(context).is_err() {
-      Box::pin(state.open_page_keyed(&key, "about:blank"))
-        .await
-        .map_err(Self::err)?;
-    }
-    state.active_page(context).map_err(Self::err).cloned()
+    let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
+    let page = Box::pin(ctx_ref.new_page()).await.map_err(Self::err)?;
+    self.state.invalidate_context(context);
+    Ok(page.inner().clone())
   }
 
   /// Get a `Page` for a context, ensuring the required browser instance exists.
