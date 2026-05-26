@@ -29,7 +29,6 @@ import { SelectorEvaluatorImpl, sortInDOMOrder } from './selectorEvaluator';
 import { generateSelector } from './selectorGenerator';
 import { elementMatchesText, elementText, getElementLabels } from './selectorUtils';
 import { XPathEngine } from './xpathSelectorEngine';
-import { ConsoleAPI } from './consoleApi';
 import { UtilityScript } from './utilityScript';
 
 import type { AriaTemplateNode } from '@isomorphic/ariaSnapshot';
@@ -93,7 +92,6 @@ export class InjectedScript {
   private _markedElements?: { callId: string, elements: Set<Element> };
   readonly window: Window & typeof globalThis;
   readonly document: Document;
-  readonly consoleApi: ConsoleAPI;
   private _lastAriaSnapshotForTrack = new Map<string, AriaSnapshot>();
   private _lastAriaSnapshotForQuery: AriaSnapshot | undefined;
 
@@ -135,8 +133,6 @@ export class InjectedScript {
     this._sdkLanguage = options.sdkLanguage;
     this._testIdAttributeNameForStrictErrorAndConsoleCodegen = options.testIdAttributeName;
     this._evaluator = new SelectorEvaluatorImpl();
-    this.consoleApi = new ConsoleAPI(this);
-
     this.onGlobalListenersRemoved = new Set();
     this._autoClosingTags = new Set(['AREA', 'BASE', 'BR', 'COL', 'COMMAND', 'EMBED', 'HR', 'IMG', 'INPUT', 'KEYGEN', 'LINK', 'MENUITEM', 'META', 'PARAM', 'SOURCE', 'TRACK', 'WBR']);
     this._booleanAttributes = new Set(['checked', 'selected', 'disabled', 'readonly', 'multiple']);
