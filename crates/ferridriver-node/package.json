@@ -37,8 +37,7 @@
     "targets": [
       "aarch64-apple-darwin",
       "x86_64-unknown-linux-gnu",
-      "aarch64-unknown-linux-gnu",
-      "x86_64-pc-windows-msvc"
+      "aarch64-unknown-linux-gnu"
     ],
     "packageConfig": {
       "access": "public"
@@ -48,10 +47,9 @@
     "node": ">= 16.0.0"
   },
   "optionalDependencies": {
-    "@ferridriver/node-darwin-arm64": "0.1.0",
-    "@ferridriver/node-linux-x64-gnu": "0.1.0",
-    "@ferridriver/node-linux-arm64-gnu": "0.1.0",
-    "@ferridriver/node-win32-x64-msvc": "0.1.0"
+    "@ferridriver/node-darwin-arm64": "0.3.0",
+    "@ferridriver/node-linux-x64-gnu": "0.3.0",
+    "@ferridriver/node-linux-arm64-gnu": "0.3.0"
   },
   "scripts": {
     "build": "napi build --platform --release",

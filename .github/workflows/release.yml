@@ -163,8 +163,12 @@ jobs:
             os: ubuntu-latest
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-24.04-arm
-          - target: x86_64-pc-windows-msvc
-            os: windows-latest
+          # x86_64-pc-windows-msvc: the WebKit backend uses
+          # UnixStream / AsRawFd / pre_exec at module-import scope, so
+          # the crate does not yet compile on Windows. Adding Windows
+          # back requires #[cfg(unix)] gating of the entire webkit
+          # module + BackendKind::WebKit variant + every AnyPage::WebKit
+          # dispatch arm. Tracked as Windows-NAPI follow-up.
     steps:
       - uses: actions/checkout@v4
 
@@ -253,7 +257,7 @@ jobs:
           cp ../../artifacts/napi-aarch64-apple-darwin/*.node npm/darwin-arm64/
           cp ../../artifacts/napi-x86_64-unknown-linux-gnu/*.node npm/linux-x64-gnu/
           cp ../../artifacts/napi-aarch64-unknown-linux-gnu/*.node npm/linux-arm64-gnu/
-          cp ../../artifacts/napi-x86_64-pc-windows-msvc/*.node npm/win32-x64-msvc/
+          # win32-x64-msvc: dropped pending Windows webkit cfg-gate.
           # Include fd_webkit_host in macOS platform package
           cp ../../artifacts/napi-aarch64-apple-darwin/fd_webkit_host npm/darwin-arm64/ 2>/dev/null || true
 
