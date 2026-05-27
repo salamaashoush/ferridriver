@@ -63,3 +63,4 @@ async function build(entrypoint: string, outfile: string, wrap: (source: string)
 await build('./index.ts', './dist/engine.min.js', output => `(function(){if(window.__fd)return;${output}})()`);
 await build('./recorderSupport.ts', './dist/recorder-support.min.js', output => output);
 await build('./mcpSupport.ts', './dist/mcp-support.min.js', output => output);
+await build('./axSupport.ts', './dist/ax-support.min.js', output => output);
