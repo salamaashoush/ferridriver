@@ -15,13 +15,11 @@ async fn event_bus_delivers_to_single_subscriber() {
   let sub = builder.subscribe();
   let bus = builder.build();
 
-  bus
-    .emit(ReporterEvent::RunStarted {
-      total_tests: 5,
-      num_workers: 2,
-      metadata: serde_json::Value::Null,
-    })
-    .await;
+  bus.emit(ReporterEvent::RunStarted {
+    total_tests: 5,
+    num_workers: 2,
+    metadata: serde_json::Value::Null,
+  });
   drop(bus);
 
   let mut rx = sub.rx;
@@ -45,23 +43,19 @@ async fn event_bus_delivers_to_multiple_subscribers() {
   let sub3 = builder.subscribe();
   let bus = builder.build();
 
-  bus
-    .emit(ReporterEvent::RunStarted {
-      total_tests: 10,
-      num_workers: 4,
-      metadata: serde_json::Value::Null,
-    })
-    .await;
-  bus
-    .emit(ReporterEvent::RunFinished {
-      total: 10,
-      passed: 8,
-      failed: 1,
-      skipped: 1,
-      flaky: 0,
-      duration: Duration::from_secs(5),
-    })
-    .await;
+  bus.emit(ReporterEvent::RunStarted {
+    total_tests: 10,
+    num_workers: 4,
+    metadata: serde_json::Value::Null,
+  });
+  bus.emit(ReporterEvent::RunFinished {
+    total: 10,
+    passed: 8,
+    failed: 1,
+    skipped: 1,
+    flaky: 0,
+    duration: Duration::from_secs(5),
+  });
   drop(bus);
 
   // All three subscribers should receive both events.
@@ -89,11 +83,11 @@ async fn event_bus_clone_shares_subscribers() {
 
   // Clone simulates what workers do.
   let bus_clone = bus.clone();
-  bus_clone.emit(ReporterEvent::WorkerStarted { worker_id: 0 }).await;
+  bus_clone.emit(ReporterEvent::WorkerStarted { worker_id: 0 });
   drop(bus_clone);
 
   // Original bus still alive — channel not closed.
-  bus.emit(ReporterEvent::WorkerFinished { worker_id: 0 }).await;
+  bus.emit(ReporterEvent::WorkerFinished { worker_id: 0 });
   drop(bus);
 
   let mut rx = sub.rx;
@@ -110,13 +104,11 @@ async fn event_bus_no_subscribers_does_not_panic() {
   let bus = builder.build();
 
   // Should not panic or error.
-  bus
-    .emit(ReporterEvent::RunStarted {
-      total_tests: 1,
-      num_workers: 1,
-      metadata: serde_json::Value::Null,
-    })
-    .await;
+  bus.emit(ReporterEvent::RunStarted {
+    total_tests: 1,
+    num_workers: 1,
+    metadata: serde_json::Value::Null,
+  });
   drop(bus);
 }
 
@@ -130,13 +122,11 @@ async fn event_bus_dropped_subscriber_does_not_block() {
   // Drop sub1's receiver — bus should still deliver to sub2 without error.
   drop(sub1);
 
-  bus
-    .emit(ReporterEvent::RunStarted {
-      total_tests: 1,
-      num_workers: 1,
-      metadata: serde_json::Value::Null,
-    })
-    .await;
+  bus.emit(ReporterEvent::RunStarted {
+    total_tests: 1,
+    num_workers: 1,
+    metadata: serde_json::Value::Null,
+  });
   drop(bus);
 
   let mut rx = sub2.rx;
@@ -189,23 +179,19 @@ async fn reporter_driver_forwards_events_and_finalizes() {
   let driver_handle = tokio::spawn(driver.run());
 
   // Emit events.
-  bus
-    .emit(ReporterEvent::RunStarted {
-      total_tests: 2,
-      num_workers: 1,
-      metadata: serde_json::Value::Null,
-    })
-    .await;
-  bus
-    .emit(ReporterEvent::RunFinished {
-      total: 2,
-      passed: 2,
-      failed: 0,
-      skipped: 0,
-      flaky: 0,
-      duration: Duration::from_millis(100),
-    })
-    .await;
+  bus.emit(ReporterEvent::RunStarted {
+    total_tests: 2,
+    num_workers: 1,
+    metadata: serde_json::Value::Null,
+  });
+  bus.emit(ReporterEvent::RunFinished {
+    total: 2,
+    passed: 2,
+    failed: 0,
+    skipped: 0,
+    flaky: 0,
+    duration: Duration::from_millis(100),
+  });
 
   // Drop bus — closes channel, driver finalizes and exits.
   drop(bus);
@@ -230,13 +216,11 @@ async fn reporter_driver_returns_reporters_after_run() {
   let driver = ReporterDriver::new(reporters, sub);
   let driver_handle = tokio::spawn(driver.run());
 
-  bus
-    .emit(ReporterEvent::RunStarted {
-      total_tests: 1,
-      num_workers: 1,
-      metadata: serde_json::Value::Null,
-    })
-    .await;
+  bus.emit(ReporterEvent::RunStarted {
+    total_tests: 1,
+    num_workers: 1,
+    metadata: serde_json::Value::Null,
+  });
   drop(bus);
 
   // Driver should return the ReporterSet (not consume it permanently).
@@ -259,13 +243,11 @@ async fn real_time_delivery_not_batched() {
   let mut rx = sub.rx;
 
   // Emit one event and immediately check it arrived.
-  bus
-    .emit(ReporterEvent::RunStarted {
-      total_tests: 1,
-      num_workers: 1,
-      metadata: serde_json::Value::Null,
-    })
-    .await;
+  bus.emit(ReporterEvent::RunStarted {
+    total_tests: 1,
+    num_workers: 1,
+    metadata: serde_json::Value::Null,
+  });
 
   // Use try_recv — if the event is delivered in real-time, it's already in the channel.
   let result = rx.try_recv();
@@ -276,7 +258,7 @@ async fn real_time_delivery_not_batched() {
   assert!(matches!(result.unwrap(), ReporterEvent::RunStarted { .. }));
 
   // Emit another and verify.
-  bus.emit(ReporterEvent::WorkerStarted { worker_id: 0 }).await;
+  bus.emit(ReporterEvent::WorkerStarted { worker_id: 0 });
   let result = rx.try_recv();
   assert!(result.is_ok(), "second event should be available immediately");
 
@@ -298,28 +280,24 @@ async fn concurrent_execution_and_observation() {
   // Bus is explicitly dropped to close the channel, mirroring how
   // execute(plan, bus) consumes bus by value in real usage.
   let execute_fut = async {
-    bus
-      .emit(ReporterEvent::RunStarted {
-        total_tests: 3,
-        num_workers: 1,
-        metadata: serde_json::Value::Null,
-      })
-      .await;
+    bus.emit(ReporterEvent::RunStarted {
+      total_tests: 3,
+      num_workers: 1,
+      metadata: serde_json::Value::Null,
+    });
     tokio::task::yield_now().await;
-    bus.emit(ReporterEvent::WorkerStarted { worker_id: 0 }).await;
+    bus.emit(ReporterEvent::WorkerStarted { worker_id: 0 });
     tokio::task::yield_now().await;
-    bus.emit(ReporterEvent::WorkerFinished { worker_id: 0 }).await;
+    bus.emit(ReporterEvent::WorkerFinished { worker_id: 0 });
     tokio::task::yield_now().await;
-    bus
-      .emit(ReporterEvent::RunFinished {
-        total: 3,
-        passed: 3,
-        failed: 0,
-        skipped: 0,
-        flaky: 0,
-        duration: Duration::from_millis(50),
-      })
-      .await;
+    bus.emit(ReporterEvent::RunFinished {
+      total: 3,
+      passed: 3,
+      failed: 0,
+      skipped: 0,
+      flaky: 0,
+      duration: Duration::from_millis(50),
+    });
     drop(bus); // Must explicitly drop — tokio::join! holds MaybeDone alive
   };
 

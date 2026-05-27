@@ -491,13 +491,11 @@ impl TestRunner {
       }
     }
 
-    event_bus
-      .emit(ReporterEvent::RunStarted {
-        total_tests,
-        num_workers,
-        metadata: run_metadata,
-      })
-      .await;
+    event_bus.emit(ReporterEvent::RunStarted {
+      total_tests,
+      num_workers,
+      metadata: run_metadata,
+    });
 
     let start = Instant::now();
 
@@ -507,16 +505,14 @@ impl TestRunner {
       for setup_fn in &self.hooks.global_setup_fns {
         if let Err(e) = setup_fn(global_pool.clone()).await {
           tracing::error!(target: "ferridriver::runner", "global setup failed: {e}");
-          event_bus
-            .emit(ReporterEvent::RunFinished {
-              total: total_tests,
-              passed: 0,
-              failed: total_tests,
-              skipped: 0,
-              flaky: 0,
-              duration: start.elapsed(),
-            })
-            .await;
+          event_bus.emit(ReporterEvent::RunFinished {
+            total: total_tests,
+            passed: 0,
+            failed: total_tests,
+            skipped: 0,
+            flaky: 0,
+            duration: start.elapsed(),
+          });
           return 1;
         }
       }
@@ -732,16 +728,14 @@ impl TestRunner {
       mgr.stop().await;
     }
 
-    event_bus
-      .emit(ReporterEvent::RunFinished {
-        total: total_tests,
-        passed,
-        failed,
-        skipped,
-        flaky,
-        duration,
-      })
-      .await;
+    event_bus.emit(ReporterEvent::RunFinished {
+      total: total_tests,
+      passed,
+      failed,
+      skipped,
+      flaky,
+      duration,
+    });
 
     let exit_code = if failed > 0 || (self.config.fail_on_flaky_tests && flaky > 0) {
       1
