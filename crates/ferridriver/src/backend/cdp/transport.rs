@@ -16,6 +16,7 @@
 //! Playwright likewise drives navigation off `Page.lifecycleEvent` only).
 
 use dashmap::DashMap;
+use dashmap::mapref::entry::Entry;
 use rustc_hash::FxHashMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -228,6 +229,10 @@ pub trait CdpTransport: Send + Sync + 'static {
 
   fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>>;
 
+  fn subscribe_event_method(&self, method: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>>;
+
+  fn subscribe_event_domain(&self, domain: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>>;
+
   fn register_lifecycle_tracker(
     &self,
     session_id: &str,
@@ -257,6 +262,13 @@ pub(crate) struct CdpDispatcher {
   /// allocs each). At 200 events/s × ~12 subscribers per page this
   /// is the single biggest hot-loop CPU win in transport.
   pub event_tx: broadcast::Sender<Arc<serde_json::Value>>,
+  /// Routed event channels keyed by exact CDP method, for listeners
+  /// that should not wake up for unrelated traffic.
+  method_event_txs: Arc<DashMap<&'static str, broadcast::Sender<Arc<serde_json::Value>>>>,
+  /// Routed event channels keyed by CDP domain (`Network`, `Fetch`,
+  /// `Runtime`, ...), for listeners that legitimately consume many
+  /// methods in one domain but should not receive the rest of CDP.
+  domain_event_txs: Arc<DashMap<&'static str, broadcast::Sender<Arc<serde_json::Value>>>>,
   /// Per-method RTT statistics. Only populated when
   /// `FERRIDRIVER_RTT_STATS=1` is set; otherwise the entry insert /
   /// remove path skips the bookkeeping for zero-cost-when-unused.
@@ -298,6 +310,8 @@ impl CdpDispatcher {
       pending: Arc::new(DashMap::default()),
       lifecycle_trackers: Arc::new(DashMap::default()),
       event_tx,
+      method_event_txs: Arc::new(DashMap::default()),
+      domain_event_txs: Arc::new(DashMap::default()),
       rtt_stats: Arc::new(std::sync::Mutex::new(RttStats::default())),
     }
   }
@@ -315,6 +329,28 @@ impl CdpDispatcher {
 
   pub fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>> {
     self.event_tx.subscribe()
+  }
+
+  pub fn subscribe_event_method(&self, method: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>> {
+    match self.method_event_txs.entry(method) {
+      Entry::Occupied(entry) => entry.get().subscribe(),
+      Entry::Vacant(entry) => {
+        let (tx, rx) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
+        entry.insert(tx);
+        rx
+      },
+    }
+  }
+
+  pub fn subscribe_event_domain(&self, domain: &'static str) -> broadcast::Receiver<Arc<serde_json::Value>> {
+    match self.domain_event_txs.entry(domain) {
+      Entry::Occupied(entry) => entry.get().subscribe(),
+      Entry::Vacant(entry) => {
+        let (tx, rx) = broadcast::channel(EVENT_BROADCAST_CAPACITY);
+        entry.insert(tx);
+        rx
+      },
+    }
   }
 
   /// Drain every in-flight `send_command` oneshot and deliver a
@@ -430,17 +466,27 @@ impl CdpDispatcher {
         "CDP << event",
       );
 
-      // Broadcast (full parse for console/network listeners). Wrap
-      // the parsed Value in `Arc` so fan-out to N subscribers is N
-      // refcount bumps instead of N deep clones — see field doc on
-      // `event_tx` above.
-      //
-      // TODO: skip the parse entirely when `event_tx.receiver_count()
-      // == 0` to save the per-event 600ns + 10-alloc cost on
-      // workloads that have no event subscribers (rare in tests but
-      // common in raw-action MCP usage).
-      if let Ok(msg) = serde_json::from_slice::<serde_json::Value>(raw) {
-        let _ = self.event_tx.send(Arc::new(msg));
+      let method_tx = self.method_event_txs.get(method_str).map(|entry| entry.clone());
+      let domain_tx = method_str
+        .split_once('.')
+        .and_then(|(domain, _)| self.domain_event_txs.get(domain).map(|entry| entry.clone()));
+      let needs_global = self.event_tx.receiver_count() > 0;
+      let needs_method = method_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
+      let needs_domain = domain_tx.as_ref().is_some_and(|tx| tx.receiver_count() > 0);
+
+      if (needs_global || needs_method || needs_domain)
+        && let Ok(msg) = serde_json::from_slice::<serde_json::Value>(raw)
+      {
+        let msg = Arc::new(msg);
+        if needs_global {
+          let _ = self.event_tx.send(msg.clone());
+        }
+        if needs_method && let Some(tx) = method_tx {
+          let _ = tx.send(msg.clone());
+        }
+        if needs_domain && let Some(tx) = domain_tx {
+          let _ = tx.send(msg);
+        }
       }
     }
   }
@@ -532,5 +578,101 @@ impl Drop for CdpDispatcher {
       lock_or_recover(global_rtt_stats()).merge(&local);
       local.dump();
     }
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+  use std::time::Instant;
+
+  const NETWORK_EVENT: &[u8] = br#"{"method":"Network.requestWillBeSent","sessionId":"s1","params":{"requestId":"r1","request":{"url":"https://example.test/asset.js","method":"GET"},"type":"Script"}}"#;
+
+  #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+  #[ignore = "benchmark; run with --ignored --nocapture"]
+  async fn bench_routed_event_dispatch_wakeups() {
+    const EVENTS: usize = 2_000;
+    const LISTENERS: usize = 8;
+
+    let global = CdpDispatcher::new();
+    let global_wakeups = Arc::new(AtomicUsize::new(0));
+    let mut global_handles = Vec::with_capacity(LISTENERS);
+    for _ in 0..LISTENERS {
+      let mut rx = global.subscribe_events();
+      let wakeups = global_wakeups.clone();
+      global_handles.push(tokio::spawn(async move {
+        for _ in 0..EVENTS {
+          let event = rx.recv().await.expect("global event");
+          let _ = event.get("method").and_then(|m| m.as_str());
+          wakeups.fetch_add(1, Ordering::Relaxed);
+        }
+      }));
+    }
+    tokio::task::yield_now().await;
+    let global_started = Instant::now();
+    for _ in 0..EVENTS {
+      global.dispatch_message(NETWORK_EVENT);
+    }
+    for handle in global_handles {
+      handle.await.expect("global listener task");
+    }
+    let global_elapsed = global_started.elapsed();
+
+    let routed = CdpDispatcher::new();
+    let mut idle_method_receivers = vec![
+      routed.subscribe_event_method("Runtime.consoleAPICalled"),
+      routed.subscribe_event_method("Runtime.exceptionThrown"),
+      routed.subscribe_event_method("Page.javascriptDialogOpening"),
+      routed.subscribe_event_method("Page.fileChooserOpened"),
+      routed.subscribe_event_method("Runtime.bindingCalled"),
+      routed.subscribe_event_method("Page.screencastFrame"),
+    ];
+    let mut idle_domain_receivers = vec![
+      routed.subscribe_event_domain("Browser"),
+      routed.subscribe_event_domain("Fetch"),
+    ];
+    let routed_wakeups = Arc::new(AtomicUsize::new(0));
+    let mut network_rx = routed.subscribe_event_domain("Network");
+    let wakeups = routed_wakeups.clone();
+    let network_handle = tokio::spawn(async move {
+      for _ in 0..EVENTS {
+        let event = network_rx.recv().await.expect("routed network event");
+        let _ = event.get("method").and_then(|m| m.as_str());
+        wakeups.fetch_add(1, Ordering::Relaxed);
+      }
+    });
+    tokio::task::yield_now().await;
+    let routed_started = Instant::now();
+    for _ in 0..EVENTS {
+      routed.dispatch_message(NETWORK_EVENT);
+    }
+    network_handle.await.expect("network listener task");
+    let routed_elapsed = routed_started.elapsed();
+
+    let idle_method_wakeups: usize = idle_method_receivers
+      .iter_mut()
+      .map(|rx| rx.try_recv().ok().map_or(0, |_| 1))
+      .sum();
+    let idle_domain_wakeups: usize = idle_domain_receivers
+      .iter_mut()
+      .map(|rx| rx.try_recv().ok().map_or(0, |_| 1))
+      .sum();
+
+    println!(
+      "global broadcast: {:?}, wakeups={}",
+      global_elapsed,
+      global_wakeups.load(Ordering::Relaxed)
+    );
+    println!(
+      "routed dispatch:   {:?}, wakeups={}, idle_wakeups={}",
+      routed_elapsed,
+      routed_wakeups.load(Ordering::Relaxed),
+      idle_method_wakeups + idle_domain_wakeups
+    );
+
+    assert_eq!(global_wakeups.load(Ordering::Relaxed), EVENTS * LISTENERS);
+    assert_eq!(routed_wakeups.load(Ordering::Relaxed), EVENTS);
+    assert_eq!(idle_method_wakeups + idle_domain_wakeups, 0);
   }
 }

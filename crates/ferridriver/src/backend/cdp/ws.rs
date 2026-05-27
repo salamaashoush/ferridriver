@@ -151,6 +151,20 @@ impl super::transport::CdpTransport for WsTransport {
     self.dispatcher.subscribe_events()
   }
 
+  fn subscribe_event_method(
+    &self,
+    method: &'static str,
+  ) -> tokio::sync::broadcast::Receiver<std::sync::Arc<serde_json::Value>> {
+    self.dispatcher.subscribe_event_method(method)
+  }
+
+  fn subscribe_event_domain(
+    &self,
+    domain: &'static str,
+  ) -> tokio::sync::broadcast::Receiver<std::sync::Arc<serde_json::Value>> {
+    self.dispatcher.subscribe_event_domain(domain)
+  }
+
   fn register_lifecycle_tracker(
     &self,
     session_id: &str,
