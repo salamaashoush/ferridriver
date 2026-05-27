@@ -28,6 +28,10 @@ use rustc_hash::FxHashMap;
 use std::time::Duration;
 use transport::CdpTransport;
 
+pub(crate) const LC_COMMIT: u8 = 0b001;
+pub(crate) const LC_DOMCONTENTLOADED: u8 = 0b010;
+pub(crate) const LC_LOAD: u8 = 0b100;
+
 /// Sealed trait mapping transport types to their `AnyPage`/`AnyElement` enum constructors.
 /// This avoids having "abstract" methods or duplicated impls on the generic types.
 pub trait CdpWrap: CdpTransport + Sized {
@@ -1015,7 +1019,7 @@ pub struct LifecycleState {
   /// loaderId of the current committed document (from Page.frameNavigated).
   pub current_loader_id: String,
   /// Lifecycle events fired for the current document.
-  pub fired: std::collections::HashSet<String>,
+  pub fired: u8,
   /// Set by the transport dispatcher when `Inspector.targetCrashed`
   /// fires for the page's session. Goto/reload/wait-for-navigation
   /// observe this and bail out with a typed error instead of stalling
@@ -1028,7 +1032,7 @@ impl LifecycleState {
   fn new() -> Self {
     Self {
       current_loader_id: String::new(),
-      fired: std::collections::HashSet::new(),
+      fired: 0,
       crashed: false,
     }
   }
@@ -1321,6 +1325,16 @@ impl<T: CdpWrap> CdpPage<T> {
     }
   }
 
+  fn lifecycle_fired(fired: u8, target_event: &str) -> bool {
+    let flag = match target_event {
+      "commit" => LC_COMMIT,
+      "domcontentloaded" => LC_DOMCONTENTLOADED,
+      "load" => LC_LOAD,
+      _ => 0,
+    };
+    flag != 0 && fired & flag != 0
+  }
+
   pub async fn goto(
     &self,
     url: &str,
@@ -1504,7 +1518,7 @@ impl<T: CdpWrap> CdpPage<T> {
         if state.crashed {
           return Err(FerriError::target_closed(Some("target crashed".into())));
         }
-        if state.current_loader_id == expected_loader_id && state.fired.contains(target_event) {
+        if state.current_loader_id == expected_loader_id && Self::lifecycle_fired(state.fired, target_event) {
           return Ok(());
         }
       }
@@ -1532,7 +1546,7 @@ impl<T: CdpWrap> CdpPage<T> {
         }
         if state.current_loader_id != pre_loader_id
           && !state.current_loader_id.is_empty()
-          && state.fired.contains(target_event)
+          && Self::lifecycle_fired(state.fired, target_event)
         {
           return Ok(());
         }

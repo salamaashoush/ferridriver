@@ -48,7 +48,7 @@ type CdpResult = Result<serde_json::Value>;
 pub(crate) struct PendingEntry {
   tx: oneshot::Sender<CdpResult>,
   method: String,
-  send_at: Instant,
+  send_at: Option<Instant>,
 }
 
 /// Pending-command map: command ID -> [`PendingEntry`].
@@ -355,17 +355,18 @@ impl CdpDispatcher {
     );
 
     let (tx, rx) = oneshot::channel();
+    let stats_enabled = rtt_stats_enabled();
     let entry = PendingEntry {
       tx,
       // Allocate the method String only when stats are enabled —
       // saves the per-command alloc when stats are off (the common
       // path).
-      method: if rtt_stats_enabled() {
+      method: if stats_enabled {
         method.to_string()
       } else {
         String::new()
       },
-      send_at: Instant::now(),
+      send_at: stats_enabled.then(Instant::now),
     };
     self.pending.insert(id, entry);
     Ok((data, rx))
@@ -400,8 +401,10 @@ impl CdpDispatcher {
         "CDP << response",
       );
       if let Some((_, entry)) = self.pending.remove(&id) {
-        if rtt_stats_enabled() {
-          let elapsed = entry.send_at.elapsed().as_nanos();
+        if rtt_stats_enabled()
+          && let Some(send_at) = entry.send_at
+        {
+          let elapsed = send_at.elapsed().as_nanos();
           // Record into both the per-dispatcher bucket (dump on
           // graceful Drop) AND the process-global bucket (dump via
           // libc atexit — covers `process::exit` paths where Drop
@@ -418,9 +421,8 @@ impl CdpDispatcher {
       let session_id = json_scan::json_string(json_scan::json_field(raw, b"sessionId"));
       let method_str = std::str::from_utf8(method).unwrap_or("");
       let sid_str = std::str::from_utf8(session_id).unwrap_or("");
-      let key = sid_str.to_string();
 
-      self.dispatch_lifecycle(raw, method_str, &key);
+      self.dispatch_lifecycle(raw, method_str, sid_str);
 
       tracing::trace!(
         target: "ferridriver::cdp::recv",
@@ -469,8 +471,7 @@ impl CdpDispatcher {
           let loader_id_str = std::str::from_utf8(loader_id).unwrap_or("");
           let mut state = lock_or_recover(&tracker.state);
           state.current_loader_id = loader_id_str.to_string();
-          state.fired.clear();
-          state.fired.insert("commit".to_string());
+          state.fired = super::LC_COMMIT;
           drop(state);
           tracker.notify.notify_waiters();
         },
@@ -481,11 +482,11 @@ impl CdpDispatcher {
           let name = json_scan::json_string(json_scan::json_field(params, b"name"));
           let name_str = std::str::from_utf8(name).unwrap_or("");
           let event_name = match name_str {
-            "DOMContentLoaded" => Some("domcontentloaded"),
-            "load" => Some("load"),
+            "DOMContentLoaded" => Some(super::LC_DOMCONTENTLOADED),
+            "load" => Some(super::LC_LOAD),
             _ => None,
           };
-          if let Some(event_name) = event_name {
+          if let Some(event_flag) = event_name {
             let mut state = lock_or_recover(&tracker.state);
             // Strict loaderId match. A subframe lifecycle event carries
             // the subframe's loaderId, which never matches the main
@@ -498,7 +499,7 @@ impl CdpDispatcher {
             // `crates/ferridriver/src/backend/cdp/mod.rs::CdpPage::goto`)
             // before awaiting any lifecycle event.
             if state.current_loader_id == loader_id_str {
-              state.fired.insert(event_name.to_string());
+              state.fired |= event_flag;
               drop(state);
               tracker.notify.notify_waiters();
             }
