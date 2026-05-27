@@ -34,27 +34,32 @@ const inlineCssPlugin: BunPlugin = {
 
 mkdirSync('./dist', { recursive: true });
 
-const result = await Bun.build({
-  entrypoints: ['./index.ts'],
-  target: 'browser',
-  minify: true,
-  format: 'iife',
-  sourcemap: 'none',
-  plugins: [inlineCssPlugin],
-});
+async function build(entrypoint: string, outfile: string, wrap: (source: string) => string) {
+  const result = await Bun.build({
+    entrypoints: [entrypoint],
+    target: 'browser',
+    minify: true,
+    format: 'iife',
+    sourcemap: 'none',
+    plugins: [inlineCssPlugin],
+  });
 
-if (!result.success) {
-  console.error('Build failed:');
-  for (const log of result.logs) {
-    console.error(log);
+  if (!result.success) {
+    console.error(`Build failed for ${entrypoint}:`);
+    for (const log of result.logs) {
+      console.error(log);
+    }
+    process.exit(1);
   }
-  process.exit(1);
+
+  const output = await result.outputs[0].text();
+  const wrapped = wrap(output);
+  await Bun.write(outfile, wrapped);
+
+  const size = new Blob([wrapped]).size;
+  console.log(`Built ${outfile} (${(size / 1024).toFixed(1)} KB)`);
 }
 
-const output = await result.outputs[0].text();
-// Wrap in idempotency check
-const wrapped = `(function(){if(window.__fd)return;${output}})()`;
-await Bun.write('./dist/engine.min.js', wrapped);
-
-const size = new Blob([wrapped]).size;
-console.log(`Built dist/engine.min.js (${(size / 1024).toFixed(1)} KB)`);
+await build('./index.ts', './dist/engine.min.js', output => `(function(){if(window.__fd)return;${output}})()`);
+await build('./recorderSupport.ts', './dist/recorder-support.min.js', output => output);
+await build('./mcpSupport.ts', './dist/mcp-support.min.js', output => output);

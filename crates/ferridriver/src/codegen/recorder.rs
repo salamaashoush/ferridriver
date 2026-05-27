@@ -15,6 +15,7 @@ use super::{Action, OutputLanguage};
 
 /// Recorder JS injected into every page (survives navigations).
 const RECORDER_JS: &str = include_str!("recorder.js");
+const RECORDER_SUPPORT_JS: &str = include_str!("../injected/dist/recorder-support.min.js");
 
 /// Options for the interactive recorder.
 pub struct RecorderOptions {
@@ -105,11 +106,18 @@ impl Recorder {
 
     page.expose_function("__fdRecorderAction", callback).await?;
 
-    // Inject recorder JS (persists across navigations via add_init_script).
+    // Inject recorder support + recorder JS (persists across navigations via add_init_script).
+    page
+      .add_init_script(
+        crate::options::InitScriptSource::Source(RECORDER_SUPPORT_JS.into()),
+        None,
+      )
+      .await?;
     page
       .add_init_script(crate::options::InitScriptSource::Source(RECORDER_JS.into()), None)
       .await?;
     // Also evaluate immediately for the current page.
+    let _ = page.inner().evaluate(RECORDER_SUPPORT_JS).await;
     let _ = page.inner().evaluate(RECORDER_JS).await;
 
     eprintln!("Recording started. Interact with the browser.");

@@ -805,6 +805,7 @@ impl WebKitPage {
 
   pub async fn accessibility_tree_with_depth(&self, max_depth: i32) -> Result<Vec<AxNodeData>> {
     let fd = self.injected_script().await?;
+    self.eval_value(crate::selectors::MCP_SUPPORT_JS).await?;
     let json_str = self
       .eval_value(&format!("JSON.stringify({fd}.accessibilityTree({max_depth}))"))
       .await?;
