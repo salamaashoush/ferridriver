@@ -171,8 +171,10 @@ impl EventBusBuilder {
 
   /// Finalize the bus. No more subscribers can be added after this.
   pub fn build(self) -> EventBus {
+    let has_subscribers = !self.subscribers.is_empty();
     EventBus {
       inner: Arc::new(EventBusInner {
+        has_subscribers,
         subscribers: std::sync::RwLock::new(self.subscribers),
       }),
     }
@@ -194,15 +196,23 @@ pub struct EventBus {
 }
 
 struct EventBusInner {
+  has_subscribers: bool,
   /// Subscriber channels — frozen after build. Read-only during emit (no lock needed).
   /// `close()` swaps to empty Vec via `std::sync::RwLock` (write only on shutdown).
   subscribers: std::sync::RwLock<Vec<mpsc::UnboundedSender<ReporterEvent>>>,
 }
 
 impl EventBus {
+  pub fn has_subscribers(&self) -> bool {
+    self.inner.has_subscribers
+  }
+
   /// Emit an event to all subscribers. Lock-free read path — `RwLock::read()` never
   /// blocks other readers. Only `close()` takes a write lock (once, at shutdown).
   pub fn emit(&self, event: ReporterEvent) {
+    if !self.inner.has_subscribers {
+      return;
+    }
     let subs = self.inner.subscribers.read().expect("EventBus RwLock poisoned");
     if subs.is_empty() {
       return;

@@ -491,11 +491,14 @@ impl TestRunner {
       }
     }
 
-    event_bus.emit(ReporterEvent::RunStarted {
-      total_tests,
-      num_workers,
-      metadata: run_metadata,
-    });
+    let reporting_enabled = event_bus.has_subscribers();
+    if reporting_enabled {
+      event_bus.emit(ReporterEvent::RunStarted {
+        total_tests,
+        num_workers,
+        metadata: run_metadata,
+      });
+    }
 
     let start = Instant::now();
 
@@ -505,14 +508,16 @@ impl TestRunner {
       for setup_fn in &self.hooks.global_setup_fns {
         if let Err(e) = setup_fn(global_pool.clone()).await {
           tracing::error!(target: "ferridriver::runner", "global setup failed: {e}");
-          event_bus.emit(ReporterEvent::RunFinished {
-            total: total_tests,
-            passed: 0,
-            failed: total_tests,
-            skipped: 0,
-            flaky: 0,
-            duration: start.elapsed(),
-          });
+          if reporting_enabled {
+            event_bus.emit(ReporterEvent::RunFinished {
+              total: total_tests,
+              passed: 0,
+              failed: total_tests,
+              skipped: 0,
+              flaky: 0,
+              duration: start.elapsed(),
+            });
+          }
           return 1;
         }
       }
@@ -596,9 +601,10 @@ impl TestRunner {
 
     let mut worker_handles = Vec::new();
     let launch_plan = build_launch_plan(&self.config.browser);
+    let worker_event_bus = reporting_enabled.then(|| event_bus.clone());
 
     for worker_id in 0..num_workers {
-      let worker = Worker::new(worker_id, Arc::clone(&self.config), event_bus.clone());
+      let worker = Worker::new(worker_id, Arc::clone(&self.config), worker_event_bus.clone());
       let rx = dispatcher.receiver();
       let tx = result_tx.clone();
       let custom_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Worker);
@@ -728,14 +734,16 @@ impl TestRunner {
       mgr.stop().await;
     }
 
-    event_bus.emit(ReporterEvent::RunFinished {
-      total: total_tests,
-      passed,
-      failed,
-      skipped,
-      flaky,
-      duration,
-    });
+    if reporting_enabled {
+      event_bus.emit(ReporterEvent::RunFinished {
+        total: total_tests,
+        passed,
+        failed,
+        skipped,
+        flaky,
+        duration,
+      });
+    }
 
     let exit_code = if failed > 0 || (self.config.fail_on_flaky_tests && flaky > 0) {
       1
