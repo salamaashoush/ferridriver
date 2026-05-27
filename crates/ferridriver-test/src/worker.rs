@@ -619,11 +619,11 @@ struct SuiteState {
 pub struct Worker {
   pub id: u32,
   config: Arc<TestConfig>,
-  event_bus: EventBus,
+  event_bus: Option<EventBus>,
 }
 
 impl Worker {
-  pub fn new(id: u32, config: Arc<TestConfig>, event_bus: EventBus) -> Self {
+  pub fn new(id: u32, config: Arc<TestConfig>, event_bus: Option<EventBus>) -> Self {
     Self { id, config, event_bus }
   }
 
@@ -665,7 +665,7 @@ impl Worker {
       timeout: Duration::from_millis(self.config.timeout),
       tags: Vec::new(),
       start_time: Instant::now(),
-      event_bus: Some(self.event_bus.clone()),
+      event_bus: self.event_bus.clone(),
       annotations: Arc::new(Mutex::new(Vec::new())),
     })
   }
@@ -679,7 +679,9 @@ impl Worker {
     result_tx: mpsc::Sender<WorkerTestResult>,
     stop_flag: Arc<std::sync::atomic::AtomicBool>,
   ) {
-    self.event_bus.emit(ReporterEvent::WorkerStarted { worker_id: self.id });
+    if let Some(event_bus) = &self.event_bus {
+      event_bus.emit(ReporterEvent::WorkerStarted { worker_id: self.id });
+    }
 
     // Register the worker-scope `browser` + `request` fixtures on the
     // custom pool so child suite/test pools resolve them via the parent
@@ -742,30 +744,34 @@ impl Worker {
             name: step_title.clone(),
             line: None,
           };
-          self.event_bus.emit(ReporterEvent::StepStarted(Box::new(
-            crate::reporter::StepStartedEvent {
-              test_id: synthetic_id.clone(),
-              step_id: step_id.clone(),
-              parent_step_id: None,
-              title: step_title.clone(),
-              category: StepCategory::Hook,
-            },
-          )));
+          if let Some(event_bus) = &self.event_bus {
+            event_bus.emit(ReporterEvent::StepStarted(Box::new(
+              crate::reporter::StepStartedEvent {
+                test_id: synthetic_id.clone(),
+                step_id: step_id.clone(),
+                parent_step_id: None,
+                title: step_title.clone(),
+                category: StepCategory::Hook,
+              },
+            )));
+          }
           let start = Instant::now();
           let result = hook(state.fixture_pool.clone()).await;
           let duration = start.elapsed();
           let error = result.as_ref().err().map(|e| format!("{e}"));
-          self.event_bus.emit(ReporterEvent::StepFinished(Box::new(
-            crate::reporter::StepFinishedEvent {
-              test_id: synthetic_id,
-              step_id,
-              title: step_title,
-              category: StepCategory::Hook,
-              duration,
-              error: error.clone(),
-              metadata: None,
-            },
-          )));
+          if let Some(event_bus) = &self.event_bus {
+            event_bus.emit(ReporterEvent::StepFinished(Box::new(
+              crate::reporter::StepFinishedEvent {
+                test_id: synthetic_id,
+                step_id,
+                title: step_title,
+                category: StepCategory::Hook,
+                duration,
+                error: error.clone(),
+                metadata: None,
+              },
+            )));
+          }
           if let Err(e) = result {
             tracing::warn!(target: "ferridriver::worker", "afterAll error: {e}");
           }
@@ -784,9 +790,9 @@ impl Worker {
     // because no browser was launched in the first place.
     browser_handle.close().await;
 
-    self
-      .event_bus
-      .emit(ReporterEvent::WorkerFinished { worker_id: self.id });
+    if let Some(event_bus) = &self.event_bus {
+      event_bus.emit(ReporterEvent::WorkerFinished { worker_id: self.id });
+    }
   }
 
   /// Run a serial batch: all tests in order, skip rest on failure.
@@ -823,10 +829,12 @@ impl Worker {
           annotations: test.annotations.clone(),
           metadata: self.config.metadata.clone(),
         };
-        self.event_bus.emit(ReporterEvent::TestFinished {
-          test_id: test.id.clone(),
-          outcome: outcome.clone(),
-        });
+        if let Some(event_bus) = &self.event_bus {
+          event_bus.emit(ReporterEvent::TestFinished {
+            test_id: test.id.clone(),
+            outcome: outcome.clone(),
+          });
+        }
         results.push(WorkerTestResult {
           outcome,
           should_retry: false,
@@ -911,30 +919,34 @@ impl Worker {
         } else {
           format!("beforeAll [{i}]")
         };
-        self.event_bus.emit(ReporterEvent::StepStarted(Box::new(
-          crate::reporter::StepStartedEvent {
-            test_id: test_id.clone(),
-            step_id: format!("hook:beforeAll:{suite_key}:{i}"),
-            parent_step_id: None,
-            title: step_title.clone(),
-            category: StepCategory::Hook,
-          },
-        )));
+        if let Some(event_bus) = &self.event_bus {
+          event_bus.emit(ReporterEvent::StepStarted(Box::new(
+            crate::reporter::StepStartedEvent {
+              test_id: test_id.clone(),
+              step_id: format!("hook:beforeAll:{suite_key}:{i}"),
+              parent_step_id: None,
+              title: step_title.clone(),
+              category: StepCategory::Hook,
+            },
+          )));
+        }
         let start = Instant::now();
         let result = hook(suite_state.fixture_pool.clone()).await;
         let duration = start.elapsed();
         let error = result.as_ref().err().map(|e| e.message.clone());
-        self.event_bus.emit(ReporterEvent::StepFinished(Box::new(
-          crate::reporter::StepFinishedEvent {
-            test_id: test_id.clone(),
-            step_id: format!("hook:beforeAll:{suite_key}:{i}"),
-            title: step_title,
-            category: StepCategory::Hook,
-            duration,
-            error: error.clone(),
-            metadata: None,
-          },
-        )));
+        if let Some(event_bus) = &self.event_bus {
+          event_bus.emit(ReporterEvent::StepFinished(Box::new(
+            crate::reporter::StepFinishedEvent {
+              test_id: test_id.clone(),
+              step_id: format!("hook:beforeAll:{suite_key}:{i}"),
+              title: step_title,
+              category: StepCategory::Hook,
+              duration,
+              error: error.clone(),
+              metadata: None,
+            },
+          )));
+        }
         if let Err(e) = result {
           tracing::error!(target: "ferridriver::worker", "beforeAll failed for {suite_key}: {e}");
           suite_state.before_all_failed = true;
@@ -965,10 +977,12 @@ impl Worker {
         annotations: test.annotations.clone(),
         metadata: self.config.metadata.clone(),
       };
-      self.event_bus.emit(ReporterEvent::TestFinished {
-        test_id: test_id.clone(),
-        outcome: outcome.clone(),
-      });
+      if let Some(event_bus) = &self.event_bus {
+        event_bus.emit(ReporterEvent::TestFinished {
+          test_id: test_id.clone(),
+          outcome: outcome.clone(),
+        });
+      }
       return WorkerTestResult {
         outcome,
         should_retry: false,
@@ -1008,10 +1022,12 @@ impl Worker {
         annotations: test.annotations.clone(),
         metadata: self.config.metadata.clone(),
       };
-      self.event_bus.emit(ReporterEvent::TestFinished {
-        test_id: test_id.clone(),
-        outcome: outcome.clone(),
-      });
+      if let Some(event_bus) = &self.event_bus {
+        event_bus.emit(ReporterEvent::TestFinished {
+          test_id: test_id.clone(),
+          outcome: outcome.clone(),
+        });
+      }
       return WorkerTestResult {
         outcome,
         should_retry: false,
@@ -1023,10 +1039,12 @@ impl Worker {
       };
     }
 
-    self.event_bus.emit(ReporterEvent::TestStarted {
-      test_id: test_id.clone(),
-      attempt,
-    });
+    if let Some(event_bus) = &self.event_bus {
+      event_bus.emit(ReporterEvent::TestStarted {
+        test_id: test_id.clone(),
+        attempt,
+      });
+    }
 
     // Evaluate Fail condition: if condition matches, expect failure (invert pass/fail).
     let mut expected_status = test.expected_status.clone();
@@ -1102,7 +1120,7 @@ impl Worker {
         })
         .collect(),
       start_time: start,
-      event_bus: Some(self.event_bus.clone()),
+      event_bus: self.event_bus.clone(),
       annotations: Arc::new(Mutex::new(Vec::new())),
     });
     let resources = Arc::new(TestBrowserResources::new(
@@ -1194,10 +1212,12 @@ impl Worker {
               annotations: test.annotations.clone(),
               metadata: self.config.metadata.clone(),
             };
-            self.event_bus.emit(ReporterEvent::TestFinished {
-              test_id: test_id.clone(),
-              outcome: outcome.clone(),
-            });
+            if let Some(event_bus) = &self.event_bus {
+              event_bus.emit(ReporterEvent::TestFinished {
+                test_id: test_id.clone(),
+                outcome: outcome.clone(),
+              });
+            }
             return WorkerTestResult {
               outcome,
               should_retry: attempt <= max_retries,
@@ -1330,10 +1350,12 @@ impl Worker {
             annotations: test.annotations.clone(),
             metadata: self.config.metadata.clone(),
           };
-          self.event_bus.emit(ReporterEvent::TestFinished {
-            test_id: test_id.clone(),
-            outcome: outcome.clone(),
-          });
+          if let Some(event_bus) = &self.event_bus {
+            event_bus.emit(ReporterEvent::TestFinished {
+              test_id: test_id.clone(),
+              outcome: outcome.clone(),
+            });
+          }
           return WorkerTestResult {
             outcome,
             should_retry: false,
@@ -1499,10 +1521,12 @@ impl Worker {
       metadata: self.config.metadata.clone(),
     };
 
-    self.event_bus.emit(ReporterEvent::TestFinished {
-      test_id: test_id.clone(),
-      outcome: outcome.clone(),
-    });
+    if let Some(event_bus) = &self.event_bus {
+      event_bus.emit(ReporterEvent::TestFinished {
+        test_id: test_id.clone(),
+        outcome: outcome.clone(),
+      });
+    }
 
     let should_retry =
       outcome.status != TestStatus::Passed && outcome.status != TestStatus::Skipped && attempt < max_attempts;
