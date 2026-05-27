@@ -108,6 +108,10 @@ impl ReporterSet {
     Self { reporters }
   }
 
+  pub fn is_empty(&self) -> bool {
+    self.reporters.is_empty()
+  }
+
   /// Append an additional reporter (e.g., NAPI ResultCollector).
   pub fn add(&mut self, reporter: Box<dyn Reporter>) {
     self.reporters.push(reporter);
@@ -273,6 +277,10 @@ pub(crate) fn create_reporters(
   quiet: bool,
   report_slow_tests: Option<crate::config::ReportSlowTestsConfig>,
 ) -> ReporterSet {
+  if names.len() == 1 && matches!(names[0].name.as_str(), "none" | "null" | "empty") {
+    return ReporterSet::default();
+  }
+
   let mut reporters: Vec<Box<dyn Reporter>> = Vec::new();
   let mut has_terminal = false;
 
