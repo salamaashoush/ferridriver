@@ -12,6 +12,12 @@ use crate::error::{FerriError, Result};
 use crate::selectors;
 use rustc_hash::FxHashMap;
 
+async fn ensure_mcp_support(page: &AnyPage) -> Result<String> {
+  let fd = page.injected_script().await?;
+  page.evaluate(selectors::MCP_SUPPORT_JS).await?;
+  Ok(fd)
+}
+
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 pub struct SearchOptions {
@@ -178,7 +184,7 @@ pub async fn resolve_element<S: std::hash::BuildHasher>(
 
 /// Suggest available selectors on the page.
 pub async fn suggest_selectors(page: &AnyPage) -> Vec<String> {
-  let Ok(fd) = page.injected_script().await else {
+  let Ok(fd) = ensure_mcp_support(page).await else {
     return Vec::new();
   };
   let json_str = rt_eval_str(page, &format!("{fd}.suggestSelectors()"))
@@ -453,7 +459,7 @@ pub async fn search_page(page: &AnyPage, opts: &SearchOptions) -> Result<SearchR
   let css_scope = serde_json::to_string(&opts.css_scope)?;
   let max_results = opts.max_results;
 
-  let fd = page.injected_script().await?;
+  let fd = ensure_mcp_support(page).await?;
   let js =
     format!("{fd}.searchPage({pattern}, {is_regex}, {case_sensitive}, {context_chars}, {css_scope}, {max_results})");
 
@@ -552,7 +558,7 @@ pub async fn find_elements(page: &AnyPage, opts: &FindElementsOptions) -> Result
   let max_results = opts.max_results;
   let include_text = if opts.include_text { "true" } else { "false" };
 
-  let fd = page.injected_script().await?;
+  let fd = ensure_mcp_support(page).await?;
   let js = format!("{fd}.findElementsCSS({selector}, {attributes}, {max_results}, {include_text})");
 
   let result_str = rt_eval_str(page, &js).await?;
@@ -641,7 +647,7 @@ pub fn format_find_results(result: &FindResult, selector: &str) -> String {
 /// Returns an error if the element is not a select or the target option is not found.
 pub async fn select_option(element: &AnyElement, page: &AnyPage, target: &str) -> Result<SelectResult> {
   let escaped = target.replace('\\', "\\\\").replace('\'', "\\'");
-  let fd = page.injected_script().await?;
+  let fd = ensure_mcp_support(page).await?;
   let result_json = element
     .call_js_fn_value(&format!(
       "function() {{ return JSON.stringify({fd}.selectOption(this, '{escaped}')); }}"
@@ -733,7 +739,7 @@ pub async fn scroll_info(page: &AnyPage) -> Result<ScrollInfo> {
 
 /// Get console error count (installs interceptor on first call). Uses runtime.
 pub async fn console_error_count(page: &AnyPage) -> i64 {
-  let Ok(fd) = page.injected_script().await else {
+  let Ok(fd) = ensure_mcp_support(page).await else {
     return 0;
   };
   rt_eval(page, &format!("{fd}.consoleErrors()"))
@@ -752,7 +758,7 @@ pub async fn console_error_count(page: &AnyPage) -> i64 {
 ///
 /// Returns an error if JS evaluation fails.
 pub async fn extract_markdown(page: &AnyPage) -> Result<String> {
-  let fd = page.injected_script().await?;
+  let fd = ensure_mcp_support(page).await?;
   rt_eval_str(page, &format!("{fd}.extractMarkdown()")).await
 }
 

@@ -21,7 +21,6 @@ import { cacheNormalizedWhitespaces, normalizeWhiteSpace, trimStringWithEllipsis
 
 import { generateAriaTree, getAllElementsMatchingExpectAriaTemplate, matchesExpectAriaTemplate, renderAriaTree, findNewElement } from './ariaSnapshot';
 import { beginDOMCaches, enclosingShadowRootOrDocument, endDOMCaches, isElementVisible, isInsideScope, parentElementOrShadowHost, setGlobalOptions } from './domUtils';
-import { Highlight } from './highlight';
 import { kLayoutSelectorNames, layoutSelectorScore } from './layoutSelectorUtils';
 import { createRoleEngine } from './roleSelectorEngine';
 import { beginAriaCaches, endAriaCaches, getAriaDisabled, getAriaRole, getCheckedAllowMixed, getCheckedWithoutMixed, getElementAccessibleDescription, getElementAccessibleErrorMessage, getElementAccessibleName, getReadonly } from './roleUtils';
@@ -85,7 +84,6 @@ export class InjectedScript {
   private _isUtilityWorld: boolean;
   readonly onGlobalListenersRemoved: Set<() => void>;
   private _hitTargetInterceptor: undefined | ((event: MouseEvent | PointerEvent | TouchEvent) => void);
-  private _highlight: Highlight | undefined;
   readonly isUnderTest: boolean;
   private _sdkLanguage: Language;
   private _testIdAttributeNameForStrictErrorAndConsoleCodegen: string = 'data-testid';
@@ -1281,95 +1279,6 @@ export class InjectedScript {
     // Chromium/WebKit should delete the stack instead.
     delete error.stack;
     return error;
-  }
-
-  createHighlight() {
-    return new Highlight(this);
-  }
-
-  maskSelectors(selectors: ParsedSelector[], color: string) {
-    const highlight = this._createHighlight();
-    const elements = [];
-    for (const selector of selectors)
-      elements.push(this.querySelectorAll(selector, this.document.documentElement));
-    highlight.maskElements(elements.flat(), color);
-  }
-
-  private _createHighlight() {
-    if (this._highlight)
-      this.hideHighlight();
-    this._highlight = new Highlight(this);
-    this._highlight.install();
-    return this._highlight;
-  }
-
-  private _ensureHighlight() {
-    if (!this._highlight) {
-      this._highlight = new Highlight(this);
-      this._highlight.install();
-    }
-    return this._highlight;
-  }
-
-  addHighlight(selector: ParsedSelector, style?: string) {
-    const highlight = this._ensureHighlight();
-    highlight.addElementHighlight(selector, style);
-  }
-
-  removeHighlight(selector: ParsedSelector) {
-    const highlight = this._ensureHighlight();
-    highlight.removeElementHighlight(selector);
-  }
-
-  setScreencastAnnotation(annotation: { point?: channels.Point, box?: channels.Rect, actionTitle?: string, duration?: number, position?: string, fontSize?: number } | null) {
-    const highlight = this._ensureHighlight();
-    if (!annotation) {
-      highlight.updateHighlight([]);
-      highlight.hideActionPoint();
-      highlight.hideActionTitle();
-      return;
-    }
-    const fadeDuration = annotation.duration ?? 500;
-
-    if (annotation.box) {
-      highlight.updateHighlight([{
-        box: annotation.box,
-        color: 'rgba(0, 128, 255, 0.15)',
-        borderColor: 'rgba(0, 128, 255, 0.6)',
-        fadeDuration,
-      }]);
-    }
-    if (annotation.point)
-      highlight.showActionPoint(annotation.point.x, annotation.point.y, fadeDuration);
-    if (annotation.actionTitle)
-      highlight.showActionTitle(annotation.actionTitle, fadeDuration, annotation.position, annotation.fontSize);
-  }
-
-  addUserOverlay(id: string, html: string) {
-    const highlight = this._ensureHighlight();
-    highlight.addUserOverlay(id, html);
-  }
-
-  getUserOverlay(id: string): HTMLElement | undefined {
-    const highlight = this._ensureHighlight();
-    return highlight.getUserOverlay(id);
-  }
-
-  removeUserOverlay(id: string) {
-    const highlight = this._ensureHighlight();
-    highlight.removeUserOverlay(id);
-  }
-
-  setUserOverlaysVisible(visible: boolean) {
-    const highlight = this._ensureHighlight();
-    highlight.setUserOverlaysVisible(visible);
-  }
-
-  hideHighlight() {
-    if (this._highlight) {
-      this._highlight.uninstall();
-      delete this._highlight;
-    }
   }
 
   markTargetElements(markedElements: Set<Element>, callId: string) {

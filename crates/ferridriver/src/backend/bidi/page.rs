@@ -974,6 +974,9 @@ impl BidiPage {
 
   pub async fn accessibility_tree_with_depth(&self, max_depth: i32) -> Result<Vec<AxNodeData>> {
     let fd = self.injected_script().await?;
+    self
+      .eval_internal(crate::selectors::MCP_SUPPORT_JS, &self.context_id)
+      .await?;
     // Use the shared JS accessibility tree helper from window.__fd.accessibilityTree().
     // This uses Playwright's ARIA role/name computation and tags elements with data-fdref
     // for ref resolution. Shared between BiDi and WebKit backends.
