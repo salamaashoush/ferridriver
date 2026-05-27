@@ -202,7 +202,7 @@ struct EventBusInner {
 impl EventBus {
   /// Emit an event to all subscribers. Lock-free read path — `RwLock::read()` never
   /// blocks other readers. Only `close()` takes a write lock (once, at shutdown).
-  pub async fn emit(&self, event: ReporterEvent) {
+  pub fn emit(&self, event: ReporterEvent) {
     let subs = self.inner.subscribers.read().expect("EventBus RwLock poisoned");
     if subs.is_empty() {
       return;

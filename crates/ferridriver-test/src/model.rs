@@ -513,17 +513,15 @@ impl TestInfo {
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
     if let Some(bus) = &self.event_bus {
-      bus
-        .emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
-          crate::reporter::StepStartedEvent {
-            test_id: self.test_id.clone(),
-            step_id: step_id.clone(),
-            parent_step_id: None,
-            title: title.clone(),
-            category: category.clone(),
-          },
-        )))
-        .await;
+      bus.emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
+        crate::reporter::StepStartedEvent {
+          test_id: self.test_id.clone(),
+          step_id: step_id.clone(),
+          parent_step_id: None,
+          title: title.clone(),
+          category: category.clone(),
+        },
+      )));
     }
 
     StepHandle {
@@ -550,17 +548,15 @@ impl TestInfo {
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
     if let Some(bus) = &self.event_bus {
-      bus
-        .emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
-          crate::reporter::StepStartedEvent {
-            test_id: self.test_id.clone(),
-            step_id: step_id.clone(),
-            parent_step_id: Some(parent_step_id.to_string()),
-            title: title.clone(),
-            category: category.clone(),
-          },
-        )))
-        .await;
+      bus.emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
+        crate::reporter::StepStartedEvent {
+          test_id: self.test_id.clone(),
+          step_id: step_id.clone(),
+          parent_step_id: Some(parent_step_id.to_string()),
+          title: title.clone(),
+          category: category.clone(),
+        },
+      )));
     }
 
     StepHandle {
@@ -591,30 +587,26 @@ impl TestInfo {
     let step_id = format!("{}@{}", category, STEP_ID_COUNTER.fetch_add(1, Ordering::Relaxed));
 
     if let Some(bus) = &self.event_bus {
-      bus
-        .emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
-          crate::reporter::StepStartedEvent {
-            test_id: self.test_id.clone(),
-            step_id: step_id.clone(),
-            parent_step_id: None,
-            title: title.clone(),
-            category: category.clone(),
-          },
-        )))
-        .await;
-      bus
-        .emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
-          crate::reporter::StepFinishedEvent {
-            test_id: self.test_id.clone(),
-            step_id: step_id.clone(),
-            title: title.clone(),
-            category: category.clone(),
-            duration,
-            error: error.clone(),
-            metadata: metadata.clone(),
-          },
-        )))
-        .await;
+      bus.emit(crate::reporter::ReporterEvent::StepStarted(Box::new(
+        crate::reporter::StepStartedEvent {
+          test_id: self.test_id.clone(),
+          step_id: step_id.clone(),
+          parent_step_id: None,
+          title: title.clone(),
+          category: category.clone(),
+        },
+      )));
+      bus.emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
+        crate::reporter::StepFinishedEvent {
+          test_id: self.test_id.clone(),
+          step_id: step_id.clone(),
+          title: title.clone(),
+          category: category.clone(),
+          duration,
+          error: error.clone(),
+          metadata: metadata.clone(),
+        },
+      )));
     }
 
     self.steps.lock().await.push(TestStep {
@@ -665,19 +657,17 @@ impl StepHandle {
 
     // Emit real-time event.
     if let Some(bus) = &self.event_bus {
-      bus
-        .emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
-          crate::reporter::StepFinishedEvent {
-            test_id: self.test_id.clone(),
-            step_id: self.step_id.clone(),
-            title: self.title.clone(),
-            category: self.category.clone(),
-            duration,
-            error: error.clone(),
-            metadata: self.metadata.clone(),
-          },
-        )))
-        .await;
+      bus.emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
+        crate::reporter::StepFinishedEvent {
+          test_id: self.test_id.clone(),
+          step_id: self.step_id.clone(),
+          title: self.title.clone(),
+          category: self.category.clone(),
+          duration,
+          error: error.clone(),
+          metadata: self.metadata.clone(),
+        },
+      )));
     }
 
     // Push to batch step list (for TestOutcome.steps).
@@ -710,19 +700,17 @@ impl StepHandle {
     let duration = self.start.elapsed();
 
     if let Some(bus) = &self.event_bus {
-      bus
-        .emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
-          crate::reporter::StepFinishedEvent {
-            test_id: self.test_id.clone(),
-            step_id: self.step_id.clone(),
-            title: self.title.clone(),
-            category: self.category.clone(),
-            duration,
-            error: error.clone(),
-            metadata: self.metadata.clone(),
-          },
-        )))
-        .await;
+      bus.emit(crate::reporter::ReporterEvent::StepFinished(Box::new(
+        crate::reporter::StepFinishedEvent {
+          test_id: self.test_id.clone(),
+          step_id: self.step_id.clone(),
+          title: self.title.clone(),
+          category: self.category.clone(),
+          duration,
+          error: error.clone(),
+          metadata: self.metadata.clone(),
+        },
+      )));
     }
 
     let step = TestStep {
