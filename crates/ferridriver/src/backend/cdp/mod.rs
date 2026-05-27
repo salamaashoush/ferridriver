@@ -450,7 +450,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     viewport: Option<&crate::options::ViewportConfig>,
   ) -> Result<AnyPage> {
     // Subscribe to events BEFORE createTarget so we don't miss the auto-attach.
-    let mut event_rx = self.transport.subscribe_events();
+    let mut event_rx = self.transport.subscribe_event_method("Target.attachedToTarget");
 
     let create_params = if let Some(ctx_id) = browser_context_id {
       serde_json::json!({"url": "about:blank", "browserContextId": ctx_id})
@@ -2446,7 +2446,7 @@ impl<T: CdpWrap> CdpPage<T> {
     shutdown_rx: tokio::sync::oneshot::Receiver<()>,
   ) {
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_events();
+      let mut rx = transport.subscribe_event_method("Page.screencastFrame");
       let mut shutdown_rx = shutdown_rx;
       loop {
         let event = tokio::select! {
@@ -3965,7 +3965,7 @@ impl<T: CdpWrap> CdpPage<T> {
     page_backref: crate::backend::PageBackref,
   ) {
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_events();
+      let mut rx = transport.subscribe_event_method("Runtime.consoleAPICalled");
       loop {
         // Tolerate broadcast `Lagged` so the console listener stays
         // alive after a busy session — exit-on-Lagged silently dropped
@@ -3982,9 +3982,6 @@ impl<T: CdpWrap> CdpPage<T> {
           }
         }
 
-        if event.get("method").and_then(|m| m.as_str()) != Some("Runtime.consoleAPICalled") {
-          continue;
-        }
         let Some(params) = event.get("params") else {
           continue;
         };
@@ -4043,16 +4040,13 @@ impl<T: CdpWrap> CdpPage<T> {
     page_backref: crate::backend::PageBackref,
   ) {
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_events();
+      let mut rx = transport.subscribe_event_method("Runtime.exceptionThrown");
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
             continue;
           }
-        }
-        if event.get("method").and_then(|m| m.as_str()) != Some("Runtime.exceptionThrown") {
-          continue;
         }
         let Some(exception_details) = event.get("params").and_then(|p| p.get("exceptionDetails")) else {
           continue;
@@ -4080,7 +4074,7 @@ impl<T: CdpWrap> CdpPage<T> {
       nav_request_slot,
     ));
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_events();
+      let mut rx = transport.subscribe_event_domain("Network");
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
@@ -4160,16 +4154,13 @@ impl<T: CdpWrap> CdpPage<T> {
     dialog_manager: crate::dialog::DialogManager,
   ) {
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_events();
+      let mut rx = transport.subscribe_event_method("Page.javascriptDialogOpening");
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
             continue;
           }
-        }
-        if event.get("method").and_then(|m| m.as_str()) != Some("Page.javascriptDialogOpening") {
-          continue;
         }
         let Some(params) = event.get("params") else {
           continue;
@@ -4266,11 +4257,10 @@ impl<T: CdpWrap> CdpPage<T> {
     page_backref: crate::backend::PageBackref,
   ) {
     tokio::spawn(async move {
-      // Subscribe FIRST so we don't race: `subscribe_events` only
-      // delivers events published AFTER subscription, and a fast
+      // Subscribe FIRST so we don't race: routed subscriptions only
+      // deliver events published AFTER subscription, and a fast
       // test can trigger the picker before our enable-intercept
-      // reply lands. `transport.subscribe_events()` is synchronous
-      // and cheap.
+      // reply lands. The subscription call is synchronous and cheap.
       //
       // We do NOT fire `Page.setInterceptFileChooserDialog` here.
       // Mirrors Playwright's `_updateFileChooserInterception` lazy
@@ -4280,7 +4270,7 @@ impl<T: CdpWrap> CdpPage<T> {
       // `update_file_chooser_intercept` from the page's
       // `on('filechooser', ...)` registration path. Saves one RTT per
       // newly-opened page (~5ms) when no test uses file pickers.
-      let mut rx = transport.subscribe_events();
+      let mut rx = transport.subscribe_event_method("Page.fileChooserOpened");
 
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = session_id {
@@ -4288,9 +4278,6 @@ impl<T: CdpWrap> CdpPage<T> {
           if event_sid != Some(&**expected_sid) {
             continue;
           }
-        }
-        if event.get("method").and_then(|m| m.as_str()) != Some("Page.fileChooserOpened") {
-          continue;
         }
         let Some(params) = event.get("params") else {
           continue;
@@ -4385,7 +4372,7 @@ impl<T: CdpWrap> CdpPage<T> {
       // explicitly set, so opt-in callers keep working.
       let _ = browser_context_id;
       let _ = downloads_dir;
-      let mut rx = transport.subscribe_events();
+      let mut rx = transport.subscribe_event_domain("Browser");
 
       while let Ok(event) = rx.recv().await {
         // `Browser.downloadWillBegin` / `Browser.downloadProgress` fire
@@ -4492,8 +4479,21 @@ impl<T: CdpWrap> CdpPage<T> {
     emitter: crate::events::EventEmitter,
   ) {
     tokio::spawn(async move {
-      let mut rx = transport.subscribe_events();
-      while let Ok(event) = rx.recv().await {
+      let mut runtime_rx = transport.subscribe_event_domain("Runtime");
+      let mut page_rx = transport.subscribe_event_domain("Page");
+      loop {
+        let event = tokio::select! {
+          ev = runtime_rx.recv() => match ev {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+          },
+          ev = page_rx.recv() => match ev {
+            Ok(event) => event,
+            Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => continue,
+            Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+          },
+        };
         if let Some(ref expected_sid) = session_id {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
@@ -4652,16 +4652,13 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     let sid = self.session_id.clone();
     let fns = self.exposed_fns.clone();
     tokio::spawn(async move {
-      let mut rx = t.subscribe_events();
+      let mut rx = t.subscribe_event_method("Runtime.bindingCalled");
       while let Ok(event) = rx.recv().await {
         if let Some(ref expected_sid) = sid {
           let event_sid = event.get("sessionId").and_then(|v| v.as_str());
           if event_sid != Some(&**expected_sid) {
             continue;
           }
-        }
-        if event.get("method").and_then(|m| m.as_str()) != Some("Runtime.bindingCalled") {
-          continue;
         }
         if let Some(params) = event.get("params") {
           let binding_name = params.get("name").and_then(|v| v.as_str()).unwrap_or("");
@@ -4825,7 +4822,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
       }
       Some(format!("{scheme}://{host_and_port}"))
     }
-    let mut rx = transport.subscribe_events();
+    let mut rx = transport.subscribe_event_domain("Fetch");
     loop {
       // Tolerate broadcast `Lagged` (slow-consumer overflow) so the
       // Fetch interceptor stays alive after a busy session — previously
