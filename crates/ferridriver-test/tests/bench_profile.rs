@@ -15,7 +15,7 @@ use std::time::{Duration, Instant};
 
 use ferridriver::chromium;
 use ferridriver::options::LaunchOptions;
-use ferridriver_test::config::{CliOverrides, TestConfig};
+use ferridriver_test::config::{CliOverrides, ReporterConfig, TestConfig};
 use ferridriver_test::model::*;
 use ferridriver_test::runner::TestRunner;
 
@@ -246,7 +246,10 @@ async fn deep_profile() {
   let config = TestConfig {
     workers: 1,
     timeout: 5000,
-    reporter: vec![],
+    reporter: vec![ReporterConfig {
+      name: "none".into(),
+      options: std::collections::BTreeMap::new(),
+    }],
     ..Default::default()
   };
   let t = Instant::now();

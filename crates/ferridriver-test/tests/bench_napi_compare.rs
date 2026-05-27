@@ -27,7 +27,7 @@ use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use ferridriver_test::config::{CliOverrides, TestConfig};
+use ferridriver_test::config::{CliOverrides, ReporterConfig, TestConfig};
 use ferridriver_test::model::*;
 use ferridriver_test::runner::TestRunner;
 
@@ -199,7 +199,10 @@ async fn run_one(workers: u32) -> Duration {
   let config = TestConfig {
     workers,
     timeout: 10_000,
-    reporter: vec![],
+    reporter: vec![ReporterConfig {
+      name: "none".into(),
+      options: std::collections::BTreeMap::new(),
+    }],
     ..Default::default()
   };
 

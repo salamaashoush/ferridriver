@@ -79,12 +79,15 @@ impl TestRunner {
 
       // ── Single-project path ──
       let mut builder = EventBusBuilder::new();
-      let reporter_sub = builder.subscribe();
+      let driver_handle = if self.reporters.is_empty() {
+        None
+      } else {
+        let reporter_sub = builder.subscribe();
+        let reporters = std::mem::take(&mut self.reporters);
+        let driver = ReporterDriver::new(reporters, reporter_sub);
+        Some(tokio::spawn(driver.run()))
+      };
       let bus = builder.build();
-
-      let reporters = std::mem::take(&mut self.reporters);
-      let driver = ReporterDriver::new(reporters, reporter_sub);
-      let driver_handle = tokio::spawn(driver.run());
 
       let exit_code = self.execute(plan, bus.clone()).await;
 
@@ -93,8 +96,10 @@ impl TestRunner {
       // keeping Arc<EventBusInner> alive after JoinHandle::await returns.
       bus.close();
 
-      if let Ok(reporters) = driver_handle.await {
-        self.reporters = reporters;
+      if let Some(driver_handle) = driver_handle {
+        if let Ok(reporters) = driver_handle.await {
+          self.reporters = reporters;
+        }
       }
 
       exit_code
@@ -319,14 +324,16 @@ impl TestRunner {
     );
 
     // Create a sub-runner with merged config. Reuse our reporters + overrides.
-    let reporters = std::mem::take(&mut self.reporters);
-
     let mut builder = EventBusBuilder::new();
-    let reporter_sub = builder.subscribe();
+    let driver_handle = if self.reporters.is_empty() {
+      None
+    } else {
+      let reporter_sub = builder.subscribe();
+      let reporters = std::mem::take(&mut self.reporters);
+      let driver = ReporterDriver::new(reporters, reporter_sub);
+      Some(tokio::spawn(driver.run()))
+    };
     let bus = builder.build();
-
-    let driver = ReporterDriver::new(reporters, reporter_sub);
-    let driver_handle = tokio::spawn(driver.run());
 
     // Build a temporary runner with the merged config.
     let sub_runner = TestRunner {
@@ -340,8 +347,10 @@ impl TestRunner {
     let exit_code = sub_runner.execute(plan, bus.clone()).await;
     bus.close();
 
-    if let Ok(reporters) = driver_handle.await {
-      self.reporters = reporters;
+    if let Some(driver_handle) = driver_handle {
+      if let Ok(reporters) = driver_handle.await {
+        self.reporters = reporters;
+      }
     }
 
     exit_code
