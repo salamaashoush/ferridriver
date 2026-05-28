@@ -655,6 +655,73 @@ impl ElementHandle {
     result
   }
 
+  // ── $ / $$ (Playwright: elementHandle.$ / $$) ─────────────────────────
+
+  /// Playwright: `elementHandle.$(selector): Promise<ElementHandle | null>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:206`).
+  /// Resolves the first descendant matching `selector` inside this
+  /// element's subtree, returning a pinned [`ElementHandle`] or `None`
+  /// when nothing matches.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`FerriError::Evaluation`] / backend error on protocol
+  /// failure; the disposed-handle error when [`Self::is_disposed`].
+  pub async fn query_selector(&self, selector: &str) -> Result<Option<ElementHandle>> {
+    self.ensure_live()?;
+    let sel_escaped = serde_json::to_string(selector)
+      .map_err(|e| FerriError::Backend(format!("query_selector selector escape: {e}")))?;
+    let expr = format!("el => el.querySelector({sel_escaped})");
+    let handle = self
+      .js_handle
+      .evaluate_handle(&expr, SerializedArgument::default(), Some(true))
+      .await?;
+    if let Some(eh) = handle.as_element() {
+      return Ok(Some(eh));
+    }
+    // Null match (or a non-node, which querySelector never yields) —
+    // release the intermediate handle and report no match.
+    let _ = handle.dispose().await;
+    Ok(None)
+  }
+
+  /// Playwright: `elementHandle.$$(selector): Promise<ElementHandle[]>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:210`).
+  /// Resolves every descendant matching `selector` in document order,
+  /// returning one pinned [`ElementHandle`] per match. An empty match
+  /// is not an error.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`FerriError::Evaluation`] / backend error on protocol
+  /// failure; the disposed-handle error when [`Self::is_disposed`].
+  pub async fn query_selector_all(&self, selector: &str) -> Result<Vec<ElementHandle>> {
+    self.ensure_live()?;
+    let sel_escaped = serde_json::to_string(selector)
+      .map_err(|e| FerriError::Backend(format!("query_selector_all selector escape: {e}")))?;
+    let expr = format!("el => Array.from(el.querySelectorAll({sel_escaped}))");
+    let array_handle = self
+      .js_handle
+      .evaluate_handle(&expr, SerializedArgument::default(), Some(true))
+      .await?;
+    // The array's own enumerable properties are its numeric indices;
+    // each indexed property handle is a DOM element. Non-element
+    // properties (e.g. `length`, which is non-enumerable on arrays and
+    // thus excluded) are skipped via `as_element`.
+    let props = array_handle.get_properties().await?;
+    let mut out = Vec::with_capacity(props.len());
+    for (_key, prop) in props {
+      match prop.as_element() {
+        Some(eh) => out.push(eh),
+        None => {
+          let _ = prop.dispose().await;
+        },
+      }
+    }
+    let _ = array_handle.dispose().await;
+    Ok(out)
+  }
+
   // ── Frame accessors (Playwright: elementHandle.ownerFrame / contentFrame) ──
 
   /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`

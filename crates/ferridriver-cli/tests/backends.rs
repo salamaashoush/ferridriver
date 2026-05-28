@@ -187,6 +187,7 @@ fn register_script_handles(set: &mut TestSet<'_>) {
   run!(set, backends_support::handle_surface::test_handle_properties);
   run!(set, backends_support::handle_surface::test_handle_multi_arg_evaluate);
   run!(set, backends_support::handle_surface::test_element_handle_eval);
+  run!(set, backends_support::handle_surface::test_element_handle_query);
   run!(set, backends_support::handle_surface::test_element_handle_frames);
   run!(set, backends_support::handle_surface::test_element_handle_waits);
   run!(

@@ -163,6 +163,59 @@ pub fn test_element_handle_eval(c: &mut McpClient) {
   assert_eq!(v, json!(0), "$$eval empty match length: {v}");
 }
 
+pub fn test_element_handle_query(c: &mut McpClient) {
+  c.nav("<div id='parent'><button class='b'>one</button><span class='b'>two</span><button class='b'>three</button></div><button class='b'>outside</button>");
+
+  // $ resolves the first descendant inside this element's subtree only
+  // — the `outside` button is a sibling of #parent, so it must not be
+  // returned even though it matches `.b`.
+  let v = c.script_value(
+    "const p = await page.querySelector('#parent');\
+     const first = await p.$('.b');\
+     const txt = await first.textContent();\
+     await first.dispose();\
+     await p.dispose();\
+     return txt;",
+  );
+  assert_eq!(v, json!("one"), "$ returns first scoped descendant: {v}");
+
+  // $ on a non-matching selector returns null (Playwright parity).
+  let v = c.script_value(
+    "const p = await page.querySelector('#parent');\
+     const r = await p.$('.does-not-exist');\
+     await p.dispose();\
+     return r === null || r === undefined;",
+  );
+  assert_eq!(v, json!(true), "$ non-match returns null: {v}");
+
+  // $$ returns every scoped descendant in document order — three `.b`
+  // inside #parent, NOT the fourth `.b` sibling outside it. Proves the
+  // query is scoped to the handle, not the whole document.
+  let v = c.script_value(
+    "const p = await page.querySelector('#parent');\
+     const els = await p.$$('.b');\
+     const texts = [];\
+     for (const e of els) { texts.push(await e.textContent()); await e.dispose(); }\
+     await p.dispose();\
+     return {count: els.length, texts};",
+  );
+  assert_eq!(v["count"], json!(3), "$$ scoped count excludes sibling: {v}");
+  assert_eq!(
+    v["texts"],
+    json!(["one", "two", "three"]),
+    "$$ document-order texts: {v}"
+  );
+
+  // $$ with no match returns an empty array, not an error.
+  let v = c.script_value(
+    "const p = await page.querySelector('#parent');\
+     const els = await p.$$('.none');\
+     await p.dispose();\
+     return els.length;",
+  );
+  assert_eq!(v, json!(0), "$$ empty match returns empty array: {v}");
+}
+
 pub fn test_element_handle_frames(c: &mut McpClient) {
   c.nav("<button id='b'>ok</button>");
 

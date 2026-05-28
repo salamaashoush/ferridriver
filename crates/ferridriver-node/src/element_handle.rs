@@ -291,6 +291,24 @@ impl ElementHandle {
     Ok(crate::serialize_out::Evaluated(result))
   }
 
+  // ── $ / $$ (query shortcuts — Playwright parity) ─────────────────────
+
+  /// Playwright: `elementHandle.$(selector): Promise<ElementHandle | null>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:206`).
+  #[napi(js_name = "$")]
+  pub async fn query_selector(&self, selector: String) -> Result<Option<ElementHandle>> {
+    let maybe = self.inner.query_selector(&selector).await.into_napi()?;
+    Ok(maybe.map(ElementHandle::wrap))
+  }
+
+  /// Playwright: `elementHandle.$$(selector): Promise<ElementHandle[]>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:210`).
+  #[napi(js_name = "$$")]
+  pub async fn query_selector_all(&self, selector: String) -> Result<Vec<ElementHandle>> {
+    let handles = self.inner.query_selector_all(&selector).await.into_napi()?;
+    Ok(handles.into_iter().map(ElementHandle::wrap).collect())
+  }
+
   // ── Frame accessors ──────────────────────────────────────────────────
 
   /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`.

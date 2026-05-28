@@ -35,7 +35,7 @@ beforeAll(async () => {
         `<button id="primary">Primary</button>` +
         `<a href="/about">About</a>` +
         `<div class="needle">match</div>` +
-        `</body></html>`
+        `</body></html>`,
     );
   });
   await new Promise<void>((resolve) => {
@@ -91,6 +91,58 @@ for (const backend of BACKENDS) {
       await handle!.dispose();
     });
 
+    it("elementHandle.$ resolves the first scoped descendant", async () => {
+      // Inject a container whose `.b` children are a strict subset of
+      // the document's `.b` elements — a sibling `.b` lives outside it.
+      await page.evaluate(() => {
+        const old = document.querySelector("#qparent");
+        if (old) old.remove();
+        const outside = document.querySelector("#qoutside");
+        if (outside) outside.remove();
+        const p = document.createElement("div");
+        p.id = "qparent";
+        p.innerHTML =
+          "<button class='b'>one</button><span class='b'>two</span><button class='b'>three</button>";
+        document.body.appendChild(p);
+        const o = document.createElement("button");
+        o.id = "qoutside";
+        o.className = "b";
+        o.textContent = "outside";
+        document.body.appendChild(o);
+      });
+      const parent = await page.querySelector("#qparent");
+      expect(parent).not.toBeNull();
+      const first = await parent!.$(".b");
+      expect(first).not.toBeNull();
+      expect(await first!.textContent()).toBe("one");
+      await first!.dispose();
+
+      // Non-matching selector resolves to null.
+      const miss = await parent!.$(".does-not-exist");
+      expect(miss).toBeNull();
+      await parent!.dispose();
+    });
+
+    it("elementHandle.$$ returns every scoped descendant in document order", async () => {
+      const parent = await page.querySelector("#qparent");
+      expect(parent).not.toBeNull();
+      // Three `.b` inside #qparent; the fourth `.b` sibling (#qoutside)
+      // must be excluded — proves the query is scoped to the handle.
+      const els = await parent!.$$(".b");
+      expect(els.length).toBe(3);
+      const texts: string[] = [];
+      for (const e of els) {
+        texts.push(await e.textContent());
+        await e.dispose();
+      }
+      expect(texts).toEqual(["one", "two", "three"]);
+
+      // Empty match is an empty array, not an error.
+      const none = await parent!.$$(".none");
+      expect(none.length).toBe(0);
+      await parent!.dispose();
+    });
+
     it("dispose() latches isDisposed to true", async () => {
       const handle = await page.querySelector("button#primary");
       expect(handle).not.toBeNull();
@@ -133,7 +185,10 @@ for (const backend of BACKENDS) {
     });
 
     it("JSHandle.asElement returns null for non-DOM remotes", async () => {
-      const jh = await page.evaluateHandle("() => ({ not: 'a dom node' })", null);
+      const jh = await page.evaluateHandle(
+        "() => ({ not: 'a dom node' })",
+        null,
+      );
       const promoted = await jh.asElement();
       expect(promoted).toBeNull();
       await jh.dispose();
@@ -152,14 +207,17 @@ for (const backend of BACKENDS) {
     });
 
     it("page.evaluate runs fn with object arg", async () => {
-      const result = await page.evaluate((o: { x: number; y: number }) => o.x + o.y, { x: 3, y: 4 });
+      const result = await page.evaluate(
+        (o: { x: number; y: number }) => o.x + o.y,
+        { x: 3, y: 4 },
+      );
       expect(result).toBe(7);
     });
 
     it("page.evaluate runs fn with array arg (roundtrip via isomorphic wire)", async () => {
       const result = await page.evaluate(
         (a: number[]) => a.reduce((s, n) => s + n, 0),
-        [1, 2, 3, 4]
+        [1, 2, 3, 4],
       );
       expect(result).toBe(10);
     });
@@ -167,7 +225,9 @@ for (const backend of BACKENDS) {
     it("page.evaluate rehydrates rich types (Date) to native JS", async () => {
       // Mirrors Playwright's `parseResult` — Date arrives as a real
       // `Date` instance, not the wire `{d: iso}` shape.
-      const d = (await page.evaluate(() => new Date("2024-06-01T00:00:00.000Z"))) as Date;
+      const d = (await page.evaluate(
+        () => new Date("2024-06-01T00:00:00.000Z"),
+      )) as Date;
       expect(d instanceof Date).toBe(true);
       expect(d.toISOString()).toBe("2024-06-01T00:00:00.000Z");
     });
@@ -206,7 +266,7 @@ for (const backend of BACKENDS) {
 
     it("ElementHandle reads: innerHTML / innerText / textContent / getAttribute", async () => {
       await page.goto(
-        `data:text/html,<a id="link" href="/x" data-k="v">hello <b>world</b></a>`
+        `data:text/html,<a id="link" href="/x" data-k="v">hello <b>world</b></a>`,
       );
       const eh = await page.querySelector("a#link");
       expect(eh).not.toBeNull();
@@ -220,9 +280,7 @@ for (const backend of BACKENDS) {
     });
 
     it("ElementHandle inputValue for <input>", async () => {
-      await page.goto(
-        `data:text/html,<input id="i" value="hello" />`
-      );
+      await page.goto(`data:text/html,<input id="i" value="hello" />`);
       const eh = await page.querySelector("#i");
       expect(eh).not.toBeNull();
       expect(await eh!.inputValue()).toBe("hello");
@@ -231,7 +289,7 @@ for (const backend of BACKENDS) {
 
     it("ElementHandle state predicates (visible/hidden/disabled/enabled)", async () => {
       await page.goto(
-        `data:text/html,<button id="v">visible</button><button id="d" disabled>disabled</button><button id="h" style="display:none">hidden</button>`
+        `data:text/html,<button id="v">visible</button><button id="d" disabled>disabled</button><button id="h" style="display:none">hidden</button>`,
       );
       const v = await page.querySelector("#v");
       const d = await page.querySelector("#d");
@@ -258,7 +316,7 @@ for (const backend of BACKENDS) {
 
     it("ElementHandle isChecked on input and aria-checked", async () => {
       await page.goto(
-        `data:text/html,<input type="checkbox" id="c1" checked><input type="checkbox" id="c2"><div id="c3" role="checkbox" aria-checked="true"></div>`
+        `data:text/html,<input type="checkbox" id="c1" checked><input type="checkbox" id="c2"><div id="c3" role="checkbox" aria-checked="true"></div>`,
       );
       const c1 = await page.querySelector("#c1");
       const c2 = await page.querySelector("#c2");
@@ -273,7 +331,7 @@ for (const backend of BACKENDS) {
 
     it("ElementHandle isEditable on input vs disabled vs readonly vs contenteditable", async () => {
       await page.goto(
-        `data:text/html,<input id="i" /><input id="d" disabled /><input id="r" readonly /><div id="e" contenteditable="true"></div>`
+        `data:text/html,<input id="i" /><input id="d" disabled /><input id="r" readonly /><div id="e" contenteditable="true"></div>`,
       );
       expect(await (await page.querySelector("#i"))!.isEditable()).toBe(true);
       expect(await (await page.querySelector("#d"))!.isEditable()).toBe(false);
@@ -283,7 +341,7 @@ for (const backend of BACKENDS) {
 
     it("ElementHandle boundingBox returns a rect or null", async () => {
       await page.goto(
-        `data:text/html,<button id="b" style="position:absolute;left:10px;top:20px;width:50px;height:30px;">b</button>`
+        `data:text/html,<button id="b" style="position:absolute;left:10px;top:20px;width:50px;height:30px;">b</button>`,
       );
       const b = await page.querySelector("#b");
       expect(b).not.toBeNull();
@@ -296,7 +354,7 @@ for (const backend of BACKENDS) {
 
     it("ElementHandle.click fires native click handler", async () => {
       await page.goto(
-        `data:text/html,<button id="b" onclick="document.title='clicked'">b</button>`
+        `data:text/html,<button id="b" onclick="document.title='clicked'">b</button>`,
       );
       const b = await page.querySelector("#b");
       expect(b).not.toBeNull();
@@ -360,7 +418,7 @@ for (const backend of BACKENDS) {
       expect(i).not.toBeNull();
       await i!.focus();
       const active = await page.evaluate(
-        "document.activeElement && document.activeElement.id"
+        "document.activeElement && document.activeElement.id",
       );
       expect(active).toBe("i");
       await i!.dispose();
@@ -403,17 +461,17 @@ for (const backend of BACKENDS) {
         const fresh = await browser.newPageWithUrl(testUrl);
         try {
           const sizeBefore = Number(
-            (await fresh.evaluate("window.__wr ? window.__wr.size : 0")) ?? 0
+            (await fresh.evaluate("window.__wr ? window.__wr.size : 0")) ?? 0,
           );
           const handle = await fresh.querySelector("button#primary");
           expect(handle).not.toBeNull();
           const sizeDuring = Number(
-            (await fresh.evaluate("window.__wr ? window.__wr.size : 0")) ?? 0
+            (await fresh.evaluate("window.__wr ? window.__wr.size : 0")) ?? 0,
           );
           expect(sizeDuring).toBe(sizeBefore + 1);
           await handle!.dispose();
           const sizeAfter = Number(
-            (await fresh.evaluate("window.__wr ? window.__wr.size : 0")) ?? 0
+            (await fresh.evaluate("window.__wr ? window.__wr.size : 0")) ?? 0,
           );
           expect(sizeAfter).toBe(sizeBefore);
         } finally {
