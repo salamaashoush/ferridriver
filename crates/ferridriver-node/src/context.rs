@@ -142,13 +142,17 @@ impl BrowserContext {
   /// `browserContext.addInitScript(script, arg)` — see
   /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:356`.
   /// See [`crate::page::Page::add_init_script`] for argument semantics.
-  #[napi(ts_args_type = "script: Function | string | { path?: string, content?: string }, arg?: any")]
+  #[napi(
+    ts_args_type = "script: Function | string | { path?: string, content?: string }, arg?: any",
+    ts_return_type = "Promise<Disposable>"
+  )]
   pub async fn add_init_script(
     &self,
     script: crate::types::NapiInitScript,
     arg: crate::types::NapiInitScriptArg,
-  ) -> Result<Vec<String>> {
-    self.inner.add_init_script(script.into(), arg.0).await.into_napi()
+  ) -> Result<crate::disposable::Disposable> {
+    let disposable = self.inner.add_init_script(script.into(), arg.0).await.into_napi()?;
+    Ok(crate::disposable::Disposable::wrap(disposable))
   }
 
   // ── Video recording ──

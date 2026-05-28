@@ -666,8 +666,10 @@ impl ContextRef {
   /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:356`.
   /// See [`crate::page::Page::add_init_script`] for argument semantics.
   ///
-  /// Returns identifiers for each existing page — the same injection also
-  /// lands on pages created later in the context.
+  /// Returns a [`crate::disposable::Disposable`] whose `dispose()` removes the
+  /// injected script from every page it was added to. Mirrors Playwright
+  /// `browserContext.addInitScript(...)` which returns a `DisposableObject`
+  /// (`client/browserContext.ts:361`).
   ///
   /// # Errors
   ///
@@ -677,15 +679,22 @@ impl ContextRef {
     &self,
     script: crate::options::InitScriptSource,
     arg: Option<serde_json::Value>,
-  ) -> Result<Vec<String>> {
+  ) -> Result<crate::disposable::Disposable> {
     let source = crate::options::evaluation_script(script, arg.as_ref())?;
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
-    let mut ids = Vec::new();
+    let mut undo = Vec::with_capacity(ctx.pages.len());
     for page in &ctx.pages {
-      ids.push(page.add_init_script(&source).await?);
+      let id = page.add_init_script(&source).await?;
+      undo.push((page.clone(), id));
     }
-    Ok(ids)
+    drop(state);
+    Ok(crate::disposable::Disposable::new(move || async move {
+      for (page, id) in undo {
+        page.remove_init_script(&id).await?;
+      }
+      Ok(())
+    }))
   }
 
   /// Playwright: `browserContext.setGeolocation(geo)` — mutates the
@@ -727,6 +736,11 @@ impl ContextRef {
 
   /// Register a route handler for all pages in this context.
   ///
+  /// Returns a [`crate::disposable::Disposable`] whose `dispose()` removes the
+  /// handler from every page (equivalent to [`BrowserContext::unroute`]).
+  /// Mirrors Playwright `browserContext.route(...)` which returns a
+  /// `DisposableStub` (`client/browserContext.ts:377`).
+  ///
   /// # Errors
   ///
   /// Returns an error if the context does not exist or route registration fails.
@@ -734,13 +748,21 @@ impl ContextRef {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
-  ) -> Result<()> {
+  ) -> Result<crate::disposable::Disposable> {
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
+    let mut undo = Vec::with_capacity(ctx.pages.len());
     for page in &ctx.pages {
       page.route(matcher.clone(), handler.clone()).await?;
+      undo.push(page.clone());
     }
-    Ok(())
+    drop(state);
+    Ok(crate::disposable::Disposable::new(move || async move {
+      for page in undo {
+        page.unroute(&matcher).await?;
+      }
+      Ok(())
+    }))
   }
 
   /// Remove route handlers matching the given matcher from all pages.

@@ -319,6 +319,51 @@ fn test_network_request_failure_via_refused_port(c: &mut McpClient) {
   });
 }
 
+// ── 2b. Route Disposable (page.route returns a DisposableStub) ───────────
+
+/// Playwright parity: `page.route(url, handler)` returns a `DisposableStub`
+/// (`client/page.ts:535`) whose `dispose()` reverses the registration. This
+/// test fulfills `/api/users` with a sentinel body, asserts the mock fires,
+/// then calls `dispose()` and asserts the request falls through to the real
+/// stub server (returns the live `alice`/`bob` payload). A second `dispose()`
+/// must be an idempotent no-op. WebKit's `page.evaluate` runs in the utility
+/// context where the user-script fetch wrap is invisible (same world-isolation
+/// limit documented in `test_network_request_failure`), so the route never
+/// intercepts there — skip the assertion path on WebKit only.
+pub fn test_route_disposable(c: &mut McpClient) {
+  if c.backend == "webkit" {
+    return;
+  }
+  with_stub_server(|base| {
+    c.nav_url(&format!("{base}/landed"));
+    let script = r#"
+      const disposable = await page.route('**/api/users', (route) => {
+        route.fulfill({ status: 200, contentType: 'application/json', body: '{"mocked":true}' });
+      });
+      const mocked = await page.evaluate("fetch('/api/users').then(r => r.text())");
+      await disposable.dispose();
+      const afterFirst = await page.evaluate("fetch('/api/users').then(r => r.text())");
+      // Second dispose() must be a no-op (DisposableStub idempotency).
+      await disposable.dispose();
+      const afterSecond = await page.evaluate("fetch('/api/users').then(r => r.text())");
+      return { mocked, afterFirst, afterSecond };
+      "#;
+    let v = c.script_value(script);
+    assert!(
+      v["mocked"].as_str().is_some_and(|s| s.contains("\"mocked\":true")),
+      "active route should fulfill with the mock body: {v}",
+    );
+    assert!(
+      v["afterFirst"].as_str().is_some_and(|s| s.contains("alice")),
+      "after dispose() the request must fall through to the real server: {v}",
+    );
+    assert!(
+      v["afterSecond"].as_str().is_some_and(|s| s.contains("alice")),
+      "repeat dispose() must stay idempotent (route still gone): {v}",
+    );
+  });
+}
+
 // ── 3. Response body (response.json) ─────────────────────────────────────
 
 pub fn test_network_response_body(c: &mut McpClient) {

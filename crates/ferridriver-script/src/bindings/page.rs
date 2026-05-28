@@ -436,9 +436,12 @@ impl PageJs {
     ctx: rquickjs::Ctx<'js>,
     script: rquickjs::Value<'js>,
     arg: Opt<rquickjs::Value<'js>>,
-  ) -> rquickjs::Result<String> {
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
     let (init, arg_json) = init_script_from_js(&ctx, script, arg.0)?;
-    self.inner.add_init_script(init, arg_json).await.into_js()
+    let disposable = self.inner.add_init_script(init, arg_json).await.into_js()?;
+    let instance =
+      rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
   /// Remove a previously-registered init script by identifier.
@@ -1105,7 +1108,7 @@ impl PageJs {
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
     handler: rquickjs::Function<'js>,
-  ) -> rquickjs::Result<()> {
+  ) -> rquickjs::Result<rquickjs::Value<'js>> {
     let async_ctx = self.async_ctx.clone().ok_or_else(|| {
       rquickjs::Error::new_from_js_message(
         "page.route",
@@ -1179,7 +1182,10 @@ impl PageJs {
       });
     });
 
-    self.inner.route(matcher, rust_handler).await.into_js()
+    let disposable = self.inner.route(matcher, rust_handler).await.into_js()?;
+    let instance =
+      rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
   /// `page.unroute(string | RegExp | ((url: URL) => boolean))`. A

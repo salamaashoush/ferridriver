@@ -1217,21 +1217,34 @@ for (const backend of BACKENDS) {
 
     // ── Page.addInitScript / removeInitScript ────────────────────────
 
-    it("addInitScript injects JS before page scripts", async () => {
-      const id = await page.addInitScript(
+    it("addInitScript injects JS before page scripts, dispose() reverses it", async () => {
+      // Playwright parity: `page.addInitScript` returns a Disposable
+      // (client/page.ts:532). `dispose()` removes the script and is
+      // idempotent (DisposableStub semantics).
+      const disposable = await page.addInitScript(
         "window.__test_init_napi = 'injected'"
       );
-      expect(id.length).toBeGreaterThan(0);
       await page.goto(testUrl);
       const val = await page.evaluate("window.__test_init_napi || 'missing'");
       expect(val).toBe("injected");
-      await page.removeInitScript(id);
+
+      // dispose() must remove the script so the next document never sees it.
+      await disposable.dispose();
+      await page.goto(testUrl);
+      const after = await page.evaluate("window.__test_init_napi || 'missing'");
+      expect(after).toBe("missing");
+
+      // Repeat dispose() is a no-op (idempotent).
+      await disposable.dispose();
+      await page.goto(testUrl);
+      const after2 = await page.evaluate("window.__test_init_napi || 'missing'");
+      expect(after2).toBe("missing");
     });
 
     it("addInitScript accepts a function + JSON-serialised arg", async () => {
       // Mirrors Playwright docs example `page.addInitScript(mock => {...}, mock)`
       // from /tmp/playwright/packages/playwright-core/types/types.d.ts:303.
-      const id = await page.addInitScript(
+      const disposable = await page.addInitScript(
         (cfg: { answer: number; label: string }) => {
           (window as any).__fd_init_arg = cfg;
         },
@@ -1242,38 +1255,38 @@ for (const backend of BACKENDS) {
       const label = await page.evaluate("window.__fd_init_arg.label");
       expect(Number(answer)).toBe(42);
       expect(label).toBe("hello");
-      await page.removeInitScript(id);
+      await disposable.dispose();
     });
 
     it("addInitScript function without arg renders as (fn)(undefined)", async () => {
-      const id = await page.addInitScript((x: unknown) => {
+      const disposable = await page.addInitScript((x: unknown) => {
         (window as any).__fd_init_noarg = typeof x;
       });
       await page.goto(testUrl);
       const ty = await page.evaluate("window.__fd_init_noarg");
       expect(ty).toBe("undefined");
-      await page.removeInitScript(id);
+      await disposable.dispose();
     });
 
     it("addInitScript function with explicit null arg receives null", async () => {
       // Playwright: `Object.is(null, undefined)` is false → JSON.stringify(null) = "null".
-      const id = await page.addInitScript((x: unknown) => {
+      const disposable = await page.addInitScript((x: unknown) => {
         (window as any).__fd_init_null = x === null ? "is-null" : typeof x;
       }, null);
       await page.goto(testUrl);
       const val = await page.evaluate("window.__fd_init_null");
       expect(val).toBe("is-null");
-      await page.removeInitScript(id);
+      await disposable.dispose();
     });
 
     it("addInitScript with { content } bag treats string as-is", async () => {
-      const id = await page.addInitScript({
+      const disposable = await page.addInitScript({
         content: "window.__fd_init_content = 'from-content';",
       });
       await page.goto(testUrl);
       const val = await page.evaluate("window.__fd_init_content");
       expect(val).toBe("from-content");
-      await page.removeInitScript(id);
+      await disposable.dispose();
     });
 
     it("addInitScript with { path } reads the file from disk", async () => {
@@ -1286,11 +1299,11 @@ for (const backend of BACKENDS) {
       );
       await fs.writeFile(tmpFile, "window.__fd_init_file = 'from-file';");
       try {
-        const id = await page.addInitScript({ path: tmpFile });
+        const disposable = await page.addInitScript({ path: tmpFile });
         await page.goto(testUrl);
         const val = await page.evaluate("window.__fd_init_file");
         expect(val).toBe("from-file");
-        await page.removeInitScript(id);
+        await disposable.dispose();
       } finally {
         await fs.unlink(tmpFile);
       }

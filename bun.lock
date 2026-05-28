@@ -7,17 +7,16 @@
     },
     "crates/ferridriver-node": {
       "name": "@ferridriver/node",
-      "version": "0.1.0",
+      "version": "0.3.0",
       "devDependencies": {
         "@napi-rs/cli": "^3.2.0",
         "@types/ws": "^8.5.10",
         "ws": "^8.18.0",
       },
       "optionalDependencies": {
-        "@ferridriver/node-darwin-arm64": "0.1.0",
-        "@ferridriver/node-linux-arm64-gnu": "0.1.0",
-        "@ferridriver/node-linux-x64-gnu": "0.1.0",
-        "@ferridriver/node-win32-x64-msvc": "0.1.0",
+        "@ferridriver/node-darwin-arm64": "0.3.0",
+        "@ferridriver/node-linux-arm64-gnu": "0.3.0",
+        "@ferridriver/node-linux-x64-gnu": "0.3.0",
       },
     },
     "site": {
@@ -66,14 +65,6 @@
     "@emnapi/wasi-threads": ["@emnapi/wasi-threads@1.2.1", "", { "dependencies": { "tslib": "^2.4.0" } }, "sha512-uTII7OYF+/Mes/MrcIOYp5yOtSMLBWSIoLPpcgwipoiKbli6k322tcoFsxoIIxPDqW01SQGAgko4EzZi2BNv2w=="],
 
     "@ferridriver/node": ["@ferridriver/node@workspace:crates/ferridriver-node"],
-
-    "@ferridriver/node-darwin-arm64": ["@ferridriver/node-darwin-arm64@0.1.0", "", { "os": "darwin", "cpu": "arm64" }, "sha512-zlWQdxpOJBCeEf8nzgfDF6z6ATxfkIFmQDsudEoAsth+a3XttZViOIvMkZlSlgDY3t1mymDfPmO/8FLvyV2CTg=="],
-
-    "@ferridriver/node-linux-arm64-gnu": ["@ferridriver/node-linux-arm64-gnu@0.1.0", "", { "os": "linux", "cpu": "arm64" }, "sha512-SywafvunqsdCUHICoLWTt5DXEeoQW9iR07emJvWqdEfgRpOPrWtszcrDN3qplUZwCL6vYdfWHhzbtx6Vm4azMg=="],
-
-    "@ferridriver/node-linux-x64-gnu": ["@ferridriver/node-linux-x64-gnu@0.1.0", "", { "os": "linux", "cpu": "x64" }, "sha512-EVWf35U/9S3Fhyu9n8KKsNgTkVlFBQYcgKwC+L+joj+963/LLSlmmRWXNdcU0nJj4FmLVw3EUDXBy5mmF/8DBg=="],
-
-    "@ferridriver/node-win32-x64-msvc": ["@ferridriver/node-win32-x64-msvc@0.1.0", "", { "os": "win32", "cpu": "x64" }, "sha512-h+MfxVImZYt6R3roF88d2nGcfkeLn5koiKegVOqr3OwVkr6qIk+MqoVTqb5PGmzkrrxa2NJjvNFq+QSJlC/k9A=="],
 
     "@inquirer/ansi": ["@inquirer/ansi@2.0.4", "", {}, "sha512-DpcZrQObd7S0R/U3bFdkcT5ebRwbTTC4D3tCc1vsJizmgPLxNJBo+AAFmrZwe8zk30P2QzgzGWZ3Q9uJwWuhIg=="],
 

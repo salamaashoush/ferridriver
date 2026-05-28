@@ -518,12 +518,13 @@ async fn add_init_script_tests() {
     .expect("launch browser");
   let page = browser.page().await.expect("get page");
 
-  // Add an init script that sets a global variable
-  let id = page
+  // Add an init script that sets a global variable. `add_init_script`
+  // returns a `Disposable` whose `dispose()` reverses the injection
+  // (Playwright parity: `page.addInitScript` returns a Disposable).
+  let disposable = page
     .add_init_script("window.__test_init = 'injected'".into(), None)
     .await
     .unwrap();
-  assert!(!id.is_empty(), "should return identifier");
 
   // Navigate -- the init script should run before page JS
   page
@@ -565,8 +566,8 @@ async fn add_init_script_tests() {
   let title = page.title().await.unwrap();
   assert_eq!(title, "injected:second", "multiple init scripts should all run");
 
-  // Remove the first init script
-  page.remove_init_script(&id).await.unwrap();
+  // Remove the first init script via the Disposable handle.
+  disposable.dispose().await.unwrap();
   page
     .goto(
       &data_url("<script>document.title = (window.__test_init || 'gone') + ':' + (window.__test_init2 || '')</script>"),
@@ -575,7 +576,20 @@ async fn add_init_script_tests() {
     .await
     .unwrap();
   let title = page.title().await.unwrap();
-  assert_eq!(title, "gone:second", "removed init script should no longer run");
+  assert_eq!(title, "gone:second", "disposed init script should no longer run");
+
+  // A second dispose() is a no-op (idempotent — Playwright DisposableStub
+  // semantics) and the script stays gone.
+  disposable.dispose().await.unwrap();
+  page
+    .goto(
+      &data_url("<script>document.title = (window.__test_init || 'gone') + ':' + (window.__test_init2 || '')</script>"),
+      None,
+    )
+    .await
+    .unwrap();
+  let title = page.title().await.unwrap();
+  assert_eq!(title, "gone:second", "repeat dispose() must stay idempotent");
 
   browser.close(None).await.unwrap();
 }
@@ -1113,8 +1127,10 @@ async fn network_interception_tests() {
     "body should contain mocked text: {body}"
   );
 
-  // 2. Fulfill with JSON -- mock an API on the now-mocked origin
-  page
+  // 2. Fulfill with JSON -- mock an API on the now-mocked origin.
+  // `route` returns a `Disposable` whose `dispose()` reverses the route
+  // (Playwright parity: `page.route` returns a DisposableStub).
+  let api_route = page
     .route(
       ferridriver::UrlMatcher::glob("**/api/data").unwrap(),
       Arc::new(|route| {
@@ -1138,6 +1154,21 @@ async fn network_interception_tests() {
   assert!(
     result.contains("\"mocked\":true"),
     "API should return mocked JSON: {result}"
+  );
+
+  // Dispose the route handle: the mock must stop firing and the request
+  // now falls through to the network (404 against the mocked origin).
+  api_route.dispose().await.unwrap();
+  let after = eval_str(
+    &page,
+    "(async () => { try { const r = await fetch('/api/data'); return 'status:' + r.status; } \
+     catch (e) { return 'error'; } })()",
+  )
+  .await
+  .unwrap();
+  assert!(
+    !after.contains("status:200"),
+    "disposed route must no longer fulfill: {after}"
   );
 
   // 3. Abort -- block specific requests
