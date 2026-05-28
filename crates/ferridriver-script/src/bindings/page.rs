@@ -31,7 +31,7 @@ struct JsWaitOptions {
   timeout: Option<u64>,
 }
 
-fn parse_wait_options<'js>(
+pub(crate) fn parse_wait_options<'js>(
   ctx: &rquickjs::Ctx<'js>,
   value: Opt<rquickjs::Value<'js>>,
 ) -> rquickjs::Result<WaitOptions> {

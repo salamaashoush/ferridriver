@@ -129,6 +129,23 @@ impl FrameJs {
     self.inner.wait_for_load_state().await.into_js()
   }
 
+  /// Playwright: `frame.waitForSelector(selector, options?)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:217`).
+  /// Options: `{ state?: 'visible'|'hidden'|'attached'|'detached', timeout?: ms }`.
+  /// Resolves to the matched element handle for `state: 'attached'` /
+  /// `'visible'` (default), or `null` for `state: 'hidden'` / `'detached'`.
+  #[qjs(rename = "waitForSelector")]
+  pub async fn wait_for_selector<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    selector: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<Option<crate::bindings::element_handle::ElementHandleJs>> {
+    let opts = crate::bindings::page::parse_wait_options(&ctx, options)?;
+    let handle = self.inner.wait_for_selector(&selector, opts).await.into_js()?;
+    Ok(handle.map(crate::bindings::element_handle::ElementHandleJs::new))
+  }
+
   // ── Locator (frame-scoped) ─────────────────────────────────────────
 
   /// Create a locator scoped to this frame.

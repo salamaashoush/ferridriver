@@ -94,6 +94,43 @@ pub fn test_script_wait_for_selector(c: &mut McpClient) {
   assert_eq!(v, json!("ok"));
 }
 
+// Fix #14: Frame.waitForSelector returns the matched ElementHandle for
+// `state: 'attached' | 'visible'` (default) and null for
+// `hidden` / `detached`, mirroring
+// /tmp/playwright/packages/playwright-core/src/client/frame.ts:217.
+pub fn test_script_frame_wait_for_selector_handle(c: &mut McpClient) {
+  c.nav("<div id='t'>payload-text</div><div id='hid' style='display:none'>x</div>");
+  let v = c.script_value(
+    "const main = page.mainFrame(); \
+       const h = await main.waitForSelector('#t'); \
+       const hidden = await main.waitForSelector('#hid', { state: 'hidden' }); \
+       return { \
+         handleText: h ? await h.textContent() : null, \
+         handleIsNull: h == null, \
+         hiddenIsNull: hidden == null, \
+       };",
+  );
+  // Observable effect: the returned object is the resolved element, so
+  // reading its text yields the element content — only possible when the
+  // handle is the real match rather than the old `()` return.
+  assert_eq!(v["handleText"], json!("payload-text"), "returned handle text: {v}");
+  assert_eq!(v["handleIsNull"], json!(false), "default state returns a handle: {v}");
+  assert_eq!(v["hiddenIsNull"], json!(true), "state:'hidden' returns null: {v}");
+}
+
+// Fix #14: waitForSelector resolves inside a child frame and returns that
+// frame's element (not the parent's).
+pub fn test_script_frame_wait_for_selector_in_child(c: &mut McpClient) {
+  c.nav("<iframe name='child' srcdoc=\"<div id='inner'>inner-payload</div>\"></iframe>");
+  let v = c.script_value(
+    "await page.waitForSelector('iframe[name=\"child\"]'); \
+       const frame = page.frame('child'); \
+       const h = await frame.waitForSelector('#inner'); \
+       return h ? await h.textContent() : null;",
+  );
+  assert_eq!(v, json!("inner-payload"), "child-frame handle text: {v}");
+}
+
 pub fn test_script_wait_for_text(c: &mut McpClient) {
   c.nav("<body></body><script>setTimeout(function(){document.body.innerHTML='<p>findme</p>'}, 100)</script>");
   let v = c.script_value(
@@ -275,6 +312,14 @@ pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_locators::test_script_wait_for_selector",
     test_script_wait_for_selector,
+  );
+  set.run(
+    "backends_support::script_locators::test_script_frame_wait_for_selector_handle",
+    test_script_frame_wait_for_selector_handle,
+  );
+  set.run(
+    "backends_support::script_locators::test_script_frame_wait_for_selector_in_child",
+    test_script_frame_wait_for_selector_in_child,
   );
   set.run(
     "backends_support::script_locators::test_script_wait_for_text",
