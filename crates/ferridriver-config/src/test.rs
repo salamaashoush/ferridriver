@@ -128,6 +128,12 @@ pub struct TestConfig {
   pub browser: BrowserConfig,
   pub base_url: Option<String>,
   pub projects: Vec<ProjectConfig>,
+  /// Maximum number of projects allowed to run concurrently. A project only
+  /// starts once all its dependencies have completed successfully, so this
+  /// caps the breadth of the ready-set scheduler. `0` means "unbounded" —
+  /// every dependency-ready project runs at once.
+  #[serde(default)]
+  pub max_parallel_projects: u32,
   pub global_setup: Vec<String>,
   pub global_teardown: Vec<String>,
   pub repeat_each: u32,
@@ -615,6 +621,7 @@ impl Default for TestConfig {
       browser: BrowserConfig::default(),
       base_url: None,
       projects: Vec::new(),
+      max_parallel_projects: 0,
       global_setup: Vec::new(),
       global_teardown: Vec::new(),
       repeat_each: 1,

@@ -20,6 +20,18 @@ use ferridriver::backend::BackendKind;
 use ferridriver::options::{BrowserKind, LaunchPlan};
 use ferridriver::state::{BrowserState, ConnectMode};
 
+/// Aggregate outcome of one `execute()` pass. The multi-project orchestrator
+/// sums these across concurrently-run projects to emit a single `RunFinished`.
+#[derive(Clone, Copy, Default)]
+pub struct ExecuteSummary {
+  pub exit_code: i32,
+  pub total: usize,
+  pub passed: usize,
+  pub failed: usize,
+  pub skipped: usize,
+  pub flaky: usize,
+}
+
 /// Top-level test runner.
 pub struct TestRunner {
   config: Arc<TestConfig>,
@@ -28,6 +40,12 @@ pub struct TestRunner {
   overrides: CliOverrides,
   /// Shared browser for watch mode (persists across runs).
   shared_browser: Option<Arc<Browser>>,
+  /// When set, `execute()` does not emit `RunStarted` / `RunFinished`. The
+  /// multi-project orchestrator turns this on for every per-project run so a
+  /// single aggregate run boundary is emitted once around all projects,
+  /// rather than one pair per project (which would reset terminal counters
+  /// and finalize reporters mid-run).
+  suppress_run_boundary: bool,
 }
 
 impl TestRunner {
@@ -52,6 +70,7 @@ impl TestRunner {
       reporters,
       overrides,
       shared_browser: None,
+      suppress_run_boundary: false,
     }
   }
 
@@ -200,157 +219,287 @@ impl TestRunner {
       "running projects in dependency order",
     );
 
-    let mut exit_code = 0i32;
-    let mut failed_projects: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
-    // Track completed projects for teardown scheduling.
-    let mut completed_projects: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
-    // Collect teardown projects to run after all dependents finish.
-    let mut pending_teardowns: Vec<usize> = Vec::new();
-
-    for &idx in &sorted {
-      let project = &projects[idx];
-
-      // Skip if any dependency failed.
-      let dep_failed = project.dependencies.iter().any(|dep| failed_projects.contains(dep));
-      if dep_failed {
-        tracing::warn!(
-          target: "ferridriver::runner",
-          project = project.name,
-          "skipping — dependency failed",
-        );
-        failed_projects.insert(project.name.clone());
-        continue;
+    // Append CLI-supplied teardown so the scheduler tracks it like any other
+    // project. It runs after every other selected project reaches a terminal
+    // state, regardless of pass/fail — modelled below as a teardown with all
+    // remaining projects as prerequisites.
+    let mut scheduled: Vec<usize> = sorted.clone();
+    if let Some(td_idx) = cli_teardown_idx {
+      if !scheduled.contains(&td_idx) {
+        scheduled.push(td_idx);
       }
+    }
 
-      // Check if this is a teardown-only project (referenced by another project's `teardown` field).
-      // Teardown projects are deferred until after their parent and all dependents complete.
-      let is_teardown = projects.iter().any(|p| p.teardown.as_deref() == Some(&project.name));
-      if is_teardown && !completed_projects.contains(&project.name) {
-        // Haven't been explicitly scheduled yet — defer.
-        pending_teardowns.push(idx);
-        continue;
-      }
+    // Pre-compute each scheduled project's prerequisites and whether it is a
+    // teardown. The ready-set scheduler spawns a project once all its
+    // prerequisites have reached a terminal state.
+    //
+    // - A normal project requires every `dependencies` entry to have PASSED.
+    //   If any dependency failed/was skipped, the project is itself skipped.
+    // - A teardown project (referenced by another project's `teardown` field)
+    //   requires only that its declaring parent reached a terminal state — it
+    //   runs even if the parent failed (Playwright teardown semantics).
+    // - The CLI-supplied teardown requires every other selected project to be
+    //   terminal.
+    let teardown_parent: FxHashMap<usize, usize> = projects
+      .iter()
+      .enumerate()
+      .filter_map(|(parent_idx, p)| {
+        p.teardown
+          .as_deref()
+          .and_then(|name| projects.iter().position(|q| q.name == name))
+          .map(|td_idx| (td_idx, parent_idx))
+      })
+      .collect();
 
-      let project_exit = Box::pin(self.run_single_project(project, &plan)).await;
-
-      completed_projects.insert(project.name.clone());
-
-      if project_exit != 0 {
-        exit_code = 1;
-        failed_projects.insert(project.name.clone());
-      }
-
-      // Run any teardown projects whose parent just completed.
-      if let Some(ref teardown_name) = project.teardown {
-        if let Some(td_idx) = projects.iter().position(|p| p.name == *teardown_name) {
-          let td_project = &projects[td_idx];
-          tracing::info!(
-            target: "ferridriver::runner",
-            project = td_project.name,
-            parent = project.name,
-            "running teardown project",
-          );
-          let td_exit = Box::pin(self.run_single_project(td_project, &plan)).await;
-          completed_projects.insert(td_project.name.clone());
-          // Remove from pending if it was deferred.
-          pending_teardowns.retain(|&i| i != td_idx);
-          if td_exit != 0 {
-            exit_code = 1;
+    // Prerequisites by index: (prereq_idx, must_pass).
+    let prereqs: FxHashMap<usize, Vec<(usize, bool)>> = scheduled
+      .iter()
+      .map(|&idx| {
+        let mut reqs: Vec<(usize, bool)> = Vec::new();
+        // Normal dependencies must pass.
+        for dep_name in &projects[idx].dependencies {
+          if let Some(dep_idx) = projects.iter().position(|p| &p.name == dep_name) {
+            if scheduled.contains(&dep_idx) {
+              reqs.push((dep_idx, true));
+            }
           }
         }
-      }
-    }
-
-    // Run any remaining deferred teardown projects.
-    for td_idx in pending_teardowns {
-      let td_project = &projects[td_idx];
-      if completed_projects.contains(&td_project.name) {
-        continue;
-      }
-      tracing::info!(
-        target: "ferridriver::runner",
-        project = td_project.name,
-        "running deferred teardown project",
-      );
-      let td_exit = Box::pin(self.run_single_project(td_project, &plan)).await;
-      if td_exit != 0 {
-        exit_code = 1;
-      }
-    }
-
-    // Honour `--teardown NAME` — runs once after every selected
-    // project has finished (success or failure), even if no project
-    // declared it as their teardown.
-    if let Some(td_idx) = cli_teardown_idx {
-      let td_project = &projects[td_idx];
-      if !completed_projects.contains(&td_project.name) {
-        tracing::info!(
-          target: "ferridriver::runner",
-          project = td_project.name,
-          "running CLI-supplied teardown project",
-        );
-        let td_exit = Box::pin(self.run_single_project(td_project, &plan)).await;
-        if td_exit != 0 {
-          exit_code = 1;
+        // Teardown parent must merely be terminal.
+        if let Some(&parent_idx) = teardown_parent.get(&idx) {
+          if scheduled.contains(&parent_idx) {
+            reqs.push((parent_idx, false));
+          }
         }
+        // CLI-supplied teardown waits on every other scheduled project.
+        if Some(idx) == cli_teardown_idx {
+          for &other in &scheduled {
+            if other != idx {
+              reqs.push((other, false));
+            }
+          }
+        }
+        (idx, reqs)
+      })
+      .collect();
+
+    // ── Hoist web servers out of per-project execute ──
+    // `merge_project` copies the top-level `web_server` list onto every
+    // project; starting/stopping the same servers per project would bind the
+    // same ports concurrently. Start them once here and clear the per-project
+    // copies so each project's `execute()` skips its web-server lifecycle.
+    let web_server_manager = if self.config.web_server.is_empty() {
+      None
+    } else {
+      match crate::server::WebServerManager::start(&self.config.web_server).await {
+        Ok(mgr) => {
+          if let Some(url) = mgr.first_url() {
+            if self.config.base_url.is_none() {
+              // SAFETY: set once here before any worker threads spawn.
+              #[allow(unsafe_code)]
+              unsafe {
+                std::env::set_var("FERRIDRIVER_BASE_URL", &url)
+              };
+              tracing::info!(target: "ferridriver::runner", "webServer base_url={url}");
+            }
+          }
+          Some(mgr)
+        },
+        Err(e) => {
+          tracing::error!(target: "ferridriver::runner", "webServer start failed: {e}");
+          return 1;
+        },
       }
+    };
+
+    // Build each project's merged config + filtered plan up front so we can
+    // both report an accurate aggregate total and reuse them when spawning.
+    let mut merged: FxHashMap<usize, Arc<TestConfig>> = FxHashMap::default();
+    let mut plans: FxHashMap<usize, TestPlan> = FxHashMap::default();
+    let mut total_tests = 0usize;
+    for &idx in &scheduled {
+      let mut mc = self.config.merge_project(&projects[idx]);
+      mc.web_server = Vec::new();
+      let mut p = plan.clone();
+      filter_plan_for_project(&mut p, &mc, &projects[idx]);
+      total_tests += p.total_tests;
+      merged.insert(idx, Arc::new(mc));
+      plans.insert(idx, p);
     }
 
-    exit_code
-  }
-
-  /// Run a single project with merged config.
-  async fn run_single_project(&mut self, project: &ProjectConfig, base_plan: &TestPlan) -> i32 {
-    let merged_config = self.config.merge_project(project);
-
-    // Clone and filter the plan for this project.
-    let mut plan = base_plan.clone();
-    filter_plan_for_project(&mut plan, &merged_config, project);
-
-    if plan.total_tests == 0 {
-      tracing::debug!(
-        target: "ferridriver::runner",
-        project = project.name,
-        "no tests matched, skipping",
-      );
-      return 0;
-    }
-
-    tracing::info!(
-      target: "ferridriver::runner",
-      project = project.name,
-      tests = plan.total_tests,
-      "running project",
-    );
-
-    // Create a sub-runner with merged config. Reuse our reporters + overrides.
+    // ── Shared reporter driver + single aggregate run boundary ──
     let mut builder = EventBusBuilder::new();
     let driver_handle = if self.reporters.is_empty() {
       None
     } else {
-      let reporter_sub = builder.subscribe();
+      let sub = builder.subscribe();
       let reporters = std::mem::take(&mut self.reporters);
-      let driver = ReporterDriver::new(reporters, reporter_sub);
-      Some(tokio::spawn(driver.run()))
+      Some(tokio::spawn(ReporterDriver::new(reporters, sub).run()))
     };
     let bus = builder.build();
+    let reporting_enabled = bus.has_subscribers();
 
-    // Build a temporary runner with the merged config.
-    let sub_runner = TestRunner {
-      config: Arc::new(merged_config),
-      hooks: self.hooks.clone(),
-      reporters: ReporterSet::default(),
-      overrides: self.overrides.clone(),
-      shared_browser: self.shared_browser.clone(),
+    // `workers` is the global concurrency budget; never launch more workers
+    // than tests across all projects in flight.
+    let num_workers = (self.config.workers as usize).min(total_tests.max(1)).max(1) as u32;
+    if reporting_enabled {
+      bus.emit(ReporterEvent::RunStarted {
+        total_tests,
+        num_workers,
+        metadata: self.config.metadata.clone(),
+      });
+    }
+    let run_start = Instant::now();
+
+    // ── Ready-set scheduler ──
+    // `max_parallel_projects == 0` means unbounded (cap at the number of
+    // scheduled projects). Spawn every dependency-ready project up to the cap,
+    // drive completions via a JoinSet, and re-evaluate readiness on each
+    // completion. Dependency ordering, teardown ordering, and dep-failure
+    // skipping are all preserved by the prerequisite model above.
+    let cap = if self.config.max_parallel_projects == 0 {
+      scheduled.len().max(1)
+    } else {
+      self.config.max_parallel_projects as usize
     };
 
-    let exit_code = sub_runner.execute(plan, bus.clone()).await;
-    bus.close();
+    let mut passed_projects: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
+    let mut terminal: rustc_hash::FxHashSet<usize> = rustc_hash::FxHashSet::default();
+    let mut remaining: Vec<usize> = scheduled.clone();
+    let mut join_set: tokio::task::JoinSet<(usize, Option<ExecuteSummary>)> = tokio::task::JoinSet::new();
+    let mut in_flight = 0usize;
 
+    let mut exit_code = 0i32;
+    let mut agg = ExecuteSummary::default();
+
+    loop {
+      // Launch every ready project up to the parallelism cap. Skips (no tests
+      // or dependency failed) resolve immediately and may unblock others, so
+      // keep scanning until no further progress is possible this round.
+      while in_flight < cap {
+        // Find a not-yet-started project whose prerequisites are all terminal.
+        let next = remaining.iter().copied().find(|&idx| {
+          prereqs
+            .get(&idx)
+            .map(|rs| rs.iter().all(|(dep, _)| terminal.contains(dep)))
+            .unwrap_or(true)
+        });
+        let Some(idx) = next else { break };
+        remaining.retain(|&i| i != idx);
+
+        // Skip a normal project whose passing-required prerequisites did not
+        // pass (dependency failure). Teardowns are never skipped this way.
+        let blocked = prereqs
+          .get(&idx)
+          .map(|rs| {
+            rs.iter()
+              .any(|&(dep, must_pass)| must_pass && !passed_projects.contains(&dep))
+          })
+          .unwrap_or(false);
+        if blocked {
+          tracing::warn!(
+            target: "ferridriver::runner",
+            project = projects[idx].name,
+            "skipping — dependency failed",
+          );
+          terminal.insert(idx);
+          exit_code = 1;
+          continue;
+        }
+
+        let Some(project_plan) = plans.remove(&idx) else {
+          terminal.insert(idx);
+          passed_projects.insert(idx);
+          continue;
+        };
+        if project_plan.total_tests == 0 {
+          tracing::debug!(
+            target: "ferridriver::runner",
+            project = projects[idx].name,
+            "no tests matched, skipping",
+          );
+          terminal.insert(idx);
+          passed_projects.insert(idx);
+          continue;
+        }
+
+        tracing::info!(
+          target: "ferridriver::runner",
+          project = projects[idx].name,
+          tests = project_plan.total_tests,
+          "running project",
+        );
+
+        let sub_runner = TestRunner {
+          config: merged.get(&idx).cloned().unwrap_or_else(|| Arc::clone(&self.config)),
+          hooks: self.hooks.clone(),
+          reporters: ReporterSet::default(),
+          overrides: self.overrides.clone(),
+          shared_browser: self.shared_browser.clone(),
+          suppress_run_boundary: true,
+        };
+        let project_bus = bus.clone();
+        join_set.spawn(async move {
+          let summary = sub_runner.execute_with_summary(project_plan, project_bus).await;
+          (idx, Some(summary))
+        });
+        in_flight += 1;
+      }
+
+      // Nothing running and nothing launchable — done (or a cycle the topo
+      // sort already rejected, so `remaining` is unreachable prereqs).
+      if in_flight == 0 {
+        break;
+      }
+
+      // Await the next completion, then loop to launch newly-ready projects.
+      if let Some(joined) = join_set.join_next().await {
+        in_flight -= 1;
+        match joined {
+          Ok((idx, Some(summary))) => {
+            terminal.insert(idx);
+            if summary.exit_code == 0 {
+              passed_projects.insert(idx);
+            } else {
+              exit_code = 1;
+            }
+            agg.passed += summary.passed;
+            agg.failed += summary.failed;
+            agg.skipped += summary.skipped;
+            agg.flaky += summary.flaky;
+          },
+          Ok((idx, None)) => {
+            terminal.insert(idx);
+            exit_code = 1;
+          },
+          Err(e) => {
+            tracing::error!(target: "ferridriver::runner", "project task panicked: {e}");
+            exit_code = 1;
+          },
+        }
+      }
+    }
+
+    // ── Single aggregate RunFinished + reporter teardown ──
+    if reporting_enabled {
+      bus.emit(ReporterEvent::RunFinished {
+        total: total_tests,
+        passed: agg.passed,
+        failed: agg.failed,
+        skipped: agg.skipped,
+        flaky: agg.flaky,
+        duration: run_start.elapsed(),
+      });
+    }
+    bus.close();
     if let Some(driver_handle) = driver_handle {
       if let Ok(reporters) = driver_handle.await {
         self.reporters = reporters;
       }
+    }
+
+    if let Some(mgr) = web_server_manager {
+      mgr.stop().await;
     }
 
     exit_code
@@ -363,8 +512,15 @@ impl TestRunner {
   ///
   /// The bus is consumed by value and dropped when execution completes,
   /// closing all subscriber channels and signaling consumers to finalize.
+  pub async fn execute(&self, plan: TestPlan, event_bus: EventBus) -> i32 {
+    self.execute_with_summary(plan, event_bus).await.exit_code
+  }
+
+  /// Core execution engine, returning the full per-run tally. `execute()` is
+  /// the thin `i32` wrapper; the multi-project orchestrator uses the summary
+  /// to aggregate counts across concurrently-run projects.
   #[tracing::instrument(skip_all, fields(workers = self.config.workers, tests = plan.total_tests))]
-  pub async fn execute(&self, mut plan: TestPlan, event_bus: EventBus) -> i32 {
+  pub async fn execute_with_summary(&self, mut plan: TestPlan, event_bus: EventBus) -> ExecuteSummary {
     // ── Filtering ──
     if let Some(shard_arg) = &self.overrides.shard {
       shard::filter_by_shard(
@@ -396,7 +552,10 @@ impl TestRunner {
     if self.config.forbid_only || self.overrides.forbid_only {
       if let Err(e) = crate::discovery::check_forbid_only(&plan) {
         eprint!("{e}");
-        return 1;
+        return ExecuteSummary {
+          exit_code: 1,
+          ..Default::default()
+        };
       }
     }
 
@@ -423,7 +582,7 @@ impl TestRunner {
     );
     if total_tests == 0 {
       tracing::info!(target: "ferridriver::runner", "no tests found");
-      return 0;
+      return ExecuteSummary::default();
     }
 
     if self.overrides.list_only {
@@ -433,7 +592,10 @@ impl TestRunner {
         }
       }
       println!("\n  {total_tests} test(s) found");
-      return 0;
+      return ExecuteSummary {
+        total: total_tests,
+        ..Default::default()
+      };
     }
 
     // Never launch more workers than tests — extra workers launch browsers for nothing.
@@ -444,7 +606,12 @@ impl TestRunner {
       let fixture_defs = builtin_fixtures(&self.config.browser);
       if let Err(e) = validate_dag(&fixture_defs) {
         tracing::error!(target: "ferridriver::fixture", "fixture DAG error: {e}");
-        return 1;
+        return ExecuteSummary {
+          exit_code: 1,
+          total: total_tests,
+          failed: total_tests,
+          ..Default::default()
+        };
       }
     }
 
@@ -468,7 +635,12 @@ impl TestRunner {
         },
         Err(e) => {
           tracing::error!(target: "ferridriver::runner", "webServer start failed: {e}");
-          return 1;
+          return ExecuteSummary {
+            exit_code: 1,
+            total: total_tests,
+            failed: total_tests,
+            ..Default::default()
+          };
         },
       }
     } else {
@@ -492,7 +664,12 @@ impl TestRunner {
     }
 
     let reporting_enabled = event_bus.has_subscribers();
-    if reporting_enabled {
+    // Boundary events (`RunStarted` / `RunFinished`) are emitted once per
+    // `execute()` for the single-project path, but suppressed when the
+    // multi-project orchestrator drives many `execute()` calls into one
+    // shared bus — it emits a single aggregate boundary itself.
+    let emit_boundary = reporting_enabled && !self.suppress_run_boundary;
+    if emit_boundary {
       event_bus.emit(ReporterEvent::RunStarted {
         total_tests,
         num_workers,
@@ -508,7 +685,7 @@ impl TestRunner {
       for setup_fn in &self.hooks.global_setup_fns {
         if let Err(e) = setup_fn(global_pool.clone()).await {
           tracing::error!(target: "ferridriver::runner", "global setup failed: {e}");
-          if reporting_enabled {
+          if emit_boundary {
             event_bus.emit(ReporterEvent::RunFinished {
               total: total_tests,
               passed: 0,
@@ -518,7 +695,12 @@ impl TestRunner {
               duration: start.elapsed(),
             });
           }
-          return 1;
+          return ExecuteSummary {
+            exit_code: 1,
+            total: total_tests,
+            failed: total_tests,
+            ..Default::default()
+          };
         }
       }
     }
@@ -734,7 +916,7 @@ impl TestRunner {
       mgr.stop().await;
     }
 
-    if reporting_enabled {
+    if emit_boundary {
       event_bus.emit(ReporterEvent::RunFinished {
         total: total_tests,
         passed,
@@ -757,7 +939,14 @@ impl TestRunner {
         "fail_on_flaky_tests: flagging exit 1 for {flaky} flaky test(s)",
       );
     }
-    exit_code
+    ExecuteSummary {
+      exit_code,
+      total: total_tests,
+      passed,
+      failed,
+      skipped,
+      flaky,
+    }
   }
 
   /// Run in watch mode: re-run tests on file changes with interactive keyboard controls.
