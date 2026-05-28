@@ -26,6 +26,7 @@ use super::client::McpClient;
 /// path resolves.
 fn setup(c: &mut McpClient) {
   c.nav("<button title='hi' aria-label='click-me'>x</button><img alt='kitten' src='data:image/gif;base64,R0lGODlhAQABAAAAACw='><iframe srcdoc='<button id=inner>inside</button>'></iframe>");
+  c.script("await page.waitForSelector('button[title=\"hi\"]'); return true;");
 }
 
 pub fn test_frame_get_by_methods(c: &mut McpClient) {
