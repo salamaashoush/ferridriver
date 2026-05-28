@@ -510,6 +510,84 @@ impl ContextRef {
     }
   }
 
+  /// Export the current storage state of this context — cookies plus a
+  /// per-origin `localStorage` snapshot.
+  ///
+  /// Playwright: `storageState(options?: { path?: string, indexedDB?: boolean })
+  ///   : Promise<{ cookies, origins }>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`;
+  /// server collection at `.../server/browserContext.ts:609`).
+  ///
+  /// Cookies are read via the existing [`Self::cookies`] surface. For each
+  /// live page in the context we evaluate `Object.entries(localStorage)` to
+  /// snapshot its origin's storage, grouping by `location.origin` and skipping
+  /// origins with no entries (mirrors Playwright's `if (storage.localStorage
+  /// .length)` filter). `opts.path`, when set, writes the JSON-serialized
+  /// state (pretty-printed) to disk; `opts.indexed_db` is accepted for
+  /// signature parity but does not yet collect `IndexedDB` databases.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context does not exist, cookie retrieval fails,
+  /// or (when `path` is set) the file cannot be written.
+  pub async fn storage_state(
+    &self,
+    opts: Option<crate::options::StorageStateOptions>,
+  ) -> Result<crate::options::StorageState> {
+    // Page-side wrapper JSON-stringifies the result so the backend ships flat
+    // strings rather than re-serializing via its own RemoteValue path (see
+    // CLAUDE.md "utility-script JSON.stringify wrapper trick").
+    const COLLECT_JS: &str = r"JSON.stringify({
+      origin: location.origin,
+      localStorage: Object.entries(localStorage).map(([name, value]) => ({ name, value }))
+    })";
+
+    let cookies = self.cookies().await?;
+
+    let pages = self.pages().await?;
+    let mut origins: Vec<crate::options::OriginState> = Vec::new();
+    let mut seen: rustc_hash::FxHashSet<String> = rustc_hash::FxHashSet::default();
+
+    for page in &pages {
+      // `Ok(None)` (no value) and `Err` (opaque origin / mid-navigation, where
+      // localStorage access throws) are both skipped, matching Playwright's
+      // per-page try/catch.
+      let Ok(Some(raw)) = page.inner.evaluate(COLLECT_JS).await else {
+        continue;
+      };
+      let parsed: Option<crate::options::OriginState> = raw
+        .as_str()
+        .and_then(|s| serde_json::from_str::<crate::options::OriginState>(s).ok());
+      let Some(state) = parsed else { continue };
+      if state.origin.is_empty() || state.origin == "null" || state.local_storage.is_empty() {
+        continue;
+      }
+      if seen.insert(state.origin.clone()) {
+        origins.push(state);
+      }
+    }
+
+    let state = crate::options::StorageState { cookies, origins };
+
+    if let Some(opts) = opts {
+      if let Some(path) = opts.path {
+        let json = serde_json::to_string_pretty(&state)
+          .map_err(|e| crate::error::FerriError::Backend(format!("storageState: serialize JSON: {e}")))?;
+        if let Some(parent) = path.parent() {
+          if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent).map_err(|e| {
+              crate::error::FerriError::Backend(format!("storageState: mkdir {}: {e}", parent.display()))
+            })?;
+          }
+        }
+        std::fs::write(&path, json)
+          .map_err(|e| crate::error::FerriError::Backend(format!("storageState: write {}: {e}", path.display())))?;
+      }
+    }
+
+    Ok(state)
+  }
+
   /// Add cookies to this context.
   ///
   /// # Errors

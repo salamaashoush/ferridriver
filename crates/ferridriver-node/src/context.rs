@@ -91,6 +91,23 @@ impl BrowserContext {
     ctx.delete_cookie(&name, domain.as_deref()).await.into_napi()
   }
 
+  // ── Storage state ──
+
+  /// Playwright: `context.storageState(options?: { path?, indexedDB? })
+  ///   : Promise<{ cookies, origins }>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`).
+  /// Exports cookies + per-origin localStorage. `path` writes the JSON to disk;
+  /// `indexedDB` is accepted for parity but IndexedDB is not yet collected.
+  #[napi]
+  pub async fn storage_state(&self, options: Option<NapiStorageStateOptions>) -> Result<NapiStorageState> {
+    let core_opts = options.map(|o| ferridriver::options::StorageStateOptions {
+      path: o.path.map(std::path::PathBuf::from),
+      indexed_db: o.indexed_db,
+    });
+    let state = self.inner.storage_state(core_opts).await.into_napi()?;
+    Ok(NapiStorageState::from(state))
+  }
+
   // ── Timeouts ──
 
   #[napi]
@@ -673,6 +690,59 @@ pub struct NapiScreenSize {
 pub struct NapiViewportSize {
   pub width: f64,
   pub height: f64,
+}
+
+/// NAPI shape for Playwright's `storageState(options?)` —
+/// `{ path?: string, indexedDB?: boolean }`
+/// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`).
+#[napi(object)]
+pub struct NapiStorageStateOptions {
+  pub path: Option<String>,
+  pub indexed_db: Option<bool>,
+}
+
+/// A single `localStorage` entry — Playwright `NameValue`.
+#[napi(object)]
+pub struct NapiNameValue {
+  pub name: String,
+  pub value: String,
+}
+
+/// Per-origin storage snapshot — Playwright `OriginStorage` (minus indexedDB).
+#[napi(object)]
+pub struct NapiOriginState {
+  pub origin: String,
+  pub local_storage: Vec<NapiNameValue>,
+}
+
+/// Result of `context.storageState()` — Playwright `StorageState`.
+#[napi(object)]
+pub struct NapiStorageState {
+  pub cookies: Vec<CookieData>,
+  pub origins: Vec<NapiOriginState>,
+}
+
+impl From<ferridriver::options::StorageState> for NapiStorageState {
+  fn from(s: ferridriver::options::StorageState) -> Self {
+    Self {
+      cookies: s.cookies.iter().map(CookieData::from).collect(),
+      origins: s
+        .origins
+        .into_iter()
+        .map(|o| NapiOriginState {
+          origin: o.origin,
+          local_storage: o
+            .local_storage
+            .into_iter()
+            .map(|nv| NapiNameValue {
+              name: nv.name,
+              value: nv.value,
+            })
+            .collect(),
+        })
+        .collect(),
+    }
+  }
 }
 
 impl NapiBrowserContextOptions {

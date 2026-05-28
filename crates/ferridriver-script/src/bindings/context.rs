@@ -109,6 +109,35 @@ impl BrowserContextJs {
     self.inner.delete_cookie(&name, domain.0.as_deref()).await.into_js()
   }
 
+  /// Export the current storage state — cookies + per-origin localStorage.
+  ///
+  /// Playwright: `storageState(options?: { path?, indexedDB? })
+  ///   : Promise<{ cookies, origins }>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`).
+  /// `path` writes the JSON to disk; `indexedDB` is accepted for parity but
+  /// IndexedDB is not yet collected.
+  #[qjs(rename = "storageState")]
+  pub async fn storage_state<'js>(&self, ctx: Ctx<'js>, options: Opt<Value<'js>>) -> rquickjs::Result<Value<'js>> {
+    #[derive(serde::Deserialize)]
+    #[serde(rename_all = "camelCase")]
+    struct JsStorageStateOptions {
+      path: Option<String>,
+      indexed_db: Option<bool>,
+    }
+    let core_opts = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => {
+        let parsed: JsStorageStateOptions = serde_from_js(&ctx, v)?;
+        Some(ferridriver::options::StorageStateOptions {
+          path: parsed.path.map(std::path::PathBuf::from),
+          indexed_db: parsed.indexed_db,
+        })
+      },
+      _ => None,
+    };
+    let state = self.inner.storage_state(core_opts).await.into_js()?;
+    serde_to_js(&ctx, &state)
+  }
+
   // ── Permissions ───────────────────────────────────────────────────────────
 
   /// Grant a set of permissions (e.g. `['geolocation', 'notifications']`),
