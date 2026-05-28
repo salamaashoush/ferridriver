@@ -196,23 +196,27 @@ impl ElementHandle {
   // ── Actions (Phase E) ────────────────────────────────────────────────
 
   #[napi]
-  pub async fn click(&self) -> Result<()> {
-    self.inner.click().await.into_napi()
+  pub async fn click(&self, options: Option<crate::types::ClickOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.click(opts).await.into_napi()
   }
 
   #[napi]
-  pub async fn dblclick(&self) -> Result<()> {
-    self.inner.dblclick().await.into_napi()
+  pub async fn dblclick(&self, options: Option<crate::types::DblClickOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.dblclick(opts).await.into_napi()
   }
 
   #[napi]
-  pub async fn hover(&self) -> Result<()> {
-    self.inner.hover().await.into_napi()
+  pub async fn hover(&self, options: Option<crate::types::HoverOptions>) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.hover(opts).await.into_napi()
   }
 
   #[napi]
-  pub async fn type_str(&self, text: String) -> Result<()> {
-    self.inner.type_str(&text).await.into_napi()
+  pub async fn type_str(&self, text: String, options: Option<crate::types::TypeOptions>) -> Result<()> {
+    let opts = options.map(Into::into);
+    self.inner.type_str(&text, opts).await.into_napi()
   }
 
   #[napi]

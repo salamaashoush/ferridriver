@@ -307,6 +307,53 @@ for (const backend of BACKENDS) {
       await b!.dispose();
     });
 
+    it("ElementHandle.click({ button: 'right' }) reports e.button === 2", async () => {
+      await page.goto(
+        `data:text/html,<button id="b">b</button><script>window.__btn=-1;document.getElementById('b').addEventListener('mousedown',e=>{window.__btn=e.button;});</script>`
+      );
+      const b = await page.querySelector("#b");
+      expect(b).not.toBeNull();
+      await b!.click({ button: "right" });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await page.evaluate("window.__btn")).toBe(2);
+      await b!.dispose();
+    });
+
+    it("ElementHandle.dblclick fires the dblclick handler", async () => {
+      await page.goto(
+        `data:text/html,<button id="b">b</button><script>window.__dbl=false;document.getElementById('b').addEventListener('dblclick',()=>{window.__dbl=true;});</script>`
+      );
+      const b = await page.querySelector("#b");
+      expect(b).not.toBeNull();
+      await b!.dblclick();
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await page.evaluate("window.__dbl")).toBe(true);
+      await b!.dispose();
+    });
+
+    it("ElementHandle.hover fires mouseover", async () => {
+      await page.goto(
+        `data:text/html,<div id="d" style="width:80px;height:80px">d</div><script>window.__hov=false;document.getElementById('d').addEventListener('mouseover',()=>{window.__hov=true;});</script>`
+      );
+      const d = await page.querySelector("#d");
+      expect(d).not.toBeNull();
+      await d!.hover();
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await page.evaluate("window.__hov")).toBe(true);
+      await d!.dispose();
+    });
+
+    it("ElementHandle.typeStr({ delay }) types every character", async () => {
+      await page.goto(`data:text/html,<input id="i" />`);
+      const i = await page.querySelector("#i");
+      expect(i).not.toBeNull();
+      await i!.focus();
+      await i!.typeStr("xyz", { delay: 1 });
+      await new Promise((r) => setTimeout(r, 50));
+      expect(await i!.inputValue()).toBe("xyz");
+      await i!.dispose();
+    });
+
     it("ElementHandle.focus updates document.activeElement", async () => {
       await page.goto(`data:text/html,<input id="i" />`);
       const i = await page.querySelector("#i");

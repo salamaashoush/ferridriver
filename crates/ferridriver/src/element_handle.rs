@@ -481,53 +481,71 @@ impl ElementHandle {
 
   // ── Actions (Phase E) ─────────────────────────────────────────────────
 
-  /// Playwright: `elementHandle.click()`. Phase-E MVP: delegates to
-  /// the backend's native element click path (the same call
-  /// `Locator::click` uses after resolution) — actionability is not
-  /// re-checked because the handle was already resolved at
-  /// materialisation time.
+  /// Playwright: `elementHandle.click(options?)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:122`).
+  /// Delegates through the temp-tag Locator bridge so every option
+  /// (button, clickCount, delay, modifiers, position, force, trial,
+  /// timeout) is honored by the shared Locator click dispatch.
   ///
   /// # Errors
   ///
-  /// Forwards the backend's click error.
-  pub async fn click(&self) -> Result<()> {
+  /// Forwards Locator's `click` error.
+  pub async fn click(&self, opts: Option<crate::options::ClickOptions>) -> Result<()> {
     self.ensure_live()?;
-    self.any_element().click().await
+    let nonce = self.temp_tag().await?;
+    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
+    let result = locator.click(opts).await;
+    self.temp_untag().await;
+    result
   }
 
-  /// Playwright: `elementHandle.dblclick()`. Delegates to the
-  /// backend's native element dblclick path.
+  /// Playwright: `elementHandle.dblclick(options?)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:126`).
+  /// Delegates through the temp-tag Locator bridge.
   ///
   /// # Errors
   ///
-  /// Forwards the backend's click error.
-  pub async fn dblclick(&self) -> Result<()> {
+  /// Forwards Locator's `dblclick` error.
+  pub async fn dblclick(&self, opts: Option<crate::options::DblClickOptions>) -> Result<()> {
     self.ensure_live()?;
-    self.any_element().dblclick().await
+    let nonce = self.temp_tag().await?;
+    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
+    let result = locator.dblclick(opts).await;
+    self.temp_untag().await;
+    result
   }
 
-  /// Playwright: `elementHandle.hover()`. Delegates to the backend's
-  /// native element hover path.
+  /// Playwright: `elementHandle.hover(options?)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:118`).
+  /// Delegates through the temp-tag Locator bridge.
   ///
   /// # Errors
   ///
-  /// Forwards the backend's hover error.
-  pub async fn hover(&self) -> Result<()> {
+  /// Forwards Locator's `hover` error.
+  pub async fn hover(&self, opts: Option<crate::options::HoverOptions>) -> Result<()> {
     self.ensure_live()?;
-    self.any_element().hover().await
+    let nonce = self.temp_tag().await?;
+    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
+    let result = locator.hover(opts).await;
+    self.temp_untag().await;
+    result
   }
 
-  /// Playwright: `elementHandle.type(text)`. Delegates to the
-  /// backend's native type path. Playwright's `type` dispatches one
-  /// character at a time via the keyboard — matches our `AnyElement`
-  /// impl.
+  /// Playwright: `elementHandle.type(text, options?)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:159`).
+  /// Delegates through the temp-tag Locator bridge so `delay` and
+  /// `timeout` are honored by the shared `Locator::type` dispatch.
   ///
   /// # Errors
   ///
-  /// Forwards the backend's type error.
-  pub async fn type_str(&self, text: &str) -> Result<()> {
+  /// Forwards Locator's `type` error.
+  pub async fn type_str(&self, text: &str, opts: Option<crate::options::TypeOptions>) -> Result<()> {
     self.ensure_live()?;
-    self.any_element().type_str(text).await
+    let nonce = self.temp_tag().await?;
+    let locator = self.page().locator(&Self::temp_selector(&nonce), None);
+    let result = locator.r#type(text, opts).await;
+    self.temp_untag().await;
+    result
   }
 
   /// Playwright: `elementHandle.focus()`. JS `el.focus()`.

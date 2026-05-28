@@ -282,6 +282,76 @@ pub fn test_element_handle_temp_tag_actions(c: &mut McpClient) {
   assert_eq!(v, json!(["b"]), "ElementHandle.selectOption: {v}");
 }
 
+pub fn test_element_handle_action_options(c: &mut McpClient) {
+  // click({ button: 'right' }) — the mousedown handler records the
+  // numeric button; right button is 2. A no-option click would record 0.
+  c.nav(
+    "<button id='b'>b</button>\
+     <script>window.__btn=-1;\
+     document.getElementById('b').addEventListener('mousedown',e=>{window.__btn=e.button;});\
+     </script>",
+  );
+  let v = c.script_value(
+    "const eh = await page.querySelector('#b');\
+     await eh.click({ button: 'right' });\
+     const b = await page.evaluate('window.__btn');\
+     await eh.dispose();\
+     return b;",
+  );
+  // `page.evaluate` JSON-stringifies primitives on the QuickJS boundary.
+  let btn = v.as_i64().or_else(|| v.as_str().and_then(|s| s.parse().ok()));
+  assert_eq!(btn, Some(2), "ElementHandle.click button:right -> e.button===2: {v}");
+
+  // dblclick() — the dblclick handler only fires on a genuine
+  // double-click sequence, so a flag flip proves the two clicks landed.
+  c.nav(
+    "<button id='b'>b</button>\
+     <script>window.__dbl=false;\
+     document.getElementById('b').addEventListener('dblclick',()=>{window.__dbl=true;});\
+     </script>",
+  );
+  let v = c.script_value(
+    "const eh = await page.querySelector('#b');\
+     await eh.dblclick();\
+     const d = await page.evaluate('window.__dbl');\
+     await eh.dispose();\
+     return d;",
+  );
+  let dbl = v.as_bool().unwrap_or_else(|| v.as_str() == Some("true"));
+  assert!(dbl, "ElementHandle.dblclick fires dblclick handler: {v}");
+
+  // hover() — mouseover sets a sentinel that is absent until the
+  // pointer moves over the element.
+  c.nav(
+    "<div id='d' style='width:80px;height:80px'>d</div>\
+     <script>window.__hov=false;\
+     document.getElementById('d').addEventListener('mouseover',()=>{window.__hov=true;});\
+     </script>",
+  );
+  let v = c.script_value(
+    "const eh = await page.querySelector('#d');\
+     await eh.hover();\
+     const h = await page.evaluate('window.__hov');\
+     await eh.dispose();\
+     return h;",
+  );
+  let hov = v.as_bool().unwrap_or_else(|| v.as_str() == Some("true"));
+  assert!(hov, "ElementHandle.hover fires mouseover: {v}");
+
+  // type(text, { delay }) — every character lands; `delay` only paces
+  // the keystrokes and must not drop input. Observe the full value.
+  c.nav("<input id='i' value=''>");
+  let v = c.script_value(
+    "const eh = await page.querySelector('#i');\
+     await eh.focus();\
+     await eh.type('xyz', { delay: 1 });\
+     const val = await eh.inputValue();\
+     await eh.dispose();\
+     return val;",
+  );
+  assert_eq!(v, json!("xyz"), "ElementHandle.type with delay types all chars: {v}");
+}
+
 pub fn test_element_handle_select_text(c: &mut McpClient) {
   c.nav("<input id='i' value='abc'>");
   let v = c.script_value(

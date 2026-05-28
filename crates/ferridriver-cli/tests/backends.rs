@@ -193,6 +193,10 @@ fn register_script_handles(set: &mut TestSet<'_>) {
     set,
     backends_support::handle_surface::test_element_handle_temp_tag_actions
   );
+  run!(
+    set,
+    backends_support::handle_surface::test_element_handle_action_options
+  );
   run!(set, backends_support::handle_surface::test_element_handle_select_text);
   run!(set, backends_support::script_handles_local::test_script_click_options);
   run!(set, backends_support::action_options::test_script_dblclick_options);
