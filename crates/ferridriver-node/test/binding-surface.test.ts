@@ -35,7 +35,9 @@ for (const backend of BACKENDS) {
     });
 
     it("frame.getByAltText resolves an image by alt", async () => {
-      await page.setContent("<img alt='kitten' src='data:image/gif;base64,R0lGODlhAQABAAAAACw='>");
+      await page.setContent(
+        "<img alt='kitten' src='data:image/gif;base64,R0lGODlhAQABAAAAACw='>",
+      );
       const loc = page.mainFrame().getByAltText("kitten");
       expect(await loc.isVisible()).toBe(true);
     });
@@ -75,7 +77,9 @@ for (const backend of BACKENDS) {
     // ── FrameLocator class ───────────────────────────────────────────
 
     it("FrameLocator getters return Locators / FrameLocators", async () => {
-      await page.setContent("<iframe srcdoc='<button>inside</button>'></iframe>");
+      await page.setContent(
+        "<iframe srcdoc='<button>inside</button>'></iframe>",
+      );
       const fl = page.frameLocator("iframe");
       expect(typeof fl.locator("body").click).toBe("function");
       expect(typeof fl.getByRole("button").click).toBe("function");
@@ -95,7 +99,9 @@ for (const backend of BACKENDS) {
     // ── Page additions ───────────────────────────────────────────────
 
     it("page.touchscreen.tap does not throw", async () => {
-      await page.setContent("<button id='btn' style='width:200px;height:200px'>x</button>");
+      await page.setContent(
+        "<button id='btn' style='width:200px;height:200px'>x</button>",
+      );
       await page.touchscreen.tap(50, 50);
     });
 
@@ -176,13 +182,86 @@ for (const backend of BACKENDS) {
 
     // ── Context additions ────────────────────────────────────────────
 
+    it("context.exposeBinding applies to a page opened after registration", async () => {
+      // Register BEFORE opening the page, then open a fresh page and
+      // observe window[name] is present and the BindingSource reached
+      // the callback. NAPI is fire-and-forget: (source, args).
+      const ctx = browser.newContext();
+      const seenSource: Record<string, unknown>[] = [];
+      const seenArgs: unknown[][] = [];
+      const disposable = await ctx.exposeBinding(
+        "__ctx_bind",
+        (
+          source: { context: string; page: string; frame: string },
+          args: unknown[],
+        ) => {
+          seenSource.push(source);
+          seenArgs.push(args);
+        },
+      );
+      const p = await ctx.newPage();
+      await p.goto("data:text/html,<title>x</title>");
+      const installed = await p.evaluate(`typeof window.__ctx_bind`);
+      expect(installed).toBe("function");
+      await p.evaluate(`window.__ctx_bind(2, 3)`);
+      for (let i = 0; i < 50 && seenArgs.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(seenArgs.length).toBe(1);
+      expect(seenArgs[0]).toEqual([2, 3]);
+      expect(Object.keys(seenSource[0]).sort()).toEqual([
+        "context",
+        "frame",
+        "page",
+      ]);
+      expect(typeof seenSource[0].context).toBe("string");
+      // dispose() removes the page-side proxy.
+      await disposable.dispose();
+      const afterDispose = await p.evaluate(`typeof window.__ctx_bind`);
+      expect(afterDispose).toBe("undefined");
+      await ctx.close();
+    });
+
+    it("context.exposeFunction delivers only the page-side args (no source)", async () => {
+      const ctx = browser.newContext();
+      const seen: unknown[][] = [];
+      await ctx.exposeFunction("__ctx_fn", (args: unknown[]) => {
+        seen.push(args);
+      });
+      const p = await ctx.newPage();
+      await p.goto("data:text/html,<title>x</title>");
+      await p.evaluate(`window.__ctx_fn(1, 'two')`);
+      for (let i = 0; i < 50 && seen.length === 0; i++) {
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      expect(seen.length).toBe(1);
+      expect(seen[0]).toEqual([1, "two"]);
+      await ctx.close();
+    });
+
     it("context.clearCookies({name}) clears only matching", async () => {
       const ctx = browser.newContext();
       const p = await ctx.newPage();
       await p.goto("data:text/html,<title>x</title>");
       await ctx.addCookies([
-        { name: "keep", value: "1", domain: ".example.test", path: "/", secure: false, httpOnly: false, expires: -1 },
-        { name: "drop", value: "1", domain: ".example.test", path: "/", secure: false, httpOnly: false, expires: -1 },
+        {
+          name: "keep",
+          value: "1",
+          domain: ".example.test",
+          path: "/",
+          secure: false,
+          httpOnly: false,
+          expires: -1,
+        },
+        {
+          name: "drop",
+          value: "1",
+          domain: ".example.test",
+          path: "/",
+          secure: false,
+          httpOnly: false,
+          expires: -1,
+        },
       ]);
       const before = (await ctx.cookies()).map((c) => c.name).sort();
       await ctx.clearCookies({ name: "drop" });

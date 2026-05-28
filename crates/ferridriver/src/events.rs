@@ -100,6 +100,38 @@ pub type ExposedFnFuture = Pin<Box<dyn Future<Output = serde_json::Value> + Send
 /// dispatch must `await` this before resolving the page binding.
 pub type ExposedFn = Arc<dyn Fn(Vec<serde_json::Value>) -> ExposedFnFuture + Send + Sync>;
 
+/// The `source` object Playwright passes as the first argument to an
+/// `exposeBinding` callback. Mirrors
+/// `BindingSource = { context, page, frame }` from
+/// `/tmp/playwright/packages/playwright-core/types/structs.d.ts:45`.
+///
+/// ferridriver delivers identity strings rather than live handles
+/// because the backend binding dispatch runs outside the
+/// `BrowserContext`/`Page` handle lifetime; the binding layers
+/// reconstruct the JS-visible `{ context, page, frame }` object from
+/// these identifiers. `context` is the composite session key,
+/// `page` the page's stable id, `frame` the calling frame id.
+#[derive(Debug, Clone, Default)]
+pub struct BindingSource {
+  /// Composite session key of the context the call originated from.
+  pub context: String,
+  /// Stable page identifier (target id) of the calling page.
+  pub page: String,
+  /// Frame id of the calling frame (the main frame when the call
+  /// comes from the top document).
+  pub frame: String,
+}
+
+/// Callback type for context/page bindings registered via
+/// `exposeBinding`. Like [`ExposedFn`] but receives a [`BindingSource`]
+/// as its first argument, matching Playwright's
+/// `(source: BindingSource, ...args) => any`.
+///
+/// `exposeFunction` is `exposeBinding` minus the source argument: the
+/// binding layers wrap a source-less callback by discarding the
+/// [`BindingSource`] before invoking it.
+pub type ExposedBinding = Arc<dyn Fn(BindingSource, Vec<serde_json::Value>) -> ExposedFnFuture + Send + Sync>;
+
 /// Event listener callback type.
 pub type EventCallback = Arc<dyn Fn(PageEvent) + Send + Sync>;
 

@@ -246,6 +246,28 @@ fn with_page_callbacks<R>(ctx: &rquickjs::Ctx<'_>, f: impl FnOnce(&mut PageCallb
   Ok(f(&mut reg))
 }
 
+/// Stash an exposed-binding JS callback keyed by binding name. Shared
+/// by `page.exposeFunction` and `context.exposeBinding` /
+/// `context.exposeFunction` — both inject `window[name]`, so a single
+/// name-keyed registry suffices. Exposed `pub(crate)` so the context
+/// binding (in a sibling module) can reuse the same userdata.
+pub(crate) fn insert_exposed_callback(
+  ctx: &rquickjs::Ctx<'_>,
+  name: String,
+  cb: rquickjs::Persistent<rquickjs::Function<'static>>,
+) -> rquickjs::Result<()> {
+  with_page_callbacks(ctx, |r| r.exposed.insert(name, cb))?;
+  Ok(())
+}
+
+/// Look up a previously stashed exposed-binding callback by name.
+pub(crate) fn get_exposed_callback(
+  ctx: &rquickjs::Ctx<'_>,
+  name: &str,
+) -> rquickjs::Result<Option<rquickjs::Persistent<rquickjs::Function<'static>>>> {
+  with_page_callbacks(ctx, |r| r.exposed.get(name).cloned())
+}
+
 /// JS-visible wrapper around [`ferridriver::Page`].
 ///
 /// Held as `Arc<Page>` so the same page can be shared with the MCP session

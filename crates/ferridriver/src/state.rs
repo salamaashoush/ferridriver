@@ -193,6 +193,16 @@ pub struct BrowserState {
   /// every fresh page. Sync mutex so non-async construction paths
   /// can write without owning a tokio guard.
   pub context_options: Arc<std::sync::Mutex<HashMap<String, crate::options::BrowserContextOptions>>>,
+  /// Per-context binding registry — `exposeBinding` / `exposeFunction`
+  /// callbacks registered on a [`crate::ContextRef`]. Keyed by composite
+  /// session key, then by binding name so a context-level binding
+  /// applies to every page in the context (current + future). Consumed
+  /// by `ContextRef::new_page` to inject the binding onto each fresh
+  /// page. `tokio::sync::RwLock` (not the sync mutex used by the
+  /// emitter/options registries) because the stored
+  /// [`crate::events::ExposedBinding`] is invoked across `.await`
+  /// points and read during async page-open.
+  pub context_bindings: Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, crate::events::ExposedBinding>>>>,
   /// Sync-readable connection flag mirroring `!instances.is_empty()`.
   /// Set true when an instance is ensured, false on `shutdown`, so
   /// `Browser::is_connected()` stays sync like Playwright's.
@@ -271,6 +281,7 @@ impl BrowserState {
       context_events: Arc::new(std::sync::Mutex::new(HashMap::default())),
       record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
+      context_bindings: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
       connected: Arc::new(std::sync::atomic::AtomicBool::new(false)),
       storage_state_hydrated: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashSet::default())),
       persistent_context: false,
@@ -341,6 +352,17 @@ impl BrowserState {
   pub fn get_record_video(&self, composite_key: &str) -> Option<crate::options::RecordVideoOptions> {
     let map = self.record_video.lock().ok()?;
     map.get(composite_key).cloned()
+  }
+
+  /// Shared handle to the per-context binding registry. Cheap clone of
+  /// the `Arc`; callers take the async lock themselves. Used by
+  /// `ContextRef::expose_binding` to register and by
+  /// `ContextRef::new_page` to re-apply bindings onto a fresh page.
+  #[must_use]
+  pub fn context_bindings_handle(
+    &self,
+  ) -> Arc<tokio::sync::RwLock<HashMap<String, HashMap<String, crate::events::ExposedBinding>>>> {
+    self.context_bindings.clone()
   }
 
   /// Look up (or lazily create) the `ContextEventEmitter` for a

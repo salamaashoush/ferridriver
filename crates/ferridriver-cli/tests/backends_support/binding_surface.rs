@@ -225,6 +225,83 @@ pub fn test_page_expose_function(c: &mut McpClient) {
   );
 }
 
+pub fn test_context_expose_binding(c: &mut McpClient) {
+  setup(c);
+  // Register the binding BEFORE opening the page, then open a fresh
+  // page in the context and observe that `window[name]` is present and
+  // that the BindingSource object reached the callback. This proves the
+  // binding applied to a page created AFTER registration (the context
+  // registry re-applies on new_page) — an effect that only occurs when
+  // the binding wired through, not merely that the call didn't throw.
+  let v = c.script_value(
+    r"
+    const ctx = await browser.newContext();
+    try {
+      let sourceKeys = null;
+      const disp = await ctx.exposeBinding('__ctx_bind', (source, ...a) => {
+        sourceKeys = Object.keys(source).sort();
+        return { sum: a.reduce((x, y) => x + y, 0), hasContext: typeof source.context };
+      });
+      const p = await ctx.newPage();
+      await p.goto('data:text/html,<title>x</title>');
+      const installed = await p.evaluate(`typeof window.__ctx_bind`);
+      const result = await p.evaluate(`window.__ctx_bind(2, 3, 5)`);
+      // After dispose the page-side proxy is gone.
+      await disp.dispose();
+      const afterDispose = await p.evaluate(`typeof window.__ctx_bind`);
+      return { installed, result, sourceKeys, afterDispose };
+    } finally {
+      await ctx.close();
+    }
+  ",
+  );
+  assert_eq!(
+    v["installed"].as_str(),
+    Some("function"),
+    "context.exposeBinding should install window.__ctx_bind on a page opened after registration: {v}"
+  );
+  assert_eq!(
+    &v["result"],
+    &json!({ "sum": 10, "hasContext": "string" }),
+    "binding callback receives spread args after the source object and its return reaches the page: {v}"
+  );
+  assert_eq!(
+    v["sourceKeys"],
+    json!(["context", "frame", "page"]),
+    "exposeBinding callback first arg is the {{ context, page, frame }} BindingSource: {v}"
+  );
+  assert_eq!(
+    v["afterDispose"].as_str(),
+    Some("undefined"),
+    "Disposable.dispose() removes the page-side window binding: {v}"
+  );
+}
+
+pub fn test_context_expose_function(c: &mut McpClient) {
+  setup(c);
+  // exposeFunction = exposeBinding minus the source arg: the callback
+  // sees ONLY the spread page-side args (no leading source object).
+  let v = c.script_value(
+    r"
+    const ctx = await browser.newContext();
+    try {
+      await ctx.exposeFunction('__ctx_fn', (...a) => ({ got: a, n: a.length }));
+      const p = await ctx.newPage();
+      await p.goto('data:text/html,<title>x</title>');
+      const result = await p.evaluate(`window.__ctx_fn(1, 'two')`);
+      return { result };
+    } finally {
+      await ctx.close();
+    }
+  ",
+  );
+  assert_eq!(
+    &v["result"],
+    &json!({ "got": [1, "two"], "n": 2 }),
+    "context.exposeFunction delivers ONLY the spread page-side args (no source): {v}"
+  );
+}
+
 pub fn test_context_clear_cookies_filter(c: &mut McpClient) {
   // WebKit's host can't enumerate per-context cookies the same way;
   // the BrowserContextOptions cookie tests skip it for the same
