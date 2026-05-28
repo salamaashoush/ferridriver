@@ -3931,6 +3931,7 @@ impl<T: CdpWrap> CdpPage<T> {
       dialog_log,
       emitter3,
       self.dialog_manager.clone(),
+      self.page_backref.clone(),
     );
     Self::spawn_file_chooser_listener(
       self.transport.clone(),
@@ -4149,6 +4150,7 @@ impl<T: CdpWrap> CdpPage<T> {
     dialog_log: Arc<RwLock<Vec<crate::state::DialogEvent>>>,
     _emitter: crate::events::EventEmitter,
     dialog_manager: crate::dialog::DialogManager,
+    page_backref: crate::backend::PageBackref,
   ) {
     tokio::spawn(async move {
       let mut rx = transport.subscribe_event_method("Page.javascriptDialogOpening");
@@ -4207,6 +4209,7 @@ impl<T: CdpWrap> CdpPage<T> {
           default_value.clone(),
           responder,
           Some(dialog_manager.clone()),
+          page_backref.weak(),
         );
 
         // Synchronous dialog dispatch — mirrors Playwright's

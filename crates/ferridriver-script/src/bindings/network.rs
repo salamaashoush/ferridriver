@@ -70,6 +70,18 @@ impl RequestJs {
     self.inner.post_data()
   }
 
+  /// Mirrors Playwright `request.postDataBuffer(): Buffer | null`.
+  /// QuickJS has no native `Buffer`, so the raw body bytes are returned
+  /// base64-encoded (same convention as `response.body()`); `null` when
+  /// the request has no post body.
+  #[qjs(rename = "postDataBuffer")]
+  pub fn post_data_buffer(&self) -> Option<String> {
+    self
+      .inner
+      .post_data_buffer()
+      .map(|b| base64::Engine::encode(&base64::engine::general_purpose::STANDARD, b))
+  }
+
   #[qjs(rename = "postDataJSON")]
   pub fn post_data_json<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
     let v = self.inner.post_data_json().into_js()?;
@@ -313,6 +325,13 @@ impl ResponseJs {
       Some(s) => serde_to_js(&ctx, &s),
       None => Ok(Value::new_null(ctx.clone())),
     }
+  }
+
+  /// Mirrors Playwright `response.httpVersion(): Promise<string>`.
+  /// Empty string when the backend did not report a protocol version.
+  #[qjs(rename = "httpVersion")]
+  pub async fn http_version(&self) -> String {
+    self.inner.http_version().await.unwrap_or_default()
   }
 
   #[qjs(rename = "request")]
@@ -699,6 +718,34 @@ impl RouteJs {
       .and_then(|mut g| g.take())
       .ok_or_else(|| rquickjs::Error::new_from_js_message("Route", "Error", "Route already handled".to_string()))?;
     route.continue_route(ContinueOverrides {
+      url: opts.url,
+      method: opts.method,
+      headers: opts.headers.map(|m| m.into_iter().collect()),
+      post_data: opts.post_data.map(String::into_bytes),
+    });
+    Ok(())
+  }
+
+  /// Mirrors Playwright `route.fallback(options?)`
+  /// (`client/network.ts`): hand the request to the next matching
+  /// handler with the given overrides applied. ferridriver dispatches a
+  /// single handler per matched route, so `fallback` resolves the route
+  /// by continuing the request with the overrides applied (with no
+  /// overrides this is the unmodified request, matching the end state
+  /// Playwright's `fallback` reaches once no further handler claims it).
+  #[qjs(rename = "fallback")]
+  pub fn fallback<'js>(&self, ctx: Ctx<'js>, options: rquickjs::function::Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let opts: JsContinueOptions = match options.0 {
+      Some(v) if !v.is_undefined() && !v.is_null() => serde_from_js(&ctx, v)?,
+      _ => JsContinueOptions::default(),
+    };
+    let route = self
+      .inner
+      .lock()
+      .ok()
+      .and_then(|mut g| g.take())
+      .ok_or_else(|| rquickjs::Error::new_from_js_message("Route", "Error", "Route already handled".to_string()))?;
+    route.fallback(ContinueOverrides {
       url: opts.url,
       method: opts.method,
       headers: opts.headers.map(|m| m.into_iter().collect()),

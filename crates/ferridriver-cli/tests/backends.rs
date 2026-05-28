@@ -257,8 +257,11 @@ fn register_events_network(set: &mut TestSet<'_>) {
   run!(set, backends_support::network::test_route_disposable);
   run!(set, backends_support::network::test_network_response_body);
   run!(set, backends_support::network::test_network_post_data);
+  run!(set, backends_support::network::test_network_post_data_buffer);
   run!(set, backends_support::network::test_network_headers);
+  run!(set, backends_support::network::test_network_http_version);
   run!(set, backends_support::network::test_network_websocket);
+  run!(set, backends_support::network::test_route_fallback_applies_overrides);
   run!(set, backends_support::navigation_response::test_goto_returns_response);
   run!(set, backends_support::navigation_response::test_goto_follows_redirects);
   run!(set, backends_support::navigation_response::test_goto_network_failure);
@@ -275,6 +278,7 @@ fn register_events_dialog_files(set: &mut TestSet<'_>) {
   run!(set, backends_support::dialog::test_dialog_prompt_with_text);
   run!(set, backends_support::dialog::test_dialog_double_accept_rejects);
   run!(set, backends_support::dialog::test_dialog_auto_dismiss_without_listener);
+  run!(set, backends_support::dialog::test_dialog_page_accessor);
   run!(
     set,
     backends_support::file_chooser::test_file_chooser_single_string_path

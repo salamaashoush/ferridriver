@@ -40,6 +40,13 @@ impl FileChooserJs {
     self.inner.is_multiple()
   }
 
+  /// Playwright: `fileChooser.page(): Page`. Derived from the captured
+  /// element's owning page.
+  #[qjs(rename = "page")]
+  pub fn page(&self) -> crate::bindings::page::PageJs {
+    crate::bindings::page::PageJs::new(self.inner.page().clone())
+  }
+
   /// Playwright: `fileChooser.setFiles(files, options?): Promise<void>`.
   /// Accepts the full `string | string[] | FilePayload | FilePayload[]`
   /// union — delegates through the captured `ElementHandle`'s

@@ -116,6 +116,31 @@ impl Route {
     &self.request
   }
 
+  /// Build a [`crate::network::Request`] view over the intercepted
+  /// request. Mirrors Playwright's `route.request(): Request`
+  /// (`client/network.ts`), where the returned object is the full
+  /// `Request` API rather than the raw interception record. The
+  /// resulting `Request` carries the intercepted URL, method, headers,
+  /// post body, and resource type; it has no live response / timing /
+  /// redirect chain because an intercepted-but-not-yet-continued
+  /// request has not produced any of those yet.
+  #[must_use]
+  pub fn network_request(&self) -> crate::network::Request {
+    crate::network::Request::new(crate::network::RequestInit {
+      id: self.request.request_id.clone(),
+      url: self.request.url.clone(),
+      method: self.request.method.clone(),
+      resource_type: self.request.resource_type.clone(),
+      is_navigation_request: false,
+      post_data: self.request.post_data.clone().map(String::into_bytes),
+      headers: self.request.headers.clone(),
+      frame_id: None,
+      redirected_from: None,
+      timing: None,
+      raw_headers_fn: None,
+    })
+  }
+
   /// Fulfill with a custom response (mock).
   pub fn fulfill(mut self, response: FulfillResponse) {
     if let Some(tx) = self.action_tx.take() {
@@ -125,6 +150,24 @@ impl Route {
 
   /// Continue the request, optionally with modifications.
   pub fn continue_route(mut self, overrides: ContinueOverrides) {
+    if let Some(tx) = self.action_tx.take() {
+      let _ = tx.send(RouteAction::Continue(overrides));
+    }
+  }
+
+  /// Fall back to the next matching handler, applying the given
+  /// overrides. Mirrors Playwright's `route.fallback(options?)`
+  /// (`client/network.ts`): it records the fallback overrides and
+  /// reports the route as not handled so a subsequent handler (or the
+  /// default behaviour) takes over.
+  ///
+  /// ferridriver dispatches a single handler per matched route, so the
+  /// "next handler" is the default continue: `fallback` resolves the
+  /// route by continuing the request with the supplied overrides
+  /// applied. With no overrides this is identical to letting the
+  /// request proceed unmodified, which is exactly Playwright's
+  /// `fallback()` end state once no further handler claims it.
+  pub fn fallback(mut self, overrides: ContinueOverrides) {
     if let Some(tx) = self.action_tx.take() {
       let _ = tx.send(RouteAction::Continue(overrides));
     }
@@ -184,5 +227,62 @@ pub fn status_text(code: i32) -> &'static str {
     503 => "Service Unavailable",
     // 200 and all unknown codes default to "OK"
     _ => "OK",
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn sample_request() -> InterceptedRequest {
+    let mut headers = FxHashMap::default();
+    headers.insert("x-from".to_string(), "test".to_string());
+    InterceptedRequest {
+      request_id: "req-1".to_string(),
+      url: "https://example.com/api".to_string(),
+      method: "POST".to_string(),
+      headers,
+      post_data: Some("hello".to_string()),
+      resource_type: "Fetch".to_string(),
+    }
+  }
+
+  #[tokio::test]
+  async fn fallback_sends_continue_with_overrides() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let route = Route::new(sample_request(), tx);
+    route.fallback(ContinueOverrides {
+      method: Some("PUT".to_string()),
+      ..Default::default()
+    });
+    match rx.await.expect("route action") {
+      RouteAction::Continue(o) => assert_eq!(o.method.as_deref(), Some("PUT")),
+      other => panic!("expected Continue, got {other:?}"),
+    }
+  }
+
+  #[tokio::test]
+  async fn fallback_without_overrides_sends_unmodified_continue() {
+    let (tx, rx) = tokio::sync::oneshot::channel();
+    let route = Route::new(sample_request(), tx);
+    route.fallback(ContinueOverrides::default());
+    match rx.await.expect("route action") {
+      RouteAction::Continue(o) => {
+        assert!(o.url.is_none() && o.method.is_none() && o.headers.is_none() && o.post_data.is_none());
+      },
+      other => panic!("expected Continue, got {other:?}"),
+    }
+  }
+
+  #[test]
+  fn network_request_carries_interception_fields() {
+    let (tx, _rx) = tokio::sync::oneshot::channel();
+    let route = Route::new(sample_request(), tx);
+    let req = route.network_request();
+    assert_eq!(req.url(), "https://example.com/api");
+    assert_eq!(req.method(), "POST");
+    assert_eq!(req.resource_type(), "Fetch");
+    assert_eq!(req.post_data().as_deref(), Some("hello"));
+    assert!(!req.is_navigation_request());
   }
 }

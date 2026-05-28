@@ -47,6 +47,14 @@ impl Dialog {
     self.inner.default_value().to_string()
   }
 
+  /// Playwright: `dialog.page(): Page | null`. `null` when the dialog
+  /// opened before its page was available (early page initialization)
+  /// or the owning page has been closed.
+  #[napi(ts_return_type = "Page | null")]
+  pub fn page(&self) -> Option<crate::page::Page> {
+    self.inner.page().map(crate::page::Page::wrap)
+  }
+
   /// Playwright: `dialog.accept(promptText?): Promise<void>`.
   /// `promptText` is applied to `prompt` dialogs only. Double-accept
   /// / accept-after-dismiss rejects with the Playwright-exact message

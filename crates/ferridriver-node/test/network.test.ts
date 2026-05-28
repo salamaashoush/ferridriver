@@ -37,6 +37,10 @@ const SERVE: Record<string, (req: IncomingMessage, res: ServerResponse) => void>
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ users: ["alice", "bob"] }));
   },
+  "/api/posts": (_req, res) => {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(JSON.stringify({ posts: ["first"] }));
+  },
   "/echo": (req, res) => {
     const chunks: Buffer[] = [];
     req.on("data", (c: Buffer) => chunks.push(c));
@@ -157,6 +161,66 @@ for (const backend of BACKENDS) {
       const parsed = req.postDataJSON() as { ping: string; n: number };
       expect(parsed.ping).toBe("pong");
       expect(parsed.n).toBe(7);
+    });
+
+    it("request.postDataBuffer() returns the raw body bytes", async () => {
+      await page.goto(`${baseUrl}/landed`, null);
+      const wait = page.waitForRequest("**/echo", 10_000);
+      await page.evaluate(
+        "fetch('/echo', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ buf: 'yes' }) }).then(r => r.text())"
+      );
+      const req = await wait;
+      const buf = req.postDataBuffer();
+      expect(buf).not.toBeNull();
+      expect(Buffer.from(buf!).toString("utf-8")).toContain('"buf":"yes"');
+    });
+
+    it("response.httpVersion() resolves to the reported protocol string", async () => {
+      await page.goto(`${baseUrl}/landed`, null);
+      const wait = page.waitForResponse("**/api/users", 10_000);
+      await page.evaluate("fetch('/api/users').then(r => r.text())");
+      const resp = await wait;
+      const hv = await resp.httpVersion();
+      expect(typeof hv).toBe("string");
+      // CDP reports e.g. "http/1.1".
+      expect(hv.toLowerCase()).toContain("http");
+    });
+
+    it("route.request() exposes the intercepted request as a Request", async () => {
+      await page.goto(`${baseUrl}/landed`, null);
+      let seenUrl = "";
+      let seenMethod = "";
+      await page.route("**/api/users", (route) => {
+        const r = route.request();
+        seenUrl = r.url();
+        seenMethod = r.method();
+        route.fulfill({ status: 200, body: '{"users":["mocked"]}', contentType: "application/json" });
+      });
+      try {
+        const text = await page.evaluate("fetch('/api/users').then(r => r.text())");
+        expect(String(text)).toContain("mocked");
+        expect(seenUrl).toContain("/api/users");
+        expect(seenMethod).toBe("GET");
+      } finally {
+        await page.unroute("**/api/users");
+      }
+    });
+
+    it("route.fallback({ url }) routes the request to the override target", async () => {
+      await page.goto(`${baseUrl}/landed`, null);
+      await page.route("**/api/users", (route) => {
+        const target = route.request().url().replace("/api/users", "/api/posts");
+        route.fallback({ url: target });
+      });
+      try {
+        const text = await page.evaluate("fetch('/api/users').then(r => r.text())");
+        // fallback re-points the request to /api/posts; the page must see
+        // the posts payload, proving the url override took effect.
+        expect(String(text)).toContain("posts");
+        expect(String(text)).not.toContain('"users"');
+      } finally {
+        await page.unroute("**/api/users");
+      }
     });
 
     it("request.headers() carries User-Agent; response.headersArray() preserves multi-Set-Cookie", async () => {

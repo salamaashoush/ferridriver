@@ -179,8 +179,10 @@ pub fn test_download_save_as_roundtrip(c: &mut McpClient) {
       const dl = await p;
       const url = dl.url();
       const suggested = dl.suggestedFilename();
+      const dlPage = dl.page();
+      const samePage = dlPage != null && dlPage.url() === page.url();
       await dl.saveAs({save_str});
-      return {{ url, suggested }};
+      return {{ url, suggested, samePage }};
     "##,
       save_str = serde_json::to_string(&save_str).unwrap(),
     );
@@ -189,6 +191,11 @@ pub fn test_download_save_as_roundtrip(c: &mut McpClient) {
     assert!(
       url.contains("/file.bin"),
       "download.url() should expose the download URL: {v}"
+    );
+    assert_eq!(
+      v["samePage"].as_bool(),
+      Some(true),
+      "download.page() resolves to the owning page: {v}"
     );
     assert_eq!(
       v["suggested"].as_str(),

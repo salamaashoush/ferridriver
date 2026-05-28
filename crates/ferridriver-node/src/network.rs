@@ -472,6 +472,13 @@ impl Response {
     self.inner.security_details().await.map(Into::into)
   }
 
+  /// Mirrors Playwright `response.httpVersion(): Promise<string>`.
+  /// Empty string when the backend did not report a protocol version.
+  #[napi(ts_return_type = "Promise<string>")]
+  pub async fn http_version(&self) -> String {
+    self.inner.http_version().await.unwrap_or_default()
+  }
+
   /// Mirrors Playwright `response.request(): Request`.
   #[napi]
   pub fn request(&self) -> Request {

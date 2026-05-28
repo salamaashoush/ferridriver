@@ -60,6 +60,21 @@ for (const backend of BACKENDS) {
       expect(await page.title()).toBe("yes");
     });
 
+    it("dialog.page() returns the owning page", async () => {
+      const html =
+        "<title>dlg</title><script>document.title = confirm('p?') ? 'y' : 'n'</script>";
+      const { waiter, gotoPromise } = await navigateAndDialog(page, html);
+      const dialog = (await waiter) as unknown as {
+        page(): Page | null;
+        accept(text?: string | null): Promise<void>;
+      };
+      const dlgPage = dialog.page();
+      expect(dlgPage).not.toBeNull();
+      expect(dlgPage!.url()).toBe(page.url());
+      await dialog.accept();
+      await gotoPromise;
+    });
+
     it("dialog.dismiss() makes confirm return false", async () => {
       const html =
         "<script>document.title = confirm('ok?') ? 'yes' : 'no'</script>";

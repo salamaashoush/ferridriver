@@ -2045,6 +2045,7 @@ impl BidiPage {
               default_value,
               responder,
               Some(dialog_manager.clone()),
+              page_backref.weak(),
             );
 
             // Synchronous dialog dispatch — mirrors Playwright's

@@ -80,6 +80,17 @@ impl Route {
     self.inner.as_ref().and_then(|r| r.request().post_data.clone())
   }
 
+  /// Mirrors Playwright `route.request(): Request` — the full Request
+  /// API view over the intercepted request.
+  #[napi]
+  pub fn request(&self) -> Result<crate::network::Request> {
+    let inner = self
+      .inner
+      .as_ref()
+      .ok_or_else(|| napi::Error::from_reason("Route already handled"))?;
+    Ok(crate::network::Request::from_core(inner.network_request()))
+  }
+
   /// The request headers as a JSON object.
   #[napi(getter)]
   pub fn headers(&self) -> serde_json::Value {
@@ -140,6 +151,40 @@ impl Route {
 
     let opts = options.unwrap_or_default();
     inner.continue_route(ferridriver::route::ContinueOverrides {
+      url: opts.url,
+      method: opts.method,
+      headers: opts.headers.as_ref().map(|h| {
+        h.iter()
+          .filter_map(|pair| {
+            if pair.len() == 2 {
+              Some((pair[0].clone(), pair[1].clone()))
+            } else {
+              None
+            }
+          })
+          .collect()
+      }),
+      post_data: opts.post_data.map(String::into_bytes),
+    });
+    Ok(())
+  }
+
+  /// Mirrors Playwright `route.fallback(options?)`
+  /// (`client/network.ts`): hand the request to the next matching
+  /// handler, applying the given overrides. ferridriver dispatches one
+  /// handler per matched route, so `fallback` resolves the route by
+  /// continuing the request with the overrides applied (with no
+  /// overrides this is the unmodified request, which is the end state
+  /// Playwright's `fallback` reaches once no further handler claims it).
+  #[napi]
+  pub fn fallback(&mut self, options: Option<ContinueOptions>) -> Result<()> {
+    let inner = self
+      .inner
+      .take()
+      .ok_or_else(|| napi::Error::from_reason("Route already handled"))?;
+
+    let opts = options.unwrap_or_default();
+    inner.fallback(ferridriver::route::ContinueOverrides {
       url: opts.url,
       method: opts.method,
       headers: opts.headers.as_ref().map(|h| {

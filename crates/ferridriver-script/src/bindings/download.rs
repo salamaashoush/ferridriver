@@ -40,6 +40,14 @@ impl DownloadJs {
     self.inner.suggested_filename()
   }
 
+  /// Playwright: `download.page(): Page`. Returns `undefined` only when
+  /// the owning page has already been closed (the Rust weak-backref
+  /// model surfaces that case; Playwright's TS type is non-nullable).
+  #[qjs(rename = "page")]
+  pub fn page(&self) -> Option<crate::bindings::page::PageJs> {
+    self.inner.page().map(crate::bindings::page::PageJs::new)
+  }
+
   /// Playwright: `download.path(): Promise<string>`.
   #[qjs(rename = "path")]
   pub async fn path(&self) -> rquickjs::Result<String> {

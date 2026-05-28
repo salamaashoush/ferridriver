@@ -47,6 +47,7 @@ use std::thread;
 /// - `GET /redirect` → 302 to `/landed`
 /// - `GET /landed` → 200 `text/plain` "landed"
 /// - `GET /api/users` → 200 `application/json` `{"users":["alice","bob"]}`
+/// - `GET /api/posts` → 200 `application/json` `{"posts":["first"]}`
 /// - `POST /echo` → 200 echoes the request body back as text/plain
 /// - `GET /multi-cookie` → 200 with two `Set-Cookie` headers
 /// - `GET /ua-marker` → 200 echoes `User-Agent` back as text/plain
@@ -134,6 +135,7 @@ fn build_stub_response(method: &str, path: &str, headers: &[(String, String)], b
     },
     ("GET", "/landed") => http_response("text/plain", b"landed"),
     ("GET", "/api/users") => http_response("application/json", br#"{"users":["alice","bob"]}"#),
+    ("GET", "/api/posts") => http_response("application/json", br#"{"posts":["first"]}"#),
     ("POST", "/echo") => http_response("text/plain", body),
     ("GET", "/multi-cookie") => {
       let body = b"cookies-set";
@@ -603,6 +605,125 @@ pub fn test_network_websocket(c: &mut McpClient) {
   assert_eq!(v["payload"].as_str(), Some("hello-ws"), "echoed payload: {v}");
   let _ = ws_stop.send(());
   let _ = http_stop.send(());
+}
+
+// ── 7. Response.httpVersion ──────────────────────────────────────────────
+
+/// `response.httpVersion()` resolves to the protocol version the
+/// backend reported. CDP fills `Network.responseReceived.response.protocol`
+/// (e.g. `http/1.1`); other backends may leave it empty, in which case
+/// the accessor resolves to `""` (Playwright's `Promise<string>` shape,
+/// never null). We assert the Promise resolves to a string either way,
+/// and to a non-empty `http`-prefixed value on CDP.
+pub fn test_network_http_version(c: &mut McpClient) {
+  with_stub_server(|base| {
+    c.nav_url(&format!("{base}/landed"));
+    let script = r"
+      const wait = page.waitForResponse('**/api/users', 10000);
+      await page.evaluate(`fetch('/api/users').then(r => r.text())`);
+      const resp = await wait;
+      const hv = await resp.httpVersion();
+      return { httpVersion: hv, typeofHv: typeof hv };
+      ";
+    let v = c.script_value(script);
+    assert_eq!(
+      v["typeofHv"].as_str(),
+      Some("string"),
+      "httpVersion always resolves to a string: {v}"
+    );
+    if c.backend == "cdp-pipe" || c.backend == "cdp-raw" {
+      assert!(
+        v["httpVersion"]
+          .as_str()
+          .is_some_and(|s| s.to_ascii_lowercase().contains("http")),
+        "CDP reports a protocol version: {v}",
+      );
+    }
+  });
+}
+
+// ── 8. Request.postDataBuffer (base64) ───────────────────────────────────
+
+/// `request.postDataBuffer()` returns the raw POST body base64-encoded
+/// in the QuickJS binding (no native Buffer). Decoding it must yield the
+/// exact bytes the page sent. Only CDP / PW-WebKit capture the request
+/// body; BiDi and the WebKit JS-interceptor leave it null (same gap as
+/// `postData()` in `test_network_post_data`).
+pub fn test_network_post_data_buffer(c: &mut McpClient) {
+  with_stub_server(|base| {
+    c.nav_url(&format!("{base}/landed"));
+    let script = r"
+      const wait = page.waitForRequest('**/echo', 10000);
+      await page.evaluate(`
+        fetch('/echo', {
+          method: 'POST',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify({ buf: 'yes', n: 9 }),
+        }).then(r => r.text())
+      `);
+      const req = await wait;
+      const b64 = req.postDataBuffer();
+      let decoded = null;
+      if (b64 != null) {
+        decoded = atob(b64);
+      }
+      return { b64, decoded };
+      ";
+    let v = c.script_value(script);
+    if c.backend == "cdp-pipe" || c.backend == "cdp-raw" || c.backend == "webkit" {
+      assert!(
+        v["b64"].as_str().is_some_and(|s| !s.is_empty()),
+        "postDataBuffer base64 present: {v}",
+      );
+      assert!(
+        v["decoded"].as_str().is_some_and(|s| s.contains("\"buf\":\"yes\"")),
+        "decoded base64 matches sent body: {v}",
+      );
+    } else {
+      assert!(
+        v["b64"].is_null(),
+        "{} cannot capture post body buffer yet: {v}",
+        c.backend,
+      );
+    }
+  });
+}
+
+// ── 9. Route.fallback applies overrides ──────────────────────────────────
+
+/// `route.fallback(overrides)` lets the request proceed with the given
+/// overrides applied (single-handler model: fallback === continue with
+/// overrides). We register a route that calls `route.fallback({ url })`
+/// rewriting `/api/users` to `/api/posts`; the page must observe the
+/// `/api/posts` payload, proving the override took effect rather than
+/// the request being dropped or the original URL fetched.
+pub fn test_route_fallback_applies_overrides(c: &mut McpClient) {
+  // BiDi/WebKit route interception of page `fetch` is exercised
+  // elsewhere; fallback shares the same Continue dispatch path. Run the
+  // observable-effect assertion where page-fetch routing is supported.
+  if c.backend == "webkit" {
+    return;
+  }
+  with_stub_server(|base| {
+    c.nav_url(&format!("{base}/landed"));
+    let script = r#"
+      await page.route('**/api/users', (route) => {
+        const target = route.request().url().replace('/api/users', '/api/posts');
+        route.fallback({ url: target });
+      });
+      try {
+        const text = await page.evaluate("fetch('/api/users').then(r => r.text())");
+        return { text: String(text) };
+      } finally {
+        await page.unroute('**/api/users');
+      }
+      "#;
+    let v = c.script_value(script);
+    assert!(
+      v["text"].as_str().is_some_and(|s| s.contains("posts")),
+      "fallback url override should route to /api/posts payload: {v}",
+    );
+  });
 }
 
 /// Spawn a tiny HTTP server that responds 200 OK to any request.
