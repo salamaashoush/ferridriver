@@ -106,6 +106,10 @@ impl SharedState {
   pub(crate) fn invalidate_context(&self, context: &str) {
     self.ref_maps.remove(context);
     self.log_handles.remove(context);
+    // Drop the per-context serialization lock too; otherwise context_locks
+    // grows unbounded as contexts are created and destroyed. Any guard
+    // currently held keeps its Arc<Mutex> alive, so in-flight work is safe.
+    self.context_locks.remove(context);
   }
 
   /// Invalidate all caches (after shutdown).
