@@ -3,8 +3,20 @@
  * Tests every function in the injected script against real browser behavior.
  */
 import { test, expect, describe, beforeAll, afterAll } from "bun:test";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { type Browser } from "../index.js";
 import { launchForBackend } from "./_helpers.js";
+
+// The MCP-support helpers (allElements/searchPage/scrollInfo/...) live in a
+// separate bundle that Rust injects lazily via `ensure_mcp_support` on MCP
+// actions. Raw `page.evaluate('window.__fd.searchPage(...)')` does not trigger
+// that path, so the test injects the bundle itself, mirroring the Rust const
+// `selectors::MCP_SUPPORT_JS`.
+const MCP_SUPPORT_JS = readFileSync(
+  fileURLToPath(new URL("../../ferridriver/src/injected/dist/mcp-support.min.js", import.meta.url)),
+  "utf8",
+);
 
 // When FERRIDRIVER_BACKEND is set, run only that backend for parallel execution.
 const BACKENDS = process.env.FERRIDRIVER_BACKEND
@@ -61,6 +73,9 @@ for (const backend of BACKENDS) {
       await page.goto(dataUrl);
       // Trigger selector engine injection by performing a locator query
       await page.waitForSelector("#heading");
+      // Inject the MCP-support bundle so window.__fd gains the
+      // allElements/searchPage/scrollInfo/... helpers this suite exercises.
+      await page.evaluate(MCP_SUPPORT_JS);
     });
 
     afterAll(async () => {
