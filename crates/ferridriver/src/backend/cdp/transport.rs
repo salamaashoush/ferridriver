@@ -588,7 +588,6 @@ mod tests {
   use std::time::Instant;
 
   const NETWORK_EVENT: &[u8] = br#"{"method":"Network.requestWillBeSent","sessionId":"s1","params":{"requestId":"r1","request":{"url":"https://example.test/asset.js","method":"GET"},"type":"Script"}}"#;
-
   #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
   #[ignore = "benchmark; run with --ignored --nocapture"]
   async fn bench_routed_event_dispatch_wakeups() {
