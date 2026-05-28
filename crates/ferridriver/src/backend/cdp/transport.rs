@@ -514,11 +514,14 @@ impl CdpDispatcher {
             return;
           }
           let loader_id = json_scan::json_string(json_scan::json_field(frame, b"loaderId"));
-          let loader_id_str = std::str::from_utf8(loader_id).unwrap_or("");
-          let mut state = lock_or_recover(&tracker.state);
-          state.current_loader_id = loader_id_str.to_string();
-          state.fired = super::LC_COMMIT;
-          drop(state);
+          // Allocate the owned loaderId string BEFORE taking the lock so the
+          // critical section holds no heap work — only the two field stores.
+          let loader_id_owned = std::str::from_utf8(loader_id).unwrap_or("").to_string();
+          {
+            let mut state = lock_or_recover(&tracker.state);
+            state.current_loader_id = loader_id_owned;
+            state.fired = super::LC_COMMIT;
+          }
           tracker.notify.notify_waiters();
         },
         "Page.lifecycleEvent" => {
@@ -533,7 +536,6 @@ impl CdpDispatcher {
             _ => None,
           };
           if let Some(event_flag) = event_name {
-            let mut state = lock_or_recover(&tracker.state);
             // Strict loaderId match. A subframe lifecycle event carries
             // the subframe's loaderId, which never matches the main
             // frame's `current_loader_id`. The previous "or is_empty()"
@@ -544,9 +546,20 @@ impl CdpDispatcher {
             // `Page.navigate` response (see
             // `crates/ferridriver/src/backend/cdp/mod.rs::CdpPage::goto`)
             // before awaiting any lifecycle event.
-            if state.current_loader_id == loader_id_str {
-              state.fired |= event_flag;
-              drop(state);
+            //
+            // The critical section holds only the compare-and-set; the
+            // `loader_id_str` borrows the incoming buffer (no allocation),
+            // and `notify_waiters` runs after the guard drops.
+            let matched = {
+              let mut state = lock_or_recover(&tracker.state);
+              if state.current_loader_id == loader_id_str {
+                state.fired |= event_flag;
+                true
+              } else {
+                false
+              }
+            };
+            if matched {
               tracker.notify.notify_waiters();
             }
           }
@@ -709,5 +722,85 @@ mod tests {
     let a = std::ptr::from_ref::<serde_json::Value>(&crate::backend::EMPTY_PARAMS);
     let b = std::ptr::from_ref::<serde_json::Value>(&crate::backend::EMPTY_PARAMS);
     assert_eq!(a, b, "EMPTY_PARAMS must be a single shared static");
+  }
+
+  fn register_test_tracker(
+    dispatcher: &CdpDispatcher,
+    session_id: &str,
+  ) -> Arc<std::sync::Mutex<super::super::LifecycleState>> {
+    let state = Arc::new(std::sync::Mutex::new(super::super::LifecycleState {
+      current_loader_id: String::new(),
+      fired: 0,
+      crashed: false,
+    }));
+    let notify = Arc::new(tokio::sync::Notify::new());
+    dispatcher.register_lifecycle_tracker(session_id, state.clone(), notify);
+    state
+  }
+
+  #[test]
+  fn lifecycle_dispatch_commit_then_load_updates_state() {
+    let dispatcher = CdpDispatcher::new();
+    let state = register_test_tracker(&dispatcher, "s1");
+
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameNavigated","sessionId":"s1","params":{"frame":{"id":"f1","loaderId":"L1","url":"https://example.test/"}}}"#,
+    );
+    {
+      let guard = lock_or_recover(&state);
+      assert_eq!(guard.current_loader_id, "L1");
+      assert_eq!(guard.fired, super::super::LC_COMMIT);
+    }
+
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.lifecycleEvent","sessionId":"s1","params":{"loaderId":"L1","name":"load"}}"#,
+    );
+    {
+      let guard = lock_or_recover(&state);
+      assert_eq!(guard.current_loader_id, "L1");
+      assert_eq!(guard.fired, super::super::LC_COMMIT | super::super::LC_LOAD);
+    }
+  }
+
+  #[test]
+  fn lifecycle_dispatch_subframe_navigation_does_not_clobber_main() {
+    let dispatcher = CdpDispatcher::new();
+    let state = register_test_tracker(&dispatcher, "s1");
+
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameNavigated","sessionId":"s1","params":{"frame":{"id":"f1","loaderId":"L1","url":"https://example.test/"}}}"#,
+    );
+    // Subframe commit carries a parentId; main-frame lifecycle must be untouched.
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameNavigated","sessionId":"s1","params":{"frame":{"id":"f2","parentId":"f1","loaderId":"L2","url":"https://sub.example.test/"}}}"#,
+    );
+    let guard = lock_or_recover(&state);
+    assert_eq!(guard.current_loader_id, "L1");
+    assert_eq!(guard.fired, super::super::LC_COMMIT);
+  }
+
+  #[test]
+  fn lifecycle_dispatch_mismatched_loader_id_is_ignored() {
+    let dispatcher = CdpDispatcher::new();
+    let state = register_test_tracker(&dispatcher, "s1");
+
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.frameNavigated","sessionId":"s1","params":{"frame":{"id":"f1","loaderId":"L1","url":"https://example.test/"}}}"#,
+    );
+    // A subframe lifecycle event carries a different loaderId; it must not set load.
+    dispatcher.dispatch_message(
+      br#"{"method":"Page.lifecycleEvent","sessionId":"s1","params":{"loaderId":"OTHER","name":"load"}}"#,
+    );
+    let guard = lock_or_recover(&state);
+    assert_eq!(guard.fired, super::super::LC_COMMIT);
+  }
+
+  #[test]
+  fn lifecycle_dispatch_target_crashed_sets_flag() {
+    let dispatcher = CdpDispatcher::new();
+    let state = register_test_tracker(&dispatcher, "s1");
+
+    dispatcher.dispatch_message(br#"{"method":"Inspector.targetCrashed","sessionId":"s1","params":{}}"#);
+    assert!(lock_or_recover(&state).crashed);
   }
 }
