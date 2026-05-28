@@ -899,4 +899,51 @@ async fn binding_surface_sweep() {
   )
   .await;
   assert_all_true("evaluateHandle", &v);
+
+  // 44 ── page.unrouteAll removes EVERY registered route. Register two
+  // fulfilling routes against the server-less `app.test` host, prove both
+  // serve, then unrouteAll() and prove neither serves (navigation now
+  // throws — no real server). Observing the post-unroute navigation
+  // failure is the effect that ONLY occurs once the routes are gone.
+  let v = step(
+    &h,
+    "unrouteAll",
+    "await page.route('**/ua-a', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<h1 id=a>A</h1>' })); \
+     await page.route('**/ua-b', route => route.fulfill({ status: 200, contentType: 'text/html', body: '<h1 id=b>B</h1>' })); \
+     await page.goto('https://app.test/ua-a'); \
+     const aServed = (await page.locator('#a').textContent()) === 'A'; \
+     await page.goto('https://app.test/ua-b'); \
+     const bServed = (await page.locator('#b').textContent()) === 'B'; \
+     await page.unrouteAll({ behavior: 'wait' }); \
+     let aGone = false; \
+     try { await page.goto('https://app.test/ua-a'); } catch (_) { aGone = true; } \
+     let bGone = false; \
+     try { await page.goto('https://app.test/ua-b'); } catch (_) { bGone = true; } \
+     return { aServed, bServed, aGone, bGone };",
+  )
+  .await;
+  assert_all_true("unrouteAll", &v);
+
+  // 45 ── page.pickLocator resolves with a Locator for the element the
+  // user clicks. We drive a trusted CDP click via page.mouse over the
+  // target's center while the picker is pending; the picker generates a
+  // selector for that element, and the returned Locator must address it
+  // (textContent round-trips the picked button's text). The picked
+  // selector resolving to exactly the clicked element is the effect that
+  // proves the picker captured the click target, not some default.
+  let v = step(
+    &h,
+    "pickLocator",
+    "await page.setContent('<button id=pick style=\"position:fixed;left:40px;top:40px;width:120px;height:40px\">PickMe</button>'); \
+     const box = await page.evaluate(() => { const r = document.getElementById('pick').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; }); \
+     const pending = page.pickLocator(); \
+     let ready = false; \
+     for (let i = 0; i < 50 && !ready; i++) { const r = await page.evaluate('!!window.__fdPickerReady'); ready = (r === true || r === 'true'); } \
+     await page.mouse.click(box.x, box.y); \
+     const picked = await pending; \
+     const txt = await picked.textContent(); \
+     return { pickedText: txt === 'PickMe' };",
+  )
+  .await;
+  assert_all_true("pickLocator", &v);
 }

@@ -1793,6 +1793,64 @@ impl Page {
     })
     .build(env)
   }
+
+  /// `page.unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' })`.
+  #[napi]
+  pub async fn unroute_all(&self, options: Option<UnrouteAllOptions>) -> Result<()> {
+    let behavior = options
+      .and_then(|o| o.behavior)
+      .map(|b| parse_unroute_behavior(&b))
+      .transpose()?
+      .unwrap_or_default();
+    self
+      .inner
+      .unroute_all(Some(behavior))
+      .await
+      .map_err(crate::error::to_napi)
+  }
+
+  /// `page.pickLocator(): Promise<Locator>`. Highlights elements under the
+  /// cursor and resolves with a Locator for the element the user clicks.
+  #[napi]
+  pub async fn pick_locator(&self) -> Result<Locator> {
+    self
+      .inner
+      .pick_locator()
+      .await
+      .map(Locator::wrap)
+      .map_err(crate::error::to_napi)
+  }
+
+  /// `page.cancelPickLocator(): Promise<void>`.
+  #[napi]
+  pub async fn cancel_pick_locator(&self) -> Result<()> {
+    self.inner.cancel_pick_locator().await.map_err(crate::error::to_napi)
+  }
+
+  /// `page.hideHighlight(): Promise<void>`.
+  #[napi]
+  pub async fn hide_highlight(&self) -> Result<()> {
+    self.inner.hide_highlight().await.map_err(crate::error::to_napi)
+  }
+}
+
+/// Playwright `page.unrouteAll({ behavior })` option bag.
+#[napi(object)]
+pub struct UnrouteAllOptions {
+  /// `'wait' | 'ignoreErrors' | 'default'`.
+  #[napi(ts_type = "'wait' | 'ignoreErrors' | 'default'")]
+  pub behavior: Option<String>,
+}
+
+fn parse_unroute_behavior(behavior: &str) -> Result<ferridriver::options::UnrouteBehavior> {
+  match behavior {
+    "default" => Ok(ferridriver::options::UnrouteBehavior::Default),
+    "wait" => Ok(ferridriver::options::UnrouteBehavior::Wait),
+    "ignoreErrors" => Ok(ferridriver::options::UnrouteBehavior::IgnoreErrors),
+    other => Err(napi::Error::from_reason(format!(
+      "unrouteAll: invalid behavior {other:?} (expected 'wait', 'ignoreErrors', or 'default')"
+    ))),
+  }
 }
 
 #[napi(object)]

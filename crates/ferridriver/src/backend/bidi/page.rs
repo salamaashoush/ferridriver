@@ -2508,6 +2508,15 @@ impl BidiPage {
     Ok(())
   }
 
+  pub async fn unroute_all(&self, _behavior: crate::options::UnrouteBehavior) -> Result<()> {
+    self.routes.write().await.clear();
+    let mut ids = self.intercept_ids.write().await;
+    for id in ids.drain(..) {
+      let _ = self.cmd("network.removeIntercept", json!({"intercept": id})).await;
+    }
+    Ok(())
+  }
+
   // ── Lifecycle ───────────────────────────────────────────────────────────
 
   pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {

@@ -298,6 +298,19 @@ pub(crate) fn get_exposed_callback(
   with_page_callbacks(ctx, |r| r.exposed.get(name).cloned())
 }
 
+fn parse_unroute_behavior(behavior: &str) -> rquickjs::Result<ferridriver::options::UnrouteBehavior> {
+  match behavior {
+    "default" => Ok(ferridriver::options::UnrouteBehavior::Default),
+    "wait" => Ok(ferridriver::options::UnrouteBehavior::Wait),
+    "ignoreErrors" => Ok(ferridriver::options::UnrouteBehavior::IgnoreErrors),
+    other => Err(rquickjs::Error::new_from_js_message(
+      "unrouteAll options",
+      "behavior",
+      format!("invalid behavior {other:?} (expected 'wait', 'ignoreErrors', or 'default')"),
+    )),
+  }
+}
+
 /// JS-visible wrapper around [`ferridriver::Page`].
 ///
 /// Held as `Arc<Page>` so the same page can be shared with the MCP session
@@ -1279,6 +1292,55 @@ impl PageJs {
     }
     let matcher = url_value_to_matcher(&ctx, url)?;
     self.inner.unroute(&matcher).await.into_js()
+  }
+
+  /// `page.unrouteAll(options?: { behavior?: 'wait' | 'ignoreErrors' | 'default' })`.
+  /// Removes every route registered via `page.route`, clearing the script-side
+  /// predicate/handler tables too.
+  #[qjs(rename = "unrouteAll")]
+  pub async fn unroute_all<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let behavior = match options.0.and_then(rquickjs::Value::into_object) {
+      Some(obj) => match obj.get::<_, Option<String>>("behavior")? {
+        Some(b) => Some(parse_unroute_behavior(&b)?),
+        None => None,
+      },
+      None => None,
+    };
+    self.inner.unroute_all(behavior).await.into_js()?;
+    self
+      .route_matchers
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .clear();
+    with_page_callbacks(&ctx, |r| {
+      r.route_preds.clear();
+      r.route_handlers.clear();
+    })?;
+    Ok(())
+  }
+
+  /// `page.pickLocator(): Promise<Locator>`. Highlights elements under the
+  /// cursor and resolves with a Locator for the element the user clicks.
+  #[qjs(rename = "pickLocator")]
+  pub async fn pick_locator(&self) -> rquickjs::Result<LocatorJs> {
+    let loc = self.inner.pick_locator().await.into_js()?;
+    Ok(LocatorJs::new(loc))
+  }
+
+  /// `page.cancelPickLocator(): Promise<void>`.
+  #[qjs(rename = "cancelPickLocator")]
+  pub async fn cancel_pick_locator(&self) -> rquickjs::Result<()> {
+    self.inner.cancel_pick_locator().await.into_js()
+  }
+
+  /// `page.hideHighlight(): Promise<void>`.
+  #[qjs(rename = "hideHighlight")]
+  pub async fn hide_highlight(&self) -> rquickjs::Result<()> {
+    self.inner.hide_highlight().await.into_js()
   }
 
   // ── Network lifecycle waits ──────────────────────────────────────────────
