@@ -1713,6 +1713,51 @@ pub struct ScreenSize {
   pub height: i64,
 }
 
+/// A single `localStorage` entry — `{ name, value }`.
+/// Mirrors Playwright's `NameValue` (protocol channels.d.ts:5399).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct NameValue {
+  pub name: String,
+  pub value: String,
+}
+
+/// Per-origin storage snapshot — `{ origin, localStorage }`.
+/// Mirrors Playwright's `OriginStorage` (protocol channels.d.ts:5158),
+/// minus `indexedDB` (not yet collected — see [`StorageState`]).
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OriginState {
+  pub origin: String,
+  pub local_storage: Vec<NameValue>,
+}
+
+/// The state EXPORTED by `context.storageState()` — `{ cookies, origins }`.
+/// Mirrors Playwright's `StorageState`
+/// (`/tmp/playwright/packages/playwright-core/src/client/types.ts:42`).
+/// Serializes to the same JSON shape consumed by [`StorageStateInput`], so a
+/// round-trip (export -> `new_context` `storageState`) preserves state.
+///
+/// `indexedDB` is intentionally NOT collected yet; Playwright gates it behind
+/// `storageState({ indexedDB: true })`. We accept the option for signature
+/// parity but always emit an empty `IndexedDB` set.
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
+pub struct StorageState {
+  pub cookies: Vec<crate::backend::CookieData>,
+  pub origins: Vec<OriginState>,
+}
+
+/// Options for `context.storageState(options?)`.
+/// `{ path?: string, indexedDB?: boolean }` —
+/// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`.
+#[derive(Debug, Clone, Default)]
+pub struct StorageStateOptions {
+  /// Write the JSON-serialized state to this file (pretty-printed, 2-space).
+  pub path: Option<std::path::PathBuf>,
+  /// Collect `IndexedDB` databases as well. Not yet implemented; accepted for
+  /// signature parity. When `true`, the export is unaffected (empty set).
+  pub indexed_db: Option<bool>,
+}
+
 /// Storage state bag — cookies + per-origin localStorage snapshot.
 /// `storageState: string | { cookies, origins }` —
 /// types.d.ts:22566.
@@ -2448,5 +2493,60 @@ mod click_option_tests {
       ..Default::default()
     };
     assert_eq!(opts.resolved_steps(), 1);
+  }
+}
+
+#[cfg(test)]
+mod storage_state_tests {
+  use super::*;
+
+  /// The exported `StorageState` must serialize to Playwright's exact wire
+  /// shape: `{ cookies: [...], origins: [{ origin, localStorage: [{name,
+  /// value}] }] }` (client/types.ts:42, protocol channels.d.ts:5158/5399).
+  #[test]
+  fn storage_state_serializes_to_playwright_shape() {
+    let state = StorageState {
+      cookies: vec![crate::backend::CookieData {
+        name: "sid".into(),
+        value: "abc".into(),
+        domain: "example.com".into(),
+        path: "/".into(),
+        secure: false,
+        http_only: false,
+        expires: None,
+        same_site: None,
+        url: None,
+      }],
+      origins: vec![OriginState {
+        origin: "https://example.com".into(),
+        local_storage: vec![NameValue {
+          name: "token".into(),
+          value: "t1".into(),
+        }],
+      }],
+    };
+    let v = serde_json::to_value(&state).unwrap();
+    assert_eq!(v["cookies"][0]["name"], "sid");
+    assert_eq!(v["cookies"][0]["value"], "abc");
+    // camelCase on the wire — `localStorage`, not `local_storage`.
+    assert_eq!(v["origins"][0]["origin"], "https://example.com");
+    assert_eq!(v["origins"][0]["localStorage"][0]["name"], "token");
+    assert_eq!(v["origins"][0]["localStorage"][0]["value"], "t1");
+    assert!(v["origins"][0].get("local_storage").is_none());
+  }
+
+  /// A round-trip through the EXPORT shape must be re-consumable as
+  /// [`StorageStateInput::Inline`] (same JSON), so saved auth state hydrates.
+  #[test]
+  fn exported_state_is_valid_storage_state_input() {
+    let json = serde_json::json!({
+      "cookies": [],
+      "origins": [{ "origin": "https://e.com", "localStorage": [{ "name": "k", "value": "v" }] }]
+    });
+    let parsed: StorageState = serde_json::from_value(json.clone()).unwrap();
+    assert_eq!(parsed.origins[0].origin, "https://e.com");
+    assert_eq!(parsed.origins[0].local_storage[0].name, "k");
+    // Same value is accepted as inline hydration input.
+    let _input = StorageStateInput::Inline(json);
   }
 }

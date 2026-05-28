@@ -108,6 +108,33 @@ pub fn test_script_localstorage(c: &mut McpClient) {
   assert!(v["count"].as_i64().unwrap_or(0) >= 1);
 }
 
+pub fn test_script_storage_state(c: &mut McpClient) {
+  // Playwright: `context.storageState(): Promise<{ cookies, origins }>` —
+  // `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:460`.
+  // Set a cookie + a localStorage entry on a real origin, then export and
+  // assert BOTH appear in the result with the camelCase wire shape.
+  c.nav_url("https://example.com");
+  let v = c.script_value(
+    "await context.addCookies([{ \
+         name: 'ssk', value: 'ssv', domain: 'example.com', path: '/', \
+         secure: false, httpOnly: false, sameSite: 'Lax' \
+       }]); \
+       await page.evaluate(\"localStorage.setItem('sk', 'sv')\"); \
+       const state = await context.storageState(); \
+       const cookie = state.cookies.find(c => c.name === 'ssk'); \
+       const origin = state.origins.find(o => o.origin === 'https://example.com'); \
+       const item = origin ? origin.localStorage.find(kv => kv.name === 'sk') : null; \
+       return { \
+         cookieValue: cookie?.value ?? null, \
+         originFound: !!origin, \
+         itemValue: item?.value ?? null \
+       };",
+  );
+  assert_eq!(v["cookieValue"], json!("ssv"), "cookie should be exported");
+  assert_eq!(v["originFound"], json!(true), "origin should be present");
+  assert_eq!(v["itemValue"], json!("sv"), "localStorage entry should be exported");
+}
+
 pub fn test_script_markdown(c: &mut McpClient) {
   c.nav("<h1>Title</h1><p>Hello world</p><ul><li>Item 1</li><li>Item 2</li></ul>");
   let v = c.script_value("return await page.markdown();");
@@ -148,6 +175,10 @@ pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_emul_storage::test_script_localstorage",
     test_script_localstorage,
+  );
+  set.run(
+    "backends_support::script_emul_storage::test_script_storage_state",
+    test_script_storage_state,
   );
   set.run(
     "backends_support::script_emul_storage::test_script_markdown",
