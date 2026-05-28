@@ -1,8 +1,8 @@
 #![allow(clippy::expect_used)]
-//! Ignored microbench for the QuickJS -> ferridriver evaluate-argument bridge.
+//! Ignored microbench for the `QuickJS` -> ferridriver evaluate-argument bridge.
 //!
 //! Run with:
-//! cargo test --profile release-fast -p ferridriver-script --test binding_convert_bench -- --ignored --nocapture
+//! `cargo test --profile release-fast -p ferridriver-script --test binding_convert_bench -- --ignored --nocapture`
 
 use std::time::Instant;
 

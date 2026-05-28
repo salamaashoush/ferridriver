@@ -1,3 +1,4 @@
+#![allow(clippy::expect_used, clippy::unwrap_used)]
 //! Round-trip correctness for the `QuickJS` value rehydration path.
 //!
 //! `serialized_value_to_quickjs` rebuilds a native JS value from the wire
