@@ -536,6 +536,37 @@ pub fn build_selone_js(selector: &str, fd: &str, strict: bool) -> Result<String>
   Ok(format!("{fd}.selOne({parts_json},{strict_lit})"))
 }
 
+/// Resolve `selector` to a single element in `frame_id`'s execution
+/// context and return the canonical selector Playwright's
+/// recorder/codegen would emit for it (`injected.generateSelectorSimple`).
+/// Mirrors `Frame.resolveSelector` in
+/// `/tmp/playwright/packages/playwright-core/src/server/frames.ts:1274`.
+///
+/// # Errors
+///
+/// Returns an error if selector parsing fails, no element matches, or
+/// (strict, like Playwright's `query`) more than one element matches.
+pub async fn normalize_selector(page: &AnyPage, selector: &str, frame_id: Option<&str>) -> Result<String> {
+  let parsed = parse(selector)?;
+  let parts_json = build_parts_json(&parsed);
+  page.ensure_engine_injected().await?;
+  let js = format!("window.__fd.normalizeSelector({parts_json})");
+  let result = match frame_id {
+    Some(fid) => page.evaluate_in_frame(&js, fid).await,
+    None => page.evaluate(&js).await,
+  };
+  let value = result.map_err(|err| {
+    if let Some(count) = parse_strict_violation_count(&err) {
+      FerriError::strict(selector, count)
+    } else {
+      err
+    }
+  })?;
+  value
+    .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+    .ok_or_else(|| FerriError::invalid_selector(selector, "no element found"))
+}
+
 /// Parse a `strict mode violation: <count>` exception message thrown
 /// by the engine-side `selOne(parts, strict=true)` and return the
 /// match count. Used by [`crate::locator::Locator`] to convert a

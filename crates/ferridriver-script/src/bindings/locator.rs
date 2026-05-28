@@ -624,6 +624,14 @@ impl LocatorJs {
       .map(|c| i32::try_from(c).unwrap_or(i32::MAX))
   }
 
+  /// Playwright: `locator.normalize(): Promise<Locator>`. Resolves the
+  /// selector to its canonical recorder/codegen form and returns a new
+  /// locator built from it.
+  #[qjs(rename = "normalize")]
+  pub async fn normalize(&self) -> rquickjs::Result<LocatorJs> {
+    self.inner.normalize().await.into_js().map(LocatorJs::new)
+  }
+
   /// Playwright: `locator.screenshot(options?): Promise<Buffer>`.
   /// Thin delegator to core `Locator::screenshot` (PNG bytes).
   #[qjs(rename = "screenshot")]

@@ -1123,6 +1123,42 @@ impl Locator {
     Ok(usize::try_from(val).unwrap_or(usize::MAX))
   }
 
+  /// Resolve this locator to a canonical selector and return a new
+  /// [`Locator`] built from it.
+  ///
+  /// Playwright: `normalize(): Promise<Locator>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:269`)
+  /// which calls `frame.resolveSelector` -> `injected.generateSelectorSimple`
+  /// (`/tmp/playwright/packages/playwright-core/src/server/frames.ts:1274`).
+  ///
+  /// The trailing selector (the part that runs inside the deepest
+  /// resolved frame) is replaced with the recorder/codegen selector the
+  /// injected script generates for the single matched element. When the
+  /// locator targets a child frame (it carries `internal:control=enter-frame`
+  /// hops), the original enter-frame prefix is preserved so the returned
+  /// locator still resolves into the same frame; only the trailing
+  /// segment is canonicalised. Strict by design: errors if 0 or >1
+  /// elements match, mirroring Playwright's `selectors.query`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing fails, no element matches, or
+  /// more than one element matches.
+  pub async fn normalize(&self) -> Result<Locator> {
+    const MARK: &str = ">> internal:control=enter-frame >>";
+    let (rf, rsel) = self.resolved().await?;
+    let frame_id: Option<&str> = if rf.is_main_frame() { None } else { Some(rf.id()) };
+    let generated = selectors::normalize_selector(rf.page_arc().inner(), &rsel, frame_id).await?;
+    // Re-attach the enter-frame prefix (everything up to and including
+    // the last hop) so the new locator targets the same frame; only the
+    // trailing segment is replaced with the canonical generated selector.
+    let new_selector = match self.selector.rsplit_once(MARK) {
+      Some((prefix, _)) => format!("{prefix}{MARK} {generated}"),
+      None => generated,
+    };
+    Ok(Locator::new(self.frame.clone(), new_selector))
+  }
+
   /// Return the bounding box of the element, or `None` if the element is not found.
   ///
   /// # Errors
