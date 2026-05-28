@@ -2752,18 +2752,27 @@ impl Keyboard<'_> {
   /// in the text. For characters not representable as single key presses,
   /// falls back to `insert_text` for that character.
   ///
+  /// When `named_keys` is set, `{Name}` / `{Mod+Key}` sequences are parsed out
+  /// of the text and dispatched as key presses (same format as `press`); `{{`
+  /// types a literal `{`. Mirrors Playwright `keyboard.type({ namedKeys: true })`.
+  ///
   /// # Errors
   ///
   /// Returns an error if the typing dispatch fails.
   pub async fn r#type(&self, text: &str, opts: Option<KeyboardTypeOptions>) -> Result<()> {
-    let delay = opts.and_then(|o| o.delay);
+    let opts = opts.unwrap_or_default();
+    let delay = opts.delay;
+    let named_keys = opts.named_keys.unwrap_or(false);
     let mut first = true;
-    for ch in text.chars() {
+    for token in parse_named_keys(text, named_keys) {
       if let (false, Some(ms)) = (first, delay) {
         tokio::time::sleep(std::time::Duration::from_millis(ms)).await;
       }
       first = false;
-      self.page.press_key(&ch.to_string()).await?;
+      match token {
+        TypeToken::Key(key) => self.page.press_key(&key).await?,
+        TypeToken::Char(ch) => self.page.press_key(&ch.to_string()).await?,
+      }
     }
     Ok(())
   }
@@ -2907,11 +2916,57 @@ pub struct KeyboardPressOptions {
   pub delay: Option<u64>,
 }
 
-/// Options for `Keyboard.type()` — Playwright `{ delay? }`.
+/// Options for `Keyboard.type()` — Playwright `{ delay?, namedKeys? }`.
 #[derive(Debug, Clone, Default)]
 pub struct KeyboardTypeOptions {
   /// Milliseconds to wait between key presses.
   pub delay: Option<u64>,
+  /// When true, `{Name}` / `{Mod+Key}` sequences in the text are treated as key
+  /// presses (same format as `Keyboard::press`). `{{` types a literal `{`.
+  pub named_keys: Option<bool>,
+}
+
+/// A single token produced by parsing `keyboard.type` text with `namedKeys`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum TypeToken {
+  /// A key name or combination to press (e.g. `Enter`, `Control+a`).
+  Key(String),
+  /// A literal character to type.
+  Char(char),
+}
+
+/// Tokenize `keyboard.type` text. When `named_keys` is false every character is
+/// a `Char`. When true, `{Name}` becomes a `Key`, `{{` becomes a literal `{`,
+/// and an unterminated `{` is treated as a literal `{`.
+///
+/// Mirrors Playwright `packages/playwright-core/src/server/input.ts::parseNamedKeys`.
+fn parse_named_keys(text: &str, named_keys: bool) -> Vec<TypeToken> {
+  if !named_keys {
+    return text.chars().map(TypeToken::Char).collect();
+  }
+  let chars: Vec<char> = text.chars().collect();
+  let mut result = Vec::new();
+  let mut i = 0;
+  while i < chars.len() {
+    if chars[i] == '{' {
+      if i + 1 < chars.len() && chars[i + 1] == '{' {
+        result.push(TypeToken::Char('{'));
+        i += 2;
+      } else if let Some(offset) = chars[i + 1..].iter().position(|&c| c == '}') {
+        let end = i + 1 + offset;
+        let name: String = chars[i + 1..end].iter().collect();
+        result.push(TypeToken::Key(name));
+        i = end + 1;
+      } else {
+        result.push(TypeToken::Char('{'));
+        i += 1;
+      }
+    } else {
+      result.push(TypeToken::Char(chars[i]));
+      i += 1;
+    }
+  }
+  result
 }
 
 /// Options for `Mouse.down()`.
@@ -3015,5 +3070,97 @@ mod tests {
     // Other errors bubble up unchanged.
     assert!(!is_element_not_found(&FerriError::backend("session detached")));
     assert!(!is_element_not_found(&FerriError::timeout_plain(30_000)));
+  }
+
+  #[test]
+  fn parse_named_keys_disabled_yields_only_chars() {
+    assert_eq!(
+      parse_named_keys("a{Enter}b", false),
+      vec![
+        TypeToken::Char('a'),
+        TypeToken::Char('{'),
+        TypeToken::Char('E'),
+        TypeToken::Char('n'),
+        TypeToken::Char('t'),
+        TypeToken::Char('e'),
+        TypeToken::Char('r'),
+        TypeToken::Char('}'),
+        TypeToken::Char('b'),
+      ]
+    );
+  }
+
+  #[test]
+  fn parse_named_keys_extracts_single_key() {
+    assert_eq!(
+      parse_named_keys("Hello{Enter}World", true),
+      vec![
+        TypeToken::Char('H'),
+        TypeToken::Char('e'),
+        TypeToken::Char('l'),
+        TypeToken::Char('l'),
+        TypeToken::Char('o'),
+        TypeToken::Key("Enter".to_string()),
+        TypeToken::Char('W'),
+        TypeToken::Char('o'),
+        TypeToken::Char('r'),
+        TypeToken::Char('l'),
+        TypeToken::Char('d'),
+      ]
+    );
+  }
+
+  #[test]
+  fn parse_named_keys_extracts_modifier_combo() {
+    assert_eq!(
+      parse_named_keys("{Control+a}x", true),
+      vec![TypeToken::Key("Control+a".to_string()), TypeToken::Char('x')]
+    );
+  }
+
+  #[test]
+  fn parse_named_keys_double_brace_is_literal() {
+    assert_eq!(
+      parse_named_keys("a{{b", true),
+      vec![TypeToken::Char('a'), TypeToken::Char('{'), TypeToken::Char('b')]
+    );
+  }
+
+  #[test]
+  fn parse_named_keys_double_brace_then_key() {
+    // `{{` -> literal `{`, then `Enter}` is a plain char run (no opening brace).
+    assert_eq!(
+      parse_named_keys("{{Enter}", true),
+      vec![
+        TypeToken::Char('{'),
+        TypeToken::Char('E'),
+        TypeToken::Char('n'),
+        TypeToken::Char('t'),
+        TypeToken::Char('e'),
+        TypeToken::Char('r'),
+        TypeToken::Char('}'),
+      ]
+    );
+  }
+
+  #[test]
+  fn parse_named_keys_unterminated_brace_is_literal() {
+    assert_eq!(
+      parse_named_keys("a{bc", true),
+      vec![
+        TypeToken::Char('a'),
+        TypeToken::Char('{'),
+        TypeToken::Char('b'),
+        TypeToken::Char('c'),
+      ]
+    );
+  }
+
+  #[test]
+  fn parse_named_keys_adjacent_keys() {
+    assert_eq!(
+      parse_named_keys("{Tab}{Enter}", true),
+      vec![TypeToken::Key("Tab".to_string()), TypeToken::Key("Enter".to_string())]
+    );
   }
 }

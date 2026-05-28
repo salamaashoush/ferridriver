@@ -1861,10 +1861,17 @@ pub struct MouseClickOptions {
   pub delay: Option<f64>,
 }
 
-/// Playwright `{ delay? }` for `keyboard.press` / `keyboard.type`.
+/// Playwright `{ delay? }` for `keyboard.press`.
 #[napi(object)]
 pub struct KeyDelayOptions {
   pub delay: Option<f64>,
+}
+
+/// Playwright `{ delay?, namedKeys? }` for `keyboard.type`.
+#[napi(object)]
+pub struct KeyTypeOptions {
+  pub delay: Option<f64>,
+  pub named_keys: Option<bool>,
 }
 
 #[napi]
@@ -1900,14 +1907,13 @@ impl Keyboard {
       .map_err(crate::error::to_napi)
   }
 
-  /// Playwright: `keyboard.type(text, options?: { delay? })`.
+  /// Playwright: `keyboard.type(text, options?: { delay?, namedKeys? })`.
   #[napi(js_name = "type")]
-  pub async fn type_text(&self, text: String, options: Option<KeyDelayOptions>) -> Result<()> {
-    let opts = options
-      .and_then(|o| o.delay)
-      .map(|d| ferridriver::page::KeyboardTypeOptions {
-        delay: Some(crate::types::f64_to_u64(d)),
-      });
+  pub async fn type_text(&self, text: String, options: Option<KeyTypeOptions>) -> Result<()> {
+    let opts = options.map(|o| ferridriver::page::KeyboardTypeOptions {
+      delay: o.delay.map(crate::types::f64_to_u64),
+      named_keys: o.named_keys,
+    });
     self
       .page
       .keyboard()

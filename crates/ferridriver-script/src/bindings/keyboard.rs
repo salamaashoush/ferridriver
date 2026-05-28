@@ -21,9 +21,32 @@ struct JsKeyDelay {
   delay: Option<u64>,
 }
 
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, rename_all = "camelCase")]
+struct JsKeyType {
+  delay: Option<u64>,
+  named_keys: Option<bool>,
+}
+
 fn parse_delay<'js>(ctx: &rquickjs::Ctx<'js>, v: Opt<rquickjs::Value<'js>>) -> rquickjs::Result<Option<u64>> {
   match v.0 {
     Some(val) if !val.is_undefined() && !val.is_null() => Ok(serde_from_js::<JsKeyDelay>(ctx, val)?.delay),
+    _ => Ok(None),
+  }
+}
+
+fn parse_type_options<'js>(
+  ctx: &rquickjs::Ctx<'js>,
+  v: Opt<rquickjs::Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::page::KeyboardTypeOptions>> {
+  match v.0 {
+    Some(val) if !val.is_undefined() && !val.is_null() => {
+      let parsed = serde_from_js::<JsKeyType>(ctx, val)?;
+      Ok(Some(ferridriver::page::KeyboardTypeOptions {
+        delay: parsed.delay,
+        named_keys: parsed.named_keys,
+      }))
+    },
     _ => Ok(None),
   }
 }
@@ -69,7 +92,7 @@ impl KeyboardJs {
     self.page.keyboard().press(&key, opts).await.into_js()
   }
 
-  /// `keyboard.type(text, options?: { delay? })`.
+  /// `keyboard.type(text, options?: { delay?, namedKeys? })`.
   #[qjs(rename = "type")]
   pub async fn type_<'js>(
     &self,
@@ -77,8 +100,7 @@ impl KeyboardJs {
     text: String,
     options: Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<()> {
-    let delay = parse_delay(&ctx, options)?;
-    let opts = delay.map(|d| ferridriver::page::KeyboardTypeOptions { delay: Some(d) });
+    let opts = parse_type_options(&ctx, options)?;
     self.page.keyboard().r#type(&text, opts).await.into_js()
   }
 
