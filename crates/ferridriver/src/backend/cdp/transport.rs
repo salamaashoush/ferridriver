@@ -619,7 +619,7 @@ mod tests {
     let global_elapsed = global_started.elapsed();
 
     let routed = CdpDispatcher::new();
-    let mut idle_method_receivers = vec![
+    let mut idle_method_receivers = [
       routed.subscribe_event_method("Runtime.consoleAPICalled"),
       routed.subscribe_event_method("Runtime.exceptionThrown"),
       routed.subscribe_event_method("Page.javascriptDialogOpening"),
@@ -627,7 +627,7 @@ mod tests {
       routed.subscribe_event_method("Runtime.bindingCalled"),
       routed.subscribe_event_method("Page.screencastFrame"),
     ];
-    let mut idle_domain_receivers = vec![
+    let mut idle_domain_receivers = [
       routed.subscribe_event_domain("Browser"),
       routed.subscribe_event_domain("Fetch"),
     ];
