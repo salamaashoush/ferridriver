@@ -191,7 +191,7 @@ impl SessionTable {
 
     // A build happens unless an entry already holds a live VM for this
     // name (a locked entry owns its own VM lifecycle — don't second-guess).
-    let will_build = self.map.get(name).map_or(true, |slot| match slot.value().try_lock() {
+    let will_build = self.map.get(name).is_none_or(|slot| match slot.value().try_lock() {
       Ok(s) => !s.has_vm(),
       Err(_) => false,
     });

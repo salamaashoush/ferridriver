@@ -57,6 +57,7 @@ mod codegen;
 mod console_message;
 mod context;
 mod dialog;
+mod disposable;
 mod download;
 mod element_handle;
 mod error;

@@ -1231,17 +1231,21 @@ impl Page {
   /// All function/arg lowering lands in Rust core via
   /// [`ferridriver::options::evaluation_script`]; this method is a thin
   /// delegator.
-  #[napi(ts_args_type = "script: Function | string | { path?: string, content?: string }, arg?: any")]
+  #[napi(
+    ts_args_type = "script: Function | string | { path?: string, content?: string }, arg?: any",
+    ts_return_type = "Promise<Disposable>"
+  )]
   pub async fn add_init_script(
     &self,
     script: crate::types::NapiInitScript,
     arg: crate::types::NapiInitScriptArg,
-  ) -> Result<String> {
-    self
+  ) -> Result<crate::disposable::Disposable> {
+    let disposable = self
       .inner
       .add_init_script(script.into(), arg.0)
       .await
-      .map_err(crate::error::to_napi)
+      .map_err(crate::error::to_napi)?;
+    Ok(crate::disposable::Disposable::wrap(disposable))
   }
 
   #[napi]
@@ -1620,7 +1624,7 @@ impl Page {
   /// ```
   #[napi(
     ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler: (route: Route) => void",
-    ts_return_type = "Promise<void>"
+    ts_return_type = "Promise<Disposable>"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn route(
@@ -1640,7 +1644,7 @@ impl Page {
       true,
       0,
     >,
-  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::disposable::Disposable>> {
     use napi::bindgen_prelude::Either3;
     let nb = napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking;
     // The route-handler TSFN is `weak` (not `Clone`); share it via `Arc`
@@ -1705,7 +1709,11 @@ impl Page {
     let inner = Arc::clone(&self.inner);
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       let matcher = spec.build()?;
-      inner.route(matcher, rust_handler).await.map_err(crate::error::to_napi)
+      let disposable = inner
+        .route(matcher, rust_handler)
+        .await
+        .map_err(crate::error::to_napi)?;
+      Ok(crate::disposable::Disposable::wrap(disposable))
     })
     .build(env)
   }

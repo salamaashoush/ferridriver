@@ -28,6 +28,7 @@ pub mod console_message;
 pub mod context;
 pub mod convert;
 pub mod dialog;
+pub mod disposable;
 pub mod download;
 pub mod element_handle;
 pub mod expect;

@@ -2059,6 +2059,11 @@ impl Page {
   /// })).await?;
   /// ```
   ///
+  /// Returns a [`crate::disposable::Disposable`] whose `dispose()` reverses
+  /// the registration (equivalent to calling [`Page::unroute`] with the same
+  /// matcher). Mirrors Playwright `page.route(...)` which returns a
+  /// `DisposableStub` (`client/page.ts:535`).
+  ///
   /// # Errors
   ///
   /// Returns an error if the route interception cannot be set up.
@@ -2066,8 +2071,12 @@ impl Page {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
-  ) -> Result<()> {
-    self.inner.route(matcher, handler).await
+  ) -> Result<crate::disposable::Disposable> {
+    self.inner.route(matcher.clone(), handler).await?;
+    let inner = self.inner.clone();
+    Ok(crate::disposable::Disposable::new(move || async move {
+      inner.unroute(&matcher).await
+    }))
   }
 
   /// Remove all route handlers whose matcher is
@@ -2392,7 +2401,10 @@ impl Page {
   /// the `Function` variant; passing `arg` alongside any non-function
   /// variant is a Playwright-parity error (see [`crate::options::evaluation_script`]).
   ///
-  /// Returns an identifier that can be used with `remove_init_script`.
+  /// Returns a [`crate::disposable::Disposable`] whose `dispose()` removes the
+  /// injected script (equivalent to [`Page::remove_init_script`] with the
+  /// generated identifier). Mirrors Playwright `page.addInitScript(...)` which
+  /// returns a `Disposable` (`client/page.ts:532`).
   ///
   /// # Errors
   ///
@@ -2402,9 +2414,13 @@ impl Page {
     &self,
     script: crate::options::InitScriptSource,
     arg: Option<serde_json::Value>,
-  ) -> Result<String> {
+  ) -> Result<crate::disposable::Disposable> {
     let source = crate::options::evaluation_script(script, arg.as_ref())?;
-    self.inner.add_init_script(&source).await
+    let identifier = self.inner.add_init_script(&source).await?;
+    let inner = self.inner.clone();
+    Ok(crate::disposable::Disposable::new(move || async move {
+      inner.remove_init_script(&identifier).await
+    }))
   }
 
   /// Remove a previously injected init script by identifier.

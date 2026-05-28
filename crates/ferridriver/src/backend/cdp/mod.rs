@@ -2721,6 +2721,49 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// Single-click fast path: `click_count == 1`, no delay, `steps == 1`.
+  /// Pipelines the (optional pre-press move +) press + release in one
+  /// `try_join!` so the renderer sees them back-to-back at one CDP RTT.
+  async fn single_click_fast_path(&self, x: f64, y: f64, button: &str, mods: u32, skip_move: bool) -> Result<()> {
+    let press = self.cmd(
+      "Input.dispatchMouseEvent",
+      serde_json::json!({
+        "type": "mousePressed",
+        "x": x,
+        "y": y,
+        "button": button,
+        "clickCount": 1,
+        "modifiers": mods,
+      }),
+    );
+    let release = self.cmd(
+      "Input.dispatchMouseEvent",
+      serde_json::json!({
+        "type": "mouseReleased",
+        "x": x,
+        "y": y,
+        "button": button,
+        "clickCount": 1,
+        "modifiers": mods,
+      }),
+    );
+    if skip_move {
+      let _ = tokio::try_join!(press, release)?;
+    } else {
+      let moved = self.cmd(
+        "Input.dispatchMouseEvent",
+        serde_json::json!({
+          "type": "mouseMoved",
+          "x": x,
+          "y": y,
+          "modifiers": mods,
+        }),
+      );
+      let _ = tokio::try_join!(moved, press, release)?;
+    }
+    Ok(())
+  }
+
   /// Dispatch a click at `(x, y)` honoring the full Playwright option
   /// bag: `button`, `click_count`, modifiers bitmask, delay between
   /// press/release, and `steps` interpolated mousemoves from the last
@@ -2752,64 +2795,7 @@ impl<T: CdpWrap> CdpPage<T> {
         Err(_) => false,
       };
     if args.click_count == 1 && args.delay_ms == 0 && steps == 1 {
-      if skip_move {
-        let press = self.cmd(
-          "Input.dispatchMouseEvent",
-          serde_json::json!({
-            "type": "mousePressed",
-            "x": x,
-            "y": y,
-            "button": button,
-            "clickCount": 1,
-            "modifiers": mods,
-          }),
-        );
-        let release = self.cmd(
-          "Input.dispatchMouseEvent",
-          serde_json::json!({
-            "type": "mouseReleased",
-            "x": x,
-            "y": y,
-            "button": button,
-            "clickCount": 1,
-            "modifiers": mods,
-          }),
-        );
-        let _ = tokio::try_join!(press, release)?;
-      } else {
-        let moved = self.cmd(
-          "Input.dispatchMouseEvent",
-          serde_json::json!({
-            "type": "mouseMoved",
-            "x": x,
-            "y": y,
-            "modifiers": mods,
-          }),
-        );
-        let press = self.cmd(
-          "Input.dispatchMouseEvent",
-          serde_json::json!({
-            "type": "mousePressed",
-            "x": x,
-            "y": y,
-            "button": button,
-            "clickCount": 1,
-            "modifiers": mods,
-          }),
-        );
-        let release = self.cmd(
-          "Input.dispatchMouseEvent",
-          serde_json::json!({
-            "type": "mouseReleased",
-            "x": x,
-            "y": y,
-            "button": button,
-            "clickCount": 1,
-            "modifiers": mods,
-          }),
-        );
-        let _ = tokio::try_join!(moved, press, release)?;
-      }
+      self.single_click_fast_path(x, y, button, mods, skip_move).await?;
       if let Ok(mut guard) = self.last_cursor_pos.lock() {
         *guard = Some((x, y));
       }

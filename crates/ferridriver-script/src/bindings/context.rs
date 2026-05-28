@@ -148,9 +148,12 @@ impl BrowserContextJs {
     ctx: Ctx<'js>,
     script: Value<'js>,
     arg: Opt<Value<'js>>,
-  ) -> rquickjs::Result<Vec<String>> {
+  ) -> rquickjs::Result<Value<'js>> {
     let (init, arg_json) = init_script_from_js(&ctx, script, arg.0)?;
-    self.inner.add_init_script(init, arg_json).await.into_js()
+    let disposable = self.inner.add_init_script(init, arg_json).await.into_js()?;
+    let instance =
+      rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
+    rquickjs::IntoJs::into_js(instance, &ctx)
   }
 
   // ── Timeouts ──────────────────────────────────────────────────────────────
