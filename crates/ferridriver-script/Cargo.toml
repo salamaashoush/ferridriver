@@ -59,3 +59,7 @@ sourcemap = "9"
 [dev-dependencies]
 tempfile = "3"
 tokio = { workspace = true, features = ["full", "test-util"] }
+# Convert round-trip test drives rquickjs directly; it is a runtime dep
+# but integration tests are separate crates and cannot name a lib-only
+# dependency, so it is mirrored here.
+rquickjs = { version = "0.11", features = ["full-async", "parallel", "macro", "loader", "array-buffer"] }

@@ -379,24 +379,27 @@ fn rehydrate<'js>(
       Ok(buf)
     },
     SerializedValue::Array { id, items } => {
+      // `Array::new` already owns one `Ctx` dup (stored inside `arr`).
+      // The back-ref map needs a `Value` handle to the same array while
+      // `arr` stays alive for `set`; clone the borrowed underlying value
+      // (one dup) rather than cloning the whole `Array` (which would dup
+      // the `Ctx` a second time). `into_value` at the end is a move.
       let arr = rquickjs::Array::new(ctx.clone())?;
-      let arr_value: Value<'js> = arr.clone().into_value();
-      refs.insert(*id, arr_value.clone());
+      refs.insert(*id, arr.as_value().clone());
       for (i, item) in items.iter().enumerate() {
         let v = rehydrate(ctx, item, refs)?;
         arr.set(i, v)?;
       }
-      Ok(arr_value)
+      Ok(arr.into_value())
     },
     SerializedValue::Object { id, entries } => {
       let obj = Object::new(ctx.clone())?;
-      let obj_value: Value<'js> = obj.clone().into_value();
-      refs.insert(*id, obj_value.clone());
+      refs.insert(*id, obj.as_value().clone());
       for entry in entries {
         let v = rehydrate(ctx, &entry.v, refs)?;
         define_own(&obj, &entry.k, v)?;
       }
-      Ok(obj_value)
+      Ok(obj.into_value())
     },
     SerializedValue::Reference(id) => refs
       .get(id)
