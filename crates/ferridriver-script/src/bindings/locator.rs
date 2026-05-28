@@ -199,6 +199,14 @@ impl LocatorJs {
 
 #[rquickjs::methods]
 impl LocatorJs {
+  /// The resolved selector string for this locator. Mirrors the NAPI
+  /// `Locator.selector` getter; used by `{ selector }`-style locator
+  /// round-tripping and by `normalize()` callers reading the canonical form.
+  #[qjs(get, rename = "selector")]
+  pub fn selector(&self) -> String {
+    self.inner.selector().to_string()
+  }
+
   // ── Chain/refine (return new Locator) ─────────────────────────────────────
 
   /// Narrow this locator's scope.
