@@ -321,6 +321,32 @@ impl Frame {
     self.locator(selector, None).wait_for(opts).await
   }
 
+  /// Show the element-highlight overlay for `selector` in this frame.
+  /// `style` is an optional resolved CSS string applied to the highlight
+  /// box. Internal API mirroring Playwright's
+  /// `frame._highlight(selector, style)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:338`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing or JS evaluation fails.
+  pub async fn highlight(&self, selector: &str, style: Option<&str>) -> Result<()> {
+    let frame_id = if self.is_main_frame() { None } else { Some(&*self.id) };
+    crate::selectors::highlight(self.page.inner(), selector, style, frame_id).await
+  }
+
+  /// Hide the element-highlight overlay in this frame. Internal API
+  /// mirroring Playwright's `frame._hideHighlight(selector)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:342`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if JS evaluation fails.
+  pub async fn hide_highlight(&self) -> Result<()> {
+    let frame_id = if self.is_main_frame() { None } else { Some(&*self.id) };
+    crate::selectors::hide_highlight(self.page.inner(), frame_id).await
+  }
+
   /// Whether this frame has been detached from the page. Sync -- reads
   /// the cached `detached` flag maintained by the page's frame event
   /// listener. Playwright:

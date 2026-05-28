@@ -1421,6 +1421,34 @@ pub(crate) fn getby_input_to_rust(input: napi::Either<String, JsRegExpLike>) -> 
   }
 }
 
+/// Lower `Locator.highlight`'s `style` option (`string | Record<string,
+/// string | number>`) into [`ferridriver::options::HighlightStyle`]. A
+/// string becomes `Css`; an object becomes `Object` with each value
+/// rendered to its CSS text (numbers stringified, strings verbatim).
+/// Non-string/non-object values (or non-string/number record values) are
+/// ignored, matching how Playwright's `cssObjectToString` template-literals
+/// whatever the value is.
+pub(crate) fn highlight_style_to_rust(value: serde_json::Value) -> Option<ferridriver::options::HighlightStyle> {
+  match value {
+    serde_json::Value::String(s) => Some(ferridriver::options::HighlightStyle::Css(s)),
+    serde_json::Value::Object(map) => {
+      let entries = map
+        .into_iter()
+        .filter_map(|(k, v)| {
+          let rendered = match v {
+            serde_json::Value::String(s) => s,
+            serde_json::Value::Number(n) => n.to_string(),
+            _ => return None,
+          };
+          Some((k, rendered))
+        })
+        .collect::<Vec<_>>();
+      Some(ferridriver::options::HighlightStyle::Object(entries))
+    },
+    _ => None,
+  }
+}
+
 /// `addInitScript` first-argument shape at the NAPI boundary.
 ///
 /// Mirrors Playwright's `Function | string | { path?: string, content?: string }`

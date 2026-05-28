@@ -72,6 +72,53 @@ fn get_locator_like<'js>(
   ))
 }
 
+/// Parse `Locator.highlight`'s optional `{ style }` bag. `style` is
+/// `string | Record<string, string | number>`. A string becomes
+/// [`ferridriver::options::HighlightStyle::Css`]; an object becomes
+/// `Object` with each value rendered to CSS text (numbers stringified,
+/// strings verbatim; other value types skipped). Parsed synchronously so
+/// no `!Send` JS value is held across the async `highlight` await.
+fn parse_highlight_style(
+  options: Opt<rquickjs::Value<'_>>,
+) -> rquickjs::Result<Option<ferridriver::options::HighlightStyle>> {
+  let Some(val) = options.0 else {
+    return Ok(None);
+  };
+  let Some(obj) = val.as_object() else {
+    return Ok(None);
+  };
+  let style: rquickjs::Value<'_> = obj.get("style")?;
+  if style.is_undefined() || style.is_null() {
+    return Ok(None);
+  }
+  if let Some(s) = style.as_string() {
+    return Ok(Some(ferridriver::options::HighlightStyle::Css(s.to_string()?)));
+  }
+  if let Some(map) = style.as_object() {
+    let mut entries = Vec::new();
+    for key_res in map.keys::<String>() {
+      let key = key_res?;
+      let v: rquickjs::Value<'_> = map.get(&key)?;
+      let rendered = if let Some(s) = v.as_string() {
+        s.to_string()?
+      } else if let Some(n) = v.as_number() {
+        // Match `cssObjectToString`'s template-literal: integers print
+        // without a trailing `.0`.
+        if n.fract() == 0.0 && n.is_finite() {
+          format!("{}", n as i64)
+        } else {
+          n.to_string()
+        }
+      } else {
+        continue;
+      };
+      entries.push((key, rendered));
+    }
+    return Ok(Some(ferridriver::options::HighlightStyle::Object(entries)));
+  }
+  Ok(None)
+}
+
 fn get_bool<'js>(obj: &rquickjs::Object<'js>, key: &str) -> rquickjs::Result<Option<bool>> {
   let v: rquickjs::Value<'js> = obj.get(key)?;
   if v.is_undefined() || v.is_null() {
@@ -419,6 +466,30 @@ impl LocatorJs {
   #[qjs(rename = "clear")]
   pub async fn clear(&self) -> rquickjs::Result<()> {
     self.inner.clear().await.into_js()
+  }
+
+  /// Playwright: `highlight(options?: { style?: string | Record<string,
+  /// string | number> }): Promise<Disposable>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:158`).
+  /// Shows the element-highlight overlay; returns a `Disposable` whose
+  /// `dispose()` hides it. The optional `style` is parsed synchronously
+  /// (the JS scope is `!Send`) into [`ferridriver::options::HighlightStyle`]
+  /// before the async body forwards to core.
+  #[qjs(rename = "highlight")]
+  pub async fn highlight(
+    &self,
+    options: Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<crate::bindings::disposable::DisposableJs> {
+    let style = parse_highlight_style(options)?;
+    let disposable = self.inner.highlight(style).await.into_js()?;
+    Ok(crate::bindings::disposable::DisposableJs::new(disposable))
+  }
+
+  /// Playwright: `hideHighlight(): Promise<void>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
+  #[qjs(rename = "hideHighlight")]
+  pub async fn hide_highlight(&self) -> rquickjs::Result<()> {
+    self.inner.hide_highlight().await.into_js()
   }
 
   #[qjs(rename = "type")]

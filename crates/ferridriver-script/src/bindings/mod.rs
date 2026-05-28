@@ -62,6 +62,7 @@ pub use browser_type::{BrowserTypeJs, install_browser_type};
 pub use console_message::ConsoleMessageJs;
 pub use context::BrowserContextJs;
 pub use dialog::DialogJs;
+pub use disposable::DisposableJs;
 pub use download::DownloadJs;
 pub use element_handle::ElementHandleJs;
 pub use file_chooser::FileChooserJs;
@@ -113,6 +114,7 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   Class::<DialogJs>::define(&g)?;
   Class::<FileChooserJs>::define(&g)?;
   Class::<DownloadJs>::define(&g)?;
+  Class::<DisposableJs>::define(&g)?;
   Class::<ConsoleMessageJs>::define(&g)?;
   Class::<WebErrorJs>::define(&g)?;
   Class::<VideoJs>::define(&g)?;

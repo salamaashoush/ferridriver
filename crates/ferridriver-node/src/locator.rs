@@ -240,6 +240,29 @@ impl Locator {
     self.inner.clear().await.map_err(crate::error::to_napi)
   }
 
+  /// Playwright: `highlight(options?: { style?: string | Record<string,
+  /// string | number> }): Promise<Disposable>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:158`).
+  /// Shows the element-highlight overlay and returns a `Disposable` whose
+  /// `dispose()` hides it. The `style` union is lowered by
+  /// [`crate::types::highlight_style_to_rust`]; core composes the CSS
+  /// string and applies it.
+  #[napi(ts_args_type = "options?: { style?: string | Record<string, string | number> }")]
+  pub async fn highlight(&self, options: Option<serde_json::Value>) -> Result<crate::disposable::Disposable> {
+    let style = options
+      .and_then(|o| o.get("style").cloned())
+      .and_then(crate::types::highlight_style_to_rust);
+    let disposable = self.inner.highlight(style).await.map_err(crate::error::to_napi)?;
+    Ok(crate::disposable::Disposable::wrap(disposable))
+  }
+
+  /// Playwright: `hideHighlight(): Promise<void>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
+  #[napi]
+  pub async fn hide_highlight(&self) -> Result<()> {
+    self.inner.hide_highlight().await.map_err(crate::error::to_napi)
+  }
+
   /// Type `text` character-by-character. Accepts Playwright's full
   /// `LocatorTypeOptions` bag. Deprecated in Playwright in favor of
   /// `pressSequentially`; both call paths are identical in ferridriver.

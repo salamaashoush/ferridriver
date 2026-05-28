@@ -1865,6 +1865,101 @@ impl From<&String> for FrameSelector {
   }
 }
 
+/// The `style` argument of `Locator.highlight`. Playwright:
+/// `highlight(options: { style?: string | Record<string, string | number> })`
+/// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:158`).
+/// A `Css` string is forwarded verbatim; an `Object` map is collapsed to
+/// a CSS declaration string the same way Playwright's `cssObjectToString`
+/// does (`camelCase` -> `kebab-case`, `--custom-props` preserved,
+/// `"k: v"` joined with `"; "`).
+#[derive(Debug, Clone)]
+pub enum HighlightStyle {
+  Css(String),
+  Object(Vec<(String, String)>),
+}
+
+impl HighlightStyle {
+  /// Resolve to the CSS string the injected highlight overlay applies.
+  /// Mirrors Playwright's `cssObjectToString`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:486`).
+  #[must_use]
+  pub fn to_css_string(&self) -> String {
+    match self {
+      Self::Css(s) => s.clone(),
+      Self::Object(entries) => entries
+        .iter()
+        .map(|(key, value)| {
+          let property = if key.starts_with("--") {
+            key.clone()
+          } else {
+            let mut out = String::with_capacity(key.len() + 4);
+            for ch in key.chars() {
+              if ch.is_ascii_uppercase() {
+                out.push('-');
+                out.push(ch.to_ascii_lowercase());
+              } else {
+                out.push(ch);
+              }
+            }
+            out
+          };
+          format!("{property}: {value}")
+        })
+        .collect::<Vec<_>>()
+        .join("; "),
+    }
+  }
+}
+
+impl From<&str> for HighlightStyle {
+  fn from(s: &str) -> Self {
+    Self::Css(s.to_string())
+  }
+}
+
+impl From<String> for HighlightStyle {
+  fn from(s: String) -> Self {
+    Self::Css(s)
+  }
+}
+
+#[cfg(test)]
+mod highlight_style_tests {
+  use super::*;
+
+  #[test]
+  fn css_string_passes_through_verbatim() {
+    let s = HighlightStyle::Css("outline: 2px solid red".to_string());
+    assert_eq!(s.to_css_string(), "outline: 2px solid red");
+  }
+
+  #[test]
+  fn object_camel_case_becomes_kebab_case() {
+    let s = HighlightStyle::Object(vec![("backgroundColor".to_string(), "red".to_string())]);
+    assert_eq!(s.to_css_string(), "background-color: red");
+  }
+
+  #[test]
+  fn object_custom_property_preserved() {
+    let s = HighlightStyle::Object(vec![("--my-var".to_string(), "10".to_string())]);
+    assert_eq!(s.to_css_string(), "--my-var: 10");
+  }
+
+  #[test]
+  fn object_multiple_entries_joined_with_semicolon() {
+    let s = HighlightStyle::Object(vec![
+      ("border".to_string(), "1px".to_string()),
+      ("zIndex".to_string(), "5".to_string()),
+    ]);
+    assert_eq!(s.to_css_string(), "border: 1px; z-index: 5");
+  }
+
+  #[test]
+  fn from_str_is_css_variant() {
+    assert!(matches!(HighlightStyle::from("a: b"), HighlightStyle::Css(_)));
+  }
+}
+
 #[cfg(test)]
 mod pdf_option_tests {
   use super::*;
