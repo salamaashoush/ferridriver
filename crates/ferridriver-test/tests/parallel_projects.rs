@@ -73,7 +73,7 @@ fn base_config(projects: Vec<ProjectConfig>, max_parallel_projects: u32) -> Test
     quiet: true,
     reporter: vec![ReporterConfig {
       name: "none".into(),
-      options: Default::default(),
+      options: std::collections::BTreeMap::new(),
     }],
     projects,
     max_parallel_projects,
@@ -99,9 +99,7 @@ async fn independent_projects_run_concurrently() {
   // the 1600ms serial sum. Allow generous headroom for scheduling overhead.
   assert!(
     elapsed < sleep * 2,
-    "expected ~slowest ({:?}), got {:?} — projects did not run concurrently",
-    sleep,
-    elapsed,
+    "expected ~slowest ({sleep:?}), got {elapsed:?} — projects did not run concurrently",
   );
 }
 
@@ -175,7 +173,6 @@ async fn dependency_orders_dependent_after_dependency() {
   // Sequential because of the dependency edge: must exceed setup + app.
   assert!(
     elapsed >= setup_sleep + app_sleep / 2,
-    "dependent project ran before its dependency finished: {:?}",
-    elapsed,
+    "dependent project ran before its dependency finished: {elapsed:?}",
   );
 }

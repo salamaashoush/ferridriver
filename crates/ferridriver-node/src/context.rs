@@ -435,6 +435,8 @@ impl BrowserContext {
     ts_args_type = "name: string, callback: (source: { context: string, page: string, frame: string }, args: unknown[]) => void",
     ts_return_type = "Promise<Disposable>"
   )]
+  // napi `AsyncBlockBuilder::build` takes `&Env`; matches the sibling `route` binding.
+  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn expose_binding(
     &self,
     env: &napi::Env,
@@ -482,6 +484,8 @@ impl BrowserContext {
     ts_args_type = "name: string, callback: (args: unknown[]) => void",
     ts_return_type = "Promise<Disposable>"
   )]
+  // napi `AsyncBlockBuilder::build` takes `&Env`; matches the sibling `route` binding.
+  #[allow(clippy::trivially_copy_pass_by_ref)]
   pub fn expose_function(
     &self,
     env: &napi::Env,
