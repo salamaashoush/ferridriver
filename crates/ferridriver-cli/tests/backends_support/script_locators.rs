@@ -300,6 +300,43 @@ pub fn test_script_locator_highlight(c: &mut McpClient) {
   assert_eq!(v["afterHide"], json!(0), "hideHighlight() removes overlay: {v}");
 }
 
+// QuickJS<->NAPI parity: Locator.selector / isStrict / setStrict /
+// selectText / rightClick / boundingBox were NAPI-only until added to the
+// script binding. Exercise each so the binding surface stays in lockstep.
+pub fn test_script_locator_napi_parity(c: &mut McpClient) {
+  c.nav(
+    "<button id='b' oncontextmenu=\"this.dataset.rc='1';return false\">Target</button>\
+     <input id='inp' value='select me'>",
+  );
+  let v = c.script_value(
+    "const b = page.locator('#b'); \
+       const sel = b.selector; \
+       const strictDefault = b.isStrict; \
+       const loose = b.setStrict(false); \
+       const looseStrict = loose.isStrict; \
+       const box = await b.boundingBox(); \
+       await b.rightClick(); \
+       const rc = await page.evaluate(\"document.getElementById('b').dataset.rc\"); \
+       await page.locator('#inp').selectText(); \
+       const selText = await page.evaluate(\"String(window.getSelection ? document.getSelection().toString() : '') || (document.activeElement && document.activeElement.id)\"); \
+       return { sel, strictDefault, looseStrict, \
+         hasBox: box != null && box.width > 0 && box.height > 0, \
+         rc, selText };",
+  );
+  assert_eq!(v["sel"], json!("#b"), "selector getter returns the selector: {v}");
+  assert_eq!(v["strictDefault"], json!(true), "locators are strict by default: {v}");
+  assert_eq!(v["looseStrict"], json!(false), "setStrict(false) clears strict: {v}");
+  assert_eq!(v["hasBox"], json!(true), "boundingBox returns a non-empty rect: {v}");
+  assert_eq!(v["rc"].as_str(), Some("1"), "rightClick fired contextmenu: {v}");
+  // selectText focuses+selects the input; either the selection text or the
+  // focused element id confirms it ran (core uses input.select()).
+  let st = v["selText"].as_str().unwrap_or_default();
+  assert!(
+    st.contains("select me") || st == "inp",
+    "selectText selected/focused the input: {v}"
+  );
+}
+
 pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_locators::test_script_frame_sync_accessors",
@@ -368,5 +405,9 @@ pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_locators::test_script_locator_highlight",
     test_script_locator_highlight,
+  );
+  set.run(
+    "backends_support::script_locators::test_script_locator_napi_parity",
+    test_script_locator_napi_parity,
   );
 }
