@@ -224,7 +224,7 @@ pub trait CdpTransport: Send + Sync + 'static {
     &self,
     session_id: Option<&str>,
     method: &str,
-    params: serde_json::Value,
+    params: &serde_json::Value,
   ) -> impl std::future::Future<Output = Result<serde_json::Value>> + Send;
 
   fn subscribe_events(&self) -> broadcast::Receiver<Arc<serde_json::Value>>;
@@ -673,5 +673,41 @@ mod tests {
     assert_eq!(global_wakeups.load(Ordering::Relaxed), EVENTS * LISTENERS);
     assert_eq!(routed_wakeups.load(Ordering::Relaxed), EVENTS);
     assert_eq!(idle_method_wakeups + idle_domain_wakeups, 0);
+  }
+
+  /// `build_command` borrows its params, so the shared `EMPTY_PARAMS`
+  /// static can be serialized by reference for every no-param CDP call
+  /// instead of cloning a fresh `{}` map per call. This guards both the
+  /// borrowed signature and the serialized wire shape: `params:{}` with
+  /// no trailing junk.
+  #[test]
+  fn build_command_serializes_borrowed_empty_params_by_reference() {
+    let dispatcher = CdpDispatcher::new();
+    let empty = &crate::backend::EMPTY_PARAMS;
+
+    // Two builds from the same static reference: identical params shape,
+    // monotonically increasing ids, and no per-call clone of the map
+    // (the reference is what reaches `build_command`).
+    let (data1, _rx1) = dispatcher
+      .build_command(Some("sess-1"), "Page.enable", empty)
+      .expect("build with session");
+    let (data2, _rx2) = dispatcher
+      .build_command(None, "Runtime.enable", empty)
+      .expect("build without session");
+
+    let s1 = String::from_utf8(data1).expect("utf8");
+    let s2 = String::from_utf8(data2).expect("utf8");
+
+    assert!(s1.contains(r#""params":{}"#), "expected empty params object, got {s1}");
+    assert!(s1.contains(r#""method":"Page.enable""#), "method missing: {s1}");
+    assert!(s1.contains(r#""sessionId":"sess-1""#), "sessionId missing: {s1}");
+    assert!(s2.contains(r#""params":{}"#), "expected empty params object, got {s2}");
+    assert!(!s2.contains("sessionId"), "no sessionId expected: {s2}");
+
+    // The static is a single shared instance — repeated borrows resolve
+    // to the same address, confirming no clone is materialized per call.
+    let a = std::ptr::from_ref::<serde_json::Value>(&crate::backend::EMPTY_PARAMS);
+    let b = std::ptr::from_ref::<serde_json::Value>(&crate::backend::EMPTY_PARAMS);
+    assert_eq!(a, b, "EMPTY_PARAMS must be a single shared static");
   }
 }

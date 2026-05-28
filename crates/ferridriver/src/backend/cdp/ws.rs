@@ -127,9 +127,9 @@ impl super::transport::CdpTransport for WsTransport {
     &self,
     session_id: Option<&str>,
     method: &str,
-    params: serde_json::Value,
+    params: &serde_json::Value,
   ) -> Result<serde_json::Value> {
-    let (mut data, rx) = self.dispatcher.build_command(session_id, method, &params)?;
+    let (mut data, rx) = self.dispatcher.build_command(session_id, method, params)?;
     // Remove NUL terminator — WebSocket doesn't need it
     if data.last() == Some(&0) {
       data.pop();
