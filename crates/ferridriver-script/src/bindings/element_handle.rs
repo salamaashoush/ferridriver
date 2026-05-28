@@ -313,6 +313,24 @@ impl ElementHandleJs {
     serialized_value_to_quickjs(&ctx, &result)
   }
 
+  // ── $ / $$ (query shortcuts — Playwright parity) ─────────────────────
+
+  /// Playwright: `elementHandle.$(selector): Promise<ElementHandle | null>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:206`).
+  #[qjs(rename = "$")]
+  pub async fn query_selector(&self, selector: String) -> rquickjs::Result<Option<ElementHandleJs>> {
+    let maybe = self.inner.query_selector(&selector).await.into_js()?;
+    Ok(maybe.map(ElementHandleJs::new))
+  }
+
+  /// Playwright: `elementHandle.$$(selector): Promise<ElementHandle[]>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/elementHandle.ts:210`).
+  #[qjs(rename = "$$")]
+  pub async fn query_selector_all(&self, selector: String) -> rquickjs::Result<Vec<ElementHandleJs>> {
+    let handles = self.inner.query_selector_all(&selector).await.into_js()?;
+    Ok(handles.into_iter().map(ElementHandleJs::new).collect())
+  }
+
   // ── Frame accessors ──────────────────────────────────────────────────
 
   /// Playwright: `elementHandle.ownerFrame(): Promise<Frame | null>`.
