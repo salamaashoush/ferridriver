@@ -132,14 +132,11 @@ pub(crate) fn json_to_js<'js>(ctx: &Ctx<'js>, v: &serde_json::Value) -> rquickjs
 /// instances. `undefined` / absent maps to the utility script's
 /// `{v: "undefined"}` sentinel; `null` maps to `{v: "null"}`.
 ///
-/// Class-instance detection: a top-level `JSHandleJs` or
-/// `ElementHandleJs` value is emitted as `SerializedValue::Handle(0)`
-/// with its backend [`ferridriver::protocol::HandleId`] pushed into
-/// `handles[0]`. Nested handles inside object / array user args are a
-/// follow-up; today a nested handle serialises as its JSON
-/// representation (usually an empty object), which is a behavior gap
-/// rather than a correctness bug — we detect it at the top level
-/// where every Playwright test actually passes handles.
+/// Class-instance detection: a `JSHandleJs` or `ElementHandleJs`
+/// value is emitted as `SerializedValue::Handle(index)` with its
+/// backend [`ferridriver::protocol::HandleId`] pushed into the shared
+/// handle table. Detection is recursive, so handles nested inside
+/// object / array user args keep their page-side identity.
 pub fn quickjs_arg_to_serialized<'js>(
   _ctx: &Ctx<'js>,
   value: Option<Value<'js>>,
@@ -163,20 +160,6 @@ pub fn quickjs_arg_to_serialized<'js>(
     });
   }
 
-  // Top-level class-instance detection. The detection itself is
-  // QuickJS-specific (`rquickjs::Class::from_value`), but the
-  // packaging of a handle-to-SerializedArgument lives on core
-  // (`HandleRemote::to_serialized_argument`) so NAPI and QuickJS
-  // produce identical wire shapes for the same remote (Rule 1).
-  if let Ok(class) = rquickjs::Class::<crate::bindings::js_handle::JSHandleJs>::from_value(&v) {
-    let inner = class.borrow();
-    return Ok(inner.inner().backing().to_serialized_argument());
-  }
-  if let Ok(class) = rquickjs::Class::<crate::bindings::element_handle::ElementHandleJs>::from_value(&v) {
-    let inner = class.borrow();
-    return Ok(inner.inner().as_js_handle().backing().to_serialized_argument());
-  }
-
   // Direct JS -> SerializedValue. The old path went
   // JS -> serde_json::Value -> SerializedValue, allocating the whole
   // argument tree twice on every `page.evaluate(fn, arg)` /
@@ -185,9 +168,10 @@ pub fn quickjs_arg_to_serialized<'js>(
   // undefined/function/symbol properties, array holes -> null,
   // non-finite -> null) — `toJSON()` was not honoured before either.
   let mut alloc = SerializationContext::default();
+  let mut handles = Vec::new();
   Ok(SerializedArgument {
-    value: js_value_to_serialized(&v, &mut alloc, 0)?,
-    handles: Vec::new(),
+    value: js_value_to_serialized(&v, &mut alloc, &mut handles, 0)?,
+    handles,
   })
 }
 
@@ -201,6 +185,7 @@ const MAX_ARG_DEPTH: u32 = 512;
 fn js_value_to_serialized(
   v: &Value<'_>,
   alloc: &mut ferridriver::protocol::SerializationContext,
+  handles: &mut Vec<ferridriver::protocol::HandleId>,
   depth: u32,
 ) -> rquickjs::Result<ferridriver::protocol::SerializedValue> {
   use ferridriver::protocol::{SerializedValue, SpecialValue};
@@ -258,7 +243,7 @@ fn js_value_to_serialized(
       items.push(if el.is_undefined() || el.is_function() {
         SerializedValue::Special(SpecialValue::Null)
       } else {
-        js_value_to_serialized(&el, alloc, depth + 1)?
+        js_value_to_serialized(&el, alloc, handles, depth + 1)?
       });
     }
     return Ok(SerializedValue::Array { id, items });
@@ -276,8 +261,13 @@ fn js_value_to_serialized(
       }
       entries.push(ferridriver::protocol::PropertyEntry {
         k: key,
-        v: js_value_to_serialized(&val, alloc, depth + 1)?,
+        v: js_value_to_serialized(&val, alloc, handles, depth + 1)?,
       });
+    }
+    if entries.is_empty() {
+      if let Some(handle) = handle_value_to_serialized(v, handles)? {
+        return Ok(handle);
+      }
     }
     return Ok(SerializedValue::Object { id, entries });
   }
@@ -285,6 +275,37 @@ fn js_value_to_serialized(
   // Symbol / function / other non-JSON value at this position:
   // JSON.stringify treats it as undefined.
   Ok(SerializedValue::Special(SpecialValue::Undefined))
+}
+
+fn handle_value_to_serialized(
+  v: &Value<'_>,
+  handles: &mut Vec<ferridriver::protocol::HandleId>,
+) -> rquickjs::Result<Option<ferridriver::protocol::SerializedValue>> {
+  if let Ok(class) = rquickjs::Class::<crate::bindings::js_handle::JSHandleJs>::from_value(v) {
+    let inner = class.borrow();
+    return Ok(Some(handle_backing_to_serialized(inner.inner().backing(), handles)?));
+  }
+  if let Ok(class) = rquickjs::Class::<crate::bindings::element_handle::ElementHandleJs>::from_value(v) {
+    let inner = class.borrow();
+    let handle = inner.inner().as_js_handle();
+    return Ok(Some(handle_backing_to_serialized(handle.backing(), handles)?));
+  }
+  Ok(None)
+}
+
+fn handle_backing_to_serialized(
+  backing: &ferridriver::js_handle::JSHandleBacking,
+  handles: &mut Vec<ferridriver::protocol::HandleId>,
+) -> rquickjs::Result<ferridriver::protocol::SerializedValue> {
+  match backing {
+    ferridriver::js_handle::JSHandleBacking::Remote(remote) => {
+      let idx = u32::try_from(handles.len())
+        .map_err(|_| rquickjs::Error::new_from_js_message("serde", "serialize", "too many JS handles"))?;
+      handles.push(remote.to_handle_id());
+      Ok(ferridriver::protocol::SerializedValue::Handle(idx))
+    },
+    ferridriver::js_handle::JSHandleBacking::Value(value) => Ok(value.clone()),
+  }
 }
 
 /// Convert a [`ferridriver::protocol::SerializedValue`] into a native
