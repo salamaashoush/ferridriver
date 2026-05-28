@@ -206,23 +206,44 @@ impl ElementHandleJs {
   // ── Actions (Phase E) ────────────────────────────────────────────────
 
   #[qjs(rename = "click")]
-  pub async fn click(&self) -> rquickjs::Result<()> {
-    self.inner.click().await.into_js()
+  pub async fn click<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_click_options(&ctx, options)?;
+    self.inner.click(opts).await.into_js()
   }
 
   #[qjs(rename = "dblclick")]
-  pub async fn dblclick(&self) -> rquickjs::Result<()> {
-    self.inner.dblclick().await.into_js()
+  pub async fn dblclick<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_dblclick_options(&ctx, options)?;
+    self.inner.dblclick(opts).await.into_js()
   }
 
   #[qjs(rename = "hover")]
-  pub async fn hover(&self) -> rquickjs::Result<()> {
-    self.inner.hover().await.into_js()
+  pub async fn hover<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_hover_options(&ctx, options)?;
+    self.inner.hover(opts).await.into_js()
   }
 
   #[qjs(rename = "type")]
-  pub async fn type_str(&self, text: String) -> rquickjs::Result<()> {
-    self.inner.type_str(&text).await.into_js()
+  pub async fn type_str<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    text: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::convert::parse_type_options(&ctx, options)?;
+    self.inner.type_str(&text, opts).await.into_js()
   }
 
   #[qjs(rename = "focus")]
