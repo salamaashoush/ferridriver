@@ -5,7 +5,11 @@
   clippy::implicit_clone
 )]
 //! Performance benchmark: measures ferridriver-test runner overhead and parallelism.
-//! Compare against Playwright Test for the same 50-test workload.
+//!
+//! This reports ferridriver-test's own numbers (per-test latency, throughput,
+//! worker scaling). It does NOT assert any speedup against Playwright unless a
+//! same-machine baseline is supplied via `FERRIDRIVER_PW_BASELINE_MS`. See
+//! `BENCHMARKING.md` for the methodology and current honest numbers.
 
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -188,22 +192,36 @@ async fn bench_parallel_scaling() {
   println!("  Speedup 1→4: {:.2}x", t1.as_secs_f64() / t4.as_secs_f64());
   println!();
 
-  // Throughput: 50 tests (matches Playwright bench).
+  // Throughput: 50 tests (same workload size used for the optional Playwright baseline).
   let t50_4 = Box::pin(run_bench("50 tests, 4 workers", 50, 4)).await;
   let t50_6 = Box::pin(run_bench("50 tests, 6 workers", 50, 6)).await;
 
   println!();
-  println!("  Playwright comparison (50 tests): ~2200ms (self-reported)");
   println!("  ferridriver-test (50 tests, 4w): {}ms", t50_4.as_millis());
   println!("  ferridriver-test (50 tests, 6w): {}ms", t50_6.as_millis());
-  println!(
-    "  Speedup vs Playwright (4w): {:.1}x",
-    2200.0 / t50_4.as_millis() as f64
-  );
-  println!(
-    "  Speedup vs Playwright (6w): {:.1}x",
-    2200.0 / t50_6.as_millis() as f64
-  );
+  // No Playwright baseline is asserted here. A speedup figure is only
+  // defensible against a baseline measured on the SAME machine in the SAME
+  // run with the SAME 50-test workload. To produce that comparison, set
+  // FERRIDRIVER_PW_BASELINE_MS to a Playwright Test number you measured
+  // locally; absent that env var we refuse to print a ratio rather than
+  // cite a hardcoded self-reported figure. See BENCHMARKING.md.
+  if let Some(baseline_ms) = std::env::var("FERRIDRIVER_PW_BASELINE_MS")
+    .ok()
+    .and_then(|v| v.parse::<f64>().ok())
+  {
+    println!("  Playwright baseline (50 tests, measured): {baseline_ms:.0}ms");
+    println!(
+      "  Speedup vs Playwright (4w): {:.2}x",
+      baseline_ms / t50_4.as_millis() as f64
+    );
+    println!(
+      "  Speedup vs Playwright (6w): {:.2}x",
+      baseline_ms / t50_6.as_millis() as f64
+    );
+  } else {
+    println!("  Playwright baseline: NOT MEASURED (set FERRIDRIVER_PW_BASELINE_MS to compare)");
+    println!("  Refusing to print a speedup ratio without a same-machine baseline. See BENCHMARKING.md.");
+  }
   println!();
 
   // Large scale: 100 tests.
