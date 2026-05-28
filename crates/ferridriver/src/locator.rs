@@ -1365,6 +1365,100 @@ impl Locator {
     self.frame.page_arc().inner().click_and_drag(from, to, steps).await
   }
 
+  // ── Drop a payload onto this element ────────────────────────────────────
+
+  /// Drop a file/data payload onto this element. Mirrors Playwright's
+  /// `Locator.drop(payload, options)` (`client/locator.ts:129`), which
+  /// forwards to `frame._drop` -> server `dom.ts::_drop`.
+  ///
+  /// The drop is performed by constructing a `DataTransfer` carrying the
+  /// payload's `File` objects (built from each `FilePayload`'s bytes) and
+  /// `data` entries (`DataTransfer.setData(mimeType, value)`), then
+  /// dispatching the `dragenter` / `dragover` / `drop` `DragEvent`
+  /// sequence on the resolved element at the drop point. Matching
+  /// Playwright, if the `dragover` handler does not call `preventDefault()`
+  /// the target is treated as rejecting the drop: a `dragleave` is
+  /// dispatched and a `FerriError::Backend` is returned.
+  ///
+  /// `DropOptions::position` offsets the drop point from the element's
+  /// padding-box top-left; when absent the element center is used.
+  /// `DropOptions::modifiers` are reflected on the dispatched `DragEvent`s'
+  /// modifier flags. `DropOptions::timeout` is accepted for signature
+  /// parity; the underlying single-shot resolve already honours the
+  /// context's default action timeout.
+  ///
+  /// File paths in `DropPayload::files` are read into memory here (matching
+  /// the co-located server path in Playwright) so the page can construct
+  /// real `File` objects without filesystem access of its own.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the element cannot be resolved, a referenced file
+  /// path cannot be read, or the target rejects the drop.
+  pub async fn drop(
+    &self,
+    payload: crate::options::DropPayload,
+    options: Option<crate::options::DropOptions>,
+  ) -> Result<()> {
+    let opts = options.unwrap_or_default();
+
+    // Lower the payload's files into `{name, mimeType, buffer(base64)}`
+    // records the page can rebuild into `File` objects. `Paths` are read
+    // from disk into buffers (Playwright's co-located server reads
+    // localPaths the same way); `Payloads` carry their bytes already.
+    let file_records = lower_drop_files(payload.files)?;
+
+    let data_records: Vec<serde_json::Value> = payload
+      .data
+      .into_iter()
+      .map(|(mime_type, value)| serde_json::json!({ "mimeType": mime_type, "value": value }))
+      .collect();
+
+    let modifiers = serde_json::json!({
+      "alt": opts.modifiers.contains(&crate::options::Modifier::Alt),
+      "ctrl": opts.modifiers.iter().any(|m| {
+        matches!(m, crate::options::Modifier::Control)
+          || (matches!(m, crate::options::Modifier::ControlOrMeta) && !cfg!(target_os = "macos"))
+      }),
+      "meta": opts.modifiers.iter().any(|m| {
+        matches!(m, crate::options::Modifier::Meta)
+          || (matches!(m, crate::options::Modifier::ControlOrMeta) && cfg!(target_os = "macos"))
+      }),
+      "shift": opts.modifiers.contains(&crate::options::Modifier::Shift),
+    });
+
+    let position = match opts.position {
+      Some(p) => serde_json::json!({ "x": p.x, "y": p.y }),
+      None => serde_json::Value::Null,
+    };
+
+    let arg = serde_json::json!({
+      "payloads": file_records,
+      "data": data_records,
+      "modifiers": modifiers,
+      "position": position,
+    });
+    let arg_json = serde_json::to_string(&arg)
+      .map_err(|e| crate::error::FerriError::Backend(format!("failed to serialise drop payload: {e}")))?;
+
+    let el = self.resolve().await?;
+    let function = format!("function() {{ const arg = {arg_json}; {DROP_BODY} }}");
+    let result = el.call_js_fn_value(&function).await?;
+
+    match result.as_ref().and_then(serde_json::Value::as_str) {
+      Some("accepted") => Ok(()),
+      Some("not-accepted") => Err(crate::error::FerriError::Backend(
+        "Drop target did not accept the drop -- its dragover handler did not call preventDefault()".into(),
+      )),
+      Some("error:notconnected") => Err(crate::error::FerriError::Backend(
+        "Drop target element is not connected to the document".into(),
+      )),
+      _ => Err(crate::error::FerriError::Backend(
+        "drop did not return a recognised status".into(),
+      )),
+    }
+  }
+
   // ── Combinators ─────────────────────────────────────────────────────────
 
   /// Union: matches elements from either this or the other locator.
@@ -1970,6 +2064,121 @@ impl std::fmt::Debug for FrameLocator {
 /// element's padding-box top-left offset by `(position.x, position.y)` —
 /// matching Playwright's `sourcePosition` / `targetPosition` semantics. When
 /// `position` is `None`, the element's center is used.
+/// Page-side body for [`Locator::drop`]. Runs with `this` bound to the
+/// target element and a JSON-literal `arg` ({payloads, data, modifiers,
+/// position}) in scope. Mirrors Playwright's `dom.ts::_drop` page-side
+/// closure: builds a `DataTransfer`, adds the `File` objects + `setData`
+/// entries, then dispatches `dragenter` / `dragover` / `drop`. Returns a
+/// status string the Rust side maps to `Ok`/`Err`.
+const DROP_BODY: &str = r"
+  if (!this.isConnected || this.nodeType !== 1) return 'error:notconnected';
+  this.scrollIntoViewIfNeeded ? this.scrollIntoViewIfNeeded() : this.scrollIntoView();
+  const r = this.getBoundingClientRect();
+  const point = arg.position
+    ? { x: r.x + arg.position.x, y: r.y + arg.position.y }
+    : { x: r.x + r.width / 2, y: r.y + r.height / 2 };
+  const dt = new DataTransfer();
+  for (const p of arg.payloads) {
+    const bin = atob(p.buffer);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    dt.items.add(new File([bytes], p.name, { type: p.mimeType }));
+  }
+  for (const entry of arg.data) dt.setData(entry.mimeType, entry.value);
+  const makeEvent = (type) => new DragEvent(type, {
+    bubbles: true,
+    cancelable: true,
+    composed: true,
+    clientX: point.x,
+    clientY: point.y,
+    altKey: arg.modifiers.alt,
+    ctrlKey: arg.modifiers.ctrl,
+    metaKey: arg.modifiers.meta,
+    shiftKey: arg.modifiers.shift,
+    dataTransfer: dt,
+  });
+  this.dispatchEvent(makeEvent('dragenter'));
+  const over = makeEvent('dragover');
+  this.dispatchEvent(over);
+  if (!over.defaultPrevented) {
+    this.dispatchEvent(makeEvent('dragleave'));
+    return 'not-accepted';
+  }
+  this.dispatchEvent(makeEvent('drop'));
+  return 'accepted';
+";
+
+/// Lower a [`crate::options::DropPayload`]'s files into the page-side
+/// `{name, mimeType, buffer(base64)}` records that [`DROP_BODY`] rebuilds
+/// into `File` objects. Disk paths are read into buffers (matching
+/// Playwright's co-located server path); in-memory payloads carry their
+/// bytes already.
+fn lower_drop_files(files: Option<crate::options::InputFiles>) -> Result<Vec<serde_json::Value>> {
+  use base64::Engine as _;
+  match files {
+    Some(crate::options::InputFiles::Paths(paths)) => {
+      let mut out = Vec::with_capacity(paths.len());
+      for p in paths {
+        let bytes = std::fs::read(&p)
+          .map_err(|e| crate::error::FerriError::Backend(format!("failed to read drop file {}: {e}", p.display())))?;
+        let name = p
+          .file_name()
+          .map(|n| n.to_string_lossy().into_owned())
+          .unwrap_or_default();
+        out.push(serde_json::json!({
+          "name": name,
+          "mimeType": guess_mime_type(&name),
+          "buffer": base64::engine::general_purpose::STANDARD.encode(&bytes),
+        }));
+      }
+      Ok(out)
+    },
+    Some(crate::options::InputFiles::Payloads(payloads)) => Ok(
+      payloads
+        .into_iter()
+        .map(|p| {
+          let mime = if p.mime_type.is_empty() {
+            "application/octet-stream".to_string()
+          } else {
+            p.mime_type
+          };
+          serde_json::json!({
+            "name": p.name,
+            "mimeType": mime,
+            "buffer": base64::engine::general_purpose::STANDARD.encode(&p.buffer),
+          })
+        })
+        .collect(),
+    ),
+    None => Ok(Vec::new()),
+  }
+}
+
+/// Best-effort MIME type for a filename based on its extension. Used by
+/// [`Locator::drop`] when reading `DropPayload` file paths from disk, where
+/// the caller did not supply an explicit MIME type. Falls back to
+/// `application/octet-stream` for unknown extensions.
+fn guess_mime_type(name: &str) -> &'static str {
+  let ext = name.rsplit('.').next().unwrap_or("").to_ascii_lowercase();
+  match ext.as_str() {
+    "txt" | "text" => "text/plain",
+    "html" | "htm" => "text/html",
+    "css" => "text/css",
+    "csv" => "text/csv",
+    "js" | "mjs" => "text/javascript",
+    "json" => "application/json",
+    "xml" => "application/xml",
+    "pdf" => "application/pdf",
+    "png" => "image/png",
+    "jpg" | "jpeg" => "image/jpeg",
+    "gif" => "image/gif",
+    "svg" => "image/svg+xml",
+    "webp" => "image/webp",
+    "zip" => "application/zip",
+    _ => "application/octet-stream",
+  }
+}
+
 fn rect_point(rect: &serde_json::Value, position: Option<crate::options::Point>) -> (f64, f64) {
   let x = rect.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
   let y = rect.get("y").and_then(serde_json::Value::as_f64).unwrap_or(0.0);

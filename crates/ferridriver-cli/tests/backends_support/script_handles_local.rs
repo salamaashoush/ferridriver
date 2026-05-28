@@ -135,6 +135,74 @@ pub fn test_script_locator_drag_to_options(c: &mut McpClient) {
   assert!((214.0..=216.0).contains(&uy), "drop y should be ~215: got {uy} (v={v})");
 }
 
+pub fn test_script_locator_drop_payload(c: &mut McpClient) {
+  // A drop zone whose dragover calls preventDefault (accepts the drop)
+  // and whose drop handler records the DataTransfer's text payload plus
+  // the dropped file name/bytes back onto a dataset attribute. The Rust
+  // side observes that data ONLY appears when the payload reached the
+  // page-side drop handler (Rule 9).
+  c.nav(
+    "<style>html,body{margin:0;padding:0}</style>\
+     <div id='zone' style='width:200px;height:200px;background:#eee'></div>\
+     <script>\
+       var z=document.getElementById('zone');\
+       z.addEventListener('dragover',function(e){e.preventDefault();});\
+       z.addEventListener('drop',function(e){\
+         e.preventDefault();\
+         var dt=e.dataTransfer;\
+         var text=dt.getData('text/plain');\
+         var f=dt.files[0];\
+         var r=new FileReader();\
+         r.onload=function(){\
+           z.dataset.result=JSON.stringify({text:text,name:f?f.name:'',body:r.result});\
+         };\
+         if(f){r.readAsText(f);}else{z.dataset.result=JSON.stringify({text:text,name:'',body:''});}\
+       });\
+     </script>",
+  );
+  let v = c.script_value(
+    "await page.locator('#zone').drop({ \
+        files: { name: 'card.txt', mimeType: 'text/plain', buffer: [112, 119, 45, 98, 121, 116, 101, 115] }, \
+        data: { 'text/plain': 'hello-drop' } \
+     }); \
+     await page.waitForFunction(\"document.getElementById('zone').dataset.result !== undefined\"); \
+     const raw = await page.evaluate(\"document.getElementById('zone').dataset.result\"); \
+     return JSON.parse(raw);",
+  );
+  assert_eq!(
+    v["text"],
+    json!("hello-drop"),
+    "drop data payload should be readable via DataTransfer.getData: {v}"
+  );
+  assert_eq!(
+    v["name"],
+    json!("card.txt"),
+    "drop FilePayload name should reach DataTransfer.files: {v}"
+  );
+  assert_eq!(
+    v["body"],
+    json!("pw-bytes"),
+    "drop FilePayload bytes should decode to the original buffer: {v}"
+  );
+}
+
+pub fn test_script_locator_drop_rejected(c: &mut McpClient) {
+  // Drop zone with NO dragover preventDefault -> the drop is rejected;
+  // `Locator.drop` must surface an error, not resolve silently.
+  c.nav("<div id='zone' style='width:200px;height:200px;background:#eee'></div>");
+  let payload = c.script(
+    "try { \
+       await page.locator('#zone').drop({ data: { 'text/plain': 'x' } }); \
+       return 'no-error'; \
+     } catch (e) { return 'threw:' + String(e && e.message ? e.message : e); }",
+  );
+  let value = payload["value"].as_str().unwrap_or("");
+  assert!(
+    value.contains("did not accept the drop"),
+    "drop onto a non-accepting target should throw a 'did not accept' error: {payload}"
+  );
+}
+
 pub fn test_script_emulate_media_all_fields(c: &mut McpClient) {
   // BiDi/Firefox only supports colorScheme; CDP + WebKit support all five.
   // This test runs on CDP backends (cdp-pipe, cdp-raw) and WebKit.
