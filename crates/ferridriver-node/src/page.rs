@@ -979,7 +979,16 @@ impl Page {
 
   #[napi]
   pub async fn screenshot(&self, options: Option<ScreenshotOptions>) -> Result<Buffer> {
-    let opts: ferridriver::options::ScreenshotOptions = options.map_or_else(Default::default, Into::into);
+    let mask_selectors: Vec<String> = options
+      .as_ref()
+      .and_then(|o| o.mask.as_ref())
+      .map(|m| m.iter().map(|l| l.selector.clone()).collect())
+      .unwrap_or_default();
+    let mut opts: ferridriver::options::ScreenshotOptions = options.map_or_else(Default::default, Into::into);
+    opts.mask = mask_selectors
+      .into_iter()
+      .map(|sel| self.inner.locator(&sel, None))
+      .collect();
     let bytes = self.inner.screenshot(opts).await.map_err(crate::error::to_napi)?;
     Ok(bytes.into())
   }

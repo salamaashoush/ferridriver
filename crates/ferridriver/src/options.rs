@@ -337,9 +337,10 @@ pub struct AriaSnapshotOptions {
 ///   Only meaningful for `Page::screenshot`; ignored by `Locator`.
 /// - `full_page` — capture the entire scrollable page. Only meaningful
 ///   for `Page::screenshot`.
-/// - `mask` — selectors (held as strings so NAPI/BDD can pass through
-///   without materialising a full `Locator`) whose matches are overlaid
-///   with `mask_color` before capture.
+/// - `mask` — locators whose matches are overlaid with `mask_color`
+///   before capture. Mirrors Playwright's `mask?: Locator[]`; the
+///   selector string is extracted from each locator before backend
+///   dispatch.
 /// - `mask_color` — CSS color for the mask overlay. Defaults to pink
 ///   `#FF00FF`.
 /// - `omit_background` — transparent background when `true`. Ignored for
@@ -362,7 +363,7 @@ pub struct ScreenshotOptions {
   pub clip: Option<ClipRect>,
   pub full_page: Option<bool>,
   pub format: Option<String>,
-  pub mask: Vec<String>,
+  pub mask: Vec<crate::locator::Locator>,
   pub mask_color: Option<String>,
   pub omit_background: Option<bool>,
   pub path: Option<std::path::PathBuf>,

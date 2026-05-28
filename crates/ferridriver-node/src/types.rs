@@ -136,10 +136,13 @@ pub struct ScreenshotOptions {
   /// identical with Playwright.
   #[napi(ts_type = "'png' | 'jpeg' | 'webp'", js_name = "type")]
   pub format: Option<String>,
-  /// Selectors whose matches are painted over with [`Self::mask_color`].
-  /// Playwright takes `Array<Locator>`; we accept selectors here
-  /// because `Locator` instances lower to their selector string at
-  /// the NAPI boundary (see [`LocatorRef`]).
+  /// Locators whose matches are painted over with [`Self::mask_color`].
+  /// Playwright takes `Array<Locator>`; each `Locator` instance lowers
+  /// to its `.selector` string at the NAPI boundary via the
+  /// prototype-chain read on [`LocatorRef`]. `ts_type` forces the
+  /// generated `.d.ts` to show `Array<Locator>` rather than leaking
+  /// the `{ selector }` wire shape.
+  #[napi(ts_type = "Array<Locator>")]
   pub mask: Option<Vec<LocatorRef>>,
   /// CSS color for the mask overlay. Default `#FF00FF`.
   pub mask_color: Option<String>,
@@ -1203,7 +1206,9 @@ impl From<ScreenshotOptions> for ferridriver::options::ScreenshotOptions {
       clip: o.clip.map(Into::into),
       full_page: o.full_page,
       format: o.format,
-      mask: o.mask.unwrap_or_default().into_iter().map(|l| l.selector).collect(),
+      // `mask` needs a `Page` to materialise core `Locator` values; the
+      // caller (`Page::screenshot`) fills it from `o.mask` selectors.
+      mask: Vec::new(),
       mask_color: o.mask_color,
       omit_background: o.omit_background,
       path: o.path.map(std::path::PathBuf::from),

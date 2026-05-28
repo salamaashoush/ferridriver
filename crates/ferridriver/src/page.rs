@@ -1063,7 +1063,7 @@ impl Page {
       scale,
       animations,
       caret,
-      mask: opts.mask.clone(),
+      mask: opts.mask.iter().map(|l| l.selector().to_string()).collect(),
       mask_color: opts.mask_color.clone(),
       style: opts.style.clone(),
     };

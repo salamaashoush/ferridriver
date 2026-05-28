@@ -794,6 +794,48 @@ pub fn test_script_action_timeout(c: &mut McpClient) {
   }
 }
 
+// Issue #10: `page.screenshot({ mask })` takes `Locator[]`, not selector
+// strings (which leaked the internal wire shape). The QuickJS binding
+// reads real `LocatorJs` instances out of the `mask` array and extracts
+// each selector Rust-side. Rule 9 observable: masking a green box with a
+// custom magenta color overpaints those pixels, so the PNG bytes differ
+// from an unmasked capture; masking a Locator that matches nothing leaves
+// the capture byte-identical. We checksum the byte array in JS (QuickJS
+// has no zlib for full PNG decode) and compare the three captures.
+pub fn test_script_screenshot_mask_locator(c: &mut McpClient) {
+  c.nav(
+    "<style>html,body{margin:0;padding:0;background:#fff}\
+     #box{position:fixed;left:0;top:0;width:100px;height:100px;background:#00ff00}</style>\
+     <div id='box'></div>",
+  );
+  // sum32 over the byte array gives a deterministic content fingerprint.
+  let v = c.script_value(
+    "function sum(bytes) { let s = 0; for (let i = 0; i < bytes.length; i++) { s = (s + bytes[i] * (i % 7 + 1)) >>> 0; } return s; }\
+     const plain = await page.screenshot({ type: 'png', scale: 'css' });\
+     const masked = await page.screenshot({ type: 'png', scale: 'css', mask: [page.locator('#box')], maskColor: '#ff00ff' });\
+     const empty = await page.screenshot({ type: 'png', scale: 'css', mask: [page.locator('#does-not-exist')], maskColor: '#ff00ff' });\
+     return { plain: sum(plain), masked: sum(masked), empty: sum(empty), len: plain.length };",
+  );
+  let plain = v["plain"].as_u64();
+  let masked = v["masked"].as_u64();
+  let empty = v["empty"].as_u64();
+  assert!(
+    v["len"].as_u64().unwrap_or(0) > 0,
+    "{}: screenshot returned no bytes: {v}",
+    c.backend
+  );
+  assert_ne!(
+    plain, masked,
+    "{}: masking #box with magenta must change the captured pixels: {v}",
+    c.backend
+  );
+  assert_eq!(
+    plain, empty,
+    "{}: masking a non-matching locator must leave the capture unchanged: {v}",
+    c.backend
+  );
+}
+
 // Task 1.3 phase B: the injected `window.__fd` namespace exposes the
 // Playwright `UtilityScript` class and its isomorphic serializer
 // helpers (`parseEvaluationResultValue`, `serializeAsCallArgument`).
