@@ -106,6 +106,48 @@ hardware before citing.
   dominates and ferridriver's load-state handling adds overhead here. This is a
   known weak spot and must not be hidden behind an aggregate "Nx faster" claim.
 
+## Latest measured run (2026-05-29, Linux, cdp-pipe vs Playwright 1.60 chromium)
+
+Per-operation harness, 15 runs after 3 warmups, both sides `force:true` on
+actions. Median latency, cdp-pipe column:
+
+| Operation | Playwright | cdp-pipe | ratio |
+|---|---|---|---|
+| goto (network) | 20.2ms | 17.1ms | 1.2x |
+| setContent | 1.0ms | 1.2ms | 0.9x |
+| title() | 0.15ms | 0.07ms | 2.1x |
+| innerText('h1') | 0.36ms | 0.12ms | 3.0x |
+| evaluate('1+1') | 0.12ms | 0.09ms | 1.3x |
+| loc.textContent() | 0.30ms | 0.09ms | 3.3x |
+| loc.boundingBox() | 0.66ms | 0.11ms | 6.0x |
+| loc.allTextContents() | 0.45ms | 0.13ms | 3.5x |
+| fill (force) | 0.85ms | 0.34ms | 2.5x |
+| click (force) | 14.5ms | 0.71ms | 20.5x |
+| check (force) | 1.18ms | 0.74ms | 1.6x |
+| screenshot() | 33.3ms | 33.2ms | 1.0x |
+| screenshot(fullPage) | 33.2ms | 33.4ms | 1.0x |
+| **TOTAL (sum of medians)** | **107.5ms** | **86.9ms** | **1.2x** |
+
+Reading:
+
+- **Aggregate ~1.2x** on this op mix. The total is dominated by the two 33ms
+  screenshots (parity, browser-bound) and the 20ms network goto, so the
+  headline multiple is small even though most ops are much faster.
+- **Driver-bound DOM/locator reads: 2-6x** (boundingBox 6x, allTextContents
+  3.5x, textContent 3.3x, innerText 3x) -- where ferridriver's lower per-call
+  overhead shows.
+- **click 20.5x** is now a fair comparison (both sides `force:true`); the gap is
+  ferridriver's batched single-click fast path (press+release+move in one
+  `try_join!`) vs Playwright's per-event dispatch. Not the old `force` confound.
+- **Navigation is no longer slower**: this run shows goto at 1.2x faster,
+  reversing the previously observed 0.74x. Treat as variance-sensitive; do not
+  advertise a navigation speedup without re-confirming.
+- **Screenshots at parity** (1.0x) -- Chrome does the encode; ferridriver cannot
+  change that.
+
+The strongest, separately-measured win is the test runner: independent projects
+now run concurrently (wall-clock ~= slowest project, not the sum).
+
 ## What a defensible "5x or more" claim requires
 
 Do not state "5x faster than Playwright" (or any single headline multiplier)
