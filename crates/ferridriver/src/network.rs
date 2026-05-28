@@ -600,7 +600,6 @@ pub(crate) struct ResponseState {
   status: i64,
   status_text: String,
   from_service_worker: bool,
-  http_version: Option<String>,
   provisional_headers: Headers,
 
   state: RwLock<ResponseMutState>,
@@ -615,6 +614,11 @@ struct ResponseMutState {
   body_cache: Option<Vec<u8>>,
   remote_addr: Option<RemoteAddr>,
   security_details: Option<SecurityDetails>,
+  /// HTTP protocol version reported by the backend (e.g. `http/1.1`).
+  /// Captured at construction; lives in the async state alongside the
+  /// other backend-reported metadata so the public accessor mirrors
+  /// Playwright's `Promise<string>` shape.
+  http_version: Option<String>,
   finished: Option<std::result::Result<(), FerriError>>,
 }
 
@@ -627,13 +631,13 @@ impl Response {
       status: init.status,
       status_text: init.status_text,
       from_service_worker: init.from_service_worker,
-      http_version: init.http_version,
       provisional_headers: init.headers,
       state: RwLock::new(ResponseMutState {
         raw_headers: None,
         body_cache: None,
         remote_addr: init.remote_addr,
         security_details: init.security_details,
+        http_version: init.http_version,
         finished: None,
       }),
       finished_notify: Notify::new(),
@@ -827,9 +831,12 @@ impl Response {
     self.inner.state.read().await.security_details.clone()
   }
 
-  #[must_use]
-  pub fn http_version(&self) -> Option<String> {
-    self.inner.http_version.clone()
+  /// HTTP protocol version (e.g. `http/1.1`), or `None` when the
+  /// backend did not report one. Playwright: `response.httpVersion():
+  /// Promise<string>` (`client/network.ts`) — async to mirror the
+  /// channel round-trip Playwright performs.
+  pub async fn http_version(&self) -> Option<String> {
+    self.inner.state.read().await.http_version.clone()
   }
 
   // -- Internal mutators ---------------------------------------------------

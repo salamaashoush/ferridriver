@@ -48,6 +48,14 @@ impl DialogJs {
     self.inner.default_value().to_string()
   }
 
+  /// Playwright: `dialog.page(): Page | null`. `null` when the dialog
+  /// opened before its page was available (early page initialization)
+  /// or the owning page has been closed.
+  #[qjs(rename = "page")]
+  pub fn page(&self) -> Option<crate::bindings::page::PageJs> {
+    self.inner.page().map(crate::bindings::page::PageJs::new)
+  }
+
   /// Playwright: `dialog.accept(promptText?): Promise<void>`.
   /// `promptText` is applied to `prompt` dialogs only; other types
   /// ignore it. Double-accept / accept-after-dismiss rejects with the

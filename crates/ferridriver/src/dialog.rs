@@ -35,6 +35,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::error::{FerriError, Result};
+use crate::page::Page;
 
 /// Playwright-compatible dialog type. Mirrors the `DialogType` union
 /// from `/tmp/playwright/packages/playwright-core/src/server/dialog.ts`.
@@ -115,6 +116,13 @@ pub(crate) struct DialogState {
   /// ad-hoc `Dialog::new` callers (e.g. the `WebKit` placeholder
   /// responder) don't need a manager reference.
   manager: Option<DialogManager>,
+  /// Weak back-reference to the owning page. Playwright's
+  /// `dialog.page()` is nullable because dialogs opening early during
+  /// page initialization are reported without a page (see
+  /// `client/dialog.ts`: `Page.fromNullable(initializer.page)`); the
+  /// Rust `Weak` upgrade returns `None` for that case as well as for a
+  /// dropped page.
+  page: std::sync::Weak<Page>,
 }
 
 impl Dialog {
@@ -123,15 +131,25 @@ impl Dialog {
   /// the page's [`DialogManager`] handler.
   #[must_use]
   pub fn new(dialog_type: DialogType, message: String, default_value: String, responder: DialogResponder) -> Self {
-    Self::new_with_manager(dialog_type, message, default_value, responder, None)
+    Self::new_with_manager(
+      dialog_type,
+      message,
+      default_value,
+      responder,
+      None,
+      std::sync::Weak::new(),
+    )
   }
 
   /// Variant of [`Self::new`] that binds the dialog to a
-  /// [`DialogManager`], so [`Self::accept`] / [`Self::dismiss`] notify
-  /// the manager's open-set via
-  /// [`DialogManager::dialog_will_close`]. Backend listeners use this
-  /// form; ad-hoc constructions (placeholders, tests) use the
-  /// unbound form.
+  /// [`DialogManager`] and the owning page, so [`Self::accept`] /
+  /// [`Self::dismiss`] notify the manager's open-set via
+  /// [`DialogManager::dialog_will_close`] and [`Self::page`] resolves
+  /// the page. Backend listeners use this form; ad-hoc constructions
+  /// (placeholders, tests) use the unbound form. Pass
+  /// `std::sync::Weak::new()` for `page` when no page reference is
+  /// available (early-init dialogs), matching Playwright's nullable
+  /// `dialog.page()`.
   #[must_use]
   pub fn new_with_manager(
     dialog_type: DialogType,
@@ -139,6 +157,7 @@ impl Dialog {
     default_value: String,
     responder: DialogResponder,
     manager: Option<DialogManager>,
+    page: std::sync::Weak<Page>,
   ) -> Self {
     Self {
       inner: Arc::new(DialogState {
@@ -148,8 +167,17 @@ impl Dialog {
         handled: AtomicBool::new(false),
         responder,
         manager,
+        page,
       }),
     }
+  }
+
+  /// Owning page (weak). Returns `None` if the page has been dropped or
+  /// the dialog opened before a page was available. Playwright:
+  /// `dialog.page(): Page | null` (`client/dialog.ts`).
+  #[must_use]
+  pub fn page(&self) -> Option<Arc<Page>> {
+    self.inner.page.upgrade()
   }
 
   /// Dialog type. Playwright: `dialog.type(): string`.
@@ -423,5 +451,20 @@ impl DialogManager {
         false
       }
     }))
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  fn noop_responder() -> DialogResponder {
+    Arc::new(|_| Box::pin(async { Ok(()) }))
+  }
+
+  #[test]
+  fn page_is_none_without_backref() {
+    let d = Dialog::new(DialogType::Alert, "hi".into(), String::new(), noop_responder());
+    assert!(d.page().is_none());
   }
 }

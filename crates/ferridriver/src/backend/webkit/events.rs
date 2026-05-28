@@ -180,7 +180,7 @@ pub fn attach_listeners(page: &WebKitPage) {
           Ok(env) => match env.method.as_deref() {
             Some("Dialog.javascriptDialogOpening") => {
               let log = arc_swap::Guard::into_inner(dialog_log.load());
-              dispatch_dialog(&proxy, &env.params, &dialog_manager, &log).await;
+              dispatch_dialog(&proxy, &env.params, &dialog_manager, &log, page.page_backref.weak()).await;
             },
             Some("Target.targetCreated") => {
               handle_provisional_target_created(&env.params, &page, provisional.clone()).await;
@@ -1131,6 +1131,7 @@ async fn dispatch_dialog(
   params: &Value,
   dialog_manager: &crate::dialog::DialogManager,
   dialog_log: &Arc<RwLock<Vec<DialogEvent>>>,
+  page: std::sync::Weak<crate::page::Page>,
 ) {
   let dialog_type_str = params
     .get("type")
@@ -1171,6 +1172,7 @@ async fn dispatch_dialog(
     default_value,
     responder,
     Some(dialog_manager.clone()),
+    page,
   );
   dialog_manager.did_open(dialog);
   dialog_log.write().await.push(DialogEvent {

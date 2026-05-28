@@ -99,6 +99,15 @@ impl PageBackref {
   pub fn upgrade(&self) -> Option<Arc<crate::page::Page>> {
     self.inner.lock().ok()?.upgrade()
   }
+
+  /// Clone the stored `Weak<Page>` without upgrading. Used to hand a
+  /// page back-reference to live handles (e.g.
+  /// [`crate::dialog::Dialog`]) whose `page()` accessor resolves the
+  /// page lazily.
+  #[must_use]
+  pub fn weak(&self) -> std::sync::Weak<crate::page::Page> {
+    self.inner.lock().map(|g| g.clone()).unwrap_or_default()
+  }
 }
 
 // ─── Backend-agnostic types ─────────────────────────────────────────────────

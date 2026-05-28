@@ -133,9 +133,10 @@ pub fn test_file_chooser_single_string_path(c: &mut McpClient) {
     await page.click("#b");
     const chooser = await p;
     const isMult = chooser.isMultiple();
+    const samePage = chooser.page().url() === page.url();
     await chooser.setFiles({path});
     const title = {wait};
-    return {{ isMult, title }};
+    return {{ isMult, samePage, title }};
   "##,
     path = serde_json::to_string(&path).unwrap(),
     wait = WAIT_FOR_TITLE_CALL.replace("PREFIX_JSON", "\"count=\"").trim(),
@@ -145,6 +146,11 @@ pub fn test_file_chooser_single_string_path(c: &mut McpClient) {
     v["isMult"].as_bool(),
     Some(false),
     "single-file input reports isMultiple=false: {v}"
+  );
+  assert_eq!(
+    v["samePage"].as_bool(),
+    Some(true),
+    "fileChooser.page() resolves to the owning page: {v}"
   );
   assert_eq!(
     v["title"].as_str(),

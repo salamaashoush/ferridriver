@@ -179,3 +179,42 @@ pub fn test_dialog_auto_dismiss_without_listener(c: &mut McpClient) {
     "without a dialog listener the backend auto-dismisses: {v}",
   );
 }
+
+/// `dialog.page()` resolves to the owning page. We navigate to a known
+/// data URL, trigger a dialog, and assert the dialog's `page().url()`
+/// matches the page we navigated. cdp / bidi wire the page back-reference
+/// into the live Dialog handle; webkit's host auto-decides before the
+/// event reaches Rust, so the handle may not arrive (asserted as the
+/// documented Timeout there rather than skipped).
+pub fn test_dialog_page_accessor(c: &mut McpClient) {
+  let script = r#"
+    await page.goto("data:text/html,<title>dlg</title><script>setTimeout(()=>{document.title = confirm('p?') ? 'y' : 'n'}, 80)</script>");
+    const dialog = await page.waitForEvent("dialog", 10000);
+    const dlgPage = dialog.page();
+    const out = {
+      hasPage: dlgPage != null,
+      sameUrl: dlgPage != null ? (dlgPage.url() === page.url()) : false,
+    };
+    await dialog.accept();
+    return out;
+  "#;
+  if c.backend == "webkit" {
+    let payload = c.script(script);
+    let status = payload["status"].as_str().unwrap_or("");
+    if status == "error" {
+      let msg = payload["error"]["message"].as_str().unwrap_or("");
+      assert!(
+        msg.contains("Timeout") || msg.contains("not supported") || msg.contains("unsupported"),
+        "webkit dialog path should surface Timeout or Unsupported, got: {msg}",
+      );
+    }
+    return;
+  }
+  let v = c.script_value(script);
+  assert_eq!(v["hasPage"].as_bool(), Some(true), "dialog.page() returns a page: {v}");
+  assert_eq!(
+    v["sameUrl"].as_bool(),
+    Some(true),
+    "dialog.page().url() matches the owning page url: {v}",
+  );
+}
