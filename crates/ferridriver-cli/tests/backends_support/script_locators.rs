@@ -225,6 +225,44 @@ pub fn test_script_locator_normalize(c: &mut McpClient) {
   );
 }
 
+// Locator.highlight installs the Playwright glass-pane overlay
+// (`<x-pw-glass>`) on documentElement; hideHighlight / the returned
+// Disposable's dispose() tears it down. The overlay element only exists
+// when addHighlight actually ran, so its presence/absence is a real
+// effect of the call, not just a non-error.
+// Playwright: client/locator.ts:158 (highlight) + :164 (hideHighlight).
+pub fn test_script_locator_highlight(c: &mut McpClient) {
+  c.nav("<button id='b'>Target</button>");
+  let v = c.script_value(
+    "const loc = page.locator('#b'); \
+       const before = await page.evaluate(\"document.querySelectorAll('x-pw-glass').length\"); \
+       const disp = await loc.highlight({ style: { outlineColor: 'red', zIndex: 7 } }); \
+       const during = await page.evaluate(\"document.querySelectorAll('x-pw-glass').length\"); \
+       await disp.dispose(); \
+       const afterDispose = await page.evaluate(\"document.querySelectorAll('x-pw-glass').length\"); \
+       await loc.highlight(); \
+       const reAdded = await page.evaluate(\"document.querySelectorAll('x-pw-glass').length\"); \
+       await loc.hideHighlight(); \
+       const afterHide = await page.evaluate(\"document.querySelectorAll('x-pw-glass').length\"); \
+       return { \
+         before: Number(before), \
+         during: Number(during), \
+         afterDispose: Number(afterDispose), \
+         reAdded: Number(reAdded), \
+         afterHide: Number(afterHide), \
+       };",
+  );
+  assert_eq!(v["before"], json!(0), "no overlay before highlight: {v}");
+  assert_eq!(v["during"], json!(1), "overlay installed by highlight(): {v}");
+  assert_eq!(v["afterDispose"], json!(0), "Disposable.dispose() removes overlay: {v}");
+  assert_eq!(
+    v["reAdded"],
+    json!(1),
+    "highlight() without style re-installs overlay: {v}"
+  );
+  assert_eq!(v["afterHide"], json!(0), "hideHighlight() removes overlay: {v}");
+}
+
 pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_locators::test_script_frame_sync_accessors",
@@ -281,5 +319,9 @@ pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_locators::test_script_locator_normalize",
     test_script_locator_normalize,
+  );
+  set.run(
+    "backends_support::script_locators::test_script_locator_highlight",
+    test_script_locator_highlight,
   );
 }

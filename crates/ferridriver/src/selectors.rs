@@ -589,6 +589,53 @@ pub fn parse_strict_violation_count<E: std::fmt::Display + ?Sized>(err: &E) -> O
   count_str.parse().ok()
 }
 
+/// Show the element highlight overlay for `selector` in `frame_id`'s
+/// execution context. `style` is an optional resolved CSS string applied
+/// to the highlight box (the caller composes the `style` record into a
+/// string, mirroring Playwright's `cssObjectToString`). Mirrors
+/// Playwright's `frame._highlight(selector, style)` ->
+/// `injected.addHighlight(parsed, style)` flow
+/// (`/tmp/playwright/packages/playwright-core/src/server/frames.ts:1333`).
+///
+/// # Errors
+///
+/// Returns an error if selector parsing or JS evaluation fails.
+pub async fn highlight(page: &AnyPage, selector: &str, style: Option<&str>, frame_id: Option<&str>) -> Result<()> {
+  let parsed = parse(selector)?;
+  page.ensure_engine_injected().await?;
+  let parts_json = build_parts_json(&parsed);
+  let style_arg = match style {
+    Some(s) => serde_json::to_string(s).unwrap_or_else(|_| "undefined".to_string()),
+    None => "undefined".to_string(),
+  };
+  let js = format!("window.__fd.addHighlight({parts_json},{style_arg})");
+  run_void(page, &js, frame_id).await
+}
+
+/// Hide the element highlight overlay in `frame_id`'s execution context.
+/// Mirrors Playwright's `frame._hideHighlight(selector)` ->
+/// `injected.hideHighlight()`
+/// (`/tmp/playwright/packages/playwright-core/src/server/frames.ts:1351`).
+/// Playwright's `removeHighlight` is per-selector, but its public
+/// `hideHighlight` tears the whole overlay down; `Locator.hideHighlight`
+/// uses the latter, so we mirror that and drop the entire overlay.
+///
+/// # Errors
+///
+/// Returns an error if JS evaluation fails.
+pub async fn hide_highlight(page: &AnyPage, frame_id: Option<&str>) -> Result<()> {
+  page.ensure_engine_injected().await?;
+  run_void(page, "window.__fd.hideHighlight()", frame_id).await
+}
+
+async fn run_void(page: &AnyPage, js: &str, frame_id: Option<&str>) -> Result<()> {
+  match frame_id {
+    Some(fid) => page.evaluate_in_frame(js, fid).await,
+    None => page.evaluate(js).await,
+  }?;
+  Ok(())
+}
+
 /// Clean up any leftover selector tags (call after operations).
 pub async fn cleanup_tags(page: &AnyPage) {
   let _ = page

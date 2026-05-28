@@ -518,6 +518,55 @@ impl Locator {
     )
   }
 
+  /// Show the element-highlight overlay for this locator's selector.
+  ///
+  /// Playwright:
+  /// `highlight(options: { style?: string | Record<string, string | number> }): Promise<Disposable>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:158`).
+  /// The optional `style` is collapsed to a CSS declaration string (see
+  /// [`crate::options::HighlightStyle::to_css_string`]) and applied to the
+  /// highlight box. The overlay re-resolves the selector on each animation
+  /// frame, so no element wait happens here — matching Playwright, which
+  /// just forwards to `frame._highlight`. Returns a
+  /// [`crate::disposable::Disposable`] whose `dispose()` hides the overlay
+  /// (Playwright returns a `DisposableStub` wrapping `hideHighlight`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if selector parsing, frame resolution, or the
+  /// injected `addHighlight` call fails.
+  pub async fn highlight(
+    &self,
+    style: Option<crate::options::HighlightStyle>,
+  ) -> Result<crate::disposable::Disposable> {
+    let (frame, selector) = self.resolved().await?;
+    let css = style.as_ref().map(crate::options::HighlightStyle::to_css_string);
+    frame.highlight(&selector, css.as_deref()).await?;
+    let this = self.clone();
+    Ok(crate::disposable::Disposable::new(move || async move {
+      match this.hide_highlight().await {
+        Ok(()) => Ok(()),
+        Err(e) if e.is_target_closed_error() => Ok(()),
+        Err(e) => Err(e),
+      }
+    }))
+  }
+
+  /// Hide the element-highlight overlay shown by [`Locator::highlight`].
+  ///
+  /// Playwright: `hideHighlight(): Promise<void>`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/locator.ts:164`).
+  /// Tears down the whole overlay for this locator's frame.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if frame resolution or the injected `hideHighlight`
+  /// call fails.
+  pub async fn hide_highlight(&self) -> Result<()> {
+    let (frame, _selector) = self.resolved().await?;
+    frame.hide_highlight().await
+  }
+
   /// Type text into the element character by character using keyboard events.
   ///
   /// # Errors

@@ -21,6 +21,7 @@ import { cacheNormalizedWhitespaces, normalizeWhiteSpace, trimStringWithEllipsis
 
 import { generateAriaTree, getAllElementsMatchingExpectAriaTemplate, matchesExpectAriaTemplate, renderAriaTree, findNewElement } from './ariaSnapshot';
 import { beginDOMCaches, enclosingShadowRootOrDocument, endDOMCaches, isElementVisible, isInsideScope, parentElementOrShadowHost, setGlobalOptions } from './domUtils';
+import { Highlight } from './highlight';
 import { kLayoutSelectorNames, layoutSelectorScore } from './layoutSelectorUtils';
 import { createRoleEngine } from './roleSelectorEngine';
 import { beginAriaCaches, endAriaCaches, getAriaDisabled, getAriaRole, getCheckedAllowMixed, getCheckedWithoutMixed, getElementAccessibleDescription, getElementAccessibleErrorMessage, getElementAccessibleName, getReadonly } from './roleUtils';
@@ -92,6 +93,7 @@ export class InjectedScript {
   readonly document: Document;
   private _lastAriaSnapshotForTrack = new Map<string, AriaSnapshot>();
   private _lastAriaSnapshotForQuery: AriaSnapshot | undefined;
+  private _highlight: Highlight | undefined;
 
   // Recorder must use any external dependencies through InjectedScript.
   // Otherwise it will end up with a copy of all modules it uses, and any
@@ -1605,6 +1607,27 @@ export class InjectedScript {
       ++rIndex;
     }
     return mIndex === matchers.length;
+  }
+
+  private _ensureHighlight(): Highlight {
+    if (!this._highlight) {
+      this._highlight = new Highlight(this);
+      this._highlight.install();
+    }
+    return this._highlight;
+  }
+
+  addHighlight(selector: ParsedSelector, style?: string) {
+    this._ensureHighlight().addElementHighlight(selector, style);
+  }
+
+  removeHighlight(selector: ParsedSelector) {
+    this._ensureHighlight().removeElementHighlight(selector);
+  }
+
+  hideHighlight() {
+    this._highlight?.uninstall();
+    this._highlight = undefined;
   }
 }
 

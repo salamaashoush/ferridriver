@@ -31,14 +31,12 @@ const injected = new InjectedScript(window, {
 
 // ── Selector Execution (compatibility with ferridriver's parts-based API) ──
 
-function executeSelector(parts: SelectorPart[], root: Node): Element[] {
-  // Convert ferridriver's {engine, body} parts to Playwright's parsed selector format
-  // Map ferridriver engine names to Playwright engine names
-  // Build the selector string using Playwright's own escaping conventions.
-  // body format from Rust: raw text for text/label, attribute value for placeholder/alt/title,
-  // role spec for role, CSS for css, etc.
-  // exact flag: body enclosed in double quotes = exact match, otherwise substring/case-insensitive.
-  const selectorStr = parts.map(p => {
+// Convert ferridriver's {engine, body} parts to a Playwright selector string.
+// body format from Rust: raw text for text/label, attribute value for placeholder/alt/title,
+// role spec for role, CSS for css, etc.
+// exact flag: body enclosed in double quotes = exact match, otherwise substring/case-insensitive.
+function partsToSelectorString(parts: SelectorPart[]): string {
+  return parts.map(p => {
     const engine = p.engine;
     const body = p.body;
     // Detect exact match: Playwright convention is body wrapped in double quotes
@@ -93,6 +91,10 @@ function executeSelector(parts: SelectorPart[], root: Node): Element[] {
         return `${engine}=${body}`;
     }
   }).join(' >> ');
+}
+
+function executeSelector(parts: SelectorPart[], root: Node): Element[] {
+  const selectorStr = partsToSelectorString(parts);
   try {
     const parsed = injected.parseSelector(selectorStr);
     return injected.querySelectorAll(parsed, root);
@@ -407,6 +409,23 @@ if (!window.__fd) {
     parseSelector: (s: string) => injected.parseSelector(s),
     querySelector: (selector: any, root: Node, strict: boolean) => injected.querySelector(selector, root, strict),
     querySelectorAll: (selector: any, root: Node) => injected.querySelectorAll(selector, root),
+
+    // Element highlight overlay (Playwright `injected.addHighlight` /
+    // `removeHighlight` / `hideHighlight`). Mirrors
+    // packages/injected/src/injectedScript.ts addHighlight/removeHighlight.
+    // `parts` is ferridriver's {engine, body} array — converted to a
+    // Playwright ParsedSelector so the highlight RAF loop can re-resolve
+    // it as the DOM/layout changes. `cssStyle` is the resolved CSS string
+    // (Locator.highlight composes the optional style record host-side).
+    addHighlight(parts: SelectorPart[], cssStyle?: string) {
+      injected.addHighlight(injected.parseSelector(partsToSelectorString(parts)), cssStyle);
+    },
+    removeHighlight(parts: SelectorPart[]) {
+      injected.removeHighlight(injected.parseSelector(partsToSelectorString(parts)));
+    },
+    hideHighlight() {
+      injected.hideHighlight();
+    },
 
     // Actionability
     elementState,
