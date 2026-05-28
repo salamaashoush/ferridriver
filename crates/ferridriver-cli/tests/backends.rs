@@ -233,6 +233,10 @@ fn register_script_handles(set: &mut TestSet<'_>) {
     set,
     backends_support::script_handles_local::test_script_screenshot_mask_locator
   );
+  run!(
+    set,
+    backends_support::script_handles_local::test_script_keyboard_type_named_keys
+  );
 }
 
 fn register_script_locators(set: &mut TestSet<'_>) {

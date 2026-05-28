@@ -1483,3 +1483,64 @@ pub fn test_script_keyboard_press(c: &mut McpClient) {
     "keyboard.press should insert characters: {s:?}"
   );
 }
+
+pub fn test_script_keyboard_type_named_keys(c: &mut McpClient) {
+  // namedKeys=true: `{Enter}` presses Enter, producing a newline in the
+  // textarea. Without the option the literal text `{Enter}` would be typed,
+  // so the resulting value distinguishes the two paths.
+  c.nav("<textarea id='t'></textarea>");
+  let v = c.script_value(
+    "await page.locator('#t').focus(); \
+       await page.keyboard.type('Hello{Enter}World', { namedKeys: true }); \
+       return await page.inputValue('#t');",
+  );
+  let s = v.as_str().unwrap_or("").to_string();
+  assert_eq!(
+    s, "Hello\nWorld",
+    "namedKeys should press Enter as a newline, not type literal braces: {s:?}"
+  );
+
+  // namedKeys=false (default): `{Enter}` is typed verbatim.
+  c.nav("<textarea id='t2'></textarea>");
+  let v2 = c.script_value(
+    "await page.locator('#t2').focus(); \
+       await page.keyboard.type('A{Enter}B'); \
+       return await page.inputValue('#t2');",
+  );
+  let s2 = v2.as_str().unwrap_or("").to_string();
+  assert_eq!(s2, "A{Enter}B", "default type should keep literal braces: {s2:?}");
+
+  // Escaped `{{` types a literal `{`.
+  c.nav("<textarea id='t3'></textarea>");
+  let v3 = c.script_value(
+    "await page.locator('#t3').focus(); \
+       await page.keyboard.type('a{{b', { namedKeys: true }); \
+       return await page.inputValue('#t3');",
+  );
+  let s3 = v3.as_str().unwrap_or("").to_string();
+  assert_eq!(s3, "a{b", "double-brace should type a literal brace: {s3:?}");
+
+  // `{Backspace}` is a real key press that edits the value.
+  c.nav("<textarea id='t4'></textarea>");
+  let v4 = c.script_value(
+    "await page.locator('#t4').focus(); \
+       await page.keyboard.type('abc{Backspace}d', { namedKeys: true }); \
+       return await page.inputValue('#t4');",
+  );
+  let s4 = v4.as_str().unwrap_or("").to_string();
+  assert_eq!(s4, "abd", "Backspace should delete a char: {s4:?}");
+
+  // `{Control+a}` dispatches a keydown carrying the Ctrl modifier.
+  c.nav("<input id='t5'>");
+  let v5 = c.script_value(
+    "await page.locator('#t5').focus(); \
+       await page.evaluate(`(() => { window.__ctrlA = ''; document.getElementById('t5').addEventListener('keydown', e => { if (e.key === 'a') window.__ctrlA += 'ctrl=' + e.ctrlKey + ';'; }); })()`); \
+       await page.keyboard.type('{Control+a}', { namedKeys: true }); \
+       return await page.evaluate('window.__ctrlA');",
+  );
+  let s5 = v5.as_str().unwrap_or("").to_string();
+  assert!(
+    s5.contains("ctrl=true"),
+    "Control+a should dispatch a keydown with ctrlKey true: {s5:?}"
+  );
+}
