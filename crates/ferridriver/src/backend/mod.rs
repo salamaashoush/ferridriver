@@ -16,7 +16,21 @@ pub mod webkit;
 
 pub mod bidi;
 
-/// Empty JSON object `{}` — avoids `serde_json::json!({})` heap allocation per call.
+/// Shared empty JSON object `{}` for CDP commands that take no params.
+///
+/// CDP `send_command` / `build_command` borrow their params
+/// (`&serde_json::Value`), so every no-param call serializes this single
+/// static by reference instead of allocating and cloning a fresh `Map`.
+/// The hot per-page-enable batch (`Page.enable` / `Runtime.enable` /
+/// `Network.enable` / `DOM.enable`, fired on every new target) previously
+/// paid five `Map::clone()`s per page; it now borrows this static. Built
+/// once via `LazyLock`.
+pub(crate) static EMPTY_PARAMS: std::sync::LazyLock<serde_json::Value> =
+  std::sync::LazyLock::new(|| serde_json::Value::Object(serde_json::Map::new()));
+
+/// Owned empty JSON object `{}` for the few cold paths that build `params`
+/// as an owned value (e.g. the cookie-context branch that conditionally
+/// produces a populated map). Hot/no-param paths borrow [`EMPTY_PARAMS`].
 #[inline]
 pub(crate) fn empty_params() -> serde_json::Value {
   serde_json::Value::Object(serde_json::Map::new())

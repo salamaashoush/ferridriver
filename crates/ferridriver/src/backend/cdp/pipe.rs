@@ -133,9 +133,9 @@ impl super::transport::CdpTransport for PipeTransport {
     &self,
     session_id: Option<&str>,
     method: &str,
-    params: serde_json::Value,
+    params: &serde_json::Value,
   ) -> Result<serde_json::Value> {
-    let (data, rx) = self.dispatcher.build_command(session_id, method, &params)?;
+    let (data, rx) = self.dispatcher.build_command(session_id, method, params)?;
     self
       .write_tx
       .send(data)

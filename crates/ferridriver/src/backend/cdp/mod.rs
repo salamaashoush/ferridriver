@@ -148,7 +148,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     unpause: bool,
     init_script: Option<&str>,
   ) -> Result<Option<Vec<super::FrameInfo>>> {
-    let ep = super::empty_params();
+    let ep = &super::EMPTY_PARAMS;
 
     let vp_params = viewport.map(metrics_params_for);
 
@@ -158,7 +158,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let vp_fut = async {
       if let Some(params) = vp_params {
         transport
-          .send_command(session_id, "Emulation.setDeviceMetricsOverride", params)
+          .send_command(session_id, "Emulation.setDeviceMetricsOverride", &params)
           .await
           .map(|_| ())
       } else {
@@ -171,7 +171,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     let unpause_fut = async {
       if unpause {
         transport
-          .send_command(session_id, "Runtime.runIfWaitingForDebugger", super::empty_params())
+          .send_command(session_id, "Runtime.runIfWaitingForDebugger", &super::EMPTY_PARAMS)
           .await
           .map(|_| ())
       } else {
@@ -190,7 +190,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
           .send_command(
             session_id,
             "Page.addScriptToEvaluateOnNewDocument",
-            serde_json::json!({
+            &serde_json::json!({
               "source": src,
               "runImmediately": true,
             }),
@@ -221,21 +221,15 @@ impl<T: CdpWrap> CdpBrowser<T> {
     // bubbles back to the user even when the page-side selector lookup
     // succeeded. Mirrors Playwright's `_initialize`
     // (`crPage.ts`) which also fires `DOM.enable` per session.
+    let lifecycle_params = serde_json::json!({"enabled": true});
+    let autoattach_params = serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true});
     let (r1, r2, r3, r4, r5, r6, r7, r8, r9) = tokio::join!(
-      transport.send_command(session_id, "Page.enable", ep.clone()),
-      transport.send_command(session_id, "Runtime.enable", ep.clone()),
-      transport.send_command(session_id, "Network.enable", ep.clone()),
-      transport.send_command(session_id, "DOM.enable", ep.clone()),
-      transport.send_command(
-        session_id,
-        "Page.setLifecycleEventsEnabled",
-        serde_json::json!({"enabled": true})
-      ),
-      transport.send_command(
-        session_id,
-        "Target.setAutoAttach",
-        serde_json::json!({"autoAttach": true, "waitForDebuggerOnStart": true, "flatten": true})
-      ),
+      transport.send_command(session_id, "Page.enable", ep),
+      transport.send_command(session_id, "Runtime.enable", ep),
+      transport.send_command(session_id, "Network.enable", ep),
+      transport.send_command(session_id, "DOM.enable", ep),
+      transport.send_command(session_id, "Page.setLifecycleEventsEnabled", &lifecycle_params),
+      transport.send_command(session_id, "Target.setAutoAttach", &autoattach_params),
       vp_fut,
       inject_fut,
       unpause_fut,
@@ -265,7 +259,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     user_data_dir: Option<tempfile::TempDir>,
   ) -> Result<Self> {
     let version_resp = transport
-      .send_command(None, "Browser.getVersion", super::empty_params())
+      .send_command(None, "Browser.getVersion", &super::EMPTY_PARAMS)
       .await?;
     // `product` is a string like "HeadlessChrome/120.0.6099.109" — mirrors
     // what Playwright surfaces via `browser.version()`.
@@ -278,7 +272,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .send_command(
         None,
         "Target.setAutoAttach",
-        serde_json::json!({
+        &serde_json::json!({
           "autoAttach": true,
           "waitForDebuggerOnStart": true,
           "flatten": true,
@@ -299,7 +293,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
   pub async fn pages(&self) -> Result<Vec<AnyPage>> {
     let result = self
       .transport
-      .send_command(None, "Target.getTargets", super::empty_params())
+      .send_command(None, "Target.getTargets", &super::EMPTY_PARAMS)
       .await?;
 
     let targets = result
@@ -339,7 +333,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
           .send_command(
             None,
             "Target.attachToTarget",
-            serde_json::json!({"targetId": target_id, "flatten": true}),
+            &serde_json::json!({"targetId": target_id, "flatten": true}),
           )
           .await?;
 
@@ -416,7 +410,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
     }
     let ctx = self
       .transport
-      .send_command(None, "Target.createBrowserContext", params)
+      .send_command(None, "Target.createBrowserContext", &params)
       .await?;
 
     ctx
@@ -433,7 +427,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
       .send_command(
         None,
         "Target.disposeBrowserContext",
-        serde_json::json!({"browserContextId": browser_context_id}),
+        &serde_json::json!({"browserContextId": browser_context_id}),
       )
       .await?;
     Ok(())
@@ -460,7 +454,7 @@ impl<T: CdpWrap> CdpBrowser<T> {
 
     let result = self
       .transport
-      .send_command(None, "Target.createTarget", create_params)
+      .send_command(None, "Target.createTarget", &create_params)
       .await?;
 
     let target_id = result
@@ -705,7 +699,7 @@ impl CdpBrowser<ws::WsTransport> {
     // Capture product version for `browser.version()` — same handshake
     // Playwright's CRBrowser.connect does.
     let version_resp = transport
-      .send_command(None, "Browser.getVersion", super::empty_params())
+      .send_command(None, "Browser.getVersion", &super::EMPTY_PARAMS)
       .await?;
     let version: Arc<str> = version_resp
       .get("product")
@@ -713,12 +707,16 @@ impl CdpBrowser<ws::WsTransport> {
       .map_or_else(|| Arc::from("Unknown"), Arc::from);
 
     transport
-      .send_command(None, "Target.setDiscoverTargets", serde_json::json!({"discover": true}))
+      .send_command(
+        None,
+        "Target.setDiscoverTargets",
+        &serde_json::json!({"discover": true}),
+      )
       .await?;
 
     // Find existing page targets
     let result = transport
-      .send_command(None, "Target.getTargets", super::empty_params())
+      .send_command(None, "Target.getTargets", &super::EMPTY_PARAMS)
       .await?;
 
     let mut attached = FxHashMap::default();
@@ -736,7 +734,7 @@ impl CdpBrowser<ws::WsTransport> {
             .send_command(
               None,
               "Target.attachToTarget",
-              serde_json::json!({"targetId": target_id, "flatten": true}),
+              &serde_json::json!({"targetId": target_id, "flatten": true}),
             )
             .await?;
           let sid = attach
@@ -754,7 +752,7 @@ impl CdpBrowser<ws::WsTransport> {
     // If no existing page, create one
     if !found_page {
       let create_result = transport
-        .send_command(None, "Target.createTarget", serde_json::json!({"url": "about:blank"}))
+        .send_command(None, "Target.createTarget", &serde_json::json!({"url": "about:blank"}))
         .await?;
       let target_id = create_result
         .get("targetId")
@@ -765,7 +763,7 @@ impl CdpBrowser<ws::WsTransport> {
         .send_command(
           None,
           "Target.attachToTarget",
-          serde_json::json!({"targetId": target_id, "flatten": true}),
+          &serde_json::json!({"targetId": target_id, "flatten": true}),
         )
         .await?;
       let sid = attach
@@ -1307,7 +1305,7 @@ impl<T: CdpWrap> CdpPage<T> {
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     self
       .transport
-      .send_command(self.session_id.as_deref(), method, params)
+      .send_command(self.session_id.as_deref(), method, &params)
       .await
   }
 
@@ -2515,7 +2513,7 @@ impl<T: CdpWrap> CdpPage<T> {
         .send_command(
           sid.as_deref(),
           "Page.screencastFrameAck",
-          serde_json::json!({ "sessionId": ack_id }),
+          &serde_json::json!({ "sessionId": ack_id }),
         )
         .await;
     });
@@ -3357,7 +3355,7 @@ impl<T: CdpWrap> CdpPage<T> {
     } else {
       (self.session_id.as_deref(), super::empty_params())
     };
-    let result = self.transport.send_command(sid, "Storage.getCookies", params).await?;
+    let result = self.transport.send_command(sid, "Storage.getCookies", &params).await?;
     let cookies = result
       .get("cookies")
       .and_then(|c| c.as_array())
@@ -3641,7 +3639,7 @@ impl<T: CdpWrap> CdpPage<T> {
         }
         self
           .transport
-          .send_command(None, "Browser.grantPermissions", params)
+          .send_command(None, "Browser.grantPermissions", &params)
           .await
           .map(|_| ())
       })
@@ -3798,7 +3796,7 @@ impl<T: CdpWrap> CdpPage<T> {
     }
     self
       .transport
-      .send_command(None, "Browser.resetPermissions", params)
+      .send_command(None, "Browser.resetPermissions", &params)
       .await?;
     Ok(())
   }
@@ -4198,7 +4196,7 @@ impl<T: CdpWrap> CdpPage<T> {
               cmd_params["promptText"] = serde_json::Value::String(text);
             }
             transport
-              .send_command(session.as_deref(), "Page.handleJavaScriptDialog", cmd_params)
+              .send_command(session.as_deref(), "Page.handleJavaScriptDialog", &cmd_params)
               .await
               .map(|_| ())
           })
@@ -4425,7 +4423,7 @@ impl<T: CdpWrap> CdpPage<T> {
                   params["browserContextId"] = serde_json::Value::String(c.to_string());
                 }
                 transport
-                  .send_command(session.as_deref(), "Browser.cancelDownload", params)
+                  .send_command(session.as_deref(), "Browser.cancelDownload", &params)
                   .await
                   .map(|_| ())
                   .map_err(|e| crate::error::FerriError::protocol("Browser.cancelDownload", e.to_string()))
@@ -4688,7 +4686,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
               .send_command(
                 sid.as_deref(),
                 "Runtime.evaluate",
-                serde_json::json!({"expression": deliver_js}),
+                &serde_json::json!({"expression": deliver_js}),
               )
               .await;
           } else {
@@ -4697,7 +4695,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
               .send_command(
                 sid.as_deref(),
                 "Runtime.evaluate",
-                serde_json::json!({"expression": deliver_js}),
+                &serde_json::json!({"expression": deliver_js}),
               )
               .await;
           }
@@ -4742,7 +4740,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     if opts.run_before_unload.unwrap_or(false) {
       let _ = self
         .transport
-        .send_command(self.session_id.as_deref(), "Page.close", super::empty_params())
+        .send_command(self.session_id.as_deref(), "Page.close", &super::EMPTY_PARAMS)
         .await;
     } else {
       let _ = self
@@ -4750,7 +4748,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         .send_command(
           None,
           "Target.closeTarget",
-          serde_json::json!({"targetId": &*self.target_id}),
+          &serde_json::json!({"targetId": &*self.target_id}),
         )
         .await;
     }
@@ -4885,7 +4883,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           })
         };
         let _ = transport
-          .send_command(session_id.as_deref(), "Fetch.continueWithAuth", response)
+          .send_command(session_id.as_deref(), "Fetch.continueWithAuth", &response)
           .await;
         continue;
       }
@@ -4953,7 +4951,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           .send_command(
             session_id.as_deref(),
             "Fetch.continueRequest",
-            serde_json::json!({"requestId": request_id}),
+            &serde_json::json!({"requestId": request_id}),
           )
           .await;
       }
@@ -4986,7 +4984,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           .send_command(
             session_id,
             "Fetch.fulfillRequest",
-            serde_json::json!({
+            &serde_json::json!({
                 "requestId": request_id,
                 "responseCode": resp.status,
                 "responsePhrase": crate::route::status_text(resp.status),
@@ -5015,7 +5013,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           params["postData"] = serde_json::Value::String(base64::engine::general_purpose::STANDARD.encode(post_data));
         }
         let _ = transport
-          .send_command(session_id, "Fetch.continueRequest", params)
+          .send_command(session_id, "Fetch.continueRequest", &params)
           .await;
       },
       Some(crate::route::RouteAction::Abort(reason)) => {
@@ -5036,7 +5034,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           .send_command(
             session_id,
             "Fetch.failRequest",
-            serde_json::json!({
+            &serde_json::json!({
                 "requestId": request_id,
                 "errorReason": error_reason,
             }),
@@ -5048,7 +5046,7 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
           .send_command(
             session_id,
             "Fetch.continueRequest",
-            serde_json::json!({"requestId": request_id}),
+            &serde_json::json!({"requestId": request_id}),
           )
           .await;
       },
@@ -5127,7 +5125,7 @@ impl<T: CdpTransport> CdpElement<T> {
   async fn cmd(&self, method: &str, params: serde_json::Value) -> Result<serde_json::Value> {
     self
       .transport
-      .send_command(self.session_id.as_deref(), method, params)
+      .send_command(self.session_id.as_deref(), method, &params)
       .await
   }
 
@@ -5835,7 +5833,7 @@ impl<T: CdpTransport + 'static> NetworkTracker<T> {
           .send_command(
             session_id.as_deref(),
             "Network.getResponseBody",
-            serde_json::json!({"requestId": request_id}),
+            &serde_json::json!({"requestId": request_id}),
           )
           .await
           .map_err(|e| crate::error::FerriError::Protocol {
