@@ -207,6 +207,46 @@ impl LocatorJs {
     self.inner.selector().to_string()
   }
 
+  /// Whether this locator is in strict mode (mirrors NAPI `isStrict`).
+  #[qjs(get, rename = "isStrict")]
+  pub fn is_strict(&self) -> bool {
+    self.inner.is_strict()
+  }
+
+  /// Returns a copy of this locator with strict-mode toggled.
+  #[qjs(rename = "setStrict")]
+  pub fn set_strict(&self, strict: bool) -> LocatorJs {
+    LocatorJs::new(self.inner.strict(strict))
+  }
+
+  /// Playwright: `locator.selectText(options?)`. Selects the element's text.
+  #[qjs(rename = "selectText")]
+  pub async fn select_text(&self) -> rquickjs::Result<()> {
+    self.inner.select_text().await.into_js()
+  }
+
+  /// Playwright: `locator.click({ button: 'right' })` shorthand.
+  #[qjs(rename = "rightClick")]
+  pub async fn right_click(&self) -> rquickjs::Result<()> {
+    self.inner.right_click().await.into_js()
+  }
+
+  /// Playwright: `locator.boundingBox()`. Returns `{x, y, width, height}` or `null`.
+  #[qjs(rename = "boundingBox")]
+  pub async fn bounding_box<'js>(&self, ctx: rquickjs::Ctx<'js>) -> rquickjs::Result<rquickjs::Value<'js>> {
+    match self.inner.bounding_box().await.into_js()? {
+      None => Ok(rquickjs::Value::new_null(ctx)),
+      Some(b) => {
+        let obj = rquickjs::Object::new(ctx.clone())?;
+        obj.set("x", b.x)?;
+        obj.set("y", b.y)?;
+        obj.set("width", b.width)?;
+        obj.set("height", b.height)?;
+        Ok(obj.into_value())
+      },
+    }
+  }
+
   // ── Chain/refine (return new Locator) ─────────────────────────────────────
 
   /// Narrow this locator's scope.
