@@ -194,7 +194,7 @@ impl Browser {
       };
       names.push(name.clone());
     }
-    let ctx = ContextRef::new(self.state.clone(), name);
+    let ctx = ContextRef::new(self.state.clone(), name).with_browser(self.clone());
     if let Some(opts) = options {
       let composite = ctx.key.to_composite();
       // Mirror `record_video` into the legacy per-video registry too,
@@ -221,7 +221,7 @@ impl Browser {
   /// Get the default browser context.
   #[must_use]
   pub fn default_context(&self) -> ContextRef {
-    ContextRef::new(self.state.clone(), "default".to_string())
+    ContextRef::new(self.state.clone(), "default".to_string()).with_browser(self.clone())
   }
 
   /// Whether this backend exposes isolated browser contexts (i.e.

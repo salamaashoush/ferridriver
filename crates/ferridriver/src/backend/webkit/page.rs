@@ -948,6 +948,17 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// Backs [`crate::Page::set_http_credentials`]. The stock `WebKit` IPC
+  /// host has no `Fetch.authRequired`-equivalent hook, so dynamic
+  /// HTTP-credential mutation is surfaced as a typed Unsupported per
+  /// Rule 4 rather than silently dropped.
+  pub async fn set_http_credentials(&self, _creds: Option<crate::options::HttpCredentials>) -> Result<()> {
+    tokio::task::yield_now().await;
+    Err(crate::error::FerriError::Unsupported(
+      "BrowserContext.setHTTPCredentials is not supported on the webkit backend: the WKWebView IPC host exposes no auth-challenge hook".into(),
+    ))
+  }
+
   async fn apply_runtime_overrides(&self, opts: &crate::options::BrowserContextOptions) -> Result<()> {
     if let Some(vp) = opts.resolved_viewport() {
       self.emulate_viewport(&vp).await?;

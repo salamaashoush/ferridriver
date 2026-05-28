@@ -3803,6 +3803,18 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+  /// Set (or clear) the HTTP credentials used to answer
+  /// `Fetch.authRequired` challenges. Backs
+  /// [`crate::Page::set_http_credentials`] (Playwright's public
+  /// `browserContext.setHTTPCredentials(creds | null)`). Passing `None`
+  /// clears stored credentials so future 401 challenges surface as the
+  /// browser's native auth dialog (`CancelAuth`).
+  pub async fn set_http_credentials(&self, creds: Option<crate::options::HttpCredentials>) -> Result<()> {
+    *self.http_credentials.write().await = creds;
+    // Re-arm Fetch so `handleAuthRequests` tracks the new state.
+    self.ensure_fetch_enabled().await
+  }
+
   // ---- Tracing ----
 
   pub async fn start_tracing(&self) -> Result<()> {

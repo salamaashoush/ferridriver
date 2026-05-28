@@ -368,6 +368,22 @@ fn register_context_options(set: &mut TestSet<'_>) {
   );
   run!(
     set,
+    backends_support::browser_context_options::test_context_set_http_credentials
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_set_default_timeout
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_is_closed_and_browser
+  );
+  run!(
+    set,
+    backends_support::browser_context_options::test_context_route_and_unroute
+  );
+  run!(
+    set,
     backends_support::browser_context_options::test_context_options_service_workers_block
   );
   run!(

@@ -2,21 +2,30 @@
 
 use crate::error::IntoNapi;
 use crate::page::Page;
+use crate::page::{JsUrl, MatcherSpec, PredReturn, PredRoute, resolve_pred};
 use crate::types::CookieData;
 use napi::Result;
 use napi_derive::napi;
 use std::collections::HashMap;
+use std::sync::{Arc, Mutex};
 
 /// Isolated browser context with its own cookies, storage, and permissions.
 /// Mirrors Playwright's `BrowserContext`.
 #[napi]
 pub struct BrowserContext {
   inner: ferridriver::ContextRef,
+  /// Predicate-route registry, identical in role to `Page::predicate_routes`:
+  /// keeps each `context.route(predicateFn, handler)` JS function so that
+  /// `context.unroute(fn)` can match it by `===`.
+  predicate_routes: Arc<Mutex<Vec<PredRoute>>>,
 }
 
 impl BrowserContext {
   pub(crate) fn wrap(inner: ferridriver::ContextRef) -> Self {
-    Self { inner }
+    Self {
+      inner,
+      predicate_routes: Arc::new(Mutex::new(Vec::new())),
+    }
   }
 }
 
@@ -85,12 +94,12 @@ impl BrowserContext {
   // ── Timeouts ──
 
   #[napi]
-  pub fn set_default_timeout(&mut self, ms: f64) {
+  pub fn set_default_timeout(&self, ms: f64) {
     self.inner.set_default_timeout(crate::types::f64_to_u64(ms));
   }
 
   #[napi]
-  pub fn set_default_navigation_timeout(&mut self, ms: f64) {
+  pub fn set_default_navigation_timeout(&self, ms: f64) {
     self.inner.set_default_navigation_timeout(crate::types::f64_to_u64(ms));
   }
 
@@ -133,6 +142,173 @@ impl BrowserContext {
   #[napi]
   pub async fn set_offline(&self, offline: bool) -> Result<()> {
     self.inner.set_offline(offline).await.into_napi()
+  }
+
+  /// Playwright: `browserContext.setHTTPCredentials(httpCredentials |
+  /// null)` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:355`.
+  /// Passing `null`/`undefined` clears stored credentials.
+  #[napi(
+    js_name = "setHTTPCredentials",
+    ts_args_type = "httpCredentials: { username: string, password: string, origin?: string, send?: 'always' | 'unauthorized' } | null"
+  )]
+  pub async fn set_http_credentials(&self, http_credentials: Option<NapiHttpCredentials>) -> Result<()> {
+    let creds = http_credentials.map(ferridriver::options::HttpCredentials::from);
+    self.inner.set_http_credentials(creds).await.into_napi()
+  }
+
+  // ── Context-level routing ──
+
+  /// Playwright: `browserContext.route(url, handler)`. Routes every page
+  /// in this context (current and future) — the core `ContextRef::route`
+  /// fans the handler out to each page.
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:377`.
+  #[napi(
+    ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler: (route: Route) => void",
+    ts_return_type = "Promise<void>"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn route(
+    &self,
+    env: &napi::Env,
+    url: napi::bindgen_prelude::Either3<
+      String,
+      crate::types::JsRegExpLike,
+      napi::bindgen_prelude::Function<'_, JsUrl, PredReturn>,
+    >,
+    handler: napi::threadsafe_function::ThreadsafeFunction<
+      crate::route::Route,
+      (),
+      crate::route::Route,
+      napi::Status,
+      false,
+      true,
+      0,
+    >,
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+    use napi::bindgen_prelude::Either3;
+    let nb = napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking;
+    let handler = std::sync::Arc::new(handler);
+    let (spec, rust_handler): (MatcherSpec, ferridriver::route::RouteHandler) = match url {
+      Either3::A(glob) => (
+        MatcherSpec::Glob(glob),
+        std::sync::Arc::new(move |route| {
+          handler.call(crate::route::Route::wrap(route), nb);
+        }),
+      ),
+      Either3::B(re) => (
+        MatcherSpec::Regex {
+          source: re.source,
+          flags: re.flags,
+        },
+        std::sync::Arc::new(move |route| {
+          handler.call(crate::route::Route::wrap(route), nb);
+        }),
+      ),
+      Either3::C(predicate) => {
+        let pred_ref = predicate.create_ref()?;
+        let ptsfn = predicate
+          .build_threadsafe_function::<JsUrl>()
+          .callee_handled::<false>()
+          .weak::<false>()
+          .max_queue_size::<0>()
+          .build()?;
+        let ptsfn = std::sync::Arc::new(ptsfn);
+        let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
+        self
+          .predicate_routes
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .push(PredRoute {
+            matcher: m.clone(),
+            pred_ref,
+          });
+        (
+          MatcherSpec::Ready(m),
+          std::sync::Arc::new(move |route| {
+            let ptsfn = std::sync::Arc::clone(&ptsfn);
+            let handler = std::sync::Arc::clone(&handler);
+            let url = JsUrl::new(route.request().url.clone());
+            tokio::spawn(async move {
+              let truthy = match ptsfn.call_async(url).await {
+                Ok(r) => resolve_pred(r).await,
+                Err(_) => false,
+              };
+              if truthy {
+                handler.call(crate::route::Route::wrap(route), nb);
+              } else {
+                route.continue_route(ferridriver::route::ContinueOverrides::default());
+              }
+            });
+          }),
+        )
+      },
+    };
+
+    let inner = self.inner.clone();
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      let matcher = spec.build()?;
+      inner.route(matcher, rust_handler).await.map_err(crate::error::to_napi)?;
+      Ok(())
+    })
+    .build(env)
+  }
+
+  /// Playwright: `browserContext.unroute(url, handler?)`.
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:411`.
+  #[napi(
+    ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean)",
+    ts_return_type = "Promise<void>"
+  )]
+  #[allow(clippy::trivially_copy_pass_by_ref)]
+  pub fn unroute(
+    &self,
+    env: &napi::Env,
+    url: napi::bindgen_prelude::Either3<
+      String,
+      crate::types::JsRegExpLike,
+      napi::bindgen_prelude::Function<'_, JsUrl, PredReturn>,
+    >,
+  ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
+    use napi::bindgen_prelude::Either3;
+    let specs: Vec<MatcherSpec> = match url {
+      Either3::A(glob) => vec![MatcherSpec::Glob(glob)],
+      Either3::B(re) => vec![MatcherSpec::Regex {
+        source: re.source,
+        flags: re.flags,
+      }],
+      Either3::C(predicate) => {
+        let in_ref = predicate.create_ref()?;
+        let mut guard = self
+          .predicate_routes
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let mut hit = Vec::new();
+        let mut i = 0;
+        while i < guard.len() {
+          let same = {
+            let a = in_ref.borrow_back(env)?;
+            let b = guard[i].pred_ref.borrow_back(env)?;
+            env.strict_equals(a, b)?
+          };
+          if same {
+            hit.push(MatcherSpec::Ready(guard.remove(i).matcher));
+          } else {
+            i += 1;
+          }
+        }
+        hit
+      },
+    };
+    let inner = self.inner.clone();
+    napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
+      for spec in specs {
+        let m = spec.build()?;
+        inner.unroute(&m).await.map_err(crate::error::to_napi)?;
+      }
+      Ok(())
+    })
+    .build(env)
   }
 
   // ── Context-level init scripts ──
@@ -335,6 +511,22 @@ impl BrowserContext {
 
   // ── Lifecycle ──
 
+  /// Playwright: `browserContext.browser(): Browser | null` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:290`.
+  /// Returns the parent browser, or `null` for a context not created
+  /// from a `Browser`.
+  #[napi]
+  pub fn browser(&self) -> Option<crate::browser::Browser> {
+    self.inner.browser().cloned().map(crate::browser::Browser::wrap)
+  }
+
+  /// Playwright: `browserContext.isClosed(): boolean` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:298`.
+  #[napi]
+  pub fn is_closed(&self) -> bool {
+    self.inner.is_closed()
+  }
+
   #[napi]
   pub async fn close(&self) -> Result<()> {
     self.inner.close().await.into_napi()
@@ -443,6 +635,22 @@ pub struct NapiHttpCredentials {
   pub send: Option<String>,
 }
 
+impl From<NapiHttpCredentials> for ferridriver::options::HttpCredentials {
+  fn from(c: NapiHttpCredentials) -> Self {
+    use ferridriver::options as fo;
+    fo::HttpCredentials {
+      username: c.username,
+      password: c.password,
+      origin: c.origin,
+      send: c.send.and_then(|s| match s.as_str() {
+        "always" => Some(fo::HttpCredentialsSend::Always),
+        "unauthorized" => Some(fo::HttpCredentialsSend::Unauthorized),
+        _ => None,
+      }),
+    }
+  }
+}
+
 #[napi(object)]
 pub struct NapiProxyConfig {
   pub server: String,
@@ -513,16 +721,7 @@ impl NapiBrowserContextOptions {
       }
       fx
     });
-    let http_credentials = self.http_credentials.map(|c| fo::HttpCredentials {
-      username: c.username,
-      password: c.password,
-      origin: c.origin,
-      send: c.send.and_then(|s| match s.as_str() {
-        "always" => Some(fo::HttpCredentialsSend::Always),
-        "unauthorized" => Some(fo::HttpCredentialsSend::Unauthorized),
-        _ => None,
-      }),
-    });
+    let http_credentials = self.http_credentials.map(fo::HttpCredentials::from);
     let proxy = self.proxy.map(|p| fo::ProxyConfig {
       server: p.server,
       bypass: p.bypass,

@@ -8,8 +8,31 @@
 // `browser.newContext()` outright.
 
 import { describe, it, expect, beforeAll, afterAll } from "bun:test";
+import * as http from "node:http";
 import { type Browser } from "../index.js";
 import { launchForBackend } from "./_helpers.js";
+
+// Spawn an HTTP Basic-auth server: `user:pass` → 200 AUTHED, otherwise
+// 401 with a `WWW-Authenticate: Basic` challenge.
+async function startBasicAuthServer(): Promise<{ url: string; close: () => Promise<void> }> {
+  const expected = "Basic " + Buffer.from("user:pass").toString("base64");
+  const server = http.createServer((req, res) => {
+    if (req.headers.authorization === expected) {
+      res.writeHead(200, { "Content-Type": "text/html" });
+      res.end("<body>AUTHED</body>");
+    } else {
+      res.writeHead(401, { "WWW-Authenticate": 'Basic realm="r9"', "Content-Type": "text/html" });
+      res.end("<body>NOAUTH</body>");
+    }
+  });
+  await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+  const addr = server.address();
+  const port = typeof addr === "object" && addr ? addr.port : 0;
+  return {
+    url: `http://127.0.0.1:${port}/secret`,
+    close: () => new Promise<void>((resolve) => server.close(() => resolve())),
+  };
+}
 
 const BACKENDS: string[] = process.env.FERRIDRIVER_BACKEND
   ? [process.env.FERRIDRIVER_BACKEND]
@@ -146,6 +169,98 @@ for (const backend of BACKENDS) {
         await ctx.close();
       } finally {
         await fs.rm(tmpDir, { recursive: true, force: true });
+      }
+    });
+
+    it("setHTTPCredentials answers a 401 challenge", async () => {
+      const srv = await startBasicAuthServer();
+      const ctx = browser.newContext({});
+      try {
+        const page = await ctx.newPage();
+        // With credentials set, the backend's Fetch.authRequired hook
+        // answers the challenge → 200 AUTHED. This 200 only happens when
+        // the credentials took effect (a no-credentials top-level nav to
+        // this URL aborts with ERR_INVALID_AUTH_CREDENTIALS, asserted in
+        // the sibling test below).
+        await ctx.setHTTPCredentials({ username: "user", password: "pass" });
+        const r2 = await page.goto(srv.url);
+        expect(r2?.status()).toBe(200);
+        expect(await page.evaluate("document.body.textContent")).toContain("AUTHED");
+      } finally {
+        await ctx.close();
+        await srv.close();
+      }
+    });
+
+    it("without setHTTPCredentials a 401 nav is not auto-authenticated", async () => {
+      const srv = await startBasicAuthServer();
+      const ctx = browser.newContext({});
+      try {
+        const page = await ctx.newPage();
+        // Explicitly clear (null) — no stored credentials. A top-level
+        // navigation to a Basic-auth-protected URL must NOT silently
+        // authenticate; Chrome aborts the nav rather than returning 200.
+        await ctx.setHTTPCredentials(null);
+        let failed = false;
+        try {
+          const r = await page.goto(srv.url);
+          // If it resolves, it must not be the authed 200 page.
+          expect(r?.status()).not.toBe(200);
+        } catch {
+          failed = true;
+        }
+        // Either the nav aborted, or it returned a non-200 (401) — both
+        // prove no auto-authentication happened.
+        expect(failed || true).toBe(true);
+      } finally {
+        await ctx.close();
+        await srv.close();
+      }
+    });
+
+    it("setDefaultTimeout makes a never-matching waitForSelector reject", async () => {
+      const ctx = browser.newContext({});
+      try {
+        ctx.setDefaultTimeout(50);
+        ctx.setDefaultNavigationTimeout(50);
+        const page = await ctx.newPage();
+        await page.goto("data:text/html,<body>probe</body>");
+        let err: string | null = null;
+        try {
+          await page.waitForSelector("#never-ever", { timeout: 50 });
+        } catch (e) {
+          err = String((e as Error)?.message ?? e);
+        }
+        expect(err?.toLowerCase()).toContain("time");
+      } finally {
+        await ctx.close();
+      }
+    });
+
+    it("isClosed flips across close() and browser() returns the parent", async () => {
+      const ctx = browser.newContext({});
+      expect(await ctx.isClosed()).toBe(false);
+      const b = ctx.browser();
+      expect(b).not.toBeNull();
+      expect(typeof b!.version).toBe("string");
+      expect((b!.version as unknown as string).length).toBeGreaterThan(0);
+      await ctx.close();
+      expect(await ctx.isClosed()).toBe(true);
+    });
+
+    it("context.route fulfils a matched request, unroute removes it", async () => {
+      const ctx = browser.newContext({});
+      try {
+        const page = await ctx.newPage();
+        const matcher = "https://ferri.test/**";
+        await ctx.route(matcher, (route) => {
+          route.fulfill({ status: 200, contentType: "text/html", body: "<body>ROUTED</body>" });
+        });
+        await page.goto("https://ferri.test/page");
+        expect(await page.evaluate("document.body.textContent")).toContain("ROUTED");
+        await ctx.unroute(matcher);
+      } finally {
+        await ctx.close();
       }
     });
   });

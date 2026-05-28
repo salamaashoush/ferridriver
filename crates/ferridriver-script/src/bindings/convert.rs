@@ -17,6 +17,27 @@ pub fn to_rq_error(err: &FerriError) -> rquickjs::Error {
   rquickjs::Error::new_from_js_message("ferridriver", err.name(), err.to_string())
 }
 
+/// Convert a JS millisecond value (`f64`) into a `u64`, clamping
+/// negatives to `0`. Single home for the otherwise-repeated f64->u64
+/// timeout cast so call sites stay lint-clean.
+#[must_use]
+pub fn ms_f64_to_u64(ms: f64) -> u64 {
+  if ms <= 0.0 {
+    return 0;
+  }
+  // `ms` is now strictly positive and finite-or-inf; `f64::min` against
+  // `u64::MAX` keeps the cast in range, and the fractional part is
+  // truncated (sub-millisecond precision is irrelevant for timeouts).
+  #[allow(
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    clippy::cast_precision_loss
+  )]
+  {
+    ms.min(u64::MAX as f64) as u64
+  }
+}
+
 /// Adapter: `Result<T, FerriError>` into `rquickjs::Result<T>`.
 pub trait FerriResultExt<T> {
   fn into_js(self) -> rquickjs::Result<T>;
