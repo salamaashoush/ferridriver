@@ -229,6 +229,10 @@ fn register_script_handles(set: &mut TestSet<'_>) {
   );
   run!(set, backends_support::script_handles_local::test_script_mouse_wheel);
   run!(set, backends_support::script_handles_local::test_script_keyboard_press);
+  run!(
+    set,
+    backends_support::script_handles_local::test_script_screenshot_mask_locator
+  );
 }
 
 fn register_script_locators(set: &mut TestSet<'_>) {

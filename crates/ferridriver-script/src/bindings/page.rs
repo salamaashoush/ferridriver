@@ -1781,11 +1781,12 @@ struct JsScreenshotOptions {
   full_page: Option<bool>,
   #[serde(rename = "type")]
   format: Option<String>,
-  /// `mask` accepts selector strings. Full `Locator` instances aren't
-  /// deserialisable from JS via serde, so Playwright-style
-  /// `mask: [page.locator('.foo')]` should be rewritten at the call
-  /// site as `mask: ['.foo']` — documented on the QuickJS binding.
-  mask: Option<Vec<String>>,
+  // `mask` is NOT decoded here: Playwright takes `Locator[]`, and a
+  // `LocatorJs` class instance is not serde-deserialisable. It is read
+  // manually from the options object via `parse_mask_locators` before
+  // this struct is built.
+  #[serde(skip)]
+  _mask_placeholder: (),
   mask_color: Option<String>,
   omit_background: Option<bool>,
   path: Option<String>,
@@ -1814,12 +1815,44 @@ impl From<JsClipRect> for ferridriver::options::ClipRect {
   }
 }
 
+/// Read `mask: Locator[]` from the screenshot options object. Each entry
+/// must be a `LocatorJs` class instance (Playwright's `mask?: Locator[]`);
+/// the core `Locator` is cloned out so the selector string is extracted
+/// Rust-side before backend dispatch.
+fn parse_mask_locators<'js>(obj: &rquickjs::Object<'js>) -> rquickjs::Result<Vec<ferridriver::Locator>> {
+  let v: rquickjs::Value<'js> = obj.get("mask")?;
+  if v.is_undefined() || v.is_null() {
+    return Ok(Vec::new());
+  }
+  let arr = v.into_array().ok_or_else(|| {
+    rquickjs::Error::new_from_js_message("screenshot options", "mask", "expected an array of Locator")
+  })?;
+  let mut out = Vec::with_capacity(arr.len());
+  for item in arr.iter::<rquickjs::Value<'js>>() {
+    let item = item?;
+    if let Ok(class) = rquickjs::Class::<LocatorJs>::from_value(&item) {
+      out.push(class.borrow().inner_ref().clone());
+    } else {
+      return Err(rquickjs::Error::new_from_js_message(
+        "screenshot options",
+        "mask",
+        "each mask entry must be a Locator instance",
+      ));
+    }
+  }
+  Ok(out)
+}
+
 fn parse_screenshot_options<'js>(
   ctx: &rquickjs::Ctx<'js>,
   value: Opt<rquickjs::Value<'js>>,
 ) -> rquickjs::Result<ferridriver::options::ScreenshotOptions> {
   match value.0 {
     Some(v) if !v.is_undefined() && !v.is_null() => {
+      let mask = match v.as_object() {
+        Some(obj) => parse_mask_locators(obj)?,
+        None => Vec::new(),
+      };
       let js: JsScreenshotOptions = serde_from_js(ctx, v)?;
       Ok(ferridriver::options::ScreenshotOptions {
         animations: js.animations,
@@ -1827,7 +1860,7 @@ fn parse_screenshot_options<'js>(
         clip: js.clip.map(Into::into),
         full_page: js.full_page,
         format: js.format,
-        mask: js.mask.unwrap_or_default(),
+        mask,
         mask_color: js.mask_color,
         omit_background: js.omit_background,
         path: js.path.map(std::path::PathBuf::from),
