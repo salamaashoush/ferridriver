@@ -181,6 +181,50 @@ pub fn test_script_upload_file(c: &mut McpClient) {
   let _ = std::fs::remove_file(&tmp);
 }
 
+// Playwright: `locator.normalize(): Promise<Locator>`
+// (client/locator.ts:269 -> server frames.ts:1274 resolveSelector ->
+// injected.generateSelectorSimple). normalize() must return a NEW
+// locator whose selector is the canonical recorder form for the matched
+// element. Observable effect: the input is a text selector but the
+// normalized selector is the generated `internal:testid` / id form
+// (clearly different from the input) AND still resolves to the same
+// single element, so an action through it hits the same node.
+pub fn test_script_locator_normalize(c: &mut McpClient) {
+  c.nav(
+    "<button data-testid='save-btn' onclick=\"this.dataset.hit='1'\">Save</button>\
+     <button>Cancel</button>",
+  );
+  let v = c.script_value(
+    "const orig = page.getByText('Save'); \
+       const norm = await orig.normalize(); \
+       const normSel = norm.selector; \
+       const origSel = orig.selector; \
+       await norm.click(); \
+       const count = await norm.count(); \
+       const hit = await page.evaluate(\"document.querySelector('[data-testid=save-btn]').dataset.hit\"); \
+       return { origSel, normSel, count, hit, changed: normSel !== origSel };",
+  );
+  assert_eq!(
+    v["count"],
+    json!(1),
+    "normalized locator resolves to exactly one element: {v}"
+  );
+  assert_eq!(v["changed"], json!(true), "normalized selector differs from input: {v}");
+  assert_eq!(
+    v["hit"].as_str(),
+    Some("1"),
+    "click through normalized locator hit the same Save button: {v}"
+  );
+  // generateSelectorSimple prefers the data-testid attribute for an
+  // element that has one — proves the canonical recorder form, not a
+  // pass-through of the original text selector.
+  let norm_sel = v["normSel"].as_str().unwrap_or_default();
+  assert!(
+    norm_sel.contains("save-btn"),
+    "normalized selector uses the canonical testid form: {v}"
+  );
+}
+
 pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_locators::test_script_frame_sync_accessors",
@@ -233,5 +277,9 @@ pub fn register(set: &mut crate::TestSet<'_>) {
   set.run(
     "backends_support::script_locators::test_script_upload_file",
     test_script_upload_file,
+  );
+  set.run(
+    "backends_support::script_locators::test_script_locator_normalize",
+    test_script_locator_normalize,
   );
 }

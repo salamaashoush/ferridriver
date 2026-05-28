@@ -385,6 +385,24 @@ if (!window.__fd) {
     selAll(parts: SelectorPart[]) { return executeSelector(parts, document); },
     selCount(parts: SelectorPart[]) { return executeSelector(parts, document).length; },
 
+    /**
+     * Resolve `parts` to a single element (strict) and return the
+     * canonical selector Playwright's recorder/codegen would emit for
+     * it. Mirrors `Frame.resolveSelector` in
+     * `/tmp/playwright/packages/playwright-core/src/server/frames.ts:1274`
+     * which calls `injected.generateSelectorSimple(node)`. Throws
+     * `strict mode violation: <count>` on >1 match and a plain error on
+     * 0 matches so the Rust host can surface a typed error.
+     */
+    normalizeSelector(parts: SelectorPart[]): string {
+      const r = executeSelector(parts, document);
+      if (r.length === 0)
+        throw new Error('normalize: no element found');
+      if (r.length > 1)
+        throw new Error('strict mode violation: ' + r.length);
+      return injected.generateSelectorSimple(r[0]);
+    },
+
     // Playwright selector API (direct access)
     parseSelector: (s: string) => injected.parseSelector(s),
     querySelector: (selector: any, root: Node, strict: boolean) => injected.querySelector(selector, root, strict),

@@ -438,6 +438,15 @@ impl Locator {
     i32::try_from(n).map_err(|_| napi::Error::from_reason(format!("element count {n} exceeds i32::MAX")))
   }
 
+  /// Playwright: `locator.normalize(): Promise<Locator>`. Resolves the
+  /// selector to the canonical form the recorder/codegen would emit for
+  /// the matched element and returns a new locator built from it.
+  #[napi]
+  pub async fn normalize(&self) -> Result<Locator> {
+    let inner = self.inner.normalize().await.map_err(crate::error::to_napi)?;
+    Ok(Self::wrap(inner))
+  }
+
   #[napi]
   pub async fn bounding_box(&self) -> Result<Option<BoundingBox>> {
     let bb = self.inner.bounding_box().await.map_err(crate::error::to_napi)?;
