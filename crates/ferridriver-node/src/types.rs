@@ -405,54 +405,139 @@ impl napi::bindgen_prelude::TypeName for NapiInputFiles {
 
 impl napi::bindgen_prelude::ValidateNapiValue for NapiInputFiles {}
 
+/// Lower a JS `string | string[] | FilePayload | FilePayload[]` value into
+/// the core `InputFiles` union. Shared by `setInputFiles` and the `files`
+/// field of `Locator.drop`'s payload so both accept the identical native
+/// shape.
+unsafe fn parse_input_files(
+  env: napi::sys::napi_env,
+  napi_val: napi::sys::napi_value,
+  context: &str,
+) -> napi::Result<ferridriver::options::InputFiles> {
+  use napi::JsValue;
+  use napi::bindgen_prelude::JsObjectValue;
+  let unknown = unsafe { napi::Unknown::from_raw_unchecked(env, napi_val) };
+  match unknown.get_type()? {
+    napi::ValueType::String => {
+      let s = unknown.coerce_to_string()?.into_utf8()?.into_owned()?;
+      Ok(ferridriver::options::InputFiles::Paths(vec![s.into()]))
+    },
+    napi::ValueType::Object => {
+      let obj = napi::bindgen_prelude::Object::from_raw(env, napi_val);
+      let is_array = unsafe {
+        let mut is_arr = false;
+        napi::check_status!(napi::sys::napi_is_array(env, napi_val, &raw mut is_arr))?;
+        is_arr
+      };
+      if is_array {
+        let len: u32 = obj.get("length")?.unwrap_or(0);
+        // Peek first entry to decide whether this is string[] or FilePayload[].
+        if len == 0 {
+          return Ok(ferridriver::options::InputFiles::Paths(Vec::new()));
+        }
+        let first: napi::Unknown<'_> = obj.get_element(0)?;
+        if first.get_type()? == napi::ValueType::String {
+          let mut paths = Vec::with_capacity(len as usize);
+          for i in 0..len {
+            let s: String = obj.get_element(i)?;
+            paths.push(std::path::PathBuf::from(s));
+          }
+          Ok(ferridriver::options::InputFiles::Paths(paths))
+        } else {
+          let mut payloads = Vec::with_capacity(len as usize);
+          for i in 0..len {
+            let p: FilePayload = obj.get_element(i)?;
+            payloads.push(p.into());
+          }
+          Ok(ferridriver::options::InputFiles::Payloads(payloads))
+        }
+      } else {
+        let p: FilePayload = unsafe { unknown.cast()? };
+        Ok(ferridriver::options::InputFiles::Payloads(vec![p.into()]))
+      }
+    },
+    other => Err(napi::Error::from_reason(format!(
+      "{context} expects string | string[] | FilePayload | FilePayload[], got {other}"
+    ))),
+  }
+}
+
 impl napi::bindgen_prelude::FromNapiValue for NapiInputFiles {
+  unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
+    Ok(Self(unsafe { parse_input_files(env, napi_val, "setInputFiles")? }))
+  }
+}
+
+/// Playwright-parity options for `Locator.drop`. Mirrors the trimmed
+/// `FrameDropOptions` bag from `client/locator.ts` (no `payloads`,
+/// `localPaths`, `streams`, `data`, `force`, `trial` -- those are folded
+/// into the payload or unsupported), leaving `modifiers`, `position`, and
+/// `timeout`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct DropOptions {
+  #[napi(ts_type = "Array<'Alt' | 'Control' | 'ControlOrMeta' | 'Meta' | 'Shift'>")]
+  pub modifiers: Option<Vec<String>>,
+  pub position: Option<Point>,
+  pub timeout: Option<f64>,
+}
+
+impl TryFrom<DropOptions> for ferridriver::options::DropOptions {
+  type Error = napi::Error;
+
+  fn try_from(o: DropOptions) -> std::result::Result<Self, Self::Error> {
+    let mut modifiers = Vec::new();
+    if let Some(list) = o.modifiers {
+      for name in list {
+        let m = ferridriver::options::Modifier::parse(&name)
+          .ok_or_else(|| napi::Error::from_reason(format!("Unknown modifier: {name}")))?;
+        modifiers.push(m);
+      }
+    }
+    Ok(Self {
+      modifiers,
+      position: o.position.map(Into::into),
+      timeout: o.timeout.map(f64_to_u64),
+    })
+  }
+}
+
+/// Native `DropPayload` for `Locator.drop`. Mirrors Playwright's
+/// `{ files?: string | FilePayload | string[] | FilePayload[], data?: { [mimeType: string]: string } }`
+/// via a custom `FromNapiValue` impl -- no wire shape exposed.
+#[derive(Debug, Clone)]
+pub struct NapiDropPayload(pub ferridriver::options::DropPayload);
+
+impl napi::bindgen_prelude::TypeName for NapiDropPayload {
+  fn type_name() -> &'static str {
+    "{ files?: string | string[] | FilePayload | FilePayload[], data?: Record<string, string> }"
+  }
+  fn value_type() -> napi::ValueType {
+    napi::ValueType::Object
+  }
+}
+
+impl napi::bindgen_prelude::ValidateNapiValue for NapiDropPayload {}
+
+impl napi::bindgen_prelude::FromNapiValue for NapiDropPayload {
   unsafe fn from_napi_value(env: napi::sys::napi_env, napi_val: napi::sys::napi_value) -> napi::Result<Self> {
     use napi::JsValue;
     use napi::bindgen_prelude::JsObjectValue;
-    let unknown = unsafe { napi::Unknown::from_raw_unchecked(env, napi_val) };
-    match unknown.get_type()? {
-      napi::ValueType::String => {
-        let s = unknown.coerce_to_string()?.into_utf8()?.into_owned()?;
-        Ok(Self(ferridriver::options::InputFiles::Paths(vec![s.into()])))
+    let obj = napi::bindgen_prelude::Object::from_raw(env, napi_val);
+
+    let files = match obj.get_named_property_unchecked::<napi::Unknown<'_>>("files") {
+      Ok(v) if !matches!(v.get_type()?, napi::ValueType::Undefined | napi::ValueType::Null) => {
+        Some(unsafe { parse_input_files(env, v.raw(), "drop payload files")? })
       },
-      napi::ValueType::Object => {
-        let obj = napi::bindgen_prelude::Object::from_raw(env, napi_val);
-        let is_array = unsafe {
-          let mut is_arr = false;
-          napi::check_status!(napi::sys::napi_is_array(env, napi_val, &raw mut is_arr))?;
-          is_arr
-        };
-        if is_array {
-          let len: u32 = obj.get("length")?.unwrap_or(0);
-          // Peek first entry to decide whether this is string[] or FilePayload[].
-          if len == 0 {
-            return Ok(Self(ferridriver::options::InputFiles::Paths(Vec::new())));
-          }
-          let first: napi::Unknown<'_> = obj.get_element(0)?;
-          if first.get_type()? == napi::ValueType::String {
-            let mut paths = Vec::with_capacity(len as usize);
-            for i in 0..len {
-              let s: String = obj.get_element(i)?;
-              paths.push(std::path::PathBuf::from(s));
-            }
-            Ok(Self(ferridriver::options::InputFiles::Paths(paths)))
-          } else {
-            let mut payloads = Vec::with_capacity(len as usize);
-            for i in 0..len {
-              let p: FilePayload = obj.get_element(i)?;
-              payloads.push(p.into());
-            }
-            Ok(Self(ferridriver::options::InputFiles::Payloads(payloads)))
-          }
-        } else {
-          let p: FilePayload = unsafe { unknown.cast()? };
-          Ok(Self(ferridriver::options::InputFiles::Payloads(vec![p.into()])))
-        }
-      },
-      other => Err(napi::Error::from_reason(format!(
-        "setInputFiles expects string | string[] | FilePayload | FilePayload[], got {other}"
-      ))),
-    }
+      _ => None,
+    };
+
+    let data = match obj.get::<std::collections::HashMap<String, String>>("data") {
+      Ok(Some(map)) => map.into_iter().collect(),
+      _ => Vec::new(),
+    };
+
+    Ok(Self(ferridriver::options::DropPayload { files, data }))
   }
 }
 

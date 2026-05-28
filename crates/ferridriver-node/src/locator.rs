@@ -458,6 +458,20 @@ impl Locator {
     self.inner.drag_to(&target.inner, opts).await.into_napi()
   }
 
+  /// Drop a file/data payload onto this element. Mirrors Playwright's
+  /// `locator.drop(payload, options?)` per `client/locator.ts:129`.
+  #[napi(
+    ts_args_type = "payload: { files?: string | string[] | FilePayload | FilePayload[], data?: Record<string, string> }, options?: DropOptions"
+  )]
+  pub async fn drop(
+    &self,
+    payload: crate::types::NapiDropPayload,
+    options: Option<crate::types::DropOptions>,
+  ) -> Result<()> {
+    let opts = options.map(TryInto::try_into).transpose()?;
+    self.inner.drop(payload.0, opts).await.map_err(crate::error::to_napi)
+  }
+
   // ── Waiting ─────────────────────────────────────────────────────────────
 
   #[napi]

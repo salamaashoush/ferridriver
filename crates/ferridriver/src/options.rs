@@ -946,6 +946,42 @@ pub struct DragAndDropOptions {
   pub trial: Option<bool>,
 }
 
+/// Options for `Locator.drop`.
+/// Mirrors Playwright's `Locator.drop(payload, options)` per
+/// `client/locator.ts` — the option bag omits `payloads`, `localPaths`,
+/// `streams`, `data`, `force`, and `trial` (those are folded into the
+/// `DropPayload` or are unsupported), leaving the actionability +
+/// positioning fields shared with the other pointer actions.
+#[derive(Debug, Clone, Default)]
+pub struct DropOptions {
+  /// Modifier keys held during the drop's pointer events.
+  pub modifiers: Vec<Modifier>,
+  /// Drop point relative to the target element's padding-box top-left.
+  /// When absent, the target element's center is used.
+  pub position: Option<Point>,
+  /// Maximum time in ms. `0` means no timeout. Default is inherited from
+  /// the context's default action timeout.
+  pub timeout: Option<u64>,
+}
+
+/// Drop payload for `Locator.drop`.
+/// Mirrors Playwright's `DropPayload` (`client/types.ts`):
+/// `{ files?: string | FilePayload | string[] | FilePayload[], data?: { [mimeType: string]: string } }`.
+/// Both fields are optional; an empty payload still dispatches the
+/// drag/drop event sequence with an empty `DataTransfer`.
+///
+/// Native shape only — file payloads are `FilePayload { name, mimeType,
+/// buffer }`, never the `{ buffer: base64 }` wire form, and `data` is a
+/// list of `(mimeType, value)` pairs lowered from the JS object/map.
+#[derive(Debug, Clone, Default)]
+pub struct DropPayload {
+  /// Files dragged onto the target. `None` means no files; an empty list
+  /// behaves the same as `None` (no `File` objects added to the transfer).
+  pub files: Option<InputFiles>,
+  /// `(mimeType, value)` entries set on the transfer via `DataTransfer.setData`.
+  pub data: Vec<(String, String)>,
+}
+
 /// Viewport configuration -- consistent across all backends.
 /// Matches viewport options.
 #[derive(Debug, Clone, PartialEq)]
@@ -2036,6 +2072,52 @@ mod drag_option_tests {
   #[test]
   fn point_default_is_origin() {
     assert_eq!(Point::default(), Point { x: 0.0, y: 0.0 });
+  }
+
+  #[test]
+  fn default_drop_options_and_payload_are_empty() {
+    let opts = DropOptions::default();
+    assert!(opts.modifiers.is_empty());
+    assert!(opts.position.is_none());
+    assert!(opts.timeout.is_none());
+
+    let payload = DropPayload::default();
+    assert!(payload.files.is_none());
+    assert!(payload.data.is_empty());
+  }
+
+  #[test]
+  fn drop_payload_carries_files_and_data() {
+    let payload = DropPayload {
+      files: Some(InputFiles::Payloads(vec![FilePayload {
+        name: "card.png".into(),
+        mime_type: "image/png".into(),
+        buffer: vec![1, 2, 3],
+      }])),
+      data: vec![("text/plain".into(), "dropped".into())],
+    };
+    match payload.files {
+      Some(InputFiles::Payloads(p)) => {
+        assert_eq!(p.len(), 1);
+        assert_eq!(p[0].name, "card.png");
+        assert_eq!(p[0].mime_type, "image/png");
+        assert_eq!(p[0].buffer, vec![1, 2, 3]);
+      },
+      _ => panic!("expected payloads"),
+    }
+    assert_eq!(payload.data, vec![("text/plain".to_string(), "dropped".to_string())]);
+  }
+
+  #[test]
+  fn drop_options_carry_modifiers_position_timeout() {
+    let opts = DropOptions {
+      modifiers: vec![Modifier::Shift, Modifier::ControlOrMeta],
+      position: Some(Point { x: 5.0, y: 7.0 }),
+      timeout: Some(1_500),
+    };
+    assert_eq!(opts.modifiers, vec![Modifier::Shift, Modifier::ControlOrMeta]);
+    assert_eq!(opts.position, Some(Point { x: 5.0, y: 7.0 }));
+    assert_eq!(opts.timeout, Some(1_500));
   }
 }
 

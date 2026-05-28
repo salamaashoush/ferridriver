@@ -542,6 +542,22 @@ impl LocatorJs {
     self.inner.set_input_files(files, opts).await.into_js()
   }
 
+  /// Drop a file/data payload onto this element. Mirrors Playwright's
+  /// `locator.drop(payload, options?)` per `client/locator.ts:129`.
+  /// `payload` is the native `{ files?, data? }` shape; `options` is the
+  /// trimmed `{ modifiers?, position?, timeout? }` bag.
+  #[qjs(rename = "drop")]
+  pub async fn drop<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    payload: rquickjs::Value<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
+  ) -> rquickjs::Result<()> {
+    let payload = crate::bindings::convert::parse_drop_payload(&ctx, payload)?;
+    let opts = crate::bindings::convert::parse_drop_options(&ctx, options)?;
+    self.inner.drop(payload, opts).await.into_js()
+  }
+
   #[qjs(rename = "scrollIntoViewIfNeeded")]
   pub async fn scroll_into_view_if_needed(&self) -> rquickjs::Result<()> {
     self.inner.scroll_into_view_if_needed().await.into_js()

@@ -642,6 +642,70 @@ pub fn parse_set_input_files_options<'js>(
   }))
 }
 
+/// Raw JS shape of Playwright's `DropOptions` (the trimmed
+/// `FrameDropOptions` bag from `client/locator.ts`): `modifiers`,
+/// `position`, `timeout`.
+#[derive(serde::Deserialize, Debug, Default)]
+#[serde(rename_all = "camelCase", default)]
+struct JsDropOptions {
+  modifiers: Option<Vec<String>>,
+  position: Option<JsClickPosition>,
+  timeout: Option<u64>,
+}
+
+/// Parse Playwright's `DropOptions` JS bag into the core struct.
+pub fn parse_drop_options<'js>(
+  ctx: &Ctx<'js>,
+  value: rquickjs::function::Opt<Value<'js>>,
+) -> rquickjs::Result<Option<ferridriver::options::DropOptions>> {
+  let raw = match value.0 {
+    Some(v) if !v.is_undefined() && !v.is_null() => v,
+    _ => return Ok(None),
+  };
+  let js: JsDropOptions = serde_from_js(ctx, raw)?;
+  let mut modifiers = Vec::new();
+  if let Some(list) = js.modifiers {
+    for name in list {
+      let m = ferridriver::options::Modifier::parse(&name).ok_or_else(|| {
+        rquickjs::Error::new_from_js_message("ferridriver", "drop", format!("Unknown modifier: {name}"))
+      })?;
+      modifiers.push(m);
+    }
+  }
+  Ok(Some(ferridriver::options::DropOptions {
+    modifiers,
+    position: js.position.map(Into::into),
+    timeout: js.timeout,
+  }))
+}
+
+/// Parse Playwright's native `DropPayload`
+/// (`{ files?: string | string[] | FilePayload | FilePayload[], data?: { [mimeType: string]: string } }`)
+/// into the core struct. Both fields are optional.
+pub fn parse_drop_payload<'js>(
+  ctx: &Ctx<'js>,
+  value: Value<'js>,
+) -> rquickjs::Result<ferridriver::options::DropPayload> {
+  let obj = value
+    .into_object()
+    .ok_or_else(|| rquickjs::Error::new_from_js_message("ferridriver", "drop", "payload must be an object"))?;
+
+  let files = match obj.get::<_, Value<'js>>("files") {
+    Ok(v) if !v.is_undefined() && !v.is_null() => Some(parse_input_files(ctx, v)?),
+    _ => None,
+  };
+
+  let data = match obj.get::<_, Value<'js>>("data") {
+    Ok(v) if !v.is_undefined() && !v.is_null() => {
+      let map: std::collections::BTreeMap<String, String> = serde_from_js(ctx, v)?;
+      map.into_iter().collect()
+    },
+    _ => Vec::new(),
+  };
+
+  Ok(ferridriver::options::DropPayload { files, data })
+}
+
 /// Raw JS shape of a `selectOption` descriptor — mirrors Playwright's
 /// `{ value?, label?, index? }`.
 #[derive(serde::Deserialize, Debug, Default)]

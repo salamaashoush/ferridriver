@@ -152,6 +152,14 @@ fn register_script_handles(set: &mut TestSet<'_>) {
   );
   run!(
     set,
+    backends_support::script_handles_local::test_script_locator_drop_payload
+  );
+  run!(
+    set,
+    backends_support::script_handles_local::test_script_locator_drop_rejected
+  );
+  run!(
+    set,
     backends_support::script_handles_local::test_script_emulate_media_all_fields
   );
   run!(
