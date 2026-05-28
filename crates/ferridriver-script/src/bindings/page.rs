@@ -218,6 +218,33 @@ pub(crate) struct PageCallbacks {
   screencast: Option<rquickjs::Persistent<rquickjs::Function<'static>>>,
 }
 
+impl PageCallbacks {
+  pub(crate) fn insert_route_handler(&mut self, id: u64, f: rquickjs::Persistent<rquickjs::Function<'static>>) {
+    self.route_handlers.insert(id, f);
+  }
+
+  pub(crate) fn insert_route_pred(&mut self, id: u64, f: rquickjs::Persistent<rquickjs::Function<'static>>) {
+    self.route_preds.insert(id, f);
+  }
+
+  pub(crate) fn get_route_handler(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
+    self.route_handlers.get(&id).cloned()
+  }
+
+  pub(crate) fn get_route_pred(&self, id: u64) -> Option<rquickjs::Persistent<rquickjs::Function<'static>>> {
+    self.route_preds.get(&id).cloned()
+  }
+
+  pub(crate) fn route_preds_snapshot(&self) -> Vec<(u64, rquickjs::Persistent<rquickjs::Function<'static>>)> {
+    self.route_preds.iter().map(|(k, v)| (*k, v.clone())).collect()
+  }
+
+  pub(crate) fn remove_route(&mut self, id: u64) {
+    self.route_preds.remove(&id);
+    self.route_handlers.remove(&id);
+  }
+}
+
 pub(crate) struct PageCallbacksUd(std::cell::RefCell<PageCallbacks>);
 
 // SAFETY: holds only `'static` data (`Persistent<…>` handles), so
@@ -237,7 +264,10 @@ pub(crate) fn ensure_page_callbacks(ctx: &rquickjs::Ctx<'_>) {
   }
 }
 
-fn with_page_callbacks<R>(ctx: &rquickjs::Ctx<'_>, f: impl FnOnce(&mut PageCallbacks) -> R) -> rquickjs::Result<R> {
+pub(crate) fn with_page_callbacks<R>(
+  ctx: &rquickjs::Ctx<'_>,
+  f: impl FnOnce(&mut PageCallbacks) -> R,
+) -> rquickjs::Result<R> {
   ensure_page_callbacks(ctx);
   let ud = ctx.userdata::<PageCallbacksUd>().ok_or_else(|| {
     rquickjs::Error::new_from_js_message("page", "Error", "page callbacks registry missing".to_string())
@@ -2063,7 +2093,7 @@ fn js_truthy(v: &rquickjs::Value<'_>) -> bool {
 }
 
 /// Call a JS predicate and resolve `boolean | Promise<boolean>`.
-async fn call_predicate_truthy<'js>(
+pub(crate) async fn call_predicate_truthy<'js>(
   pred: &rquickjs::Function<'js>,
   arg: impl rquickjs::IntoJs<'js>,
   ctx: &rquickjs::Ctx<'js>,
@@ -2174,7 +2204,7 @@ async fn wait_response_predicate<'js>(
 /// the NAPI `JsRegExpLike` shape — the JS RegExp's `source` and
 /// `flags` getters drive `UrlMatcher::regex_from_source`. Plain
 /// strings go through `UrlMatcher::glob`.
-fn url_value_to_matcher<'js>(
+pub(crate) fn url_value_to_matcher<'js>(
   ctx: &rquickjs::Ctx<'js>,
   value: rquickjs::Value<'js>,
 ) -> rquickjs::Result<ferridriver::url_matcher::UrlMatcher> {

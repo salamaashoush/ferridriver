@@ -1534,6 +1534,17 @@ impl BidiPage {
     }
   }
 
+  /// Backs [`crate::Page::set_http_credentials`]. Firefox's `BiDi`
+  /// implementation has no auth-challenge interception primitive, so
+  /// dynamic HTTP-credential mutation is surfaced as a typed Unsupported
+  /// per Rule 4 (matches the static `httpCredentials` gap above).
+  pub async fn set_http_credentials(&self, _creds: Option<crate::options::HttpCredentials>) -> Result<()> {
+    tokio::task::yield_now().await;
+    Err(FerriError::unsupported(
+      "BrowserContext.setHTTPCredentials is not supported on the bidi/Firefox backend: no network auth-challenge command exists",
+    ))
+  }
+
   pub async fn emulate_viewport(&self, config: &crate::options::ViewportConfig) -> Result<()> {
     let mut params = json!({
       "context": &*self.context_id,

@@ -1150,6 +1150,13 @@ impl AnyPage {
     page_dispatch!(self, set_extra_http_headers(headers))
   }
 
+  /// Set (or clear) HTTP credentials. Backs
+  /// [`crate::ContextRef::set_http_credentials`] (Playwright
+  /// `browserContext.setHTTPCredentials(creds | null)`).
+  pub async fn set_http_credentials(&self, creds: Option<crate::options::HttpCredentials>) -> Result<()> {
+    page_dispatch!(self, set_http_credentials(creds))
+  }
+
   /// Reset any context-granted permissions. Backs
   /// [`crate::ContextRef::clear_permissions`] (Playwright
   /// `browserContext.clearPermissions`).

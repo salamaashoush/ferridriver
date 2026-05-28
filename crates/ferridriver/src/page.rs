@@ -1425,6 +1425,17 @@ impl Page {
     self.inner.set_extra_http_headers(headers).await
   }
 
+  /// Set (or clear) the HTTP credentials answered to auth challenges.
+  /// Backs [`crate::ContextRef::set_http_credentials`]
+  /// (Playwright `browserContext.setHTTPCredentials(creds | null)`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the backend cannot apply the credentials.
+  pub async fn set_http_credentials(&self, creds: Option<crate::options::HttpCredentials>) -> Result<()> {
+    self.inner.set_http_credentials(creds).await
+  }
+
   // ── Tracing ─────────────────────────────────────────────────────────────
 
   /// Start performance tracing.

@@ -1,6 +1,7 @@
 //! `BrowserContextJs`: JS wrapper around `ferridriver::context::ContextRef`.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use ferridriver::context::ContextRef;
 use rquickjs::function::Opt;
@@ -8,18 +9,38 @@ use rquickjs::{Ctx, JsLifetime, Value, class::Trace};
 use rustc_hash::FxHashMap;
 
 use crate::bindings::convert::{FerriResultExt, init_script_from_js, serde_from_js, serde_to_js};
+use crate::bindings::page::{call_predicate_truthy, url_value_to_matcher, with_page_callbacks};
 
 #[derive(JsLifetime, Trace)]
 #[rquickjs::class(rename = "BrowserContext")]
 pub struct BrowserContextJs {
   #[qjs(skip_trace)]
   inner: Arc<ContextRef>,
+  /// Per-context route registration counter. Mirrors `PageJs::next_route_id`;
+  /// each `context.route(matcher, fn)` gets a unique id used as the key in
+  /// the shared `PageCallbacks` userdata registry.
+  #[qjs(skip_trace)]
+  next_route_id: Arc<AtomicU64>,
+  /// Always-true `UrlMatcher`s registered for predicate routes, keyed by id,
+  /// so `context.unroute(fn)` can drop exactly the matching registration by
+  /// `Arc` identity. Mirrors `PageJs::route_matchers`.
+  #[qjs(skip_trace)]
+  route_matchers: Arc<std::sync::Mutex<FxHashMap<u64, ferridriver::url_matcher::UrlMatcher>>>,
 }
 
 impl BrowserContextJs {
   #[must_use]
   pub fn new(inner: Arc<ContextRef>) -> Self {
-    Self { inner }
+    // Context route ids share the per-session `PageCallbacks` userdata
+    // registry with page routes (and with other contexts), so they're
+    // drawn from a process-global counter offset above any per-page id
+    // range to avoid key collisions.
+    static CONTEXT_ROUTE_BASE: AtomicU64 = AtomicU64::new(1 << 48);
+    Self {
+      inner,
+      next_route_id: Arc::new(AtomicU64::new(CONTEXT_ROUTE_BASE.fetch_add(1 << 20, Ordering::Relaxed))),
+      route_matchers: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
+    }
   }
 }
 
@@ -125,6 +146,41 @@ impl BrowserContextJs {
     self.inner.set_offline(offline).await.into_js()
   }
 
+  /// Playwright: `browserContext.setHTTPCredentials(httpCredentials |
+  /// null)` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:355`.
+  /// Accepts `{ username, password, origin?, send? }` or `null` /
+  /// `undefined` (clears stored credentials).
+  #[qjs(rename = "setHTTPCredentials")]
+  pub async fn set_http_credentials<'js>(&self, ctx: Ctx<'js>, credentials: Opt<Value<'js>>) -> rquickjs::Result<()> {
+    let creds = match credentials.0 {
+      None => None,
+      Some(v) if v.is_undefined() || v.is_null() => None,
+      Some(v) => {
+        #[derive(serde::Deserialize)]
+        #[serde(rename_all = "camelCase")]
+        struct JsCreds {
+          username: String,
+          password: String,
+          origin: Option<String>,
+          send: Option<String>,
+        }
+        let parsed: JsCreds = serde_from_js(&ctx, v)?;
+        Some(ferridriver::options::HttpCredentials {
+          username: parsed.username,
+          password: parsed.password,
+          origin: parsed.origin,
+          send: parsed.send.and_then(|s| match s.as_str() {
+            "always" => Some(ferridriver::options::HttpCredentialsSend::Always),
+            "unauthorized" => Some(ferridriver::options::HttpCredentialsSend::Unauthorized),
+            _ => None,
+          }),
+        })
+      },
+    };
+    self.inner.set_http_credentials(creds).await.into_js()
+  }
+
   /// Set HTTP headers sent with every request in this context.
   ///
   /// `headers` is a plain object (e.g. `{ 'X-Foo': 'bar' }`).
@@ -132,6 +188,113 @@ impl BrowserContextJs {
   pub async fn set_extra_http_headers<'js>(&self, ctx: Ctx<'js>, headers: Value<'js>) -> rquickjs::Result<()> {
     let map: FxHashMap<String, String> = serde_from_js(&ctx, headers)?;
     self.inner.set_extra_http_headers(&map).await.into_js()
+  }
+
+  // ── Routing ─────────────────────────────────────────────────────────────
+
+  /// Playwright: `browserContext.route(url, handler)` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:377`.
+  /// Routes every page in this context (current and future). Mirrors the
+  /// `PageJs::route` dispatch: predicate functions register an always-true
+  /// core matcher and are evaluated in the JS runtime via the session's
+  /// `AsyncContext`; the JS callback / predicate live in the shared
+  /// `PageCallbacks` userdata registry keyed by route id.
+  #[qjs(rename = "route")]
+  pub async fn route<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    url: Value<'js>,
+    handler: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<()> {
+    let async_ctx = match ctx.userdata::<crate::engine::SessionAsyncCtx>() {
+      Some(ud) => ud.0.clone(),
+      None => {
+        return Err(rquickjs::Error::new_from_js_message(
+          "context.route",
+          "Error",
+          "context.route requires the script engine's AsyncContext".to_string(),
+        ));
+      },
+    };
+    let id = self.next_route_id.fetch_add(1, Ordering::Relaxed);
+    let saved_handler = rquickjs::Persistent::save(&ctx, handler);
+    with_page_callbacks(&ctx, |r| r.insert_route_handler(id, saved_handler))?;
+
+    let has_predicate = url.as_function().is_some();
+    let matcher = if let Some(pred) = url.as_function() {
+      let saved_pred = rquickjs::Persistent::save(&ctx, pred.clone());
+      with_page_callbacks(&ctx, |r| r.insert_route_pred(id, saved_pred))?;
+      let m = ferridriver::url_matcher::UrlMatcher::predicate(|_| true);
+      self
+        .route_matchers
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .insert(id, m.clone());
+      m
+    } else {
+      url_value_to_matcher(&ctx, url)?
+    };
+
+    let rust_handler: ferridriver::route::RouteHandler = std::sync::Arc::new(move |route| {
+      let async_ctx = async_ctx.clone();
+      tokio::spawn(async move {
+        use rquickjs::class::Class;
+        let _: rquickjs::Result<()> = rquickjs::async_with!(async_ctx => |ctx| {
+          if has_predicate {
+            let pred = with_page_callbacks(&ctx, |r| r.get_route_pred(id))?
+              .ok_or_else(|| rquickjs::Error::new_from_js_message("context.route", "Error", "route predicate gone".to_string()))?
+              .restore(&ctx)?;
+            let url_ctor: rquickjs::function::Constructor<'_> = ctx.globals().get("URL")?;
+            let url_obj: rquickjs::Value<'_> = url_ctor.construct((route.request().url.clone(),))?;
+            if !call_predicate_truthy(&pred, url_obj, &ctx).await? {
+              route.continue_route(ferridriver::route::ContinueOverrides::default());
+              return Ok(());
+            }
+          }
+          let f = with_page_callbacks(&ctx, |r| r.get_route_handler(id))?
+            .ok_or_else(|| rquickjs::Error::new_from_js_message("context.route", "Error", "route handler gone".to_string()))?
+            .restore(&ctx)?;
+          let route_class = Class::instance(ctx.clone(), crate::bindings::network::RouteJs::new(route))?;
+          let _: rquickjs::Value<'_> = f.call((route_class,))?;
+          Ok(())
+        })
+        .await;
+      });
+    });
+
+    self.inner.route(matcher, rust_handler).await.into_js()?;
+    Ok(())
+  }
+
+  /// Playwright: `browserContext.unroute(url, handler?)` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:411`.
+  /// A predicate is matched by `===` against the function passed to `route`.
+  #[qjs(rename = "unroute")]
+  pub async fn unroute<'js>(&self, ctx: Ctx<'js>, url: Value<'js>) -> rquickjs::Result<()> {
+    if let Some(pred) = url.as_function() {
+      let saved = with_page_callbacks(&ctx, |r| r.route_preds_snapshot())?;
+      let mut victims: Vec<u64> = Vec::new();
+      for (id, sp) in saved {
+        let stored = sp.restore(&ctx)?;
+        if stored.as_value() == pred.as_value() {
+          victims.push(id);
+        }
+      }
+      for id in victims {
+        let m = self
+          .route_matchers
+          .lock()
+          .unwrap_or_else(std::sync::PoisonError::into_inner)
+          .remove(&id);
+        if let Some(m) = m {
+          self.inner.unroute(&m).await.into_js()?;
+        }
+        with_page_callbacks(&ctx, |r| r.remove_route(id))?;
+      }
+      return Ok(());
+    }
+    let matcher = url_value_to_matcher(&ctx, url)?;
+    self.inner.unroute(&matcher).await.into_js()
   }
 
   // ── Init scripts ──────────────────────────────────────────────────────────
@@ -158,9 +321,25 @@ impl BrowserContextJs {
 
   // ── Timeouts ──────────────────────────────────────────────────────────────
 
-  // `set_default_timeout` takes `&mut self` on core, which rquickjs can't
-  // safely expose on `&self`. Expose read-only for now; callers that need to
-  // change it can do so via the page's own timeout setters.
+  /// Playwright: `browserContext.setDefaultTimeout(timeout)` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:286`.
+  /// Core stores the value behind an `Arc<AtomicU64>` so the setter works
+  /// through this shared `&self` handle.
+  #[qjs(rename = "setDefaultTimeout")]
+  pub fn set_default_timeout(&self, timeout: f64) {
+    self
+      .inner
+      .set_default_timeout(crate::bindings::convert::ms_f64_to_u64(timeout));
+  }
+
+  /// Playwright: `browserContext.setDefaultNavigationTimeout(timeout)` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:282`.
+  #[qjs(rename = "setDefaultNavigationTimeout")]
+  pub fn set_default_navigation_timeout(&self, timeout: f64) {
+    self
+      .inner
+      .set_default_navigation_timeout(crate::bindings::convert::ms_f64_to_u64(timeout));
+  }
 
   // ── Lifecycle ─────────────────────────────────────────────────────────────
 
@@ -168,6 +347,30 @@ impl BrowserContextJs {
   #[qjs(rename = "name")]
   pub fn name(&self) -> String {
     self.inner.name().to_string()
+  }
+
+  /// Playwright: `browserContext.browser(): Browser | null` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:290`.
+  /// Returns the parent browser, or `null` if the context was not created
+  /// from a `Browser`.
+  #[qjs(rename = "browser")]
+  pub fn browser<'js>(&self, ctx: Ctx<'js>) -> rquickjs::Result<Value<'js>> {
+    use rquickjs::class::Class;
+    match self.inner.browser() {
+      Some(b) => {
+        let wrapper = crate::bindings::browser::BrowserJs::new(std::sync::Arc::new(b.clone()));
+        let instance = Class::instance(ctx.clone(), wrapper)?;
+        rquickjs::IntoJs::into_js(instance, &ctx)
+      },
+      None => Ok(Value::new_null(ctx)),
+    }
+  }
+
+  /// Playwright: `browserContext.isClosed(): boolean` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:298`.
+  #[qjs(rename = "isClosed")]
+  pub fn is_closed(&self) -> bool {
+    self.inner.is_closed()
   }
 
   /// Close the context (tears down the underlying browser state).

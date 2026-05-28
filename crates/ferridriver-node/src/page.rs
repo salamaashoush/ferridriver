@@ -43,14 +43,14 @@ pub type PageWaitForEventResult = napi::bindgen_prelude::Either9<
 /// High-level page API, mirrors Playwright's Page interface.
 /// Predicate return: a `(req|res|url) => boolean | Promise<boolean>`
 /// function resolves to either arm.
-type PredReturn = napi::Either<bool, napi::bindgen_prelude::Promise<bool>>;
+pub(crate) type PredReturn = napi::Either<bool, napi::bindgen_prelude::Promise<bool>>;
 
 /// A `page.route(predicateFn, handler)` registration. The core matcher
 /// is always-true (unique `Arc` identity); `pred_ref` keeps the JS
 /// function so `unroute(fn)` can match it by `===`.
-struct PredRoute {
-  matcher: ferridriver::url_matcher::UrlMatcher,
-  pred_ref: napi::bindgen_prelude::FunctionRef<JsUrl, PredReturn>,
+pub(crate) struct PredRoute {
+  pub(crate) matcher: ferridriver::url_matcher::UrlMatcher,
+  pub(crate) pred_ref: napi::bindgen_prelude::FunctionRef<JsUrl, PredReturn>,
 }
 
 /// Carries a URL string into JS as a real `URL` instance — the
@@ -59,6 +59,12 @@ struct PredRoute {
 /// `web_error::JsErrorValue`), so no borrowed handle escapes a
 /// threadsafe-function arg transform.
 pub struct JsUrl(String);
+
+impl JsUrl {
+  pub(crate) fn new(url: String) -> Self {
+    Self(url)
+  }
+}
 
 impl napi::bindgen_prelude::ToNapiValue for JsUrl {
   unsafe fn to_napi_value(raw_env: napi::sys::napi_env, val: Self) -> napi::Result<napi::sys::napi_value> {
@@ -76,14 +82,14 @@ impl napi::bindgen_prelude::ToNapiValue for JsUrl {
 /// `AsyncBlock`, so an invalid glob/regex rejects the JS promise
 /// instead of throwing synchronously (Playwright `route` returns a
 /// `Promise`).
-enum MatcherSpec {
+pub(crate) enum MatcherSpec {
   Glob(String),
   Regex { source: String, flags: Option<String> },
   Ready(ferridriver::url_matcher::UrlMatcher),
 }
 
 impl MatcherSpec {
-  fn build(self) -> Result<ferridriver::url_matcher::UrlMatcher> {
+  pub(crate) fn build(self) -> Result<ferridriver::url_matcher::UrlMatcher> {
     match self {
       Self::Glob(g) => ferridriver::url_matcher::UrlMatcher::glob(g).map_err(crate::error::to_napi),
       Self::Regex { source, flags } => {
@@ -96,7 +102,7 @@ impl MatcherSpec {
 }
 
 /// Resolve a predicate's `boolean | Promise<boolean>` return.
-async fn resolve_pred(r: PredReturn) -> bool {
+pub(crate) async fn resolve_pred(r: PredReturn) -> bool {
   match r {
     napi::Either::A(b) => b,
     napi::Either::B(p) => p.await.unwrap_or(false),

@@ -193,9 +193,14 @@ pub struct ContextRef {
   /// Pre-parsed session key (avoids re-parsing on every operation).
   pub(crate) key: SessionKey,
   /// Default timeout for actions in this context (ms). 0 = no override.
-  default_timeout_ms: u64,
+  /// `Arc<AtomicU64>` so the Playwright `setDefaultTimeout` setter can
+  /// mutate through a shared `&self` handle (the `QuickJS` binding holds
+  /// the context behind an `Arc` and cannot offer `&mut self`).
+  default_timeout_ms: Arc<std::sync::atomic::AtomicU64>,
   /// Default navigation timeout in this context (ms). 0 = no override.
-  default_navigation_timeout_ms: u64,
+  /// Shared via `Arc<AtomicU64>` for the same reason as
+  /// [`Self::default_timeout_ms`].
+  default_navigation_timeout_ms: Arc<std::sync::atomic::AtomicU64>,
   /// Context-scoped event emitter. Shared across every `ContextRef`
   /// clone with the same composite session key via the per-state
   /// [`BrowserState::get_or_create_context_events`] registry — without
@@ -204,6 +209,16 @@ pub struct ContextRef {
   /// miss events dispatched via the per-page bridge installed on a
   /// page created through a different `ContextRef` instance.
   events: crate::events::ContextEventEmitter,
+  /// Parent browser handle. `Some` when the context was created from a
+  /// [`crate::Browser`] (`browser.newContext()` / `browser.defaultContext()`);
+  /// surfaced by [`Self::browser`] to mirror Playwright's
+  /// `browserContext.browser(): Browser | null`. `Browser` is a cheap
+  /// `Arc`-handle clone, so this carries no protocol cost.
+  browser: Option<crate::Browser>,
+  /// Shared closed-flag for this context's composite key (see
+  /// [`BrowserState::context_closed`]). `false` from handle creation
+  /// until [`Self::close`] flips it `true`; backs [`Self::is_closed`].
+  closed: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl ContextRef {
@@ -219,18 +234,61 @@ impl ContextRef {
     // only, matching the old behaviour. `get_or_create_context_events`
     // itself uses a `std::sync::Mutex` so it doesn't need the tokio
     // read guard to stay alive beyond the call.
-    let events = match state.try_read() {
-      Ok(s) => s.get_or_create_context_events(&key.to_composite()),
-      Err(_) => crate::events::ContextEventEmitter::new(),
+    let (events, closed) = match state.try_read() {
+      Ok(s) => (
+        s.get_or_create_context_events(&key.to_composite()),
+        s.get_or_create_context_closed(&key.to_composite()),
+      ),
+      Err(_) => (
+        crate::events::ContextEventEmitter::new(),
+        Arc::new(std::sync::atomic::AtomicBool::new(false)),
+      ),
     };
     Self {
       state,
       name: Arc::from(name),
       key,
-      default_timeout_ms: 0,
-      default_navigation_timeout_ms: 0,
+      default_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+      default_navigation_timeout_ms: Arc::new(std::sync::atomic::AtomicU64::new(0)),
       events,
+      browser: None,
+      closed,
     }
+  }
+
+  /// Attach the parent [`crate::Browser`] handle so [`Self::browser`]
+  /// returns it. Called by [`crate::Browser::new_context`] and
+  /// [`crate::Browser::default_context`] right after construction.
+  #[must_use]
+  pub(crate) fn with_browser(mut self, browser: crate::Browser) -> Self {
+    self.browser = Some(browser);
+    self
+  }
+
+  /// Parent browser handle, or `None` for a context not created from a
+  /// [`crate::Browser`]. Mirrors Playwright's
+  /// `browserContext.browser(): Browser | null`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:290`).
+  #[must_use]
+  pub fn browser(&self) -> Option<&crate::Browser> {
+    self.browser.as_ref()
+  }
+
+  /// Whether this context has been closed. Mirrors Playwright's
+  /// `browserContext.isClosed(): boolean`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:298`).
+  /// `false` from handle creation until [`Self::close`] is called (or the
+  /// underlying browser instance is shut down / disconnected), matching
+  /// Playwright's `_closingStatus !== 'none'`. Uses the shared
+  /// [`BrowserState::context_closed`] flag so a `close()` on one handle is
+  /// seen by every clone with the same composite key.
+  #[must_use]
+  pub fn is_closed(&self) -> bool {
+    if self.closed.load(std::sync::atomic::Ordering::SeqCst) {
+      return true;
+    }
+    // A disconnected browser implicitly closes every context.
+    self.browser.as_ref().is_some_and(|b| !b.is_connected())
   }
 
   /// Context-scoped event emitter. Cheap to clone.
@@ -527,14 +585,34 @@ impl ContextRef {
     ctx.delete_cookie(name, domain).await
   }
 
-  /// Set the default timeout for actions in this context (ms).
-  pub fn set_default_timeout(&mut self, ms: u64) {
-    self.default_timeout_ms = ms;
+  /// Set the default timeout for actions in this context (ms). Mirrors
+  /// Playwright's `browserContext.setDefaultTimeout(timeout)`. Takes
+  /// `&self` (interior mutability via `Arc<AtomicU64>`) so it works
+  /// behind a shared handle.
+  pub fn set_default_timeout(&self, ms: u64) {
+    self.default_timeout_ms.store(ms, std::sync::atomic::Ordering::Relaxed);
   }
 
-  /// Set the default navigation timeout for this context (ms).
-  pub fn set_default_navigation_timeout(&mut self, ms: u64) {
-    self.default_navigation_timeout_ms = ms;
+  /// Set the default navigation timeout for this context (ms). Mirrors
+  /// Playwright's `browserContext.setDefaultNavigationTimeout(timeout)`.
+  pub fn set_default_navigation_timeout(&self, ms: u64) {
+    self
+      .default_navigation_timeout_ms
+      .store(ms, std::sync::atomic::Ordering::Relaxed);
+  }
+
+  /// Current default action timeout (ms). 0 = no override.
+  #[must_use]
+  pub fn default_timeout(&self) -> u64 {
+    self.default_timeout_ms.load(std::sync::atomic::Ordering::Relaxed)
+  }
+
+  /// Current default navigation timeout (ms). 0 = no override.
+  #[must_use]
+  pub fn default_navigation_timeout(&self) -> u64 {
+    self
+      .default_navigation_timeout_ms
+      .load(std::sync::atomic::Ordering::Relaxed)
   }
 
   /// Mutate the stored [`crate::options::BrowserContextOptions`] bag
@@ -609,6 +687,7 @@ impl ContextRef {
   ///
   /// Returns an error if state lock acquisition fails.
   pub async fn close(&self) -> Result<()> {
+    self.closed.store(true, std::sync::atomic::Ordering::SeqCst);
     let mut state = self.state.write().await;
     let persistent = state.persistent_context;
     state.remove_context(&self.name).await;
@@ -757,6 +836,38 @@ impl ContextRef {
   /// Returns an error if re-application fails on any page.
   pub async fn set_offline(&self, offline: bool) -> Result<()> {
     self.mutate_options(|o| o.offline = Some(offline)).await
+  }
+
+  /// Playwright: `browserContext.setHTTPCredentials(httpCredentials |
+  /// null)` (`/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:355`).
+  /// Stores the credentials on the context options bag so pages opened
+  /// later inherit them, and applies them to every already-open page.
+  /// Passing `None` clears stored credentials — future 401 challenges
+  /// then surface as the browser's native auth dialog rather than being
+  /// answered automatically.
+  ///
+  /// The bag mutation alone cannot express "clear" (the per-field
+  /// `apply_context_options` future is keyed on `Some`), so this drives
+  /// the dedicated [`crate::Page::set_http_credentials`] backend path on
+  /// each open page directly.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if any open page's backend rejects the change
+  /// (e.g. a backend that does not support auth-challenge interception).
+  pub async fn set_http_credentials(&self, credentials: Option<crate::options::HttpCredentials>) -> Result<()> {
+    let composite = self.key.to_composite();
+    {
+      let state = self.state.read().await;
+      let mut opts = state.get_context_options(&composite).unwrap_or_default();
+      opts.http_credentials.clone_from(&credentials);
+      state.set_context_options(&composite, opts);
+    }
+    let pages = self.pages().await?;
+    for page in pages {
+      page.set_http_credentials(credentials.clone()).await?;
+    }
+    Ok(())
   }
 
   /// Register a route handler for all pages in this context.
@@ -938,9 +1049,11 @@ fn bind_source(
 ///
 /// Fields deferred to a follow-up session (no-op here): `proxy`,
 /// `record_har`, `storage_state`, `screen`, `base_url`, `service_workers`,
-/// `http_credentials`, `accept_downloads`, `ignore_https_errors`,
-/// `strict_selectors` beyond storage, `bypass_csp`. Each gets a
-/// dedicated implementation when the supporting infrastructure lands.
+/// `accept_downloads`, `ignore_https_errors`, `strict_selectors` beyond
+/// storage, `bypass_csp`. Each gets a dedicated implementation when the
+/// supporting infrastructure lands. (`http_credentials` is now wired
+/// through CDP both at context-creation time and via the dynamic
+/// `ContextRef::set_http_credentials` setter.)
 /// Apply a context-options bag to a freshly-opened page. This
 /// delegates to the backend's single `apply_context_options` dispatch
 /// which fires every protocol command in parallel and aggregates

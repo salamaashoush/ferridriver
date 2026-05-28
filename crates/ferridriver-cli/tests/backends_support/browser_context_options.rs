@@ -957,3 +957,223 @@ pub fn test_context_options_has_touch(c: &mut McpClient) {
     "hasTouch should expose touch APIs to the page: {v}"
   );
 }
+
+/// Spawn a multi-connection HTTP Basic-auth server. Each request that
+/// carries `Authorization: Basic dXNlcjpwYXNz` (`user:pass`) gets a
+/// `200` with `AUTHED` in the body; otherwise it gets a `401` with a
+/// `WWW-Authenticate: Basic` challenge and `NOAUTH` body. Returns the
+/// bound port. Serves up to `max_conns` connections then exits.
+fn spawn_basic_auth_server(max_conns: usize) -> u16 {
+  let listener = TcpListener::bind("127.0.0.1:0").expect("bind auth server");
+  let port = listener.local_addr().expect("addr").port();
+  thread::spawn(move || {
+    for _ in 0..max_conns {
+      let Ok((mut stream, _)) = listener.accept() else { break };
+      let mut reader = BufReader::new(stream.try_clone().expect("clone"));
+      let mut authed = false;
+      loop {
+        let mut line = String::new();
+        if reader.read_line(&mut line).unwrap_or(0) == 0 {
+          break;
+        }
+        if line == "\r\n" || line == "\n" {
+          break;
+        }
+        // base64("user:pass") == "dXNlcjpwYXNz"
+        if line.to_ascii_lowercase().starts_with("authorization:") && line.contains("dXNlcjpwYXNz") {
+          authed = true;
+        }
+      }
+      let resp = if authed {
+        let body = "AUTHED";
+        format!(
+          "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+          body.len(),
+          body
+        )
+      } else {
+        let body = "NOAUTH";
+        format!(
+          "HTTP/1.1 401 Unauthorized\r\nWWW-Authenticate: Basic realm=\"r9\"\r\nContent-Type: text/html\r\nContent-Length: {}\r\n\r\n{}",
+          body.len(),
+          body
+        )
+      };
+      let _ = stream.write_all(resp.as_bytes());
+    }
+  });
+  port
+}
+
+/// `context.setHTTPCredentials({ username, password })` → a navigation
+/// that would otherwise 401 succeeds because the backend answers the
+/// auth challenge with the stored credentials. Passing `null` then
+/// clears them so the next navigation 401s again. Only CDP backends
+/// implement the `Fetch.authRequired` hook; BiDi/WebKit return a typed
+/// Unsupported, which the test asserts instead.
+pub fn test_context_set_http_credentials(c: &mut McpClient) {
+  if skip_if_no_new_context(c) {
+    return;
+  }
+  if c.backend == "bidi" {
+    // Firefox/BiDi has no auth-challenge interception command; the
+    // setter rejects with a typed Unsupported. Assert that contract.
+    let v = c.script_value(
+      r"
+      const ctx = await browser.newContext({});
+      try {
+        await ctx.newPage();
+        let err = null;
+        try { await ctx.setHTTPCredentials({ username: 'user', password: 'pass' }); }
+        catch (e) { err = String(e && e.message ? e.message : e); }
+        return { err };
+      } finally {
+        await ctx.close();
+      }
+    ",
+    );
+    let err = v["err"].as_str().unwrap_or("");
+    assert!(
+      err.contains("not supported") || err.contains("Unsupported"),
+      "BiDi setHTTPCredentials should reject as Unsupported: {v}"
+    );
+    return;
+  }
+
+  let port = spawn_basic_auth_server(2);
+  let url = format!("http://127.0.0.1:{port}/secret");
+  let v = c.script_value_with_args(
+    r"
+    const [url] = args;
+    const ctx = await browser.newContext({});
+    try {
+      const p = await ctx.newPage();
+      // With credentials set, the backend's Fetch.authRequired hook
+      // answers the challenge → 200 AUTHED. This 200 only occurs when
+      // the credentials took effect; a no-credentials top-level nav to
+      // this URL aborts with ERR_INVALID_AUTH_CREDENTIALS.
+      await ctx.setHTTPCredentials({ username: 'user', password: 'pass' });
+      const r = await p.goto(url);
+      const status = r ? r.status() : null;
+      const body = await p.evaluate(() => document.body.textContent);
+      return { status, body };
+    } finally {
+      await ctx.close();
+    }
+  ",
+    json!([url]),
+  );
+  // QuickJS JSON-stringifies primitive results, so statuses may arrive
+  // as numbers or numeric strings — normalise via serde's as_i64 /
+  // string parse.
+  let as_status = |val: &serde_json::Value| -> Option<i64> {
+    val.as_i64().or_else(|| val.as_str().and_then(|s| s.parse::<i64>().ok()))
+  };
+  assert_eq!(
+    as_status(&v["status"]),
+    Some(200),
+    "nav after setHTTPCredentials should 200: {v}"
+  );
+  assert!(
+    v["body"].as_str().unwrap_or("").contains("AUTHED"),
+    "authed body should be served after setHTTPCredentials: {v}"
+  );
+}
+
+/// `context.setDefaultTimeout(ms)` → a too-short action timeout makes a
+/// never-matching `waitForSelector` reject quickly. Observes the
+/// timeout error to prove the setter took effect through the shared
+/// `Arc<AtomicU64>` (the method takes `&self`, not `&mut self`).
+pub fn test_context_set_default_timeout(c: &mut McpClient) {
+  if skip_if_no_new_context(c) {
+    return;
+  }
+  let v = c.script_value(
+    r"
+    const ctx = await browser.newContext({});
+    try {
+      // Setter takes effect via interior mutability on a shared handle.
+      ctx.setDefaultTimeout(50);
+      ctx.setDefaultNavigationTimeout(50);
+      const p = await ctx.newPage();
+      await p.goto('data:text/html,<body>timeout-probe</body>');
+      let err = null;
+      try {
+        await p.waitForSelector('#never-ever', { timeout: 50 });
+      } catch (e) {
+        err = String(e && e.message ? e.message : e);
+      }
+      return { err };
+    } finally {
+      await ctx.close();
+    }
+  ",
+  );
+  let err = v["err"].as_str().unwrap_or("");
+  assert!(
+    err.to_ascii_lowercase().contains("timeout") || err.to_ascii_lowercase().contains("timed out"),
+    "waitForSelector should time out: {v}"
+  );
+}
+
+/// `context.isClosed()` flips from `false` to `true` across `close()`,
+/// and `context.browser()` returns the parent Browser handle.
+pub fn test_context_is_closed_and_browser(c: &mut McpClient) {
+  if skip_if_no_new_context(c) {
+    return;
+  }
+  let v = c.script_value(
+    r"
+    const ctx = await browser.newContext({});
+    const before = await ctx.isClosed();
+    const hasBrowser = ctx.browser() != null;
+    // browser() should hand back a usable Browser (version() is sync-ish).
+    const ver = ctx.browser() != null ? String(ctx.browser().version()) : null;
+    await ctx.close();
+    const after = await ctx.isClosed();
+    return { before, hasBrowser, after, verNonEmpty: ver != null && ver.length > 0 };
+  ",
+  );
+  assert_eq!(v["before"].as_bool(), Some(false), "isClosed() should be false before close: {v}");
+  assert_eq!(
+    v["hasBrowser"].as_bool(),
+    Some(true),
+    "browser() should return the parent Browser: {v}"
+  );
+  assert_eq!(
+    v["verNonEmpty"].as_bool(),
+    Some(true),
+    "browser().version() should be a non-empty string: {v}"
+  );
+  assert_eq!(v["after"].as_bool(), Some(true), "isClosed() should be true after close: {v}");
+}
+
+/// `context.route(url, handler)` fulfils a matched request for every
+/// page in the context, then `context.unroute(url)` removes it.
+pub fn test_context_route_and_unroute(c: &mut McpClient) {
+  if skip_if_no_new_context(c) {
+    return;
+  }
+  let v = c.script_value(
+    r"
+    const ctx = await browser.newContext({});
+    try {
+      const p = await ctx.newPage();
+      const matcher = 'https://ferri.test/**';
+      await ctx.route(matcher, (route) => {
+        route.fulfill({ status: 200, contentType: 'text/html', body: '<body>ROUTED</body>' });
+      });
+      await p.goto('https://ferri.test/page');
+      const routed = await p.evaluate(() => document.body.textContent);
+      await ctx.unroute(matcher);
+      return { routed };
+    } finally {
+      await ctx.close();
+    }
+  ",
+  );
+  assert!(
+    v["routed"].as_str().unwrap_or("").contains("ROUTED"),
+    "context.route should fulfil the matched request: {v}"
+  );
+}

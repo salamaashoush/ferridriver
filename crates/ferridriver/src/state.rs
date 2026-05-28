@@ -176,6 +176,15 @@ pub struct BrowserState {
   /// guard — `get_or_create_context_events` is called on every
   /// `ContextRef::new` for its composite key.
   pub context_events: Arc<std::sync::Mutex<HashMap<String, crate::events::ContextEventEmitter>>>,
+  /// Per-context closed-flag registry. Mirrors `context_events`: every
+  /// `ContextRef` constructed with the same composite key shares one
+  /// `Arc<AtomicBool>` so `context.close()` on one handle is observed by
+  /// `context.isClosed()` on any clone. The flag starts `false` at
+  /// context-handle creation (before any page is opened, matching
+  /// Playwright's `_closingStatus === 'none'`) and flips `true` on
+  /// `ContextRef::close`. Sync mutex so `ContextRef::new` can init the
+  /// entry without owning the tokio `RwLock` guard.
+  pub context_closed: Arc<std::sync::Mutex<HashMap<String, Arc<std::sync::atomic::AtomicBool>>>>,
   /// Per-context `recordVideo` configuration registry. Mirrors
   /// `context_events` above: sync `std::sync::Mutex` so the
   /// non-async setter (`ContextRef::set_record_video`) can write
@@ -279,6 +288,7 @@ impl BrowserState {
       default_viewport: plan.default_viewport,
       close_reason: None,
       context_events: Arc::new(std::sync::Mutex::new(HashMap::default())),
+      context_closed: Arc::new(std::sync::Mutex::new(HashMap::default())),
       record_video: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_options: Arc::new(std::sync::Mutex::new(HashMap::default())),
       context_bindings: Arc::new(tokio::sync::RwLock::new(HashMap::default())),
@@ -379,6 +389,20 @@ impl BrowserState {
     map
       .entry(key.to_string())
       .or_insert_with(crate::events::ContextEventEmitter::new)
+      .clone()
+  }
+
+  /// Look up (or lazily create) the shared closed-flag for a context's
+  /// composite key. See [`Self::context_closed`].
+  #[must_use]
+  pub fn get_or_create_context_closed(&self, key: &str) -> Arc<std::sync::atomic::AtomicBool> {
+    let mut map = match self.context_closed.lock() {
+      Ok(g) => g,
+      Err(poisoned) => poisoned.into_inner(),
+    };
+    map
+      .entry(key.to_string())
+      .or_insert_with(|| Arc::new(std::sync::atomic::AtomicBool::new(false)))
       .clone()
   }
 
