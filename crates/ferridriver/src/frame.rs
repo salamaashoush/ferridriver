@@ -312,13 +312,35 @@ impl Frame {
 
   // ── Waiting ──────────────────────────────────────────────────────────
 
-  /// Wait for a selector within this frame.
+  /// Wait for a selector within this frame and return the matched handle.
+  ///
+  /// Playwright: `frame.waitForSelector(selector, options?)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/frame.ts:217`).
+  /// For the default `state: 'visible'` and for `state: 'attached'` the
+  /// resolved [`crate::element_handle::ElementHandle`] is returned. For
+  /// `state: 'hidden' | 'detached'` the element is gone (or invisible)
+  /// so Playwright returns `null`; we mirror that with `Ok(None)`.
   ///
   /// # Errors
   ///
-  /// Returns an error if the element is not found within the timeout.
-  pub async fn wait_for_selector(&self, selector: &str, opts: WaitOptions) -> Result<()> {
-    self.locator(selector, None).wait_for(opts).await
+  /// Returns an error if the element does not reach the requested state
+  /// within the timeout.
+  pub async fn wait_for_selector(
+    &self,
+    selector: &str,
+    opts: WaitOptions,
+  ) -> Result<Option<crate::element_handle::ElementHandle>> {
+    let state = opts.state.clone();
+    let locator = self.locator(selector, None);
+    locator.wait_for(opts).await?;
+    // Playwright returns a handle only when the element is present; the
+    // `hidden` / `detached` states resolve precisely because it is not.
+    let returns_handle = !matches!(state.as_deref(), Some("hidden" | "detached"));
+    if returns_handle {
+      Ok(Some(locator.element_handle().await?))
+    } else {
+      Ok(None)
+    }
   }
 
   /// Show the element-highlight overlay for `selector` in this frame.

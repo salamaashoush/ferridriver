@@ -155,10 +155,18 @@ impl Frame {
     self.inner.wait_for_load_state().await.into_napi()
   }
 
+  /// Playwright: `frame.waitForSelector(selector, options?)`. Returns the
+  /// matched handle for `state: 'attached' | 'visible'` (default), or
+  /// `null` for `state: 'hidden' | 'detached'`.
   #[napi]
-  pub async fn wait_for_selector(&self, selector: String, options: Option<crate::types::WaitOptions>) -> Result<()> {
+  pub async fn wait_for_selector(
+    &self,
+    selector: String,
+    options: Option<crate::types::WaitOptions>,
+  ) -> Result<Option<crate::element_handle::ElementHandle>> {
     let opts: ferridriver::options::WaitOptions = options.map_or_else(Default::default, Into::into);
-    self.inner.wait_for_selector(&selector, opts).await.into_napi()
+    let handle = self.inner.wait_for_selector(&selector, opts).await.into_napi()?;
+    Ok(handle.map(crate::element_handle::ElementHandle::wrap))
   }
 
   // ── Additional content methods ───────────────────────────────────────
