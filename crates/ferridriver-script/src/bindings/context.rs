@@ -226,6 +226,47 @@ impl BrowserContextJs {
     self.inner.set_record_video(opts).await.into_js()
   }
 
+  // ── Exposed bindings / functions ───────────────────────────────────────
+
+  /// Playwright: `browserContext.exposeBinding(name, callback)` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:364`.
+  ///
+  /// Binds `window[name]` on every page in this context (current +
+  /// future). The page-side call routes back into `callback`, invoked
+  /// as `callback(source, ...args)` where `source` is
+  /// `{ context, page, frame }` (identity strings) and the page-side
+  /// call args are spread (Playwright parity). The callback's return
+  /// value (awaiting any returned promise) is delivered to the
+  /// page-side caller. Returns a `{ dispose() }` Disposable.
+  #[qjs(rename = "exposeBinding")]
+  pub async fn expose_binding<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    name: String,
+    callback: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
+    let binding = self.make_binding(&ctx, &name, callback, true)?;
+    self.inner.expose_binding(&name, binding).await.into_js()?;
+    self.make_disposable(&ctx, name)
+  }
+
+  /// Playwright: `browserContext.exposeFunction(name, callback)` —
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:370`.
+  ///
+  /// `exposeFunction` is `exposeBinding` minus the `source` argument:
+  /// the callback receives only the spread page-side call args.
+  #[qjs(rename = "exposeFunction")]
+  pub async fn expose_function<'js>(
+    &self,
+    ctx: Ctx<'js>,
+    name: String,
+    callback: rquickjs::Function<'js>,
+  ) -> rquickjs::Result<Value<'js>> {
+    let binding = self.make_binding(&ctx, &name, callback, false)?;
+    self.inner.expose_binding(&name, binding).await.into_js()?;
+    self.make_disposable(&ctx, name)
+  }
+
   // ── Context-level events ───────────────────────────────────────────────
 
   /// Wait for the next context-scoped event. Currently supports
@@ -253,5 +294,107 @@ impl BrowserContextJs {
         rquickjs::IntoJs::into_js(instance, &ctx)
       },
     }
+  }
+}
+
+impl BrowserContextJs {
+  /// Stash `callback` in the shared exposed-callback registry and build
+  /// an [`ferridriver::ExposedBinding`] that dispatches back into the
+  /// script context via the session `AsyncContext`. When `with_source`
+  /// is true the `{ context, page, frame }` source object is prepended
+  /// to the spread args (`exposeBinding`); otherwise only the args are
+  /// spread (`exposeFunction`).
+  fn make_binding<'js>(
+    &self,
+    ctx: &Ctx<'js>,
+    name: &str,
+    callback: rquickjs::Function<'js>,
+    with_source: bool,
+  ) -> rquickjs::Result<ferridriver::ExposedBinding> {
+    let async_ctx = match ctx.userdata::<crate::engine::SessionAsyncCtx>() {
+      Some(ud) => ud.0.clone(),
+      None => {
+        return Err(rquickjs::Error::new_from_js_message(
+          "BrowserContext.exposeBinding",
+          "Error",
+          "exposeBinding requires the script engine's AsyncContext".to_string(),
+        ));
+      },
+    };
+    let saved = rquickjs::Persistent::save(ctx, callback);
+    crate::bindings::page::insert_exposed_callback(ctx, name.to_string(), saved)?;
+
+    let name = name.to_string();
+    let binding: ferridriver::ExposedBinding = Arc::new(move |source, args| {
+      let async_ctx = async_ctx.clone();
+      let name = name.clone();
+      Box::pin(async move {
+        let out: rquickjs::Result<serde_json::Value> = rquickjs::async_with!(async_ctx => |ctx| {
+          let f = crate::bindings::page::get_exposed_callback(&ctx, &name)?
+            .ok_or_else(|| {
+              rquickjs::Error::new_from_js_message(
+                "BrowserContext.exposeBinding",
+                "Error",
+                "exposed callback gone".to_string(),
+              )
+            })?
+            .restore(&ctx)?;
+          // Playwright spreads the page-side call args into the
+          // callback. For exposeBinding the BindingSource object is the
+          // first argument; for exposeFunction it is omitted.
+          let mut call_args = rquickjs::function::Args::new_unsized(ctx.clone());
+          if with_source {
+            let src = rquickjs::Object::new(ctx.clone())?;
+            src.set("context", source.context.clone())?;
+            src.set("page", source.page.clone())?;
+            src.set("frame", source.frame.clone())?;
+            call_args.push_arg(src)?;
+          }
+          for v in &args {
+            // `json_to_js` (NOT serde): a transitive dep force-enables
+            // `serde_json/arbitrary_precision`, under which the serde
+            // path turns numbers into wrapper objects.
+            call_args.push_arg(crate::bindings::convert::json_to_js(&ctx, v)?)?;
+          }
+          let mp: rquickjs::promise::MaybePromise<'_> = call_args.apply(&f)?;
+          let res = mp.into_future::<rquickjs::Value<'_>>().await?;
+          let json = match ctx.json_stringify(res)? {
+            Some(s) => serde_json::from_str(&s.to_string()?).unwrap_or(serde_json::Value::Null),
+            None => serde_json::Value::Null,
+          };
+          Ok(json)
+        })
+        .await;
+        out.unwrap_or(serde_json::Value::Null)
+      })
+    });
+    Ok(binding)
+  }
+
+  /// Build the `{ dispose() }` Disposable returned from
+  /// `exposeBinding` / `exposeFunction`. `dispose()` removes the
+  /// binding from the registry and from every page in the context
+  /// (`window[name]` is deleted on each page).
+  fn make_disposable<'js>(&self, ctx: &Ctx<'js>, name: String) -> rquickjs::Result<Value<'js>> {
+    let obj = rquickjs::Object::new(ctx.clone())?;
+    let inner = self.inner.clone();
+    let dispose = rquickjs::Function::new(
+      ctx.clone(),
+      rquickjs::prelude::Async(move || {
+        let inner = inner.clone();
+        let name = name.clone();
+        // Core removal drops the binding from the registry AND removes
+        // `window[name]` from every page in the context. The stashed
+        // QuickJS callback stays in the name-keyed registry but is never
+        // invoked again (the page-side proxy is gone); re-entering the
+        // engine `AsyncContext` from this JS-invoked async fn would
+        // deadlock against the script's own outer `async_with`.
+        async move {
+          let _ = inner.remove_exposed_binding(&name).await;
+        }
+      }),
+    )?;
+    obj.set("dispose", dispose)?;
+    rquickjs::IntoJs::into_js(obj, ctx)
   }
 }

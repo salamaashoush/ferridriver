@@ -51,7 +51,9 @@ pub use context::{BrowserContext, ContextRef};
 pub use disposable::Disposable;
 pub use element_handle::{BoundingBox, ElementHandle, ElementState};
 pub use error::{FerriError, Result};
-pub use events::{ContextEvent, ContextEventEmitter, EventEmitter, PageEvent};
+pub use events::{
+  BindingSource, ContextEvent, ContextEventEmitter, EventEmitter, ExposedBinding, ExposedFn, PageEvent,
+};
 pub use frame::Frame;
 pub use js_handle::{HandleRemote, JSHandle};
 pub use locator::{FrameLocator, Locator};

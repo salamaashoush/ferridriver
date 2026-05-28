@@ -389,7 +389,32 @@ impl ContextRef {
       start_video_recording(&page, &opts);
     }
 
+    // Re-apply every context-level binding (exposeBinding /
+    // exposeFunction) to the fresh page so it sees `window[name]`
+    // just like pages opened before the binding was registered.
+    self.apply_context_bindings(page.inner()).await?;
+
     Ok(page)
+  }
+
+  /// Inject every registered context-level binding onto `page`.
+  /// Called from `new_page` so a freshly-opened page sees the same
+  /// `window[name]` proxies as pages opened before the binding existed.
+  async fn apply_context_bindings(&self, page: &AnyPage) -> Result<()> {
+    let composite = self.key.to_composite();
+    let bindings = {
+      let bindings_handle = self.state.read().await.context_bindings_handle();
+      let guard = bindings_handle.read().await;
+      guard
+        .get(&composite)
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect::<Vec<_>>())
+        .unwrap_or_default()
+    };
+    for (name, binding) in bindings {
+      let fn_for_page = bind_source(binding, composite.clone(), page);
+      page.expose_function(&name, fn_for_page).await?;
+    }
+    Ok(())
   }
 
   /// Get all pages in this context as Page handles.
@@ -778,6 +803,127 @@ impl ContextRef {
     }
     Ok(())
   }
+
+  // ── Exposed bindings / functions (apply to all pages) ───────────────────
+
+  /// Playwright: `browserContext.exposeBinding(name, callback)` from
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:364`.
+  ///
+  /// Registers `window[name]` on every page in this context (current +
+  /// future). The page-side call routes back into `callback`, which
+  /// receives a [`crate::events::BindingSource`] as its first argument
+  /// followed by the page-side call args. The callback's return value
+  /// (after awaiting any returned promise in the binding layers) is
+  /// delivered to the page-side caller.
+  ///
+  /// Returns a [`Disposable`] whose `dispose()` removes the binding
+  /// from the registry and from every page in the context.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context does not exist or injection fails
+  /// on any page.
+  pub async fn expose_binding(
+    &self,
+    name: &str,
+    callback: crate::events::ExposedBinding,
+  ) -> Result<crate::disposable::Disposable> {
+    {
+      let bindings = self.state.read().await.context_bindings_handle();
+      let mut guard = bindings.write().await;
+      guard
+        .entry(self.key.to_composite())
+        .or_default()
+        .insert(name.to_string(), callback.clone());
+    }
+    // Apply to every page already open in this context.
+    let pages = {
+      let state = self.state.read().await;
+      state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
+    };
+    let composite = self.key.to_composite();
+    for page in &pages {
+      let fn_for_page = bind_source(callback.clone(), composite.clone(), page);
+      page.expose_function(name, fn_for_page).await?;
+    }
+    Ok(crate::disposable::Disposable::new({
+      let this = self.clone();
+      let name = name.to_string();
+      move || async move {
+        let _ = this.remove_exposed_binding(&name).await;
+        Ok(())
+      }
+    }))
+  }
+
+  /// Playwright: `browserContext.exposeFunction(name, callback)` from
+  /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:370`.
+  ///
+  /// `exposeFunction` is `exposeBinding` minus the source argument:
+  /// the supplied source-less [`crate::events::ExposedFn`] is wrapped
+  /// into an [`crate::events::ExposedBinding`] that discards the
+  /// [`crate::events::BindingSource`].
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the context does not exist or injection fails
+  /// on any page.
+  pub async fn expose_function(
+    &self,
+    name: &str,
+    callback: crate::events::ExposedFn,
+  ) -> Result<crate::disposable::Disposable> {
+    let binding: crate::events::ExposedBinding = Arc::new(move |_source, args| callback(args));
+    self.expose_binding(name, binding).await
+  }
+
+  /// Remove a previously exposed binding/function from the registry and
+  /// from every page in this context. Mirrors Playwright's
+  /// `BrowserContext.removeExposedBinding` (driven by `Disposable`).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if removal fails on any open page.
+  pub async fn remove_exposed_binding(&self, name: &str) -> Result<()> {
+    {
+      let bindings = self.state.read().await.context_bindings_handle();
+      let mut guard = bindings.write().await;
+      if let Some(map) = guard.get_mut(&self.key.to_composite()) {
+        map.remove(name);
+      }
+    }
+    let pages = {
+      let state = self.state.read().await;
+      state.context(&self.name).map(|c| c.pages.clone()).unwrap_or_default()
+    };
+    for page in &pages {
+      page.remove_exposed_function(name).await?;
+    }
+    Ok(())
+  }
+}
+
+/// Bind a [`crate::events::ExposedBinding`] to a concrete page by
+/// capturing the per-call [`crate::events::BindingSource`]. The backend
+/// binding dispatch (`page.expose_function`) only forwards the page-side
+/// call args, so the `{ context, page, frame }` identity is captured
+/// here at apply time. `page`/`frame` use the page's main-frame id
+/// (the stable per-page identifier reachable without an extra RTT);
+/// `context` is the composite session key.
+fn bind_source(
+  binding: crate::events::ExposedBinding,
+  context_key: String,
+  page: &AnyPage,
+) -> crate::events::ExposedFn {
+  let frame_id = page.peek_main_frame_id().unwrap_or_default();
+  Arc::new(move |args| {
+    let source = crate::events::BindingSource {
+      context: context_key.clone(),
+      page: frame_id.clone(),
+      frame: frame_id.clone(),
+    };
+    binding(source, args)
+  })
 }
 
 /// Apply every supported field on a [`crate::options::BrowserContextOptions`]
@@ -881,4 +1027,48 @@ fn start_video_recording(page: &Arc<Page>, opts: &crate::options::RecordVideoOpt
       Err(e) => sink.finish_err(crate::FerriError::backend(format!("stop recording: {e}"))),
     }
   });
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use std::sync::atomic::{AtomicUsize, Ordering};
+
+  #[tokio::test]
+  async fn expose_function_wrapper_discards_source() {
+    // The exposeFunction adapter must drop the BindingSource and pass
+    // only the page-side args to the user callback (Playwright:
+    // `(source, ...args) => callback(...args)`).
+    let seen = Arc::new(AtomicUsize::new(0));
+    let seen_cb = seen.clone();
+    let inner: crate::events::ExposedFn = Arc::new(move |args: Vec<serde_json::Value>| {
+      seen_cb.store(args.len(), Ordering::SeqCst);
+      Box::pin(async move { serde_json::json!(args.iter().filter_map(serde_json::Value::as_i64).sum::<i64>()) })
+    });
+    let binding: crate::events::ExposedBinding = Arc::new(move |_source, args| inner(args));
+    let source = crate::events::BindingSource {
+      context: "inst:ctx".into(),
+      page: "frame-1".into(),
+      frame: "frame-1".into(),
+    };
+    let out = binding(source, vec![serde_json::json!(20), serde_json::json!(22)]).await;
+    assert_eq!(seen.load(Ordering::SeqCst), 2);
+    assert_eq!(out, serde_json::json!(42));
+  }
+
+  #[tokio::test]
+  async fn disposable_runs_once() {
+    let count = Arc::new(AtomicUsize::new(0));
+    let c = count.clone();
+    let d = crate::disposable::Disposable::new(move || {
+      let c = c.clone();
+      async move {
+        c.fetch_add(1, Ordering::SeqCst);
+        Ok(())
+      }
+    });
+    d.dispose().await.expect("dispose");
+    d.dispose().await.expect("dispose");
+    assert_eq!(count.load(Ordering::SeqCst), 1);
+  }
 }
