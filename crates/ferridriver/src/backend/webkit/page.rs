@@ -1428,6 +1428,11 @@ impl WebKitPage {
     Ok(())
   }
 
+  pub async fn unroute_all(&self, _behavior: crate::options::UnrouteBehavior) -> Result<()> {
+    self.routes.write().await.clear();
+    Ok(())
+  }
+
   pub async fn enable_file_chooser_intercept(&self) -> Result<()> {
     let _ = self
       .target_session()

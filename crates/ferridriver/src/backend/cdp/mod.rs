@@ -2859,6 +2859,7 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
+
   /// Dispatch a hover at `(x, y)`: `steps` interpolated `mouseMoved`
   /// events with the caller's CDP `modifiers` bitmask on each, ending
   /// at `(x, y)` exactly. No `mousePressed` / `mouseReleased`.
@@ -5068,6 +5069,16 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     let mut routes = self.routes.write().await;
     routes.retain(|r| !r.matcher.equivalent(matcher));
     if routes.is_empty() && self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
+      self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
+      let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
+    }
+    Ok(())
+  }
+
+  pub async fn unroute_all(&self, _behavior: crate::options::UnrouteBehavior) -> Result<()> {
+    let mut routes = self.routes.write().await;
+    routes.clear();
+    if self.fetch_enabled.load(std::sync::atomic::Ordering::SeqCst) {
       self.fetch_enabled.store(false, std::sync::atomic::Ordering::SeqCst);
       let _ = self.cmd("Fetch.disable", serde_json::json!({})).await;
     }

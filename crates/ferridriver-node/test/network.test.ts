@@ -219,5 +219,51 @@ for (const backend of BACKENDS) {
       expect(failure!.errorText.length).toBeGreaterThan(0);
       expect(failed.url()).toContain("/blocked");
     });
+
+    it("unrouteAll removes every route so later requests hit the network", async () => {
+      // Two fulfilling routes shadow the real server. After unrouteAll the
+      // shadows are gone and the real /api/users payload (alice) comes back.
+      await page.route("**/api/users", (route) =>
+        route.fulfill({ status: 200, contentType: "application/json", body: '{"users":["mocked"]}' })
+      );
+      await page.route("**/landed", (route) =>
+        route.fulfill({ status: 200, contentType: "text/plain", body: "mocked-landed" })
+      );
+      await page.goto(`${baseUrl}/landed`, null);
+      const mockedFetch = (await page.evaluate("fetch('/api/users').then(r => r.text())")) as string;
+      expect(mockedFetch).toContain("mocked");
+      expect(mockedFetch).not.toContain("alice");
+
+      await page.unrouteAll({ behavior: "wait" });
+
+      await page.goto(`${baseUrl}/landed`, null);
+      const realLanded = await page.evaluate("document.body.textContent");
+      expect(realLanded).toBe("landed");
+      const realFetch = (await page.evaluate("fetch('/api/users').then(r => r.text())")) as string;
+      expect(realFetch).toContain("alice");
+      expect(realFetch).not.toContain("mocked");
+    });
+
+    it("pickLocator resolves with a Locator for the clicked element", async () => {
+      await page.goto("about:blank", null);
+      await page.setContent(
+        '<button id="pick" style="position:fixed;left:40px;top:40px;width:120px;height:40px">PickMe</button>'
+      );
+      const box = (await page.evaluate(
+        "(() => { const r = document.getElementById('pick').getBoundingClientRect(); return { x: r.left + r.width / 2, y: r.top + r.height / 2 }; })()"
+      )) as { x: number; y: number };
+      const pending = page.pickLocator();
+      // Wait until the page-side picker has installed its listeners before
+      // dispatching the trusted click, otherwise the click can land before
+      // the capture-phase handler is armed.
+      for (let i = 0; i < 50; i++) {
+        const ready = await page.evaluate("window.__fdPickerReady === true");
+        if (ready) break;
+        await new Promise((r) => setTimeout(r, 20));
+      }
+      await page.mouse.click(box.x, box.y);
+      const picked = await pending;
+      expect(await picked.textContent()).toBe("PickMe");
+    });
   });
 }

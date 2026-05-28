@@ -1216,6 +1216,28 @@ pub struct PageCloseOptions {
   pub reason: Option<String>,
 }
 
+/// Behavior for [`crate::page::Page::unroute_all`].
+/// Mirrors Playwright's `page.unrouteAll({ behavior })` union
+/// `'wait' | 'ignoreErrors' | 'default'`.
+///
+/// In Playwright this controls whether to wait for currently-running
+/// route handlers to finish (`wait`), wait but swallow their errors
+/// (`ignoreErrors`), or not wait at all (`default`). In ferridriver
+/// route handlers run synchronously inside the interception loop, so no
+/// detached handler task can still be in flight after the routes are
+/// cleared; the variant is accepted for API parity and selects the same
+/// post-clear teardown in every case.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum UnrouteBehavior {
+  /// Do not wait for active handlers (Playwright default).
+  #[default]
+  Default,
+  /// Wait for active handlers to finish.
+  Wait,
+  /// Wait for active handlers and ignore any errors they raise.
+  IgnoreErrors,
+}
+
 /// Options for [`crate::browser::Browser::close`].
 /// `browser.close({ reason })`.
 #[derive(Debug, Clone, Default)]

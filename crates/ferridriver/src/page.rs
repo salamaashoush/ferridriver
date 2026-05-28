@@ -60,6 +60,12 @@ pub struct Page {
 }
 
 impl Page {
+  /// Highlight helpers (`createHighlight`, `hideHighlight`) layered onto the
+  /// injected engine. Shared with the codegen recorder.
+  const RECORDER_SUPPORT_JS: &'static str = include_str!("injected/dist/recorder-support.min.js");
+  /// Interactive locator picker injected by [`Page::pick_locator`].
+  const PICKER_JS: &'static str = include_str!("picker.js");
+
   /// Construct a Page (no `BrowserContext`). Synchronous — only
   /// spawns the frame-cache listener; the eager `Page.getFrameTree`
   /// RTT was dropped (see `PERF_AUDIT` §M.4). The listener seeds
@@ -2098,6 +2104,119 @@ impl Page {
   /// Returns an error if the route handlers cannot be removed.
   pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
     self.inner.unroute(matcher).await
+  }
+
+  /// Remove all route handlers registered via [`Page::route`].
+  ///
+  /// Mirrors Playwright's
+  /// `page.unrouteAll({ behavior?: 'wait' | 'ignoreErrors' | 'default' })`.
+  /// The `behavior` selects how to treat handlers still running when the
+  /// call is made; ferridriver route handlers run synchronously inside the
+  /// interception loop, so once the routes are cleared no detached handler
+  /// task can still be in flight — every variant performs the same teardown
+  /// (clear routes, disable interception).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the underlying interception teardown fails.
+  pub async fn unroute_all(&self, behavior: Option<crate::options::UnrouteBehavior>) -> Result<()> {
+    self.inner.unroute_all(behavior.unwrap_or_default()).await
+  }
+
+  // ── Interactive picker ──────────────────────────────────────────────────
+
+  /// Open the interactive locator picker: highlight elements under the
+  /// cursor and resolve with a [`Locator`] for the element the user clicks.
+  ///
+  /// Mirrors Playwright's `page.pickLocator(): Promise<Locator>`. The picker
+  /// generates a selector for the clicked element using the same engine that
+  /// backs `codegen`/recording, then returns `page.locator(selector)`.
+  ///
+  /// Cancel an in-progress pick with [`Page::cancel_pick_locator`].
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the picker scaffolding cannot be injected, the page
+  /// closes before a selection is made, or the returned selector is empty.
+  pub async fn pick_locator(self: &Arc<Self>) -> Result<Locator> {
+    self.inner.ensure_engine_injected().await?;
+    self.inner.evaluate(Self::RECORDER_SUPPORT_JS).await?;
+    self.inner.evaluate(Self::PICKER_JS).await?;
+
+    // Poll the page-side global for the picked selector. Playwright's
+    // `pickLocator` waits indefinitely for the user to click; we mirror
+    // that (no timeout) while honoring cancellation: when the picker is
+    // torn down via `cancel_pick_locator`/`hide_highlight` without a
+    // selection, `__fdPicker` flips to `false` and we surface a cancelled
+    // error. Polling (rather than a cross-task exposed-function callback)
+    // keeps engine teardown race-free on the QuickJS host.
+    loop {
+      let probe = self
+        .inner
+        .evaluate(
+          "JSON.stringify({ \
+             selector: (typeof window.__fdPickedSelector === 'string') ? window.__fdPickedSelector : null, \
+             active: window.__fdPicker === true })",
+        )
+        .await?;
+      let parsed: serde_json::Value = match probe {
+        Some(serde_json::Value::String(s)) => serde_json::from_str(&s).unwrap_or(serde_json::Value::Null),
+        Some(v) => v,
+        None => serde_json::Value::Null,
+      };
+      if let Some(sel) = parsed.get("selector").and_then(serde_json::Value::as_str) {
+        return Ok(self.locator(sel, None));
+      }
+      if !parsed
+        .get("active")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+      {
+        return Err(crate::error::FerriError::interrupted(
+          "pickLocator: cancelled before a selection was made",
+        ));
+      }
+      tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+    }
+  }
+
+  /// Cancel an in-progress [`Page::pick_locator`] and hide its highlight.
+  ///
+  /// Mirrors Playwright's `page.cancelPickLocator()`. Any pending
+  /// `pick_locator` future resolves with a `page closed`-style error once the
+  /// page-side picker is torn down (the exposed callback is removed, so the
+  /// oneshot sender drops).
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the page-side teardown evaluation fails.
+  pub async fn cancel_pick_locator(&self) -> Result<()> {
+    self
+      .inner
+      .evaluate("(function(){ if (window.__fdPickerCancel) window.__fdPickerCancel(); })()")
+      .await?;
+    let _ = self.inner.remove_exposed_function("__fdPickLocator").await;
+    Ok(())
+  }
+
+  /// Hide any highlight overlay currently shown by the picker or by
+  /// `highlight`-style helpers.
+  ///
+  /// Mirrors Playwright's `page.hideHighlight()`.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the page-side teardown evaluation fails.
+  pub async fn hide_highlight(&self) -> Result<()> {
+    self
+      .inner
+      .evaluate(
+        "(function(){ var i = window.__fd && window.__fd._injected; \
+         if (i && i.hideHighlight) i.hideHighlight(); \
+         if (window.__fdPickerCancel) window.__fdPickerCancel(); })()",
+      )
+      .await?;
+    Ok(())
   }
 
   // ── Exposed Functions ───────────────────────────────────────────────────

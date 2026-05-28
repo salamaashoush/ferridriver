@@ -1282,6 +1282,10 @@ impl AnyPage {
     page_dispatch!(self, unroute(matcher))
   }
 
+  pub async fn unroute_all(&self, behavior: crate::options::UnrouteBehavior) -> Result<()> {
+    page_dispatch!(self, unroute_all(behavior))
+  }
+
   // ── Lifecycle ──
 
   pub async fn close_page(&self, opts: crate::options::PageCloseOptions) -> Result<()> {
