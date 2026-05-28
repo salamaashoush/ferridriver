@@ -17,7 +17,13 @@ if (process.platform === "darwin") {
   (FD_BACKENDS as unknown as string[]).push("webkit");
 }
 
-async function median(fn: () => Promise<void>, reset?: () => Promise<void>): Promise<number> {
+interface Agg {
+  median: number;
+  mean: number;
+  samples: number;
+}
+
+async function measure(fn: () => Promise<void>, reset?: () => Promise<void>): Promise<Agg> {
   for (let i = 0; i < WARMUP; i++) {
     if (reset) await reset();
     try { await fn(); } catch {}
@@ -31,14 +37,17 @@ async function median(fn: () => Promise<void>, reset?: () => Promise<void>): Pro
       t.push(performance.now() - s);
     } catch {}
   }
-  if (t.length === 0) return -1; // all failed
+  if (t.length === 0) return { median: -1, mean: -1, samples: 0 }; // all failed
   t.sort((a, b) => a - b);
-  return t[Math.floor(t.length / 2)];
+  const median = t[Math.floor(t.length / 2)];
+  const mean = t.reduce((s, v) => s + v, 0) / t.length;
+  return { median, mean, samples: t.length };
 }
 
 interface Row {
   op: string;
   playwright: number;
+  playwrightMean: number;
   [backend: string]: number | string;
 }
 
@@ -75,11 +84,15 @@ const ops: { name: string; reset?: boolean; fd: (p: any) => Promise<void>; pw: (
   { name: "loc('h1').isVisible()", fd: p => p.locator("h1").isVisible(), pw: p => p.locator("h1").isVisible() },
   { name: "loc('h1').boundingBox()", fd: p => p.locator("h1").boundingBox(), pw: p => p.locator("h1").boundingBox() },
   { name: "loc('li').allTextContents()", fd: p => p.locator("li").allTextContents(), pw: p => p.locator("li").allTextContents() },
-  // Actions - reset content each iteration to keep DOM clean
-  // Playwright: use force:true to skip actionability waits (which hang after rapid setContent)
-  { name: "fill('#name', text)", reset: true, fd: p => p.fill("#name", "bench"), pw: p => p.locator("#name").fill("bench", { force: true }) },
-  { name: "click('#btn')", reset: true, fd: p => p.click("#btn"), pw: p => p.locator("#btn").click({ force: true }) },
-  { name: "check('#agree')", reset: true, fd: p => p.check("#agree"), pw: p => p.locator("#agree").check({ force: true }) },
+  // Actions - reset content each iteration to keep DOM clean.
+  // Both sides MUST use the SAME flags or the comparison is confounded. We
+  // previously passed force:true ONLY to Playwright (to skip actionability
+  // waits that hang after rapid setContent), which made the reported click()
+  // ratio meaningless. Both sides now go through the locator API with
+  // force:true so each skips the same actionability checks. See BENCHMARKING.md.
+  { name: "fill('#name', text)", reset: true, fd: p => p.locator("#name").fill("bench", { force: true }), pw: p => p.locator("#name").fill("bench", { force: true }) },
+  { name: "click('#btn')", reset: true, fd: p => p.locator("#btn").click({ force: true }), pw: p => p.locator("#btn").click({ force: true }) },
+  { name: "check('#agree')", reset: true, fd: p => p.locator("#agree").check({ force: true }), pw: p => p.locator("#agree").check({ force: true }) },
   // Screenshots
   { name: "screenshot()", fd: p => p.screenshot(), pw: p => p.screenshot() },
   { name: "screenshot(fullPage)", fd: p => p.screenshot({ fullPage: true }), pw: p => p.screenshot({ fullPage: true }) },
@@ -112,22 +125,24 @@ async function main() {
   for (const op of ops) {
     process.stdout.write(`\n${op.name.padEnd(30)}`);
 
-    const row: Row = { op: op.name, playwright: 0 };
+    const row: Row = { op: op.name, playwright: 0, playwrightMean: 0 };
 
     // Playwright
     const pwReset = op.reset ? () => pwPage.setContent(HTML) : undefined;
-    const pw = await median(() => op.pw(pwPage), pwReset);
-    row.playwright = +pw.toFixed(2);
-    process.stdout.write(` pw:${pw.toFixed(1).padStart(7)}ms`);
+    const pw = await measure(() => op.pw(pwPage), pwReset);
+    row.playwright = +pw.median.toFixed(2);
+    row.playwrightMean = +pw.mean.toFixed(2);
+    process.stdout.write(` pw:${pw.median.toFixed(1).padStart(7)}ms`);
 
     // Each ferridriver backend
     for (const { backend, page } of fdBrowsers) {
       const fdReset = op.reset ? () => page.setContent(HTML) : undefined;
-      const fd = await median(() => op.fd(page), fdReset);
-      row[backend] = +fd.toFixed(2);
-      const ratio = pw / fd;
+      const fd = await measure(() => op.fd(page), fdReset);
+      row[backend] = +fd.median.toFixed(2);
+      row[`${backend}_mean`] = +fd.mean.toFixed(2);
+      const ratio = pw.median / fd.median;
       const tag = ratio > 1 ? `${ratio.toFixed(1)}x` : `${(1/ratio).toFixed(1)}x slow`;
-      process.stdout.write(`  ${backend}:${fd.toFixed(1).padStart(7)}ms (${tag})`);
+      process.stdout.write(`  ${backend}:${fd.median.toFixed(1).padStart(7)}ms (${tag})`);
     }
 
     rows.push(row);
@@ -169,9 +184,21 @@ async function main() {
   console.log(totalLine);
 
   // ── CSV ───────────────────────────────────────────────────────────────
-  const header = ["operation", "playwright_ms", ...backendNames.map(b => `${b}_ms`)].join(",");
+  // Emit both median and mean per op so the aggregation is auditable and no
+  // downstream claim can cherry-pick a single statistic. See BENCHMARKING.md.
+  const header = [
+    "operation",
+    "playwright_median_ms",
+    "playwright_mean_ms",
+    ...backendNames.flatMap(b => [`${b}_median_ms`, `${b}_mean_ms`]),
+  ].join(",");
   const csvRows = rows.map(r =>
-    [r.op, r.playwright, ...backendNames.map(b => r[b])].join(",")
+    [
+      r.op,
+      r.playwright,
+      r.playwrightMean,
+      ...backendNames.flatMap(b => [r[b], r[`${b}_mean`]]),
+    ].join(",")
   );
   const csv = [header, ...csvRows].join("\n");
   await Bun.write("test/benchmark-results.csv", csv);
