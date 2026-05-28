@@ -696,6 +696,20 @@ async fn binding_surface_sweep() {
   .await;
   assert_all_true("evaluate-arg", &v);
 
+  // 31b ── nested JSHandle / ElementHandle args keep identity.
+  let v = step(
+    &h,
+    "evaluate-nested-handle-arg",
+    "await page.setContent('<button id=\"nested\">ok</button>'); \
+     const h = await page.evaluateHandle(() => document.querySelector('#nested')); \
+     const fromObj = await page.evaluate(({ node }) => node.id, { node: h }); \
+     const fromArr = await page.evaluate(([node]) => node.textContent, [h]); \
+     await h.dispose(); \
+     return { obj: fromObj === 'nested', arr: fromArr === 'ok' };",
+  )
+  .await;
+  assert_all_true("evaluate-nested-handle-arg", &v);
+
   // 32 ── locator.waitFor({state:'visible'|'hidden'}).
   let v = step(
     &h,
