@@ -21,6 +21,7 @@ pub mod expect;
 pub mod file_chooser;
 pub mod getby_regex;
 pub mod handle_surface;
+pub mod locator_handler;
 pub mod multi_page;
 pub mod nav;
 pub mod navigation_response;

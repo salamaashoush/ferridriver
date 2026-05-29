@@ -78,6 +78,10 @@ macro_rules! retry_resolve {
         }
       }
 
+      // Action pre-checks: run registered locator handlers if any of their
+      // overlays are currently visible (Playwright `performActionPreChecks`).
+      $crate::locator_handler::perform_checkpoint(__rframe.page_arc()).await;
+
       let __delay_ms = Locator::RETRY_BACKOFFS_MS[__idx.min(Locator::RETRY_BACKOFFS_MS.len() - 1)];
       __idx = __idx.saturating_add(1);
       if __delay_ms > 0 {

@@ -16,6 +16,10 @@ impl Locator {
   pub(crate) fn wrap(inner: ferridriver::Locator) -> Self {
     Self { inner }
   }
+
+  pub(crate) fn core(&self) -> &ferridriver::Locator {
+    &self.inner
+  }
 }
 
 #[napi]

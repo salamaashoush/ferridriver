@@ -45,6 +45,18 @@ pub type PageWaitForEventResult = napi::bindgen_prelude::Either9<
 /// function resolves to either arm.
 pub(crate) type PredReturn = napi::Either<bool, napi::bindgen_prelude::Promise<bool>>;
 
+/// Return type of an `addLocatorHandler` handler: `void | Promise<void>`.
+/// The registry awaits the promise arm before continuing the original action.
+pub(crate) type LocatorHandlerReturn = napi::Either<(), napi::bindgen_prelude::Promise<()>>;
+
+/// Options for `page.addLocatorHandler(locator, handler, options?)`.
+/// Mirrors Playwright `{ times?: number, noWaitAfter?: boolean }`.
+#[napi(object)]
+pub struct AddLocatorHandlerOptions {
+  pub times: Option<u32>,
+  pub no_wait_after: Option<bool>,
+}
+
 /// A `page.route(predicateFn, handler)` registration. The core matcher
 /// is always-true (unique `Arc` identity); `pred_ref` keeps the JS
 /// function so `unroute(fn)` can match it by `===`.
@@ -1824,6 +1836,58 @@ impl Page {
       .route_from_har(std::path::Path::new(&har), opts)
       .await
       .map_err(crate::error::to_napi)
+  }
+
+  /// `page.addLocatorHandler(locator, handler, options?: { times?, noWaitAfter? })`.
+  /// Registers `handler` to run whenever `locator` becomes visible during an
+  /// actionability wait, dismissing overlays/modals that block actions.
+  /// Mirrors Playwright `client/page.ts:397`.
+  #[napi(
+    ts_args_type = "locator: Locator, handler: (locator: Locator) => unknown | Promise<unknown>, options?: AddLocatorHandlerOptions"
+  )]
+  pub fn add_locator_handler(
+    &self,
+    locator: &Locator,
+    handler: napi::bindgen_prelude::Function<'_, Locator, LocatorHandlerReturn>,
+    options: Option<AddLocatorHandlerOptions>,
+  ) -> Result<()> {
+    let times = options.as_ref().and_then(|o| o.times);
+    let no_wait_after = options.as_ref().and_then(|o| o.no_wait_after).unwrap_or(false);
+    if times == Some(0) {
+      return Ok(());
+    }
+    let tsfn = handler
+      .build_threadsafe_function::<Locator>()
+      .callee_handled::<false>()
+      .weak::<false>()
+      .max_queue_size::<0>()
+      .build()?;
+    let tsfn = std::sync::Arc::new(tsfn);
+    let cb: ferridriver::locator_handler::LocatorHandlerFn = std::sync::Arc::new(move |loc| {
+      let tsfn = std::sync::Arc::clone(&tsfn);
+      Box::pin(async move {
+        let napi_loc = Locator::wrap(loc);
+        match tsfn.call_async(napi_loc).await {
+          Ok(napi::Either::A(())) => Ok(()),
+          Ok(napi::Either::B(p)) => {
+            let _ = p.await;
+            Ok(())
+          },
+          Err(_) => Ok(()),
+        }
+      })
+    });
+    self
+      .inner
+      .add_locator_handler(locator.core(), cb, times, no_wait_after)
+      .map_err(crate::error::to_napi)
+  }
+
+  /// `page.removeLocatorHandler(locator)`. Removes handlers registered for
+  /// `locator`. Mirrors Playwright `client/page.ts:423`.
+  #[napi]
+  pub fn remove_locator_handler(&self, locator: &Locator) {
+    self.inner.remove_locator_handler(locator.core());
   }
 
   /// `page.pickLocator(): Promise<Locator>`. Highlights elements under the

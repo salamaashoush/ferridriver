@@ -216,6 +216,9 @@ pub(crate) struct PageCallbacks {
   route_preds: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
   exposed: rustc_hash::FxHashMap<String, rquickjs::Persistent<rquickjs::Function<'static>>>,
   screencast: Option<rquickjs::Persistent<rquickjs::Function<'static>>>,
+  /// `addLocatorHandler` JS callbacks, keyed by core-registry uid so the
+  /// cross-task dispatch bridge can restore the persisted function.
+  locator_handlers: rustc_hash::FxHashMap<u64, rquickjs::Persistent<rquickjs::Function<'static>>>,
 }
 
 impl PageCallbacks {
@@ -242,6 +245,10 @@ impl PageCallbacks {
   pub(crate) fn remove_route(&mut self, id: u64) {
     self.route_preds.remove(&id);
     self.route_handlers.remove(&id);
+  }
+
+  pub(crate) fn remove_locator_handler(&mut self, id: u64) {
+    self.locator_handlers.remove(&id);
   }
 }
 
@@ -393,6 +400,11 @@ pub struct PageJs {
   /// `route` and `unroute` on the same `Page` wrapper see one table.
   #[qjs(skip_trace)]
   route_matchers: Arc<std::sync::Mutex<rustc_hash::FxHashMap<u64, ferridriver::url_matcher::UrlMatcher>>>,
+  /// Maps a handler locator's selector to the persisted-callback ids so
+  /// `removeLocatorHandler` can drop them. (QuickJS `addLocatorHandler`
+  /// itself is Unsupported -- see its binding -- so this normally stays empty.)
+  #[qjs(skip_trace)]
+  locator_handler_ids: Arc<std::sync::Mutex<rustc_hash::FxHashMap<String, Vec<u64>>>>,
 }
 
 impl PageJs {
@@ -403,6 +415,7 @@ impl PageJs {
       async_ctx: None,
       next_route_id: Arc::new(AtomicU64::new(0)),
       route_matchers: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     }
   }
 
@@ -413,6 +426,7 @@ impl PageJs {
       async_ctx: Some(async_ctx),
       next_route_id: Arc::new(AtomicU64::new(0)),
       route_matchers: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
+      locator_handler_ids: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
     }
   }
 
@@ -1381,6 +1395,62 @@ impl PageJs {
     with_page_callbacks(&ctx, |r| {
       r.route_preds.clear();
       r.route_handlers.clear();
+    })?;
+    Ok(())
+  }
+
+  /// `page.addLocatorHandler(locator, handler, options?: { times?, noWaitAfter? })`.
+  /// Registers `handler` to run whenever `locator` becomes visible during an
+  /// actionability wait (dismissing overlays/modals). Mirrors Playwright
+  /// `client/page.ts:397`.
+  ///
+  /// The JS handler runs cross-task via the session `AsyncContext` (same
+  /// bridge as `page.route`): the core checkpoint awaits a oneshot that the
+  /// spawned dispatch task fulfils once the handler (and any returned
+  /// promise) settles, so the original action only resumes afterwards.
+  #[qjs(rename = "addLocatorHandler")]
+  pub fn add_locator_handler(
+    &self,
+    _locator: rquickjs::Class<'_, LocatorJs>,
+    _handler: rquickjs::Function<'_>,
+    _options: Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<()> {
+    // The handler must run *during* an in-progress action's actionability
+    // wait. In the QuickJS scripting engine every action executes inside an
+    // exclusive `async_with` over the single session VM, so a nested
+    // handler callback can never acquire the VM until the action finishes --
+    // invoking it would deadlock. Playwright sidesteps this with a
+    // client/server split; ferridriver-script has none, so this is a typed
+    // Unsupported rather than a hang. The core + NAPI layers support it fully.
+    ferridriver::error::Result::<()>::Err(ferridriver::error::FerriError::unsupported(
+      "page.addLocatorHandler is not available in the QuickJS scripting engine \
+       (handlers cannot fire during an in-VM action without deadlocking the \
+       single-threaded VM); use the NAPI/core API for locator handlers",
+    ))
+    .into_js()
+  }
+
+  /// `page.removeLocatorHandler(locator)`. Drops every handler registered for
+  /// `locator` (by selector) and releases the persisted JS callbacks. Mirrors
+  /// Playwright `client/page.ts:423`.
+  #[qjs(rename = "removeLocatorHandler")]
+  pub fn remove_locator_handler<'js>(
+    &self,
+    ctx: rquickjs::Ctx<'js>,
+    locator: rquickjs::Class<'js, LocatorJs>,
+  ) -> rquickjs::Result<()> {
+    let core_locator = locator.borrow().inner_ref().clone();
+    self.inner.remove_locator_handler(&core_locator);
+    let ids = self
+      .locator_handler_ids
+      .lock()
+      .unwrap_or_else(std::sync::PoisonError::into_inner)
+      .remove(core_locator.selector())
+      .unwrap_or_default();
+    with_page_callbacks(&ctx, |r| {
+      for id in ids {
+        r.remove_locator_handler(id);
+      }
     })?;
     Ok(())
   }
