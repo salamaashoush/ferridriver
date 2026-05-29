@@ -384,17 +384,50 @@ fn key_descriptor(key: &str) -> (String, String, i64, Option<String>) {
   }
 }
 
-async fn dispatch_key(page: &WebKitPage, ty: &str, key: &str) -> Result<()> {
+/// `WebKit` modifier bit for a Playwright modifier-key name (the leading
+/// tokens of a `"Control+a"` combo). Mirrors [`modifiers_mask`] but keyed
+/// on the string name. Returns `0` for non-modifier tokens.
+fn modifier_bit_for_name(name: &str) -> u32 {
+  match name {
+    "Shift" => 1,
+    "Control" => 2,
+    "Alt" => 4,
+    "Meta" => 8,
+    "ControlOrMeta" => {
+      if cfg!(target_os = "macos") {
+        8
+      } else {
+        2
+      }
+    },
+    _ => 0,
+  }
+}
+
+/// Dispatch one `Input.dispatchKeyEvent` carrying a `WebKit` `modifiers`
+/// bitmask (Shift=1, Control=2, Alt=4, Meta=8 -- see
+/// `Source/WebKit/Shared/WebEvent.h` and `wkInput.ts::toModifiersMask`).
+/// `text` is suppressed while a non-Shift modifier is held so that
+/// `Control+a` performs select-all rather than inserting a literal "a"
+/// (mirrors `wkInput.ts::keydown`, which only sends `text` for the bare
+/// key — the editing behaviour rides on `macCommands` on macOS and on
+/// the modifiers mask everywhere).
+async fn dispatch_key_with_mods(page: &WebKitPage, ty: &str, key: &str, modifiers: u32) -> Result<()> {
   let (code, key_name, vk, text) = key_descriptor(key);
   let mut params = json!({
     "type": ty,
     "key": key_name,
     "code": code,
     "windowsVirtualKeyCode": vk,
-    "modifiers": 0,
+    "modifiers": modifiers,
   });
   if ty == "keyDown" {
-    if let Some(t) = text {
+    // Shift (bit 1) still produces text (capital letters); any other
+    // held modifier suppresses the inserted character.
+    let suppress_text = modifiers & !1 != 0;
+    if let Some(t) = text
+      && !suppress_text
+    {
       params["text"] = Value::String(t.clone());
       params["unmodifiedText"] = Value::String(t);
     }
@@ -407,6 +440,10 @@ async fn dispatch_key(page: &WebKitPage, ty: &str, key: &str) -> Result<()> {
   Ok(())
 }
 
+async fn dispatch_key(page: &WebKitPage, ty: &str, key: &str) -> Result<()> {
+  dispatch_key_with_mods(page, ty, key, 0).await
+}
+
 pub async fn key_down(page: &WebKitPage, key: &str) -> Result<()> {
   dispatch_key(page, "keyDown", key).await
 }
@@ -415,21 +452,57 @@ pub async fn key_up(page: &WebKitPage, key: &str) -> Result<()> {
   dispatch_key(page, "keyUp", key).await
 }
 
+/// Press a key or a Playwright-style modifier combo (`"Control+a"`,
+/// `"Shift+Alt+T"`). The leading `+`-separated tokens are modifiers;
+/// the final token is the primary key. Each modifier keyDown carries
+/// the cumulative mask (`WebKit` expects to see Ctrl set on the Ctrl
+/// keyDown itself), then the primary key is dispatched with the full
+/// mask so the page sees `e.ctrlKey === true`. Mirrors the CDP backend's
+/// `press_key` combo handling and `wkInput.ts::keydown`.
 pub async fn press_key(page: &WebKitPage, key: &str) -> Result<()> {
-  dispatch_key(page, "keyDown", key).await?;
-  dispatch_key(page, "keyUp", key).await
+  let parts: Vec<&str> = key.split('+').collect();
+  if parts.len() <= 1 {
+    dispatch_key(page, "keyDown", key).await?;
+    dispatch_key(page, "keyUp", key).await?;
+    return Ok(());
+  }
+  let (mods, primary) = parts.split_at(parts.len() - 1);
+  let primary = primary[0];
+  let mut bits = 0u32;
+  for m in mods {
+    let b = modifier_bit_for_name(m);
+    if b != 0 {
+      bits |= b;
+      dispatch_key_with_mods(page, "keyDown", m, bits).await?;
+    }
+  }
+  dispatch_key_with_mods(page, "keyDown", primary, bits).await?;
+  dispatch_key_with_mods(page, "keyUp", primary, bits).await?;
+  let mut down_bits = bits;
+  for m in mods.iter().rev() {
+    let b = modifier_bit_for_name(m);
+    if b != 0 {
+      dispatch_key_with_mods(page, "keyUp", m, down_bits).await?;
+      down_bits &= !b;
+    }
+  }
+  Ok(())
 }
 
 pub async fn press_modifiers(page: &WebKitPage, mods: &[Modifier]) -> Result<()> {
+  let mut bits = 0u32;
   for m in mods {
-    dispatch_key(page, "keyDown", m.key_name()).await?;
+    bits |= modifiers_mask(std::slice::from_ref(m));
+    dispatch_key_with_mods(page, "keyDown", m.key_name(), bits).await?;
   }
   Ok(())
 }
 
 pub async fn release_modifiers(page: &WebKitPage, mods: &[Modifier]) -> Result<()> {
+  let mut bits = modifiers_mask(mods);
   for m in mods.iter().rev() {
-    dispatch_key(page, "keyUp", m.key_name()).await?;
+    dispatch_key_with_mods(page, "keyUp", m.key_name(), bits).await?;
+    bits &= !modifiers_mask(std::slice::from_ref(m));
   }
   Ok(())
 }
