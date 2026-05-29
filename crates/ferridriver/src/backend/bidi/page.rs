@@ -231,6 +231,25 @@ pub struct BidiPage {
   pub(crate) frame_cache: Arc<std::sync::Mutex<crate::frame_cache::FrameCache>>,
   /// Idempotent latch for the frame-event listener.
   pub(crate) frame_listener_started: Arc<AtomicBool>,
+  /// Idempotent latch for the route (`network.beforeRequestSent`) listener.
+  /// Spawned once per page: it reads the shared `routes` map live, so a
+  /// `route`/`unroute` cycle (which drains `intercept_ids`) must NOT
+  /// re-spawn it — a second listener would double-dispatch `continueRequest`
+  /// for every blocked request.
+  pub(crate) route_listener_started: Arc<AtomicBool>,
+  /// Maps a retained `BiDi` reference (a `handle` UUID or a node
+  /// `sharedId`) to the browsing context whose realm it was created in.
+  ///
+  /// Unlike CDP `RemoteObjectId`s (resolvable from any call against the
+  /// same target) `BiDi` `handle`s are realm-scoped and a `sharedId`
+  /// resolves only in realms of the same browsing context. A handle
+  /// produced by `frame.evaluateHandle` in a child frame must therefore
+  /// be re-targeted at that child's context when later passed as a
+  /// `script.callFunction` argument (e.g. `JSHandle::evaluate`, which
+  /// the shared core dispatches with `frame_id = None`). The shared
+  /// `HandleRemote::Bidi` wire shape carries no context, so we recover
+  /// it here, inside the backend, keyed on the reference string.
+  pub(crate) handle_realms: Arc<std::sync::Mutex<FxHashMap<String, Arc<str>>>>,
 }
 
 pub struct InjectedScriptManager {
@@ -334,7 +353,48 @@ impl BidiPage {
       page_backref: crate::backend::PageBackref::new(),
       frame_cache: Arc::new(std::sync::Mutex::new(crate::frame_cache::FrameCache::default())),
       frame_listener_started: Arc::new(AtomicBool::new(false)),
+      route_listener_started: Arc::new(AtomicBool::new(false)),
+      handle_realms: Arc::new(std::sync::Mutex::new(FxHashMap::default())),
     })
+  }
+
+  /// Record that the `BiDi` reference `key` (a `handle` UUID or node
+  /// `sharedId`) lives in browsing context `ctx`. No-op for empty keys
+  /// or when `ctx` is the page's main context (the default target).
+  fn remember_handle_realm(&self, key: &str, ctx: &str) {
+    if key.is_empty() || ctx == &*self.context_id {
+      return;
+    }
+    if let Ok(mut map) = self.handle_realms.lock() {
+      map.insert(key.to_string(), Arc::from(ctx));
+    }
+  }
+
+  /// Look up the browsing context a previously-retained handle/sharedId
+  /// belongs to, if it was created in a non-main realm.
+  fn handle_realm(&self, key: &str) -> Option<Arc<str>> {
+    if key.is_empty() {
+      return None;
+    }
+    self.handle_realms.lock().ok().and_then(|map| map.get(key).cloned())
+  }
+
+  /// Drop a single reference's realm mapping once the remote is released.
+  fn forget_handle_realm(&self, key: &str) {
+    if key.is_empty() {
+      return;
+    }
+    if let Ok(mut map) = self.handle_realms.lock() {
+      map.remove(key);
+    }
+  }
+
+  /// Drop every realm mapping — a top-level navigation discards all
+  /// realms, so every retained reference becomes invalid.
+  fn clear_handle_realms(&self) {
+    if let Ok(mut map) = self.handle_realms.lock() {
+      map.clear();
+    }
   }
 
   /// Helper: send a `BiDi` command.
@@ -472,6 +532,7 @@ impl BidiPage {
     referer: Option<&str>,
   ) -> Result<Option<Response>> {
     self.injected_script.reset();
+    self.clear_handle_realms();
     self.nav_request_slot.clear();
 
     // WebDriver BiDi `browsingContext.navigate` has no `referrer` param —
@@ -557,6 +618,7 @@ impl BidiPage {
 
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {
     self.injected_script.reset();
+    self.clear_handle_realms();
     self.nav_request_slot.clear();
     let wait = Self::lifecycle_to_wait(lifecycle);
     let result = tokio::time::timeout(
@@ -775,6 +837,11 @@ impl BidiPage {
           Some(fid) => Arc::from(fid),
           None => self.context_id.clone(),
         };
+        // Record the realm so that when this element is repackaged as a
+        // `JSHandle`/`ElementHandle` and later evaluated against (with
+        // `frame_id = None`), `call_utility_evaluate` re-targets the
+        // owning child context instead of the page's main context.
+        self.remember_handle_realm(&shared_ref.shared_id, &owning_ctx);
         Ok(AnyElement::Bidi(BidiElement::new(
           self.session.clone(),
           owning_ctx,
@@ -2406,81 +2473,12 @@ impl BidiPage {
         .to_string();
 
       self.intercept_ids.write().await.push(intercept_id);
-
-      // Spawn a single listener task for all route handlers on this page
-      let mut rx = self.session.transport.subscribe_events();
-      let ctx = self.context_id.clone();
-      let session = self.session.clone();
-      let routes = self.routes.clone();
-
-      tokio::spawn(async move {
-        while let Ok(event) = rx.recv().await {
-          if event.method != "network.beforeRequestSent" {
-            continue;
-          }
-          let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
-          if event_ctx != &*ctx {
-            continue;
-          }
-          let is_blocked = event
-            .params
-            .get("isBlocked")
-            .and_then(serde_json::Value::as_bool)
-            .unwrap_or(false);
-          if !is_blocked {
-            continue;
-          }
-
-          let req_obj = event.params.get("request");
-          let request_id = req_obj
-            .and_then(|v| v.get("request"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-          let url = req_obj
-            .and_then(|v| v.get("url"))
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
-
-          let matched_handler = {
-            let mut guard = routes.write().await;
-            crate::route::take_matching_handler(&mut guard, url)
-          };
-
-          if let Some(handler) = matched_handler {
-            let method = req_obj
-              .and_then(|r| r.get("method"))
-              .and_then(|v| v.as_str())
-              .unwrap_or("GET");
-            let headers: FxHashMap<String, String> = req_obj
-              .and_then(|r| r.get("headers"))
-              .map(parse_bidi_headers)
-              .unwrap_or_default();
-
-            let intercepted = crate::route::InterceptedRequest {
-              request_id: request_id.to_string(),
-              url: url.to_string(),
-              method: method.to_string(),
-              headers,
-              post_data: None,
-              resource_type: String::new(),
-            };
-
-            let (tx, action_rx) = tokio::sync::oneshot::channel();
-            let route = crate::route::Route::new(intercepted, tx);
-            handler(route);
-            let action = action_rx.await.unwrap_or(crate::route::RouteAction::Continue(
-              crate::route::ContinueOverrides::default(),
-            ));
-            execute_bidi_route_action(&session.transport, request_id, action).await;
-          } else {
-            let _ = session
-              .transport
-              .send_command("network.continueRequest", json!({"request": request_id}))
-              .await;
-          }
-        }
-      });
     }
+
+    // Spawn the route-event listener exactly once per page. It reads the
+    // shared `routes` map live, so a route/unroute cycle (which drains
+    // `intercept_ids` and removes the BiDi intercept) must NOT re-spawn it.
+    self.start_route_listener();
 
     self
       .routes
@@ -2489,6 +2487,95 @@ impl BidiPage {
       .push(crate::route::RegisteredRoute::new(matcher, handler, times));
 
     Ok(())
+  }
+
+  /// Spawn the `network.beforeRequestSent` route listener exactly once per
+  /// page. Guarded by `route_listener_started`, NOT `intercept_ids`: a
+  /// `route`/`unroute` cycle drains `intercept_ids`, so guarding the spawn
+  /// on that would leak a second listener on the next `route` — both would
+  /// call `network.continueRequest` for the same blocked request and all but
+  /// the first fail with "no such request", stalling it (the page sees an
+  /// `AbortError`). One listener, reading the shared `routes` map live,
+  /// transparently handles handlers added/removed over the page's lifetime.
+  fn start_route_listener(&self) {
+    if self
+      .route_listener_started
+      .swap(true, std::sync::atomic::Ordering::SeqCst)
+    {
+      return;
+    }
+    let mut rx = self.session.transport.subscribe_events();
+    let ctx = self.context_id.clone();
+    let session = self.session.clone();
+    let routes = self.routes.clone();
+
+    tokio::spawn(async move {
+      while let Ok(event) = rx.recv().await {
+        if event.method != "network.beforeRequestSent" {
+          continue;
+        }
+        let event_ctx = event.params.get("context").and_then(|v| v.as_str()).unwrap_or("");
+        if event_ctx != &*ctx {
+          continue;
+        }
+        let is_blocked = event
+          .params
+          .get("isBlocked")
+          .and_then(serde_json::Value::as_bool)
+          .unwrap_or(false);
+        if !is_blocked {
+          continue;
+        }
+
+        let req_obj = event.params.get("request");
+        let request_id = req_obj
+          .and_then(|v| v.get("request"))
+          .and_then(|v| v.as_str())
+          .unwrap_or("");
+        let url = req_obj
+          .and_then(|v| v.get("url"))
+          .and_then(|v| v.as_str())
+          .unwrap_or("");
+
+        let matched_handler = {
+          let mut guard = routes.write().await;
+          crate::route::take_matching_handler(&mut guard, url)
+        };
+
+        if let Some(handler) = matched_handler {
+          let method = req_obj
+            .and_then(|r| r.get("method"))
+            .and_then(|v| v.as_str())
+            .unwrap_or("GET");
+          let headers: FxHashMap<String, String> = req_obj
+            .and_then(|r| r.get("headers"))
+            .map(parse_bidi_headers)
+            .unwrap_or_default();
+
+          let intercepted = crate::route::InterceptedRequest {
+            request_id: request_id.to_string(),
+            url: url.to_string(),
+            method: method.to_string(),
+            headers,
+            post_data: None,
+            resource_type: String::new(),
+          };
+
+          let (tx, action_rx) = tokio::sync::oneshot::channel();
+          let route = crate::route::Route::new(intercepted, tx);
+          handler(route);
+          let action = action_rx.await.unwrap_or(crate::route::RouteAction::Continue(
+            crate::route::ContinueOverrides::default(),
+          ));
+          execute_bidi_route_action(&session.transport, request_id, action).await;
+        } else {
+          let _ = session
+            .transport
+            .send_command("network.continueRequest", json!({"request": request_id}))
+            .await;
+        }
+      }
+    });
   }
 
   pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {
@@ -2634,7 +2721,24 @@ impl BidiPage {
 
     self.ensure_engine_injected().await?;
 
-    let target_ctx: &str = frame_id.unwrap_or(&self.context_id);
+    // Resolve the realm to evaluate in. An explicit `frame_id` (frame-
+    // scoped evaluate) wins. Otherwise — the `JSHandle::evaluate` /
+    // `ElementHandle` path the shared core dispatches with `frame_id =
+    // None` — recover the realm from a handle argument: a handle
+    // retained in a child frame is realm-scoped and only resolves when
+    // `target` is that same browsing context.
+    let resolved_ctx: Option<Arc<str>> = if frame_id.is_some() {
+      None
+    } else {
+      handles.iter().find_map(|h| match h {
+        HandleId::Bidi { shared_id, handle } => handle
+          .as_deref()
+          .and_then(|hh| self.handle_realm(hh))
+          .or_else(|| self.handle_realm(shared_id)),
+        _ => None,
+      })
+    };
+    let target_ctx: &str = frame_id.or(resolved_ctx.as_deref()).unwrap_or(&self.context_id);
 
     // A utility eval targeting a child browsing context (e.g. the
     // recursive cross-iframe `ariaSnapshot` stitch running
@@ -2742,7 +2846,13 @@ impl BidiPage {
           // a primitive (inline value — no page-side retention).
           // Playwright's `JSHandle` has both shapes; mirror that here.
           if let Some(shared) = result.as_shared_reference() {
-            // sharedReference is BiDi's DOM-node shape.
+            // sharedReference is BiDi's DOM-node shape. Remember which
+            // realm it came from so a later `JSHandle::evaluate`
+            // (dispatched with `frame_id = None`) re-targets it.
+            self.remember_handle_realm(&shared.shared_id, target_ctx);
+            if let Some(h) = shared.handle.as_deref() {
+              self.remember_handle_realm(h, target_ctx);
+            }
             Ok(FdEvalResult::Handle(
               crate::js_handle::JSHandleBacking::Remote(HandleRemote::Bidi {
                 shared_id: shared.shared_id,
@@ -2772,6 +2882,7 @@ impl BidiPage {
               // sharedId}` (the old mistake) causes BiDi to reject
               // with "no such node" because the handle-string was
               // never registered as a node sharedId.
+              self.remember_handle_realm(&h, target_ctx);
               Ok(FdEvalResult::Handle(
                 crate::js_handle::JSHandleBacking::Remote(HandleRemote::Bidi {
                   shared_id: String::new(),
@@ -2835,16 +2946,28 @@ impl BidiPage {
   /// Returns the transport error if the `BiDi` command fails.
   pub async fn release_handle(&self, shared_id: &str, handle: Option<&str>) -> Result<()> {
     let handle_str = handle.unwrap_or(shared_id);
-    self
+    // Disown in the realm the reference was created in — a child-frame
+    // handle is realm-scoped and `script.disown` against the main
+    // context would not match it.
+    let ctx = handle
+      .and_then(|h| self.handle_realm(h))
+      .or_else(|| self.handle_realm(shared_id))
+      .unwrap_or_else(|| self.context_id.clone());
+    let result = self
       .cmd(
         "script.disown",
         json!({
           "handles": [handle_str],
-          "target": {"context": &*self.context_id},
+          "target": {"context": &*ctx},
         }),
       )
       .await
-      .map(|_| ())
+      .map(|_| ());
+    self.forget_handle_realm(shared_id);
+    if let Some(h) = handle {
+      self.forget_handle_realm(h);
+    }
+    result
   }
 
   // ── Exposed Functions ───────────────────────────────────────────────────
@@ -3270,25 +3393,45 @@ async fn execute_bidi_route_action(
         .await;
     },
     crate::route::RouteAction::Continue(overrides) => {
-      let mut params = json!({"request": request_id});
-      if let Some(url) = &overrides.url {
-        params["url"] = serde_json::Value::String(url.clone());
+      if let Some(target_url) = &overrides.url {
+        // Firefox/BiDi `network.continueRequest` accepts a `url` override
+        // but then ABORTS the request instead of honoring it. Emulate the
+        // URL rewrite with a 307 redirect so the browser itself follows to
+        // the new URL — re-sending the same method/body with its own
+        // cookies/origin. The redirected request hits the all-URL intercept
+        // again, doesn't match this route, and is continued normally. This
+        // makes `route.fallback`/`continue` with a `url` override work on
+        // BiDi, where Playwright sends the override best-effort and Firefox
+        // silently drops it.
+        let _ = transport
+          .send_command(
+            "network.provideResponse",
+            json!({
+              "request": request_id,
+              "statusCode": 307,
+              "reasonPhrase": "Temporary Redirect",
+              "headers": [{"name": "location", "value": {"type": "string", "value": target_url}}],
+            }),
+          )
+          .await;
+      } else {
+        let mut params = json!({"request": request_id});
+        if let Some(method) = &overrides.method {
+          params["method"] = serde_json::Value::String(method.clone());
+        }
+        if let Some(headers) = &overrides.headers {
+          let hdrs: Vec<serde_json::Value> = headers
+            .iter()
+            .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
+            .collect();
+          params["headers"] = serde_json::Value::Array(hdrs);
+        }
+        if let Some(post_data) = &overrides.post_data {
+          let encoded = base64::engine::general_purpose::STANDARD.encode(post_data);
+          params["body"] = json!({"type": "base64", "value": encoded});
+        }
+        let _ = transport.send_command("network.continueRequest", params).await;
       }
-      if let Some(method) = &overrides.method {
-        params["method"] = serde_json::Value::String(method.clone());
-      }
-      if let Some(headers) = &overrides.headers {
-        let hdrs: Vec<serde_json::Value> = headers
-          .iter()
-          .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
-          .collect();
-        params["headers"] = serde_json::Value::Array(hdrs);
-      }
-      if let Some(post_data) = &overrides.post_data {
-        let encoded = base64::engine::general_purpose::STANDARD.encode(post_data);
-        params["body"] = json!({"type": "base64", "value": encoded});
-      }
-      let _ = transport.send_command("network.continueRequest", params).await;
     },
     crate::route::RouteAction::Abort(_reason) => {
       let _ = transport
