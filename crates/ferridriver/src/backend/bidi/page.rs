@@ -2552,6 +2552,13 @@ impl BidiPage {
             .map(parse_bidi_headers)
             .unwrap_or_default();
 
+          // The original method/headers are forwarded when a `url` override
+          // is applied (continue resolves to the new URL's content with the
+          // request's own cookies/headers), so keep a copy before the
+          // `InterceptedRequest` moves them into the handler's `Route`.
+          let orig_method = method.to_string();
+          let orig_headers = headers.clone();
+
           let intercepted = crate::route::InterceptedRequest {
             request_id: request_id.to_string(),
             url: url.to_string(),
@@ -2567,7 +2574,7 @@ impl BidiPage {
           let action = action_rx.await.unwrap_or(crate::route::RouteAction::Continue(
             crate::route::ContinueOverrides::default(),
           ));
-          execute_bidi_route_action(&session.transport, request_id, action).await;
+          execute_bidi_route_action(&session.transport, request_id, action, &orig_method, &orig_headers).await;
         } else {
           let _ = session
             .transport
@@ -3362,6 +3369,8 @@ async fn execute_bidi_route_action(
   transport: &super::transport::BidiTransport,
   request_id: &str,
   action: crate::route::RouteAction,
+  orig_method: &str,
+  orig_headers: &FxHashMap<String, String>,
 ) {
   match action {
     crate::route::RouteAction::Fulfill(resp) => {
@@ -3394,26 +3403,33 @@ async fn execute_bidi_route_action(
     },
     crate::route::RouteAction::Continue(overrides) => {
       if let Some(target_url) = &overrides.url {
-        // Firefox/BiDi `network.continueRequest` accepts a `url` override
-        // but then ABORTS the request instead of honoring it. Emulate the
-        // URL rewrite with a 307 redirect so the browser itself follows to
-        // the new URL — re-sending the same method/body with its own
-        // cookies/origin. The redirected request hits the all-URL intercept
-        // again, doesn't match this route, and is continued normally. This
-        // makes `route.fallback`/`continue` with a `url` override work on
-        // BiDi, where Playwright sends the override best-effort and Firefox
-        // silently drops it.
-        let _ = transport
-          .send_command(
-            "network.provideResponse",
-            json!({
-              "request": request_id,
-              "statusCode": 307,
-              "reasonPhrase": "Temporary Redirect",
-              "headers": [{"name": "location", "value": {"type": "string", "value": target_url}}],
-            }),
-          )
-          .await;
+        // Continue with a URL override. Firefox/BiDi `network.continueRequest`
+        // accepts a `url` field but then aborts the request instead of
+        // honoring it (verified against Firefox; Playwright sends it
+        // best-effort and it is silently dropped). Implement the rewrite
+        // faithfully: issue the request to the new URL ourselves — applying
+        // the method/header/body overrides on top of the original request's
+        // method/headers (so cookies and auth carry over) — and fulfill the
+        // ORIGINAL request with that response. The page sees its own request
+        // resolve to the new URL's content: `response.url` stays the original
+        // and `response.redirected` is false, exactly like a native continue
+        // with a rewritten URL.
+        let method = overrides.method.as_deref().unwrap_or(orig_method);
+        // Original headers, then apply the override headers on top.
+        let mut merged: Vec<(String, String)> = orig_headers.iter().map(|(k, v)| (k.clone(), v.clone())).collect();
+        if let Some(over) = &overrides.headers {
+          merged.retain(|(k, _)| !over.iter().any(|(ok, _)| ok.eq_ignore_ascii_case(k)));
+          merged.extend(over.iter().cloned());
+        }
+        bidi_continue_via_fetch(
+          transport,
+          request_id,
+          target_url,
+          method,
+          &merged,
+          overrides.post_data.as_deref(),
+        )
+        .await;
       } else {
         let mut params = json!({"request": request_id});
         if let Some(method) = &overrides.method {
@@ -3439,6 +3455,108 @@ async fn execute_bidi_route_action(
         .await;
     },
   }
+}
+
+/// Continue an intercepted request with a `url` override on `BiDi` by issuing
+/// the request to the new URL ourselves and fulfilling the ORIGINAL request
+/// with the result — Firefox's `network.continueRequest` `url` field aborts
+/// rather than rewriting. The page's request resolves to the new URL's
+/// content (`response.url` stays original, not a redirect). On any failure
+/// the original request is continued unmodified so the page never stalls.
+async fn bidi_continue_via_fetch(
+  transport: &super::transport::BidiTransport,
+  request_id: &str,
+  url: &str,
+  method: &str,
+  headers: &[(String, String)],
+  body: Option<&[u8]>,
+) {
+  match fetch_for_route(url, method, headers, body).await {
+    Ok((status, resp_headers, resp_body)) => {
+      let body_b64 = base64::engine::general_purpose::STANDARD.encode(&resp_body);
+      let hdrs: Vec<serde_json::Value> = resp_headers
+        .iter()
+        .map(|(k, v)| json!({"name": k, "value": {"type": "string", "value": v}}))
+        .collect();
+      let _ = transport
+        .send_command(
+          "network.provideResponse",
+          json!({
+            "request": request_id,
+            "statusCode": status,
+            "reasonPhrase": crate::route::status_text(i32::from(status)),
+            "headers": hdrs,
+            "body": {"type": "base64", "value": body_b64},
+          }),
+        )
+        .await;
+    },
+    Err(e) => {
+      tracing::warn!("bidi route url-override fetch failed ({e}); continuing request unmodified");
+      let _ = transport
+        .send_command("network.continueRequest", json!({"request": request_id}))
+        .await;
+    },
+  }
+}
+
+/// Issue the HTTP request for a route `url` override. Hop-by-hop / length
+/// headers are dropped (reqwest sets them on the request; the browser
+/// recomputes them when the fulfilled body is delivered).
+async fn fetch_for_route(
+  url: &str,
+  method: &str,
+  headers: &[(String, String)],
+  body: Option<&[u8]>,
+) -> Result<(u16, Vec<(String, String)>, Vec<u8>)> {
+  use reqwest::header::{HeaderMap, HeaderName, HeaderValue};
+
+  let client = reqwest::Client::builder()
+    .build()
+    .map_err(|e| FerriError::protocol("route url override", format!("http client: {e}")))?;
+  let m = reqwest::Method::from_bytes(method.as_bytes())
+    .map_err(|e| FerriError::protocol("route url override", format!("bad method {method:?}: {e}")))?;
+
+  let mut hmap = HeaderMap::new();
+  for (k, v) in headers {
+    if matches!(
+      k.to_ascii_lowercase().as_str(),
+      "host" | "content-length" | "connection" | "accept-encoding"
+    ) {
+      continue;
+    }
+    if let (Ok(name), Ok(val)) = (HeaderName::from_bytes(k.as_bytes()), HeaderValue::from_str(v)) {
+      hmap.insert(name, val);
+    }
+  }
+
+  let mut req = client.request(m, url).headers(hmap);
+  if let Some(b) = body {
+    req = req.body(b.to_vec());
+  }
+  let resp = req
+    .send()
+    .await
+    .map_err(|e| FerriError::protocol("route url override", format!("request to {url} failed: {e}")))?;
+
+  let status = resp.status().as_u16();
+  let resp_headers: Vec<(String, String)> = resp
+    .headers()
+    .iter()
+    .filter(|(k, _)| {
+      !matches!(
+        k.as_str().to_ascii_lowercase().as_str(),
+        "content-length" | "transfer-encoding" | "connection"
+      )
+    })
+    .filter_map(|(k, v)| v.to_str().ok().map(|s| (k.as_str().to_string(), s.to_string())))
+    .collect();
+  let bytes = resp
+    .bytes()
+    .await
+    .map_err(|e| FerriError::protocol("route url override", format!("body read failed: {e}")))?
+    .to_vec();
+  Ok((status, resp_headers, bytes))
 }
 
 /// Parse a `BiDi` network cookie into our `CookieData`.
