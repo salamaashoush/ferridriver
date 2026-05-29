@@ -25,7 +25,8 @@ use std::time::{Duration, Instant};
 use dashmap::DashMap;
 use tokio::sync::Mutex as AsyncMutex;
 
-use crate::engine::{RunContext, RunOptions, ScriptEngineConfig, Session};
+use crate::bundle::CompiledBundle;
+use crate::engine::{RunContext, RunOptions, ScriptEngineConfig, Session, SessionRun};
 use crate::error::ScriptError;
 use crate::result::ScriptResult;
 use crate::vars::InMemoryVars;
@@ -87,6 +88,35 @@ impl BrowserSession {
   /// same session name — a *different* browser, so any JS handles the
   /// old `globalThis` cached are dead and must not be reachable). In
   /// every one of those cases `vars` is untouched.
+  /// Ensure the session VM exists for `epoch`, rebuilding it when the
+  /// epoch changed (a browser reattach invalidates the prior VM).
+  async fn ensure_vm(
+    &mut self,
+    config: ScriptEngineConfig,
+    context: &RunContext,
+    epoch: Option<u64>,
+  ) -> Result<(), ScriptError> {
+    if self.vm.is_some() && self.epoch != epoch {
+      self.vm = None;
+    }
+    if self.vm.is_none() {
+      self.vm = Some(Session::create(config, context).await?);
+      self.epoch = epoch;
+    }
+    Ok(())
+  }
+
+  /// Apply the poison rule (discard the VM after a timeout/OOM force-halt
+  /// so the next call rebuilds; a plain throw keeps the warm VM) and the
+  /// last-used bookkeeping, returning the run's result.
+  fn finish_run(&mut self, run: SessionRun) -> ScriptResult {
+    if run.poisoned {
+      self.vm = None;
+    }
+    self.last_used = Instant::now();
+    run.result
+  }
+
   pub async fn run(
     &mut self,
     config: ScriptEngineConfig,
@@ -96,48 +126,51 @@ impl BrowserSession {
     context: RunContext,
     epoch: Option<u64>,
   ) -> ScriptResult {
-    if self.vm.is_some() && self.epoch != epoch {
-      self.vm = None;
+    if let Err(e) = self.ensure_vm(config, &context, epoch).await {
+      self.last_used = Instant::now();
+      return ScriptResult::err(e, 0, Vec::new());
     }
-
-    if self.vm.is_none() {
-      match Session::create(config, &context).await {
-        Ok(vm) => {
-          self.vm = Some(vm);
-          self.epoch = epoch;
-        },
-        Err(e) => {
-          self.last_used = Instant::now();
-          return ScriptResult::err(e, 0, Vec::new());
-        },
-      }
-    }
-
-    let run = match self.vm.as_ref() {
-      Some(vm) => {
-        // Re-install the durable process registry on every (re)built VM
-        // so a tool's `commands` start/status/stop reaches the SAME
-        // registry that outlives the VM.
-        vm.install_session_procs(self.procs.clone()).await;
-        vm.execute(source, args, options, &context).await
-      },
-      None => {
-        return ScriptResult::err(
-          ScriptError::internal("session vm unexpectedly absent".to_string()),
-          0,
-          Vec::new(),
-        );
-      },
+    let Some(vm) = self.vm.as_ref() else {
+      return ScriptResult::err(
+        ScriptError::internal("session vm unexpectedly absent".to_string()),
+        0,
+        Vec::new(),
+      );
     };
+    // Re-install the durable process registry on every (re)built VM so a
+    // tool's `commands` start/status/stop reaches the SAME registry that
+    // outlives the VM.
+    vm.install_session_procs(self.procs.clone()).await;
+    let run = vm.execute(source, args, options, &context).await;
+    self.finish_run(run)
+  }
 
-    // A poisoning fault (timeout interrupt / OOM) left the interpreter
-    // halted at an arbitrary point — discard so the NEXT call rebuilds.
-    // A plain JS throw is not poisoning and keeps the warm VM.
-    if run.poisoned {
-      self.vm = None;
+  /// Like [`run`], but executes a precompiled bundled ES module — the
+  /// TypeScript / `import` path. The run's result is the module's
+  /// `default` export. Shares VM lifecycle + poison handling with `run`.
+  pub async fn run_module(
+    &mut self,
+    config: ScriptEngineConfig,
+    bundle: &CompiledBundle,
+    args: &[serde_json::Value],
+    options: RunOptions,
+    context: RunContext,
+    epoch: Option<u64>,
+  ) -> ScriptResult {
+    if let Err(e) = self.ensure_vm(config, &context, epoch).await {
+      self.last_used = Instant::now();
+      return ScriptResult::err(e, 0, Vec::new());
     }
-    self.last_used = Instant::now();
-    run.result
+    let Some(vm) = self.vm.as_ref() else {
+      return ScriptResult::err(
+        ScriptError::internal("session vm unexpectedly absent".to_string()),
+        0,
+        Vec::new(),
+      );
+    };
+    vm.install_session_procs(self.procs.clone()).await;
+    let run = vm.execute_module(bundle, args, options, &context).await;
+    self.finish_run(run)
   }
 }
 

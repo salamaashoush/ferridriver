@@ -702,6 +702,33 @@ impl McpServer {
     .await
   }
 
+  /// Like [`run_on_session_vm`], but runs a precompiled bundled ES module
+  /// (the TypeScript / `import` path) on the session VM. The run's result
+  /// is the module's `default` export.
+  pub(crate) async fn run_module_on_session_vm(
+    &self,
+    session: &str,
+    _guard: &tokio::sync::OwnedMutexGuard<()>,
+    bundle: &ferridriver_script::CompiledBundle,
+    args: &[serde_json::Value],
+    options: ferridriver_script::RunOptions,
+    mut context: ferridriver_script::RunContext,
+  ) -> ferridriver_script::ScriptResult {
+    let slot = self.sessions.acquire(session);
+    let mut bs = slot.lock().await;
+    context.vars = bs.vars();
+    let epoch = self.state.instance_generation(session).await;
+    bs.run_module(
+      self.script_engine.config().clone(),
+      bundle,
+      args,
+      options,
+      context,
+      epoch,
+    )
+    .await
+  }
+
   /// Add extra tool routers (merges with built-in browser tools).
   #[must_use]
   pub fn with_extra_tools(mut self, extra: ToolRouter<Self>) -> Self {

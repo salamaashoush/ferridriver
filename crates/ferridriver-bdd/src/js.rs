@@ -674,8 +674,20 @@ pub fn translate_features_js(
     let is_serial = scenarios.iter().any(|s| s.tags.iter().any(|t| t == "@serial"));
 
     let mut tests = Vec::new();
-    for scenario in &scenarios {
-      let scenario_clone = scenario.clone();
+    for scenario in scenarios {
+      // Build the immutable TestCase metadata up front, then move the
+      // scenario into an Arc so the per-invocation closure shares it via a
+      // refcount bump instead of deep-cloning the step Vec twice (mirrors
+      // the Rust-step path in `translate::translate_scenario`).
+      let id = TestId {
+        file: scenario.feature_path.display().to_string(),
+        suite: Some(scenario.feature_name.clone()),
+        name: scenario.name.clone(),
+        line: crate::translate::scenario_line(&scenario),
+      };
+      let annotations = crate::translate::scenario_annotations(&scenario);
+      let scenario = Arc::new(scenario);
+
       let bundle = Arc::clone(&bundle);
       let cwd = Arc::clone(&cwd);
       let browser_config = config.browser.clone();
@@ -683,7 +695,7 @@ pub fn translate_features_js(
       let bdd_strict = config.strict;
 
       let test_fn: TestFn = Arc::new(move |pool: FixturePool| {
-        let scenario = scenario_clone.clone();
+        let scenario = Arc::clone(&scenario);
         let bundle = Arc::clone(&bundle);
         let cwd = Arc::clone(&cwd);
         let browser_config = browser_config.clone();
@@ -765,12 +777,7 @@ pub fn translate_features_js(
       });
 
       tests.push(TestCase {
-        id: TestId {
-          file: scenario.feature_path.display().to_string(),
-          suite: Some(scenario.feature_name.clone()),
-          name: scenario.name.clone(),
-          line: crate::translate::scenario_line(scenario),
-        },
+        id,
         test_fn,
         fixture_requests: vec![
           "browser".to_string(),
@@ -779,7 +786,7 @@ pub fn translate_features_js(
           "test_info".to_string(),
           "request".to_string(),
         ],
-        annotations: crate::translate::scenario_annotations(scenario),
+        annotations,
         timeout: None,
         retries: None,
         expected_status: ExpectedStatus::Pass,

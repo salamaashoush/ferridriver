@@ -41,11 +41,16 @@ pub struct RunScriptParams {
   pub source: Option<String>,
 
   #[schemars(
-    description = "Path to a `.js` or `.mjs` file to execute, relative to the configured \
-    script_root. Mutually exclusive with `source`. Lets the LLM iterate on a saved script by \
-    editing the file and re-invoking `run_script` without re-sending the full source each call. \
-    The path is validated against script_root: absolute paths, `..` components, and symlinks \
-    escaping the root are rejected. Error line numbers in the script result are file-relative."
+    description = "Path to a script file under the configured script_root, relative. Accepts \
+    `.js`/`.mjs` and `.ts`/`.tsx`/`.mts`/`.cts`. Mutually exclusive with `source`. Lets the LLM \
+    iterate on a saved script by editing the file and re-invoking `run_script` without re-sending \
+    the full source. A TypeScript file, or any file with top-level `import`/`export`, is bundled \
+    + transpiled and run as an ES module: top-level `await` works and the result is the module's \
+    `default` export (use `export default <value>`); a plain `.js` file keeps the `return <value>` \
+    convention. Imports are resolved off disk but every resolved file must stay under script_root \
+    (a traversal/symlink escape is rejected). The path itself is validated against script_root: \
+    absolute paths, `..` components, and symlinks escaping the root are rejected. Error line \
+    numbers are remapped to the original source."
   )]
   pub path: Option<String>,
 
@@ -117,8 +122,10 @@ impl McpServer {
     let args = p.args.unwrap_or_default();
 
     // Resolve the script source from either `source` (inline) or `path`
-    // (file under script_root). Exactly one must be provided.
-    let source = match (p.source.as_deref(), p.path.as_deref()) {
+    // (file under script_root). Exactly one must be provided. A file
+    // entry is also remembered so an ES-module source (TypeScript, or
+    // `import`/`export`) can be bundled and run as a module.
+    let (source, module_entry): (String, Option<std::path::PathBuf>) = match (p.source.as_deref(), p.path.as_deref()) {
       (Some(_), Some(_)) => {
         return Err(McpServer::err("run_script accepts `source` OR `path`, not both"));
       },
@@ -127,21 +134,27 @@ impl McpServer {
           "run_script requires either `source` (inline JS) or `path` (file under script_root)",
         ));
       },
-      (Some(src), None) => src.to_string(),
+      // Inline source stays on the raw wrap-and-eval path (top-level
+      // `return` yields the result); only file paths are bundled.
+      (Some(src), None) => (src.to_string(), None),
       (None, Some(rel)) => {
         let resolved = sandbox
           .resolve_read(rel)
           .map_err(|e| McpServer::err(format!("run_script path: {}", e.message)))?;
         match resolved.extension().and_then(|e| e.to_str()) {
-          Some("js" | "mjs") => {},
+          Some("js" | "mjs" | "ts" | "tsx" | "mts" | "cts") => {},
           _ => {
             return Err(McpServer::err(
-              "run_script `path` must point at a .js or .mjs file under script_root",
+              "run_script `path` must point at a .js/.mjs/.ts/.tsx/.mts/.cts file under script_root",
             ));
           },
         }
-        std::fs::read_to_string(&resolved)
-          .map_err(|e| McpServer::err(format!("run_script read {}: {e}", resolved.display())))?
+        let src = std::fs::read_to_string(&resolved)
+          .map_err(|e| McpServer::err(format!("run_script read {}: {e}", resolved.display())))?;
+        let entry = (ferridriver_script::is_typescript_path(&resolved)
+          || ferridriver_script::source_is_es_module(&src))
+        .then_some(resolved);
+        (src, entry)
       },
     };
 
@@ -150,9 +163,36 @@ impl McpServer {
     // (pure-compute scripts still work; they just pay the one-time cost).
     let context = self.mcp_run_context(&session).await?;
 
-    let result = self
-      .run_on_session_vm(&session, &guard, &source, &args, options, context)
-      .await;
+    let result = if let Some(entry) = module_entry {
+      // ES-module file: rolldown-bundle (TypeScript + imports, disk-cached)
+      // and run as a module — the result is its `default` export. Bundling
+      // resolves imports off disk, so every transitive input must be
+      // re-validated under script_root before execution; an import that
+      // escapes the sandbox is rejected (never run).
+      let bundle_cwd = entry
+        .parent()
+        .map_or_else(|| sandbox.root().to_path_buf(), std::path::Path::to_path_buf);
+      let bundle = ferridriver_script::bundle_and_compile(std::slice::from_ref(&entry), &bundle_cwd)
+        .await
+        .map_err(|e| McpServer::err(format!("run_script bundle {}: {}", entry.display(), e.message)))?;
+      for input in bundle.source_files(&bundle_cwd) {
+        let canon = std::fs::canonicalize(&input)
+          .map_err(|e| McpServer::err(format!("run_script input {}: {e}", input.display())))?;
+        if !canon.starts_with(sandbox.root()) {
+          return Err(McpServer::err(format!(
+            "run_script: import escapes script_root: {}",
+            input.display()
+          )));
+        }
+      }
+      self
+        .run_module_on_session_vm(&session, &guard, &bundle, &args, options, context)
+        .await
+    } else {
+      self
+        .run_on_session_vm(&session, &guard, &source, &args, options, context)
+        .await
+    };
 
     let json = serde_json::to_string_pretty(&result).map_err(|e| McpServer::err(format!("serialize result: {e}")))?;
 

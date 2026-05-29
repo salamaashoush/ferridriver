@@ -205,6 +205,11 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   }
   overrides.executable_path = args.browser.executable_path;
 
+  if let Some(ref spec) = args.shard {
+    overrides.shard =
+      Some(ferridriver_test::config::ShardArg::parse(spec).map_err(|e| anyhow::anyhow!("invalid --shard: {e}"))?);
+  }
+
   let mut test_config = ferridriver_test::config::resolve_config_from(config.test, &overrides)
     .map_err(|e| anyhow::anyhow!("config error: {e}"))?;
 
@@ -225,17 +230,28 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
 /// full Playwright-style binding surface. The script launches its own
 /// browser via `chromium()` / `firefox()` / `webkit()`; `--backend`
 /// chooses what a plain `chromium()` resolves to. No page is pre-bound.
+/// Where a `run` script came from: a real file on disk, or inline source
+/// (`--eval` / stdin). Determines how an ES-module entry is materialized
+/// for bundling and which directory imports resolve against.
+enum ScriptOrigin {
+  File(std::path::PathBuf),
+  Inline,
+}
+
 async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
   use std::io::Read as _;
 
-  let source = match (args.eval, args.script.as_deref()) {
-    (Some(code), _) => code,
+  let (source, origin) = match (args.eval, args.script.as_deref()) {
+    (Some(code), _) => (code, ScriptOrigin::Inline),
     (None, Some("-")) => {
       let mut s = String::new();
       std::io::stdin().read_to_string(&mut s)?;
-      s
+      (s, ScriptOrigin::Inline)
     },
-    (None, Some(path)) => std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("read {path}: {e}"))?,
+    (None, Some(path)) => (
+      std::fs::read_to_string(path).map_err(|e| anyhow::anyhow!("read {path}: {e}"))?,
+      ScriptOrigin::File(std::path::PathBuf::from(path)),
+    ),
     (None, None) => anyhow::bail!("provide a script path, `-` for stdin, or --eval <code>"),
   };
 
@@ -274,7 +290,21 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
   let session = ferridriver_script::Session::create(ferridriver_script::ScriptEngineConfig::default(), &ctx)
     .await
     .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
-  let result = session.execute(&source, &script_args, opts, &ctx).await.result;
+
+  // ES-module sources (TypeScript, or static `import`/`export`) are
+  // rolldown-bundled + transpiled + compiled to bytecode (disk-cached for
+  // file inputs), then run as a module; the run result is its `default`
+  // export. Plain scripts keep the wrap-and-eval path where top-level
+  // `return` yields the result.
+  let result = if needs_bundle(&origin, &source) {
+    let (entry, bundle_cwd, _tmp) = bundle_entry(&origin, &source, &cwd)?;
+    let bundle = ferridriver_script::bundle_and_compile(std::slice::from_ref(&entry), &bundle_cwd)
+      .await
+      .map_err(|e| anyhow::anyhow!("bundle {}: {}", entry.display(), e.message))?;
+    session.execute_module(&bundle, &script_args, opts, &ctx).await.result
+  } else {
+    session.execute(&source, &script_args, opts, &ctx).await.result
+  };
 
   println!("{}", serde_json::to_string_pretty(&result)?);
   if let ferridriver_script::Outcome::Error { ref error } = result.outcome {
@@ -282,6 +312,51 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     std::process::exit(1);
   }
   Ok(())
+}
+
+/// True when the source must run as a bundled ES module (TypeScript file
+/// extension, or top-level `import`/`export`). Plain scripts stay on the
+/// wrap-and-eval path where top-level `return` yields the result.
+fn needs_bundle(origin: &ScriptOrigin, source: &str) -> bool {
+  if let ScriptOrigin::File(p) = origin {
+    if ferridriver_script::is_typescript_path(p) {
+      return true;
+    }
+  }
+  ferridriver_script::source_is_es_module(source)
+}
+
+/// Removes a materialized temp entry file on drop.
+struct TmpEntryGuard(std::path::PathBuf);
+impl Drop for TmpEntryGuard {
+  fn drop(&mut self) {
+    let _ = std::fs::remove_file(&self.0);
+  }
+}
+
+/// Resolve the rolldown entry path + bundler cwd for a module-mode run.
+/// File inputs bundle in place (imports resolve against the file's dir);
+/// inline sources are written to a temp `.ts` entry in `cwd` so relative
+/// imports resolve against `cwd`, cleaned up via the returned guard.
+fn bundle_entry(
+  origin: &ScriptOrigin,
+  source: &str,
+  cwd: &std::path::Path,
+) -> anyhow::Result<(std::path::PathBuf, std::path::PathBuf, Option<TmpEntryGuard>)> {
+  match origin {
+    ScriptOrigin::File(p) => {
+      let dir = p
+        .parent()
+        .filter(|d| !d.as_os_str().is_empty())
+        .map_or_else(|| cwd.to_path_buf(), std::path::Path::to_path_buf);
+      Ok((p.clone(), dir, None))
+    },
+    ScriptOrigin::Inline => {
+      let entry = cwd.join(format!(".ferridriver-run-{}.ts", std::process::id()));
+      std::fs::write(&entry, source).map_err(|e| anyhow::anyhow!("write temp entry {}: {e}", entry.display()))?;
+      Ok((entry.clone(), cwd.to_path_buf(), Some(TmpEntryGuard(entry))))
+    },
+  }
 }
 
 async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Result<()> {

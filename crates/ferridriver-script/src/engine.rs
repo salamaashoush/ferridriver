@@ -13,7 +13,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
 
 use rquickjs::function::{Async, Func};
-use rquickjs::{AsyncContext, AsyncRuntime, Ctx, Object, Value, async_with};
+use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Ctx, Module, Object, Value, async_with};
 
 use crate::console::{ConsoleCapture, strip_ansi};
 use crate::error::{ScriptError, ScriptErrorKind};
@@ -479,9 +479,101 @@ impl Session {
     }
   }
 
+  /// Fresh console capture sized by the session config.
+  fn new_console(&self) -> Arc<ConsoleCapture> {
+    Arc::new(ConsoleCapture::new(
+      self.config.max_console_entries,
+      self.config.max_console_bytes,
+      self.config.max_console_entry_bytes,
+    ))
+  }
+
+  /// Arm the interrupt handler for this call's deadline. The handler fires
+  /// regularly during interpretation; once the deadline passes it halts
+  /// the interpreter. Returns the flag set when a force-halt occurred.
+  async fn arm_timeout(&self, deadline: Instant) -> Arc<AtomicBool> {
+    let timed_out = Arc::new(AtomicBool::new(false));
+    let flag = timed_out.clone();
+    self
+      .runtime
+      .set_interrupt_handler(Some(Box::new(move || {
+        if Instant::now() >= deadline {
+          flag.store(true, Ordering::Relaxed);
+          true
+        } else {
+          false
+        }
+      })))
+      .await;
+    timed_out
+  }
+
+  /// Per-call framework globals (`console`, `page`, `context`, ...).
+  fn globals_install(&self, context: &RunContext, console: &Arc<ConsoleCapture>) -> GlobalsInstall {
+    GlobalsInstall {
+      console: console.clone(),
+      page: context.page.clone(),
+      browser_context: context.browser_context.clone(),
+      request: context.request.clone(),
+      default_request: self.default_request.clone(),
+      browser: context.browser.clone(),
+      async_ctx: self.ctx.clone(),
+    }
+  }
+
+  /// Build the `SessionRun` from an eval result, applying the poison rule:
+  /// a timeout force-halt or an OOM leaves the heap untrustworthy and must
+  /// rebuild the VM; a plain throw / recoverable stack overflow does not.
+  fn finish(
+    &self,
+    eval_result: Result<serde_json::Value, ScriptError>,
+    started: Instant,
+    console: &Arc<ConsoleCapture>,
+    timed_out: &Arc<AtomicBool>,
+    timeout: Duration,
+  ) -> SessionRun {
+    let duration = elapsed_ms(started);
+    let drained = console.drain();
+    match eval_result {
+      Ok(value) => SessionRun {
+        result: ScriptResult::ok(value, duration, drained),
+        poisoned: false,
+      },
+      Err(mut err) => {
+        let timed_out = timed_out.load(Ordering::Relaxed);
+        let oom = is_oom(&err);
+        let poisoned = timed_out || oom;
+        if timed_out {
+          err = ScriptError::timeout(duration, timeout.as_millis() as u64);
+        }
+        SessionRun {
+          result: ScriptResult::err(err, duration, drained),
+          poisoned,
+        }
+      },
+    }
+  }
+
+  /// Apply this call's resource overrides (falling back to session
+  /// defaults), and return the resolved wall-clock timeout.
+  async fn apply_call_limits(&self, options: &RunOptions) -> Duration {
+    self
+      .apply_limits(
+        options.memory_limit.unwrap_or(self.config.default_memory_limit),
+        options.stack_size.unwrap_or(self.config.default_stack_size),
+        options.gc_threshold.unwrap_or(self.config.default_gc_threshold),
+      )
+      .await;
+    options.timeout.unwrap_or(self.config.default_timeout)
+  }
+
   /// Execute one script against the persistent VM. Framework globals are
   /// refreshed from `context` first; user `globalThis` state from prior
   /// executions is preserved.
+  ///
+  /// The source is wrapped in an async IIFE, so top-level `return <value>`
+  /// surfaces as the run result. For ES-module sources (TypeScript,
+  /// `import`/`export`) bundle them first and use [`Self::execute_module`].
   pub async fn execute(
     &self,
     source: &str,
@@ -490,52 +582,10 @@ impl Session {
     context: &RunContext,
   ) -> SessionRun {
     let started = Instant::now();
-    let timeout = options.timeout.unwrap_or(self.config.default_timeout);
-    let memory_limit = options.memory_limit.unwrap_or(self.config.default_memory_limit);
-    let stack_size = options.stack_size.unwrap_or(self.config.default_stack_size);
-    let gc_threshold = options.gc_threshold.unwrap_or(self.config.default_gc_threshold);
-
-    let console = Arc::new(ConsoleCapture::new(
-      self.config.max_console_entries,
-      self.config.max_console_bytes,
-      self.config.max_console_entry_bytes,
-    ));
-
-    // Per-call resource overrides may differ from the session defaults;
-    // re-apply only the ones that actually changed (skips the runtime
-    // async lock on the warm-session hot path, where they never do).
-    self.apply_limits(memory_limit, stack_size, gc_threshold).await;
-
-    // Timeout enforcement via interrupt handler. The handler fires
-    // regularly during script execution; once the deadline passes we
-    // signal `true` to halt the interpreter. Reset each call with this
-    // call's deadline (overwrites any prior call's handler).
-    let deadline = started + timeout;
-    let timed_out = Arc::new(AtomicBool::new(false));
-    {
-      let timed_out = timed_out.clone();
-      self
-        .runtime
-        .set_interrupt_handler(Some(Box::new(move || {
-          if Instant::now() >= deadline {
-            timed_out.store(true, Ordering::Relaxed);
-            true
-          } else {
-            false
-          }
-        })))
-        .await;
-    }
-
-    let install = GlobalsInstall {
-      console: console.clone(),
-      page: context.page.clone(),
-      browser_context: context.browser_context.clone(),
-      request: context.request.clone(),
-      default_request: self.default_request.clone(),
-      browser: context.browser.clone(),
-      async_ctx: self.ctx.clone(),
-    };
+    let console = self.new_console();
+    let timeout = self.apply_call_limits(&options).await;
+    let timed_out = self.arm_timeout(started + timeout).await;
+    let install = self.globals_install(context, &console);
     let source_owned = source.to_string();
 
     let eval_result: Result<serde_json::Value, ScriptError> = async_with!(self.ctx => |ctx| {
@@ -559,33 +609,76 @@ impl Session {
     })
     .await;
 
-    let duration = elapsed_ms(started);
-    let drained = console.drain();
+    self.finish(eval_result, started, &console, &timed_out, timeout)
+  }
 
-    match eval_result {
-      Ok(value) => SessionRun {
-        result: ScriptResult::ok(value, duration, drained),
-        poisoned: false,
-      },
-      Err(mut err) => {
-        // The VM is no longer trustworthy and must be rebuilt when
-        // either: a timeout interrupt force-halted the interpreter at an
-        // arbitrary point, OR the runtime hit its memory limit (the
-        // allocation that failed could be anywhere — global tables,
-        // a half-built object — so reusing the heap is unsound). A
-        // plain JS throw and a recoverable stack overflow do NOT poison.
-        let timed_out = timed_out.load(Ordering::Relaxed);
-        let oom = is_oom(&err);
-        let poisoned = timed_out || oom;
-        if timed_out {
-          err = ScriptError::timeout(duration, timeout.as_millis() as u64);
+  /// Execute a precompiled bundled ES module against the persistent VM —
+  /// the TypeScript / `import` / `export` path. Framework globals
+  /// (`args`, `page`, `console`, ...) are installed exactly as for
+  /// [`Self::execute`]; top-level `await` is native to the module.
+  ///
+  /// A module cannot use top-level `return`, so the run's result value is
+  /// the module's `default` export (`null` when it has none). Error
+  /// locations are remapped through the bundle's source map back to the
+  /// original `.ts`/`.js` position.
+  pub async fn execute_module(
+    &self,
+    bundle: &crate::bundle::CompiledBundle,
+    args: &[serde_json::Value],
+    options: RunOptions,
+    context: &RunContext,
+  ) -> SessionRun {
+    let started = Instant::now();
+    let console = self.new_console();
+    let timeout = self.apply_call_limits(&options).await;
+    let timed_out = self.arm_timeout(started + timeout).await;
+    let install = self.globals_install(context, &console);
+    let bytecode = Arc::clone(&bundle.bytecode);
+    let label = bundle.module_name.clone();
+
+    let eval_result: Result<serde_json::Value, ScriptError> = async_with!(self.ctx => |ctx| {
+      if let Err(e) = install_call_globals(&ctx, args, install) {
+        return Err(ScriptError::internal(format!("failed to install globals: {e}")));
+      }
+
+      // SAFETY: `bytecode` was produced by `Module::write` in THIS process
+      // with native endianness and is never persisted across an
+      // interpreter boundary in a form this load trusts — same contract
+      // `eval_bundle` / `install_plugins` rely on. (The disk cache only
+      // ever loads bytecode written by an ABI-identical toolchain.)
+      #[allow(unsafe_code)]
+      let module = match (unsafe { Module::load(ctx.clone(), &bytecode) }).catch(&ctx) {
+        Ok(m) => m,
+        Err(e) => return Err(caught_to_script_error(e, &label)),
+      };
+      let (evaluated, promise) = match module.eval().catch(&ctx) {
+        Ok(v) => v,
+        Err(e) => return Err(caught_to_script_error(e, &label)),
+      };
+      if let Err(e) = promise.into_future::<()>().await.catch(&ctx) {
+        return Err(caught_to_script_error(e, &label));
+      }
+
+      // Result = the module's `default` export, if any.
+      let default = evaluated
+        .namespace()
+        .and_then(|ns| ns.get::<_, Value<'_>>("default"))
+        .unwrap_or_else(|_| Value::new_undefined(ctx.clone()));
+      Ok(value_to_json(&ctx, default).unwrap_or(serde_json::Value::Null))
+    })
+    .await;
+
+    // Remap the failure location back to the original source.
+    let eval_result = eval_result.map_err(|mut e| {
+      if let Some(line) = e.line {
+        if let Some((src, sl, sc)) = bundle.remap(line, e.column.unwrap_or(1)) {
+          e.message = format!("{} (at {src}:{sl}:{sc})", e.message);
         }
-        SessionRun {
-          result: ScriptResult::err(err, duration, drained),
-          poisoned,
-        }
-      },
-    }
+      }
+      e
+    });
+
+    self.finish(eval_result, started, &console, &timed_out, timeout)
   }
 }
 

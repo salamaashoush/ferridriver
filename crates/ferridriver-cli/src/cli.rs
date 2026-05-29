@@ -111,6 +111,11 @@ pub struct BddArgs {
   #[arg(long)]
   pub workers: Option<usize>,
 
+  /// Shard the scenarios across CI machines, `X/N` (e.g. `2/4` runs the
+  /// second of four shards).
+  #[arg(long)]
+  pub shard: Option<String>,
+
   /// Reporter spec list, e.g. `terminal,junit:target/junit.xml`.
   #[arg(long)]
   pub reporter: Vec<String>,
@@ -165,11 +170,15 @@ pub enum TestRunner {
 
 #[derive(Args)]
 pub struct RunArgs {
-  /// Script file (`.js`/`.mjs`), or `-` to read source from stdin.
-  /// Omit when using `--eval`.
+  /// Script file, or `-` to read source from stdin. Omit when using
+  /// `--eval`. A `.ts`/`.tsx` file, or any source with top-level
+  /// `import`/`export`, is rolldown-bundled + transpiled + run as an ES
+  /// module (its `default` export is the result). Plain `.js` scripts run
+  /// as before, where top-level `return <value>` is the result.
   pub script: Option<String>,
 
-  /// Inline script source (alternative to a file / stdin).
+  /// Inline script source (alternative to a file / stdin). Treated as an
+  /// ES module when it contains top-level `import`/`export`.
   #[arg(short = 'e', long = "eval", conflicts_with = "script")]
   pub eval: Option<String>,
 
