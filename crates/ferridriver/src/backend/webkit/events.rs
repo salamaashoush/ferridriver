@@ -839,11 +839,8 @@ async fn dispatch_intercepted(
 ) {
   let intercepted = build_intercepted(&request_id, &request_payload);
   let handler = {
-    let routes_guard = routes.read().await;
-    routes_guard
-      .iter()
-      .find(|r| r.matcher.matches(&intercepted.url))
-      .map(|r| r.handler.clone())
+    let mut guard = routes.write().await;
+    crate::route::take_matching_handler(&mut guard, &intercepted.url)
   };
   let Some(handler) = handler else {
     let _ = target

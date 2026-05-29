@@ -1638,7 +1638,7 @@ impl Page {
   /// });
   /// ```
   #[napi(
-    ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler: (route: Route) => void",
+    ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler: (route: Route) => void, options?: { times?: number }",
     ts_return_type = "Promise<Disposable>"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -1659,8 +1659,10 @@ impl Page {
       true,
       0,
     >,
+    options: Option<crate::types::RouteOptions>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<crate::disposable::Disposable>> {
     use napi::bindgen_prelude::Either3;
+    let times = options.and_then(|o| o.times_u32());
     let nb = napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking;
     // The route-handler TSFN is `weak` (not `Clone`); share it via `Arc`
     // so the predicate path can move it into a per-request task.
@@ -1725,7 +1727,7 @@ impl Page {
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       let matcher = spec.build()?;
       let disposable = inner
-        .route(matcher, rust_handler)
+        .route(matcher, rust_handler, times)
         .await
         .map_err(crate::error::to_napi)?;
       Ok(crate::disposable::Disposable::wrap(disposable))

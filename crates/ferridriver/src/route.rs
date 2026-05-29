@@ -206,6 +206,54 @@ pub struct RegisteredRoute {
   pub matcher: crate::url_matcher::UrlMatcher,
   /// The handler function.
   pub handler: RouteHandler,
+  /// Remaining number of times this handler may fire (Playwright `times`
+  /// option). `None` means unlimited. Interior-mutable so the interception
+  /// loop can decrement it without upgrading its read lock; a route whose
+  /// counter has reached zero is skipped (and pruned opportunistically).
+  pub remaining: Option<std::sync::Arc<std::sync::atomic::AtomicU32>>,
+}
+
+impl RegisteredRoute {
+  /// Build a route registration, optionally limited to `times` invocations.
+  #[must_use]
+  pub fn new(matcher: crate::url_matcher::UrlMatcher, handler: RouteHandler, times: Option<u32>) -> Self {
+    Self {
+      matcher,
+      handler,
+      remaining: times.map(|t| std::sync::Arc::new(std::sync::atomic::AtomicU32::new(t))),
+    }
+  }
+
+  /// Whether this route may still fire (unlimited, or counter > 0).
+  #[must_use]
+  pub fn live(&self) -> bool {
+    self
+      .remaining
+      .as_ref()
+      .is_none_or(|c| c.load(std::sync::atomic::Ordering::Acquire) > 0)
+  }
+}
+
+/// Select the first live route matching `url`, atomically consume one unit of
+/// its `times` budget, and drop it once exhausted. Returns the handler to run,
+/// or `None` when no live route matches. Shared by every backend's
+/// interception loop so the `times` semantics are identical everywhere.
+#[must_use]
+pub fn take_matching_handler(routes: &mut Vec<RegisteredRoute>, url: &str) -> Option<RouteHandler> {
+  let idx = routes.iter().position(|r| r.live() && r.matcher.matches(url))?;
+  let handler = std::sync::Arc::clone(&routes[idx].handler);
+  let exhausted = routes[idx].remaining.as_ref().is_some_and(|c| {
+    c.fetch_update(
+      std::sync::atomic::Ordering::AcqRel,
+      std::sync::atomic::Ordering::Acquire,
+      |n| n.checked_sub(1),
+    )
+    .map_or(true, |prev| prev <= 1)
+  });
+  if exhausted {
+    routes.remove(idx);
+  }
+  Some(handler)
 }
 
 /// HTTP status text for common status codes.

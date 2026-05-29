@@ -962,12 +962,17 @@ impl ContextRef {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
+    times: Option<u32>,
   ) -> Result<crate::disposable::Disposable> {
+    // NOTE: `times` is applied per-page here (each page tracks its own
+    // remaining count) rather than shared across the whole context. For the
+    // common single-page / times:1 case this matches Playwright; a strict
+    // context-shared counter across multiple pages is not yet implemented.
     let state = self.state.read().await;
     let ctx = state.context(&self.name)?;
     let mut undo = Vec::with_capacity(ctx.pages.len());
     for page in &ctx.pages {
-      page.route(matcher.clone(), handler.clone()).await?;
+      page.route(matcher.clone(), handler.clone(), times).await?;
       undo.push(page.clone());
     }
     drop(state);

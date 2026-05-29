@@ -1113,6 +1113,7 @@ async fn network_interception_tests() {
           ..Default::default()
         });
       }),
+      None,
     )
     .await
     .unwrap();
@@ -1141,6 +1142,7 @@ async fn network_interception_tests() {
           ..Default::default()
         });
       }),
+      None,
     )
     .await
     .unwrap();
@@ -1178,6 +1180,7 @@ async fn network_interception_tests() {
       Arc::new(|route| {
         route.abort("blockedbyclient");
       }),
+      None,
     )
     .await
     .unwrap();

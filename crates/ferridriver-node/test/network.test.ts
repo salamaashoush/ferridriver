@@ -308,6 +308,27 @@ for (const backend of BACKENDS) {
       expect(realFetch).not.toContain("mocked");
     });
 
+    it("route({ times: 1 }) fires the handler exactly once then auto-removes", async () => {
+      await page.goto(`${baseUrl}/landed`, null);
+      let hits = 0;
+      await page.route(
+        "**/api/users",
+        (route) => {
+          hits++;
+          route.fulfill({ status: 200, contentType: "application/json", body: '{"users":["mocked"]}' });
+        },
+        { times: 1 }
+      );
+      // Fire several matching requests; a times:1 route must invoke the
+      // handler exactly once across all of them, then drop out so later
+      // requests reach the network. (Asserting on hits avoids races between
+      // Fetch.enable install timing and the first request.)
+      for (let i = 0; i < 4; i++) {
+        await page.evaluate("fetch('/api/users', { cache: 'no-store' }).then(r => r.text())");
+      }
+      expect(hits).toBe(1);
+    });
+
     it("pickLocator resolves with a Locator for the clicked element", async () => {
       await page.goto("about:blank", null);
       await page.setContent(

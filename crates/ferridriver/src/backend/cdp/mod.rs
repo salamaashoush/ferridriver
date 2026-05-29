@@ -4902,14 +4902,13 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
         .and_then(|v| v.as_str())
         .unwrap_or("");
 
-      // Match route BEFORE allocating InterceptedRequest.
-      // For non-matching requests (the common case), this is zero-alloc.
+      // Match-and-consume under a single write lock so a `times`-limited
+      // route can never fire more than its budget even when the same logical
+      // request pauses at multiple Fetch stages. The matched route's counter
+      // is decremented and the route removed the moment it reaches zero.
       let matched_handler = {
-        let routes_guard = routes.read().await;
-        routes_guard
-          .iter()
-          .find(|r| r.matcher.matches(url))
-          .map(|r| std::sync::Arc::clone(&r.handler))
+        let mut guard = routes.write().await;
+        crate::route::take_matching_handler(&mut guard, url)
       };
 
       if let Some(handler) = matched_handler {
@@ -5059,12 +5058,13 @@ bc.reject=function(seq,err){var c=bc.cbs[seq];if(c){delete bc.cbs[seq];c.j(new E
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
+    times: Option<u32>,
   ) -> Result<()> {
     self
       .routes
       .write()
       .await
-      .push(crate::route::RegisteredRoute { matcher, handler });
+      .push(crate::route::RegisteredRoute::new(matcher, handler, times));
     self.ensure_fetch_enabled().await
   }
 

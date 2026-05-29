@@ -181,7 +181,7 @@ impl BrowserContext {
   /// fans the handler out to each page.
   /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:377`.
   #[napi(
-    ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler: (route: Route) => void",
+    ts_args_type = "urlOrPredicate: string | RegExp | ((url: URL) => boolean), handler: (route: Route) => void, options?: { times?: number }",
     ts_return_type = "Promise<void>"
   )]
   #[allow(clippy::trivially_copy_pass_by_ref)]
@@ -202,8 +202,10 @@ impl BrowserContext {
       true,
       0,
     >,
+    options: Option<crate::types::RouteOptions>,
   ) -> Result<napi::bindgen_prelude::AsyncBlock<()>> {
     use napi::bindgen_prelude::Either3;
+    let times = options.and_then(|o| o.times_u32());
     let nb = napi::threadsafe_function::ThreadsafeFunctionCallMode::NonBlocking;
     let handler = std::sync::Arc::new(handler);
     let (spec, rust_handler): (MatcherSpec, ferridriver::route::RouteHandler) = match url {
@@ -265,7 +267,7 @@ impl BrowserContext {
     let inner = self.inner.clone();
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       let matcher = spec.build()?;
-      inner.route(matcher, rust_handler).await.map_err(crate::error::to_napi)?;
+      inner.route(matcher, rust_handler, times).await.map_err(crate::error::to_napi)?;
       Ok(())
     })
     .build(env)
