@@ -822,11 +822,10 @@ impl BidiPage {
         "BiDi/Firefox does not support `omitBackground` screenshots — no BiDi command exposes the transparent-background override.",
       ));
     }
-    if matches!(opts.scale, Some(crate::backend::ScreenshotScale::Css)) {
-      return Err(FerriError::unsupported(
-        "BiDi/Firefox does not support `scale: \"css\"` screenshots — BiDi always captures at device-pixel scale.",
-      ));
-    }
+    // `scale` is a no-op on BiDi: `browsingContext.captureScreenshot` clips in
+    // CSS pixels and captures at the device pixel ratio, matching Playwright's
+    // own BiDi backend (which accepts `scale` and ignores it). At the default
+    // DPR=1 css and device are identical; we do not refuse it.
 
     // Pre-capture DOM setup (caret, style, mask, CSS-animation pause) —
     // shared helpers, BiDi-specific execution via `script.callFunction`.

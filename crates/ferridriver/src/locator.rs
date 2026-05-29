@@ -469,7 +469,7 @@ impl Locator {
       "right_click",
       |el, page| async move {
         let center = el.call_js_fn_value(
-        "function() { this.scrollIntoViewIfNeeded(); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
+        "function() { this.scrollIntoViewIfNeeded ? this.scrollIntoViewIfNeeded() : this.scrollIntoView({block: 'center', inline: 'center'}); var r = this.getBoundingClientRect(); return {x: r.x + r.width/2, y: r.y + r.height/2}; }"
       ).await?;
         if let Some(c) = center {
           let x = c.get("x").and_then(serde_json::Value::as_f64).unwrap_or(0.0);
