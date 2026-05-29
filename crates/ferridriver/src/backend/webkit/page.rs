@@ -62,6 +62,17 @@ pub struct WebKitPage {
   exposed_fns: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, crate::events::ExposedFn>>>,
   /// Idempotent latch for the `Runtime.addBinding` + listener setup.
   binding_initialized: Arc<AtomicBool>,
+  /// Ordered list of `(identifier, source)` bootstrap-script fragments.
+  /// PW `WebKit`'s `Page.setBootstrapScript` holds a SINGLE source that
+  /// each call overwrites, so every `add_init_script` must re-send the
+  /// JOINED accumulation (mirrors `wkPage.ts::_calculateBootstrapScript`
+  /// and `_updateBootstrapScript`). Without this, registering the binding
+  /// controller and then a `__fd_bc.add(name)` fragment left only the
+  /// fragment at bootstrap time, so a freshly-navigated page hit a
+  /// `__fd_bc` undefined error and `window[name]` never installed.
+  init_scripts: Arc<tokio::sync::Mutex<Vec<(String, String)>>>,
+  /// Monotonic id source for [`Self::init_scripts`] identifiers.
+  init_script_seq: Arc<std::sync::atomic::AtomicU64>,
   /// Live request table, keyed by PW `WebKit` `requestId`. The network
   /// listener inserts on `Network.requestWillBeSent`, links responses
   /// on `Network.responseReceived`, and removes on terminal
@@ -82,6 +93,18 @@ pub struct WebKitPage {
   /// `Runtime.executionContextCreated` events. Used by
   /// [`Self::evaluate_in_frame`] to evaluate inside an iframe's realm.
   pub(crate) frame_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<String, i64>>>,
+  /// Per-execution-context cache of the global-object `objectId` keyed
+  /// by `executionContextId`, plus a flag for whether the `window.__fd`
+  /// selector engine has been injected into that context. The main
+  /// frame's `__fd` injection is tracked by [`Self::engine_injected`] +
+  /// [`Self::global_object_id`]; child frames each have their own realm
+  /// where `__fd` must be injected independently (Playwright's
+  /// `wkPage.ts` creates a `FrameExecutionContext` per
+  /// `Runtime.executionContextCreated`). Without this, a
+  /// `frame.waitForSelector` polling `window.__fd.selOne` in the child
+  /// realm throws forever (`__fd` is undefined there) and the wait
+  /// times out. Cleared on navigation.
+  frame_engine_contexts: Arc<tokio::sync::RwLock<rustc_hash::FxHashMap<i64, FrameEngineContext>>>,
   /// Main-frame id captured from the initial `Page.getResourceTree`
   /// response. PW `WebKit`'s `frame_id` is distinct from `target_id`
   /// (the page proxy's id); returning `target_id` from
@@ -118,6 +141,15 @@ pub struct WebKitPage {
   pub(crate) console_log: Arc<ArcSwap<tokio::sync::RwLock<Vec<ConsoleMessage>>>>,
   pub(crate) network_log: Arc<ArcSwap<tokio::sync::RwLock<Vec<NetworkRequest>>>>,
   pub(crate) dialog_log: Arc<ArcSwap<tokio::sync::RwLock<Vec<DialogEvent>>>>,
+}
+
+/// Per-child-frame execution-context bookkeeping for the `window.__fd`
+/// selector engine. `global_object_id` anchors `Runtime.callFunctionOn`
+/// at the child realm; `engine_injected` latches the one-time injection.
+#[derive(Clone, Default)]
+struct FrameEngineContext {
+  global_object_id: Option<String>,
+  engine_injected: bool,
 }
 
 /// Latch + notify for navigation lifecycle events fed by the
@@ -267,11 +299,14 @@ impl WebKitPage {
       global_object_id: Arc::new(std::sync::Mutex::new(None)),
       exposed_fns: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
       binding_initialized: Arc::new(AtomicBool::new(false)),
+      init_scripts: Arc::new(tokio::sync::Mutex::new(Vec::new())),
+      init_script_seq: Arc::new(std::sync::atomic::AtomicU64::new(0)),
       requests: Arc::new(std::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       nav_request_slot: crate::network::NavRequestSlot::new(),
       routes: Arc::new(tokio::sync::RwLock::new(Vec::new())),
       intercept_enabled: Arc::new(AtomicBool::new(false)),
       frame_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
+      frame_engine_contexts: Arc::new(tokio::sync::RwLock::new(rustc_hash::FxHashMap::default())),
       main_frame_id_cache,
       websockets: Arc::new(tokio::sync::Mutex::new(rustc_hash::FxHashMap::default())),
       events: EventEmitter::new(),
@@ -476,6 +511,16 @@ impl WebKitPage {
 
   pub async fn evaluate_in_frame(&self, expression: &str, frame_id: &str) -> Result<Option<Value>> {
     let ctx_id = self.frame_contexts.read().await.get(frame_id).copied();
+    // Selector-engine calls reach a child frame's realm through
+    // `contextId`. `window.__fd` only lives in whichever realm the
+    // engine was injected into, so inject it into THIS context first
+    // when the expression depends on it — otherwise the child realm
+    // throws `__fd is undefined` on every poll and the wait wedges.
+    if let Some(id) = ctx_id
+      && expression.contains("window.__fd")
+    {
+      self.ensure_engine_in_context(id).await?;
+    }
     let mut params = json!({ "expression": expression, "returnByValue": true });
     if let Some(id) = ctx_id {
       params["contextId"] = json!(id);
@@ -678,6 +723,106 @@ impl WebKitPage {
     Ok(())
   }
 
+  /// Resolve the global-object `objectId` for a specific execution
+  /// context (an iframe's realm), evaluating `"this"` with `contextId`
+  /// set. Cached per context in [`Self::frame_engine_contexts`].
+  async fn frame_context_anchor(&self, context_id: i64) -> Result<String> {
+    if let Some(id) = self
+      .frame_engine_contexts
+      .read()
+      .await
+      .get(&context_id)
+      .and_then(|c| c.global_object_id.clone())
+    {
+      return Ok(id);
+    }
+    let resp = self
+      .target_session()
+      .send(
+        protocol::RUNTIME_EVALUATE,
+        json!({ "expression": "this", "returnByValue": false, "contextId": context_id }),
+      )
+      .await
+      .map_err(conn_err)?;
+    let id = resp
+      .get("result")
+      .and_then(|r| r.get("objectId"))
+      .and_then(Value::as_str)
+      .ok_or_else(|| FerriError::protocol("Runtime.evaluate", "frame context anchor: no objectId"))?
+      .to_string();
+    self
+      .frame_engine_contexts
+      .write()
+      .await
+      .entry(context_id)
+      .or_default()
+      .global_object_id = Some(id.clone());
+    Ok(id)
+  }
+
+  /// Inject the `window.__fd` selector engine into the iframe realm
+  /// identified by `context_id`. Idempotent per context. Mirrors
+  /// [`Self::ensure_engine_injected`] but anchors `callFunctionOn` on
+  /// the child realm's global so `__fd` lands in THAT realm. Playwright
+  /// creates one `FrameExecutionContext` (and lazily injects the
+  /// utility script) per `Runtime.executionContextCreated`
+  /// (`wkPage.ts::_onExecutionContextCreated`).
+  async fn ensure_engine_in_context(&self, context_id: i64) -> Result<()> {
+    if self
+      .frame_engine_contexts
+      .read()
+      .await
+      .get(&context_id)
+      .is_some_and(|c| c.engine_injected)
+    {
+      return Ok(());
+    }
+    // Prune engine entries for contexts that have since been replaced
+    // (a navigated frame gets a fresh contextId) so the map stays
+    // bounded across long-lived pages.
+    {
+      let live: std::collections::HashSet<i64> = self.frame_contexts.read().await.values().copied().collect();
+      self
+        .frame_engine_contexts
+        .write()
+        .await
+        .retain(|id, _| *id == context_id || live.contains(id));
+    }
+    let anchor = self.frame_context_anchor(context_id).await?;
+    let js = crate::selectors::build_lazy_inject_js();
+    let wrapper = format!("function(){{ return ({js}); }}");
+    let resp = self
+      .target_session()
+      .send(
+        protocol::RUNTIME_CALL_FUNCTION_ON,
+        json!({
+          "objectId": anchor,
+          "functionDeclaration": wrapper,
+          "returnByValue": false,
+          "awaitPromise": true,
+        }),
+      )
+      .await
+      .map_err(conn_err)?;
+    if resp.get("wasThrown").and_then(Value::as_bool).unwrap_or(false) {
+      let text = resp
+        .get("result")
+        .and_then(|r| r.get("description").or_else(|| r.get("value")))
+        .and_then(Value::as_str)
+        .unwrap_or("frame engine injection threw")
+        .to_string();
+      return Err(FerriError::evaluation(text));
+    }
+    self
+      .frame_engine_contexts
+      .write()
+      .await
+      .entry(context_id)
+      .or_default()
+      .engine_injected = true;
+    Ok(())
+  }
+
   pub async fn evaluate(&self, expression: &str) -> Result<Option<Value>> {
     Ok(Some(self.eval_value(expression).await?))
   }
@@ -693,8 +838,40 @@ impl WebKitPage {
       .map_err(|_| FerriError::invalid_selector(selector, "no element found"))
   }
 
-  pub async fn evaluate_to_element(&self, js: &str, _frame_id: Option<&str>) -> Result<AnyElement> {
-    let resp = self.runtime_evaluate(js, false).await?;
+  pub async fn evaluate_to_element(&self, js: &str, frame_id: Option<&str>) -> Result<AnyElement> {
+    // Resolve element selectors inside the owning frame's realm so the
+    // returned `objectId` is bound to the right execution context and
+    // `window.__fd` is present there. `None` (or the main frame) uses
+    // the page's default realm.
+    let ctx_id = match frame_id {
+      Some(fid) => self.frame_contexts.read().await.get(fid).copied(),
+      None => None,
+    };
+    let resp = if let Some(id) = ctx_id {
+      if js.contains("window.__fd") {
+        self.ensure_engine_in_context(id).await?;
+      }
+      let r = self
+        .target_session()
+        .send(
+          protocol::RUNTIME_EVALUATE,
+          json!({ "expression": js, "returnByValue": false, "contextId": id }),
+        )
+        .await
+        .map_err(conn_err)?;
+      if r.get("wasThrown").and_then(Value::as_bool).unwrap_or(false) {
+        let text = r
+          .get("result")
+          .and_then(|res| res.get("description").or_else(|| res.get("value")))
+          .and_then(Value::as_str)
+          .unwrap_or("evaluation threw")
+          .to_string();
+        return Err(FerriError::evaluation(text));
+      }
+      r
+    } else {
+      self.runtime_evaluate(js, false).await?
+    };
     let object_id = resp
       .get("result")
       .and_then(|r| r.get("objectId"))
@@ -741,6 +918,46 @@ impl WebKitPage {
   // ── Screenshots ───────────────────────────────────────────────────────
 
   pub async fn screenshot(&self, opts: ScreenshotOpts) -> Result<Vec<u8>> {
+    // Install the DOM-side overrides (caret hide, user style, animation
+    // pause, mask overlays) before the capture, exactly like the CDP
+    // backend (`CdpPage::screenshot_install_dom`). WebKit has no
+    // protocol-level masking, so the shared `screenshot_js` overlay
+    // divs are the only way to honour `mask` / `maskColor`.
+    let css = crate::backend::screenshot_js::build_css(&opts);
+    let style_installed = if css.is_empty() {
+      false
+    } else {
+      self
+        .eval_value(&crate::backend::screenshot_js::install_style_js(&css))
+        .await?;
+      true
+    };
+    let mask_installed = if let Some(js) = crate::backend::screenshot_js::install_mask_js(&opts) {
+      self.eval_value(&js).await?;
+      true
+    } else {
+      false
+    };
+    let result = self.capture_rect(&opts).await;
+    // Teardown always runs so post-screenshot interaction sees pristine
+    // DOM, even when the capture itself failed.
+    if style_installed {
+      let _ = self
+        .eval_value(crate::backend::screenshot_js::uninstall_style_js())
+        .await;
+    }
+    if mask_installed {
+      let _ = self
+        .eval_value(crate::backend::screenshot_js::uninstall_mask_js())
+        .await;
+    }
+    result
+  }
+
+  /// Capture the visible / full-page / clipped rect via `Page.snapshotRect`
+  /// and decode the returned data URL. Split out of [`Self::screenshot`]
+  /// so the mask/style install + teardown wrap a single capture call.
+  async fn capture_rect(&self, opts: &ScreenshotOpts) -> Result<Vec<u8>> {
     let (document_rect, coord_system) = if opts.full_page {
       let dims = self
         .eval_value(
@@ -1538,22 +1755,43 @@ impl WebKitPage {
   }
 
   pub async fn add_init_script(&self, source: &str) -> Result<String> {
-    let resp = self
-      .target_session()
-      .send("Page.setBootstrapScript", json!({ "source": source }))
-      .await
-      .map_err(conn_err)?;
-    Ok(
-      resp
-        .get("identifier")
-        .and_then(Value::as_str)
-        .unwrap_or("0")
-        .to_string(),
-    )
+    let id = self.init_script_seq.fetch_add(1, Ordering::Relaxed).to_string();
+    {
+      let mut scripts = self.init_scripts.lock().await;
+      scripts.push((id.clone(), source.to_string()));
+    }
+    self.flush_bootstrap_script().await?;
+    Ok(id)
   }
 
-  pub async fn remove_init_script(&self, _identifier: &str) -> Result<()> {
-    let _ = self.target_session().send("Page.setBootstrapScript", json!({})).await;
+  pub async fn remove_init_script(&self, identifier: &str) -> Result<()> {
+    {
+      let mut scripts = self.init_scripts.lock().await;
+      scripts.retain(|(id, _)| id != identifier);
+    }
+    self.flush_bootstrap_script().await?;
+    Ok(())
+  }
+
+  /// Re-send `Page.setBootstrapScript` with the JOINED accumulation of
+  /// every registered init-script fragment. `Page.setBootstrapScript`
+  /// holds a single source that each call overwrites, so the only way
+  /// to keep N scripts live across navigations is to concatenate them
+  /// (mirrors `wkPage.ts::_calculateBootstrapScript`).
+  async fn flush_bootstrap_script(&self) -> Result<()> {
+    let joined = {
+      let scripts = self.init_scripts.lock().await;
+      scripts
+        .iter()
+        .map(|(_, src)| src.as_str())
+        .collect::<Vec<_>>()
+        .join(";\n")
+    };
+    self
+      .target_session()
+      .send("Page.setBootstrapScript", json!({ "source": joined }))
+      .await
+      .map_err(conn_err)?;
     Ok(())
   }
 
@@ -1606,7 +1844,19 @@ impl WebKitPage {
       }
     }
     let anchor = match anchor {
-      Some(a) => a,
+      Some(a) => {
+        // The wrapper runs in the realm the anchor handle belongs to.
+        // A handle resolved in a child frame carries that frame's
+        // `injectedScriptId` (== execution context id) inside its
+        // objectId JSON; `window.__fd` must exist in THAT realm for the
+        // UtilityScript wrapper to work. Inject it there if needed.
+        if let Some(ctx_id) = object_id_context(&a)
+          && self.frame_contexts.read().await.values().any(|&v| v == ctx_id)
+        {
+          self.ensure_engine_in_context(ctx_id).await?;
+        }
+        a
+      },
       None => self.global_anchor().await?,
     };
     let resp = self
@@ -1775,6 +2025,17 @@ fn collect_frames(node: &Value, parent: Option<&str>, out: &mut Vec<FrameInfo>) 
 /// Map a [`super::connection::ConnectionError`] to a [`FerriError`].
 fn conn_err(e: super::connection::ConnectionError) -> FerriError {
   e.into()
+}
+
+/// Extract the execution-context id (`injectedScriptId`) from a PW
+/// `WebKit` `objectId`. The wire form is a JSON string like
+/// `{"injectedScriptId":6,"id":42}`; the `injectedScriptId` is the
+/// `Runtime.ExecutionContextId` the object lives in.
+fn object_id_context(object_id: &str) -> Option<i64> {
+  serde_json::from_str::<Value>(object_id)
+    .ok()?
+    .get("injectedScriptId")
+    .and_then(Value::as_i64)
 }
 
 /// Decode a `Runtime.callFunctionOn` reply produced by the
