@@ -234,7 +234,9 @@ impl BrowserContextJs {
     ctx: Ctx<'js>,
     url: Value<'js>,
     handler: rquickjs::Function<'js>,
+    options: rquickjs::function::Opt<Value<'js>>,
   ) -> rquickjs::Result<()> {
+    let times = crate::bindings::page::parse_route_times(&options)?;
     let async_ctx = match ctx.userdata::<crate::engine::SessionAsyncCtx>() {
       Some(ud) => ud.0.clone(),
       None => {
@@ -291,7 +293,7 @@ impl BrowserContextJs {
       });
     });
 
-    self.inner.route(matcher, rust_handler).await.into_js()?;
+    self.inner.route(matcher, rust_handler, times).await.into_js()?;
     Ok(())
   }
 

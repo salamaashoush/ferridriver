@@ -2088,8 +2088,9 @@ impl Page {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
+    times: Option<u32>,
   ) -> Result<crate::disposable::Disposable> {
-    self.inner.route(matcher.clone(), handler).await?;
+    self.inner.route(matcher.clone(), handler, times).await?;
     let inner = self.inner.clone();
     Ok(crate::disposable::Disposable::new(move || async move {
       inner.unroute(&matcher).await

@@ -18,6 +18,23 @@ pub(crate) fn f64_to_u64(v: f64) -> u64 {
   }
 }
 
+/// Options for `page.route` / `browserContext.route`.
+#[napi(object)]
+#[derive(Debug, Clone, Default)]
+pub struct RouteOptions {
+  /// Playwright: `times?: number` — how many times the handler may fire
+  /// before it is automatically removed.
+  pub times: Option<f64>,
+}
+
+impl RouteOptions {
+  /// Resolve `times` to a `u32` count (truncates fractional, clamps negative).
+  #[must_use]
+  pub fn times_u32(&self) -> Option<u32> {
+    self.times.map(|t| f64_to_u64(t) as u32)
+  }
+}
+
 /// Options for role-based locators (getByRole).
 #[napi(object)]
 #[derive(Debug, Clone, Default)]

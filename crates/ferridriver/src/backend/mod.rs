@@ -1283,8 +1283,9 @@ impl AnyPage {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
+    times: Option<u32>,
   ) -> Result<()> {
-    page_dispatch!(self, route(matcher, handler))
+    page_dispatch!(self, route(matcher, handler, times))
   }
 
   pub async fn unroute(&self, matcher: &crate::url_matcher::UrlMatcher) -> Result<()> {

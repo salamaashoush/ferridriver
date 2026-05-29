@@ -2546,7 +2546,7 @@ mod storage_state_tests {
     let parsed: StorageState = serde_json::from_value(json.clone()).unwrap();
     assert_eq!(parsed.origins[0].origin, "https://e.com");
     assert_eq!(parsed.origins[0].local_storage[0].name, "k");
-    // Same value is accepted as inline hydration input.
-    let _input = StorageStateInput::Inline(json);
+    // The same value is accepted as inline hydration input.
+    assert!(matches!(StorageStateInput::Inline(json), StorageStateInput::Inline(_)));
   }
 }

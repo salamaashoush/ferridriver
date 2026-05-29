@@ -1393,13 +1393,14 @@ impl WebKitPage {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
+    times: Option<u32>,
   ) -> Result<()> {
     self.ensure_interception_enabled().await?;
     self
       .routes
       .write()
       .await
-      .push(crate::route::RegisteredRoute { matcher, handler });
+      .push(crate::route::RegisteredRoute::new(matcher, handler, times));
     Ok(())
   }
 

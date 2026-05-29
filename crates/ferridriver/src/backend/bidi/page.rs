@@ -2383,6 +2383,7 @@ impl BidiPage {
     &self,
     matcher: crate::url_matcher::UrlMatcher,
     handler: crate::route::RouteHandler,
+    times: Option<u32>,
   ) -> Result<()> {
     let needs_intercept = self.intercept_ids.read().await.is_empty();
     if needs_intercept {
@@ -2442,11 +2443,8 @@ impl BidiPage {
             .unwrap_or("");
 
           let matched_handler = {
-            let routes_guard = routes.read().await;
-            routes_guard
-              .iter()
-              .find(|r| r.matcher.matches(url))
-              .map(|r| std::sync::Arc::clone(&r.handler))
+            let mut guard = routes.write().await;
+            crate::route::take_matching_handler(&mut guard, url)
           };
 
           if let Some(handler) = matched_handler {
@@ -2489,7 +2487,7 @@ impl BidiPage {
       .routes
       .write()
       .await
-      .push(crate::route::RegisteredRoute { matcher, handler });
+      .push(crate::route::RegisteredRoute::new(matcher, handler, times));
 
     Ok(())
   }

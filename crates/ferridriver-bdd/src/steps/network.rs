@@ -57,6 +57,7 @@ async fn mock_with_status_and_body(world: &mut BrowserWorld, pattern: String, st
           ..FulfillResponse::default()
         });
       }),
+      None,
     )
     .await
     .map_err(|e| StepError::wrap(format!("mock requests to \"{pattern}\""), e))?;
@@ -79,6 +80,7 @@ async fn mock_with_json(world: &mut BrowserWorld, pattern: String, json_body: St
           ..FulfillResponse::default()
         });
       }),
+      None,
     )
     .await
     .map_err(|e| StepError::wrap(format!("mock JSON requests to \"{pattern}\""), e))?;
@@ -115,6 +117,7 @@ async fn mock_with_fixture(world: &mut BrowserWorld, pattern: String, fixture_pa
           ..FulfillResponse::default()
         });
       }),
+      None,
     )
     .await
     .map_err(|e| StepError::wrap(format!("mock with fixture \"{fixture_path}\""), e))?;
@@ -151,6 +154,7 @@ async fn mock_with_fixture_and_status(world: &mut BrowserWorld, pattern: String,
           ..FulfillResponse::default()
         });
       }),
+      None,
     )
     .await
     .map_err(|e| StepError::wrap(format!("mock with fixture \"{fixture_path}\""), e))?;
@@ -167,6 +171,7 @@ async fn block_requests(world: &mut BrowserWorld, pattern: String) {
       Arc::new(|route| {
         route.abort("BlockedByClient");
       }),
+      None,
     )
     .await
     .map_err(|e| StepError::wrap(format!("block requests to \"{pattern}\""), e))?;
@@ -185,6 +190,7 @@ async fn intercept_requests(world: &mut BrowserWorld, pattern: String) {
         tracker.push(route.request().clone());
         route.continue_route(ContinueOverrides::default());
       }),
+      None,
     )
     .await
     .map_err(|e| StepError::wrap(format!("intercept requests to \"{pattern}\""), e))?;

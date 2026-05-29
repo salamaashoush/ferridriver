@@ -311,6 +311,23 @@ fn parse_unroute_behavior(behavior: &str) -> rquickjs::Result<ferridriver::optio
   }
 }
 
+/// Extract the `times` field from a `route(url, handler, { times })` options
+/// bag. Absent/undefined options or a missing `times` yields `None`
+/// (unlimited). Shared by `page.route` and `context.route`.
+pub(crate) fn parse_route_times(options: &rquickjs::function::Opt<rquickjs::Value<'_>>) -> rquickjs::Result<Option<u32>> {
+  let Some(v) = options.0.as_ref() else { return Ok(None) };
+  if v.is_undefined() || v.is_null() {
+    return Ok(None);
+  }
+  let Some(obj) = v.as_object() else { return Ok(None) };
+  let t: rquickjs::Value<'_> = obj.get("times")?;
+  if t.is_undefined() || t.is_null() {
+    return Ok(None);
+  }
+  #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+  Ok(t.as_number().map(|n| if n < 0.0 { 0 } else { n as u32 }))
+}
+
 /// JS-visible wrapper around [`ferridriver::Page`].
 ///
 /// Held as `Arc<Page>` so the same page can be shared with the MCP session
@@ -1173,7 +1190,9 @@ impl PageJs {
     ctx: rquickjs::Ctx<'js>,
     url: rquickjs::Value<'js>,
     handler: rquickjs::Function<'js>,
+    options: rquickjs::function::Opt<rquickjs::Value<'js>>,
   ) -> rquickjs::Result<rquickjs::Value<'js>> {
+    let times = parse_route_times(&options)?;
     let async_ctx = self.async_ctx.clone().ok_or_else(|| {
       rquickjs::Error::new_from_js_message(
         "page.route",
@@ -1247,7 +1266,7 @@ impl PageJs {
       });
     });
 
-    let disposable = self.inner.route(matcher, rust_handler).await.into_js()?;
+    let disposable = self.inner.route(matcher, rust_handler, times).await.into_js()?;
     let instance =
       rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
     rquickjs::IntoJs::into_js(instance, &ctx)
