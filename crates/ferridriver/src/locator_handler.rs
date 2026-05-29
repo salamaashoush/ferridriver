@@ -22,8 +22,7 @@ use crate::locator::Locator;
 /// Callback invoked when a registered handler's locator becomes visible.
 /// Receives a [`Locator`] bound to the handler's selector (matching
 /// Playwright's `handler(locator)` signature).
-pub type LocatorHandlerFn =
-  Arc<dyn Fn(Locator) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
+pub type LocatorHandlerFn = Arc<dyn Fn(Locator) -> Pin<Box<dyn Future<Output = Result<()>> + Send>> + Send + Sync>;
 
 struct LocatorHandlerEntry {
   uid: u64,

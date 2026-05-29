@@ -2859,7 +2859,6 @@ impl<T: CdpWrap> CdpPage<T> {
     Ok(())
   }
 
-
   /// Dispatch a hover at `(x, y)`: `steps` interpolated `mouseMoved`
   /// events with the caller's CDP `modifiers` bitmask on each, ending
   /// at `(x, y)` exactly. No `mousePressed` / `mouseReleased`.
