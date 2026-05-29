@@ -76,11 +76,12 @@ there is no generated TypeScript config-type mirror.
 
 ### Backend System (enum dispatch, not trait objects)
 
-Three backends in `crates/ferridriver/src/backend/`:
+Four backends in `crates/ferridriver/src/backend/`:
 
 - **CdpPipe** (default) — CDP over Unix pipes (fd 3/4), lowest latency, launches Chrome
 - **CdpRaw** — CDP over WebSocket, fully parallel, can connect to running Chrome
-- **WebKit** — macOS-only native WKWebView via Objective-C subprocess IPC
+- **BiDi** — WebDriver BiDi over WebSocket (Firefox); cross-platform
+- **WebKit** — Playwright's WebKit build driven via `pw_run.sh` over a NUL-delimited JSON inspector pipe (fd 3/4); cross-platform (Linux + macOS), same transport on every platform
 
 Backend directory structure:
 ```
@@ -90,9 +91,14 @@ backend/
     pipe.rs         Pipe transport
     ws.rs           WebSocket transport
     transport.rs    Transport abstraction + CDP tracing
-  webkit/
+  bidi/             WebDriver BiDi (Firefox) over WebSocket
+  webkit/           Playwright WebKit protocol over pw_run.sh (NUL-delimited JSON pipe)
     mod.rs
-    ipc.rs
+    browser.rs      pw_run.sh child + root session
+    connection.rs   protocol session / message routing
+    protocol.rs     Playwright WebKit protocol method constants
+    transport.rs    NUL-delimited JSON pipe (fd 3/4)
+    input.rs page.rs element.rs events.rs launcher.rs
 ```
 
 ### Test Runner (`ferridriver-test`)
@@ -184,9 +190,9 @@ If the user sees `regexSource` or `glob` as a key in the generated `.d.ts`, that
 
 ### 4. Every backend gets a real implementation — no stubs, no placeholder strings
 
-Every public API must work on every backend (`cdp-pipe`, `cdp-raw`, `bidi`, `webkit`). Not "stub returns a constant and we'll fix it later." Not "only CDP for now, others return Unsupported." If the protocol supports the operation, implement it — and if it genuinely cannot (e.g. `printToPDF` on `WKWebView`), return a typed `FerriError::Unsupported { reason }` with a clear explanation, not a placeholder value.
+Every public API must work on every backend (`cdp-pipe`, `cdp-raw`, `bidi`, `webkit`). Not "stub returns a constant and we'll fix it later." Not "only CDP for now, others return Unsupported." If the protocol supports the operation, implement it — and if it genuinely cannot (e.g. `page.pdf()` on WebKit/Firefox, which Playwright supports only on Chromium), return a typed `FerriError::Unsupported { reason }` with a clear explanation, not a placeholder value.
 
-- **WebKit**: add an IPC op to `host.m` + `ipc.rs` if needed (`Op::GetWebKitVersion` is an example — queries `CFBundleShortVersionString` from the `com.apple.WebKit` bundle).
+- **WebKit**: drive it through Playwright's WebKit Inspector protocol — add/inspect message constants in `backend/webkit/protocol.rs` and the send/await flow in `backend/webkit/browser.rs` / `connection.rs`. It is a `pw_run.sh` child over a NUL-delimited JSON pipe, cross-platform; there is no native (`host.m`/Objective-C/WKWebView) layer. Version comes from the protocol/launcher (`webkit-playwright/{revision}`), not a native bundle query.
 - **BiDi**: read `/tmp/playwright/packages/playwright-core/src/server/bidi/` to see what Playwright's own BiDi backend does; sometimes Playwright itself drops features BiDi can't support (e.g. `referer` on goto), sometimes it works around via `network.setExtraHeaders` — we can do better where possible.
 - **CDP**: actual CDP calls capture real protocol values, don't reshape them.
 
@@ -241,7 +247,7 @@ there must be an integration test that:
 3. Passes on every backend the API is claimed to support (`cdp-pipe`,
    `cdp-raw`, `bidi`, `webkit`). If a backend fails, FIX THE BACKEND — do
    not write `if (backend !== 'webkit')` or similar guards in the test.
-   Backend-specific NSEvent coalescing, protocol timing, IPC buffering are
+   Backend-specific input-event coalescing, protocol timing, IPC buffering are
    all real problems and all have fixes. Skipping the assertion is a
    shortcut that hides the bug.
 4. Is deterministic across runs (5×/10× loops shouldn't show flake). State
@@ -291,7 +297,7 @@ concrete symptom — never paper over it with a conditional skip.
 - **Never skip or suppress lints or type errors** — fix them properly.
 - **Never take shortcuts** or simplify code just to compile / pass tests. If a change requires rethinking, say so; don't silently drop the hard case.
 - **Never commit with red tests**, even if the red is "pre-existing." Fix it in the same commit that noticed it.
-- Cross-platform: repo must build on macOS AND Arch Linux (the user's two machines). No macOS-only syscalls in non-WebKit code.
+- Cross-platform: repo must build AND run on macOS AND Arch Linux (the user's two machines) — including the WebKit backend, which uses Playwright's cross-platform WebKit build (`pw_run.sh`), not native WKWebView. No platform-specific syscalls.
 
 ---
 
@@ -323,11 +329,11 @@ Napi-rs doesn't ship a `RegExp` type directly, but `napi_get_named_property` wal
 
 When a test says `browser.version()` returns `"Firefox"` regardless of the real Firefox version (because the BiDi path hardcoded a constant), the silent lie only surfaces after someone spends hours debugging. For each backend:
 
-- **WebKit**: add an IPC op to `host.m` + `ipc.rs` if needed. `Op::GetWebKitVersion` queries `[NSBundle bundleWithIdentifier:@"com.apple.WebKit"]` for real version strings — not a hardcode.
+- **WebKit**: drive the Playwright WebKit Inspector protocol (`backend/webkit/protocol.rs` + `browser.rs`); version is `webkit-playwright/{revision}` from the launcher, not a native bundle query. No `host.m`/Objective-C.
 - **BiDi**: use session capabilities from `session.new` (`browserName` + `browserVersion` — real values). Read `/tmp/playwright/packages/playwright-core/src/server/bidi/` before falling back.
 - **CDP**: capture what the protocol returns; don't reshape it.
 
-Typed `FerriError::Unsupported { reason }` is OK where a backend genuinely cannot (e.g. `printToPDF` on `WKWebView`). Placeholder values are never OK.
+Typed `FerriError::Unsupported { reason }` is OK where a backend genuinely cannot (e.g. `page.pdf()` on WebKit/Firefox — Playwright supports it only on Chromium). Placeholder values are never OK.
 
 ### Every API change updates NAPI AND QuickJS bindings in the same commit
 
@@ -378,7 +384,7 @@ If a pre-existing test is failing, fix it in the same commit. "Pre-existing fail
 - **QuickJS `page.evaluate` JSON-stringifies primitive results.** Numbers come back as `"42"`. `Number(...)` inside JS or `.as_str().parse::<i64>()` in Rust.
 - **QuickJS doesn't have `setTimeout`.** `await new Promise(r => setTimeout(r, 50))` throws `setTimeout is not defined`. Avoid synthetic sleeps in `run_script` tests; observe the next page round-trip or use `page.waitForLoadState`.
 - **BiDi injects `data-fdref="<id>"` attributes on DOM elements it references.** `innerHTML` serialises as `<b data-fdref="4">world</b>` on BiDi where CDP/WebKit return bare `<b>world</b>`. Match substrings, not literals.
-- **WebKit reuses `Op::Evaluate` for utility-script calls.** Because every handle is reachable from page-side JS via `window.__wr.get(ref_id)`, a full `callFunctionOn`-equivalent can be synthesised as an inline expression — no new IPC op needed. Saves a host.m change.
+- **WebKit synthesises `callFunctionOn` via an inline `evaluate`.** Because every handle is reachable from page-side JS via the page-side handle registry, a full `callFunctionOn`-equivalent is built as an inline expression sent over the WebKit Inspector protocol's evaluate — no extra protocol method needed.
 - **The utility-script `JSON.stringify` wrapper trick keeps the wire clean.** If the wrapper returns the raw isomorphic wire object directly, CDP / BiDi re-serialise it via their own `RemoteValue` format and corrupt the tags. Fix: `JSON.stringify` the result inside the page-side wrapper so the backend only ships flat strings; Rust-side `JSON.parse` back into `SerializedValue`. Canonical wrapper at `crates/ferridriver/src/backend/cdp/mod.rs::UTILITY_EVAL_WRAPPER` — shared with BiDi and WebKit.
 - **CDP `Input.dispatchTouchEvent` needs `Emulation.setTouchEmulationEnabled` first** or DOM touch listeners never fire. Not obvious from the protocol docs; surfaced only via a test failure under full-suite vs. isolated contrast.
 
