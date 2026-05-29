@@ -473,6 +473,10 @@ fn register_binding_surface(set: &mut TestSet<'_>) {
   );
 }
 
+fn register_locator_handler(set: &mut TestSet<'_>) {
+  run!(set, backends_support::locator_handler::test_add_locator_handler_unsupported);
+}
+
 fn register_getby_regex(set: &mut TestSet<'_>) {
   run!(set, backends_support::getby_regex::test_getby_text_regex);
   run!(set, backends_support::getby_regex::test_getby_role_name_regex);
@@ -559,6 +563,10 @@ macro_rules! backend_module {
       #[test]
       fn getby_regex() {
         run_category($backend, register_getby_regex);
+      }
+      #[test]
+      fn locator_handler() {
+        run_category($backend, register_locator_handler);
       }
       #[test]
       fn multi_page() {

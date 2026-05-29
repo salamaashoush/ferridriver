@@ -57,6 +57,9 @@ pub struct Page {
   /// [`crate::state::BrowserState::register_opened_page`] at page
   /// registration time, when the recording runtime is spawned.
   video: Mutex<Option<Arc<crate::video::Video>>>,
+  /// Registered `addLocatorHandler` callbacks. Consulted before every
+  /// actionability retry (see [`crate::locator_handler::perform_checkpoint`]).
+  locator_handlers: crate::locator_handler::LocatorHandlerRegistry,
 }
 
 impl Page {
@@ -86,6 +89,7 @@ impl Page {
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
       frame_cache,
       video: Mutex::new(None),
+      locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
     });
     // Wire the backend's weak back-reference before the frame cache
     // starts seeding — the file-chooser listener (spawned in
@@ -112,6 +116,7 @@ impl Page {
       emulated_media: Mutex::new(crate::options::EmulateMediaOptions::default()),
       frame_cache,
       video: Mutex::new(None),
+      locator_handlers: crate::locator_handler::LocatorHandlerRegistry::default(),
     });
     page.inner.set_page_backref(Arc::downgrade(&page));
     page.seed_frame_cache();
@@ -464,6 +469,50 @@ impl Page {
   #[must_use]
   pub fn locator(self: &Arc<Self>, selector: &str, options: Option<crate::options::FilterOptions>) -> Locator {
     self.main_frame().locator(selector, options)
+  }
+
+  /// Internal accessor for the locator-handler registry. Consumed by the
+  /// actionability checkpoint and by the public add/remove methods below.
+  pub(crate) fn locator_handlers(&self) -> &crate::locator_handler::LocatorHandlerRegistry {
+    &self.locator_handlers
+  }
+
+  /// Register a handler that runs when `locator` becomes visible during an
+  /// actionability wait. Mirrors Playwright
+  /// `page.addLocatorHandler(locator, handler, options?: { times?, noWaitAfter? })`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:397`).
+  ///
+  /// The handler must belong to the main frame of this page. `times: Some(0)`
+  /// registers nothing. When `times` runs out the handler auto-removes.
+  ///
+  /// # Errors
+  ///
+  /// Returns [`crate::error::FerriError`] if `locator` is not bound to this
+  /// page's main frame.
+  pub fn add_locator_handler(
+    self: &Arc<Self>,
+    locator: &Locator,
+    handler: crate::locator_handler::LocatorHandlerFn,
+    times: Option<u32>,
+    no_wait_after: bool,
+  ) -> Result<()> {
+    if !locator.frame.is_main_frame() {
+      return Err(crate::error::FerriError::protocol(
+        "addLocatorHandler",
+        "Locator must belong to the main frame of this page",
+      ));
+    }
+    self
+      .locator_handlers
+      .register(locator.selector().to_string(), handler, times, no_wait_after);
+    Ok(())
+  }
+
+  /// Remove all handlers registered for `locator`. Mirrors Playwright
+  /// `page.removeLocatorHandler(locator)`
+  /// (`/tmp/playwright/packages/playwright-core/src/client/page.ts:423`).
+  pub fn remove_locator_handler(self: &Arc<Self>, locator: &Locator) {
+    self.locator_handlers.remove_by_selector(locator.selector());
   }
 
   #[must_use]
