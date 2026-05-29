@@ -58,7 +58,11 @@ pub fn test_add_locator_handler_unsupported(c: &mut McpClient) {
     "QuickJS addLocatorHandler should throw Unsupported: {v}"
   );
   assert!(
-    v["message"].as_str().unwrap_or_default().to_lowercase().contains("addlocatorhandler"),
+    v["message"]
+      .as_str()
+      .unwrap_or_default()
+      .to_lowercase()
+      .contains("addlocatorhandler"),
     "error should explain the addLocatorHandler limitation: {v}"
   );
 }

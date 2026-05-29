@@ -1067,7 +1067,9 @@ pub fn test_context_set_http_credentials(c: &mut McpClient) {
   // as numbers or numeric strings — normalise via serde's as_i64 /
   // string parse.
   let as_status = |val: &serde_json::Value| -> Option<i64> {
-    val.as_i64().or_else(|| val.as_str().and_then(|s| s.parse::<i64>().ok()))
+    val
+      .as_i64()
+      .or_else(|| val.as_str().and_then(|s| s.parse::<i64>().ok()))
   };
   assert_eq!(
     as_status(&v["status"]),
@@ -1134,7 +1136,11 @@ pub fn test_context_is_closed_and_browser(c: &mut McpClient) {
     return { before, hasBrowser, after, verNonEmpty: ver != null && ver.length > 0 };
   ",
   );
-  assert_eq!(v["before"].as_bool(), Some(false), "isClosed() should be false before close: {v}");
+  assert_eq!(
+    v["before"].as_bool(),
+    Some(false),
+    "isClosed() should be false before close: {v}"
+  );
   assert_eq!(
     v["hasBrowser"].as_bool(),
     Some(true),
@@ -1145,7 +1151,11 @@ pub fn test_context_is_closed_and_browser(c: &mut McpClient) {
     Some(true),
     "browser().version() should be a non-empty string: {v}"
   );
-  assert_eq!(v["after"].as_bool(), Some(true), "isClosed() should be true after close: {v}");
+  assert_eq!(
+    v["after"].as_bool(),
+    Some(true),
+    "isClosed() should be true after close: {v}"
+  );
 }
 
 /// `context.route(url, handler)` fulfils a matched request for every

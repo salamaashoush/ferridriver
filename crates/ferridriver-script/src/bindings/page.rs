@@ -321,7 +321,9 @@ fn parse_unroute_behavior(behavior: &str) -> rquickjs::Result<ferridriver::optio
 /// Extract the `times` field from a `route(url, handler, { times })` options
 /// bag. Absent/undefined options or a missing `times` yields `None`
 /// (unlimited). Shared by `page.route` and `context.route`.
-pub(crate) fn parse_route_times(options: &rquickjs::function::Opt<rquickjs::Value<'_>>) -> rquickjs::Result<Option<u32>> {
+pub(crate) fn parse_route_times(
+  options: &rquickjs::function::Opt<rquickjs::Value<'_>>,
+) -> rquickjs::Result<Option<u32>> {
   let Some(v) = options.0.as_ref() else { return Ok(None) };
   if v.is_undefined() || v.is_null() {
     return Ok(None);
@@ -346,9 +348,10 @@ pub(crate) fn parse_har_options(
   let url: rquickjs::Value<'_> = obj.get("url")?;
   if let Some(s) = url.as_string() {
     let glob = s.to_string()?;
-    out.url = Some(ferridriver::url_matcher::UrlMatcher::glob(glob).map_err(|e| {
-      rquickjs::Error::new_from_js_message("routeFromHAR", "url", format!("invalid url glob: {e}"))
-    })?);
+    out.url = Some(
+      ferridriver::url_matcher::UrlMatcher::glob(glob)
+        .map_err(|e| rquickjs::Error::new_from_js_message("routeFromHAR", "url", format!("invalid url glob: {e}")))?,
+    );
   }
   let nf: rquickjs::Value<'_> = obj.get("notFound")?;
   if let Some(s) = nf.as_string() {
@@ -1326,7 +1329,11 @@ impl PageJs {
     options: rquickjs::function::Opt<rquickjs::Value<'_>>,
   ) -> rquickjs::Result<()> {
     let opts = parse_har_options(&options)?;
-    self.inner.route_from_har(std::path::Path::new(&har), opts).await.into_js()
+    self
+      .inner
+      .route_from_har(std::path::Path::new(&har), opts)
+      .await
+      .into_js()
   }
 
   /// `page.unroute(string | RegExp | ((url: URL) => boolean))`. A

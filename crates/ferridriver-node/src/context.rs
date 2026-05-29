@@ -282,7 +282,10 @@ impl BrowserContext {
     let inner = self.inner.clone();
     napi::bindgen_prelude::AsyncBlockBuilder::new(async move {
       let matcher = spec.build()?;
-      inner.route(matcher, rust_handler, times).await.map_err(crate::error::to_napi)?;
+      inner
+        .route(matcher, rust_handler, times)
+        .await
+        .map_err(crate::error::to_napi)?;
       Ok(())
     })
     .build(env)
