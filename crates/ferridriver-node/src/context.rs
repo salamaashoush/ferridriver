@@ -174,6 +174,21 @@ impl BrowserContext {
     self.inner.set_http_credentials(creds).await.into_napi()
   }
 
+  /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replays a HAR
+  /// file across every page in the context. Replay-only.
+  #[napi(
+    js_name = "routeFromHAR",
+    ts_args_type = "har: string, options?: { url?: string, notFound?: 'abort' | 'fallback' }"
+  )]
+  pub async fn route_from_har(&self, har: String, options: Option<serde_json::Value>) -> Result<()> {
+    let opts = crate::page::parse_har_options(options.as_ref())?;
+    self
+      .inner
+      .route_from_har(std::path::Path::new(&har), opts)
+      .await
+      .map_err(crate::error::to_napi)
+  }
+
   // ── Context-level routing ──
 
   /// Playwright: `browserContext.route(url, handler)`. Routes every page

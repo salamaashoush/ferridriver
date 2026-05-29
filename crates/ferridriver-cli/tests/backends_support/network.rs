@@ -366,6 +366,51 @@ pub fn test_route_disposable(c: &mut McpClient) {
   });
 }
 
+/// Playwright parity: `page.routeFromHAR(har, { notFound })`. Replays a
+/// recorded response for a matching request; an unrecorded URL with
+/// `notFound: 'fallback'` reaches the real server. WebKit's evaluate runs in
+/// the utility world where the fetch wrap is invisible (same limit as
+/// test_route_disposable), so skip there.
+pub fn test_route_from_har(c: &mut McpClient) {
+  if c.backend == "webkit" {
+    return;
+  }
+  with_stub_server(|base| {
+    let har = format!(
+      r#"{{"log":{{"version":"1.2","entries":[{{"request":{{"method":"GET","url":"{base}/api/users"}},"response":{{"status":200,"headers":[{{"name":"content-type","value":"application/json"}}],"content":{{"mimeType":"application/json","text":"{{\"users\":[\"from-har\"]}}"}}}}}}]}}}}"#
+    );
+    let dir = std::env::temp_dir().join(format!("ferri-har-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).expect("mkdir har");
+    let har_path = dir.join("rec.har");
+    std::fs::write(&har_path, har).expect("write har");
+    let har_str = har_path.to_string_lossy().replace('\\', "\\\\");
+
+    c.nav_url(&format!("{base}/landed"));
+    let script = format!(
+      r#"
+      try {{
+        await page.routeFromHAR("{har_str}", {{ notFound: 'fallback' }});
+        const served = await page.evaluate("fetch('/api/users').then(r => r.text())");
+        const real = await page.evaluate("fetch('/landed').then(r => r.text())");
+        return {{ served, real }};
+      }} finally {{
+        await page.unrouteAll();
+      }}
+      "#
+    );
+    let v = c.script_value(&script);
+    assert!(
+      v["served"].as_str().is_some_and(|s| s.contains("from-har")),
+      "recorded HAR entry must be replayed: {v}",
+    );
+    assert!(
+      v["real"].as_str().is_some_and(|s| s.contains("landed")),
+      "unrecorded URL must fall through to the real server (notFound: fallback): {v}",
+    );
+    let _ = std::fs::remove_dir_all(&dir);
+  });
+}
+
 // ── 3. Response body (response.json) ─────────────────────────────────────
 
 pub fn test_network_response_body(c: &mut McpClient) {

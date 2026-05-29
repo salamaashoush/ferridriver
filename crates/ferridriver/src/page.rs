@@ -2097,6 +2097,20 @@ impl Page {
     }))
   }
 
+  /// Playwright: `page.routeFromHAR(har, options?)`. Replay recorded
+  /// responses from a HAR file for matching requests. Replay-only; HAR
+  /// recording (`update: true`) is not supported.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the HAR file cannot be read/parsed or the route
+  /// cannot be installed.
+  pub async fn route_from_har(&self, path: &std::path::Path, options: crate::har::RouteFromHarOptions) -> Result<()> {
+    let handler = crate::har::route_handler_from_file(path, options.not_found)?;
+    let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
+    self.inner.route(matcher, handler, None).await
+  }
+
   /// Remove all route handlers whose matcher is
   /// [`crate::url_matcher::UrlMatcher::equivalent`] to the given matcher.
   ///

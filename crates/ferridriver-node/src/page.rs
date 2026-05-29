@@ -1811,6 +1811,21 @@ impl Page {
       .map_err(crate::error::to_napi)
   }
 
+  /// Playwright: `page.routeFromHAR(har, options?)`. Replays recorded
+  /// responses from a HAR file. Replay-only (no `update` recording mode).
+  #[napi(
+    js_name = "routeFromHAR",
+    ts_args_type = "har: string, options?: { url?: string, notFound?: 'abort' | 'fallback' }"
+  )]
+  pub async fn route_from_har(&self, har: String, options: Option<serde_json::Value>) -> Result<()> {
+    let opts = crate::page::parse_har_options(options.as_ref())?;
+    self
+      .inner
+      .route_from_har(std::path::Path::new(&har), opts)
+      .await
+      .map_err(crate::error::to_napi)
+  }
+
   /// `page.pickLocator(): Promise<Locator>`. Highlights elements under the
   /// cursor and resolves with a Locator for the element the user clicks.
   #[napi]
@@ -1853,6 +1868,28 @@ fn parse_unroute_behavior(behavior: &str) -> Result<ferridriver::options::Unrout
       "unrouteAll: invalid behavior {other:?} (expected 'wait', 'ignoreErrors', or 'default')"
     ))),
   }
+}
+
+/// Parse the `{ url?, notFound? }` options bag for `routeFromHAR` (shared by
+/// Page and BrowserContext). `url` is a glob string filter; `notFound`
+/// defaults to `abort` (Playwright default).
+pub(crate) fn parse_har_options(options: Option<&serde_json::Value>) -> Result<ferridriver::har::RouteFromHarOptions> {
+  let mut out = ferridriver::har::RouteFromHarOptions::default();
+  if let Some(o) = options {
+    if let Some(url) = o.get("url").and_then(serde_json::Value::as_str) {
+      out.url = Some(ferridriver::url_matcher::UrlMatcher::glob(url).map_err(crate::error::to_napi)?);
+    }
+    match o.get("notFound").and_then(serde_json::Value::as_str) {
+      Some("fallback") => out.not_found = ferridriver::har::HarNotFound::Fallback,
+      Some("abort") | None => out.not_found = ferridriver::har::HarNotFound::Abort,
+      Some(other) => {
+        return Err(napi::Error::from_reason(format!(
+          "routeFromHAR: invalid notFound {other:?} (expected 'abort' or 'fallback')"
+        )));
+      },
+    }
+  }
+  Ok(out)
 }
 
 #[napi(object)]

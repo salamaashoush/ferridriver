@@ -297,6 +297,17 @@ impl BrowserContextJs {
     Ok(())
   }
 
+  /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replay-only.
+  #[qjs(rename = "routeFromHAR")]
+  pub async fn route_from_har(
+    &self,
+    har: String,
+    options: rquickjs::function::Opt<Value<'_>>,
+  ) -> rquickjs::Result<()> {
+    let opts = crate::bindings::page::parse_har_options(&options)?;
+    self.inner.route_from_har(std::path::Path::new(&har), opts).await.into_js()
+  }
+
   /// Playwright: `browserContext.unroute(url, handler?)` —
   /// `/tmp/playwright/packages/playwright-core/src/client/browserContext.ts:411`.
   /// A predicate is matched by `===` against the function passed to `route`.
