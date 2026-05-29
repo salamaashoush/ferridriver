@@ -35,6 +35,7 @@ pub mod error;
 pub mod events;
 pub mod file_chooser;
 pub mod frame;
+pub mod har;
 pub(crate) mod frame_cache;
 pub mod js_handle;
 pub mod locator;

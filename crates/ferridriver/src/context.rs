@@ -984,6 +984,25 @@ impl ContextRef {
     }))
   }
 
+  /// Playwright: `browserContext.routeFromHAR(har, options?)`. Replays a HAR
+  /// file across every page in this context. Replay-only; recording
+  /// (`update: true`) is unsupported.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if the HAR file cannot be read/parsed or routes fail
+  /// to install.
+  pub async fn route_from_har(&self, path: &std::path::Path, options: crate::har::RouteFromHarOptions) -> Result<()> {
+    let handler = crate::har::route_handler_from_file(path, options.not_found)?;
+    let matcher = options.url.unwrap_or_else(crate::url_matcher::UrlMatcher::any);
+    let state = self.state.read().await;
+    let ctx = state.context(&self.name)?;
+    for page in &ctx.pages {
+      page.route(matcher.clone(), handler.clone(), None).await?;
+    }
+    Ok(())
+  }
+
   /// Remove route handlers matching the given matcher from all pages.
   ///
   /// # Errors

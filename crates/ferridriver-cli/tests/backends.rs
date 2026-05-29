@@ -255,6 +255,7 @@ fn register_events_network(set: &mut TestSet<'_>) {
   run!(set, backends_support::network::test_network_redirect_chain);
   run!(set, backends_support::network::test_network_request_failure);
   run!(set, backends_support::network::test_route_disposable);
+  run!(set, backends_support::network::test_route_from_har);
   run!(set, backends_support::network::test_network_response_body);
   run!(set, backends_support::network::test_network_post_data);
   run!(set, backends_support::network::test_network_post_data_buffer);

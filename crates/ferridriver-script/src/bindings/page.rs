@@ -328,6 +328,38 @@ pub(crate) fn parse_route_times(options: &rquickjs::function::Opt<rquickjs::Valu
   Ok(t.as_number().map(|n| if n < 0.0 { 0 } else { n as u32 }))
 }
 
+/// Parse the `{ url?, notFound? }` options bag for `routeFromHAR`. Shared by
+/// `page.routeFromHAR` and `context.routeFromHAR`. `url` is a glob string.
+pub(crate) fn parse_har_options(
+  options: &rquickjs::function::Opt<rquickjs::Value<'_>>,
+) -> rquickjs::Result<ferridriver::har::RouteFromHarOptions> {
+  let mut out = ferridriver::har::RouteFromHarOptions::default();
+  let Some(v) = options.0.as_ref() else { return Ok(out) };
+  let Some(obj) = v.as_object() else { return Ok(out) };
+  let url: rquickjs::Value<'_> = obj.get("url")?;
+  if let Some(s) = url.as_string() {
+    let glob = s.to_string()?;
+    out.url = Some(ferridriver::url_matcher::UrlMatcher::glob(glob).map_err(|e| {
+      rquickjs::Error::new_from_js_message("routeFromHAR", "url", format!("invalid url glob: {e}"))
+    })?);
+  }
+  let nf: rquickjs::Value<'_> = obj.get("notFound")?;
+  if let Some(s) = nf.as_string() {
+    match s.to_string()?.as_str() {
+      "fallback" => out.not_found = ferridriver::har::HarNotFound::Fallback,
+      "abort" => out.not_found = ferridriver::har::HarNotFound::Abort,
+      other => {
+        return Err(rquickjs::Error::new_from_js_message(
+          "routeFromHAR",
+          "notFound",
+          format!("invalid notFound {other:?} (expected 'abort' or 'fallback')"),
+        ));
+      },
+    }
+  }
+  Ok(out)
+}
+
 /// JS-visible wrapper around [`ferridriver::Page`].
 ///
 /// Held as `Arc<Page>` so the same page can be shared with the MCP session
@@ -1270,6 +1302,17 @@ impl PageJs {
     let instance =
       rquickjs::class::Class::instance(ctx.clone(), crate::bindings::disposable::DisposableJs::new(disposable))?;
     rquickjs::IntoJs::into_js(instance, &ctx)
+  }
+
+  /// Playwright: `page.routeFromHAR(har, options?)`. Replay-only.
+  #[qjs(rename = "routeFromHAR")]
+  pub async fn route_from_har(
+    &self,
+    har: String,
+    options: rquickjs::function::Opt<rquickjs::Value<'_>>,
+  ) -> rquickjs::Result<()> {
+    let opts = parse_har_options(&options)?;
+    self.inner.route_from_har(std::path::Path::new(&har), opts).await.into_js()
   }
 
   /// `page.unroute(string | RegExp | ((url: URL) => boolean))`. A

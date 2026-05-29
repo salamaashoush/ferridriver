@@ -329,6 +329,40 @@ for (const backend of BACKENDS) {
       expect(hits).toBe(1);
     });
 
+    it("routeFromHAR replays a recorded response", async () => {
+      const { writeFileSync, mkdtempSync } = await import("node:fs");
+      const { tmpdir } = await import("node:os");
+      const { join } = await import("node:path");
+      const har = {
+        log: {
+          version: "1.2",
+          entries: [
+            {
+              request: { method: "GET", url: `${baseUrl}/api/users` },
+              response: {
+                status: 200,
+                headers: [{ name: "content-type", value: "application/json" }],
+                content: { mimeType: "application/json", text: '{"users":["from-har"]}' },
+              },
+            },
+          ],
+        },
+      };
+      const harPath = join(mkdtempSync(join(tmpdir(), "ferri-har-")), "rec.har");
+      writeFileSync(harPath, JSON.stringify(har));
+
+      await page.goto(`${baseUrl}/landed`, null);
+      await page.routeFromHAR(harPath, { notFound: "fallback" });
+      const served = (await page.evaluate(
+        "fetch('/api/users', { cache: 'no-store' }).then(r => r.text())"
+      )) as string;
+      expect(served).toContain("from-har");
+      // A URL with no HAR entry falls through to the real server (notFound: fallback).
+      await page.goto(`${baseUrl}/landed`, null);
+      const real = (await page.evaluate("document.body.textContent")) as string;
+      expect(real).toBe("landed");
+    });
+
     it("pickLocator resolves with a Locator for the clicked element", async () => {
       await page.goto("about:blank", null);
       await page.setContent(
