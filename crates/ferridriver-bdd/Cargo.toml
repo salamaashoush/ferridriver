@@ -26,10 +26,18 @@ tracing = { workspace = true }
 anyhow = { workspace = true }
 regex = { workspace = true }
 
-gherkin = "0.15"
+gherkin = "0.16"
 cucumber-expressions = { version = "0.5", features = ["into-regex"] }
 inventory = "0.3"
 rustc-hash = "2"
 dashmap = { workspace = true }
 glob = "0.3"
 console = "0.16"
+
+[dev-dependencies]
+criterion = { version = "0.8", features = ["html_reports"] }
+tempfile = "3"
+
+[[bench]]
+name = "scenario_clone"
+harness = false

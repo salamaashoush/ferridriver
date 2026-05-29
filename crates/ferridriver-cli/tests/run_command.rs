@@ -122,3 +122,57 @@ fn factories_match_playwright_chromium_is_chromium_firefox_is_firefox() {
     "firefox() must launch Firefox, got version `{got}`"
   );
 }
+
+// ── ES-module path: TypeScript + imports via the shared bundle infra ──
+
+#[test]
+fn ts_file_transpiles_and_returns_default_export() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("s.ts");
+  // TypeScript syntax (type annotation) + `export default` result.
+  std::fs::write(&path, "const n: number = 19 + 23;\nexport default n;").unwrap();
+  let (ok, stdout, stderr) = run(&[path.to_str().unwrap()], None);
+  assert!(ok, "exit ok; stderr={stderr}");
+  let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+  assert_eq!(v["status"], "ok", "{v}");
+  assert_eq!(v["value"], 42, "default export is the run result: {v}");
+}
+
+#[test]
+fn ts_module_with_relative_import_is_bundled() {
+  let dir = tempfile::tempdir().unwrap();
+  std::fs::write(
+    dir.path().join("helper.ts"),
+    "export const triple = (n: number): number => n * 3;",
+  )
+  .unwrap();
+  let entry = dir.path().join("main.ts");
+  std::fs::write(&entry, "import { triple } from './helper';\nexport default triple(14);").unwrap();
+  let (ok, stdout, stderr) = run(&[entry.to_str().unwrap()], None);
+  assert!(ok, "exit ok; stderr={stderr}");
+  let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+  assert_eq!(v["value"], 42, "imported helper must be bundled + run: {v}");
+}
+
+#[test]
+fn module_without_default_export_yields_null() {
+  let dir = tempfile::tempdir().unwrap();
+  let path = dir.path().join("s.ts");
+  std::fs::write(&path, "export const x = 1;\nconst _y = x + 1;").unwrap();
+  let (ok, stdout, _) = run(&[path.to_str().unwrap()], None);
+  assert!(ok);
+  let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+  assert_eq!(v["status"], "ok", "{v}");
+  assert!(v["value"].is_null(), "no default export -> null result: {v}");
+}
+
+#[test]
+fn inline_eval_with_static_import_runs_as_module() {
+  // `--eval` containing a static import is detected and bundled. Uses a
+  // top-level await with no default export -> null result, but must not
+  // error on the `import`/`export` syntax (which raw eval would reject).
+  let (ok, stdout, stderr) = run(&["-e", "export default Math.max(1, 41) + 1;"], None);
+  assert!(ok, "exit ok; stderr={stderr}");
+  let v: serde_json::Value = serde_json::from_str(&stdout).unwrap();
+  assert_eq!(v["value"], 42, "{v}");
+}

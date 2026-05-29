@@ -73,6 +73,15 @@ async fn set_user_agent(world: &mut BrowserWorld, ua: String) {
   .await?;
 }
 
+#[step("I set viewport to {int}x{int}")]
+async fn set_viewport(world: &mut BrowserWorld, width: i64, height: i64) {
+  world
+    .page()
+    .set_viewport_size(width, height)
+    .await
+    .map_err(|e| StepError::wrap("set viewport", e))?;
+}
+
 #[step("I set geolocation to {float},{float}")]
 async fn set_geolocation(world: &mut BrowserWorld, lat: f64, lng: f64) {
   apply(

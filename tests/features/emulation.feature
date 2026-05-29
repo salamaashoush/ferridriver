@@ -23,3 +23,9 @@ Feature: Emulation
     Given I navigate to "/emulation.html"
     Then "#viewport-width" should have text "1280"
     And "#viewport-height" should have text "720"
+
+  Scenario: Set viewport size
+    Given I set viewport to 800x600
+    And I navigate to "/emulation.html"
+    Then "#viewport-width" should have text "800"
+    And "#viewport-height" should have text "600"

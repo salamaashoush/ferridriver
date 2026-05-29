@@ -42,6 +42,7 @@
 
 pub mod bindings;
 pub mod bundle;
+pub mod bytecode_cache;
 pub mod command_spec;
 pub mod console;
 pub mod discover;
@@ -61,6 +62,7 @@ pub use bindings::{
 };
 pub use bundle::{
   CompiledBundle, CompiledPlugin, bundle_and_compile, bundle_source, compile_and_extract_plugins, eval_bundle,
+  is_typescript_path, source_is_es_module,
 };
 pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
 pub use console::ConsoleCapture;

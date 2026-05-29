@@ -40,7 +40,7 @@ pub fn translate_features(feature_set: &FeatureSet, registry: Arc<StepRegistry>,
     let is_serial = scenarios.iter().any(|s| s.tags.iter().any(|t| t == "@serial"));
 
     let test_cases: Vec<TestCase> = scenarios
-      .iter()
+      .into_iter()
       .map(|s| translate_scenario(s, Arc::clone(&registry), config))
       .collect();
 
@@ -180,77 +180,71 @@ async fn build_world_from_pool(
 /// and `@key(value)` -> `Info`). Shared by the Rust-step and JS-step
 /// translation paths.
 pub fn scenario_annotations(scenario: &ScenarioExecution) -> Vec<TestAnnotation> {
-  let mut annotations: Vec<TestAnnotation> = scenario.tags.iter().map(|t| TestAnnotation::Tag(t.clone())).collect();
-
-  if scenario.tags.iter().any(|t| t == "@wip" || t == "@pending") {
-    annotations.push(TestAnnotation::Skip {
-      reason: Some("tagged @wip/@pending".to_string()),
-      condition: None,
-    });
-  }
-
-  if scenario.tags.iter().any(|t| t == "@only") {
-    annotations.push(TestAnnotation::Only);
-  }
+  let mut annotations: Vec<TestAnnotation> = Vec::with_capacity(scenario.tags.len() + 1);
 
   for tag in &scenario.tags {
-    if tag == "@skip" {
-      annotations.push(TestAnnotation::Skip {
+    annotations.push(TestAnnotation::Tag(tag.clone()));
+
+    match tag.as_str() {
+      "@wip" | "@pending" => annotations.push(TestAnnotation::Skip {
+        reason: Some("tagged @wip/@pending".to_string()),
+        condition: None,
+      }),
+      "@only" => annotations.push(TestAnnotation::Only),
+      "@skip" => annotations.push(TestAnnotation::Skip {
         reason: Some("tagged @skip".to_string()),
         condition: None,
-      });
-    } else if let Some(cond) = tag.strip_prefix("@skip(").and_then(|s| s.strip_suffix(')')) {
-      annotations.push(TestAnnotation::Skip {
-        reason: Some(format!("tagged @skip({cond})")),
-        condition: Some(cond.to_string()),
-      });
-    } else if tag == "@fixme" {
-      annotations.push(TestAnnotation::Fixme {
+      }),
+      "@fixme" => annotations.push(TestAnnotation::Fixme {
         reason: Some("tagged @fixme".to_string()),
         condition: None,
-      });
-    } else if let Some(cond) = tag.strip_prefix("@fixme(").and_then(|s| s.strip_suffix(')')) {
-      annotations.push(TestAnnotation::Fixme {
-        reason: Some(format!("tagged @fixme({cond})")),
-        condition: Some(cond.to_string()),
-      });
-    } else if tag == "@fail" {
-      annotations.push(TestAnnotation::Fail {
+      }),
+      "@fail" => annotations.push(TestAnnotation::Fail {
         reason: Some("tagged @fail".to_string()),
         condition: None,
-      });
-    } else if let Some(cond) = tag.strip_prefix("@fail(").and_then(|s| s.strip_suffix(')')) {
-      annotations.push(TestAnnotation::Fail {
-        reason: Some(format!("tagged @fail({cond})")),
-        condition: Some(cond.to_string()),
-      });
-    } else if tag == "@slow" {
-      annotations.push(TestAnnotation::Slow {
+      }),
+      "@slow" => annotations.push(TestAnnotation::Slow {
         reason: Some("tagged @slow".to_string()),
         condition: None,
-      });
-    } else if let Some(cond) = tag.strip_prefix("@slow(").and_then(|s| s.strip_suffix(')')) {
-      annotations.push(TestAnnotation::Slow {
-        reason: Some(format!("tagged @slow({cond})")),
-        condition: Some(cond.to_string()),
-      });
-    }
-  }
-
-  for tag in &scenario.tags {
-    if let Some(rest) = tag.strip_prefix('@') {
-      if let Some(paren_pos) = rest.find('(') {
-        if rest.ends_with(')') {
-          let key = &rest[..paren_pos];
-          let value = &rest[paren_pos + 1..rest.len() - 1];
-          if !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only") {
-            annotations.push(TestAnnotation::Info {
-              type_name: key.to_string(),
-              description: value.to_string(),
-            });
+      }),
+      _ => {
+        // Parameterised forms: `@kind(cond)` for the known kinds, then the
+        // generic `@key(value)` -> Info for everything else.
+        if let Some(cond) = tag.strip_prefix("@skip(").and_then(|s| s.strip_suffix(')')) {
+          annotations.push(TestAnnotation::Skip {
+            reason: Some(format!("tagged @skip({cond})")),
+            condition: Some(cond.to_string()),
+          });
+        } else if let Some(cond) = tag.strip_prefix("@fixme(").and_then(|s| s.strip_suffix(')')) {
+          annotations.push(TestAnnotation::Fixme {
+            reason: Some(format!("tagged @fixme({cond})")),
+            condition: Some(cond.to_string()),
+          });
+        } else if let Some(cond) = tag.strip_prefix("@fail(").and_then(|s| s.strip_suffix(')')) {
+          annotations.push(TestAnnotation::Fail {
+            reason: Some(format!("tagged @fail({cond})")),
+            condition: Some(cond.to_string()),
+          });
+        } else if let Some(cond) = tag.strip_prefix("@slow(").and_then(|s| s.strip_suffix(')')) {
+          annotations.push(TestAnnotation::Slow {
+            reason: Some(format!("tagged @slow({cond})")),
+            condition: Some(cond.to_string()),
+          });
+        } else if let Some(rest) = tag.strip_prefix('@') {
+          if let Some(paren_pos) = rest.find('(') {
+            if rest.ends_with(')') {
+              let key = &rest[..paren_pos];
+              let value = &rest[paren_pos + 1..rest.len() - 1];
+              if !matches!(key, "fixme" | "skip" | "fail" | "slow" | "only") {
+                annotations.push(TestAnnotation::Info {
+                  type_name: key.to_string(),
+                  description: value.to_string(),
+                });
+              }
+            }
           }
         }
-      }
+      },
     }
   }
 
@@ -266,15 +260,27 @@ pub fn scenario_line(scenario: &ScenarioExecution) -> Option<usize> {
     .and_then(|(_, l)| l.parse::<usize>().ok())
 }
 
-fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>, config: &TestConfig) -> TestCase {
-  let scenario_clone = scenario.clone();
+fn translate_scenario(scenario: ScenarioExecution, registry: Arc<StepRegistry>, config: &TestConfig) -> TestCase {
   let step_timeout = Duration::from_millis(config.timeout);
   let screenshot_on_failure = config.screenshot_on_failure;
   let strict = config.strict;
   let browser_config = config.browser.clone();
 
+  // Build the immutable TestCase metadata up front (borrows `scenario`),
+  // then move the scenario into an Arc so the per-invocation closure shares
+  // it via a cheap refcount bump instead of deep-cloning the step Vec.
+  let annotations = scenario_annotations(&scenario);
+  let line = scenario_line(&scenario);
+  let id = TestId {
+    file: scenario.feature_path.display().to_string(),
+    suite: Some(scenario.feature_name.clone()),
+    name: scenario.name.clone(),
+    line,
+  };
+  let scenario = Arc::new(scenario);
+
   let test_fn: TestFn = Arc::new(move |pool: FixturePool| {
-    let scenario = scenario_clone.clone();
+    let scenario = Arc::clone(&scenario);
     let registry = Arc::clone(&registry);
     let browser_config = browser_config.clone();
 
@@ -346,16 +352,8 @@ fn translate_scenario(scenario: &ScenarioExecution, registry: Arc<StepRegistry>,
     })
   });
 
-  let annotations = scenario_annotations(scenario);
-  let line = scenario_line(scenario);
-
   TestCase {
-    id: TestId {
-      file: scenario.feature_path.display().to_string(),
-      suite: Some(scenario.feature_name.clone()),
-      name: scenario.name.clone(),
-      line,
-    },
+    id,
     test_fn,
     fixture_requests: vec![
       "browser".to_string(),

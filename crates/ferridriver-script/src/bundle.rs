@@ -81,10 +81,24 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(Strin
 /// shared utils resolved + tree-shaken) into one ESM module and compile
 /// it to bytecode. Done once, before workers spawn.
 pub async fn bundle_and_compile(entry_paths: &[PathBuf], cwd: &Path) -> Result<CompiledBundle, ScriptError> {
-  let (code, map_json) = Box::pin(bundle_source(entry_paths, cwd)).await?;
-  let source_map = map_json.and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok());
-
   let module_name = "ferridriver-bdd-steps.js".to_string();
+
+  // Disk cache: an unchanged source tree skips rolldown AND the QuickJS
+  // compile. Validated against every transitive input's content hash.
+  let cache_key = crate::bytecode_cache::entry_key(entry_paths);
+  if let Some(hit) = crate::bytecode_cache::load(cache_key) {
+    let source_map = hit
+      .source_map_json
+      .and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok());
+    return Ok(CompiledBundle {
+      module_name,
+      bytecode: Arc::from(hit.bytecode.into_boxed_slice()),
+      source_map,
+    });
+  }
+
+  let (code, map_json) = Box::pin(bundle_source(entry_paths, cwd)).await?;
+
   let name = module_name.clone();
   let runtime = AsyncRuntime::new().map_err(|e| ScriptError::internal(format!("bytecode runtime: {e}")))?;
   let ctx = AsyncContext::full(&runtime)
@@ -105,6 +119,10 @@ pub async fn bundle_and_compile(entry_paths: &[PathBuf], cwd: &Path) -> Result<C
   })
   .await?;
 
+  let inputs = crate::bytecode_cache::collect_inputs(entry_paths, map_json.as_deref(), cwd);
+  crate::bytecode_cache::store(cache_key, &bytecode, &module_name, map_json.as_deref(), None, &inputs);
+
+  let source_map = map_json.and_then(|j| sourcemap::SourceMap::from_slice(j.as_bytes()).ok());
   Ok(CompiledBundle {
     module_name,
     bytecode: Arc::from(bytecode.into_boxed_slice()),
@@ -148,6 +166,55 @@ impl CompiledBundle {
     let src = token.get_source().unwrap_or("<unknown>").to_string();
     Some((src, token.get_src_line() + 1, token.get_src_col() + 1))
   }
+
+  /// Every source file that went into this bundle (entry + transitive
+  /// imports), resolved to absolute paths against `cwd`. Read from the
+  /// source map's `sources`; synthetic (non-file) sources are skipped.
+  ///
+  /// Callers running untrusted bundles use this to enforce a sandbox
+  /// jail (every input must live under an allowed root).
+  #[must_use]
+  pub fn source_files(&self, cwd: &Path) -> Vec<PathBuf> {
+    let Some(sm) = self.source_map.as_ref() else {
+      return Vec::new();
+    };
+    sm.sources()
+      .map(|src| {
+        let p = Path::new(src);
+        if p.is_absolute() { p.to_path_buf() } else { cwd.join(p) }
+      })
+      .collect()
+  }
+}
+
+/// True when a path's extension marks it as TypeScript (`.ts`/`.tsx`/
+/// `.mts`/`.cts`) and so must be transpiled through the bundler.
+#[must_use]
+pub fn is_typescript_path(path: &Path) -> bool {
+  matches!(
+    path.extension().and_then(|e| e.to_str()),
+    Some("ts" | "tsx" | "mts" | "cts")
+  )
+}
+
+/// Heuristic: the source begins a line with a static `import`/`export`
+/// and so must run as an ES module (bundled). Dynamic `import(...)` is
+/// intentionally NOT matched — it is valid in a plain script, so such a
+/// script keeps top-level `return`. A false positive only costs an
+/// unnecessary bundle, never wrong output.
+#[must_use]
+pub fn source_is_es_module(source: &str) -> bool {
+  source.lines().any(|line| {
+    let t = line.trim_start();
+    let static_import = t
+      .strip_prefix("import")
+      .is_some_and(|rest| matches!(rest.as_bytes().first(), Some(b' ' | b'\t' | b'{' | b'\'' | b'"')));
+    static_import
+      || t.starts_with("export ")
+      || t.starts_with("export\t")
+      || t.starts_with("export{")
+      || t.starts_with("export*")
+  })
 }
 
 /// One plugin file: rolldown-bundled (TypeScript, plugin-local imports,
@@ -215,10 +282,12 @@ fn cache_key(path: &Path, bytes: &[u8]) -> u64 {
 /// surviving `CompiledPlugin`s carry contiguous `index` values.
 pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlugin>, Vec<(PathBuf, ScriptError)>) {
   // Per original position: a cache hit (bytecode + manifests), or a
-  // cache miss we must bundle, or an early failure.
+  // cache miss we must bundle, or an early failure. A miss carries both
+  // the in-memory content key and the disk-cache key so the compile step
+  // can populate both tiers.
   enum Slot {
     Hit(Arc<[u8]>, String),
-    Miss(u64),
+    Miss { inmem_key: u64, disk_key: u64 },
     Failed(ScriptError),
   }
 
@@ -227,11 +296,26 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
   for path in files {
     match std::fs::read(path) {
       Ok(b) => {
-        let key = cache_key(path, &b);
-        let cached = plugin_cache().lock().ok().and_then(|c| c.get(&key).cloned());
+        let inmem_key = cache_key(path, &b);
+        let cached = plugin_cache().lock().ok().and_then(|c| c.get(&inmem_key).cloned());
+        let disk_key = crate::bytecode_cache::entry_key(std::slice::from_ref(path));
         match cached {
+          // 1. In-memory (same process).
           Some((bc, mj)) => slots.push(Slot::Hit(bc, mj)),
-          None => slots.push(Slot::Miss(key)),
+          // 2. Disk (cross-process), transitively validated. Promote into
+          //    the in-memory tier so later same-process loads stay hot.
+          None => match crate::bytecode_cache::load(disk_key) {
+            Some(entry) => {
+              let bc: Arc<[u8]> = Arc::from(entry.bytecode.into_boxed_slice());
+              let mj = entry.aux.unwrap_or_else(|| "[]".to_string());
+              if let Ok(mut cache) = plugin_cache().lock() {
+                cache.insert(inmem_key, (bc.clone(), mj.clone()));
+              }
+              slots.push(Slot::Hit(bc, mj));
+            },
+            // 3. Cold: bundle + compile below.
+            None => slots.push(Slot::Miss { inmem_key, disk_key }),
+          },
         }
         bytes.push(b);
       },
@@ -250,7 +334,7 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
   let miss_idx: Vec<usize> = slots
     .iter()
     .enumerate()
-    .filter_map(|(i, s)| matches!(s, Slot::Miss(_)).then_some(i))
+    .filter_map(|(i, s)| matches!(s, Slot::Miss { .. }).then_some(i))
     .collect();
   let bundles = futures::future::join_all(miss_idx.iter().map(|&i| {
     let path = files[i].clone();
@@ -261,12 +345,15 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
   }))
   .await;
 
-  // Compiled code per missed position (None = bundle failed).
+  // Compiled code (+ source map, for the disk cache's transitive input
+  // set) per missed position. None = bundle failed.
   let mut bundled_code: rustc_hash::FxHashMap<usize, String> = rustc_hash::FxHashMap::default();
+  let mut bundled_map: rustc_hash::FxHashMap<usize, Option<String>> = rustc_hash::FxHashMap::default();
   for (i, res) in bundles {
     match res {
-      Ok((code, _map)) => {
+      Ok((code, map)) => {
         bundled_code.insert(i, code);
+        bundled_map.insert(i, map);
       },
       Err(e) => slots[i] = Slot::Failed(e),
     }
@@ -279,7 +366,7 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
       Err(e) => {
         let err = ScriptError::internal(format!("plugin bytecode context: {e}"));
         for s in &mut slots {
-          if matches!(s, Slot::Miss(_)) {
+          if matches!(s, Slot::Miss { .. }) {
             *s = Slot::Failed(err.clone());
           }
         }
@@ -289,7 +376,7 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
     Err(e) => {
       let err = ScriptError::internal(format!("plugin bytecode runtime: {e}"));
       for s in &mut slots {
-        if matches!(s, Slot::Miss(_)) {
+        if matches!(s, Slot::Miss { .. }) {
           *s = Slot::Failed(err.clone());
         }
       }
@@ -300,15 +387,24 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
   if let Some((_runtime, actx)) = runtime_ctx {
     for i in &miss_idx {
       let i = *i;
-      let Slot::Miss(key) = slots[i] else { continue };
+      let Slot::Miss { inmem_key, disk_key } = slots[i] else {
+        continue;
+      };
       let Some(code) = bundled_code.get(&i) else { continue };
       let module_name = format!("ferri_plugin_{i}.js");
       match compile_extract_one(&actx, &module_name, code).await {
         Ok((bc, mj)) => {
           let bc: Arc<[u8]> = Arc::from(bc.into_boxed_slice());
           if let Ok(mut cache) = plugin_cache().lock() {
-            cache.insert(key, (bc.clone(), mj.clone()));
+            cache.insert(inmem_key, (bc.clone(), mj.clone()));
           }
+          // Persist for the next process. Inputs = this plugin file plus
+          // its transitive imports (from the source map), so an edited
+          // helper invalidates the entry on the next load.
+          let cwd = files[i].parent().unwrap_or_else(|| Path::new(".")).to_path_buf();
+          let map = bundled_map.get(&i).cloned().flatten();
+          let inputs = crate::bytecode_cache::collect_inputs(std::slice::from_ref(&files[i]), map.as_deref(), &cwd);
+          crate::bytecode_cache::store(disk_key, &bc, &module_name, map.as_deref(), Some(&mj), &inputs);
           slots[i] = Slot::Hit(bc, mj);
         },
         Err(e) => slots[i] = Slot::Failed(e),
@@ -330,7 +426,7 @@ pub async fn compile_and_extract_plugins(files: &[PathBuf]) -> (Vec<CompiledPlug
       // A Miss with no compiled output never reached Hit/Failed only if
       // its bundle was dropped — already recorded as Failed above; this
       // arm is unreachable but keeps the match total without a panic.
-      Slot::Miss(_) => failures.push((
+      Slot::Miss { .. } => failures.push((
         files[i].clone(),
         ScriptError::internal("plugin compile produced no output".to_string()),
       )),
