@@ -209,9 +209,8 @@ impl Page {
   // ── Navigation ──────────────────────────────────────────────────────────
 
   /// Navigate to `url`. Returns the main-document `Response`, or `null`
-  /// for same-document navigations / backends that cannot observe the
-  /// main-document response (stock `WKWebView` — see the §1.4 backend
-  /// gap matrix). Mirrors Playwright's `Promise<Response | null>`.
+  /// for same-document navigations (no new main-document request was
+  /// issued). Mirrors Playwright's `Promise<Response | null>`.
   #[napi(ts_return_type = "Promise<Response | null>")]
   pub async fn goto(&self, url: String, options: Option<GotoOptions>) -> Result<Option<crate::network::Response>> {
     let opts = options.map(ferridriver::options::GotoOptions::from);
@@ -260,10 +259,10 @@ impl Page {
   /// Playwright: `page.video(): null | Video` —
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:4756`.
   /// Returns a live [`crate::video::Video`] handle when the owning
-  /// context was created with `recordVideo`, or `null` otherwise. On
-  /// backends that do not support screencast (stock `WKWebView`), a
-  /// handle is still returned but its `path()` / `saveAs()` /
-  /// `delete()` reject with a typed error explaining the reason.
+  /// context was created with `recordVideo`, or `null` otherwise. If a
+  /// backend cannot produce the recording, a handle is still returned
+  /// but its `path()` / `saveAs()` / `delete()` reject with a typed
+  /// error explaining the reason.
   #[napi(ts_return_type = "Video | null")]
   pub fn video(&self) -> Option<crate::video::Video> {
     self.inner.video().map(crate::video::Video::from_core)
@@ -1378,8 +1377,9 @@ impl Page {
   /// number }` (backed by CDP `Page.startScreencast`). Call
   /// `stopScreencast()` to halt.
   ///
-  /// Backends: CDP-pipe / CDP-raw via `Page.startScreencast`. BiDi
-  /// and stock `WKWebView` reject with a typed `Unsupported`.
+  /// Backed on all backends: CDP-pipe / CDP-raw via
+  /// `Page.startScreencast`, BiDi and WebKit via their respective
+  /// screencast protocols.
   #[napi(
     ts_args_type = "quality: number, maxWidth: number, maxHeight: number, callback: (frame: { frame: Buffer; timestamp: number }) => void",
     ts_return_type = "Promise<void>"
@@ -2150,9 +2150,9 @@ pub struct Touchscreen {
 #[napi]
 impl Touchscreen {
   /// Playwright: `touchscreen.tap(x, y)`. Dispatches a real
-  /// `TouchEvent` on platforms supporting it; falls back to a
-  /// synthesized `PointerEvent` on platforms without touch (e.g.,
-  /// stock `WKWebView` on macOS).
+  /// `TouchEvent` where the `Touch` constructor is usable; falls back
+  /// to a synthesized `PointerEvent` + click where it is not (WebKit on
+  /// Linux and macOS throws on `new Touch(...)`).
   #[napi]
   pub async fn tap(&self, x: f64, y: f64) -> Result<()> {
     self.page.touchscreen().tap(x, y).await.map_err(crate::error::to_napi)

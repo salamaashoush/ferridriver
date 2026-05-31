@@ -4,7 +4,7 @@
 //! use ferridriver_test::snapshot::assert_snapshot;
 //!
 //! let info: Arc<TestInfo> = pool.get("test_info").await?;
-//! assert_snapshot(&info, &page.content().await?, "page-content", false).await?;
+//! assert_snapshot(&info, &page.content().await?, "page-content", false)?;
 //! ```
 //!
 //! First run: creates the `.snap` file (test passes).

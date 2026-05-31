@@ -86,7 +86,11 @@ ferridriver mcp --connect ws://localhost:9222/devtools/browser/...
 Or programmatically:
 
 ```rust
-let browser = Browser::connect("ws://localhost:9222/devtools/browser/...").await?;
+use ferridriver::browser_type::chromium;
+
+let browser = chromium()
+    .connect("ws://localhost:9222/devtools/browser/...", Default::default())
+    .await?;
 ```
 
 ## How do I capture network traffic for a test?

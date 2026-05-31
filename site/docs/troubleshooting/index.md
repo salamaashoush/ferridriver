@@ -71,11 +71,13 @@ LaunchOptions {
 
 ### `Playwright WebKit binary not found`
 
-`ferridriver install` does not download the WebKit binary today.
-Provide it via:
+Download the WebKit binary, or point ferridriver at an existing one:
 
 ```bash
-# Install via Playwright (one-time)
+# Download into the ferridriver cache
+ferridriver install webkit
+
+# Or install via Playwright (one-time)
 npx playwright install webkit
 
 # Or set the override
@@ -110,8 +112,8 @@ worker count as a workaround.
 Bisect by tag:
 
 ```bash
-ferridriver bdd -j 8 --tags '@db'    # narrow scope
-ferridriver bdd -j 8 --tags '@!db'
+ferridriver bdd --workers 8 --tags '@db'        # narrow scope
+ferridriver bdd --workers 8 --tags 'not @db'
 ```
 
 ### `Timeout: element not actionable`
@@ -237,7 +239,8 @@ Common causes:
   DejaVu / Noto in CI.
 
 - **Headless behavior.** A few sites detect headless mode and serve
-  different HTML. Test with `--headed` locally to confirm.
+  different HTML. Run locally without `--headless` (MCP and `run` are
+  headed by default) to confirm.
 
 ## Performance
 
@@ -250,9 +253,8 @@ scales linearly.
 ### Browser launches dominate the run
 
 You may be launching too often. The default model is one browser per
-worker per run; if you see "launch" lines for every test, you have
-`SuiteMode::Isolated` somewhere or a fixture that closes the worker
-browser.
+worker per run; if you see "launch" lines for every test, a fixture or
+hook is closing the worker browser between tests instead of reusing it.
 
 ### Build is slow
 

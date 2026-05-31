@@ -43,10 +43,10 @@ Access them through the `TestContext` bound by `#[ferritest]`:
 ```rust
 #[ferritest]
 async fn basic(ctx: TestContext) {
-    let browser = ctx.browser().await?;     // worker-scoped, cached
-    let context = ctx.context().await?;     // test-scoped, fresh
-    let page = ctx.page().await?;           // test-scoped, fresh
-    let info = ctx.test_info().await?;      // test metadata
+    let browser = ctx.browser().await?;            // worker-scoped, cached
+    let context = ctx.browser_context().await?;    // test-scoped, fresh
+    let page = ctx.page().await?;                  // test-scoped, fresh
+    let info = ctx.test_info().await?;             // test metadata
     // ...
 }
 ```
@@ -70,23 +70,26 @@ amortize real cost.
 
 ## Custom fixtures
 
-A fixture is a value produced by a function, plus optional teardown.
-Register custom ones for something more specialized than `page` — a
-pre-authenticated context, a WebSocket client, a factory for seeded test
-data.
+Register your own with `#[fixture]`. The function takes a `TestContext`
+and returns `ferridriver_test::Result<T>`; the value is shared as
+`Arc<T>` and retrieved with `ctx.get::<T>("name")`. Use it for anything
+more specialized than the built-ins — seeded test data, a pre-configured
+API client, a logged-in session.
 
 ```rust
 use ferridriver_test::prelude::*;
-use std::sync::Arc;
 
-#[ferridriver_test::fixture(scope = "test")]
-async fn authed_page(ctx: TestContext) -> Arc<Page> {
-    let page = ctx.page().await.unwrap();
-    page.goto("https://app.example.com/login", None).await.unwrap();
-    page.locator("#email").fill("user@example.com").await.unwrap();
-    page.locator("button[type=submit]").click().await.unwrap();
-    page.wait_for_url("/dashboard").await.unwrap();
-    page
+struct AdminUser {
+    name: String,
+    email: String,
+}
+
+#[fixture(scope = "test")]
+async fn admin_user(_ctx: TestContext) -> ferridriver_test::Result<AdminUser> {
+    Ok(AdminUser {
+        name: "admin".into(),
+        email: "admin@example.com".into(),
+    })
 }
 ```
 
@@ -94,21 +97,56 @@ Then in a test:
 
 ```rust
 #[ferritest]
-async fn shows_dashboard(ctx: TestContext) {
-    let page = ctx.get::<Arc<Page>>("authed_page").await?;
-    expect(&page.locator("h1")).to_have_text("Dashboard").await?;
+async fn greets_admin(ctx: TestContext) {
+    let user = ctx.get::<AdminUser>("admin_user").await?;
+    let page = ctx.page().await?;
+    page.goto(&format!("/users/{}", user.name), None).await?;
+    expect(&page.locator("h1", None)).to_have_text(&user.email).await?;
 }
 ```
 
-A fixture can depend on other fixtures — request them from `ctx` inside
-the body. The DAG is validated at startup: if `A` needs `B` and `B`
-needs `A`, the run aborts before any test starts.
+The scope argument is `"test"` (default), `"worker"`, or `"global"`. Add
+`auto` to force the fixture to resolve for every test in scope even if no
+body asks for it, and `timeout = "10s"` to bound setup.
 
-## Teardown is automatic
+A fixture can depend on other fixtures (built-in or custom) — resolve them
+lazily from `ctx` inside the body:
 
-Fixtures that implement `Drop` (or that you explicitly register with a
-teardown closure) are torn down at the end of their scope, in **LIFO**
-order. No `afterEach` noise to remember.
+```rust
+#[fixture(scope = "test")]
+async fn admin_email(ctx: TestContext) -> ferridriver_test::Result<String> {
+    let user = ctx.get::<AdminUser>("admin_user").await?;
+    Ok(user.email.clone())
+}
+```
+
+A fixture can also re-expose a configured built-in. Because `ctx.page()`
+already hands back an `Arc<Page>`, return that `Arc` and retrieve it with
+`ctx.get::<Arc<Page>>("authed_page")`:
+
+```rust
+use ferridriver::url_matcher::UrlMatcher;
+
+#[fixture(scope = "test")]
+async fn authed_page(ctx: TestContext) -> ferridriver_test::Result<std::sync::Arc<Page>> {
+    let page = ctx.page().await?;
+    page.goto("https://app.example.com/login", None).await?;
+    page.locator("#email", None).fill("user@example.com", None).await?;
+    page.locator("button[type=submit]", None).click(None).await?;
+    page.wait_for_url(UrlMatcher::glob("**/dashboard")?).await?;
+    Ok(page)
+}
+```
+
+## Teardown
+
+A fixture's value is dropped when its scope ends — test-scoped values
+after each test, worker-scoped values on worker shutdown — in **LIFO**
+order across the pool. Anything that owns a resource (a `Drop` impl, a
+spawned task, a temp dir) cleans itself up then. Fixtures built on the
+`page` / `context` built-ins inherit their teardown, so closing a context
+also tears down everything derived from it. No `afterEach` noise to
+remember.
 
 ```mermaid
 sequenceDiagram

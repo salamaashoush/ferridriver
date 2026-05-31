@@ -114,10 +114,10 @@ pub type BodyFn = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Vec<u8>>> +
 /// for backends without push, the `Response` calls this lazily.
 pub type RawHeadersFn = Arc<dyn Fn() -> Pin<Box<dyn Future<Output = Result<Vec<HeaderEntry>>> + Send>> + Send + Sync>;
 
-/// Returns a `BodyFn` that reports the operation as unsupported. Used by
-/// backends that genuinely can't expose response bodies (stock
-/// `WKWebView` — no public API for `loadResource:` interception on
-/// main-document navigations).
+/// Returns a `BodyFn` that reports the operation as unsupported. Kept
+/// as a typed fallback for any request whose backend genuinely can't
+/// expose its body. (The Playwright `WebKit` backend fetches bodies via
+/// `Network.getResponseBody`, so it does not use this.)
 #[must_use]
 pub fn body_unsupported(reason: &'static str) -> BodyFn {
   Arc::new(move || {

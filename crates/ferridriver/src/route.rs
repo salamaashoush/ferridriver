@@ -9,7 +9,9 @@
 //! with no modifications (fail-open).
 //!
 //! ```ignore
-//! page.route("**/api/*", Arc::new(|route: Route| {
+//! use ferridriver::url_matcher::UrlMatcher;
+//!
+//! page.route(UrlMatcher::glob("**/api/*")?, Arc::new(|route: Route| {
 //!     if route.request().url.contains("block-me") {
 //!         route.abort("blockedbyclient");
 //!     } else {
@@ -20,7 +22,7 @@
 //!             ..Default::default()
 //!         });
 //!     }
-//! })).await?;
+//! }), None).await?;
 //! ```
 
 use rustc_hash::FxHashMap;

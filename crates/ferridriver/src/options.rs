@@ -438,11 +438,13 @@ impl MouseButton {
     }
   }
 
-  /// `WebKit` host IPC `OP_MOUSE_EVENT.button` byte: `0=left, 1=right,
-  /// 2=middle` — the order `host.m`'s `NSEventType*Mouse*` switches on
-  /// (see `rightMouseDown:` vs `otherMouseDown:` dispatch). This is a
-  /// different ordering than the CDP / `BiDi` pointer spec, so we keep a
-  /// dedicated accessor to make the mapping explicit at every call site.
+  /// Legacy native-`WebKit` mouse-button byte ordering: `0=left,
+  /// 1=right, 2=middle` — distinct from the CDP / `BiDi` pointer spec.
+  /// The current Playwright `WebKit` backend dispatches mouse events with
+  /// CDP-style string buttons (`backend/webkit/input.rs` uses
+  /// `MouseButton::as_cdp`), so this numeric accessor is no longer on a
+  /// live dispatch path; retained for the documented ordering and its
+  /// regression test.
   #[must_use]
   pub fn as_webkit(self) -> u8 {
     match self {
@@ -2404,8 +2406,8 @@ mod click_option_tests {
     assert_eq!(MouseButton::Left.as_bidi(), 0);
     assert_eq!(MouseButton::Middle.as_bidi(), 1);
     assert_eq!(MouseButton::Right.as_bidi(), 2);
-    // WebKit host.m uses a different ordering than CDP/BiDi: 0=left,
-    // 1=right, 2=middle (matches its NSEventType*Mouse* switch).
+    // Legacy native-WebKit ordering differs from CDP/BiDi: 0=left,
+    // 1=right, 2=middle.
     assert_eq!(MouseButton::Left.as_webkit(), 0);
     assert_eq!(MouseButton::Right.as_webkit(), 1);
     assert_eq!(MouseButton::Middle.as_webkit(), 2);

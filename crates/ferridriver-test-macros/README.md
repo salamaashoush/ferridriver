@@ -12,10 +12,11 @@ need the macros without the runner.
 |--------------------------|---------|
 | `#[ferritest]`           | Mark an async function as a ferridriver test. Optional attributes: `retries`, `timeout`, `tag`, `skip`, `slow`, `fixme`, `fail`, `only`, `info`, `use_options`. |
 | `#[ferritest_each(data = [...])]` | Parameterized test. Generates one test per row of `data`. |
+| `#[fixture(scope = "...")]` | Register a custom fixture: `async fn name(ctx: TestContext) -> ferridriver_test::Result<T>`, shared as `Arc<T>`, retrieved via `ctx.get::<T>("name")`. Optional: `scope` (`"test"` default / `"worker"` / `"global"`), `auto`, `timeout`. |
+| `#[ferritest_suite(mode = "...")]` | Set the execution mode of every `#[ferritest]` in the annotated module: `"serial"` (one worker, source order, skip-rest-on-failure) or `"parallel"` (default). |
 | `#[before_all]` / `#[after_all]` | Per-suite per-worker hook. |
 | `#[before_each]` / `#[after_each]` | Per-test hook. `#[after_each]` runs even on failure. |
-| `#[fixture(scope = "test"|"worker"|"global")]` | Declare a custom fixture. |
-| `ferridriver_test::main!()` | Generate the `fn main()` harness for a test binary (used in `tests/harness.rs`). |
+| `ferridriver_test::main!()` | Generate the `fn main()` harness for a test binary (used in `tests/harness.rs`). The `main!` macro lives in `ferridriver-test`, not this crate. |
 
 See `ferridriver-test` for the full attribute syntax, condition grammar,
 and lifecycle.

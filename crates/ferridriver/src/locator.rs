@@ -6,7 +6,7 @@
 //!
 //! Locators can be chained to narrow scope:
 //! ```ignore
-//! page.locator("css=.form").get_by_role("textbox", &Default::default()).fill("hello").await?;
+//! page.locator("css=.form", None).get_by_role("textbox", &Default::default()).fill("hello", None).await?;
 //! ```
 
 use std::fmt::Write as _;
@@ -436,7 +436,16 @@ impl Locator {
     // the owned `ClickOptions` (which contains a non-Copy `Vec<Modifier>`).
     let opts_ref = &opts;
     retry_resolve!(self, opts_ref.timeout, "click", |el, page| async move {
-      actions::click_with_opts(&el, page, opts_ref).await
+      // Playwright `waitForSignalsCreatedBy`: snapshot nav state, click, then
+      // if the click started a navigation wait (bounded, best-effort) for it
+      // to commit so a following read/action sees the new document. Zero cost
+      // when the click navigates nowhere.
+      let snap = page.nav_snapshot();
+      actions::click_with_opts(&el, page, opts_ref).await?;
+      if !opts_ref.is_trial() {
+        page.settle_navigation(snap, 2_000).await;
+      }
+      Ok::<(), crate::error::FerriError>(())
     })
   }
 
@@ -452,7 +461,12 @@ impl Locator {
     let click_opts = opts.unwrap_or_default().into_click_options();
     let click_opts_ref = &click_opts;
     retry_resolve!(self, click_opts_ref.timeout, "dblclick", |el, page| async move {
-      actions::click_with_opts(&el, page, click_opts_ref).await
+      let snap = page.nav_snapshot();
+      actions::click_with_opts(&el, page, click_opts_ref).await?;
+      if !click_opts_ref.is_trial() {
+        page.settle_navigation(snap, 2_000).await;
+      }
+      Ok::<(), crate::error::FerriError>(())
     })
   }
 
@@ -762,7 +776,7 @@ impl Locator {
 
   /// Tap the element (touch event). Dispatches touchstart + touchend on platforms
   /// that support Touch/TouchEvent APIs, falls back to pointerdown + pointerup + click
-  /// on desktop browsers (e.g. macOS `WKWebView`) where Touch constructors are unavailable.
+  /// on desktop browsers (e.g. Playwright `WebKit`) where Touch constructors are unavailable.
   ///
   /// # Errors
   ///

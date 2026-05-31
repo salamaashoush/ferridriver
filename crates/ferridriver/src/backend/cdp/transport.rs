@@ -521,6 +521,19 @@ impl CdpDispatcher {
             let mut state = lock_or_recover(&tracker.state);
             state.current_loader_id = loader_id_owned;
             state.fired = super::LC_COMMIT;
+            state.nav_committed_seq = state.nav_committed_seq.wrapping_add(1);
+          }
+          tracker.notify.notify_waiters();
+        },
+        "Page.frameStartedNavigating" => {
+          // A navigation began (any frame). Bump the generation counter so a
+          // post-input settle knows the action created a navigation and must
+          // wait for it to commit. Main-frame filtering is done by the waiter
+          // (it waits for the main-frame loader to change, bounded), so a
+          // subframe nav here costs at most the bounded settle, never a hang.
+          {
+            let mut state = lock_or_recover(&tracker.state);
+            state.nav_started_seq = state.nav_started_seq.wrapping_add(1);
           }
           tracker.notify.notify_waiters();
         },
@@ -730,6 +743,8 @@ mod tests {
   ) -> Arc<std::sync::Mutex<super::super::LifecycleState>> {
     let state = Arc::new(std::sync::Mutex::new(super::super::LifecycleState {
       current_loader_id: String::new(),
+      nav_started_seq: 0,
+      nav_committed_seq: 0,
       fired: 0,
       crashed: false,
     }));

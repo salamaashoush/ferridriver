@@ -71,9 +71,8 @@ async fn ensure_page_alive(page: &Arc<ferridriver::Page>) -> ferridriver::Result
 }
 
 /// Returns true when [`ensure_page_alive`] should fire on a freshly
-/// created page. CDP-backed pages skip the check (~1 CDP RTT per
-/// test saved); WebKit shares the default context so per-test pages
-/// don't get created at all on that backend.
+/// created page. Only BiDi needs the probe; CDP and Playwright WebKit
+/// pages skip the check (~1 RTT per test saved).
 fn needs_alive_check(backend: ferridriver::backend::BackendKind) -> bool {
   matches!(backend, ferridriver::backend::BackendKind::Bidi)
 }
@@ -176,14 +175,14 @@ impl TestBrowserResources {
         close_test_context(&ctx).await;
       },
       TestBrowserState::Page { ctx, page } => {
-        // For backends that share the default context (webkit) the
+        // When a backend shares the persistent default context the
         // page is the only per-test resource we own — closing the
         // context itself would tear down the persistent default and
-        // break later tests. For isolated-context backends (CDP /
-        // BiDi) the context's `Target.disposeBrowserContext` already
-        // closes every page in it, so an explicit `page.close()`
-        // would only add a redundant `Target.closeTarget` round-trip
-        // per test (~3-5ms each on the bench's tight loop).
+        // break later tests. For isolated-context backends (CDP, BiDi,
+        // Playwright WebKit) the context's `disposeBrowserContext`
+        // already closes every page in it, so an explicit `page.close()`
+        // would only add a redundant `closeTarget` round-trip per test
+        // (~3-5ms each on the bench's tight loop).
         if ctx.name() == "default" {
           let _ = page.close(None).await;
         } else {
@@ -197,10 +196,10 @@ impl TestBrowserResources {
 }
 
 /// Open a per-test browsing container. Backends that support
-/// isolated contexts (CDP pipe, CDP raw, BiDi/Firefox) get a fresh
-/// `Browser::new_context(None)`. WebKit's stock `WKWebView` doesn't
-/// expose multiple contexts, so we share the persistent default —
-/// state will leak between tests on that backend.
+/// isolated contexts get a fresh `Browser::new_context(None)`. All
+/// current backends — CDP pipe, CDP raw, BiDi/Firefox, and Playwright
+/// WebKit — create real isolated contexts; the shared-default fallback
+/// remains for any future backend that reports otherwise.
 fn new_test_context(browser: &Arc<ferridriver::Browser>) -> ferridriver::ContextRef {
   if browser.supports_isolated_contexts() {
     browser.new_context(None)
@@ -211,8 +210,9 @@ fn new_test_context(browser: &Arc<ferridriver::Browser>) -> ferridriver::Context
 
 /// Drop a per-test context. Skips `ctx.close()` when the context is
 /// the shared default container — closing it would tear down the
-/// only browsing context available on backends without isolated
-/// contexts (webkit).
+/// only browsing context available on a backend that shares the
+/// persistent default. All current backends use isolated contexts, so
+/// this guard only fires for a shared-default fallback.
 async fn close_test_context(ctx: &ferridriver::ContextRef) {
   if ctx.name() == "default" {
     return;

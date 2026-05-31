@@ -30,18 +30,20 @@ Cargo aliases: `cargo ck`, `cargo lint`, `cargo lintfix`, `cargo release`, `carg
 
 ## Workspace Structure
 
-12 crates in `crates/`:
+11 crates in `crates/`:
 
 ```
 ferridriver              Core library: Browser, Page, Locator, Frame, backends
-ferridriver-config       Unified config schema (Rust source of truth; ts-rs generates TS types)
+ferridriver-config       Unified config schema (Rust source of truth; consumed entirely Rust-side)
 ferridriver-mcp          MCP server library (rmcp-based, stdio + HTTP transports)
-ferridriver-cli          CLI binary (MCP server only: stdio + HTTP transports)
+ferridriver-cli          CLI binary `ferridriver`: mcp, bdd, test, run, install, codegen
 ferridriver-node         Core-only browser binding via NAPI-RS (Playwright-in-Rust analogue; no test runner / expect / BDD)
 ferridriver-test         E2E test runner: parallel workers, fixtures, reporters, retries
 ferridriver-test-macros  Proc macros: #[ferritest], #[ferritest_each]
 ferridriver-bdd          BDD/Cucumber framework: step registry, Gherkin parser, translators
 ferridriver-bdd-macros   Proc macros: #[given], #[when], #[then], #[step]
+ferridriver-script       QuickJS engine: JS/TS step bodies + `ferridriver run` scripts
+ferridriver-expect       Auto-retrying assertions (Playwright poll schedule); thin shims in bindings
 ```
 
 There is no TypeScript CLI or test package. JavaScript/TypeScript BDD step

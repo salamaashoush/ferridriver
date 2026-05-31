@@ -81,13 +81,13 @@ role=img[include-hidden=true]       include ARIA-hidden elements
 Text-based engines accept options from their typed getter equivalents:
 
 ```rust
-use ferridriver::options::TextOptions;
+use ferridriver::options::{StringOrRegex, TextOptions};
 
-let opts = TextOptions { exact: Some(true), ..Default::default() };
-page.get_by_text("Sign in", &opts);
+let opts = TextOptions { exact: Some(true) };
+page.get_by_text(&"Sign in".into(), &opts);
 
-let opts = TextOptions { regex: Some("^Sign".to_string()), ..Default::default() };
-page.get_by_text("", &opts);
+// Regex matching: pass a regex as the text argument, not as an option.
+page.get_by_text(&StringOrRegex::regex("^Sign", ""), &TextOptions::default());
 ```
 
 In raw selector strings:
@@ -107,12 +107,12 @@ preferred API when you have something accessible to target.
 
 ```rust
 page.get_by_role("button", &RoleOptions { name: Some("Save".into()), ..Default::default() });
-page.get_by_text("Hello", &TextOptions::default());
-page.get_by_label("Email", &TextOptions::default());
-page.get_by_placeholder("you@example.com", &TextOptions::default());
-page.get_by_alt_text("Logo", &TextOptions::default());
-page.get_by_title("Settings", &TextOptions::default());
-page.get_by_test_id("login-form");
+page.get_by_text(&"Hello".into(), &TextOptions::default());
+page.get_by_label(&"Email".into(), &TextOptions::default());
+page.get_by_placeholder(&"you@example.com".into(), &TextOptions::default());
+page.get_by_alt_text(&"Logo".into(), &TextOptions::default());
+page.get_by_title(&"Settings".into(), &TextOptions::default());
+page.get_by_test_id(&"login-form".into());
 ```
 
 **TypeScript (NAPI):**
@@ -127,17 +127,11 @@ page.getByTitle('Settings');
 page.getByTestId('login-form');
 ```
 
-## Custom test ID attribute
+## Test ID attribute
 
-By default, `testid=` and `getByTestId` look at `data-testid`. Override
-per context:
-
-```rust
-browser.new_context_with_options(ContextOptions {
-    test_id_attribute: Some("data-qa".to_string()),
-    ..Default::default()
-}).await?;
-```
+`testid=` and `getByTestId` resolve against `data-testid`. Configuring a
+custom test-id attribute (e.g. `data-qa`) is not supported yet — the
+attribute name is currently fixed to `data-testid`.
 
 ## Performance notes
 

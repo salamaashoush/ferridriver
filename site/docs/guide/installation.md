@@ -24,7 +24,7 @@ binary destination.
 ```toml
 # Cargo.toml
 [dependencies]
-ferridriver = "0.2"
+ferridriver = "0.3"
 ```
 
 `ferridriver-test`, `ferridriver-bdd`, `ferridriver-expect`,
@@ -56,16 +56,17 @@ The platform binary is pulled in via `optionalDependencies`:
 | macOS arm64        | `@ferridriver/node-darwin-arm64`       |
 | Linux x64 (glibc)  | `@ferridriver/node-linux-x64-gnu`      |
 | Linux arm64 (glibc)| `@ferridriver/node-linux-arm64-gnu`    |
-| Windows x64        | `@ferridriver/node-win32-x64-msvc`     |
 
 ## Browsers
 
-Download Chromium and Firefox into the local cache:
+Download browser binaries into the local cache. Supported targets:
+`chromium`, `chromium-headless-shell`, `firefox`, `webkit`.
 
 ```bash
 ferridriver install chromium                          # default
 ferridriver install --with-deps chromium              # Linux: also install system libs
 ferridriver install firefox chromium-headless-shell
+ferridriver install webkit                            # Playwright WebKit build
 ```
 
 Override the cache location with `FERRIDRIVER_BROWSERS_PATH`. Defaults:
@@ -76,13 +77,17 @@ Override the cache location with `FERRIDRIVER_BROWSERS_PATH`. Defaults:
 
 ### WebKit backend
 
-The WebKit backend speaks Playwright's WebKit Inspector protocol. Today
-the binary must be provided out-of-band:
+The WebKit backend speaks Playwright's WebKit Inspector protocol over
+`pw_run.sh`. The binary is discovered in this order:
 
-- Set `FERRIDRIVER_WEBKIT` to a Playwright WebKit checkout containing
+- `FERRIDRIVER_WEBKIT`, pointed at a Playwright WebKit checkout containing
   `pw_run.sh`, **or**
-- Install Playwright once (`npx playwright install webkit`) — ferridriver
-  picks up the Playwright cache automatically.
+- the Playwright cache (`npx playwright install webkit`) — ferridriver
+  picks it up automatically, **or**
+- the ferridriver cache, populated by `ferridriver install webkit`.
+
+WebKit is available on Linux and macOS only (the `--inspector-pipe`
+transport relies on a Unix fork/dup model). It is not native WKWebView.
 
 ## System dependencies
 
@@ -97,8 +102,14 @@ Runtime dependencies:
 
 ## Platform support
 
-- Linux x86_64 / aarch64 (glibc)
-- macOS arm64 (Apple Silicon) and x86_64
-- Windows x64
+The prebuilt `ferridriver` CLI binary ships for Linux x86_64 / aarch64
+(musl) and macOS x86_64 / arm64. There is no prebuilt Windows CLI binary
+(`cdp-pipe`'s fd 3/4 transport and signal handling are Unix-only); build
+from source if you need other targets.
 
-All four backends are available on all platforms.
+The `@ferridriver/node` NAPI binary ships for macOS arm64 and Linux
+x86_64 / aarch64 (glibc).
+
+The CDP backends (`cdp-pipe`, `cdp-raw`) and the Firefox `bidi` backend
+run on Linux and macOS. The `webkit` backend runs on Linux and macOS
+only.

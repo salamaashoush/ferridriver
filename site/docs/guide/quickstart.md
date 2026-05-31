@@ -7,7 +7,7 @@ Pick your language. Both Rust and TypeScript drive the same Rust engine.
 ```toml
 # Cargo.toml
 [dependencies]
-ferridriver = "0.2"
+ferridriver = "0.3"
 tokio       = { version = "1", features = ["full"] }
 ```
 
@@ -35,7 +35,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
 `chromium()`, `firefox()`, and `webkit()` are the launch entry points.
 Default backend is `CdpPipe` (Chromium over fd 3/4 pipes). Pick a
-different one with `chromium_with(BrowserTypeOptions { transport: ... })`
+different one with `BrowserType::chromium_with(&BrowserTypeOptions { transport: ... })`
 or `BrowserType::with_backend(...)`.
 
 ## TypeScript (Node.js or Bun)
@@ -47,9 +47,9 @@ bun add @ferridriver/node
 ```
 
 ```ts
-import { Browser } from '@ferridriver/node';
+import { chromium } from '@ferridriver/node';
 
-const browser = await Browser.launch();
+const browser = await chromium().launch();
 const page = await browser.newPageWithUrl('https://example.com');
 
 await page.locator('#email').fill('test@example.com');

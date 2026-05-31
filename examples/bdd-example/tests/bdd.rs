@@ -5,8 +5,8 @@
 //! retries, reporters).
 //!
 //! Run with:
-//!   cargo test -p bdd-example                     # run all scenarios
-//!   cargo test -p bdd-example -- --headed          # show browser
+//!   cargo test -p bdd-example                      # run all scenarios (headed)
+//!   cargo test -p bdd-example -- --headless        # hide the browser
 //!   cargo test -p bdd-example -- --workers 2       # 2 parallel workers
 //!   cargo test -p bdd-example -- --list            # list scenarios
 //!   cargo test -p bdd-example -- --grep "TodoMVC"  # filter by name
@@ -19,7 +19,7 @@ use ferridriver_bdd::prelude::*;
 
 // ── Custom step definitions ──
 // These are auto-registered via inventory and available in all .feature files
-// alongside the 109 built-in steps.
+// alongside the 145 built-in steps.
 
 #[given("I am on the example page")]
 async fn navigate_example(world: &mut BrowserWorld) {

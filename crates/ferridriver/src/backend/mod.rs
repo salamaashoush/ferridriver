@@ -4,7 +4,9 @@
 //! Provides a unified API across multiple browser backends:
 //! - `CdpPipe`: Chrome `DevTools` Protocol over pipes (--remote-debugging-pipe, fd 3/4)
 //! - `CdpRaw`: Chrome `DevTools` Protocol over WebSocket (our own, fully parallel)
-//! - `WebKit`: Native `WKWebView` on macOS (subprocess model)
+//! - `BiDi`: `WebDriver` `BiDi` over WebSocket (Firefox)
+//! - `WebKit`: Playwright's `WebKit` build over `pw_run.sh` (NUL-delimited JSON
+//!   inspector pipe, fd 3/4); cross-platform (Linux + macOS), not native `WKWebView`
 //!
 //! Uses enum dispatch (not trait objects) for zero-cost abstraction and Clone support.
 
@@ -916,6 +918,29 @@ impl AnyPage {
 
   pub async fn wait_for_navigation(&self) -> Result<()> {
     page_dispatch!(self, wait_for_navigation())
+  }
+
+  /// Snapshot navigation state before an input action (cheap, no RTT).
+  /// CDP-only; returns a trivial snapshot on other backends.
+  #[must_use]
+  pub fn nav_snapshot(&self) -> (u64, u64) {
+    match self {
+      AnyPage::CdpPipe(p) => p.nav_snapshot(),
+      AnyPage::CdpRaw(p) => p.nav_snapshot(),
+      _ => (0, 0),
+    }
+  }
+
+  /// Wait (bounded, best-effort) for a navigation the just-completed action
+  /// started to commit — Playwright's `waitForSignalsCreatedBy`. Zero cost
+  /// when no navigation started; no-op on non-CDP backends (their
+  /// auto-retrying locators cover the same case).
+  pub async fn settle_navigation(&self, snap: (u64, u64), timeout_ms: u64) {
+    match self {
+      AnyPage::CdpPipe(p) => p.settle_navigation(snap, timeout_ms).await,
+      AnyPage::CdpRaw(p) => p.settle_navigation(snap, timeout_ms).await,
+      _ => {},
+    }
   }
 
   pub async fn reload(&self, lifecycle: NavLifecycle, timeout_ms: u64) -> Result<Option<crate::network::Response>> {

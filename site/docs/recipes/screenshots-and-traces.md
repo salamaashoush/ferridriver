@@ -6,7 +6,7 @@
 use ferridriver::options::ScreenshotOptions;
 
 let png = page.screenshot(ScreenshotOptions::default()).await?;
-std::fs::write("home.png", png)?;
+std::fs::write("home.png", png).map_err(|e| e.to_string())?;
 
 // Full page (scrolling capture)
 let png = page.screenshot(ScreenshotOptions {
@@ -25,7 +25,7 @@ let jpg = page.screenshot(ScreenshotOptions {
 ## Element screenshots
 
 ```rust
-let png = page.locator(".chart").screenshot(Default::default()).await?;
+let png = page.locator(".chart", None).screenshot().await?;
 ```
 
 ## Masking sensitive regions
@@ -33,9 +33,14 @@ let png = page.locator(".chart").screenshot(Default::default()).await?;
 Overlay a solid color over selected elements before snapshotting:
 
 ```rust
+use ferridriver::options::ScreenshotOptions;
+
 let png = page.screenshot(ScreenshotOptions {
     full_page: Some(true),
-    mask: vec![".user-email".into(), ".credit-card".into()],
+    mask: vec![
+        page.locator(".user-email", None),
+        page.locator(".credit-card", None),
+    ],
     mask_color: Some("#FF00FF".into()),
     ..Default::default()
 }).await?;
@@ -44,6 +49,8 @@ let png = page.screenshot(ScreenshotOptions {
 ## Disable animations for stable captures
 
 ```rust
+use ferridriver::options::ScreenshotOptions;
+
 let png = page.screenshot(ScreenshotOptions {
     animations: Some("disabled".into()),
     caret: Some("hide".into()),
@@ -57,12 +64,13 @@ Stored baseline; failures emit a diff image next to the snapshot.
 
 ```rust
 use ferridriver_test::prelude::*;
+use ferridriver_test::expect::LocatorSnapshotMatchers;
 
 #[ferritest]
 async fn dashboard_snapshot(ctx: TestContext) {
     let page = ctx.page().await?;
     page.goto("https://app.example.com/dashboard", None).await?;
-    expect(&page.locator(".main")).to_have_screenshot("dashboard.png").await?;
+    expect(&page.locator(".main", None)).to_have_screenshot("dashboard.png").await?;
 }
 ```
 
@@ -78,6 +86,9 @@ YAML representation of the accessibility tree — readable, deterministic,
 and great for catching unintended a11y regressions.
 
 ```rust
+use ferridriver_test::prelude::*;
+use ferridriver_test::expect::PageSnapshotMatchers;
+
 expect(&page).to_match_aria_snapshot(r#"
 - banner:
   - link "Dashboard"
@@ -108,7 +119,7 @@ Modes: `off`, `on`, `retain-on-failure`, `on-first-retry`.
 ```rust
 page.start_tracing().await?;
 page.goto("https://app.example.com", None).await?;
-page.locator("button.cta").click().await?;
+page.locator("button.cta", None).click(None).await?;
 page.stop_tracing().await?;
 // Output goes to launchOptions.traces_dir
 ```
@@ -136,5 +147,8 @@ Requires `ffmpeg` on `PATH` at runtime.
 
 ```ts
 await page.screenshot({ path: 'home.png', fullPage: true });
-await page.locator('.chart').screenshot({ path: 'chart.png' });
+
+// Locator.screenshot() returns the bytes (no path option) — write them yourself.
+const chart = await page.locator('.chart').screenshot();
+await Bun.write('chart.png', chart);
 ```

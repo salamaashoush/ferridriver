@@ -357,7 +357,7 @@ impl Page {
     // - BiDi: `browsingContext.contextCreated` arrives async with empty
     //   `name`; the cache won't reflect the DOM until our `getTree` probe
     //   runs.
-    // - WebKit (WKWebView on macOS, WebKitGTK on Linux): no FrameAttached
+    // - WebKit (Playwright WebKit, cross-platform): no FrameAttached
     //   events at all — the cache is populated solely by `get_frame_tree`'s
     //   DOM probe, which must run after EVERY navigation since
     //   `ensure_frame_cache_seeded`'s early-return on `main_frame_id`
@@ -1958,7 +1958,7 @@ impl Page {
   ///
   /// ```ignore
   /// let nav = page.expect_navigation(None);
-  /// page.click("#link").await?;
+  /// page.click("#link", None).await?;
   /// nav.await?; // resolves when navigation completes
   /// ```
   ///
@@ -2101,28 +2101,29 @@ impl Page {
 
   // ── Network Interception ────────────────────────────────────────────────
 
-  /// Intercept network requests matching a URL glob pattern.
-  /// The handler receives the intercepted request and returns a `RouteAction`
-  /// (Continue, Fulfill, or Abort).
+  /// Intercept network requests matching a [`crate::url_matcher::UrlMatcher`].
+  /// The handler receives a [`crate::route::Route`] and must call exactly one
+  /// of `fulfill()`, `continue_route()`, or `abort()`.
   ///
   /// ```ignore
-  /// use ferridriver::route::{RouteAction, FulfillResponse};
+  /// use ferridriver::route::{Route, FulfillResponse};
+  /// use ferridriver::url_matcher::UrlMatcher;
   /// use std::sync::Arc;
   ///
   /// // Mock an API endpoint
-  /// page.route("**/api/data", Arc::new(|req| {
-  ///     RouteAction::Fulfill(FulfillResponse {
+  /// page.route(UrlMatcher::glob("**/api/data")?, Arc::new(|route: Route| {
+  ///     route.fulfill(FulfillResponse {
   ///         status: 200,
   ///         body: b"{\"mocked\": true}".to_vec(),
   ///         content_type: Some("application/json".into()),
   ///         ..Default::default()
-  ///     })
-  /// })).await?;
+  ///     });
+  /// }), None).await?;
   ///
   /// // Block image loading
-  /// page.route("**/*.{png,jpg,gif}", Arc::new(|_| {
-  ///     RouteAction::Abort("blockedbyclient".into())
-  /// })).await?;
+  /// page.route(UrlMatcher::glob("**/*.{png,jpg,gif}")?, Arc::new(|route: Route| {
+  ///     route.abort("blockedbyclient");
+  /// }), None).await?;
   /// ```
   ///
   /// Returns a [`crate::disposable::Disposable`] whose `dispose()` reverses
@@ -2293,8 +2294,10 @@ impl Page {
   /// use std::sync::Arc;
   ///
   /// page.expose_function("compute", Arc::new(|args| {
-  ///     let x = args[0].as_f64().unwrap_or(0.0);
-  ///     serde_json::json!(x * 2.0)
+  ///     Box::pin(async move {
+  ///         let x = args.first().and_then(|v| v.as_f64()).unwrap_or(0.0);
+  ///         serde_json::json!(x * 2.0)
+  ///     })
   /// })).await?;
   ///
   /// // In the page:
@@ -2685,9 +2688,10 @@ impl Page {
   /// owning context. Playwright:
   /// `/tmp/playwright/packages/playwright-core/types/types.d.ts:4756`
   /// — `video(): null | Video`. Returns `None` for pages in contexts
-  /// that were not created with `recordVideo`, and on backends where
-  /// recording genuinely isn't wired (e.g. stock `WKWebView`, which
-  /// surfaces a typed `Unsupported` via the handle's accessors).
+  /// that were not created with `recordVideo`. Recording is driven by
+  /// `start_screencast`, which every backend (CDP, `BiDi`, Playwright
+  /// `WebKit`) implements, so any context created with `recordVideo`
+  /// yields a handle.
   #[must_use]
   pub fn video(&self) -> Option<Arc<crate::video::Video>> {
     self.video.lock().ok().and_then(|g| g.clone())
@@ -3060,16 +3064,16 @@ pub struct Touchscreen<'a> {
 
 impl Touchscreen<'_> {
   /// Tap at coordinates. Uses Touch/TouchEvent on platforms that support them,
-  /// falls back to `PointerEvent` + click on desktop (e.g. macOS `WKWebView`).
+  /// falls back to `PointerEvent` + click on desktop (e.g. Playwright `WebKit`).
   ///
   /// # Errors
   ///
   /// Returns an error if the tap event dispatch fails.
   pub async fn tap(&self, x: f64, y: f64) -> Result<()> {
-    // webkit6 / WebKitGTK exposes `Touch` and `TouchEvent` as
+    // Playwright WebKit exposes `Touch` and `TouchEvent` as
     // constructors but throws "Illegal constructor" when JS tries to
-    // instantiate them — they're internal-only. macOS WKWebView is
-    // the same. `typeof X !== 'undefined'` isn't enough; try the
+    // instantiate them — they're internal-only on both Linux and
+    // macOS. `typeof X !== 'undefined'` isn't enough; try the
     // actual construction in a try/catch and fall through on throw.
     self.page.inner.evaluate(&format!(
       "(function(){{var el=document.elementFromPoint({x},{y})||document.body;\

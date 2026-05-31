@@ -647,6 +647,12 @@ pub struct NapiBrowserContextOptions {
   pub reduced_motion: Option<String>,
   pub screen: Option<NapiScreenSize>,
   pub service_workers: Option<String>,
+  /// Playwright: `storageState?: string | StorageState`. Either a path to
+  /// a JSON file written by `context.storageState({ path })`, or an inline
+  /// state object of the same shape `storageState()` returns. Cookies and
+  /// localStorage hydrate before the first navigation.
+  #[napi(ts_type = "string | NapiStorageState")]
+  pub storage_state: Option<serde_json::Value>,
   pub strict_selectors: Option<bool>,
   pub timezone_id: Option<String>,
   pub user_agent: Option<String>,
@@ -838,6 +844,11 @@ impl NapiBrowserContextOptions {
       "block" => Some(fo::ServiceWorkerPolicy::Block),
       _ => None,
     });
+    let storage_state = self.storage_state.and_then(|v| match v {
+      serde_json::Value::String(s) => Some(fo::StorageStateInput::Path(std::path::PathBuf::from(s))),
+      serde_json::Value::Null => None,
+      inline => Some(fo::StorageStateInput::Inline(inline)),
+    });
     fo::BrowserContextOptions {
       accept_downloads: self.accept_downloads,
       base_url: self.base_url,
@@ -866,7 +877,7 @@ impl NapiBrowserContextOptions {
       reduced_motion,
       screen,
       service_workers,
-      storage_state: None,
+      storage_state,
       strict_selectors: self.strict_selectors,
       timezone_id: self.timezone_id,
       user_agent: self.user_agent,

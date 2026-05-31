@@ -1,7 +1,7 @@
 #![allow(clippy::doc_markdown)]
 //! ferridriver -- single-binary CLI for browser automation.
 //!
-//! Subcommands: `mcp`, `bdd`, `test`, `install`, `codegen`, `config`.
+//! Subcommands: `mcp`, `bdd`, `test`, `run`, `install`, `codegen`.
 //!
 //! The unified `FerridriverConfig` is loaded exactly once per invocation and
 //! its sections are passed to the selected subcommand.
@@ -35,9 +35,29 @@ async fn main() -> anyhow::Result<()> {
     cli::Command::Test(test_args) => run_test(&test_args),
     cli::Command::Run(run_args) => Box::pin(run_script_cli(run_args)).await,
     cli::Command::Install(install_args) => Box::pin(run_install(install_args)).await,
-    cli::Command::Codegen(_) => anyhow::bail!("`codegen` subcommand not yet implemented"),
-    cli::Command::Config(_) => anyhow::bail!("`config` subcommand not yet implemented"),
+    cli::Command::Codegen(codegen_args) => Box::pin(run_codegen(codegen_args)).await,
   }
+}
+
+/// Launch the interactive recorder: open a headed browser, capture the user's
+/// interactions, and emit a runnable script (TypeScript by default) to stdout
+/// or `--output`. The emitted script runs standalone via `ferridriver run`
+/// and replays on a live session via the MCP `run_script` tool.
+async fn run_codegen(args: cli::CodegenArgs) -> anyhow::Result<()> {
+  use ferridriver::codegen::OutputLanguage;
+  use ferridriver::codegen::recorder::{Recorder, RecorderOptions};
+
+  let url = args.url.unwrap_or_else(|| "about:blank".to_string());
+  let options = RecorderOptions {
+    url,
+    language: OutputLanguage::parse_cli(&args.language),
+    output_file: args.output.as_deref().map(|p| p.to_string_lossy().into_owned()),
+    viewport: None,
+  };
+  Recorder::new(options)
+    .start()
+    .await
+    .map_err(|e| anyhow::anyhow!("codegen: {e}"))
 }
 
 async fn run_install(args: cli::InstallArgs) -> anyhow::Result<()> {

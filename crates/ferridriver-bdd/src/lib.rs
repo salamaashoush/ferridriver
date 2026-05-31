@@ -53,14 +53,14 @@
 //! #[given("I am logged in as {string}")]
 //! async fn login(world: &mut BrowserWorld, username: String) {
 //!     world.page().goto("https://app.example.com/login", None).await.map_err(|e| step_err!("{e}"))?;
-//!     world.page().locator("#email").fill(&username).await.map_err(|e| step_err!("{e}"))?;
-//!     world.page().locator("#password").fill("secret").await.map_err(|e| step_err!("{e}"))?;
-//!     world.page().locator("button[type=submit]").click().await.map_err(|e| step_err!("{e}"))?;
+//!     world.page().locator("#email", None).fill(&username, None).await.map_err(|e| step_err!("{e}"))?;
+//!     world.page().locator("#password", None).fill("secret", None).await.map_err(|e| step_err!("{e}"))?;
+//!     world.page().locator("button[type=submit]", None).click(None).await.map_err(|e| step_err!("{e}"))?;
 //! }
 //!
 //! #[then("I should see the dashboard")]
 //! async fn see_dashboard(world: &mut BrowserWorld) {
-//!     let loc = world.page().locator("[data-testid=dashboard]");
+//!     let loc = world.page().locator("[data-testid=dashboard]", None);
 //!     ferridriver_test::expect::expect(&loc).to_be_visible().await.map_err(|e| step_err!("{e}"))?;
 //! }
 //!

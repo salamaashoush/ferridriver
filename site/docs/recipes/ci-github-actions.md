@@ -42,8 +42,6 @@ jobs:
         run: |
           cargo test --test e2e --release -- \
             --shard ${{ matrix.shard }} \
-            --reporter junit:test-results/junit.xml \
-            --reporter terminal \
             --retries 1
 
       - name: Upload JUnit
@@ -65,6 +63,22 @@ jobs:
           retention-days: 7
 ```
 
+The `cargo test --test e2e` harness parses `--shard`, `--project`, and
+`--retries`, but it does NOT take `--reporter`. For that path the JUnit
+output above comes from the config file, not a CLI flag — add a reporter
+to `ferridriver.toml`:
+
+```toml
+[[test.reporter]]
+name = "junit"
+
+[[test.reporter]]
+name = "terminal"
+```
+
+(The `ferridriver bdd` runner is the one that accepts `--reporter <name>`
+on the command line, as shown in the BDD-only workflow below.)
+
 ## Cross-browser matrix
 
 ```yaml
@@ -84,8 +98,7 @@ steps:
     run: |
       cargo test --test e2e --release -- \
         --project ${{ matrix.project }} \
-        --shard ${{ matrix.shard }} \
-        --reporter junit:test-results/junit-${{ matrix.project }}-${{ strategy.job-index }}.xml
+        --shard ${{ matrix.shard }}
 ```
 
 ## Browser cache between runs
@@ -113,8 +126,8 @@ Hits halve clean-build time on PRs.
   run: |
     ferridriver bdd \
       --workers 4 \
-      --reporter junit:test-results/junit.xml \
       --reporter terminal \
+      --reporter junit \
       --tags 'not @wip' \
       tests/features/
 ```
@@ -125,7 +138,7 @@ Add the `github` reporter to get test failures inline as annotations on
 the PR:
 
 ```bash
---reporter github --reporter junit:test-results/junit.xml
+--reporter github --reporter junit
 ```
 
 ## Test reports in the PR

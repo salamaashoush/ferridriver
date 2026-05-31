@@ -91,8 +91,19 @@ pub struct TypeScriptEmitter;
 
 impl CodeEmitter for TypeScriptEmitter {
   fn header(&self, url: &str) -> String {
+    // Adaptive preamble: reuse the live `page` global when present (MCP
+    // `run_script` injects it), otherwise launch a browser. The same file
+    // therefore runs standalone via `ferridriver run <file>` and against a
+    // live session via the MCP `run_script` tool. `typeof page` is safe even
+    // when `page` is undeclared, and the `? page :` branch only evaluates
+    // when it exists.
     format!(
-      "import {{ test }} from 'ferridriver';\n\ntest('recorded test', async ({{ page }}) => {{\n  await page.goto('{}');\n",
+      "// Recorded with `ferridriver codegen`.\n\
+       // Run standalone: `ferridriver run <file>`.\n\
+       // Replay on a live session: the MCP `run_script` tool (reuses `page`).\n\
+       const __browser = typeof page !== 'undefined' ? null : await chromium().launch();\n\
+       const __page = typeof page !== 'undefined' ? page : await __browser.newPage();\n\
+       await __page.goto('{}');\n",
       escape_js(url)
     )
   }
@@ -100,34 +111,35 @@ impl CodeEmitter for TypeScriptEmitter {
   fn action(&self, action: &Action) -> String {
     match action {
       Action::Navigate { url } => {
-        format!("  await page.goto('{}');\n", escape_js(url))
+        format!("await __page.goto('{}');\n", escape_js(url))
       },
       Action::Click { locator, .. } => {
-        format!("  await page.{locator}.click();\n")
+        format!("await __page.{locator}.click();\n")
       },
       Action::Dblclick { locator, .. } => {
-        format!("  await page.{locator}.dblclick();\n")
+        format!("await __page.{locator}.dblclick();\n")
       },
       Action::Fill { locator, value, .. } => {
-        format!("  await page.{}.fill('{}');\n", locator, escape_js(value))
+        format!("await __page.{}.fill('{}');\n", locator, escape_js(value))
       },
       Action::Press { locator, key, .. } => {
-        format!("  await page.{}.press('{}');\n", locator, escape_js(key))
+        format!("await __page.{}.press('{}');\n", locator, escape_js(key))
       },
       Action::Select { locator, value, .. } => {
-        format!("  await page.{}.selectOption('{}');\n", locator, escape_js(value))
+        format!("await __page.{}.selectOption('{}');\n", locator, escape_js(value))
       },
       Action::Check { locator, .. } => {
-        format!("  await page.{locator}.check();\n")
+        format!("await __page.{locator}.check();\n")
       },
       Action::Uncheck { locator, .. } => {
-        format!("  await page.{locator}.uncheck();\n")
+        format!("await __page.{locator}.uncheck();\n")
       },
     }
   }
 
   fn footer(&self) -> String {
-    "});\n".into()
+    // Close only the browser we launched; an injected session `page` lives on.
+    "if (__browser) await __browser.close();\n".into()
   }
 }
 
@@ -195,5 +207,38 @@ impl CodeEmitter for GherkinEmitter {
 
   fn footer(&self) -> String {
     String::new()
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn typescript_emits_runnable_adaptive_script() {
+    let e = TypeScriptEmitter;
+
+    let header = e.header("https://example.com");
+    // Reuses an injected MCP `page`; otherwise launches its own browser.
+    assert!(header.contains("typeof page !== 'undefined' ? page : await __browser.newPage()"));
+    assert!(header.contains("typeof page !== 'undefined' ? null : await chromium().launch()"));
+    assert!(header.contains("await __page.goto('https://example.com');"));
+    // No dead test-runner import — it must run under `ferridriver run` / MCP.
+    assert!(!header.contains("import { test }"));
+
+    let click = e.action(&Action::Click {
+      selector: "internal:role=button".into(),
+      locator: "getByRole('button', { name: 'Go' })".into(),
+    });
+    assert_eq!(click, "await __page.getByRole('button', { name: 'Go' }).click();\n");
+
+    let fill = e.action(&Action::Fill {
+      selector: "#email".into(),
+      locator: "getByLabel('Email')".into(),
+      value: "a@b.com".into(),
+    });
+    assert_eq!(fill, "await __page.getByLabel('Email').fill('a@b.com');\n");
+
+    assert!(e.footer().contains("if (__browser) await __browser.close();"));
   }
 }

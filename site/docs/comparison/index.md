@@ -17,7 +17,7 @@ likely choosing between. Snapshot: 2026-05-25.
 | **Strict locators** | yes | yes | no | no | no |
 | **Network mocking** | `route` / `unroute` / HAR (no BiDi) | `route` / HAR | `setRequestInterception` | proxy / extension | `cy.intercept` |
 | **Trace viewer** | Playwright-compatible ZIP | yes | no | no (Selenium 4 has BiDi traces) | yes |
-| **BDD** | bundled (`ferridriver-bdd`, 144 steps) | community plugins | community plugins | yes (per language) | community plugins |
+| **BDD** | bundled (`ferridriver-bdd`, 145 steps) | community plugins | community plugins | yes (per language) | community plugins |
 | **MCP server** | bundled (10 tools) | community | community | no | no |
 | **Parallel workers** | per-process MPMC dispatch | per-process | per-script | grid | per-spec (single browser) |
 | **Test framework included** | yes (`ferridriver-test`) | yes (`@playwright/test`) | no (use Jest etc.) | yes (per language) | yes |
@@ -77,8 +77,9 @@ likely choosing between. Snapshot: 2026-05-25.
   ensure nothing covers the target. On the roadmap.
 - **UI mode** — no time-travel debugger. Use the Playwright trace
   viewer on the trace ZIP we emit.
-- **Codegen** — `ferridriver codegen` is scaffolded but not yet
-  implemented.
+- **Codegen** — `ferridriver codegen` records interactions and emits a
+  runnable script (default TypeScript), but has no interactive picker /
+  inspector UI like Playwright's codegen window.
 - **HAR on BiDi backend** — returns `Unsupported`. Use a CDP backend.
 - **Download events on BiDi backend** — returns `Unsupported`. Use a
   CDP backend.

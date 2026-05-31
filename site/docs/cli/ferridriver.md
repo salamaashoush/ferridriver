@@ -1,6 +1,6 @@
 # `ferridriver`
 
-A single static binary with five subcommands. JavaScript / TypeScript
+A single static binary with six subcommands. JavaScript / TypeScript
 BDD step files run natively through the same binary — no separate
 TypeScript CLI exists.
 
@@ -15,8 +15,22 @@ ferridriver [GLOBAL FLAGS] <SUBCOMMAND> [ARGS]
 | `ferridriver mcp`    | Run the MCP server (stdio or HTTP) for AI agents |
 | `ferridriver bdd`    | Run Gherkin features (Rust and / or JS / TS step bodies) |
 | `ferridriver test`   | Wrap `cargo nextest` / `cargo test` for Rust unit and integration tests |
-| `ferridriver run`    | Execute a JavaScript script with Playwright-style bindings |
+| `ferridriver run`    | Execute a JavaScript / TypeScript script with Playwright-style bindings |
 | `ferridriver install`| Download browser binaries into the local cache |
+| `ferridriver codegen`| Record interactions in a headed browser; emit a runnable script |
+
+## Codegen
+
+`ferridriver codegen <url> [--output rec.ts] [--language ts|rust|gherkin]`
+opens a headed browser, records your clicks / fills / selects / navigation
+(generating Playwright-style locators), and writes code to `--output` or
+stdout. Stop with Ctrl+C or by closing the browser.
+
+The default `ts` output is a **runnable** script, not a test stub: it reuses
+an injected `page` when one exists — so the MCP `run_script` tool replays it
+on a live session — and otherwise launches its own browser, so the same file
+runs standalone via `ferridriver run rec.ts`. `rust` emits a `#[ferritest]`
+test; `gherkin` emits a `.feature`.
 
 ## Global flags
 
@@ -24,7 +38,8 @@ ferridriver [GLOBAL FLAGS] <SUBCOMMAND> [ARGS]
 -v, --verbose...        Cumulative log level (-v debug, -vv trace incl. CDP)
 -c, --config PATH       Config file (TOML/YAML/JSON; inferred from extension).
                         Auto-searches ferridriver.{toml,yaml,yml,json} in the
-                        current directory and ~/.config/ferridriver/.
+                        current directory, then config.{toml,yaml,yml,json}
+                        in ~/.config/ferridriver/.
 ```
 
 ## `ferridriver mcp`
@@ -80,10 +95,12 @@ mixed projects where one command should drive any Rust test target.
 ferridriver run [SCRIPT|-] [-e CODE] [--timeout-ms MS] [-- ARGS...]
 ```
 
-Executes a `.js` / `.mjs` script with Playwright-shaped globals
-(`chromium`, `firefox`, `webkit`, `page`, `context`, `request`). `args`
-is the positional list exposed as a global. `-` reads source from stdin.
-`--eval` runs an inline expression instead of a file.
+Executes a script with Playwright-shaped globals (`chromium`, `firefox`,
+`webkit`, `page`, `context`, `request`). A `.ts` / `.tsx` file, or any
+source with top-level `import` / `export`, is rolldown-bundled and
+transpiled before running. `args` is the positional list exposed as a
+global. `-` reads source from stdin. `--eval` runs inline source instead
+of a file.
 
 ## `ferridriver install`
 
@@ -91,13 +108,14 @@ is the positional list exposed as a global. `-` reads source from stdin.
 ferridriver install [BROWSERS]... [--with-deps]
 ```
 
-Browsers: `chromium`, `chromium-headless-shell`, `firefox`. Defaults to
-`chromium`. `--with-deps` also installs Linux system libraries via the
-platform package manager.
+Browsers: `chromium`, `chromium-headless-shell`, `firefox`, `webkit`.
+Defaults to `chromium`. `--with-deps` also installs Linux system
+libraries via the platform package manager.
 
-The WebKit backend uses Playwright's WebKit binary; it is not downloaded
-by `ferridriver install` today. Provide it via `FERRIDRIVER_WEBKIT` or
-install Playwright once (`npx playwright install webkit`).
+`ferridriver install webkit` downloads Playwright's WebKit build into the
+ferridriver cache. Alternatively, point `FERRIDRIVER_WEBKIT` at a
+Playwright WebKit checkout, or install Playwright once
+(`npx playwright install webkit`) and ferridriver picks up its cache.
 
 ## Environment variables
 

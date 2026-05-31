@@ -4,9 +4,9 @@
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-c97b4a.svg)](https://github.com/salamaashoush/ferridriver)
 
 Node.js and Bun bindings for the ferridriver browser engine. NAPI-RS
-native addon with a Playwright-shaped API: `Browser`, `BrowserContext`,
-`Page`, `Frame`, `Locator`, `ElementHandle`, `Route`, `Mouse`,
-`Keyboard`, `Touchscreen`.
+native addon with a Playwright-shaped API: `BrowserType`, `Browser`,
+`BrowserContext`, `Page`, `Frame`, `Locator`, `ElementHandle`, `Route`,
+`Mouse`, `Keyboard`, `Touchscreen`.
 
 This package is the **core browser binding**. For test running, BDD, or
 the MCP server, install the `ferridriver` CLI separately
@@ -27,14 +27,13 @@ The right platform binary is pulled in via `optionalDependencies`:
 | macOS arm64        | `@ferridriver/node-darwin-arm64`       |
 | Linux x64 (glibc)  | `@ferridriver/node-linux-x64-gnu`      |
 | Linux arm64 (glibc)| `@ferridriver/node-linux-arm64-gnu`    |
-| Windows x64        | `@ferridriver/node-win32-x64-msvc`     |
 
 ## Usage
 
 ```ts
-import { Browser } from '@ferridriver/node';
+import { chromium } from '@ferridriver/node';
 
-const browser = await Browser.launch();
+const browser = await chromium().launch();
 const page = await browser.newPageWithUrl('https://example.com');
 
 const heading = page.locator('h1');
@@ -59,20 +58,22 @@ await browser.close();
 ## Backends
 
 ```ts
-// Default: CdpPipe (Chromium over fd 3/4 pipes — fastest)
-const a = await Browser.launch();
+import { chromium, firefox, webkit } from '@ferridriver/node';
 
-// CDP over WebSocket
-const b = await Browser.launch({ backend: 'cdp-raw' });
+// Default: CdpPipe (Chromium over fd 3/4 pipes)
+const a = await chromium().launch();
+
+// CDP over WebSocket (CdpRaw)
+const b = await chromium({ transport: 'ws' }).launch();
 
 // Attach to an already-running Chromium
-const c = await Browser.connect('ws://localhost:9222/devtools/browser/...');
+const c = await chromium().connect('ws://localhost:9222/devtools/browser/...');
 
 // Playwright WebKit (cross-platform — requires the Playwright WebKit binary)
-const d = await Browser.launch({ backend: 'webkit' });
+const d = await webkit().launch();
 
 // Firefox via WebDriver BiDi
-const e = await Browser.launch({ backend: 'bidi' });
+const e = await firefox().launch();
 ```
 
 The `webkit` backend needs the Playwright WebKit binary
@@ -80,26 +81,34 @@ The `webkit` backend needs the Playwright WebKit binary
 
 ## Public API surface
 
-Classes exported from `index.d.ts`: `ApiRequestContext`, `ApiResponse`,
-`Browser`, `BrowserContext`, `Codegen`, `Frame`, `Keyboard`, `Locator`,
-`Mouse`, `Page`, `Route`, `StepHandle`, `TestFixtures`, `TestInfo`,
-`TestRunner`, `Touchscreen`.
+Classes exported from `index.d.ts`: `Browser`, `BrowserContext`,
+`BrowserType`, `Codegen`, `ConsoleMessage`, `Dialog`, `Disposable`,
+`Download`, `ElementHandle`, `FileChooser`, `Frame`, `FrameLocator`,
+`HttpClient`, `HttpResponse`, `JsHandle`, `Keyboard`, `Locator`, `Mouse`,
+`Page`, `Request`, `Response`, `Route`, `Touchscreen`, `Video`,
+`WebError`, `WebSocket`.
 
-Helper functions: `findInstalledChromium()`, `findInstalledHeadlessShell()`,
-`getBrowserCacheDir()`, `installChromium()`, `installChromiumHeadlessShell()`,
-`installChromiumWithDeps()`, `installSystemDeps()`.
+Factory functions: `chromium(options?)`, `firefox()`, `webkit()` — each
+returns a `BrowserType`.
+
+Helper functions: `findInstalledChromium()`, `findInstalledFirefox()`,
+`findInstalledHeadlessShell()`, `getBrowserCacheDir()`, `installChromium()`,
+`installChromiumHeadlessShell()`, `installChromiumWithDeps()`,
+`installFirefox()`, `installSystemDeps()`.
 
 ## Notable differences from Playwright
 
 - `page.on(event, handler)` returns a numeric listener id; remove with
   `page.off(id)`. (Playwright returns the `Page` itself.)
-- `locator.orLocator(other)` / `locator.andLocator(other)` instead of
-  `.or()` / `.and()` — `or` / `and` are Rust keywords and the rename
-  carries through NAPI.
+- A browser is created via the `chromium()` / `firefox()` / `webkit()`
+  factories — each returns a `BrowserType` whose `.launch()` /
+  `.connect()` produce a `Browser`. There is no `Browser.launch()` static.
+- `locator.orLocator(other)` / `locator.andLocator(other)` are aliases for
+  `.or()` / `.and()` (all four are exported).
 - `goto(url, options?)` accepts an optional `{ waitUntil, timeout }`
   argument as the second parameter; defaults to `load`.
-- `evaluateAll()` on a `Locator` takes a JavaScript expression string with
-  `elements` in scope, not a function.
+- `evaluateAll()` on a `Locator` accepts either a JavaScript expression
+  string (with `elements` in scope) or a function.
 
 ## Building from source
 
@@ -110,12 +119,12 @@ bun run build:debug   # debug
 bun test              # NAPI test suite
 ```
 
-The release pipeline builds all four platform targets in parallel in
-GitHub Actions.
+The release pipeline builds all platform targets in parallel in
+GitHub Actions (macOS arm64, Linux x64 glibc, Linux arm64 glibc).
 
 ## Requirements
 
-- Node.js 18+ or Bun 1.0+
+- Node.js 16+ or Bun 1.0+
 - Chrome / Chromium (auto-detected, or run `ferridriver install chromium`)
 - Playwright WebKit binary for the `webkit` backend
 

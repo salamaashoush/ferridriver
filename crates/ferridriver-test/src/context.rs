@@ -11,6 +11,7 @@
 //! }
 //! ```
 
+use std::any::Any;
 use std::sync::Arc;
 
 use crate::fixture::FixturePool;
@@ -61,6 +62,17 @@ impl TestContext {
   /// Get the `TestInfo` fixture (test-scoped runtime context).
   pub async fn test_info(&self) -> Result<Arc<TestInfo>, TestFailure> {
     self.pool.get::<TestInfo>("test_info").await.map_err(TestFailure::from)
+  }
+
+  /// Resolve a custom `#[fixture]` (or any fixture) by name, returning `Arc<T>`.
+  ///
+  /// Dependencies resolve lazily and cache for the fixture's scope:
+  ///
+  /// ```ignore
+  /// let users = ctx.get::<Vec<User>>("seeded_users").await?;
+  /// ```
+  pub async fn get<T: Any + Send + Sync>(&self, name: &str) -> Result<Arc<T>, TestFailure> {
+    self.pool.get::<T>(name).await.map_err(TestFailure::from)
   }
 
   /// Access the underlying `FixturePool` directly (for custom fixtures).

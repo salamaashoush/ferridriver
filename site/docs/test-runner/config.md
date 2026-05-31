@@ -73,11 +73,12 @@ Lowest to highest:
 2. `main!()` / `HarnessConfig` macro arguments (Rust)
 3. Environment variables — `FERRIDRIVER_BACKEND`, `FERRIDRIVER_WORKERS`,
    `FERRIDRIVER_TIMEOUT`, `FERRIDRIVER_RETRIES`, …
-4. CLI flags — `--headed`, `--backend`, `--workers`, `--timeout`, …
+4. CLI flags — `--headless`, `--backend`, `--workers`, `--timeout`, …
 
 ## Profiles
 
-Named presets that merge into the base config via `--profile NAME`:
+Named presets that merge into the base config via `--profile NAME`,
+passed through the Rust test harness:
 
 ```toml
 [test.profiles.ci]
@@ -90,7 +91,7 @@ name = "github"
 ```
 
 ```bash
-ferridriver bdd --profile ci tests/features/
+cargo test --test e2e -- --profile ci
 ```
 
 ## Full schema
@@ -115,7 +116,7 @@ The `TestConfig` Rust type is the canonical reference. Notable fields:
 | `trace`                | enum      | `off`   | `off` / `on` / `retain-on-failure` / `on-first-retry` |
 | `outputDir`            | path      | `test-results` | Test output root |
 | `snapshotDir`          | path?     | none    | Snapshot baseline directory |
-| `updateSnapshots`      | enum      | `none`  | `all` / `changed` / `missing` / `none` |
+| `updateSnapshots`      | enum      | `missing` | `all` / `changed` / `missing` / `none` |
 | `storageState`         | path?     | none    | Saved auth state JSON |
 | `baseUrl`              | string?   | none    | Base URL for relative `page.goto`s |
 | `strict`               | bool      | false   | (BDD) undefined / pending steps fail |

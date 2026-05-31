@@ -15,8 +15,8 @@
 //! ```ignore
 //! use ferridriver_test::expect::expect;
 //!
-//! expect(&page).to_have_title("Example").await?;
-//! expect(&page.locator("h1")).to_have_text("Hello").await?;
+//! expect(&*page).to_have_title("Example").await?;
+//! expect(&page.locator("h1", None)).to_have_text("Hello").await?;
 //! expect_value(json!({"id":1})).to_equal(&json!({"id":1}))?;
 //! ```
 

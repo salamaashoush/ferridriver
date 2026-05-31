@@ -276,13 +276,23 @@ pub async fn click_prep(
   element: &AnyElement,
   page: &AnyPage,
   position: Option<crate::options::Point>,
+  scroll_align: Option<&str>,
 ) -> Result<ClickPrep> {
   let _ = page.ensure_engine_injected().await;
   let position_lit = match position {
     Some(p) => format!("{{x:{},y:{}}}", p.x, p.y),
     None => "null".to_string(),
   };
-  let js = format!("function() {{ return JSON.stringify(window.__fd.clickPrep(this, {position_lit})); }}");
+  // Scroll alignment for this attempt (`null` => precise
+  // `scrollIntoViewIfNeeded`; an object => cycled retry alignment).
+  let scroll_lit = scroll_align.unwrap_or("null");
+  // Pointer-action actionability (Playwright `_performPointerAction`):
+  // visible + enabled + stable. `clickPrep` is async (the `stable` gate
+  // does rAF box-stability sampling page-side); `call_js_fn_value` awaits
+  // the returned promise, so this stays ONE round-trip.
+  let js = format!(
+    "async function() {{ return JSON.stringify(await window.__fd.clickPrep(this, {position_lit}, ['visible','enabled','stable'], {scroll_lit})); }}"
+  );
   let raw = element
     .call_js_fn_value(&js)
     .await?
@@ -881,16 +891,40 @@ pub async fn click_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
       }
     }
 
-    // Single combined pre-flight: `clickGuard` + `isActionable` +
-    // `scrollIntoView` + `clickPoint` in ONE callFunctionOn.
+    // Cycle scroll alignment across retries — Playwright `_retryPointerAction`
+    // (`undefined` => precise `scrollIntoViewIfNeeded`, then end/center/start)
+    // to reveal targets under `position:sticky` overlays.
+    let scroll_align = match attempt % 4 {
+      0 => None,
+      1 => Some("{block:'end',inline:'end'}"),
+      2 => Some("{block:'center',inline:'center'}"),
+      _ => Some("{block:'start',inline:'start'}"),
+    };
+
+    // Single combined pre-flight: `clickGuard` + actionability (visible /
+    // enabled / stable) + `scrollIntoView` + viewport-intersected
+    // `clickPoint` in ONE callFunctionOn.
     let (x, y) = if opts.is_force() {
       resolve_click_point(element, opts.position).await?
     } else {
-      match click_prep(element, page, opts.position).await? {
+      match click_prep(element, page, opts.position, scroll_align).await? {
         ClickPrep::Ready { x, y } => (x, y),
         ClickPrep::IsSelect => return Err(FerriError::Backend(ClickGuardError::IsSelect.to_string())),
         ClickPrep::IsFileInput => return Err(FerriError::Backend(ClickGuardError::IsFileInput.to_string())),
-        ClickPrep::NotActionable { reason } => return Err(FerriError::Backend(reason)),
+        ClickPrep::NotActionable { reason } => {
+          // `notconnected` => the element is gone; surface it so the
+          // locator re-resolves. Transient failures (notinviewport while a
+          // scroll is in flight, not-yet-visible/stable) retry with backoff
+          // and the next scroll alignment — Playwright's `_retryAction`.
+          if reason.contains("notconnected") {
+            return Err(FerriError::Backend(reason));
+          }
+          attempt += 1;
+          if attempt >= retry_backoff_ms.len() + 2 {
+            return Err(FerriError::Backend(reason));
+          }
+          continue;
+        },
       }
     };
 
@@ -1016,7 +1050,8 @@ async fn finalize_hit_interceptor(element: &AnyElement) -> Result<HitResult> {
 /// per-backend mouse-move dispatch.
 pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::options::HoverOptions) -> Result<()> {
   if !opts.is_force() {
-    wait_for_actionable(element, page).await.ok();
+    // Playwright hover: visible + stable (no enabled gate).
+    wait_for_states(element, page, &["visible", "stable"]).await.ok();
   }
   page.press_modifiers(&opts.modifiers).await?;
   let result: Result<()> = if opts.is_trial() {
@@ -1063,7 +1098,10 @@ pub async fn hover_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate:
 /// backend's native `tap_at_with` dispatch.
 pub async fn tap_with_opts(element: &AnyElement, page: &AnyPage, opts: &crate::options::TapOptions) -> Result<()> {
   if !opts.is_force() {
-    wait_for_actionable(element, page).await.ok();
+    // Playwright tap: visible + enabled + stable.
+    wait_for_states(element, page, &["visible", "enabled", "stable"])
+      .await
+      .ok();
   }
   page.press_modifiers(&opts.modifiers).await?;
   let result: Result<()> = if opts.is_trial() {
@@ -1169,6 +1207,48 @@ pub async fn wait_for_actionable(element: &AnyElement, page: &AnyPage) -> Result
     }
 
     // Yield to other tasks (allows parallel pages to make progress)
+    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+  }
+}
+
+/// Wait for an element to satisfy a specific Playwright actionability state
+/// list (e.g. `["visible", "enabled", "stable"]` for click/tap, or
+/// `["visible", "stable"]` for hover). Delegates to the page-side
+/// `awaitStates` helper, which runs the vendored `checkElementStates` —
+/// including the async rAF `stable` (bounding-box-steady) sampling — in a
+/// single round-trip per poll. Retries until the states pass or the 5s
+/// actionability deadline elapses.
+///
+/// # Errors
+///
+/// Returns a timeout error if the states are not all satisfied in time.
+pub async fn wait_for_states(element: &AnyElement, page: &AnyPage, states: &[&str]) -> Result<()> {
+  let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(5);
+  let _ = page.ensure_engine_injected().await;
+  let states_lit = states.iter().map(|s| format!("'{s}'")).collect::<Vec<_>>().join(",");
+  // `awaitStates` resolves to `undefined` when every state passes (so
+  // `?? 'ok'` yields `"ok"`), or the failing state name otherwise.
+  let js = format!(
+    "async function() {{ return JSON.stringify((await window.__fd.awaitStates(this, [{states_lit}])) ?? 'ok'); }}"
+  );
+
+  loop {
+    if tokio::time::Instant::now() >= deadline {
+      return Err(FerriError::timeout("element not actionable", 5_000));
+    }
+
+    let val = element
+      .call_js_fn_value(&js)
+      .await
+      .ok()
+      .flatten()
+      .and_then(|v| v.as_str().map(std::string::ToString::to_string))
+      .unwrap_or_default();
+
+    if val == "\"ok\"" {
+      return Ok(());
+    }
+
     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
   }
 }

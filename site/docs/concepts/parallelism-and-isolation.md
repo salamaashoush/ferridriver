@@ -79,7 +79,7 @@ auto-scale on a shared host leads to unpredictable timings.
 ## Test isolation
 
 Every `#[ferritest]` body receives a `TestContext` whose `page()` /
-`context()` / `browser()` are cached fixtures:
+`browser_context()` / `browser()` are cached fixtures:
 
 - `browser` — worker-scoped, shared across all tests on this worker.
 - `context` — test-scoped, **created fresh for this test**, torn down

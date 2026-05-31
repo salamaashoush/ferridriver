@@ -8,34 +8,39 @@ The handler chooses `fulfill` (mock a response), `continue_route`
 
 ```rust
 use ferridriver_test::prelude::*;
-use ferridriver::route::{Route, FulfillResponse};
+use ferridriver::route::{Route, RouteHandler, FulfillResponse};
+use ferridriver::url_matcher::UrlMatcher;
 use std::sync::Arc;
 
 #[ferritest]
 async fn mocks_user_list(ctx: TestContext) {
     let page = ctx.page().await?;
 
-    page.route("**/api/users", Arc::new(|route: Route| async move {
+    let handler: RouteHandler = Arc::new(|route: Route| {
         route.fulfill(FulfillResponse {
             status: 200,
             headers: vec![("content-type".into(), "application/json".into())],
             body: br#"[{"id":1,"name":"Ada"},{"id":2,"name":"Grace"}]"#.to_vec(),
             content_type: Some("application/json".into()),
-        }).await.ok();
-    })).await?;
+        });
+    });
+    page.route(UrlMatcher::glob("**/api/users")?, handler, None).await?;
 
     page.goto("https://app.example.com/users", None).await?;
-    expect(&page.locator(".user-row")).to_have_count(2).await?;
+    expect(&page.locator(".user-row", None)).to_have_count(2).await?;
 }
 ```
 
 ## Block third-party trackers
 
 ```rust
-page.route("**/{google-analytics,segment,mixpanel}.com/**",
-    Arc::new(|route: Route| async move {
-        route.abort("blockedbyclient").await.ok();
-    })
+let block: RouteHandler = Arc::new(|route: Route| {
+    route.abort("blockedbyclient");
+});
+page.route(
+    UrlMatcher::glob("**/{google-analytics,segment,mixpanel}.com/**")?,
+    block,
+    None,
 ).await?;
 ```
 
@@ -44,22 +49,30 @@ page.route("**/{google-analytics,segment,mixpanel}.com/**",
 ```rust
 use ferridriver::route::ContinueOverrides;
 
-page.route("**/api/**", Arc::new(|route: Route| async move {
-    let mut headers = route.request().headers.clone();
-    headers.insert("x-test-run".into(), "ci-12345".into());
+let modify: RouteHandler = Arc::new(|route: Route| {
+    let mut headers: Vec<(String, String)> = route
+        .request()
+        .headers
+        .iter()
+        .map(|(k, v)| (k.clone(), v.clone()))
+        .collect();
+    headers.push(("x-test-run".into(), "ci-12345".into()));
     route.continue_route(ContinueOverrides {
         url: None,
         method: None,
         headers: Some(headers),
         post_data: None,
-    }).await.ok();
-})).await?;
+    });
+});
+page.route(UrlMatcher::glob("**/api/**")?, modify, None).await?;
 ```
 
 ## Wait for a specific response
 
 ```rust
-let response = page.wait_for_response("**/api/checkout", 30_000).await?;
+let response = page
+    .wait_for_response(UrlMatcher::glob("**/api/checkout")?, Some(30_000))
+    .await?;
 assert_eq!(response.status(), 200);
 let body: serde_json::Value = response.json().await?;
 assert_eq!(body["order_id"], "abc-123");
@@ -68,8 +81,8 @@ assert_eq!(body["order_id"], "abc-123");
 ## TypeScript
 
 ```ts
-await page.route('**/api/users', async (route) => {
-  await route.fulfill({
+await page.route('**/api/users', (route) => {
+  route.fulfill({
     status: 200,
     contentType: 'application/json',
     body: JSON.stringify([
@@ -88,8 +101,16 @@ await page.goto('https://app.example.com/users');
 when you have multi-tab flows:
 
 ```rust
-let context = ctx.context().await?;
-context.route("**/api/**", Arc::new(handler)).await?;
+let context = ctx.browser_context().await?;
+let handler: RouteHandler = Arc::new(|route: Route| {
+    route.fulfill(FulfillResponse {
+        status: 200,
+        headers: vec![],
+        body: b"{}".to_vec(),
+        content_type: Some("application/json".into()),
+    });
+});
+context.route(UrlMatcher::glob("**/api/**")?, handler, None).await?;
 ```
 
 ## HAR recording
@@ -111,7 +132,7 @@ flows.
 ## Removing routes
 
 ```rust
-page.unroute("**/api/users").await?;
+page.unroute(&UrlMatcher::glob("**/api/users")?).await?;
 ```
 
 Or set up the route inside a test fixture so teardown removes it

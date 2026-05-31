@@ -1180,11 +1180,11 @@ async fn apply_context_options(page: &Arc<Page>, opts: &crate::options::BrowserC
 /// and calling `await video.path()` resolves cleanly once the page
 /// closes.
 ///
-/// On backends that do not support screencast (stock `WKWebView`,
-/// surfaced through `AnyPage::start_screencast`'s typed error), the
-/// video sink is populated with the error text so the Playwright
-/// contract — `page.video()` returns a handle; the handle's methods
-/// reject with a clear reason — is preserved.
+/// Should a backend's `AnyPage::start_screencast` ever surface a typed
+/// error, the video sink is populated with the error text so the
+/// Playwright contract — `page.video()` returns a handle; the handle's
+/// methods reject with a clear reason — is preserved. (Every current
+/// backend, including Playwright `WebKit`, supports screencast.)
 fn start_video_recording(page: &Arc<Page>, opts: &crate::options::RecordVideoOptions) {
   // Compose the output filename: `<dir>/<timestamp>-<page-id>.<ext>`.
   // Playwright derives its name from the page's GUID; ferridriver uses

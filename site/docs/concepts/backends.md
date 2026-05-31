@@ -8,10 +8,10 @@ and every test keeps working.
 
 | Backend     | Browser            | When to use                                           | Platform |
 |-------------|--------------------|-------------------------------------------------------|----------|
-| `cdp-pipe` (default) | Chromium / Chrome | Most things. Fastest.                          | Linux, macOS, Windows |
-| `cdp-raw`   | Chromium / Chrome  | Attach to an already-running Chrome, or when fd inheritance is awkward | Linux, macOS, Windows |
-| `webkit`    | Playwright WebKit  | Safari-family rendering coverage                       | Linux, macOS, Windows |
-| `bidi`      | Firefox            | Firefox coverage, BiDi interop                         | Linux, macOS, Windows |
+| `cdp-pipe` (default) | Chromium / Chrome | Most things. Fastest.                          | Linux, macOS |
+| `cdp-raw`   | Chromium / Chrome  | Attach to an already-running Chrome, or when fd inheritance is awkward | Linux, macOS |
+| `webkit`    | Playwright WebKit  | Safari-family rendering coverage                       | Linux, macOS |
+| `bidi`      | Firefox            | Firefox coverage, BiDi interop                         | Linux, macOS |
 
 ## `cdp-pipe` — the default
 
@@ -42,16 +42,19 @@ Same CDP protocol over a WebSocket. ferridriver can launch Chrome and
 dial its `ws://...` endpoint, or you can point it at an existing browser.
 
 ```rust
-use ferridriver::browser_type::{chromium_with, BrowserTypeOptions, ChromiumTransport};
+use ferridriver::browser_type::{chromium, BrowserType};
+use ferridriver::options::{BrowserTypeOptions, ChromiumTransport};
 
 // launch
-let browser = chromium_with(BrowserTypeOptions {
+let browser = BrowserType::chromium_with(&BrowserTypeOptions {
     transport: Some(ChromiumTransport::Ws),
     ..Default::default()
 }).launch(Default::default()).await?;
 
 // attach
-let browser = Browser::connect("ws://localhost:9222/devtools/browser/abcd-1234").await?;
+let browser = chromium()
+    .connect("ws://localhost:9222/devtools/browser/abcd-1234", Default::default())
+    .await?;
 ```
 
 **Use when**
@@ -66,24 +69,25 @@ Slightly slower than `cdp-pipe` — WebSocket framing plus a loopback hop
 — but the difference is in the low single-digit ms per CDP call and is
 usually irrelevant.
 
-## `webkit` — Playwright WebKit (cross-platform)
+## `webkit` — Playwright WebKit (Linux + macOS)
 
 Speaks Playwright's WebKit Inspector protocol over a NUL-byte-delimited
-JSON pipe to a `pw_run.sh` child process. Same code on every platform.
+JSON pipe to a `pw_run.sh` child process. Same code on Linux and macOS.
 
 **Strengths**
 
 - Real WebKit / JavaScriptCore rendering and JS engine.
-- Cross-platform — Linux, macOS, Windows.
+- Cross-platform — Linux and macOS (the `--inspector-pipe` transport
+  relies on a Unix fork/dup model, so there is no Windows support).
 - Closes most Playwright feature gaps that a public-API WKWebView build
   cannot (PDF, video, network interception, per-frame execution context,
   main-document response, etc.).
 
 **Limits**
 
-- Requires the Playwright WebKit binary. `ferridriver install` does not
-  download it today; provide it via `FERRIDRIVER_WEBKIT` or
-  `npx playwright install webkit`.
+- Requires the Playwright WebKit binary. Download it with
+  `ferridriver install webkit`, or provide it via `FERRIDRIVER_WEBKIT`
+  or `npx playwright install webkit`.
 - A few hundred MB on disk per platform.
 
 ## `bidi` — Firefox via WebDriver BiDi
@@ -105,18 +109,21 @@ WebSocket.
 - HAR recording and download interception return
   `FerriError::Unsupported` (BiDi protocol gap).
 
-## How backends relate to `--browser`
+## How browsers relate to backends
 
-`--browser` sets a sensible default backend:
+Each browser has a sensible default backend, chosen by the Rust factory
+you call (`chromium()` / `firefox()` / `webkit()`) or by `[[test.projects]]`
+config:
 
-| `--browser` | Default backend |
-|-------------|-----------------|
-| `chromium`  | `cdp-pipe`      |
-| `firefox`   | `bidi`          |
-| `webkit`    | `webkit`        |
+| Browser    | Default backend |
+|------------|-----------------|
+| `chromium` | `cdp-pipe`      |
+| `firefox`  | `bidi`          |
+| `webkit`   | `webkit`        |
 
-Mixing is fine — `--browser chromium --backend cdp-raw` is valid.
-`--browser firefox --backend webkit` is not.
+Chromium also supports `cdp-raw` (`chromium({ transport: 'ws' })` in JS,
+`BrowserType::chromium_with` in Rust). Pairings like Firefox-on-webkit or
+WebKit-on-bidi are not valid.
 
 ## Cross-backend matrix
 
@@ -162,9 +169,9 @@ transport.
 
 - **Writing a new suite today**: start on `cdp-pipe`. Add `webkit` and
   `bidi` projects when you need cross-browser coverage.
-- **Debugging a single test**: `--headed --backend cdp-pipe -j 1` —
-  one browser, visible, linear output.
+- **Debugging a single test**: `--backend cdp-pipe` with `--workers 1` —
+  one browser, linear output. (MCP / `run` launch headed by default.)
 - **Attaching to a logged-in profile**: `cdp-raw` with
-  `Browser::connect`.
+  `chromium().connect(...)`.
 - **Safari-family regression**: `webkit`.
 - **Firefox regression**: `bidi`.

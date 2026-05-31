@@ -55,17 +55,48 @@ pub struct HookRegistration {
 
 inventory::collect!(HookRegistration);
 
+/// What the `#[fixture]` proc macro submits via `inventory::submit!`.
+///
+/// `build` is a plain fn pointer (const-storable in the inventory static)
+/// that constructs the heap-allocated [`FixtureDef`] at collection time.
+pub struct FixtureRegistration {
+  pub name: &'static str,
+  pub module_path: &'static str,
+  pub build: fn() -> crate::fixture::FixtureDef,
+}
+
+inventory::collect!(FixtureRegistration);
+
+/// What the `#[ferritest_suite]` proc macro submits via `inventory::submit!`.
+/// Sets the execution mode of the suite derived from `module_path`.
+pub struct SuiteModeRegistration {
+  pub module_path: &'static str,
+  pub mode: crate::model::SuiteMode,
+}
+
+inventory::collect!(SuiteModeRegistration);
+
+/// Collect every `#[fixture]`-registered custom fixture into a defs map,
+/// keyed by fixture name. Merged into the worker fixture pool so tests and
+/// other fixtures can resolve them via `ctx.get::<T>(name)`.
+pub fn collect_rust_fixtures() -> rustc_hash::FxHashMap<String, crate::fixture::FixtureDef> {
+  let mut defs = rustc_hash::FxHashMap::default();
+  for reg in inventory::iter::<FixtureRegistration> {
+    defs.insert(reg.name.to_string(), (reg.build)());
+  }
+  defs
+}
+
 // ── Discovery ──
 
 /// Derive suite name from `module_path!()`.
 ///
-/// Given `"my_crate::tests::login_tests::test_fn"`, returns `"tests::login_tests"`.
-/// Strips the crate root (first segment) and the test function name (last segment).
+/// `module_path!()` expands to the MODULE path (it never includes the
+/// function name), so `"my_crate::login_tests"` -> `"login_tests"`. We strip
+/// only the crate root; the remainder is the suite. A top-level test (no
+/// enclosing module) keeps the crate name as its suite.
 fn suite_from_module_path(mp: &str) -> &str {
-  // Strip last segment (the function name).
-  let without_fn = mp.rsplit_once("::").map_or(mp, |(prefix, _)| prefix);
-  // Strip first segment (the crate name).
-  without_fn.split_once("::").map_or(without_fn, |(_, rest)| rest)
+  mp.split_once("::").map_or(mp, |(_, rest)| rest)
 }
 
 /// Collect all registered tests and build a `TestPlan`.
@@ -134,6 +165,17 @@ pub fn collect_rust_tests(config: &TestConfig) -> TestPlan {
             }
           },
         }
+      }
+    }
+  }
+
+  // Apply explicit suite modes from `#[ferritest_suite]`, keyed by the same
+  // module-derived suite name `#[ferritest]` registrations use.
+  for reg in inventory::iter::<SuiteModeRegistration> {
+    let reg_suite = suite_from_module_path(reg.module_path);
+    for suite in suites.values_mut() {
+      if suite.name == reg_suite {
+        suite.mode = reg.mode;
       }
     }
   }

@@ -28,7 +28,7 @@ expect breaking changes between minor versions.
 
 ## Project layout
 
-12 workspace crates plus one example crate.
+11 workspace crates plus one example crate.
 
 | Crate                          | Purpose |
 |--------------------------------|---------|
@@ -39,11 +39,11 @@ expect breaking changes between minor versions.
 | `ferridriver-script`           | QuickJS engine — backs `run_script`, JS/TS BDD steps, and JS extensions |
 | `ferridriver-node`             | NAPI-RS binding shipping the browser API to Node.js / Bun |
 | `ferridriver-test`             | Test runner core — parallel workers, fixtures, hooks, retries, reporters, snapshots, traces |
-| `ferridriver-test-macros`      | `#[ferritest]`, `#[ferritest_each]`, hook attribute macros |
+| `ferridriver-test-macros`      | `#[ferritest]`, `#[ferritest_each]`, `#[fixture]`, `#[ferritest_suite]`, hook attribute macros |
 | `ferridriver-expect`           | Auto-retrying assertion library — locator, page, value, polling matchers |
 | `ferridriver-bdd`              | BDD framework — Gherkin parser, step / hook registry, scenario translator, executor |
 | `ferridriver-bdd-macros`       | `#[given]`, `#[when]`, `#[then]`, `#[step]`, `#[before]`, `#[after]`, `#[param_type]` |
-| `examples/bdd-example`         | Reference Rust + JS/TS BDD suite |
+| `examples/bdd-example`         | Reference Rust BDD suite (feature files + Rust step bodies) |
 
 Everything above the core is a thin translator. The same `Page::click`
 implementation is reached by a Rust `#[ferritest]`, a Gherkin `When I click
@@ -79,10 +79,11 @@ ferridriver install --with-deps chromium              # Linux: also install syst
 ferridriver install firefox chromium-headless-shell   # multiple at once
 ```
 
-The WebKit backend uses Playwright's WebKit binary. Today it must be
-provided out-of-band — set `FERRIDRIVER_WEBKIT` to a Playwright WebKit
-checkout containing `pw_run.sh`, or install Playwright once
-(`npx playwright install webkit`) and ferridriver picks up the cache.
+The WebKit backend uses Playwright's WebKit binary. `ferridriver install
+webkit` downloads it into ferridriver's own cache. Alternatively, set
+`FERRIDRIVER_WEBKIT` to a Playwright WebKit checkout containing
+`pw_run.sh`, or install Playwright once (`npx playwright install webkit`)
+and ferridriver picks up that cache.
 
 ### Node.js / Bun (core browser binding only)
 
@@ -93,13 +94,14 @@ bun add @ferridriver/node
 ```
 
 Platform binaries are pulled in via `optionalDependencies`
-(`@ferridriver/node-{darwin-arm64,linux-x64-gnu,linux-arm64-gnu,win32-x64-msvc}`).
+(`@ferridriver/node-{darwin-arm64,linux-x64-gnu,linux-arm64-gnu}`).
 
 ## Quick start (Rust)
 
 ```rust
 use ferridriver::{Browser, browser_type::chromium};
 use ferridriver::options::LaunchOptions;
+use ferridriver::url_matcher::UrlMatcher;
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
@@ -107,9 +109,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     let page = browser.page().await?;
 
     page.goto("https://example.com", None).await?;
-    page.locator("#email").fill("test@example.com").await?;
-    page.locator("button[type=submit]").click().await?;
-    page.wait_for_url("/dashboard").await?;
+    page.locator("#email", None).fill("test@example.com", None).await?;
+    page.locator("button[type=submit]", None).click(None).await?;
+    page.wait_for_url(UrlMatcher::glob("**/dashboard")?).await?;
 
     let png = page.screenshot(Default::default()).await?;
     std::fs::write("home.png", png)?;
@@ -120,8 +122,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `firefox()` and `webkit()` are factories with the same shape. `chromium()`
-defaults to the `CdpPipe` backend; pass `BrowserTypeOptions { transport:
-Some(ChromiumTransport::Ws), .. }` for `CdpRaw`.
+defaults to the `CdpPipe` backend; use `BrowserType::chromium_with(&BrowserTypeOptions
+{ transport: Some(ChromiumTransport::Ws), .. })` for `CdpRaw`.
 
 ## Quick start (Node.js / Bun)
 
@@ -159,8 +161,8 @@ async fn loads_homepage(ctx: TestContext) {
 async fn login_flow(ctx: TestContext) {
     let page = ctx.page().await?;
     page.goto("https://app.example.com/login", None).await?;
-    page.locator("#email").fill("user@example.com").await?;
-    page.locator("button[type=submit]").click().await?;
+    page.locator("#email", None).fill("user@example.com", None).await?;
+    page.locator("button[type=submit]", None).click(None).await?;
     expect(&page).to_have_url("/dashboard").await?;
 }
 ```
@@ -182,12 +184,12 @@ path = "tests/harness.rs"
 harness = false
 
 [dev-dependencies]
-ferridriver-test = "0.2"
+ferridriver-test = "0.3"
 ```
 
 ```bash
 cargo test --test e2e
-cargo test --test e2e -- --headed --backend webkit -j 1
+cargo test --test e2e -- --headless --backend webkit -j 1
 cargo test --test e2e -- -g smoke --retries 2
 ```
 
@@ -203,7 +205,7 @@ async fn navigate(world: &mut BrowserWorld, url: String) {
 
 #[when("I click {string}")]
 async fn click(world: &mut BrowserWorld, selector: String) {
-    world.page().locator(&selector).click().await.unwrap();
+    world.page().locator(&selector, None).click(None).await.unwrap();
 }
 ```
 
@@ -218,7 +220,7 @@ cargo test --test bdd
 ferridriver bdd tests/features/
 ```
 
-`ferridriver-bdd` ships 144 built-in steps (assertions, interaction,
+`ferridriver-bdd` ships 145 built-in steps (assertions, interaction,
 navigation, network, API, storage, keyboard, mouse, frame, dialog,
 emulation, etc.) — write your own only for app-specific vocabulary.
 
@@ -245,7 +247,7 @@ Then('the URL should contain {string}', async function (fragment: string) {
 ferridriver bdd --steps 'steps/**/*.{js,ts}' tests/features/
 ```
 
-`Given` / `When` / `Then` / `Step` / `Before` / `After` /
+`Given` / `When` / `Then` / `defineStep` / `Before` / `After` /
 `defineParameterType` / `setWorldConstructor` / `setDefaultTimeout` are
 global; `this` is the `World` with `page` / `context` / `request` /
 `browser` / `parameters` / `attach` / `log` / `skip`. No `package.json`,
@@ -316,8 +318,9 @@ WebKit speaks Playwright's WebKit Inspector protocol over a NUL-byte-
 delimited JSON pipe to a `pw_run.sh` child process. Same code on every
 platform (macOS, Linux, Windows). The binary is shipped by Playwright;
 ferridriver locates it via `FERRIDRIVER_WEBKIT`, then the Playwright
-cache, then the ferridriver cache. Run `npx playwright install webkit`
-once (or set `FERRIDRIVER_WEBKIT`) to provide it.
+cache, then the ferridriver cache. Run `ferridriver install webkit`
+(or `npx playwright install webkit`, or set `FERRIDRIVER_WEBKIT`) to
+provide it.
 
 ## Build and test
 
@@ -352,15 +355,16 @@ bun test
 
 ## Requirements
 
-- Rust stable 1.91 or newer (edition 2024). See `rust-toolchain.toml`.
+- Rust nightly (edition 2024). The toolchain is pinned in
+  `rust-toolchain.toml`; `rust-version` (MSRV) is 1.91.
 - Chrome or Chromium (`ferridriver install chromium`, or set
   `FERRIDRIVER_BROWSERS_PATH` to use an existing install).
 - Firefox installed locally for the `bidi` backend (ferridriver does not
   bundle Firefox).
-- Playwright WebKit binary for the `webkit` backend (set
-  `FERRIDRIVER_WEBKIT` or use Playwright's cache).
+- Playwright WebKit binary for the `webkit` backend (`ferridriver install
+  webkit`, set `FERRIDRIVER_WEBKIT`, or use Playwright's cache).
 - `ffmpeg` on `PATH` at runtime for video recording (optional).
-- Node.js 18+ or Bun 1.0+ only if you build or consume `@ferridriver/node`.
+- Node.js 16+ or Bun 1.0+ only if you build or consume `@ferridriver/node`.
 
 ## Documentation
 

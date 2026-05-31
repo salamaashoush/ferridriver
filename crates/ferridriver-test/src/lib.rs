@@ -81,12 +81,16 @@
 //! async fn login_test(ctx: TestContext) {
 //!     let page = ctx.page().await?;
 //!     page.goto("https://app.example.com/login", None).await?;
-//!     page.locator("#email").fill("user@example.com").await?;
-//!     page.locator("#password").fill("password").await?;
-//!     page.locator("button[type=submit]").click().await?;
+//!     page.locator("#email", None).fill("user@example.com", None).await?;
+//!     page.locator("#password", None).fill("password", None).await?;
+//!     page.locator("button[type=submit]", None).click(None).await?;
 //!     expect(&*page).to_have_url("https://app.example.com/dashboard").await?;
 //! }
 //! ```
+
+/// Result type for `#[fixture]` bodies and other test helpers: a
+/// `std::result::Result` whose error is [`TestFailure`](model::TestFailure).
+pub type Result<T> = std::result::Result<T, model::TestFailure>;
 
 // -- Core modules --
 pub mod config;
@@ -115,9 +119,12 @@ pub mod worker;
 // -- Re-exports --
 pub use config::{CliOverrides, TestConfig, parse_common_cli_args};
 pub use context::TestContext;
-pub use discovery::{HookKindTag, HookRegistration as InventoryHookRegistration, TestRegistration};
+pub use discovery::{
+  FixtureRegistration, HookKindTag, HookRegistration as InventoryHookRegistration, SuiteModeRegistration,
+  TestRegistration, collect_rust_fixtures,
+};
 pub use expect::{ToPassOptions, expect, expect_configured, expect_poll, to_pass, to_pass_with_options};
-pub use fixture::FixturePool;
+pub use fixture::{FixtureDef, FixturePool, FixtureScope};
 pub use model::{
   HookDef, HookKind, HookOwner, HookPhase, HookRegistration, HookScope, SuiteDef, SuiteMode, TestAnnotation, TestCase,
   TestFailure, TestFixtures, TestFn, TestId, TestInfo, TestModifiers, TestOutcome, TestPlan, TestPlanBuilder,
@@ -127,7 +134,9 @@ pub use reporter::{EventBus, EventBusBuilder, Reporter, ReporterDriver, Reporter
 pub use runner::TestRunner;
 
 // Re-export proc macros.
-pub use ferridriver_test_macros::{after_all, after_each, before_all, before_each, ferritest, ferritest_each};
+pub use ferridriver_test_macros::{
+  after_all, after_each, before_all, before_each, ferritest, ferritest_each, ferritest_suite, fixture,
+};
 
 // Re-export inventory for the proc macro expansion.
 pub use inventory;
@@ -142,8 +151,9 @@ pub use inventory;
 /// use ferridriver_test::prelude::*;
 ///
 /// #[ferritest]
-/// async fn my_test(page: Page) {
-///     page.goto("https://example.com", None).await.unwrap();
+/// async fn my_test(ctx: TestContext) {
+///     let page = ctx.page().await?;
+///     page.goto("https://example.com", None).await?;
 /// }
 ///
 /// ferridriver_test::main!();
@@ -195,5 +205,7 @@ pub mod prelude {
   pub use crate::expect::{expect, expect_configured, expect_poll, to_pass};
   pub use crate::fixture::FixturePool;
   pub use crate::model::{TestFailure, TestInfo};
-  pub use ferridriver_test_macros::{after_all, after_each, before_all, before_each, ferritest, ferritest_each};
+  pub use ferridriver_test_macros::{
+    after_all, after_each, before_all, before_each, ferritest, ferritest_each, ferritest_suite, fixture,
+  };
 }

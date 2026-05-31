@@ -1,7 +1,7 @@
 # Scripting overview
 
 ferridriver embeds a QuickJS engine (`ferridriver-script`) and exposes
-it to three first-class surfaces. All three share one bundler
+it to four first-class surfaces. All four share one bundler
 (rolldown), one bytecode cache, one set of globals, and one sandbox.
 
 | Surface              | Entry point                          | What you write |
@@ -33,9 +33,15 @@ source files (.js / .ts / .mjs / .tsx / ...)
   — all bundled and tree-shaken.
 - **No Node, no Bun in the run path.** Rolldown runs `Platform::Neutral`;
   QuickJS has no Node builtins.
-- **Bytecode cache is in-memory and process-local.** It is never written
-  to disk — a requirement of the `Module::load` invariant (bytecode is
-  interpreter-build- and process-specific).
+- **Bytecode is cached in-memory and on disk.** An in-process cache
+  serves repeat compiles within one process; a cross-process disk cache
+  (under the user cache dir, or `FERRIDRIVER_CACHE_DIR`) lets an
+  unchanged source tree skip both rolldown and the QuickJS compile on a
+  fresh start. Disk entries live under an ABI-tag directory (QuickJS
+  version, arch, endianness, pointer width) so `Module::load` only ever
+  reads bytecode from a matching toolchain; a mismatch misses and
+  recompiles. Set `FERRIDRIVER_NO_BYTECODE_CACHE` to disable the disk
+  cache.
 - **One bad file does not abort the batch.** Bundle / compile failures
   are reported per file and skipped; the server still starts.
 - **Errors are source-mapped.** A thrown error in a bundled step is
@@ -61,7 +67,7 @@ source files (.js / .ts / .mjs / .tsx / ...)
 - [Extensions](/scripting/extensions) — `defineTool`, `exposeAsTool`,
   `ferridriver.host`, handler context, lifecycle.
 - [BDD JS / TS API](/scripting/bdd-js-api) — full Cucumber-shaped
-  reference: `Given` / `When` / `Then` / `Step`, hooks, World,
+  reference: `Given` / `When` / `Then` / `defineStep`, hooks, World,
   `DataTable`, parameter types.
 - [`run_script` reference](/scripting/run-script) — the MCP action
   path: parameters, return shape, globals.
