@@ -17,7 +17,7 @@ ferridriver bdd \
   --steps 'steps/**/*.{js,ts}' \
   --tags '@smoke and not @wip' \
   --workers 4 \
-  --reporter junit:reports/junit.xml \
+  --reporter junit \
   --reporter terminal \
   tests/features/
 ```
@@ -32,15 +32,15 @@ file. Defaults to `steps/**/*.{js,ts}` and
 --steps GLOB              JS / TS step files (repeatable)
 --tags EXPR               tag filter: @smoke and not @wip, etc.
 --workers N               parallel workers (default: CPU count)
---reporter SPEC           reporter name [:options] (repeatable)
+--reporter NAME           reporter name (repeatable)
 --strict                  treat undefined / pending steps as failures
 --dry-run                 parse + report scenarios without executing
 --fail-fast               stop after first failure
 --step-timeout MS         override per-step timeout
 --order MODE              defined | random | random:SEED
 --language LANG           default Gherkin keyword language (en, de, fr, ...)
+--shard X/N               run shard X of N across CI machines
 --world-parameters JSON   pass JSON object to this.parameters
---profile NAME            merge [test.profiles.NAME] from config
 ```
 
 Plus the shared browser flags (`--backend`, `--headless`,
@@ -63,13 +63,15 @@ path = "tests/bdd.rs"
 harness = false
 
 [dev-dependencies]
-ferridriver-bdd  = "0.2"
-ferridriver-test = "0.2"
+ferridriver-bdd  = "0.3"
+ferridriver-test = "0.3"
 ```
 
 ```bash
-cargo test --test bdd -- --headed -j 4 --tags '@smoke and not @wip'
+cargo test --test bdd -- -j 4 --tags '@smoke and not @wip'
 ```
+
+Tests run headed by default; pass `--headless` to opt into headless mode.
 
 ## Reporters
 
@@ -88,8 +90,11 @@ cargo test --test bdd -- --headed -j 4 --tags '@smoke and not @wip'
 | `github`         | GitHub Actions annotations |
 | `empty`          | No output |
 
-Specify multiple reporters by repeating `--reporter`. Each reporter can
-take options after a colon, e.g. `--reporter junit:reports/junit.xml`.
+Specify multiple reporters by repeating `--reporter`, e.g. `--reporter
+terminal --reporter junit`. Each name is matched exactly (no `name:path`
+syntax). File-writing reporters emit into the run's output directory —
+`junit` writes `junit.xml`, `json` writes `results.json`. Set the path or
+per-reporter options with a `[[test.reporter]]` table in the config file.
 
 ## Environment variables
 

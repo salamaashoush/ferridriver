@@ -15,7 +15,7 @@
 //! let path = installer.install_chromium(|p| { /* handle progress */ }).await?;
 //!
 //! // Install system deps on Linux (requires sudo)
-//! installer.install_system_deps().await?;
+//! installer.install_system_deps(|p| { /* handle progress */ }).await?;
 //! ```
 
 use std::path::{Path, PathBuf};

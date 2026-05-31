@@ -54,7 +54,7 @@ async fn teardown_db(ctx: TestContext) {
 
 #[before_each]
 async fn set_auth(ctx: TestContext) {
-    let context = ctx.context().await?;
+    let context = ctx.browser_context().await?;
     context.add_cookies(vec![/* ... */]).await?;
 }
 
@@ -91,36 +91,42 @@ sequenceDiagram
 
 ## Custom fixtures
 
-Use the `#[fixture]` attribute to register a custom value with explicit
-scope. The body becomes a producer; teardown happens automatically when
-the scope ends.
+Use the `#[fixture]` attribute to register a custom value. The body takes
+a `TestContext`, returns `ferridriver_test::Result<T>`, and the value is
+shared as `Arc<T>`. Retrieve it from a test with `ctx.get::<T>("name")`.
 
 ```rust
 use ferridriver_test::prelude::*;
-use std::sync::Arc;
 
-#[ferridriver_test::fixture(scope = "test")]
-async fn authed_page(ctx: TestContext) -> Arc<Page> {
-    let page = ctx.page().await.unwrap();
-    page.goto("https://app.example.com/login", None).await.unwrap();
-    page.locator("#email").fill("user@example.com").await.unwrap();
-    page.locator("button[type=submit]").click().await.unwrap();
-    page.wait_for_url("/dashboard").await.unwrap();
-    page
+struct AdminUser {
+    name: String,
+    email: String,
+}
+
+#[fixture(scope = "test")]
+async fn admin_user(_ctx: TestContext) -> ferridriver_test::Result<AdminUser> {
+    Ok(AdminUser {
+        name: "admin".into(),
+        email: "admin@example.com".into(),
+    })
 }
 ```
 
 ```rust
 #[ferritest]
-async fn shows_dashboard(ctx: TestContext) {
-    let page = ctx.get::<Arc<Page>>("authed_page").await?;
-    expect(&page.locator("h1")).to_have_text("Dashboard").await?;
+async fn shows_admin(ctx: TestContext) {
+    let user = ctx.get::<AdminUser>("admin_user").await?;
+    let page = ctx.page().await?;
+    page.goto(&format!("/users/{}", user.name), None).await?;
+    expect(&page.locator("h1", None)).to_have_text(&user.email).await?;
 }
 ```
 
-Fixtures can depend on other fixtures — request them from `ctx` inside
-the body. The DAG is validated at startup: a cycle aborts the run before
-any test starts.
+`scope` is `"test"` (default), `"worker"`, or `"global"`; add `auto` to
+resolve the fixture for every test in scope, and `timeout = "10s"` to
+bound setup. Fixtures can depend on built-in or other custom fixtures —
+resolve them lazily with `ctx.get` inside the body. The fixture DAG is
+validated at startup: a cycle aborts the run before any test starts.
 
 ## Hooks vs fixtures
 

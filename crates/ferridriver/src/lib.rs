@@ -1,7 +1,7 @@
 //! ferridriver -- Rust-based browser automation library.
 //!
 //! Provides a Playwright-shaped API for browser automation across
-//! multiple backends (CDP WebSocket, CDP Pipes, native `WebKit`,
+//! multiple backends (CDP WebSocket, CDP Pipes, Playwright `WebKit`,
 //! `WebDriver` `BiDi`).
 //!
 //! # Quick Start
@@ -14,8 +14,8 @@
 //! let page = browser.new_page_with_url("https://example.com").await?;
 //!
 //! // Playwright-style locators
-//! page.get_by_role("link", RoleOptions { name: Some("More".into()), ..Default::default() })
-//!     .click().await?;
+//! page.get_by_role("link", &RoleOptions { name: Some("More".into()), ..Default::default() })
+//!     .click(None).await?;
 //!
 //! // Content extraction
 //! let title = page.title().await?;

@@ -57,8 +57,8 @@ path = "tests/bdd.rs"
 harness = false
 
 [dev-dependencies]
-ferridriver-bdd = "0.2"
-ferridriver-test = "0.2"
+ferridriver-bdd = "0.3"
+ferridriver-test = "0.3"
 ```
 
 ```bash
@@ -88,11 +88,11 @@ Then('the URL contains {string}', async function (fragment: string) {
 ferridriver bdd --steps 'steps/**/*.{js,ts}' tests/features/
 ```
 
-`Given` / `When` / `Then` / `Step` / `Before` / `After` / `BeforeAll` /
-`AfterAll` / `BeforeStep` / `AfterStep` / `defineParameterType` /
-`setWorldConstructor` / `setDefaultTimeout` / `setDefinitionFunctionWrapper`
-are globals. `this` is the World — `page`, `context`, `browser`, `request`,
-`parameters`, `attach`, `log`, `skip`.
+`Given` / `When` / `Then` / `defineStep` (with `And` / `But` aliases) /
+`Before` / `After` / `BeforeAll` / `AfterAll` / `BeforeStep` / `AfterStep` /
+`defineParameterType` / `setWorldConstructor` / `setDefaultTimeout` /
+`setDefinitionFunctionWrapper` are globals. `this` is the World — `page`,
+`context`, `browser`, `request`, `parameters`, `attach`, `log`, `skip`.
 
 Files are bundled with rolldown (TypeScript + `node_modules` + tree-shake),
 compiled to QuickJS bytecode once at startup, and `Module::load`ed per
@@ -143,7 +143,7 @@ Scenario Outline placeholders (`<key>`) substitute into step text, table
 cells, and doc strings recursively. At runtime, `$key` interpolation
 reaches into `world.vars()` / `world.set_var(name, value)`.
 
-## Built-in steps (144)
+## Built-in steps (145)
 
 Source: `crates/ferridriver-bdd/src/steps/`. Counts reflect actual
 `#[given]` / `#[when]` / `#[then]` / `#[step]` registrations.
@@ -159,7 +159,7 @@ Source: `crates/ferridriver-bdd/src/steps/`. Counts reflect actual
 | `navigation` | 6     | Navigate, back, forward, reload, URL assertions |
 | `frame`      | 6     | Switch frames by name / index, main frame, frame queries |
 | `dialog`     | 5     | Accept / dismiss, prompt text, assert message |
-| `emulation`  | 5     | Viewport, user agent, geolocation, color scheme, network |
+| `emulation`  | 6     | Viewport, user agent, geolocation, color scheme, timezone, locale |
 | `mouse`      | 5     | Move to coordinates, scroll by delta, wheel, button holds |
 | `window`     | 5     | Window size, maximize / minimize, tab / window switching |
 | `keyboard`   | 4     | Press key, press on selector, repeat N times, type slowly |

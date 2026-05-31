@@ -7,7 +7,7 @@ significant code so we can agree on the approach.
 
 ## Repository layout
 
-12 workspace crates plus one example. See
+11 workspace crates plus one example. See
 [Project layout](https://github.com/salamaashoush/ferridriver/blob/main/README.md#project-layout) in the README for the full
 table.
 
@@ -16,7 +16,8 @@ Documentation lives in [`site/`](https://github.com/salamaashoush/ferridriver/bl
 
 ## Prerequisites
 
-- Rust stable 1.91 or newer (edition 2024). See `rust-toolchain.toml`.
+- Rust nightly toolchain (edition 2024; MSRV 1.91). The pinned channel
+  is in `rust-toolchain.toml` — rustup installs it automatically.
 - `just` — task runner. `cargo install just` or use your package manager.
 - Bun 1.0+ (only for the `ferridriver-node` NAPI binding and the
   documentation site).
@@ -29,7 +30,7 @@ Documentation lives in [`site/`](https://github.com/salamaashoush/ferridriver/bl
 ## Building and testing
 
 ```bash
-# Type-check the workspace (default-members; ferridriver-node excluded)
+# Type-check the workspace (cargo check --all-targets)
 just check
 
 # Format check + clippy + full test suite (matrix across all 4 backends + BDD)
@@ -45,7 +46,8 @@ just bdd tests/features/
 just build
 ```
 
-The Node binding lives outside default-members. To exercise it:
+The Node binding is built with napi-rs via Bun, not `cargo build`. To
+exercise it:
 
 ```bash
 cd crates/ferridriver-node

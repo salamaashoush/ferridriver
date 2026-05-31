@@ -8,13 +8,13 @@ factor, mobile flag, touch flag, locale, timezone, geolocation.
 
 ```rust
 use ferridriver_test::prelude::*;
-use ferridriver::options::{ContextOptions, ViewportOption, ScreenSize};
+use ferridriver::options::{BrowserContextOptions, ViewportOption};
 
 #[ferritest]
 async fn mobile_layout(ctx: TestContext) {
-    let context = ctx.browser().await?.new_context_with_options(
-        ContextOptions {
-            viewport: ViewportOption::Size(ScreenSize { width: 390, height: 844 }),
+    let context = ctx.browser().await?.new_context(Some(
+        BrowserContextOptions {
+            viewport: ViewportOption::Size { width: 390, height: 844 },
             device_scale_factor: Some(3.0),
             is_mobile: Some(true),
             has_touch: Some(true),
@@ -26,11 +26,11 @@ async fn mobile_layout(ctx: TestContext) {
             locale: Some("en-US".into()),
             ..Default::default()
         }
-    ).await?;
+    ));
 
     let page = context.new_page().await?;
     page.goto("https://example.com", None).await?;
-    expect(&page.locator(".mobile-nav")).to_be_visible().await?;
+    expect(&page.locator(".mobile-nav", None)).to_be_visible().await?;
 }
 ```
 
@@ -56,7 +56,7 @@ height = 844
 ```
 
 ```bash
-ferridriver bdd --project iphone-15-pro tests/features/
+cargo test --test e2e -- --project iphone-15-pro
 ```
 
 ## Touch interactions
@@ -66,35 +66,37 @@ When `hasTouch` is `true`, use the touch API (or `tap`) instead of
 
 ```rust
 page.touchscreen().tap(200.0, 400.0).await?;
-page.locator("button.cta").tap().await?;
+page.locator("button.cta", None).tap(None).await?;
 ```
 
 ## Geolocation
 
 ```rust
-use ferridriver::options::Geolocation;
+use ferridriver::options::{BrowserContextOptions, Geolocation};
 
-let context = ctx.browser().await?.new_context_with_options(
-    ContextOptions {
+let context = ctx.browser().await?.new_context(Some(
+    BrowserContextOptions {
         geolocation: Some(Geolocation {
             latitude: 48.858844,
             longitude: 2.294351,
-            accuracy: Some(20.0),
+            accuracy: 20.0,
         }),
         permissions: Some(vec!["geolocation".into()]),
         ..Default::default()
     }
-).await?;
+));
 ```
 
 ## Timezone and locale
 
 ```rust
-ContextOptions {
+use ferridriver::options::BrowserContextOptions;
+
+BrowserContextOptions {
     timezone_id: Some("Europe/Paris".into()),
     locale: Some("fr-FR".into()),
     ..Default::default()
-}
+};
 ```
 
 The page's `Intl` and `Date.now()` reflect both.
@@ -102,19 +104,23 @@ The page's `Intl` and `Date.now()` reflect both.
 ## Color scheme and contrast
 
 ```rust
-ContextOptions {
-    color_scheme: ferridriver::options::MediaOverride::Value("dark".into()),
-    contrast: ferridriver::options::MediaOverride::Value("more".into()),
-    reduced_motion: ferridriver::options::MediaOverride::Value("reduce".into()),
+use ferridriver::options::{BrowserContextOptions, MediaOverride};
+
+BrowserContextOptions {
+    color_scheme: MediaOverride::Set("dark".into()),
+    contrast: MediaOverride::Set("more".into()),
+    reduced_motion: MediaOverride::Set("reduce".into()),
     ..Default::default()
-}
+};
 ```
 
 Or per page after creation:
 
 ```rust
-page.emulate_media(EmulateMediaOptions {
-    color_scheme: Some("dark".into()),
+use ferridriver::options::{EmulateMediaOptions, MediaOverride};
+
+page.emulate_media(&EmulateMediaOptions {
+    color_scheme: MediaOverride::Set("dark".into()),
     ..Default::default()
 }).await?;
 ```

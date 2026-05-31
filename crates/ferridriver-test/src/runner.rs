@@ -601,9 +601,16 @@ impl TestRunner {
     // Never launch more workers than tests — extra workers launch browsers for nothing.
     let num_workers = (self.config.workers as usize).min(total_tests).max(1) as u32;
 
+    // Custom `#[fixture]` definitions, collected once and seeded into every
+    // worker's fixture pool so tests can resolve them via `ctx.get`.
+    let custom_fixtures = crate::discovery::collect_rust_fixtures();
+
     // ── Validate fixture DAG ──
     {
-      let fixture_defs = builtin_fixtures(&self.config.browser);
+      let mut fixture_defs = builtin_fixtures(&self.config.browser);
+      for (name, def) in &custom_fixtures {
+        fixture_defs.insert(name.clone(), def.clone());
+      }
       if let Err(e) = validate_dag(&fixture_defs) {
         tracing::error!(target: "ferridriver::fixture", "fixture DAG error: {e}");
         return ExecuteSummary {
@@ -789,7 +796,7 @@ impl TestRunner {
       let worker = Worker::new(worker_id, Arc::clone(&self.config), worker_event_bus.clone());
       let rx = dispatcher.receiver();
       let tx = result_tx.clone();
-      let custom_pool = FixturePool::new(FxHashMap::default(), FixtureScope::Worker);
+      let custom_pool = FixturePool::new(custom_fixtures.clone(), FixtureScope::Worker);
       let shared = self.shared_browser.clone();
       let plan = launch_plan.clone();
       let stop_flag = dispatcher.stop_flag();

@@ -19,7 +19,10 @@ one atomic LLM turn.
 ```
 
 Pass either `source` (inline JavaScript) **or** `path` (relative path
-to a `.js` / `.mjs` file under `script_root`) — not both.
+to a `.js` / `.mjs` / `.ts` / `.tsx` / `.mts` / `.cts` file under
+`script_root`) — not both. A TypeScript file, or any file with
+top-level `import` / `export`, is bundled and run as an ES module
+whose `default` export is the result.
 
 `source` is wrapped in an async IIFE; use `return <value>` for the
 result. Top-level `await` works.
@@ -156,13 +159,19 @@ any `allow.net` restriction bind both.
 
 ## Configuration
 
+The engine defaults are fixed in the server: a 5-minute timeout, a
+256 MiB memory quota, `script_root` at `./.ferridriver/scripts` (for
+`path` / `fs` / imports), and `artifacts_root` at
+`./.ferridriver/artifacts` (for `artifacts.*`). Override the timeout and
+memory quota per call via the `timeout_ms` / `memory_limit_mb`
+parameters above (each capped by the server maximum).
+
+The one scripting knob in `ferridriver.toml` is the `process.env`
+allow-list:
+
 ```toml
-[mcp]
-[mcp.script_engine]
-default_timeout_ms = 300000   # 5 min
-default_memory_mb  = 256
-script_root        = "./.ferridriver/scripts"   # for path / fs / imports
-artifacts_root     = "./.ferridriver/artifacts" # for artifacts.*
+[scripting]
+allowEnv = ["HOME", "TZ"]
 ```
 
 See [Sandbox](/scripting/sandbox) for `process` / `fetch` / `fs` /

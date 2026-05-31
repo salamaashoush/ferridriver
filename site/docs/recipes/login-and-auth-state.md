@@ -13,13 +13,14 @@ use ferridriver_test::prelude::*;
 async fn save_auth(ctx: TestContext) {
     let page = ctx.page().await?;
     page.goto("https://app.example.com/login", None).await?;
-    page.locator("#email").fill("user@example.com").await?;
-    page.locator("#password").fill("secret").await?;
-    page.locator("button[type=submit]").click().await?;
+    page.locator("#email", None).fill("user@example.com", None).await?;
+    page.locator("#password", None).fill("secret", None).await?;
+    page.locator("button[type=submit]", None).click(None).await?;
     expect(&page).to_have_url("/dashboard").await?;
 
     let state = page.storage_state().await?;
-    std::fs::write(".auth/admin.json", serde_json::to_vec_pretty(&state)?)?;
+    let bytes = serde_json::to_vec_pretty(&state).map_err(|e| e.to_string())?;
+    std::fs::write(".auth/admin.json", bytes).map_err(|e| e.to_string())?;
 }
 ```
 
@@ -50,9 +51,9 @@ storageState = ".auth/admin.json"
 ## TypeScript
 
 ```ts
-import { Browser } from '@ferridriver/node';
+import { chromium } from '@ferridriver/node';
 
-const browser = await Browser.launch();
+const browser = await chromium().launch();
 const context = await browser.newContext();
 const page = await context.newPage();
 
@@ -60,7 +61,7 @@ await page.goto('https://app.example.com/login');
 await page.getByLabel('Email').fill('user@example.com');
 await page.getByLabel('Password').fill('secret');
 await page.getByRole('button', { name: 'Sign in' }).click();
-await page.waitForURL('/dashboard');
+await page.waitForUrl('/dashboard');
 
 const state = await context.storageState();
 await Bun.write('.auth/admin.json', JSON.stringify(state));
@@ -100,8 +101,8 @@ storageState = ".auth/editor.json"
 ```
 
 ```bash
-ferridriver bdd --project admin tests/features/admin/
-ferridriver bdd --project editor tests/features/editor/
+cargo test --test e2e -- --project admin
+cargo test --test e2e -- --project editor
 ```
 
 ## Invalidation

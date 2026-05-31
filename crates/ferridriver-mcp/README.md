@@ -61,20 +61,20 @@ sandbox rules. Bare specifiers (`import 'lodash'`) are rejected.
 ## Embedding
 
 ```rust
-use ferridriver_mcp::{McpServer, McpServerConfig};
+use ferridriver_mcp::{serve_stdio, serve_http};
 use ferridriver::backend::BackendKind;
+use ferridriver::state::ConnectMode;
 
-let server = McpServer::with_options(
-    BackendKind::CdpPipe,
-    /* headless */ true,
-).await?;
+// stdio transport (mode, backend, headless)
+serve_stdio(ConnectMode::Launch, BackendKind::CdpPipe, /* headless */ true).await?;
 
-// stdio transport
-server.run_stdio().await?;
-
-// or HTTP
-server.run_http("0.0.0.0:8080").await?;
+// or HTTP (mode, backend, port, headless) — serves on 0.0.0.0:<port>/mcp
+serve_http(ConnectMode::Launch, BackendKind::CdpPipe, 8080, /* headless */ true).await?;
 ```
+
+To customize the server (config, extensions, extra tools), build an
+`McpServer` and serve it via `serve_stdio_with(server)` /
+`serve_http_with(server, port)`.
 
 Implement `McpServerConfig` to override `script_root`, `artifacts_root`,
 script engine config, base Chrome args, per-instance args, instance

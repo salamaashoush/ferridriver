@@ -15,9 +15,9 @@ expect.
 
 ```ts
 // @ferridriver/node — the core browser binding
-import { Browser } from '@ferridriver/node';
+import { chromium } from '@ferridriver/node';
 
-const browser = await Browser.launch();
+const browser = await chromium().launch();
 const page = await browser.newPageWithUrl('https://app.example.com/login');
 await page.getByLabel('Email').fill('user@example.com');
 await page.getByRole('button', { name: 'Sign in' }).click();
@@ -69,21 +69,21 @@ page.off(id);
 
 ## Backends and browser choice
 
-| Playwright flag                          | ferridriver equivalent |
+| Playwright                               | ferridriver equivalent |
 |------------------------------------------|------------------------|
-| `--project=chromium`                     | `--browser chromium` (implies `--backend cdp-pipe`) |
-| `--project=firefox`                      | `--browser firefox --backend bidi` |
-| `--project=webkit`                       | `--browser webkit --backend webkit` |
+| `--project=chromium`                     | `chromium()` (default `cdp-pipe`), or a `[[test.projects]]` entry |
+| `--project=firefox`                      | `firefox()` (default `bidi`) |
+| `--project=webkit`                       | `webkit()` (default `webkit`) |
 | `chromium.launch({ channel: 'chrome' })` | `LaunchOptions { executable_path: Some("..."), .. }` |
-| attach to a running browser              | `--backend cdp-raw` + `Browser::connect("ws://...")` |
+| attach to a running browser              | `--backend cdp-raw` + `chromium().connect("ws://...", Default::default())` |
 
 Default is `cdp-pipe` (Chromium over fd pipes). On a protocol-level
 issue porting tests, try `--backend cdp-raw` to switch to CDP over
 WebSocket.
 
-The WebKit backend uses Playwright's WebKit binary
-(`npx playwright install webkit` or `FERRIDRIVER_WEBKIT`). It is
-cross-platform (Linux, macOS, Windows).
+The WebKit backend uses Playwright's WebKit binary (`ferridriver install
+webkit`, `npx playwright install webkit`, or `FERRIDRIVER_WEBKIT`). It
+runs on Linux and macOS only.
 
 Firefox uses WebDriver BiDi; Firefox must already be installed (no
 bundled binary).

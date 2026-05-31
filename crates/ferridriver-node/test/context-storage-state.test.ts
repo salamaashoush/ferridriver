@@ -114,5 +114,67 @@ for (const backend of BACKENDS) {
         await ctx.close();
       }
     });
+
+    it("hydrates a new context from storageState({ path })", async () => {
+      const out = join(tmpdir(), `ferri-reload-path-${backend}-${Date.now()}.json`);
+      const seed = browser.newContext();
+      try {
+        const page = await seed.newPage();
+        await page.goto(testUrl, null);
+        await seed.addCookies([
+          { name: "sid", value: "abc", domain: testHost, path: "/", secure: false, httpOnly: false },
+        ]);
+        await page.evaluate("localStorage.setItem('token', 't1')");
+        await seed.storageState({ path: out });
+      } finally {
+        await seed.close();
+      }
+
+      const restored = browser.newContext({ storageState: out });
+      try {
+        const page = await restored.newPage();
+        await page.goto(testUrl, null);
+        const cookieValue = await page.evaluate(
+          "document.cookie.split('; ').find((c) => c.startsWith('sid='))?.slice(4) ?? ''",
+        );
+        expect(cookieValue).toBe("abc");
+        const token = await page.evaluate("localStorage.getItem('token')");
+        expect(token).toBe("t1");
+      } finally {
+        rmSync(out, { force: true });
+        await restored.close();
+      }
+    });
+
+    it("hydrates a new context from an inline storageState object", async () => {
+      const seed = browser.newContext();
+      let state: any;
+      try {
+        const page = await seed.newPage();
+        await page.goto(testUrl, null);
+        await seed.addCookies([
+          { name: "sid", value: "inline-xyz", domain: testHost, path: "/", secure: false, httpOnly: false },
+        ]);
+        await page.evaluate("localStorage.setItem('token', 'inline-t')");
+        state = await seed.storageState();
+      } finally {
+        await seed.close();
+      }
+
+      // Pass the exported state straight back as an inline object.
+      const restored = browser.newContext({ storageState: state });
+      try {
+        const page = await restored.newPage();
+        await page.goto(testUrl, null);
+        const cookieValue = await page.evaluate(
+          "document.cookie.split('; ').find((c) => c.startsWith('sid='))?.slice(4) ?? ''",
+        );
+        expect(cookieValue).toBe("inline-xyz");
+        const token = await page.evaluate("localStorage.getItem('token')");
+        expect(token).toBe("inline-t");
+      } finally {
+        await restored.close();
+      }
+    });
   });
 }

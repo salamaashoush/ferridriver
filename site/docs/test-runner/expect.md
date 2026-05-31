@@ -1,8 +1,9 @@
 # expect
 
 Auto-retrying assertions. All polling, actionability checks, and retries
-run inside the Rust core (`ferridriver-expect`) — the TypeScript bindings
-are thin wrappers so there are no NAPI round-trips per retry.
+run inside the Rust core (`ferridriver-expect`) — the JavaScript /
+TypeScript binding is a thin wrapper, so the retry loop never crosses
+the language boundary.
 
 ## Rust matchers (38)
 
@@ -48,30 +49,50 @@ Modifiers on every matcher: `.not()`, `.with_timeout()`, `.soft()`,
 - `to_pass` — run an async closure until it succeeds
 - `to_pass_with_options` — `to_pass` with custom `intervals` / `timeout`
 
-## TypeScript matchers
+## JavaScript / TypeScript matchers
 
-The NAPI wrapper currently exposes a subset. All take `string`
-arguments — regex is a Rust-only affordance today. Missing matchers
-fall back to composing `toPass` with a `page.evaluate` or a locator
-method.
+The `expect` global is available in `run_script`, in BDD JS / TS step
+bodies, and in extensions. It is a thin QuickJS binding
+(`ferridriver-script`) over the same `ferridriver-expect` core, so every
+matcher delegates to the Rust implementation. String matchers also
+accept a native `RegExp`.
 
-**Page (2):** `toHaveTitle`, `toHaveURL`.
+`expect(value | locator | page | apiResponse | fn)` dispatches on the
+runtime type:
 
-**Locator — visibility / state (5):** `toBeVisible`, `toBeHidden`,
-`toBeEnabled`, `toBeDisabled`, `toBeChecked`.
+**Value (Jest-style):** `toBe`, `toEqual`, `toStrictEqual`, `toBeNull`,
+`toBeUndefined`, `toBeDefined`, `toBeTruthy`, `toBeFalsy`, `toBeNaN`,
+`toBeCloseTo`, `toBeGreaterThan`, `toBeGreaterThanOrEqual`,
+`toBeLessThan`, `toBeLessThanOrEqual`, `toContain`, `toContainEqual`,
+`toHaveLength`, `toHaveProperty`, `toMatch`, `toMatchObject`,
+`toBeInstanceOf`, `toThrow`.
 
-**Locator — other (5):** `toHaveText`, `toContainText`, `toHaveValue`,
-`toHaveAttribute`, `toHaveCount`.
+**Page:** `toHaveTitle`, `toHaveURL`.
 
-**Poll (1):** `toPass(options)`.
+**Locator — visibility / state:** `toBeVisible`, `toBeHidden`,
+`toBeEnabled`, `toBeDisabled`, `toBeChecked`, `toBeEditable`,
+`toBeAttached`, `toBeEmpty`.
 
-All TS matchers support `.not` (a getter returning a negated proxy) and
-a `timeout` option passed through the fluent API.
+**Locator — text / value / attributes:** `toHaveText`, `toContainText`,
+`toHaveValue`, `toHaveCount`, `toHaveAttribute`.
+
+**APIResponse:** `toBeOK`.
+
+**Poll:** `expect.poll(fn, { timeout? }).toBe` / `.toEqual` /
+`.toSatisfy`.
+
+**Asymmetric:** `expect.any`, `expect.anything`,
+`expect.arrayContaining`, `expect.objectContaining`,
+`expect.stringContaining`, `expect.stringMatching`, `expect.closeTo`,
+plus the `expect.not.*` shorthand.
+
+Modifiers: `.not` (a getter returning a negated proxy), `.soft()` (or
+`expect.soft(...)`), `.withTimeout(ms)`, and `.withMessage(msg)`.
 
 ## Retry cadence
 
 Polling schedule follows Playwright: `100, 250, 500, 1000` ms, then
 `1000` ms thereafter. The total wait is capped by `expectTimeout`
 (default 5000 ms). Polling and actionability checks are implemented in
-Rust — the TS wrapper issues a single async NAPI call per assertion and
-the core loop decides when to re-check.
+Rust — the JS binding issues a single async call per assertion and the
+core loop decides when to re-check.

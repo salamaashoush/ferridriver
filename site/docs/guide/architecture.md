@@ -63,7 +63,7 @@ A Gherkin step, a Rust `#[ferritest]`, an MCP tool call, and a Node.js
 | Backend     | Browser            | Transport                                       | Default? |
 |-------------|--------------------|--------------------------------------------------|----------|
 | `cdp-pipe`  | Chromium / Chrome  | CDP over Unix pipes (fd 3/4)                     | yes      |
-| `cdp-raw`   | Chromium / Chrome  | CDP over WebSocket (also supports `Browser::connect`) |     |
+| `cdp-raw`   | Chromium / Chrome  | CDP over WebSocket (also supports `chromium().connect`) |     |
 | `webkit`    | Playwright WebKit  | Playwright Inspector protocol over `pw_run.sh` (NUL-delimited JSON) | |
 | `bidi`      | Firefox            | WebDriver BiDi over WebSocket                    |          |
 

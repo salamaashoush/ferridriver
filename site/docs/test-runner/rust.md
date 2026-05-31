@@ -32,7 +32,7 @@ path = "tests/harness.rs"
 harness = false
 
 [dev-dependencies]
-ferridriver-test = "0.2"
+ferridriver-test = "0.3"
 ```
 
 ## Tests
@@ -63,7 +63,7 @@ async fn login_flow(ctx: TestContext) {
 ```
 
 Use `ctx.page()` for the pre-created `Arc<Page>`. Also available:
-`ctx.context()`, `ctx.browser()`, `ctx.test_info()`.
+`ctx.browser_context()`, `ctx.browser()`, `ctx.test_info()`.
 
 The generated wrapper returns `Result<(), TestFailure>` and propagates
 `?` — the body can use `?` freely on anything that converts into
@@ -73,9 +73,11 @@ The generated wrapper returns `Result<(), TestFailure>` and propagates
 
 ```bash
 cargo test --test e2e
-cargo test --test e2e -- --headed --backend webkit -j 1
+cargo test --test e2e -- --backend webkit -j 1
 cargo test --test e2e -- -g smoke --retries 2
 ```
+
+Tests run headed by default; pass `--headless` to opt into headless mode.
 
 ## `#[ferritest]` attributes
 

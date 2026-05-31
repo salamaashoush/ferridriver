@@ -229,12 +229,12 @@ impl Browser {
   /// returning a handle that resolves to the persistent default).
   ///
   /// Mirrors Playwright's behaviour where `chromium`, `firefox`, and
-  /// `webkit` all support multiple contexts. Stock `WKWebView`
-  /// (ferridriver's `WebKit` backend) only exposes the persistent
-  /// default context — there's no public API for additional
-  /// containers without a private framework or a custom `WKProcessPool`
-  /// fork. Callers that need to share the persistent default in that
-  /// case can branch on this method.
+  /// `webkit` all support multiple contexts. Every ferridriver backend
+  /// — CDP pipe, CDP raw, `BiDi`, and Playwright `WebKit` (via
+  /// `Playwright.createContext`) — opens real isolated contexts, so
+  /// this currently returns `true` for all of them. The method exists
+  /// so callers can fall back to the persistent default should a future
+  /// backend not support additional containers.
   #[must_use]
   pub fn supports_isolated_contexts(&self) -> bool {
     match self.backend_kind {
@@ -343,12 +343,12 @@ impl Browser {
   /// Real product version string for the running browser — mirrors
   /// Playwright's synchronous `browser.version()`.
   ///
-  /// Captured once from CDP `Browser.getVersion().product` at handshake
-  /// (e.g. `"HeadlessChrome/120.0.6099.109"` or `"Chrome/120.0.6099.109"`).
-  /// For `WebKit` returns `"WebKit"` until we plumb `WKWebView`'s version
-  /// through the IPC; for `BiDi` returns `"Firefox"`. Returns `"Unknown"`
-  /// if the handshake did not complete before the `Browser` handle was
-  /// constructed.
+  /// Captured once at handshake. For CDP it's `Browser.getVersion().product`
+  /// (e.g. `"HeadlessChrome/120.0.6099.109"` or `"Chrome/120.0.6099.109"`);
+  /// for Playwright `WebKit` it's `"webkit-playwright/{revision}"` from the
+  /// launcher; for `BiDi` it's `"{browserName}/{browserVersion}"` from the
+  /// session capabilities. Returns `"Unknown"` if the handshake did not
+  /// complete before the `Browser` handle was constructed.
   #[must_use]
   pub fn version(&self) -> &str {
     &self.version

@@ -89,9 +89,9 @@ expect(&page.locator("#logout")).to_be_visible().soft().await?;
 ## Navigations
 
 `page.goto(url, None)` resolves on `load` by default. Override with
-`GotoOptions { wait_until: Some(WaitUntilState::NetworkIdle), .. }` or
-the string equivalents (`"networkidle"`, `"domcontentloaded"`, `"load"`,
-`"commit"`).
+`GotoOptions { wait_until: Some("networkidle".into()), .. }` —
+`wait_until` is a string: `"load"` (default), `"domcontentloaded"`,
+`"networkidle"`, or `"commit"`.
 
 For navigations triggered by clicks, use `page.expect_navigation` which
 registers the listener before the action and awaits it afterwards — no

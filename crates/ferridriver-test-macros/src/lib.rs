@@ -1,19 +1,23 @@
 //! Proc macros for the ferridriver test framework.
 //!
-//! Provides `#[ferritest]` to register async browser test functions
-//! with automatic fixture injection based on parameter types.
+//! Provides `#[ferritest]` to register async browser test functions. The
+//! annotated function takes a single `TestContext`; built-in fixtures
+//! (`page`, `browser`, `context`, ...) resolve lazily through it.
 //!
 //! ```ignore
 //! use ferridriver_test::prelude::*;
 //!
 //! #[ferritest]
-//! async fn basic_navigation(page: Page) {
-//!     page.goto("https://example.com", None).await.unwrap();
-//!     expect(&page).to_have_title("Example").await.unwrap();
+//! async fn basic_navigation(ctx: TestContext) {
+//!     let page = ctx.page().await?;
+//!     page.goto("https://example.com", None).await?;
+//!     expect(&page).to_have_title("Example").await?;
 //! }
 //!
 //! #[ferritest(retries = 2, timeout = "30s", tag = "smoke")]
-//! async fn flaky_test(page: Page, context: BrowserContext) {
+//! async fn flaky_test(ctx: TestContext) {
+//!     let page = ctx.page().await?;
+//!     let context = ctx.browser_context().await?;
 //!     // ...
 //! }
 //! ```
@@ -22,7 +26,7 @@ use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::parse::{Parse, ParseStream};
 use syn::punctuated::Punctuated;
-use syn::{Expr, FnArg, ItemFn, Lit, Meta, Pat, Token, Type, parse_macro_input};
+use syn::{Expr, FnArg, ItemFn, ItemMod, Lit, Meta, Pat, Token, Type, parse_macro_input, parse_quote};
 
 /// Attribute arguments: `#[ferritest(retries = 2, timeout = "30s", tag = "smoke")]`
 struct FerritestArgs {
@@ -275,6 +279,7 @@ pub fn ferritest(attr: TokenStream, item: TokenStream) -> TokenStream {
 
   let expanded = quote! {
     #(#attrs)*
+    #[allow(clippy::unused_async)]
     #vis async fn #fn_name(__pool: ferridriver_test::fixture::FixturePool) -> Result<(), ferridriver_test::model::TestFailure> {
       let #ctx_param_name = ferridriver_test::TestContext::new(__pool);
       #block
@@ -335,13 +340,13 @@ impl Parse for FerritestEachArgs {
 /// `#[ferritest_each(data = [("a", 1), ("b", 2)])]` — parameterized test macro.
 ///
 /// Expands a single async test function into N registered tests, one per data row.
-/// First parameter is `FixturePool`, remaining parameters receive the data values.
+/// First parameter is `TestContext`, remaining parameters receive the data values.
 ///
 /// ```ignore
 /// #[ferritest_each(data = [("admin", "admin@example.com"), ("guest", "guest@example.com")])]
-/// async fn login(pool: FixturePool, role: &str, email: &str) {
-///     let page = pool.page().await.unwrap();
-///     page.goto(&format!("/login?role={role}"), None).await.unwrap();
+/// async fn login(ctx: TestContext, role: &str, email: &str) {
+///     let page = ctx.page().await?;
+///     page.goto(&format!("/login?role={role}"), None).await?;
 /// }
 /// ```
 /// Registers: `login (admin, admin@example.com)` and `login (guest, guest@example.com)`.
@@ -418,6 +423,7 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
     let ctx_param = ctx_param_name.clone();
 
     submissions.push(quote! {
+      #[allow(clippy::unused_async)]
       async fn #inner_fn_name(__pool: ferridriver_test::fixture::FixturePool) -> Result<(), ferridriver_test::model::TestFailure> {
         let #ctx_param = ferridriver_test::TestContext::new(__pool);
         #(#data_bindings)*
@@ -446,6 +452,279 @@ pub fn ferritest_each(attr: TokenStream, item: TokenStream) -> TokenStream {
   };
 
   expanded.into()
+}
+
+// ── Fixture macro ──
+
+/// Fixture lifecycle scope, parsed from `scope = "..."`.
+enum FixtureScopeArg {
+  Test,
+  Worker,
+  Global,
+}
+
+/// Attribute arguments: `#[fixture(scope = "worker", auto, timeout = "10s")]`.
+struct FixtureArgs {
+  scope: FixtureScopeArg,
+  auto: bool,
+  timeout_ms: Option<u64>,
+}
+
+impl Parse for FixtureArgs {
+  fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+    let mut args = Self {
+      scope: FixtureScopeArg::Test,
+      auto: false,
+      timeout_ms: None,
+    };
+    let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
+    for meta in metas {
+      match &meta {
+        Meta::NameValue(nv) => {
+          let ident = nv.path.get_ident().map(ToString::to_string).unwrap_or_default();
+          match ident.as_str() {
+            "scope" => {
+              if let syn::Expr::Lit(lit) = &nv.value {
+                if let Lit::Str(s) = &lit.lit {
+                  args.scope = match s.value().as_str() {
+                    "test" => FixtureScopeArg::Test,
+                    "worker" => FixtureScopeArg::Worker,
+                    "global" => FixtureScopeArg::Global,
+                    other => {
+                      return Err(syn::Error::new_spanned(
+                        &nv.value,
+                        format!("unknown fixture scope '{other}' (use \"test\", \"worker\", or \"global\")"),
+                      ));
+                    },
+                  };
+                }
+              }
+            },
+            "timeout" => {
+              if let syn::Expr::Lit(lit) = &nv.value {
+                if let Lit::Str(s) = &lit.lit {
+                  args.timeout_ms = Some(parse_duration_str(&s.value())?);
+                }
+              }
+            },
+            _ => {
+              return Err(syn::Error::new_spanned(
+                &nv.path,
+                format!("unknown fixture attribute: {ident}"),
+              ));
+            },
+          }
+        },
+        Meta::Path(p) => {
+          let ident = p.get_ident().map(ToString::to_string).unwrap_or_default();
+          match ident.as_str() {
+            "auto" => args.auto = true,
+            _ => return Err(syn::Error::new_spanned(p, format!("unknown fixture flag: {ident}"))),
+          }
+        },
+        Meta::List(_) => {
+          return Err(syn::Error::new_spanned(&meta, "unexpected nested attribute"));
+        },
+      }
+    }
+    Ok(args)
+  }
+}
+
+/// `#[fixture]` — register a custom, dependency-injected, scoped fixture.
+///
+/// The function takes a single `TestContext` and returns
+/// `ferridriver_test::Result<T>`. The resolved value is shared as `Arc<T>`
+/// and retrieved from a test (or another fixture) via
+/// `ctx.get::<T>("fixture_name").await?`. Custom fixtures may depend on the
+/// built-ins (`page`, `context`, `browser`, `request`, `test_info`) and on
+/// each other — dependencies resolve lazily through `ctx.get`.
+///
+/// ```ignore
+/// use ferridriver_test::prelude::*;
+/// use std::sync::Arc;
+///
+/// #[fixture(scope = "test")]
+/// async fn authed_page(ctx: TestContext) -> ferridriver_test::Result<Arc<Page>> {
+///     let page = ctx.page().await?;
+///     page.goto("https://app.example.com/login", None).await?;
+///     page.locator("#email", None).fill("user@example.com", None).await?;
+///     page.locator("button[type=submit]", None).click(None).await?;
+///     Ok(page)
+/// }
+///
+/// #[ferritest]
+/// async fn shows_dashboard(ctx: TestContext) {
+///     let page = ctx.get::<Arc<Page>>("authed_page").await?;
+///     expect(&page.locator("h1", None)).to_have_text("Dashboard").await?;
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn fixture(attr: TokenStream, item: TokenStream) -> TokenStream {
+  let args = parse_macro_input!(attr as FixtureArgs);
+  let input = parse_macro_input!(item as ItemFn);
+
+  // Require exactly one parameter (the TestContext).
+  if input.sig.inputs.len() != 1 {
+    return syn::Error::new_spanned(
+      &input.sig,
+      "#[fixture] functions take exactly one parameter: `ctx: TestContext`",
+    )
+    .to_compile_error()
+    .into();
+  }
+
+  let fn_name = &input.sig.ident;
+  let fn_name_str = fn_name.to_string();
+  let builder_ident = format_ident!("__ferridriver_fixture_build_{}", fn_name);
+
+  let scope_tok = match args.scope {
+    FixtureScopeArg::Test => quote! { ferridriver_test::fixture::FixtureScope::Test },
+    FixtureScopeArg::Worker => quote! { ferridriver_test::fixture::FixtureScope::Worker },
+    FixtureScopeArg::Global => quote! { ferridriver_test::fixture::FixtureScope::Global },
+  };
+  let timeout_ms = args.timeout_ms.unwrap_or(10_000);
+  let auto = args.auto;
+
+  let expanded = quote! {
+    // Keep the user's function callable. Fixtures are async by contract
+    // (most await a built-in or another fixture); a data-only fixture that
+    // never awaits is still valid, so silence the no-await lint here rather
+    // than forcing every author to add a workaround.
+    #[allow(clippy::unused_async)]
+    #input
+
+    #[doc(hidden)]
+    fn #builder_ident() -> ferridriver_test::fixture::FixtureDef {
+      ferridriver_test::fixture::FixtureDef {
+        name: #fn_name_str.to_string(),
+        scope: #scope_tok,
+        dependencies: ::std::vec::Vec::new(),
+        setup: ::std::sync::Arc::new(|__pool: ferridriver_test::fixture::FixturePool| {
+          ::std::boxed::Box::pin(async move {
+            let __ctx = ferridriver_test::TestContext::new(__pool);
+            let __value = #fn_name(__ctx).await.map_err(|__e| {
+              ferridriver::error::FerriError::backend(::std::format!("fixture '{}' failed: {}", #fn_name_str, __e))
+            })?;
+            ::std::result::Result::Ok(
+              ::std::sync::Arc::new(__value)
+                as ::std::sync::Arc<dyn ::std::any::Any + ::std::marker::Send + ::std::marker::Sync>,
+            )
+          })
+        }),
+        teardown: ::std::option::Option::None,
+        timeout: ::std::time::Duration::from_millis(#timeout_ms),
+        auto: #auto,
+      }
+    }
+
+    ferridriver_test::inventory::submit! {
+      ferridriver_test::discovery::FixtureRegistration {
+        name: #fn_name_str,
+        module_path: ::core::module_path!(),
+        build: #builder_ident,
+      }
+    }
+  };
+
+  expanded.into()
+}
+
+// ── Suite mode macro ──
+
+/// Suite execution mode parsed from `mode = "..."`.
+enum SuiteModeArg {
+  Serial,
+  Parallel,
+}
+
+struct SuiteArgs {
+  mode: SuiteModeArg,
+}
+
+impl Parse for SuiteArgs {
+  fn parse(input: ParseStream<'_>) -> syn::Result<Self> {
+    let mut mode = SuiteModeArg::Parallel;
+    let metas = Punctuated::<Meta, Token![,]>::parse_terminated(input)?;
+    for meta in metas {
+      match &meta {
+        Meta::NameValue(nv) if nv.path.is_ident("mode") => {
+          if let syn::Expr::Lit(lit) = &nv.value {
+            if let Lit::Str(s) = &lit.lit {
+              mode = match s.value().as_str() {
+                "serial" => SuiteModeArg::Serial,
+                "parallel" => SuiteModeArg::Parallel,
+                other => {
+                  return Err(syn::Error::new_spanned(
+                    &nv.value,
+                    format!("unknown suite mode '{other}' (use \"serial\" or \"parallel\")"),
+                  ));
+                },
+              };
+            }
+          }
+        },
+        _ => {
+          return Err(syn::Error::new_spanned(
+            &meta,
+            "expected `mode = \"serial\" | \"parallel\"`",
+          ));
+        },
+      }
+    }
+    Ok(Self { mode })
+  }
+}
+
+/// `#[ferritest_suite(mode = "serial")]` — set the execution mode of every
+/// `#[ferritest]` in the annotated module. A serial suite is dispatched as
+/// one batch to a single worker, runs in source order, and skips the rest
+/// on first failure. The default (no attribute) is parallel.
+///
+/// ```ignore
+/// #[ferritest_suite(mode = "serial")]
+/// mod payment_flow {
+///     use ferridriver_test::prelude::*;
+///
+///     #[ferritest]
+///     async fn initiate(ctx: TestContext) { /* ... */ }
+///     #[ferritest]
+///     async fn verify_receipt(ctx: TestContext) { /* runs only if initiate passed */ }
+/// }
+/// ```
+#[proc_macro_attribute]
+pub fn ferritest_suite(attr: TokenStream, item: TokenStream) -> TokenStream {
+  let args = parse_macro_input!(attr as SuiteArgs);
+  let mut module = parse_macro_input!(item as ItemMod);
+
+  let Some((_, ref mut items)) = module.content else {
+    return syn::Error::new_spanned(
+      &module,
+      "#[ferritest_suite] requires an inline module body `mod name { ... }`",
+    )
+    .to_compile_error()
+    .into();
+  };
+
+  let mode_tok = match args.mode {
+    SuiteModeArg::Serial => quote! { ferridriver_test::model::SuiteMode::Serial },
+    SuiteModeArg::Parallel => quote! { ferridriver_test::model::SuiteMode::Parallel },
+  };
+
+  // Inject the registration INSIDE the module so `module_path!()` resolves
+  // to this module's path — the same key `#[ferritest]` registrations derive
+  // their suite name from.
+  let submit: syn::Item = parse_quote! {
+    ferridriver_test::inventory::submit! {
+      ferridriver_test::discovery::SuiteModeRegistration {
+        module_path: ::core::module_path!(),
+        mode: #mode_tok,
+      }
+    }
+  };
+  items.push(submit);
+
+  quote! { #module }.into()
 }
 
 // ── Hook macros ──

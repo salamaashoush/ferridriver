@@ -4,9 +4,9 @@
 //! - `mcp`     -- MCP server (stdio or HTTP) for browser automation agents
 //! - `bdd`     -- run Gherkin/Cucumber feature files via the Rust test runner
 //! - `test`    -- wrap `cargo nextest` (or `cargo test`) for unit/integration tests
+//! - `run`     -- execute a JS/TS script with Playwright-style bindings
 //! - `install` -- download browser binaries into the local cache
 //! - `codegen` -- generate test scaffolding
-//! - `config`  -- inspect resolved configuration
 
 use std::path::PathBuf;
 
@@ -56,9 +56,6 @@ pub enum Command {
 
   /// Generate test scaffolding from recorded interactions.
   Codegen(CodegenArgs),
-
-  /// Print the resolved configuration and exit.
-  Config(ConfigArgs),
 }
 
 // ── mcp subcommand ──────────────────────────────────────────────────────
@@ -116,7 +113,9 @@ pub struct BddArgs {
   #[arg(long)]
   pub shard: Option<String>,
 
-  /// Reporter spec list, e.g. `terminal,junit:target/junit.xml`.
+  /// Reporter name, repeatable (e.g. `--reporter terminal --reporter junit`).
+  /// Each name is matched exactly; file reporters write into the run's output
+  /// directory. Set paths/options with `[[test.reporter]]` in the config file.
   #[arg(long)]
   pub reporter: Vec<String>,
 
@@ -217,28 +216,13 @@ pub struct CodegenArgs {
   #[arg(short, long)]
   pub output: Option<PathBuf>,
 
-  /// Output language: `ts`, `js`, `rust`.
+  /// Output language: `ts` (runnable script, default), `rust`
+  /// (`#[ferritest]`), or `gherkin` (`.feature`).
   #[arg(long, default_value = "ts")]
   pub language: String,
 
   #[command(flatten)]
   pub browser: BrowserArgs,
-}
-
-// ── config subcommand ───────────────────────────────────────────────────
-
-#[derive(Args)]
-pub struct ConfigArgs {
-  /// Output format: `toml`, `json`, `yaml`.
-  #[arg(long, default_value = "toml")]
-  pub format: ConfigFormat,
-}
-
-#[derive(Clone, Copy, ValueEnum)]
-pub enum ConfigFormat {
-  Toml,
-  Json,
-  Yaml,
 }
 
 // ── Shared browser / transport args ─────────────────────────────────────

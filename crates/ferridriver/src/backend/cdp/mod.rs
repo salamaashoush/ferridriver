@@ -1016,6 +1016,15 @@ fn collect_frames(node: &serde_json::Value, out: &mut Vec<super::FrameInfo>) {
 pub struct LifecycleState {
   /// loaderId of the current committed document (from Page.frameNavigated).
   pub current_loader_id: String,
+  /// Generation counter bumped on every `Page.frameStartedNavigating`. A
+  /// post-input "settle" snapshots this before an action and waits for a
+  /// commit only if it advanced — Playwright's `waitForSignalsCreatedBy`
+  /// barrier, with zero cost when the action started no navigation.
+  pub nav_started_seq: u64,
+  /// Generation counter bumped on every `Page.frameNavigated` (commit). The
+  /// settle waits for THIS to advance (not a loaderId change) so a reload —
+  /// which re-commits the same loaderId — also satisfies the barrier.
+  pub nav_committed_seq: u64,
   /// Lifecycle events fired for the current document.
   pub fired: u8,
   /// Set by the transport dispatcher when `Inspector.targetCrashed`
@@ -1030,6 +1039,8 @@ impl LifecycleState {
   fn new() -> Self {
     Self {
       current_loader_id: String::new(),
+      nav_started_seq: 0,
+      nav_committed_seq: 0,
       fired: 0,
       crashed: false,
     }
@@ -1417,6 +1428,49 @@ impl<T: CdpWrap> CdpPage<T> {
       state.current_loader_id.clone()
     };
     self.await_loader_change(&pre_loader_id, "load", 30_000).await
+  }
+
+  /// Snapshot the navigation state before an input action (cheap, no RTT):
+  /// `(frameStartedNavigating generation, frameNavigated/commit generation)`.
+  #[must_use]
+  pub fn nav_snapshot(&self) -> (u64, u64) {
+    let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+    (state.nav_started_seq, state.nav_committed_seq)
+  }
+
+  /// Playwright `waitForSignalsCreatedBy`: if the just-completed action
+  /// started a navigation (the `frameStartedNavigating` generation advanced
+  /// vs `snap`), wait — bounded, best-effort — for the next commit
+  /// (`frameNavigated`). Waiting on the commit *generation* (not a loaderId
+  /// change) means a reload, which re-commits the same loaderId, also
+  /// satisfies the barrier. No-op (zero cost) when the action started no
+  /// navigation, which is the common case.
+  pub async fn settle_navigation(&self, snap: (u64, u64), timeout_ms: u64) {
+    let (pre_started, pre_committed) = snap;
+    {
+      let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+      if state.nav_started_seq == pre_started {
+        return; // no navigation started — zero cost.
+      }
+    }
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+    loop {
+      let notified = self.lifecycle_notify.notified();
+      tokio::pin!(notified);
+      notified.as_mut().enable();
+      {
+        let state = self.lifecycle.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        // A commit landed after our snapshot, or the target crashed — done.
+        if state.crashed || state.nav_committed_seq != pre_committed {
+          return;
+        }
+      }
+      // Bounded: a navigation that starts but never commits (cancelled /
+      // no-op) costs at most `timeout_ms`, never a hang.
+      if tokio::time::timeout_at(deadline, notified).await.is_err() {
+        return;
+      }
+    }
   }
 
   pub async fn reload(&self, lifecycle: crate::backend::NavLifecycle, timeout_ms: u64) -> Result<Option<Response>> {

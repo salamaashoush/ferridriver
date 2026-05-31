@@ -48,7 +48,7 @@ path = "tests/harness.rs"
 harness = false
 
 [dev-dependencies]
-ferridriver-test = "0.2"
+ferridriver-test = "0.3"
 ```
 
 ```bash
@@ -98,14 +98,17 @@ Generates one test per row, named `title_check (<row values>)`.
 | Name         | Scope  | Type                  |
 |--------------|--------|-----------------------|
 | `browser`    | Worker | `Arc<Browser>`        |
+| `request`    | Worker | `Arc<HttpClient>`     |
 | `context`    | Test   | `Arc<ContextRef>`     |
 | `page`       | Test   | `Arc<Page>`           |
 | `test_info`  | Test   | `Arc<TestInfo>`       |
 
 Resolution walks Global → Worker → Test. Workers reuse the browser; each
-test gets a fresh context and page. Custom fixtures register at the
-`FixturePool` level with a scope tag; dependencies form a DAG validated at
-startup.
+test gets a fresh context and page. Register custom fixtures with the
+`#[fixture(scope = "...")]` macro — `async fn name(ctx: TestContext) ->
+ferridriver_test::Result<T>`, resolved via `ctx.get::<T>("name")`;
+dependencies (built-in or custom) resolve lazily and the DAG is validated
+at startup.
 
 ## Hooks
 
@@ -144,8 +147,8 @@ All matchers support `.not`, `.with_timeout(Duration)`, `.with_message(&str)`,
 
 ## Reporters
 
-Built-in reporter names (passed as `[[test.reporter]] name = "..."` or
-`--reporter NAME[:OPTIONS]` on the CLI):
+Built-in reporter names (set via `[[test.reporter]] name = "..."` in
+config, or `--reporter NAME[:OPTIONS]` on the `ferridriver bdd` CLI):
 
 `terminal`, `progress`, `dot`, `json`, `junit`, `html`, `blob`, `allure`,
 `github`, `rerun`, `messages` / `ndjson` (Cucumber Messages), `usage`,
@@ -156,26 +159,33 @@ bus.
 
 ## CLI flags (after `--`)
 
+Parsed by `parse_common_cli_args` (the after-`--` flag parser for
+`#[ferritest]` harnesses):
+
 ```
---headed                 Show browser window
+--headless               Run the browser without a visible window
 --backend NAME           cdp-pipe | cdp-raw | webkit | bidi
---browser NAME           chromium | firefox | webkit (selects default backend)
 -j N, --workers N        Parallel workers
 --retries N              Retry failed tests
 --timeout MS             Per-test timeout
---expect-timeout MS      Assertion timeout
+--global-timeout MS      Whole-run timeout
 -g PATTERN, --grep ...   Filter by test name (regex, case-insensitive)
---grep-invert PATTERN    Exclude tests matching pattern
 --tag NAME               Filter by tag
---shard N/TOTAL          Run only shard N of TOTAL
 --list                   List tests without running
---update-snapshots       Update snapshot files
+-u, --update-snapshots   Update snapshot files
+--ignore-snapshots       Skip snapshot comparisons
 --last-failed            Re-run only previously failed tests
 --forbid-only            Fail if any #[ferritest(only)] is present
--c, --project NAME       Filter by project
---reporter SPEC          Reporter name (repeatable)
+--max-failures N         Stop after N failures
+--repeat-each N          Run each test N times
+--fail-on-flaky-tests    Treat flaky passes as failures
+--project NAME           Filter by project (repeatable)
 --profile NAME           Apply a named [test.profiles.NAME] preset
 ```
+
+Reporters, sharding, browser/project selection, and most other settings
+are configured via `ferridriver.toml`; the `ferridriver bdd` subcommand
+exposes its own clap flags (`--reporter`, `--shard`, …).
 
 ## Architecture
 

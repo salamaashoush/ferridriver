@@ -123,13 +123,25 @@ impl Recorder {
     eprintln!("Recording started. Interact with the browser.");
     eprintln!("Press Ctrl+C or close the browser to stop.\n");
 
-    // Wait for browser close or Ctrl+C.
-    tokio::select! {
-      _ = page.wait_for_event("close", Some(86_400_000)) => {
-        // Browser/page closed by user.
+    // Stop on browser close, Ctrl+C (SIGINT), or SIGTERM — finalize the
+    // emitted script (footer) in every case so a non-interactive stop
+    // (`kill`, editor, CI) still produces a complete, runnable file.
+    #[cfg(unix)]
+    {
+      use tokio::signal::unix::{SignalKind, signal};
+      let mut term =
+        signal(SignalKind::terminate()).map_err(|e| crate::error::FerriError::backend(format!("signal: {e}")))?;
+      tokio::select! {
+        _ = page.wait_for_event("close", Some(86_400_000)) => {}
+        _ = tokio::signal::ctrl_c() => { eprintln!("\nRecording stopped."); }
+        _ = term.recv() => { eprintln!("\nRecording stopped."); }
       }
-      _ = tokio::signal::ctrl_c() => {
-        eprintln!("\nRecording stopped.");
+    }
+    #[cfg(not(unix))]
+    {
+      tokio::select! {
+        _ = page.wait_for_event("close", Some(86_400_000)) => {}
+        _ = tokio::signal::ctrl_c() => { eprintln!("\nRecording stopped."); }
       }
     }
 

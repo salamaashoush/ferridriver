@@ -4,7 +4,7 @@ Cucumber / Gherkin framework for ferridriver. Translates `.feature` files
 into parallel test execution via the core `TestRunner` — same worker
 pool, retries, reporters, and fixtures as Rust tests.
 
-**144 built-in steps** backed by the Page / Locator API (not raw JS
+**145 built-in steps** backed by the Page / Locator API (not raw JS
 `evaluate`). All selectors support the Playwright engine syntax
 (`role=`, `text=`, `label=`, …).
 
@@ -78,9 +78,9 @@ Then('the URL contains {string}', async function (fragment: string) {
 ferridriver bdd --steps 'steps/**/*.{js,ts}' tests/features/
 ```
 
-`Given` / `When` / `Then` / `Step` / `Before` / `After` / `BeforeAll` /
-`AfterAll` / `BeforeStep` / `AfterStep` / `defineParameterType` /
-`setWorldConstructor` / `setDefaultTimeout` /
+`Given` / `When` / `Then` / `defineStep` / `And` / `But` / `Before` /
+`After` / `BeforeAll` / `AfterAll` / `BeforeStep` / `AfterStep` /
+`defineParameterType` / `setWorldConstructor` / `setDefaultTimeout` /
 `setDefinitionFunctionWrapper` are globals. `this` is the World,
 carrying `page` / `context` / `request` / `browser` / `parameters` /
 `attach` / `log` / `skip`.
@@ -91,8 +91,10 @@ step as such.
 
 Files are bundled with rolldown (TypeScript, imports, tree-shake),
 compiled to QuickJS bytecode once, and `Module::load`ed per worker. The
-bytecode cache is content-hashed and in-memory. **No Node, no Bun, no
-`package.json`, no `node_modules`.**
+bytecode cache is content-hashed, in-memory within a run and persisted
+to a cross-process disk cache so an unchanged source tree skips both
+rolldown and the QuickJS compile on the next start. **No Node, no Bun,
+no `package.json`, no `node_modules`.**
 
 ## Hybrid (Rust + JS / TS)
 
@@ -110,6 +112,6 @@ like `"""json`), the asterisk (`*`) keyword, and i18n keywords via
 
 ## Learn more
 
-- [Built-in steps](/bdd/steps) — all 144 steps grouped by category
+- [Built-in steps](/bdd/steps) — all 145 steps grouped by category
 - [Hooks](/bdd/hooks) — lifecycle points and tag filters
 - [Running](/bdd/running) — CLI, reporters, profiles

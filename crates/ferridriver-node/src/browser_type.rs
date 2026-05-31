@@ -230,8 +230,10 @@ pub fn firefox() -> BrowserType {
   BrowserType::wrap(ferridriver::BrowserType::firefox())
 }
 
-/// Top-level Playwright `webkit` accessor. macOS-only at runtime; on
-/// other platforms `launch()` returns a typed error.
+/// Top-level Playwright `webkit` accessor. Drives Playwright's
+/// cross-platform WebKit build via `pw_run.sh`, so `launch()` works on
+/// Unix (Linux + macOS); on unsupported platforms (Windows) it returns
+/// a typed error.
 #[napi]
 pub fn webkit() -> BrowserType {
   BrowserType::wrap(ferridriver::BrowserType::webkit())

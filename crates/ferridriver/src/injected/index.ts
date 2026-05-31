@@ -24,7 +24,11 @@ const injected = new InjectedScript(window, {
   isUnderTest: false,
   sdkLanguage: 'javascript',
   testIdAttributeName: 'data-testid',
-  stableRafCount: 2,
+  // Matches Playwright's `rafCountForStablePosition()` — 1 for Chromium,
+  // Firefox, and WebKit on Linux/macOS (only WebKit-Windows uses 5, which
+  // ferridriver does not target). 2 made the `stable` gate wait an extra
+  // animation frame per pointer action vs Playwright.
+  stableRafCount: 1,
   browserName: 'chromium',
   customEngines: [],
 });
@@ -244,29 +248,89 @@ function clickGuard(el: Element): string {
  * in `dom.ts::_performPointerAction` which similarly batches these
  * checks into one CDP RTT.
  */
-function clickPrep(
+/**
+ * Run Playwright's full actionability gate via the vendored
+ * `injected.checkElementStates`. This is the single source of truth for
+ * element states INCLUDING `'stable'` (async rAF bounding-box sampling,
+ * `injectedScript.ts::_checkElementIsStable`). Returns `undefined` when
+ * every requested state passes, otherwise the failing state name so the
+ * Rust host can format `error:not<state>` and retry.
+ */
+async function awaitStates(el: Element, states: ElementState[]): Promise<string | undefined> {
+  const result = await injected.checkElementStates(el, states as any);
+  if (result === undefined) return undefined;
+  if (result === 'error:notconnected') return 'connected';
+  return (result as any).missingState;
+}
+
+async function clickPrep(
   el: Element,
   position: { x: number; y: number } | null,
-): {
+  states: ElementState[],
+  scrollAlign?: ScrollIntoViewOptions | null,
+): Promise<{
   guard: string;
   actionable: boolean;
   reason?: string;
   point: { x: number; y: number } | null;
-} {
+}> {
   const guard = clickGuard(el);
   if (guard) return { guard, actionable: false, point: null };
-  const act = isActionable(el);
-  if (!act.actionable) {
-    return { guard: '', actionable: false, reason: act.reason, point: null };
-  }
-  if (typeof (el as any).scrollIntoViewIfNeeded === 'function') {
+  // Full actionability (visible / enabled / stable as requested) before
+  // resolving the click point — mirrors Playwright's `_performPointerAction`
+  // order (states gate first, then scroll + clickable point).
+  const reason = await awaitStates(el, states);
+  if (reason) return { guard: '', actionable: false, reason, point: null };
+  // Scroll into view. On a retry the host passes an explicit alignment
+  // (Playwright `_retryPointerAction` cycles undefined/end/center/start to
+  // escape position:sticky overlays); otherwise use the precise non-standard
+  // `scrollIntoViewIfNeeded`.
+  if (scrollAlign) {
+    el.scrollIntoView(scrollAlign);
+  } else if (typeof (el as any).scrollIntoViewIfNeeded === 'function') {
     (el as any).scrollIntoViewIfNeeded();
   } else {
     el.scrollIntoView({ block: 'center', inline: 'center' });
   }
-  const r = el.getBoundingClientRect();
-  let x = position ? r.x + position.x : r.x + r.width / 2;
-  let y = position ? r.y + position.y : r.y + r.height / 2;
+  let x: number;
+  let y: number;
+  if (position) {
+    // Playwright `_offsetPoint`: `position` is relative to the PADDING box,
+    // so add the top/left border widths (a border-box-relative offset would
+    // land `borderWidth` px off).
+    const r = el.getBoundingClientRect();
+    const cs = (el.ownerDocument as Document).defaultView!.getComputedStyle(el);
+    x = r.x + (parseFloat(cs.borderLeftWidth) || 0) + position.x;
+    y = r.y + (parseFloat(cs.borderTopWidth) || 0) + position.y;
+  } else {
+    // Playwright `_clickablePoint`: pick the largest viewport-intersected
+    // client rect's centre. Approximated page-side via `getClientRects()`
+    // (one rect per line box) instead of CDP `DOM.getContentQuads`, so it
+    // stays in this single round-trip. Avoids the inter-line gap a wrapped
+    // inline element's bounding-box centre falls into, and keeps the point
+    // inside the viewport for partially-scrolled elements.
+    const vw = window.innerWidth;
+    const vh = window.innerHeight;
+    let best: DOMRect | null = null;
+    let bestArea = -1;
+    for (const rc of Array.from(el.getClientRects())) {
+      const iw = Math.max(0, Math.min(rc.right, vw) - Math.max(rc.left, 0));
+      const ih = Math.max(0, Math.min(rc.bottom, vh) - Math.max(rc.top, 0));
+      const area = iw * ih;
+      if (area > bestArea) {
+        bestArea = area;
+        best = rc;
+      }
+    }
+    if (!best || bestArea <= 0.99) {
+      // No client rect intersects the viewport (Playwright `_clickablePoint`
+      // returns `error:notinviewport`). The host retries with the next scroll
+      // alignment to bring it on-screen.
+      return { guard: '', actionable: false, reason: 'inviewport', point: null };
+    }
+    x = (Math.max(best.left, 0) + Math.min(best.right, vw)) / 2;
+    y = (Math.max(best.top, 0) + Math.min(best.bottom, vh)) / 2;
+  }
   let win: any = (el.ownerDocument as Document).defaultView;
   while (win && win !== win.parent && win.frameElement) {
     const fr = (win.frameElement as Element).getBoundingClientRect();
@@ -441,6 +505,7 @@ if (!window.__fd) {
     dispatchInputEvents,
     clickGuard,
     clickPrep,
+    awaitStates,
     selectOption,
     selectOptions,
     getOptions,

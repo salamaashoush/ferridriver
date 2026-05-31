@@ -45,7 +45,7 @@ Before({ tags: '@auth' }, async function () {
 });
 
 After(async function (result) {
-  if (result.status === 'FAILED') {
+  if (result?.result?.status === 'FAILED') {
     this.attach(await this.page.screenshot(), 'image/png');
   }
 });

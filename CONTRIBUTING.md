@@ -7,7 +7,7 @@ significant code so we can agree on the approach.
 
 ## Repository layout
 
-12 workspace crates plus one example. See
+11 workspace crates plus one example. See
 [Project layout](./README.md#project-layout) in the README for the full
 table.
 
@@ -16,12 +16,14 @@ Documentation lives in [`site/`](./site/) (rspress) and per-crate
 
 ## Prerequisites
 
-- Rust stable 1.91 or newer (edition 2024). See `rust-toolchain.toml`.
+- Rust nightly (edition 2024), pinned in `rust-toolchain.toml`. MSRV
+  (`rust-version`) is 1.91.
 - `just` — task runner. `cargo install just` or use your package manager.
 - Bun 1.0+ (only for the `ferridriver-node` NAPI binding and the
   documentation site).
-- For the WebKit backend: the Playwright WebKit binary
-  (`npx playwright install webkit` or set `FERRIDRIVER_WEBKIT`).
+- For the WebKit backend: the Playwright WebKit binary (`ferridriver
+  install webkit`, `npx playwright install webkit`, or set
+  `FERRIDRIVER_WEBKIT`).
 - For the BiDi backend: Firefox installed locally.
 - Linux: `pkg-config`, `libclang-dev`, and the Chromium runtime
   dependencies. `ferridriver install --with-deps chromium` covers them.

@@ -13,7 +13,7 @@
 //!
 //! #[when("I click {string}")]
 //! async fn click(world: &mut BrowserWorld, selector: String) {
-//!     world.page().locator(&selector).click(None).await.map_err(|e| step_err!("{e}"))?;
+//!     world.page().locator(&selector, None).click(None).await.map_err(|e| step_err!("{e}"))?;
 //! }
 //!
 //! #[then("the page title should be {string}")]
@@ -470,7 +470,7 @@ pub fn given(attr: TokenStream, item: TokenStream) -> TokenStream {
 /// ```ignore
 /// #[when("I click {string}")]
 /// async fn click(world: &mut BrowserWorld, selector: String) {
-///     world.page().locator(&selector).click(None).await.map_err(|e| step_err!("{e}"))?;
+///     world.page().locator(&selector, None).click(None).await.map_err(|e| step_err!("{e}"))?;
 /// }
 /// ```
 #[proc_macro_attribute]

@@ -43,7 +43,7 @@ Every matcher supports:
 | `.with_message(s)`  | Attach a custom message to the failure. |
 | `.soft()`           | Record the failure but do not throw — `TestInfo` aggregates and fails the test at the end. |
 
-## Matcher list (38)
+## Matcher list
 
 **Page (4):** `to_have_title`, `to_contain_title`, `to_have_url`, `to_contain_url`.
 
@@ -59,11 +59,14 @@ Every matcher supports:
 `to_have_accessible_name`, `to_have_accessible_description`,
 `to_have_accessible_error_message`.
 
-**Locator other (5):** `to_have_js_property`, `to_have_count`,
-`to_match_snapshot`, `to_have_screenshot`, `to_match_aria_snapshot`.
+**Locator other (2):** `to_have_js_property`, `to_have_count`.
 
 **Poll / satisfy (4):** `to_equal`, `to_satisfy`, `to_pass`,
 `to_pass_with_options`.
+
+Snapshot and pixel-diff matchers (`to_match_snapshot`,
+`to_have_screenshot`, `to_match_aria_snapshot`) live in
+`ferridriver-test`, which layers them on top of these core matchers.
 
 ## License
 

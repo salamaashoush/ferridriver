@@ -6,7 +6,7 @@
 //! Usage:
 //! ```ignore
 //! let server = TestServer::start("tests/assets").await?;
-//! page.goto(&format!("{}/input/button.html", server.url())).await?;
+//! page.goto(&format!("{}/input/button.html", server.url()), None).await?;
 //! server.stop().await;
 //! ```
 

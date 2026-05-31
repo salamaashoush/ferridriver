@@ -51,7 +51,8 @@ let you pin a backend explicitly.
 
 ## Public API surface
 
-- `Browser::launch`, `Browser::connect`, `Browser::context`, `Browser::page`, `Browser::close`
+- `BrowserType::launch`, `BrowserType::connect`, `BrowserType::connect_over_cdp`, `BrowserType::launch_persistent_context`
+- `Browser::new_context`, `Browser::default_context`, `Browser::new_page`, `Browser::page`, `Browser::close`
 - `BrowserContext::new_page`, `pages`, `cookies`, `add_cookies`, `clear_cookies`,
   `grant_permissions`, `set_geolocation`, `add_init_script`, `route`,
   `set_extra_http_headers`, `storage_state`, `close`

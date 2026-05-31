@@ -20,7 +20,7 @@ Then("the URL contains {string}", async function (fragment: string) {
 });
 
 // Keyword-agnostic (matches Given / When / Then / And / But)
-Step("I wait {int} seconds", async function (n: number) {
+defineStep("I wait {int} seconds", async function (n: number) {
   await new Promise((r) => setTimeout(r, n * 1000));
 });
 ```
