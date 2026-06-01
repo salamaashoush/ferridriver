@@ -24,7 +24,7 @@ binary destination.
 ```toml
 # Cargo.toml
 [dependencies]
-ferridriver = "0.3"
+ferridriver = "0.4"
 ```
 
 `ferridriver-test`, `ferridriver-bdd`, `ferridriver-expect`,

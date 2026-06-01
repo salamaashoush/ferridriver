@@ -26,6 +26,8 @@ once at startup, and executed on the embedded `ferridriver-script` engine.
 Status: pre-1.0. The API tracks Playwright closely but is not API-stable —
 expect breaking changes between minor versions.
 
+**Documentation:** <https://salamaashoush.github.io/ferridriver/>
+
 ## Project layout
 
 11 workspace crates plus one example crate.
@@ -184,7 +186,7 @@ path = "tests/harness.rs"
 harness = false
 
 [dev-dependencies]
-ferridriver-test = "0.3"
+ferridriver-test = "0.4"
 ```
 
 ```bash

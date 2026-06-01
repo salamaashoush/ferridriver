@@ -63,8 +63,8 @@ path = "tests/bdd.rs"
 harness = false
 
 [dev-dependencies]
-ferridriver-bdd  = "0.3"
-ferridriver-test = "0.3"
+ferridriver-bdd  = "0.4"
+ferridriver-test = "0.4"
 ```
 
 ```bash
