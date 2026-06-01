@@ -15,8 +15,13 @@ filter = 'package(ferridriver-test) and kind(test)'
 threads-required = 'num-cpus'
 retries = { count = 2, backoff = "exponential", delay = "2s", jitter = true }
 
+# Every ferridriver-cli integration bin spawns a browser / MCP child
+# (backends, binding_coverage, run_command), so throttle + retry the whole
+# package's integration tests, not just `backends` — otherwise the others
+# run at full -j2 with no retry and flake the run (e.g. coverage_page_scripts
+# on a starved Linux runner).
 [[profile.default.overrides]]
-filter = 'package(ferridriver-cli) and binary(backends)'
+filter = 'package(ferridriver-cli) and kind(test)'
 threads-required = 'num-cpus'
 retries = { count = 2, backoff = "exponential", delay = "2s", jitter = true }
 
