@@ -73,6 +73,30 @@ async fn concurrent_requests_match_by_id() {
   s.close().await.expect("close");
 }
 
+#[tokio::test]
+async fn pushed_event_arrives_on_subscriber() {
+  let s = Sidecar::connect(&spec()).await.expect("connect");
+  let mut rx = s.subscribe();
+  // The fixture writes the id-less event frame before acking `emit`, so by
+  // the time `send` resolves the event is already on the wire.
+  let ack = s
+    .send(
+      "emit",
+      Some(serde_json::json!({ "event": "tick", "payload": { "n": 42 } })),
+      5000,
+    )
+    .await
+    .expect("emit");
+  assert_eq!(ack.get("ok").and_then(serde_json::Value::as_bool), Some(true));
+  let (method, params) = tokio::time::timeout(std::time::Duration::from_secs(5), rx.recv())
+    .await
+    .expect("event timed out")
+    .expect("event recv");
+  assert_eq!(method, "tick");
+  assert_eq!(params, serde_json::json!({ "n": 42 }));
+  s.close().await.expect("close");
+}
+
 // ── JS binding ──────────────────────────────────────────────────────────────
 
 fn engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
@@ -116,6 +140,75 @@ async fn connect_send_close_from_js() {
         serde_json::json!({ "ok": true, "echoed": { "hello": "world" } })
       );
     },
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
+  }
+}
+
+#[tokio::test]
+async fn on_delivers_pushed_events_to_js() {
+  let (eng, _tmp, ctx) = engine();
+  // The callback resolves a promise we await, so delivery is deterministic
+  // (no sleeps): `await got` yields until the pump dispatches the listener.
+  let src = r"
+    const sc = await sidecars.connect('echo');
+    let resolve;
+    const got = new Promise((r) => { resolve = r; });
+    sc.on('evt', (p) => resolve(p));
+    await sc.send('emit', { event: 'evt', payload: { hi: 5 } });
+    const payload = await got;
+    await sc.close();
+    return payload;
+  ";
+  let result = eng.run(src, &[], RunOptions::default(), ctx).await;
+  match result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "hi": 5 })),
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
+  }
+}
+
+#[tokio::test]
+async fn once_resolves_with_next_event() {
+  let (eng, _tmp, ctx) = engine();
+  let src = r"
+    const sc = await sidecars.connect('echo');
+    const p = sc.once('done');
+    await sc.send('emit', { event: 'done', payload: { v: 'ok' } });
+    const out = await p;
+    await sc.close();
+    return out;
+  ";
+  let result = eng.run(src, &[], RunOptions::default(), ctx).await;
+  match result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!({ "v": "ok" })),
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
+  }
+}
+
+#[tokio::test]
+async fn unsubscribe_and_off_stop_delivery() {
+  let (eng, _tmp, ctx) = engine();
+  // Deterministic ordering: events are processed in send order, so when the
+  // `gate` listener fires, the earlier `evt` frame has already been
+  // dispatched (to nobody, since it was unsubscribed). No sleeps.
+  let src = r"
+    const sc = await sidecars.connect('echo');
+    let count = 0;
+    const off = sc.on('evt', () => { count++; });
+    off();                       // unsubscribe via returned fn
+    sc.on('evt', () => { count++; });
+    sc.off('evt');               // drop all listeners for 'evt'
+    let openGate;
+    const gate = new Promise((r) => { openGate = r; });
+    sc.on('gate', () => openGate());
+    await sc.send('emit', { event: 'evt', payload: {} });
+    await sc.send('emit', { event: 'gate', payload: {} });
+    await gate;
+    await sc.close();
+    return count;
+  ";
+  let result = eng.run(src, &[], RunOptions::default(), ctx).await;
+  match result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!(0)),
     Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
   }
 }

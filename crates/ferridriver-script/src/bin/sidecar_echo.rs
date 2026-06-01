@@ -1,7 +1,8 @@
 //! Test fixture: a minimal sidecar speaking the fd 3/4 NUL-delimited JSON
 //! protocol. Reads requests on fd 3, writes responses on fd 4. Answers
-//! `ping` with `{ok:true}`, `echo` by reflecting `params`, anything else with
-//! an `{error}`. Used only by the sidecar transport/binding tests
+//! `ping` with `{ok:true}`, `echo` by reflecting `params`, `emit` by pushing
+//! an id-less event frame `{method, params}` before acking, and anything else
+//! with an `{error}`. Used only by the sidecar transport/binding tests
 //! (`env!("CARGO_BIN_EXE_sidecar_echo")`).
 
 #[cfg(unix)]
@@ -35,6 +36,22 @@ fn main() {
         "ping" => serde_json::json!({ "id": id, "result": { "ok": true } }),
         "echo" => {
           serde_json::json!({ "id": id, "result": v.get("params").cloned().unwrap_or(serde_json::Value::Null) })
+        },
+        "emit" => {
+          // Push an id-less event frame first, then ack. Ordering matters
+          // for the tests: the event is on the wire before `send` resolves.
+          let params = v.get("params").cloned().unwrap_or(serde_json::Value::Null);
+          let event = params.get("event").and_then(|e| e.as_str()).unwrap_or("");
+          let payload = params.get("payload").cloned().unwrap_or(serde_json::Value::Null);
+          let pushed = serde_json::json!({ "method": event, "params": payload });
+          if let Ok(mut ev) = serde_json::to_vec(&pushed) {
+            ev.push(0);
+            if tx.write_all(&ev).is_err() {
+              return;
+            }
+            let _ = tx.flush();
+          }
+          serde_json::json!({ "id": id, "result": { "ok": true } })
         },
         other => {
           serde_json::json!({ "id": id, "error": { "code": -1, "message": format!("unknown method: {other}") } })
