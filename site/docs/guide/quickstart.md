@@ -7,7 +7,7 @@ Pick your language. Both Rust and TypeScript drive the same Rust engine.
 ```toml
 # Cargo.toml
 [dependencies]
-ferridriver = "0.3"
+ferridriver = "0.4"
 tokio       = { version = "1", features = ["full"] }
 ```
 

@@ -32,7 +32,7 @@ path = "tests/harness.rs"
 harness = false
 
 [dev-dependencies]
-ferridriver-test = "0.3"
+ferridriver-test = "0.4"
 ```
 
 ## Tests
