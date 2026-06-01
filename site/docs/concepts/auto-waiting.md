@@ -22,8 +22,15 @@ Before executing any action, the Rust core asks the browser to evaluate
 - **Attached** (`el.isConnected`)
 - **Visible** (non-zero box; `display` / `visibility` / `opacity` pass)
 - **Enabled** (not `aria-disabled`)
+- **Stable** (bounding box unchanged across animation frames — an element
+  mid-transition keeps polling until it settles)
+- **Receives events** (for clicks: the click point hit-tests to the target
+  and is not occluded by another element)
 
-If any check fails, the Rust side yields for 50 ms and retries. After
+This is the same set Playwright enforces. The exact subset depends on the
+action — `hover` waits for visible + stable, `fill` for visible + enabled
++ editable, `click` for visible + enabled + stable plus the hit-test. If
+any check fails, the Rust side yields for 50 ms and retries. After
 5 seconds the call fails with `Timeout: element not actionable`.
 
 ```rust
@@ -110,17 +117,23 @@ Prefer raising `expectTimeout` or `timeout` (per-test) over adding
 manual `sleep` calls. Polling short-circuits as soon as the condition
 passes; a blind sleep always waits the full duration.
 
-## What ferridriver does *not* do
+## `force` — skipping the checks
 
-A few differences from Playwright's auto-wait:
+Pass `force: true` to bypass actionability entirely and dispatch the
+action immediately, same as Playwright. Use it only when you deliberately
+want to act on a not-yet-actionable element (e.g. asserting a disabled
+button does nothing).
 
-- **No "stable" check.** ferridriver does not wait for position
-  stability (the rect staying constant across animation frames). For
-  animations, target the post-animation state with an assertion.
-- **No "receives events" check.** Playwright re-hits the element's
-  coordinates to ensure nothing covers it. ferridriver clicks after the
-  visibility / enabled checks pass.
+```rust
+use ferridriver::options::ClickOptions;
 
-These are on the roadmap. For now, if you hit a flake where an element
-moves during a click, `expect(&locator).to_be_visible().await?;
-locator.click().await?;` is the reliable workaround.
+page.locator("#submit")
+    .click(Some(ClickOptions { force: Some(true), ..Default::default() }))
+    .await?;
+```
+
+The `stable` gate is `requestAnimationFrame`-driven. On a backgrounded
+page rAF is throttled, so the gate races a `setTimeout` watchdog: if it
+hasn't settled within ~1 s the element is treated as stable (a page whose
+rAF is paused is not animating). Foreground pages settle in one frame, so
+there is no added latency in the common case.
