@@ -73,6 +73,10 @@ pub struct ScriptEngineConfig {
   /// Idle TTL for a session VM. `None` disables time-based reaping (only
   /// the `max_session_vms` LRU cap applies).
   pub session_idle_ttl: Option<Duration>,
+  /// Declared sidecar processes exposed to scripts as `sidecars.connect(name)`.
+  /// Empty ⇒ `sidecars.connect` rejects every name. Connecting is by name only
+  /// (no arbitrary spawn from the sandbox).
+  pub sidecars: Vec<crate::sidecar::SidecarSpec>,
 }
 
 impl Default for ScriptEngineConfig {
@@ -87,6 +91,7 @@ impl Default for ScriptEngineConfig {
       max_console_entry_bytes: DEFAULT_MAX_CONSOLE_ENTRY_BYTES,
       max_session_vms: DEFAULT_MAX_SESSION_VMS,
       session_idle_ttl: Some(DEFAULT_SESSION_IDLE_TTL),
+      sidecars: Vec::new(),
     }
   }
 }
@@ -358,6 +363,7 @@ impl Session {
     let artifacts = context.artifacts.clone();
     let host = context.host;
     let caps = context.caps.clone();
+    let sidecars = config.sidecars.clone();
     let ud_ctx = ctx.clone();
     let install: Result<(), ScriptError> = async_with!(ctx => |ctx| {
       // Stash the session's AsyncContext so script-minted pages can
@@ -412,6 +418,11 @@ impl Session {
       // `Given`...), so the registry must already exist.
       crate::bindings::install_bdd(&ctx)
         .map_err(|e| ScriptError::internal(format!("failed to install extension registry: {e}")))?;
+
+      // `sidecars.connect(name)` — declared external processes driven over
+      // fd 3/4. Connect is by declared name only; no arbitrary spawn.
+      crate::bindings::install_sidecars(&ctx, &sidecars)
+        .map_err(|e| ScriptError::internal(format!("failed to install sidecars: {e}")))?;
 
       // `ferridriver.host` — the native context flag an extension reads
       // to branch between MCP and the test runner. One string, set once.

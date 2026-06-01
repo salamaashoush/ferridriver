@@ -53,6 +53,7 @@ pub mod modules;
 pub mod result;
 pub mod session_procs;
 pub mod session_table;
+pub mod sidecar;
 pub mod vars;
 
 pub use bindings::{

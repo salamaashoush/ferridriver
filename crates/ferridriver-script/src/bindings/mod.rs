@@ -46,6 +46,7 @@ pub mod network;
 pub mod page;
 pub mod plugins;
 pub mod process;
+pub mod sidecars;
 pub mod streams;
 pub mod video;
 pub mod web_error;
@@ -76,6 +77,7 @@ pub use mouse::MouseJs;
 pub use network::{RequestJs, ResponseJs, RouteJs, WebSocketJs};
 pub use page::PageJs;
 pub use plugins::{PluginBinding, PluginCommandsJs, install_plugins};
+pub use sidecars::{SidecarJs, SidecarsJs, install_sidecars};
 pub use video::VideoJs;
 pub use web_error::WebErrorJs;
 
