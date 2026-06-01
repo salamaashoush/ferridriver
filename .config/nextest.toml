@@ -4,10 +4,24 @@
 # and tests pile up on the per-test 30s tokio deadline. Cap concurrency
 # to one for the browser-heavy integration test bins; smaller library
 # unit tests still parallelise on the global slot pool.
+#
+# Those same browser-heavy bins flake under CI load — a starved Chromium /
+# MCP child can blow the 30s request deadline — and the failing test varies
+# run to run. Retry them (the retry runs once the contention clears); the
+# deterministic unit tests keep zero retries so a real regression still
+# fails fast.
 [[profile.default.overrides]]
 filter = 'package(ferridriver-test) and kind(test)'
 threads-required = 'num-cpus'
+retries = { count = 2, backoff = "exponential", delay = "2s", jitter = true }
 
 [[profile.default.overrides]]
 filter = 'package(ferridriver-cli) and binary(backends)'
 threads-required = 'num-cpus'
+retries = { count = 2, backoff = "exponential", delay = "2s", jitter = true }
+
+# ferridriver core integration tests (parallel.rs, connect_select, ...) each
+# launch a browser too — same contention flakiness, same retry policy.
+[[profile.default.overrides]]
+filter = 'package(ferridriver) and kind(test)'
+retries = { count = 2, backoff = "exponential", delay = "2s", jitter = true }
