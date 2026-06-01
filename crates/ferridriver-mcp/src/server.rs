@@ -745,6 +745,20 @@ impl McpServer {
     self
   }
 
+  /// Declare the sidecar processes scripts may `sidecars.connect(name)`.
+  /// Rebuilds the scripting engine with the specs merged into its config
+  /// (the engine was constructed with `config.script_engine_config()`,
+  /// which has no access to the top-level `[[sidecars]]` table). Connecting
+  /// is by declared name only — a script can never spawn an arbitrary
+  /// process.
+  #[must_use]
+  pub fn with_sidecars(mut self, sidecars: Vec<ferridriver_script::sidecar::SidecarSpec>) -> Self {
+    let mut cfg = self.script_engine.config().clone();
+    cfg.sidecars = sidecars;
+    self.script_engine = Arc::new(ferridriver_script::ScriptEngine::new(cfg));
+    self
+  }
+
   /// Attach custom state accessible from tool handlers via `extension()`.
   #[must_use]
   pub fn with_extension<T: Send + Sync + 'static>(mut self, ext: Arc<T>) -> Self {

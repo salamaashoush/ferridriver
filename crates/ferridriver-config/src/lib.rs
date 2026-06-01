@@ -34,6 +34,7 @@
 pub mod mcp;
 pub mod test;
 
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
@@ -49,12 +50,40 @@ pub struct FerridriverConfig {
   /// test runner consumes its steps. Top-level (not under `mcp`) because
   /// both hosts load it.
   pub extensions: Vec<String>,
+  /// Declared sidecar processes, exposed to scripts as
+  /// `sidecars.connect(name)`. Top-level (sibling of `[mcp]` / `[test]`)
+  /// because both the MCP server / `run` path and the test runner consume
+  /// them. Connecting is by declared name only — a script can never spawn
+  /// an arbitrary process.
+  pub sidecars: Vec<Sidecar>,
   /// Sandbox-relaxation knobs for the scripting VM (default-deny).
   pub scripting: ScriptingConfig,
   /// MCP server configuration.
   pub mcp: mcp::McpConfig,
   /// Test runner configuration.
   pub test: test::TestConfig,
+}
+
+/// One declared sidecar process. Driven over fd 3/4 with NUL-delimited
+/// JSON by `ferridriver-script`'s sidecar transport. `command[0]` is the
+/// program; the rest are its arguments (fd 3/4 are wired by the transport,
+/// not via argv).
+#[derive(Debug, Default, Clone, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(default, rename_all = "camelCase")]
+pub struct Sidecar {
+  /// The name scripts connect by (`sidecars.connect("<name>")`). Must be
+  /// unique across all declared sidecars.
+  pub name: String,
+  /// Program + arguments. Must be non-empty.
+  pub command: Vec<String>,
+  /// Extra environment variables for the child (merged onto the inherited
+  /// environment). Keys are used verbatim (not camelCased).
+  pub env: Option<BTreeMap<String, String>>,
+  /// Working directory for the child. Defaults to the parent's cwd.
+  pub cwd: Option<String>,
+  /// How long to wait for the child to become ready before failing the
+  /// connect. Absent ⇒ the consumer's default applies.
+  pub startup_timeout_ms: Option<u64>,
 }
 
 /// Opt-in relaxations of the scripting sandbox. Every field defaults to
@@ -115,8 +144,31 @@ impl FerridriverConfig {
       other => anyhow::bail!("unsupported config format: {other} (expected toml/yaml/yml/json)"),
     };
 
+    cfg
+      .validate()
+      .map_err(|e| anyhow::anyhow!("invalid config {}: {e}", path.display()))?;
+
     tracing::debug!("loaded ferridriver config from {}", path.display());
     Ok(cfg)
+  }
+
+  /// Validate cross-field invariants the serde layer can't express.
+  ///
+  /// # Errors
+  ///
+  /// Returns an error if two sidecars share a `name`, or a sidecar has an
+  /// empty `command`.
+  pub fn validate(&self) -> anyhow::Result<()> {
+    let mut seen = std::collections::HashSet::new();
+    for s in &self.sidecars {
+      if s.command.is_empty() {
+        anyhow::bail!("sidecar '{}' has an empty command", s.name);
+      }
+      if !seen.insert(s.name.as_str()) {
+        anyhow::bail!("duplicate sidecar name '{}'", s.name);
+      }
+    }
+    Ok(())
   }
 }
 
@@ -273,6 +325,85 @@ test:
     assert_eq!(parsed.test.workers, 4);
     assert!(parsed.test.browser.headless);
     assert!(parsed.test.browser.use_options.is_mobile);
+  }
+
+  #[test]
+  fn load_toml_with_sidecars() {
+    let dir = std::env::temp_dir().join("ferridriver-config-sidecars-ok");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("ferridriver.toml");
+    std::fs::write(
+      &path,
+      r#"
+[[sidecars]]
+name = "tooling"
+command = ["my-helper", "--serve"]
+cwd = "/tmp"
+startupTimeoutMs = 2000
+
+[sidecars.env]
+LOG = "debug"
+"#,
+    )
+    .unwrap();
+
+    let root = FerridriverConfig::load_from(&path).unwrap();
+    let _ = std::fs::remove_dir_all(&dir);
+
+    assert_eq!(root.sidecars.len(), 1);
+    let s = &root.sidecars[0];
+    assert_eq!(s.name, "tooling");
+    assert_eq!(s.command, vec!["my-helper", "--serve"]);
+    assert_eq!(s.cwd.as_deref(), Some("/tmp"));
+    assert_eq!(s.startup_timeout_ms, Some(2000));
+    assert_eq!(
+      s.env.as_ref().and_then(|e| e.get("LOG")).map(String::as_str),
+      Some("debug")
+    );
+  }
+
+  #[test]
+  fn duplicate_sidecar_name_is_an_error() {
+    let dir = std::env::temp_dir().join("ferridriver-config-sidecars-dup");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("ferridriver.toml");
+    std::fs::write(
+      &path,
+      r#"
+[[sidecars]]
+name = "dup"
+command = ["a"]
+
+[[sidecars]]
+name = "dup"
+command = ["b"]
+"#,
+    )
+    .unwrap();
+
+    let err = FerridriverConfig::load_from(&path).unwrap_err();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(err.to_string().contains("duplicate sidecar name"), "got: {err}");
+  }
+
+  #[test]
+  fn empty_sidecar_command_is_an_error() {
+    let dir = std::env::temp_dir().join("ferridriver-config-sidecars-empty");
+    let _ = std::fs::create_dir_all(&dir);
+    let path = dir.join("ferridriver.toml");
+    std::fs::write(
+      &path,
+      r#"
+[[sidecars]]
+name = "broken"
+command = []
+"#,
+    )
+    .unwrap();
+
+    let err = FerridriverConfig::load_from(&path).unwrap_err();
+    let _ = std::fs::remove_dir_all(&dir);
+    assert!(err.to_string().contains("empty command"), "got: {err}");
   }
 
   #[test]
