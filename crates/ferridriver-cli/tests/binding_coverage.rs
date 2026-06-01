@@ -205,9 +205,11 @@ ok('jsHandle.asElement(non-node)', h.asElement() == null);
 const nodeH = await page.evaluateHandle("document.body");
 const elFromHandle = nodeH.asElement();
 ok('jsHandle.asElement(node)', elFromHandle != null && (await elFromHandle.evaluate(e => e.tagName)) === 'BODY');
-const initId = await page.addInitScript("globalThis.__init=1");
-ok('page.addInitScript', typeof initId === 'string');
-await page.removeInitScript(initId);
+// addInitScript returns a Disposable (Playwright parity, client/page.ts:532);
+// removal is via dispose(), which routes through core remove_init_script.
+const initDisp = await page.addInitScript("globalThis.__init=1");
+ok('page.addInitScript', initDisp != null && typeof initDisp.dispose === 'function');
+await initDisp.dispose();
 ok('page.removeInitScript', true);
 let exposed = 0;
 await page.exposeFunction('__cov_fn', () => { exposed = 1; });
