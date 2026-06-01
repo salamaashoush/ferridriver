@@ -468,6 +468,9 @@ if (!window.__fd) {
     },
     selAll(parts: SelectorPart[]) { return executeSelector(parts, document); },
     selCount(parts: SelectorPart[]) { return executeSelector(parts, document).length; },
+    scrollInfo() {
+      return JSON.stringify({ scrollY: window.scrollY, scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight });
+    },
 
     /**
      * Resolve `parts` to a single element (strict) and return the

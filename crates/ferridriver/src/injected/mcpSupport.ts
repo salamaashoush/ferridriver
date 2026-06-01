@@ -51,10 +51,6 @@ function findElementsCSS(selector: string, attributes: string[], maxResults: num
   } catch (e: any) { return JSON.stringify({ error: e.message }); }
 }
 
-function scrollInfo() {
-  return JSON.stringify({ scrollY: window.scrollY, scrollHeight: document.documentElement.scrollHeight, viewportHeight: window.innerHeight });
-}
-
 function suggestSelectors() {
   const ids = [...document.querySelectorAll('[id]')].map(el => el.id).filter(Boolean).slice(0, 50);
   const inputs = [...document.querySelectorAll('input,textarea,select,button,a')].map(el => {
@@ -125,7 +121,6 @@ function extractMarkdown(): string {
   Object.assign(fd, {
     searchPage,
     findElementsCSS,
-    scrollInfo,
     suggestSelectors,
     consoleErrors,
     extractMarkdown,

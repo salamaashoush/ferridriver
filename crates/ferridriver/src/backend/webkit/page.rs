@@ -31,6 +31,18 @@ use crate::state::DialogEvent;
 /// in `wkPage.ts`.
 pub const UTILITY_WORLD_NAME: &str = "__playwright_utility_world__";
 
+/// Document-start bootstrap that suppresses the native context menu on
+/// every page. A right-button click on the Playwright `WebKit` build
+/// opens context-menu tracking that, with no active UI to dismiss it,
+/// stays pending and swallows every subsequent synthetic mouse event — so
+/// any action after a right-click silently does nothing. Cancelling the
+/// default in a capture-phase listener clears that state while still
+/// letting the page's own `contextmenu` handlers run (`preventDefault`
+/// does not stop propagation), matching the headless `Chromium` backend
+/// where a synthetic right-click never raises an OS menu.
+const CONTEXT_MENU_SUPPRESSOR: &str =
+  "window.addEventListener('contextmenu', function(e){ e.preventDefault(); }, true)";
+
 /// Playwright `WebKit` page. Cheaply cloneable; clones share the
 /// underlying sessions + managers.
 #[derive(Clone)]
@@ -252,6 +264,15 @@ impl WebKitPage {
     // without `Dialog.enable` the `javascriptDialogOpening` event
     // never fires and `window.alert` would wedge the page.
     proxy.send("Dialog.enable", json!({})).await?;
+    // Mark the page active + focused (page-proxy session), mirroring
+    // `wkPage.ts::_initializePageProxySession`. Without it WebKit treats
+    // the page as a background/inactive window: a right-button click
+    // opens context-menu tracking that never resolves (no active window
+    // to dismiss it), and every subsequent synthetic mouse event is
+    // swallowed by that pending menu instead of reaching the document.
+    proxy
+      .send("Emulation.setActiveAndFocused", json!({ "active": true }))
+      .await?;
     // Apply per-page context overrides BEFORE the about:blank document
     // becomes scriptable. Mirrors `WKPage._initializeSessionMayThrow` —
     // userAgent / timezone / bypassCSP / offline / permissions live on
@@ -272,6 +293,13 @@ impl WebKitPage {
     // shared MCP browser couldn't drain pending events fast enough.
     let _ = target
       .send("Page.createUserWorld", json!({ "name": UTILITY_WORLD_NAME }))
+      .await;
+    // Install the context-menu suppressor at document start. No user
+    // init scripts exist yet, so the bootstrap is just the suppressor;
+    // `flush_bootstrap_script` re-prepends it whenever the user adds or
+    // removes their own init scripts.
+    let _ = target
+      .send("Page.setBootstrapScript", json!({ "source": CONTEXT_MENU_SUPPRESSOR }))
       .await;
     let resource_tree = target.send("Page.getResourceTree", json!({})).await.ok();
     let main_frame_id_cache: Arc<std::sync::Mutex<Option<String>>> = Arc::new(std::sync::Mutex::new(None));
@@ -1781,9 +1809,8 @@ impl WebKitPage {
   async fn flush_bootstrap_script(&self) -> Result<()> {
     let joined = {
       let scripts = self.init_scripts.lock().await;
-      scripts
-        .iter()
-        .map(|(_, src)| src.as_str())
+      std::iter::once(CONTEXT_MENU_SUPPRESSOR)
+        .chain(scripts.iter().map(|(_, src)| src.as_str()))
         .collect::<Vec<_>>()
         .join(";\n")
     };
