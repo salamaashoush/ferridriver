@@ -58,7 +58,7 @@ inventory::collect!(HookRegistration);
 /// What the `#[fixture]` proc macro submits via `inventory::submit!`.
 ///
 /// `build` is a plain fn pointer (const-storable in the inventory static)
-/// that constructs the heap-allocated [`FixtureDef`] at collection time.
+/// that constructs the heap-allocated [`crate::fixture::FixtureDef`] at collection time.
 pub struct FixtureRegistration {
   pub name: &'static str,
   pub module_path: &'static str,
