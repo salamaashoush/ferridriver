@@ -19,6 +19,31 @@ use clap::Parser;
 use ferridriver_config::FerridriverConfig;
 use ferridriver_mcp::McpServer;
 
+/// Default sidecar startup timeout when a `[[sidecars]]` entry omits
+/// `startupTimeoutMs`.
+const DEFAULT_SIDECAR_STARTUP_TIMEOUT_MS: u64 = 5000;
+
+/// Lower the declared `[[sidecars]]` config entries into the scripting
+/// engine's `SidecarSpec`s. Shared by the `run`, `mcp`, and `bdd` paths so
+/// the same config table drives every host.
+fn sidecar_specs(config: &FerridriverConfig) -> Vec<ferridriver_script::sidecar::SidecarSpec> {
+  config
+    .sidecars
+    .iter()
+    .map(|s| ferridriver_script::sidecar::SidecarSpec {
+      name: s.name.clone(),
+      command: s.command.clone(),
+      env: s
+        .env
+        .as_ref()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default(),
+      cwd: s.cwd.clone(),
+      startup_timeout_ms: s.startup_timeout_ms.unwrap_or(DEFAULT_SIDECAR_STARTUP_TIMEOUT_MS),
+    })
+    .collect()
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
   let args = cli::Cli::parse();
@@ -191,6 +216,7 @@ async fn run_bdd(config: FerridriverConfig, args: cli::BddArgs) -> anyhow::Resul
   // same resolution the MCP server and `ferridriver run` use. Must be
   // set before the run starts.
   ferridriver_bdd::js::set_bdd_script_caps(ferridriver_script::ScriptCaps::resolve(&config.scripting.allow_env));
+  ferridriver_bdd::js::set_bdd_sidecars(sidecar_specs(&config));
   let mut overrides = ferridriver_test::config::CliOverrides {
     bdd_tags: args.tags,
     bdd_dry_run: args.dry_run,
@@ -281,9 +307,10 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
       .map_err(|e| anyhow::anyhow!("sandbox init ({}): {}", cwd.display(), e.message))?,
   );
   // `ferridriver run` honours a ferridriver.toml in scope for the
-  // scripting sandbox env allow-list.
-  let scripting = FerridriverConfig::load(None).unwrap_or_default().scripting;
-  let caps = ferridriver_script::ScriptCaps::resolve(&scripting.allow_env);
+  // scripting sandbox env allow-list and declared sidecars.
+  let file_config = FerridriverConfig::load(None).unwrap_or_default();
+  let caps = ferridriver_script::ScriptCaps::resolve(&file_config.scripting.allow_env);
+  let sidecars = sidecar_specs(&file_config);
 
   let ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
@@ -307,7 +334,11 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
   };
   let script_args: Vec<serde_json::Value> = args.script_args.into_iter().map(serde_json::Value::String).collect();
 
-  let session = ferridriver_script::Session::create(ferridriver_script::ScriptEngineConfig::default(), &ctx)
+  let engine_config = ferridriver_script::ScriptEngineConfig {
+    sidecars,
+    ..Default::default()
+  };
+  let session = ferridriver_script::Session::create(engine_config, &ctx)
     .await
     .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
 
@@ -384,6 +415,7 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   // CLI flags fall back when the [mcp] section is empty so the user can
   // launch the server with no config file at all.
   let extension_paths: Vec<std::path::PathBuf> = config.extensions.iter().map(std::path::PathBuf::from).collect();
+  let sidecars = sidecar_specs(&config);
   let scripting = config.scripting;
   let mcp = config.mcp;
   let backend = if mcp.browser.backend.is_some() {
@@ -399,7 +431,9 @@ async fn run_mcp(config: FerridriverConfig, args: cli::McpArgs) -> anyhow::Resul
   let connect_mode = args.browser.connect_mode();
 
   let caps = ferridriver_script::ScriptCaps::resolve(&scripting.allow_env);
-  let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp)).with_script_caps(caps);
+  let mut server = McpServer::with_options(connect_mode, backend, headless, Arc::new(mcp))
+    .with_script_caps(caps)
+    .with_sidecars(sidecars);
   server.load_extensions(&extension_paths).await;
   match args.transport.transport {
     cli::Transport::Stdio => ferridriver_mcp::mcp::serve_stdio_with(server).await,

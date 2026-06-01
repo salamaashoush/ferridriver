@@ -50,6 +50,7 @@
       { "text": "run_script", "link": "/scripting/run-script" },
       { "text": "Sandbox", "link": "/scripting/sandbox" },
       { "text": "Capabilities", "link": "/scripting/capabilities" },
+      { "text": "Sidecars", "link": "/scripting/sidecars" },
       { "text": "State and sessions", "link": "/scripting/state-and-sessions" }
     ],
     "activeMatch": "/scripting/"

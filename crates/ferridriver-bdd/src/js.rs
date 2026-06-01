@@ -250,7 +250,11 @@ impl JsBddSession {
       caps: BDD_SCRIPT_CAPS.get().cloned().unwrap_or_default(),
     };
 
-    let session = Session::create(ScriptEngineConfig::default(), &run_ctx)
+    let engine_config = ScriptEngineConfig {
+      sidecars: BDD_SIDECARS.get().cloned().unwrap_or_default(),
+      ..Default::default()
+    };
+    let session = Session::create(engine_config, &run_ctx)
       .await
       .map_err(|e| anyhow::anyhow!("session create: {}", e.message))?;
 
@@ -604,6 +608,18 @@ static BDD_SCRIPT_CAPS: OnceLock<ferridriver_script::ScriptCaps> = OnceLock::new
 /// before the run; idempotent (first set wins).
 pub fn set_bdd_script_caps(caps: ferridriver_script::ScriptCaps) {
   let _ = BDD_SCRIPT_CAPS.set(caps);
+}
+
+/// Declared sidecar specs the BDD step VM exposes as
+/// `sidecars.connect(name)`. Set once by the `ferridriver bdd` entry from
+/// resolved config (same threading as [`BDD_SCRIPT_CAPS`]); unset ⇒ no
+/// declared sidecars (`sidecars.connect` rejects every name).
+static BDD_SIDECARS: OnceLock<Vec<ferridriver_script::sidecar::SidecarSpec>> = OnceLock::new();
+
+/// Install the declared sidecar specs for the BDD step VM. Call before the
+/// run; idempotent (first set wins).
+pub fn set_bdd_sidecars(sidecars: Vec<ferridriver_script::sidecar::SidecarSpec>) {
+  let _ = BDD_SIDECARS.set(sidecars);
 }
 
 async fn worker_session(
