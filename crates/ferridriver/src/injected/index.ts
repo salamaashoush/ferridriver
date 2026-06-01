@@ -250,17 +250,35 @@ function clickGuard(el: Element): string {
  */
 /**
  * Run Playwright's full actionability gate via the vendored
- * `injected.checkElementStates`. This is the single source of truth for
- * element states INCLUDING `'stable'` (async rAF bounding-box sampling,
- * `injectedScript.ts::_checkElementIsStable`). Returns `undefined` when
- * every requested state passes, otherwise the failing state name so the
- * Rust host can format `error:not<state>` and retry.
+ * `injected.checkElementStates` (`'stable'` = async rAF bounding-box
+ * sampling). Returns `undefined` when every requested state passes,
+ * otherwise the failing state name so the Rust host formats
+ * `error:not<state>` and retries.
+ *
+ * The `'stable'` check is rAF-driven, and `requestAnimationFrame` is
+ * throttled (or paused) on a backgrounded page — e.g. any non-foreground
+ * tab in a multi-page context. To stop that from stalling an action
+ * indefinitely, the stable wait races a `setTimeout` watchdog (timers keep
+ * firing thanks to `--disable-background-timer-throttling`): if rAF hasn't
+ * settled within the window, treat the element as stable — a page whose rAF
+ * is throttled is not animating fast enough to matter.
  */
 async function awaitStates(el: Element, states: ElementState[]): Promise<string | undefined> {
-  const result = await injected.checkElementStates(el, states as any);
-  if (result === undefined) return undefined;
+  // Non-stable states (visible / enabled / editable) are synchronous — no
+  // rAF — so check them directly.
+  const nonStable = states.filter((s) => s !== 'stable');
+  const result = await injected.checkElementStates(el, nonStable as any);
   if (result === 'error:notconnected') return 'connected';
-  return (result as any).missingState;
+  if (result !== undefined) return (result as any).missingState;
+
+  if (states.includes('stable')) {
+    const stable = await Promise.race([
+      injected.checkElementStates(el, ['stable'] as any).then((r: any) => r === undefined),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(true), 1000)),
+    ]);
+    if (!stable) return 'stable';
+  }
+  return undefined;
 }
 
 async function clickPrep(
