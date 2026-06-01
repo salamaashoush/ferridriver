@@ -16,6 +16,8 @@ fo = "fo"
 PN = "PN"
 # "ba" appears in test data
 ba = "ba"
+# "abd" is intentional keyboard test data — typing "abcd" then Backspace -> "abd"
+abd = "abd"
 # "bui" appears in identifiers
 bui = "bui"
 # "mis" appears as a prefix in identifiers

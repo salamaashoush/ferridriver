@@ -951,7 +951,7 @@ impl ContextRef {
   /// Register a route handler for all pages in this context.
   ///
   /// Returns a [`crate::disposable::Disposable`] whose `dispose()` removes the
-  /// handler from every page (equivalent to [`BrowserContext::unroute`]).
+  /// handler from every page (equivalent to [`Self::unroute`]).
   /// Mirrors Playwright `browserContext.route(...)` which returns a
   /// `DisposableStub` (`client/browserContext.ts:377`).
   ///
@@ -1029,7 +1029,7 @@ impl ContextRef {
   /// (after awaiting any returned promise in the binding layers) is
   /// delivered to the page-side caller.
   ///
-  /// Returns a [`Disposable`] whose `dispose()` removes the binding
+  /// Returns a [`crate::disposable::Disposable`] whose `dispose()` removes the binding
   /// from the registry and from every page in the context.
   ///
   /// # Errors

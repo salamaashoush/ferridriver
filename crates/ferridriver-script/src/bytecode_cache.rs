@@ -12,7 +12,7 @@
 //! `Module::load` on bytecode is `unsafe`: it trusts the input was
 //! produced by an identical QuickJS build with native endianness. A disk
 //! cache crosses process (and machine) boundaries, so every entry lives
-//! under an [`abi_tag`]-named directory folding the QuickJS version
+//! under an `abi_tag`-named directory folding the QuickJS version
 //! (which tracks the on-disk `BC_VERSION`), target arch, endianness, and
 //! pointer width. Bytecode is only ever loaded from the directory
 //! matching the running toolchain — a mismatched build simply misses and

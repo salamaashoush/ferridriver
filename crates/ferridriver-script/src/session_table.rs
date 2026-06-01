@@ -145,7 +145,7 @@ impl BrowserSession {
     self.finish_run(run)
   }
 
-  /// Like [`run`], but executes a precompiled bundled ES module — the
+  /// Like [`Self::run`], but executes a precompiled bundled ES module — the
   /// TypeScript / `import` path. The run's result is the module's
   /// `default` export. Shares VM lifecycle + poison handling with `run`.
   pub async fn run_module(

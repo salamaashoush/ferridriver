@@ -89,7 +89,7 @@
 //! ```
 
 /// Result type for `#[fixture]` bodies and other test helpers: a
-/// `std::result::Result` whose error is [`TestFailure`](model::TestFailure).
+/// `std::result::Result` whose error is [`TestFailure`].
 pub type Result<T> = std::result::Result<T, model::TestFailure>;
 
 // -- Core modules --
