@@ -10,14 +10,20 @@
 //!
 //! Pushed events (id-less `{method, params}` frames the child writes) are
 //! dispatched to JS listeners by ONE pump task per connected handle. The
-//! pump owns a `broadcast::Receiver` and, for each event, re-enters the
-//! session's [`rquickjs::AsyncContext`] to invoke every registered callback —
-//! the same cross-task dispatch mechanism `page.route` uses. Callbacks are
-//! kept as `Persistent<Function>` in context userdata (single-threaded VM),
-//! never moved across the task boundary (they are not `Send`); the pump
-//! restores them by handle/event id inside the context. The broadcast
-//! channel is bounded (1024); if a listener falls far enough behind that the
-//! channel laps it, those events are dropped (logged, never panics).
+//! pump is spawned onto the QuickJS runtime's OWN executor via
+//! [`rquickjs::Ctx::spawn`] (the same mechanism `setInterval` uses), so every
+//! VM access stays on the single interpreter thread — driving JS from a
+//! separate OS thread (`tokio::spawn` + `async_with`) races the interpreter
+//! and is unsound under a multi-threaded runtime. The pump owns a
+//! `broadcast::Receiver`; for each event it restores the matching listeners
+//! (`Persistent<Function>` in context userdata, keyed by handle/event) and
+//! calls them. The channel is bounded (1024); if a listener falls far enough
+//! behind that the channel laps it, those events are dropped (logged, never
+//! panics).
+//!
+//! The pump is only polled while the runtime is being driven (inside a script
+//! execution / its awaits). Events that arrive while no script is running
+//! buffer in the broadcast channel until the next VM activity.
 
 use std::cell::RefCell;
 use std::sync::Arc;
@@ -26,9 +32,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 
 use rquickjs::class::Trace;
 use rquickjs::function::Opt;
-use rquickjs::{AsyncContext, Class, Ctx, Function, IntoJs, JsLifetime, Persistent, Value, async_with};
+use rquickjs::{Class, Ctx, Function, IntoJs, JsLifetime, Persistent, Value};
 use rustc_hash::FxHashMap;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, Notify};
 
 use crate::sidecar::{Sidecar, SidecarSpec};
 
@@ -77,14 +83,9 @@ impl SidecarsJs {
         s
       }
     };
-    // Grab the session's AsyncContext (stashed as userdata at
-    // `Session::create`) so the event pump can re-enter JS from its tokio
-    // task — exactly how `PageJs` obtains it for `page.route` dispatch.
-    let async_ctx = ctx.userdata::<crate::engine::SessionAsyncCtx>().map(|ud| ud.0.clone());
     let wrapper = SidecarJs {
       inner,
       default_timeout_ms: DEFAULT_SEND_TIMEOUT_MS,
-      async_ctx,
       handle_id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
       pump: Arc::new(StdMutex::new(None)),
     };
@@ -137,79 +138,75 @@ pub struct SidecarJs {
   inner: Arc<Sidecar>,
   #[qjs(skip_trace)]
   default_timeout_ms: u64,
-  /// Session `AsyncContext` the event pump re-enters to call JS listeners.
-  /// `None` when no session context is installed (e.g. a bare engine with
-  /// no `SessionAsyncCtx` userdata) — `on`/`once` then reject clearly.
-  #[qjs(skip_trace)]
-  async_ctx: Option<AsyncContext>,
   /// Identifies this handle's listener bucket in the context registry.
   #[qjs(skip_trace)]
   handle_id: u64,
-  /// The single event-pump task, started on the first `on`. Aborted on
-  /// `close()` and on drop.
+  /// Cancellation handle for the one event-pump task, set on the first `on`.
+  /// `Some` ⇒ the pump is running; notifying it stops the loop. The pump
+  /// future itself lives on the runtime executor and is also dropped when
+  /// the VM tears down.
   #[qjs(skip_trace)]
-  pump: Arc<StdMutex<Option<tokio::task::JoinHandle<()>>>>,
+  pump: Arc<StdMutex<Option<Arc<Notify>>>>,
 }
 
 impl Drop for SidecarJs {
   fn drop(&mut self) {
-    if let Some(handle) = self
+    if let Some(stop) = self
       .pump
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .take()
     {
-      handle.abort();
+      stop.notify_waiters();
     }
   }
 }
 
 impl SidecarJs {
-  /// Start the one event-pump task for this handle if it is not already
-  /// running. The pump owns a `broadcast::Receiver` and dispatches each
-  /// id-less frame to every callback registered (in context userdata) for
-  /// this handle + event.
-  fn ensure_pump(&self, ctx: &Ctx<'_>) -> rquickjs::Result<()> {
+  /// Start the one event-pump for this handle if it is not already running.
+  /// The pump runs on the QuickJS runtime's own executor (`ctx.spawn`), so it
+  /// only ever touches the interpreter from the interpreter thread. It owns a
+  /// `broadcast::Receiver` and dispatches each id-less frame to every callback
+  /// registered (in context userdata) for this handle + event.
+  fn ensure_pump(&self, ctx: &Ctx<'_>) {
     let mut guard = self.pump.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
     if guard.is_some() {
-      return Ok(());
+      return;
     }
-    let Some(async_ctx) = self.async_ctx.clone() else {
-      return Err(throw(
-        ctx,
-        "sidecar events require the script engine's AsyncContext (connect via a session)",
-      ));
-    };
+    let stop = Arc::new(Notify::new());
+    let stop_for_task = stop.clone();
     let mut rx = self.inner.subscribe();
     let handle_id = self.handle_id;
-    let handle = tokio::spawn(async move {
+    let pump_ctx = ctx.clone();
+    ctx.spawn(async move {
       loop {
-        match rx.recv().await {
+        let event = tokio::select! {
+          () = stop_for_task.notified() => break,
+          ev = rx.recv() => ev,
+        };
+        match event {
           Ok((method, params)) => {
-            // Re-enter the JS context to restore + invoke each callback. A
-            // throwing listener is swallowed so one bad callback can't kill
-            // the pump (the reader task is never blocked on JS — it only
-            // feeds the broadcast channel).
-            let _: rquickjs::Result<()> = async_with!(async_ctx => |ctx| {
-              let targets: Vec<Persistent<Function<'static>>> = with_sidecar_listeners(&ctx, |r| {
-                r.by_handle
-                  .get(&handle_id)
-                  .and_then(|m| m.get(&method))
-                  .map(|v| v.iter().map(|(_, f)| f.clone()).collect())
-                  .unwrap_or_default()
-              });
-              if targets.is_empty() {
-                return Ok(());
+            // Already on the interpreter thread — restore + invoke directly.
+            // A throwing listener is swallowed so one bad callback can't kill
+            // the pump.
+            let targets: Vec<Persistent<Function<'static>>> = with_sidecar_listeners(&pump_ctx, |r| {
+              r.by_handle
+                .get(&handle_id)
+                .and_then(|m| m.get(&method))
+                .map(|v| v.iter().map(|(_, f)| f.clone()).collect())
+                .unwrap_or_default()
+            });
+            if targets.is_empty() {
+              continue;
+            }
+            let Ok(arg) = crate::bindings::convert::json_to_js(&pump_ctx, &params) else {
+              continue;
+            };
+            for f in targets {
+              if let Ok(func) = f.restore(&pump_ctx) {
+                let _: rquickjs::Result<Value<'_>> = func.call((arg.clone(),));
               }
-              let arg = crate::bindings::convert::json_to_js(&ctx, &params)?;
-              for f in targets {
-                if let Ok(func) = f.restore(&ctx) {
-                  let _: rquickjs::Result<Value<'_>> = func.call((arg.clone(),));
-                }
-              }
-              Ok(())
-            })
-            .await;
+            }
           },
           Err(tokio::sync::broadcast::error::RecvError::Lagged(n)) => {
             // Bounded channel lapped a slow consumer: drop those events.
@@ -219,8 +216,7 @@ impl SidecarJs {
         }
       }
     });
-    *guard = Some(handle);
-    Ok(())
+    *guard = Some(stop);
   }
 }
 
@@ -263,7 +259,7 @@ impl SidecarJs {
         .or_default()
         .push((lid, saved));
     });
-    self.ensure_pump(&ctx)?;
+    self.ensure_pump(&ctx);
 
     Function::new(ctx.clone(), move |ctx: Ctx<'_>| {
       with_sidecar_listeners(&ctx, |r| {
@@ -323,13 +319,13 @@ impl SidecarJs {
   /// transport and reaps the child.
   #[qjs(rename = "close")]
   pub async fn close(&self, ctx: Ctx<'_>) -> rquickjs::Result<()> {
-    if let Some(handle) = self
+    if let Some(stop) = self
       .pump
       .lock()
       .unwrap_or_else(std::sync::PoisonError::into_inner)
       .take()
     {
-      handle.abort();
+      stop.notify_waiters();
     }
     with_sidecar_listeners(&ctx, |r| {
       r.by_handle.remove(&self.handle_id);

@@ -76,6 +76,53 @@ fn declared_sidecar_is_reachable_from_a_script() {
   assert_eq!(v["value"]["ok"], true, "declared sidecar ping returned ok: {v}");
 }
 
+/// The gateway extension (`fixtures/sidecar_gateway.ts`) is loaded via
+/// `--plugin` and drives the declared sidecar through its tools — the real
+/// deployed path (extension → `plugins['gateway.*']` → `sidecars`). Covers
+/// the event path (`on` + pushed frame) that deadlocked under the
+/// multi-threaded runtime before the pump moved onto `ctx.spawn`.
+fn gateway_fixture() -> PathBuf {
+  PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../ferridriver-script/tests/fixtures/sidecar_gateway.ts")
+}
+
+#[test]
+fn gateway_plugin_drives_sidecar_over_the_real_binary() {
+  let echo = ensure_sidecar_echo();
+  let dir = tempfile::tempdir().unwrap();
+  let toml = format!(
+    "[[sidecars]]\nname = \"gateway\"\ncommand = [\"{}\"]\n",
+    echo.to_str().unwrap()
+  );
+  std::fs::write(dir.path().join("ferridriver.toml"), toml).unwrap();
+
+  let script = "\
+    const ping = await plugins['gateway.ping']();\n\
+    const echoed = await plugins['gateway.call']({ method: 'echo', params: { n: 7 } });\n\
+    const evt = await plugins['gateway.roundtripEvent']({ event: 'tick', params: { event: 'tick', payload: { hits: 3 } } });\n\
+    await plugins['gateway.close']();\n\
+    return { ping, echoed, evt };";
+
+  let out = Command::new(ferridriver_bin())
+    .current_dir(dir.path())
+    .args(["run", "--plugin", gateway_fixture().to_str().unwrap(), "-e", script])
+    .output()
+    .expect("spawn ferridriver run");
+
+  let stdout = String::from_utf8_lossy(&out.stdout);
+  let stderr = String::from_utf8_lossy(&out.stderr);
+  assert!(out.status.success(), "exit ok; stdout={stdout} stderr={stderr}");
+  let v: serde_json::Value = serde_json::from_str(&stdout).expect("json stdout");
+  assert_eq!(v["status"], "ok", "{v}");
+  assert_eq!(v["value"]["ping"]["ok"], true, "ping: {v}");
+  assert_eq!(v["value"]["ping"]["name"], "gateway", "{v}");
+  assert_eq!(v["value"]["echoed"], serde_json::json!({ "n": 7 }), "{v}");
+  assert_eq!(
+    v["value"]["evt"],
+    serde_json::json!({ "hits": 3 }),
+    "pushed event via plugin: {v}"
+  );
+}
+
 #[test]
 fn unknown_sidecar_name_is_rejected_when_not_declared() {
   let dir = tempfile::tempdir().unwrap();
