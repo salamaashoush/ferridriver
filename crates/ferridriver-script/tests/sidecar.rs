@@ -122,7 +122,7 @@ fn engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
   (ScriptEngine::new(cfg), tmp, context)
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn connect_send_close_from_js() {
   let (eng, _tmp, ctx) = engine();
   let src = r"
@@ -144,7 +144,7 @@ async fn connect_send_close_from_js() {
   }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn on_delivers_pushed_events_to_js() {
   let (eng, _tmp, ctx) = engine();
   // The callback resolves a promise we await, so delivery is deterministic
@@ -166,7 +166,7 @@ async fn on_delivers_pushed_events_to_js() {
   }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn once_resolves_with_next_event() {
   let (eng, _tmp, ctx) = engine();
   let src = r"
@@ -184,7 +184,7 @@ async fn once_resolves_with_next_event() {
   }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unsubscribe_and_off_stop_delivery() {
   let (eng, _tmp, ctx) = engine();
   // Deterministic ordering: events are processed in send order, so when the
@@ -213,7 +213,7 @@ async fn unsubscribe_and_off_stop_delivery() {
   }
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn unknown_sidecar_name_rejects() {
   let (eng, _tmp, ctx) = engine();
   let src = r"

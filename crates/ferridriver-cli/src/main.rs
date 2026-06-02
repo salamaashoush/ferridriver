@@ -23,6 +23,47 @@ use ferridriver_mcp::McpServer;
 /// `startupTimeoutMs`.
 const DEFAULT_SIDECAR_STARTUP_TIMEOUT_MS: u64 = 5000;
 
+/// Discover + compile extension files into plugin bindings for the `run`
+/// path. `roots` are files or directories (directories are scanned shallowly
+/// for `.js`/`.mjs`/`.ts`/`.mts`). Discovery / compile failures are logged
+/// and skipped so a single bad extension never aborts the run.
+async fn load_run_plugins(roots: &[String]) -> Vec<ferridriver_script::PluginBinding> {
+  if roots.is_empty() {
+    return Vec::new();
+  }
+  let mut files = Vec::new();
+  for root in roots {
+    match ferridriver_mcp::plugin::discover(std::path::Path::new(root)) {
+      Ok(v) => files.extend(v),
+      Err(e) => tracing::warn!(path = %root, error = %e, "plugin discovery failed; skipping"),
+    }
+  }
+  if files.is_empty() {
+    return Vec::new();
+  }
+  // rolldown resolves the bundle entry from an absolute id; a relative
+  // path (e.g. `extensions = ["gateway.ts"]` in ferridriver.toml) would
+  // fail with UnresolvedEntry. Canonicalize, dropping any that vanished.
+  let files: Vec<std::path::PathBuf> = files
+    .into_iter()
+    .filter_map(|f| match std::fs::canonicalize(&f) {
+      Ok(abs) => Some(abs),
+      Err(e) => {
+        tracing::warn!(path = %f.display(), error = %e, "plugin path not found; skipping");
+        None
+      },
+    })
+    .collect();
+  let (compiled, failures) = ferridriver_script::compile_and_extract_plugins(&files).await;
+  for (path, err) in failures {
+    tracing::warn!(path = %path.display(), error = %err.message, "plugin compile failed; skipping");
+  }
+  compiled
+    .into_iter()
+    .map(|cp| ferridriver_script::PluginBinding { bytecode: cp.bytecode })
+    .collect()
+}
+
 /// Lower the declared `[[sidecars]]` config entries into the scripting
 /// engine's `SidecarSpec`s. Shared by the `run`, `mcp`, and `bdd` paths so
 /// the same config table drives every host.
@@ -312,6 +353,12 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
   let caps = ferridriver_script::ScriptCaps::resolve(&file_config.scripting.allow_env);
   let sidecars = sidecar_specs(&file_config);
 
+  // Plugins: config `extensions` plus any `--plugin` paths. Their
+  // `defineTool` tools become `plugins['<name>'](args)` in the script.
+  let mut plugin_roots = file_config.extensions.clone();
+  plugin_roots.extend(args.plugins.iter().cloned());
+  let plugins = load_run_plugins(&plugin_roots).await;
+
   let ctx = ferridriver_script::RunContext {
     vars: Arc::new(ferridriver_script::InMemoryVars::new()),
     sandbox,
@@ -320,7 +367,7 @@ async fn run_script_cli(args: cli::RunArgs) -> anyhow::Result<()> {
     browser_context: None,
     request: None,
     browser: None,
-    plugins: Vec::new(),
+    plugins,
     trusted_modules: false,
     host: ferridriver_script::ExtensionHost::Script,
     caps,

@@ -185,6 +185,12 @@ pub struct RunArgs {
   #[arg(long)]
   pub timeout_ms: Option<u64>,
 
+  /// Extension file(s) or directory(ies) to load as plugins, exposing
+  /// their `defineTool` tools to the script as `plugins['<name>'](args)`.
+  /// Repeatable; merged with the `extensions` list from `ferridriver.toml`.
+  #[arg(long = "plugin")]
+  pub plugins: Vec<String>,
+
   /// Positional args exposed to the script as the `args` global
   /// (strings). Pass after `--`.
   #[arg(last = true)]
