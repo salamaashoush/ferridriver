@@ -243,6 +243,49 @@ impl SidecarJs {
     }
   }
 
+  /// `sendMany(calls)` → `Promise<result[]>`. `calls` is an array of
+  /// `{ method, params? }`. All requests are issued as ONE batch (one write
+  /// syscall, one pending registration) and awaited together, then the
+  /// results are returned positionally. Rejects on the first `{error}`
+  /// reply / timeout (Promise.all semantics) — the direct, lower-overhead
+  /// replacement for `Promise.all(items.map(x => sc.send(x.method, x.params)))`,
+  /// collapsing N JS promises + the Promise.all aggregation into one.
+  #[qjs(rename = "sendMany")]
+  pub async fn send_many<'js>(&self, ctx: Ctx<'js>, calls: Value<'js>) -> rquickjs::Result<Value<'js>> {
+    let arr = calls
+      .as_array()
+      .ok_or_else(|| throw(&ctx, "sendMany: expected an array of { method, params? }"))?;
+    let mut reqs: Vec<(String, Option<serde_json::Value>)> = Vec::with_capacity(arr.len());
+    for i in 0..arr.len() {
+      let item: Value<'js> = arr.get(i)?;
+      let obj = item
+        .into_object()
+        .ok_or_else(|| throw(&ctx, "sendMany: each item must be an object { method, params? }"))?;
+      let method: String = obj
+        .get::<_, Option<String>>("method")?
+        .ok_or_else(|| throw(&ctx, "sendMany: each item needs a string 'method'"))?;
+      let params_val: Value<'js> = obj.get("params")?;
+      let params = if params_val.is_null() || params_val.is_undefined() {
+        None
+      } else {
+        Some(crate::bindings::convert::serde_from_js::<serde_json::Value>(
+          &ctx, params_val,
+        )?)
+      };
+      reqs.push((method, params));
+    }
+
+    let results = self.inner.send_many(reqs, self.default_timeout_ms).await;
+    let out = rquickjs::Array::new(ctx.clone())?;
+    for (i, r) in results.into_iter().enumerate() {
+      match r {
+        Ok(v) => out.set(i, crate::bindings::convert::json_to_js(&ctx, &v)?)?,
+        Err(e) => return Err(throw(&ctx, &e.to_string())),
+      }
+    }
+    Ok(out.into_value())
+  }
+
   /// `on(event, cb)` → unsubscribe function. Registers `cb` for `event`'s
   /// pushed frames and starts the pump on first use. Calling the returned
   /// function removes exactly this listener.

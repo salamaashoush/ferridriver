@@ -73,6 +73,59 @@ async fn concurrent_requests_match_by_id() {
   s.close().await.expect("close");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_many_returns_positional_results() {
+  let s = Sidecar::connect(&spec()).await.expect("connect");
+  let calls: Vec<(String, Option<serde_json::Value>)> = (0..50)
+    .map(|i| ("echo".to_string(), Some(serde_json::json!(i))))
+    .collect();
+  let results = s.send_many(calls, 5000).await;
+  assert_eq!(results.len(), 50);
+  for (i, r) in results.into_iter().enumerate() {
+    assert_eq!(r.expect("ok"), serde_json::json!(i), "slot {i} mismatched");
+  }
+  s.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_many_reports_per_call_errors_without_failing_the_batch() {
+  let s = Sidecar::connect(&spec()).await.expect("connect");
+  let calls = vec![
+    ("ping".to_string(), None),
+    ("__nope__".to_string(), None),
+    ("echo".to_string(), Some(serde_json::json!("z"))),
+  ];
+  let results = s.send_many(calls, 5000).await;
+  assert_eq!(results.len(), 3);
+  assert_eq!(
+    results[0]
+      .as_ref()
+      .expect("ping")
+      .get("ok")
+      .and_then(serde_json::Value::as_bool),
+    Some(true)
+  );
+  assert!(results[1].as_ref().unwrap_err().to_string().contains("unknown method"));
+  assert_eq!(results[2].as_ref().expect("echo"), &serde_json::json!("z"));
+  s.close().await.expect("close");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_many_empty_is_noop() {
+  let s = Sidecar::connect(&spec()).await.expect("connect");
+  assert!(s.send_many(Vec::new(), 5000).await.is_empty());
+  // Transport still usable afterward.
+  assert_eq!(
+    s.send("ping", None, 5000)
+      .await
+      .expect("ping")
+      .get("ok")
+      .and_then(serde_json::Value::as_bool),
+    Some(true)
+  );
+  s.close().await.expect("close");
+}
+
 #[tokio::test]
 async fn pushed_event_arrives_on_subscriber() {
   let s = Sidecar::connect(&spec()).await.expect("connect");
@@ -225,6 +278,47 @@ async fn unknown_sidecar_name_rejects() {
     Outcome::Ok { success } => {
       let msg = success.value.as_str().unwrap_or("");
       assert!(msg.contains("unknown sidecar"), "got: {msg}");
+    },
+    Outcome::Error { error } => panic!("expected a caught rejection, got engine error: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_many_from_js_returns_results_array() {
+  let (eng, _tmp, ctx) = engine();
+  let src = r"
+    const sc = await sidecars.connect('echo');
+    const out = await sc.sendMany([
+      { method: 'echo', params: { a: 1 } },
+      { method: 'ping' },
+      { method: 'echo', params: 'three' },
+    ]);
+    await sc.close();
+    return out;
+  ";
+  let result = eng.run(src, &[], RunOptions::default(), ctx).await;
+  match result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!([{ "a": 1 }, { "ok": true }, "three"])),
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
+  }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn send_many_from_js_rejects_on_a_remote_error() {
+  let (eng, _tmp, ctx) = engine();
+  let src = r"
+    const sc = await sidecars.connect('echo');
+    let msg = 'no-throw';
+    try { await sc.sendMany([{ method: 'ping' }, { method: '__nope__' }]); }
+    catch (e) { msg = String(e.message || e); }
+    await sc.close();
+    return msg;
+  ";
+  let result = eng.run(src, &[], RunOptions::default(), ctx).await;
+  match result.outcome {
+    Outcome::Ok { success } => {
+      let msg = success.value.as_str().unwrap_or("");
+      assert!(msg.contains("unknown method"), "got: {msg}");
     },
     Outcome::Error { error } => panic!("expected a caught rejection, got engine error: {error:?}"),
   }
