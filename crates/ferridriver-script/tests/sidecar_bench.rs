@@ -24,8 +24,8 @@
 //!   cargo test -p ferridriver-script --test sidecar_bench --release -- --ignored --nocapture
 //! ```
 //!
-//! Every benched call is `ping` (the cheapest method), so the figures are
-//! framework + IPC overhead, not the child's business logic.
+//! `ping` (empty round trip) isolates framework + IPC overhead; a payloaded
+//! `echo` variant exposes the serde/JSON conversion cost on real data.
 
 use std::sync::Arc;
 use std::time::Instant;
@@ -145,6 +145,29 @@ async fn bench_round_trip_via_quickjs() {
     conc.as_micros() as f64 / CONCURRENT as f64,
   );
 
+  // Payloaded echo: round-trips a ~40-field object both ways. The per-call
+  // cost jumps ~8x over `ping` (the conversions + the child's own
+  // parse/reserialize), but it is bound by the child + wire, not the binding:
+  // swapping serde_from_js/json_to_js for native JSON.stringify/parse was
+  // measured to NOT move it (the raw-transport payload line below shows the
+  // same floor). Left as a guard against regressions on real payloads.
+  let payload_seq = timed(
+    &session,
+    &rc,
+    &format!(
+      "const sc = globalThis.sc; \
+       const obj = {{}}; for (let k = 0; k < 40; k++) obj['field_' + k] = {{ n: k, s: 'value-' + k, ok: k % 2 === 0 }}; \
+       for (let i = 0; i < {SEQUENTIAL}; i++) {{ const r = await sc.send('echo', obj); if (r.field_0.n !== 0) throw new Error('bad'); }} \
+       return {SEQUENTIAL};"
+    ),
+  )
+  .await;
+  eprintln!(
+    "sequential payload ({SEQUENTIAL}, ~40-field obj) : {:.1} req/s | mean {:.1} us/req",
+    SEQUENTIAL as f64 / payload_seq.as_secs_f64(),
+    payload_seq.as_micros() as f64 / SEQUENTIAL as f64,
+  );
+
   timed(&session, &rc, "await globalThis.sc.close(); return 'closed';").await;
   eprintln!();
 }
@@ -174,6 +197,28 @@ async fn bench_round_trip_transport_only() {
     "sequential ({SEQUENTIAL}) : {:.1} req/s | mean {:.1} us/req",
     SEQUENTIAL as f64 / seq.as_secs_f64(),
     seq.as_micros() as f64 / SEQUENTIAL as f64,
+  );
+
+  // Same ~40-field payload as the QuickJS bench, but through the raw
+  // transport: isolates wire + transport-serde + child cost from the
+  // serde_from_js/json_to_js the JS binding adds.
+  let mut obj = serde_json::Map::new();
+  for k in 0..40 {
+    obj.insert(
+      format!("field_{k}"),
+      serde_json::json!({ "n": k, "s": format!("value-{k}"), "ok": k % 2 == 0 }),
+    );
+  }
+  let payload = serde_json::Value::Object(obj);
+  let pay_start = Instant::now();
+  for _ in 0..SEQUENTIAL {
+    s.send("echo", Some(payload.clone()), 10_000).await.expect("payload");
+  }
+  let pay = pay_start.elapsed();
+  eprintln!(
+    "sequential payload ({SEQUENTIAL}, ~40-field obj) : {:.1} req/s | mean {:.1} us/req",
+    SEQUENTIAL as f64 / pay.as_secs_f64(),
+    pay.as_micros() as f64 / SEQUENTIAL as f64,
   );
 
   let s = Arc::new(s);
