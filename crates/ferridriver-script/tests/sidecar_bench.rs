@@ -30,7 +30,7 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use ferridriver_script::sidecar::SidecarSpec;
+use ferridriver_script::sidecar::{Sidecar, SidecarSpec};
 use ferridriver_script::{InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngineConfig, Session};
 
 const FIXTURE: &str = env!("CARGO_BIN_EXE_sidecar_echo");
@@ -146,5 +146,83 @@ async fn bench_round_trip_via_quickjs() {
   );
 
   timed(&session, &rc, "await globalThis.sc.close(); return 'closed';").await;
+  eprintln!();
+}
+
+/// Raw transport, NO `QuickJS` — the same `ping` loop driven straight through
+/// `Sidecar::send`. Subtract from `bench_round_trip_via_quickjs` to attribute
+/// the per-call cost between the IPC round trip and the JS/serde/async stack.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "timing harness; run with --ignored --nocapture"]
+async fn bench_round_trip_transport_only() {
+  let spec = bench_spec();
+  eprintln!("\n=== sidecar bench (raw transport): {:?} ===", spec.command);
+  let s = Sidecar::connect(&spec).await.expect("connect");
+  let first = s.send("ping", None, 10_000).await.expect("first ping");
+  assert_eq!(first.get("ok").and_then(serde_json::Value::as_bool), Some(true));
+
+  for _ in 0..WARMUP {
+    s.send("ping", None, 10_000).await.expect("warmup");
+  }
+
+  let seq_start = Instant::now();
+  for _ in 0..SEQUENTIAL {
+    s.send("ping", None, 10_000).await.expect("seq ping");
+  }
+  let seq = seq_start.elapsed();
+  eprintln!(
+    "sequential ({SEQUENTIAL}) : {:.1} req/s | mean {:.1} us/req",
+    SEQUENTIAL as f64 / seq.as_secs_f64(),
+    seq.as_micros() as f64 / SEQUENTIAL as f64,
+  );
+
+  let s = Arc::new(s);
+
+  // (a) 64 tasks across the worker pool — true multi-thread parallelism.
+  let conc_start = Instant::now();
+  let per = CONCURRENT / 64;
+  let mut handles = Vec::new();
+  for _ in 0..64 {
+    let s = s.clone();
+    handles.push(tokio::spawn(async move {
+      for _ in 0..per {
+        s.send("ping", None, 10_000).await.expect("conc ping");
+      }
+    }));
+  }
+  for h in handles {
+    h.await.expect("join");
+  }
+  let conc = conc_start.elapsed();
+  let n = per * 64;
+  eprintln!(
+    "concurrent ({n}, 64 tasks/threads) : {:.1} req/s | {:.1} us/req wall",
+    n as f64 / conc.as_secs_f64(),
+    conc.as_micros() as f64 / n as f64,
+  );
+
+  // (b) ONE issuing task — all futures multiplexed on a single thread via
+  // join_all. This mirrors the QuickJS `Promise.all` topology (one thread
+  // drives every in-flight send) but with NO JS/serde overhead, isolating
+  // the single-issuer cost from the JS-stack cost.
+  let single = Arc::clone(&s);
+  let one_start = Instant::now();
+  tokio::spawn(async move {
+    let futs = (0..CONCURRENT).map(|_| single.send("ping", None, 10_000));
+    let results = futures::future::join_all(futs).await;
+    for r in results {
+      r.expect("single-issuer ping");
+    }
+  })
+  .await
+  .expect("join");
+  let one = one_start.elapsed();
+  eprintln!(
+    "concurrent ({CONCURRENT}, 1 task/thread, join_all) : {:.1} req/s | {:.1} us/req wall",
+    CONCURRENT as f64 / one.as_secs_f64(),
+    one.as_micros() as f64 / CONCURRENT as f64,
+  );
+
+  s.close().await.expect("close");
   eprintln!();
 }
