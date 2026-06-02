@@ -145,6 +145,24 @@ async fn bench_round_trip_via_quickjs() {
     conc.as_micros() as f64 / CONCURRENT as f64,
   );
 
+  // Batched: ONE `sendMany` call carrying all N requests -> one promise, one
+  // write syscall, Rust-side join_all. Collapses the per-call JS promise +
+  // Promise.all aggregation that sets the concurrent ceiling; lands close to
+  // the raw-transport floor (see `sidecar_attrib::bench_batching`).
+  let batch = timed(
+    &session,
+    &rc,
+    &format!(
+      "const sc = globalThis.sc; const calls = []; for (let i = 0; i < {CONCURRENT}; i++) calls.push({{ method: 'ping' }}); await sc.sendMany(calls); return {CONCURRENT};"
+    ),
+  )
+  .await;
+  eprintln!(
+    "batched ({CONCURRENT}, sendMany) : {:.1} req/s | {:.1} us/req wall",
+    CONCURRENT as f64 / batch.as_secs_f64(),
+    batch.as_micros() as f64 / CONCURRENT as f64,
+  );
+
   // Payloaded echo: round-trips a ~40-field object both ways. The per-call
   // cost jumps ~8x over `ping` (the conversions + the child's own
   // parse/reserialize), but it is bound by the child + wire, not the binding:

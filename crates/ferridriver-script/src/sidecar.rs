@@ -157,6 +157,91 @@ impl Sidecar {
     }
   }
 
+  /// Send N requests as one batch: all frames are written in a single
+  /// `write_all` (one syscall instead of N), all ids registered under one
+  /// `pending` lock, then every response is awaited together. Responses are
+  /// still id-correlated by [`read_loop`], so the child may answer in any
+  /// order. Results are returned positionally (`results[i]` is the reply to
+  /// `calls[i]`); a per-call `{error}` reply becomes `Err` in that slot
+  /// without failing the batch. `timeout_ms` (0 = wait indefinitely) bounds
+  /// the whole batch; on expiry every still-unanswered slot is `Timeout`.
+  ///
+  /// This is the throughput path for issuing many calls from the single JS
+  /// interpreter thread: it collapses the per-call promise/future/Promise.all
+  /// machinery (and the per-call write syscall) that otherwise dominates the
+  /// concurrent ceiling into one call.
+  pub async fn send_many(
+    &self,
+    calls: Vec<(String, Option<Value>)>,
+    timeout_ms: u64,
+  ) -> Vec<Result<Value, SidecarError>> {
+    if calls.is_empty() {
+      return Vec::new();
+    }
+    let n = calls.len();
+    // One slot per input, in order: a registered receiver, or an immediate
+    // error (encode failure). Keeps `results[i]` aligned to `calls[i]`.
+    let mut slots: Vec<Result<oneshot::Receiver<Result<Value, SidecarError>>, SidecarError>> = Vec::with_capacity(n);
+    let mut ids = Vec::with_capacity(n);
+    let mut buf: Vec<u8> = Vec::with_capacity(n * 64);
+    {
+      let mut pending = self.pending.lock().await;
+      for (method, params) in calls {
+        let id = self.next_id.fetch_add(1, Ordering::Relaxed);
+        let frame = json!({ "id": id, "method": method, "params": params.unwrap_or_else(|| json!({})) });
+        let checkpoint = buf.len();
+        match serde_json::to_writer(&mut buf, &frame) {
+          Ok(()) => {
+            buf.push(0);
+            let (tx, rx) = oneshot::channel();
+            pending.insert(id, tx);
+            ids.push(id);
+            slots.push(Ok(rx));
+          },
+          Err(e) => {
+            buf.truncate(checkpoint);
+            slots.push(Err(SidecarError::Protocol(e.to_string())));
+          },
+        }
+      }
+    }
+
+    {
+      let mut w = self.writer.lock().await;
+      if let Err(e) = w.write_all(&buf).await {
+        let mut pending = self.pending.lock().await;
+        for id in &ids {
+          pending.remove(id);
+        }
+        return (0..n)
+          .map(|_| Err(SidecarError::Protocol(format!("write: {e}"))))
+          .collect();
+      }
+      let _ = w.flush().await;
+    }
+
+    let gather = futures::future::join_all(slots.into_iter().map(|slot| async move {
+      match slot {
+        Ok(rx) => match rx.await {
+          Ok(result) => result,
+          Err(_) => Err(SidecarError::Closed),
+        },
+        Err(e) => Err(e),
+      }
+    }));
+    if timeout_ms == 0 {
+      gather.await
+    } else if let Ok(results) = tokio::time::timeout(std::time::Duration::from_millis(timeout_ms), gather).await {
+      results
+    } else {
+      let mut pending = self.pending.lock().await;
+      for id in &ids {
+        pending.remove(id);
+      }
+      (0..n).map(|_| Err(SidecarError::Timeout(timeout_ms))).collect()
+    }
+  }
+
   /// Close the request socket and reap the child. Idempotent.
   pub async fn close(&self) -> Result<(), SidecarError> {
     // Dropping the writer's stream closes fd 3 for the child -> it sees EOF
