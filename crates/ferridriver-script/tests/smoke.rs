@@ -6,7 +6,8 @@
 use std::sync::Arc;
 
 use ferridriver_script::{
-  InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig, ScriptErrorKind,
+  CommandSpec, InMemoryVars, Outcome, PathSandbox, RunContext, RunOptions, ScriptEngine, ScriptEngineConfig,
+  ScriptErrorKind,
 };
 
 fn make_engine() -> (ScriptEngine, tempfile::TempDir, RunContext) {
@@ -99,6 +100,72 @@ async fn console_log_is_captured() {
   assert_eq!(result.console[0].message, "hello");
   assert!(result.console[1].message.contains("be careful"));
   assert!(result.console[1].message.contains("42"));
+}
+
+#[tokio::test]
+async fn ferridriver_runtime_object_and_virtual_modules_are_available() {
+  let (engine, _tmp, ctx) = make_engine();
+  let result = engine
+    .run(
+      r#"
+        const fd = await import("ferridriver");
+        const cukes = await import("@cucumber/cucumber");
+        return {
+          host: ferridriver.host,
+          same: fd.ferridriver === ferridriver,
+          tool: typeof fd.tool,
+          tools: fd.tools === ferridriver.tools,
+          noPublicPlugins: typeof fd.plugins,
+          noGlobalPlugins: typeof globalThis.plugins,
+          bdd: typeof ferridriver.bdd.Given,
+          cucumber: cukes.Given === ferridriver.bdd.Given,
+        };
+      "#,
+      &[],
+      RunOptions::default(),
+      ctx,
+    )
+    .await;
+  match result.outcome {
+    Outcome::Ok { success } => assert_eq!(
+      success.value,
+      serde_json::json!({
+        "host": "script",
+        "same": true,
+        "tool": "function",
+        "tools": true,
+        "noPublicPlugins": "undefined",
+        "noGlobalPlugins": "undefined",
+        "bdd": "function",
+        "cucumber": true,
+      })
+    ),
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
+  }
+}
+
+#[tokio::test]
+async fn configured_global_commands_are_available_to_plain_scripts() {
+  let (engine, _tmp, mut ctx) = make_engine();
+  let spec: CommandSpec = serde_json::from_value(serde_json::json!({
+    "run": ["echo", "${value}"],
+    "output": "text"
+  }))
+  .expect("command spec");
+  ctx.caps.commands.insert("echoValue".to_string(), spec);
+
+  let result = engine
+    .run(
+      r#"return await ferridriver.commands.run("echoValue", { value: "hello" })"#,
+      &[],
+      RunOptions::default(),
+      ctx,
+    )
+    .await;
+  match result.outcome {
+    Outcome::Ok { success } => assert_eq!(success.value, serde_json::json!("hello")),
+    Outcome::Error { error } => panic!("expected ok, got error: {error:?}"),
+  }
 }
 
 #[tokio::test]

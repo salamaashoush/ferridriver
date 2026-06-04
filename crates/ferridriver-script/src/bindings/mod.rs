@@ -46,6 +46,7 @@ pub mod network;
 pub mod page;
 pub mod plugins;
 pub mod process;
+pub mod runtime;
 pub mod sidecars;
 pub mod streams;
 pub mod video;
@@ -147,7 +148,8 @@ pub fn define_classes<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
 /// Scripts that do not need browser interaction can run with
 /// `RunContext.page = None` and simply have no `page` binding.
 pub fn install_page(ctx: &Ctx<'_>, page: Arc<ferridriver::Page>, async_ctx: AsyncContext) -> rquickjs::Result<()> {
-  install_page_on(ctx, &ctx.globals(), page, async_ctx)
+  install_page_on(ctx, &ctx.globals(), page, async_ctx)?;
+  crate::bindings::runtime::mirror_global(ctx, "page")
 }
 
 /// Install the `page` binding onto an arbitrary target object.
@@ -174,7 +176,8 @@ pub fn install_page_on<'js>(
 
 /// Install the `context` global (cookies, storage, permissions, route, etc.).
 pub fn install_browser_context(ctx: &Ctx<'_>, bcx: Arc<ferridriver::context::ContextRef>) -> rquickjs::Result<()> {
-  install_browser_context_on(ctx, &ctx.globals(), bcx)
+  install_browser_context_on(ctx, &ctx.globals(), bcx)?;
+  crate::bindings::runtime::mirror_global(ctx, "context")
 }
 
 /// `context` binding onto an arbitrary target (see [`install_page_on`]).
@@ -193,7 +196,8 @@ pub fn install_browser_context_on<'js>(
 /// [`ferridriver::options::BrowserContextOptions`] bag. Rule-9 tests
 /// for §4.1 consume this entry point.
 pub fn install_browser(ctx: &Ctx<'_>, browser: Arc<ferridriver::Browser>) -> rquickjs::Result<()> {
-  install_browser_on(ctx, &ctx.globals(), browser)
+  install_browser_on(ctx, &ctx.globals(), browser)?;
+  crate::bindings::runtime::mirror_global(ctx, "browser")
 }
 
 /// `browser` binding onto an arbitrary target (see [`install_page_on`]).
@@ -209,7 +213,8 @@ pub fn install_browser_on<'js>(
 
 /// Install the `request` global (runner-side HTTP via HttpClient).
 pub fn install_request(ctx: &Ctx<'_>, req: Arc<ferridriver::http_client::HttpClient>) -> rquickjs::Result<()> {
-  install_request_on(ctx, &ctx.globals(), req)
+  install_request_on(ctx, &ctx.globals(), req)?;
+  crate::bindings::runtime::mirror_global(ctx, "request")
 }
 
 /// `request` binding onto an arbitrary target (see [`install_page_on`]).
@@ -228,5 +233,6 @@ pub fn install_request_on<'js>(
 pub fn install_artifacts(ctx: &Ctx<'_>, sandbox: Arc<crate::fs::PathSandbox>) -> rquickjs::Result<()> {
   let js_art = Class::instance(ctx.clone(), ArtifactsJs::new(sandbox))?;
   ctx.globals().set("artifacts", js_art)?;
+  crate::bindings::runtime::mirror_global(ctx, "artifacts")?;
   Ok(())
 }

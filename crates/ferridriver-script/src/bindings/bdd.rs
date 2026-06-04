@@ -22,7 +22,7 @@ use std::cell::RefCell;
 use std::sync::Arc;
 
 use rquickjs::class::{Class, Trace};
-use rquickjs::function::{Args, Constructor, Func, Opt, Rest};
+use rquickjs::function::{Args, Constructor, Opt, Rest};
 use rquickjs::{
   ArrayBuffer, AsyncContext, CatchResultExt, Ctx, Function, JsLifetime, Object, Persistent, TypedArray, Value,
   async_with,
@@ -93,7 +93,7 @@ struct ToolReg {
   name: String,
   description: Option<String>,
   input_schema: Option<serde_json::Value>,
-  expose_as_tool: bool,
+  expose_as_mcp_tool: bool,
   allowed_commands: std::collections::BTreeMap<String, crate::command_spec::CommandSpec>,
   allowed_net: Vec<String>,
   /// Per-tool handler timeout (ms) from the manifest `timeoutMs`. `None`
@@ -425,15 +425,15 @@ pub async fn drain_attachments(actx: &AsyncContext) -> Result<Vec<ScriptAttachme
 }
 
 /// Register one MCP tool from a manifest object + handler function.
-/// The single tool-registration path, behind the native `defineTool`
-/// contribution point.
+/// The single tool-registration path, behind the native `tool` /
+/// `defineTool` contribution point.
 fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -> Result<(), ScriptError> {
   let name: String = m
     .get("name")
     .map_err(|e| ScriptError::internal(format!("tool manifest missing string `name`: {e}")))?;
   if name.trim().is_empty() {
     return Err(ScriptError::internal(
-      "defineTool: `name` must be a non-empty string".to_string(),
+      "tool: `name` must be a non-empty string".to_string(),
     ));
   }
   let description = m
@@ -446,7 +446,10 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
     },
     _ => None,
   };
-  let expose_as_tool = m.get::<_, bool>("exposeAsTool").unwrap_or(false);
+  let expose_as_mcp_tool = m
+    .get::<_, bool>("exposeAsMcpTool")
+    .or_else(|_| m.get::<_, bool>("exposeAsTool"))
+    .unwrap_or(false);
   let timeout_ms = m
     .get::<_, f64>("timeoutMs")
     .ok()
@@ -456,9 +459,9 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
   let (allowed_commands, allowed_net) = match m.get::<_, Value<'_>>("allow") {
     Ok(v) => {
       if let Some(allow) = v.as_object() {
-        // `exec` is the canonical capability name; `commands` is the
-        // back-compat spelling. Either populates the exec allow-list.
-        let commands = ["exec", "commands"]
+        // `commands` is the canonical capability name; `exec` is a
+        // compatibility alias. Either populates the command allow-list.
+        let commands = ["commands", "exec"]
           .into_iter()
           .find_map(|k| match allow.get::<_, Value<'_>>(k) {
             Ok(c) if c.is_object() => serde_from_js(ctx, c).ok(),
@@ -481,14 +484,14 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
   with_registry(ctx, |reg| {
     if reg.tools.iter().any(|t| t.name == name) {
       return Err(ScriptError::internal(format!(
-        "defineTool: duplicate tool name `{name}` — names must be unique across all loaded extensions"
+        "tool: duplicate tool name `{name}` — names must be unique across all loaded extensions"
       )));
     }
     reg.tools.push(ToolReg {
       name,
       description,
       input_schema,
-      expose_as_tool,
+      expose_as_mcp_tool,
       allowed_commands,
       allowed_net,
       timeout_ms,
@@ -498,17 +501,17 @@ fn register_tool<'js>(ctx: &Ctx<'js>, m: &Object<'js>, handler: Function<'js>) -
   })?
 }
 
-/// `defineTool(...)` argument adapter. Two equivalent native forms:
-/// `defineTool(tool)` where `tool` carries an inline `handler`, or
-/// `defineTool(manifest, handlerFn)`. Uses the same `Rest`-derived
+/// `tool(...)` / `defineTool(...)` argument adapter. Two equivalent
+/// native forms: `tool(tool)` where `tool` carries an inline `handler`,
+/// or `tool(manifest, handlerFn)`. Uses the same `Rest`-derived
 /// single-`'js` pattern `register_step`/`register_hook` use so the
 /// `Persistent::save` lifetimes unify. There is no `globalThis.exports`
-/// path — `defineTool` is the only tool-registration surface.
+/// path.
 fn register_tool_args(args: &[Value<'_>]) -> rquickjs::Result<()> {
   let ctx = ctx_of(args)?;
   let manifest = args.first().and_then(Value::as_object).ok_or_else(|| {
     rq(&ScriptError::internal(
-      "defineTool: first arg must be a tool/manifest object".to_string(),
+      "tool: first arg must be a tool/manifest object".to_string(),
     ))
   })?;
   // Handler: an explicit 2nd-arg function wins; otherwise the tool
@@ -525,8 +528,7 @@ fn register_tool_args(args: &[Value<'_>]) -> rquickjs::Result<()> {
     })
     .ok_or_else(|| {
       rq(&ScriptError::internal(
-        "defineTool: no handler — pass defineTool(tool) with a `handler` method or defineTool(manifest, fn)"
-          .to_string(),
+        "tool: no handler — pass tool(manifest) with a `handler` method or tool(manifest, fn)".to_string(),
       ))
     })?;
   register_tool(&ctx, manifest, handler).map_err(|e| rq(&e))
@@ -545,6 +547,7 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   })));
 
   let g = ctx.globals();
+  let bdd = Object::new(ctx.clone())?;
   Class::<DataTableJs>::define(&g)?;
 
   for (name, kind) in [
@@ -555,75 +558,71 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
     ("And", StepKind::Step),
     ("But", StepKind::Step),
   ] {
-    g.set(
-      name,
-      Func::from(move |args: Rest<Value<'_>>| register_step(kind, &args.0)),
-    )?;
+    let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| register_step(kind, &args.0))?;
+    g.set(name, f.clone())?;
+    bdd.set(name, f)?;
   }
 
   for hook in ["Before", "After", "BeforeAll", "AfterAll", "BeforeStep", "AfterStep"] {
-    g.set(
-      hook,
-      Func::from(move |args: Rest<Value<'_>>| register_hook(hook, &args.0)),
-    )?;
+    let f = Function::new(ctx.clone(), move |args: Rest<Value<'_>>| register_hook(hook, &args.0))?;
+    g.set(hook, f.clone())?;
+    bdd.set(hook, f)?;
   }
 
-  g.set(
-    "defineParameterType",
-    Func::from(|def: Object<'_>| -> rquickjs::Result<()> {
-      let ctx = def.ctx().clone();
-      let name: String = def.get("name").map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
-      let rx_val: Value<'_> = def
-        .get("regexp")
-        .map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
-      let regexp = if let Some(s) = rx_val.as_string() {
-        s.to_string().map_err(|e| rq(&ScriptError::internal(e.to_string())))?
-      } else if let Some(o) = rx_val.as_object() {
-        o.get::<_, String>("source")
-          .map_err(|e| rq(&ScriptError::internal(e.to_string())))?
-      } else {
-        return Err(rq(&ScriptError::internal(
-          "parameter type regexp must be string or RegExp".to_string(),
-        )));
-      };
-      let transformer = def
-        .get::<_, Value<'_>>("transformer")
-        .ok()
-        .and_then(|v| v.as_function().cloned())
-        .map(|f| Persistent::save(&ctx, f));
-      with_registry(&ctx, |reg| {
-        reg.param_types.push(ParamTypeReg {
-          name,
-          regexp,
-          transformer,
-        });
-      })
-      .map_err(|e| rq(&e))
-    }),
-  )?;
+  let define_parameter_type = Function::new(ctx.clone(), |def: Object<'_>| -> rquickjs::Result<()> {
+    let ctx = def.ctx().clone();
+    let name: String = def.get("name").map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
+    let rx_val: Value<'_> = def
+      .get("regexp")
+      .map_err(|e| rq(&ScriptError::internal(e.to_string())))?;
+    let regexp = if let Some(s) = rx_val.as_string() {
+      s.to_string().map_err(|e| rq(&ScriptError::internal(e.to_string())))?
+    } else if let Some(o) = rx_val.as_object() {
+      o.get::<_, String>("source")
+        .map_err(|e| rq(&ScriptError::internal(e.to_string())))?
+    } else {
+      return Err(rq(&ScriptError::internal(
+        "parameter type regexp must be string or RegExp".to_string(),
+      )));
+    };
+    let transformer = def
+      .get::<_, Value<'_>>("transformer")
+      .ok()
+      .and_then(|v| v.as_function().cloned())
+      .map(|f| Persistent::save(&ctx, f));
+    with_registry(&ctx, |reg| {
+      reg.param_types.push(ParamTypeReg {
+        name,
+        regexp,
+        transformer,
+      });
+    })
+    .map_err(|e| rq(&e))
+  })?;
+  g.set("defineParameterType", define_parameter_type.clone())?;
+  bdd.set("defineParameterType", define_parameter_type)?;
 
-  g.set(
-    "setDefaultTimeout",
-    Func::from(|ctx: Ctx<'_>, ms: f64| -> rquickjs::Result<()> {
-      with_registry(&ctx, |reg| reg.default_timeout_ms = ms.max(0.0) as u64).map_err(|e| rq(&e))
-    }),
-  )?;
-  g.set(
-    "setDefinitionFunctionWrapper",
-    Func::from(|w: Function<'_>| -> rquickjs::Result<()> {
-      let ctx = w.ctx().clone();
-      let saved = Persistent::save(&ctx, w);
-      with_registry(&ctx, |reg| reg.def_fn_wrapper = Some(saved)).map_err(|e| rq(&e))
-    }),
-  )?;
-  g.set(
-    "setWorldConstructor",
-    Func::from(|c: Constructor<'_>| -> rquickjs::Result<()> {
-      let ctx = c.ctx().clone();
-      let saved = Persistent::save(&ctx, c);
-      with_registry(&ctx, |reg| reg.world_ctor = Some(saved)).map_err(|e| rq(&e))
-    }),
-  )?;
+  let set_default_timeout = Function::new(ctx.clone(), |ctx: Ctx<'_>, ms: f64| -> rquickjs::Result<()> {
+    with_registry(&ctx, |reg| reg.default_timeout_ms = ms.max(0.0) as u64).map_err(|e| rq(&e))
+  })?;
+  g.set("setDefaultTimeout", set_default_timeout.clone())?;
+  bdd.set("setDefaultTimeout", set_default_timeout)?;
+
+  let set_definition_function_wrapper = Function::new(ctx.clone(), |w: Function<'_>| -> rquickjs::Result<()> {
+    let ctx = w.ctx().clone();
+    let saved = Persistent::save(&ctx, w);
+    with_registry(&ctx, |reg| reg.def_fn_wrapper = Some(saved)).map_err(|e| rq(&e))
+  })?;
+  g.set("setDefinitionFunctionWrapper", set_definition_function_wrapper.clone())?;
+  bdd.set("setDefinitionFunctionWrapper", set_definition_function_wrapper)?;
+
+  let set_world_constructor = Function::new(ctx.clone(), |c: Constructor<'_>| -> rquickjs::Result<()> {
+    let ctx = c.ctx().clone();
+    let saved = Persistent::save(&ctx, c);
+    with_registry(&ctx, |reg| reg.world_ctor = Some(saved)).map_err(|e| rq(&e))
+  })?;
+  g.set("setWorldConstructor", set_world_constructor.clone())?;
+  bdd.set("setWorldConstructor", set_world_constructor)?;
   // `setParallelCanAssign` is accepted (so cucumber-js suites that call
   // it don't break) but intentionally inert: it governs cucumber-js's
   // own pickle-level parallel scheduler, whereas ferridriver
@@ -631,14 +630,19 @@ pub fn install_bdd(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   // worker) with no equivalent per-pickle assignment hook. A real
   // implementation would be a cross-worker scheduler rework with no
   // proportionate value — documented-inert, not a stub claiming to work.
-  g.set("setParallelCanAssign", Func::from(|_: Opt<Value<'_>>| {}))?;
+  let set_parallel_can_assign = Function::new(ctx.clone(), |_: Opt<Value<'_>>| {})?;
+  g.set("setParallelCanAssign", set_parallel_can_assign.clone())?;
+  bdd.set("setParallelCanAssign", set_parallel_can_assign)?;
 
   // MCP tool contribution point — the only tool-registration surface.
   // `defineTool(tool)` (inline `handler`) or `defineTool(manifest, fn)`.
-  g.set(
-    "defineTool",
-    Func::from(|args: Rest<Value<'_>>| register_tool_args(&args.0)),
-  )?;
+  let tool = Function::new(ctx.clone(), |args: Rest<Value<'_>>| register_tool_args(&args.0))?;
+  g.set("defineTool", tool.clone())?;
+  g.set("tool", tool.clone())?;
+
+  let fd = crate::bindings::runtime::ensure_ferridriver(ctx)?;
+  fd.set("bdd", bdd)?;
+  fd.set("tool", tool)?;
 
   Ok(())
 }
@@ -729,7 +733,7 @@ pub struct CollectedTool {
   #[serde(skip_serializing_if = "Option::is_none")]
   pub input_schema: Option<serde_json::Value>,
   pub allow: CollectedAllow,
-  pub expose_as_tool: bool,
+  pub expose_as_mcp_tool: bool,
   #[serde(skip_serializing_if = "Option::is_none")]
   pub timeout_ms: Option<u64>,
 }
@@ -750,7 +754,7 @@ pub fn tools_snapshot(ctx: &Ctx<'_>) -> Result<Vec<CollectedTool>, ScriptError> 
           commands: t.allowed_commands.clone(),
           net: t.allowed_net.clone(),
         },
-        expose_as_tool: t.expose_as_tool,
+        expose_as_mcp_tool: t.expose_as_mcp_tool,
         timeout_ms: t.timeout_ms,
       })
       .collect()
@@ -763,14 +767,14 @@ pub fn tools_len(ctx: &Ctx<'_>) -> Result<usize, ScriptError> {
   with_registry(ctx, |reg| reg.tools.len())
 }
 
-/// The ordered tool names — drives building the native `plugins.<name>`
+/// The ordered tool names — drives building the native `tools.<name>`
 /// surface.
 pub fn tool_names(ctx: &Ctx<'_>) -> Result<Vec<String>, ScriptError> {
   with_registry(ctx, |reg| reg.tools.iter().map(|t| t.name.clone()).collect())
 }
 
 /// A tool's restored handler + its capability allow-lists, looked up by
-/// registration index. Used by the native `plugins.<name>` dispatch in
+/// registration index. Used by the native `tools.<name>` dispatch in
 /// `plugins.rs` — the analogue of `invoke_step`'s registry lookup.
 pub(crate) struct ToolDispatch<'js> {
   pub handler: Function<'js>,

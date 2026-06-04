@@ -269,6 +269,9 @@ pub fn install_browser_type(ctx: &Ctx<'_>) -> rquickjs::Result<()> {
   ctx
     .globals()
     .set("webkit", rquickjs::Function::new(ctx.clone(), webkit_factory)?)?;
+  crate::bindings::runtime::mirror_global(ctx, "chromium")?;
+  crate::bindings::runtime::mirror_global(ctx, "firefox")?;
+  crate::bindings::runtime::mirror_global(ctx, "webkit")?;
 
   // Suppress the unused-import warning for `Browser`, which is only
   // here to keep doc-link references valid in a future binding.

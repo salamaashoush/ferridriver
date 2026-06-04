@@ -31,6 +31,7 @@
 //! 2. `./ferridriver.{toml,yaml,yml,json}` in the current working directory.
 //! 3. `~/.config/ferridriver/config.{toml,yaml,yml,json}`.
 
+pub mod command_spec;
 pub mod mcp;
 pub mod test;
 
@@ -45,7 +46,7 @@ use serde::{Deserialize, Serialize};
 pub struct FerridriverConfig {
   /// Extension files (plugins): each a single `.js`/`.mjs`/`.ts`/`.mts`
   /// file or a directory scanned shallowly for those. An extension
-  /// registers MCP tools (`defineTool`) and/or BDD steps
+  /// registers MCP tools (`tool`) and/or BDD steps
   /// (`Given`/`When`/`Then`); the MCP server consumes its tools and the
   /// test runner consumes its steps. Top-level (not under `mcp`) because
   /// both hosts load it.
@@ -98,7 +99,24 @@ pub struct ScriptingConfig {
   /// exposed — a script never sees an ambient secret the operator did
   /// not name.
   pub allow_env: Vec<String>,
+  /// Capability grants for first-party scripts and BDD step files.
+  /// Plugins/tools do not inherit these automatically; they must opt in
+  /// through their own `allow.commands` manifest.
+  pub allow: ScriptingAllow,
 }
+
+/// First-party scripting capability grants.
+#[derive(Debug, Default, Clone, Deserialize, Serialize)]
+#[serde(default, rename_all = "camelCase")]
+pub struct ScriptingAllow {
+  /// Named commands exposed through `ferridriver.commands` /
+  /// `commands` to `ferridriver run`, MCP `run_script`, and BDD step
+  /// files. The command schema is intentionally the same as plugin
+  /// `allow.commands`.
+  pub commands: BTreeMap<String, command_spec::CommandSpec>,
+}
+
+pub use command_spec::{CommandOutput, CommandRun, CommandSpec, ResolvedCommand, ResolvedExec};
 
 impl FerridriverConfig {
   /// Load the unified configuration document.

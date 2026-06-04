@@ -400,5 +400,6 @@ pub fn install_sidecars(ctx: &Ctx<'_>, specs: &[SidecarSpec]) -> rquickjs::Resul
     },
   )?;
   g.set("sidecars", inst)?;
+  crate::bindings::runtime::mirror_global(ctx, "sidecars")?;
   Ok(())
 }

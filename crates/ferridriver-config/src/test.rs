@@ -593,7 +593,7 @@ pub struct CliOverrides {
   pub bdd_steps: Vec<String>,
   /// Top-level `extensions` paths (files or dirs). Their `Given/When/Then`
   /// step definitions are bundled alongside `bdd_steps` so one extension
-  /// can serve both the MCP server (`defineTool`) and the test runner.
+  /// can serve both the MCP server (`tool`) and the test runner.
   pub extensions: Vec<String>,
   /// `--world-parameters <JSON>`: overrides `[test].worldParameters`;
   /// parsed and exposed to scenarios as `this.parameters`.

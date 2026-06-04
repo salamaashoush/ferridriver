@@ -8,15 +8,57 @@
 //! parse, no resolver). A hidden source map is kept so a JS error in
 //! the bundled output is reported at the original `.ts`/`.js` location.
 
+use std::borrow::Cow;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use rolldown::{Bundler, BundlerOptions, InputItem, OutputFormat, Platform, SourceMapType};
-use rolldown_common::Output;
+use rolldown_common::{ModuleType, Output};
+use rolldown_plugin::{
+  HookLoadArgs, HookLoadOutput, HookLoadReturn, HookResolveIdArgs, HookResolveIdOutput, HookResolveIdReturn, HookUsage,
+  Plugin, PluginContext, SharedLoadPluginContext,
+};
 use rquickjs::{AsyncContext, AsyncRuntime, CatchResultExt, Module, WriteOptions, WriteOptionsEndianness, async_with};
 
 use crate::engine::caught_to_script_error;
 use crate::error::ScriptError;
+
+const VIRTUAL_FERRIDRIVER_ID: &str = "\0ferridriver-runtime";
+const VIRTUAL_CUCUMBER_ID: &str = "\0ferridriver-cucumber";
+
+#[derive(Debug)]
+struct FerridriverRuntimePlugin;
+
+impl Plugin for FerridriverRuntimePlugin {
+  fn name(&self) -> Cow<'static, str> {
+    "ferridriver-runtime".into()
+  }
+
+  async fn resolve_id(&self, _ctx: &PluginContext, args: &HookResolveIdArgs<'_>) -> HookResolveIdReturn {
+    match args.specifier {
+      "ferridriver" => Ok(Some(HookResolveIdOutput::from_id(VIRTUAL_FERRIDRIVER_ID))),
+      "@cucumber/cucumber" => Ok(Some(HookResolveIdOutput::from_id(VIRTUAL_CUCUMBER_ID))),
+      _ => Ok(None),
+    }
+  }
+
+  async fn load(&self, _ctx: SharedLoadPluginContext, args: &HookLoadArgs<'_>) -> HookLoadReturn {
+    let code = match args.id {
+      VIRTUAL_FERRIDRIVER_ID => Some(crate::runtime_modules::FERRIDRIVER_MODULE),
+      VIRTUAL_CUCUMBER_ID => Some(crate::runtime_modules::CUCUMBER_MODULE),
+      _ => None,
+    };
+    Ok(code.map(|code| HookLoadOutput {
+      code: code.into(),
+      module_type: Some(ModuleType::Js),
+      ..Default::default()
+    }))
+  }
+
+  fn register_hook_usage(&self) -> HookUsage {
+    HookUsage::ResolveId | HookUsage::Load
+  }
+}
 
 /// One bundled+tree-shaken step graph compiled to `QuickJS` bytecode,
 /// plus the source map to translate bundled positions back to source.
@@ -56,7 +98,8 @@ pub async fn bundle_source(entry_paths: &[PathBuf], cwd: &Path) -> Result<(Strin
     ..Default::default()
   };
 
-  let mut bundler = Bundler::new(options).map_err(|e| ScriptError::internal(format!("rolldown init: {e:?}")))?;
+  let mut bundler = Bundler::with_plugins(options, vec![Arc::new(FerridriverRuntimePlugin)])
+    .map_err(|e| ScriptError::internal(format!("rolldown init: {e:?}")))?;
   // rolldown's generate future is large; box it so it doesn't bloat the
   // enclosing future.
   let out = Box::pin(bundler.generate())

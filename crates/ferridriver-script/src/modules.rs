@@ -25,6 +25,9 @@ use rquickjs::{Ctx, Error, Module, Result, loader::Loader, loader::Resolver, mod
 
 use crate::fs::PathSandbox;
 
+const FERRIDRIVER_MODULE: &str = "ferridriver";
+const CUCUMBER_MODULE: &str = "@cucumber/cucumber";
+
 /// Path-sanitising resolver that maps ES module specifiers to absolute paths
 /// inside the sandbox root.
 #[derive(Debug, Clone)]
@@ -57,6 +60,13 @@ impl SandboxResolver {
 
 impl Resolver for SandboxResolver {
   fn resolve(&mut self, _ctx: &Ctx<'_>, base: &str, name: &str) -> Result<String> {
+    if name == "ferridriver" {
+      return Ok(FERRIDRIVER_MODULE.to_string());
+    }
+    if name == "@cucumber/cucumber" {
+      return Ok(CUCUMBER_MODULE.to_string());
+    }
+
     // Reject bare specifiers up front — we don't support node_modules or
     // package resolution. Only relative (`./x`, `../x`) and explicit absolute
     // paths inside the sandbox are allowed; the latter is still rejected
@@ -107,6 +117,13 @@ impl SandboxLoader {
 
 impl Loader for SandboxLoader {
   fn load<'js>(&mut self, ctx: &Ctx<'js>, name: &str) -> Result<Module<'js, Declared>> {
+    if name == FERRIDRIVER_MODULE {
+      return Module::declare(ctx.clone(), name, crate::runtime_modules::FERRIDRIVER_MODULE);
+    }
+    if name == CUCUMBER_MODULE {
+      return Module::declare(ctx.clone(), name, crate::runtime_modules::CUCUMBER_MODULE);
+    }
+
     // Defensive check: the resolver should have returned a path inside the
     // sandbox, but verify before reading from disk.
     let path = Path::new(name);

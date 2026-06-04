@@ -1052,6 +1052,7 @@ pub fn install_expect<'js>(ctx: &Ctx<'js>) -> rquickjs::Result<()> {
   expect_obj.set("not", not_obj)?;
 
   ctx.globals().set("expect", expect_fn)?;
+  crate::bindings::runtime::mirror_global(ctx, "expect")?;
   Ok(())
 }
 

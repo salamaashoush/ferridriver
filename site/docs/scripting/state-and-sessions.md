@@ -122,11 +122,15 @@ export const cache = new Map<string, unknown>();
 
 // extension-a.ts
 import { cache } from "./shared/state.js";
-defineTool({ name: "a.read", handler: () => cache.get("key") });
+import { tool } from "ferridriver";
+
+tool({ name: "a.read", handler: () => cache.get("key") });
 
 // extension-b.ts
 import { cache } from "./shared/state.js";
-defineTool({ name: "b.write", handler: ({ args }) => cache.set("key", args.value) });
+import { tool } from "ferridriver";
+
+tool({ name: "b.write", handler: ({ args }) => cache.set("key", args.value) });
 ```
 
 Both files import the **same** module instance (rolldown deduplicates),

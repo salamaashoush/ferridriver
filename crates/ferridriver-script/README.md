@@ -8,7 +8,7 @@ QuickJS engine for ferridriver. Powers three surfaces with one runtime:
 
 - **`run_script`** (MCP tool) — sandboxed JavaScript with live browser bindings.
 - **BDD JS / TS step bodies** — `ferridriver bdd --steps 'steps/**/*.{js,ts}'`.
-- **JS / TS extension files** — `defineTool` (MCP) and `Given` / `When` / `Then` (BDD) in one module.
+- **JS / TS extension files** — `tool` (MCP) and `Given` / `When` / `Then` (BDD) in one module.
 
 There is no Node or Bun in the run path. Sources are bundled with
 rolldown, compiled to QuickJS bytecode once, and loaded into per-session
@@ -25,7 +25,7 @@ source files (.js/.ts/.mjs/.tsx/...)
         │
         ▼  Module::load per session VM (no re-parse, no resolver — imports already inlined)
         │
-        ▼  top-level Given() / defineTool() side effects populate the Rust ExtensionRegistry
+        ▼  top-level Given() / tool() side effects populate the Rust ExtensionRegistry
 ```
 
 The bundler runs once per file change. Bytecode is content-hashed and

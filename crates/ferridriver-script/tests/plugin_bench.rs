@@ -33,13 +33,13 @@ const FILES: &[(&str, &str)] = &[
     "login.js",
     "defineTool({ name: 'acme.login', description: 'login', \
        inputSchema: { type: 'object' }, allow: { commands: { resolveUser: 'true' } }, \
-       exposeAsTool: true, async handler({ args }) { return { ok: true, user: args && args.user }; } });",
+       exposeAsMcpTool: true, async handler({ args }) { return { ok: true, user: args && args.user }; } });",
   ),
   (
     "core.js",
     "const V = 'yes';\n\
-     defineTool({ name: 'acme.noop', description: 'noop', exposeAsTool: true, async handler() { return null; } });\n\
-     defineTool({ name: 'acme.setFeatureFlip', description: 'ff', exposeAsTool: true, \
+     defineTool({ name: 'acme.noop', description: 'noop', exposeAsMcpTool: true, async handler() { return null; } });\n\
+     defineTool({ name: 'acme.setFeatureFlip', description: 'ff', exposeAsMcpTool: true, \
        async handler({ args }) { \
          const flags = Array.isArray(args.flag) ? args.flag : [args.flag]; \
          const cookies = flags.map((f) => ({ name: 'ff_' + f, value: V, domain: '.acme.com', path: '/' })); \
@@ -47,12 +47,12 @@ const FILES: &[(&str, &str)] = &[
   ),
   (
     "ui.js",
-    "defineTool({ name: 'box.click', description: 'click', exposeAsTool: true, async handler() { return 1; } });\n\
-     defineTool({ name: 'box.type', description: 'type', exposeAsTool: true, async handler() { return 2; } });",
+    "defineTool({ name: 'box.click', description: 'click', exposeAsMcpTool: true, async handler() { return 1; } });\n\
+     defineTool({ name: 'box.type', description: 'type', exposeAsMcpTool: true, async handler() { return 2; } });",
   ),
   (
     "sign.js",
-    "defineTool({ name: 'box.sign', description: 'sign', exposeAsTool: true, async handler() { return 'signed'; } });",
+    "defineTool({ name: 'box.sign', description: 'sign', exposeAsMcpTool: true, async handler() { return 'signed'; } });",
   ),
 ];
 
@@ -130,30 +130,20 @@ async fn plugin_path_bench() {
     .expect("session create");
 
   let warm = session
-    .execute(
-      "return await plugins['acme.noop']({});",
-      &[],
-      RunOptions::default(),
-      &ctx,
-    )
+    .execute("return await tools['acme.noop']({});", &[], RunOptions::default(), &ctx)
     .await;
   assert!(matches!(warm.result.outcome, Outcome::Ok { .. }), "noop must succeed");
 
   let noop_t = Instant::now();
   for _ in 0..ITERS {
     let r = session
-      .execute(
-        "return await plugins['acme.noop']({});",
-        &[],
-        RunOptions::default(),
-        &ctx,
-      )
+      .execute("return await tools['acme.noop']({});", &[], RunOptions::default(), &ctx)
       .await;
     assert!(matches!(r.result.outcome, Outcome::Ok { .. }));
   }
   let noop_us = (noop_t.elapsed().as_secs_f64() * 1e6) / f64::from(ITERS);
 
-  let ff_src = "return await plugins['acme.setFeatureFlip']({ flag: ['vega','nova','orion'] });";
+  let ff_src = "return await tools['acme.setFeatureFlip']({ flag: ['vega','nova','orion'] });";
   let ff_t = Instant::now();
   for _ in 0..ITERS {
     let r = session.execute(ff_src, &[], RunOptions::default(), &ctx).await;
