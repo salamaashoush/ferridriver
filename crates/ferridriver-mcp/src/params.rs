@@ -8,10 +8,13 @@ use serde::Deserialize;
 /// Defines the `instance:context` key format in one place.
 #[derive(Debug, Default, Deserialize, schemars::JsonSchema)]
 pub struct SessionParam {
-  #[schemars(description = "Session key. Format: 'instance:context' (e.g. 'staging:admin'). \
-    Instance selects the browser process (each can have its own DNS/proxy/flags). \
-    Context isolates cookies/storage within that browser. \
-    Plain name without ':' uses the default instance. Omit for 'default:default'.")]
+  #[schemars(description = "Session key, format '<instance>:<context>' (e.g. 'staging:admin'). \
+    The INSTANCE (before ':') selects the browser process and its DNS/proxy/flags; in environment \
+    setups it is the environment name (dev|staging|prod) and decides which env's DNS the browser uses. \
+    The CONTEXT (after ':') isolates cookies/storage within that browser (use one per user). \
+    IMPORTANT: a value with NO ':' is treated as a context on the 'default' instance, NOT as an \
+    instance -- so to act on an environment always pass '<env>:<context>' (e.g. 'staging:admin'), \
+    never a bare 'staging'. Omit entirely only for the plain 'default:default' session.")]
   pub session: Option<String>,
 }
 
