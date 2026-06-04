@@ -214,6 +214,21 @@ pub trait McpServerConfig: Send + Sync + 'static {
     None
   }
 
+  /// Validate that an instance can be started, before launching a browser.
+  ///
+  /// Called on the cold-start path with the instance parsed from the session
+  /// key. Return `Err(message)` to abort with an actionable error instead of
+  /// launching (e.g. the session key resolved to a bogus instance). Default
+  /// allows everything.
+  ///
+  /// # Errors
+  ///
+  /// Returns `Err` with a user-facing message when `instance` must not be
+  /// launched (surfaced as the tool error).
+  fn instance_health(&self, _instance: &str) -> Result<(), String> {
+    Ok(())
+  }
+
   /// Server name for MCP `get_info`.
   fn server_name(&self) -> &str {
     DEFAULT_SERVER_NAME
@@ -831,6 +846,11 @@ impl McpServer {
         return Ok(any_page.clone());
       }
     }
+    // Cold start: validate the target instance before launching so a bad session
+    // key (e.g. a bare env name resolving to the 'default' instance) fails loudly
+    // instead of silently launching an unmapped browser on the wrong environment.
+    let instance = context.split_once(':').map_or("default", |(i, _)| i);
+    self.config.instance_health(instance).map_err(Self::err)?;
     let ctx_ref = ferridriver::context::ContextRef::new(self.state.state_arc(), context.to_string());
     let page = Box::pin(ctx_ref.new_page()).await.map_err(Self::err)?;
     self.state.invalidate_context(context);

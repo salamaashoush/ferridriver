@@ -163,6 +163,38 @@ impl McpConfig {
     args
   }
 
+  /// Check that an instance can be started, before a browser is launched for it.
+  ///
+  /// When `instance_args_command` is configured (the env-mapped setup), a hard
+  /// failure of that command for `instance` (nonzero exit) means the instance
+  /// name is wrong -- almost always a session key with no `:` that resolved to
+  /// the `default` instance, so the command ran against a non-existent env.
+  /// Returns an actionable error in that case so the caller can surface it
+  /// instead of silently launching an unmapped browser on the wrong environment.
+  ///
+  /// No-ops (returns `Ok`) when no args command is configured, or when the
+  /// command succeeds or merely yields no output.
+  ///
+  /// # Errors
+  ///
+  /// Returns `Err` with an actionable message when a configured
+  /// `instance_args_command` exits non-zero for `instance`.
+  pub fn instance_health(&self, instance: &str) -> Result<(), String> {
+    let Some(cmd_template) = &self.browser.instance_args_command else {
+      return Ok(());
+    };
+    let cmd = cmd_template.replace("${INSTANCE}", instance);
+    match self.command_cache.get_or_exec(&cmd, self.cache_ttl()) {
+      Ok(_) => Ok(()),
+      Err(e) => Err(format!(
+        "cannot start instance '{instance}': its args command failed ({e}). \
+         If you meant an environment, set the session to '<env>:<context>' \
+         (e.g. 'staging:admin') -- a session with no ':' selects the 'default' \
+         instance, which has no environment mapping."
+      )),
+    }
+  }
+
   /// Resolve a `ConnectMode` for the given instance: static `connect_url`,
   /// then profile discovery, then `instance_discover_command`.
   #[must_use]
@@ -733,6 +765,34 @@ mod tests {
   fn no_discovery_returns_none_for_launch_fallback() {
     let config = McpConfig::default();
     assert!(config.resolve_instance("anything").is_none());
+  }
+
+  #[test]
+  fn instance_health_ok_when_no_args_command() {
+    let config = McpConfig::default();
+    assert!(config.instance_health("default").is_ok());
+    assert!(config.instance_health("staging").is_ok());
+  }
+
+  #[test]
+  fn instance_health_ok_when_args_command_succeeds() {
+    let mut config = McpConfig::default();
+    config.browser.instance_args_command = Some("echo '[\"--flag\"]'".into());
+    assert!(config.instance_health("staging").is_ok());
+  }
+
+  #[test]
+  fn instance_health_errors_when_args_command_hard_fails() {
+    // Mirrors `box-dev-gate browser args --env default` rejecting a bad env:
+    // nonzero exit -> instance_health surfaces an actionable error.
+    let mut config = McpConfig::default();
+    config.browser.instance_args_command = Some("echo 'bad env' >&2; exit 2".into());
+    let err = config.instance_health("default").unwrap_err();
+    assert!(err.contains("instance 'default'"), "names the bad instance: {err}");
+    assert!(
+      err.contains("<env>:<context>"),
+      "suggests the correct session form: {err}"
+    );
   }
 
   #[test]
