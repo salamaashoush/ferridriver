@@ -192,20 +192,59 @@ impl McpConfig {
 
     if let Some(ref cmd_template) = self.browser.instance_discover_command {
       let cmd = cmd_template.replace("${INSTANCE}", instance);
-      match self.command_cache.get_or_exec(&cmd, self.cache_ttl()) {
-        Ok(lines) => {
-          if let Some(url) = lines.first() {
-            let url = url.trim();
-            if url.starts_with("ws://") || url.starts_with("wss://") {
-              return Some(ConnectMode::ConnectUrl(url.to_string()));
-            }
-          }
-        },
-        Err(e) => tracing::warn!("instance_discover_command failed for '{instance}': {e}"),
+      if let Some(url) = self.discover_ws_via_command(&cmd) {
+        return Some(ConnectMode::ConnectUrl(url));
       }
     }
 
     None
+  }
+
+  /// Run a discover command and return a *live* CDP WebSocket URL.
+  ///
+  /// A browser can restart and bind a new port within the cache TTL, and it may
+  /// not be up yet on the first call. Both cases would otherwise poison the
+  /// command cache (a stale or empty entry served for the whole TTL). So the
+  /// happy path is cached, but the cached URL is always TCP-probed, and any
+  /// miss (dead port, empty/malformed output) evicts the entry and re-runs the
+  /// command once. A failure is never cached: the next call rediscovers. Returns
+  /// `None` only when no live `ws(s)://` endpoint exists even after a refresh.
+  fn discover_ws_via_command(&self, cmd: &str) -> Option<String> {
+    let ttl = self.cache_ttl();
+
+    if let Some(url) = self.exec_ws_url(cmd, ttl) {
+      if ws_endpoint_is_live(&url) {
+        return Some(url);
+      }
+    }
+
+    // First result was missing, malformed, or pointed at a dead port. Force a
+    // fresh discover (browser may have just started or rebound to a new port).
+    self.command_cache.evict(cmd);
+    if let Some(url) = self.exec_ws_url(cmd, ttl) {
+      if ws_endpoint_is_live(&url) {
+        return Some(url);
+      }
+    }
+
+    // Still nothing live -- drop the entry so a transient outage doesn't get
+    // cached as "no browser" for the rest of the TTL.
+    self.command_cache.evict(cmd);
+    None
+  }
+
+  /// Execute a discover command and extract its first `ws(s)://` line, if any.
+  fn exec_ws_url(&self, cmd: &str, ttl: Duration) -> Option<String> {
+    match self.command_cache.get_or_exec(cmd, ttl) {
+      Ok(lines) => {
+        let url = lines.first()?.trim();
+        (url.starts_with("ws://") || url.starts_with("wss://")).then(|| url.to_string())
+      },
+      Err(e) => {
+        tracing::warn!("instance_discover_command failed: {e}");
+        None
+      },
+    }
   }
 
   /// MCP server display name from config or the default.
@@ -303,6 +342,35 @@ impl CommandCache {
     }
 
     Ok(lines)
+  }
+
+  /// Drop a cached entry so the next `get_or_exec` re-runs the command.
+  fn evict(&self, command: &str) {
+    if let Ok(mut cache) = self.entries.lock() {
+      cache.remove(command);
+    }
+  }
+}
+
+/// TCP-probe a `ws(s)://host:port/...` URL to confirm a browser is still
+/// listening there. Treats an unparseable/portless authority as not live so a
+/// caller can refuse a bogus endpoint rather than hang connecting to it.
+fn ws_endpoint_is_live(url: &str) -> bool {
+  use std::net::ToSocketAddrs;
+
+  let Some(rest) = url.strip_prefix("ws://").or_else(|| url.strip_prefix("wss://")) else {
+    return false;
+  };
+  let authority = rest.split('/').next().unwrap_or("");
+  if authority.is_empty() {
+    return false;
+  }
+
+  match authority.to_socket_addrs() {
+    Ok(addrs) => addrs
+      .into_iter()
+      .any(|addr| TcpStream::connect_timeout(&addr, DISCOVER_TCP_TIMEOUT).is_ok()),
+    Err(_) => false,
   }
 }
 
@@ -553,24 +621,44 @@ mod tests {
 
   #[test]
   fn discover_command_returns_ws_url() {
+    // A reachable port is required: discovery validates endpoint liveness.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let mut config = McpConfig::default();
-    config.browser.instance_discover_command = Some("echo 'ws://127.0.0.1:9222/devtools/browser/abc'".into());
+    config.browser.instance_discover_command = Some(format!("echo 'ws://127.0.0.1:{port}/devtools/browser/abc'"));
     let mode = config.resolve_instance("any");
     assert!(matches!(
       mode,
-      Some(ConnectMode::ConnectUrl(url)) if url == "ws://127.0.0.1:9222/devtools/browser/abc"
+      Some(ConnectMode::ConnectUrl(url)) if url == format!("ws://127.0.0.1:{port}/devtools/browser/abc")
     ));
   }
 
   #[test]
   fn discover_command_substitutes_instance() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
     let mut config = McpConfig::default();
-    config.browser.instance_discover_command = Some("echo 'ws://127.0.0.1:9222/${INSTANCE}'".into());
+    config.browser.instance_discover_command = Some(format!("echo 'ws://127.0.0.1:{port}/${{INSTANCE}}'"));
     let mode = config.resolve_instance("staging");
     assert!(matches!(
       mode,
-      Some(ConnectMode::ConnectUrl(url)) if url == "ws://127.0.0.1:9222/staging"
+      Some(ConnectMode::ConnectUrl(url)) if url == format!("ws://127.0.0.1:{port}/staging")
     ));
+  }
+
+  #[test]
+  fn discover_command_rejects_dead_endpoint() {
+    // Bind then drop to obtain a port guaranteed not to be listening.
+    let port = {
+      let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+      l.local_addr().unwrap().port()
+    };
+    let mut config = McpConfig::default();
+    config.browser.instance_discover_command = Some(format!("echo 'ws://127.0.0.1:{port}/devtools/browser/abc'"));
+    assert!(
+      config.resolve_instance("any").is_none(),
+      "an unreachable discovered endpoint must not be returned"
+    );
   }
 
   #[test]
@@ -622,8 +710,12 @@ mod tests {
         ..Default::default()
       },
     );
-    config.browser.instance_discover_command = Some("echo 'ws://discovered-host:9222/${INSTANCE}'".into());
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    config.browser.instance_discover_command = Some(format!("echo 'ws://127.0.0.1:{port}/${{INSTANCE}}'"));
 
+    // Static connect_url wins for "staging" and is returned without a liveness
+    // probe (the user pinned it explicitly).
     let staging = config.resolve_instance("staging");
     assert!(matches!(
       staging,
@@ -633,7 +725,7 @@ mod tests {
     let prod = config.resolve_instance("production");
     assert!(matches!(
       prod,
-      Some(ConnectMode::ConnectUrl(url)) if url == "ws://discovered-host:9222/production"
+      Some(ConnectMode::ConnectUrl(url)) if url == format!("ws://127.0.0.1:{port}/production")
     ));
   }
 
@@ -641,6 +733,84 @@ mod tests {
   fn no_discovery_returns_none_for_launch_fallback() {
     let config = McpConfig::default();
     assert!(config.resolve_instance("anything").is_none());
+  }
+
+  #[test]
+  fn ws_endpoint_is_live_true_for_listening_port() {
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    assert!(ws_endpoint_is_live(&format!(
+      "ws://127.0.0.1:{port}/devtools/browser/x"
+    )));
+  }
+
+  #[test]
+  fn ws_endpoint_is_live_false_for_dead_port() {
+    let port = {
+      let l = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+      l.local_addr().unwrap().port()
+    };
+    assert!(!ws_endpoint_is_live(&format!(
+      "ws://127.0.0.1:{port}/devtools/browser/x"
+    )));
+  }
+
+  #[test]
+  fn ws_endpoint_is_live_false_for_non_ws_and_portless() {
+    assert!(!ws_endpoint_is_live("http://127.0.0.1:9222/"));
+    assert!(!ws_endpoint_is_live("ws://127.0.0.1/devtools"));
+    assert!(!ws_endpoint_is_live("ws:///devtools"));
+    assert!(!ws_endpoint_is_live(""));
+  }
+
+  #[test]
+  fn discover_command_evicts_stale_cache_entry() {
+    // First discovery caches a live endpoint; after the listener drops, a second
+    // resolve within TTL must not return the now-dead cached endpoint.
+    let mut config = McpConfig::default();
+    let cmd;
+    let port;
+    {
+      let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+      port = listener.local_addr().unwrap().port();
+      cmd = format!("echo 'ws://127.0.0.1:{port}/devtools/browser/abc'");
+      config.browser.instance_discover_command = Some(cmd.clone());
+      config.browser.command_cache_ttl = Some(300);
+      let live = config.resolve_instance("any");
+      assert!(live.is_some(), "first resolve should find the live endpoint");
+    } // listener dropped -> port now dead
+
+    assert!(
+      config.resolve_instance("any").is_none(),
+      "stale cached endpoint must be re-validated and rejected"
+    );
+  }
+
+  #[test]
+  fn discover_command_does_not_cache_failure() {
+    // Command emits a ws URL only once a sentinel file exists, simulating a
+    // browser that is not up on the first resolve but appears before the second.
+    // A negative result must not be cached for the TTL.
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = listener.local_addr().unwrap().port();
+    // Port is unique per run, so the sentinel path won't collide with other tests.
+    let sentinel = std::env::temp_dir().join(format!("ferridriver-discover-test-{port}"));
+    let _ = std::fs::remove_file(&sentinel);
+
+    let mut config = McpConfig::default();
+    config.browser.command_cache_ttl = Some(300);
+    config.browser.instance_discover_command = Some(format!(
+      "test -f '{}' && echo 'ws://127.0.0.1:{port}/devtools/browser/abc' || true",
+      sentinel.display()
+    ));
+
+    assert!(config.resolve_instance("any").is_none(), "browser not up yet");
+    std::fs::write(&sentinel, b"").unwrap();
+    assert!(
+      config.resolve_instance("any").is_some(),
+      "must rediscover after the browser comes up (failure must not be cached)"
+    );
+    let _ = std::fs::remove_file(&sentinel);
   }
 
   #[test]
