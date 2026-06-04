@@ -28,6 +28,10 @@ impl McpServerConfig for McpConfig {
     McpConfig::resolve_instance(self, instance)
   }
 
+  fn instance_health(&self, instance: &str) -> Result<(), String> {
+    McpConfig::instance_health(self, instance)
+  }
+
   fn server_name(&self) -> &str {
     McpConfig::server_name(self)
   }
